@@ -9,6 +9,7 @@ with an actionable message when it is not.
 """
 
 import asyncio
+import json
 
 import pytest
 
@@ -560,37 +561,85 @@ async def test_factory_approver_allow_once_no_persist():
     approver = _make_system_install_approver(
         resolver=_resolver, sandbox_manager=mgr, config=cfg,
     )
-    decision = await approver("sudo apt-get install -y texlive-xetex")
+    decision, persist_failed = await approver("sudo apt-get install -y texlive-xetex")
     assert decision == "once"
+    assert persist_failed is False
     assert mgr.allow_system_installs is False
     assert cfg.tools.sandbox.allow_system_installs is False
 
 
-async def test_factory_approver_allow_always_persists():
-    """统一入口：允许并记住 → always + runtime/config 原子成对持久化。"""
+async def test_factory_approver_allow_always_persists(tmp_path, monkeypatch):
+    """统一入口：允许并记住 → always + fresh-read 持久化（只改目标字段，保留其他配置）。
+
+    CodeRabbit #875 Major：closure 捕获的旧 Config 不能作为持久化载体——
+    必须从磁盘重读，仅修改 tools.sandbox.allow_system_installs 再保存，
+    否则会把用户其他设置的旧值（如 provider/API key）覆盖回去。
+    """
     from miqi.runtime.tool_registry_factory import _make_system_install_approver
 
-    cfg = _FakeConfig()
+    # 磁盘上已有用户配置（含 API key 等）
+    cfg_path = tmp_path / "config.json"
+    cfg_path.write_text(
+        json.dumps({
+            "providers": {"deepseek": {"apiKey": "sk-keep-me", "apiBase": "https://api.deepseek.com/v1"}},
+            "tools": {"sandbox": {"enabled": True, "allowSystemInstalls": False}},
+        }),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("miqi.paths.get_config_path", lambda: cfg_path)
+
     mgr = FakeSandboxManager(allow_system_installs=False, sandbox=FakeSandbox())
-    saved = []
+    stale_cfg = _FakeConfig()  # 模拟 closure 捕获的旧 Config（已过期）
+
+    async def _resolver(payload):
+        return {"status": "submitted", "answers": {"choice_id": "allow_always"}}
+
+    approver = _make_system_install_approver(
+        resolver=_resolver, sandbox_manager=mgr, config=stale_cfg,
+    )
+    decision, persist_failed = await approver("sudo apt-get install -y texlive-xetex")
+
+    assert decision == "always"
+    assert persist_failed is False
+    assert mgr.allow_system_installs is True  # runtime 生效
+
+    # 磁盘上的配置：目标字段已开，其他字段（API key）保留
+    disk = json.loads(cfg_path.read_text(encoding="utf-8"))
+    assert disk["tools"]["sandbox"]["allowSystemInstalls"] is True
+    assert disk["providers"]["deepseek"]["apiKey"] == "sk-keep-me"
+    assert disk["providers"]["deepseek"]["apiBase"] == "https://api.deepseek.com/v1"
+
+
+async def test_factory_approver_persist_failure_visible(tmp_path, monkeypatch):
+    """持久化失败 → (always, persist_failed=True)——shell 据此向用户透出（外部审阅 #854 疑点 1 → B）。"""
+    from miqi.runtime.tool_registry_factory import _make_system_install_approver
+
+    cfg_path = tmp_path / "config.json"
+    cfg_path.write_text(json.dumps({"tools": {"sandbox": {"enabled": True}}}), encoding="utf-8")
+    monkeypatch.setattr("miqi.paths.get_config_path", lambda: cfg_path)
+
+    mgr = FakeSandboxManager(allow_system_installs=False, sandbox=FakeSandbox())
 
     async def _resolver(payload):
         return {"status": "submitted", "answers": {"choice_id": "allow_always"}}
 
     import miqi.config.loader as loader
     orig = loader.save_config
-    loader.save_config = lambda c: saved.append(c)  # 不落盘，仅记录
+
+    def _boom(cfg, path=None):
+        raise OSError("disk locked")
+
+    loader.save_config = _boom
     try:
         approver = _make_system_install_approver(
-            resolver=_resolver, sandbox_manager=mgr, config=cfg,
+            resolver=_resolver, sandbox_manager=mgr, config=_FakeConfig(),
         )
-        decision = await approver("sudo apt-get install -y texlive-xetex")
+        decision, persist_failed = await approver("sudo apt-get install -y texlive-xetex")
     finally:
         loader.save_config = orig
+
     assert decision == "always"
-    assert mgr.allow_system_installs is True       # runtime 生效
-    assert cfg.tools.sandbox.allow_system_installs is True  # config 更新
-    assert saved, "持久化被调用"
+    assert persist_failed is True  # runtime 已生效但持久化失败 → 用户可见提示
 
 
 async def test_factory_approver_fails_closed():
@@ -606,7 +655,7 @@ async def test_factory_approver_fails_closed():
     approver = _make_system_install_approver(
         resolver=_cancelled, sandbox_manager=mgr, config=cfg,
     )
-    assert await approver("cmd") == "deny"
+    assert await approver("cmd") == ("deny", False)
     assert mgr.allow_system_installs is False
 
     async def _boom(payload):
@@ -615,7 +664,7 @@ async def test_factory_approver_fails_closed():
     approver2 = _make_system_install_approver(
         resolver=_boom, sandbox_manager=mgr, config=cfg,
     )
-    assert await approver2("cmd") == "deny"
+    assert await approver2("cmd") == ("deny", False)
 
     async def _unknown(payload):
         return {"status": "submitted", "answers": {"choice_id": "whatever"}}
@@ -623,13 +672,94 @@ async def test_factory_approver_fails_closed():
     approver3 = _make_system_install_approver(
         resolver=_unknown, sandbox_manager=mgr, config=cfg,
     )
-    assert await approver3("cmd") == "deny"
+    assert await approver3("cmd") == ("deny", False)
 
     # 无 resolver 通道 → deny（fail-closed）
     approver4 = _make_system_install_approver(
         resolver=None, sandbox_manager=mgr, config=cfg,
     )
-    assert await approver4("cmd") == "deny"
+    assert await approver4("cmd") == ("deny", False)
+
+
+async def test_cross_instance_concurrent_approvals_no_cross_talk():
+    """跨 ExecTool 实例并发弹卡：A 的点击结果不会给 B（外部审阅 #854 疑点 3）。
+
+    per-实例 asyncio.Lock 不共享，但 user_input_gate 全局排队；
+    验证两个实例各自的 approver 拿到各自的决策（A=once, B=deny 不串值）。
+    """
+    from miqi.runtime.tool_registry_factory import _make_system_install_approver
+    import asyncio
+
+    mgr_a = FakeSandboxManager(allow_system_installs=False, sandbox=FakeSandbox())
+    mgr_b = FakeSandboxManager(allow_system_installs=False, sandbox=FakeSandbox())
+    decisions = {"a": "allow_once", "b": "deny"}
+    in_flight = 0
+    max_in_flight = 0
+
+    async def _resolver_for(key):
+        async def _resolver(payload):
+            nonlocal in_flight, max_in_flight
+            in_flight += 1
+            max_in_flight = max(max_in_flight, in_flight)
+            await asyncio.sleep(0.05)  # 模拟用户思考
+            in_flight -= 1
+            return {"status": "submitted", "answers": {"choice_id": decisions[key]}}
+        return _resolver
+
+    approver_a = _make_system_install_approver(
+        resolver=await _resolver_for("a"), sandbox_manager=mgr_a, config=_FakeConfig(),
+    )
+    approver_b = _make_system_install_approver(
+        resolver=await _resolver_for("b"), sandbox_manager=mgr_b, config=_FakeConfig(),
+    )
+    tool_a = ExecTool(working_dir=".", sandbox_manager=mgr_a,
+                      system_install_approver=approver_a)
+    tool_b = ExecTool(working_dir=".", sandbox_manager=mgr_b,
+                      system_install_approver=approver_b)
+
+    results = await asyncio.gather(
+        tool_a._request_system_install_approval("install-a"),
+        tool_b._request_system_install_approval("install-b"),
+    )
+    # A 得到 once、B 得到 deny——不串值（gate 按 input_id 分发）
+    assert results[0][0] == "once"
+    assert results[1][0] == "deny"
+    # 跨实例锁不共享时 gate 层排队：同刻至多一张卡（本例两个 resolver 由
+    # 各自 gate 实例处理，此处验证的是决策不串值这一核心契约）
+    assert mgr_a.allow_system_installs is False
+    assert mgr_b.allow_system_installs is False
+
+
+async def test_allow_once_second_invocation_prompts_again():
+    """允许本次后第二次安装仍弹卡（外部审阅 #854 疑点 2 → A：不采用 session remember）。"""
+    manager = FakeSandboxManager(
+        allow_system_installs=False,
+        sandbox=FakeSandbox(),
+    )
+    calls = []
+
+    async def _once(command: str) -> str:
+        calls.append(command)
+        return ("once", False)
+
+    tool = ExecTool(working_dir=".", sandbox_manager=manager,
+                    system_install_approver=_once)
+    # 第一次：允许本次 → 放行
+    r1 = await tool._maybe_route_system_install(
+        "sudo apt-get install -y gcc",
+        sandbox_selection=_make_selection(),
+        session_key="k",
+    )
+    assert r1 is not None and r1.exit_code == 0
+    # 第二次（不同命令）：仍弹卡（approver 被再次调用）
+    r2 = await tool._maybe_route_system_install(
+        "sudo apt-get install -y make",
+        sandbox_selection=_make_selection(),
+        session_key="k",
+    )
+    assert r2 is not None and r2.exit_code == 0
+    assert len(calls) == 2, f"第二次安装应再次弹卡（当前弹卡次数 {len(calls)}）"
+    assert calls == ["sudo apt-get install -y gcc", "sudo apt-get install -y make"]
 
 
 async def test_factory_approver_card_payload_structured():

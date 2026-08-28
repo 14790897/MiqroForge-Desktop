@@ -60,9 +60,9 @@ def _make_system_install_approver(*, resolver, sandbox_manager, config):
 
     logger = logging.getLogger(__name__)
 
-    async def _approver(command: str) -> str:
+    async def _approver(command: str) -> tuple[str, bool]:
         if resolver is None:
-            return "deny"
+            return ("deny", False)
         payload = {
             "title": "系统包安装授权",
             "message": (
@@ -85,25 +85,58 @@ def _make_system_install_approver(*, resolver, sandbox_manager, config):
             gate_result = await resolver(payload)
         except Exception as exc:  # noqa: BLE001 - fail-closed
             logger.warning("system install card resolver failed: %s — deny", exc)
-            return "deny"
+            return ("deny", False)
         if gate_result.get("status") != "submitted":
-            return "deny"
+            return ("deny", False)
         choice_id = str((gate_result.get("answers") or {}).get("choice_id") or "")
         if choice_id == "allow_always":
-            # 统一入口：runtime + config 原子成对（外部审阅 #854）
+            # 统一入口：runtime + config 原子成对（外部审阅 #854）。
+            # 持久化必须 fresh-read：closure 捕获的旧 Config 可能覆盖
+            # 用户其他设置的旧值（CodeRabbit #875 Major / Data Integrity）。
+            # 照 #864 extra-root persister 模式：磁盘 JSON → 只改目标字段 → save。
             if sandbox_manager is not None:
                 sandbox_manager.allow_system_installs = True
+            persist_failed = False
             try:
-                config.tools.sandbox.allow_system_installs = True
-                from miqi.config.loader import save_config
+                import json
+                import threading
 
-                save_config(config)
-            except Exception as exc:  # noqa: BLE001 - runtime 已生效，持久化失败仅告警
-                logger.error("system install allow persist failed: %s", exc)
-            return "always"
+                from miqi.config.loader import save_config
+                from miqi.config.schema import Config
+                from miqi.paths import get_config_path
+
+                path = get_config_path()
+                with threading.Lock():
+                    try:
+                        with open(path, encoding="utf-8") as f:
+                            data = json.load(f)
+                    except FileNotFoundError:
+                        data = {}
+                    except (OSError, json.JSONDecodeError) as exc:
+                        logger.error(
+                            "system install allow persist: cannot read config %s: %s",
+                            path, exc,
+                        )
+                        persist_failed = True
+                    else:
+                        fresh = Config.model_validate(data) if data else Config()
+                        try:
+                            fresh.tools.sandbox.allow_system_installs = True
+                            save_config(fresh, path)
+                        except Exception as exc:  # noqa: BLE001
+                            logger.error(
+                                "system install allow persist failed: %s", exc,
+                            )
+                            persist_failed = True
+            except Exception as exc:  # noqa: BLE001 - runtime 已生效，失败仅透出
+                logger.error("system install allow persist error: %s", exc)
+                persist_failed = True
+            # (decision, persist_failed)：shell 拦截点据此向用户透出
+            # "本次已生效但保存失败，重启后需重新授权"（外部审阅 #854 疑点 1 → B）
+            return ("always", persist_failed)
         if choice_id == "allow_once":
-            return "once"
-        return "deny"
+            return ("once", False)
+        return ("deny", False)
 
     return _approver
 

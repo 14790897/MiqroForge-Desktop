@@ -377,6 +377,8 @@ class ExecTool(Tool):
         self.system_install_approver = system_install_approver
         # 并发串行弹卡：同一时刻只允许一张系统安装授权卡进入前台（外部审阅 #854）
         self._system_install_lock = asyncio.Lock()
+        # 「允许并记住」持久化失败标记（外部审阅 #854 疑点 1 → B：用户可见）
+        self._system_install_persist_failed = False
 
     @property
     def name(self) -> str:
@@ -2162,25 +2164,33 @@ class ExecTool(Tool):
             return await self._sandbox_manager.get_or_create(session_key)
         return self._sandbox_manager.active_sandbox
 
-    async def _request_system_install_approval(self, command: str) -> str:
-        """#854: 系统包安装授权确认卡（once/always/deny）。
+    async def _request_system_install_approval(self, command: str) -> tuple[str, bool]:
+        """#854: 系统包安装授权确认卡 → (decision, persist_failed)。
+
+        decision ∈ {"once", "always", "deny"}；persist_failed 仅在
+        decision=="always" 且 config 持久化失败时为 True（外部审阅 #854：
+        "允许并记住"保存失败必须对用户可见——重启后授权失效）。
 
         - fail-closed：无 approver 通道 / 异常 / 超时一律 deny，绝不放行
         - 并发串行：同一时刻只有一张系统安装授权卡进入前台（外部审阅 #854）
         - "允许本次"（once）是调用级授权——不修改任何全局状态
         """
         if self.system_install_approver is None:
-            return "deny"
+            return ("deny", False)
         async with self._system_install_lock:
             try:
                 decision = await self.system_install_approver(command)
             except Exception as exc:  # noqa: BLE001 - fail-closed on any error
                 logger.warning("system install approval failed (%s) — deny", exc)
-                return "deny"
+                return ("deny", False)
+        if isinstance(decision, tuple):
+            decision, persist_failed = decision
+        else:
+            persist_failed = False
         if decision not in ("once", "always", "deny"):
             logger.warning("system install approval returned unknown decision %r — deny", decision)
-            return "deny"
-        return decision
+            return ("deny", False)
+        return (decision, persist_failed)
 
     async def _maybe_route_system_install(
         self,
@@ -2271,9 +2281,10 @@ class ExecTool(Tool):
             # #854: 弹系统安装授权卡（once/always/deny），替代直接拒绝。
             # "允许本次"是调用级授权，不修改全局开关（外部审阅 #854）；
             # "允许并记住"由 approver 内部走统一入口持久化后放行。
-            decision = await self._request_system_install_approval(command)
+            decision, persist_failed = await self._request_system_install_approval(command)
             if decision not in ("once", "always"):
                 return _ExecResult(output=_SYSTEM_INSTALL_NOT_ENABLED_MSG, exit_code=1)
+            self._system_install_persist_failed = persist_failed
 
         # Phase 77 (#759) + review F2: routed commands must not bypass the
         # approval system.  Same call the normal path uses; commands that
@@ -2456,6 +2467,13 @@ class ExecTool(Tool):
             output_parts.append(f"STDERR:\n{err.rstrip()}")
         if rc != 0:
             output_parts.append(f"\nExit code: {rc}")
+        # 外部审阅 #854 疑点 1 → B：「允许并记住」持久化失败必须用户可见——
+        # runtime 已生效但重启后授权失效。
+        if rc == 0 and getattr(self, "_system_install_persist_failed", False):
+            output_parts.append(
+                "\n[提示] 永久授权已生效但配置保存失败，重启后需要重新授权。"
+            )
+        self._system_install_persist_failed = False
 
         return _ExecResult(
             output="\n".join(output_parts),
