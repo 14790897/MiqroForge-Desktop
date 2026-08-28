@@ -100,9 +100,9 @@ _SAFE_TEXTS: dict[str, str] = {
     ),
     "privilege": (
         "用户级安装：python3 -m pip install --user <包名>；"
-        "系统包安装：请用户在配置中开启 tools.sandbox.allow_system_installs 后，"
-        "sudo apt-get install ... 会自动路由到 WSL 发行版以 root 执行"
-        "（仅 Windows + WSL）。"
+        "系统包安装：请在 设置 > 沙箱隔离 中开启「允许系统包安装」（或在授权"
+        "确认卡选择「允许本次安装」）后，sudo apt-get install ... 会自动路由到"
+        "WSL 发行版以 root 执行（仅 Windows + WSL）。"
     ),
 }
 

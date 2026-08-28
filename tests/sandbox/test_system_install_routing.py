@@ -377,6 +377,7 @@ async def test_route_system_install_passes_verb_side_flags_through():
 
 
 async def test_intercept_when_disabled():
+    """关闭状态 + 无 approver（CLI/无桌面通道）→ 拦截，文案指向设置页（#854 fail-closed）。"""
     manager = FakeSandboxManager(
         allow_system_installs=False,
         sandbox=FakeSandbox(),
@@ -391,8 +392,269 @@ async def test_intercept_when_disabled():
     assert result is not None
     assert result.exit_code == 1
     # actionable guidance instead of the generic guard message
-    assert "allow_system_installs" in result.output
+    assert "设置 > 沙箱隔离" in result.output
     assert "被安全护栏拦截（检测到危险模式）" not in result.output
+
+
+async def test_approver_deny_when_disabled():
+    """关闭状态 + 用户拒绝 → 拦截（#854）。"""
+    manager = FakeSandboxManager(
+        allow_system_installs=False,
+        sandbox=FakeSandbox(),
+    )
+
+    async def _deny(command: str) -> str:
+        return "deny"
+
+    tool = ExecTool(working_dir=".", sandbox_manager=manager,
+                    system_install_approver=_deny)
+    result = await tool._maybe_route_system_install(
+        "sudo apt-get install -y texlive-xetex",
+        sandbox_selection=_make_selection(),
+        session_key="k",
+    )
+    assert result is not None and result.exit_code == 1
+    assert "设置 > 沙箱隔离" in result.output
+    assert not manager._sandbox.install_calls  # 未执行安装
+
+
+async def test_approver_allow_once_routes_install():
+    """关闭状态 + 允许本次 → 放行路由执行，且不修改全局开关（#854 调用级授权）。"""
+    manager = FakeSandboxManager(
+        allow_system_installs=False,
+        sandbox=FakeSandbox(),
+    )
+    calls = []
+
+    async def _once(command: str) -> str:
+        calls.append(command)
+        return "once"
+
+    tool = ExecTool(working_dir=".", sandbox_manager=manager,
+                    system_install_approver=_once)
+    result = await tool._maybe_route_system_install(
+        "sudo apt-get install -y texlive-xetex",
+        sandbox_selection=_make_selection(),
+        session_key="k",
+    )
+    assert result is not None and result.exit_code == 0
+    assert manager._sandbox.install_calls  # 已路由执行
+    assert manager.allow_system_installs is False  # 全局开关未被修改
+
+
+async def test_approver_allow_always_routes_install():
+    """关闭状态 + 允许并记住 → 放行 + approver 内部持久化开关（#854）。"""
+    manager = FakeSandboxManager(
+        allow_system_installs=False,
+        sandbox=FakeSandbox(),
+    )
+
+    async def _always(command: str) -> str:
+        manager.allow_system_installs = True  # 模拟统一入口持久化
+        return "always"
+
+    tool = ExecTool(working_dir=".", sandbox_manager=manager,
+                    system_install_approver=_always)
+    result = await tool._maybe_route_system_install(
+        "sudo apt-get install -y texlive-xetex",
+        sandbox_selection=_make_selection(),
+        session_key="k",
+    )
+    assert result is not None and result.exit_code == 0
+    assert manager._sandbox.install_calls
+
+
+async def test_approver_exception_fails_closed():
+    """approver 抛异常 → deny（fail-closed，#854 外部审阅）。"""
+    manager = FakeSandboxManager(
+        allow_system_installs=False,
+        sandbox=FakeSandbox(),
+    )
+
+    async def _boom(command: str) -> str:
+        raise RuntimeError("channel down")
+
+    tool = ExecTool(working_dir=".", sandbox_manager=manager,
+                    system_install_approver=_boom)
+    result = await tool._maybe_route_system_install(
+        "sudo apt-get install -y texlive-xetex",
+        sandbox_selection=_make_selection(),
+        session_key="k",
+    )
+    assert result is not None and result.exit_code == 1
+    assert not manager._sandbox.install_calls
+
+
+async def test_approver_unknown_decision_fails_closed():
+    """approver 返回未知决策 → deny（fail-closed）。"""
+    manager = FakeSandboxManager(
+        allow_system_installs=False,
+        sandbox=FakeSandbox(),
+    )
+
+    async def _weird(command: str) -> str:
+        return "maybe"
+
+    tool = ExecTool(working_dir=".", sandbox_manager=manager,
+                    system_install_approver=_weird)
+    result = await tool._maybe_route_system_install(
+        "sudo apt-get install -y texlive-xetex",
+        sandbox_selection=_make_selection(),
+        session_key="k",
+    )
+    assert result is not None and result.exit_code == 1
+    assert not manager._sandbox.install_calls
+
+
+async def test_approver_concurrent_cards_serialized():
+    """并发安装请求 → 确认卡串行（同一时刻只有一个 in-flight，#854 外部审阅）。"""
+    manager = FakeSandboxManager(
+        allow_system_installs=False,
+        sandbox=FakeSandbox(),
+    )
+    import asyncio
+
+    in_flight = 0
+    max_in_flight = 0
+
+    async def _slow(command: str) -> str:
+        nonlocal in_flight, max_in_flight
+        in_flight += 1
+        max_in_flight = max(max_in_flight, in_flight)
+        await asyncio.sleep(0.05)
+        in_flight -= 1
+        return "deny"
+
+    tool = ExecTool(working_dir=".", sandbox_manager=manager,
+                    system_install_approver=_slow)
+    await asyncio.gather(
+        *[
+            tool._request_system_install_approval(f"install-{i}")
+            for i in range(5)
+        ]
+    )
+    assert max_in_flight == 1, f"确认卡并发泄漏: max_in_flight={max_in_flight}"
+
+
+# ── _make_system_install_approver（统一入口）单测 ──────────────────────────
+
+
+class _FakeConfig:
+    def __init__(self):
+        class _SB:
+            allow_system_installs = False
+        self.tools = type("T", (), {"sandbox": _SB()})()
+
+
+async def test_factory_approver_allow_once_no_persist():
+    """统一入口：允许本次 → once，不写 config 不改 manager（#854 外部审阅）。"""
+    from miqi.runtime.tool_registry_factory import _make_system_install_approver
+
+    cfg = _FakeConfig()
+    mgr = FakeSandboxManager(allow_system_installs=False, sandbox=FakeSandbox())
+    answers = {"choice_id": "allow_once", "choice_label": "允许本次安装"}
+
+    async def _resolver(payload):
+        return {"status": "submitted", "answers": dict(answers)}
+
+    approver = _make_system_install_approver(
+        resolver=_resolver, sandbox_manager=mgr, config=cfg,
+    )
+    decision = await approver("sudo apt-get install -y texlive-xetex")
+    assert decision == "once"
+    assert mgr.allow_system_installs is False
+    assert cfg.tools.sandbox.allow_system_installs is False
+
+
+async def test_factory_approver_allow_always_persists():
+    """统一入口：允许并记住 → always + runtime/config 原子成对持久化。"""
+    from miqi.runtime.tool_registry_factory import _make_system_install_approver
+
+    cfg = _FakeConfig()
+    mgr = FakeSandboxManager(allow_system_installs=False, sandbox=FakeSandbox())
+    saved = []
+
+    async def _resolver(payload):
+        return {"status": "submitted", "answers": {"choice_id": "allow_always"}}
+
+    import miqi.config.loader as loader
+    orig = loader.save_config
+    loader.save_config = lambda c: saved.append(c)  # 不落盘，仅记录
+    try:
+        approver = _make_system_install_approver(
+            resolver=_resolver, sandbox_manager=mgr, config=cfg,
+        )
+        decision = await approver("sudo apt-get install -y texlive-xetex")
+    finally:
+        loader.save_config = orig
+    assert decision == "always"
+    assert mgr.allow_system_installs is True       # runtime 生效
+    assert cfg.tools.sandbox.allow_system_installs is True  # config 更新
+    assert saved, "持久化被调用"
+
+
+async def test_factory_approver_fails_closed():
+    """统一入口 fail-closed：cancelled/异常/未知选项 → deny。"""
+    from miqi.runtime.tool_registry_factory import _make_system_install_approver
+
+    cfg = _FakeConfig()
+    mgr = FakeSandboxManager(allow_system_installs=False, sandbox=FakeSandbox())
+
+    async def _cancelled(payload):
+        return {"status": "cancelled", "reason": "timeout"}
+
+    approver = _make_system_install_approver(
+        resolver=_cancelled, sandbox_manager=mgr, config=cfg,
+    )
+    assert await approver("cmd") == "deny"
+    assert mgr.allow_system_installs is False
+
+    async def _boom(payload):
+        raise RuntimeError("gate down")
+
+    approver2 = _make_system_install_approver(
+        resolver=_boom, sandbox_manager=mgr, config=cfg,
+    )
+    assert await approver2("cmd") == "deny"
+
+    async def _unknown(payload):
+        return {"status": "submitted", "answers": {"choice_id": "whatever"}}
+
+    approver3 = _make_system_install_approver(
+        resolver=_unknown, sandbox_manager=mgr, config=cfg,
+    )
+    assert await approver3("cmd") == "deny"
+
+    # 无 resolver 通道 → deny（fail-closed）
+    approver4 = _make_system_install_approver(
+        resolver=None, sandbox_manager=mgr, config=cfg,
+    )
+    assert await approver4("cmd") == "deny"
+
+
+async def test_factory_approver_card_payload_structured():
+    """确认卡 payload 结构化：命令=执行命令，含 root/持久/风险字段（外部审阅 #854）。"""
+    from miqi.runtime.tool_registry_factory import _make_system_install_approver
+
+    cfg = _FakeConfig()
+    mgr = FakeSandboxManager(allow_system_installs=False, sandbox=FakeSandbox())
+    seen = {}
+
+    async def _resolver(payload):
+        seen.update(payload)
+        return {"status": "submitted", "answers": {"choice_id": "deny"}}
+
+    approver = _make_system_install_approver(
+        resolver=_resolver, sandbox_manager=mgr, config=cfg,
+    )
+    await approver("sudo apt-get install -y texlive-xetex")
+    assert seen["title"] == "系统包安装授权"
+    assert "sudo apt-get install -y texlive-xetex" in seen["message"]
+    assert "root" in seen["message"]
+    assert "持久" in seen["message"]
+    labels = [c["label"] for c in seen["choices"]]
+    assert labels == ["允许本次安装", "允许并记住（开启开关）", "拒绝"]
+    assert seen["timeout_seconds"] == 120
 
 
 async def test_intercept_wsl_only_on_native_linux():
@@ -670,7 +932,7 @@ async def test_execute_end_to_end_intercepted_when_disabled():
         "sudo apt-get install -y texlive-xetex",
         _session_key="k",
     )
-    assert "allow_system_installs" in output
+    assert "设置 > 沙箱隔离" in output
 
 
 # ── exec environment description ───────────────────────────────────────
@@ -786,7 +1048,7 @@ async def test_intercept_when_disabled_without_sandbox():
     )
     assert result is not None
     assert result.exit_code == 1
-    assert "allow_system_installs" in result.output  # NOT_ENABLED, not NO_SANDBOX
+    assert "设置 > 沙箱隔离" in result.output  # NOT_ENABLED, not NO_SANDBOX
     assert "没有可用的 bwrap 沙箱" not in result.output
     assert manager.get_or_create_calls == 0  # no sandbox side-effect
 

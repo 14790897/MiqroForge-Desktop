@@ -306,7 +306,7 @@ def test_sudo_structured_refusal(rt):
     assert verdict.reason_code == "privilege"
     assert "提权" in verdict.message
     assert "pip install --user" in verdict.message
-    assert "allow_system_installs" in verdict.message
+    assert "设置 > 沙箱隔离" in verdict.message
     # even compound sudo in any subcommand
     verdict = v("echo ok && sudo rm -rf ./x", rt)
     assert not verdict.allowed

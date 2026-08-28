@@ -45,6 +45,69 @@ def _default_read_roots() -> list[Path]:
     return roots
 
 
+def _make_system_install_approver(*, resolver, sandbox_manager, config):
+    """#854: 系统包安装授权确认卡 approver（once/always/deny）。
+
+    - 复用 #646/#864 的 user-input 通道（同一 gate，桌面端渲染确认卡）
+    - 卡片展示结构化信息：操作/命令/权限(root)/范围(WSL)/持久性/风险
+      （显示的命令 = 最终执行 plan，来自拦截点的原始命令，外部审阅 #854）
+    - "允许本次"（once）= 调用级授权，不修改任何全局状态
+    - "允许并记住"（always）走统一入口：runtime 属性 + config 持久化，
+      二者原子成对（外部审阅 #854：不许散落各自改）
+    - 任何非 submitted / 未知选项 → deny（fail-closed）
+    """
+    import logging
+
+    logger = logging.getLogger(__name__)
+
+    async def _approver(command: str) -> str:
+        if resolver is None:
+            return "deny"
+        payload = {
+            "title": "系统包安装授权",
+            "message": (
+                "AI 请求执行系统包安装：\n\n"
+                f"操作：系统包安装\n"
+                f"命令：{command}\n"
+                "权限：root（WSL 发行版）\n"
+                "范围：Windows + WSL 环境\n"
+                "持久性：安装后跨会话持续生效\n"
+                "风险：会修改系统软件环境"
+            ),
+            "choices": [
+                {"id": "allow_once", "label": "允许本次安装"},
+                {"id": "allow_always", "label": "允许并记住（开启开关）"},
+                {"id": "deny", "label": "拒绝"},
+            ],
+            "timeout_seconds": 120,
+        }
+        try:
+            gate_result = await resolver(payload)
+        except Exception as exc:  # noqa: BLE001 - fail-closed
+            logger.warning("system install card resolver failed: %s — deny", exc)
+            return "deny"
+        if gate_result.get("status") != "submitted":
+            return "deny"
+        choice_id = str((gate_result.get("answers") or {}).get("choice_id") or "")
+        if choice_id == "allow_always":
+            # 统一入口：runtime + config 原子成对（外部审阅 #854）
+            if sandbox_manager is not None:
+                sandbox_manager.allow_system_installs = True
+            try:
+                config.tools.sandbox.allow_system_installs = True
+                from miqi.config.loader import save_config
+
+                save_config(config)
+            except Exception as exc:  # noqa: BLE001 - runtime 已生效，持久化失败仅告警
+                logger.error("system install allow persist failed: %s", exc)
+            return "always"
+        if choice_id == "allow_once":
+            return "once"
+        return "deny"
+
+    return _approver
+
+
 def _make_extra_root_persister():
     """Build an async callback that appends a directory to ``tools.extra_roots``.
 
@@ -390,6 +453,11 @@ def create_runtime_tool_registry(
             env_passthrough=list(getattr(exec_cfg, "env_passthrough", [])) if exec_cfg is not None else [],
             approval_callback=approval_callback,
             sandbox_manager=_sbm,
+            # #854: 系统包安装授权确认卡——关闭状态下拦截点弹卡（once/always/deny）。
+            # "允许并记住"走统一入口：runtime 属性 + config 持久化（外部审阅 #854）。
+            system_install_approver=_make_system_install_approver(
+                resolver=_write_resolver, sandbox_manager=_sbm, config=config,
+            ),
         )
     )
 

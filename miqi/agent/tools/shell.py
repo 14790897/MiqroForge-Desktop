@@ -254,9 +254,9 @@ _SYSTEM_INSTALL_VERBS: dict[str, tuple[str, ...]] = {
 _SYSTEM_INSTALL_NOT_ENABLED_MSG = (
     "Error: 系统包安装命令被拦截——沙箱内无 root 权限且系统目录只读，"
     "apt-get 无法在沙箱内安装。\n"
-    "请让用户在配置中开启 tools.sandbox.allow_system_installs 后重试："
-    "开启后 sudo apt-get install ... 会自动以 root 在 WSL 发行版中执行，"
-    "安装一次跨会话持久，装完即可在沙箱内使用。"
+    "请在 设置 > 沙箱隔离 中开启「允许系统包安装」后重试，或在授权确认卡中选择"
+    "「允许本次安装」：开启后 sudo apt-get install ... 会自动以 root 在 WSL "
+    "发行版中执行，安装一次跨会话持久，装完即可在沙箱内使用。"
 )
 
 #: Interception message when system installs are enabled but the sandbox
@@ -332,6 +332,7 @@ class ExecTool(Tool):
         env_passthrough: list[str] | None = None,
         approval_callback=None,
         sandbox_manager=None,
+        system_install_approver=None,
     ):
         self.timeout = timeout
         self.max_timeout = max_timeout
@@ -370,6 +371,12 @@ class ExecTool(Tool):
         self.restrict_to_workspace = restrict_to_workspace
         self.approval_callback = approval_callback
         self._sandbox_manager = sandbox_manager
+        # #854: 系统包安装授权通道——关闭状态下拦截点弹确认卡而非直接拒绝。
+        # 签名: async (command: str) -> "once" | "always" | "deny"。
+        # fail-closed: 无通道/异常/超时一律 deny（外部审阅 #854）。
+        self.system_install_approver = system_install_approver
+        # 并发串行弹卡：同一时刻只允许一张系统安装授权卡进入前台（外部审阅 #854）
+        self._system_install_lock = asyncio.Lock()
 
     @property
     def name(self) -> str:
@@ -2155,6 +2162,26 @@ class ExecTool(Tool):
             return await self._sandbox_manager.get_or_create(session_key)
         return self._sandbox_manager.active_sandbox
 
+    async def _request_system_install_approval(self, command: str) -> str:
+        """#854: 系统包安装授权确认卡（once/always/deny）。
+
+        - fail-closed：无 approver 通道 / 异常 / 超时一律 deny，绝不放行
+        - 并发串行：同一时刻只有一张系统安装授权卡进入前台（外部审阅 #854）
+        - "允许本次"（once）是调用级授权——不修改任何全局状态
+        """
+        if self.system_install_approver is None:
+            return "deny"
+        async with self._system_install_lock:
+            try:
+                decision = await self.system_install_approver(command)
+            except Exception as exc:  # noqa: BLE001 - fail-closed on any error
+                logger.warning("system install approval failed (%s) — deny", exc)
+                return "deny"
+        if decision not in ("once", "always", "deny"):
+            logger.warning("system install approval returned unknown decision %r — deny", decision)
+            return "deny"
+        return decision
+
     async def _maybe_route_system_install(
         self,
         command: str,
@@ -2241,7 +2268,12 @@ class ExecTool(Tool):
         # it, no approval is prompted, and the user is pointed at the real
         # fix (enable allow_system_installs) rather than at the sandbox.
         if not getattr(self._sandbox_manager, "allow_system_installs", False):
-            return _ExecResult(output=_SYSTEM_INSTALL_NOT_ENABLED_MSG, exit_code=1)
+            # #854: 弹系统安装授权卡（once/always/deny），替代直接拒绝。
+            # "允许本次"是调用级授权，不修改全局开关（外部审阅 #854）；
+            # "允许并记住"由 approver 内部走统一入口持久化后放行。
+            decision = await self._request_system_install_approval(command)
+            if decision not in ("once", "always"):
+                return _ExecResult(output=_SYSTEM_INSTALL_NOT_ENABLED_MSG, exit_code=1)
 
         # Phase 77 (#759) + review F2: routed commands must not bypass the
         # approval system.  Same call the normal path uses; commands that

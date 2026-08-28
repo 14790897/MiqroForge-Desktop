@@ -316,6 +316,12 @@ class BridgeRuntimeLoop:
             "sandbox.setEnabled", self._sandbox_set_enabled_handler,
         )
 
+        # Register #854: allow_system_installs runtime toggle (no restart)
+        self._app_server.register_method(
+            "sandbox.setAllowSystemInstalls",
+            self._sandbox_set_allow_system_installs_handler,
+        )
+
         # Register Phase 27.3: chat.send through AppServer
         self._app_server.register_method("chat.send", self._chat_send_handler)
 
@@ -1941,6 +1947,57 @@ class BridgeRuntimeLoop:
                 "(client={})", destroyed, client_id,
             )
             return {"result": {"enabled": False, "destroyed": destroyed}}
+
+    async def _sandbox_set_allow_system_installs_handler(
+        self, request_id: str, params: dict, client_id: str,
+        session_id: str | None, registry: Any,
+    ) -> dict:
+        """#854: sandbox.setAllowSystemInstalls — runtime toggle, no restart.
+
+        统一入口（外部审阅 #854）：runtime 属性与 config 持久化原子成对，
+        设置页开关与确认卡「允许并记住」都走这里。
+        """
+        enabled = params.get("enabled")
+        if not isinstance(enabled, bool):
+            from miqi.runtime.app_server import AppServerError
+
+            raise AppServerError(
+                "sandbox.setAllowSystemInstalls: 'enabled' must be a boolean",
+                code="INVALID_PARAMS",
+            )
+        if self._bridge_state is None:
+            from miqi.runtime.app_server import AppServerError
+
+            raise AppServerError(
+                "Bridge state not available", code="INTERNAL",
+            )
+
+        from miqi.config.loader import save_config
+
+        config = self._bridge_state.load_config()
+        config.tools.sandbox.allow_system_installs = enabled
+        try:
+            save_config(config)
+        except Exception as exc:
+            logger.error("sandbox.setAllowSystemInstalls: config save failed: {}", exc)
+            from miqi.runtime.app_server import AppServerError
+
+            raise AppServerError(
+                "Failed to save config", code="INTERNAL",
+            ) from exc
+
+        mgr = getattr(self._bridge_state, "_sandbox_manager", None)
+        if isinstance(mgr, object) and mgr is not None and mgr != "disabled":
+            try:
+                mgr.allow_system_installs = enabled
+            except Exception as exc:  # noqa: BLE001 - runtime 更新失败仅告警
+                logger.warning(
+                    "sandbox.setAllowSystemInstalls: runtime update failed: {}", exc,
+                )
+        logger.info(
+            "sandbox.setAllowSystemInstalls: {} (client={})", enabled, client_id,
+        )
+        return {"result": {"allowSystemInstalls": enabled}}
 
     async def _shutdown(self) -> None:
         """Graceful shutdown sequence.

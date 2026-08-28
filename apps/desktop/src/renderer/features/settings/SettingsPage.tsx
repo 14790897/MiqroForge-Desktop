@@ -52,8 +52,9 @@ import {
   FileText,
   MessageSquare,
   Scale,
+  Package,
   type LucideIcon,
-} from 'lucide-react';
+  } from 'lucide-react';
 import { useRuntime } from '../../contexts/RuntimeContext';
 import * as Tabs from '@radix-ui/react-tabs';
 import {
@@ -348,6 +349,23 @@ function SandboxToggle() {
   );
 }
 
+function AllowSystemInstallsToggle() {
+  return (
+    <SettingsToggle
+      icon={Package}
+      testId="allow-system-installs-toggle"
+      label="允许系统包安装"
+      getInitial={(cfg) => cfg?.tools?.sandbox?.allowSystemInstalls ?? false}
+      onToggle={async (next) => {
+        const r: any = await window.miqi.sandbox.setAllowSystemInstalls(next);
+        if (r?.error) throw new Error(r.error);
+      }}
+      readyLabel="已开启"
+      togglingLabel="正在保存…"
+    />
+  );
+}
+
 function InlineExecOutputToggle() {
   const toggle = async (next: boolean) => {
     await window.miqi.config.update({ desktop: { ui: { inlineExecOutput: next } } });
@@ -636,6 +654,16 @@ function GeneralTab({
           关闭后直接操作主机文件系统（无隔离，性能更好但风险更高）。
         </p>
         <SandboxToggle />
+        <div className="mt-3 rounded-xl border border-[var(--border-subtle)] bg-[var(--surface)] px-3 py-2.5">
+          <AllowSystemInstallsToggle />
+          <p className="text-size-xs text-[var(--text-muted)] mt-1">
+            开启后，AI 可将 apt 等系统包安装请求转交给 WSL，并以{' '}
+            <span className="text-[var(--accent)] font-medium">root 权限</span>{' '}
+            执行（仅 Windows + WSL）。此权限会{' '}
+            <span className="text-[var(--accent)] font-medium">持续保存到后续会话</span>
+            。仅在你信任 AI 操作时开启。
+          </p>
+        </div>
       </div>
 
       {/* ---- Inline Exec Output ---- */}
