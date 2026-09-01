@@ -398,7 +398,7 @@ async def test_intercept_when_disabled():
 
 
 async def test_approver_deny_when_disabled():
-    """关闭状态 + 用户拒绝 → 拦截（#854）。"""
+    """关闭状态 + 用户拒绝 → 拦截，消息明确告知拒绝（#854 / #875 P3-2）。"""
     manager = FakeSandboxManager(
         allow_system_installs=False,
         sandbox=FakeSandbox(),
@@ -415,8 +415,39 @@ async def test_approver_deny_when_disabled():
         session_key="k",
     )
     assert result is not None and result.exit_code == 1
-    assert "设置 > 沙箱隔离" in result.output
+    # 卡已弹但被拒绝 → 使用专门的拒绝消息（不再建议用户去用刚拒绝的卡）
+    assert "授权未通过" in result.output
     assert not manager._sandbox.install_calls  # 未执行安装
+
+
+async def test_guard_runs_before_approver():
+    """#875 P3-1：护栏前置——被护栏拒绝的命令不弹卡（approver 不被调用）。
+
+    护栏（deny-pattern / 单命令归一化）在授权卡之前执行：用户不该为
+    一个随后必然被拒的命令看到授权卡。
+    """
+    manager = FakeSandboxManager(
+        allow_system_installs=False,
+        sandbox=FakeSandbox(),
+    )
+    called = []
+
+    async def _never(command: str) -> str:
+        called.append(command)
+        return "once"
+
+    tool = ExecTool(working_dir=".", sandbox_manager=manager,
+                    system_install_approver=_never)
+    # 复合命令（&&）会被单命令护栏拒绝
+    result = await tool._maybe_route_system_install(
+        "sudo apt-get install gcc && sudo apt-get install make",
+        sandbox_selection=_make_selection(),
+        session_key="k",
+    )
+    assert result is not None and result.exit_code == 1
+    assert "安全护栏" in result.output
+    assert called == []  # approver 从未被调用
+    assert not manager._sandbox.install_calls
 
 
 async def test_approver_allow_once_routes_install():
@@ -441,6 +472,9 @@ async def test_approver_allow_once_routes_install():
     assert result is not None and result.exit_code == 0
     assert manager._sandbox.install_calls  # 已路由执行
     assert manager.allow_system_installs is False  # 全局开关未被修改
+    # #875 P3-3：approver 收到的是归一化后的最终执行命令（显示 = 执行），
+    # 而非带 sudo 前缀的原始命令。
+    assert calls == ["apt-get install -y texlive-xetex"]
 
 
 async def test_approver_allow_always_routes_install():
@@ -559,7 +593,7 @@ async def test_factory_approver_allow_once_no_persist():
         return {"status": "submitted", "answers": dict(answers)}
 
     approver = _make_system_install_approver(
-        resolver=_resolver, sandbox_manager=mgr, config=cfg,
+        resolver=_resolver, sandbox_manager=mgr,
     )
     decision, persist_failed = await approver("sudo apt-get install -y texlive-xetex")
     assert decision == "once"
@@ -595,7 +629,7 @@ async def test_factory_approver_allow_always_persists(tmp_path, monkeypatch):
         return {"status": "submitted", "answers": {"choice_id": "allow_always"}}
 
     approver = _make_system_install_approver(
-        resolver=_resolver, sandbox_manager=mgr, config=stale_cfg,
+        resolver=_resolver, sandbox_manager=mgr,
     )
     decision, persist_failed = await approver("sudo apt-get install -y texlive-xetex")
 
@@ -632,14 +666,17 @@ async def test_factory_approver_persist_failure_visible(tmp_path, monkeypatch):
     loader.save_config = _boom
     try:
         approver = _make_system_install_approver(
-            resolver=_resolver, sandbox_manager=mgr, config=_FakeConfig(),
+            resolver=_resolver, sandbox_manager=mgr,
         )
         decision, persist_failed = await approver("sudo apt-get install -y texlive-xetex")
     finally:
         loader.save_config = orig
 
     assert decision == "always"
-    assert persist_failed is True  # runtime 已生效但持久化失败 → 用户可见提示
+    assert persist_failed is True  # 本次放行但持久化失败 → 用户可见提示
+    # #875 P2：持久化失败时 runtime 保持关闭（fail-closed 方向）——
+    # 先开 runtime 会让「保存失败」时权限在本会话仍然生效。
+    assert mgr.allow_system_installs is False
 
 
 async def test_factory_approver_fails_closed():
@@ -653,7 +690,7 @@ async def test_factory_approver_fails_closed():
         return {"status": "cancelled", "reason": "timeout"}
 
     approver = _make_system_install_approver(
-        resolver=_cancelled, sandbox_manager=mgr, config=cfg,
+        resolver=_cancelled, sandbox_manager=mgr,
     )
     assert await approver("cmd") == ("deny", False)
     assert mgr.allow_system_installs is False
@@ -662,7 +699,7 @@ async def test_factory_approver_fails_closed():
         raise RuntimeError("gate down")
 
     approver2 = _make_system_install_approver(
-        resolver=_boom, sandbox_manager=mgr, config=cfg,
+        resolver=_boom, sandbox_manager=mgr,
     )
     assert await approver2("cmd") == ("deny", False)
 
@@ -670,13 +707,13 @@ async def test_factory_approver_fails_closed():
         return {"status": "submitted", "answers": {"choice_id": "whatever"}}
 
     approver3 = _make_system_install_approver(
-        resolver=_unknown, sandbox_manager=mgr, config=cfg,
+        resolver=_unknown, sandbox_manager=mgr,
     )
     assert await approver3("cmd") == ("deny", False)
 
     # 无 resolver 通道 → deny（fail-closed）
     approver4 = _make_system_install_approver(
-        resolver=None, sandbox_manager=mgr, config=cfg,
+        resolver=None, sandbox_manager=mgr,
     )
     assert await approver4("cmd") == ("deny", False)
 
@@ -707,10 +744,10 @@ async def test_cross_instance_concurrent_approvals_no_cross_talk():
         return _resolver
 
     approver_a = _make_system_install_approver(
-        resolver=await _resolver_for("a"), sandbox_manager=mgr_a, config=_FakeConfig(),
+        resolver=await _resolver_for("a"), sandbox_manager=mgr_a,
     )
     approver_b = _make_system_install_approver(
-        resolver=await _resolver_for("b"), sandbox_manager=mgr_b, config=_FakeConfig(),
+        resolver=await _resolver_for("b"), sandbox_manager=mgr_b,
     )
     tool_a = ExecTool(working_dir=".", sandbox_manager=mgr_a,
                       system_install_approver=approver_a)
@@ -759,7 +796,8 @@ async def test_allow_once_second_invocation_prompts_again():
     )
     assert r2 is not None and r2.exit_code == 0
     assert len(calls) == 2, f"第二次安装应再次弹卡（当前弹卡次数 {len(calls)}）"
-    assert calls == ["sudo apt-get install -y gcc", "sudo apt-get install -y make"]
+    # #875 P3-3：approver 收到归一化命令（无 sudo 前缀）
+    assert calls == ["apt-get install -y gcc", "apt-get install -y make"]
 
 
 async def test_factory_approver_card_payload_structured():
@@ -775,7 +813,7 @@ async def test_factory_approver_card_payload_structured():
         return {"status": "submitted", "answers": {"choice_id": "deny"}}
 
     approver = _make_system_install_approver(
-        resolver=_resolver, sandbox_manager=mgr, config=cfg,
+        resolver=_resolver, sandbox_manager=mgr,
     )
     await approver("sudo apt-get install -y texlive-xetex")
     assert seen["title"] == "系统包安装授权"
@@ -823,9 +861,12 @@ async def test_dangerous_compound_refused_before_root_run():
 # ── approval wiring (review F2) ────────────────────────────────────────
 
 
-async def test_route_respects_approval_callback_deny(monkeypatch):
-    """A routed command hitting DANGEROUS_PATTERNS goes through the same
-    approval system as the normal path — the user can decline it."""
+async def test_route_guard_rejects_dangerous_before_approval(monkeypatch):
+    """DANGEROUS_PATTERNS 命令由护栏在审批系统之前直接拒绝（#875 P3-1）。
+
+    护栏前置后：用户永远不会被要求批准一个随后必然被护栏拒绝的命令。
+    危险模式（rm -rf 等）→ 护栏拒绝，approval_callback 不被调用。
+    """
     import miqi.agent.command_approval as ca
 
     calls = []
@@ -851,9 +892,11 @@ async def test_route_respects_approval_callback_deny(monkeypatch):
     )
     assert result is not None
     assert result.exit_code == 1
-    assert "BLOCKED" in result.output
-    assert calls == ["sudo apt-get install -y x && rm -rf /"]
-    assert sandbox.install_calls == []  # approval denied → nothing ran
+    # 护栏消息（而非用户审批的 BLOCKED）——护栏先于审批系统
+    assert "安全护栏" in result.output
+    assert "BLOCKED" not in result.output
+    assert calls == []  # approval_callback 从未被调用
+    assert sandbox.install_calls == []  # 未执行安装
 
 
 async def test_route_respects_approval_callback_approve(monkeypatch):

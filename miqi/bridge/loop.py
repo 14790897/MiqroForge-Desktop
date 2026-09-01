@@ -1957,6 +1957,13 @@ class BridgeRuntimeLoop:
         统一入口（外部审阅 #854）：runtime 属性与 config 持久化原子成对，
         设置页开关与确认卡「允许并记住」都走这里。
         """
+        if not isinstance(params, dict):
+            from miqi.runtime.app_server import AppServerError
+
+            raise AppServerError(
+                "sandbox.setAllowSystemInstalls: params must be an object",
+                code="INVALID_PARAMS",
+            )
         enabled = params.get("enabled")
         if not isinstance(enabled, bool):
             from miqi.runtime.app_server import AppServerError
@@ -1987,7 +1994,7 @@ class BridgeRuntimeLoop:
             ) from exc
 
         mgr = getattr(self._bridge_state, "_sandbox_manager", None)
-        if isinstance(mgr, object) and mgr is not None and mgr != "disabled":
+        if mgr is not None and mgr != "disabled":
             try:
                 mgr.allow_system_installs = enabled
             except Exception as exc:  # noqa: BLE001 - runtime 更新失败仅告警

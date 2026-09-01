@@ -10,6 +10,7 @@ Registration order is kept stable so model tool specs remain deterministic.
 from __future__ import annotations
 
 import logging
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +19,11 @@ from miqi.agent.tools.user_roots import _is_protected_extra_root
 from miqi.paths import get_config_path
 
 _log = logging.getLogger(__name__)
+
+#: 跨实例共享的 config.json 写锁——「允许并记住」fresh-read-write 需要串行；
+#: per-call / per-instance 锁不防跨会话并发（#875 review P3-4，原实现
+#: `threading.Lock()` 每次调用新建，是无效保护）。
+_config_write_lock = threading.Lock()
 
 
 def _default_read_roots() -> list[Path]:
@@ -45,15 +51,17 @@ def _default_read_roots() -> list[Path]:
     return roots
 
 
-def _make_system_install_approver(*, resolver, sandbox_manager, config):
+def _make_system_install_approver(*, resolver, sandbox_manager):
     """#854: 系统包安装授权确认卡 approver（once/always/deny）。
 
     - 复用 #646/#864 的 user-input 通道（同一 gate，桌面端渲染确认卡）
     - 卡片展示结构化信息：操作/命令/权限(root)/范围(WSL)/持久性/风险
-      （显示的命令 = 最终执行 plan，来自拦截点的原始命令，外部审阅 #854）
+      ——命令由拦截点传入**归一化后**的最终执行命令（显示 = 执行，
+      #875 review P3-3），并预告批准后仍会经过命令安全审批（P3-5）
     - "允许本次"（once）= 调用级授权，不修改任何全局状态
-    - "允许并记住"（always）走统一入口：runtime 属性 + config 持久化，
-      二者原子成对（外部审阅 #854：不许散落各自改）
+    - "允许并记住"（always）走统一入口：**config 持久化在前，runtime
+      属性在后**——持久化失败时 runtime 保持关闭（fail-closed 方向，
+      #875 review P2），本次安装仍放行但 persist_failed=True 透出
     - 任何非 submitted / 未知选项 → deny（fail-closed）
     """
     import logging
@@ -72,7 +80,8 @@ def _make_system_install_approver(*, resolver, sandbox_manager, config):
                 "权限：root（WSL 发行版）\n"
                 "范围：Windows + WSL 环境\n"
                 "持久性：安装后跨会话持续生效\n"
-                "风险：会修改系统软件环境"
+                "风险：会修改系统软件环境\n"
+                "注意：批准后命令仍会经过命令安全审批，可能再次弹出确认"
             ),
             "choices": [
                 {"id": "allow_once", "label": "允许本次安装"},
@@ -90,23 +99,21 @@ def _make_system_install_approver(*, resolver, sandbox_manager, config):
             return ("deny", False)
         choice_id = str((gate_result.get("answers") or {}).get("choice_id") or "")
         if choice_id == "allow_always":
-            # 统一入口：runtime + config 原子成对（外部审阅 #854）。
-            # 持久化必须 fresh-read：closure 捕获的旧 Config 可能覆盖
-            # 用户其他设置的旧值（CodeRabbit #875 Major / Data Integrity）。
-            # 照 #864 extra-root persister 模式：磁盘 JSON → 只改目标字段 → save。
-            if sandbox_manager is not None:
-                sandbox_manager.allow_system_installs = True
+            # 统一入口（外部审阅 #854）：**config 持久化在前，runtime 在后**。
+            # 先开 runtime 会让「保存失败」时权限在本会话仍然生效（fail-open），
+            # 与本 PR 的 fail-closed 原则矛盾（#875 review P2）。
+            # 持久化必须 fresh-read：closure 捕获的旧 Config 可能覆盖用户
+            # 其他设置的旧值（CodeRabbit #875 Major / Data Integrity）。
             persist_failed = False
             try:
                 import json
-                import threading
 
                 from miqi.config.loader import save_config
                 from miqi.config.schema import Config
                 from miqi.paths import get_config_path
 
                 path = get_config_path()
-                with threading.Lock():
+                with _config_write_lock:
                     try:
                         with open(path, encoding="utf-8") as f:
                             data = json.load(f)
@@ -128,11 +135,20 @@ def _make_system_install_approver(*, resolver, sandbox_manager, config):
                                 "system install allow persist failed: %s", exc,
                             )
                             persist_failed = True
-            except Exception as exc:  # noqa: BLE001 - runtime 已生效，失败仅透出
+            except Exception as exc:  # noqa: BLE001 - 失败仅透出，不放行 runtime
                 logger.error("system install allow persist error: %s", exc)
                 persist_failed = True
+            # 持久化成功才开 runtime（fail-closed 方向）
+            if not persist_failed and sandbox_manager is not None:
+                try:
+                    sandbox_manager.allow_system_installs = True
+                except Exception as exc:  # noqa: BLE001 - config 已持久化，重启自愈
+                    logger.warning(
+                        "system install allow: runtime update failed (config "
+                        "persisted, restart will apply): %s", exc,
+                    )
             # (decision, persist_failed)：shell 拦截点据此向用户透出
-            # "本次已生效但保存失败，重启后需重新授权"（外部审阅 #854 疑点 1 → B）
+            # "本次已放行但未记住，重启后需重新授权"（#875 review P2）
             return ("always", persist_failed)
         if choice_id == "allow_once":
             return ("once", False)
@@ -489,7 +505,7 @@ def create_runtime_tool_registry(
             # #854: 系统包安装授权确认卡——关闭状态下拦截点弹卡（once/always/deny）。
             # "允许并记住"走统一入口：runtime 属性 + config 持久化（外部审阅 #854）。
             system_install_approver=_make_system_install_approver(
-                resolver=_write_resolver, sandbox_manager=_sbm, config=config,
+                resolver=_write_resolver, sandbox_manager=_sbm,
             ),
         )
     )

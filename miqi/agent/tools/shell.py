@@ -259,6 +259,16 @@ _SYSTEM_INSTALL_NOT_ENABLED_MSG = (
     "发行版中执行，安装一次跨会话持久，装完即可在沙箱内使用。"
 )
 
+#: Interception message when the approval card WAS shown and the user
+#: declined or the card timed out — the NOT_ENABLED message suggests using
+#: the card, which the user just rejected, so it must not be reused here
+#: (#875 review P3-2).
+_SYSTEM_INSTALL_DENIED_MSG = (
+    "Error: 系统包安装授权未通过（拒绝或超时），本次安装未执行。\n"
+    "如需继续，请重新发起命令后在授权确认卡中选择「允许本次安装」，"
+    "或在 设置 > 沙箱隔离 中开启「允许系统包安装」。"
+)
+
 #: Interception message when system installs are enabled but the sandbox
 #: runs on native Linux (no rootful WSL distro layer to install into).
 _SYSTEM_INSTALL_WSL_ONLY_MSG = (
@@ -2227,24 +2237,26 @@ class ExecTool(Tool):
         4. A disabled sandbox manager (user chose direct host exec) → the
            routing never participates, not even to intercept (review #759
            O2).
-        5. ``allow_system_installs`` off → intercept with an actionable
-           message, BEFORE any sandbox resolution or approval: the command
-           is dead on arrival, no sandbox should be created for it, and the
-           message must point at the real fix (enable the option), not at
-           the sandbox (review #759 O1).
-        6. Desktop approval (when ``approval_callback`` is wired) runs here
+        5. Guard + normalize run BEFORE any card or approval — a command
+           that fails the deny-pattern re-check or single-command
+           normalization is refused outright; only commands that will
+           actually execute reach the approval card, and the card shows the
+           NORMALIZED command, i.e. exactly what runs as root (#875 review
+           P3-1/P3-3).
+        6. ``allow_system_installs`` off → the approval card (once/always/
+           deny) intercepts BEFORE any sandbox resolution: no sandbox is
+           created for it.  The deny branch either points at the settings
+           page (card never shown — CLI/no desktop channel) or states the
+           refusal plainly (card denied or timed out, #875 review P3-2).
+        7. Desktop approval (when ``approval_callback`` is wired) runs here
            too — routed commands do NOT bypass the approval system; the
            user can decline, which intercepts before any sandbox is
            resolved or any root command is spawned.
-        7. A live bwrap sandbox must resolve — when none is available the
+        8. A live bwrap sandbox must resolve — when none is available the
            command is intercepted with a clear message instead of falling
            through to the normal path's Windows-cmd degradation (review
            #759 N2).
-        8. WSL-only — native Linux sandboxes get a WSL-only message.
-        9. Deny-pattern re-check (minus sudo), allow_patterns, dist-upgrade
-           refusal, and single-command normalization (see
-           :meth:`_guard_system_install_command`) — dangerous, option-
-           carrying or system-rewriting commands are refused.
+        9. WSL-only — native Linux sandboxes get a WSL-only message.
         10. Cancel check, then the normalized command is executed as root in
             the WSL distro.
         """
@@ -2273,6 +2285,21 @@ class ExecTool(Tool):
         if not getattr(self._sandbox_manager, "enabled", False):
             return None
 
+        # Guard + normalize BEFORE any card or approval (#875 review P3-1):
+        # a command that the guard would refuse (un-allowlisted flags, deny
+        # patterns, dist-upgrade, shell compounds) or that cannot be
+        # normalized must never reach the user's approval card — the user
+        # would approve something that then gets refused anyway.  The card
+        # therefore shows the NORMALIZED command, i.e. exactly what will
+        # execute (display == execution, #875 review P3-3).
+        guard_error = self._guard_system_install_command(command)
+        if guard_error:
+            return _ExecResult(output=guard_error, exit_code=1)
+
+        normalized = self._normalize_system_install(command)
+        if normalized is None:
+            return _ExecResult(output=_SYSTEM_INSTALL_SINGLE_MSG, exit_code=1)
+
         # O1: check the allow toggle before touching the sandbox.  When it
         # is off the command is dead on arrival — no sandbox is created for
         # it, no approval is prompted, and the user is pointed at the real
@@ -2281,9 +2308,13 @@ class ExecTool(Tool):
             # #854: 弹系统安装授权卡（once/always/deny），替代直接拒绝。
             # "允许本次"是调用级授权，不修改全局开关（外部审阅 #854）；
             # "允许并记住"由 approver 内部走统一入口持久化后放行。
-            decision, persist_failed = await self._request_system_install_approval(command)
+            decision, persist_failed = await self._request_system_install_approval(normalized)
             if decision not in ("once", "always"):
-                return _ExecResult(output=_SYSTEM_INSTALL_NOT_ENABLED_MSG, exit_code=1)
+                # 卡已弹但用户拒绝/超时 → 明确告知；从未弹卡（CLI/无桌面
+                # 通道）→ 指向设置页（#875 review P3-2）。
+                if self.system_install_approver is None:
+                    return _ExecResult(output=_SYSTEM_INSTALL_NOT_ENABLED_MSG, exit_code=1)
+                return _ExecResult(output=_SYSTEM_INSTALL_DENIED_MSG, exit_code=1)
             self._system_install_persist_failed = persist_failed
 
         # Phase 77 (#759) + review F2: routed commands must not bypass the
@@ -2319,14 +2350,6 @@ class ExecTool(Tool):
 
         if not getattr(sandbox, "supports_system_installs", False):
             return _ExecResult(output=_SYSTEM_INSTALL_WSL_ONLY_MSG, exit_code=1)
-
-        guard_error = self._guard_system_install_command(command)
-        if guard_error:
-            return _ExecResult(output=guard_error, exit_code=1)
-
-        normalized = self._normalize_system_install(command)
-        if normalized is None:  # defensive — the guard already refuses these
-            return _ExecResult(output=_SYSTEM_INSTALL_SINGLE_MSG, exit_code=1)
 
         if cancel_event is not None and cancel_event.is_set():
             return _ExecResult(
@@ -2467,11 +2490,13 @@ class ExecTool(Tool):
             output_parts.append(f"STDERR:\n{err.rstrip()}")
         if rc != 0:
             output_parts.append(f"\nExit code: {rc}")
-        # 外部审阅 #854 疑点 1 → B：「允许并记住」持久化失败必须用户可见——
-        # runtime 已生效但重启后授权失效。
-        if rc == 0 and getattr(self, "_system_install_persist_failed", False):
+        # 外部审阅 #854 疑点 1 → B + #875 review P2：持久化失败必须可见，
+        # 且与安装命令成败无关（rc==0 才提示会漏掉安装失败的情况）——用户
+        # 点了「允许并记住」，却可能在重启后丢失授权，必须无条件告知。
+        if getattr(self, "_system_install_persist_failed", False):
             output_parts.append(
-                "\n[提示] 永久授权已生效但配置保存失败，重启后需要重新授权。"
+                "\n[提示] 本次安装已放行，但授权保存失败，「允许系统包安装」"
+                "未开启，重启后需要重新授权。"
             )
         self._system_install_persist_failed = False
 
