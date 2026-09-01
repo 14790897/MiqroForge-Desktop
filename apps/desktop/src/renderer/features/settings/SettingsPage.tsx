@@ -54,7 +54,7 @@ import {
   Scale,
   Package,
   type LucideIcon,
-  } from 'lucide-react';
+} from 'lucide-react';
 import { useRuntime } from '../../contexts/RuntimeContext';
 import * as Tabs from '@radix-ui/react-tabs';
 import {
@@ -658,8 +658,8 @@ function GeneralTab({
           <AllowSystemInstallsToggle />
           <p className="text-size-xs text-[var(--text-muted)] mt-1">
             开启后，AI 可将 apt 等系统包安装请求转交给 WSL，并以{' '}
-            <span className="text-[var(--accent)] font-medium">root 权限</span>{' '}
-            执行（仅 Windows + WSL）。此权限会{' '}
+            <span className="text-[var(--accent)] font-medium">root 权限</span> 执行（仅 Windows +
+            WSL）。此权限会{' '}
             <span className="text-[var(--accent)] font-medium">持续保存到后续会话</span>
             。仅在你信任 AI 操作时开启。
           </p>

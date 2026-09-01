@@ -49,11 +49,12 @@ test.describe('System Install Card (real LLM, #854/#875)', () => {
     await textarea.fill(text);
     await textarea.press('Enter');
     await expect(
-      page.locator('main').getByText(/授权流程测试场景/).first(),
+      page
+        .locator('main')
+        .getByText(/授权流程测试场景/)
+        .first()
     ).toBeVisible({ timeout: 30_000 });
-    await expect(
-      page.locator('[data-testid="chat-input-container"] textarea'),
-    ).toHaveValue('');
+    await expect(page.locator('[data-testid="chat-input-container"] textarea')).toHaveValue('');
   }
 
   test.beforeAll(async () => {
@@ -114,7 +115,9 @@ test.describe('System Install Card (real LLM, #854/#875)', () => {
     // 就绪，否则授权卡永远不会出现（sandbox-exec.spec.ts 同款模式）。
     const ready = await waitForSandboxReady(page, 300_000);
     if (!ready) {
-      throw new Error('Sandbox manager did not become ready within 300s — card flow cannot be exercised');
+      throw new Error(
+        'Sandbox manager did not become ready within 300s — card flow cannot be exercised'
+      );
     }
     console.log('[test] ✅ sandbox ready, sending install instruction');
 
@@ -149,9 +152,7 @@ test.describe('System Install Card (real LLM, #854/#875)', () => {
     } finally {
       // 无论上面哪步失败都恢复 OFF——防止 ON 状态泄漏给卡片测试导致
       // 级联误报（#875 review F10）
-      await page
-        .evaluate(() => window.miqi.sandbox.setAllowSystemInstalls(false))
-        .catch(() => {});
+      await page.evaluate(() => window.miqi.sandbox.setAllowSystemInstalls(false)).catch(() => {});
     }
   });
 
@@ -182,7 +183,7 @@ test.describe('System Install Card (real LLM, #854/#875)', () => {
           'sudo apt-get install -y figlet。执行时系统会弹出「系统包安装授权」' +
           '确认卡片，这是预期行为——你正常执行即可。不要先做检查（不要运行 ' +
           'which / apt-cache 等命令），不要使用 pip，不要询问用户，' +
-          '直接执行这条命令，执行完把结果回复给我。',
+          '直接执行这条命令，执行完把结果回复给我。'
       );
 
       // 路由拦截 → 授权卡出现（含具体命令文本——显示 = 执行）
@@ -200,10 +201,12 @@ test.describe('System Install Card (real LLM, #854/#875)', () => {
         });
         const mainSends = await electronApp.evaluate(() => {
           const g = globalThis as any;
-          return (g.__mainSends ?? []).filter(
-            (s: { channel: string }) =>
-              s.channel.includes('userInput') || s.channel.includes('chat:'),
-          ).slice(-15);
+          return (g.__mainSends ?? [])
+            .filter(
+              (s: { channel: string }) =>
+                s.channel.includes('userInput') || s.channel.includes('chat:')
+            )
+            .slice(-15);
         });
         console.log('[debug] __uiCardEvents =', JSON.stringify(dump, null, 2));
         console.log('[debug] __mainSends (userInput/chat) =', JSON.stringify(mainSends, null, 2));
@@ -223,7 +226,7 @@ test.describe('System Install Card (real LLM, #854/#875)', () => {
       // 允许本次 → 决议回传 → 路由以 root 在 WSL 发行版执行
       await cardArea.getByRole('button', { name: '允许本次安装' }).click();
       await expect(
-        page.getByTestId('confirm-card-resolved').getByText('已选择「允许本次安装」'),
+        page.getByTestId('confirm-card-resolved').getByText('已选择「允许本次安装」')
       ).toBeVisible({ timeout: 30_000 });
 
       await waitForResponseComplete(page, LLM_TIMEOUT);
@@ -238,6 +241,6 @@ test.describe('System Install Card (real LLM, #854/#875)', () => {
         // 长会话 + 卡片历史下 fullPage 截图可能超过 30s 默认超时
         timeout: 90_000,
       });
-    },
+    }
   );
 });
