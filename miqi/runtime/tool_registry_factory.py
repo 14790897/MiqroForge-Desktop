@@ -69,7 +69,7 @@ def _make_system_install_approver(*, resolver, sandbox_manager):
 
     async def _approver(command: str) -> tuple[str, bool]:
         if resolver is None:
-            return ("deny_no_channel", False)
+            return ("deny_no_channel", False, False)
         payload = {
             "title": "系统包安装授权",
             "message": (
@@ -95,17 +95,17 @@ def _make_system_install_approver(*, resolver, sandbox_manager):
             gate_result = await asyncio.wait_for(resolver(payload), timeout=120)
         except TimeoutError:
             logger.warning("system install card wait timed out — deny")
-            return ("deny", False)
+            return ("deny", False, False)
         except Exception as exc:  # noqa: BLE001 - fail-closed
             logger.warning("system install card resolver failed: %s — deny", exc)
-            return ("deny", False)
+            return ("deny", False, False)
         if gate_result.get("status") != "submitted":
             # 无桌面通道（emitter 未注册）→ 卡从未出现——shell 应给设置页
             # 指引而非"去用刚拒绝的卡"（#875 review F3）。
             reason = str(gate_result.get("reason") or "")
             if "no user-input channel" in reason:
-                return ("deny_no_channel", False)
-            return ("deny", False)
+                return ("deny_no_channel", False, False)
+            return ("deny", False, False)
         choice_id = str((gate_result.get("answers") or {}).get("choice_id") or "")
         if choice_id == "allow_always":
             # 统一入口（外部审阅 #854）：**config 持久化在前，runtime 在后**。
@@ -126,20 +126,29 @@ def _make_system_install_approver(*, resolver, sandbox_manager):
                 logger.error("system install allow persist error: %s", exc)
                 persist_failed = True
             # 持久化成功才开 runtime（fail-closed 方向）
+            runtime_failed = False
             if not persist_failed and sandbox_manager is not None:
                 try:
                     sandbox_manager.allow_system_installs = True
                 except Exception as exc:  # noqa: BLE001 - config 已持久化，重启自愈
+                    # #875 review: this is an AUTHOR-recognized failure
+                    # mode — surface it instead of swallowing it, or the
+                    # user sees "允许并记住" accepted while the current
+                    # runtime still denies installs (config=true /
+                    # runtime=false).  This call is still allowed (the
+                    # user explicitly granted it); the shell surfaces a
+                    # "restart to apply" notice.
                     logger.warning(
                         "system install allow: runtime update failed (config "
                         "persisted, restart will apply): %s", exc,
                     )
-            # (decision, persist_failed)：shell 拦截点据此向用户透出
-            # "本次已放行但未记住，重启后需重新授权"（#875 review P2）
-            return ("always", persist_failed)
+                    runtime_failed = True
+            # (decision, persist_failed, runtime_failed)：shell 拦截点据此
+            # 向用户透出"本次已放行但未记住/未生效"（#875 review P2/P4）。
+            return ("always", persist_failed, runtime_failed)
         if choice_id == "allow_once":
-            return ("once", False)
-        return ("deny", False)
+            return ("once", False, False)
+        return ("deny", False, False)
 
     return _approver
 

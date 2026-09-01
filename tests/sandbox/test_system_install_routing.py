@@ -514,7 +514,7 @@ async def test_malformed_approver_tuple_fails_closed():
     )
 
     async def _malformed(command: str) -> str:
-        return ("once", False, "extra")
+        return ("once", False, False, "extra")
 
     tool = ExecTool(working_dir=".", sandbox_manager=manager,
                     system_install_approver=_malformed)
@@ -672,7 +672,7 @@ async def test_factory_approver_allow_once_no_persist():
     approver = _make_system_install_approver(
         resolver=_resolver, sandbox_manager=mgr,
     )
-    decision, persist_failed = await approver("sudo apt-get install -y texlive-xetex")
+    decision, persist_failed, runtime_failed = await approver("sudo apt-get install -y texlive-xetex")
     assert decision == "once"
     assert persist_failed is False
     assert mgr.allow_system_installs is False
@@ -710,7 +710,7 @@ async def test_factory_approver_allow_always_persists(tmp_path, monkeypatch):
     approver = _make_system_install_approver(
         resolver=_resolver, sandbox_manager=mgr,
     )
-    decision, persist_failed = await approver("sudo apt-get install -y texlive-xetex")
+    decision, persist_failed, runtime_failed = await approver("sudo apt-get install -y texlive-xetex")
 
     assert decision == "always"
     assert persist_failed is False
@@ -749,7 +749,7 @@ async def test_factory_approver_persist_failure_visible(tmp_path, monkeypatch):
         approver = _make_system_install_approver(
             resolver=_resolver, sandbox_manager=mgr,
         )
-        decision, persist_failed = await approver("sudo apt-get install -y texlive-xetex")
+        decision, persist_failed, runtime_failed = await approver("sudo apt-get install -y texlive-xetex")
     finally:
         loader.save_config = orig
 
@@ -773,7 +773,7 @@ async def test_factory_approver_fails_closed():
     approver = _make_system_install_approver(
         resolver=_cancelled, sandbox_manager=mgr,
     )
-    assert await approver("cmd") == ("deny", False)
+    assert await approver("cmd") == ("deny", False, False)
     assert mgr.allow_system_installs is False
 
     async def _boom(payload):
@@ -782,7 +782,7 @@ async def test_factory_approver_fails_closed():
     approver2 = _make_system_install_approver(
         resolver=_boom, sandbox_manager=mgr,
     )
-    assert await approver2("cmd") == ("deny", False)
+    assert await approver2("cmd") == ("deny", False, False)
 
     async def _unknown(payload):
         return {"status": "submitted", "answers": {"choice_id": "whatever"}}
@@ -790,14 +790,14 @@ async def test_factory_approver_fails_closed():
     approver3 = _make_system_install_approver(
         resolver=_unknown, sandbox_manager=mgr,
     )
-    assert await approver3("cmd") == ("deny", False)
+    assert await approver3("cmd") == ("deny", False, False)
 
     # 无 resolver 通道 → deny_no_channel（shell 据此给设置页指引而非"去用
     # 刚拒绝的卡"，#875 review F3）
     approver4 = _make_system_install_approver(
         resolver=None, sandbox_manager=mgr,
     )
-    assert await approver4("cmd") == ("deny_no_channel", False)
+    assert await approver4("cmd") == ("deny_no_channel", False, False)
 
 
 async def test_cross_instance_concurrent_approvals_no_cross_talk():
@@ -1752,3 +1752,43 @@ def test_sandbox_config_new_field():
     assert cfg.allow_system_installs is False
     cfg2 = SandboxConfig(allow_system_installs=True)
     assert cfg2.allow_system_installs is True
+
+
+async def test_factory_approver_allow_always_runtime_failure_surfaced(tmp_path, monkeypatch):
+    """#875 review P4: config 持久化成功但 runtime 更新失败 → runtime_failed=True
+    透出（用户可见"重启后生效"），而不是被吞掉当成功处理。"""
+    from miqi.runtime.tool_registry_factory import _make_system_install_approver
+
+    cfg_path = tmp_path / "config.json"
+    cfg_path.write_text(
+        json.dumps({
+            "tools": {"sandbox": {"enabled": True, "allowSystemInstalls": False}},
+        }),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("miqi.config.loader._get_load_path", lambda: cfg_path)
+
+    class _BrokenMgr:
+        allow_system_installs = False
+
+        def __setattr__(self, name, value):
+            if name == "allow_system_installs":
+                raise RuntimeError("runtime toggle not writable")
+            super().__setattr__(name, value)
+
+    mgr = _BrokenMgr()
+
+    async def _resolver(payload):
+        return {"status": "submitted", "answers": {"choice_id": "allow_always"}}
+
+    approver = _make_system_install_approver(resolver=_resolver, sandbox_manager=mgr)
+    decision, persist_failed, runtime_failed = await approver(
+        "sudo apt-get install -y texlive-xetex"
+    )
+
+    assert decision == "always"
+    assert persist_failed is False  # config 持久化成功
+    assert runtime_failed is True   # runtime 失败必须透出
+    # config 已写盘（重启生效），runtime 未生效
+    data = json.loads(cfg_path.read_text(encoding="utf-8"))
+    assert data["tools"]["sandbox"]["allowSystemInstalls"] is True

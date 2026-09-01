@@ -1454,7 +1454,7 @@ class ExecTool(Tool):
         # #810: called on every real chunk — lets the exec heartbeat
         # reset its silence clock (chatty commands suppress heartbeats).
         on_chunk=None,
-    ) -> tuple[str, bool]:
+    ) -> tuple[str, bool, bool]:
         """Read *stream* incrementally, emit delta events, accumulate text.
 
         Returns ``(accumulated_text, was_truncated)``.
@@ -2205,7 +2205,7 @@ class ExecTool(Tool):
             return await self._sandbox_manager.get_or_create(session_key)
         return self._sandbox_manager.active_sandbox
 
-    async def _request_system_install_approval(self, command: str) -> tuple[str, bool]:
+    async def _request_system_install_approval(self, command: str) -> tuple[str, bool, bool]:
         """#854: 系统包安装授权确认卡 → (decision, persist_failed)。
 
         decision ∈ {"once", "always", "deny", "deny_no_channel"}；
@@ -2218,7 +2218,7 @@ class ExecTool(Tool):
         - "允许本次"（once）是调用级授权——不修改任何全局状态
         """
         if self.system_install_approver is None:
-            return ("deny_no_channel", False)
+            return ("deny_no_channel", False, False)
         # 应用级串行：同一时刻只允许一张系统安装授权卡进入前台（外部审阅
         # #854；CodeRabbit #875：模块级锁跨 ExecTool 实例生效）
         async with _get_system_install_approval_lock():
@@ -2227,22 +2227,25 @@ class ExecTool(Tool):
             except Exception as exc:  # noqa: BLE001 - fail-closed on any error
                 # loguru: {} interpolation, NOT logging-style %s (#875 review)
                 logger.warning("system install approval failed ({}) — deny", exc)
-                return ("deny", False)
+                return ("deny", False, False)
         # 畸形元组（错误长度）也必须 fail-closed 而非抛穿（#875 review F8）
         persist_failed = False
+        runtime_failed = False
         if isinstance(decision, tuple):
-            if len(decision) != 2:
+            if len(decision) not in (2, 3):
                 logger.warning(
                     "system install approval returned malformed tuple {!r} — deny",
                     decision,
                 )
-                return ("deny", False)
-            decision, persist_failed = decision
+                return ("deny", False, False)
+            decision, persist_failed = decision[0], decision[1]
             persist_failed = bool(persist_failed)
+            if len(decision) == 3:
+                runtime_failed = bool(decision[2])
         if decision not in ("once", "always", "deny", "deny_no_channel"):
             logger.warning("system install approval returned unknown decision {!r} — deny", decision)
-            return ("deny", False)
-        return (decision, persist_failed)
+            return ("deny", False, False)
+        return (decision, persist_failed, runtime_failed)
 
     async def _maybe_route_system_install(
         self,
@@ -2348,6 +2351,7 @@ class ExecTool(Tool):
         normalized = self._inject_noninteractive_flags(normalized)
 
         persist_failed = False
+        runtime_failed = False  # #875 review P4: 弹卡分支可能置位
 
         # O1: check the allow toggle before touching the sandbox.  When it
         # is off the command is not dead on arrival — an approval card is
@@ -2358,7 +2362,9 @@ class ExecTool(Tool):
             # "允许本次"是调用级授权，不修改全局开关（外部审阅 #854）；
             # "允许并记住"由 approver 内部走统一入口持久化后放行。
             # 无桌面通道（deny_no_channel）时指向设置页（#875 review F3）。
-            decision, persist_failed = await self._request_system_install_approval(normalized)
+            decision, persist_failed, runtime_failed = (
+                await self._request_system_install_approval(normalized)
+            )
             if decision not in ("once", "always"):
                 # 卡已弹但用户拒绝/超时 → 明确告知；无桌面通道（卡从未出现）
                 # → 指向设置页（#875 review P3-2/F3——approver 恒非 None，
@@ -2366,6 +2372,9 @@ class ExecTool(Tool):
                 if decision == "deny_no_channel":
                     return _ExecResult(output=_SYSTEM_INSTALL_NOT_ENABLED_MSG, exit_code=1)
                 return _ExecResult(output=_SYSTEM_INSTALL_DENIED_MSG, exit_code=1)
+            # runtime_failed (#875 review)：config 已保存但 runtime 未生效——
+            # 提示交给 _execute_system_install 输出（与 persist_failed 同路径），
+            # 不在此处中断执行流程。
 
         # Phase 77 (#759) + review F2: routed commands must not bypass the
         # approval system.  Same call the normal path uses; commands that
@@ -2412,10 +2421,11 @@ class ExecTool(Tool):
             event_emitter=event_emitter, turn_id=turn_id,
             tool_call_id=tool_call_id,
             requested_timeout_ms=requested_timeout_ms,
-            # #875 review F4：persist_failed 显式传递（"允许并记住"保存失败
-            # 提示只属于本次安装），不再用实例标志——实例标志在早期返回路径
-            # （拒绝/无沙箱/WSL-only）会残留，导致后续安装误报保存失败。
+            # #875 review F4/P4：persist_failed / runtime_failed 显式传递
+            # （提示只属于本次安装），不再用实例标志——实例标志在早期返回路径
+            # （拒绝/无沙箱/WSL-only）会残留，导致后续安装误报。
             persist_failed=persist_failed,
+            runtime_failed=runtime_failed,
         )
 
     async def _execute_system_install(
@@ -2430,6 +2440,8 @@ class ExecTool(Tool):
         requested_timeout_ms: int | None = None,
         # #875 review F4: "允许并记住"持久化失败提示（显式传递，不用实例标志）
         persist_failed: bool = False,
+        # #875 review P4: config 已保存但 runtime 未立即生效（重启后生效）
+        runtime_failed: bool = False,
     ) -> _ExecResult:
         """Run a normalized install command as root in the WSL distro (#759).
 
@@ -2554,6 +2566,13 @@ class ExecTool(Tool):
             output_parts.append(
                 "\n[提示] 本次安装已放行，但授权保存失败，「允许系统包安装」"
                 "未开启，重启后需要重新授权。"
+            )
+        if runtime_failed:
+            # #875 review P4: config 持久化成功但 runtime 未生效——用户点了
+            # 「允许并记住」却看到当前会话仍未开启，必须无条件告知。
+            output_parts.append(
+                "\n[提示] 「允许并记住」已保存到配置，但当前运行时未能立即生效——"
+                "本次安装已放行，重启后系统包安装将自动以 root 执行。"
             )
 
         return _ExecResult(
