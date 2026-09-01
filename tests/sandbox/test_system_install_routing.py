@@ -658,11 +658,23 @@ class _FakeConfig:
         self.tools = type("T", (), {"sandbox": _SB()})()
 
 
-async def test_factory_approver_allow_once_no_persist():
-    """统一入口：允许本次 → once，不写 config 不改 manager（#854 外部审阅）。"""
+async def test_factory_approver_allow_once_no_persist(monkeypatch):
+    """统一入口：允许本次 → once，不写 config 不改 manager（#854 外部审阅）。
+
+    cfg 是闭包外对象，从未参与执行——无效断言（#875 review 09-02）。
+    真正验证：update_config_field 未被调用（config 未写）。
+    """
     from miqi.runtime.tool_registry_factory import _make_system_install_approver
 
-    cfg = _FakeConfig()
+    persist_called = False
+
+    def _unexpected_persist(*args, **kwargs):
+        nonlocal persist_called
+        persist_called = True
+        raise AssertionError("allow_once 不应写 config")
+
+    monkeypatch.setattr("miqi.config.loader.update_config_field", _unexpected_persist)
+
     mgr = FakeSandboxManager(allow_system_installs=False, sandbox=FakeSandbox())
     answers = {"choice_id": "allow_once", "choice_label": "允许本次安装"}
 
@@ -676,7 +688,7 @@ async def test_factory_approver_allow_once_no_persist():
     assert decision == "once"
     assert persist_failed is False
     assert mgr.allow_system_installs is False
-    assert cfg.tools.sandbox.allow_system_installs is False
+    assert persist_called is False
 
 
 async def test_factory_approver_allow_always_persists(tmp_path, monkeypatch):
