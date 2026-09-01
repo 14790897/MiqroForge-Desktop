@@ -78,7 +78,7 @@ def _make_system_install_approver(*, resolver, sandbox_manager):
                 f"命令：{command}\n"
                 "权限：root（WSL 发行版）\n"
                 "范围：Windows + WSL 环境\n"
-                "持久性：安装后跨会话持续生效\n"
+                "持久性：仅「允许并记住」跨会话持续生效；「允许本次安装」仅本次有效\n"
                 "风险：会修改系统软件环境\n"
                 "注意：批准后命令仍会经过命令安全审批，可能再次弹出确认"
             ),

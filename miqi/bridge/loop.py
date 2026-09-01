@@ -2000,9 +2000,23 @@ class BridgeRuntimeLoop:
         if mgr is not None and mgr != "disabled":
             try:
                 mgr.allow_system_installs = enabled
-            except Exception as exc:  # noqa: BLE001 - runtime 更新失败仅告警
-                logger.warning(
-                    "sandbox.setAllowSystemInstalls: runtime update failed: {}", exc,
+            except Exception as exc:  # noqa: BLE001 - fail-closed, not best-effort
+                # #875 review: config is already persisted, but the runtime
+                # toggle did NOT apply.  Returning success here would show
+                # "已开启" in the UI while the sandbox still denies installs
+                # (UI=true / config=true / runtime=false).  Surface the
+                # failure so the toggle stays off; a restart picks up the
+                # persisted config.
+                logger.error(
+                    "sandbox.setAllowSystemInstalls: runtime update failed: {} "
+                    "(config persisted; restart will apply)",
+                    exc,
+                )
+                from miqi.runtime.app_server import AppServerError
+
+                raise AppServerError(
+                    "Runtime update failed (config saved; restart to apply)",
+                    code="INTERNAL",
                 )
         logger.info(
             "sandbox.setAllowSystemInstalls: {} (client={})", enabled, client_id,
