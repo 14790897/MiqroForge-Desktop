@@ -55,10 +55,12 @@ def _make_system_install_approver(*, resolver, sandbox_manager):
     - "允许本次"（once）= 调用级授权，不修改任何全局状态
     - "允许并记住"（always）走统一入口：**config 持久化在前，runtime
       属性在后**——持久化失败时 runtime 保持关闭（fail-closed 方向，
-      #875 review P2），本次安装仍放行但 persist_failed=True 透出
+      #875 review P2），本次安装仍放行但 persist_failed=True 透出；
+      runtime 切换失败时 runtime_failed=True 透出（重启后生效，P4）
     - 决策契约（#875 review F3）："once" / "always" / "deny"（用户拒绝
       或超时）/ "deny_no_channel"（无桌面通道——shell 据此给出设置页指引
-      而非"去用刚拒绝的卡"）
+      而非"去用刚拒绝的卡"）；返回三元组 (decision, persist_failed,
+      runtime_failed)（#875 review P4）
     - 任何异常 / 未知选项 → deny（fail-closed）；卡等待有 120s 墙钟上限
       （含排队时间，#875 review F5：gate 的 per-slot 等待无超时）
     """
@@ -67,7 +69,7 @@ def _make_system_install_approver(*, resolver, sandbox_manager):
 
     logger = logging.getLogger(__name__)
 
-    async def _approver(command: str) -> tuple[str, bool]:
+    async def _approver(command: str) -> tuple[str, bool, bool]:
         if resolver is None:
             return ("deny_no_channel", False, False)
         payload = {

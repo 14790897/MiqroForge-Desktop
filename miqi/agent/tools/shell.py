@@ -2206,11 +2206,13 @@ class ExecTool(Tool):
         return self._sandbox_manager.active_sandbox
 
     async def _request_system_install_approval(self, command: str) -> tuple[str, bool, bool]:
-        """#854: 系统包安装授权确认卡 → (decision, persist_failed)。
+        """#854: 系统包安装授权确认卡 → (decision, persist_failed, runtime_failed)。
 
         decision ∈ {"once", "always", "deny", "deny_no_channel"}；
         persist_failed 仅在 decision=="always" 且 config 持久化失败时为
-        True（外部审阅 #854："允许并记住"保存失败必须对用户可见）。
+        True（外部审阅 #854："允许并记住"保存失败必须对用户可见）；
+        runtime_failed 仅在 decision=="always" 且 config 已持久化但
+        runtime 切换失败时为 True（#875 review P4：重启后生效）。
 
         - fail-closed：无 approver 通道 / 异常 / 超时一律 deny（或
           deny_no_channel），绝不放行
