@@ -89,6 +89,24 @@ test.describe('System Install Card (real LLM, #854/#875)', () => {
         w.__uiCardEvents.push({ kind: 'hook-error', err: String(err) });
       }
     });
+    // 调试钩子（main 进程侧）：hook webContents.send，记录发往 renderer 的
+    // 所有事件——判定 user_input 事件是否在 main 进程转发环节丢失
+    await electronApp.evaluate(({ webContents }) => {
+      const g = globalThis as any;
+      g.__mainSends = [];
+      const wc = webContents.getAllWebContents()[0] ?? webContents;
+      const orig = wc.send.bind(wc);
+      wc.send = (channel: string, ...args: unknown[]) => {
+        const payload = (args[0] ?? {}) as Record<string, unknown>;
+        g.__mainSends.push({
+          channel,
+          session_key: payload.session_key,
+          type: payload.type,
+          head: JSON.stringify(args[0])?.slice(0, 160),
+        });
+        return orig(channel, ...args);
+      };
+    });
 
     // 沙箱冷启动（WSL export/import/apt 依赖）可能需要几分钟——路由拦截
     // 只在 bwrap 沙箱上下文中生效（orchestrator 注入 NONE 选择时路由直接
@@ -99,6 +117,16 @@ test.describe('System Install Card (real LLM, #854/#875)', () => {
       throw new Error('Sandbox manager did not become ready within 300s — card flow cannot be exercised');
     }
     console.log('[test] ✅ sandbox ready, sending install instruction');
+
+    // 捕获 bridge stdout——沙箱选择 reason 会打到日志（Selected NONE ...
+    // bwrap unavailable），是"路由为何未拦截"的决定性证据
+    const proc = electronApp.process();
+    (proc.stdout as any)?.on('data', (d: unknown) => {
+      const s = String(d ?? '');
+      if (/sandbox|selection|bwrap|user_input|system install/i.test(s)) {
+        console.log('[bridge-out]', s.trim().slice(0, 240));
+      }
+    });
   }, 300_000);
 
   test.afterAll(async () => {
@@ -133,12 +161,18 @@ test.describe('System Install Card (real LLM, #854/#875)', () => {
     async () => {
       const cardArea = page.getByTestId('confirm-card-area');
 
+      // 关键：bwrap_available 在会话的 RuntimeServices 构造时冻结
+      // （services.py:194，enabled && _initialized）——renderer 启动即
+      // 建默认会话，若早于沙箱延迟初始化则冻结 NONE 选择，路由永不拦截
+      // （实测：冷启动沙箱先就绪 → 卡出现；热启动会话先建 → 无卡）。
+      // 沙箱就绪后新建会话，保证新会话冻结 BWRAP 选择（#875 E2E 实测）。
+      await page.getByRole('button', { name: '新建会话' }).first().click();
+      // 新会话初始化（输入框重新就绪即为新会话可用）
+      await waitForInputReady(page, 120_000);
+
       // 冷启动稳定：沙箱已就绪时 beforeAll 秒回，但会话 UI 可能还在挂载——
-      // 先等会话标题与输入框完全就绪再发消息（sendMessage 内部的气泡检查
-      // 只有 10s 窗口，踩到启动竞态会误报）。
-      await expect(
-        page.getByRole('button', { name: 'default' }).first(),
-      ).toBeVisible({ timeout: 120_000 });
+      // 等输入框完全就绪再发消息（sendMessage 内部的气泡检查只有 10s 窗口，
+      // 踩到启动竞态会误报）。
       await waitForInputReady(page, 120_000);
 
       // 显式指令模型执行系统包安装（真实 HTTP 请求到 provider；卡片在
@@ -155,7 +189,7 @@ test.describe('System Install Card (real LLM, #854/#875)', () => {
       try {
         await expect(cardArea).toBeVisible({ timeout: 120_000 });
       } catch (err) {
-        // 诊断 dump：卡片从未渲染时的链路证据
+        // 诊断 dump：卡片从未渲染时的链路证据（renderer 事件 + main 进程转发）
         const dump = await page.evaluate(() => {
           const w = window as any;
           return {
@@ -164,7 +198,15 @@ test.describe('System Install Card (real LLM, #854/#875)', () => {
             bodyHasCardText: document.body.innerText.includes('系统包安装授权'),
           };
         });
+        const mainSends = await electronApp.evaluate(() => {
+          const g = globalThis as any;
+          return (g.__mainSends ?? []).filter(
+            (s: { channel: string }) =>
+              s.channel.includes('userInput') || s.channel.includes('chat:'),
+          ).slice(-15);
+        });
         console.log('[debug] __uiCardEvents =', JSON.stringify(dump, null, 2));
+        console.log('[debug] __mainSends (userInput/chat) =', JSON.stringify(mainSends, null, 2));
         throw err;
       }
       await expect(cardArea.getByText('系统包安装授权')).toBeVisible();
