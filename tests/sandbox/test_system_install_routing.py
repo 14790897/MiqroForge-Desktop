@@ -801,13 +801,11 @@ async def test_factory_approver_fails_closed():
 
 
 async def test_cross_instance_concurrent_approvals_no_cross_talk():
-    """跨 ExecTool 实例并发弹卡：A 的点击结果不会给 B（外部审阅 #854 疑点 3）。
+    """跨 ExecTool 实例并发弹卡（外部审阅 #854 疑点 3 + CodeRabbit #875 09-01）。
 
-    per-实例 asyncio.Lock 不共享；本测试的 fake resolver 绕过真实 gate，
-    所以"同刻至多一张卡"的串行契约不在本测试断言范围内（#875 review F9：
-    该契约由真实 gate 的 per-turn slot 保证，跨实例串行需真实 gate 集成
-    测试）——此处验证的是核心契约：各自 approver 拿到各自的决策
-    （A=once, B=deny 不串值）。
+    - 模块级 _system_install_approval_lock 全局串行：同刻至多一张卡
+      （max_in_flight == 1，CodeRabbit 要求的两实例并发集成测试）
+    - 决策不串值：A=once、B=deny 各自拿到自己的结果
     """
     from miqi.runtime.tool_registry_factory import _make_system_install_approver
     import asyncio
@@ -815,10 +813,16 @@ async def test_cross_instance_concurrent_approvals_no_cross_talk():
     mgr_a = FakeSandboxManager(allow_system_installs=False, sandbox=FakeSandbox())
     mgr_b = FakeSandboxManager(allow_system_installs=False, sandbox=FakeSandbox())
     decisions = {"a": "allow_once", "b": "deny"}
+    in_flight = 0
+    max_in_flight = 0
 
     async def _resolver_for(key):
         async def _resolver(payload):
+            nonlocal in_flight, max_in_flight
+            in_flight += 1
+            max_in_flight = max(max_in_flight, in_flight)
             await asyncio.sleep(0.05)  # 模拟用户思考
+            in_flight -= 1
             return {"status": "submitted", "answers": {"choice_id": decisions[key]}}
         return _resolver
 
@@ -837,10 +841,12 @@ async def test_cross_instance_concurrent_approvals_no_cross_talk():
         tool_a._request_system_install_approval("install-a"),
         tool_b._request_system_install_approval("install-b"),
     )
+    # 模块级锁：跨实例串行，同刻至多一张卡（CodeRabbit #875 09-01）
+    assert max_in_flight == 1, f"跨实例弹卡并发泄漏: max_in_flight={max_in_flight}"
     # A 得到 once、B 得到 deny——不串值（gate 按 input_id 分发）
     assert results[0][0] == "once"
     assert results[1][0] == "deny"
-    # 决策不串值（核心契约）；串行由真实 gate 保证，fake resolver 不覆盖
+    # 决策不串值（核心契约）
     assert mgr_a.allow_system_installs is False
     assert mgr_b.allow_system_installs is False
 

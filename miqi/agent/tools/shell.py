@@ -259,6 +259,26 @@ _SYSTEM_INSTALL_NOT_ENABLED_MSG = (
     "发行版中执行，安装一次跨会话持久，装完即可在沙箱内使用。"
 )
 
+#: 系统安装授权卡的应用级串行锁（CodeRabbit #875 09-01 review）：跨
+#: ExecTool 实例（不同会话/registry）的弹卡必须全局串行——per-instance 锁
+#: 只挡同一实例，不同会话并发安装时非可见会话的卡会静默超时而非排队。
+#: asyncio.Lock 绑定事件循环，这里按运行中 loop 惰性创建（生产 = bridge
+#: 单 loop → 全局一把锁；测试 = per-test loop → 各自新锁）。
+_system_install_approval_lock: asyncio.Lock | None = None
+_system_install_approval_lock_loop: asyncio.AbstractEventLoop | None = None
+
+
+def _get_system_install_approval_lock() -> asyncio.Lock:
+    global _system_install_approval_lock, _system_install_approval_lock_loop
+    loop = asyncio.get_running_loop()
+    if (
+        _system_install_approval_lock is None
+        or _system_install_approval_lock_loop is not loop
+    ):
+        _system_install_approval_lock = asyncio.Lock()
+        _system_install_approval_lock_loop = loop
+    return _system_install_approval_lock
+
 #: Interception message when the approval card WAS shown and the user
 #: declined or the card timed out — the NOT_ENABLED message suggests using
 #: the card, which the user just rejected, so it must not be reused here
@@ -386,8 +406,6 @@ class ExecTool(Tool):
         # "deny_no_channel"。fail-closed: 无通道/异常/超时一律 deny（外部
         # 审阅 #854；#875 review F3 增加 deny_no_channel 区分"卡从未出现"）。
         self.system_install_approver = system_install_approver
-        # 并发串行弹卡：同一时刻只允许一张系统安装授权卡进入前台（外部审阅 #854）
-        self._system_install_lock = asyncio.Lock()
 
     @property
     def name(self) -> str:
@@ -2187,7 +2205,9 @@ class ExecTool(Tool):
         """
         if self.system_install_approver is None:
             return ("deny_no_channel", False)
-        async with self._system_install_lock:
+        # 应用级串行：同一时刻只允许一张系统安装授权卡进入前台（外部审阅
+        # #854；CodeRabbit #875：模块级锁跨 ExecTool 实例生效）
+        async with _get_system_install_approval_lock():
             try:
                 decision = await self.system_install_approver(command)
             except Exception as exc:  # noqa: BLE001 - fail-closed on any error
