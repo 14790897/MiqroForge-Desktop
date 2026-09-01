@@ -38,7 +38,10 @@ import {
 // WSL、Linux 走原生 bwrap；macOS 两者皆无，套件在 macOS 上会白等 300s
 // 沙箱再失败，并把 macos-e2e 的 45 分钟步骤上限推过（45m13s 被砍）。
 // 与 wsl-one-click-install.spec.ts 同款守卫。Linux 保留运行（实测通过）。
-test.skip(process.platform === 'darwin', 'system install card requires WSL (Windows) or native bwrap (Linux)');
+test.skip(
+  process.platform === 'darwin',
+  'system install card requires WSL (Windows) or native bwrap (Linux)'
+);
 
 test.describe('System Install Card (real LLM, #854/#875)', () => {
   let electronApp: ElectronApplication;
