@@ -1792,3 +1792,35 @@ async def test_factory_approver_allow_always_runtime_failure_surfaced(tmp_path, 
     # config 已写盘（重启生效），runtime 未生效
     data = json.loads(cfg_path.read_text(encoding="utf-8"))
     assert data["tools"]["sandbox"]["allowSystemInstalls"] is True
+
+
+async def test_request_system_install_approval_passes_runtime_failed():
+    """#875 review (5th): the triple (decision, persist_failed,
+    runtime_failed) must survive _request_system_install_approval — the
+    earlier bug re-bound decision to the string before len() and the
+    runtime_failed flag was never read."""
+    mgr = FakeSandboxManager(
+        allow_system_installs=False,
+        sandbox=FakeSandbox(),
+    )
+
+    async def _triple(command: str):
+        return ("always", False, True)  # config ok, runtime failed
+
+    tool = ExecTool(working_dir=".", sandbox_manager=mgr,
+                    system_install_approver=_triple)
+    decision, persist_failed, runtime_failed = (
+        await tool._request_system_install_approval("sudo apt-get install -y x")
+    )
+    assert decision == "always"
+    assert persist_failed is False
+    assert runtime_failed is True  # must NOT be swallowed
+
+    # 二元组旧契约仍兼容
+    async def _pair(command: str):
+        return ("always", True)
+
+    tool2 = ExecTool(working_dir=".", sandbox_manager=mgr,
+                     system_install_approver=_pair)
+    d2, pf2, rf2 = await tool2._request_system_install_approval("sudo apt-get install -y x")
+    assert d2 == "always" and pf2 is True and rf2 is False

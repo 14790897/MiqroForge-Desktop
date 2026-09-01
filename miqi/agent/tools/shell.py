@@ -2238,10 +2238,16 @@ class ExecTool(Tool):
                     decision,
                 )
                 return ("deny", False, False)
-            decision, persist_failed = decision[0], decision[1]
+            # #875 review (5th): unpack BEFORE overwriting `decision` —
+            # the previous code re-bound decision to the string first, so
+            # `len(decision) == 3` compared the string length and the
+            # runtime_failed flag was never read.
+            if len(decision) == 2:
+                decision, persist_failed = decision
+            else:
+                decision, persist_failed, runtime_failed = decision
             persist_failed = bool(persist_failed)
-            if len(decision) == 3:
-                runtime_failed = bool(decision[2])
+            runtime_failed = bool(runtime_failed)
         if decision not in ("once", "always", "deny", "deny_no_channel"):
             logger.warning("system install approval returned unknown decision {!r} — deny", decision)
             return ("deny", False, False)
