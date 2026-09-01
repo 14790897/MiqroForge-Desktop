@@ -2211,21 +2211,22 @@ class ExecTool(Tool):
             try:
                 decision = await self.system_install_approver(command)
             except Exception as exc:  # noqa: BLE001 - fail-closed on any error
-                logger.warning("system install approval failed (%s) — deny", exc)
+                # loguru: {} interpolation, NOT logging-style %s (#875 review)
+                logger.warning("system install approval failed ({}) — deny", exc)
                 return ("deny", False)
         # 畸形元组（错误长度）也必须 fail-closed 而非抛穿（#875 review F8）
         persist_failed = False
         if isinstance(decision, tuple):
             if len(decision) != 2:
                 logger.warning(
-                    "system install approval returned malformed tuple %r — deny",
+                    "system install approval returned malformed tuple {!r} — deny",
                     decision,
                 )
                 return ("deny", False)
             decision, persist_failed = decision
             persist_failed = bool(persist_failed)
         if decision not in ("once", "always", "deny", "deny_no_channel"):
-            logger.warning("system install approval returned unknown decision %r — deny", decision)
+            logger.warning("system install approval returned unknown decision {!r} — deny", decision)
             return ("deny", False)
         return (decision, persist_failed)
 
@@ -2335,13 +2336,14 @@ class ExecTool(Tool):
         persist_failed = False
 
         # O1: check the allow toggle before touching the sandbox.  When it
-        # is off the command is dead on arrival — no sandbox is created for
-        # it, no approval is prompted, and the user is pointed at the real
-        # fix (enable allow_system_installs) rather than at the sandbox.
+        # is off the command is not dead on arrival — an approval card is
+        # shown instead of hard-rejecting, so a non-developer user can
+        # grant the install without editing config.json (#854).
         if not getattr(self._sandbox_manager, "allow_system_installs", False):
-            # #854: 弹系统安装授权卡（once/always/deny），替代直接拒绝。
+            # 弹系统安装授权卡（once/always/deny），替代直接拒绝：
             # "允许本次"是调用级授权，不修改全局开关（外部审阅 #854）；
             # "允许并记住"由 approver 内部走统一入口持久化后放行。
+            # 无桌面通道（deny_no_channel）时指向设置页（#875 review F3）。
             decision, persist_failed = await self._request_system_install_approval(normalized)
             if decision not in ("once", "always"):
                 # 卡已弹但用户拒绝/超时 → 明确告知；无桌面通道（卡从未出现）

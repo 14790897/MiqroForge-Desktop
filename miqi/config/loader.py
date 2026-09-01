@@ -154,13 +154,21 @@ def save_config_allowlist(patterns: set[str]) -> None:
     clear-all persist a no-op on disk, so cleared patterns came back on
     the next load).
     """
-    path = get_config_path()
-    try:
-        config = load_config(path)
-    except Exception:
-        config = Config()
-    config.agents.permanent_approvals = sorted(patterns)
-    save_config(config, path)
+
+    # #875 review: route through update_config_field (shared lock +
+    # fresh disk read) like every other single-field writer.  The old
+    # bare load_config(path)+save_config(path) read a 5-second-cached
+    # Config — a stale read could resurrect removed patterns, and a
+    # concurrent writer (e.g. allow_always persist) could clobber this
+    # field or vice versa.
+    def _mutate(config) -> None:
+        config.agents.permanent_approvals = sorted(patterns)
+
+    if not update_config_field(_mutate):
+        logger.warning(
+            "save_config_allowlist: failed to persist permanent approvals "
+            "(patterns kept in memory for this session only)"
+        )
 
 
 def _init_permanent_approvals(config: Config) -> None:
