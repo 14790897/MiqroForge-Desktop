@@ -382,13 +382,12 @@ class ExecTool(Tool):
         self.approval_callback = approval_callback
         self._sandbox_manager = sandbox_manager
         # #854: 系统包安装授权通道——关闭状态下拦截点弹确认卡而非直接拒绝。
-        # 签名: async (command: str) -> "once" | "always" | "deny"。
-        # fail-closed: 无通道/异常/超时一律 deny（外部审阅 #854）。
+        # 签名: async (command: str) -> "once" | "always" | "deny" |
+        # "deny_no_channel"。fail-closed: 无通道/异常/超时一律 deny（外部
+        # 审阅 #854；#875 review F3 增加 deny_no_channel 区分"卡从未出现"）。
         self.system_install_approver = system_install_approver
         # 并发串行弹卡：同一时刻只允许一张系统安装授权卡进入前台（外部审阅 #854）
         self._system_install_lock = asyncio.Lock()
-        # 「允许并记住」持久化失败标记（外部审阅 #854 疑点 1 → B：用户可见）
-        self._system_install_persist_failed = False
 
     @property
     def name(self) -> str:
@@ -2177,27 +2176,35 @@ class ExecTool(Tool):
     async def _request_system_install_approval(self, command: str) -> tuple[str, bool]:
         """#854: 系统包安装授权确认卡 → (decision, persist_failed)。
 
-        decision ∈ {"once", "always", "deny"}；persist_failed 仅在
-        decision=="always" 且 config 持久化失败时为 True（外部审阅 #854：
-        "允许并记住"保存失败必须对用户可见——重启后授权失效）。
+        decision ∈ {"once", "always", "deny", "deny_no_channel"}；
+        persist_failed 仅在 decision=="always" 且 config 持久化失败时为
+        True（外部审阅 #854："允许并记住"保存失败必须对用户可见）。
 
-        - fail-closed：无 approver 通道 / 异常 / 超时一律 deny，绝不放行
+        - fail-closed：无 approver 通道 / 异常 / 超时一律 deny（或
+          deny_no_channel），绝不放行
         - 并发串行：同一时刻只有一张系统安装授权卡进入前台（外部审阅 #854）
         - "允许本次"（once）是调用级授权——不修改任何全局状态
         """
         if self.system_install_approver is None:
-            return ("deny", False)
+            return ("deny_no_channel", False)
         async with self._system_install_lock:
             try:
                 decision = await self.system_install_approver(command)
             except Exception as exc:  # noqa: BLE001 - fail-closed on any error
                 logger.warning("system install approval failed (%s) — deny", exc)
                 return ("deny", False)
+        # 畸形元组（错误长度）也必须 fail-closed 而非抛穿（#875 review F8）
+        persist_failed = False
         if isinstance(decision, tuple):
+            if len(decision) != 2:
+                logger.warning(
+                    "system install approval returned malformed tuple %r — deny",
+                    decision,
+                )
+                return ("deny", False)
             decision, persist_failed = decision
-        else:
-            persist_failed = False
-        if decision not in ("once", "always", "deny"):
+            persist_failed = bool(persist_failed)
+        if decision not in ("once", "always", "deny", "deny_no_channel"):
             logger.warning("system install approval returned unknown decision %r — deny", decision)
             return ("deny", False)
         return (decision, persist_failed)
@@ -2300,6 +2307,13 @@ class ExecTool(Tool):
         if normalized is None:
             return _ExecResult(output=_SYSTEM_INSTALL_SINGLE_MSG, exit_code=1)
 
+        # 显示=执行（#875 review F6）：把非交互 flag（-y/--non-interactive/
+        # --noconfirm）注入归一化命令——卡片显示的就是最终以 root 执行的
+        # 命令（_inject_noninteractive_flags 幂等，执行时再次调用无副作用）。
+        normalized = self._inject_noninteractive_flags(normalized)
+
+        persist_failed = False
+
         # O1: check the allow toggle before touching the sandbox.  When it
         # is off the command is dead on arrival — no sandbox is created for
         # it, no approval is prompted, and the user is pointed at the real
@@ -2310,12 +2324,12 @@ class ExecTool(Tool):
             # "允许并记住"由 approver 内部走统一入口持久化后放行。
             decision, persist_failed = await self._request_system_install_approval(normalized)
             if decision not in ("once", "always"):
-                # 卡已弹但用户拒绝/超时 → 明确告知；从未弹卡（CLI/无桌面
-                # 通道）→ 指向设置页（#875 review P3-2）。
-                if self.system_install_approver is None:
+                # 卡已弹但用户拒绝/超时 → 明确告知；无桌面通道（卡从未出现）
+                # → 指向设置页（#875 review P3-2/F3——approver 恒非 None，
+                # 以 deny_no_channel 决策区分，而非 approver 是否为 None）。
+                if decision == "deny_no_channel":
                     return _ExecResult(output=_SYSTEM_INSTALL_NOT_ENABLED_MSG, exit_code=1)
                 return _ExecResult(output=_SYSTEM_INSTALL_DENIED_MSG, exit_code=1)
-            self._system_install_persist_failed = persist_failed
 
         # Phase 77 (#759) + review F2: routed commands must not bypass the
         # approval system.  Same call the normal path uses; commands that
@@ -2362,6 +2376,10 @@ class ExecTool(Tool):
             event_emitter=event_emitter, turn_id=turn_id,
             tool_call_id=tool_call_id,
             requested_timeout_ms=requested_timeout_ms,
+            # #875 review F4：persist_failed 显式传递（"允许并记住"保存失败
+            # 提示只属于本次安装），不再用实例标志——实例标志在早期返回路径
+            # （拒绝/无沙箱/WSL-only）会残留，导致后续安装误报保存失败。
+            persist_failed=persist_failed,
         )
 
     async def _execute_system_install(
@@ -2374,6 +2392,8 @@ class ExecTool(Tool):
         # min(requested, _SYSTEM_INSTALL_TIMEOUT) instead of the fixed
         # 1200 s budget alone.
         requested_timeout_ms: int | None = None,
+        # #875 review F4: "允许并记住"持久化失败提示（显式传递，不用实例标志）
+        persist_failed: bool = False,
     ) -> _ExecResult:
         """Run a normalized install command as root in the WSL distro (#759).
 
@@ -2381,8 +2401,9 @@ class ExecTool(Tool):
         :meth:`_normalize_system_install` (already prefix-stripped, only
         allowlisted flags and package tokens) — it is safe to embed in
         ``bash -c``.  The non-interactive flag (-y / --non-interactive /
-        --noconfirm) is injected so the root run never hangs on a TTY
-        prompt.
+        --noconfirm) is injected (idempotently — the routing already
+        injected it so the card displays the final executed command, #875
+        review F6) so the root run never hangs on a TTY prompt.
 
         The result is buffered (no streaming) with a dedicated long
         timeout; texlive-scale installs can emit tens of MB of progress
@@ -2490,15 +2511,14 @@ class ExecTool(Tool):
             output_parts.append(f"STDERR:\n{err.rstrip()}")
         if rc != 0:
             output_parts.append(f"\nExit code: {rc}")
-        # 外部审阅 #854 疑点 1 → B + #875 review P2：持久化失败必须可见，
+        # 外部审阅 #854 疑点 1 → B + #875 review P2/F4：持久化失败必须可见，
         # 且与安装命令成败无关（rc==0 才提示会漏掉安装失败的情况）——用户
         # 点了「允许并记住」，却可能在重启后丢失授权，必须无条件告知。
-        if getattr(self, "_system_install_persist_failed", False):
+        if persist_failed:
             output_parts.append(
                 "\n[提示] 本次安装已放行，但授权保存失败，「允许系统包安装」"
                 "未开启，重启后需要重新授权。"
             )
-        self._system_install_persist_failed = False
 
         return _ExecResult(
             output="\n".join(output_parts),

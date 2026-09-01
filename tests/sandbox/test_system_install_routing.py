@@ -450,6 +450,83 @@ async def test_guard_runs_before_approver():
     assert not manager._sandbox.install_calls
 
 
+async def test_deny_no_channel_shows_settings_guidance():
+    """#875 review F3：无桌面通道（卡从未出现）→ 设置页指引而非"去用刚拒绝的卡"。
+
+    approver 恒非 None（factory 总是注入），以 deny_no_channel 决策区分
+    "无通道"与"用户拒绝"——CLI/headless 用户应看到设置页指引。
+    """
+    manager = FakeSandboxManager(
+        allow_system_installs=False,
+        sandbox=FakeSandbox(),
+    )
+
+    async def _no_channel(command: str) -> str:
+        return ("deny_no_channel", False)
+
+    tool = ExecTool(working_dir=".", sandbox_manager=manager,
+                    system_install_approver=_no_channel)
+    result = await tool._maybe_route_system_install(
+        "sudo apt-get install -y texlive-xetex",
+        sandbox_selection=_make_selection(),
+        session_key="k",
+    )
+    assert result is not None and result.exit_code == 1
+    assert "设置 > 沙箱隔离" in result.output  # 设置页指引
+    assert "授权未通过" not in result.output  # 不是"用户拒绝"消息
+    assert not manager._sandbox.install_calls
+
+
+async def test_approver_receives_injected_noninteractive_flags():
+    """#875 review F6：卡片显示的是最终执行命令——非交互 flag 已注入。
+
+    用户批准的命令 = root 实际执行的命令（显示 = 执行）。
+    """
+    manager = FakeSandboxManager(
+        allow_system_installs=False,
+        sandbox=FakeSandbox(),
+    )
+    calls = []
+
+    async def _once(command: str) -> str:
+        calls.append(command)
+        return "once"
+
+    tool = ExecTool(working_dir=".", sandbox_manager=manager,
+                    system_install_approver=_once)
+    # 命令本身没有 -y → 注入后进入卡（apt 无 -y 会在 root 运行挂 TTY 等待）
+    result = await tool._maybe_route_system_install(
+        "sudo apt-get install figlet",
+        sandbox_selection=_make_selection(),
+        session_key="k",
+    )
+    assert result is not None and result.exit_code == 0
+    assert manager._sandbox.install_calls
+    # 非交互 flag 注入在动词后（与 _inject_noninteractive_flags 契约一致）
+    assert calls == ["apt-get install -y figlet"]
+
+
+async def test_malformed_approver_tuple_fails_closed():
+    """#875 review F8：approver 返回畸形元组 → deny（不崩溃、不放行）。"""
+    manager = FakeSandboxManager(
+        allow_system_installs=False,
+        sandbox=FakeSandbox(),
+    )
+
+    async def _malformed(command: str) -> str:
+        return ("once", False, "extra")
+
+    tool = ExecTool(working_dir=".", sandbox_manager=manager,
+                    system_install_approver=_malformed)
+    result = await tool._maybe_route_system_install(
+        "sudo apt-get install -y gcc",
+        sandbox_selection=_make_selection(),
+        session_key="k",
+    )
+    assert result is not None and result.exit_code == 1
+    assert not manager._sandbox.install_calls
+
+
 async def test_approver_allow_once_routes_install():
     """关闭状态 + 允许本次 → 放行路由执行，且不修改全局开关（#854 调用级授权）。"""
     manager = FakeSandboxManager(
@@ -620,7 +697,9 @@ async def test_factory_approver_allow_always_persists(tmp_path, monkeypatch):
         }),
         encoding="utf-8",
     )
-    monkeypatch.setattr("miqi.paths.get_config_path", lambda: cfg_path)
+    # update_config_field 走 loader._get_load_path（legacy 回退），
+    # 直接 patch 路径解析而非 get_config_path
+    monkeypatch.setattr("miqi.config.loader._get_load_path", lambda: cfg_path)
 
     mgr = FakeSandboxManager(allow_system_installs=False, sandbox=FakeSandbox())
     stale_cfg = _FakeConfig()  # 模拟 closure 捕获的旧 Config（已过期）
@@ -650,7 +729,9 @@ async def test_factory_approver_persist_failure_visible(tmp_path, monkeypatch):
 
     cfg_path = tmp_path / "config.json"
     cfg_path.write_text(json.dumps({"tools": {"sandbox": {"enabled": True}}}), encoding="utf-8")
-    monkeypatch.setattr("miqi.paths.get_config_path", lambda: cfg_path)
+    # update_config_field 走 loader._get_load_path（legacy 回退），
+    # 直接 patch 路径解析而非 get_config_path
+    monkeypatch.setattr("miqi.config.loader._get_load_path", lambda: cfg_path)
 
     mgr = FakeSandboxManager(allow_system_installs=False, sandbox=FakeSandbox())
 
@@ -711,18 +792,22 @@ async def test_factory_approver_fails_closed():
     )
     assert await approver3("cmd") == ("deny", False)
 
-    # 无 resolver 通道 → deny（fail-closed）
+    # 无 resolver 通道 → deny_no_channel（shell 据此给设置页指引而非"去用
+    # 刚拒绝的卡"，#875 review F3）
     approver4 = _make_system_install_approver(
         resolver=None, sandbox_manager=mgr,
     )
-    assert await approver4("cmd") == ("deny", False)
+    assert await approver4("cmd") == ("deny_no_channel", False)
 
 
 async def test_cross_instance_concurrent_approvals_no_cross_talk():
     """跨 ExecTool 实例并发弹卡：A 的点击结果不会给 B（外部审阅 #854 疑点 3）。
 
-    per-实例 asyncio.Lock 不共享，但 user_input_gate 全局排队；
-    验证两个实例各自的 approver 拿到各自的决策（A=once, B=deny 不串值）。
+    per-实例 asyncio.Lock 不共享；本测试的 fake resolver 绕过真实 gate，
+    所以"同刻至多一张卡"的串行契约不在本测试断言范围内（#875 review F9：
+    该契约由真实 gate 的 per-turn slot 保证，跨实例串行需真实 gate 集成
+    测试）——此处验证的是核心契约：各自 approver 拿到各自的决策
+    （A=once, B=deny 不串值）。
     """
     from miqi.runtime.tool_registry_factory import _make_system_install_approver
     import asyncio
@@ -730,16 +815,10 @@ async def test_cross_instance_concurrent_approvals_no_cross_talk():
     mgr_a = FakeSandboxManager(allow_system_installs=False, sandbox=FakeSandbox())
     mgr_b = FakeSandboxManager(allow_system_installs=False, sandbox=FakeSandbox())
     decisions = {"a": "allow_once", "b": "deny"}
-    in_flight = 0
-    max_in_flight = 0
 
     async def _resolver_for(key):
         async def _resolver(payload):
-            nonlocal in_flight, max_in_flight
-            in_flight += 1
-            max_in_flight = max(max_in_flight, in_flight)
             await asyncio.sleep(0.05)  # 模拟用户思考
-            in_flight -= 1
             return {"status": "submitted", "answers": {"choice_id": decisions[key]}}
         return _resolver
 
@@ -761,8 +840,7 @@ async def test_cross_instance_concurrent_approvals_no_cross_talk():
     # A 得到 once、B 得到 deny——不串值（gate 按 input_id 分发）
     assert results[0][0] == "once"
     assert results[1][0] == "deny"
-    # 跨实例锁不共享时 gate 层排队：同刻至多一张卡（本例两个 resolver 由
-    # 各自 gate 实例处理，此处验证的是决策不串值这一核心契约）
+    # 决策不串值（核心契约）；串行由真实 gate 保证，fake resolver 不覆盖
     assert mgr_a.allow_system_installs is False
     assert mgr_b.allow_system_installs is False
 

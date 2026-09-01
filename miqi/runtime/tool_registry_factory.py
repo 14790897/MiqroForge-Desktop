@@ -10,7 +10,6 @@ Registration order is kept stable so model tool specs remain deterministic.
 from __future__ import annotations
 
 import logging
-import threading
 from pathlib import Path
 from typing import Any
 
@@ -19,11 +18,6 @@ from miqi.agent.tools.user_roots import _is_protected_extra_root
 from miqi.paths import get_config_path
 
 _log = logging.getLogger(__name__)
-
-#: 跨实例共享的 config.json 写锁——「允许并记住」fresh-read-write 需要串行；
-#: per-call / per-instance 锁不防跨会话并发（#875 review P3-4，原实现
-#: `threading.Lock()` 每次调用新建，是无效保护）。
-_config_write_lock = threading.Lock()
 
 
 def _default_read_roots() -> list[Path]:
@@ -62,15 +56,20 @@ def _make_system_install_approver(*, resolver, sandbox_manager):
     - "允许并记住"（always）走统一入口：**config 持久化在前，runtime
       属性在后**——持久化失败时 runtime 保持关闭（fail-closed 方向，
       #875 review P2），本次安装仍放行但 persist_failed=True 透出
-    - 任何非 submitted / 未知选项 → deny（fail-closed）
+    - 决策契约（#875 review F3）："once" / "always" / "deny"（用户拒绝
+      或超时）/ "deny_no_channel"（无桌面通道——shell 据此给出设置页指引
+      而非"去用刚拒绝的卡"）
+    - 任何异常 / 未知选项 → deny（fail-closed）；卡等待有 120s 墙钟上限
+      （含排队时间，#875 review F5：gate 的 per-slot 等待无超时）
     """
+    import asyncio
     import logging
 
     logger = logging.getLogger(__name__)
 
     async def _approver(command: str) -> tuple[str, bool]:
         if resolver is None:
-            return ("deny", False)
+            return ("deny_no_channel", False)
         payload = {
             "title": "系统包安装授权",
             "message": (
@@ -91,50 +90,38 @@ def _make_system_install_approver(*, resolver, sandbox_manager):
             "timeout_seconds": 120,
         }
         try:
-            gate_result = await resolver(payload)
+            # 墙钟上限：gate 内排队（同 turn 已有其他卡）不计入其自身超时，
+            # 这里整体兜底（#875 review F5）。
+            gate_result = await asyncio.wait_for(resolver(payload), timeout=120)
+        except TimeoutError:
+            logger.warning("system install card wait timed out — deny")
+            return ("deny", False)
         except Exception as exc:  # noqa: BLE001 - fail-closed
             logger.warning("system install card resolver failed: %s — deny", exc)
             return ("deny", False)
         if gate_result.get("status") != "submitted":
+            # 无桌面通道（emitter 未注册）→ 卡从未出现——shell 应给设置页
+            # 指引而非"去用刚拒绝的卡"（#875 review F3）。
+            reason = str(gate_result.get("reason") or "")
+            if "no user-input channel" in reason:
+                return ("deny_no_channel", False)
             return ("deny", False)
         choice_id = str((gate_result.get("answers") or {}).get("choice_id") or "")
         if choice_id == "allow_always":
             # 统一入口（外部审阅 #854）：**config 持久化在前，runtime 在后**。
             # 先开 runtime 会让「保存失败」时权限在本会话仍然生效（fail-open），
             # 与本 PR 的 fail-closed 原则矛盾（#875 review P2）。
-            # 持久化必须 fresh-read：closure 捕获的旧 Config 可能覆盖用户
-            # 其他设置的旧值（CodeRabbit #875 Major / Data Integrity）。
-            persist_failed = False
+            # 持久化走 loader.update_config_field：共享锁 + legacy 路径回退 +
+            # 迁移（#875 review F1/F2——裸 get_config_path() 会丢 legacy 配置、
+            # 无锁并发写会互相覆盖）。
+            from miqi.config.loader import update_config_field
+
             try:
-                import json
-
-                from miqi.config.loader import save_config
-                from miqi.config.schema import Config
-                from miqi.paths import get_config_path
-
-                path = get_config_path()
-                with _config_write_lock:
-                    try:
-                        with open(path, encoding="utf-8") as f:
-                            data = json.load(f)
-                    except FileNotFoundError:
-                        data = {}
-                    except (OSError, json.JSONDecodeError) as exc:
-                        logger.error(
-                            "system install allow persist: cannot read config %s: %s",
-                            path, exc,
-                        )
-                        persist_failed = True
-                    else:
-                        fresh = Config.model_validate(data) if data else Config()
-                        try:
-                            fresh.tools.sandbox.allow_system_installs = True
-                            save_config(fresh, path)
-                        except Exception as exc:  # noqa: BLE001
-                            logger.error(
-                                "system install allow persist failed: %s", exc,
-                            )
-                            persist_failed = True
+                persist_failed = not update_config_field(
+                    lambda cfg: setattr(
+                        cfg.tools.sandbox, "allow_system_installs", True,
+                    )
+                )
             except Exception as exc:  # noqa: BLE001 - 失败仅透出，不放行 runtime
                 logger.error("system install allow persist error: %s", exc)
                 persist_failed = True
@@ -164,48 +151,32 @@ def _make_extra_root_persister():
     Persisting is best-effort and guarded: a protected path is never added, and
     any failure must not fail the write that already succeeded.
 
-    The read-modify-write is lock-protected and re-reads the config file from
-    disk on every call (``load_config`` returns a 5-second-cached ``Config``,
-    so a cached read could clobber a concurrent config change).
+    The read-modify-write goes through :func:`loader.update_config_field`
+    (shared lock + fresh disk read, #875 review F12) — ``load_config``
+    returns a 5-second-cached ``Config``, so a cached read could clobber a
+    concurrent config change, and per-instance locks don't serialize
+    cross-session writers.
     """
-    import json
-    import threading
-
     from miqi.agent.tools.user_roots import _is_protected_extra_root
-    from miqi.config.loader import save_config
-    from miqi.config.schema import Config
-    from miqi.paths import get_config_path
-
-    _lock = threading.Lock()
+    from miqi.config.loader import update_config_field
 
     async def persist(root: Path) -> None:
         resolved = Path(root).expanduser().resolve(strict=False)
-        path = get_config_path()
-        with _lock:
-            # Fresh read: reload the config from disk, not the cached copy.
-            data: dict = {}
-            try:
-                with open(path, encoding="utf-8") as f:
-                    data = json.load(f)
-            except FileNotFoundError:
-                data = {}
-            except (OSError, json.JSONDecodeError) as exc:
-                # Never clobber an existing-but-unreadable config (e.g. provider
-                # keys) with a default Config — a single persisted root is not
-                # worth destroying the user's configuration.
-                _log.warning("extra_root persister: cannot read config %s: %s", path, exc)
-                return
-            config = Config.model_validate(data) if data else Config()
-            if _is_protected_extra_root(resolved, config.workspace_path):
+
+        def _mutate(cfg) -> None:
+            if _is_protected_extra_root(resolved, cfg.workspace_path):
                 _log.warning("extra_root persister: refusing protected path %s", resolved)
                 return
-            tools_cfg = getattr(config, "tools", None)
+            tools_cfg = getattr(cfg, "tools", None)
             extra = list(getattr(tools_cfg, "extra_roots", []) or [])
             root_str = str(resolved)
             if root_str not in extra:
                 extra.append(root_str)
                 tools_cfg.extra_roots = extra
-                save_config(config, path)
+
+        # 失败静默（best-effort）：读不到配置不覆盖（update_config_field 返回
+        # False，不抛出）——单个 root 不值得毁掉用户配置。
+        update_config_field(_mutate)
 
     return persist
 

@@ -1,8 +1,10 @@
 """Configuration loading utilities."""
 
 import json
+import threading
 import time
 from pathlib import Path
+from typing import Callable
 
 from loguru import logger
 
@@ -11,6 +13,48 @@ from miqi.paths import get_config_path, get_legacy_config_path
 
 _cache: dict[tuple, tuple[float, Config]] = {}
 _CACHE_TTL_S = 5.0
+
+#: 跨写入方共享的 config.json 写锁（#875 review F2/F12）：所有"单字段
+#: fresh-read-修改-写回"路径（系统包安装开关、extra-root persister、
+#: loop.py 开关 handler）都必须持同一把锁，否则并发写会互相覆盖
+#: （stale-cache 回写 / 丢失对方更新）。
+_config_write_lock = threading.Lock()
+
+
+def update_config_field(mutator: Callable[[Config], None]) -> bool:
+    """Atomically read-modify-write the user config under the shared lock.
+
+    #875 review F1/F2: every writer that persists one field of the user
+    config must go through this helper so concurrent writers cannot
+    clobber each other:
+
+    - reads from disk under :data:`_config_write_lock` (bypassing the 5s
+      module cache) via the legacy-path fallback (``_get_load_path``) and
+      applies ``_migrate_config`` — a raw ``open(get_config_path())`` would
+      silently write a default config next to a legacy-path config and wipe
+      all user settings;
+    - calls *mutator* on the freshly loaded config, then saves it back to
+      the same path.
+
+    Returns:
+        True when the write succeeded; False when the config file could not
+        be read (caller decides whether to surface the failure).
+    """
+    with _config_write_lock:
+        path = _get_load_path()
+        try:
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+        except FileNotFoundError:
+            data = {}
+        except (OSError, json.JSONDecodeError) as exc:
+            logger.warning("update_config_field: cannot read config %s: %s", path, exc)
+            return False
+        data = _migrate_config(data)
+        config = Config.model_validate(data) if data else Config()
+        mutator(config)
+        save_config(config, path)
+        return True
 
 
 def _get_load_path() -> Path:

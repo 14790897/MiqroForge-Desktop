@@ -1979,19 +1979,22 @@ class BridgeRuntimeLoop:
                 "Bridge state not available", code="INTERNAL",
             )
 
-        from miqi.config.loader import save_config
+        from miqi.config.loader import update_config_field
 
-        config = self._bridge_state.load_config()
-        config.tools.sandbox.allow_system_installs = enabled
-        try:
-            save_config(config)
-        except Exception as exc:
-            logger.error("sandbox.setAllowSystemInstalls: config save failed: {}", exc)
+        # #875 review F2/F12：持久化走共享锁 fresh-read（与卡 approver、
+        # extra-root persister 同一把锁），不再保存 5s 缓存 Config——
+        # 缓存实例与其他写入方交错会互相覆盖（丢失对方更新 / 回写旧值）。
+        if not update_config_field(
+            lambda cfg: setattr(cfg.tools.sandbox, "allow_system_installs", enabled),
+        ):
+            logger.error("sandbox.setAllowSystemInstalls: config save failed")
             from miqi.runtime.app_server import AppServerError
 
             raise AppServerError(
                 "Failed to save config", code="INTERNAL",
-            ) from exc
+            )
+        # 刷新 bridge 内存态（save_config 已失效 loader 缓存，重新加载）
+        self._bridge_state.config = self._bridge_state.load_config()
 
         mgr = getattr(self._bridge_state, "_sandbox_manager", None)
         if mgr is not None and mgr != "disabled":
