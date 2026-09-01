@@ -269,6 +269,20 @@ _system_install_approval_lock_loop: asyncio.AbstractEventLoop | None = None
 
 
 def _get_system_install_approval_lock() -> asyncio.Lock:
+    """Return the application-wide serialization lock for approval cards.
+
+    The lock is bound to the CURRENT event loop: asyncio.Lock is loop
+    bound, so a lock created on another loop cannot be awaited here.  A
+    new lock is created when the loop changes.
+
+    ARCHITECTURE ASSUMPTION (#875 review): this is a true application
+    global ONLY because the production runtime guarantees a single
+    persistent event loop (BridgeRuntimeLoop owns every runtime/registry
+    on one loop).  If a future multi-loop runtime (threads, process
+    pools) is introduced, this degrades to per-loop serialization and
+    two approval cards could reach the foreground concurrently — revisit
+    this (e.g. a cross-loop lock) before enabling such a runtime.
+    """
     global _system_install_approval_lock, _system_install_approval_lock_loop
     loop = asyncio.get_running_loop()
     if (
