@@ -661,7 +661,7 @@ function GeneralTab({
             <span className="text-[var(--accent)] font-medium">root 权限</span> 执行（仅 Windows +
             WSL）。此权限会{' '}
             <span className="text-[var(--accent)] font-medium">持续保存到后续会话</span>
-            。仅在你信任 AI 操作时开启。
+            。软件包安装脚本可能以 root 权限执行代码。仅在你信任 AI 操作时开启。
           </p>
         </div>
       </div>
