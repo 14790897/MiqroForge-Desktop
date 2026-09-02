@@ -45,6 +45,54 @@ def _default_read_roots() -> list[Path]:
     return roots
 
 
+def apply_system_installs_toggle(
+    enabled: bool, sandbox_manager: Any | None,
+) -> tuple[bool, bool]:
+    """#854: 系统包安装开关统一入口——config 持久化在前、runtime 在后。
+
+    设置页开关（loop.py ``sandbox.setAllowSystemInstalls`` handler）与确认卡
+    「允许并记住」（:func:`_make_system_install_approver`）共享同一实现，
+    两条路径不得漂移（#875 review 09-02 P2：validation / audit / cache /
+    event 等后续演进只落在这里一处）。
+
+    Returns ``(persist_failed, runtime_failed)``：
+    - ``persist_failed``：config 写盘失败（调用方决定透出或 raise）
+    - ``runtime_failed``：config 已持久化但 runtime 属性切换失败（重启自愈）
+    """
+    from miqi.config.loader import update_config_field
+
+    # 统一入口：**config 持久化在前，runtime 在后**。先开 runtime 会让
+    # 「保存失败」时权限在本会话仍然生效（fail-open），与本 PR 的
+    # fail-closed 原则矛盾（#875 review P2）。持久化走 loader.
+    # update_config_field：共享锁 + legacy 路径回退 + 迁移（#875 review
+    # F1/F2——裸 get_config_path() 会丢 legacy 配置、无锁并发写会互相覆盖）。
+    try:
+        persist_failed = not update_config_field(
+            lambda cfg: setattr(
+                cfg.tools.sandbox, "allow_system_installs", enabled,
+            )
+        )
+    except Exception as exc:  # noqa: BLE001 - 失败仅透出，不放行 runtime
+        _log.error("system install allow persist error: %s", exc)
+        persist_failed = True
+    # 持久化成功才开 runtime（fail-closed 方向）
+    runtime_failed = False
+    if not persist_failed and sandbox_manager is not None:
+        try:
+            sandbox_manager.allow_system_installs = enabled
+        except Exception as exc:  # noqa: BLE001 - config 已持久化，重启自愈
+            # #875 review: this is an AUTHOR-recognized failure mode —
+            # surface it instead of swallowing it, or the user sees
+            # "允许并记住" accepted while the current runtime still denies
+            # installs (config=true / runtime=false).
+            _log.warning(
+                "system install allow: runtime update failed (config "
+                "persisted, restart will apply): %s", exc,
+            )
+            runtime_failed = True
+    return persist_failed, runtime_failed
+
+
 def _make_system_install_approver(*, resolver, sandbox_manager):
     """#854: 系统包安装授权确认卡 approver（once/always/deny）。
 
@@ -110,41 +158,12 @@ def _make_system_install_approver(*, resolver, sandbox_manager):
             return ("deny", False, False)
         choice_id = str((gate_result.get("answers") or {}).get("choice_id") or "")
         if choice_id == "allow_always":
-            # 统一入口（外部审阅 #854）：**config 持久化在前，runtime 在后**。
-            # 先开 runtime 会让「保存失败」时权限在本会话仍然生效（fail-open），
-            # 与本 PR 的 fail-closed 原则矛盾（#875 review P2）。
-            # 持久化走 loader.update_config_field：共享锁 + legacy 路径回退 +
-            # 迁移（#875 review F1/F2——裸 get_config_path() 会丢 legacy 配置、
-            # 无锁并发写会互相覆盖）。
-            from miqi.config.loader import update_config_field
-
-            try:
-                persist_failed = not update_config_field(
-                    lambda cfg: setattr(
-                        cfg.tools.sandbox, "allow_system_installs", True,
-                    )
-                )
-            except Exception as exc:  # noqa: BLE001 - 失败仅透出，不放行 runtime
-                logger.error("system install allow persist error: %s", exc)
-                persist_failed = True
-            # 持久化成功才开 runtime（fail-closed 方向）
-            runtime_failed = False
-            if not persist_failed and sandbox_manager is not None:
-                try:
-                    sandbox_manager.allow_system_installs = True
-                except Exception as exc:  # noqa: BLE001 - config 已持久化，重启自愈
-                    # #875 review: this is an AUTHOR-recognized failure
-                    # mode — surface it instead of swallowing it, or the
-                    # user sees "允许并记住" accepted while the current
-                    # runtime still denies installs (config=true /
-                    # runtime=false).  This call is still allowed (the
-                    # user explicitly granted it); the shell surfaces a
-                    # "restart to apply" notice.
-                    logger.warning(
-                        "system install allow: runtime update failed (config "
-                        "persisted, restart will apply): %s", exc,
-                    )
-                    runtime_failed = True
+            # 统一入口（#875 review 09-02 P2）：与设置页开关共享
+            # apply_system_installs_toggle——config 持久化在前、runtime 在后
+            # （fail-closed 方向），两条路径同一实现防止行为漂移。
+            persist_failed, runtime_failed = apply_system_installs_toggle(
+                True, sandbox_manager,
+            )
             # (decision, persist_failed, runtime_failed)：shell 拦截点据此
             # 向用户透出"本次已放行但未记住/未生效"（#875 review P2/P4）。
             return ("always", persist_failed, runtime_failed)

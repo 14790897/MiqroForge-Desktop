@@ -38,7 +38,10 @@ def update_config_field(mutator: Callable[[Config], None]) -> bool:
 
     Returns:
         True when the write succeeded; False when the config file could not
-        be read (caller decides whether to surface the failure).
+        be read **or saved** — the failure contract is uniform for every
+        caller (approver persists persist_failed, settings IPC raises
+        "Failed to save config", extra-root persister stays silent), instead
+        of read-failures returning False while save-failures raised.
     """
     with _config_write_lock:
         path = _get_load_path()
@@ -53,7 +56,11 @@ def update_config_field(mutator: Callable[[Config], None]) -> bool:
         data = _migrate_config(data)
         config = Config.model_validate(data) if data else Config()
         mutator(config)
-        save_config(config, path)
+        try:
+            save_config(config, path)
+        except Exception as exc:  # noqa: BLE001 - 契约：写盘失败 = False
+            logger.warning("update_config_field: cannot save config %s: %s", path, exc)
+            return False
         return True
 
 
