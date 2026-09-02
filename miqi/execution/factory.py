@@ -21,6 +21,7 @@ def create_default_orchestrator(
     event_emitter: Any | None = None,
     *,
     bwrap_available: bool | Callable[[], bool] = False,
+    allow_fallback_to_none: bool | Callable[[], bool] = True,
     permanent_allowlist: set[str] | None = None,
     approval_bypass: Any | None = None,
     ledger_runtime: Any | None = None,
@@ -71,6 +72,7 @@ def create_default_orchestrator(
         ),
         sandbox_engine=SandboxPolicyEngine(
             bwrap_available=bwrap_available,
+            allow_fallback_to_none=allow_fallback_to_none,
             default_timeout_ms=exec_timeout_ms or 30_000,
         ),
         hook_runtime=HookRuntime(),

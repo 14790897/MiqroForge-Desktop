@@ -133,7 +133,7 @@ class SandboxPolicyEngine:
         bwrap_available: bool | Callable[[], bool] = False,
         landlock_available: bool = False,
         default_timeout_ms: int = 30_000,
-        allow_fallback_to_none: bool = True,
+        allow_fallback_to_none: bool | Callable[[], bool] = True,
     ):
         # 可传 callable：沙箱管理器初始化是异步后台任务（#875 CI/产品发现——
         # 会话在沙箱就绪前创建时，冻结的 bool 会让该会话的 exec 永远落到
@@ -141,13 +141,16 @@ class SandboxPolicyEngine:
         # 静默绕过用户配置的沙箱隔离。callable 在每次 select() 时求值，
         # 一旦沙箱就绪，既有会话也立即获得 BWRAP 保护。
         self._bwrap_available_provider = bwrap_available
+        # allow_fallback_to_none 同样支持 callable（#875 第二轮评估 B7 不变量）：
+        # 用户显式关闭沙箱 → True（NONE=宿主机模式是显式选择）；
+        # 沙箱开启但不可用 → False（绝不静默降级到宿主机执行）。
+        self._allow_fallback_provider = allow_fallback_to_none
         # landlock_available reflects host-kernel capability only.
         # landlock_supported reflects whether MiQi has a real adapter.
         # Both must be True for LANDLOCK to ever be selected.
         self.landlock_available = landlock_available
         self.landlock_supported = self._LANDLOCK_SUPPORTED
         self.default_timeout_ms = default_timeout_ms
-        self.allow_fallback_to_none = allow_fallback_to_none
 
     @property
     def bwrap_available(self) -> bool:
@@ -158,6 +161,16 @@ class SandboxPolicyEngine:
                 return bool(provider())
             except Exception:
                 return False  # fail-closed: treat as unavailable on error
+        return bool(provider)
+
+    def _allow_fallback_to_none(self) -> bool:
+        """Evaluate whether NONE (host-execution) fallback is permitted."""
+        provider = self._allow_fallback_provider
+        if callable(provider):
+            try:
+                return bool(provider())
+            except Exception:
+                return False  # fail-closed: 求值失败视为不允许降级
         return bool(provider)
 
     async def select(
@@ -189,6 +202,20 @@ class SandboxPolicyEngine:
             profile = getattr(ctx, "permission_profile", None)
             if getattr(profile, "network", None) == "none":
                 base_type = SandboxType.RESTRICTED
+
+        # #875 第二轮评估（B7 不变量）：沙箱开启但 bwrap 不可用（初始化窗口 /
+        # 初始化失败 / 引擎求值失败）→ 绝不静默降级到 NONE（宿主机直连）——
+        # NONE 只允许来自用户的显式沙箱关闭（fallback 求值为 True）。
+        if (
+            base_type == SandboxType.NONE
+            and tool_name == "exec"
+            and not self._allow_fallback_to_none()
+        ):
+            raise SandboxDeniedError(
+                "沙箱已开启但尚未就绪或不可用——exec 已拒绝，避免无隔离的"
+                "宿主机执行。请稍后重试，或在 设置 > 沙箱隔离 中关闭沙箱后"
+                "改用显式的宿主机模式。"
+            )
 
         # 3. Escalate on retry (NONE is NOT in the escalation chain —
         #    fallback to NONE is gated by _resolve_fallback() below.)
@@ -352,7 +379,7 @@ class SandboxPolicyEngine:
                 "or configure a supported sandbox."
             )
 
-        if self.allow_fallback_to_none:
+        if self._allow_fallback_to_none():
             return SandboxType.NONE
 
         raise SandboxDeniedError(

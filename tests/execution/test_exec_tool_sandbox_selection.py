@@ -624,6 +624,42 @@ async def test_sandbox_policy_dynamic_bwrap_available_live():
     assert sel2.sandbox_type == SandboxType.BWRAP
 
 
+@pytest.mark.asyncio
+async def test_sandbox_enabled_no_silent_host_fallback():
+    """#875 第二轮评估（B7 不变量）：沙箱开启但 bwrap 不可用 → 拒绝，绝不 NONE。
+
+    NONE（宿主机执行）只允许来自显式的沙箱关闭——allow_fallback_to_none
+    传 callable 表达用户意图：开启 → False（拒绝）；关闭 → True（允许）。
+    """
+    from miqi.execution.sandbox_policy import (
+        SandboxPolicyEngine,
+        SandboxDeniedError,
+    )
+
+    state = {"enabled": True}
+
+    def _fallback() -> bool:
+        return not state["enabled"]
+
+    engine = SandboxPolicyEngine(
+        bwrap_available=False,  # 沙箱不可用（初始化窗口/失败）
+        allow_fallback_to_none=_fallback,
+    )
+
+    class FakeCtx:
+        tool_name = "exec"
+        arguments = {"command": "apt-get install -y x"}
+
+    # 沙箱开启 + bwrap 不可用 → 绝不静默降级到宿主机
+    with pytest.raises(SandboxDeniedError):
+        await engine.select(FakeCtx())
+
+    # 用户显式关闭沙箱 → NONE（宿主机模式是显式选择，护栏兜底）
+    state["enabled"] = False
+    sel = await engine.select(FakeCtx())
+    assert sel.sandbox_type == SandboxType.NONE
+
+
 # ── 31.3: PermissionProfile fields in SandboxSelection path ────────────
 
 @pytest.mark.asyncio
