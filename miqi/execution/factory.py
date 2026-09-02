@@ -6,7 +6,7 @@ RuntimeServices and runtime-owned execution.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Callable
 
 
 class NoopEmitter:
@@ -20,7 +20,7 @@ def create_default_orchestrator(
     tool_registry: Any,
     event_emitter: Any | None = None,
     *,
-    bwrap_available: bool = False,
+    bwrap_available: bool | Callable[[], bool] = False,
     permanent_allowlist: set[str] | None = None,
     approval_bypass: Any | None = None,
     ledger_runtime: Any | None = None,
@@ -31,7 +31,11 @@ def create_default_orchestrator(
     Args:
         tool_registry: ToolRegistry instance (or None, wired later).
         event_emitter: EventEmitter for typed events. Uses NoopEmitter if None.
-        bwrap_available: Whether bwrap sandboxing is available on this system.
+        bwrap_available: Whether bwrap sandboxing is available on this system,
+            or a live callable evaluated per selection (#875: the sandbox
+            manager initializes asynchronously after the ready signal, so a
+            frozen bool silently drops sessions created before init to
+            unisolated host execution).
         permanent_allowlist: Set of commands that bypass permission checks.
         ledger_runtime: Phase 31.8 — optional LedgerRuntime for
             replay-persistent event recording.

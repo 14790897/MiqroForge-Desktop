@@ -191,17 +191,23 @@ class RuntimeServices:
         emitter = RuntimeEventEmitter(event_sink)
         hook_runtime = HookRuntime()
 
-        bwrap_available = (
-            sandbox_manager is not None
-            and sandbox_manager != "disabled"
-            and getattr(sandbox_manager, "enabled", False)
-            and getattr(sandbox_manager, "_initialized", False)
-        )
+        # 实时求值而非冻结（#875 产品发现）：沙箱管理器初始化是 ready 信号
+        # 后的异步后台任务——会话创建早于初始化时，冻结的 False 会让该会话
+        # 的 exec 永远落到 NONE（宿主机无隔离直连），沙箱就绪后也拿不到
+        # BWRAP 选择（静默绕过用户配置的隔离，系统安装路由同样失效）。
+        # 传 lambda 让 SandboxPolicyEngine 每次 select() 读取当前状态。
+        def _bwrap_available_now() -> bool:
+            return (
+                sandbox_manager is not None
+                and sandbox_manager != "disabled"
+                and getattr(sandbox_manager, "enabled", False)
+                and getattr(sandbox_manager, "_initialized", False)
+            )
 
         orchestrator = create_default_orchestrator(
             tool_registry=tool_registry,
             event_emitter=emitter,
-            bwrap_available=bwrap_available,
+            bwrap_available=_bwrap_available_now,
             approval_bypass=approval_bypass,
             exec_timeout_ms=_resolve_exec_timeout_ms(config),
         )

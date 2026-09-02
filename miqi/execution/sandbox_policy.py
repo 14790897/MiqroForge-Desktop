@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any
+from typing import Any, Callable
 
 from miqi.protocol.permissions import (
     FileSystemAccessMode,
@@ -130,12 +130,17 @@ class SandboxPolicyEngine:
 
     def __init__(
         self,
-        bwrap_available: bool = False,
+        bwrap_available: bool | Callable[[], bool] = False,
         landlock_available: bool = False,
         default_timeout_ms: int = 30_000,
         allow_fallback_to_none: bool = True,
     ):
-        self.bwrap_available = bwrap_available
+        # 可传 callable：沙箱管理器初始化是异步后台任务（#875 CI/产品发现——
+        # 会话在沙箱就绪前创建时，冻结的 bool 会让该会话的 exec 永远落到
+        # NONE（宿主机无隔离直连），即使沙箱随后就绪也拿不到 BWRAP 选择，
+        # 静默绕过用户配置的沙箱隔离。callable 在每次 select() 时求值，
+        # 一旦沙箱就绪，既有会话也立即获得 BWRAP 保护。
+        self._bwrap_available_provider = bwrap_available
         # landlock_available reflects host-kernel capability only.
         # landlock_supported reflects whether MiQi has a real adapter.
         # Both must be True for LANDLOCK to ever be selected.
@@ -143,6 +148,17 @@ class SandboxPolicyEngine:
         self.landlock_supported = self._LANDLOCK_SUPPORTED
         self.default_timeout_ms = default_timeout_ms
         self.allow_fallback_to_none = allow_fallback_to_none
+
+    @property
+    def bwrap_available(self) -> bool:
+        """Evaluate the current bwrap availability (bool or live callable)."""
+        provider = self._bwrap_available_provider
+        if callable(provider):
+            try:
+                return bool(provider())
+            except Exception:
+                return False  # fail-closed: treat as unavailable on error
+        return bool(provider)
 
     async def select(
         self,
