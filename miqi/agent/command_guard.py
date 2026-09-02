@@ -118,6 +118,10 @@ _SCRIPT_LAUNCHERS = frozenset({
 })
 _SHELL_LAUNCHERS = frozenset({"bash", "sh", "zsh", "dash", "ksh", "ash"})
 _SCRIPT_FLAGS = frozenset({"-c", "-e", "-r"})
+#: stdin 启动器（#875 外部评估 B7 实测缺口）：`python3 - <<EOF ... EOF` /
+#: `bash -s <<EOF ... EOF` 的 payload 是 heredoc 正文——之前只有 -c/-e/-r
+#: 被识别，heredoc 携带的破坏性调用（shutil.rmtree 等）穿透两层护栏。
+_STDIN_LAUNCHER_FLAGS = frozenset({"-", "-s"})
 
 #: Words that make a following ``install`` NOT a POSIX file-copy install.
 _INSTALL_EXCLUDE_PREV = frozenset({
@@ -391,6 +395,31 @@ def split_subcommands(command: str) -> list[str]:
         if backtick:
             i += 1
             continue
+        if ch == "<" and command[i:i + 2] == "<<":
+            # heredoc（#875 B7）：正文内的 ; && | 不是命令分隔符——跳到
+            # 分隔符行，使整个 heredoc 保持为一个子命令（保守：整体暴露
+            # 给 deny-pattern 与能力扫描）。支持 <<EOF / <<-EOF / <<'EOF'。
+            j = i + 2
+            if j < n and command[j] == "-":
+                j += 1
+            while j < n and command[j] in " \t":
+                j += 1
+            delim_start = j
+            while j < n and (command[j].isalnum() or command[j] in "_'"):
+                j += 1
+            delim = command[delim_start:j].strip("'\"")
+            if not delim:
+                i += 1
+                continue
+            # 分隔符行：行首 delimiter（可能带 \r）
+            idx = command.find("\n" + delim, j)
+            if idx == -1:
+                idx = command.find(delim, j)
+            if idx != -1:
+                i = idx + len(delim)
+            else:
+                i = n  # 未闭合 heredoc——保守：整段视为一个子命令
+            continue
         if ch == "(":
             paren += 1
             i += 1
@@ -568,6 +597,35 @@ def _is_flag(tok: _Token, windows_flags: bool = False) -> bool:
     return False
 
 
+def _extract_heredoc_payload(tokens: list[_Token]) -> str:
+    """Extract a heredoc body after a stdin launcher flag.
+
+    ``python3 - <<PY\\nimport shutil; shutil.rmtree('/etc/x')\\nPY`` →
+    the tokens after ``<<`` until the delimiter token are joined into a
+    payload string for the inline-script scanner (#875 B7 实测：stdin
+    heredoc 是唯一穿透 launcher 扫描的入口).  Handles both ``<< PY``
+    and ``<<PY`` token forms.  Returns "" when no heredoc is present.
+    """
+    for idx, tok in enumerate(tokens):
+        if tok.text == "<<" or tok.text.startswith("<<"):
+            prefix = tok.text[2:]
+            if prefix.startswith("-"):
+                prefix = prefix[1:]
+            if idx + 1 < len(tokens) and not prefix:
+                prefix = tokens[idx + 1].text.strip("'\"")
+            delim = prefix.strip("'\"")
+            if not delim:
+                return ""
+            body_start = idx + 1 if not tok.text[2:] else idx + 1
+            body: list[str] = []
+            for body_tok in tokens[body_start:]:
+                if body_tok.text == delim:
+                    break
+                body.append(body_tok.text)
+            return " ".join(body)
+    return ""
+
+
 def _detect_ops(tokens: list[_Token]) -> list[_FileOp]:
     """Find destructive file operations in one subcommand's token list.
 
@@ -640,6 +698,15 @@ def _detect_ops(tokens: list[_Token]) -> list[_FileOp]:
                 # Flag matching on dequoted/de-escaped text: python '-c'
                 # still runs the -c code path (issue #811 review).
                 if ftok.text not in _SCRIPT_FLAGS:
+                    # stdin 启动器（- / -s）：payload 是 <<EOF heredoc 正文
+                    # （#875 B7 实测：python3 - <<EOF 可携带 shutil.rmtree 穿透）
+                    if ftok.text in _STDIN_LAUNCHER_FLAGS:
+                        payload = _extract_heredoc_payload(tokens[j + 1:])
+                        if payload:
+                            ops.append(_FileOp(
+                                kind="inline_script", display=text,
+                                operands=[], extra=payload,
+                            ))
                     continue
                 payload = tokens[j + 1].text if j + 1 < n else ""
                 if payload:
