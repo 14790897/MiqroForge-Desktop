@@ -5597,8 +5597,8 @@
     "source": "miqi.runtime.export_app_protocol_ts.render_typescript_contract"
   },
   "methodCounts": {
-    "legacy": 79,
-    "total": 163,
+    "legacy": 80,
+    "total": 164,
     "typed": 84
   },
   "schemaVersion": 1
