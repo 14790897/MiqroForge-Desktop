@@ -714,8 +714,6 @@ async def test_factory_approver_allow_always_persists(tmp_path, monkeypatch):
     monkeypatch.setattr("miqi.config.loader._get_load_path", lambda: cfg_path)
 
     mgr = FakeSandboxManager(allow_system_installs=False, sandbox=FakeSandbox())
-    stale_cfg = _FakeConfig()  # 模拟 closure 捕获的旧 Config（已过期）
-
     async def _resolver(payload):
         return {"status": "submitted", "answers": {"choice_id": "allow_always"}}
 
@@ -776,7 +774,6 @@ async def test_factory_approver_fails_closed():
     """统一入口 fail-closed：cancelled/异常/未知选项 → deny。"""
     from miqi.runtime.tool_registry_factory import _make_system_install_approver
 
-    cfg = _FakeConfig()
     mgr = FakeSandboxManager(allow_system_installs=False, sandbox=FakeSandbox())
 
     async def _cancelled(payload):
@@ -819,8 +816,9 @@ async def test_cross_instance_concurrent_approvals_no_cross_talk():
       （max_in_flight == 1，CodeRabbit 要求的两实例并发集成测试）
     - 决策不串值：A=once、B=deny 各自拿到自己的结果
     """
-    from miqi.runtime.tool_registry_factory import _make_system_install_approver
     import asyncio
+
+    from miqi.runtime.tool_registry_factory import _make_system_install_approver
 
     mgr_a = FakeSandboxManager(allow_system_installs=False, sandbox=FakeSandbox())
     mgr_b = FakeSandboxManager(allow_system_installs=False, sandbox=FakeSandbox())
@@ -900,7 +898,6 @@ async def test_factory_approver_card_payload_structured():
     """确认卡 payload 结构化：命令=执行命令，含 root/持久/风险字段（外部审阅 #854）。"""
     from miqi.runtime.tool_registry_factory import _make_system_install_approver
 
-    cfg = _FakeConfig()
     mgr = FakeSandboxManager(allow_system_installs=False, sandbox=FakeSandbox())
     seen = {}
 

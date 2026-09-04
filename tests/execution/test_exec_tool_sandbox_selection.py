@@ -632,8 +632,8 @@ async def test_sandbox_enabled_no_silent_host_fallback():
     传 callable 表达用户意图：开启 → False（拒绝）；关闭 → True（允许）。
     """
     from miqi.execution.sandbox_policy import (
-        SandboxPolicyEngine,
         SandboxDeniedError,
+        SandboxPolicyEngine,
     )
 
     state = {"enabled": True}

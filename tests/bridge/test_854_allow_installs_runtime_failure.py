@@ -8,7 +8,6 @@ show "已开启" while the sandbox still denies installs (UI=true /
 config=true / runtime=false).
 """
 
-import pytest
 
 from tests.bridge.test_bridge_loop import _CaptureSend, _dispatch_legacy
 
@@ -40,8 +39,6 @@ class _BridgeState:
 async def test_set_allow_system_installs_fails_closed_on_runtime_error(tmp_path):
     """Runtime toggle failure must raise AppServerError, not return success."""
     from miqi.bridge.loop import BridgeRuntimeLoop
-    from miqi.config.loader import update_config_field
-    from miqi.runtime.app_server import AppServerError
 
     loop = BridgeRuntimeLoop(
         send_func=_CaptureSend().send,

