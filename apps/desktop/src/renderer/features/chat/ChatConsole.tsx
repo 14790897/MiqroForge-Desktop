@@ -193,6 +193,10 @@ const IMAGE_PLACEHOLDER_RES = /\[Image:\s*([^\]]+)\]/g;
 /** Extract image attachments from the "[Image: name]" placeholder the sender
  *  embeds. dataUrl stays undefined — it is re-read from the session files dir
  *  lazily after load (#659). */
+
+// #875 D1：系统包安装 persist/runtime 失败 → App 级 toast 的 window 事件。
+export const INSTALL_WARNING_EVENT = 'miqi:system-install-warning';
+export type InstallWarningKind = 'persist' | 'runtime';
 function extractImageAttachmentsFromContent(content: string): Attachment[] | undefined {
   const names = [...content.matchAll(IMAGE_PLACEHOLDER_RES)].map((m) => m[1].trim());
   if (names.length === 0) return undefined;
@@ -2188,6 +2192,23 @@ export function ChatConsole({
   onWorkspaceLoaded?: (workspace: string | null) => void;
 }) {
   const [messages, setMessages] = useState<Message[]>([]);
+  // #875 D1（外部评估 P0/A1）：系统包安装的 persist/runtime 失败标记只写在
+  // 工具输出里，模型可能摘要掉——用户会误以为「允许并记住」已永久生效。
+  // 扫描消息中的失败标记并发 window 事件，由 App 级 toast 呈现（不依赖模型）。
+  const warnedInstallWarnRef = useRef(new Map<string, number>());
+  useEffect(() => {
+    const warned = warnedInstallWarnRef.current;
+    for (const m of messages) {
+      const text = String(m.content ?? '');
+      let kind: 'persist' | 'runtime' | null = null;
+      if (text.includes('授权保存失败')) kind = 'persist';
+      else if (text.includes('未能立即生效')) kind = 'runtime';
+      if (kind && warned.get(kind) !== m.timestamp) {
+        warned.set(kind, m.timestamp);
+        window.dispatchEvent(new CustomEvent(INSTALL_WARNING_EVENT, { detail: kind }));
+      }
+    }
+  }, [messages]);
   // sourcesByMsg cache: keyed by a tool-only signature so the map object is
   // stable across typewriter frames (see sourcesByMsg below).
   const sourcesCacheRef = useRef<{ sig: string; map: Map<Message, MessageSource[]> } | null>(null);
