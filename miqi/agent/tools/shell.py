@@ -2221,15 +2221,26 @@ class ExecTool(Tool):
         """
         if self.system_install_approver is None:
             return ("deny_no_channel", False, False)
-        # 应用级串行：同一时刻只允许一张系统安装授权卡进入前台（外部审阅
-        # #854；CodeRabbit #875：模块级锁跨 ExecTool 实例生效）
-        async with _get_system_install_approval_lock():
-            try:
-                decision = await self.system_install_approver(command)
-            except Exception as exc:  # noqa: BLE001 - fail-closed on any error
-                # loguru: {} interpolation, NOT logging-style %s (#875 review)
-                logger.warning("system install approval failed ({}) — deny", exc)
-                return ("deny", False, False)
+        # 统一 120s 墙钟上限（CodeRabbit #875 09-01 Minor）：从调用开始计时，
+        # 覆盖应用级锁等待 + approver（含 gate 排队）全程——排队的请求不会
+        # 先无界等锁、锁到手后再拿第二个独立 120s（最坏 240s）。
+        # 锁释放由 async with 保证（取消也释放）；approver 内部的独立超时
+        # 已移除，单一 deadline 在 shell 层。
+        async def _approve_under_lock() -> tuple[str, bool, bool]:
+            async with _get_system_install_approval_lock():
+                return await self.system_install_approver(command)
+
+        try:
+            decision = await asyncio.wait_for(_approve_under_lock(), timeout=120)
+        except TimeoutError:
+            logger.warning(
+                "system install approval timed out (120s incl. lock wait) — deny"
+            )
+            return ("deny", False, False)
+        except Exception as exc:  # noqa: BLE001 - fail-closed on any error
+            # loguru: {} interpolation, NOT logging-style %s (#875 review)
+            logger.warning("system install approval failed ({}) — deny", exc)
+            return ("deny", False, False)
         # 畸形元组（错误长度）也必须 fail-closed 而非抛穿（#875 review F8）
         persist_failed = False
         runtime_failed = False

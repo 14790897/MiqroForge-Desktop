@@ -139,13 +139,12 @@ def _make_system_install_approver(*, resolver, sandbox_manager):
             ],
             "timeout_seconds": 120,
         }
+        # 统一 120s 墙钟上限由 shell 层（_request_system_install_approval 的
+        # wait_for 覆盖锁等待 + 本调用全程）保证——此处不再设第二个独立
+        # 超时，避免排队请求获得二次独立 120s（CodeRabbit #875 09-01 Minor）。
+        # 卡文案的 timeout_seconds=120 仅为 gate 内的卡片倒计时展示。
         try:
-            # 墙钟上限：gate 内排队（同 turn 已有其他卡）不计入其自身超时，
-            # 这里整体兜底（#875 review F5）。
-            gate_result = await asyncio.wait_for(resolver(payload), timeout=120)
-        except TimeoutError:
-            logger.warning("system install card wait timed out — deny")
-            return ("deny", False, False)
+            gate_result = await resolver(payload)
         except Exception as exc:  # noqa: BLE001 - fail-closed
             logger.warning("system install card resolver failed: %s — deny", exc)
             return ("deny", False, False)
