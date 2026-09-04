@@ -112,7 +112,6 @@ def _make_system_install_approver(*, resolver, sandbox_manager):
     - 任何异常 / 未知选项 → deny（fail-closed）；卡等待有 120s 墙钟上限
       （含排队时间，#875 review F5：gate 的 per-slot 等待无超时）
     """
-    import asyncio
     import logging
 
     logger = logging.getLogger(__name__)
