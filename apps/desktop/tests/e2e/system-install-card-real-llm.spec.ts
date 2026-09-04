@@ -252,4 +252,44 @@ test.describe('System Install Card (real LLM, #854/#875)', () => {
       });
     }
   );
+
+  test('D1 弹窗：授权保存失败提示的交互式呈现（#875）', async () => {
+    // D1 验收：watcher 在检测到工具输出标记时派发 INSTALL_WARNING_EVENT，
+    // App 级 InstallWarningToaster 以模态呈现（不自动消失，需用户确认）。
+    // 这里模拟 watcher 的派发动作（与真实触发路径一致）。
+    await page.evaluate(() => {
+      window.dispatchEvent(new CustomEvent('miqi:system-install-warning', { detail: 'persist' }));
+    });
+    const dialog = page.getByTestId('install-warning-dialog');
+    await expect(dialog).toBeVisible({ timeout: 10_000 });
+    await expect(dialog).toContainText('授权未能保存');
+    await expect(dialog).toContainText('设置 → 沙箱隔离');
+    // 模态不自动消失：等待 5s 后仍在
+    await page.waitForTimeout(5000);
+    await expect(dialog).toBeVisible();
+    await page.screenshot({
+      path: 'test-results/d1-persist-failed-dialog.png',
+      timeout: 60_000,
+    });
+
+    // 「去设置」→ 跳转设置页常规页
+    await dialog.getByTestId('install-warning-action').click();
+    await expect(page.getByTestId('settings-sandbox-section-title')).toBeVisible({
+      timeout: 10_000,
+    });
+
+    // runtime 变体
+    await page.evaluate(() => {
+      window.dispatchEvent(new CustomEvent('miqi:system-install-warning', { detail: 'runtime' }));
+    });
+    await expect(dialog).toBeVisible({ timeout: 10_000 });
+    await expect(dialog).toContainText('重启后生效');
+    await page.screenshot({
+      path: 'test-results/d1-runtime-failed-dialog.png',
+      timeout: 60_000,
+    });
+    // 「知道了」→ 关闭
+    await dialog.getByText('知道了').click();
+    await expect(dialog).not.toBeVisible({ timeout: 5_000 });
+  });
 });
