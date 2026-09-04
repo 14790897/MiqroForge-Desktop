@@ -1454,7 +1454,7 @@ class ExecTool(Tool):
         # #810: called on every real chunk — lets the exec heartbeat
         # reset its silence clock (chatty commands suppress heartbeats).
         on_chunk=None,
-    ) -> tuple[str, bool, bool]:
+    ) -> tuple[str, bool]:
         """Read *stream* incrementally, emit delta events, accumulate text.
 
         Returns ``(accumulated_text, was_truncated)``.
