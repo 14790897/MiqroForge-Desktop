@@ -106,6 +106,15 @@ class TestMCPHttpUrlValidation:
         assert _validate_mcp_http_url("http://mcp.example.com/mcp") is not None
         assert _validate_mcp_http_url("http://192.168.1.10:8080/mcp") is not None
 
+    def test_non_loopback_http_allowed_with_explicit_opt_in(self):
+        from miqi.agent.tools.mcp import _validate_mcp_http_url
+
+        # insecure_http: true = 用户显式确认接受明文风险（平台托管
+        # 网关暂无 https 的过渡方案）
+        assert _validate_mcp_http_url("http://mcp.example.com/mcp", allow_insecure=True) is None
+        # 回环 http 无需 opt-in 本就放行
+        assert _validate_mcp_http_url("http://127.0.0.1:9000/mcp", allow_insecure=False) is None
+
     def test_no_scheme_not_blocked(self):
         from miqi.agent.tools.mcp import _validate_mcp_http_url
 

@@ -531,13 +531,15 @@ class PapersToolConfig(Base):
 
 
 class MCPServerConfig(Base):
-    """MCP server connection configuration (stdio or HTTP)."""
+    """MCP server connection configuration (stdio, streamable HTTP, or SSE)."""
 
+    type: str = ""  # Transport override: "sse" | "http" | "stdio"; empty = auto (command→stdio, url→http)
     command: str = ""  # Stdio: command to run (e.g. "npx")
     args: list[str] = Field(default_factory=list)  # Stdio: command arguments
     env: dict[str, str] = Field(default_factory=dict)  # Stdio: extra env vars
-    url: str = ""  # HTTP: streamable HTTP endpoint URL
-    headers: dict[str, str] = Field(default_factory=dict)  # HTTP: Custom HTTP Headers
+    url: str = ""  # HTTP/SSE: endpoint URL
+    headers: dict[str, str] = Field(default_factory=dict)  # HTTP/SSE: Custom HTTP Headers
+    insecure_http: bool = False  # Explicit opt-in: allow non-loopback http:// endpoints (credentials in cleartext; platform gateway has no https yet)
     tool_timeout: int = 30  # Seconds before a tool call is cancelled
     progress_interval_seconds: int = 15  # Interval for heartbeat progress messages during long-running tool calls (0 = off)
     description: str = ""  # Description shown to LLM in the gateway entry-point tool (lazy mode)

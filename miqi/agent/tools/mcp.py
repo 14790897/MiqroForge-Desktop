@@ -351,13 +351,32 @@ class MCPGatewayTool(Tool):
         return self._active
 
 
-def _validate_mcp_http_url(url: str) -> str | None:
+def _transport_for(cfg) -> str:
+    """决定 MCP 连接传输方式；返回 'sse' / 'stdio' / 'http'，空串 = 无可用配置。
+
+    显式 ``type`` 优先（平台托管网关用 SSE）；未指定时按字段推断
+    （command → stdio，url → streamable HTTP）。
+    """
+    cfg_type = (getattr(cfg, "type", "") or "").lower()
+    if cfg_type == "sse" and getattr(cfg, "url", ""):
+        return "sse"
+    if getattr(cfg, "command", ""):
+        return "stdio"
+    if getattr(cfg, "url", ""):
+        return "http"
+    return ""
+
+
+def _validate_mcp_http_url(url: str, *, allow_insecure: bool = False) -> str | None:
     """校验 MCP HTTP 端点；返回错误信息，None 表示可用。
 
     自定义 headers（如 Authorization）随初始请求明文发送——非回环的
     http:// 端点等于凭据明文传输（CWE-319）。只允许回环 http（本地
-    测试端点）或任意 https。
+    测试端点）、任意 https，或显式 opt-in（``insecure_http: true``，
+    平台托管网关暂无 https 时的过渡方案）。
     """
+    if allow_insecure:
+        return None
     from urllib.parse import urlsplit
 
     parsed = urlsplit(url or "")
@@ -400,16 +419,32 @@ async def _connect_one_server(
 
     try:
         try:
-            if cfg.command:
+            transport = _transport_for(cfg)
+            if transport in ("sse", "http"):
+                # SSE 与 streamable-http 都随初始请求发送自定义 headers：
+                # 非回环 http 端点先过校验（回环 http / https / 显式
+                # insecure_http opt-in 放行）。
+                _url_error = _validate_mcp_http_url(
+                    cfg.url,
+                    allow_insecure=bool(getattr(cfg, "insecure_http", False)),
+                )
+                if _url_error:
+                    logger.error("MCP server '{}': {}", name, _url_error)
+                    return
+            if transport == "sse":
+                from mcp.client.sse import sse_client
+
+                # SSE 传输（平台托管 MCP 网关）：自定义 headers（如
+                # Authorization）直接随 GET /sse 握手请求发送。
+                read, write = await server_stack.enter_async_context(
+                    sse_client(cfg.url, headers=cfg.headers or None)
+                )
+            elif transport == "stdio":
                 params = StdioServerParameters(
                     command=cfg.command, args=cfg.args, env=cfg.env or None
                 )
                 read, write = await server_stack.enter_async_context(stdio_client(params))
-            elif cfg.url:
-                _url_error = _validate_mcp_http_url(cfg.url)
-                if _url_error:
-                    logger.error("MCP server '{}': {}", name, _url_error)
-                    return
+            elif transport == "http":
                 from mcp.client.streamable_http import streamable_http_client
 
                 # follow_redirects=False：自定义 headers（如 Authorization）

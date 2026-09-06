@@ -779,11 +779,13 @@ export interface SkillDetail {
 // ---------------------------------------------------------------------------
 
 export interface McpServerConfig {
+  type?: string;
   command?: string;
   args?: string[];
   env?: Record<string, string>;
   url?: string;
   headers?: Record<string, string>;
+  insecure_http?: boolean;
   tool_timeout?: number;
   progress_interval_seconds?: number;
   description?: string;
