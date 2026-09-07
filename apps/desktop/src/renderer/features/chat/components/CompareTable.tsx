@@ -83,10 +83,14 @@ export function CompareTable({ data, rawText }: Props) {
     }
   };
 
-  const handleCopy = () => {
-    navigator.clipboard.writeText(compareToTsv(data));
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
+  const handleCopy = async () => {
+    try {
+      await navigator.clipboard.writeText(compareToTsv(data));
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      setCopied(false);
+    }
   };
 
   const toggleExpand = (key: string) => {
@@ -107,10 +111,11 @@ export function CompareTable({ data, rawText }: Props) {
   };
 
   // 长文本在单元格内部折叠：展开/收起按钮放在该格偏下处。
-  const renderValue = (p: CompareParameter, c: number, r: number) => {
+  const renderValue = (p: CompareParameter, c: number) => {
     const raw = p.values?.[c] ?? '';
     if (!isLong(raw)) return raw || ' ';
-    const key = `${r}-${c}`;
+    // 展开 key 用「参数名 + 列」而非排序后的行号，保证排序后同一格仍展开。
+    const key = `${p.name}-${c}`;
     const isExpanded = expanded.has(key);
     return (
       <span className="flex flex-col">
@@ -165,7 +170,7 @@ export function CompareTable({ data, rawText }: Props) {
       const raw = p.values?.[c] ?? '';
       const isRange = isRangeValue(raw) || !!p.range;
       return {
-        content: renderValue(p, c, r),
+        content: renderValue(p, c),
         minWidth: 96,
         maxWidth: 200,
         background: cellBackground(r, c + 1, isRange),
