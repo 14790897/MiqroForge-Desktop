@@ -562,6 +562,9 @@ const api = {
   sandbox: {
     setEnabled: (enabled: boolean): Promise<SandboxSetEnabledResult> =>
       ipcRenderer.invoke(IPC.SANDBOX_SET_ENABLED, enabled),
+    // #854: allow_system_installs runtime toggle (no restart)
+    setAllowSystemInstalls: (enabled: boolean): Promise<{ allowSystemInstalls: boolean }> =>
+      ipcRenderer.invoke(IPC.SANDBOX_SET_ALLOW_SYSTEM_INSTALLS, enabled),
   },
 
   // -- Initial config write (no bridge needed) --------------------------------

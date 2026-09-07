@@ -1559,6 +1559,11 @@ for m in ("pydantic", "httpx", "loguru"):
     return res;
   });
 
+  // #854: allow_system_installs runtime toggle (no restart)
+  ipcMain.handle(IPC.SANDBOX_SET_ALLOW_SYSTEM_INSTALLS, async (_event, enabled: boolean) => {
+    return bridge.send('sandbox.setAllowSystemInstalls', { enabled });
+  });
+
   ipcMain.handle(IPC.DIALOG_OPEN_FILE, async () => {
     const result = await dialog.showOpenDialog({
       properties: ['openFile', 'openDirectory'],

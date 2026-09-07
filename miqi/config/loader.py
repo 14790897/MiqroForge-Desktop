@@ -1,8 +1,10 @@
 """Configuration loading utilities."""
 
 import json
+import threading
 import time
 from pathlib import Path
+from typing import Callable
 
 from loguru import logger
 
@@ -11,6 +13,55 @@ from miqi.paths import get_config_path, get_legacy_config_path
 
 _cache: dict[tuple, tuple[float, Config]] = {}
 _CACHE_TTL_S = 5.0
+
+#: 跨写入方共享的 config.json 写锁（#875 review F2/F12）：所有"单字段
+#: fresh-read-修改-写回"路径（系统包安装开关、extra-root persister、
+#: loop.py 开关 handler）都必须持同一把锁，否则并发写会互相覆盖
+#: （stale-cache 回写 / 丢失对方更新）。
+_config_write_lock = threading.Lock()
+
+
+def update_config_field(mutator: Callable[[Config], None]) -> bool:
+    """Atomically read-modify-write the user config under the shared lock.
+
+    #875 review F1/F2: every writer that persists one field of the user
+    config must go through this helper so concurrent writers cannot
+    clobber each other:
+
+    - reads from disk under :data:`_config_write_lock` (bypassing the 5s
+      module cache) via the legacy-path fallback (``_get_load_path``) and
+      applies ``_migrate_config`` — a raw ``open(get_config_path())`` would
+      silently write a default config next to a legacy-path config and wipe
+      all user settings;
+    - calls *mutator* on the freshly loaded config, then saves it back to
+      the same path.
+
+    Returns:
+        True when the write succeeded; False when the config file could not
+        be read **or saved** — the failure contract is uniform for every
+        caller (approver persists persist_failed, settings IPC raises
+        "Failed to save config", extra-root persister stays silent), instead
+        of read-failures returning False while save-failures raised.
+    """
+    with _config_write_lock:
+        path = _get_load_path()
+        try:
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+        except FileNotFoundError:
+            data = {}
+        except (OSError, json.JSONDecodeError) as exc:
+            logger.warning("update_config_field: cannot read config %s: %s", path, exc)
+            return False
+        data = _migrate_config(data)
+        config = Config.model_validate(data) if data else Config()
+        mutator(config)
+        try:
+            save_config(config, path)
+        except Exception as exc:  # noqa: BLE001 - 契约：写盘失败 = False
+            logger.warning("update_config_field: cannot save config %s: %s", path, exc)
+            return False
+        return True
 
 
 def _get_load_path() -> Path:
@@ -110,13 +161,21 @@ def save_config_allowlist(patterns: set[str]) -> None:
     clear-all persist a no-op on disk, so cleared patterns came back on
     the next load).
     """
-    path = get_config_path()
-    try:
-        config = load_config(path)
-    except Exception:
-        config = Config()
-    config.agents.permanent_approvals = sorted(patterns)
-    save_config(config, path)
+
+    # #875 review: route through update_config_field (shared lock +
+    # fresh disk read) like every other single-field writer.  The old
+    # bare load_config(path)+save_config(path) read a 5-second-cached
+    # Config — a stale read could resurrect removed patterns, and a
+    # concurrent writer (e.g. allow_always persist) could clobber this
+    # field or vice versa.
+    def _mutate(config) -> None:
+        config.agents.permanent_approvals = sorted(patterns)
+
+    if not update_config_field(_mutate):
+        logger.warning(
+            "save_config_allowlist: failed to persist permanent approvals "
+            "(patterns kept in memory for this session only)"
+        )
 
 
 def _init_permanent_approvals(config: Config) -> None:

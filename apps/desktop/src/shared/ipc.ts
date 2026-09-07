@@ -126,6 +126,9 @@ export const IPC = {
   // Sandbox runtime toggle
   SANDBOX_SET_ENABLED: 'sandbox:setEnabled',
 
+  // #854: allow_system_installs runtime toggle (no restart)
+  SANDBOX_SET_ALLOW_SYSTEM_INSTALLS: 'sandbox:setAllowSystemInstalls',
+
   // Write initial config (no bridge needed �? used by Setup Wizard)
   CONFIG_WRITE_INITIAL: 'config:write_initial',
 

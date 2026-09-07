@@ -316,6 +316,12 @@ class BridgeRuntimeLoop:
             "sandbox.setEnabled", self._sandbox_set_enabled_handler,
         )
 
+        # Register #854: allow_system_installs runtime toggle (no restart)
+        self._app_server.register_method(
+            "sandbox.setAllowSystemInstalls",
+            self._sandbox_set_allow_system_installs_handler,
+        )
+
         # Register Phase 27.3: chat.send through AppServer
         self._app_server.register_method("chat.send", self._chat_send_handler)
 
@@ -1941,6 +1947,77 @@ class BridgeRuntimeLoop:
                 "(client={})", destroyed, client_id,
             )
             return {"result": {"enabled": False, "destroyed": destroyed}}
+
+    async def _sandbox_set_allow_system_installs_handler(
+        self, request_id: str, params: dict, client_id: str,
+        session_id: str | None, registry: Any,
+    ) -> dict:
+        """#854: sandbox.setAllowSystemInstalls — runtime toggle, no restart.
+
+        统一入口（外部审阅 #854；#875 review 09-02 P2 修订）：runtime 属性
+        与 config 持久化原子成对——与确认卡「允许并记住」共享
+        ``apply_system_installs_toggle``（同一实现防止行为漂移）；本 handler
+        额外刷新 bridge 内存态，失败按 fail-closed 抛 AppServerError（设置页
+        UI 语义：开关不得停留在"已开启"而实际未生效）。
+        """
+        if not isinstance(params, dict):
+            from miqi.runtime.app_server import AppServerError
+
+            raise AppServerError(
+                "sandbox.setAllowSystemInstalls: params must be an object",
+                code="INVALID_PARAMS",
+            )
+        enabled = params.get("enabled")
+        if not isinstance(enabled, bool):
+            from miqi.runtime.app_server import AppServerError
+
+            raise AppServerError(
+                "sandbox.setAllowSystemInstalls: 'enabled' must be a boolean",
+                code="INVALID_PARAMS",
+            )
+        if self._bridge_state is None:
+            from miqi.runtime.app_server import AppServerError
+
+            raise AppServerError(
+                "Bridge state not available", code="INTERNAL",
+            )
+
+        # 统一入口（外部审阅 #854；#875 review 09-02 P2）：与确认卡
+        # 「允许并记住」共享 apply_system_installs_toggle——config 持久化
+        # （共享锁 fresh-read，与卡 approver、extra-root persister 同一把锁）
+        # 在前、runtime 切换在后（fail-closed），两条路径同一实现。
+        from miqi.runtime.tool_registry_factory import apply_system_installs_toggle
+
+        mgr = getattr(self._bridge_state, "_sandbox_manager", None)
+        persist_failed, runtime_failed = apply_system_installs_toggle(
+            enabled, None if mgr == "disabled" else mgr,
+        )
+        if persist_failed:
+            logger.error("sandbox.setAllowSystemInstalls: config save failed")
+            from miqi.runtime.app_server import AppServerError
+
+            raise AppServerError(
+                "Failed to save config", code="INTERNAL",
+            )
+        if runtime_failed:
+            # #875 review: config is already persisted, but the runtime
+            # toggle did NOT apply.  Returning success here would show
+            # "已开启" in the UI while the sandbox still denies installs
+            # (UI=true / config=true / runtime=false).  Surface the
+            # failure so the toggle stays off; a restart picks up the
+            # persisted config.
+            from miqi.runtime.app_server import AppServerError
+
+            raise AppServerError(
+                "Runtime update failed (config saved; restart to apply)",
+                code="INTERNAL",
+            )
+        # 刷新 bridge 内存态（save_config 已失效 loader 缓存，重新加载）
+        self._bridge_state.config = self._bridge_state.load_config()
+        logger.info(
+            "sandbox.setAllowSystemInstalls: {} (client={})", enabled, client_id,
+        )
+        return {"result": {"allowSystemInstalls": enabled}}
 
     async def _shutdown(self) -> None:
         """Graceful shutdown sequence.
