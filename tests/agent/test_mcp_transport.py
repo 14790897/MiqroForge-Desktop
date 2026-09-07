@@ -59,3 +59,21 @@ class TestGatewayTokenInjection:
         from miqi.config.schema import DEFAULT_MCP_SERVERS
 
         assert _DEFAULT_GATEWAY_NAME in DEFAULT_MCP_SERVERS
+
+
+class TestInjectionGuards:
+    def test_https_detection(self):
+        from miqi.agent.tools.mcp import _is_https_url
+
+        assert _is_https_url("https://mcp.example.com/sse") is True
+        assert _is_https_url("http://127.0.0.1:9000/sse") is False
+        assert _is_https_url("") is False
+
+    def test_trusted_gateway_url_match(self):
+        from miqi.agent.tools.mcp import _url_matches_trusted_gateway
+        from miqi.config.schema import DEFAULT_MCP_SERVERS
+
+        builtin = DEFAULT_MCP_SERVERS["miqroforge-slurm"]["url"]
+        assert _url_matches_trusted_gateway(builtin) is True
+        assert _url_matches_trusted_gateway("http://evil.example.com/sse") is False
+        assert _url_matches_trusted_gateway("") is False
