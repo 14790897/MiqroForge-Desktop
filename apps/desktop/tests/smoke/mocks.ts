@@ -25,6 +25,8 @@ export interface MockBridgeOptions {
   qraftLoggedInStatus?: Record<string, unknown>;
   /** qraft.pointsBalance 的返回结果。默认成功返回 270 可用积分。 */
   qraftPointsResult?: Record<string, unknown>;
+  /** qraft.billingHistory 的返回结果。默认空列表。 */
+  qraftBillingHistoryResult?: Array<Record<string, unknown>>;
 }
 
 /** Build a self-contained init script that installs the mock bridge on
@@ -110,6 +112,7 @@ export function buildMockBridgeScript(opts: MockBridgeOptions = {}): string {
       points: { availablePoints: 270, heldPoints: 0, totalEarned: 300, totalSpent: 30 },
     }
   );
+  const qraftBillingHistoryJson = JSON.stringify(opts.qraftBillingHistoryResult || []);
 
   return `
 (function() {
@@ -426,7 +429,9 @@ export function buildMockBridgeScript(opts: MockBridgeOptions = {}): string {
         }
         return Promise.resolve(result);
       },
-      billingHistory: function() { return Promise.resolve([]); },
+      billingHistory: function() {
+        return Promise.resolve(JSON.parse(JSON.stringify(${qraftBillingHistoryJson})));
+      },
       onStatusChanged: function(cb) { return _on('qraftStatus', cb); },
     },
   };
