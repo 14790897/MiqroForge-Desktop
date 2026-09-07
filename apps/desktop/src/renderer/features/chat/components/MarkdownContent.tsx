@@ -165,7 +165,7 @@ export function MarkdownContent({ content }: { content: string }) {
         // 失败则回落到下方普通代码块展示。
         if (isCompareLang(lang)) {
           const data = parseCompareJson(codeText);
-          if (data) return <CompareTable data={data} />;
+          if (data) return <CompareTable data={data} rawText={codeText} />;
         }
 
         return (

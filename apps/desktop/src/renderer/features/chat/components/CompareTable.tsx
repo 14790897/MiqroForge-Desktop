@@ -4,11 +4,13 @@ import type { CompareCitation, CompareData, CompareParameter, SortDir } from './
 import { compareToTsv, isRangeValue, sortParameters } from './compareData';
 import { DataTable, type DataTableCell } from './DataTable';
 
-/** 单元格文本超过该长度时折叠，点击「展开」显示完整内容。 */
-const LONG_CELL = 24;
+/** 单元格文本超过该长度时折叠，点击该格内「展开」显示完整内容。 */
+const LONG_CELL = 20;
 
 interface Props {
   data: CompareData;
+  /** 原始 ```compare JSON 文本，用于「源码」视图核对。 */
+  rawText?: string;
 }
 
 /** 来源徽标：命中 citations 显示标题，否则显示 id；缺失显示「未标注」。 */
@@ -51,11 +53,13 @@ function SourceBadge({
   );
 }
 
-export function CompareTable({ data }: Props) {
+export function CompareTable({ data, rawText }: Props) {
   const { schemes, parameters } = data;
+  const [mode, setMode] = useState<'table' | 'source'>('table');
   const [sortCol, setSortCol] = useState<number | null>(null);
   const [sortDir, setSortDir] = useState<SortDir>('asc');
   const [hover, setHover] = useState<{ row: number; col: number } | null>(null);
+  // 展开的是「单元格」而非「行」：key = `${row}-${col}`。
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [copied, setCopied] = useState(false);
 
@@ -85,18 +89,16 @@ export function CompareTable({ data }: Props) {
     setTimeout(() => setCopied(false), 2000);
   };
 
-  const toggleExpand = (name: string) => {
+  const toggleExpand = (key: string) => {
     setExpanded((prev) => {
       const next = new Set(prev);
-      if (next.has(name)) next.delete(name);
-      else next.add(name);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
       return next;
     });
   };
 
   const isLong = (v: string | undefined) => (v ?? '').length > LONG_CELL;
-  const rowHasLong = (p: CompareParameter) =>
-    isLong(p.name) || (p.values ?? []).some((v) => isLong(v));
 
   const cellBackground = (r: number, c: number, isRange: boolean) => {
     if (hover && (hover.row === r || hover.col === c)) return 'var(--surface-hover)';
@@ -104,17 +106,25 @@ export function CompareTable({ data }: Props) {
     return 'transparent';
   };
 
-  const renderValue = (p: CompareParameter, c: number, isExpanded: boolean) => {
+  // 长文本在单元格内部折叠：展开/收起按钮放在该格偏下处。
+  const renderValue = (p: CompareParameter, c: number, r: number) => {
     const raw = p.values?.[c] ?? '';
-    if (!isExpanded && isLong(raw)) {
-      return (
-        <span title={raw}>
-          {raw.slice(0, LONG_CELL)}
-          {'…'}
-        </span>
-      );
-    }
-    return raw || ' ';
+    if (!isLong(raw)) return raw || ' ';
+    const key = `${r}-${c}`;
+    const isExpanded = expanded.has(key);
+    return (
+      <span className="flex flex-col">
+        <span>{isExpanded ? raw : `${raw.slice(0, LONG_CELL)}…`}</span>
+        <button
+          type="button"
+          onClick={() => toggleExpand(key)}
+          className="self-start mt-1 text-[10px] underline"
+          style={{ color: 'var(--text-faint)' }}
+        >
+          {isExpanded ? '收起' : '展开'}
+        </button>
+      </span>
+    );
   };
 
   const headers: DataTableCell[] = [
@@ -137,8 +147,6 @@ export function CompareTable({ data }: Props) {
   ];
 
   const rows: (DataTableCell | null)[][] = displayParams.map((p, r) => {
-    const isExpanded = expanded.has(p.name);
-    const hasLong = rowHasLong(p);
     const nameCell: DataTableCell = {
       content: (
         <>
@@ -147,32 +155,31 @@ export function CompareTable({ data }: Props) {
             {p.unit && <span className="text-[10px] text-text-faint">{p.unit}</span>}
             <SourceBadge source={p.source} citations={citations} />
           </div>
-          {hasLong && (
-            <button
-              type="button"
-              onClick={() => toggleExpand(p.name)}
-              className="mt-1 text-[10px] underline"
-              style={{ color: 'var(--text-faint)' }}
-            >
-              {isExpanded ? '收起' : '展开'}
-            </button>
-          )}
         </>
       ),
-      minWidth: 96,
+      minWidth: 100,
+      maxWidth: 160,
       background: cellBackground(r, 0, false),
     };
     const valueCells: DataTableCell[] = schemes.map((_, c) => {
       const raw = p.values?.[c] ?? '';
       const isRange = isRangeValue(raw) || !!p.range;
       return {
-        content: renderValue(p, c, isExpanded),
-        minWidth: 72,
+        content: renderValue(p, c, r),
+        minWidth: 96,
+        maxWidth: 200,
         background: cellBackground(r, c + 1, isRange),
       };
     });
     return [nameCell, ...valueCells];
   });
+
+  const toggleBtn = (active: boolean) =>
+    `px-2 py-0.5 text-xs rounded ${
+      active
+        ? 'bg-[var(--accent)] text-white'
+        : 'text-[var(--text-muted)] hover:bg-[var(--surface-muted)]'
+    }`;
 
   return (
     <div
@@ -184,31 +191,56 @@ export function CompareTable({ data }: Props) {
         style={{ borderColor: 'var(--border-subtle)' }}
       >
         <span className="text-xs font-semibold">{data.title ?? '参数对比'}</span>
-        <button
-          type="button"
-          onClick={handleCopy}
-          className="inline-flex items-center gap-1 text-[11px] rounded px-1.5 py-0.5 transition-colors hover:bg-[var(--surface-muted)]"
-          style={{ color: copied ? 'var(--success)' : 'var(--text-muted)' }}
-          title="复制为表格（TSV）"
-        >
-          {copied ? <Check size={13} /> : <Copy size={13} />}
-          {copied ? '已复制' : '复制'}
-        </button>
+        <div className="flex items-center gap-1">
+          <button
+            type="button"
+            onClick={() => setMode('table')}
+            className={toggleBtn(mode === 'table')}
+          >
+            表格
+          </button>
+          <button
+            type="button"
+            onClick={() => setMode('source')}
+            className={toggleBtn(mode === 'source')}
+          >
+            源码
+          </button>
+          <button
+            type="button"
+            onClick={handleCopy}
+            className="inline-flex items-center gap-1 text-[11px] rounded px-1.5 py-0.5 transition-colors hover:bg-[var(--surface-muted)]"
+            style={{ color: copied ? 'var(--success)' : 'var(--text-muted)' }}
+            title="复制为表格（TSV）"
+          >
+            {copied ? <Check size={13} /> : <Copy size={13} />}
+            {copied ? '已复制' : '复制'}
+          </button>
+        </div>
       </div>
-      <DataTable
-        headers={headers}
-        rows={rows}
-        emptyText="（无对比数据）"
-        fullWidth
-        onCellEnter={(r, c) => setHover({ row: r, col: c })}
-        onCellLeave={() => setHover(null)}
-      />
-      <div
-        className="px-3 py-1.5 text-[10px]"
-        style={{ borderTop: '1px solid var(--border-subtle)', color: 'var(--text-faint)' }}
-      >
-        浅色底纹表示参数区间/范围；点击列头可排序。
-      </div>
+
+      {mode === 'table' ? (
+        <>
+          <DataTable
+            headers={headers}
+            rows={rows}
+            emptyText="（无对比数据）"
+            fullWidth
+            onCellEnter={(r, c) => setHover({ row: r, col: c })}
+            onCellLeave={() => setHover(null)}
+          />
+          <div
+            className="px-3 py-1.5 text-[10px]"
+            style={{ borderTop: '1px solid var(--border-subtle)', color: 'var(--text-faint)' }}
+          >
+            浅色底纹表示参数区间/范围；点击列头可排序。
+          </div>
+        </>
+      ) : (
+        <pre className="max-h-[420px] overflow-auto p-3 text-xs font-mono leading-relaxed">
+          {rawText ?? JSON.stringify(data, null, 2)}
+        </pre>
+      )}
     </div>
   );
 }

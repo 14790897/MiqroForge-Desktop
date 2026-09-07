@@ -30,6 +30,12 @@ describe('CompareTable', () => {
     expect(markup).toContain('复制');
   });
 
+  it('renders a 表格/源码 toggle (Word 6.2 渲染与原文切换)', () => {
+    const markup = renderToStaticMarkup(createElement(CompareTable, { data: sample }));
+    expect(markup).toContain('表格');
+    expect(markup).toContain('源码');
+  });
+
   it('renders the citation title for a sourced parameter', () => {
     const markup = renderToStaticMarkup(createElement(CompareTable, { data: sample }));
     expect(markup).toContain('造粒工艺综述');
