@@ -604,20 +604,6 @@ class ToolsConfig(Base):
     )
 
 
-class BillingConfig(Base):
-    """Platform points billing (OAuth2 第三方接入 /oauth2/points/deduct).
-
-    When enabled, a logged-in session deducts ``cost_per_task`` points
-    before the first tool/skill execution of the session (one deduction
-    per session; plain conversation is free).  Deduction failures are
-    fail-closed — the task does not run.
-    """
-
-    enabled: bool = True
-    cost_per_task: int = 30
-    source: str = "desktop-agent-task"
-
-
 class Config(BaseSettings):
     """Root configuration for MiQi runtime."""
 
@@ -630,7 +616,12 @@ class Config(BaseSettings):
     cron: CronConfig = Field(default_factory=CronConfig)
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
     observability: ObservabilityConfig = Field(default_factory=ObservabilityConfig)
-    billing: BillingConfig = Field(default_factory=BillingConfig)
+    # Inert passthrough for configs written by the removed #915 points-billing
+    # gate.  Config is a BaseSettings (extra keys are forbidden), so the field
+    # must stay to keep old config.json files loadable — deleting it made
+    # load_config silently fall back to a default config (providers lost,
+    # "尚未配置模型服务" on send).  Nothing reads this value (#960).
+    billing: dict[str, object] = Field(default_factory=dict)
     # Opaque Desktop-owned settings (e.g. theme, layout).  Not validated —
     # the Desktop UI reads/writes this via config/batchWrite desktop.* paths.
     desktop: dict[str, object] = Field(default_factory=dict)
