@@ -15,6 +15,8 @@ def test_default_config_includes_hosted_slurm_gateway():
     assert srv.url == "http://124.220.57.194:9000/sse"
     assert srv.insecure_http is True
     assert srv.headers.get("Authorization", "").startswith("Bearer ")
+    assert srv.tool_timeout == 90
+    assert "SLURM" in srv.description
     # 键名含 "slurm"：进入计费范围（#936 RUNNING 扣 10 分）
     assert "slurm" in "miqroforge-slurm"
 
