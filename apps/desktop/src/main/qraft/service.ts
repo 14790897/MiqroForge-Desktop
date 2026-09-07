@@ -251,6 +251,13 @@ export class QraftService {
           'WARN',
           `qraft: userinfo 获取失败（${err instanceof QraftError ? err.code : err}），回退使用登录响应信息`
         );
+        // userinfo 失败不能静默丢弃已存储的 MCP 网关凭据：仅当本次登录
+        // 证明为同一账号时保留（CodeRabbit #951）；账号身份不一致时
+        // 保持未设置，绝不把旧账号的凭据带进新账号会话。
+        const previous = this.options.store.current;
+        if (previous && account.sub && previous.account.sub === account.sub) {
+          mcpGatewayKey = previous.mcpGatewayKey;
+        }
       }
 
       this.persistLogin(env, config, account, tokens, aiGateway, mcpGatewayKey);

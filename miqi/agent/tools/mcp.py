@@ -421,6 +421,19 @@ def _gateway_key_from_token_file(token_file) -> str | None:
     return key if isinstance(key, str) and key else None
 
 
+def _is_https_url(url: str) -> bool:
+    """URL 是否为 https（网关凭据只注入 https 端点，CWE-319）。"""
+    from urllib.parse import urlsplit
+
+    return urlsplit(url or "").scheme.lower() == "https"
+
+
+def _url_matches_trusted_gateway(url: str) -> bool:
+    """URL 是否等于内置可信网关端点（防止同名服务器把凭据导向他处）。"""
+    trusted = _DEFAULT_MCP_SERVERS.get(_DEFAULT_GATEWAY_NAME) or {}
+    return bool(url) and url == trusted.get("url", "")
+
+
 async def _connect_one_server(
     name: str,
     cfg,
@@ -466,14 +479,18 @@ async def _connect_one_server(
                 if _url_error:
                     logger.error("MCP server '{}': {}", name, _url_error)
                     return
-            # 登录态注入：默认网关服务器未显式配置 headers 时，从
-            # workspace/.qraft/token.json 读取平台下发的 mcpGatewayKey
-            # 作为 Bearer 凭据（凭据不入仓库、不进 config.json）。
+            # 登录态注入（CodeRabbit #951 三重收口）：仅当 ① 默认网关
+            # 服务器未显式配置 headers；② 名称与 URL 都匹配内置可信
+            # 端点（防止同名服务器把 workspace 凭据导向其他地址）；
+            # ③ URL 为 https（网关 token 绝不随明文 http 发送，含
+            # opt-in 端点）。平台 https 上线前默认不注入、fail-closed。
             effective_headers = dict(getattr(cfg, "headers", None) or {})
             if (
                 not effective_headers
                 and name == _DEFAULT_GATEWAY_NAME
                 and workspace is not None
+                and _url_matches_trusted_gateway(getattr(cfg, "url", ""))
+                and _is_https_url(getattr(cfg, "url", ""))
             ):
                 _gw_key = _gateway_key_from_token_file(workspace / ".qraft" / "token.json")
                 if _gw_key:
