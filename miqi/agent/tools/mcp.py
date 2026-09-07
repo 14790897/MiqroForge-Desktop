@@ -367,6 +367,16 @@ def _transport_for(cfg) -> str:
     return ""
 
 
+# 内置默认网关服务器名（schema.DEFAULT_MCP_SERVERS 的键）：该服务器
+# 未显式配置 headers 时，连接阶段从登录态 token 文件注入凭据。
+try:
+    from miqi.config.schema import DEFAULT_MCP_SERVERS as _DEFAULT_MCP_SERVERS
+
+    _DEFAULT_GATEWAY_NAME = next(iter(_DEFAULT_MCP_SERVERS), "")
+except Exception:  # pragma: no cover — schema 不可用的极端环境禁用注入
+    _DEFAULT_GATEWAY_NAME = ""
+
+
 def _validate_mcp_http_url(url: str, *, allow_insecure: bool = False) -> str | None:
     """校验 MCP HTTP 端点；返回错误信息，None 表示可用。
 
@@ -388,12 +398,49 @@ def _validate_mcp_http_url(url: str, *, allow_insecure: bool = False) -> str | N
     return f"非回环 http:// MCP 端点被拒绝（凭据明文传输风险）：{url}"
 
 
+def _gateway_key_from_token_file(token_file) -> str | None:
+    """从 .qraft/token.json 读取平台下发的 MCP 网关凭据（mcpGatewayKey）。
+
+    Desktop 在登录/刷新时写入该字段（0600 文件）；凭据不入仓库、
+    不进 config.json。文件缺失/损坏/无字段一律返回 None（静默降级，
+    连接阶段由网关返回认证错误）。
+    """
+    try:
+        import json
+        from pathlib import Path
+
+        token_file = Path(token_file)
+        if not token_file.is_file():
+            return None
+        data = json.loads(token_file.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    key = data.get("mcpGatewayKey")
+    return key if isinstance(key, str) and key else None
+
+
+def _is_https_url(url: str) -> bool:
+    """URL 是否为 https（网关凭据只注入 https 端点，CWE-319）。"""
+    from urllib.parse import urlsplit
+
+    return urlsplit(url or "").scheme.lower() == "https"
+
+
+def _url_matches_trusted_gateway(url: str) -> bool:
+    """URL 是否等于内置可信网关端点（防止同名服务器把凭据导向他处）。"""
+    trusted = _DEFAULT_MCP_SERVERS.get(_DEFAULT_GATEWAY_NAME) or {}
+    return bool(url) and url == trusted.get("url", "")
+
+
 async def _connect_one_server(
     name: str,
     cfg,
     registry: ToolRegistry,
     keep_alive: asyncio.Event,
     registered: asyncio.Event,
+    workspace=None,
 ) -> None:
     """Connect a single MCP server and keep the connection alive.
 
@@ -423,7 +470,8 @@ async def _connect_one_server(
             if transport in ("sse", "http"):
                 # SSE 与 streamable-http 都随初始请求发送自定义 headers：
                 # 非回环 http 端点先过校验（回环 http / https / 显式
-                # insecure_http opt-in 放行）。
+                # insecure_http opt-in 放行）。校验先于凭据注入——被拒
+                # 的端点绝不接触登录凭据（CWE-319，CodeRabbit #949）。
                 _url_error = _validate_mcp_http_url(
                     cfg.url,
                     allow_insecure=bool(getattr(cfg, "insecure_http", False)),
@@ -431,13 +479,30 @@ async def _connect_one_server(
                 if _url_error:
                     logger.error("MCP server '{}': {}", name, _url_error)
                     return
+            # 登录态注入（CodeRabbit #951 三重收口）：仅当 ① 默认网关
+            # 服务器未显式配置 headers；② 名称与 URL 都匹配内置可信
+            # 端点（防止同名服务器把 workspace 凭据导向其他地址）；
+            # ③ URL 为 https（网关 token 绝不随明文 http 发送，含
+            # opt-in 端点）。平台 https 上线前默认不注入、fail-closed。
+            effective_headers = dict(getattr(cfg, "headers", None) or {})
+            if (
+                not effective_headers
+                and name == _DEFAULT_GATEWAY_NAME
+                and workspace is not None
+                and _url_matches_trusted_gateway(getattr(cfg, "url", ""))
+                and _is_https_url(getattr(cfg, "url", ""))
+            ):
+                _gw_key = _gateway_key_from_token_file(workspace / ".qraft" / "token.json")
+                if _gw_key:
+                    effective_headers["Authorization"] = f"Bearer {_gw_key}"
+                    logger.info("MCP server '{}': 登录态注入网关凭据（token 文件）", name)
             if transport == "sse":
                 from mcp.client.sse import sse_client
 
                 # SSE 传输（平台托管 MCP 网关）：自定义 headers（如
                 # Authorization）直接随 GET /sse 握手请求发送。
                 read, write = await server_stack.enter_async_context(
-                    sse_client(cfg.url, headers=cfg.headers or None)
+                    sse_client(cfg.url, headers=effective_headers or None)
                 )
             elif transport == "stdio":
                 params = StdioServerParameters(
@@ -450,8 +515,8 @@ async def _connect_one_server(
                 # follow_redirects=False：自定义 headers（如 Authorization）
                 # 绝不随跨域重定向带到第三方主机（CWE-201 评审）。
                 http_client = (
-                    httpx.AsyncClient(headers=cfg.headers, follow_redirects=False)
-                    if cfg.headers
+                    httpx.AsyncClient(headers=effective_headers, follow_redirects=False)
+                    if effective_headers
                     else None
                 )
                 read, write, _ = await server_stack.enter_async_context(
@@ -508,7 +573,10 @@ async def _connect_one_server(
 
 
 async def connect_mcp_servers(
-    mcp_servers: dict, registry: ToolRegistry, keep_alive: asyncio.Event
+    mcp_servers: dict,
+    registry: ToolRegistry,
+    keep_alive: asyncio.Event,
+    workspace=None,
 ) -> list[asyncio.Task]:
     """Connect to configured MCP servers and register their tools.
 
@@ -520,12 +588,17 @@ async def connect_mcp_servers(
     *keep_alive* and awaits them after setting it (or cancels them) to
     close the connections.  A failure in one server cannot cancel siblings
     or the caller.
+
+    *workspace* 供登录态凭据注入使用（workspace/.qraft/token.json 的
+    mcpGatewayKey），可为 None（无注入）。
     """
     tasks: list[asyncio.Task] = []
     registered = [asyncio.Event() for _ in mcp_servers]
     for (name, cfg), ev in zip(mcp_servers.items(), registered):
         tasks.append(
-            asyncio.create_task(_connect_one_server(name, cfg, registry, keep_alive, ev))
+            asyncio.create_task(
+                _connect_one_server(name, cfg, registry, keep_alive, ev, workspace)
+            )
         )
 
     # Barrier: wait until every server has registered its tools (or failed)

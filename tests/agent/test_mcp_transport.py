@@ -34,3 +34,46 @@ def test_explicit_http_type():
 
 def test_empty_config_returns_empty():
     assert _transport_for(_cfg()) == ""
+
+
+class TestGatewayTokenInjection:
+    def test_reads_key_from_token_file(self, tmp_path):
+        from miqi.agent.tools.mcp import _gateway_key_from_token_file
+
+        f = tmp_path / "token.json"
+        f.write_text('{"accessToken": "a", "mcpGatewayKey": "k-123"}', encoding="utf-8")
+        assert _gateway_key_from_token_file(f) == "k-123"
+
+    def test_missing_file_or_field_returns_none(self, tmp_path):
+        from miqi.agent.tools.mcp import _gateway_key_from_token_file
+
+        assert _gateway_key_from_token_file(tmp_path / "nope.json") is None
+        f = tmp_path / "token.json"
+        f.write_text('{"accessToken": "a"}', encoding="utf-8")
+        assert _gateway_key_from_token_file(f) is None
+        f.write_text("not json", encoding="utf-8")
+        assert _gateway_key_from_token_file(f) is None
+
+    def test_default_gateway_name_matches_schema(self):
+        from miqi.agent.tools.mcp import _DEFAULT_GATEWAY_NAME
+        from miqi.config.schema import DEFAULT_MCP_SERVERS
+
+        assert _DEFAULT_GATEWAY_NAME in DEFAULT_MCP_SERVERS
+
+
+class TestInjectionGuards:
+    def test_https_detection(self):
+        from miqi.agent.tools.mcp import _is_https_url
+
+        assert _is_https_url("https://mcp.example.com/sse") is True
+        assert _is_https_url("http://127.0.0.1:9000/sse") is False
+        assert _is_https_url("") is False
+
+    def test_trusted_gateway_url_match(self):
+        from miqi.agent.tools.mcp import _url_matches_trusted_gateway
+        from miqi.config.schema import DEFAULT_MCP_SERVERS
+
+        builtin = DEFAULT_MCP_SERVERS["miqroforge-slurm"]["url"]
+        assert _url_matches_trusted_gateway(builtin) is True
+        assert _url_matches_trusted_gateway("http://evil.example.com/sse") is False
+        assert _url_matches_trusted_gateway("") is False
