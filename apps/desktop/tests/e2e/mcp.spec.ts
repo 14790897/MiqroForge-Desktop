@@ -244,6 +244,22 @@ test.describe('MCP 服务器集成', () => {
       await createNewConversation(page);
       await expect(page.locator('[data-testid="chat-input-container"]')).toBeVisible();
 
+      // #952 回归守卫：E2E 应用不得继承开发机的平台登录态。开发模式
+      // userData 按仓库隔离（index.ts），若 launchElectronApp 未隔离 qraft
+      // store，登录态会恢复 → 真实网关凭据同步进临时 workspace 的
+      // .qraft/token.json → 模型调用走真实网关、mock 收不到请求。
+      const qraftState = await page.evaluate(async () => {
+        try {
+          return await (window as any).miqi.qraft.status();
+        } catch {
+          return null;
+        }
+      });
+      expect(
+        qraftState?.loggedIn,
+        'E2E app must not inherit the developer machine platform login (see #952)'
+      ).toBeFalsy();
+
       // ── 发送任务 → mock 第一轮即调用 mcp_e2emcp_e2e_echo ──
       await sendMessage(page, 'MCP 测试：请调用 MCP 工具并返回结果');
 
