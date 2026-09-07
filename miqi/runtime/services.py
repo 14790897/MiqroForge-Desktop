@@ -204,13 +204,6 @@ class RuntimeServices:
                 and getattr(sandbox_manager, "_initialized", False)
             )
 
-        # 平台积分计费闸门：token 文件由桌面主进程写入全局 workspace
-        #（getWorkspacePath()/.qraft/token.json），与沙箱内 Skill 读取的
-        # 是同一份。billed 去重文件放同目录。未启用时 orchestrator 不设闸门。
-        # 进程内共享单个实例（按 token 文件路径缓存）：多会话并发扣费时
-        # 内存去重集合与读缓存一致，写盘也走合并策略（见 billing.py）。
-        billing = _build_billing(config)
-
         # #875 第二轮评估（B7 不变量）：NONE（宿主机执行）只允许来自显式
         # 沙箱关闭——沙箱开启但不可用（初始化窗口/失败）时引擎拒绝 exec，
         # 绝不静默降级。
