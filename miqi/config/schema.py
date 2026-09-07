@@ -546,6 +546,25 @@ class MCPServerConfig(Base):
     lazy: bool = False  # If true, register a single gateway tool instead of all tools upfront; activate on demand
 
 
+# 平台托管 slurm MCP 网关（内置默认，2026-09-05 产品确认）：
+# SSE 传输 + 共享 Bearer 凭据（面向所有客户端分发，非个人密钥）；
+# 非回环 http 显式 opt-in（平台暂无 https，见 _validate_mcp_http_url）。
+# 键名含 "slurm" 使作业进入计费范围（#936：RUNNING 时扣 10 分）。
+# 用户显式配置 mcp_servers（含空对象）即覆盖此默认。
+DEFAULT_MCP_SERVERS: dict = {
+    "miqroforge-slurm": {
+        "type": "sse",
+        "url": "http://124.220.57.194:9000/sse",
+        "headers": {
+            "Authorization": "Bearer Y4rmjqg5NeGqglzyGNK_HJvmATyCzKXv4p2ZBy-E08I",
+        },
+        "insecure_http": True,
+        "tool_timeout": 90,
+        "description": "MiQroForge 平台托管 SLURM 集群：作业提交/状态监控/取消、分区查询、输出与文件传输",
+    },
+}
+
+
 class ObservabilityConfig(Base):
     """OpenTelemetry observability configuration (Plan 59).
 
@@ -573,7 +592,13 @@ class ToolsConfig(Base):
     extra_roots: list[str] = Field(default_factory=list)  # Additional filesystem roots allowed by file tools
     auto_user_dirs: bool = True  # Auto-sense output directories the user mentions and authorize file tools for the session (#821)
     sandbox: SandboxConfig = Field(default_factory=SandboxConfig)
-    mcp_servers: dict[str, MCPServerConfig] = Field(default_factory=dict)
+    mcp_servers: dict[str, MCPServerConfig] = Field(
+        # validate_default 未开启：default_factory 结果不会自动校验，
+        # 这里显式构造 MCPServerConfig 实例保证类型正确。
+        default_factory=lambda: {
+            name: MCPServerConfig(**cfg) for name, cfg in DEFAULT_MCP_SERVERS.items()
+        }
+    )
 
 
 class BillingConfig(Base):
