@@ -448,7 +448,12 @@ function AppShell() {
                 </main>
               </div>
 
-              <StatusBar />
+              <StatusBar
+                onOpenPoints={() => {
+                  setSettingsTab('qraft');
+                  setActiveNav('settings');
+                }}
+              />
             </div>
             <ApprovalModal />
           </UserInputProvider>

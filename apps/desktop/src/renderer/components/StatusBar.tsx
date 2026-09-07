@@ -1,8 +1,9 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { cn } from '../lib/utils';
 import { useRuntime } from '../contexts/RuntimeContext';
 import { useRestartRequired } from '../contexts/RestartRequiredContext';
-import { Loader2, RefreshCw } from 'lucide-react';
+import { useQraftStatus } from '../hooks/useQraftStatus';
+import { Coins, Loader2, RefreshCw } from 'lucide-react';
 
 const STATES: Record<string, { label: string; color: string }> = {
   stopped: { label: '已停止', color: 'var(--text-faint)' },
@@ -12,12 +13,39 @@ const STATES: Record<string, { label: string; color: string }> = {
   error: { label: '错误', color: 'var(--danger)' },
 };
 
-export function StatusBar() {
+export function StatusBar({ onOpenPoints }: { onOpenPoints?: () => void }) {
   const { status, start, stop } = useRuntime();
   const { restartRequired, restartReasons, clearRestartRequired } = useRestartRequired();
+  const { status: qraftStatus, loggedIn } = useQraftStatus();
   const s = STATES[status.state] ?? STATES.stopped;
   const [restarting, setRestarting] = useState(false);
   const [restartError, setRestartError] = useState<string | null>(null);
+
+  // 登录后拉取一次积分余额：主进程（QraftService.fetchPointsBalance）成功
+  // 缓存后会推送 statusChanged，此处经 useQraftStatus 自动收到带 points
+  // 的状态。拉取失败（平台暂不可达等）30 秒后重试，成功或退出登录即停。
+  useEffect(() => {
+    if (!loggedIn || qraftStatus?.points !== undefined) return;
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const attempt = () => {
+      try {
+        window.miqi.qraft
+          .pointsBalance()
+          .catch(() => {})
+          .then((result) => {
+            if (!result?.ok && !cancelled) timer = setTimeout(attempt, 30_000);
+          });
+      } catch {
+        /* 旧版 preload（如 smoke mock）没有 qraft 命名空间 */
+      }
+    };
+    attempt();
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, [loggedIn, qraftStatus?.points]);
 
   const handleRestart = async () => {
     setRestarting(true);
@@ -101,9 +129,25 @@ export function StatusBar() {
 
       {restartError && <span style={{ color: 'var(--danger)' }}>{restartError}</span>}
 
-      <span className="ml-auto text-text-faint">
-        MiQroForge Desktop v{typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : 'dev'}
-      </span>
+      <div className="ml-auto flex items-center gap-3">
+        {loggedIn && qraftStatus?.points && (
+          <button
+            type="button"
+            onClick={onOpenPoints}
+            disabled={!onOpenPoints}
+            className="flex items-center gap-1 rounded px-1 py-0.5 text-xs transition-colors disabled:cursor-default"
+            style={{ color: 'var(--text-muted)' }}
+            data-testid="statusbar-points"
+            title={`可用积分 ${qraftStatus.points.availablePoints} · 累计获得 ${qraftStatus.points.totalEarned} · 累计支出 ${qraftStatus.points.totalSpent}${onOpenPoints ? '（点击查看明细）' : ''}`}
+          >
+            <Coins size={12} style={{ color: 'var(--accent)' }} />
+            积分 {qraftStatus.points.availablePoints}
+          </button>
+        )}
+        <span className="text-text-faint">
+          MiQroForge Desktop v{typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : 'dev'}
+        </span>
+      </div>
     </div>
   );
 }

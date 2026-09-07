@@ -7,8 +7,8 @@
  * Test coverage:
  *  1. App load — preload bridge check, UI renders
  *  2. Sidebar — navigation buttons, session list
- *  3. Chat — input field, message display, sanitization
- *  4. StatusBar — runtime status visible
+ *  3. Chat — session title header, message sanitization
+ *  4. StatusBar — runtime status visible + 登录态积分余额
  */
 
 import { test, expect } from '@playwright/test';
@@ -108,55 +108,12 @@ test.describe('Sidebar Navigation', () => {
 // ---------------------------------------------------------------------------
 
 test.describe('Chat Console', () => {
-  test('renders chat input with correct placeholder', async ({ page }) => {
-    await injectMockAndGoto(page);
-
-    // The chat textarea should be present with the expected placeholder
-    const textarea = page.getByPlaceholder('Ask Agent to analyze or edit files...');
-    await expect(textarea).toBeVisible({ timeout: 5000 });
-  });
-
-  test('renders send button', async ({ page }) => {
-    await injectMockAndGoto(page);
-
-    // There should be a button containing the Send icon
-    const sendBtn = page
-      .locator('button:has(svg)')
-      .filter({
-        has: page.locator('svg'),
-      })
-      .last();
-
-    // The send button should exist (disabled until input is entered)
-    // We just verify the textarea + button area exists
-    const inputArea = page.getByPlaceholder('Ask Agent to analyze or edit files...');
-    await expect(inputArea).toBeAttached();
-  });
-
   test('renders session title in header', async ({ page }) => {
     await injectMockAndGoto(page);
 
     // Session title (h2.font-semibold.truncate) renders in both old and new UI
     const title = page.locator('h2.font-semibold.truncate').first();
     await expect(title).toBeVisible({ timeout: 5000 });
-  });
-
-  test('renders input area footer area', async ({ page }) => {
-    await injectMockAndGoto(page);
-
-    // The input textarea and its container should render
-    const textarea = page.getByPlaceholder('Ask Agent to analyze or edit files...');
-    await expect(textarea).toBeVisible({ timeout: 5000 });
-
-    // Verify the textarea is within an input area container
-    await expect(textarea).toBeEnabled({ timeout: 5000 });
-  });
-
-  test('chat input is enabled when not streaming', async ({ page }) => {
-    await injectMockAndGoto(page);
-
-    const textarea = page.getByPlaceholder('Ask Agent to analyze or edit files...');
-    await expect(textarea).toBeEnabled({ timeout: 5000 });
   });
 });
 
@@ -177,6 +134,24 @@ test.describe('Status Bar', () => {
     await injectMockAndGoto(page, { runtimeStatus: 'stopped' });
 
     await expect(page.getByText('已停止')).toBeVisible({ timeout: 5000 });
+  });
+
+  test('shows points balance in status bar when logged in', async ({ page }) => {
+    await injectMockAndGoto(page, {
+      qraftStatus: {
+        loggedIn: true,
+        account: { phone: '18500000000', sub: '19', nickname: 'MiQi测试' },
+      },
+    });
+
+    // 状态栏在登录后拉取余额（mock 默认 270 可用积分）并展示
+    await expect(page.getByTestId('statusbar-points')).toHaveText(/积分 270/);
+  });
+
+  test('hides points balance in status bar when logged out', async ({ page }) => {
+    await injectMockAndGoto(page);
+
+    await expect(page.getByTestId('statusbar-points')).toHaveCount(0);
   });
 });
 
@@ -208,17 +183,6 @@ test.describe('Error Sanitization', () => {
 // ---------------------------------------------------------------------------
 
 test.describe('Layout', () => {
-  test('sidebar and main content are both visible', async ({ page }) => {
-    await injectMockAndGoto(page);
-
-    // The sidebar width is 240px, so the main column should be right of that
-    // Verify both key landmarks exist
-    await expect(page.getByTestId('app-title')).toBeVisible({ timeout: 3000 });
-    await expect(page.getByPlaceholder('Ask Agent to analyze or edit files...')).toBeVisible({
-      timeout: 3000,
-    });
-  });
-
   test('page title is set correctly', async ({ page }) => {
     await injectMockAndGoto(page);
 

@@ -410,7 +410,14 @@ export function buildMockBridgeScript(opts: MockBridgeOptions = {}): string {
         return Promise.resolve({ ok: true });
       },
       pointsBalance: function() {
-        return Promise.resolve(JSON.parse(JSON.stringify(${qraftPointsResultJson})));
+        var result = JSON.parse(JSON.stringify(${qraftPointsResultJson}));
+        // 镜像主进程 QraftService.fetchPointsBalance：成功后缓存进状态
+        // 并推送 statusChanged，状态栏/设置页等订阅方随之更新。
+        if (result.ok && _qraftStatus && _qraftStatus.loggedIn) {
+          _qraftStatus = Object.assign({}, _qraftStatus, { points: result.points });
+          setTimeout(function() { _fire('qraftStatus', _qraftStatus); }, 0);
+        }
+        return Promise.resolve(result);
       },
       onStatusChanged: function(cb) { return _on('qraftStatus', cb); },
     },
