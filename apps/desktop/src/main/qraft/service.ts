@@ -24,6 +24,7 @@ import {
 import { randomUUID } from 'crypto';
 import { dirname, join } from 'path';
 import { CookieJar } from './cookie-jar';
+import { decryptMcpGatewayKey } from './mcp-gateway-key';
 import { QraftClient, QraftError, type QraftLogger, type ResolvedQraftConfig } from './client';
 import { maskSecret } from './rsa';
 import { QraftStore } from './store';
@@ -242,7 +243,9 @@ export class QraftService {
           nickname: info.nickname,
         };
         aiGateway = info.aiGateway;
-        mcpGatewayKey = info.mcpGatewayKey;
+        // 平台按用户下发的凭据优先；未下发时解密内置共享凭据
+        //（全客户端同一 token，2026-09-07 产品确认的过渡方案）。
+        mcpGatewayKey = info.mcpGatewayKey ?? decryptMcpGatewayKey() ?? undefined;
       } catch (err) {
         this.options.log(
           'WARN',
@@ -294,7 +297,9 @@ export class QraftService {
           nickname: info.nickname,
         };
         aiGateway = info.aiGateway;
-        mcpGatewayKey = info.mcpGatewayKey;
+        // 平台按用户下发的凭据优先；未下发时解密内置共享凭据
+        //（全客户端同一 token，2026-09-07 产品确认的过渡方案）。
+        mcpGatewayKey = info.mcpGatewayKey ?? decryptMcpGatewayKey() ?? undefined;
       } catch (err) {
         this.options.log(
           'WARN',
