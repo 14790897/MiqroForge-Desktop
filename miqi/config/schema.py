@@ -547,9 +547,11 @@ class MCPServerConfig(Base):
 
 
 # 平台托管 slurm MCP 网关（内置默认服务器条目，2026-09-05 产品确认）：
-# 零配置预置 URL/传输/超时；凭据不入仓库——登录后平台经 userinfo 下发
-# mcpGatewayKey，Desktop 写入 workspace/.qraft/token.json（0600），Python
-# 连接本服务器时自动注入 Authorization Bearer（见 _connect_one_server）。
+# 零配置预置 URL/传输/超时；凭据不入仓库（明文）——共享网关 token
+# 以 AES-256-GCM 密文存于桌面主进程（mcp-gateway-key.ts），登录时解密
+# 写入 workspace/.qraft/token.json（0600，字段 mcpGatewayKey；未来平台
+# 按用户下发时 userinfo 字段优先覆盖），Python 连接本服务器时自动注入
+# Authorization Bearer（见 _connect_one_server）。
 # 默认 fail-closed（CWE-319，CodeRabbit #949 评审）：非回环 http 且未
 # 显式 opt-in 时连接被拒、绝不发送登录凭据——用户在设置页勾选
 # 「允许非回环 HTTP」或平台提供 https 后启用。键名含 "slurm" 使作业
