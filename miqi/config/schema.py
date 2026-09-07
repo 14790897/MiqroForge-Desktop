@@ -546,18 +546,17 @@ class MCPServerConfig(Base):
     lazy: bool = False  # If true, register a single gateway tool instead of all tools upfront; activate on demand
 
 
-# 平台托管 slurm MCP 网关（内置默认，2026-09-05 产品确认）：
-# SSE 传输 + 共享 Bearer 凭据（面向所有客户端分发，非个人密钥）；
-# 非回环 http 显式 opt-in（平台暂无 https，见 _validate_mcp_http_url）。
-# 键名含 "slurm" 使作业进入计费范围（#936：RUNNING 时扣 10 分）。
-# 用户显式配置 mcp_servers（含空对象）即覆盖此默认。
+# 平台托管 slurm MCP 网关（内置默认服务器条目，2026-09-05 产品确认）：
+# 零配置预置 URL/传输/超时；凭据不入仓库——登录后平台经 userinfo 下发
+# mcpGatewayKey，Desktop 写入 workspace/.qraft/token.json（0600），Python
+# 连接本服务器时自动注入 Authorization Bearer（见 _connect_one_server）。
+# 非回环 http 显式 opt-in（平台暂无 https）。键名含 "slurm" 使作业进入
+# 计费范围（#936：RUNNING 时扣 10 分）。用户显式配置 mcp_servers（含
+# 空对象）即覆盖此默认。
 DEFAULT_MCP_SERVERS: dict = {
     "miqroforge-slurm": {
         "type": "sse",
         "url": "http://124.220.57.194:9000/sse",
-        "headers": {
-            "Authorization": "Bearer Y4rmjqg5NeGqglzyGNK_HJvmATyCzKXv4p2ZBy-E08I",
-        },
         "insecure_http": True,
         "tool_timeout": 90,
         "description": "MiQroForge 平台托管 SLURM 集群：作业提交/状态监控/取消、分区查询、输出与文件传输",

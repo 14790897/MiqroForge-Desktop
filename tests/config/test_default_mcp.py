@@ -1,8 +1,10 @@
 """内置默认 MCP 服务器（平台托管 slurm 网关）测试。
 
 2026-09-05 产品确认：`miqroforge-slurm` 作为开箱即用的默认 MCP
-服务器（SSE + 共享 Bearer + insecure_http opt-in）；用户显式配置
-mcp_servers（含空对象）即覆盖默认。
+服务器（SSE + insecure_http opt-in）；凭据不入仓库——登录后平台经
+userinfo 下发 mcpGatewayKey，Desktop 写入 0600 token 文件，Python
+连接时自动注入 Authorization Bearer。用户显式配置 mcp_servers
+（含空对象）即覆盖默认。
 """
 
 from miqi.config.schema import Config, MCPServerConfig
@@ -14,7 +16,8 @@ def test_default_config_includes_hosted_slurm_gateway():
     assert srv.type == "sse"
     assert srv.url == "http://124.220.57.194:9000/sse"
     assert srv.insecure_http is True
-    assert srv.headers.get("Authorization", "").startswith("Bearer ")
+    # 凭据不入仓库：默认条目不含 headers，运行时从 token 文件注入
+    assert srv.headers == {}
     assert srv.tool_timeout == 90
     assert "SLURM" in srv.description
     # 键名含 "slurm"：进入计费范围（#936 RUNNING 扣 10 分）
