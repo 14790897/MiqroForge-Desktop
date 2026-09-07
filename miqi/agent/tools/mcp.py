@@ -453,6 +453,19 @@ async def _connect_one_server(
 
     try:
         try:
+            transport = _transport_for(cfg)
+            if transport in ("sse", "http"):
+                # SSE 与 streamable-http 都随初始请求发送自定义 headers：
+                # 非回环 http 端点先过校验（回环 http / https / 显式
+                # insecure_http opt-in 放行）。校验先于凭据注入——被拒
+                # 的端点绝不接触登录凭据（CWE-319，CodeRabbit #949）。
+                _url_error = _validate_mcp_http_url(
+                    cfg.url,
+                    allow_insecure=bool(getattr(cfg, "insecure_http", False)),
+                )
+                if _url_error:
+                    logger.error("MCP server '{}': {}", name, _url_error)
+                    return
             # 登录态注入：默认网关服务器未显式配置 headers 时，从
             # workspace/.qraft/token.json 读取平台下发的 mcpGatewayKey
             # 作为 Bearer 凭据（凭据不入仓库、不进 config.json）。
@@ -466,18 +479,6 @@ async def _connect_one_server(
                 if _gw_key:
                     effective_headers["Authorization"] = f"Bearer {_gw_key}"
                     logger.info("MCP server '{}': 登录态注入网关凭据（token 文件）", name)
-            transport = _transport_for(cfg)
-            if transport in ("sse", "http"):
-                # SSE 与 streamable-http 都随初始请求发送自定义 headers：
-                # 非回环 http 端点先过校验（回环 http / https / 显式
-                # insecure_http opt-in 放行）。
-                _url_error = _validate_mcp_http_url(
-                    cfg.url,
-                    allow_insecure=bool(getattr(cfg, "insecure_http", False)),
-                )
-                if _url_error:
-                    logger.error("MCP server '{}': {}", name, _url_error)
-                    return
             if transport == "sse":
                 from mcp.client.sse import sse_client
 
