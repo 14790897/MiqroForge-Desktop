@@ -471,6 +471,16 @@ export async function launchElectronApp(
   const config = existsSync(destConfigPath)
     ? JSON.parse(readFileSync(destConfigPath, 'utf-8'))
     : {};
+  // ── E2E: start from a clean provider state ──
+  // The user's real config carries desktop.providerActivation (builtin key
+  // markers). The runtime pins builtin-activated providers to their official
+  // endpoint (#933), which would silently redirect specs that patch apiBase
+  // to local mock servers (confirm-card, bridge-chinese-error, …) at the
+  // real API — mock never receives a request. Strip the markers; specs that
+  // need activation re-add it explicitly via patchConfig.
+  if (config.desktop && typeof config.desktop === 'object') {
+    delete (config.desktop as Record<string, unknown>).providerActivation;
+  }
   if (patchConfig) patchConfig(config);
   const bypassAll = opts?.bypassAll ?? true;
   if (bypassAll) {
