@@ -24,6 +24,7 @@ import {
 import { randomUUID } from 'crypto';
 import { dirname, join } from 'path';
 import { CookieJar } from './cookie-jar';
+import { decryptMcpGatewayKey } from './mcp-gateway-key';
 import { QraftClient, QraftError, type QraftLogger, type ResolvedQraftConfig } from './client';
 import { maskSecret } from './rsa';
 import { QraftStore } from './store';
@@ -230,6 +231,7 @@ export class QraftService {
       // userinfo 失败不阻断登录 —— 回退用平台登录响应里的 nickname/username。
       let account: QraftAccount = { phone, ...loginAccount };
       let aiGateway: QraftAiGateway | undefined;
+      let mcpGatewayKey: string | undefined;
       try {
         const info = await this.options.client.getUserInfo(config, tokens.accessToken);
         // 显式取身份字段：info 额外携带 aiGateway（含密钥），绝不并入 account，
@@ -241,14 +243,24 @@ export class QraftService {
           nickname: info.nickname,
         };
         aiGateway = info.aiGateway;
+        // 平台按用户下发的凭据优先；未下发时解密内置共享凭据
+        //（全客户端同一 token，2026-09-07 产品确认的过渡方案）。
+        mcpGatewayKey = info.mcpGatewayKey ?? decryptMcpGatewayKey() ?? undefined;
       } catch (err) {
         this.options.log(
           'WARN',
           `qraft: userinfo 获取失败（${err instanceof QraftError ? err.code : err}），回退使用登录响应信息`
         );
+        // userinfo 失败不能静默丢弃已存储的 MCP 网关凭据：仅当本次登录
+        // 证明为同一账号时保留（CodeRabbit #951）；账号身份不一致时
+        // 保持未设置，绝不把旧账号的凭据带进新账号会话。
+        const previous = this.options.store.current;
+        if (previous && account.sub && previous.account.sub === account.sub) {
+          mcpGatewayKey = previous.mcpGatewayKey;
+        }
       }
 
-      this.persistLogin(env, config, account, tokens, aiGateway);
+      this.persistLogin(env, config, account, tokens, aiGateway, mcpGatewayKey);
       this.options.log('INFO', `qraft: 登录完成（${account.nickname || account.username}）`);
       // 登录后尽力拉取一次积分余额，让设置页直接展示（失败不阻断登录）。
       void this.fetchPointsBalance().catch(() => {});
@@ -282,6 +294,7 @@ export class QraftService {
       //（实测响应无 picture 字段、也不含手机号）。
       let account: QraftAccount = { phone: '', sub: '', username: '', nickname: '' };
       let aiGateway: QraftAiGateway | undefined;
+      let mcpGatewayKey: string | undefined;
       try {
         const info = await this.options.client.getUserInfo(config, tokens.accessToken);
         account = {
@@ -291,6 +304,9 @@ export class QraftService {
           nickname: info.nickname,
         };
         aiGateway = info.aiGateway;
+        // 平台按用户下发的凭据优先；未下发时解密内置共享凭据
+        //（全客户端同一 token，2026-09-07 产品确认的过渡方案）。
+        mcpGatewayKey = info.mcpGatewayKey ?? decryptMcpGatewayKey() ?? undefined;
       } catch (err) {
         this.options.log(
           'WARN',
@@ -298,7 +314,7 @@ export class QraftService {
         );
       }
 
-      this.persistLogin(env, config, account, tokens, aiGateway);
+      this.persistLogin(env, config, account, tokens, aiGateway, mcpGatewayKey);
       this.options.log(
         'INFO',
         `qraft: 浏览器登录完成（${account.nickname || account.username || account.sub}）`
@@ -333,7 +349,8 @@ export class QraftService {
     config: ResolvedQraftConfig,
     account: QraftAccount,
     tokens: QraftTokens,
-    aiGateway?: QraftAiGateway
+    aiGateway?: QraftAiGateway,
+    mcpGatewayKey?: string
   ): void {
     const state: QraftStoredState = {
       version: 1,
@@ -346,6 +363,7 @@ export class QraftService {
       account,
       tokens,
       ...(aiGateway ? { aiGateway } : {}),
+      ...(mcpGatewayKey ? { mcpGatewayKey } : {}),
     };
     this.options.store.save(state);
     this.refreshError = null;
@@ -414,6 +432,7 @@ export class QraftService {
             baseUrl: state.baseUrl,
             // AI 网关信息（Python make_provider 读取；登出即随文件删除）。
             // billing/auth.py 只读已知字段，追加字段向后兼容。
+            ...(state.mcpGatewayKey ? { mcpGatewayKey: state.mcpGatewayKey } : {}),
             ...(state.aiGateway
               ? {
                   aiGateway: {

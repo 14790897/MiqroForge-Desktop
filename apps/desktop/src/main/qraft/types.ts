@@ -97,6 +97,12 @@ export interface QraftStoredState {
    * token 刷新不重拉 userinfo，故随本存储带入并在重写 token 文件时保留。
    */
   aiGateway?: QraftAiGateway;
+  /**
+   * 平台托管 MCP 网关凭据（userinfo 下发，作 Authorization Bearer）。
+   * 属密钥：只存在于加密 store 与 0600 token 文件，绝不进渲染进程/日志。
+   * token 刷新不重拉 userinfo，故随本存储带入并在重写 token 文件时保留。
+   */
+  mcpGatewayKey?: string;
 }
 
 /** 平台 AI 网关开通信息（腾讯云消费者密钥 + 状态 + 配置版本）。 */
