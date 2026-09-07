@@ -46,6 +46,7 @@
 - **长列折叠**：单元格文本超过 24 字符时截断，行首提供「展开/收起」。
 - **排序**：点击方案列头按该列排序，区间值按数值下界比较；再点切换升降序。
 - **来源徽标**：参数带 `source` 时显示 `citations` 命中的标题（可外链），缺失显示「未标注」。
+- **复制**：整表转 TSV 复制（`compareToTsv`），可粘贴进 Excel / Google Sheets。
 
 ## 降级
 
@@ -53,11 +54,12 @@
 
 ## 实现位置
 
-- `apps/desktop/src/renderer/features/chat/components/compareData.ts` — 解析与排序纯函数
+- `apps/desktop/src/renderer/features/chat/components/compareData.ts` — 解析、排序、TSV 纯函数
+- `apps/desktop/src/renderer/features/chat/components/DataTable.tsx` — 共享只读表格外壳（与 #877 复用）
 - `apps/desktop/src/renderer/features/chat/components/CompareTable.tsx` — 对比表组件
 - `apps/desktop/src/renderer/features/chat/components/MarkdownContent.tsx` — `pre` 组件拦截 `compare` 语言并替换渲染
 
 ## 关联
 
-- #877：附件只读富预览（XLSX/CSV 的 `SpreadsheetPreview`、DOCX 的 `DocxPreview`），复用一致的表格 CSS token（`--table-border` / `--table-head-bg` / `--accent-soft` 等）。
+- #877：附件只读富预览。XLSX/CSV 的 `SpreadsheetPreview` 与对比表共用同一个 `DataTable` 表格外壳（边框/主题/单元格样式统一）。
 - #879：引用结构化。`source` / `citations` 字段本期仅做占位徽标，深链接口待 #879 接入。

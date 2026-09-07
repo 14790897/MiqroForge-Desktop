@@ -146,3 +146,17 @@ export function sortParameters(
     })
     .map(({ p }) => p);
 }
+
+/**
+ * 把对比数据转为 TSV（制表符分隔），用于「复制」按钮：
+ * 可直接粘贴进 Excel / Google Sheets。
+ */
+export function compareToTsv(data: CompareData): string {
+  const header = ['参数', ...data.schemes].join('\t');
+  const lines = data.parameters.map((p) => {
+    const cells = [p.name];
+    for (let i = 0; i < data.schemes.length; i++) cells.push(p.values?.[i] ?? '');
+    return cells.join('\t');
+  });
+  return [header, ...lines].join('\n');
+}

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  compareToTsv,
   extractRangeLower,
   isCompareLang,
   isRangeValue,
@@ -143,5 +144,18 @@ describe('isCompareLang', () => {
     expect(isCompareLang('ts')).toBe(false);
     expect(isCompareLang('json')).toBe(false);
     expect(isCompareLang('')).toBe(false);
+  });
+});
+
+describe('compareToTsv', () => {
+  it('renders a header row plus one row per parameter, tab-separated', () => {
+    const data = {
+      schemes: ['A', 'B'],
+      parameters: [
+        { name: '压力', values: ['2–4', '5–8'] },
+        { name: '温度', values: ['60'] },
+      ],
+    };
+    expect(compareToTsv(data)).toBe('参数\tA\tB\n压力\t2–4\t5–8\n温度\t60\t');
   });
 });

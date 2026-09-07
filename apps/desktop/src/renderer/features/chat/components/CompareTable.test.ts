@@ -25,6 +25,11 @@ describe('CompareTable', () => {
     expect(markup).toContain('2–4');
   });
 
+  it('renders a copy button (issue #878 复制)', () => {
+    const markup = renderToStaticMarkup(createElement(CompareTable, { data: sample }));
+    expect(markup).toContain('复制');
+  });
+
   it('renders the citation title for a sourced parameter', () => {
     const markup = renderToStaticMarkup(createElement(CompareTable, { data: sample }));
     expect(markup).toContain('造粒工艺综述');
