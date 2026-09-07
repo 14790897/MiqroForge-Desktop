@@ -230,6 +230,7 @@ export class QraftService {
       // userinfo 失败不阻断登录 —— 回退用平台登录响应里的 nickname/username。
       let account: QraftAccount = { phone, ...loginAccount };
       let aiGateway: QraftAiGateway | undefined;
+      let mcpGatewayKey: string | undefined;
       try {
         const info = await this.options.client.getUserInfo(config, tokens.accessToken);
         // 显式取身份字段：info 额外携带 aiGateway（含密钥），绝不并入 account，
@@ -241,6 +242,7 @@ export class QraftService {
           nickname: info.nickname,
         };
         aiGateway = info.aiGateway;
+        mcpGatewayKey = info.mcpGatewayKey;
       } catch (err) {
         this.options.log(
           'WARN',
@@ -248,7 +250,7 @@ export class QraftService {
         );
       }
 
-      this.persistLogin(env, config, account, tokens, aiGateway);
+      this.persistLogin(env, config, account, tokens, aiGateway, mcpGatewayKey);
       this.options.log('INFO', `qraft: 登录完成（${account.nickname || account.username}）`);
       // 登录后尽力拉取一次积分余额，让设置页直接展示（失败不阻断登录）。
       void this.fetchPointsBalance().catch(() => {});
@@ -282,6 +284,7 @@ export class QraftService {
       //（实测响应无 picture 字段、也不含手机号）。
       let account: QraftAccount = { phone: '', sub: '', username: '', nickname: '' };
       let aiGateway: QraftAiGateway | undefined;
+      let mcpGatewayKey: string | undefined;
       try {
         const info = await this.options.client.getUserInfo(config, tokens.accessToken);
         account = {
@@ -291,6 +294,7 @@ export class QraftService {
           nickname: info.nickname,
         };
         aiGateway = info.aiGateway;
+        mcpGatewayKey = info.mcpGatewayKey;
       } catch (err) {
         this.options.log(
           'WARN',
@@ -298,7 +302,7 @@ export class QraftService {
         );
       }
 
-      this.persistLogin(env, config, account, tokens, aiGateway);
+      this.persistLogin(env, config, account, tokens, aiGateway, mcpGatewayKey);
       this.options.log(
         'INFO',
         `qraft: 浏览器登录完成（${account.nickname || account.username || account.sub}）`
@@ -333,7 +337,8 @@ export class QraftService {
     config: ResolvedQraftConfig,
     account: QraftAccount,
     tokens: QraftTokens,
-    aiGateway?: QraftAiGateway
+    aiGateway?: QraftAiGateway,
+    mcpGatewayKey?: string
   ): void {
     const state: QraftStoredState = {
       version: 1,
@@ -346,6 +351,7 @@ export class QraftService {
       account,
       tokens,
       ...(aiGateway ? { aiGateway } : {}),
+      ...(mcpGatewayKey ? { mcpGatewayKey } : {}),
     };
     this.options.store.save(state);
     this.refreshError = null;
@@ -414,6 +420,7 @@ export class QraftService {
             baseUrl: state.baseUrl,
             // AI 网关信息（Python make_provider 读取；登出即随文件删除）。
             // billing/auth.py 只读已知字段，追加字段向后兼容。
+            ...(state.mcpGatewayKey ? { mcpGatewayKey: state.mcpGatewayKey } : {}),
             ...(state.aiGateway
               ? {
                   aiGateway: {

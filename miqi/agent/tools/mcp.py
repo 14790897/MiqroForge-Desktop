@@ -367,6 +367,16 @@ def _transport_for(cfg) -> str:
     return ""
 
 
+# 内置默认网关服务器名（schema.DEFAULT_MCP_SERVERS 的键）：该服务器
+# 未显式配置 headers 时，连接阶段从登录态 token 文件注入凭据。
+try:
+    from miqi.config.schema import DEFAULT_MCP_SERVERS as _DEFAULT_MCP_SERVERS
+
+    _DEFAULT_GATEWAY_NAME = next(iter(_DEFAULT_MCP_SERVERS), "")
+except Exception:  # pragma: no cover — schema 不可用的极端环境禁用注入
+    _DEFAULT_GATEWAY_NAME = ""
+
+
 def _validate_mcp_http_url(url: str, *, allow_insecure: bool = False) -> str | None:
     """校验 MCP HTTP 端点；返回错误信息，None 表示可用。
 
@@ -388,12 +398,36 @@ def _validate_mcp_http_url(url: str, *, allow_insecure: bool = False) -> str | N
     return f"非回环 http:// MCP 端点被拒绝（凭据明文传输风险）：{url}"
 
 
+def _gateway_key_from_token_file(token_file) -> str | None:
+    """从 .qraft/token.json 读取平台下发的 MCP 网关凭据（mcpGatewayKey）。
+
+    Desktop 在登录/刷新时写入该字段（0600 文件）；凭据不入仓库、
+    不进 config.json。文件缺失/损坏/无字段一律返回 None（静默降级，
+    连接阶段由网关返回认证错误）。
+    """
+    try:
+        import json
+        from pathlib import Path
+
+        token_file = Path(token_file)
+        if not token_file.is_file():
+            return None
+        data = json.loads(token_file.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    key = data.get("mcpGatewayKey")
+    return key if isinstance(key, str) and key else None
+
+
 async def _connect_one_server(
     name: str,
     cfg,
     registry: ToolRegistry,
     keep_alive: asyncio.Event,
     registered: asyncio.Event,
+    workspace=None,
 ) -> None:
     """Connect a single MCP server and keep the connection alive.
 
@@ -419,6 +453,19 @@ async def _connect_one_server(
 
     try:
         try:
+            # 登录态注入：默认网关服务器未显式配置 headers 时，从
+            # workspace/.qraft/token.json 读取平台下发的 mcpGatewayKey
+            # 作为 Bearer 凭据（凭据不入仓库、不进 config.json）。
+            effective_headers = dict(getattr(cfg, "headers", None) or {})
+            if (
+                not effective_headers
+                and name == _DEFAULT_GATEWAY_NAME
+                and workspace is not None
+            ):
+                _gw_key = _gateway_key_from_token_file(workspace / ".qraft" / "token.json")
+                if _gw_key:
+                    effective_headers["Authorization"] = f"Bearer {_gw_key}"
+                    logger.info("MCP server '{}': 登录态注入网关凭据（token 文件）", name)
             transport = _transport_for(cfg)
             if transport in ("sse", "http"):
                 # SSE 与 streamable-http 都随初始请求发送自定义 headers：
@@ -437,7 +484,7 @@ async def _connect_one_server(
                 # SSE 传输（平台托管 MCP 网关）：自定义 headers（如
                 # Authorization）直接随 GET /sse 握手请求发送。
                 read, write = await server_stack.enter_async_context(
-                    sse_client(cfg.url, headers=cfg.headers or None)
+                    sse_client(cfg.url, headers=effective_headers or None)
                 )
             elif transport == "stdio":
                 params = StdioServerParameters(
@@ -450,8 +497,8 @@ async def _connect_one_server(
                 # follow_redirects=False：自定义 headers（如 Authorization）
                 # 绝不随跨域重定向带到第三方主机（CWE-201 评审）。
                 http_client = (
-                    httpx.AsyncClient(headers=cfg.headers, follow_redirects=False)
-                    if cfg.headers
+                    httpx.AsyncClient(headers=effective_headers, follow_redirects=False)
+                    if effective_headers
                     else None
                 )
                 read, write, _ = await server_stack.enter_async_context(
@@ -508,7 +555,10 @@ async def _connect_one_server(
 
 
 async def connect_mcp_servers(
-    mcp_servers: dict, registry: ToolRegistry, keep_alive: asyncio.Event
+    mcp_servers: dict,
+    registry: ToolRegistry,
+    keep_alive: asyncio.Event,
+    workspace=None,
 ) -> list[asyncio.Task]:
     """Connect to configured MCP servers and register their tools.
 
@@ -520,12 +570,17 @@ async def connect_mcp_servers(
     *keep_alive* and awaits them after setting it (or cancels them) to
     close the connections.  A failure in one server cannot cancel siblings
     or the caller.
+
+    *workspace* 供登录态凭据注入使用（workspace/.qraft/token.json 的
+    mcpGatewayKey），可为 None（无注入）。
     """
     tasks: list[asyncio.Task] = []
     registered = [asyncio.Event() for _ in mcp_servers]
     for (name, cfg), ev in zip(mcp_servers.items(), registered):
         tasks.append(
-            asyncio.create_task(_connect_one_server(name, cfg, registry, keep_alive, ev))
+            asyncio.create_task(
+                _connect_one_server(name, cfg, registry, keep_alive, ev, workspace)
+            )
         )
 
     # Barrier: wait until every server has registered its tools (or failed)
