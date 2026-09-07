@@ -5,12 +5,10 @@ import type { McpServerInfo, McpServerConfig } from '../../../shared/ipc';
 import { Modal } from '../../components/shared';
 
 function MCPServerModal({
-  open,
   onClose,
   onSave,
   initial,
 }: {
-  open: boolean;
   onClose: () => void;
   onSave: (name: string, config: McpServerConfig) => Promise<void>;
   initial?: McpServerInfo | null;
@@ -43,8 +41,6 @@ function MCPServerModal({
   const [lazy, setLazy] = useState(initial?.lazy ?? false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
-
-  if (!open) return null;
 
   const handleSave = async () => {
     setError('');
@@ -90,13 +86,7 @@ function MCPServerModal({
   };
 
   return (
-    <Modal
-      open={open}
-      onOpenChange={(o) => {
-        if (!o) onClose();
-      }}
-      hideClose
-    >
+    <Modal open onOpenChange={onClose} hideClose>
       <div className="rounded-xl shadow-2xl w-full max-w-lg mx-4 bg-surface">
         <div className="flex items-center justify-between px-5 py-4 border-b border-border">
           <h2 className="text-base font-semibold text-text">
@@ -395,65 +385,73 @@ export function MCPsPage() {
           </div>
         ) : (
           <div className="grid gap-3">
-            {servers.map((srv) => (
-              <div
-                key={srv.name}
-                className="settings-hover-card rounded-xl border p-4 transition-colors"
-                style={{ background: 'var(--surface)', borderColor: 'var(--border)' }}
-              >
-                <div className="flex items-start justify-between gap-3">
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-2 mb-1">
-                      <span className="font-mono text-sm font-semibold text-text">{srv.name}</span>
-                      <span
-                        className="px-1.5 py-0.5 rounded text-size-2xs font-medium uppercase"
-                        style={{
-                          background: srv.command ? 'var(--accent-bg)' : 'var(--info-bg)',
-                          color: srv.command ? 'var(--accent)' : 'var(--info)',
-                        }}
-                      >
-                        {srv.command ? 'stdio' : 'http'}
-                      </span>
+            {servers.map((srv) => {
+              const connType: 'stdio' | 'http' | 'sse' =
+                srv.type === 'sse' ? 'sse' : srv.command ? 'stdio' : 'http';
+              return (
+                <div
+                  key={srv.name}
+                  className="settings-hover-card rounded-xl border p-4 transition-colors"
+                  style={{ background: 'var(--surface)', borderColor: 'var(--border)' }}
+                >
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2 mb-1">
+                        <span className="font-mono text-sm font-semibold text-text">
+                          {srv.name}
+                        </span>
+                        <span
+                          className="px-1.5 py-0.5 rounded text-size-2xs font-medium uppercase"
+                          style={{
+                            background:
+                              connType === 'stdio' ? 'var(--accent-bg)' : 'var(--info-bg)',
+                            color: connType === 'stdio' ? 'var(--accent)' : 'var(--info)',
+                          }}
+                        >
+                          {connType}
+                        </span>
+                      </div>
+                      {srv.description && (
+                        <p className="text-xs mb-2 text-text-muted">{srv.description}</p>
+                      )}
+                      <p className="text-xs font-mono truncate text-text-faint">
+                        {srv.command
+                          ? `${srv.command} ${(srv.args ?? []).join(' ')}`
+                          : (srv.url ?? '')}
+                      </p>
                     </div>
-                    {srv.description && (
-                      <p className="text-xs mb-2 text-text-muted">{srv.description}</p>
-                    )}
-                    <p className="text-xs font-mono truncate text-text-faint">
-                      {srv.command
-                        ? `${srv.command} ${(srv.args ?? []).join(' ')}`
-                        : (srv.url ?? '')}
-                    </p>
-                  </div>
-                  <div className="flex items-center gap-1 shrink-0">
-                    <button
-                      onClick={() => handleEdit(srv)}
-                      className="p-1.5 rounded-lg transition-colors hover:bg-[var(--surface-muted)] text-text-muted"
-                      title="编辑"
-                    >
-                      <Pencil size={14} />
-                    </button>
-                    <button
-                      onClick={() => handleDelete(srv.name)}
-                      className="p-1.5 rounded-lg transition-colors hover:bg-[var(--danger-bg)]"
-                      style={{ color: 'var(--danger)' }}
-                      title="删除"
-                    >
-                      <Trash2 size={14} />
-                    </button>
+                    <div className="flex items-center gap-1 shrink-0">
+                      <button
+                        onClick={() => handleEdit(srv)}
+                        className="p-1.5 rounded-lg transition-colors hover:bg-[var(--surface-muted)] text-text-muted"
+                        title="编辑"
+                      >
+                        <Pencil size={14} />
+                      </button>
+                      <button
+                        onClick={() => handleDelete(srv.name)}
+                        className="p-1.5 rounded-lg transition-colors hover:bg-[var(--danger-bg)]"
+                        style={{ color: 'var(--danger)' }}
+                        title="删除"
+                      >
+                        <Trash2 size={14} />
+                      </button>
+                    </div>
                   </div>
                 </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         )}
       </div>
 
-      <MCPServerModal
-        open={modalOpen}
-        onClose={() => setModalOpen(false)}
-        onSave={handleSave}
-        initial={editingServer}
-      />
+      {modalOpen && (
+        <MCPServerModal
+          onClose={() => setModalOpen(false)}
+          onSave={handleSave}
+          initial={editingServer}
+        />
+      )}
     </div>
   );
 }

@@ -798,11 +798,13 @@ export interface McpServerInfo extends McpServerConfig {
 
 export const McpUpsertInput = z.object({
   name: z.string().min(1),
+  type: z.string().optional(),
   command: z.string().optional(),
   args: z.array(z.string()).optional(),
   env: z.record(z.string()).optional(),
   url: z.string().optional(),
   headers: z.record(z.string()).optional(),
+  insecure_http: z.boolean().optional(),
   tool_timeout: z.number().optional(),
   progress_interval_seconds: z.number().optional(),
   description: z.string().optional(),
