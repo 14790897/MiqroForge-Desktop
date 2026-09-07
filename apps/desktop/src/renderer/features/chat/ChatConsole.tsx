@@ -2141,7 +2141,7 @@ const TURN_ABORT_SETTLE_MS = 3000;
 /** Fallback for aborted events WITHOUT a turn_id (legacy/mock bridges): a
  *  stale aborted event from a superseded turn arriving this soon after a new
  *  send started is dropped. Bridges that emit turn ids use the authoritative
- *  activeTurnIdRef match instead — no time window involved (#542).
+ *  invocation-local turn id match instead — no time window involved (#542).
  *  LIMITATION: under this fallback, a legitimately fast backend abort of the
  *  NEW turn within the window is also dropped, leaving streaming=true until
  *  the 60s watchdog fires. Production bridges all emit turn ids, so this is
@@ -2483,6 +2483,14 @@ export function ChatConsole({
     return () => {
       activeSendCleanupRef.current?.();
       cleanupListeners();
+      // Dispose EVERY active send invocation — the unsubsRef singleton only
+      // tracks the latest one; cross-session invocations outlive it and must
+      // not keep firing watchdogs or calling setMessages after unmount.
+      for (const entry of sendInvocationRegistryRef.current.values()) {
+        entry.cleanup();
+        for (const unsub of entry.unsubs) unsub();
+      }
+      sendInvocationRegistryRef.current.clear();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -2668,19 +2676,25 @@ export function ChatConsole({
   const [searchResultsByCallId, setSearchResultsByCallId] = useState<Record<string, string>>({});
   const previewJustClosed = useRef(false);
   const unsubsRef = useRef<Array<() => void>>([]);
+  // Which send invocation the unsubs in unsubsRef belong to — a new send must
+  // only auto-unsubscribe the PREVIOUS invocation when both target the same
+  // session; otherwise a send in session B silently kills session A's
+  // in-flight listeners and its terminal events are never processed.
+  const unsubsSessionRef = useRef<string | null>(null);
+  // EVERY active send invocation's cleanup resources, keyed by its unique
+  // send id.  The unsubsRef singleton only remembers the latest invocation —
+  // without this registry, cross-session invocations outlive it and their
+  // watchdogs/listeners would keep calling setMessages after unmount.  The
+  // session key lets abort/stop dispose only the invocation of the session
+  // being stopped instead of the latest one.
+  const sendInvocationRegistryRef = useRef<
+    Map<number, { unsubs: Array<() => void>; cleanup: () => void; sessionKey: string }>
+  >(new Map());
   const finalCleanupTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Shared across handleSend closures: a new send aborts the previous turn's
   // typewriter reveal (its RAF is closure-local and otherwise leaks a ghost
   // assistant bubble into the next turn).
   const revealAnimIdRef = useRef<number | null>(null);
-  // Timestamp of the newest handleSend start. Fallback guard for terminal
-  // events WITHOUT a turn_id (legacy/mock bridges) arriving from a superseded
-  // turn — the turn_id path is authoritative (see the onAborted guard).
-  const currentSendStartedAtRef = useRef(0);
-  // Backend-issued turn id of the active turn, learned from the turn_started
-  // progress event. Terminal events tagged with a different turn id are
-  // dropped — a session key cannot distinguish two turns in one session.
-  const activeTurnIdRef = useRef<string | null>(null);
   // The live turn's watchdog interval. Shared across closures so an interrupt
   // (handleAbort / interrupt-and-resend) can stop the superseded turn's timer —
   // its own sendCleanup never runs because its listeners are already removed.
@@ -3605,15 +3619,30 @@ export function ChatConsole({
     }, 2000);
   }, []);
 
-  const cleanupListeners = useCallback(() => {
-    clearFinalCleanupTimer();
-    if (shareFeedbackTimerRef.current) {
-      clearTimeout(shareFeedbackTimerRef.current);
-      shareFeedbackTimerRef.current = null;
-    }
-    for (const unsub of unsubsRef.current) unsub();
-    unsubsRef.current = [];
-  }, [clearFinalCleanupTimer]);
+  const cleanupListeners = useCallback(
+    (onlyMine?: Array<() => void>) => {
+      clearFinalCleanupTimer();
+      if (shareFeedbackTimerRef.current) {
+        clearTimeout(shareFeedbackTimerRef.current);
+        shareFeedbackTimerRef.current = null;
+      }
+      if (onlyMine) {
+        // Identity-scoped: unsubscribe THIS invocation's listeners only.  The
+        // shared unsubsRef may already point at a NEWER send's listeners
+        // (overlapping sends across sessions) — those must survive.
+        for (const unsub of onlyMine) unsub();
+        if (unsubsRef.current === onlyMine) {
+          unsubsRef.current = [];
+          unsubsSessionRef.current = null;
+        }
+        return;
+      }
+      for (const unsub of unsubsRef.current) unsub();
+      unsubsRef.current = [];
+      unsubsSessionRef.current = null;
+    },
+    [clearFinalCleanupTimer]
+  );
 
   const handleAttachClick = () => fileInputRef.current?.click();
 
@@ -3703,14 +3732,20 @@ export function ChatConsole({
     setAttachments((prev) => prev.filter((_, i) => i !== idx));
 
   const handleAbort = useCallback(async () => {
-    cleanupListeners();
+    // Scope cleanup to THIS session's invocation(s): unsubsRef and
+    // watchdogTimerRef point at the LATEST send overall — a newer send in
+    // another session must not lose its listeners/watchdog when the user
+    // stops this one (send in A → send in B → back to A → stop A).
+    for (const [sendId, entry] of sendInvocationRegistryRef.current) {
+      if (entry.sessionKey !== currentSessionRef.current) continue;
+      entry.cleanup();
+      for (const unsub of entry.unsubs) unsub();
+      sendInvocationRegistryRef.current.delete(sendId);
+    }
+    clearFinalCleanupTimer();
     if (revealAnimIdRef.current !== null) {
       cancelAnimationFrame(revealAnimIdRef.current);
       revealAnimIdRef.current = null;
-    }
-    if (watchdogTimerRef.current !== null) {
-      clearInterval(watchdogTimerRef.current);
-      watchdogTimerRef.current = null;
     }
     // Keep the lifecycle promise in place — a stop-then-quick-send must still
     // await the aborted turn's settlement so its terminal event (and the
@@ -3752,7 +3787,7 @@ export function ChatConsole({
         { role: 'progress', content: '已停止。', timestamp: Date.now() },
       ]);
     }
-  }, [cleanupListeners, currentReqId]);
+  }, [clearFinalCleanupTimer, currentReqId]);
 
   // Respond to new-session trigger from App/Sidebar — create directly, no picker.
   // NOTE: this intentionally does NOT gate on `streaming`. Switching sessions
@@ -3978,7 +4013,12 @@ export function ChatConsole({
     // turn's live final render.
     streamingBySession.add(sendSessionKey);
     finalHandledSessions.delete(sendSessionKey);
-    cleanupListeners();
+    // Only auto-unsubscribe the previous invocation's listeners when it was
+    // THIS session's send (same-session supersede).  Unsubscribing across
+    // sessions strands the other session's in-flight turn: its terminal
+    // events are never processed, its send cleanup never runs, and its 60s
+    // watchdog survives to fire a false "后端 60s 无响应" later.
+    if (unsubsSessionRef.current === sendSessionKey) cleanupListeners();
     // A new send supersedes any in-flight typewriter for this session — cancel
     // the RAF chain so the previous reply stops typing the moment a new message
     // is sent, and reset its state so the new turn does NOT inherit the old
@@ -4200,10 +4240,12 @@ export function ChatConsole({
     pendingSendIdsRef.current.delete(sendSessionKey);
     setSendingFor(sendSessionKey, null);
     // Stamp this turn now (BEFORE any await below) so listeners registered
-    // later can drop terminal events from the superseded turn.
+    // later can drop terminal events from the superseded turn.  The turn id
+    // and start time are invocation-local: overlapping sends across sessions
+    // used to overwrite the shared refs, making each other's terminals look
+    // stale.
     const sendStartedAt = Date.now();
-    currentSendStartedAtRef.current = sendStartedAt;
-    activeTurnIdRef.current = null;
+    let myTurnId: string | null = null;
 
     // Generate a client-side req_id so we can abort this specific request
     const reqId = `req_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
@@ -4413,6 +4455,16 @@ export function ChatConsole({
       persistReveal();
     };
 
+    // The exact routing key this invocation passes to chat.send.  For
+    // thread-scoped sessions it differs from sendSessionKey
+    // (`desktop:<threadId>` vs the session key), so the handlers must filter
+    // on THIS value, not sendSessionKey.  Every IPC handler drops events
+    // tagged with a different key before the cache/live branch — otherwise
+    // overlapping sends across sessions would each process (and settle on)
+    // the other's events.
+    const routingKey =
+      activeThreadId === 'main' ? currentSessionRef.current : `desktop:${activeThreadId}`;
+
     // Track last progress event time for watchdog
     let lastEventAt = Date.now();
     // 思考过程实时可见后，普通等待不再提示（用户要求 #539）：只在真正
@@ -4463,7 +4515,13 @@ export function ChatConsole({
     }, 5_000); // check every 5s
     watchdogTimerRef.current = watchdogTimer;
 
-    const sendCleanup = () => {
+    // Kill ONLY this invocation's watchdog interval.  The success path uses
+    // this instead of sendCleanup(): by the time the send promise resolves,
+    // onFinal has already run (the bridge dispatches the terminal event
+    // before settling the promise) and scheduled the typewriter reveal — a
+    // full sendCleanup() there would cancel that animation frame and freeze
+    // the final answer mid-reveal.
+    const clearWatchdogTimer = () => {
       if (watchdogTimer) {
         clearInterval(watchdogTimer);
         // Identity check BEFORE nulling the local — the shared ref may
@@ -4471,13 +4529,21 @@ export function ChatConsole({
         if (watchdogTimerRef.current === watchdogTimer) watchdogTimerRef.current = null;
         watchdogTimer = null;
       }
+    };
+
+    const sendCleanup = () => {
+      clearWatchdogTimer();
       // Also stop the typewriter frame — otherwise an unmount while a send is
       // in flight leaves the RAF loop scheduling on an unmounted component.
       if (animId !== null) {
         cancelAnimationFrame(animId);
         animId = null;
       }
-      activeSendCleanupRef.current = null;
+      // Identity check BEFORE nulling the shared ref — a newer send may have
+      // already claimed it, and a settled old invocation's cleanup must not
+      // strand the newer send's watchdog (which relies on this ref for
+      // unmount cleanup).
+      if (activeSendCleanupRef.current === sendCleanup) activeSendCleanupRef.current = null;
       // NOTE: cleanupListeners() is deliberately NOT called here.
       // The typewriter completing does not mean the turn is over —
       // another final may still arrive (e.g. tool-call then final-text).
@@ -4495,11 +4561,15 @@ export function ChatConsole({
     };
 
     const unsubProgress = window.miqi.chat.onProgress((data: ChatProgress) => {
-      // session_key is optional (back-compat); a missing one belongs to this
-      // send's own session (sendSessionKey).  Without the fallback, a
-      // session_key-less event arriving after a switch-away would be applied
-      // to whatever session is now active — leaking A's stream into B.
-      const _owner = data.session_key ?? sendSessionKey;
+      // Foreign-session event — another invocation's stream.  Drop it here;
+      // the owning invocation's handlers process it.  Untagged legacy events
+      // fall through (back-compat: treated as this send's own).
+      if (data.session_key && data.session_key !== routingKey) return;
+      // Accepted events route under THIS invocation's UI session owner.  The
+      // routing key can differ from the session key for thread-scoped sends
+      // (desktop:<threadId>) — routing by it would cache events under a key
+      // load() never looks up, silently dropping the stream on switch-back.
+      const _owner = sendSessionKey;
       if (_owner !== currentSessionRef.current) {
         var buf = inFlightCacheRef.current.get(_owner);
         if (!buf) {
@@ -4565,9 +4635,10 @@ export function ChatConsole({
       // The backend announces the active turn id when it starts. Terminal
       // events (final/aborted/error) tagged with a different turn id are
       // stale and dropped — see the guards in the final/aborted/error
-      // listeners (#542).
+      // listeners (#542).  Tracked per invocation so another session's
+      // turn_started can't make this turn's terminals look stale.
       if (data.stream === 'turn' && typeof data.turn_id === 'string') {
-        activeTurnIdRef.current = data.turn_id;
+        myTurnId = data.turn_id;
         return;
       }
 
@@ -4724,7 +4795,11 @@ export function ChatConsole({
     });
 
     const unsubFinal = window.miqi.chat.onFinal((data: ChatFinal) => {
-      const _owner = data.session_key ?? sendSessionKey;
+      // Foreign-session terminal — another invocation's turn; its handler
+      // settles it.  Untagged legacy events fall through (back-compat).
+      if (data.session_key && data.session_key !== routingKey) return;
+      // Route under the UI session owner — see the progress listener.
+      const _owner = sendSessionKey;
       if (_owner !== currentSessionRef.current) {
         var buf = inFlightCacheRef.current.get(_owner);
         if (!buf) {
@@ -4737,16 +4812,16 @@ export function ChatConsole({
       // Final from a superseded turn (e.g. a pre-abort final racing a quick
       // resend): the backend's turn id is authoritative — drop it so the
       // replacement turn's UI state is untouched (#542). Strict match: a
-      // tagged event must equal the active turn id; while the replacement
-      // turn's turn_started has not arrived yet (activeTurnIdRef is null),
-      // any tagged terminal event is by definition stale. The superseded
-      // turn's lifecycle promise is settled by its own closure.
+      // tagged event must equal THIS invocation's own turn id; while the
+      // turn's turn_started has not arrived yet (id is null), any tagged
+      // terminal event is by definition stale. The superseded turn's
+      // lifecycle promise is settled by its own closure.
       //
       // BACKEND CONTRACT: turn_started (task_runner.py emits TurnStartedEvent
       // before any model call) always precedes every terminal event of a turn.
       // If that ever changes (e.g. an error emitted before turn creation),
       // this strict-match logic silently drops the legitimate event.
-      if (data.turn_id && data.turn_id !== activeTurnIdRef.current) {
+      if (data.turn_id && data.turn_id !== myTurnId) {
         return;
       }
       clearFinalCleanupTimer();
@@ -4945,7 +5020,11 @@ export function ChatConsole({
     });
 
     const unsubError = window.miqi.chat.onError((data: ChatError) => {
-      const _owner = data.session_key ?? sendSessionKey;
+      // Foreign-session terminal — another invocation's turn; its handler
+      // settles it.  Untagged legacy events fall through (back-compat).
+      if (data.session_key && data.session_key !== routingKey) return;
+      // Route under the UI session owner — see the progress listener.
+      const _owner = sendSessionKey;
       if (_owner !== currentSessionRef.current) {
         var buf = inFlightCacheRef.current.get(_owner);
         if (!buf) {
@@ -4958,7 +5037,7 @@ export function ChatConsole({
       // Error from a superseded turn (e.g. an abort-induced error racing a
       // quick resend): drop it so the replacement turn's UI state is
       // untouched (#542). Strict match — see the final listener.
-      if (data.turn_id && data.turn_id !== activeTurnIdRef.current) {
+      if (data.turn_id && data.turn_id !== myTurnId) {
         return;
       }
       streamErrorHandled = true;
@@ -4976,11 +5055,18 @@ export function ChatConsole({
       setSendingFor(sendSessionKey, null);
       streamingBySession.delete(sendSessionKey);
       sendCleanup();
-      cleanupListeners();
+      // Identity-scoped: only THIS invocation's listeners — the shared
+      // unsubsRef may point at a newer overlapping send.
+      cleanupListeners(myUnsubs);
+      sendInvocationRegistryRef.current.delete(thisSendId);
     });
 
     const unsubAborted = window.miqi.chat.onAborted((_data: ChatAborted) => {
-      const _owner = _data.session_key ?? sendSessionKey;
+      // Foreign-session terminal — another invocation's turn; its handler
+      // settles it.  Untagged legacy events fall through (back-compat).
+      if (_data.session_key && _data.session_key !== routingKey) return;
+      // Route under the UI session owner — see the progress listener.
+      const _owner = sendSessionKey;
       if (_owner !== currentSessionRef.current) {
         var buf = inFlightCacheRef.current.get(_owner);
         if (!buf) {
@@ -4996,13 +5082,13 @@ export function ChatConsole({
       // The backend's turn id is authoritative; the grace window is only a
       // fallback for bridges that don't emit turn ids (legacy/mocks).
       if (_data.turn_id) {
-        // Strict match — a tagged event must equal the active turn id; while
-        // the replacement turn's turn_started has not arrived yet (ref is
+        // Strict match — a tagged event must equal THIS invocation's own
+        // turn id; while the turn's turn_started has not arrived yet (id is
         // null), any tagged terminal event is by definition stale.
-        if (_data.turn_id !== activeTurnIdRef.current) {
+        if (_data.turn_id !== myTurnId) {
           return;
         }
-      } else if (Date.now() - currentSendStartedAtRef.current < TURN_TERMINAL_GRACE_MS) {
+      } else if (Date.now() - sendStartedAt < TURN_TERMINAL_GRACE_MS) {
         return;
       }
       if (animId !== null) cancelAnimationFrame(animId);
@@ -5019,7 +5105,19 @@ export function ChatConsole({
       sendCleanup();
     });
 
-    unsubsRef.current = [unsubProgress, unsubFinal, unsubError, unsubAborted];
+    // Capture THIS invocation's unsubs locally: by the time this send's
+    // promise settles, unsubsRef may point at a NEWER send's listeners, so
+    // self-cleanup must never go through the shared ref.
+    const myUnsubs = [unsubProgress, unsubFinal, unsubError, unsubAborted];
+    unsubsRef.current = myUnsubs;
+    unsubsSessionRef.current = sendSessionKey;
+    // Register this invocation so unmount (and settle) can dispose its
+    // resources even when it is no longer the latest send.
+    sendInvocationRegistryRef.current.set(thisSendId, {
+      unsubs: myUnsubs,
+      cleanup: sendCleanup,
+      sessionKey: sendSessionKey,
+    });
 
     try {
       // On first message for a new conversation, create a thread with
@@ -5055,8 +5153,10 @@ export function ChatConsole({
         }
       }
 
-      const key =
-        activeThreadId === 'main' ? currentSessionRef.current : `desktop:${activeThreadId}`;
+      // Same routing key the listeners filter on — the send call and the
+      // handlers must agree, or this turn's own stream would be dropped as
+      // foreign before it reaches the cache/live branch.
+      const key = routingKey;
       const chatAttachments = sentAttachments
         .filter((a) => (a.type === 'document' && a.dataBase64) || (a.type === 'image' && a.dataUrl))
         .map((a) => ({
@@ -5112,6 +5212,25 @@ export function ChatConsole({
 
       await sendPromise;
       settleLifecycle();
+      // The turn's promise settled, but the terminal LISTENER may never have
+      // run: a later send unsubscribed it (cross-session listener kill), or
+      // the turn-id guard dropped the terminal event.  Without this cleanup
+      // the invocation's 60s watchdog survives as a zombie and, once the user
+      // is back on this session with the in-flight cache flushed, fires a
+      // false "后端 60s 无响应" into the message list while the backend is
+      // streaming fine.  Deliberately NOT sendCleanup(): onFinal ran before
+      // this promise resolved (the bridge dispatches the terminal event
+      // first) and already scheduled the typewriter reveal — sendCleanup()
+      // would cancel that animation frame and freeze the final answer
+      // mid-reveal.  Only THIS invocation's watchdog and listeners are
+      // cleaned up here.
+      clearWatchdogTimer();
+      for (const unsub of myUnsubs) unsub();
+      if (unsubsRef.current === myUnsubs) {
+        unsubsRef.current = [];
+        unsubsSessionRef.current = null;
+      }
+      sendInvocationRegistryRef.current.delete(thisSendId);
     } catch (e: any) {
       if (animId !== null) cancelAnimationFrame(animId);
       if (streamErrorHandled) {
@@ -5119,7 +5238,10 @@ export function ChatConsole({
         setStreaming(false);
         setSendingFor(sendSessionKey, null);
         sendCleanup();
-        cleanupListeners();
+        // Identity-scoped: only THIS invocation's listeners — the shared
+        // unsubsRef may point at a newer overlapping send.
+        cleanupListeners(myUnsubs);
+        sendInvocationRegistryRef.current.delete(thisSendId);
         return;
       }
       const errMsg = sanitizeUiMessage(e?.message ?? String(e ?? '未知错误'));
@@ -5140,7 +5262,10 @@ export function ChatConsole({
       setStreaming(false);
       setSendingFor(sendSessionKey, null);
       sendCleanup();
-      cleanupListeners();
+      // Identity-scoped: only THIS invocation's listeners — the shared
+      // unsubsRef may point at a newer overlapping send.
+      cleanupListeners(myUnsubs);
+      sendInvocationRegistryRef.current.delete(thisSendId);
     }
   }, [
     input,
