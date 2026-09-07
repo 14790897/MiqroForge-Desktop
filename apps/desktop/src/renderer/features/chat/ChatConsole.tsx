@@ -4620,9 +4620,11 @@ export function ChatConsole({
 
       // ── Platform points billing notices ─────────────────────────
       // 平台计费事件（当前仅 Slurm MCP 作业运行扣 10 分）通过 progress
-      // 事件推送结果：billed = 已扣费（安静的活动行）；blocked = 余额
-      // 不足/登录过期/计费服务不可用（醒目错误行，任务未执行）。渲染
-      // 逻辑与缓存回放共用 pointsEventToMessage，保证切会话后通知不丢。
+      // 事件推送结果：billed = 已扣费（安静的活动行）；blocked = 扣费
+      // 未完成（余额不足/登录过期/计费服务不可用，醒目错误行）——作业已
+      // 进入运行，扣费失败不阻断任务（见 main/ipc/index.ts 的
+      // slurm_job_running 处理）。渲染逻辑与缓存回放共用
+      // pointsEventToMessage，保证切会话后通知不丢。
       {
         const pointsMessage = pointsEventToMessage(data);
         if (pointsMessage) {
