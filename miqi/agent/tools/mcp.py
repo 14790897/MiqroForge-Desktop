@@ -211,6 +211,12 @@ class MCPToolWrapper(Tool):
         # 触发一次 fire-and-forget 扣费事件（Desktop 按作业 ID 去重）。
         # 作业已在运行，扣费失败（如余额不足）不阻止作业，由 Desktop
         # 记录到扣费历史并提示。
+        if is_slurm_server(self._server_name):
+            job_state = _extract_job_state(output)
+            logger.info(
+                "billing: slurm 工具完成 server={} session_key={} state={}",
+                self._server_name, bool(session_key), job_state,
+            )
         if session_key and is_slurm_server(self._server_name):
             job_state = _extract_job_state(output)
             if job_state and job_state.upper() == "RUNNING":
@@ -231,6 +237,10 @@ class MCPToolWrapper(Tool):
                 if job_reported(session_key, self._server_name, job_id):
                     return output
                 emitter = billing_charge_emitter_for(session_key)
+                logger.info(
+                    "billing: RUNNING job={} server={} session={} emitter={}",
+                    job_id, self._server_name, session_key, emitter is not None,
+                )
                 if emitter is not None:
                     import uuid as _uuid
 
@@ -255,6 +265,7 @@ class MCPToolWrapper(Tool):
                         logger.exception(
                             "billing: RUNNING 扣费事件发送失败（不标记，下次轮询重试）"
                         )
+                    logger.info("billing: 送达 result={} delivered={}", result, delivered)
                     if delivered:
                         mark_job_reported(session_key, self._server_name, job_id)
 
@@ -501,8 +512,18 @@ async def _connect_one_server(
 
                 # SSE 传输（平台托管 MCP 网关）：自定义 headers（如
                 # Authorization）直接随 GET /sse 握手请求发送。
+                # 超时收紧到 tool_timeout 量级（修复平台网关 SSE 工具
+                # 调用挂起）：SDK 默认 connect=5s/流读=300s，流停摆时
+                # 请求要等满 300s 才报错；收紧后任何网络停摆都会在
+                # ~tool_timeout 内变成异常，回合不会被永久卡死。
+                _tool_timeout = float(getattr(cfg, "tool_timeout", 30) or 30)
                 read, write = await server_stack.enter_async_context(
-                    sse_client(cfg.url, headers=effective_headers or None)
+                    sse_client(
+                        cfg.url,
+                        headers=effective_headers or None,
+                        timeout=10.0,
+                        sse_read_timeout=max(_tool_timeout + 30.0, 60.0),
+                    )
                 )
             elif transport == "stdio":
                 params = StdioServerParameters(
@@ -514,10 +535,19 @@ async def _connect_one_server(
 
                 # follow_redirects=False：自定义 headers（如 Authorization）
                 # 绝不随跨域重定向带到第三方主机（CWE-201 评审）。
-                http_client = (
-                    httpx.AsyncClient(headers=effective_headers, follow_redirects=False)
-                    if effective_headers
-                    else None
+                # 显式超时（connect/pool 10s、read 按 tool_timeout）——
+                # 此前 httpx 默认无超时，POST 挂起会无限卡死工具调用。
+                _tool_timeout = float(getattr(cfg, "tool_timeout", 30) or 30)
+                _timeout = httpx.Timeout(
+                    connect=10.0,
+                    read=max(_tool_timeout + 30.0, 60.0),
+                    write=10.0,
+                    pool=10.0,
+                )
+                http_client = httpx.AsyncClient(
+                    headers=effective_headers or None,
+                    follow_redirects=False,
+                    timeout=_timeout,
                 )
                 read, write, _ = await server_stack.enter_async_context(
                     streamable_http_client(cfg.url, http_client=http_client)
