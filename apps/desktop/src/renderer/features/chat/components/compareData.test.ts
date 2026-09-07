@@ -158,4 +158,24 @@ describe('compareToTsv', () => {
     };
     expect(compareToTsv(data)).toBe('参数\tA\tB\n压力\t2–4\t5–8\n温度\t60\t');
   });
+
+  it('neutralizes formula-prefixed cells and normalizes tabs/newlines (CSV injection)', () => {
+    const data = {
+      schemes: ['=1+1', '正常'],
+      parameters: [
+        { name: '@cmd', values: ['-10', '值\t带制表符'] },
+        { name: '+plus', values: ['plain', 'a\nb'] },
+      ],
+    };
+    const tsv = compareToTsv(data);
+    expect(tsv).toContain("'=1+1");
+    expect(tsv).toContain("'@cmd");
+    expect(tsv).toContain("'-10");
+    expect(tsv).toContain("'+plus");
+    expect(tsv).toContain('值 带制表符');
+    expect(tsv).toContain('a b');
+    // 不含未转义的公式前缀
+    expect(tsv).not.toContain('\t=1+1');
+    expect(tsv).not.toContain('\t@cmd');
+  });
 });

@@ -152,11 +152,23 @@ export function sortParameters(
  * 可直接粘贴进 Excel / Google Sheets。
  */
 export function compareToTsv(data: CompareData): string {
-  const header = ['参数', ...data.schemes].join('\t');
+  const header = ['参数', ...data.schemes].map(escapeTsvCell).join('\t');
   const lines = data.parameters.map((p) => {
-    const cells = [p.name];
-    for (let i = 0; i < data.schemes.length; i++) cells.push(p.values?.[i] ?? '');
+    const cells = [escapeTsvCell(p.name)];
+    for (let i = 0; i < data.schemes.length; i++) {
+      cells.push(escapeTsvCell(p.values?.[i] ?? ''));
+    }
     return cells.join('\t');
   });
   return [header, ...lines].join('\n');
+}
+
+/**
+ * 中和单元格内容，防 CSV/TSV 公式注入（CWE-1236）：
+ * 把制表符/换行替换为空格；以 `=`、`+`、`-`、`@` 开头的单元格
+ * 前缀单引号，避免粘贴进表格软件时被当作公式执行。
+ */
+function escapeTsvCell(value: string): string {
+  const normalized = value.replace(/[\t\r\n]+/g, ' ');
+  return /^\s*[=+\-@]/.test(normalized) ? `'${normalized}` : normalized;
 }
