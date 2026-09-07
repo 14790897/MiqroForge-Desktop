@@ -7,6 +7,7 @@ import {
   memo,
   type ComponentProps,
 } from 'react';
+import { createPortal } from 'react-dom';
 import { AgentAvatar } from './components/Avatars';
 import { MiQroForgeLogo } from '../../components/MiQroForgeLogo';
 import { MarkdownContent } from './components/MarkdownContent';
@@ -2347,7 +2348,13 @@ export function ChatConsole({
   const [panelWidth, setPanelWidth] = useState(280);
   const panelResizing = useRef(false);
   const [workspacePickerOpen, setWorkspacePickerOpen] = useState(false);
+  const [workspacePickerAnchor, setWorkspacePickerAnchor] = useState<DOMRect | null>(null);
   const [recentWorkspaces, setRecentWorkspaces] = useState<string[]>([]);
+  const workspacePickerOpenRef = useRef(false);
+
+  useEffect(() => {
+    workspacePickerOpenRef.current = workspacePickerOpen;
+  }, [workspacePickerOpen]);
 
   useEffect(() => {
     const timer = window.setInterval(() => setClockTick(Date.now()), 60_000);
@@ -3766,14 +3773,24 @@ export function ChatConsole({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [newSessionTrigger]);
 
-  // Opens the workspace picker modal — called by the inline "更换" button
-  const handleOpenWorkspacePicker = useCallback(async () => {
-    const workspaces = await window.miqi.sessions
-      .listRecentWorkspaces()
-      .then((r) => r?.workspaces ?? [])
-      .catch(() => [] as string[]);
-    setRecentWorkspaces(workspaces);
+  // 打开工作目录下拉（锚定在点中的胶囊下方，替代原居中 Modal）。再次点击
+  // 同一胶囊即收起；每次展开前刷新“最近使用”。
+  const handleOpenWorkspacePicker = useCallback(async (el?: HTMLElement | null) => {
+    if (workspacePickerOpenRef.current) {
+      setWorkspacePickerOpen(false);
+      return;
+    }
+    setWorkspacePickerAnchor(el ? el.getBoundingClientRect() : null);
     setWorkspacePickerOpen(true);
+    try {
+      const workspaces = await window.miqi.sessions
+        .listRecentWorkspaces()
+        .then((r) => r?.workspaces ?? [])
+        .catch(() => [] as string[]);
+      setRecentWorkspaces(workspaces);
+    } catch {
+      setRecentWorkspaces([]);
+    }
   }, []);
 
   const createSession = useCallback(
@@ -6217,18 +6234,64 @@ export function ChatConsole({
                 </h2>
               )}
               <span className="tag-inprogress shrink-0">{'\u8fdb\u884c\u4e2d'}</span>
-              <div
-                className="flex min-w-0 items-center gap-1.5 shrink-0 text-[12px] leading-none whitespace-nowrap"
-                aria-label={taskHeaderInfo.meta}
-                style={{ color: 'var(--text-faint)' }}
-              >
-                <span>{taskHeaderInfo.updatedLabel}</span>
-                <span aria-hidden="true">·</span>
-                <span>{taskHeaderInfo.fileLabel}</span>
-                <span aria-hidden="true">·</span>
-                <span>{taskHeaderInfo.pluginLabel}</span>
-              </div>
+              {/* \u66f4\u65b0\u65f6\u95f4\uff1a\u653e\u5728\u5de5\u4f5c\u76ee\u5f55\u80f6\u56ca\u524d\u9762\u3001\u968f\u4f1a\u8bdd\u8eab\u4efd\u5c55\u793a\uff08\u53f3\u4fa7\u53ea\u7559\u7ed9\u64cd\u4f5c\uff09\u3002
+                  \u53ea\u9732\u65f6\u95f4\uff0c\u5b8c\u6574 \u6587\u4ef6/\u63d2\u4ef6 \u7edf\u8ba1\u6536\u8fdb tooltip\u3002 */}
+              {messages.length > 0 && (
+                <span
+                  className="hidden md:inline-flex shrink-0 items-center gap-1 text-[11px] leading-none whitespace-nowrap"
+                  aria-label={taskHeaderInfo.meta}
+                  title={taskHeaderInfo.meta}
+                  data-testid="chat-header-updated-at"
+                  style={{ color: 'var(--text-faint)' }}
+                >
+                  <span aria-hidden className="opacity-50">
+                    {'\u00b7'}
+                  </span>
+                  {taskHeaderInfo.updatedLabel}
+                </span>
+              )}
             </div>
+              {/* \u5bf9\u8bdd\u6001\u5de5\u4f5c\u76ee\u5f55\u80f6\u56ca\uff08B \u65b9\u6848\uff09\uff1a\u4f1a\u8bdd\u5df2\u4ea7\u751f\u6d88\u606f\u540e\u5728\u5b50\u6807\u9898\u680f\u5c55\u793a\u5f53\u524d\u76ee\u5f55\uff0c
+                  \u7a7a\u6001\u4e0d\u6e32\u67d3\uff08\u6b22\u8fce\u9875\u80f6\u56ca\u72ec\u7acb\u5728\u8f93\u5165\u6846\u4e0a\u65b9\uff09\u3002\u70b9\u51fb\u6362\u76ee\u5f55 \u2192 \u73b0\u6709 picker\uff0c
+                  \u9009\u62e9\u5373\u5efa\u7ed1\u5230\u65b0\u76ee\u5f55\u7684\u4f1a\u8bdd\u3002 */}
+              {messages.length > 0 && (
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    if (!streaming) void handleOpenWorkspacePicker(e.currentTarget);
+                  }}
+                  disabled={streaming}
+                  title={workspace ? `\u5de5\u4f5c\u76ee\u5f55\uff1a${workspace}` : '\u9ed8\u8ba4\u5de5\u4f5c\u76ee\u5f55'}
+                  aria-label="\u5de5\u4f5c\u76ee\u5f55"
+                  data-testid="chat-header-workspace-capsule"
+                  className={cn(
+                    'shrink-0 inline-flex items-center gap-1 rounded-md px-2 py-[3px] text-[11px] font-medium border transition-colors disabled:opacity-45',
+                    workspace ? 'border-[var(--accent)]' : 'border-[var(--border-subtle)]'
+                  )}
+                  style={{
+                    background: workspace
+                      ? 'color-mix(in srgb, var(--surface-muted) 45%, var(--accent-soft))'
+                      : 'var(--surface-muted)',
+                    color: workspace ? 'var(--accent)' : 'var(--text-muted)',
+                  }}
+                >
+                  <Folder
+                    size={12}
+                    className="shrink-0"
+                    style={{ color: workspace ? 'var(--accent)' : 'var(--text-muted)' }}
+                  />
+                  <span className="truncate max-w-[170px]" data-testid="chat-header-workspace-path">
+                    {workspace ?? '\u9ed8\u8ba4\u5de5\u4f5c\u76ee\u5f55'}
+                  </span>
+                  {workspace && (
+                    <span
+                      className="shrink-0 w-[5px] h-[5px] rounded-full"
+                      style={{ background: 'var(--accent)' }}
+                    />
+                  )}
+                  <ChevronDown size={12} className="shrink-0 opacity-70" />
+                </button>
+              )}
             <div
               className="flex shrink-0 items-stretch overflow-hidden rounded-md shadow-[0_1px_0_rgba(18,18,18,0.05)]"
               style={{
@@ -6236,19 +6299,20 @@ export function ChatConsole({
                 border: `1px solid ${shareButtonBorder}`,
               }}
             >
-              <button
-                onClick={handleCopyTaskSummary}
-                className="flex h-7 min-w-[96px] items-center justify-center gap-1.5 px-3 text-xs font-semibold transition-colors whitespace-nowrap hover:brightness-95"
-                style={{
-                  color: shareButtonTone,
-                  cursor: 'pointer',
-                }}
-                title="复制任务摘要"
-                aria-label="复制任务摘要"
-              >
-                {shareStatus === 'idle' ? <Send size={12} /> : <Check size={12} />}
-                {shareButtonLabel}
-              </button>
+              <Tooltip content={shareButtonLabel}>
+                <button
+                  onClick={handleCopyTaskSummary}
+                  className="flex h-7 w-7 items-center justify-center transition-colors hover:brightness-95"
+                  style={{
+                    color: shareButtonTone,
+                    cursor: 'pointer',
+                  }}
+                  title={shareButtonLabel}
+                  aria-label={shareButtonLabel}
+                >
+                  {shareStatus === 'idle' ? <Send size={14} /> : <Check size={14} />}
+                </button>
+              </Tooltip>
               <ContextMenu items={shareMenuItems} minWidth={180}>
                 {({ onContextMenu }) => (
                   <Tooltip content="复制摘要、导出 Markdown 或复制上下文">
@@ -6687,6 +6751,74 @@ export function ChatConsole({
               {/* AI-initiated user confirmation cards (issue #646) */}
               <ConfirmCardArea />
 
+              {/* 欢迎态工作目录胶囊：独立于输入框、在它正上方（同宽左对齐，不嵌进卡内）。
+                  首条消息后隐藏——会话进行中改由子标题栏胶囊（B）承接。 */}
+              {historyLoaded && messages.length === 0 && (
+                <div
+                  className="flex items-center pb-2.5"
+                  data-testid="inline-workspace-selector"
+                >
+                  <div
+                    role="button"
+                    tabIndex={0}
+                    aria-label="工作目录"
+                    title={workspace ? `工作目录：${workspace}` : '默认工作目录'}
+                    onClick={(e) => {
+                      if (!streaming) void handleOpenWorkspacePicker(e.currentTarget);
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault();
+                        if (!streaming) void handleOpenWorkspacePicker(e.currentTarget);
+                      }
+                    }}
+                    className={cn(
+                      'inline-flex items-center gap-1.5 pl-2.5 pr-1 py-[3px] rounded-lg border text-xs font-medium cursor-pointer select-none transition-colors',
+                      workspace ? 'border-[var(--accent)]' : 'border-[var(--border-subtle)]'
+                    )}
+                    style={{
+                      background: workspace
+                        ? 'color-mix(in srgb, var(--surface-muted) 45%, var(--accent-soft))'
+                        : 'var(--surface-muted)',
+                      color: workspace ? 'var(--accent)' : 'var(--text-muted)',
+                    }}
+                  >
+                    <Folder
+                      size={13}
+                      className="shrink-0"
+                      style={{ color: workspace ? 'var(--accent)' : 'var(--text-muted)' }}
+                    />
+                    <span
+                      className="truncate max-w-[300px]"
+                      title={workspace ?? undefined}
+                      data-testid="inline-workspace-path"
+                    >
+                      {workspace ?? '默认工作目录'}
+                    </span>
+                    {workspace && (
+                      <span
+                        className="shrink-0 w-[5px] h-[5px] rounded-full"
+                        style={{ background: 'var(--accent)' }}
+                      />
+                    )}
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        if (!streaming)
+                          void handleOpenWorkspacePicker(e.currentTarget.parentElement);
+                      }}
+                      disabled={streaming}
+                      aria-label="更换工作目录"
+                      data-testid="inline-workspace-change-btn"
+                      className="shrink-0 p-1 rounded-full text-[var(--text-faint)] hover:bg-[var(--surface)]/70 hover:text-[var(--text-muted)] disabled:opacity-40"
+                    >
+                      <ChevronDown size={13} />
+                    </button>
+                  </div>
+                </div>
+              )}
+
               <div
                 className="flex flex-col rounded-3xl px-7 py-3.5 transition-all"
                 data-testid="chat-input-container"
@@ -6826,41 +6958,6 @@ export function ChatConsole({
               </div>
             </div>
 
-            {/* Inline workspace selector — only before the conversation starts */}
-            {historyLoaded && messages.length === 0 && (
-              <div
-                className="flex items-center justify-center mt-2"
-                data-testid="inline-workspace-selector"
-              >
-                <div
-                  className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full text-xs border shadow-sm"
-                  style={{
-                    background: 'var(--surface)',
-                    borderColor: 'var(--border-subtle)',
-                    color: 'var(--text-muted)',
-                  }}
-                >
-                  <Folder size={12} className="shrink-0" />
-                  <span
-                    className="truncate max-w-[280px]"
-                    title={workspace || undefined}
-                    data-testid="inline-workspace-path"
-                  >
-                    {workspace ? `工作目录：${workspace}` : '默认工作目录'}
-                  </span>
-                  <button
-                    type="button"
-                    onClick={handleOpenWorkspacePicker}
-                    disabled={streaming}
-                    className="ml-0.5 text-[var(--accent)] hover:underline disabled:opacity-40 disabled:hover:no-underline"
-                    title="更换工作目录"
-                    data-testid="inline-workspace-change-btn"
-                  >
-                    更换
-                  </button>
-                </div>
-              </div>
-            )}
           </div>
         </div>
 
@@ -7454,101 +7551,26 @@ export function ChatConsole({
         </Modal>
       )}
 
-      {/* ── Workspace Picker Modal ── */}
-      <Modal
-        open={workspacePickerOpen}
-        onOpenChange={(o) => {
-          if (!o) setWorkspacePickerOpen(false);
-        }}
-        hideClose
-      >
-        <div
-          className="flex flex-col rounded-xl shadow-2xl"
-          style={{
-            width: 420,
-            maxHeight: '70vh',
-            background: 'var(--surface-elevated)',
-            border: '1px solid var(--border)',
-            pointerEvents: 'auto',
+      {/* ── 工作目录下拉（参考 #940 收敛：点胶囊就近弹出小面板，替代居中 Modal） ── */}
+      {workspacePickerOpen && (
+        <WorkspacePickerMenu
+          anchor={workspacePickerAnchor}
+          recent={recentWorkspaces}
+          current={workspace ?? null}
+          onClose={() => setWorkspacePickerOpen(false)}
+          onPick={(ws) => createSession(ws)}
+          onDefault={() => createSession(null)}
+          onBrowse={async () => {
+            setWorkspacePickerOpen(false);
+            try {
+              const dir = await window.miqi.dialog.openDirectory();
+              createSession(dir ?? null);
+            } catch {
+              createSession(null);
+            }
           }}
-          onClick={(e) => e.stopPropagation()}
-          onMouseDown={(e) => e.stopPropagation()}
-          data-testid="workspace-picker-modal"
-        >
-          <div className="flex items-center justify-between px-4 py-3 border-b shrink-0 border-border-subtle">
-            <div className="flex items-center gap-2">
-              <Folder size={16} style={{ color: 'var(--accent)' }} />
-              <span className="text-sm font-medium text-[var(--text)]">选择工作目录</span>
-            </div>
-            <button
-              onClick={() => setWorkspacePickerOpen(false)}
-              className="p-1 rounded hover:bg-[var(--surface-muted)] transition-colors"
-            >
-              <X size={14} style={{ color: 'var(--text-faint)' }} />
-            </button>
-          </div>
-
-          <div className="flex-1 overflow-auto p-3 flex flex-col gap-2">
-            {/* Recent workspaces */}
-            {recentWorkspaces.length > 0 && (
-              <>
-                <div
-                  className="text-[10px] font-semibold uppercase tracking-wider text-text-faint px-1 pt-1 pb-0.5"
-                  data-testid="workspace-picker-recent-label"
-                >
-                  最近使用
-                </div>
-                {recentWorkspaces.map((ws, idx) => (
-                  <button
-                    key={ws}
-                    onClick={() => createSession(ws)}
-                    className="flex items-center gap-2 px-3 py-2 rounded-lg text-left transition-colors hover:bg-[var(--surface-muted)] w-full"
-                    data-testid={`workspace-picker-recent-${idx}`}
-                  >
-                    <FolderCheck
-                      size={14}
-                      style={{ color: 'var(--text-muted)' }}
-                      className="shrink-0"
-                    />
-                    <span className="text-xs text-[var(--text)] truncate" title={ws}>
-                      {ws}
-                    </span>
-                  </button>
-                ))}
-                <div className="border-t border-border-subtle my-1" />
-              </>
-            )}
-
-            {/* Browse button */}
-            <button
-              onClick={async () => {
-                setWorkspacePickerOpen(false);
-                try {
-                  const dir = await window.miqi.dialog.openDirectory();
-                  createSession(dir ?? null);
-                } catch {
-                  createSession(null);
-                }
-              }}
-              className="flex items-center gap-2 px-3 py-2.5 rounded-lg text-left transition-colors hover:bg-[var(--surface-muted)] w-full"
-              data-testid="workspace-picker-browse"
-            >
-              <FolderOpen size={14} style={{ color: 'var(--accent)' }} className="shrink-0" />
-              <span className="text-xs text-[var(--accent)]">浏览...</span>
-            </button>
-
-            {/* Default workspace */}
-            <button
-              onClick={() => createSession(null)}
-              className="flex items-center gap-2 px-3 py-2.5 rounded-lg text-left transition-colors hover:bg-[var(--surface-muted)] w-full"
-              data-testid="workspace-picker-default"
-            >
-              <Folder size={14} style={{ color: 'var(--text-muted)' }} className="shrink-0" />
-              <span className="text-xs text-[var(--text-muted)]">使用默认工作目录</span>
-            </button>
-          </div>
-        </div>
-      </Modal>
+        />
+      )}
       {/* #696 补：下载完成 toast（屏幕居中 + 淡入淡出 + 2s 停留） */}
       {downloadToast && (
         <div
@@ -8788,6 +8810,160 @@ const MessageBubble = memo(function MessageBubble({
     </>
   );
 }, areMessageBubblePropsEqual);
+
+/* 工作目录选择下拉：点胶囊就近弹出的紧凑面板（对齐 #940 收敛稿——不再用居中的
+ * 420px Modal）。锚定在胶囊下方，收录「最近使用 + 浏览… + 使用默认工作目录」。
+ * 用全屏透明遮罩挡掉下层点击：点遮罩（含胶囊）收起、点面板内行执行动作。 */
+interface WorkspacePickerMenuProps {
+  anchor: DOMRect | null;
+  recent: string[];
+  current: string | null;
+  onClose: () => void;
+  onPick: (ws: string) => void;
+  onDefault: () => void;
+  onBrowse: () => void;
+}
+
+function WorkspacePickerMenu({
+  anchor,
+  recent,
+  current,
+  onClose,
+  onPick,
+  onDefault,
+  onBrowse,
+}: WorkspacePickerMenuProps) {
+  const panelRef = useRef<HTMLDivElement>(null);
+  // 先在胶囊下方摆放，渲染后按视口尺寸收边（面板宽度为 max-content，需实测）。
+  const [pos, setPos] = useState<{ left: number; top: number }>(() => {
+    if (!anchor) return { left: 8, top: 8 };
+    return { left: anchor.left, top: anchor.bottom + 6 };
+  });
+
+  useEffect(() => {
+    const node = panelRef.current;
+    if (!node || !anchor) return;
+    const rect = node.getBoundingClientRect();
+    const vw = document.documentElement.clientWidth;
+    const vh = document.documentElement.clientHeight;
+    const left = Math.max(8, Math.min(anchor.left, vw - rect.width - 8));
+    const below = anchor.bottom + 6;
+    const above = anchor.top - rect.height - 6;
+    // 下方放不下再整体翻到胶囊上方
+    const top = below + rect.height <= vh - 8 || above < 8 ? below : Math.max(8, above);
+    setPos((p) => (p.left === left && p.top === top ? p : { left, top }));
+  }, [anchor, pos]);
+
+  // Esc / 滚动 / 窗口尺寸变化时收起
+  useEffect(() => {
+    if (!anchor) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose();
+    };
+    window.addEventListener('keydown', onKey);
+    const onReposition = () => onClose();
+    window.addEventListener('resize', onReposition);
+    window.addEventListener('scroll', onReposition, true);
+    return () => {
+      window.removeEventListener('keydown', onKey);
+      window.removeEventListener('resize', onReposition);
+      window.removeEventListener('scroll', onReposition, true);
+    };
+  }, [anchor, onClose]);
+
+  if (!anchor) return null;
+
+  const normCurrent = current?.toLowerCase();
+
+  return createPortal(
+    <>
+      {/* 全屏遮罩：点遮罩即关闭，且拦下点击不让它落到胶囊上（避免点同一个
+          胶囊时“先关后开”又弹回来）。 */}
+      <div className="fixed inset-0 z-[59]" onMouseDown={onClose} />
+      <div
+        ref={panelRef}
+        role="menu"
+        aria-label="选择工作目录"
+        data-testid="workspace-picker-modal"
+        className="fixed z-[60] overflow-hidden rounded-xl border bg-[var(--surface-elevated)] p-1.5 shadow-[0_12px_30px_rgba(0,0,0,0.16)]"
+        style={{
+          left: pos.left,
+          top: pos.top,
+          minWidth: 288,
+          maxWidth: 'min(360px, calc(100vw - 16px))',
+          borderColor: 'var(--border)',
+        }}
+      >
+        {recent.length > 0 && (
+          <>
+            <div
+              className="px-2 pt-0.5 pb-1 text-[9.5px] font-bold uppercase tracking-[0.06em] text-text-faint select-none"
+              data-testid="workspace-picker-recent-label"
+            >
+              最近使用
+            </div>
+            {recent.map((ws, idx) => {
+              const isCur = !!current && ws.toLowerCase() === normCurrent;
+              return (
+                <button
+                  key={ws}
+                  type="button"
+                  role="menuitem"
+                  onClick={() => onPick(ws)}
+                  data-testid={`workspace-picker-recent-${idx}`}
+                  className={cn(
+                    'flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[11px] transition-colors',
+                    isCur ? 'bg-[var(--accent-soft)]' : 'hover:bg-[var(--surface-muted)]'
+                  )}
+                >
+                  {isCur ? (
+                    <FolderCheck
+                      size={13}
+                      style={{ color: 'var(--accent)' }}
+                      className="shrink-0"
+                    />
+                  ) : (
+                    <Folder size={13} style={{ color: 'var(--text-muted)' }} className="shrink-0" />
+                  )}
+                  <span className="min-w-0 flex-1 truncate text-[var(--text)]" title={ws}>
+                    {ws}
+                  </span>
+                  {isCur && (
+                    <span className="shrink-0 text-[10px] font-bold text-[var(--accent)]">
+                      当前
+                    </span>
+                  )}
+                </button>
+              );
+            })}
+            <div className="my-1 border-t border-border-subtle" />
+          </>
+        )}
+        <button
+          type="button"
+          role="menuitem"
+          onClick={onBrowse}
+          data-testid="workspace-picker-browse"
+          className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[11px] font-medium text-[var(--accent)] transition-colors hover:bg-[var(--surface-muted)]"
+        >
+          <FolderOpen size={13} className="shrink-0" />
+          浏览…
+        </button>
+        <button
+          type="button"
+          role="menuitem"
+          onClick={onDefault}
+          data-testid="workspace-picker-default"
+          className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[11px] text-[var(--text-muted)] transition-colors hover:bg-[var(--surface-muted)]"
+        >
+          <Folder size={13} style={{ color: 'var(--text-muted)' }} className="shrink-0" />
+          使用默认工作目录
+        </button>
+      </div>
+    </>,
+    document.body
+  );
+}
 
 /**
  * Memo comparator: skip re-render unless a rendering-relevant prop changed.

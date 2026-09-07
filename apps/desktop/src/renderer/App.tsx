@@ -364,7 +364,7 @@ function AppShell() {
           <UserInputProvider>
             {/* Full-height flex column */}
             <div className="flex flex-col h-screen" style={{ background: 'var(--background)' }}>
-              <TopBar onOpenApprovals={openApprovalSettings} workspace={workspace ?? undefined} />
+              <TopBar onOpenApprovals={openApprovalSettings} />
               <ApprovalBypassBanner onOpenApprovals={openApprovalSettings} />
               {/* Body row */}
               <div className="flex flex-1 overflow-hidden">

@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useRuntime } from '../contexts/RuntimeContext';
-import { AlertTriangle, RefreshCw, Loader2, Folder } from 'lucide-react';
+import { AlertTriangle, RefreshCw, Loader2 } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { MiQroForgeLogo } from './MiQroForgeLogo';
 
@@ -51,23 +51,10 @@ function getBypassTitle(status: ApprovalBypassStatus | null, autoMode: boolean =
   return labels.length > 0 ? `已绕过: ${labels.join('、')}` : '打开审批设置';
 }
 
-function formatWorkspace(workspace: string): string {
-  let display = workspace;
-  if (display.length > 30) {
-    const segs = display.split(/[\\/]/);
-    if (segs.length > 2) {
-      display = segs[0] + '/.../' + segs[segs.length - 1];
-    }
-  }
-  return display;
-}
-
 export function TopBar({
   onOpenApprovals,
-  workspace,
 }: {
   onOpenApprovals?: () => void;
-  workspace?: string;
 }) {
   const { status, start } = useRuntime();
   const [approvalBypass, setApprovalBypass] = useState<ApprovalBypassStatus | null>(null);
@@ -167,19 +154,6 @@ export function TopBar({
 
       {/* Center: status pills */}
       <div className="flex items-center gap-2">
-        {workspace && (
-          <div
-            className="flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[11px]"
-            title={workspace}
-            style={{
-              background: 'var(--surface-muted)',
-              color: 'var(--text-muted)',
-            }}
-          >
-            <Folder size={10} className="shrink-0" />
-            <span className="truncate max-w-[200px]">{formatWorkspace(workspace)}</span>
-          </div>
-        )}
         {bypassEnabled && (
           <button
             type="button"
