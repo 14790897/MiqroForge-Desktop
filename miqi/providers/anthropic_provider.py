@@ -36,11 +36,14 @@ class AnthropicProvider(LLMProvider):
         extra_headers: dict[str, str] | None = None,
         provider_name: str | None = None,
         request_timeout: float | None = None,
+        model_prefix: str | None = None,
     ):
         self._selected_spec = find_by_name(provider_name) if provider_name else None
         super().__init__(api_key, api_base)
         self.default_model = default_model
         self.extra_headers = extra_headers or {}
+        # 走非 anthropic 前缀(如 AI 网关承载 deepseek 模型)时,请求前剥掉该前缀。
+        self._model_prefix = model_prefix
 
         client_kwargs: dict[str, Any] = {
             "api_key": api_key or None,
@@ -57,10 +60,20 @@ class AnthropicProvider(LLMProvider):
     # ------------------------------------------------------------------
 
     def _resolve_model(self, model: str) -> str:
-        """Strip 'anthropic/' prefix if present; Anthropic SDK wants bare model names."""
+        """Strip provider prefix if present; Anthropic SDK wants bare model names.
+
+        anthropic 前缀剥 'anthropic/'；经 AI 网关承载其他 provider 的模型时
+        (如 deepseek-v4-flash 走 Anthropic 兼容网关)按构造时的 model_prefix 剥。
+        """
         for prefix in ("anthropic/", "anthropic-"):
             if model.startswith(prefix):
                 return model[len(prefix):]
+        mp = self._model_prefix
+        if mp:
+            for sep in ("/", "-"):
+                prefix = f"{mp}{sep}"
+                if model.startswith(prefix):
+                    return model[len(prefix):]
         return model
 
     # ------------------------------------------------------------------

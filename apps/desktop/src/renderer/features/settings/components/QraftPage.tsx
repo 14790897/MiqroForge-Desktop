@@ -27,7 +27,12 @@ import {
 import { Button } from '../../../components/ui/Button';
 import { Input } from '../../../components/ui/Input';
 import { cn } from '../../../lib/utils';
-import type { QraftErrorCode, QraftLoginResult, QraftStatus } from '../../../../shared/ipc';
+import type {
+  QraftBillingHistoryEntry,
+  QraftErrorCode,
+  QraftLoginResult,
+  QraftStatus,
+} from '../../../../shared/ipc';
 
 /** 各错误码对应的修复指引（服务端 message 优先展示，这里只兜底）。 */
 const ERROR_GUIDANCE: Partial<Record<QraftErrorCode, string>> = {
@@ -68,6 +73,25 @@ function errorText(result: QraftLoginResult | null, fallback: string): string {
   if (!result) return fallback;
   if (result.message) return result.message;
   return ERROR_GUIDANCE[result.code ?? 'INTERNAL'] ?? fallback;
+}
+
+/** AI 网关状态展示文案（#922）。 */
+function gatewayStatusText(status: string): { label: string; hint: string } {
+  switch (status) {
+    case 'active':
+      return {
+        label: '可用',
+        hint: 'AI 网关已开通：模型调用将走平台网关，计入平台消费组配额与计费。',
+      };
+    case 'provisioning':
+      return { label: '开通中', hint: 'AI 网关正在开通，暂时无法发起会话。请稍后刷新查看。' };
+    case 'failed':
+      return { label: '开通失败', hint: 'AI 网关开通失败，请联系平台处理后再试。' };
+    case 'disabled':
+      return { label: '已停用', hint: 'AI 网关已停用，请联系平台启用后再试。' };
+    default:
+      return { label: status || '未知', hint: 'AI 网关状态未知，请联系平台确认。' };
+  }
 }
 
 const ModeBtn = ({
@@ -116,6 +140,8 @@ export function QraftPage() {
   const [refreshError, setRefreshError] = useState<string | null>(null);
   const [pointsLoading, setPointsLoading] = useState(false);
   const [pointsError, setPointsError] = useState<string | null>(null);
+  /** 扣费历史（Slurm 作业扣费记录，issue #927）。 */
+  const [billingHistory, setBillingHistory] = useState<QraftBillingHistoryEntry[] | null>(null);
   /** pointsBalance IPC 的本地结果（status.points 未推送时兜底展示）。 */
   const [fetchedPoints, setFetchedPoints] = useState<{
     availablePoints: number;
@@ -248,10 +274,27 @@ export function QraftPage() {
     }
   }, []);
 
-  // 登录后拉取一次余额；此后余额经 qraft:statusChanged 事件随 status.points 更新。
+  // 登录后拉取一次余额；此后余额经 qraft:statusChanged 事件随
+  // status.points 更新。
   useEffect(() => {
-    if (status?.loggedIn === true) void loadPoints();
+    if (status?.loggedIn === true) {
+      void loadPoints();
+    }
   }, [status?.loggedIn, loadPoints]);
+
+  // 登录后拉取扣费历史；扣费结果（billed/insufficient/error）会推送
+  // 新余额——余额变化时重拉历史，保证计费结果即时可见（页面挂载期间
+  // 扣费发生时旧快照不会停留在列表里）。
+  useEffect(() => {
+    if (status?.loggedIn === true) {
+      void window.miqi.qraft
+        .billingHistory()
+        .then(setBillingHistory)
+        .catch(() => setBillingHistory([]));
+    } else {
+      setBillingHistory(null);
+    }
+  }, [status?.loggedIn, status?.points?.availablePoints]);
 
   if (loading) return null;
 
@@ -545,7 +588,38 @@ export function QraftPage() {
               实测 access_token 有效期约 2 小时，MiQroForge 会在到期前 15 分钟自动刷新。
             </p>
 
-            {/* 积分余额：执行任务（首次使用工具/技能）每次扣 30 分，普通对话不扣分 */}
+            {/* AI 网关状态：#922 —— active 才允许模型调用走网关 */}
+            {status?.aiGateway &&
+              (() => {
+                const gw = gatewayStatusText(status.aiGateway.status);
+                return (
+                  <div
+                    className="mt-4 border-t border-[var(--border-subtle)] pt-3"
+                    data-testid="qraft-ai-gateway"
+                  >
+                    <div className="flex items-center gap-2 text-size-sm text-[var(--text-muted)]">
+                      <ShieldCheck size={14} className="shrink-0 text-[var(--accent)]" />
+                      <span className="text-[var(--text-muted)]">AI 网关</span>
+                      <span
+                        className="font-mono text-[var(--text)]"
+                        data-testid="qraft-ai-gateway-status"
+                      >
+                        {gw.label}
+                      </span>
+                      {status.aiGateway.configVersion != null && (
+                        <span className="ml-auto text-size-2xs text-[var(--text-faint)]">
+                          配置版本 v{status.aiGateway.configVersion}
+                        </span>
+                      )}
+                    </div>
+                    <p className="mt-1.5 text-size-2xs leading-relaxed text-[var(--text-faint)]">
+                      {gw.hint}
+                    </p>
+                  </div>
+                );
+              })()}
+
+            {/* 积分余额：Slurm MCP 作业每次运行扣 10 分，普通对话与本地任务不扣分 */}
             <div
               className="mt-4 border-t border-[var(--border-subtle)] pt-3"
               data-testid="qraft-points-balance"
@@ -574,12 +648,62 @@ export function QraftPage() {
                 </Button>
               </div>
               <p className="mt-1.5 text-size-2xs leading-relaxed text-[var(--text-faint)]">
-                执行任务（使用工具/技能）每次消耗 30 积分，普通对话不扣积分。
+                Slurm MCP 作业每次运行消耗 10 积分；普通对话与本地任务不扣积分。
                 {points !== null &&
                   ` 累计获得 ${points.totalEarned}，累计支出 ${points.totalSpent}。`}
               </p>
               {pointsError && (
                 <p className="mt-1 text-size-2xs text-[var(--danger)]">{pointsError}</p>
+              )}
+
+              {/* 扣费历史（issue #927：Slurm 作业扣费记录，本地留存可追溯） */}
+              {billingHistory !== null && billingHistory.length > 0 && (
+                <div
+                  className="mt-3 border-t border-[var(--border-subtle)] pt-3"
+                  data-testid="qraft-billing-history"
+                >
+                  <p className="mb-1.5 text-size-2xs font-medium text-[var(--text-muted)]">
+                    扣费历史（Slurm 作业）
+                  </p>
+                  <ul className="flex max-h-56 flex-col gap-1.5 overflow-y-auto">
+                    {billingHistory.map((entry) => (
+                      <li
+                        key={entry.chargeId}
+                        className="flex items-center justify-between gap-2 text-size-2xs"
+                      >
+                        <div className="min-w-0">
+                          <p className="truncate text-[var(--text)]">
+                            {entry.jobId
+                              ? `作业 ${entry.jobId}`
+                              : `${entry.serverName ?? ''}.${entry.toolName ?? ''}`}
+                            <span className="ml-2 text-[var(--text-faint)]">
+                              {fmtDateTime(Date.parse(entry.deductedAt))}
+                            </span>
+                          </p>
+                          {entry.argsSummary && (
+                            <p className="truncate text-[var(--text-faint)]">{entry.argsSummary}</p>
+                          )}
+                        </div>
+                        <div className="shrink-0 text-right">
+                          {entry.status === 'billed' ? (
+                            <>
+                              <span className="text-[var(--danger)]">-{entry.cost}</span>
+                              {entry.balanceAfter !== undefined && (
+                                <span className="ml-1 text-[var(--text-faint)]">
+                                  余额 {entry.balanceAfter}
+                                </span>
+                              )}
+                            </>
+                          ) : (
+                            <span className="text-[var(--warning)]">
+                              {entry.status === 'insufficient' ? '余额不足' : '扣费失败'}
+                            </span>
+                          )}
+                        </div>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
               )}
             </div>
           </div>

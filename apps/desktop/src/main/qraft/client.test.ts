@@ -560,6 +560,74 @@ describe('QraftClient.getUserInfo', () => {
       code: 'SESSION_EXPIRED',
     });
   });
+
+  it('解析顶层平铺的网关字段（encryptedApiKey/aiGatewayStatus/configVersion）', async () => {
+    const body = JSON.stringify({
+      sub: '19',
+      username: 'U-HKY4-GB4E',
+      nickname: 'MiQi测试',
+      encryptedApiKey: 'sk-test-top-level',
+      aiGatewayStatus: 'active',
+      configVersion: 1,
+      consumerId: 'C-123',
+    });
+    const fetch = createFetchMock([
+      { url: /\/oauth2\/userinfo$/, response: mockResponse(200, body, jsonHeaders()) },
+    ]);
+    const client = new QraftClient(fetch, noopLog);
+    const info = await client.getUserInfo(CONFIG, 'ACCESS-TOKEN');
+    expect(info).toEqual({
+      sub: '19',
+      username: 'U-HKY4-GB4E',
+      nickname: 'MiQi测试',
+      aiGateway: {
+        encryptedApiKey: 'sk-test-top-level',
+        status: 'active',
+        configVersion: 1,
+        consumerId: 'C-123',
+      },
+    });
+  });
+
+  it('解析嵌套在 data 内的网关字段；configVersion 数字字符串归一为 number', async () => {
+    const body = JSON.stringify({
+      sub: '19',
+      username: 'U-HKY4-GB4E',
+      nickname: 'MiQi测试',
+      data: {
+        encryptedApiKey: 'sk-test-nested',
+        aiGatewayStatus: 'active',
+        configVersion: '3',
+      },
+    });
+    const fetch = createFetchMock([
+      { url: /\/oauth2\/userinfo$/, response: mockResponse(200, body, jsonHeaders()) },
+    ]);
+    const client = new QraftClient(fetch, noopLog);
+    const info = await client.getUserInfo(CONFIG, 'ACCESS-TOKEN');
+    expect(info.aiGateway).toEqual({
+      encryptedApiKey: 'sk-test-nested',
+      status: 'active',
+      configVersion: 3,
+    });
+  });
+
+  it('encryptedApiKey 缺失（即使有 aiGatewayStatus）时整体省略 aiGateway', async () => {
+    const body = JSON.stringify({
+      sub: '19',
+      username: 'U-HKY4-GB4E',
+      nickname: 'MiQi测试',
+      aiGatewayStatus: 'disabled',
+      configVersion: 0,
+    });
+    const fetch = createFetchMock([
+      { url: /\/oauth2\/userinfo$/, response: mockResponse(200, body, jsonHeaders()) },
+    ]);
+    const client = new QraftClient(fetch, noopLog);
+    const info = await client.getUserInfo(CONFIG, 'ACCESS-TOKEN');
+    expect(info).toEqual({ sub: '19', username: 'U-HKY4-GB4E', nickname: 'MiQi测试' });
+    expect('aiGateway' in info).toBe(false);
+  });
 });
 
 describe('QraftClient 错误分类与重试', () => {

@@ -65,8 +65,6 @@ TIER_A_PREFIXES: tuple[str, ...] = (
     "agents.command_approval",
     # permanent allowlist — replaced from config (step 5)
     "agents.permanent_approvals",
-    # platform points billing — gate rebuilt/swapped (apply_config_update step 7)
-    "billing",
     # desktop-owned UI settings (opaque dict, consumed by the frontend which
     # re-reads the config cache after the config_updated broadcast)
     "desktop",

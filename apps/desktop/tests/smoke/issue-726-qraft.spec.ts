@@ -112,7 +112,7 @@ test.describe('Issue #726 MiQroForge 平台登录设置页', () => {
     await expect(page.getByTestId('qraft-points-balance')).toBeVisible({ timeout: 5000 });
     await expect(page.getByTestId('qraft-points-value')).toHaveText('270');
     await expect(page.getByText('累计获得 300，累计支出 30')).toBeVisible();
-    await expect(page.getByText('每次消耗 30 积分')).toBeVisible();
+    await expect(page.getByText('Slurm MCP 作业每次运行消耗 10 积分')).toBeVisible();
 
     await page.screenshot({
       path: 'test-results/issue-726/qraft-points-balance.png',

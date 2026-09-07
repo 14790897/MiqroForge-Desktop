@@ -22,6 +22,14 @@ class RuntimeCapabilities:
     plugins: list[str] = field(default_factory=list)
 
 
+# User-configured MCP servers (config.tools.mcp_servers) register their tools
+# into the ToolRegistry at session start with an `mcp_<server>_<tool>` name
+# (or a `use_<server>` gateway when lazy).  The agent allowlist only covers
+# built-in tools, so these prefixes bypass the allowlist filter — otherwise
+# every user-configured MCP tool would be invisible to the model.
+_MCP_TOOL_PREFIXES = ("mcp_", "use_")
+
+
 class CapabilityResolver:
     """Resolves capabilities for a given agent type.
 
@@ -36,11 +44,13 @@ class CapabilityResolver:
     def resolve(self, *, agent_metadata: Any) -> RuntimeCapabilities:
         """Compute the effective capabilities for an agent."""
         allowed = set(agent_metadata.available_tools)
-        tool_definitions = [
-            spec
-            for spec in self._tools.get_definitions()
-            if spec.get("function", {}).get("name") in allowed
-        ]
+        tool_definitions = []
+        for spec in self._tools.get_definitions():
+            name = spec.get("function", {}).get("name")
+            if name in allowed or (
+                isinstance(name, str) and name.startswith(_MCP_TOOL_PREFIXES)
+            ):
+                tool_definitions.append(spec)
 
         skills: list[dict[str, Any]] = []
         mcp_servers: list[dict[str, Any]] = []

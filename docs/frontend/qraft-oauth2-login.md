@@ -108,10 +108,9 @@ IPC 通道：`qraft:login` / `qraft:browserLogin` / `qraft:status` / `qraft:refr
 `{ "accessToken": "…", "expiresAt": <epoch 毫秒>, "baseUrl": "…" }` 写入
 **`<workspace>/.qraft/token.json`**（0600 权限，包含 accessToken、expiresAt、
 baseUrl 元数据，不含 refresh_token）；退出登录即删除；应用启动恢复登录态时
-同步重写。`baseUrl` 供 KUN 计费闸门（`miqi/kun_runtime/billing.py`）定位平台
-接口（计费前会校验 https + 受信平台域名，防 token 文件被篡改后把 Bearer
-token 发往任意地址），Skill 侧 `auth.py` 计划只读前两个字段（#674 后续落地），
-多出的 baseUrl 无影响。
+同步重写。`baseUrl` 记录登录时的平台 API 基础地址（Slurm 作业扣费由
+Desktop 主进程用其登录态直接发起，不依赖本文件）；Skill 侧 `auth.py`
+计划只读前两个字段（#674 后续落地），多出的 baseUrl 无影响。
 
 - 沙箱可达性：KUN 沙箱将自定义 workspace bind-mount 到
   `/home/miqi/workspace`（bwrap.py），沙箱内 Skill 直接读
@@ -133,10 +132,11 @@ token 发往任意地址），Skill 侧 `auth.py` 计划只读前两个字段（
 2. Skill 侧（#674 后续）：`auth.py` 优先读 token 文件，自管凭据降级为兜底；
 3. 稳定后删除 Skill 自管凭据，auth.py 收敛为纯「取 token + 过期检测」。
 
-## 7. 平台积分计费（任务扣费闸门）
+## 7. 平台积分计费（Slurm MCP 作业扣费）
 
-> 产品规则（2026-09-02 确认）：新用户 300 积分；**执行任务（会话中首次
-> 执行工具/技能）每次扣 30 积分，普通对话不扣分**；余额不足时任务不执行。
+> 产品规则（2026-09-03，#927）：**调用 slurm MCP 时，slurm 作业运行
+> 每次扣 10 积分**；普通对话与本地任务不扣积分。扣费请求由 **Desktop
+> 发起**（memo 携带作业信息形成扣费记录），余额不足时阻止作业提交。
 
 ### 扣费接口（OAuth2 第三方接入指南）
 
@@ -145,26 +145,40 @@ token 发往任意地址），Skill 侧 `auth.py` 计划只读前两个字段（
 | `POST /oauth2/points/deduct` | body `{amount, source, resourceType?, project?, memo?}`；业务码 `200` 成功 / `40003` 积分不足 / `40101·40102` token 失效；成功返回扣后余额 `PointBalanceVO` |
 | `GET /oauth2/points/balance` | 查询余额（availablePoints / heldPoints / totalEarned / totalSpent） |
 
-### 计费闸门（Python：`miqi/kun_runtime/billing.py`）
+### 扣费握手（Python 侧：`miqi/agent/billing_resolver.py`）
 
-运行时在工具实际执行前（审批通过之后）调用 `PointsBilling.ensure_billed(thread_id)`：
+slurm MCP 工具（服务器名含 "slurm"）实际执行前，`MCPToolWrapper.execute`
+发起「扣费请求-决议」握手（镜像 user_input_resolver 模式）：
 
-- **触发**：会话首次执行工具/技能时扣一次（每会话一次）；纯问答不扣；
-- **未登录**（无 token 文件）不拦不扣 —— 登录收口由平台内置模型改造负责；
-- **去重**：内存标记 + `<workspace>/.qraft/billing.json` 持久化（进程重启、
-  多运行时实例不重复扣费）；余额不足未扣成不落标记，充值后同一会话可重试；
-- **失败语义 fail-closed**：网络/服务端错误重试后仍失败、token 失效且主进程
-  刷新未恢复时，阻止任务执行并提示（避免无账单跑算力）；
-- **挂载点**：live 路径 `miqi/execution/orchestrator.py`（`OrchestrationResult.
-  BILLING_BLOCKED`，经 `RuntimeServices.from_config` 装配，`config.billing`
-  可关）；KUN 路径 `miqi/kun_runtime/tool_host.py` 同步挂载；
-- **事件**：`PointsBillingEvent` → 桥接转发 `progress`（`stream=points`）→
-  ChatConsole 展示「已扣 X 积分（余额 Y）」或余额不足/登录过期提示。
+- **流程**：MCP 工具执行前 → `request_charge` 经会话发射器向 Desktop 发出
+  `slurm_job_charge_request`（含 charge_id/工具名/参数摘要/会话上下文）→
+  等待 Desktop 决议（25s 超时 fail-closed）→ 放行执行或返回「[计费阻止]」
+  消息阻止作业提交；
+- **接线**：bridge 的 chat.send drain 按 session_key 注册
+  `set_billing_charge_emitter`；Desktop 决议经 bridge 请求
+  `billing.slurmResolve` 回传（带会话归属鉴权，镜像 userInput.resolve）；
+- **作业 ID 回传**：作业提交成功后从工具输出提取作业 ID（`Submitted batch
+  job N` / `JobId=N` / `slurm-N`），经 `slurm_job_charge_enrich` 事件回传
+  Desktop 补进扣费历史；
+- **无 Desktop 通道**（headless/CLI）时 slurm MCP 调用按 fail-closed 阻止。
+
+### 扣费与历史（Desktop 主进程）
+
+- `QraftService.chargeSlurmJob`：扣 10 分（`source=slurm-job`、memo 携带
+  {jobId, tool, args, session, turn}），token 失效先刷新重试一次；去重键
+  charge_id（同一作业提交尝试只扣一次，历史文件持久化跨重启不重复扣费）；
+- 历史持久化：`userData/qraft-billing-history.json`（上限 200 条，含
+  billed/insufficient/error 三种状态），设置页经 `qraft:billingHistory`
+  IPC 展示（作业 ID、参数摘要、扣分、扣后余额、时间）；
+- 聊天区提示复用 points 事件流（`stream=points`，billed=安静活动行、
+  blocked=醒目错误行）；
+- 余额缓存：扣费成功后 deduct 响应余额直接更新 `status.points` 并推送
+  `qraft:statusChanged`。
 
 ### 余额展示（设置页）
 
-设置 → Qraft 平台 登录后展示可用积分（含累计获得/支出）；主进程
-`qraft:pointsBalance` IPC 拉取并缓存，余额变化经 `qraft:statusChanged`
+设置 → MiQroForge 平台 登录后展示可用积分（含累计获得/支出）与扣费历史；
+主进程 `qraft:pointsBalance` IPC 拉取并缓存，余额变化经 `qraft:statusChanged`
 事件推送。主进程 `QraftClient` 同时实现 `getPointsBalance` /
 `deductPoints`（含业务码分类：`40003 → INSUFFICIENT_POINTS`、
 `40101/40102 → SESSION_EXPIRED`）。

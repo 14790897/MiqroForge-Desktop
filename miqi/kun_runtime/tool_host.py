@@ -127,16 +127,9 @@ class MiQiToolHost:
     KUN-compatible return types.
     """
 
-    def __init__(
-        self,
-        registry: ToolRegistry,
-        read_tracker: bool = False,
-        billing: Any | None = None,
-    ):
+    def __init__(self, registry: ToolRegistry, read_tracker: bool = False):
         self._registry = registry
         self._read_tracker: dict[str, set[str]] = {} if read_tracker else None
-        # 平台积分计费闸门（PointsBilling 或 None=未启用）。
-        self._billing = billing
 
     async def list_tools(self, context: ToolHostContext | None = None) -> list[dict[str, Any]]:
         """Return tool specs in KUN ``ModelToolSpec`` format.
@@ -331,34 +324,6 @@ class MiQiToolHost:
         ):
             return await self._execute_user_confirm(call, context, args)
 
-        # 平台积分计费闸门：会话首次实际执行工具前扣一次（与 legacy
-        # ToolOrchestrator 同规则：余额不足/计费失败 fail-closed）。
-        # 去重作用域对齐 live 路径：有 session_key 映射时按会话去重，
-        # 子线程不重复扣费；无映射（headless/CLI）退化为 thread_id。
-        if self._billing is not None:
-            from miqi.kun_runtime.migration_adapter import thread_id_to_session_key
-
-            billing_scope = thread_id_to_session_key(context.thread_id) or context.thread_id
-            decision = await self._billing.ensure_billed(
-                context.thread_id, turn_id=context.turn_id, scope=billing_scope
-            )
-            if not decision.allowed:
-                return ToolHostResult(item={
-                    "kind": "tool_result",
-                    "id": f"item_{context.turn_id}_{call.call_id}",
-                    "turnId": context.turn_id,
-                    "threadId": context.thread_id,
-                    "role": "tool",
-                    "status": "failed",
-                    "createdAt": _now_iso(),
-                    "finishedAt": _now_iso(),
-                    "toolName": tool_name,
-                    "callId": call.call_id,
-                    "toolKind": _classify_tool_kind(tool_name),
-                    "output": decision.reason,
-                    "isError": True,
-                })
-
         # Execute
         try:
             # Session isolation: inject the session key for file/exec tools so
@@ -373,6 +338,19 @@ class MiQiToolHost:
                 session_key = thread_id_to_session_key(context.thread_id) or context.thread_id
                 if session_key:
                     extra["_session_key"] = session_key
+            if tool_name.startswith("mcp_"):
+                # MCP 工具（issue #927）：注入会话上下文供 slurm 计费事件
+                # 使用（MCPToolWrapper 会 pop 掉，不传给 MCP 服务端）。
+                from miqi.kun_runtime.migration_adapter import (
+                    thread_id_to_session_key,
+                )
+
+                extra["_session_key"] = (
+                    thread_id_to_session_key(context.thread_id)
+                    or context.thread_id
+                )
+                extra["_turn_id"] = context.turn_id
+                extra["_tool_call_id"] = call.call_id
             # User-mentioned output dirs (issue #821): pass the turn's
             # auto-sensed roots to file tools so the user's explicitly
             # requested output location (e.g. Desktop/test_result) works

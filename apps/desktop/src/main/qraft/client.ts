@@ -22,7 +22,13 @@ import {
   findEraBundleUrls,
   maskSecret,
 } from './rsa';
-import type { QraftAccount, QraftErrorCode, QraftPointsBalance, QraftTokens } from './types';
+import type {
+  QraftAccount,
+  QraftAiGateway,
+  QraftErrorCode,
+  QraftPointsBalance,
+  QraftTokens,
+} from './types';
 
 // ── 可注入依赖（生产用 electron.net.fetch，测试用 mock） ──────────────
 
@@ -433,11 +439,15 @@ export class QraftClient {
 
   // ── 业务接口 ─────────────────────────────────────────────────────────
 
-  /** GET /oauth2/userinfo：实测响应无 picture 字段。 */
+  /** GET /oauth2/userinfo：实测响应无 picture 字段。
+   *  网关字段（encryptedApiKey/aiGatewayStatus/configVersion/consumerId 等）可能
+   *  平铺在顶层或嵌套在 data 内（实测两层都出现过），两层都取。
+   *  encryptedApiKey 为空（未开通/未下发）时省略 aiGateway —— 调用方据此区分
+   *  "平台未开通网关" 与 "已开通"，同时不把空串当密钥处理。 */
   async getUserInfo(
     config: ResolvedQraftConfig,
     accessToken: string
-  ): Promise<Omit<QraftAccount, 'phone'>> {
+  ): Promise<Omit<QraftAccount, 'phone'> & { aiGateway?: QraftAiGateway }> {
     const { res, bodyText } = await this.request(`${config.baseUrl}/oauth2/userinfo`, {
       headers: { Authorization: `Bearer ${accessToken}` },
     });
@@ -453,11 +463,27 @@ export class QraftClient {
     if (typeof data.sub !== 'string' && typeof data.username !== 'string') {
       throw new QraftError('USERINFO_FAILED', 'userinfo 响应缺少 sub/username 字段');
     }
+    const nested = (data.data ?? {}) as Record<string, unknown>;
+    const field = (name: string): unknown =>
+      name in data ? data[name] : (nested[name] ?? undefined);
+    const encryptedApiKey = String(field('encryptedApiKey') ?? '');
+    const status = String(field('aiGatewayStatus') ?? '');
+    const aiGateway: QraftAiGateway | undefined = encryptedApiKey
+      ? {
+          encryptedApiKey,
+          status,
+          configVersion: coerceConfigVersion(field('configVersion')),
+          consumerId: field('consumerId') != null ? String(field('consumerId')) : undefined,
+          consumerGroupId:
+            field('consumerGroupId') != null ? String(field('consumerGroupId')) : undefined,
+        }
+      : undefined;
     this.log('INFO', 'qraft: userinfo 获取成功');
     return {
       sub: String(data.sub ?? ''),
       username: String(data.username ?? ''),
       nickname: String(data.nickname ?? ''),
+      ...(aiGateway ? { aiGateway } : {}),
     };
   }
 
@@ -612,6 +638,16 @@ function isInvalidRefreshToken(detail: string): boolean {
   return /RefreshTokenException|无效\s*refresh_token|refresh_token\s*(无效|已失效|已过期|过期)|invalid\s+refresh/i.test(
     detail
   );
+}
+
+/** configVersion 防御性归一为 number：平台可能下发数字或数字字符串。 */
+function coerceConfigVersion(raw: unknown): number | undefined {
+  if (typeof raw === 'number' && Number.isFinite(raw)) return raw;
+  if (typeof raw === 'string') {
+    const n = Number.parseInt(raw, 10);
+    if (Number.isFinite(n)) return n;
+  }
+  return undefined;
 }
 
 /** 解析 PointBalanceVO（balance/deduct 响应的 data 字段）。 */

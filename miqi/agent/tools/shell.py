@@ -254,9 +254,53 @@ _SYSTEM_INSTALL_VERBS: dict[str, tuple[str, ...]] = {
 _SYSTEM_INSTALL_NOT_ENABLED_MSG = (
     "Error: 系统包安装命令被拦截——沙箱内无 root 权限且系统目录只读，"
     "apt-get 无法在沙箱内安装。\n"
-    "请让用户在配置中开启 tools.sandbox.allow_system_installs 后重试："
-    "开启后 sudo apt-get install ... 会自动以 root 在 WSL 发行版中执行，"
-    "安装一次跨会话持久，装完即可在沙箱内使用。"
+    "请在 设置 > 沙箱隔离 中开启「允许系统包安装」后重试，或在授权确认卡中选择"
+    "「允许本次安装」：开启后 sudo apt-get install ... 会自动以 root 在 WSL "
+    "发行版中执行，安装一次跨会话持久，装完即可在沙箱内使用。"
+)
+
+#: 系统安装授权卡的应用级串行锁（CodeRabbit #875 09-01 review）：跨
+#: ExecTool 实例（不同会话/registry）的弹卡必须全局串行——per-instance 锁
+#: 只挡同一实例，不同会话并发安装时非可见会话的卡会静默超时而非排队。
+#: asyncio.Lock 绑定事件循环，这里按运行中 loop 惰性创建（生产 = bridge
+#: 单 loop → 全局一把锁；测试 = per-test loop → 各自新锁）。
+_system_install_approval_lock: asyncio.Lock | None = None
+_system_install_approval_lock_loop: asyncio.AbstractEventLoop | None = None
+
+
+def _get_system_install_approval_lock() -> asyncio.Lock:
+    """Return the application-wide serialization lock for approval cards.
+
+    The lock is bound to the CURRENT event loop: asyncio.Lock is loop
+    bound, so a lock created on another loop cannot be awaited here.  A
+    new lock is created when the loop changes.
+
+    ARCHITECTURE ASSUMPTION (#875 review): this is a true application
+    global ONLY because the production runtime guarantees a single
+    persistent event loop (BridgeRuntimeLoop owns every runtime/registry
+    on one loop).  If a future multi-loop runtime (threads, process
+    pools) is introduced, this degrades to per-loop serialization and
+    two approval cards could reach the foreground concurrently — revisit
+    this (e.g. a cross-loop lock) before enabling such a runtime.
+    """
+    global _system_install_approval_lock, _system_install_approval_lock_loop
+    loop = asyncio.get_running_loop()
+    if (
+        _system_install_approval_lock is None
+        or _system_install_approval_lock_loop is not loop
+    ):
+        _system_install_approval_lock = asyncio.Lock()
+        _system_install_approval_lock_loop = loop
+    return _system_install_approval_lock
+
+#: Interception message when the approval card WAS shown and the user
+#: declined or the card timed out — the NOT_ENABLED message suggests using
+#: the card, which the user just rejected, so it must not be reused here
+#: (#875 review P3-2).
+_SYSTEM_INSTALL_DENIED_MSG = (
+    "Error: 系统包安装授权未通过（拒绝或超时），本次安装未执行。\n"
+    "如需继续，请重新发起命令后在授权确认卡中选择「允许本次安装」，"
+    "或在 设置 > 沙箱隔离 中开启「允许系统包安装」。"
 )
 
 #: Interception message when system installs are enabled but the sandbox
@@ -332,6 +376,7 @@ class ExecTool(Tool):
         env_passthrough: list[str] | None = None,
         approval_callback=None,
         sandbox_manager=None,
+        system_install_approver=None,
     ):
         self.timeout = timeout
         self.max_timeout = max_timeout
@@ -370,6 +415,11 @@ class ExecTool(Tool):
         self.restrict_to_workspace = restrict_to_workspace
         self.approval_callback = approval_callback
         self._sandbox_manager = sandbox_manager
+        # #854: 系统包安装授权通道——关闭状态下拦截点弹确认卡而非直接拒绝。
+        # 签名: async (command: str) -> "once" | "always" | "deny" |
+        # "deny_no_channel"。fail-closed: 无通道/异常/超时一律 deny（外部
+        # 审阅 #854；#875 review F3 增加 deny_no_channel 区分"卡从未出现"）。
+        self.system_install_approver = system_install_approver
 
     @property
     def name(self) -> str:
@@ -2155,6 +2205,67 @@ class ExecTool(Tool):
             return await self._sandbox_manager.get_or_create(session_key)
         return self._sandbox_manager.active_sandbox
 
+    async def _request_system_install_approval(self, command: str) -> tuple[str, bool, bool]:
+        """#854: 系统包安装授权确认卡 → (decision, persist_failed, runtime_failed)。
+
+        decision ∈ {"once", "always", "deny", "deny_no_channel"}；
+        persist_failed 仅在 decision=="always" 且 config 持久化失败时为
+        True（外部审阅 #854："允许并记住"保存失败必须对用户可见）；
+        runtime_failed 仅在 decision=="always" 且 config 已持久化但
+        runtime 切换失败时为 True（#875 review P4：重启后生效）。
+
+        - fail-closed：无 approver 通道 / 异常 / 超时一律 deny（或
+          deny_no_channel），绝不放行
+        - 并发串行：同一时刻只有一张系统安装授权卡进入前台（外部审阅 #854）
+        - "允许本次"（once）是调用级授权——不修改任何全局状态
+        """
+        if self.system_install_approver is None:
+            return ("deny_no_channel", False, False)
+        # 统一 120s 墙钟上限（CodeRabbit #875 09-01 Minor）：从调用开始计时，
+        # 覆盖应用级锁等待 + approver（含 gate 排队）全程——排队的请求不会
+        # 先无界等锁、锁到手后再拿第二个独立 120s（最坏 240s）。
+        # 锁释放由 async with 保证（取消也释放）；approver 内部的独立超时
+        # 已移除，单一 deadline 在 shell 层。
+        async def _approve_under_lock() -> tuple[str, bool, bool]:
+            async with _get_system_install_approval_lock():
+                return await self.system_install_approver(command)
+
+        try:
+            decision = await asyncio.wait_for(_approve_under_lock(), timeout=120)
+        except TimeoutError:
+            logger.warning(
+                "system install approval timed out (120s incl. lock wait) — deny"
+            )
+            return ("deny", False, False)
+        except Exception as exc:  # noqa: BLE001 - fail-closed on any error
+            # loguru: {} interpolation, NOT logging-style %s (#875 review)
+            logger.warning("system install approval failed ({}) — deny", exc)
+            return ("deny", False, False)
+        # 畸形元组（错误长度）也必须 fail-closed 而非抛穿（#875 review F8）
+        persist_failed = False
+        runtime_failed = False
+        if isinstance(decision, tuple):
+            if len(decision) not in (2, 3):
+                logger.warning(
+                    "system install approval returned malformed tuple {!r} — deny",
+                    decision,
+                )
+                return ("deny", False, False)
+            # #875 review (5th): unpack BEFORE overwriting `decision` —
+            # the previous code re-bound decision to the string first, so
+            # `len(decision) == 3` compared the string length and the
+            # runtime_failed flag was never read.
+            if len(decision) == 2:
+                decision, persist_failed = decision
+            else:
+                decision, persist_failed, runtime_failed = decision
+            persist_failed = bool(persist_failed)
+            runtime_failed = bool(runtime_failed)
+        if decision not in ("once", "always", "deny", "deny_no_channel"):
+            logger.warning("system install approval returned unknown decision {!r} — deny", decision)
+            return ("deny", False, False)
+        return (decision, persist_failed, runtime_failed)
+
     async def _maybe_route_system_install(
         self,
         command: str,
@@ -2190,24 +2301,26 @@ class ExecTool(Tool):
         4. A disabled sandbox manager (user chose direct host exec) → the
            routing never participates, not even to intercept (review #759
            O2).
-        5. ``allow_system_installs`` off → intercept with an actionable
-           message, BEFORE any sandbox resolution or approval: the command
-           is dead on arrival, no sandbox should be created for it, and the
-           message must point at the real fix (enable the option), not at
-           the sandbox (review #759 O1).
-        6. Desktop approval (when ``approval_callback`` is wired) runs here
+        5. Guard + normalize run BEFORE any card or approval — a command
+           that fails the deny-pattern re-check or single-command
+           normalization is refused outright; only commands that will
+           actually execute reach the approval card, and the card shows the
+           NORMALIZED command, i.e. exactly what runs as root (#875 review
+           P3-1/P3-3).
+        6. ``allow_system_installs`` off → the approval card (once/always/
+           deny) intercepts BEFORE any sandbox resolution: no sandbox is
+           created for it.  The deny branch either points at the settings
+           page (card never shown — CLI/no desktop channel) or states the
+           refusal plainly (card denied or timed out, #875 review P3-2).
+        7. Desktop approval (when ``approval_callback`` is wired) runs here
            too — routed commands do NOT bypass the approval system; the
            user can decline, which intercepts before any sandbox is
            resolved or any root command is spawned.
-        7. A live bwrap sandbox must resolve — when none is available the
+        8. A live bwrap sandbox must resolve — when none is available the
            command is intercepted with a clear message instead of falling
            through to the normal path's Windows-cmd degradation (review
            #759 N2).
-        8. WSL-only — native Linux sandboxes get a WSL-only message.
-        9. Deny-pattern re-check (minus sudo), allow_patterns, dist-upgrade
-           refusal, and single-command normalization (see
-           :meth:`_guard_system_install_command`) — dangerous, option-
-           carrying or system-rewriting commands are refused.
+        9. WSL-only — native Linux sandboxes get a WSL-only message.
         10. Cancel check, then the normalized command is executed as root in
             the WSL distro.
         """
@@ -2236,12 +2349,51 @@ class ExecTool(Tool):
         if not getattr(self._sandbox_manager, "enabled", False):
             return None
 
+        # Guard + normalize BEFORE any card or approval (#875 review P3-1):
+        # a command that the guard would refuse (un-allowlisted flags, deny
+        # patterns, dist-upgrade, shell compounds) or that cannot be
+        # normalized must never reach the user's approval card — the user
+        # would approve something that then gets refused anyway.  The card
+        # therefore shows the NORMALIZED command, i.e. exactly what will
+        # execute (display == execution, #875 review P3-3).
+        guard_error = self._guard_system_install_command(command)
+        if guard_error:
+            return _ExecResult(output=guard_error, exit_code=1)
+
+        normalized = self._normalize_system_install(command)
+        if normalized is None:
+            return _ExecResult(output=_SYSTEM_INSTALL_SINGLE_MSG, exit_code=1)
+
+        # 显示=执行（#875 review F6）：把非交互 flag（-y/--non-interactive/
+        # --noconfirm）注入归一化命令——卡片显示的就是最终以 root 执行的
+        # 命令（_inject_noninteractive_flags 幂等，执行时再次调用无副作用）。
+        normalized = self._inject_noninteractive_flags(normalized)
+
+        persist_failed = False
+        runtime_failed = False  # #875 review P4: 弹卡分支可能置位
+
         # O1: check the allow toggle before touching the sandbox.  When it
-        # is off the command is dead on arrival — no sandbox is created for
-        # it, no approval is prompted, and the user is pointed at the real
-        # fix (enable allow_system_installs) rather than at the sandbox.
+        # is off the command is not dead on arrival — an approval card is
+        # shown instead of hard-rejecting, so a non-developer user can
+        # grant the install without editing config.json (#854).
         if not getattr(self._sandbox_manager, "allow_system_installs", False):
-            return _ExecResult(output=_SYSTEM_INSTALL_NOT_ENABLED_MSG, exit_code=1)
+            # 弹系统安装授权卡（once/always/deny），替代直接拒绝：
+            # "允许本次"是调用级授权，不修改全局开关（外部审阅 #854）；
+            # "允许并记住"由 approver 内部走统一入口持久化后放行。
+            # 无桌面通道（deny_no_channel）时指向设置页（#875 review F3）。
+            decision, persist_failed, runtime_failed = (
+                await self._request_system_install_approval(normalized)
+            )
+            if decision not in ("once", "always"):
+                # 卡已弹但用户拒绝/超时 → 明确告知；无桌面通道（卡从未出现）
+                # → 指向设置页（#875 review P3-2/F3——approver 恒非 None，
+                # 以 deny_no_channel 决策区分，而非 approver 是否为 None）。
+                if decision == "deny_no_channel":
+                    return _ExecResult(output=_SYSTEM_INSTALL_NOT_ENABLED_MSG, exit_code=1)
+                return _ExecResult(output=_SYSTEM_INSTALL_DENIED_MSG, exit_code=1)
+            # runtime_failed (#875 review)：config 已保存但 runtime 未生效——
+            # 提示交给 _execute_system_install 输出（与 persist_failed 同路径），
+            # 不在此处中断执行流程。
 
         # Phase 77 (#759) + review F2: routed commands must not bypass the
         # approval system.  Same call the normal path uses; commands that
@@ -2277,14 +2429,6 @@ class ExecTool(Tool):
         if not getattr(sandbox, "supports_system_installs", False):
             return _ExecResult(output=_SYSTEM_INSTALL_WSL_ONLY_MSG, exit_code=1)
 
-        guard_error = self._guard_system_install_command(command)
-        if guard_error:
-            return _ExecResult(output=guard_error, exit_code=1)
-
-        normalized = self._normalize_system_install(command)
-        if normalized is None:  # defensive — the guard already refuses these
-            return _ExecResult(output=_SYSTEM_INSTALL_SINGLE_MSG, exit_code=1)
-
         if cancel_event is not None and cancel_event.is_set():
             return _ExecResult(
                 output="Error: 命令在启动前被取消。",
@@ -2296,6 +2440,11 @@ class ExecTool(Tool):
             event_emitter=event_emitter, turn_id=turn_id,
             tool_call_id=tool_call_id,
             requested_timeout_ms=requested_timeout_ms,
+            # #875 review F4/P4：persist_failed / runtime_failed 显式传递
+            # （提示只属于本次安装），不再用实例标志——实例标志在早期返回路径
+            # （拒绝/无沙箱/WSL-only）会残留，导致后续安装误报。
+            persist_failed=persist_failed,
+            runtime_failed=runtime_failed,
         )
 
     async def _execute_system_install(
@@ -2308,6 +2457,10 @@ class ExecTool(Tool):
         # min(requested, _SYSTEM_INSTALL_TIMEOUT) instead of the fixed
         # 1200 s budget alone.
         requested_timeout_ms: int | None = None,
+        # #875 review F4: "允许并记住"持久化失败提示（显式传递，不用实例标志）
+        persist_failed: bool = False,
+        # #875 review P4: config 已保存但 runtime 未立即生效（重启后生效）
+        runtime_failed: bool = False,
     ) -> _ExecResult:
         """Run a normalized install command as root in the WSL distro (#759).
 
@@ -2315,8 +2468,9 @@ class ExecTool(Tool):
         :meth:`_normalize_system_install` (already prefix-stripped, only
         allowlisted flags and package tokens) — it is safe to embed in
         ``bash -c``.  The non-interactive flag (-y / --non-interactive /
-        --noconfirm) is injected so the root run never hangs on a TTY
-        prompt.
+        --noconfirm) is injected (idempotently — the routing already
+        injected it so the card displays the final executed command, #875
+        review F6) so the root run never hangs on a TTY prompt.
 
         The result is buffered (no streaming) with a dedicated long
         timeout; texlive-scale installs can emit tens of MB of progress
@@ -2424,6 +2578,21 @@ class ExecTool(Tool):
             output_parts.append(f"STDERR:\n{err.rstrip()}")
         if rc != 0:
             output_parts.append(f"\nExit code: {rc}")
+        # 外部审阅 #854 疑点 1 → B + #875 review P2/F4：持久化失败必须可见，
+        # 且与安装命令成败无关（rc==0 才提示会漏掉安装失败的情况）——用户
+        # 点了「允许并记住」，却可能在重启后丢失授权，必须无条件告知。
+        if persist_failed:
+            output_parts.append(
+                "\n[提示] 本次安装已放行，但授权保存失败，「允许系统包安装」"
+                "未开启，重启后需要重新授权。"
+            )
+        if runtime_failed:
+            # #875 review P4: config 持久化成功但 runtime 未生效——用户点了
+            # 「允许并记住」却看到当前会话仍未开启，必须无条件告知。
+            output_parts.append(
+                "\n[提示] 「允许并记住」已保存到配置，但当前运行时未能立即生效——"
+                "本次安装已放行，重启后系统包安装将自动以 root 执行。"
+            )
 
         return _ExecResult(
             output="\n".join(output_parts),

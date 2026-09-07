@@ -91,4 +91,22 @@ export interface QraftStoredState {
   cookie: string;
   account: QraftAccount;
   tokens: QraftTokens;
+  /**
+   * 平台 AI 网关信息（userinfo 下发）。encryptedApiKey 属密钥：只存在于
+   * safeStorage 加密的 store 与 0600 的 token 文件中，绝不进渲染进程/日志。
+   * token 刷新不重拉 userinfo，故随本存储带入并在重写 token 文件时保留。
+   */
+  aiGateway?: QraftAiGateway;
+}
+
+/** 平台 AI 网关开通信息（腾讯云消费者密钥 + 状态 + 配置版本）。 */
+export interface QraftAiGateway {
+  /** 网关消费者密钥（X-Api-Key）。 */
+  encryptedApiKey: string;
+  /** 网关开通状态：active / provisioning / failed / disabled 等。 */
+  status: string;
+  /** 平台配置版本号（可热刷本地模型/网关清单，留后续）。 */
+  configVersion?: number;
+  consumerId?: string;
+  consumerGroupId?: string;
 }

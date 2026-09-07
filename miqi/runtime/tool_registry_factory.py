@@ -45,6 +45,133 @@ def _default_read_roots() -> list[Path]:
     return roots
 
 
+def apply_system_installs_toggle(
+    enabled: bool, sandbox_manager: Any | None,
+) -> tuple[bool, bool]:
+    """#854: 系统包安装开关统一入口——config 持久化在前、runtime 在后。
+
+    设置页开关（loop.py ``sandbox.setAllowSystemInstalls`` handler）与确认卡
+    「允许并记住」（:func:`_make_system_install_approver`）共享同一实现，
+    两条路径不得漂移（#875 review 09-02 P2：validation / audit / cache /
+    event 等后续演进只落在这里一处）。
+
+    Returns ``(persist_failed, runtime_failed)``：
+    - ``persist_failed``：config 写盘失败（调用方决定透出或 raise）
+    - ``runtime_failed``：config 已持久化但 runtime 属性切换失败（重启自愈）
+    """
+    from miqi.config.loader import update_config_field
+
+    # 统一入口：**config 持久化在前，runtime 在后**。先开 runtime 会让
+    # 「保存失败」时权限在本会话仍然生效（fail-open），与本 PR 的
+    # fail-closed 原则矛盾（#875 review P2）。持久化走 loader.
+    # update_config_field：共享锁 + legacy 路径回退 + 迁移（#875 review
+    # F1/F2——裸 get_config_path() 会丢 legacy 配置、无锁并发写会互相覆盖）。
+    try:
+        persist_failed = not update_config_field(
+            lambda cfg: setattr(
+                cfg.tools.sandbox, "allow_system_installs", enabled,
+            )
+        )
+    except Exception as exc:  # noqa: BLE001 - 失败仅透出，不放行 runtime
+        _log.error("system install allow persist error: %s", exc)
+        persist_failed = True
+    # 持久化成功才开 runtime（fail-closed 方向）
+    runtime_failed = False
+    if not persist_failed and sandbox_manager is not None:
+        try:
+            sandbox_manager.allow_system_installs = enabled
+        except Exception as exc:  # noqa: BLE001 - config 已持久化，重启自愈
+            # #875 review: this is an AUTHOR-recognized failure mode —
+            # surface it instead of swallowing it, or the user sees
+            # "允许并记住" accepted while the current runtime still denies
+            # installs (config=true / runtime=false).
+            _log.warning(
+                "system install allow: runtime update failed (config "
+                "persisted, restart will apply): %s", exc,
+            )
+            runtime_failed = True
+    return persist_failed, runtime_failed
+
+
+def _make_system_install_approver(*, resolver, sandbox_manager):
+    """#854: 系统包安装授权确认卡 approver（once/always/deny）。
+
+    - 复用 #646/#864 的 user-input 通道（同一 gate，桌面端渲染确认卡）
+    - 卡片展示结构化信息：操作/命令/权限(root)/范围(WSL)/持久性/风险
+      ——命令由拦截点传入**归一化后**的最终执行命令（显示 = 执行，
+      #875 review P3-3），并预告批准后仍会经过命令安全审批（P3-5）
+    - "允许本次"（once）= 调用级授权，不修改任何全局状态
+    - "允许并记住"（always）走统一入口：**config 持久化在前，runtime
+      属性在后**——持久化失败时 runtime 保持关闭（fail-closed 方向，
+      #875 review P2），本次安装仍放行但 persist_failed=True 透出；
+      runtime 切换失败时 runtime_failed=True 透出（重启后生效，P4）
+    - 决策契约（#875 review F3）："once" / "always" / "deny"（用户拒绝
+      或超时）/ "deny_no_channel"（无桌面通道——shell 据此给出设置页指引
+      而非"去用刚拒绝的卡"）；返回三元组 (decision, persist_failed,
+      runtime_failed)（#875 review P4）
+    - 任何异常 / 未知选项 → deny（fail-closed）；卡等待有 120s 墙钟上限
+      （含排队时间，#875 review F5：gate 的 per-slot 等待无超时）
+    """
+    import logging
+
+    logger = logging.getLogger(__name__)
+
+    async def _approver(command: str) -> tuple[str, bool, bool]:
+        if resolver is None:
+            return ("deny_no_channel", False, False)
+        payload = {
+            "title": "系统包安装授权",
+            "message": (
+                "AI 请求执行系统包安装：\n\n"
+                f"操作：系统包安装\n"
+                f"命令：{command}\n"
+                "权限：root（WSL 发行版）\n"
+                "范围：Windows + WSL 环境\n"
+                "持久性：仅「允许并记住」跨会话持续生效；「允许本次安装」仅本次有效\n"
+                "风险：会修改系统软件环境；软件包安装脚本可能以 root 权限执行代码\n"
+                "注意：批准后命令仍会经过命令安全审批，可能再次弹出确认"
+            ),
+            "choices": [
+                {"id": "allow_once", "label": "允许本次安装"},
+                {"id": "allow_always", "label": "允许并记住（开启开关）"},
+                {"id": "deny", "label": "拒绝"},
+            ],
+            "timeout_seconds": 120,
+        }
+        # 统一 120s 墙钟上限由 shell 层（_request_system_install_approval 的
+        # wait_for 覆盖锁等待 + 本调用全程）保证——此处不再设第二个独立
+        # 超时，避免排队请求获得二次独立 120s（CodeRabbit #875 09-01 Minor）。
+        # 卡文案的 timeout_seconds=120 仅为 gate 内的卡片倒计时展示。
+        try:
+            gate_result = await resolver(payload)
+        except Exception as exc:  # noqa: BLE001 - fail-closed
+            logger.warning("system install card resolver failed: %s — deny", exc)
+            return ("deny", False, False)
+        if gate_result.get("status") != "submitted":
+            # 无桌面通道（emitter 未注册）→ 卡从未出现——shell 应给设置页
+            # 指引而非"去用刚拒绝的卡"（#875 review F3）。
+            reason = str(gate_result.get("reason") or "")
+            if "no user-input channel" in reason:
+                return ("deny_no_channel", False, False)
+            return ("deny", False, False)
+        choice_id = str((gate_result.get("answers") or {}).get("choice_id") or "")
+        if choice_id == "allow_always":
+            # 统一入口（#875 review 09-02 P2）：与设置页开关共享
+            # apply_system_installs_toggle——config 持久化在前、runtime 在后
+            # （fail-closed 方向），两条路径同一实现防止行为漂移。
+            persist_failed, runtime_failed = apply_system_installs_toggle(
+                True, sandbox_manager,
+            )
+            # (decision, persist_failed, runtime_failed)：shell 拦截点据此
+            # 向用户透出"本次已放行但未记住/未生效"（#875 review P2/P4）。
+            return ("always", persist_failed, runtime_failed)
+        if choice_id == "allow_once":
+            return ("once", False, False)
+        return ("deny", False, False)
+
+    return _approver
+
+
 def _make_extra_root_persister():
     """Build an async callback that appends a directory to ``tools.extra_roots``.
 
@@ -52,48 +179,32 @@ def _make_extra_root_persister():
     Persisting is best-effort and guarded: a protected path is never added, and
     any failure must not fail the write that already succeeded.
 
-    The read-modify-write is lock-protected and re-reads the config file from
-    disk on every call (``load_config`` returns a 5-second-cached ``Config``,
-    so a cached read could clobber a concurrent config change).
+    The read-modify-write goes through :func:`loader.update_config_field`
+    (shared lock + fresh disk read, #875 review F12) — ``load_config``
+    returns a 5-second-cached ``Config``, so a cached read could clobber a
+    concurrent config change, and per-instance locks don't serialize
+    cross-session writers.
     """
-    import json
-    import threading
-
     from miqi.agent.tools.user_roots import _is_protected_extra_root
-    from miqi.config.loader import save_config
-    from miqi.config.schema import Config
-    from miqi.paths import get_config_path
-
-    _lock = threading.Lock()
+    from miqi.config.loader import update_config_field
 
     async def persist(root: Path) -> None:
         resolved = Path(root).expanduser().resolve(strict=False)
-        path = get_config_path()
-        with _lock:
-            # Fresh read: reload the config from disk, not the cached copy.
-            data: dict = {}
-            try:
-                with open(path, encoding="utf-8") as f:
-                    data = json.load(f)
-            except FileNotFoundError:
-                data = {}
-            except (OSError, json.JSONDecodeError) as exc:
-                # Never clobber an existing-but-unreadable config (e.g. provider
-                # keys) with a default Config — a single persisted root is not
-                # worth destroying the user's configuration.
-                _log.warning("extra_root persister: cannot read config %s: %s", path, exc)
-                return
-            config = Config.model_validate(data) if data else Config()
-            if _is_protected_extra_root(resolved, config.workspace_path):
+
+        def _mutate(cfg) -> None:
+            if _is_protected_extra_root(resolved, cfg.workspace_path):
                 _log.warning("extra_root persister: refusing protected path %s", resolved)
                 return
-            tools_cfg = getattr(config, "tools", None)
+            tools_cfg = getattr(cfg, "tools", None)
             extra = list(getattr(tools_cfg, "extra_roots", []) or [])
             root_str = str(resolved)
             if root_str not in extra:
                 extra.append(root_str)
                 tools_cfg.extra_roots = extra
-                save_config(config, path)
+
+        # 失败静默（best-effort）：读不到配置不覆盖（update_config_field 返回
+        # False，不抛出）——单个 root 不值得毁掉用户配置。
+        update_config_field(_mutate)
 
     return persist
 
@@ -390,6 +501,11 @@ def create_runtime_tool_registry(
             env_passthrough=list(getattr(exec_cfg, "env_passthrough", [])) if exec_cfg is not None else [],
             approval_callback=approval_callback,
             sandbox_manager=_sbm,
+            # #854: 系统包安装授权确认卡——关闭状态下拦截点弹卡（once/always/deny）。
+            # "允许并记住"走统一入口：runtime 属性 + config 持久化（外部审阅 #854）。
+            system_install_approver=_make_system_install_approver(
+                resolver=_write_resolver, sandbox_manager=_sbm,
+            ),
         )
     )
 

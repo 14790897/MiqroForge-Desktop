@@ -1,6 +1,7 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
 import {
   existsSync,
+  linkSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -580,5 +581,391 @@ describe('QraftService 登出竞态与 token 文件防护', () => {
     expect(result.ok).toBe(true);
     // 凭据绝不能写到 symlink 指向的目标目录
     expect(existsSync(join(targetDir, 'token.json'))).toBe(false);
+  });
+
+  it('预置 token 文件经硬链接共享时：原子替换不覆写共享 inode', async () => {
+    // 攻击者在 .qraft 预置一个 token 文件并持有硬链接别名。若实现原地
+    // writeFileSync，凭据会写进共享 inode，攻击者经别名即可读到；原子
+    // 替换（临时文件 + rename）后别名仍应是旧内容。
+    const qraftDir = join(dir, 'qraft-hardlink');
+    mkdirSync(qraftDir, { recursive: true });
+    const tokenPath = join(qraftDir, 'token.json');
+    const attackerAlias = join(dir, 'attacker-alias.json');
+    writeFileSync(tokenPath, '{"planted":"old"}', 'utf8');
+    linkSync(tokenPath, attackerAlias);
+
+    const stub = makeClientStub();
+    stub.platformLogin.mockResolvedValue({ sub: '19', username: 'u', nickname: 'n' });
+    stub.authorizeFlow.mockResolvedValue(makeTokens());
+    stub.getUserInfo.mockResolvedValue({ sub: '19', username: 'u', nickname: 'n' });
+    const service = new QraftService({
+      client: stub as unknown as QraftClient,
+      store,
+      log: noopLog,
+      makeRedirectUri: () => 'http://localhost:38000/callback',
+      tokenFilePath: () => tokenPath,
+    });
+
+    const result = await service.login('18500000000', 'p');
+    expect(result.ok).toBe(true);
+    // 主路径已被替换为新凭据
+    expect(JSON.parse(readFileSync(tokenPath, 'utf8')).accessToken).toBe('ACCESS-TOKEN');
+    // 攻击者别名仍是旧内容 —— 凭据未落入共享 inode
+    expect(JSON.parse(readFileSync(attackerAlias, 'utf8'))).toEqual({ planted: 'old' });
+  });
+
+  it.skipIf(process.platform === 'win32')('预置文件为其他用户所有时拒绝写入', async () => {
+    const qraftDir = join(dir, 'qraft-owned');
+    mkdirSync(qraftDir, { recursive: true });
+    const tokenPath = join(qraftDir, 'token.json');
+    writeFileSync(tokenPath, '{"planted":"attacker"}', 'utf8');
+    // 模拟非本用户 uid（测试进程无法 chown）：owner 检查据此拒绝写入。
+    // process.getuid 仅 POSIX 存在，类型上需断言（tsconfig.node 不含该声明）。
+    const realUid = process.getuid?.() ?? 0;
+    const getuidSpy = vi
+      .spyOn(process as unknown as { getuid: () => number }, 'getuid')
+      .mockReturnValue(realUid + 1);
+    try {
+      const stub = makeClientStub();
+      stub.platformLogin.mockResolvedValue({ sub: '19', username: 'u', nickname: 'n' });
+      stub.authorizeFlow.mockResolvedValue(makeTokens());
+      stub.getUserInfo.mockResolvedValue({ sub: '19', username: 'u', nickname: 'n' });
+      const service = new QraftService({
+        client: stub as unknown as QraftClient,
+        store,
+        log: noopLog,
+        makeRedirectUri: () => 'http://localhost:38000/callback',
+        tokenFilePath: () => tokenPath,
+      });
+
+      const result = await service.login('18500000000', 'p');
+      expect(result.ok).toBe(true); // 登录不受 token 文件失败影响
+      // 凭据绝不能写入其他用户拥有的文件
+      expect(JSON.parse(readFileSync(tokenPath, 'utf8'))).toEqual({ planted: 'attacker' });
+    } finally {
+      getuidSpy.mockRestore();
+    }
+  });
+});
+
+describe('QraftService AI 网关字段（#922）', () => {
+  const GATEWAY = {
+    encryptedApiKey: 'sk-test-gateway-secret',
+    status: 'active',
+    configVersion: 2,
+    consumerId: 'C-1',
+  };
+  const userinfoWithGateway = () => ({
+    sub: '19',
+    username: 'U-GATEWAY',
+    nickname: '网关用户',
+    aiGateway: { ...GATEWAY },
+  });
+
+  it('登录后：store 保存 encryptedApiKey；status() 只透出非敏感字段', async () => {
+    const stub = makeClientStub();
+    stub.platformLogin.mockResolvedValue({ sub: '19', username: 'u', nickname: 'n' });
+    stub.authorizeFlow.mockResolvedValue(makeTokens());
+    stub.getUserInfo.mockResolvedValue(userinfoWithGateway());
+    const service = makeService(stub);
+
+    const result = await service.login('18500000000', 'p');
+    expect(result.ok).toBe(true);
+    // 加密 store 内保存完整 aiGateway（含密钥）
+    expect(store.current?.aiGateway).toEqual(GATEWAY);
+    // 透给渲染进程的状态只含 status/configVersion，不含 encryptedApiKey
+    expect(service.status().aiGateway).toEqual({ status: 'active', configVersion: 2 });
+    expect(JSON.stringify(service.status())).not.toContain('sk-test-gateway-secret');
+  });
+
+  it('token 文件写入 aiGateway 块（Python 握手）；登出删除', async () => {
+    const stub = makeClientStub();
+    stub.platformLogin.mockResolvedValue({ sub: '19', username: 'u', nickname: 'n' });
+    stub.authorizeFlow.mockResolvedValue(makeTokens());
+    stub.getUserInfo.mockResolvedValue(userinfoWithGateway());
+    const service = makeService(stub);
+    const tokenPath = () => join(dir, 'qraft-token.json');
+
+    await service.login('18500000000', 'p');
+    const content = JSON.parse(readFileSync(tokenPath(), 'utf8'));
+    expect(content.aiGateway).toEqual(GATEWAY);
+    expect(content.accessToken).toBe('ACCESS-TOKEN');
+
+    service.logout();
+    expect(existsSync(tokenPath())).toBe(false);
+    expect(store.current).toBeNull();
+  });
+
+  it('自动刷新重写 token 文件时保留 aiGateway（刷新不重拉 userinfo）', async () => {
+    vi.useFakeTimers();
+    const stub = makeClientStub();
+    stub.platformLogin.mockResolvedValue({ sub: '19', username: 'u', nickname: 'n' });
+    stub.authorizeFlow.mockResolvedValue(makeTokens());
+    stub.getUserInfo.mockResolvedValue(userinfoWithGateway());
+    stub.refreshTokens.mockImplementation(async () =>
+      makeTokens({ accessToken: 'ACCESS-NEW', expiresAt: Date.now() + 7_199_000 })
+    );
+    const service = makeService(stub);
+    await service.login('18500000000', 'p');
+
+    await vi.advanceTimersByTimeAsync(7_199_000 - 15 * 60_000 + 100);
+    const content = JSON.parse(readFileSync(join(dir, 'qraft-token.json'), 'utf8'));
+    expect(content.accessToken).toBe('ACCESS-NEW');
+    expect(content.aiGateway).toEqual(GATEWAY);
+    expect(store.current?.aiGateway).toEqual(GATEWAY);
+  });
+
+  it('浏览器登录路径同样携带 aiGateway', async () => {
+    const stub = makeClientStub();
+    stub.exchangeCode.mockResolvedValue(makeTokens());
+    stub.getUserInfo.mockResolvedValue(userinfoWithGateway());
+    const service = makeService(stub);
+
+    const result = await service.loginWithCode('browser-code');
+    expect(result.ok).toBe(true);
+    expect(store.current?.aiGateway?.encryptedApiKey).toBe('sk-test-gateway-secret');
+    expect(service.status().aiGateway?.status).toBe('active');
+  });
+});
+
+// ── Slurm 作业扣费（issue #927）─────────────────────────────────────────
+
+interface ChargeClientStub {
+  deductPoints: ReturnType<typeof vi.fn>;
+  refreshTokens: ReturnType<typeof vi.fn>;
+}
+
+function makeChargeClient(): ChargeClientStub {
+  return { deductPoints: vi.fn(), refreshTokens: vi.fn() };
+}
+
+function makeChargeService(clientStub: ChargeClientStub): QraftService {
+  return new QraftService({
+    client: clientStub as unknown as QraftClient,
+    store,
+    log: noopLog,
+    makeRedirectUri: () => 'http://localhost:38000/callback',
+    tokenFilePath: () => join(dir, 'qraft-token.json'),
+    billingHistoryPath: () => join(dir, 'billing-history.json'),
+    onStatusChanged: (status) => statusEvents.push(status),
+  });
+}
+
+const SLURM_PAYLOAD = {
+  charge_id: 'charge-abc',
+  job_id: '12345',
+  server_name: 'slurm',
+  tool_name: 'submit_job',
+  args_summary: '{"script": "job.sh"}',
+  session_key: 'desktop:default',
+  turn_id: 'turn-1',
+};
+
+describe('QraftService Slurm 作业扣费（issue #927）', () => {
+  it('登录态下扣费成功：10 分 + memo 携带作业信息，历史落 billed 记录', async () => {
+    const client = makeChargeClient();
+    client.deductPoints.mockResolvedValue({
+      availablePoints: 840,
+      heldPoints: 0,
+      totalEarned: 0,
+      totalSpent: 10,
+    });
+    store.save(makeStoredState());
+    const svc = makeChargeService(client);
+
+    const result = await svc.chargeSlurmJob(SLURM_PAYLOAD);
+
+    expect(result).toEqual({ ok: true, balance: 840 });
+    const [configArg, tokenArg, reqArg] = client.deductPoints.mock.calls[0] as any[];
+    expect(tokenArg).toBe('ACCESS-TOKEN');
+    expect(reqArg.amount).toBe(10);
+    expect(reqArg.source).toBe('slurm-job');
+    expect(reqArg.resourceType).toBe('slurm');
+    const memo = JSON.parse(reqArg.memo);
+    expect(memo.tool).toBe('slurm.submit_job');
+    expect(memo.args).toContain('job.sh');
+    expect(memo.session).toBe('desktop:default');
+
+    const history = svc.getBillingHistory();
+    expect(history).toHaveLength(1);
+    expect(history[0]).toMatchObject({
+      chargeId: 'charge-abc',
+      cost: 10,
+      status: 'billed',
+      balanceAfter: 840,
+    });
+    // 余额缓存更新并推送状态
+    expect(statusEvents.some((s: any) => s?.points?.availablePoints === 840)).toBe(true);
+  });
+
+  it('同一 charge_id 只扣一次（历史持久化去重，跨重启不重复扣费）', async () => {
+    const client = makeChargeClient();
+    client.deductPoints.mockResolvedValue({
+      availablePoints: 840,
+      heldPoints: 0,
+      totalEarned: 0,
+      totalSpent: 10,
+    });
+    store.save(makeStoredState());
+    const svc = makeChargeService(client);
+
+    await svc.chargeSlurmJob(SLURM_PAYLOAD);
+    const again = await svc.chargeSlurmJob(SLURM_PAYLOAD);
+
+    expect(again.ok).toBe(true);
+    expect(again.balance).toBe(840);
+    expect(client.deductPoints).toHaveBeenCalledTimes(1);
+    // 新实例（模拟重启）读历史文件同样不重复扣
+    const svc2 = makeChargeService(client);
+    const third = await svc2.chargeSlurmJob(SLURM_PAYLOAD);
+    expect(third.ok).toBe(true);
+    expect(client.deductPoints).toHaveBeenCalledTimes(1);
+  });
+
+  it('余额不足（40003）fail-closed：返回阻止并记 insufficient 历史', async () => {
+    const client = makeChargeClient();
+    client.deductPoints.mockRejectedValue(
+      new QraftError('INSUFFICIENT_POINTS', '可用积分不足（当前可用 5）')
+    );
+    store.save(makeStoredState());
+    const svc = makeChargeService(client);
+
+    const result = await svc.chargeSlurmJob(SLURM_PAYLOAD);
+
+    expect(result.ok).toBe(false);
+    expect(result.code).toBe('INSUFFICIENT_POINTS');
+    expect(result.message).toContain('可用积分不足');
+    const history = svc.getBillingHistory();
+    expect(history).toHaveLength(1);
+    expect(history[0].status).toBe('insufficient');
+    expect(history[0].chargeId).toBe('charge-abc');
+  });
+
+  it('token 失效时先刷新一次再重试扣费', async () => {
+    const client = makeChargeClient();
+    client.deductPoints
+      .mockRejectedValueOnce(new QraftError('SESSION_EXPIRED', 'access_token 已失效'))
+      .mockResolvedValueOnce({
+        availablePoints: 840,
+        heldPoints: 0,
+        totalEarned: 0,
+        totalSpent: 10,
+      });
+    client.refreshTokens.mockResolvedValue(makeTokens({ accessToken: 'FRESH-TOKEN' }));
+    store.save(makeStoredState());
+    const svc = makeChargeService(client);
+
+    const result = await svc.chargeSlurmJob(SLURM_PAYLOAD);
+
+    expect(result.ok).toBe(true);
+    expect(client.deductPoints).toHaveBeenCalledTimes(2);
+    expect((client.deductPoints.mock.calls[1] as any[])[1]).toBe('FRESH-TOKEN');
+  });
+
+  it('未登录时不发请求，返回 INVALID_CONFIG', async () => {
+    const client = makeChargeClient();
+    const svc = makeChargeService(client);
+
+    const result = await svc.chargeSlurmJob(SLURM_PAYLOAD);
+
+    expect(result.ok).toBe(false);
+    expect(result.code).toBe('INVALID_CONFIG');
+    expect(client.deductPoints).not.toHaveBeenCalled();
+  });
+
+  it('RUNNING 事件携带作业 ID：历史记录与 memo 均含 jobId', async () => {
+    const client = makeChargeClient();
+    client.deductPoints.mockResolvedValue({
+      availablePoints: 840,
+      heldPoints: 0,
+      totalEarned: 0,
+      totalSpent: 10,
+    });
+    store.save(makeStoredState());
+    const svc = makeChargeService(client);
+
+    await svc.chargeSlurmJob(SLURM_PAYLOAD);
+
+    const history = svc.getBillingHistory();
+    expect(history[0].jobId).toBe('12345');
+    const memo = JSON.parse((client.deductPoints.mock.calls[0] as any[])[2].memo);
+    expect(memo.jobId).toBe('12345');
+  });
+
+  it('同一作业 ID 只扣一次（轮询重复报告 RUNNING 不重复扣费）', async () => {
+    const client = makeChargeClient();
+    client.deductPoints.mockResolvedValue({
+      availablePoints: 840,
+      heldPoints: 0,
+      totalEarned: 0,
+      totalSpent: 10,
+    });
+    store.save(makeStoredState());
+    const svc = makeChargeService(client);
+
+    await svc.chargeSlurmJob(SLURM_PAYLOAD);
+    // 状态轮询再次报告同一作业 RUNNING（新 charge_id、同 job_id）→ 去重
+    const again = await svc.chargeSlurmJob({
+      ...SLURM_PAYLOAD,
+      charge_id: 'charge-later',
+    });
+
+    expect(again.ok).toBe(true);
+    expect(again.dedup).toBe(true);
+    expect(client.deductPoints).toHaveBeenCalledTimes(1);
+  });
+
+  it('不同 MCP 服务器上报相同 job_id 独立计费（复合键含 server_name）', async () => {
+    const client = makeChargeClient();
+    client.deductPoints.mockResolvedValue({
+      availablePoints: 840,
+      heldPoints: 0,
+      totalEarned: 0,
+      totalSpent: 10,
+    });
+    store.save(makeStoredState());
+    const svc = makeChargeService(client);
+
+    // slurm-a 与 slurm-b 各自有作业 12345：互不干扰，各扣一次
+    await svc.chargeSlurmJob(SLURM_PAYLOAD);
+    const second = await svc.chargeSlurmJob({
+      ...SLURM_PAYLOAD,
+      charge_id: 'charge-bbb',
+      server_name: 'slurm-b',
+    });
+    expect(second.ok).toBe(true);
+    expect(client.deductPoints).toHaveBeenCalledTimes(2);
+
+    // 同服务器同 job_id 仍被去重（第三声 charge_id 也拦得住）
+    const dup = await svc.chargeSlurmJob({
+      ...SLURM_PAYLOAD,
+      charge_id: 'charge-later',
+    });
+    expect(dup.ok).toBe(true);
+    expect(client.deductPoints).toHaveBeenCalledTimes(2);
+
+    // 新实例（模拟重启）：历史按复合键匹配，两服务器的作业各自保持
+    // 已计费状态且互不串扰（slurm-b/12345 不再触发新扣费）
+    const svc2 = makeChargeService(client);
+    const restartHit = await svc2.chargeSlurmJob({
+      ...SLURM_PAYLOAD,
+      charge_id: 'charge-after-restart',
+      server_name: 'slurm-b',
+    });
+    expect(restartHit.ok).toBe(true);
+    expect(client.deductPoints).toHaveBeenCalledTimes(2);
+  });
+
+  it('缺少 job_id 的计费请求在扣费前被拒绝（CodeRabbit #936）', async () => {
+    const client = makeChargeClient();
+    store.save(makeStoredState());
+    const svc = makeChargeService(client);
+
+    const result = await svc.chargeSlurmJob({ ...SLURM_PAYLOAD, job_id: '' });
+
+    expect(result.ok).toBe(false);
+    expect(result.code).toBe('INVALID_CONFIG');
+    expect(result.message).toContain('job_id');
+    expect(client.deductPoints).not.toHaveBeenCalled();
   });
 });

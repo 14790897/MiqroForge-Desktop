@@ -22,7 +22,11 @@ export function ModelQuickPanel({ activeModel, onSaved, onGoToQraft }: ModelQuic
   const [saving, setSaving] = useState(false);
   const [savedFlash, setSavedFlash] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const { loggedIn } = useQraftStatus();
+  const { loggedIn, gatewayActive, aiGatewayKnown } = useQraftStatus();
+  // 可改模型 = 未登录时引导登录（现状）；登录时需网关 active；平台未下发网关
+  // 状态（aiGatewayKnown=false）视为可用，避免误锁存量账号。
+  const canUseModel = loggedIn && (gatewayActive || !aiGatewayKnown);
+  const gatewayBlocked = loggedIn && aiGatewayKnown && !gatewayActive;
 
   useEffect(() => {
     if (activeModel) setModelValue(activeModel);
@@ -70,8 +74,22 @@ export function ModelQuickPanel({ activeModel, onSaved, onGoToQraft }: ModelQuic
           <label className="text-xs font-medium text-[var(--text-muted)] uppercase tracking-wide">
             默认模型
           </label>
-          {loggedIn ? (
+          {canUseModel ? (
             <ModelSelect value={modelValue} onChange={setModelValue} />
+          ) : gatewayBlocked ? (
+            <div className="flex items-center justify-between gap-3 rounded-lg border border-[var(--border-subtle)] bg-[var(--surface-muted)] px-3 py-2.5">
+              <span className="text-sm text-[var(--text-muted)]">
+                AI 网关未就绪（平台开通中或不可用），暂不可选模型
+              </span>
+              <button
+                onClick={onGoToQraft}
+                data-testid="model-quickpanel-go-gateway"
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-white transition-colors shrink-0"
+              >
+                <LogIn size={13} />
+                查看平台账号
+              </button>
+            </div>
           ) : (
             <div className="flex items-center justify-between gap-3 rounded-lg border border-[var(--border-subtle)] bg-[var(--surface-muted)] px-3 py-2.5">
               <span className="text-sm text-[var(--text-muted)]">登录后使用平台内置模型</span>
@@ -87,7 +105,7 @@ export function ModelQuickPanel({ activeModel, onSaved, onGoToQraft }: ModelQuic
           )}
         </div>
 
-        {loggedIn && (
+        {canUseModel && (
           <div className="flex items-center gap-2">
             <button
               onClick={handleSave}
