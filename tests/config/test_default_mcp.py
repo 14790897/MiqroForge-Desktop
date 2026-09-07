@@ -15,7 +15,9 @@ def test_default_config_includes_hosted_slurm_gateway():
     assert isinstance(srv, MCPServerConfig)
     assert srv.type == "sse"
     assert srv.url == "http://124.220.57.194:9000/sse"
-    assert srv.insecure_http is True
+    # 默认 fail-closed（CWE-319）：非回环 http 未经显式 opt-in 不连接、
+    # 绝不发送登录凭据；用户勾选设置页开关或平台 https 后启用
+    assert srv.insecure_http is False
     # 凭据不入仓库：默认条目不含 headers，运行时从 token 文件注入
     assert srv.headers == {}
     assert srv.tool_timeout == 90

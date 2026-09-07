@@ -550,14 +550,16 @@ class MCPServerConfig(Base):
 # 零配置预置 URL/传输/超时；凭据不入仓库——登录后平台经 userinfo 下发
 # mcpGatewayKey，Desktop 写入 workspace/.qraft/token.json（0600），Python
 # 连接本服务器时自动注入 Authorization Bearer（见 _connect_one_server）。
-# 非回环 http 显式 opt-in（平台暂无 https）。键名含 "slurm" 使作业进入
-# 计费范围（#936：RUNNING 时扣 10 分）。用户显式配置 mcp_servers（含
-# 空对象）即覆盖此默认。
+# 默认 fail-closed（CWE-319，CodeRabbit #949 评审）：非回环 http 且未
+# 显式 opt-in 时连接被拒、绝不发送登录凭据——用户在设置页勾选
+# 「允许非回环 HTTP」或平台提供 https 后启用。键名含 "slurm" 使作业
+# 进入计费范围（#936：RUNNING 时扣 10 分）。用户显式配置 mcp_servers
+# （含空对象）即覆盖此默认。
 DEFAULT_MCP_SERVERS: dict = {
     "miqroforge-slurm": {
         "type": "sse",
         "url": "http://124.220.57.194:9000/sse",
-        "insecure_http": True,
+        "insecure_http": False,
         "tool_timeout": 90,
         "description": "MiQroForge 平台托管 SLURM 集群：作业提交/状态监控/取消、分区查询、输出与文件传输",
     },
