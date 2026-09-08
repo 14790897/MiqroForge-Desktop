@@ -233,6 +233,38 @@ test.describe('MCP 服务器集成', () => {
       expect(entry.command).toBe(mcpCommand.command);
       const savedArgs = entry.args ?? [];
       expect(savedArgs).toContain(SERVER_SCRIPT);
+
+      // ── #950 回归：重新打开「编辑」弹窗应回显已保存配置 ──
+      const uimcpCard = page.locator('.settings-hover-card').filter({ hasText: uiName });
+      await uimcpCard.getByTitle('编辑').click();
+      await expect(page.getByRole('heading', { name: '编辑 MCP 服务器' })).toBeVisible();
+      await expect(page.getByPlaceholder('my-mcp-server')).toHaveValue(uiName);
+      await expect(page.getByPlaceholder('npx')).toHaveValue(mcpCommand.command);
+      await expect(
+        page.getByPlaceholder('-y, @modelcontextprotocol/server-filesystem')
+      ).toHaveValue(argsStr);
+      await page.getByRole('button', { name: '取消' }).click();
+
+      // ── #950 报告场景：添加 SSE 服务器 → 徽标显示 sse → 编辑回显 URL/Headers ──
+      await page.getByRole('button', { name: '添加服务器' }).click();
+      const sseName = 'uisse';
+      const sseUrl = 'http://127.0.0.1:9/mcp'; // 丢弃端口：连接快速失败，不影响会话启动
+      const sseHeaders = 'X-Api-Key: mock-key';
+      await page.getByPlaceholder('my-mcp-server').fill(sseName);
+      await page.getByRole('button', { name: 'SSE' }).click();
+      await page.getByPlaceholder('http://localhost:8080/mcp').fill(sseUrl);
+      await page.getByPlaceholder('Authorization: Bearer token').fill(sseHeaders);
+      await page.getByRole('button', { name: '保存', exact: true }).click();
+      await expect(page.getByText(sseName, { exact: true })).toBeVisible({ timeout: 15_000 });
+      await expect(page.getByText('sse', { exact: true })).toBeVisible();
+
+      const sseCard = page.locator('.settings-hover-card').filter({ hasText: sseName });
+      await sseCard.getByTitle('编辑').click();
+      await expect(page.getByRole('heading', { name: '编辑 MCP 服务器' })).toBeVisible();
+      await expect(page.getByPlaceholder('my-mcp-server')).toHaveValue(sseName);
+      await expect(page.getByPlaceholder('http://localhost:8080/mcp')).toHaveValue(sseUrl);
+      await expect(page.getByPlaceholder('Authorization: Bearer token')).toHaveValue(sseHeaders);
+      await page.getByRole('button', { name: '取消' }).click();
     }
   );
 
@@ -243,6 +275,22 @@ test.describe('MCP 服务器集成', () => {
       // ── 新建会话（离开设置页）→ 新 RuntimeSession 在 start() 时连接 MCP ──
       await createNewConversation(page);
       await expect(page.locator('[data-testid="chat-input-container"]')).toBeVisible();
+
+      // #952 回归守卫：E2E 应用不得继承开发机的平台登录态。开发模式
+      // userData 按仓库隔离（index.ts），若 launchElectronApp 未隔离 qraft
+      // store，登录态会恢复 → 真实网关凭据同步进临时 workspace 的
+      // .qraft/token.json → 模型调用走真实网关、mock 收不到请求。
+      const qraftState = await page.evaluate(async () => {
+        try {
+          return await (window as any).miqi.qraft.status();
+        } catch {
+          return null;
+        }
+      });
+      expect(
+        qraftState?.loggedIn,
+        'E2E app must not inherit the developer machine platform login (see #952)'
+      ).toBeFalsy();
 
       // ── 发送任务 → mock 第一轮即调用 mcp_e2emcp_e2e_echo ──
       await sendMessage(page, 'MCP 测试：请调用 MCP 工具并返回结果');

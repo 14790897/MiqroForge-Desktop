@@ -100,6 +100,16 @@ def test_main_agent_prompt_guides_skill_discovery():
     assert "Never claim a skill does not exist" in main_agent.system_prompt
 
 
+def test_main_agent_prompt_guides_structured_comparison_output():
+    """#878: the main agent must be instructed to emit ```compare JSON for
+    multi-scheme parameter comparisons, so the desktop renders a comparison table."""
+    registry = AgentRegistry()
+    main_agent = registry.resolve("main")
+    assert "Structured Comparison Output" in main_agent.system_prompt
+    assert "```compare" in main_agent.system_prompt
+    assert '"schemes"' in main_agent.system_prompt
+
+
 def test_registry_register_duplicate_raises():
     registry = AgentRegistry()
     meta = AgentMetadata(

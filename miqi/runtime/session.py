@@ -185,8 +185,13 @@ class RuntimeSession:
 
         keep_alive = asyncio.Event()
         try:
+            from pathlib import Path as _Path
+
             self._mcp_tasks = await connect_mcp_servers(
-                mcp_servers, self.services.tool_registry, keep_alive
+                mcp_servers,
+                self.services.tool_registry,
+                keep_alive,
+                workspace=_Path(self._config.workspace_path) if self._config else None,
             )
         except BaseException:
             _session_logger.exception("MCP server connection failed during session start")

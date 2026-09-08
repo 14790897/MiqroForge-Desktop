@@ -439,6 +439,48 @@ export interface ElectronFixture {
   miqiSessionsDir: string;
 }
 
+/**
+ * 设置页「浏览器登录」真实链路：点按钮 → 主进程打开 MiQroForge 授权窗口
+ * （独立 partition）→ 未登录被 302 到平台登录页 → 填测试账号登录 →
+ * 服务端 302 回调 redirect_uri?code → 主进程拦截 code 换 token →
+ * 应用内出现「已登录」。
+ *
+ * 凭据经环境变量注入（QRAFT_PHONE / QRAFT_PASSWORD），调用方在未登录时
+ * 才调用（dev userData 可能残留上次登录态，须先判断「已登录」徽标）。
+ * 返回授权窗口的 Page（完成时主进程会自动关闭它）。
+ */
+export async function browserLogin(
+  page: Page,
+  electronApp: ElectronApplication,
+  phone: string,
+  password: string
+): Promise<Page> {
+  await page.getByText(/^(System Settings|系统设置)$/).click();
+  await page
+    .getByRole('tab')
+    .filter({ hasText: /MiQroForge/ })
+    .first()
+    .click();
+  await expect(page.getByTestId('qraft-browser-login-btn')).toBeVisible({ timeout: 15_000 });
+
+  const loginWindowPromise = electronApp.waitForEvent('window');
+  await page.getByTestId('qraft-browser-login-btn').click();
+  const loginWin = await loginWindowPromise;
+  await loginWin.waitForLoadState('domcontentloaded');
+
+  // 未登录 → 服务端 302 到平台登录页；已有登录态时直接进授权流程
+  await loginWin.waitForURL(/\/login/, { timeout: 30_000 }).catch(() => {
+    /* 已有登录态时直接进授权流程 */
+  });
+  await expect(loginWin.locator('#login_phone')).toBeVisible({ timeout: 30_000 });
+  await loginWin.fill('#login_phone', phone);
+  await loginWin.fill('#login_password', password);
+  await loginWin.getByRole('button', { name: /登\s*录/ }).click();
+
+  await expect(page.getByText('已登录')).toBeVisible({ timeout: 120_000 });
+  return loginWin;
+}
+
 /** Launch Electron app, wait for bridge ready, return { electronApp, page, miqiHome, miqiSessionsDir }.
  *
  *  - Creates a unique temporary MIQI_HOME so parallel test workers are fully isolated.
@@ -471,6 +513,16 @@ export async function launchElectronApp(
   const config = existsSync(destConfigPath)
     ? JSON.parse(readFileSync(destConfigPath, 'utf-8'))
     : {};
+  // ── E2E: start from a clean provider state ──
+  // The user's real config carries desktop.providerActivation (builtin key
+  // markers). The runtime pins builtin-activated providers to their official
+  // endpoint (#933), which would silently redirect specs that patch apiBase
+  // to local mock servers (confirm-card, bridge-chinese-error, …) at the
+  // real API — mock never receives a request. Strip the markers; specs that
+  // need activation re-add it explicitly via patchConfig.
+  if (config.desktop && typeof config.desktop === 'object') {
+    delete (config.desktop as Record<string, unknown>).providerActivation;
+  }
   if (patchConfig) patchConfig(config);
   const bypassAll = opts?.bypassAll ?? true;
   if (bypassAll) {
@@ -501,6 +553,17 @@ export async function launchElectronApp(
   const env: Record<string, string | undefined> = { ...process.env };
   env.MIQI_HOME = miqiHome;
   delete env.ELECTRON_RUN_AS_NODE;
+  // Isolate the platform login store per run (#952): dev mode overrides
+  // app.getPath('userData') to a checkout-shared dir (index.ts ws-hash), so
+  // the developer machine's real qraft-auth.json leaks into every E2E app.
+  // A restored login re-syncs real gateway creds (encryptedApiKey) into the
+  // temp workspace's .qraft/token.json, which routes model calls to the real
+  // AI gateway — mock LLMs never receive a request.  Point MIQI_QRAFT_STORE
+  // at the temp home (the product already reads this env, see qraft/ipc.ts)
+  // unless a spec presets its own store (ai-gateway.spec.ts).
+  if (!env.MIQI_QRAFT_STORE) {
+    env.MIQI_QRAFT_STORE = join(miqiHome, 'qraft-auth.json');
+  }
   // E2E default: set MIQI_E2E so the main process skips the #837 privacy-consent
   // gate (fresh userData has no stored consent). The privacy-consent spec opts
   // out via noConsentBypass to exercise the gate itself.
@@ -644,6 +707,10 @@ export async function relaunchElectronApp(
   const env: Record<string, string | undefined> = { ...process.env };
   env.MIQI_HOME = miqiHome;
   delete env.ELECTRON_RUN_AS_NODE;
+  // Same #952 login-store isolation as launchElectronApp (see above).
+  if (!env.MIQI_QRAFT_STORE) {
+    env.MIQI_QRAFT_STORE = join(miqiHome, 'qraft-auth.json');
+  }
   // Same #837 consent-gate bypass logic as launchElectronApp (see above).
   if (opts?.noConsentBypass) {
     delete env.MIQI_E2E;

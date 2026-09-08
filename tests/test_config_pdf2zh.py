@@ -50,7 +50,8 @@ def config_file(tmp_path: Path) -> Path:
 
 
 def _reload(path: Path) -> Config:
-    return Config.model_validate(json.loads(path.read_text()))
+    # Windows 默认编码（cp1252）读 UTF-8 配置会崩（默认 MCP 条目含中文描述）
+    return Config.model_validate(json.loads(path.read_text(encoding="utf-8")))
 
 
 # ---------------------------------------------------------------------------

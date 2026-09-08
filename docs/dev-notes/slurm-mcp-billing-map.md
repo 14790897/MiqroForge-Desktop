@@ -9,7 +9,7 @@ Slurm MCP 作业计费（issue #927，PR #936）：计费触发点为「slurm MC
 **架构**：
 - Python 握手桥 `miqi/agent/billing_resolver.py`（镜像 user_input_resolver 模式）：slurm MCP 工具（服务器名含 "slurm"）执行前，MCPToolWrapper 经会话发射器发 `slurm_job_charge_request`（charge_id/工具名/参数摘要/会话上下文）→ 等 Desktop 决议（25s 超时 fail-closed）→ 放行或「[计费阻止]」；无 Desktop 通道（headless/CLI）阻止。作业提交成功后从输出提取作业 ID（Submitted batch job N / JobId=N / slurm-N 3+ 位）经 `slurm_job_charge_enrich` 回传
 - bridge/loop.py：drain 注册 `set_billing_charge_emitter`；`billing.slurmResolve` 方法（带会话归属鉴权 + protocol_specs.BILLING_SLURM_RESOLVE，注意新增方法必须带 spec，否则 phase72 audit 的 legacy 计数会超）
-- Desktop：`QraftService.chargeSlurmJob`（10 分、source=slurm-job、memo={jobId,tool,args,session,turn}；charge_id 去重 + 历史文件跨重启不重复扣；token 失效先 refreshNow 重试一次）；历史 `userData/qraft-billing-history.json`（200 条上限，billed/insufficient/error），设置页展示；聊天区提示复用 points 事件流（「本次任务已扣 N 积分 · 可用余额 M」）
+- Desktop：`QraftService.chargeSlurmJob`（10 分、source=slurm-job、memo={jobId,tool,args,session,turn}；charge_id 去重 + 历史文件跨重启不重复扣；token 失效先 refreshNow 重试一次）；历史 `userData/qraft-billing-history.json`（200 条上限，billed/insufficient/error），设置页展示 + 状态栏积分按钮点击弹层展示（弹层内「在设置中查看全部」跳设置页）；聊天区提示复用 points 事件流（「本次任务已扣 N 积分 · 可用余额 M」）
 - orchestrator 对 `mcp_` 工具注入 `_session_key/_turn_id/_tool_call_id`（MCPToolWrapper pop 掉，不传给 MCP 服务端）
 
 **关键坑（#936 live E2E 暴露，已修）**：桌面主路径 `miqi/runtime/` 的 TurnRunner 经 `CapabilityResolver.resolve` 按 agent 静态白名单（agent_registry 的 available_tools）过滤 registry——用户配置的 MCP 工具（`mcp_<server>_<tool>`）**从未进入模型请求**，DeepSeek 只能幻觉裸名调用（submit_slurm_job）。修复：capabilities.py 放行 `mcp_`/`use_` 前缀（用户 opt-in 能力不受白名单约束），tests/runtime/test_capabilities.py 有穿透用例。注意 KUN runtime（kun_runtime/loop.py）不经过这个白名单，但桌面不用 KUN。

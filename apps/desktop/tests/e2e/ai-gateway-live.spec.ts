@@ -10,7 +10,7 @@
  *   npx playwright test --config=playwright.config.ts --project=electron ai-gateway-live.spec.ts
  *
  * 覆盖真实全链路（issue #922 / PR #946）：
- *   真实 Electron 应用 → QraftPage 手机号登录 → /oauth2/userinfo 下发
+ *   真实 Electron 应用 → QraftPage 浏览器登录（OAuth）→ /oauth2/userinfo 下发
  *   encryptedApiKey（网关状态行"可用"+ 配置版本）→ 聊天发消息
  *   → 主进程写 token.json → Python make_provider 路由 AnthropicProvider
  *   → 平台 AI 网关真实回复。
@@ -20,6 +20,7 @@ import { test, expect } from '@playwright/test';
 import {
   launchElectronApp,
   closeElectronApp,
+  browserLogin,
   createNewConversation,
   sendMessage,
   type ElectronFixture,
@@ -48,17 +49,9 @@ describeFn('AI 网关真实账号 live E2E (opt-in)', () => {
     const page = fixture.page;
 
     // 1. 设置页真实登录（幂等：dev userData 可能残留上次登录态）
-    await page.getByText(/^(System Settings|系统设置)$/).click();
-    await page
-      .getByRole('tab')
-      .filter({ hasText: /MiQroForge/ })
-      .first()
-      .click();
     const loggedInBadge = page.getByText('已登录');
     if (!(await loggedInBadge.isVisible({ timeout: 5000 }).catch(() => false))) {
-      await page.getByTestId('qraft-phone-input').fill(PHONE);
-      await page.getByTestId('qraft-password-input').fill(PASSWORD);
-      await page.getByTestId('qraft-login-btn').click();
+      await browserLogin(page, fixture.electronApp, PHONE, PASSWORD);
     }
     await expect(loggedInBadge).toBeVisible({ timeout: 90_000 });
 

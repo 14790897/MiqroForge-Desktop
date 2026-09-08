@@ -61,6 +61,11 @@ test.describe('Issue #922 — AI 网关状态门禁', () => {
     await expect(page.getByText('查看平台账号')).toBeVisible();
     await expect(page.getByText('登录后使用平台内置模型')).not.toBeVisible();
     await expect(page.getByRole('button', { name: '保存' })).not.toBeVisible();
+
+    // 模型设置页展示网关使用状态：透出平台下发的状态文案（开通中）
+    const gatewayBadge = page.getByTestId('model-gateway-status');
+    await expect(gatewayBadge).toBeVisible();
+    await expect(gatewayBadge).toContainText('开通中');
   });
 
   test('登录且网关 active：模型 tab 可正常选择与保存', async ({ page }) => {
@@ -79,6 +84,8 @@ test.describe('Issue #922 — AI 网关状态门禁', () => {
           baseUrl: 'https://test.forge.miqroera.com/api',
           aiGateway: { status: 'active', configVersion: 1 },
         },
+        // 默认模型为网关模型 → 状态行应显示「使用中」
+        activeModel: 'deepseek/deepseek-v4-flash',
       }),
     });
     await gotoModelTab(page);
@@ -87,6 +94,11 @@ test.describe('Issue #922 — AI 网关状态门禁', () => {
     await expect(page.getByRole('button', { name: '保存' })).toBeVisible({ timeout: 10_000 });
     // ModelSelect 已渲染（select 元素存在，含内置 DeepSeek 兜底预设）
     await expect(page.locator('select').first()).toBeVisible();
+
+    // 模型设置页展示网关使用状态：active + 网关模型 → 「使用中」
+    const gatewayBadge = page.getByTestId('model-gateway-status');
+    await expect(gatewayBadge).toBeVisible();
+    await expect(gatewayBadge).toContainText('使用中');
   });
 
   test('登录且网关非 active（failed）：聊天发送被拦截，chat.send 不被调用', async ({ page }) => {

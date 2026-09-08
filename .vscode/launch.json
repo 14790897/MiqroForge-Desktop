@@ -1,0 +1,32 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "打开 App（dev 模式）",
+      "type": "node",
+      "request": "launch",
+      "cwd": "${workspaceFolder}/apps/desktop",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "dev"],
+      "windows": {
+        "runtimeExecutable": "npm.cmd"
+      },
+      "console": "integratedTerminal"
+    },
+    {
+      "name": "调试主进程（dev + sourcemap）",
+      "type": "node",
+      "request": "launch",
+      "cwd": "${workspaceFolder}/apps/desktop",
+      "runtimeExecutable": "${workspaceFolder}/apps/desktop/node_modules/.bin/electron-vite",
+      "windows": {
+        "runtimeExecutable": "${workspaceFolder}/apps/desktop/node_modules/.bin/electron-vite.cmd"
+      },
+      "runtimeArgs": ["dev", "--sourcemap"],
+      "env": {
+        "REMOTE_DEBUGGING_PORT": "9222"
+      },
+      "console": "integratedTerminal"
+    }
+  ]
+}

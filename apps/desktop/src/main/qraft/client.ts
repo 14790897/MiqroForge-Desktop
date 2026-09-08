@@ -447,7 +447,7 @@ export class QraftClient {
   async getUserInfo(
     config: ResolvedQraftConfig,
     accessToken: string
-  ): Promise<Omit<QraftAccount, 'phone'> & { aiGateway?: QraftAiGateway }> {
+  ): Promise<Omit<QraftAccount, 'phone'> & { aiGateway?: QraftAiGateway; mcpGatewayKey?: string }> {
     const { res, bodyText } = await this.request(`${config.baseUrl}/oauth2/userinfo`, {
       headers: { Authorization: `Bearer ${accessToken}` },
     });
@@ -478,12 +478,17 @@ export class QraftClient {
             field('consumerGroupId') != null ? String(field('consumerGroupId')) : undefined,
         }
       : undefined;
+    // 平台托管 MCP 网关凭据（作 Authorization Bearer 使用）：平台下发后
+    // 由主进程写入 0600 token 文件，Python 连接默认网关时注入；缺失时
+    // 省略（未开通/未下发），调用方据此区分。
+    const mcpGatewayKey = String(field('mcpGatewayKey') ?? '');
     this.log('INFO', 'qraft: userinfo 获取成功');
     return {
       sub: String(data.sub ?? ''),
       username: String(data.username ?? ''),
       nickname: String(data.nickname ?? ''),
       ...(aiGateway ? { aiGateway } : {}),
+      ...(mcpGatewayKey ? { mcpGatewayKey } : {}),
     };
   }
 

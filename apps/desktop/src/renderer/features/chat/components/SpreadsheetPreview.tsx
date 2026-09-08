@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import type { CellMerge, StructuredSheet } from '../../../../shared/ipc';
+import { DataTable, type DataTableCell } from './DataTable';
 
 /**
  * 合并单元格布局计算（issue #877）：把 merges 转成每个单元格的
@@ -46,6 +47,24 @@ export function SpreadsheetPreview({ sheets }: Props) {
   const rows = sheet?.rows ?? [];
   const layout = buildMergeLayout(rows, sheet?.merges);
 
+  const tableRows: (DataTableCell | null)[][] = rows.map((row, r) =>
+    Array.from({ length: layout[r]?.length ?? row.length }, (_, c) => {
+      const span = layout[r]?.[c];
+      if (span === null) return null; // covered by a merge
+      const cell = row[c] ?? ''; // 短行缺列按空单元格渲染 (#889)
+      const isHeader = r === 0;
+      return {
+        content: cell === '' ? ' ' : cell,
+        rowSpan: span?.rowSpan ?? 1,
+        colSpan: span?.colSpan ?? 1,
+        background: isHeader ? 'var(--surface-muted)' : 'transparent',
+        color: isHeader ? 'var(--text)' : 'var(--text-muted)',
+        fontWeight: isHeader ? 600 : 400,
+        title: cell,
+      };
+    })
+  );
+
   return (
     <div className="flex flex-col" style={{ background: 'var(--surface)' }}>
       {sheets.length > 1 && (
@@ -66,45 +85,12 @@ export function SpreadsheetPreview({ sheets }: Props) {
           ))}
         </div>
       )}
-      <div className="overflow-auto p-2" style={{ maxHeight: '62vh' }}>
-        <table
-          className="border-collapse text-xs"
-          style={{ border: '1px solid var(--border-subtle)' }}
-        >
-          <tbody>
-            {rows.map((row, r) => (
-              <tr key={r}>
-                {Array.from({ length: layout[r]?.length ?? row.length }, (_, c) => {
-                  const span = layout[r]?.[c];
-                  if (span === null) return null; // covered by a merge
-                  const cell = row[c] ?? ''; // 短行缺列按空单元格渲染 (#889)
-                  const isHeader = r === 0;
-                  return (
-                    <td
-                      key={c}
-                      rowSpan={span?.rowSpan ?? 1}
-                      colSpan={span?.colSpan ?? 1}
-                      title={cell}
-                      className="px-2 py-1 align-top border whitespace-pre-wrap break-words"
-                      style={{
-                        borderColor: 'var(--border-subtle)',
-                        background: isHeader ? 'var(--surface-muted)' : 'transparent',
-                        color: isHeader ? 'var(--text)' : 'var(--text-muted)',
-                        fontWeight: isHeader ? 600 : 400,
-                        maxWidth: 320,
-                        minWidth: 40,
-                      }}
-                    >
-                      {cell === '' ? ' ' : cell}
-                    </td>
-                  );
-                })}
-              </tr>
-            ))}
-          </tbody>
-        </table>
-        {rows.length === 0 && <p className="text-xs text-text-faint px-2 py-4">（空表）</p>}
-      </div>
+      <DataTable
+        rows={tableRows}
+        emptyText="（空表）"
+        maxHeight="62vh"
+        wrapperClassName="overflow-auto p-2"
+      />
     </div>
   );
 }

@@ -21,6 +21,7 @@ import {
   createNewConversation,
   launchElectronApp,
   closeElectronApp,
+  browserLogin,
   type ElectronFixture,
 } from './helpers/electron-setup';
 
@@ -85,17 +86,14 @@ describeFn('Billing live E2E — slurm MCP RUNNING 扣分 (opt-in)', () => {
     { timeout: 360_000 },
     async () => {
       // 1. 设置页真实登录（dev userData 可能残留上次运行的登录态，幂等处理）
-      await page.getByText(/^(System Settings|系统设置)$/).click();
-      await page
-        .getByRole('tab')
-        .filter({ hasText: /MiQroForge/ })
-        .first()
-        .click();
       const loggedInBadge = page.getByText('已登录');
       if (!(await loggedInBadge.isVisible({ timeout: 5000 }).catch(() => false))) {
-        await page.getByTestId('qraft-phone-input').fill(process.env.QRAFT_PHONE!);
-        await page.getByTestId('qraft-password-input').fill(process.env.QRAFT_PASSWORD!);
-        await page.getByTestId('qraft-login-btn').click();
+        await browserLogin(
+          page,
+          electronApp,
+          process.env.QRAFT_PHONE!,
+          process.env.QRAFT_PASSWORD!
+        );
       }
       await expect(loggedInBadge).toBeVisible({ timeout: 90_000 });
 
