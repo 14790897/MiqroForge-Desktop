@@ -315,6 +315,15 @@ class SessionManager:
             logger.warning("Failed to load session {}: {}", key, exc)
             return None
 
+    def load_existing(self, key: str) -> Session | None:
+        """Load a session from disk without creating it or touching the cache.
+
+        Unlike get_or_create, a missing/corrupt session returns None with no
+        side effects — used by read-side probing of other workspace roots
+        (#956 folder-bound session resolution).
+        """
+        return self._load(key)
+
     def save(self, session: Session) -> None:
         """Persist session changes with append-only writes when possible."""
         with self._get_session_lock(session.key):
