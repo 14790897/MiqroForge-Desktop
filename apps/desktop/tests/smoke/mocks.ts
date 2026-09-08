@@ -33,6 +33,8 @@ export interface MockBridgeOptions {
    * progress 事件被丢弃。默认关闭，保持其余用例的既有行为。
    */
   hangChatSend?: boolean;
+  /** qraft.billingHistory 的返回结果。默认空列表。 */
+  qraftBillingHistoryResult?: Array<Record<string, unknown>>;
 }
 
 /** Build a self-contained init script that installs the mock bridge on
@@ -119,6 +121,7 @@ export function buildMockBridgeScript(opts: MockBridgeOptions = {}): string {
     }
   );
   const hangChatSendJson = opts.hangChatSend === true ? 'true' : 'false';
+  const qraftBillingHistoryJson = JSON.stringify(opts.qraftBillingHistoryResult || []);
 
   return `
 (function() {
@@ -459,7 +462,9 @@ export function buildMockBridgeScript(opts: MockBridgeOptions = {}): string {
         }
         return Promise.resolve(result);
       },
-      billingHistory: function() { return Promise.resolve([]); },
+      billingHistory: function() {
+        return Promise.resolve(JSON.parse(JSON.stringify(${qraftBillingHistoryJson})));
+      },
       onStatusChanged: function(cb) { return _on('qraftStatus', cb); },
     },
   };

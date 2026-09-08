@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react';
-import { Check, Loader2, LogIn, Save } from 'lucide-react';
+import { Check, Loader2, LogIn, Save, ShieldCheck } from 'lucide-react';
 import { invalidateConfigCache } from '../../../lib/configCache';
 import { sanitizeUiMessage } from '../../../lib/sanitizeUiMessage';
+import { gatewayStatusText } from '../../../lib/qraftGateway';
 import { useQraftStatus } from '../../../hooks/useQraftStatus';
 import { ModelSelect } from './ModelSelect';
 
@@ -10,6 +11,68 @@ import { ModelSelect } from './ModelSelect';
  * 仅保留「默认模型」下拉；移除 Provider 凭据（API Key / Base URL）配置。
  * 未登录时禁用模型选择并引导去 Qraft 登录。
  */
+
+/** 经平台 AI 网关路由的模型（须与 miqi/providers/gateway.py 的 GATEWAY_MODEL 一致）。 */
+export const GATEWAY_MODEL_ID = 'deepseek/deepseek-v4-flash';
+
+const BADGE_BASE =
+  'inline-flex shrink-0 items-center rounded-full px-2 py-0.5 text-[11px] font-medium';
+const BADGE_MUTED = `${BADGE_BASE} bg-[var(--surface-muted)] text-[var(--text-muted)]`;
+const BADGE_SUCCESS = `${BADGE_BASE} bg-[var(--success-bg)] text-[var(--success-text)]`;
+const BADGE_INFO = `${BADGE_BASE} bg-[var(--info-bg)] text-[var(--info)]`;
+const BADGE_WARNING = `${BADGE_BASE} bg-[var(--warning-bg)] text-[var(--warning)]`;
+
+interface GatewayUsageDisplay {
+  label: string;
+  hint: string;
+  badgeClass: string;
+}
+
+/**
+ * 「是否使用 Qraft AI 网关」的展示状态（#922）。
+ * 网关路由的前提（miqi/providers/factory.py）：deepseek + 网关实测模型 +
+ * 登录凭据 active。渲染侧无法看到凭据文件与网关 origin，用登录态 +
+ * aiGateway.status + 当前默认模型近似判定；凭据/origin 异常时运行时
+ * 会落回直连，此处展示的是平台下发状态。
+ */
+function gatewayUsageDisplay(
+  loggedIn: boolean,
+  gatewayActive: boolean,
+  aiGatewayKnown: boolean,
+  aiGatewayStatus: string | undefined,
+  activeModel: string
+): GatewayUsageDisplay {
+  if (!loggedIn) {
+    return {
+      label: '未登录',
+      hint: '登录平台账号后，模型调用经平台 AI 网关转发。',
+      badgeClass: BADGE_MUTED,
+    };
+  }
+  if (gatewayActive) {
+    if (activeModel === GATEWAY_MODEL_ID) {
+      return {
+        label: '使用中',
+        hint: '当前默认模型经平台 AI 网关转发，计入平台消费组配额。',
+        badgeClass: BADGE_SUCCESS,
+      };
+    }
+    return {
+      label: '已开通',
+      hint: `当前默认模型 ${activeModel || '未设置'} 不走网关（仅 ${GATEWAY_MODEL_ID} 经平台网关路由）。`,
+      badgeClass: BADGE_INFO,
+    };
+  }
+  if (aiGatewayKnown && aiGatewayStatus) {
+    const gw = gatewayStatusText(aiGatewayStatus);
+    return { label: gw.label, hint: gw.hint, badgeClass: BADGE_WARNING };
+  }
+  return {
+    label: '未下发',
+    hint: '平台未下发网关状态，模型调用走直连。',
+    badgeClass: BADGE_MUTED,
+  };
+}
 
 interface ModelQuickPanelProps {
   activeModel: string;
@@ -22,11 +85,18 @@ export function ModelQuickPanel({ activeModel, onSaved, onGoToQraft }: ModelQuic
   const [saving, setSaving] = useState(false);
   const [savedFlash, setSavedFlash] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const { loggedIn, gatewayActive, aiGatewayKnown } = useQraftStatus();
+  const { loggedIn, gatewayActive, aiGatewayKnown, aiGatewayStatus } = useQraftStatus();
   // 可改模型 = 未登录时引导登录（现状）；登录时需网关 active；平台未下发网关
   // 状态（aiGatewayKnown=false）视为可用，避免误锁存量账号。
   const canUseModel = loggedIn && (gatewayActive || !aiGatewayKnown);
   const gatewayBlocked = loggedIn && aiGatewayKnown && !gatewayActive;
+  const gatewayDisplay = gatewayUsageDisplay(
+    loggedIn,
+    gatewayActive,
+    aiGatewayKnown,
+    aiGatewayStatus,
+    activeModel
+  );
 
   useEffect(() => {
     if (activeModel) setModelValue(activeModel);
@@ -70,6 +140,19 @@ export function ModelQuickPanel({ activeModel, onSaved, onGoToQraft }: ModelQuic
       </div>
 
       <div className="flex flex-col gap-3">
+        {/* 是否使用 Qraft AI 网关（#922）：始终可见，便于确认模型调用走网关还是直连 */}
+        <div
+          className="flex flex-wrap items-center gap-x-2 gap-y-1 rounded-lg border border-[var(--border-subtle)] bg-[var(--surface-muted)] px-3 py-2"
+          data-testid="model-gateway-status"
+        >
+          <ShieldCheck size={13} className="shrink-0 text-[var(--text-faint)]" />
+          <span className="text-xs text-[var(--text-muted)]">AI 网关</span>
+          <span className={gatewayDisplay.badgeClass}>{gatewayDisplay.label}</span>
+          <span className="min-w-0 text-xs leading-relaxed text-[var(--text-faint)]">
+            {gatewayDisplay.hint}
+          </span>
+        </div>
+
         <div className="flex flex-col gap-1.5">
           <label className="text-xs font-medium text-[var(--text-muted)] uppercase tracking-wide">
             默认模型

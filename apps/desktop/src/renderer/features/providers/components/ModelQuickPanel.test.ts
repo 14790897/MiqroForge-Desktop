@@ -52,10 +52,10 @@ function loggedInGatewayUnknown() {
   };
 }
 
-const render = () =>
+const render = (activeModel = 'deepseek/deepseek-v4-flash') =>
   renderToStaticMarkup(
     createElement(ModelQuickPanel, {
-      activeModel: 'deepseek/deepseek-v4-flash',
+      activeModel,
       onSaved: () => {},
       onGoToQraft: () => {},
     })
@@ -99,5 +99,41 @@ describe('ModelQuickPanel（#835/#922 门控）', () => {
     const html = render();
     expect(html).toContain('保存');
     expect(html).not.toContain('AI 网关未就绪');
+  });
+
+  describe('AI 网关使用状态展示（#922）', () => {
+    it('未登录：显示「未登录」', () => {
+      const html = render();
+      expect(html).toContain('AI 网关');
+      expect(html).toContain('未登录');
+      expect(html).not.toContain('使用中');
+    });
+
+    it('登录 + 网关 active + 当前模型为网关模型：显示「使用中」', () => {
+      mockedStatus.mockReturnValue(loggedInGatewayActive());
+      const html = render('deepseek/deepseek-v4-flash');
+      expect(html).toContain('使用中');
+      expect(html).not.toContain('已开通');
+    });
+
+    it('登录 + 网关 active + 当前模型非网关模型：显示「已开通」并提示不走网关', () => {
+      mockedStatus.mockReturnValue(loggedInGatewayActive());
+      const html = render('deepseek/deepseek-v4-pro');
+      expect(html).toContain('已开通');
+      expect(html).not.toContain('使用中');
+      expect(html).toContain('deepseek/deepseek-v4-pro');
+    });
+
+    it('登录但网关非 active：显示平台下发状态（开通中）', () => {
+      mockedStatus.mockReturnValue(loggedInGatewayNotReady('provisioning'));
+      const html = render();
+      expect(html).toContain('开通中');
+    });
+
+    it('登录但网关状态未下发：显示「未下发」', () => {
+      mockedStatus.mockReturnValue(loggedInGatewayUnknown());
+      const html = render();
+      expect(html).toContain('未下发');
+    });
   });
 });

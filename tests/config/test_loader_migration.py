@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from miqi.config.loader import _migrate_config
+import json
+
+from miqi.config.loader import _migrate_config, load_config
 
 
 def test_migrate_resets_custom_model_to_configured_provider_model():
@@ -48,3 +50,27 @@ def test_migrate_leaves_other_models_untouched():
     data = {"agents": {"defaults": {"model": "deepseek/deepseek-v4-flash"}}}
     migrated = _migrate_config(data)
     assert migrated["agents"]["defaults"]["model"] == "deepseek/deepseek-v4-flash"
+
+
+def test_legacy_billing_key_does_not_break_config_load(tmp_path):
+    """#960：30 分计费闸门移除后，旧版写入的 billing 键仍必须可加载。
+
+    Config 继承 BaseSettings（extra 默认 forbid），把 billing 字段整个删掉
+    会让旧 config.json 校验失败，load_config 静默回退默认空配置——providers
+    全部丢失，表现为「尚未配置模型服务」。billing 字段须以透传 dict 保留。
+    """
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "billing": {"enabled": True, "costPerTask": 30, "source": "desktop-agent-task"},
+                "providers": {"deepseek": {"apiKey": "sk-ds-1234567890"}},
+                "agents": {"defaults": {"model": "deepseek/deepseek-v4-flash"}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    cfg = load_config(config_path)
+    # 关键断言：不是静默回退的默认空配置——providers 必须原样存活
+    assert cfg.providers.deepseek.api_key == "sk-ds-1234567890"
+    assert cfg.agents.defaults.model == "deepseek/deepseek-v4-flash"
