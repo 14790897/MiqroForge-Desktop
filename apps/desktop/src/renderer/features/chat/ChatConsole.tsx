@@ -2350,9 +2350,7 @@ export function ChatConsole({
   /** 拖拽锚点:按下时的鼠标 x 与面板宽。拖动量 = 锚点宽 + 鼠标位移,不用
    *  拖拽中实时变化的 window.innerWidth 反推——窗口跟随加宽会改变
    *  innerWidth,实时反推会把「已加宽」反馈回量宽,来回拖产生追尾/发粘。 */
-  const panelDragAnchor = useRef<{ clientX: number; width: number; applied: number } | null>(
-    null
-  );
+  const panelDragAnchor = useRef<{ clientX: number; width: number; applied: number } | null>(null);
   /** 面板 DOM 节点:拖拽中直改其宽度,避免每帧 setPanelWidth 让整个 ChatConsole
    *  (含长回复消息树)重建 VDOM——内容多的对话会因此卡。 */
   const assetsPanelRef = useRef<HTMLDivElement | null>(null);
@@ -6509,57 +6507,56 @@ export function ChatConsole({
                 </span>
               )}
             </div>
-              {/* \u5bf9\u8bdd\u6001\u5de5\u4f5c\u76ee\u5f55\u80f6\u56ca\uff08B \u65b9\u6848\uff09\uff1a\u4f1a\u8bdd\u5df2\u4ea7\u751f\u6d88\u606f\u540e\u5728\u5b50\u6807\u9898\u680f\u5c55\u793a\u5f53\u524d\u76ee\u5f55\uff0c
+            {/* \u5bf9\u8bdd\u6001\u5de5\u4f5c\u76ee\u5f55\u80f6\u56ca\uff08B \u65b9\u6848\uff09\uff1a\u4f1a\u8bdd\u5df2\u4ea7\u751f\u6d88\u606f\u540e\u5728\u5b50\u6807\u9898\u680f\u5c55\u793a\u5f53\u524d\u76ee\u5f55\uff0c
                   \u7a7a\u6001\u4e0d\u6e32\u67d3\uff08\u6b22\u8fce\u9875\u80f6\u56ca\u72ec\u7acb\u5728\u8f93\u5165\u6846\u4e0a\u65b9\uff09\u3002\u70b9\u51fb\u6362\u76ee\u5f55 \u2192 \u73b0\u6709 picker\uff0c
                   \u9009\u62e9\u5373\u5efa\u7ed1\u5230\u65b0\u76ee\u5f55\u7684\u4f1a\u8bdd\u3002 */}
-              {messages.length > 0 && (
-                <button
-                  type="button"
-                  onClick={(e) => {
-                    if (!streaming) void handleOpenWorkspacePicker(e.currentTarget);
-                  }}
-                  disabled={streaming}
-                  title={workspace ? `\u5de5\u4f5c\u76ee\u5f55\uff1a${workspace}` : '\u9ed8\u8ba4\u5de5\u4f5c\u76ee\u5f55'}
-                  aria-label="\u5de5\u4f5c\u76ee\u5f55"
-                  data-testid="chat-header-workspace-capsule"
-                  className={cn(
-                    'shrink-0 inline-flex items-center rounded-md border transition-colors disabled:opacity-45',
-                    subHeaderCompact
-                      ? 'h-6 w-6 justify-center'
-                      : 'gap-1 px-2 py-[3px] text-[11px] font-medium',
-                    workspace ? 'border-[var(--accent)]' : 'border-[var(--border-subtle)]'
-                  )}
-                  style={{
-                    background: workspace
-                      ? 'color-mix(in srgb, var(--surface-muted) 45%, var(--accent-soft))'
-                      : 'var(--surface-muted)',
-                    color: workspace ? 'var(--accent)' : 'var(--text-muted)',
-                  }}
-                >
-                  <Folder
-                    size={12}
-                    className="shrink-0"
-                    style={{ color: workspace ? 'var(--accent)' : 'var(--text-muted)' }}
+            {messages.length > 0 && (
+              <button
+                type="button"
+                onClick={(e) => {
+                  if (!streaming) void handleOpenWorkspacePicker(e.currentTarget);
+                }}
+                disabled={streaming}
+                title={
+                  workspace
+                    ? `\u5de5\u4f5c\u76ee\u5f55\uff1a${workspace}`
+                    : '\u9ed8\u8ba4\u5de5\u4f5c\u76ee\u5f55'
+                }
+                aria-label="\u5de5\u4f5c\u76ee\u5f55"
+                data-testid="chat-header-workspace-capsule"
+                className={cn(
+                  'shrink-0 inline-flex items-center rounded-md border transition-colors disabled:opacity-45',
+                  subHeaderCompact
+                    ? 'h-6 w-6 justify-center'
+                    : 'gap-1 px-2 py-[3px] text-[11px] font-medium',
+                  workspace ? 'border-[var(--accent)]' : 'border-[var(--border-subtle)]'
+                )}
+                style={{
+                  background: workspace
+                    ? 'color-mix(in srgb, var(--surface-muted) 45%, var(--accent-soft))'
+                    : 'var(--surface-muted)',
+                  color: workspace ? 'var(--accent)' : 'var(--text-muted)',
+                }}
+              >
+                <Folder
+                  size={12}
+                  className="shrink-0"
+                  style={{ color: workspace ? 'var(--accent)' : 'var(--text-muted)' }}
+                />
+                {!subHeaderCompact && (
+                  <span className="truncate max-w-[170px]" data-testid="chat-header-workspace-path">
+                    {workspace ?? '\u9ed8\u8ba4\u5de5\u4f5c\u76ee\u5f55'}
+                  </span>
+                )}
+                {!subHeaderCompact && workspace && (
+                  <span
+                    className="shrink-0 w-[5px] h-[5px] rounded-full"
+                    style={{ background: 'var(--accent)' }}
                   />
-                  {!subHeaderCompact && (
-                    <span
-                      className="truncate max-w-[170px]"
-                      data-testid="chat-header-workspace-path"
-                    >
-                      {workspace ?? '\u9ed8\u8ba4\u5de5\u4f5c\u76ee\u5f55'}
-                    </span>
-                  )}
-                  {!subHeaderCompact && workspace && (
-                    <span
-                      className="shrink-0 w-[5px] h-[5px] rounded-full"
-                      style={{ background: 'var(--accent)' }}
-                    />
-                  )}
-                  {!subHeaderCompact && (
-                    <ChevronDown size={12} className="shrink-0 opacity-70" />
-                  )}
-                </button>
-              )}
+                )}
+                {!subHeaderCompact && <ChevronDown size={12} className="shrink-0 opacity-70" />}
+              </button>
+            )}
             <div
               className="flex shrink-0 items-stretch overflow-hidden rounded-md shadow-[0_1px_0_rgba(18,18,18,0.05)]"
               style={{
@@ -7033,10 +7030,7 @@ export function ChatConsole({
               {/* 欢迎态工作目录胶囊：独立于输入框、在它正上方（同宽左对齐，不嵌进卡内）。
                   首条消息后隐藏——会话进行中改由子标题栏胶囊（B）承接。 */}
               {historyLoaded && messages.length === 0 && (
-                <div
-                  className="flex items-center pb-2.5"
-                  data-testid="inline-workspace-selector"
-                >
+                <div className="flex items-center pb-2.5" data-testid="inline-workspace-selector">
                   <div
                     role="button"
                     tabIndex={0}
@@ -7236,7 +7230,6 @@ export function ChatConsole({
                 </div>
               </div>
             </div>
-
           </div>
         </div>
 

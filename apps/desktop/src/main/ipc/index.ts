@@ -2375,7 +2375,10 @@ for m in ("pydantic", "httpx", "loguru"):
   // 聊天区因此不挤压;关闭(extra=0)还原到开面板前宽度。逐次记录左右实际扩展量用于
   // 精确还原,最大化/全屏/不可调大小或屏幕已无剩余空间时跳过。记录以窗口为键,
   // 窗口销毁后自然归零(下次开面板以当时宽度为基线)。
-  const panelExtraByWin = new WeakMap<BrowserWindow, { extra: number; left: number; right: number }>();
+  const panelExtraByWin = new WeakMap<
+    BrowserWindow,
+    { extra: number; left: number; right: number }
+  >();
   ipcMain.handle(IPC.APP_PANEL_EXTRA, (event, raw: unknown) => {
     const win = electron.BrowserWindow.fromWebContents(event.sender);
     if (

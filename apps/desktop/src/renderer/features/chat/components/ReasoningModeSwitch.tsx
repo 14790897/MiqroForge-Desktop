@@ -89,7 +89,9 @@ export const ReasoningModeSwitch: React.FC<ReasoningModeSwitchProps> = ({
         aria-label="回答模式"
         aria-expanded={open}
       >
-        <span style={{ width: 6, height: 6, borderRadius: '50%', background: cur.color, flexShrink: 0 }} />
+        <span
+          style={{ width: 6, height: 6, borderRadius: '50%', background: cur.color, flexShrink: 0 }}
+        />
         <span
           title={cur.label}
           style={{

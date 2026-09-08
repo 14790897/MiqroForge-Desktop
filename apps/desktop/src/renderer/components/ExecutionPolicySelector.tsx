@@ -126,7 +126,15 @@ export function ExecutionPolicySelector({ policy, onChange, disabled, onOpenAppr
               policy === 'auto' ? `${cur.color}14` : 'var(--surface)';
           }}
         >
-          <span style={{ width: 6, height: 6, borderRadius: '50%', background: cur.color, flexShrink: 0 }} />
+          <span
+            style={{
+              width: 6,
+              height: 6,
+              borderRadius: '50%',
+              background: cur.color,
+              flexShrink: 0,
+            }}
+          />
           <span
             title={cur.label}
             style={{
@@ -140,9 +148,7 @@ export function ExecutionPolicySelector({ policy, onChange, disabled, onOpenAppr
             {cur.label}
           </span>
           <span style={{ fontSize: 8, opacity: 0.3, flexShrink: 0 }}>▾</span>
-          {cur.key === 'auto' && (
-            <span style={{ fontSize: 13, flexShrink: 0 }}>⚠</span>
-          )}
+          {cur.key === 'auto' && <span style={{ fontSize: 13, flexShrink: 0 }}>⚠</span>}
         </button>
 
         <div
