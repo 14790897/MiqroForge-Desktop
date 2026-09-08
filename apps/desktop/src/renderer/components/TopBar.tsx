@@ -51,11 +51,7 @@ function getBypassTitle(status: ApprovalBypassStatus | null, autoMode: boolean =
   return labels.length > 0 ? `已绕过: ${labels.join('、')}` : '打开审批设置';
 }
 
-export function TopBar({
-  onOpenApprovals,
-}: {
-  onOpenApprovals?: () => void;
-}) {
+export function TopBar({ onOpenApprovals }: { onOpenApprovals?: () => void }) {
   const { status, start } = useRuntime();
   const [approvalBypass, setApprovalBypass] = useState<ApprovalBypassStatus | null>(null);
   const [bypassHovered, setBypassHovered] = useState(false);
