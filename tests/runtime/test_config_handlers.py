@@ -245,6 +245,92 @@ async def test_config_update_rejects_custom_model_even_with_gateway(fake_config,
     assert exc_info.value.code == "INVALID_PARAMS"
 
 
+# ── 平台 AI 网关路由与保存门控（#922 收尾） ─────────────────────────────
+
+
+def _write_qraft_gateway_token(config, *, status: str = "active") -> None:
+    """在 config 的 workspace 下写入带 aiGateway 块的 token 文件。"""
+    import json
+    from pathlib import Path
+
+    token_file = Path(config.agents.defaults.workspace) / ".qraft" / "token.json"
+    token_file.parent.mkdir(parents=True, exist_ok=True)
+    token_file.write_text(json.dumps({
+        "accessToken": "tok-123",
+        "aiGateway": {
+            "encryptedApiKey": "sk-test-gateway-secret",
+            "status": status,
+            "configVersion": 1,
+        },
+    }), encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_config_update_accepts_gateway_model_with_active_qraft_creds(
+    fake_config, fake_provider, tmp_path, monkeypatch,
+):
+    """平台网关凭据 active 时，网关实测模型可保存 —— 门控须与
+    factory.make_provider 的网关路由一致（#922）；登录用户无任何本地
+    provider 凭据时，这是唯一可用的模型。"""
+    from unittest import mock
+
+    from miqi.runtime.config_handlers import config_update_handler
+
+    monkeypatch.delenv("QRAFT_GATEWAY_BASE", raising=False)
+    _write_qraft_gateway_token(fake_config)
+    registry = _setup_registry(fake_config, tmp_path)
+
+    with mock.patch("miqi.config.loader.save_config"):
+        result = await config_update_handler(
+            "req-1",
+            {"config": {"agents": {"defaults": {"model": "deepseek/deepseek-v4-flash"}}}},
+            "client-1", None, registry,
+        )
+    assert result["result"]["saved"] is True
+
+
+@pytest.mark.asyncio
+async def test_config_update_rejects_gateway_model_without_qraft_creds(
+    fake_config, fake_provider, tmp_path, monkeypatch,
+):
+    """无网关凭据时，网关模型与其他模型一样必须由本地 provider 凭据背书。"""
+    from miqi.runtime.app_server import AppServerError
+    from miqi.runtime.config_handlers import config_update_handler
+
+    monkeypatch.delenv("QRAFT_GATEWAY_BASE", raising=False)
+    registry = _setup_registry(fake_config, tmp_path)
+
+    with pytest.raises(AppServerError) as exc_info:
+        await config_update_handler(
+            "req-1",
+            {"config": {"agents": {"defaults": {"model": "deepseek/deepseek-v4-flash"}}}},
+            "client-1", None, registry,
+        )
+    assert exc_info.value.code == "INVALID_PARAMS"
+
+
+@pytest.mark.asyncio
+async def test_config_update_rejects_non_gateway_model_even_with_qraft_creds(
+    fake_config, fake_provider, tmp_path, monkeypatch,
+):
+    """网关凭据 active 只放行网关实测模型 —— 其余 deepseek 模型运行时仍走
+    直连（factory.make_provider），不能借网关凭据保存。"""
+    from miqi.runtime.app_server import AppServerError
+    from miqi.runtime.config_handlers import config_update_handler
+
+    monkeypatch.delenv("QRAFT_GATEWAY_BASE", raising=False)
+    _write_qraft_gateway_token(fake_config)
+    registry = _setup_registry(fake_config, tmp_path)
+
+    with pytest.raises(AppServerError) as exc_info:
+        await config_update_handler(
+            "req-1",
+            {"config": {"agents": {"defaults": {"model": "deepseek/deepseek-v4-pro"}}}},
+            "client-1", None, registry,
+        )
+    assert exc_info.value.code == "INVALID_PARAMS"
+
+
 @pytest.mark.asyncio
 async def test_config_update_accepts_model_of_configured_provider(fake_config, fake_provider, tmp_path):
     """#929 review：模型归属的 provider 持有凭据（或经网关路由）时放行。"""
