@@ -248,6 +248,14 @@ describe('_markUserTwinMatches 一对一去重匹配（#891 复核 + #968）', (
     ).toEqual([false]);
   });
 
+  it('#968 复核：文档解析失败占位（[name: 大小 — parsing on server]）可剥离', () => {
+    // handleSend catch 分支：冒号后先带 formatFileSize，再是 parsing on server——
+    // 早期规则要求 phrase 紧跟冒号导致永不匹配（CodeRabbit 阻塞项）
+    expect(
+      _markUserTwinMatches([u('看')], [u('看\n\n[a.pdf: 1.2 MB — parsing on server]')])
+    ).toEqual([true]);
+  });
+
   it('#968 复核：同图真实副本可认领（装饰名守卫通过）', () => {
     expect(
       _markUserTwinMatches(

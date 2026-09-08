@@ -1377,7 +1377,7 @@ function _isPersistedCopyOf(frontendTs: number | undefined, copyTs: number | und
 // 后果是 key 不相等 → 气泡与其副本并存（#968 双显示，方向安全），绝不会让
 // 不同消息的 key 意外相等而吞掉真实消息（方向危险）。
 const _DEDUP_TAIL_SECTION_RES =
-  /(?:^|\n\n)(?:\[系统提示：[^\]]*\]|\[Image: [^\n]+\]|\[File: [^\n]+\]\n```\n[\s\S]*?\n```|--- Document: [^\n]+ ---\n[\s\S]*?\n--- End of [^\n]+ ---|\[[^\n]+?: (?:scanned PDF|binary file|parsing on server)[^\]]*\])\s*$/;
+  /(?:^|\n\n)(?:\[系统提示：[^\]]*\]|\[Image: [^\n]+\]|\[File: [^\n]+\]\n```\n[\s\S]*?\n```|--- Document: [^\n]+ ---\n[\s\S]*?\n--- End of [^\n]+ ---|\[[^\n]+?: [^\]]*?(?:scanned PDF|binary file|parsing on server)[^\]]*\])\s*$/;
 
 function _userContentDedupKey(content: string): string {
   let s = content;
