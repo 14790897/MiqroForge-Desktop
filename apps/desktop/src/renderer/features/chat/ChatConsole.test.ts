@@ -304,6 +304,15 @@ describe('_markUserTwinMatches 一对一去重匹配（#891 复核 + #968）', (
       },
     ]);
     expect(ui2.find((m) => m.role === 'user')?.attachments?.[0]?.name).toBe('photo.png');
+    // 文件名含 ] + 指纹尾：以 fp 为锚反推名称，不得在名字内的 ] 截断（CodeRabbit）
+    const ui3 = sessionMsgsToUi([
+      {
+        role: 'user',
+        content: `看图\n\n[Image: IMG[1].png (fp:${fpa})]`,
+        timestamp: '2026-09-01T00:00:00Z',
+      },
+    ]);
+    expect(ui3.find((m) => m.role === 'user')?.attachments?.[0]?.name).toBe('IMG[1].png');
   });
 
   it('#968 复核：文档解析失败占位（[name: 大小 — parsing on server]）可剥离', () => {

@@ -191,9 +191,12 @@ interface FileChip {
   category: ReturnType<typeof getDocCategory>;
 }
 
-// 名称捕获容忍可选的内容指纹尾（(fp:64hex)，#968 复核 CodeRabbit #969）——
-// 旧版无指纹占位仍能解析（向后兼容）；惰性名称 + 回溯使带指纹的名字只取真名。
-const IMAGE_PLACEHOLDER_RES = /\[Image:\s*([^\]]+?)(?:\s*\(fp:[0-9a-f]{64}\))?\]/g;
+// #968 复核（CodeRabbit #969）：图片占位符解析——两分支交替：
+// ① 带内容指纹尾 (fp:64hex) 的新装饰：以 fp 尾为锚点反推名称（名称可含 "]"，
+//    如 IMG[1].png——旧式从首个 ] 截断会把整条装饰匹配崩坏、图片恢复丢失）；
+// ② 旧版无指纹装饰：回到 [^\]]+ 语义（名称含 ] 的旧版装饰维持历史限制）。
+// 名称与装饰均不含换行，捕获用 [^\n] 限定。
+const IMAGE_PLACEHOLDER_RES = /\[Image:\s*([^\n]*?)\s*\(fp:[0-9a-f]{64}\)\]|\[Image:\s*([^\]]+)\]/g;
 
 /** Extract image attachments from the "[Image: name]" placeholder the sender
  *  embeds. dataUrl stays undefined — it is re-read from the session files dir
@@ -203,7 +206,7 @@ const IMAGE_PLACEHOLDER_RES = /\[Image:\s*([^\]]+?)(?:\s*\(fp:[0-9a-f]{64}\))?\]
 export const INSTALL_WARNING_EVENT = 'miqi:system-install-warning';
 export type InstallWarningKind = 'persist' | 'runtime';
 function extractImageAttachmentsFromContent(content: string): Attachment[] | undefined {
-  const names = [...content.matchAll(IMAGE_PLACEHOLDER_RES)].map((m) => m[1].trim());
+  const names = [...content.matchAll(IMAGE_PLACEHOLDER_RES)].map((m) => (m[1] ?? m[2]).trim());
   if (names.length === 0) return undefined;
   return names.map((name) => ({
     name,
