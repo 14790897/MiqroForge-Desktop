@@ -23,7 +23,7 @@ async function gotoQraftTab(
 }
 
 test.describe('Issue #726 MiQroForge 平台登录设置页', () => {
-  test('未登录时显示登录表单：浏览器登录入口、手机号、密码（掩码输入）、环境与高级设置', async ({
+  test('未登录时显示登录表单：浏览器登录入口、手机号、密码（掩码输入）与高级设置', async ({
     page,
   }) => {
     await gotoQraftTab(page);
@@ -38,8 +38,9 @@ test.describe('Issue #726 MiQroForge 平台登录设置页', () => {
     await expect(page.getByTestId('qraft-browser-login-btn')).toBeVisible();
     await expect(page.getByTestId('qraft-browser-login-btn')).toContainText('浏览器登录');
     await expect(page.getByTestId('qraft-login-btn')).toBeVisible();
-    await expect(page.getByRole('button', { name: '测试环境' })).toBeVisible();
-    await expect(page.getByRole('button', { name: '生产环境' })).toBeVisible();
+    // 环境选择已隐藏（生产域名未上线，仅测试环境可用）
+    await expect(page.getByRole('button', { name: '测试环境' })).toHaveCount(0);
+    await expect(page.getByRole('button', { name: '生产环境' })).toHaveCount(0);
     // 高级设置默认折叠
     await expect(page.getByText('高级设置（接入配置，默认按环境预填）')).toBeVisible();
     await expect(page.getByText('client_id')).not.toBeVisible();

@@ -86,7 +86,7 @@ test.describe('MiQroForge 平台登录 E2E (issue #726)', () => {
     if (existsSync(storePath)) rmSync(storePath, { force: true });
   });
 
-  test('登录表单渲染：手机号/密码（掩码）/环境/高级设置默认折叠', async () => {
+  test('登录表单渲染：手机号/密码（掩码）/高级设置默认折叠', async () => {
     await gotoQraftTab(page);
 
     const phoneInput = page.getByTestId('qraft-phone-input');
@@ -95,8 +95,9 @@ test.describe('MiQroForge 平台登录 E2E (issue #726)', () => {
     await expect(passwordInput).toBeVisible();
     await expect(passwordInput).toHaveAttribute('type', 'password');
     await expect(page.getByTestId('qraft-login-btn')).toBeVisible();
-    await expect(page.getByRole('button', { name: '测试环境' })).toBeVisible();
-    await expect(page.getByRole('button', { name: '生产环境' })).toBeVisible();
+    // 环境选择已隐藏（生产域名未上线，仅测试环境可用）
+    await expect(page.getByRole('button', { name: '测试环境' })).toHaveCount(0);
+    await expect(page.getByRole('button', { name: '生产环境' })).toHaveCount(0);
     // 高级设置默认折叠，展开后出现接入配置输入框
     await expect(page.getByTestId('qraft-baseurl-input')).not.toBeVisible();
     await page.getByText('高级设置（接入配置，默认按环境预填）').click();

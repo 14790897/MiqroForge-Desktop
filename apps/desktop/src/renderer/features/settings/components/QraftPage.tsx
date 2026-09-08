@@ -94,30 +94,6 @@ function gatewayStatusText(status: string): { label: string; hint: string } {
   }
 }
 
-const ModeBtn = ({
-  value,
-  current,
-  set,
-  label,
-}: {
-  value: 'test' | 'prod';
-  current: 'test' | 'prod';
-  set: (v: 'test' | 'prod') => void;
-  label: string;
-}) => (
-  <button
-    onClick={() => set(value)}
-    className={cn(
-      'settings-hover-tab px-3 py-1.5 rounded-lg text-body-sm border',
-      current === value
-        ? 'bg-[var(--accent-soft)] text-[var(--accent)] border-[var(--accent)]'
-        : 'bg-[var(--surface)] text-[var(--text-muted)] border-[var(--border)] hover:border-[var(--accent)]'
-    )}
-  >
-    {label}
-  </button>
-);
-
 export function QraftPage() {
   const [status, setStatus] = useState<QraftStatus | null>(null);
   const [loading, setLoading] = useState(true);
@@ -125,7 +101,6 @@ export function QraftPage() {
   const [phone, setPhone] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
-  const [env, setEnv] = useState<'test' | 'prod'>('test');
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [baseUrl, setBaseUrl] = useState('');
   const [clientId, setClientId] = useState('');
@@ -184,7 +159,7 @@ export function QraftPage() {
         return;
       }
       const result = await window.miqi.qraft.login(phone.trim(), password, {
-        env,
+        env: 'test',
         baseUrl: baseUrl.trim() || undefined,
         clientId: clientId.trim() || undefined,
         clientSecret: clientSecret.trim() || undefined,
@@ -210,7 +185,7 @@ export function QraftPage() {
     setBrowserNotice(null);
     try {
       const result = await window.miqi.qraft.browserLogin({
-        env,
+        env: 'test',
         baseUrl: baseUrl.trim() || undefined,
         clientId: clientId.trim() || undefined,
         clientSecret: clientSecret.trim() || undefined,
@@ -357,15 +332,6 @@ export function QraftPage() {
             <div className="h-px flex-1 bg-[var(--border-subtle)]" />
           </div>
 
-          {/* 环境选择 */}
-          <div className="flex flex-col gap-1.5">
-            <label className="text-size-sm font-medium text-[var(--text-muted)]">环境</label>
-            <div className="flex gap-2">
-              <ModeBtn value="test" current={env} set={setEnv} label="测试环境" />
-              <ModeBtn value="prod" current={env} set={setEnv} label="生产环境" />
-            </div>
-          </div>
-
           <div className="flex flex-col gap-1.5">
             <label
               htmlFor="qraft-phone"
@@ -497,7 +463,7 @@ export function QraftPage() {
                   />
                 </div>
                 <p className="text-size-2xs text-[var(--text-faint)]">
-                  生产环境必须使用在 MiQroForge 平台注册的回调地址；测试环境不校验注册值。
+                  当前为测试环境，不校验注册值。生产环境上线后再开放环境选择。
                 </p>
               </div>
             )}
