@@ -15,6 +15,7 @@ when the event loop shuts down.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 import uuid
@@ -600,6 +601,13 @@ class HistoryRuntime:
                 ),
             )
             await db.commit()
+        except asyncio.CancelledError:
+            # CancelledError 不是 Exception 子类，只接 except Exception 会漏掉
+            # 它：回合任务取消落在事务中途时，不回滚会把本连接的写锁一直
+            # 滞留（与 test_issue_886 database is locked 同源）。ROLLBACK 用
+            # shield——任务已处于取消态，普通 await 会被立即再次取消。
+            await asyncio.shield(db.execute("ROLLBACK"))
+            raise
         except Exception:
             await db.execute("ROLLBACK")
             raise
