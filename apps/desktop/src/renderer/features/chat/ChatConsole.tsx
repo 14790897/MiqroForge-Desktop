@@ -1547,8 +1547,9 @@ function _persistedCoversAttachments(
         } else {
           // 占位装饰：同名不同字节的不可提取文档生成相同占位 + 各自 (fp:…)，
           // 按 name+fp 分组数出现条数（同名字同 fp 的重复附件不得共用一条）。
+          // key 分隔符用 \x1f（任何 OS 文件名都不合法），避免文件名含 | 解析错位。
           if (!a.contentFp) return false;
-          const key = `${a.name}|${a.contentFp}`;
+          const key = `${a.name}\x1f${a.contentFp}`;
           fpNeed.set(key, (fpNeed.get(key) ?? 0) + 1);
         }
         break;
@@ -1564,7 +1565,7 @@ function _persistedCoversAttachments(
     if (_countOccurrences(pmContent, sig) < n) return false;
   }
   for (const [key, n] of fpNeed) {
-    const sep = key.indexOf('|');
+    const sep = key.indexOf('\x1f');
     const name = key.slice(0, sep);
     const fp = key.slice(sep + 1);
     if (_countPlaceholderFp(pmContent, name, fp) < n) return false;
