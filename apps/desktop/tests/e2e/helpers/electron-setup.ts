@@ -553,6 +553,17 @@ export async function launchElectronApp(
   const env: Record<string, string | undefined> = { ...process.env };
   env.MIQI_HOME = miqiHome;
   delete env.ELECTRON_RUN_AS_NODE;
+  // Isolate the platform login store per run (#952): dev mode overrides
+  // app.getPath('userData') to a checkout-shared dir (index.ts ws-hash), so
+  // the developer machine's real qraft-auth.json leaks into every E2E app.
+  // A restored login re-syncs real gateway creds (encryptedApiKey) into the
+  // temp workspace's .qraft/token.json, which routes model calls to the real
+  // AI gateway — mock LLMs never receive a request.  Point MIQI_QRAFT_STORE
+  // at the temp home (the product already reads this env, see qraft/ipc.ts)
+  // unless a spec presets its own store (ai-gateway.spec.ts).
+  if (!env.MIQI_QRAFT_STORE) {
+    env.MIQI_QRAFT_STORE = join(miqiHome, 'qraft-auth.json');
+  }
   // E2E default: set MIQI_E2E so the main process skips the #837 privacy-consent
   // gate (fresh userData has no stored consent). The privacy-consent spec opts
   // out via noConsentBypass to exercise the gate itself.
@@ -696,6 +707,10 @@ export async function relaunchElectronApp(
   const env: Record<string, string | undefined> = { ...process.env };
   env.MIQI_HOME = miqiHome;
   delete env.ELECTRON_RUN_AS_NODE;
+  // Same #952 login-store isolation as launchElectronApp (see above).
+  if (!env.MIQI_QRAFT_STORE) {
+    env.MIQI_QRAFT_STORE = join(miqiHome, 'qraft-auth.json');
+  }
   // Same #837 consent-gate bypass logic as launchElectronApp (see above).
   if (opts?.noConsentBypass) {
     delete env.MIQI_E2E;
