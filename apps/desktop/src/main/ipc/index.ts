@@ -335,6 +335,39 @@ export function registerIpcHandlers(bridge: BridgeManager): void {
           safeSend('userInput:resolved', data);
         } else if (type === 'subagent_result') {
           safeSend('chat:subagent_result', data);
+        } else if (type === 'slurm_job_running') {
+          // Slurm 作业 RUNNING 扣费（issue #927）：主进程发起扣费（10 分/次，
+          // 按作业 ID 去重），结果以 #915 的 points 事件流在聊天区展示。
+          // 作业已在运行，扣费失败（余额不足等）不阻断作业，仅记录并提示。
+          void (async () => {
+            const { getQraftService } = await import('../qraft/ipc');
+            const payload = (data ?? {}) as Record<string, unknown>;
+            const result = await getQraftService().chargeSlurmJob({
+              charge_id: String(payload.charge_id ?? ''),
+              job_id: String(payload.job_id ?? ''),
+              server_name: String(payload.server_name ?? ''),
+              tool_name: String(payload.tool_name ?? ''),
+              args_summary: String(payload.args_summary ?? ''),
+              session_key: String(payload.session_key ?? ''),
+              turn_id: String(payload.turn_id ?? ''),
+            });
+            // 去重命中（该作业已计费过）：不当作新的扣费播报，聊天区
+            // 不出现重复的「已扣 10 积分」（CodeRabbit #936 评审）。
+            if (result.dedup) return;
+            safeSend('chat:progress', {
+              stream: 'points',
+              type: result.ok ? 'billed' : 'blocked',
+              points_cost: 10,
+              balance: result.balance ?? null,
+              message: result.ok
+                ? `Slurm 作业已扣 10 积分，可用余额 ${result.balance}`
+                : (result.message ?? 'Slurm 作业计费失败'),
+            });
+          })().catch((err) => {
+            console.error(
+              `[qraft] slurm 计费处理异常：${err instanceof Error ? err.message : err}`
+            );
+          });
         } else if (type === 'chat:delta' || type === 'delta') {
           safeSend('chat:progress', data);
         }
@@ -1526,6 +1559,11 @@ for m in ("pydantic", "httpx", "loguru"):
     return res;
   });
 
+  // #854: allow_system_installs runtime toggle (no restart)
+  ipcMain.handle(IPC.SANDBOX_SET_ALLOW_SYSTEM_INSTALLS, async (_event, enabled: boolean) => {
+    return bridge.send('sandbox.setAllowSystemInstalls', { enabled });
+  });
+
   ipcMain.handle(IPC.DIALOG_OPEN_FILE, async () => {
     const result = await dialog.showOpenDialog({
       properties: ['openFile', 'openDirectory'],
@@ -2308,5 +2346,28 @@ for m in ("pydantic", "httpx", "loguru"):
   ipcMain.handle(IPC.APP_QUIT, () => {
     app.quit();
     return { ok: true };
+  });
+
+  // 空会话回到欢迎态后把窗口带回前台（renderer 触发）。best-effort：窗口未聚焦
+  // 则 restore/show/focus；仍不聚焦则 moveTop 重试。{ hard: true } 表示 renderer
+  // 检测到 document.hasFocus()==false（window.confirm 模态关闭后页面焦点未交还）——
+  // 此时窗口即便已 OS 聚焦，win.focus() 也不产生激活变化，须 blur→focus 逼
+  // Chromium 重新下发页面焦点，否则键盘事件被吞、输入框点了没反应。
+  ipcMain.handle(IPC.APP_FOCUS, (_event, opts) => {
+    const win = electron.BrowserWindow.fromWebContents(_event.sender);
+    if (!win) return { ok: false };
+    const hard = !!opts && typeof opts === 'object' && (opts as { hard?: boolean }).hard === true;
+    if (win.isMinimized()) win.restore();
+    win.show();
+    win.focus();
+    if (hard && !win.isDestroyed()) {
+      win.blur();
+      win.focus();
+      if (win.isMinimized()) win.restore();
+    } else if (!win.isFocused() && !win.isDestroyed()) {
+      win.moveTop();
+      win.focus();
+    }
+    return { ok: true, focused: !win.isDestroyed() && win.isFocused() };
   });
 }

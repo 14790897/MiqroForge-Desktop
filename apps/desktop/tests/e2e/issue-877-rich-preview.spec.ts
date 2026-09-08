@@ -18,7 +18,12 @@ import { test, expect } from '@playwright/test';
 import type { ElectronApplication, Page } from '@playwright/test';
 import { mkdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { launchElectronApp, closeElectronApp, waitForInputReady } from './helpers/electron-setup';
+import {
+  launchElectronApp,
+  closeElectronApp,
+  waitForInputReady,
+  ensurePersistedSession,
+} from './helpers/electron-setup';
 
 const FIXTURES_DIR = join(__dirname, 'fixtures');
 const OUT_DIR = join(__dirname, '../../test-results/issue-877');
@@ -80,9 +85,7 @@ test.describe('issue #877 rich preview', () => {
     const page = fixture.page;
     await waitForInputReady(page);
 
-    const sessions: any = await page.evaluate(() => (window as any).miqi.sessions.list());
-    const key = (sessions?.sessions ?? [])[0]?.key;
-    expect(key).toBeTruthy();
+    const key = await ensurePersistedSession(page);
 
     await stageTrackedFile(
       electronApp,
@@ -122,9 +125,7 @@ test.describe('issue #877 rich preview', () => {
     const page = fixture.page;
     await waitForInputReady(page);
 
-    const sessions: any = await page.evaluate(() => (window as any).miqi.sessions.list());
-    const key = (sessions?.sessions ?? [])[0]?.key;
-    expect(key).toBeTruthy();
+    const key = await ensurePersistedSession(page);
 
     await stageTrackedFile(
       electronApp,
@@ -156,9 +157,7 @@ test.describe('issue #877 rich preview', () => {
     const page = fixture.page;
     await waitForInputReady(page);
 
-    const sessions: any = await page.evaluate(() => (window as any).miqi.sessions.list());
-    const key = (sessions?.sessions ?? [])[0]?.key;
-    expect(key).toBeTruthy();
+    const key = await ensurePersistedSession(page);
 
     await stageTrackedFile(
       electronApp,

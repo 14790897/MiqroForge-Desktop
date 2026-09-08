@@ -605,15 +605,19 @@ class AppServer:
         data: Any,
         *,
         request_id: str | None = None,
-    ) -> None:
+    ) -> int:
         """Emit an event to all clients subscribed to a session.
 
         Clients without a registered sink are silently skipped.
         Respects per-client notification opt-out (Phase 45).
+
+        Returns the number of clients whose sink accepted the envelope —
+        callers with delivery-sensitive semantics (billing handoff) can use
+        it to distinguish a silently-skipped emit from a handed-off one.
         """
         subs = self._subscriptions.get(session_id, set())
         if not subs:
-            return
+            return 0
 
         envelope = {
             "request_id": request_id,
@@ -621,8 +625,11 @@ class AppServer:
             "data": data,
         }
 
+        delivered = 0
         for client_id in list(subs):
-            await self._deliver_to_client(client_id, event_type, envelope)
+            if await self._deliver_to_client(client_id, event_type, envelope):
+                delivered += 1
+        return delivered
 
     async def emit_client_event(
         self,
@@ -685,13 +692,18 @@ class AppServer:
         client_id: str,
         event_type: str,
         envelope: dict[str, Any],
-    ) -> None:
-        """Deliver event envelope to *client_id* if not opted out."""
+    ) -> bool:
+        """Deliver event envelope to *client_id* if not opted out.
+
+        Returns True only when the client's sink accepted the envelope;
+        opt-out / missing sink / sink exception all count as not delivered
+        (the sink exception is logged, mirroring the previous behavior).
+        """
         if not self.should_deliver_notification(client_id, event_type):
-            return
+            return False
         sink = self._event_sinks.get(client_id)
         if sink is None:
-            return
+            return False
         try:
             await sink(envelope)
         except Exception as exc:
@@ -699,6 +711,8 @@ class AppServer:
                 "AppServer: failed to deliver event {} to client {}: {}",
                 event_type, client_id, exc,
             )
+            return False
+        return True
 
 
 # ── Bridge context helpers (Phase 35 hardening) ──────────────────────────

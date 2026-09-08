@@ -46,3 +46,4 @@ MiQroForge Desktop 是一款基于 **Electron** 构建的桌面应用，为 MiQr
 - [配置参考](configuration.md) — 完整配置项说明
 - [MCP 集成](mcp-integration.md) — 外部工具集成
 - [CLI 参考](backend/bridge.md) — 命令行与 Bridge API
+- [开发者笔记](dev-notes/README.md) — 开发实战经验与踩坑记录（AI 会话记忆导出）

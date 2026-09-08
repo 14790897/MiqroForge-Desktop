@@ -39,6 +39,10 @@ interface SidebarProps {
   /** Called after a successful rename so the parent can refresh the active
    *  chat header (which reads the title from the backend on reload). */
   onRenamed?: () => void;
+  /** Called after the CURRENTLY OPEN session is deleted, so the parent can
+   *  reset the active session (otherwise ChatConsole keeps showing the
+   *  deleted conversation's messages). */
+  onSessionDeleted?: (key: string) => void;
 }
 
 const STATUS_ICONS: Record<SessionStatus, LucideIcon> = {
@@ -69,6 +73,7 @@ export function Sidebar({
   refreshKey,
   onNewSession,
   onRenamed,
+  onSessionDeleted,
 }: SidebarProps) {
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
   const [initialLoading, setInitialLoading] = useState(true);
@@ -272,9 +277,16 @@ export function Sidebar({
                       onSelect: async () => {
                         if (!window.confirm(`确认删除全部 ${count} 个任务？此操作不可撤销。`))
                           return;
+                        window.dispatchEvent(new Event('miqi:chat-focus-regrant'));
                         for (const s of sessions) {
                           try {
                             await window.miqi.sessions.delete(s.key);
+                            // 命中当前会话立即通知 App 切到新空会话，不必等整批删完
+                            // ——否则删除期间 UI 仍指向已删的 key（CodeRabbit）。会话 key
+                            // 唯一，快照内最多命中一次，不会重复通知。
+                            if (s.key === currentSession) {
+                              onSessionDeleted?.(currentSession);
+                            }
                           } catch {
                             /* ignore */
                           }
@@ -399,8 +411,12 @@ export function Sidebar({
                       onSelect: async () => {
                         if (!window.confirm(`删除对话「${s.title || s.key}」？此操作不可撤销。`))
                           return;
+                        window.dispatchEvent(new Event('miqi:chat-focus-regrant'));
                         try {
                           await window.miqi.sessions.delete(s.key);
+                          // Deleting the OPEN session must reset the active chat —
+                          // otherwise ChatConsole keeps rendering its messages.
+                          if (s.key === currentSession) onSessionDeleted?.(s.key);
                           loadSessions();
                         } catch {
                           /* ignore */

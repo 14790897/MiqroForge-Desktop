@@ -132,22 +132,24 @@ function patchProvidersToMock(config: any, mockUrl: string): void {
   config.providers = providers;
 }
 
-/** Resolve the REAL session key of the session createNewConversation just
- *  made (the helper returns the TITLE; progress events filter on the key). */
-async function resolveActiveSessionKey(page: Page, title: string): Promise<string> {
-  const key = await page.evaluate(async (expectedTitle) => {
-    const list = await (window as any).miqi.sessions.list();
-    const sessions = (list?.sessions ?? []) as Array<{
-      key: string;
-      title?: string;
-      created_at?: string;
-    }>;
-    const byTitle = sessions.find((s) => s.title === expectedTitle);
-    if (byTitle) return byTitle.key;
-    sessions.sort((a, b) => (a.created_at ?? '').localeCompare(b.created_at ?? ''));
-    return sessions[sessions.length - 1]?.key ?? '';
-  }, title);
-  expect(key, 'session key must resolve').not.toBe('');
+/** Resolve the REAL session key of the conversation just created/seeded
+ *  (progress events filter on the key).  #774：空会话不落盘、不进
+ *  sessions.list——直到首条真实消息写入才成为会话，故轮询等待列表出现会话。 */
+async function resolveActiveSessionKey(page: Page): Promise<string> {
+  let key = '';
+  for (let attempt = 0; attempt < 30 && !key; attempt += 1) {
+    key = await page.evaluate(async () => {
+      const list = await (window as any).miqi.sessions.list();
+      const sessions = (list?.sessions ?? []) as Array<{ key: string; created_at?: string }>;
+      sessions.sort((a, b) => (a.created_at ?? '').localeCompare(b.created_at ?? ''));
+      return sessions[sessions.length - 1]?.key ?? '';
+    });
+    if (!key) await page.waitForTimeout(1000);
+  }
+  expect(
+    key,
+    'session key must resolve (empty session persists only after the first message, #774)'
+  ).not.toBe('');
   return key;
 }
 
@@ -310,15 +312,14 @@ test.describe('Session isolation tool error rendering (injected event)', () => {
     'ToolErrorEvent renders as a neutral warning row, not a red error bubble',
     { timeout: 120_000 },
     async () => {
-      const title = await createNewConversation(page);
-      const sessionKey = await resolveActiveSessionKey(page, title);
-      console.log(`[tool-error-neutral] active session key: ${sessionKey}`);
-
-      // Start a real send — the frontend registers its chat event listeners
-      // only while a turn is in flight.  The hanging mock keeps the turn
-      // alive for the rest of the test.
+      await createNewConversation(page);
+      // #774：空会话不落盘、不进 sessions.list——先发首条真实消息让会话落盘
+      // 并进入回合（前端仅在回合进行中注册 chat 监听，挂起 mock 保持回合存活），
+      // 再从 sessions.list 解析 session key 用于注入 ToolErrorEvent。
       await sendMessage(page, `会话隔离渲染回归测试 ${Date.now()}`);
       await page.waitForTimeout(3000);
+      const sessionKey = await resolveActiveSessionKey(page);
+      console.log(`[tool-error-neutral] active session key: ${sessionKey}`);
 
       // Inject the events the backend would emit during a real turn, on the
       // same IPC channel the bridge forwards ('chat:progress'): first a

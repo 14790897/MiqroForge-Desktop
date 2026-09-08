@@ -77,6 +77,7 @@ import type {
   FeedbackSubmitResult,
   QraftLoginResult,
   QraftPointsBalance,
+  QraftBillingHistoryEntry,
   QraftErrorCode,
   QraftStatus,
   ConfigUpdatedPayload,
@@ -102,6 +103,8 @@ const api = {
   // 隐私协议拒绝退出 (#837)：走主进程 app.quit()（macOS 上 window.close 不退出）。
   app: {
     quit: (): Promise<{ ok: boolean }> => ipcRenderer.invoke(IPC.APP_QUIT),
+    focus: (opts?: { hard?: boolean }): Promise<{ ok: boolean }> =>
+      ipcRenderer.invoke(IPC.APP_FOCUS, opts),
   },
   // -- Runtime ----------------------------------------------------------------
   runtime: {
@@ -559,6 +562,9 @@ const api = {
   sandbox: {
     setEnabled: (enabled: boolean): Promise<SandboxSetEnabledResult> =>
       ipcRenderer.invoke(IPC.SANDBOX_SET_ENABLED, enabled),
+    // #854: allow_system_installs runtime toggle (no restart)
+    setAllowSystemInstalls: (enabled: boolean): Promise<{ allowSystemInstalls: boolean }> =>
+      ipcRenderer.invoke(IPC.SANDBOX_SET_ALLOW_SYSTEM_INSTALLS, enabled),
   },
 
   // -- Initial config write (no bridge needed) --------------------------------
@@ -717,6 +723,8 @@ const api = {
       | { ok: true; points: QraftPointsBalance }
       | { ok: false; code: QraftErrorCode; message: string }
     > => ipcRenderer.invoke(IPC.QRAFT_POINTS_BALANCE),
+    billingHistory: (): Promise<QraftBillingHistoryEntry[]> =>
+      ipcRenderer.invoke(IPC.QRAFT_BILLING_HISTORY),
     onStatusChanged: (callback: (status: QraftStatus) => void): (() => void) => {
       const handler = (_event: Electron.IpcRendererEvent, status: QraftStatus) => callback(status);
       ipcRenderer.on(IPC_EVENTS.QRAFT_STATUS_CHANGED, handler);

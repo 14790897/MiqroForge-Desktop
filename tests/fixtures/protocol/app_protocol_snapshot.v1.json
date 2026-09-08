@@ -3464,6 +3464,21 @@
         "description": "Legacy untyped method; migrate to an explicit spec in a later plan.",
         "emits": [],
         "eventSchemas": {},
+        "method": "sandbox.setAllowSystemInstalls",
+        "paramsSchema": {
+          "type": "object"
+        },
+        "resultSchema": {
+          "type": "object"
+        },
+        "scope": "session",
+        "stability": "legacy"
+      },
+      {
+        "deprecatedBy": null,
+        "description": "Legacy untyped method; migrate to an explicit spec in a later plan.",
+        "emits": [],
+        "eventSchemas": {},
         "method": "sandbox.setEnabled",
         "paramsSchema": {
           "type": "object"
@@ -5582,8 +5597,8 @@
     "source": "miqi.runtime.export_app_protocol_ts.render_typescript_contract"
   },
   "methodCounts": {
-    "legacy": 79,
-    "total": 163,
+    "legacy": 80,
+    "total": 164,
     "typed": 84
   },
   "schemaVersion": 1

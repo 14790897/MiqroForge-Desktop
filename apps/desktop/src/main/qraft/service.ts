@@ -8,9 +8,23 @@
  * 由设置页引导用户重新登录。
  */
 
-import { chmodSync, existsSync, lstatSync, mkdirSync, rmSync, writeFileSync } from 'fs';
-import { dirname } from 'path';
+import {
+  chmodSync,
+  closeSync,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'fs';
+import { randomUUID } from 'crypto';
+import { dirname, join } from 'path';
 import { CookieJar } from './cookie-jar';
+import { decryptMcpGatewayKey } from './mcp-gateway-key';
 import { QraftClient, QraftError, type QraftLogger, type ResolvedQraftConfig } from './client';
 import { maskSecret } from './rsa';
 import { QraftStore } from './store';
@@ -19,6 +33,7 @@ import {
   prodEnvClientSecret,
   testEnvClientSecret,
   type QraftAccount,
+  type QraftAiGateway,
   type QraftEnv,
   type QraftErrorCode,
   type QraftLoginOptions,
@@ -28,9 +43,24 @@ import {
   type QraftStoredState,
   type QraftTokens,
 } from './types';
+import type { QraftBillingHistoryEntry } from '../../shared/ipc';
 
 /** 到期前提前刷新的提前量（15 分钟）。 */
 const REFRESH_ADVANCE_MS = 15 * 60_000;
+/** Slurm MCP 作业单价（issue #927）：每次作业运行扣 10 积分。 */
+export const SLURM_JOB_COST = 10;
+/** 扣费历史文件最多保留条目数。 */
+const MAX_BILLING_HISTORY = 200;
+/** Slurm 扣费结果（chargeSlurmJob 返回值；同时回传 Python 决议）。 */
+export interface SlurmChargeResult {
+  ok: boolean;
+  code?: string;
+  message?: string;
+  /** 扣费后的可用余额（成功时）。 */
+  balance?: number;
+  /** 去重命中（该作业已计费过），未发起新的扣费请求。 */
+  dedup?: boolean;
+}
 /** 瞬时失败（网络等）的退避重试间隔（30 分钟后重试）。
  *  refresh_token 已失效（REFRESH_TOKEN_INVALID）属永久错误，不重试。 */
 const REFRESH_RETRY_MS = 30 * 60_000;
@@ -49,6 +79,16 @@ export interface QraftServiceOptions {
    * 返回 null 表示不启用 token 文件（如 workspace 不可解析时）。
    */
   tokenFilePath?: () => string | null;
+  /**
+   * 扣费历史文件路径解析器（issue #927：Slurm 作业扣费记录本地留存）。
+   * 返回 null 表示不启用历史持久化。
+   */
+  billingHistoryPath?: () => string | null;
+  /**
+   * 已计费作业 ID 的持久化索引文件（无条数上限）：展示历史有 200 条
+   * 截断，去重索引必须跨重启完整保留，否则被淘汰的作业会重复扣费。
+   */
+  billedJobIdsPath?: () => string | null;
 }
 
 export function defaultRedirectUri(): string {
@@ -123,6 +163,14 @@ export class QraftService {
   /** 最近一次拉取的积分余额（随 status() 推送给设置页；任务扣费后由
    *  设置页重新拉取刷新）。 */
   private pointsBalance: QraftPointsBalance | null = null;
+  /** 已计费的 charge_id / 复合作业键（账号+服务器+作业 ID）内存集合
+   *  （issue #927）：去重不依赖历史文件持久化——文件写盘失败时同进程
+   *  内仍能保证同一作业只扣一次。 */
+  private billedChargeIds = new Set<string>();
+  private billedJobIds = new Set<string>();
+  /** 在途扣费（charge_id / 复合作业键 → 首次请求的 Promise）：并发到达
+   *  的同一作业 RUNNING 事件共享同一次扣费，后到者等待首个结果。 */
+  private inFlightCharges = new Map<string, Promise<SlurmChargeResult>>();
 
   constructor(private readonly options: QraftServiceOptions) {
     // 应用启动时恢复登录态、重建刷新调度，并同步 token 文件
@@ -132,6 +180,14 @@ export class QraftService {
       this.restoreJar(stored);
       this.scheduleRefresh(stored);
       this.syncTokenFile(stored);
+    }
+    // 启动时恢复内存去重集合：charge_id 来自展示历史；复合作业键来自
+    // 独立无上限索引文件（展示历史有 200 条截断，索引必须完整）。
+    for (const entry of this.loadBillingHistory()) {
+      if (entry.status === 'billed') this.billedChargeIds.add(entry.chargeId);
+    }
+    for (const jobKey of this.loadBilledJobIds()) {
+      this.billedJobIds.add(jobKey);
     }
   }
 
@@ -174,17 +230,37 @@ export class QraftService {
       // 登录后展示账号信息以 userinfo 为准（实测响应无 picture 字段）；
       // userinfo 失败不阻断登录 —— 回退用平台登录响应里的 nickname/username。
       let account: QraftAccount = { phone, ...loginAccount };
+      let aiGateway: QraftAiGateway | undefined;
+      let mcpGatewayKey: string | undefined;
       try {
         const info = await this.options.client.getUserInfo(config, tokens.accessToken);
-        account = { phone, ...info, sub: info.sub || loginAccount.sub };
+        // 显式取身份字段：info 额外携带 aiGateway（含密钥），绝不并入 account，
+        // 否则会经 status().account 泄漏给渲染进程。
+        account = {
+          phone,
+          sub: info.sub || loginAccount.sub,
+          username: info.username,
+          nickname: info.nickname,
+        };
+        aiGateway = info.aiGateway;
+        // 平台按用户下发的凭据优先；未下发时解密内置共享凭据
+        //（全客户端同一 token，2026-09-07 产品确认的过渡方案）。
+        mcpGatewayKey = info.mcpGatewayKey ?? decryptMcpGatewayKey() ?? undefined;
       } catch (err) {
         this.options.log(
           'WARN',
           `qraft: userinfo 获取失败（${err instanceof QraftError ? err.code : err}），回退使用登录响应信息`
         );
+        // userinfo 失败不能静默丢弃已存储的 MCP 网关凭据：仅当本次登录
+        // 证明为同一账号时保留（CodeRabbit #951）；账号身份不一致时
+        // 保持未设置，绝不把旧账号的凭据带进新账号会话。
+        const previous = this.options.store.current;
+        if (previous && account.sub && previous.account.sub === account.sub) {
+          mcpGatewayKey = previous.mcpGatewayKey;
+        }
       }
 
-      this.persistLogin(env, config, account, tokens);
+      this.persistLogin(env, config, account, tokens, aiGateway, mcpGatewayKey);
       this.options.log('INFO', `qraft: 登录完成（${account.nickname || account.username}）`);
       // 登录后尽力拉取一次积分余额，让设置页直接展示（失败不阻断登录）。
       void this.fetchPointsBalance().catch(() => {});
@@ -217,9 +293,20 @@ export class QraftService {
       // 浏览器路径没有平台登录响应，账号信息以 userinfo 为准
       //（实测响应无 picture 字段、也不含手机号）。
       let account: QraftAccount = { phone: '', sub: '', username: '', nickname: '' };
+      let aiGateway: QraftAiGateway | undefined;
+      let mcpGatewayKey: string | undefined;
       try {
         const info = await this.options.client.getUserInfo(config, tokens.accessToken);
-        account = { phone: '', ...info };
+        account = {
+          phone: '',
+          sub: info.sub,
+          username: info.username,
+          nickname: info.nickname,
+        };
+        aiGateway = info.aiGateway;
+        // 平台按用户下发的凭据优先；未下发时解密内置共享凭据
+        //（全客户端同一 token，2026-09-07 产品确认的过渡方案）。
+        mcpGatewayKey = info.mcpGatewayKey ?? decryptMcpGatewayKey() ?? undefined;
       } catch (err) {
         this.options.log(
           'WARN',
@@ -227,7 +314,7 @@ export class QraftService {
         );
       }
 
-      this.persistLogin(env, config, account, tokens);
+      this.persistLogin(env, config, account, tokens, aiGateway, mcpGatewayKey);
       this.options.log(
         'INFO',
         `qraft: 浏览器登录完成（${account.nickname || account.username || account.sub}）`
@@ -261,7 +348,9 @@ export class QraftService {
     env: QraftEnv,
     config: ResolvedQraftConfig,
     account: QraftAccount,
-    tokens: QraftTokens
+    tokens: QraftTokens,
+    aiGateway?: QraftAiGateway,
+    mcpGatewayKey?: string
   ): void {
     const state: QraftStoredState = {
       version: 1,
@@ -273,6 +362,8 @@ export class QraftService {
       cookie: this.jar.header(),
       account,
       tokens,
+      ...(aiGateway ? { aiGateway } : {}),
+      ...(mcpGatewayKey ? { mcpGatewayKey } : {}),
     };
     this.options.store.save(state);
     this.refreshError = null;
@@ -295,12 +386,16 @@ export class QraftService {
 
   /** 登录/刷新成功后写入 token 文件：accessToken + expiresAt + baseUrl（0600）。
    *  baseUrl 供 KUN 计费闸门定位平台接口；Skill 侧 auth.py 只读前两个字段。
-   *  防符号链接重定向：.qraft 目录必须是真实目录、token 文件必须是真实
-   *  常规文件，否则跳过写入并告警（workspace 对 agent 可写，恶意/意外
-   *  替换成 symlink 时不能把凭据写到重定向目标）。 */
+   *  防符号链接/硬链接重定向：.qraft 目录必须是真实目录、token 文件必须是
+   *  真实常规文件且为本进程用户所有，否则跳过写入并告警（workspace 对
+   *  agent 可写，恶意/意外替换成 symlink 或预置文件时不能把凭据写进去）。
+   *  写入采用同目录临时文件 + rename 原子替换：rename 替换目录条目本身
+   *  （不跟随目标 symlink），且凭据只落在新建 inode 上 —— 原地 writeFileSync
+   *  会跟随 symlink、并把攻击者经硬链接预置的文件就地覆写。 */
   private syncTokenFile(state: QraftStoredState): void {
     const filePath = this.options.tokenFilePath?.();
     if (!filePath) return;
+    let tmpPath: string | null = null;
     try {
       const dir = dirname(filePath);
       mkdirSync(dir, { recursive: true });
@@ -314,24 +409,63 @@ export class QraftService {
         if (!fileStat.isFile() || fileStat.isSymbolicLink()) {
           throw new Error('token 文件路径被非常规文件/symlink 占用，跳过写入');
         }
+        // 拒绝替换其他用户拥有的文件（POSIX 语义；Windows 无 uid 概念，
+        // rename 替换 + 0600 已足够）。攻击者预置的文件绝不原地覆写。
+        if (process.platform !== 'win32' && typeof process.getuid === 'function') {
+          if (statSync(filePath).uid !== process.getuid()) {
+            throw new Error('token 文件被其他用户所有，跳过写入');
+          }
+        }
       }
-      writeFileSync(
-        filePath,
-        JSON.stringify({
-          accessToken: state.tokens.accessToken,
-          expiresAt: state.tokens.expiresAt,
-          // 平台 API 基础地址：KUN 计费闸门（billing.py）据此定位
-          // /oauth2/points/deduct；Skill 侧 auth.py 只读前两个字段，无影响。
-          baseUrl: state.baseUrl,
-        }),
-        { encoding: 'utf8', mode: 0o600 }
-      );
+      // 原子替换：临时文件 O_EXCL 创建（0600）→ rename。任何异常路径下
+      // 临时文件都会被 finally 清理，不残留凭据。
+      tmpPath = join(dir, `.qraft-token-${process.pid}-${randomUUID()}.tmp`);
+      const fd = openSync(tmpPath, 'wx', 0o600);
+      try {
+        writeFileSync(
+          fd,
+          JSON.stringify({
+            accessToken: state.tokens.accessToken,
+            expiresAt: state.tokens.expiresAt,
+            // 平台 API 基础地址：KUN 计费闸门（billing.py）据此定位
+            // /oauth2/points/deduct；Skill 侧 auth.py 只读前两个字段，无影响。
+            baseUrl: state.baseUrl,
+            // AI 网关信息（Python make_provider 读取；登出即随文件删除）。
+            // billing/auth.py 只读已知字段，追加字段向后兼容。
+            ...(state.mcpGatewayKey ? { mcpGatewayKey: state.mcpGatewayKey } : {}),
+            ...(state.aiGateway
+              ? {
+                  aiGateway: {
+                    encryptedApiKey: state.aiGateway.encryptedApiKey,
+                    status: state.aiGateway.status,
+                    configVersion: state.aiGateway.configVersion,
+                    consumerId: state.aiGateway.consumerId,
+                    consumerGroupId: state.aiGateway.consumerGroupId,
+                  },
+                }
+              : {}),
+          }),
+          { encoding: 'utf8' }
+        );
+      } finally {
+        closeSync(fd);
+      }
+      renameSync(tmpPath, filePath);
+      tmpPath = null;
       chmodSync(filePath, 0o600);
     } catch (err) {
       this.options.log(
         'WARN',
         `qraft: 同步 token 文件失败（${err instanceof Error ? err.message : err}）`
       );
+    } finally {
+      if (tmpPath) {
+        try {
+          rmSync(tmpPath, { force: true });
+        } catch {
+          // 清理失败无碍：临时文件不包含可用凭据引用，且 0600。
+        }
+      }
     }
   }
 
@@ -366,6 +500,10 @@ export class QraftService {
         // 已过期且最近一次自动刷新失败 → 引导重新登录
         (this.refreshError !== null && now > state.tokens.expiresAt),
       points: this.pointsBalance ?? undefined,
+      // 只透出非敏感网关信息（status/configVersion）；encryptedApiKey 不外发渲染进程。
+      aiGateway: state.aiGateway
+        ? { status: state.aiGateway.status, configVersion: state.aiGateway.configVersion }
+        : undefined,
     };
   }
 
@@ -380,6 +518,32 @@ export class QraftService {
     this.refreshError = null;
     this.requiresRelogin = false;
     this.pointsBalance = null;
+    // Slurm 扣费历史随登出清除（换账号后不展示前任账号的计费记录）。
+    this.billedChargeIds.clear();
+    this.billedJobIds.clear();
+    this.inFlightCharges.clear();
+    const jobIdsPath = this.options.billedJobIdsPath?.();
+    if (jobIdsPath) {
+      try {
+        rmSync(jobIdsPath, { force: true });
+      } catch (err) {
+        this.options.log(
+          'WARN',
+          `qraft: 计费索引删除失败（${err instanceof Error ? err.message : err}）`
+        );
+      }
+    }
+    const historyPath = this.options.billingHistoryPath?.();
+    if (historyPath) {
+      try {
+        rmSync(historyPath, { force: true });
+      } catch (err) {
+        this.options.log(
+          'WARN',
+          `qraft: 扣费历史删除失败（${err instanceof Error ? err.message : err}）`
+        );
+      }
+    }
     this.options.log('INFO', 'qraft: 已退出登录（cookie 与 token 均已清除）');
     this.emitStatus();
   }
@@ -416,6 +580,302 @@ export class QraftService {
         code: 'INTERNAL',
         message: err instanceof Error ? err.message : String(err),
       };
+    }
+  }
+
+  // ── Slurm MCP 作业计费（issue #927）──────────────────────────────────
+
+  /** 跨层去重用的稳定复合键：账号 + MCP 服务器 + 作业 ID。
+   *
+   * 不同 MCP 服务器上报相同 job_id 的作业互相独立（如 slurm-a 与
+   * slurm-b 都有作业 123）；在途/内存/历史/持久索引四层统一使用，
+   * jobId 本身仅用于展示（#936 CodeRabbit 评审）。
+   */
+  private slurmJobKey(accountSub: string, serverName: string, jobId: string): string {
+    return `${accountSub}::${serverName}::${jobId}`;
+  }
+
+  /**
+   * Slurm 作业扣费（issue #927，2026-09-04 产品确认）：作业状态变为
+   * RUNNING 时由这里执行实际扣费（10 分/次，memo 携带作业信息）。
+   * 作业已在运行——扣费失败（余额不足等）不阻断作业，记录到扣费历史
+   * 并通过 points 事件流提示。
+   *
+   * 去重：同一 charge_id 或同一作业 ID 只扣一次（历史文件持久化，
+   * 跨重启不重复扣费）；token 失效时先尝试一次刷新再重试。
+   */
+  async chargeSlurmJob(payload: {
+    charge_id?: string;
+    job_id?: string;
+    server_name?: string;
+    tool_name?: string;
+    args_summary?: string;
+    session_key?: string;
+    turn_id?: string;
+  }): Promise<SlurmChargeResult> {
+    const chargeId = String(payload.charge_id ?? '').slice(0, 128);
+    const jobId = String(payload.job_id ?? '').slice(0, 64);
+    if (!chargeId) return { ok: false, code: 'INVALID_CONFIG', message: '计费请求缺少 charge_id' };
+    // 无作业 ID 的请求拒绝在扣费之前：jobId 是去重键的组成部分，
+    // 缺失时重复轮询会以新 charge_id 反复扣费（Python 侧同样跳过）。
+    if (!jobId) return { ok: false, code: 'INVALID_CONFIG', message: '计费请求缺少 job_id' };
+
+    // 并发去重：同一 charge_id / 复合作业键（账号+服务器+作业 ID）的
+    // 在途请求共享同一次扣费，后到者等待首个结果（状态轮询会并发报告 RUNNING）。
+    const inFlightKey = `c:${chargeId}`;
+    const jobKey = jobId
+      ? this.slurmJobKey(
+          this.options.store.current?.account.sub ?? '',
+          String(payload.server_name ?? '').slice(0, 64),
+          jobId
+        )
+      : '';
+    const inFlightJobKey = jobKey ? `j:${jobKey}` : null;
+    const inFlight =
+      this.inFlightCharges.get(inFlightKey) ??
+      (inFlightJobKey ? this.inFlightCharges.get(inFlightJobKey) : undefined);
+    if (inFlight) {
+      this.options.log('INFO', `qraft: slurm 扣费在途去重（charge=${chargeId.slice(0, 8)}）`);
+      return inFlight;
+    }
+
+    const run = this.runSlurmCharge(chargeId, jobId, payload);
+    this.inFlightCharges.set(inFlightKey, run);
+    if (inFlightJobKey) this.inFlightCharges.set(inFlightJobKey, run);
+    try {
+      return await run;
+    } finally {
+      this.inFlightCharges.delete(inFlightKey);
+      if (inFlightJobKey) this.inFlightCharges.delete(inFlightJobKey);
+    }
+  }
+
+  private async runSlurmCharge(
+    chargeId: string,
+    jobId: string,
+    payload: Record<string, unknown>
+  ): Promise<SlurmChargeResult> {
+    const state = this.options.store.current;
+    if (!state) {
+      return {
+        ok: false,
+        code: 'INVALID_CONFIG',
+        message: '尚未登录 MiQroForge，无法完成 Slurm 作业计费',
+      };
+    }
+
+    // 去重：同一 charge_id 或同一复合作业键（账号+服务器+作业 ID）
+    // 只扣一次。内存集合为第一道（历史文件写盘失败时同进程内仍不
+    // 重复扣费），历史文件覆盖跨重启。
+    const accountSub = state.account.sub;
+    const serverName = String(payload.server_name ?? '').slice(0, 64);
+    const jobKey = jobId ? this.slurmJobKey(accountSub, serverName, jobId) : '';
+    const history = this.loadBillingHistory();
+    const existing =
+      history.find((e) => e.chargeId === chargeId) ||
+      (jobKey
+        ? history.find(
+            (e) =>
+              e.status === 'billed' &&
+              this.slurmJobKey(e.accountSub ?? '', e.serverName ?? '', e.jobId ?? '') === jobKey
+          )
+        : undefined);
+    if (existing) {
+      this.options.log(
+        'INFO',
+        `qraft: slurm 扣费去重命中（charge=${chargeId.slice(0, 8)}，job=${jobId || '-'}）`
+      );
+      return existing.status === 'billed'
+        ? { ok: true, balance: existing.balanceAfter, dedup: true }
+        : { ok: false, code: existing.status, message: '该作业已计费过，未重复扣费', dedup: true };
+    }
+    if (this.billedChargeIds.has(chargeId) || (jobKey && this.billedJobIds.has(jobKey))) {
+      this.options.log('INFO', `qraft: slurm 扣费内存去重命中（job=${jobId || '-'}）`);
+      return {
+        ok: true,
+        balance: this.pointsBalance?.availablePoints,
+        dedup: true,
+      };
+    }
+
+    // 单个时间戳贯穿 memo 与历史记录；memo 各字段分别截断，保证 JSON
+    // 完整有效且 session/turn 字段不因整体切片而丢失。
+    const now = new Date().toISOString();
+    const memo = JSON.stringify({
+      jobId: jobId || null,
+      tool: `${payload.server_name ?? ''}.${payload.tool_name ?? ''}`.slice(0, 120),
+      args: String(payload.args_summary ?? '').slice(0, 200),
+      session: String(payload.session_key ?? '').slice(0, 128),
+      turn: String(payload.turn_id ?? '').slice(0, 64),
+      submittedAt: now,
+    });
+    const generation = this.authGeneration;
+
+    const config: ResolvedQraftConfig = {
+      baseUrl: state.baseUrl,
+      clientId: state.clientId,
+      clientSecret: state.clientSecret,
+      redirectUri: state.redirectUri,
+    };
+
+    try {
+      let balance: QraftPointsBalance;
+      try {
+        balance = await this.options.client.deductPoints(config, state.tokens.accessToken, {
+          amount: SLURM_JOB_COST,
+          source: 'slurm-job',
+          resourceType: 'slurm',
+          memo,
+        });
+      } catch (err) {
+        // token 失效：主进程自动刷新可能刚好错过窗口，先刷新再重试一次。
+        if (err instanceof QraftError && err.code === 'SESSION_EXPIRED') {
+          this.options.log('WARN', 'qraft: slurm 扣费前 token 失效，尝试刷新后重试');
+          const refreshed = await this.refreshNow();
+          if (refreshed.ok) {
+            // 刷新期间可能退出登录/换账号：登录代际或账号身份变化时
+            // 绝不拿新账号的凭据给旧作业计费（C4）。
+            const fresh = this.options.store.current;
+            if (!fresh || this.authGeneration !== generation || fresh.account.sub !== accountSub) {
+              throw new QraftError('INTERNAL', '登录状态在计费期间发生变化，本次作业计费已取消');
+            }
+            balance = await this.options.client.deductPoints(
+              {
+                ...config,
+                baseUrl: fresh.baseUrl,
+                clientId: fresh.clientId,
+                clientSecret: fresh.clientSecret,
+              },
+              fresh.tokens.accessToken,
+              { amount: SLURM_JOB_COST, source: 'slurm-job', resourceType: 'slurm', memo }
+            );
+          } else {
+            throw err;
+          }
+        } else {
+          throw err;
+        }
+      }
+
+      // 先记内存集合（持久化失败也保去重），再落历史文件与
+      // 无上限 job-id 索引（展示历史截断不丢去重）。
+      this.billedChargeIds.add(chargeId);
+      if (jobKey) {
+        this.billedJobIds.add(jobKey);
+        this.persistBilledJobId(jobKey);
+      }
+      this.pointsBalance = balance;
+      this.appendBillingHistory({
+        chargeId,
+        jobId: jobId || undefined,
+        deductedAt: now,
+        cost: SLURM_JOB_COST,
+        balanceAfter: balance.availablePoints,
+        status: 'billed',
+        serverName: String(payload.server_name ?? ''),
+        toolName: String(payload.tool_name ?? ''),
+        argsSummary: String(payload.args_summary ?? '').slice(0, 200),
+        sessionKey: String(payload.session_key ?? ''),
+        accountSub,
+      });
+      this.emitStatus();
+      this.options.log(
+        'INFO',
+        `qraft: slurm 作业扣费成功（charge=${chargeId.slice(0, 8)}，余额 ${balance.availablePoints}）`
+      );
+      return { ok: true, balance: balance.availablePoints };
+    } catch (err) {
+      const code = err instanceof QraftError ? err.code : 'INTERNAL';
+      const message = err instanceof Error ? err.message : String(err);
+      const status: QraftBillingHistoryEntry['status'] =
+        code === 'INSUFFICIENT_POINTS' ? 'insufficient' : 'error';
+      this.appendBillingHistory({
+        chargeId,
+        jobId: jobId || undefined,
+        deductedAt: now,
+        cost: SLURM_JOB_COST,
+        status,
+        serverName: String(payload.server_name ?? ''),
+        toolName: String(payload.tool_name ?? ''),
+        argsSummary: String(payload.args_summary ?? '').slice(0, 200),
+        sessionKey: String(payload.session_key ?? ''),
+        accountSub,
+      });
+      this.options.log('WARN', `qraft: slurm 作业扣费失败（${code}）`);
+      return { ok: false, code, message };
+    }
+  }
+
+  /** 读取扣费历史（新→旧；只返回当前登录账号的记录）。 */
+  getBillingHistory(): QraftBillingHistoryEntry[] {
+    const sub = this.options.store.current?.account.sub;
+    const history = this.loadBillingHistory();
+    return sub ? history.filter((e) => !e.accountSub || e.accountSub === sub) : history;
+  }
+
+  // ── 扣费历史持久化（userData/qraft-billing-history.json）──────────────
+
+  private loadBillingHistory(): QraftBillingHistoryEntry[] {
+    const filePath = this.options.billingHistoryPath?.();
+    if (!filePath) return [];
+    try {
+      if (!existsSync(filePath)) return [];
+      const raw = JSON.parse(readFileSync(filePath, 'utf8')) as unknown;
+      if (!Array.isArray(raw)) return [];
+      return raw as QraftBillingHistoryEntry[];
+    } catch {
+      return [];
+    }
+  }
+
+  private appendBillingHistory(entry: QraftBillingHistoryEntry): void {
+    const history = this.loadBillingHistory();
+    history.unshift(entry);
+    this.writeBillingHistory(history.slice(0, MAX_BILLING_HISTORY));
+  }
+
+  private writeBillingHistory(history: QraftBillingHistoryEntry[]): void {
+    const filePath = this.options.billingHistoryPath?.();
+    if (!filePath) return;
+    try {
+      mkdirSync(dirname(filePath), { recursive: true });
+      writeFileSync(filePath, JSON.stringify(history, null, 2), { encoding: 'utf8' });
+    } catch (err) {
+      this.options.log(
+        'WARN',
+        `qraft: 扣费历史写入失败（${err instanceof Error ? err.message : err}）`
+      );
+    }
+  }
+
+  // ── 已计费作业 ID 索引（无上限持久化，展示历史截断不丢去重）────
+
+  private loadBilledJobIds(): string[] {
+    const filePath = this.options.billedJobIdsPath?.();
+    if (!filePath) return [];
+    try {
+      if (!existsSync(filePath)) return [];
+      const raw = JSON.parse(readFileSync(filePath, 'utf8')) as unknown;
+      if (!Array.isArray(raw)) return [];
+      return raw.filter((v): v is string => typeof v === 'string');
+    } catch {
+      return [];
+    }
+  }
+
+  private persistBilledJobId(jobId: string): void {
+    const filePath = this.options.billedJobIdsPath?.();
+    if (!filePath) return;
+    try {
+      const existing = new Set(this.loadBilledJobIds());
+      existing.add(jobId);
+      mkdirSync(dirname(filePath), { recursive: true });
+      writeFileSync(filePath, JSON.stringify([...existing]), { encoding: 'utf8' });
+    } catch (err) {
+      this.options.log(
+        'WARN',
+        `qraft: 计费索引写入失败（${err instanceof Error ? err.message : err}）`
+      );
     }
   }
 

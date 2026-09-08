@@ -34,6 +34,11 @@ const { ipcMain, app, net, safeStorage, BrowserWindow, session } = electron;
 
 let service: QraftService | null = null;
 
+/** 供主进程其他模块（slurm 计费拦截）获取共享的 QraftService 实例。 */
+export function getQraftService(): QraftService {
+  return getService();
+}
+
 /**
  * electron.net.fetch 的 redirect:'manual' 实现：目标响应为 302 时直接
  * reject（"Redirect was cancelled"，Chromium 行为），而 OAuth2 授权码
@@ -88,6 +93,10 @@ function getService(): QraftService {
         if (!win.isDestroyed()) win.webContents.send(IPC_EVENTS.QRAFT_STATUS_CHANGED, status);
       }
     },
+    // Slurm 作业扣费历史（issue #927）：与登录态同目录，随 userData 隔离。
+    billingHistoryPath: () => join(app.getPath('userData'), 'qraft-billing-history.json'),
+    // 已计费作业 ID 无上限索引（展示历史 200 条截断，去重索引完整保留）。
+    billedJobIdsPath: () => join(app.getPath('userData'), 'qraft-billed-job-ids.json'),
     // Skill/agent 读取 access_token 的通道：workspace 在沙箱中 bind-mount，
     // 文件放 workspace 下即可被沙箱内 Skill 读取（见 docs qraft-oauth2-login.md 第 6 节）。
     tokenFilePath: () => {
@@ -281,6 +290,10 @@ export function registerQraftIpcHandlers(): void {
 
   ipcMain.handle(IPC.QRAFT_POINTS_BALANCE, async () => {
     return getService().fetchPointsBalance();
+  });
+
+  ipcMain.handle(IPC.QRAFT_BILLING_HISTORY, async () => {
+    return getService().getBillingHistory();
   });
 
   ipcMain.handle(IPC.QRAFT_REFRESH, async (): Promise<QraftLoginResult> => {

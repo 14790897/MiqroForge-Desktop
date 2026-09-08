@@ -14,6 +14,7 @@ import { ApprovalProvider } from './contexts/ApprovalContext';
 import { UserInputProvider } from './contexts/UserInputContext';
 import { RestartRequiredProvider } from './contexts/RestartRequiredContext';
 import { ConfigHotReloadListener } from './components/ConfigHotReloadListener';
+import { InstallWarningToaster } from './components/InstallWarningToaster';
 import { ApprovalModal } from './features/approvals/ApprovalModal';
 import { CronPage } from './features/cron/CronPage';
 import { MemoryPage } from './features/memory/MemoryPage';
@@ -220,6 +221,16 @@ function AppShell() {
     setSessionRefreshKey((k) => k + 1);
   };
 
+  // Deleting the currently open session: the sidebar already removed the
+  // record + refreshed its list, but App still points sessionKey at the
+  // deleted key, so ChatConsole keeps showing its messages.  Route through
+  // the existing new-session machinery to land on a fresh empty session
+  // (which renders the welcome hero) instead of a stale deleted key.
+  const handleSessionDeleted = useCallback((key: string) => {
+    if (key !== sessionKeyRef.current) return;
+    setNewSessionTrigger((k) => k + 1);
+  }, []);
+
   const openApprovalSettings = () => {
     setSettingsTab('approvals');
     setActiveNav('settings');
@@ -343,6 +354,12 @@ function AppShell() {
     <TooltipProvider>
       <RestartRequiredProvider>
         <ConfigHotReloadListener />
+        <InstallWarningToaster
+          onOpenSandboxSettings={() => {
+            setSettingsTab('general');
+            setActiveNav('settings');
+          }}
+        />
         <ApprovalProvider>
           <UserInputProvider>
             {/* Full-height flex column */}
@@ -366,6 +383,7 @@ function AppShell() {
                   refreshKey={sessionRefreshKey + runtimeReadyKey * 100000}
                   onNewSession={handleNewSession}
                   onRenamed={() => setRenameVersion((v) => v + 1)}
+                  onSessionDeleted={handleSessionDeleted}
                 />
 
                 <main
@@ -388,6 +406,7 @@ function AppShell() {
                       onSessionActivityChange={handleSessionActivityChange}
                       pendingWorkspace={pendingWorkspace}
                       onChatFinished={() => setSessionRefreshKey((k) => k + 1)}
+                      onSessionsChanged={() => setSessionRefreshKey((k) => k + 1)}
                       renameVersion={renameVersion}
                       onRename={() => setSessionRefreshKey((k) => k + 1)}
                       onOpenProviderSettings={() => {
@@ -436,7 +455,12 @@ function AppShell() {
                 </main>
               </div>
 
-              <StatusBar />
+              <StatusBar
+                onOpenPoints={() => {
+                  setSettingsTab('qraft');
+                  setActiveNav('settings');
+                }}
+              />
             </div>
             <ApprovalModal />
           </UserInputProvider>

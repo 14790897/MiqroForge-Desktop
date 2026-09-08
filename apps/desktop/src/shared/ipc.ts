@@ -126,6 +126,9 @@ export const IPC = {
   // Sandbox runtime toggle
   SANDBOX_SET_ENABLED: 'sandbox:setEnabled',
 
+  // #854: allow_system_installs runtime toggle (no restart)
+  SANDBOX_SET_ALLOW_SYSTEM_INSTALLS: 'sandbox:setAllowSystemInstalls',
+
   // Write initial config (no bridge needed �? used by Setup Wizard)
   CONFIG_WRITE_INITIAL: 'config:write_initial',
 
@@ -165,9 +168,11 @@ export const IPC = {
   QRAFT_REFRESH: 'qraft:refresh',
   QRAFT_LOGOUT: 'qraft:logout',
   QRAFT_POINTS_BALANCE: 'qraft:pointsBalance',
+  QRAFT_BILLING_HISTORY: 'qraft:billingHistory',
 
   // App lifecycle
   APP_QUIT: 'app:quit',
+  APP_FOCUS: 'app:focus',
 } as const;
 
 // ---------------------------------------------------------------------------
@@ -777,11 +782,13 @@ export interface SkillDetail {
 // ---------------------------------------------------------------------------
 
 export interface McpServerConfig {
+  type?: string;
   command?: string;
   args?: string[];
   env?: Record<string, string>;
   url?: string;
   headers?: Record<string, string>;
+  insecure_http?: boolean;
   tool_timeout?: number;
   progress_interval_seconds?: number;
   description?: string;
@@ -1417,6 +1424,28 @@ export interface QraftLoginResult {
   message?: string;
 }
 
+/** 本地留存的扣费历史条目（issue #927；平台无扣费历史查询接口）。 */
+export interface QraftBillingHistoryEntry {
+  /** 计费请求唯一 ID（Python 侧生成，去重键）。 */
+  chargeId: string;
+  /** 扣费时间（ISO 8601）。 */
+  deductedAt: string;
+  /** 本次扣除积分。 */
+  cost: number;
+  /** 扣费后可用余额（成功时）。 */
+  balanceAfter?: number;
+  status: 'billed' | 'insufficient' | 'error';
+  /** SLURM 作业 ID（作业提交成功后回传补充）。 */
+  jobId?: string;
+  serverName?: string;
+  toolName?: string;
+  /** 提交命令/脚本参数摘要。 */
+  argsSummary?: string;
+  sessionKey?: string;
+  /** 扣费时的登录账号 sub（历史按账号隔离展示，换账号互不可见）。 */
+  accountSub?: string;
+}
+
 /** 平台积分余额（GET /oauth2/points/balance 的 data 字段）。 */
 export interface QraftPointsBalance {
   /** 可用积分 */
@@ -1427,6 +1456,16 @@ export interface QraftPointsBalance {
   totalEarned: number;
   /** 累计支出积分 */
   totalSpent: number;
+}
+
+/** 平台 AI 网关开通状态（userinfo 下发；"active" 才允许模型调用走网关）。 */
+export type QraftAiGatewayStatus = string;
+
+/** 登录态中下发的网关开通信息（仅非敏感字段进渲染进程；encryptedApiKey 永不外发）。 */
+export interface QraftAiGatewayInfo {
+  status: QraftAiGatewayStatus;
+  /** 平台配置版本号（本切片仅展示/透出，热刷新留后续）。 */
+  configVersion?: number;
 }
 
 export interface QraftStatus {
@@ -1442,4 +1481,6 @@ export interface QraftStatus {
   requiresRelogin?: boolean;
   /** 最近一次拉取的积分余额（设置页拉取后缓存，随状态事件推送）。 */
   points?: QraftPointsBalance;
+  /** 平台 AI 网关开通状态（登录且 active 时模型调用走网关）。 */
+  aiGateway?: QraftAiGatewayInfo;
 }

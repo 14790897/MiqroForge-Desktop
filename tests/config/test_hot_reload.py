@@ -225,15 +225,3 @@ def test_pending_restart_unknown_without_startup_snapshot():
 
     current = _mutate(**{"tools.sandbox.wsl_distro": "Debian"})
     assert pending_restart_paths(current, None) == ([], [])
-
-
-def test_billing_change_is_tier_a():
-    """billing.* 变更应热生效（apply_config_update step 7 重建计费闸门）。"""
-    new = _mutate(**{"billing.cost_per_task": 50})
-    report = classify_config_update(Config(), new)
-    assert "billing.cost_per_task" in report.applied
-    assert report.needs_restart is False
-
-    disabled = _mutate(**{"billing.enabled": False})
-    report2 = classify_config_update(Config(), disabled)
-    assert "billing.enabled" in report2.applied

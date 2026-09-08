@@ -128,6 +128,11 @@ test.describe('Execution Policy E2E', () => {
   });
 
   test('keyboard shortcuts 1-4 switch modes', async () => {
+    // 空态 welcome 自动聚焦输入框(welcome-page delete-all fix),而
+    // ExecutionPolicySelector 故意忽略 INPUT/TEXTAREA 上的按键——否则在输入框
+    // 里打 "1" 会切模式。先 blur 让 1-4 落到 document handler。
+    await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur?.());
+
     // Press '1' = Plan
     await page.keyboard.press('1');
     await page.waitForTimeout(300);

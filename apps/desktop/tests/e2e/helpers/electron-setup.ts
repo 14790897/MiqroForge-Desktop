@@ -84,6 +84,33 @@ export async function sendMessage(page: Page, text: string) {
   await expect(page.locator('[data-testid="chat-input-container"] textarea')).toHaveValue('');
 }
 
+/**
+ * 空会话不再落盘 / 不再进 sessions.list(#774)后,list[0] 不再恒等于刚打开的
+ * 当前空会话。本 helper 保证当前会话已是一条"真实"会话并返回其 key:先查
+ * list,空则发一条 seed 消息(用户消息写入即持久化,不必等 AI 回复)再轮询。
+ * 供那些"launch 后直接取 list[0].key 当当前会话"的 spec 使用。
+ */
+export async function ensurePersistedSession(
+  page: Page,
+  seedText = '请创建会话',
+  timeout = 90_000
+): Promise<string> {
+  const firstKey = async (): Promise<string | undefined> => {
+    const all = (await page.evaluate(() => (window as any).miqi.sessions.list())) as any;
+    return (all?.sessions ?? [])[0]?.key as string | undefined;
+  };
+  let key = await firstKey();
+  if (key) return key;
+  await sendMessage(page, seedText);
+  const deadline = Date.now() + timeout;
+  while (Date.now() < deadline) {
+    key = await firstKey();
+    if (key) return key;
+    await page.waitForTimeout(500);
+  }
+  throw new Error(`ensurePersistedSession: no session after seeding "${seedText}"`);
+}
+
 /** Wait for streaming to finish (no "Thinking…" indicator) */
 export async function waitForResponseComplete(page: Page, timeout = 120_000) {
   // Phase 1: if the AI used tools, "IN PROGRESS" stays visible while
@@ -412,6 +439,48 @@ export interface ElectronFixture {
   miqiSessionsDir: string;
 }
 
+/**
+ * 设置页「浏览器登录」真实链路：点按钮 → 主进程打开 MiQroForge 授权窗口
+ * （独立 partition）→ 未登录被 302 到平台登录页 → 填测试账号登录 →
+ * 服务端 302 回调 redirect_uri?code → 主进程拦截 code 换 token →
+ * 应用内出现「已登录」。
+ *
+ * 凭据经环境变量注入（QRAFT_PHONE / QRAFT_PASSWORD），调用方在未登录时
+ * 才调用（dev userData 可能残留上次登录态，须先判断「已登录」徽标）。
+ * 返回授权窗口的 Page（完成时主进程会自动关闭它）。
+ */
+export async function browserLogin(
+  page: Page,
+  electronApp: ElectronApplication,
+  phone: string,
+  password: string
+): Promise<Page> {
+  await page.getByText(/^(System Settings|系统设置)$/).click();
+  await page
+    .getByRole('tab')
+    .filter({ hasText: /MiQroForge/ })
+    .first()
+    .click();
+  await expect(page.getByTestId('qraft-browser-login-btn')).toBeVisible({ timeout: 15_000 });
+
+  const loginWindowPromise = electronApp.waitForEvent('window');
+  await page.getByTestId('qraft-browser-login-btn').click();
+  const loginWin = await loginWindowPromise;
+  await loginWin.waitForLoadState('domcontentloaded');
+
+  // 未登录 → 服务端 302 到平台登录页；已有登录态时直接进授权流程
+  await loginWin.waitForURL(/\/login/, { timeout: 30_000 }).catch(() => {
+    /* 已有登录态时直接进授权流程 */
+  });
+  await expect(loginWin.locator('#login_phone')).toBeVisible({ timeout: 30_000 });
+  await loginWin.fill('#login_phone', phone);
+  await loginWin.fill('#login_password', password);
+  await loginWin.getByRole('button', { name: /登\s*录/ }).click();
+
+  await expect(page.getByText('已登录')).toBeVisible({ timeout: 120_000 });
+  return loginWin;
+}
+
 /** Launch Electron app, wait for bridge ready, return { electronApp, page, miqiHome, miqiSessionsDir }.
  *
  *  - Creates a unique temporary MIQI_HOME so parallel test workers are fully isolated.
@@ -444,6 +513,16 @@ export async function launchElectronApp(
   const config = existsSync(destConfigPath)
     ? JSON.parse(readFileSync(destConfigPath, 'utf-8'))
     : {};
+  // ── E2E: start from a clean provider state ──
+  // The user's real config carries desktop.providerActivation (builtin key
+  // markers). The runtime pins builtin-activated providers to their official
+  // endpoint (#933), which would silently redirect specs that patch apiBase
+  // to local mock servers (confirm-card, bridge-chinese-error, …) at the
+  // real API — mock never receives a request. Strip the markers; specs that
+  // need activation re-add it explicitly via patchConfig.
+  if (config.desktop && typeof config.desktop === 'object') {
+    delete (config.desktop as Record<string, unknown>).providerActivation;
+  }
   if (patchConfig) patchConfig(config);
   const bypassAll = opts?.bypassAll ?? true;
   if (bypassAll) {

@@ -193,6 +193,10 @@ const IMAGE_PLACEHOLDER_RES = /\[Image:\s*([^\]]+)\]/g;
 /** Extract image attachments from the "[Image: name]" placeholder the sender
  *  embeds. dataUrl stays undefined — it is re-read from the session files dir
  *  lazily after load (#659). */
+
+// #875 D1：系统包安装 persist/runtime 失败 → App 级 toast 的 window 事件。
+export const INSTALL_WARNING_EVENT = 'miqi:system-install-warning';
+export type InstallWarningKind = 'persist' | 'runtime';
 function extractImageAttachmentsFromContent(content: string): Attachment[] | undefined {
   const names = [...content.matchAll(IMAGE_PLACEHOLDER_RES)].map((m) => m[1].trim());
   if (names.length === 0) return undefined;
@@ -442,6 +446,16 @@ function createProviderConfigMessage(content?: string): Message {
     content: content || '尚未配置模型服务。请先配置 Provider/API Key 后再发送消息。',
     action: 'open-provider-settings',
     actionLabel: '去配置模型',
+    timestamp: Date.now(),
+  };
+}
+
+/** #922：登录但 AI 网关未 active 时的发送阻断提示（不含可点 action，指向平台页文案）。 */
+function createGatewayBlockedMessage(): Message {
+  return {
+    role: 'error',
+    content:
+      'AI 网关未就绪（平台开通中或不可用），暂时无法发起会话。请到 设置 → MiQroForge 平台 查看网关状态或重新登录后重试。',
     timestamp: Date.now(),
   };
 }
@@ -1355,14 +1369,26 @@ function _isPersistedCopyOf(frontendTs: number | undefined, copyTs: number | und
   return Math.abs(copyTs - frontendTs) < _PERSISTED_COPY_TS_TOLERANCE_MS;
 }
 
-// 统一谓词（删 flag 门控与保留块共用——#891 深度审阅 #11：两处手写导致漂移）。
-function _hasPersistedUserCopyIn(m: Message, merged: Message[]): boolean {
-  return merged.some(
-    (pm) =>
-      pm.role === 'user' &&
-      String(pm.content) === String(m.content) &&
-      _isPersistedCopyOf(m.timestamp, pm.timestamp)
-  );
+// #891 深度审阅 #11：删 flag 门控与保留块须用同一匹配（两处不再手写漂移）。
+// 唯一匹配改为一对一：merged 里每条持久化用户行只认领最早一条同内容、时间相近
+// 的乐观气泡。此前 .some() 会让同一条持久化副本同时满足多条相同文本的气泡——
+// 用户 30s 内两次发送同一句、恢复快照时第二条尚未落盘，两条都会被误判为已持久
+// 化而漏掉第二条。返回数组与 frontend 等长：matched[i]===true 表示该条乐观气泡
+// 已有专属持久化副本。
+function _markUserTwinMatches(frontend: Message[], merged: Message[]): boolean[] {
+  const matched = new Array<boolean>(frontend.length).fill(false);
+  for (const pm of merged) {
+    if (pm.role !== 'user') continue;
+    const idx = frontend.findIndex(
+      (m, i) =>
+        !matched[i] &&
+        m.role === 'user' &&
+        String(pm.content) === String(m.content) &&
+        _isPersistedCopyOf(m.timestamp, pm.timestamp)
+    );
+    if (idx >= 0) matched[idx] = true;
+  }
+  return matched;
 }
 
 export function sessionMsgsToUi(rawMsgs: any[]): Message[] {
@@ -2115,7 +2141,7 @@ const TURN_ABORT_SETTLE_MS = 3000;
 /** Fallback for aborted events WITHOUT a turn_id (legacy/mock bridges): a
  *  stale aborted event from a superseded turn arriving this soon after a new
  *  send started is dropped. Bridges that emit turn ids use the authoritative
- *  activeTurnIdRef match instead — no time window involved (#542).
+ *  invocation-local turn id match instead — no time window involved (#542).
  *  LIMITATION: under this fallback, a legitimately fast backend abort of the
  *  NEW turn within the window is also dropped, leaving streaming=true until
  *  the 60s watchdog fires. Production bridges all emit turn ids, so this is
@@ -2139,6 +2165,7 @@ export function ChatConsole({
   onOpenProviderSettings,
   onOpenApprovals,
   onWorkspaceLoaded,
+  onSessionsChanged,
 }: {
   sessionKey?: string;
   /** Increment to force a session history reload (e.g. after bridge becomes ready) */
@@ -2151,6 +2178,9 @@ export function ChatConsole({
   onSessionActivityChange?: (hasActivity: boolean) => void;
   pendingWorkspace?: { current: { sessionKey: string; workspace: string } | null };
   onChatFinished?: () => void;
+  /** Called after an empty session is garbage-collected on switch-away, so
+   *  the parent can refresh the sidebar list. */
+  onSessionsChanged?: () => void;
   /** Increment to force a title reload after the session is renamed from
    *  the sidebar, so the active header stays in sync. */
   renameVersion?: number;
@@ -2162,6 +2192,23 @@ export function ChatConsole({
   onWorkspaceLoaded?: (workspace: string | null) => void;
 }) {
   const [messages, setMessages] = useState<Message[]>([]);
+  // #875 D1（外部评估 P0/A1）：系统包安装的 persist/runtime 失败标记只写在
+  // 工具输出里，模型可能摘要掉——用户会误以为「允许并记住」已永久生效。
+  // 扫描消息中的失败标记并发 window 事件，由 App 级 toast 呈现（不依赖模型）。
+  const warnedInstallWarnRef = useRef(new Map<string, number>());
+  useEffect(() => {
+    const warned = warnedInstallWarnRef.current;
+    for (const m of messages) {
+      const text = String(m.content ?? '');
+      let kind: 'persist' | 'runtime' | null = null;
+      if (text.includes('授权保存失败')) kind = 'persist';
+      else if (text.includes('未能立即生效')) kind = 'runtime';
+      if (kind && warned.get(kind) !== m.timestamp) {
+        warned.set(kind, m.timestamp);
+        window.dispatchEvent(new CustomEvent(INSTALL_WARNING_EVENT, { detail: kind }));
+      }
+    }
+  }, [messages]);
   // sourcesByMsg cache: keyed by a tool-only signature so the map object is
   // stable across typewriter frames (see sourcesByMsg below).
   const sourcesCacheRef = useRef<{ sig: string; map: Map<Message, MessageSource[]> } | null>(null);
@@ -2201,6 +2248,31 @@ export function ChatConsole({
       // ignore
     }
   }, [reasoningMode]);
+  // EB-1 欢迎页模式卡选中态：独立于 reasoningMode（深度研究与代码任务都映射 think，
+  // 若用 reasoningMode 推导会同时高亮两张卡）。welcomeMode 是组件级 state，跨会话
+  // 不随欢迎页重挂而重置（ChatConsole 常驻），见下方 sessionKey effect。
+  const [welcomeMode, setWelcomeMode] = useState<'fast' | 'think' | 'code'>(
+    reasoningMode === 'think' ? 'think' : 'fast'
+  );
+  const selectWelcomeMode = (k: 'fast' | 'think' | 'code') => {
+    setWelcomeMode(k);
+    setReasoningMode(k === 'code' ? 'think' : k);
+  };
+  // Composer 侧的推理模式切换(ReasoningModeSwitch / 建议提示)同样要同步 welcome
+  // 卡高亮——否则空态下先选了「代码任务」再从输入条切 fast,welcomeMode 停在 code、
+  // 发送却用 fast,高亮与真实模式不一致(CodeRabbit)。会话已有消息后 welcome 卡不
+  // 再渲染,只在 messages.length===0 时回写 welcomeMode。
+  const changeReasoningMode = (m: ReasoningMode) => {
+    setReasoningMode(m);
+    if (messages.length === 0) setWelcomeMode(m);
+  };
+  // 切到新会话时按当前 reasoningMode 重新派生选中卡：避免沿用上个会话的 code 选择，
+  // 却因中途切到 fast 而高亮与发送模式不一致（CodeRabbit）。仅随 sessionKey 触发，
+  // 不在同一会话内用 reasoningMode 变化覆盖用户手动选卡。
+  useEffect(() => {
+    setWelcomeMode(reasoningMode === 'think' ? 'think' : 'fast');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionKey]);
   const [streaming, setStreaming] = useState(false);
   const [copiedIdx, setCopiedIdx] = useState<number | null>(null);
   const [attachments, setAttachments] = useState<Attachment[]>([]);
@@ -2411,6 +2483,14 @@ export function ChatConsole({
     return () => {
       activeSendCleanupRef.current?.();
       cleanupListeners();
+      // Dispose EVERY active send invocation — the unsubsRef singleton only
+      // tracks the latest one; cross-session invocations outlive it and must
+      // not keep firing watchdogs or calling setMessages after unmount.
+      for (const entry of sendInvocationRegistryRef.current.values()) {
+        entry.cleanup();
+        for (const unsub of entry.unsubs) unsub();
+      }
+      sendInvocationRegistryRef.current.clear();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -2498,6 +2578,97 @@ export function ChatConsole({
     if (!adjustHint || streaming) return;
     textareaRef.current?.focus();
   }, [adjustHint, streaming]);
+  // 原生 window.confirm 模态框关闭后，Chromium 可能不把“真实的 OS 激活”交还
+  // renderer：键盘事件被吞、点输入条无光标，刷新重建页面才恢复（手动复现）。
+  // 早期版本里空/非空输入条是两棵子树，删除对话时旧 textarea 卸载重挂会顺带
+  // 触发一次真实焦点重授，故能靠“document.hasFocus() 为 false 再硬激活”兜住。
+  // 现在输入条统一为常驻一棵，confirm 关闭时 Chromium 会把焦点“还”给仍挂载的
+  // textarea —— document.hasFocus() 读 true，但击键从未被重新授予，仅凭
+  // hasFocus() 判据会漏。因此凡从“有内容的会话”落到空欢迎页（删光会话/删除
+  // 当前会话），无条件硬激活一次（主进程 blur→focus 逼出真正的激活，重新下发
+  // 页面焦点）；其余空态仍按 hasFocus() 缺失才硬激活，避免无谓闪烁。
+  const welcomeFocusedFor = useRef<string | null>(null);
+  const lastMsgCountRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (!historyLoaded || streaming) return;
+    if (messages.length === 0 && welcomeFocusedFor.current !== sessionKey) {
+      welcomeFocusedFor.current = sessionKey ?? null;
+      const prevHadMessages = (lastMsgCountRef.current ?? 0) > 0;
+      const focusInput = () => textareaRef.current?.focus();
+      focusInput();
+      void window.miqi.app?.focus?.();
+      const t1 = window.setTimeout(focusInput, 120);
+      const t2 = window.setTimeout(() => {
+        focusInput();
+        void window.miqi.app?.focus?.();
+        const needsHard = prevHadMessages || !document.hasFocus();
+        if (needsHard) {
+          window.setTimeout(() => {
+            void window.miqi.app?.focus?.({ hard: true }).then(() => {
+              window.setTimeout(focusInput, 80);
+            });
+          }, 60);
+        }
+      }, 420);
+      return () => {
+        window.clearTimeout(t1);
+        window.clearTimeout(t2);
+      };
+    }
+  }, [historyLoaded, streaming, messages, sessionKey]);
+  // 从侧栏删除「非当前」会话时不会发生会话切换，上面的入口 effect 不会重跑；但
+  // 原生 window.confirm 模态同样会偷走 OS 键盘授予（hasFocus() 读 true、击键却被
+  // 吞）。删除路径在 confirm 通过后派发本事件，这里若处于空欢迎页就重发一次硬激活
+  // （主进程 blur→focus），与上面 9ad436c7 的修法同源。
+  // 监听器无条件注册：若删除发生在历史加载完成前（空态还没就绪），事件不会丢——
+  // 记下 pending，等当前会话加载完成且为空时再消费执行（CodeRabbit）。非空会话里
+  // 删除其它会话本就不该动当前输入框（入口 effect 只在落到空态时接管），直接忽略。
+  const historyLoadedRef = useRef(historyLoaded);
+  historyLoadedRef.current = historyLoaded;
+  const messageCountRef = useRef(messages.length);
+  messageCountRef.current = messages.length;
+  const pendingRegrantRef = useRef(false);
+  useEffect(() => {
+    const runRegrant = () => {
+      textareaRef.current?.focus();
+      window.setTimeout(() => {
+        void window.miqi.app?.focus?.({ hard: true }).then(() => {
+          window.setTimeout(() => textareaRef.current?.focus(), 80);
+        });
+      }, 60);
+    };
+    const regrant = () => {
+      if (messageCountRef.current > 0) return;
+      if (!historyLoadedRef.current) {
+        pendingRegrantRef.current = true;
+        return;
+      }
+      runRegrant();
+    };
+    window.addEventListener('miqi:chat-focus-regrant', regrant);
+    return () => window.removeEventListener('miqi:chat-focus-regrant', regrant);
+  }, []);
+  // 切换会话会重建空态，加载途中攒下的 pending 只属于旧会话——先于消费 effect
+  // 清掉，别在别的会话里误触发一次硬激活（同源：消费 effect 仅在「空 + 已加载」时跑）。
+  useEffect(() => {
+    pendingRegrantRef.current = false;
+  }, [sessionKey]);
+  useEffect(() => {
+    if (historyLoaded && messages.length === 0 && pendingRegrantRef.current) {
+      pendingRegrantRef.current = false;
+      textareaRef.current?.focus();
+      window.setTimeout(() => {
+        void window.miqi.app?.focus?.({ hard: true }).then(() => {
+          window.setTimeout(() => textareaRef.current?.focus(), 80);
+        });
+      }, 60);
+    }
+  }, [historyLoaded, messages, sessionKey]);
+  // 记录上一次提交的 messages 长度（声明于聚焦 effect 之后：effect 按声明顺序
+  // 逐个执行，聚焦 effect 先跑、读到的仍是旧值；本 effect 无依赖、每次提交都跑）。
+  useEffect(() => {
+    lastMsgCountRef.current = messages.length;
+  });
   const toolArgsByCallId = useRef<Map<string, unknown>>(new Map());
   /** web_search tool outputs (by tool_call_id) for click-to-expand result
    *  cards on the live tool row (#539). State, not ref — cards must re-render
@@ -2505,19 +2676,25 @@ export function ChatConsole({
   const [searchResultsByCallId, setSearchResultsByCallId] = useState<Record<string, string>>({});
   const previewJustClosed = useRef(false);
   const unsubsRef = useRef<Array<() => void>>([]);
+  // Which send invocation the unsubs in unsubsRef belong to — a new send must
+  // only auto-unsubscribe the PREVIOUS invocation when both target the same
+  // session; otherwise a send in session B silently kills session A's
+  // in-flight listeners and its terminal events are never processed.
+  const unsubsSessionRef = useRef<string | null>(null);
+  // EVERY active send invocation's cleanup resources, keyed by its unique
+  // send id.  The unsubsRef singleton only remembers the latest invocation —
+  // without this registry, cross-session invocations outlive it and their
+  // watchdogs/listeners would keep calling setMessages after unmount.  The
+  // session key lets abort/stop dispose only the invocation of the session
+  // being stopped instead of the latest one.
+  const sendInvocationRegistryRef = useRef<
+    Map<number, { unsubs: Array<() => void>; cleanup: () => void; sessionKey: string }>
+  >(new Map());
   const finalCleanupTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Shared across handleSend closures: a new send aborts the previous turn's
   // typewriter reveal (its RAF is closure-local and otherwise leaks a ghost
   // assistant bubble into the next turn).
   const revealAnimIdRef = useRef<number | null>(null);
-  // Timestamp of the newest handleSend start. Fallback guard for terminal
-  // events WITHOUT a turn_id (legacy/mock bridges) arriving from a superseded
-  // turn — the turn_id path is authoritative (see the onAborted guard).
-  const currentSendStartedAtRef = useRef(0);
-  // Backend-issued turn id of the active turn, learned from the turn_started
-  // progress event. Terminal events tagged with a different turn id are
-  // dropped — a session key cannot distinguish two turns in one session.
-  const activeTurnIdRef = useRef<string | null>(null);
   // The live turn's watchdog interval. Shared across closures so an interrupt
   // (handleAbort / interrupt-and-resend) can stop the superseded turn's timer —
   // its own sendCleanup never runs because its listeners are already removed.
@@ -2715,7 +2892,27 @@ export function ChatConsole({
     // take the LIVE path (in `messages`), never moduleInFlightCache — so
     // without this snapshot they'd be lost when setMessages([]) runs below.
     if (_sessionChanged && currentSessionRef.current) {
-      moduleMessagesSnapshot.set(currentSessionRef.current, messagesRef.current);
+      const leavingKey = currentSessionRef.current;
+      moduleMessagesSnapshot.set(leavingKey, messagesRef.current);
+      // GC 空会话（对齐 WorkBuddy）：没提问的新对话切走后不应残留在会话
+      // 列表。messagesRef 为空只说明当前渲染无内容——加载是异步的，切走太
+      // 快时磁盘可能已有消息，所以删前用后端再确认一次，避免误删。
+      if (messagesRef.current.length === 0) {
+        window.miqi.sessions
+          .get(leavingKey)
+          .then((d) => {
+            if (d && Array.isArray(d.messages) && d.messages.length > 0) return null;
+            // get 返回前用户可能已切回 leavingKey 并发出首条消息（已落盘）；
+            // 此刻 currentSessionRef 若已指回该 key，删除会误删这条新会话
+            // （CodeRabbit）。竞态窗口极窄但护栏成本为零。
+            if (currentSessionRef.current === leavingKey) return null;
+            return window.miqi.sessions.delete(leavingKey);
+          })
+          .then(() => onSessionsChanged?.())
+          .catch(() => {
+            /* bridge 离线时跳过清理，空会话保留 */
+          });
+      }
     }
     // Update the ref FIRST so the per-handler session_key guard on the
     // CURRENT listeners (from the previous session's handleSend) sees the
@@ -3167,6 +3364,9 @@ export function ChatConsole({
           }
           inFlightCacheRef.current.delete(sessionKey);
         }
+        // 单一判定：把 messagesRef 每条用户乐观行与其 merged 持久化副本一一
+        // 对应（谓词见 _markUserTwinMatches），缓存 final 门控与保留块共用。
+        const _userTwinMatches = _markUserTwinMatches(messagesRef.current, merged);
         // A cached final (or persisted history) now renders the full reply —
         // mark the session so the old send listener's live onFinal doesn't
         // append a duplicate when it fires for the same reply.
@@ -3175,7 +3375,7 @@ export function ChatConsole({
           // 新消息时，不能重新打上"final 已处理"标记（否则新回合的 live
           // final 会被吞、回复不渲染）。
           const _newInflightUser = messagesRef.current.some(
-            (m) => m.role === 'user' && !_hasPersistedUserCopyIn(m, merged)
+            (m, i) => m.role === 'user' && !_userTwinMatches[i]
           );
           if (!_newInflightUser) {
             finalHandledSessions.add(sessionKey);
@@ -3243,18 +3443,18 @@ export function ChatConsole({
           // messages (#891 深度审阅)。持久化副本与前端气泡同属机器时钟
           // （后端 ISO 经 sessionMsgsToUi 转 epoch ms），同一次发送的收发
           // 时间差秒级。
-          // - 用户行：merged 中【任一条】同内容 + 时间相近即已持久化——
-          //   保留块运行在完整恢复快照上，只比最后一条会把旧历史行整段
-          //   重复渲染（审阅 #1）；时间相近限定保证跨轮重复的旧文本不被
-          //   误判（审阅 #5）。
+          // - 用户行：与其专属持久化副本一一对应（_markUserTwinMatches，整体
+          //   快照匹配而非只比最后一条——否则旧历史行被整段重复渲染，审阅 #1；
+          //   时间相近限定保证跨轮重复的旧文本不被误判，审阅 #5）。同文本多条
+          //   气泡共有一条持久化副本时只认领一条，余下按未落盘保留（#891 复核）。
           // - error 行：不保留——错误横幅是 load 失败的瞬时 UI，成功的
           //   retry load 应移除而非被永久嵌入历史（审阅 #8）。
           // - thinking/tool 行：保持内容去重（部分更新导致的瞬时双副本为
           //   已知限制，审阅 #4）。
-          const _inFlight = messagesRef.current.filter((m) => {
+          const _inFlight = messagesRef.current.filter((m, i) => {
             if (m.role === 'assistant' || m.role === 'error') return false;
             if (m.role === 'user') {
-              return !_hasPersistedUserCopyIn(m, merged);
+              return !_userTwinMatches[i];
             }
             return !merged.some(
               (pm) => pm.role === m.role && String(pm.content) === String(m.content)
@@ -3419,15 +3619,30 @@ export function ChatConsole({
     }, 2000);
   }, []);
 
-  const cleanupListeners = useCallback(() => {
-    clearFinalCleanupTimer();
-    if (shareFeedbackTimerRef.current) {
-      clearTimeout(shareFeedbackTimerRef.current);
-      shareFeedbackTimerRef.current = null;
-    }
-    for (const unsub of unsubsRef.current) unsub();
-    unsubsRef.current = [];
-  }, [clearFinalCleanupTimer]);
+  const cleanupListeners = useCallback(
+    (onlyMine?: Array<() => void>) => {
+      clearFinalCleanupTimer();
+      if (shareFeedbackTimerRef.current) {
+        clearTimeout(shareFeedbackTimerRef.current);
+        shareFeedbackTimerRef.current = null;
+      }
+      if (onlyMine) {
+        // Identity-scoped: unsubscribe THIS invocation's listeners only.  The
+        // shared unsubsRef may already point at a NEWER send's listeners
+        // (overlapping sends across sessions) — those must survive.
+        for (const unsub of onlyMine) unsub();
+        if (unsubsRef.current === onlyMine) {
+          unsubsRef.current = [];
+          unsubsSessionRef.current = null;
+        }
+        return;
+      }
+      for (const unsub of unsubsRef.current) unsub();
+      unsubsRef.current = [];
+      unsubsSessionRef.current = null;
+    },
+    [clearFinalCleanupTimer]
+  );
 
   const handleAttachClick = () => fileInputRef.current?.click();
 
@@ -3517,14 +3732,20 @@ export function ChatConsole({
     setAttachments((prev) => prev.filter((_, i) => i !== idx));
 
   const handleAbort = useCallback(async () => {
-    cleanupListeners();
+    // Scope cleanup to THIS session's invocation(s): unsubsRef and
+    // watchdogTimerRef point at the LATEST send overall — a newer send in
+    // another session must not lose its listeners/watchdog when the user
+    // stops this one (send in A → send in B → back to A → stop A).
+    for (const [sendId, entry] of sendInvocationRegistryRef.current) {
+      if (entry.sessionKey !== currentSessionRef.current) continue;
+      entry.cleanup();
+      for (const unsub of entry.unsubs) unsub();
+      sendInvocationRegistryRef.current.delete(sendId);
+    }
+    clearFinalCleanupTimer();
     if (revealAnimIdRef.current !== null) {
       cancelAnimationFrame(revealAnimIdRef.current);
       revealAnimIdRef.current = null;
-    }
-    if (watchdogTimerRef.current !== null) {
-      clearInterval(watchdogTimerRef.current);
-      watchdogTimerRef.current = null;
     }
     // Keep the lifecycle promise in place — a stop-then-quick-send must still
     // await the aborted turn's settlement so its terminal event (and the
@@ -3566,7 +3787,7 @@ export function ChatConsole({
         { role: 'progress', content: '已停止。', timestamp: Date.now() },
       ]);
     }
-  }, [cleanupListeners, currentReqId]);
+  }, [clearFinalCleanupTimer, currentReqId]);
 
   // Respond to new-session trigger from App/Sidebar — create directly, no picker.
   // NOTE: this intentionally does NOT gate on `streaming`. Switching sessions
@@ -3624,6 +3845,9 @@ export function ChatConsole({
     retry?: boolean;
   } | null>(null);
   const handleSendRef = useRef<() => void>(() => {});
+  /** 程序化发送（论文下载 fallback 等）经此 ref 显式传文本，handleSend
+   *  一次性消费。不依赖 setInput 后的渲染 flush（旧闭包读 input 是旧值）。 */
+  const programmaticTextRef = useRef<string | null>(null);
   /** #740: pending resume-turn id — set by 继续执行, consumed by handleSend
    *  so the resume request flows through the full send pipeline (listeners,
    *  streaming render) instead of a bare chat.send call. */
@@ -3686,7 +3910,11 @@ export function ChatConsole({
     const _resumeId = resumeTurnIdRef.current;
     resumeTurnIdRef.current = null;
     const payload = retryPayloadRef.current;
-    const text = (payload?.text ?? input).trim();
+    // 程序化发送（论文下载 fallback 等）经 ref 显式传文本：不依赖
+    // setInput 后的渲染 flush（旧闭包读到的 input state 是旧值）。
+    const programmaticText = programmaticTextRef.current;
+    programmaticTextRef.current = null;
+    const text = (payload?.text ?? programmaticText ?? input).trim();
     const atts = payload?.attachments ?? attachments;
     if (!text && atts.length === 0 && !_resumeId) {
       retryPayloadRef.current = null;
@@ -3785,7 +4013,12 @@ export function ChatConsole({
     // turn's live final render.
     streamingBySession.add(sendSessionKey);
     finalHandledSessions.delete(sendSessionKey);
-    cleanupListeners();
+    // Only auto-unsubscribe the previous invocation's listeners when it was
+    // THIS session's send (same-session supersede).  Unsubscribing across
+    // sessions strands the other session's in-flight turn: its terminal
+    // events are never processed, its send cleanup never runs, and its 60s
+    // watchdog survives to fire a false "后端 60s 无响应" later.
+    if (unsubsSessionRef.current === sendSessionKey) cleanupListeners();
     // A new send supersedes any in-flight typewriter for this session — cancel
     // the RAF chain so the previous reply stops typing the moment a new message
     // is sent, and reset its state so the new turn does NOT inherit the old
@@ -3839,6 +4072,37 @@ export function ChatConsole({
             const last = prev[prev.length - 1];
             if (last?.timestamp === userMsg.timestamp) {
               return [...prev.slice(0, -1), createProviderConfigMessage()];
+            }
+            return prev;
+          });
+          setInput(text);
+          setAttachments(atts);
+        }
+        return;
+      }
+
+      // ── #922 AI 网关门禁 ──
+      // 登录后网关状态明确非 active（provisioning/failed/disabled）时拒绝发起
+      // 会话：把乐观气泡换成网关提示并恢复输入框。未登录 / 平台未下发网关状态
+      // 时放行（与模型面板语义一致）。旧 preload/smoke mock 无 qraft 命名空间则跳过。
+      const gatewayStatus =
+        typeof window.miqi.qraft?.status === 'function'
+          ? await window.miqi.qraft.status().catch(() => null)
+          : null;
+      if (
+        gatewayStatus?.loggedIn === true &&
+        gatewayStatus.aiGateway &&
+        gatewayStatus.aiGateway.status !== 'active'
+      ) {
+        pendingSendIdsRef.current.delete(sendSessionKey);
+        streamingBySession.delete(sendSessionKey);
+        setSendingFor(sendSessionKey, null);
+        if (currentSessionRef.current === sendSessionKey) {
+          setStreaming(false);
+          setMessages((prev) => {
+            const last = prev[prev.length - 1];
+            if (last?.timestamp === userMsg.timestamp) {
+              return [...prev.slice(0, -1), createGatewayBlockedMessage()];
             }
             return prev;
           });
@@ -3976,10 +4240,12 @@ export function ChatConsole({
     pendingSendIdsRef.current.delete(sendSessionKey);
     setSendingFor(sendSessionKey, null);
     // Stamp this turn now (BEFORE any await below) so listeners registered
-    // later can drop terminal events from the superseded turn.
+    // later can drop terminal events from the superseded turn.  The turn id
+    // and start time are invocation-local: overlapping sends across sessions
+    // used to overwrite the shared refs, making each other's terminals look
+    // stale.
     const sendStartedAt = Date.now();
-    currentSendStartedAtRef.current = sendStartedAt;
-    activeTurnIdRef.current = null;
+    let myTurnId: string | null = null;
 
     // Generate a client-side req_id so we can abort this specific request
     const reqId = `req_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
@@ -4189,6 +4455,16 @@ export function ChatConsole({
       persistReveal();
     };
 
+    // The exact routing key this invocation passes to chat.send.  For
+    // thread-scoped sessions it differs from sendSessionKey
+    // (`desktop:<threadId>` vs the session key), so the handlers must filter
+    // on THIS value, not sendSessionKey.  Every IPC handler drops events
+    // tagged with a different key before the cache/live branch — otherwise
+    // overlapping sends across sessions would each process (and settle on)
+    // the other's events.
+    const routingKey =
+      activeThreadId === 'main' ? currentSessionRef.current : `desktop:${activeThreadId}`;
+
     // Track last progress event time for watchdog
     let lastEventAt = Date.now();
     // 思考过程实时可见后，普通等待不再提示（用户要求 #539）：只在真正
@@ -4239,7 +4515,13 @@ export function ChatConsole({
     }, 5_000); // check every 5s
     watchdogTimerRef.current = watchdogTimer;
 
-    const sendCleanup = () => {
+    // Kill ONLY this invocation's watchdog interval.  The success path uses
+    // this instead of sendCleanup(): by the time the send promise resolves,
+    // onFinal has already run (the bridge dispatches the terminal event
+    // before settling the promise) and scheduled the typewriter reveal — a
+    // full sendCleanup() there would cancel that animation frame and freeze
+    // the final answer mid-reveal.
+    const clearWatchdogTimer = () => {
       if (watchdogTimer) {
         clearInterval(watchdogTimer);
         // Identity check BEFORE nulling the local — the shared ref may
@@ -4247,13 +4529,21 @@ export function ChatConsole({
         if (watchdogTimerRef.current === watchdogTimer) watchdogTimerRef.current = null;
         watchdogTimer = null;
       }
+    };
+
+    const sendCleanup = () => {
+      clearWatchdogTimer();
       // Also stop the typewriter frame — otherwise an unmount while a send is
       // in flight leaves the RAF loop scheduling on an unmounted component.
       if (animId !== null) {
         cancelAnimationFrame(animId);
         animId = null;
       }
-      activeSendCleanupRef.current = null;
+      // Identity check BEFORE nulling the shared ref — a newer send may have
+      // already claimed it, and a settled old invocation's cleanup must not
+      // strand the newer send's watchdog (which relies on this ref for
+      // unmount cleanup).
+      if (activeSendCleanupRef.current === sendCleanup) activeSendCleanupRef.current = null;
       // NOTE: cleanupListeners() is deliberately NOT called here.
       // The typewriter completing does not mean the turn is over —
       // another final may still arrive (e.g. tool-call then final-text).
@@ -4271,11 +4561,15 @@ export function ChatConsole({
     };
 
     const unsubProgress = window.miqi.chat.onProgress((data: ChatProgress) => {
-      // session_key is optional (back-compat); a missing one belongs to this
-      // send's own session (sendSessionKey).  Without the fallback, a
-      // session_key-less event arriving after a switch-away would be applied
-      // to whatever session is now active — leaking A's stream into B.
-      const _owner = data.session_key ?? sendSessionKey;
+      // Foreign-session event — another invocation's stream.  Drop it here;
+      // the owning invocation's handlers process it.  Untagged legacy events
+      // fall through (back-compat: treated as this send's own).
+      if (data.session_key && data.session_key !== routingKey) return;
+      // Accepted events route under THIS invocation's UI session owner.  The
+      // routing key can differ from the session key for thread-scoped sends
+      // (desktop:<threadId>) — routing by it would cache events under a key
+      // load() never looks up, silently dropping the stream on switch-back.
+      const _owner = sendSessionKey;
       if (_owner !== currentSessionRef.current) {
         var buf = inFlightCacheRef.current.get(_owner);
         if (!buf) {
@@ -4325,10 +4619,12 @@ export function ChatConsole({
       }
 
       // ── Platform points billing notices ─────────────────────────
-      // 后端计费闸门（首次工具执行扣 30 分）通过 progress 事件推送结果：
-      // billed = 已扣费（安静的活动行）；blocked = 余额不足/登录过期/
-      // 计费服务不可用（醒目错误行，任务未执行）。渲染逻辑与缓存回放
-      // 共用 pointsEventToMessage，保证切会话后通知不丢。
+      // 平台计费事件（当前仅 Slurm MCP 作业运行扣 10 分）通过 progress
+      // 事件推送结果：billed = 已扣费（安静的活动行）；blocked = 扣费
+      // 未完成（余额不足/登录过期/计费服务不可用，醒目错误行）——作业已
+      // 进入运行，扣费失败不阻断任务（见 main/ipc/index.ts 的
+      // slurm_job_running 处理）。渲染逻辑与缓存回放共用
+      // pointsEventToMessage，保证切会话后通知不丢。
       {
         const pointsMessage = pointsEventToMessage(data);
         if (pointsMessage) {
@@ -4341,9 +4637,10 @@ export function ChatConsole({
       // The backend announces the active turn id when it starts. Terminal
       // events (final/aborted/error) tagged with a different turn id are
       // stale and dropped — see the guards in the final/aborted/error
-      // listeners (#542).
+      // listeners (#542).  Tracked per invocation so another session's
+      // turn_started can't make this turn's terminals look stale.
       if (data.stream === 'turn' && typeof data.turn_id === 'string') {
-        activeTurnIdRef.current = data.turn_id;
+        myTurnId = data.turn_id;
         return;
       }
 
@@ -4500,7 +4797,11 @@ export function ChatConsole({
     });
 
     const unsubFinal = window.miqi.chat.onFinal((data: ChatFinal) => {
-      const _owner = data.session_key ?? sendSessionKey;
+      // Foreign-session terminal — another invocation's turn; its handler
+      // settles it.  Untagged legacy events fall through (back-compat).
+      if (data.session_key && data.session_key !== routingKey) return;
+      // Route under the UI session owner — see the progress listener.
+      const _owner = sendSessionKey;
       if (_owner !== currentSessionRef.current) {
         var buf = inFlightCacheRef.current.get(_owner);
         if (!buf) {
@@ -4513,16 +4814,16 @@ export function ChatConsole({
       // Final from a superseded turn (e.g. a pre-abort final racing a quick
       // resend): the backend's turn id is authoritative — drop it so the
       // replacement turn's UI state is untouched (#542). Strict match: a
-      // tagged event must equal the active turn id; while the replacement
-      // turn's turn_started has not arrived yet (activeTurnIdRef is null),
-      // any tagged terminal event is by definition stale. The superseded
-      // turn's lifecycle promise is settled by its own closure.
+      // tagged event must equal THIS invocation's own turn id; while the
+      // turn's turn_started has not arrived yet (id is null), any tagged
+      // terminal event is by definition stale. The superseded turn's
+      // lifecycle promise is settled by its own closure.
       //
       // BACKEND CONTRACT: turn_started (task_runner.py emits TurnStartedEvent
       // before any model call) always precedes every terminal event of a turn.
       // If that ever changes (e.g. an error emitted before turn creation),
       // this strict-match logic silently drops the legitimate event.
-      if (data.turn_id && data.turn_id !== activeTurnIdRef.current) {
+      if (data.turn_id && data.turn_id !== myTurnId) {
         return;
       }
       clearFinalCleanupTimer();
@@ -4721,7 +5022,11 @@ export function ChatConsole({
     });
 
     const unsubError = window.miqi.chat.onError((data: ChatError) => {
-      const _owner = data.session_key ?? sendSessionKey;
+      // Foreign-session terminal — another invocation's turn; its handler
+      // settles it.  Untagged legacy events fall through (back-compat).
+      if (data.session_key && data.session_key !== routingKey) return;
+      // Route under the UI session owner — see the progress listener.
+      const _owner = sendSessionKey;
       if (_owner !== currentSessionRef.current) {
         var buf = inFlightCacheRef.current.get(_owner);
         if (!buf) {
@@ -4734,7 +5039,7 @@ export function ChatConsole({
       // Error from a superseded turn (e.g. an abort-induced error racing a
       // quick resend): drop it so the replacement turn's UI state is
       // untouched (#542). Strict match — see the final listener.
-      if (data.turn_id && data.turn_id !== activeTurnIdRef.current) {
+      if (data.turn_id && data.turn_id !== myTurnId) {
         return;
       }
       streamErrorHandled = true;
@@ -4752,11 +5057,18 @@ export function ChatConsole({
       setSendingFor(sendSessionKey, null);
       streamingBySession.delete(sendSessionKey);
       sendCleanup();
-      cleanupListeners();
+      // Identity-scoped: only THIS invocation's listeners — the shared
+      // unsubsRef may point at a newer overlapping send.
+      cleanupListeners(myUnsubs);
+      sendInvocationRegistryRef.current.delete(thisSendId);
     });
 
     const unsubAborted = window.miqi.chat.onAborted((_data: ChatAborted) => {
-      const _owner = _data.session_key ?? sendSessionKey;
+      // Foreign-session terminal — another invocation's turn; its handler
+      // settles it.  Untagged legacy events fall through (back-compat).
+      if (_data.session_key && _data.session_key !== routingKey) return;
+      // Route under the UI session owner — see the progress listener.
+      const _owner = sendSessionKey;
       if (_owner !== currentSessionRef.current) {
         var buf = inFlightCacheRef.current.get(_owner);
         if (!buf) {
@@ -4772,13 +5084,13 @@ export function ChatConsole({
       // The backend's turn id is authoritative; the grace window is only a
       // fallback for bridges that don't emit turn ids (legacy/mocks).
       if (_data.turn_id) {
-        // Strict match — a tagged event must equal the active turn id; while
-        // the replacement turn's turn_started has not arrived yet (ref is
+        // Strict match — a tagged event must equal THIS invocation's own
+        // turn id; while the turn's turn_started has not arrived yet (id is
         // null), any tagged terminal event is by definition stale.
-        if (_data.turn_id !== activeTurnIdRef.current) {
+        if (_data.turn_id !== myTurnId) {
           return;
         }
-      } else if (Date.now() - currentSendStartedAtRef.current < TURN_TERMINAL_GRACE_MS) {
+      } else if (Date.now() - sendStartedAt < TURN_TERMINAL_GRACE_MS) {
         return;
       }
       if (animId !== null) cancelAnimationFrame(animId);
@@ -4795,7 +5107,19 @@ export function ChatConsole({
       sendCleanup();
     });
 
-    unsubsRef.current = [unsubProgress, unsubFinal, unsubError, unsubAborted];
+    // Capture THIS invocation's unsubs locally: by the time this send's
+    // promise settles, unsubsRef may point at a NEWER send's listeners, so
+    // self-cleanup must never go through the shared ref.
+    const myUnsubs = [unsubProgress, unsubFinal, unsubError, unsubAborted];
+    unsubsRef.current = myUnsubs;
+    unsubsSessionRef.current = sendSessionKey;
+    // Register this invocation so unmount (and settle) can dispose its
+    // resources even when it is no longer the latest send.
+    sendInvocationRegistryRef.current.set(thisSendId, {
+      unsubs: myUnsubs,
+      cleanup: sendCleanup,
+      sessionKey: sendSessionKey,
+    });
 
     try {
       // On first message for a new conversation, create a thread with
@@ -4831,8 +5155,10 @@ export function ChatConsole({
         }
       }
 
-      const key =
-        activeThreadId === 'main' ? currentSessionRef.current : `desktop:${activeThreadId}`;
+      // Same routing key the listeners filter on — the send call and the
+      // handlers must agree, or this turn's own stream would be dropped as
+      // foreign before it reaches the cache/live branch.
+      const key = routingKey;
       const chatAttachments = sentAttachments
         .filter((a) => (a.type === 'document' && a.dataBase64) || (a.type === 'image' && a.dataUrl))
         .map((a) => ({
@@ -4888,6 +5214,25 @@ export function ChatConsole({
 
       await sendPromise;
       settleLifecycle();
+      // The turn's promise settled, but the terminal LISTENER may never have
+      // run: a later send unsubscribed it (cross-session listener kill), or
+      // the turn-id guard dropped the terminal event.  Without this cleanup
+      // the invocation's 60s watchdog survives as a zombie and, once the user
+      // is back on this session with the in-flight cache flushed, fires a
+      // false "后端 60s 无响应" into the message list while the backend is
+      // streaming fine.  Deliberately NOT sendCleanup(): onFinal ran before
+      // this promise resolved (the bridge dispatches the terminal event
+      // first) and already scheduled the typewriter reveal — sendCleanup()
+      // would cancel that animation frame and freeze the final answer
+      // mid-reveal.  Only THIS invocation's watchdog and listeners are
+      // cleaned up here.
+      clearWatchdogTimer();
+      for (const unsub of myUnsubs) unsub();
+      if (unsubsRef.current === myUnsubs) {
+        unsubsRef.current = [];
+        unsubsSessionRef.current = null;
+      }
+      sendInvocationRegistryRef.current.delete(thisSendId);
     } catch (e: any) {
       if (animId !== null) cancelAnimationFrame(animId);
       if (streamErrorHandled) {
@@ -4895,7 +5240,10 @@ export function ChatConsole({
         setStreaming(false);
         setSendingFor(sendSessionKey, null);
         sendCleanup();
-        cleanupListeners();
+        // Identity-scoped: only THIS invocation's listeners — the shared
+        // unsubsRef may point at a newer overlapping send.
+        cleanupListeners(myUnsubs);
+        sendInvocationRegistryRef.current.delete(thisSendId);
         return;
       }
       const errMsg = sanitizeUiMessage(e?.message ?? String(e ?? '未知错误'));
@@ -4916,7 +5264,10 @@ export function ChatConsole({
       setStreaming(false);
       setSendingFor(sendSessionKey, null);
       sendCleanup();
-      cleanupListeners();
+      // Identity-scoped: only THIS invocation's listeners — the shared
+      // unsubsRef may point at a newer overlapping send.
+      cleanupListeners(myUnsubs);
+      sendInvocationRegistryRef.current.delete(thisSendId);
     }
   }, [
     input,
@@ -5022,17 +5373,18 @@ export function ChatConsole({
     setInput(instruction);
     setTimeout(() => {
       const text = instruction.trim();
-      if (!text) return;
-      // Direct send: bypasses the input-state read in handleSend since
-      // we just set it. We inline the send logic here for simplicity.
-      window.miqi.chat
-        .send(text, sessionKey)
-        .then(() => {
-          setDownloadingPaperId(null);
-        })
-        .catch(() => {
-          setDownloadingPaperId(null);
-        });
+      if (!text) {
+        programmaticTextRef.current = null;
+        setDownloadingPaperId(null);
+        return;
+      }
+      // 经 handleSend 主流程发送（而非直连 chat.send）：网关门禁、乐观气泡
+      // 与流式渲染路径一致（#922）。文本经 programmaticTextRef 显式传入。
+      programmaticTextRef.current = instruction;
+      handleSendRef.current();
+      // 发出即清理下载指示：无论网关拦截（handleSend 恢复草稿）还是发送
+      // 失败，指示都不悬挂；流式回复由 handleSend 的监听链负责渲染。
+      setDownloadingPaperId(null);
     }, 0);
   };
 
@@ -6062,7 +6414,11 @@ export function ChatConsole({
             className="flex-1 overflow-y-auto"
             style={{ background: 'var(--background)' }}
           >
-            <div className="max-w-[760px] mx-auto px-4 py-5 flex flex-col gap-2">
+            <div
+              className={`max-w-[760px] mx-auto px-4 py-5 flex flex-col gap-2 ${
+                historyLoaded && messages.length === 0 ? 'min-h-full' : ''
+              }`}
+            >
               {/* Only show the "connecting" spinner while loading AND no messages
                   yet.  A user can send before the session's load() finishes
                   (historyLoaded false), and the optimistic bubble is already in
@@ -6074,21 +6430,94 @@ export function ChatConsole({
                   <p className="text-xs text-text-faint">正在连接…</p>
                 </div>
               ) : messages.length === 0 ? (
-                <div className="flex flex-col items-center justify-center h-full min-h-[400px] text-center gap-4">
+                <div className="relative flex flex-1 flex-col items-center justify-center text-center min-h-[400px] gap-5">
+                  {/* EB-1 光晕衬底 */}
                   <div
-                    className="w-16 h-16 rounded-2xl flex items-center justify-center shadow-lg overflow-hidden"
+                    className="pointer-events-none absolute top-0 left-1/2 -translate-x-1/2 w-[680px] h-[360px]"
+                    style={{
+                      background:
+                        'radial-gradient(closest-side, var(--accent-soft), transparent 72%)',
+                    }}
+                  />
+                  <div
+                    className="relative w-14 h-14 rounded-2xl flex items-center justify-center shadow-sm"
                     style={{
                       background: 'var(--surface)',
                       border: '1px solid var(--border-subtle)',
                     }}
                   >
-                    <MiQroForgeLogo size={44} />
+                    <MiQroForgeLogo size={34} />
                   </div>
-                  <div className="flex flex-col items-center gap-1">
-                    <p className="text-[15px] font-medium text-text-muted">
-                      从文件、问题或修改请求开始
+                  <div className="relative flex flex-col items-center gap-2">
+                    <p
+                      className="text-[30px] font-extrabold tracking-[-0.02em] leading-tight"
+                      style={{ color: 'var(--text)' }}
+                    >
+                      让 <span style={{ color: 'var(--accent)' }}>MiQroForge</span> 帮你干活
                     </p>
-                    <p className="text-xs text-text-faint">发起一段对话即可开始</p>
+                    <p className="text-[13px] text-text-muted">先选一种做事方式，再告诉我任务</p>
+                  </div>
+                  <div className="relative flex gap-[10px] w-full max-w-[560px]">
+                    {[
+                      {
+                        key: 'fast' as const,
+                        icon: '⚡',
+                        tag: '极速问答',
+                        tagline: '面向快速解答',
+                        desc: '即时回答问题、改少量代码，低延迟优先。',
+                      },
+                      {
+                        key: 'think' as const,
+                        icon: '🧠',
+                        tag: '深度研究',
+                        tagline: '面向复杂任务',
+                        desc: '长链路检索、推理与方案推演，先想后答。',
+                      },
+                      {
+                        key: 'code' as const,
+                        icon: '💻',
+                        tag: '代码任务',
+                        tagline: '面向工程交付',
+                        desc: '实现 / 重构 / 测试全流程，产出可审阅变更。',
+                      },
+                    ].map((m) => {
+                      const active = welcomeMode === m.key;
+                      return (
+                        <button
+                          key={m.key}
+                          type="button"
+                          onClick={() => selectWelcomeMode(m.key)}
+                          className={`flex-1 flex flex-col items-center gap-[5px] rounded-xl px-3 py-3 cursor-pointer transition-colors duration-200 border min-h-[132px] ${
+                            active ? 'border-[var(--accent)]' : 'border-[var(--border-subtle)]'
+                          } hover:border-[var(--accent)]`}
+                          style={{
+                            background: active
+                              ? 'color-mix(in srgb, var(--surface) 92%, var(--accent-soft))'
+                              : 'var(--surface)',
+                          }}
+                        >
+                          <span
+                            className="inline-flex items-center gap-[6px] text-[13px] font-bold"
+                            style={{ color: 'var(--text)' }}
+                          >
+                            <span className="text-[15px]">{m.icon}</span>
+                            {m.tag}
+                          </span>
+                          <span className="text-[11px] text-text-faint">{m.tagline}</span>
+                          <span className="text-[11.5px] text-text-muted leading-snug">
+                            {m.desc}
+                          </span>
+                          {/* ✓ 仅 active 渲染:opacity 隐藏会让文本留在 DOM,
+                              toContainText 断言不了"取消选中"。占位 div 保持底部对齐。 */}
+                          <div
+                            className="mt-auto flex items-center justify-center"
+                            style={{ minHeight: 16, color: 'var(--accent)' }}
+                          >
+                            {active && <span className="text-[11px] font-bold">✓ 已选择</span>}
+                          </div>
+                        </button>
+                      );
+                    })}
                   </div>
                 </div>
               ) : (
@@ -6430,7 +6859,7 @@ export function ChatConsole({
                   {/* 复杂问题角标（#680 跟进）：轻量气泡挂在模式按钮上，
                       3 秒自动消失，不占输入区。 */}
                   <div className="relative">
-                    <ReasoningModeSwitch mode={reasoningMode} onChange={setReasoningMode} />
+                    <ReasoningModeSwitch mode={reasoningMode} onChange={changeReasoningMode} />
                     {complexHint && reasoningMode === 'fast' && (
                       <div
                         className="absolute left-full ml-2 top-1/2 -translate-y-1/2 z-50 flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] whitespace-nowrap"
@@ -6455,7 +6884,7 @@ export function ChatConsole({
                         <button
                           type="button"
                           onClick={() => {
-                            setReasoningMode('think');
+                            changeReasoningMode('think');
                             setComplexHint(false);
                           }}
                           className="font-semibold cursor-pointer"

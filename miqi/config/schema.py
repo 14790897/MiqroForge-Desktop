@@ -531,17 +531,41 @@ class PapersToolConfig(Base):
 
 
 class MCPServerConfig(Base):
-    """MCP server connection configuration (stdio or HTTP)."""
+    """MCP server connection configuration (stdio, streamable HTTP, or SSE)."""
 
+    type: str = ""  # Transport override: "sse" | "http" | "stdio"; empty = auto (command→stdio, url→http)
     command: str = ""  # Stdio: command to run (e.g. "npx")
     args: list[str] = Field(default_factory=list)  # Stdio: command arguments
     env: dict[str, str] = Field(default_factory=dict)  # Stdio: extra env vars
-    url: str = ""  # HTTP: streamable HTTP endpoint URL
-    headers: dict[str, str] = Field(default_factory=dict)  # HTTP: Custom HTTP Headers
+    url: str = ""  # HTTP/SSE: endpoint URL
+    headers: dict[str, str] = Field(default_factory=dict)  # HTTP/SSE: Custom HTTP Headers
+    insecure_http: bool = False  # Explicit opt-in: allow non-loopback http:// endpoints (credentials in cleartext; platform gateway has no https yet)
     tool_timeout: int = 30  # Seconds before a tool call is cancelled
     progress_interval_seconds: int = 15  # Interval for heartbeat progress messages during long-running tool calls (0 = off)
     description: str = ""  # Description shown to LLM in the gateway entry-point tool (lazy mode)
     lazy: bool = False  # If true, register a single gateway tool instead of all tools upfront; activate on demand
+
+
+# 平台托管 slurm MCP 网关（内置默认服务器条目，2026-09-05 产品确认）：
+# 零配置预置 URL/传输/超时；凭据不入仓库（明文）——共享网关 token
+# 以 AES-256-GCM 密文存于桌面主进程（mcp-gateway-key.ts），登录时解密
+# 写入 workspace/.qraft/token.json（0600，字段 mcpGatewayKey；未来平台
+# 按用户下发时 userinfo 字段优先覆盖），Python 连接本服务器时自动注入
+# Authorization Bearer（见 _connect_one_server）。
+# 默认 fail-closed（CWE-319，CodeRabbit #949 评审）：非回环 http 且未
+# 显式 opt-in 时连接被拒、绝不发送登录凭据——用户在设置页勾选
+# 「允许非回环 HTTP」或平台提供 https 后启用。键名含 "slurm" 使作业
+# 进入计费范围（#936：RUNNING 时扣 10 分）。用户显式配置 mcp_servers
+# （含空对象）即覆盖此默认。
+DEFAULT_MCP_SERVERS: dict = {
+    "miqroforge-slurm": {
+        "type": "sse",
+        "url": "http://124.220.57.194:9000/sse",
+        "insecure_http": False,
+        "tool_timeout": 90,
+        "description": "MiQroForge 平台托管 SLURM 集群：作业提交/状态监控/取消、分区查询、输出与文件传输",
+    },
+}
 
 
 class ObservabilityConfig(Base):
@@ -571,21 +595,13 @@ class ToolsConfig(Base):
     extra_roots: list[str] = Field(default_factory=list)  # Additional filesystem roots allowed by file tools
     auto_user_dirs: bool = True  # Auto-sense output directories the user mentions and authorize file tools for the session (#821)
     sandbox: SandboxConfig = Field(default_factory=SandboxConfig)
-    mcp_servers: dict[str, MCPServerConfig] = Field(default_factory=dict)
-
-
-class BillingConfig(Base):
-    """Platform points billing (OAuth2 第三方接入 /oauth2/points/deduct).
-
-    When enabled, a logged-in session deducts ``cost_per_task`` points
-    before the first tool/skill execution of the session (one deduction
-    per session; plain conversation is free).  Deduction failures are
-    fail-closed — the task does not run.
-    """
-
-    enabled: bool = True
-    cost_per_task: int = 30
-    source: str = "desktop-agent-task"
+    mcp_servers: dict[str, MCPServerConfig] = Field(
+        # validate_default 未开启：default_factory 结果不会自动校验，
+        # 这里显式构造 MCPServerConfig 实例保证类型正确。
+        default_factory=lambda: {
+            name: MCPServerConfig(**cfg) for name, cfg in DEFAULT_MCP_SERVERS.items()
+        }
+    )
 
 
 class Config(BaseSettings):
@@ -600,7 +616,12 @@ class Config(BaseSettings):
     cron: CronConfig = Field(default_factory=CronConfig)
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
     observability: ObservabilityConfig = Field(default_factory=ObservabilityConfig)
-    billing: BillingConfig = Field(default_factory=BillingConfig)
+    # Inert passthrough for configs written by the removed #915 points-billing
+    # gate.  Config is a BaseSettings (extra keys are forbidden), so the field
+    # must stay to keep old config.json files loadable — deleting it made
+    # load_config silently fall back to a default config (providers lost,
+    # "尚未配置模型服务" on send).  Nothing reads this value (#960).
+    billing: dict[str, object] = Field(default_factory=dict)
     # Opaque Desktop-owned settings (e.g. theme, layout).  Not validated —
     # the Desktop UI reads/writes this via config/batchWrite desktop.* paths.
     desktop: dict[str, object] = Field(default_factory=dict)

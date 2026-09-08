@@ -52,6 +52,7 @@ import {
   FileText,
   MessageSquare,
   Scale,
+  Package,
   type LucideIcon,
 } from 'lucide-react';
 import { useRuntime } from '../../contexts/RuntimeContext';
@@ -348,6 +349,23 @@ function SandboxToggle() {
   );
 }
 
+function AllowSystemInstallsToggle() {
+  return (
+    <SettingsToggle
+      icon={Package}
+      testId="allow-system-installs-toggle"
+      label="允许系统包安装"
+      getInitial={(cfg) => cfg?.tools?.sandbox?.allowSystemInstalls ?? false}
+      onToggle={async (next) => {
+        const r: any = await window.miqi.sandbox.setAllowSystemInstalls(next);
+        if (r?.error) throw new Error(r.error);
+      }}
+      readyLabel="已开启"
+      togglingLabel="正在保存…"
+    />
+  );
+}
+
 function InlineExecOutputToggle() {
   const toggle = async (next: boolean) => {
     await window.miqi.config.update({ desktop: { ui: { inlineExecOutput: next } } });
@@ -463,9 +481,12 @@ function GeneralTab({
   const [maxTokens, setMaxTokens] = useState('');
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
+  const { loggedIn, gatewayActive, aiGatewayKnown } = useQraftStatus();
+  // #922 网关门控：未登录引导登录；登录且网关 active（或未下发）可改模型。
+  const canUseModel = loggedIn && (gatewayActive || !aiGatewayKnown);
+  const gatewayBlocked = loggedIn && aiGatewayKnown && !gatewayActive;
   const [saveError, setSaveError] = useState<string | null>(null);
   const savedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const { loggedIn } = useQraftStatus();
 
   useEffect(() => {
     getCachedConfig()
@@ -549,8 +570,23 @@ function GeneralTab({
 
       <div className="flex flex-col gap-1.5">
         <label className="text-size-sm font-medium text-[var(--text-muted)]">默认模型</label>
-        {loggedIn ? (
+        {canUseModel ? (
           <ModelSelect value={model} onChange={setModel} />
+        ) : gatewayBlocked ? (
+          <div className="flex items-center justify-between gap-3 rounded-lg border border-[var(--border-subtle)] bg-[var(--surface-muted)] px-3 py-2.5">
+            <span className="text-sm text-[var(--text-muted)]">
+              AI 网关未就绪（平台开通中或不可用），暂不可选模型
+            </span>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={onGoToQraft}
+              data-testid="general-go-gateway"
+            >
+              <LogIn size={14} />
+              查看平台账号
+            </Button>
+          </div>
         ) : (
           <div className="flex items-center justify-between gap-3 rounded-lg border border-[var(--border-subtle)] bg-[var(--surface-muted)] px-3 py-2.5">
             <span className="text-sm text-[var(--text-muted)]">登录后使用平台内置模型</span>
@@ -618,6 +654,16 @@ function GeneralTab({
           关闭后直接操作主机文件系统（无隔离，性能更好但风险更高）。
         </p>
         <SandboxToggle />
+        <div className="mt-3 rounded-xl border border-[var(--border-subtle)] bg-[var(--surface)] px-3 py-2.5">
+          <AllowSystemInstallsToggle />
+          <p className="text-size-xs text-[var(--text-muted)] mt-1">
+            开启后，AI 可将 apt 等系统包安装请求转交给 WSL，并以{' '}
+            <span className="text-[var(--accent)] font-medium">root 权限</span> 执行（仅 Windows +
+            WSL）。此权限会{' '}
+            <span className="text-[var(--accent)] font-medium">持续保存到后续会话</span>
+            。软件包安装脚本可能以 root 权限执行代码。仅在你信任 AI 操作时开启。
+          </p>
+        </div>
       </div>
 
       {/* ---- Inline Exec Output ---- */}

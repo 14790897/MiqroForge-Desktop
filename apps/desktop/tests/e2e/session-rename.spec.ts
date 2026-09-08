@@ -114,33 +114,39 @@ test.describe.serial('Session Rename E2E', () => {
     return page.locator('input[type="text"]').last();
   }
 
-  test('01: chat header inline edit — click title, type new name, Enter confirms', async () => {
-    // Fresh launch → exactly one session already exists.  On slow CI the
-    // sidebar may not have rendered its session cards yet, so wait for at
-    // least one to appear instead of asserting the count immediately.
-    // 60s: macOS CI runners can take >15s to cold-start the Python bridge
-    // and return the first sessions.list (observed "暂无任务" at 15s on a
-    // loaded runner — the cards appear a few seconds later).  If the list
-    // never populates (heavily loaded macOS runner), the rename flow can't
-    // be exercised — environment limitation, skip instead of failing
-    // (session-rename 在 macos-e2e 反复误报).
+  /**
+   * Empty sessions are ephemeral now — they are never persisted nor listed,
+   * so a fresh launch has ZERO sidebar cards until the first real message is
+   * sent (before that the chat shows the welcome hero).  Ensure a real,
+   * titled session exists to rename by seeding one message if none is there.
+   */
+  async function ensureSeededSession(): Promise<void> {
+    if ((await getSidebarSessionCount(page)) > 0) return;
+    await waitForInputReady(page);
+    await page.locator('textarea').first().fill(`seed-${Date.now()} 请创建会话`);
+    await page.locator('textarea').first().press('Enter');
     try {
       await expect
         .poll(async () => getSidebarSessionCount(page), { timeout: 60_000 })
         .toBeGreaterThanOrEqual(1);
     } catch (e) {
-      // Only the polling timeout means "environment too slow" — rethrow any
-      // real locator/page error so genuine failures stay visible.
-      if (!(e instanceof Error) || !/timed out|exceeded/i.test(e.message)) {
-        throw e;
-      }
-      console.log('[test] ⚠️ sidebar session list never populated — skipping (environment)');
-      test.skip(true, 'sidebar session list unavailable on this runner');
-      return;
+      // 播种 60s 未完成直接 rethrow：若「空会话不落盘」回归，会表现为永远播种
+      // 不出卡片，test.skip 会把这种真回归藏成跳过（CodeRabbit）。
+      console.log('[test] ⚠️ seeding a session never completed within 60s — failing');
+      throw e;
     }
-    const initialCount = await getSidebarSessionCount(page);
+  }
 
-    // Header shows the auto-extracted title (no custom title yet).
+  test('01: chat header inline edit — click title, type new name, Enter confirms', async () => {
+    // Seed a real session first (fresh launch no longer shows an empty
+    // default card — only conversations with a message are listed).  On slow
+    // CI the sidebar may not have rendered its cards yet, so the seeding step
+    // itself polls up to 60s (macOS runners can take >15s to cold-start the
+    // Python bridge — observed "暂无任务" at 15s on a loaded runner).
+    await ensureSeededSession();
+
+    // Header shows the auto-extracted title (first user message, no custom
+    // title yet).
     await expect(chatTitle()).toBeVisible();
     const original = (await chatTitle().textContent()) || '';
     expect(original.trim().length).toBeGreaterThan(0);

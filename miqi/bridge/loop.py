@@ -316,6 +316,12 @@ class BridgeRuntimeLoop:
             "sandbox.setEnabled", self._sandbox_set_enabled_handler,
         )
 
+        # Register #854: allow_system_installs runtime toggle (no restart)
+        self._app_server.register_method(
+            "sandbox.setAllowSystemInstalls",
+            self._sandbox_set_allow_system_installs_handler,
+        )
+
         # Register Phase 27.3: chat.send through AppServer
         self._app_server.register_method("chat.send", self._chat_send_handler)
 
@@ -1189,8 +1195,13 @@ class BridgeRuntimeLoop:
             data: Any,
             *,
             refresh_activity: bool = True,
-        ) -> None:
-            """Emit a non-terminal event through AppServer fanout."""
+        ) -> int:
+            """Emit a non-terminal event through AppServer fanout.
+
+            Returns the number of clients the event was handed off to
+            (0 = silently skipped) — delivery-sensitive callers (billing)
+            treat a zero as a failed handoff.
+            """
             # Inject session_key so the frontend can filter events
             # by session, preventing cross-session message leaks (#212).
             if isinstance(data, dict):
@@ -1204,7 +1215,7 @@ class BridgeRuntimeLoop:
                 active = self._session_drain_tasks.get(session_id)
                 if active is not None and not active.done():
                     active._miqi_last_activity = time.monotonic()
-            await app_server.emit_event(
+            return await app_server.emit_event(
                 session_id, event_type, data,
                 request_id=request_id,
             )
@@ -1247,6 +1258,22 @@ class BridgeRuntimeLoop:
                 await _emit("user_input_requested", payload)
 
             set_user_input_emitter(session_key, _user_input_emitter)
+
+            # Slurm MCP 计费握手（issue #927）：MCP 工具执行前经此通道向
+            # Desktop 发起扣费请求；作业提交成功后回传作业 ID 补进历史。
+            from miqi.agent.billing_resolver import set_billing_charge_emitter
+
+            async def _billing_charge_emitter(payload: dict) -> int:
+                # 返回送达的客户端数：MCP 工具侧据此决定是否标记作业已
+                # 报告（0 送达不标记，下一次 RUNNING 轮询重试）。
+                return await _emit("slurm_job_running", payload)
+
+            # 双键注册：MCP 工具侧拿到的 _session_key 是 client 前缀的
+            # session_id（f"{client_id}:{session_key}"），与 drain 的
+            # session_key 不是同一个键——两个键都注册才能命中。
+            set_billing_charge_emitter(session_key, _billing_charge_emitter)
+            set_billing_charge_emitter(session_id, _billing_charge_emitter)
+
             from miqi.agent.user_input_resolver import set_thread_session
 
             set_thread_session(thread_id, session_key)
@@ -1278,7 +1305,6 @@ class BridgeRuntimeLoop:
                 ExecCommandBeginEvent,
                 ExecCommandEndEvent,
                 ExecCommandOutputDeltaEvent,
-                PointsBillingEvent,
                 ToolCallBeginEvent,
                 ToolCallEndEvent,
                 ToolCallOutputDeltaEvent,
@@ -1371,20 +1397,6 @@ class BridgeRuntimeLoop:
                         "delta": event.delta,
                         "tool_call_id": event.tool_call_id,
                         "tool_hint": True,
-                    })
-                    continue
-
-                # 平台积分计费结果：转发为 progress 事件（stream=points），
-                # ChatConsole 据此在聊天区展示"已扣 X 积分（余额 Y）"或
-                # 积分不足/登录过期等阻止提示。
-                if isinstance(event, PointsBillingEvent):
-                    await _emit("progress", {
-                        "stream": "points",
-                        "type": event.status,
-                        "points_cost": event.cost,
-                        "balance": event.balance_after,
-                        "message": event.message,
-                        "turn_id": event.turn_id,
                     })
                     continue
 
@@ -1935,6 +1947,77 @@ class BridgeRuntimeLoop:
                 "(client={})", destroyed, client_id,
             )
             return {"result": {"enabled": False, "destroyed": destroyed}}
+
+    async def _sandbox_set_allow_system_installs_handler(
+        self, request_id: str, params: dict, client_id: str,
+        session_id: str | None, registry: Any,
+    ) -> dict:
+        """#854: sandbox.setAllowSystemInstalls — runtime toggle, no restart.
+
+        统一入口（外部审阅 #854；#875 review 09-02 P2 修订）：runtime 属性
+        与 config 持久化原子成对——与确认卡「允许并记住」共享
+        ``apply_system_installs_toggle``（同一实现防止行为漂移）；本 handler
+        额外刷新 bridge 内存态，失败按 fail-closed 抛 AppServerError（设置页
+        UI 语义：开关不得停留在"已开启"而实际未生效）。
+        """
+        if not isinstance(params, dict):
+            from miqi.runtime.app_server import AppServerError
+
+            raise AppServerError(
+                "sandbox.setAllowSystemInstalls: params must be an object",
+                code="INVALID_PARAMS",
+            )
+        enabled = params.get("enabled")
+        if not isinstance(enabled, bool):
+            from miqi.runtime.app_server import AppServerError
+
+            raise AppServerError(
+                "sandbox.setAllowSystemInstalls: 'enabled' must be a boolean",
+                code="INVALID_PARAMS",
+            )
+        if self._bridge_state is None:
+            from miqi.runtime.app_server import AppServerError
+
+            raise AppServerError(
+                "Bridge state not available", code="INTERNAL",
+            )
+
+        # 统一入口（外部审阅 #854；#875 review 09-02 P2）：与确认卡
+        # 「允许并记住」共享 apply_system_installs_toggle——config 持久化
+        # （共享锁 fresh-read，与卡 approver、extra-root persister 同一把锁）
+        # 在前、runtime 切换在后（fail-closed），两条路径同一实现。
+        from miqi.runtime.tool_registry_factory import apply_system_installs_toggle
+
+        mgr = getattr(self._bridge_state, "_sandbox_manager", None)
+        persist_failed, runtime_failed = apply_system_installs_toggle(
+            enabled, None if mgr == "disabled" else mgr,
+        )
+        if persist_failed:
+            logger.error("sandbox.setAllowSystemInstalls: config save failed")
+            from miqi.runtime.app_server import AppServerError
+
+            raise AppServerError(
+                "Failed to save config", code="INTERNAL",
+            )
+        if runtime_failed:
+            # #875 review: config is already persisted, but the runtime
+            # toggle did NOT apply.  Returning success here would show
+            # "已开启" in the UI while the sandbox still denies installs
+            # (UI=true / config=true / runtime=false).  Surface the
+            # failure so the toggle stays off; a restart picks up the
+            # persisted config.
+            from miqi.runtime.app_server import AppServerError
+
+            raise AppServerError(
+                "Runtime update failed (config saved; restart to apply)",
+                code="INTERNAL",
+            )
+        # 刷新 bridge 内存态（save_config 已失效 loader 缓存，重新加载）
+        self._bridge_state.config = self._bridge_state.load_config()
+        logger.info(
+            "sandbox.setAllowSystemInstalls: {} (client={})", enabled, client_id,
+        )
+        return {"result": {"allowSystemInstalls": enabled}}
 
     async def _shutdown(self) -> None:
         """Graceful shutdown sequence.

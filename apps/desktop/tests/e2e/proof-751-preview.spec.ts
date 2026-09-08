@@ -7,7 +7,12 @@ import { test, expect } from '@playwright/test';
 import type { ElectronApplication, Page } from '@playwright/test';
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { launchElectronApp, closeElectronApp, waitForInputReady } from './helpers/electron-setup';
+import {
+  launchElectronApp,
+  closeElectronApp,
+  waitForInputReady,
+  ensurePersistedSession,
+} from './helpers/electron-setup';
 
 const OUT_DIR = join(__dirname, '../../test-results/proof-751');
 
@@ -25,9 +30,7 @@ test('proof #751: file preview modal renders tracked html file', async () => {
   const page = fixture.page;
   await waitForInputReady(page);
 
-  const sessions: any = await page.evaluate(() => (window as any).miqi.sessions.list());
-  const key = (sessions?.sessions ?? [])[0]?.key;
-  expect(key).toBeTruthy();
+  const key = await ensurePersistedSession(page);
 
   // Write the file + a BARE-name tracked record (mimics local tool-hint
   // tracking: the panel card carries just "sales_dashboard.html").

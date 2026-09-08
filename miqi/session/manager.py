@@ -590,6 +590,7 @@ class SessionManager:
         include_archived: bool = False,
         *,
         client_id: str | None = None,
+        exclude_empty: bool = False,
     ) -> list[dict[str, Any]]:
         """List sessions sorted by updated time descending.
 
@@ -600,6 +601,11 @@ class SessionManager:
                 - Unowned legacy sessions: included with ownership="unowned".
                 - Sessions owned by other clients: EXCLUDED.
                 - If None (backward compat): all sessions included, no ownership field.
+            exclude_empty: If True, omit sessions whose conversation file has
+                no real message yet (only a metadata line).  Empty sessions are
+                ephemeral until the first message lands, so the desktop sidebar
+                must not list them (the UI cannot tell empties apart from the
+                list payload alone).
         """
         sessions: list[dict[str, Any]] = []
 
@@ -610,6 +616,8 @@ class SessionManager:
                 if data is None:
                     continue
                 if not include_archived and (path.parent / ".archived").exists():
+                    continue
+                if exclude_empty and not self._conversation_has_messages(path):
                     continue
                 key = data.get("key") or path.parent.name.replace("_", ":", 1)
 
@@ -645,6 +653,8 @@ class SessionManager:
             try:
                 data = self._read_metadata(path)
                 if data is None:
+                    continue
+                if exclude_empty and not self._conversation_has_messages(path):
                     continue
                 key = data.get("key") or path.stem.replace("_", ":", 1)
 
@@ -747,6 +757,27 @@ class SessionManager:
         except Exception:
             pass
         return ""
+
+    @staticmethod
+    def _conversation_has_messages(path: Path) -> bool:
+        """True if a conversation file contains any real message (role) line.
+
+        Stops at the first message — a real session costs ~2 lines of reads;
+        an empty session file holds only a metadata line, so the full scan is
+        just that one line.  Used by list_sessions(exclude_empty=True).
+        """
+        try:
+            with open(path, encoding="utf-8") as f:
+                for raw in f:
+                    line = raw.strip()
+                    if not line:
+                        continue
+                    obj = json.loads(line)
+                    if isinstance(obj, dict) and obj.get("role"):
+                        return True
+        except Exception:
+            return False
+        return False
 
     def _read_metadata(self, path: Path) -> dict | None:
         """Read the metadata line from a conversation.jsonl or flat .jsonl file.

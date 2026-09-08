@@ -19,6 +19,7 @@ import { existsSync, rmSync } from 'node:fs';
 import {
   launchElectronApp,
   closeElectronApp,
+  browserLogin,
   type ElectronFixture,
 } from './helpers/electron-setup';
 
@@ -26,14 +27,6 @@ const PHONE = process.env.QRAFT_PHONE ?? '';
 const PASSWORD = process.env.QRAFT_PASSWORD ?? '';
 
 const STORE_ENV = 'MIQI_QRAFT_STORE';
-
-async function gotoQraftTab(page: Page): Promise<void> {
-  await page.getByText(/^(System Settings|系统设置)$/).click();
-  await page
-    .getByRole('tab')
-    .filter({ hasText: /MiQroForge/ })
-    .click();
-}
 
 let storePath: string;
 
@@ -61,28 +54,11 @@ test.describe('MiQroForge 浏览器登录 E2E（真实测试环境）', () => {
   test('浏览器登录：MiQroForge 页面完成登录 → 自动回到授权 → 应用内完成登录', async () => {
     test.setTimeout(300_000);
 
-    await gotoQraftTab(page);
-    await expect(page.getByTestId('qraft-browser-login-btn')).toBeVisible({ timeout: 15_000 });
+    // 点浏览器登录 → 主进程打开 MiQroForge 授权窗口 → 填测试账号登录 →
+    // 拦截回调 code 换 token → 设置页出现已登录账号信息（helper 全链路）
+    const loginWin = await browserLogin(page, electronApp, PHONE, PASSWORD);
 
-    // 点浏览器登录 → 主进程打开 MiQroForge 授权窗口（标题「MiQroForge 平台登录」）
-    const loginWindowPromise = electronApp.waitForEvent('window');
-    await page.getByTestId('qraft-browser-login-btn').click();
-    const loginWin = await loginWindowPromise;
-    await loginWin.waitForLoadState('domcontentloaded');
-
-    // 未登录 → 服务端 302 到平台登录页；填入测试账号登录
-    await loginWin.waitForURL(/\/login/, { timeout: 30_000 }).catch(() => {
-      /* 已有登录态时直接进授权流程 */
-    });
-    await expect(loginWin.locator('#login_phone')).toBeVisible({ timeout: 30_000 });
-    await loginWin.fill('#login_phone', PHONE);
-    await loginWin.fill('#login_password', PASSWORD);
-    await loginWin.getByRole('button', { name: /登\s*录/ }).click();
-
-    // 主进程检测到登录态 cookie → 带回授权流程 → 拦截回调 code →
-    // 换 token + userinfo → 设置页出现已登录账号信息
     await expect(page.getByText('MiQi测试').first()).toBeVisible({ timeout: 120_000 });
-    await expect(page.getByText('已登录')).toBeVisible();
     await expect(page.getByTestId('qraft-logout-btn')).toBeVisible();
 
     // 授权窗口已在完成时自动关闭
@@ -93,8 +69,8 @@ test.describe('MiQroForge 浏览器登录 E2E（真实测试环境）', () => {
       fullPage: true,
     });
 
-    // 退出登录：回到登录表单，磁盘凭据清空
+    // 退出登录：回到登录入口，磁盘凭据清空
     await page.getByTestId('qraft-logout-btn').click();
-    await expect(page.getByTestId('qraft-login-btn')).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByTestId('qraft-browser-login-btn')).toBeVisible({ timeout: 15_000 });
   });
 });

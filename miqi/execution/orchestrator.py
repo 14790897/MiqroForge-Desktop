@@ -194,8 +194,6 @@ class OrchestrationResult(str, Enum):
     TOOL_ERROR = "tool_error"
     TIMEOUT = "timeout"
     CANCELLED = "cancelled"
-    # 平台积分计费未通过（余额不足/计费服务不可用等），任务未执行。
-    BILLING_BLOCKED = "billing_blocked"
 
 
 @dataclass
@@ -263,7 +261,6 @@ class ToolOrchestrator:
         approval_timeout_ms: int = 60_000,
         session_id: str = "",
         ledger_runtime: Any | None = None,
-        billing: Any | None = None,
     ):
         self.permissions = permission_engine
         self.sandbox = sandbox_engine
@@ -274,33 +271,12 @@ class ToolOrchestrator:
         self._session_id = session_id
         # Phase 31.8: ledger runtime for replay-persistent event recording
         self._ledger = ledger_runtime
-        # 平台积分计费闸门（PointsBilling 或 None=未启用/未登录环境）。
-        self._billing = billing        # In-flight approval futures: approval_id → Future[PermissionDecision]
+        # In-flight approval futures: approval_id → Future[PermissionDecision]
         self._pending_approvals: dict[str, asyncio.Future] = {}
         # Approval metadata for listing: approval_id → metadata dict
         self._approval_meta: dict[str, dict[str, Any]] = {}
         # Phase 31.4: thread_id → {approval_id} for abort reconciliation
         self._thread_approvals: dict[str, set[str]] = {}
-
-    async def _emit_billing_event(self, payload: dict[str, Any]) -> None:
-        """计费闸门事件回调：payload → PointsBillingEvent → 本会话事件 sink。
-
-        计费实例在进程内共享，事件必须走当前会话自己的 emitter，而不是
-        实例构造时绑定的某个会话的 sink。
-        """
-        from miqi.protocol.events import PointsBillingEvent
-
-        await self.events.emit(
-            PointsBillingEvent(
-                turn_id=str(payload.get("turn_id") or ""),
-                thread_id=str(payload.get("thread_id") or ""),
-                status=str(payload.get("kind") or "blocked"),
-                cost=int(payload.get("cost") or 0),
-                balance_after=payload.get("balance"),
-                message=str(payload.get("message") or ""),
-                outcome=str(payload.get("status") or ""),
-            )
-        )
 
     async def execute(self, ctx: ToolExecutionContext) -> ToolExecutionContext:
         """Execute a tool call through the full orchestration pipeline."""
@@ -396,23 +372,6 @@ class ToolOrchestrator:
                 if decision.verdict != PermissionVerdict.ALLOW:
                     ctx.result = f"用户已拒绝：{decision.reason or '未提供原因'}"
                     ctx.status = OrchestrationResult.DENIED_BY_USER
-                    return ctx
-
-            # 2.5. 平台积分计费闸门（会话首次工具执行前扣一次；余额不足/
-            # 计费服务不可用时 fail-closed 阻止执行，任务不跑）。
-            # 去重作用域 = session（子代理独立 thread 不重复扣费）。
-            # 计费实例进程内共享，事件回调按本会话 sink 逐调用传入。
-            if self._billing is not None:
-                billing_decision = await self._billing.ensure_billed(
-                    ctx.thread_id,
-                    turn_id=ctx.turn_id,
-                    scope=ctx.session_id or None,
-                    on_event=self._emit_billing_event,
-                )
-                if not billing_decision.allowed:
-                    ctx.result = billing_decision.reason
-                    ctx.status = OrchestrationResult.BILLING_BLOCKED
-                    ctx.duration_ms = int((time.monotonic() - start) * 1000)
                     return ctx
 
             # 3. Try execution with retry-escalation
@@ -943,6 +902,12 @@ class ToolOrchestrator:
             # requested output location (e.g. Desktop/test_result).
             if ctx.user_mentioned_roots:
                 kwargs["_user_roots"] = list(ctx.user_mentioned_roots)
+        elif ctx.tool_name.startswith("mcp_"):
+            # MCP 工具（issue #927）：注入会话上下文供 slurm 计费握手使用
+            #（MCPToolWrapper 会 pop 掉，不传给 MCP 服务端）。
+            kwargs["_session_key"] = ctx.session_id
+            kwargs["_turn_id"] = ctx.turn_id
+            kwargs["_tool_call_id"] = ctx.tool_call_id
         elif sandbox.sandbox_type != SandboxType.NONE:
             kwargs["_sandbox"] = sandbox
 
