@@ -68,6 +68,19 @@ MiQroForge 是一个个人 AI 代理框架，将强大的 **Python 运行时引�
 - **Node.js 20+** — 运行 Electron 前端
 - **uv** — Python 包管理器（推荐）
 
+> **Windows 用户**可通过 winget 一键安装 uv 和 Node.js（Windows 10 1709+ / Windows 11 自带 winget；若没有，请先从 Microsoft Store 安装「应用安装程序」）：
+>
+> ```bash
+> # 安装 uv
+> winget install --id astral-sh.uv -e
+>
+> # 安装 nvm-windows，并安装 Node.js 22
+> winget install --id CoreyButler.NVMforWindows -e
+> nvm install 22
+> ```
+>
+> 安装 nvm-windows 后请新开一个终端窗口再执行 `nvm`。
+
 ### 安装步骤
 
 ```bash

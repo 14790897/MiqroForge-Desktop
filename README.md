@@ -69,6 +69,19 @@ MiQroForge Desktop is an Electron-based desktop application that provides a mode
 - **Node.js 20+** — to run Electron frontend
 - **uv** — Python package manager (recommended)
 
+> **Windows users** can install `uv` and Node.js with winget (included in Windows 10 1709+ / Windows 11; if missing, install "App Installer" from the Microsoft Store first):
+>
+> ```bash
+> # Install uv
+> winget install --id astral-sh.uv -e
+>
+> # Install nvm-windows, then Node.js 22
+> winget install --id CoreyButler.NVMforWindows -e
+> nvm install 22
+> ```
+>
+> After installing nvm-windows, open a new terminal before running `nvm`.
+
 ### Installation
 
 ```bash
