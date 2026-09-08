@@ -58,7 +58,7 @@ export const ReasoningModeSwitch: React.FC<ReasoningModeSwitchProps> = ({
   }, [pick, disabled]);
 
   return (
-    <div ref={ref} style={{ position: 'relative', flexShrink: 0 }}>
+    <div ref={ref} style={{ position: 'relative', minWidth: 0 }}>
       <button
         type="button"
         onClick={() => setOpen(!open)}
@@ -67,6 +67,9 @@ export const ReasoningModeSwitch: React.FC<ReasoningModeSwitchProps> = ({
           display: 'flex',
           alignItems: 'center',
           gap: 6,
+          width: '100%',
+          minWidth: 0,
+          overflow: 'hidden',
           padding: '4px 10px',
           borderRadius: 7,
           fontSize: 11,
@@ -86,9 +89,20 @@ export const ReasoningModeSwitch: React.FC<ReasoningModeSwitchProps> = ({
         aria-label="回答模式"
         aria-expanded={open}
       >
-        <span style={{ width: 6, height: 6, borderRadius: '50%', background: cur.color }} />
-        <span>{cur.label}</span>
-        <span style={{ fontSize: 8, opacity: 0.3 }}>▾</span>
+        <span style={{ width: 6, height: 6, borderRadius: '50%', background: cur.color, flexShrink: 0 }} />
+        <span
+          title={cur.label}
+          style={{
+            flex: '1 1 auto',
+            minWidth: 0,
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+            whiteSpace: 'nowrap',
+          }}
+        >
+          {cur.label}
+        </span>
+        <span style={{ fontSize: 8, opacity: 0.3, flexShrink: 0 }}>▾</span>
       </button>
 
       <div

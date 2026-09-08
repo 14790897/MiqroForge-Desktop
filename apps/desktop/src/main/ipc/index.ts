@@ -2370,4 +2370,61 @@ for m in ("pydantic", "httpx", "loguru"):
     }
     return { ok: true, focused: !win.isDestroyed() && win.isFocused() };
   });
+
+  // 资产面板推开聊天区时把窗口加宽(extra≈面板宽):聊天列是 flex-1,新增宽度全归它,
+  // 聊天区因此不挤压;关闭(extra=0)还原到开面板前宽度。逐次记录左右实际扩展量用于
+  // 精确还原,最大化/全屏/不可调大小或屏幕已无剩余空间时跳过。记录以窗口为键,
+  // 窗口销毁后自然归零(下次开面板以当时宽度为基线)。
+  const panelExtraByWin = new WeakMap<BrowserWindow, { extra: number; left: number; right: number }>();
+  ipcMain.handle(IPC.APP_PANEL_EXTRA, (event, raw: unknown) => {
+    const win = electron.BrowserWindow.fromWebContents(event.sender);
+    if (
+      !win ||
+      win.isDestroyed() ||
+      win.isMaximized() ||
+      win.isFullScreen() ||
+      !win.isResizable()
+    ) {
+      return { ok: false, applied: 0, skipped: true };
+    }
+    const target = Math.max(
+      0,
+      Math.round(typeof raw === 'number' && Number.isFinite(raw) ? raw : 0)
+    );
+    const rec = panelExtraByWin.get(win) ?? { extra: 0, left: 0, right: 0 };
+    let delta = target - rec.extra;
+    if (delta !== 0) {
+      const b = win.getBounds();
+      const wa = electron.screen.getDisplayMatching(b).workArea;
+      if (delta > 0) {
+        // 优先向右扩(左缘不动),右缘到工作区边界后向左借位把窗口整体放中间可多补
+        const growRight = Math.min(delta, Math.max(0, wa.x + wa.width - (b.x + b.width)));
+        const growLeft = Math.min(delta - growRight, Math.max(0, b.x - wa.x));
+        const grown = growRight + growLeft;
+        if (grown > 0) {
+          win.setBounds({ x: b.x - growLeft, y: b.y, width: b.width + grown, height: b.height });
+          rec.right += growRight;
+          rec.left += growLeft;
+          rec.extra += grown;
+        }
+      } else {
+        // 收窄:先还左借位再收右侧,总量不越过最小宽(minWidth)。绝不主动抹掉
+        // 用户自己拉宽的窗口(仅收回本面板实际加宽的 px)。
+        const maxRemove = Math.max(0, b.width - win.getMinimumSize()[0]);
+        let remove = Math.min(-delta, rec.extra);
+        const remLeft = Math.min(remove, rec.left, maxRemove);
+        remove -= remLeft;
+        const remRight = Math.min(remove, rec.right, maxRemove - remLeft);
+        const removed = remLeft + remRight;
+        if (removed > 0) {
+          win.setBounds({ x: b.x + remLeft, y: b.y, width: b.width - removed, height: b.height });
+          rec.left = Math.max(0, rec.left - remLeft);
+          rec.right = Math.max(0, rec.right - remRight);
+          rec.extra = Math.max(0, rec.extra - removed);
+        }
+      }
+      panelExtraByWin.set(win, rec);
+    }
+    return { ok: true, applied: rec.extra, skipped: false };
+  });
 }

@@ -2347,6 +2347,33 @@ export function ChatConsole({
   const [panelOpen, setPanelOpen] = useState(true);
   const [panelWidth, setPanelWidth] = useState(280);
   const panelResizing = useRef(false);
+  /** 拖拽锚点:按下时的鼠标 x 与面板宽。拖动量 = 锚点宽 + 鼠标位移,不用
+   *  拖拽中实时变化的 window.innerWidth 反推——窗口跟随加宽会改变
+   *  innerWidth,实时反推会把「已加宽」反馈回量宽,来回拖产生追尾/发粘。 */
+  const panelDragAnchor = useRef<{ clientX: number; width: number; applied: number } | null>(
+    null
+  );
+  /** 面板 DOM 节点:拖拽中直改其宽度,避免每帧 setPanelWidth 让整个 ChatConsole
+   *  (含长回复消息树)重建 VDOM——内容多的对话会因此卡。 */
+  const assetsPanelRef = useRef<HTMLDivElement | null>(null);
+  const panelWidthRef = useRef(panelWidth);
+  /** 拖拽过程中的最新目标面板宽(供 mouseup 收尾用,避免闭包捕获旧值)。 */
+  const lastDragTargetRef = useRef(280);
+  /** 顶部工作目录胶囊:窄的不是视口而是「聊天列」(被资产面板挤窄、窗口又有 minWidth),
+   *  原 md: 视口断点永不触发。量聊天列宽,过窄时把目录路径收成一个小图标。 */
+  const chatColRef = useRef<HTMLDivElement | null>(null);
+  const capsuleRoRef = useRef<ResizeObserver | null>(null);
+  const [subHeaderCompact, setSubHeaderCompact] = useState(false);
+  const setChatColRef = useCallback((el: HTMLDivElement | null) => {
+    chatColRef.current = el;
+    capsuleRoRef.current?.disconnect();
+    capsuleRoRef.current = null;
+    if (!el) return;
+    const ro = new ResizeObserver(() => setSubHeaderCompact(el.clientWidth < 520));
+    ro.observe(el);
+    capsuleRoRef.current = ro;
+    setSubHeaderCompact(el.clientWidth < 520);
+  }, []);
   const [workspacePickerOpen, setWorkspacePickerOpen] = useState(false);
   const [workspacePickerAnchor, setWorkspacePickerAnchor] = useState<DOMRect | null>(null);
   const [recentWorkspaces, setRecentWorkspaces] = useState<string[]>([]);
@@ -2355,6 +2382,10 @@ export function ChatConsole({
   useEffect(() => {
     workspacePickerOpenRef.current = workspacePickerOpen;
   }, [workspacePickerOpen]);
+
+  useEffect(() => {
+    panelWidthRef.current = panelWidth;
+  }, [panelWidth]);
 
   useEffect(() => {
     const timer = window.setInterval(() => setClockTick(Date.now()), 60_000);
@@ -2390,27 +2421,122 @@ export function ChatConsole({
     };
   }, []);
 
+  useEffect(
+    () => () => {
+      capsuleRoRef.current?.disconnect();
+      capsuleRoRef.current = null;
+    },
+    []
+  );
+  // 资产面板推开聊天区 → 请求主进程把窗口加宽相应 px,聊天列(flex-1)分到新增
+  // 宽度而保持原宽、内容不重排; extra=0 还原(面板关闭)。最大化/满屏由主进程跳过。
+  // 资产面板拖宽/开合 → 窗口跟随加宽(syncPanelWindowExtra)。
+  // latest-wins 合并:每帧至多发一次 IPC + 原生 setBounds,且同一时刻至多一个在途;
+  // 快速来回拖时不会把几十个窗口 resize 塞进主进程排队(鼠标停手后窗口不再追着动)。
+  const panelSyncRef = useRef<{
+    cancelled: boolean;
+    raf: number;
+    pending: number;
+    inFlight: boolean;
+    applied: number;
+  }>({ cancelled: false, raf: 0, pending: NaN, inFlight: false, applied: 0 });
+
+  const syncPanelWindowExtra = useCallback((extra: number) => {
+    const st = panelSyncRef.current;
+    st.pending = Math.round(extra);
+    const maybeQueue = () => {
+      if (st.cancelled || st.raf || st.inFlight) return;
+      st.raf = requestAnimationFrame(() => {
+        st.raf = 0;
+        const target = st.pending;
+        if (!Number.isFinite(target)) return;
+        st.pending = NaN;
+        if (target === st.applied) return; // 主进程当前已停在此宽度,无需再 resize
+        st.inFlight = true;
+        window.miqi.app
+          .setPanelWindowExtra(target)
+          .then((r) => {
+            st.applied = r.applied;
+            // 拖拽中:面板宽度只按主进程实际应用到的增量走,不超前于窗口扩出。
+            // 面板是消息树兄弟节点、聊天列 flex-1——若 DOM 先于窗口加宽,聊天列被
+            // 瞬时压扁,长回复对话里拖拽即「输入/对话模块压缩变形」。跟随 applied
+            // 则聊天列宽度恒定、分隔条贴住鼠标,仅剩 1 帧内的轻微追尾。
+            const a = panelDragAnchor.current;
+            const el = assetsPanelRef.current;
+            if (a && el) {
+              el.style.width = `${Math.max(120, Math.round(a.width + (r.applied - a.applied)))}px`;
+            }
+          })
+          .catch(() => {})
+          .finally(() => {
+            st.inFlight = false;
+            maybeQueue(); // 在途期间又收到更新宽度 → 补发到最新
+          });
+      });
+    };
+    maybeQueue();
+  }, []);
+
+  // 卸载(nav 离开聊天页)时若窗口被面板加宽过则还原,避免残宽影响其它页面;
+  // 冷启动默认面板开启,基线即当前宽度,此还原为 no-op。
+  useEffect(
+    () => () => {
+      const st = panelSyncRef.current;
+      st.cancelled = true;
+      if (st.raf) cancelAnimationFrame(st.raf);
+      st.raf = 0;
+      // 卸载(nav 离开聊天页)时若窗口被面板加宽过则还原,避免残宽影响其它页面;
+      // 冷启动默认面板开启,基线即当前宽度,此还原为 no-op。
+      void window.miqi.app.setPanelWindowExtra(0).catch(() => {});
+    },
+    []
+  );
+
   // Task Assets panel resize
   const handlePanelResizeStart = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
+    const el = assetsPanelRef.current;
+    // 按下点即当前分隔条:记锚点实际面板宽 + 主进程此刻已应用的窗口加宽,
+    // 拖动时两者作为相对基准,不用绝对宽(冷启动默认面板已占空间,绝对宽会让窗口多扩整块)。
+    const width = el ? el.getBoundingClientRect().width : window.innerWidth - e.clientX;
     panelResizing.current = true;
+    panelDragAnchor.current = { clientX: e.clientX, width, applied: panelSyncRef.current.applied };
     document.body.style.cursor = 'col-resize';
     document.body.style.userSelect = 'none';
   }, []);
 
   useEffect(() => {
     const handleMouseMove = (e: MouseEvent) => {
-      if (!panelResizing.current) return;
-      // panel is on the right, so new width = window width - mouse x
-      const newWidth = window.innerWidth - e.clientX;
-      setPanelWidth(Math.max(200, Math.min(500, newWidth)));
+      const anchor = panelDragAnchor.current;
+      if (!panelResizing.current || !anchor) return;
+      // 以按下点为锚按鼠标位移增减面板宽(向右移收窄、向左移加宽)。
+      const newWidth = Math.max(200, Math.min(500, anchor.width + (anchor.clientX - e.clientX)));
+      // 窗口加宽请求 = 锚点 applied + 宽度增量(相对量);面板 DOM 由 IPC 解析后的
+      // applied 增量在 syncPanelWindowExtra 里跟随,本处不直改 DOM。
+      syncPanelWindowExtra(anchor.applied + (newWidth - anchor.width));
+      lastDragTargetRef.current = newWidth;
     };
     const handleMouseUp = () => {
-      if (panelResizing.current) {
-        panelResizing.current = false;
-        document.body.style.cursor = '';
-        document.body.style.userSelect = '';
+      if (!panelResizing.current) return;
+      panelResizing.current = false;
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+      const anchor = panelDragAnchor.current;
+      if (anchor) {
+        const finalWidth = lastDragTargetRef.current;
+        // 拖拽中窗口从未响应(最大化/满屏被主进程跳过,applied 未动)→ 面板不生效,
+        // 还原锚点宽、不改 state;否则收尾到最终宽并提交 state 供开关面板等复用。
+        const el = assetsPanelRef.current;
+        if (panelSyncRef.current.applied === anchor.applied) {
+          if (el) el.style.width = `${anchor.width}px`;
+        } else {
+          if (el) el.style.width = `${finalWidth}px`;
+          if (Math.round(finalWidth) !== panelWidthRef.current) setPanelWidth(finalWidth);
+        }
+        // 收尾兜底:让窗口停在面板最终宽度(relative 到锚点)。
+        syncPanelWindowExtra(anchor.applied + (finalWidth - anchor.width));
       }
+      panelDragAnchor.current = null;
     };
     document.addEventListener('mousemove', handleMouseMove);
     document.addEventListener('mouseup', handleMouseUp);
@@ -2419,10 +2545,11 @@ export function ChatConsole({
       document.removeEventListener('mouseup', handleMouseUp);
       // cleanup if unmounted during drag
       panelResizing.current = false;
+      panelDragAnchor.current = null;
       document.body.style.cursor = '';
       document.body.style.userSelect = '';
     };
-  }, []);
+  }, [syncPanelWindowExtra]);
   /** Current in-flight request ID (for abort) */
   const [currentReqId, setCurrentReqId] = useState<string | null>(null);
   /** Per-session timestamp of the pending optimistic user bubble (issue #364)
@@ -6129,7 +6256,7 @@ export function ChatConsole({
           ? '已复制上下文'
           : '分享任务';
 
-  const shareButtonTone = shareStatus === 'idle' ? 'var(--text)' : 'var(--success)';
+  const shareButtonTone = shareStatus === 'idle' ? 'var(--text-muted)' : 'var(--success)';
   const shareButtonBackground = 'var(--surface-muted)';
   const shareButtonBorder = 'var(--border-subtle)';
 
@@ -6314,7 +6441,7 @@ export function ChatConsole({
       {/* ── Main area: chat + right panel ── */}
       <div className="flex flex-1 overflow-hidden">
         {/* Chat area */}
-        <div className="flex flex-col flex-1 overflow-hidden">
+        <div ref={setChatColRef} className="flex flex-col flex-1 overflow-hidden">
           {/* ── Sub header: task title + status (inside chat area) ── */}
           <div
             className="flex items-center gap-3 px-5 min-h-12 border-b shrink-0"
@@ -6346,7 +6473,7 @@ export function ChatConsole({
                 <h2
                   role="button"
                   tabIndex={0}
-                  className="text-[16px] font-semibold truncate leading-[1.35] text-text cursor-pointer hover:text-[var(--accent)] transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)] rounded"
+                  className="text-[16px] font-semibold truncate leading-[1.35] text-text cursor-pointer hover:text-[var(--accent)] transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)] rounded max-w-[220px]"
                   data-testid="chat-title"
                   title="\u70b9\u51fb\u91cd\u547d\u540d"
                   onClick={() => setEditingTitle(true)}
@@ -6375,6 +6502,10 @@ export function ChatConsole({
                     {'\u00b7'}
                   </span>
                   {taskHeaderInfo.updatedLabel}
+                  <span aria-hidden className="opacity-50">
+                    {'\u00b7'}
+                  </span>
+                  <span className="shrink-0">{taskHeaderInfo.fileLabel}</span>
                 </span>
               )}
             </div>
@@ -6392,7 +6523,10 @@ export function ChatConsole({
                   aria-label="\u5de5\u4f5c\u76ee\u5f55"
                   data-testid="chat-header-workspace-capsule"
                   className={cn(
-                    'shrink-0 inline-flex items-center gap-1 rounded-md px-2 py-[3px] text-[11px] font-medium border transition-colors disabled:opacity-45',
+                    'shrink-0 inline-flex items-center rounded-md border transition-colors disabled:opacity-45',
+                    subHeaderCompact
+                      ? 'h-6 w-6 justify-center'
+                      : 'gap-1 px-2 py-[3px] text-[11px] font-medium',
                     workspace ? 'border-[var(--accent)]' : 'border-[var(--border-subtle)]'
                   )}
                   style={{
@@ -6407,16 +6541,23 @@ export function ChatConsole({
                     className="shrink-0"
                     style={{ color: workspace ? 'var(--accent)' : 'var(--text-muted)' }}
                   />
-                  <span className="truncate max-w-[170px]" data-testid="chat-header-workspace-path">
-                    {workspace ?? '\u9ed8\u8ba4\u5de5\u4f5c\u76ee\u5f55'}
-                  </span>
-                  {workspace && (
+                  {!subHeaderCompact && (
+                    <span
+                      className="truncate max-w-[170px]"
+                      data-testid="chat-header-workspace-path"
+                    >
+                      {workspace ?? '\u9ed8\u8ba4\u5de5\u4f5c\u76ee\u5f55'}
+                    </span>
+                  )}
+                  {!subHeaderCompact && workspace && (
                     <span
                       className="shrink-0 w-[5px] h-[5px] rounded-full"
                       style={{ background: 'var(--accent)' }}
                     />
                   )}
-                  <ChevronDown size={12} className="shrink-0 opacity-70" />
+                  {!subHeaderCompact && (
+                    <ChevronDown size={12} className="shrink-0 opacity-70" />
+                  )}
                 </button>
               )}
             <div
@@ -6429,7 +6570,12 @@ export function ChatConsole({
               <Tooltip content={shareButtonLabel}>
                 <button
                   onClick={handleCopyTaskSummary}
-                  className="flex h-7 w-7 items-center justify-center transition-colors hover:brightness-95"
+                  className={cn(
+                    'flex items-center justify-center gap-1 transition-colors hover:brightness-95',
+                    subHeaderCompact
+                      ? 'h-6 w-6'
+                      : 'px-2 py-[3px] text-[11px] font-medium whitespace-nowrap'
+                  )}
                   style={{
                     color: shareButtonTone,
                     cursor: 'pointer',
@@ -6437,7 +6583,8 @@ export function ChatConsole({
                   title={shareButtonLabel}
                   aria-label={shareButtonLabel}
                 >
-                  {shareStatus === 'idle' ? <Send size={14} /> : <Check size={14} />}
+                  {shareStatus === 'idle' ? <Send size={12} /> : <Check size={12} />}
+                  {!subHeaderCompact && <span>{shareButtonLabel}</span>}
                 </button>
               </Tooltip>
               <ContextMenu items={shareMenuItems} minWidth={180}>
@@ -6445,7 +6592,7 @@ export function ChatConsole({
                   <Tooltip content="复制摘要、导出 Markdown 或复制上下文">
                     <button
                       onClick={onContextMenu}
-                      className="flex h-7 w-7 items-center justify-center transition-colors hover:brightness-95"
+                      className="flex w-6 items-center justify-center transition-colors hover:brightness-95"
                       style={{
                         borderLeft: `1px solid ${shareButtonBorder}`,
                         color: shareStatus === 'idle' ? 'var(--text-muted)' : 'var(--success)',
@@ -6462,13 +6609,18 @@ export function ChatConsole({
             </div>
             <Tooltip content="显示或隐藏文件面板">
               <button
-                onClick={() => setPanelOpen((v) => !v)}
-                className="p-1.5 rounded hover:bg-[var(--surface-muted)] transition-colors shrink-0 ml-1"
+                onClick={() => {
+                  const opening = !panelOpen;
+                  // 打开:窗口加宽到与面板等宽 → 聊天列原宽不变;关闭:还原。
+                  syncPanelWindowExtra(opening ? panelWidth : 0);
+                  setPanelOpen(opening);
+                }}
+                className="flex h-6 w-6 items-center justify-center rounded hover:bg-[var(--surface-muted)] transition-colors shrink-0 ml-1"
                 title="显示或隐藏文件面板"
                 aria-label="显示或隐藏文件面板"
                 data-testid="toggle-assets-panel-btn"
               >
-                <LayoutGrid size={14} style={{ color: 'var(--text-faint)' }} />
+                <LayoutGrid size={12} style={{ color: 'var(--text-muted)' }} />
               </button>
             </Tooltip>
           </div>
@@ -6675,7 +6827,7 @@ export function ChatConsole({
               background: 'var(--background)',
             }}
           >
-            <div className="max-w-[760px] mx-auto">
+            <div className="max-w-[760px] min-w-[min(360px,100%)] mx-auto">
               {attachments.length > 0 && (
                 <div className="flex flex-wrap gap-2 mb-2">
                   {attachments.map((att, i) => {
@@ -6900,7 +7052,7 @@ export function ChatConsole({
                       }
                     }}
                     className={cn(
-                      'inline-flex items-center gap-1.5 pl-2.5 pr-1 py-[3px] rounded-lg border text-xs font-medium cursor-pointer select-none transition-colors',
+                      'inline-flex items-center gap-1 rounded-md px-2 py-[3px] text-[11px] font-medium border cursor-pointer select-none transition-colors',
                       workspace ? 'border-[var(--accent)]' : 'border-[var(--border-subtle)]'
                     )}
                     style={{
@@ -6911,12 +7063,12 @@ export function ChatConsole({
                     }}
                   >
                     <Folder
-                      size={13}
+                      size={12}
                       className="shrink-0"
                       style={{ color: workspace ? 'var(--accent)' : 'var(--text-muted)' }}
                     />
                     <span
-                      className="truncate max-w-[300px]"
+                      className="hidden md:inline truncate max-w-[220px]"
                       title={workspace ?? undefined}
                       data-testid="inline-workspace-path"
                     >
@@ -6924,7 +7076,7 @@ export function ChatConsole({
                     </span>
                     {workspace && (
                       <span
-                        className="shrink-0 w-[5px] h-[5px] rounded-full"
+                        className="hidden md:inline shrink-0 w-[5px] h-[5px] rounded-full"
                         style={{ background: 'var(--accent)' }}
                       />
                     )}
@@ -6938,9 +7090,9 @@ export function ChatConsole({
                       disabled={streaming}
                       aria-label="更换工作目录"
                       data-testid="inline-workspace-change-btn"
-                      className="shrink-0 p-1 rounded-full text-[var(--text-faint)] hover:bg-[var(--surface)]/70 hover:text-[var(--text-muted)] disabled:opacity-40"
+                      className="flex shrink-0 items-center justify-center rounded p-0.5 opacity-70 hover:opacity-100 hover:text-[var(--text-muted)] disabled:opacity-40"
                     >
-                      <ChevronDown size={13} />
+                      <ChevronDown size={12} />
                     </button>
                   </div>
                 </div>
@@ -6990,7 +7142,7 @@ export function ChatConsole({
                   />
                   {/* 复杂问题角标（#680 跟进）：轻量气泡挂在模式按钮上，
                       3 秒自动消失，不占输入区。 */}
-                  <div className="relative">
+                  <div className="relative min-w-0">
                     <ReasoningModeSwitch mode={reasoningMode} onChange={changeReasoningMode} />
                     {complexHint && reasoningMode === 'fast' && (
                       <div
@@ -7036,9 +7188,9 @@ export function ChatConsole({
                     )}
                   </div>
                   {/* AI disclaimer — centered in the mode row, fades when typing */}
-                  <div className="flex-1 flex items-center justify-center">
+                  <div className="flex-1 min-w-0 overflow-hidden flex items-center justify-center">
                     <span
-                      className="text-size-2xs leading-relaxed tracking-wide text-[var(--text-faint)] italic select-none transition-opacity duration-300"
+                      className="text-size-2xs leading-relaxed tracking-wide text-[var(--text-faint)] italic select-none transition-opacity duration-300 whitespace-nowrap"
                       style={{ opacity: !input.trim() && attachments.length === 0 ? 1 : 0 }}
                     >
                       AI 也会犯错误，对于重要答案请谨慎验证
@@ -7132,6 +7284,7 @@ export function ChatConsole({
         {panelOpen && (
           <div
             data-testid="task-assets-panel"
+            ref={assetsPanelRef}
             className="flex flex-col shrink-0 border-l overflow-y-auto relative"
             style={{
               width: panelWidth,

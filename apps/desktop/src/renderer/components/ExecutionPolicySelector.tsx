@@ -95,7 +95,7 @@ export function ExecutionPolicySelector({ policy, onChange, disabled, onOpenAppr
 
   return (
     <>
-      <div ref={ref} style={{ position: 'relative', flexShrink: 0 }}>
+      <div ref={ref} style={{ position: 'relative', minWidth: 0 }}>
         <button
           type="button"
           onClick={() => setOpen(!open)}
@@ -104,6 +104,9 @@ export function ExecutionPolicySelector({ policy, onChange, disabled, onOpenAppr
             display: 'flex',
             alignItems: 'center',
             gap: 6,
+            width: '100%',
+            minWidth: 0,
+            overflow: 'hidden',
             padding: '4px 10px',
             borderRadius: 7,
             fontSize: 11,
@@ -123,10 +126,23 @@ export function ExecutionPolicySelector({ policy, onChange, disabled, onOpenAppr
               policy === 'auto' ? `${cur.color}14` : 'var(--surface)';
           }}
         >
-          <span style={{ width: 6, height: 6, borderRadius: '50%', background: cur.color }} />
-          <span>{cur.label}</span>
-          <span style={{ fontSize: 8, opacity: 0.3 }}>▾</span>
-          {cur.key === 'auto' && <span style={{ fontSize: 13 }}>⚠</span>}
+          <span style={{ width: 6, height: 6, borderRadius: '50%', background: cur.color, flexShrink: 0 }} />
+          <span
+            title={cur.label}
+            style={{
+              flex: '1 1 auto',
+              minWidth: 0,
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+              whiteSpace: 'nowrap',
+            }}
+          >
+            {cur.label}
+          </span>
+          <span style={{ fontSize: 8, opacity: 0.3, flexShrink: 0 }}>▾</span>
+          {cur.key === 'auto' && (
+            <span style={{ fontSize: 13, flexShrink: 0 }}>⚠</span>
+          )}
         </button>
 
         <div

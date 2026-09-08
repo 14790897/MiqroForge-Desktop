@@ -105,6 +105,12 @@ const api = {
     quit: (): Promise<{ ok: boolean }> => ipcRenderer.invoke(IPC.APP_QUIT),
     focus: (opts?: { hard?: boolean }): Promise<{ ok: boolean }> =>
       ipcRenderer.invoke(IPC.APP_FOCUS, opts),
+    // 资产面板推开聊天区时加宽窗口(extra≈面板宽),聊天列 flex-1 分到新增宽度
+    // 而保持原宽; 关闭(extra=0)还原。主进程记录实际加宽量,最大化/满屏时跳过。
+    setPanelWindowExtra: (
+      extra: number
+    ): Promise<{ ok: boolean; applied: number; skipped?: boolean }> =>
+      ipcRenderer.invoke(IPC.APP_PANEL_EXTRA, extra),
   },
   // -- Runtime ----------------------------------------------------------------
   runtime: {
