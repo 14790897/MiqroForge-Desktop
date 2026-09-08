@@ -449,6 +449,27 @@ describe('_markUserTwinMatches 一对一去重匹配（#891 复核 + #968）', (
     ).toEqual([false]);
   });
 
+  it('#968 复核：同名不可提取文档占位扫描全部出现点（CodeRabbit #969 Major）', () => {
+    // 同一条消息带两张同名异字节的扫描 PDF：占位各带 (fp:…)，守卫须逐个出现点
+    // 比对——旧实现只看第一个占位，第二个附件对到第一个的 fp → 误拒 → 持久化
+    // 副本不被认领 → 双显示（#968 同类回归）
+    const fpa = 'a'.repeat(64);
+    const fpb = 'b'.repeat(64);
+    const pmBoth = `看\n\n[report.pdf: scanned PDF (fp:${fpa}) — OCR will be attempted by the server]\n\n[report.pdf: scanned PDF (fp:${fpb}) — OCR will be attempted by the server]`;
+    // live 两张同名附件（fpA + fpB）→ 第二张必须扫到自己的占位，整条消息认领
+    expect(
+      _markUserTwinMatches(
+        [
+          u('看', T, [
+            { name: 'report.pdf', type: 'document', contentFp: fpa },
+            { name: 'report.pdf', type: 'document', contentFp: fpb },
+          ]),
+        ],
+        [u(pmBoth, T)]
+      )
+    ).toEqual([true]);
+  });
+
   it('#968 复核：SHA-256 覆盖全量内容——同名同首尾、仅中段不同的大附件指纹不同', async () => {
     // CodeRabbit #969 回归要求：>8192 字符、长度与首尾 4KB 相同、中段不同的
     // dataBase64 必须产生不同指纹（采样方案会被构造性绕过，全量摘要不会）

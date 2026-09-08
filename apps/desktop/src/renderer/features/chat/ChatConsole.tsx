@@ -1518,19 +1518,28 @@ function _persistedCoversAttachments(
         // 占位装饰（scanned PDF / binary file / parsing on server）不承载内容，
         // 同名不同字节的文件会生成相同的占位 → 发送侧把全量 SHA-256 写进占位
         // （(fp:…)），此处与 live 附件暂存的 contentFp 比对（CodeRabbit #969）。
-        // 无指纹的旧版占位 / live 附件无法验证内容 → 一律不认领（方向安全）。
+        // 同名占位可出现多次（同消息两张同名不同字节的不可提取文档）→ 扫描全部
+        // 出现点，任一 fp 一致即认领（CodeRabbit #969 Major：旧实现只看第一个，
+        // 第二个附件对到第一个的 fp → 误拒 → 双显示）。无指纹的旧版占位 / live
+        // 附件无法验证内容 → 一律不认领（方向安全）。
+        if (!a.contentFp) return false;
         const ph = `[${a.name}: `;
-        const phIdx = pmContent.indexOf(ph);
-        if (phIdx < 0) return false;
-        // 收尾 ] 须从 phIdx + ph.length 起找：文件名可含 ]（report].pdf），从
-        // phIdx 起找会命中文件名内的 ]、把段截在文件名里丢掉 (fp:…)（CodeRabbit
-        // #969 Minor：合法同文件重发被误拒 → 双显示）
-        const closeIdx = pmContent.indexOf(']', phIdx + ph.length);
-        if (closeIdx < 0 || closeIdx - phIdx > 400) return false;
-        const seg = pmContent.slice(phIdx, closeIdx + 1);
-        const fpMatch = seg.match(/\(fp:([0-9a-f]{64})\)/);
-        if (!fpMatch || !a.contentFp) return false;
-        return fpMatch[1] === a.contentFp;
+        let searchFrom = 0;
+        for (;;) {
+          const phIdx = pmContent.indexOf(ph, searchFrom);
+          if (phIdx < 0) return false;
+          // 收尾 ] 须从 phIdx + ph.length 起找：文件名可含 ]（report].pdf），从
+          // phIdx 起找会命中文件名内的 ]、把段截在文件名里丢掉 (fp:…)（CodeRabbit
+          // #969 Minor：合法同文件重发被误拒 → 双显示）。畸形段（无收尾/超长）
+          // 视为非装饰跳过，继续搜后续出现点。
+          const closeIdx = pmContent.indexOf(']', phIdx + ph.length);
+          if (closeIdx >= 0 && closeIdx - phIdx <= 400) {
+            const seg = pmContent.slice(phIdx, closeIdx + 1);
+            const fpMatch = seg.match(/\(fp:([0-9a-f]{64})\)/);
+            if (fpMatch && fpMatch[1] === a.contentFp) return true;
+          }
+          searchFrom = phIdx + ph.length;
+        }
       }
       default:
         // 未知/未来扩展类型（audio/video/archive/…）无法验证内容 → 不认领。
