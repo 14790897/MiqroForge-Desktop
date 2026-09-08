@@ -180,7 +180,9 @@ def _sanitize_exc_for_ui(exc: BaseException) -> str:
         raw = raw[:300] + "…"
     # Strip common sensitive patterns (absolute paths, URLs with credentials)
     import re as _re
-    raw = _re.sub(r'(?:/[^\s"\'<>|:]{1,200})+', '[path]', raw)
+    # 负向后顾：斜杠段前面不能紧跟单词字符，避免把 deepseek/deepseek-v4-flash
+    # 这类 provider/model id 误当 Unix 路径打码（前端 sanitizeUiMessage 同款修复）。
+    raw = _re.sub(r'(?<![A-Za-z0-9_.-])(?:/[^\s"\'<>|:]{1,200})+', '[path]', raw)
     raw = _re.sub(r'https?://[^\s"\'<>]{1,200}', '[url]', raw)
     raw = _re.sub(r'\b[A-Za-z0-9+/=]{40,}\b', '[token]', raw)
     return f"{type(exc).__name__}: {raw}" if raw else type(exc).__name__

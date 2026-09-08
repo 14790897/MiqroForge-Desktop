@@ -26,10 +26,12 @@ const RE_URL = /https?:\/\/[^\s"'<>]{1,200}/g;
  * Three alternatives (longest-first so UNC wins over drive-letter):
  *   1) UNC:  \\?\X:\dir\...\file
  *   2) Windows drive:  X:\dir\...\file
- *   3) Unix absolute:  /dir/.../file
+ *   3) Unix absolute:  /dir/.../file — 负向后顾要求斜杠前不是单词字符，
+ *      避免把 deepseek/deepseek-v4-flash 这类 provider/model id 误当路径
+ *      打码成 [path]（实测：保存网关模型报错被显示成 deepseek[path]）。
  */
 const RE_PATH =
-  /(?:\\\\\?\\[A-Za-z]:[\\/](?:[^\s"'<>|:]+[\\/])*[^\s"'<>|:]+)|(?:[A-Za-z]:[\\/](?:[^\s"'<>|:]+[\\/])*[^\s"'<>|:]+)|(?:\/(?:[^\s"'<>|:]+[\/])*[^\s"'<>|:]+)/g;
+  /(?:\\\\\?\\[A-Za-z]:[\\/](?:[^\s"'<>|:]+[\\/])*[^\s"'<>|:]+)|(?:[A-Za-z]:[\\/](?:[^\s"'<>|:]+[\\/])*[^\s"'<>|:]+)|(?:(?<![A-Za-z0-9_.-])\/(?:[^\s"'<>|:]+[\/])*[^\s"'<>|:]+)/g;
 
 /** Matches long Base64-like tokens (40+ contiguous base64 chars). */
 const RE_TOKEN = /\b[A-Za-z0-9+/=]{40,}\b/g;

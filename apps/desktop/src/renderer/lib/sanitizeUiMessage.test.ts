@@ -68,4 +68,14 @@ describe('sanitizeUiMessage', () => {
     expect(out).toContain('[url]');
     expect(out).toContain('[token]');
   });
+
+  it('keeps model ids intact instead of mangling them into [path]', () => {
+    // 实测：保存网关模型被 #929 门控拒绝时，/deepseek-v4-flash 曾被
+    // 路径正则打码成 [path]，报错显示成令人费解的 deepseek[path]。
+    const out = sanitizeUiMessage(
+      "Error invoking remote method 'config:update': Error: Unsupported model: deepseek/deepseek-v4-flash (INVALID_PARAMS)"
+    );
+    expect(out).toContain('deepseek/deepseek-v4-flash');
+    expect(out).not.toContain('[path]');
+  });
 });
