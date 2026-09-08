@@ -4,6 +4,7 @@ import {
   extractRangeLower,
   isCompareLang,
   isRangeValue,
+  paramCellKey,
   parseCompareJson,
   sortParameters,
   type CompareParameter,
@@ -177,5 +178,16 @@ describe('compareToTsv', () => {
     // 不含未转义的公式前缀
     expect(tsv).not.toContain('\t=1+1');
     expect(tsv).not.toContain('\t@cmd');
+  });
+});
+
+describe('paramCellKey', () => {
+  it('uses parameter identity (not name) so duplicate names get distinct keys', () => {
+    const p1 = { name: '压力', values: ['1'] };
+    const p2 = { name: '压力', values: ['2'] };
+    const all = [p1, p2];
+    expect(paramCellKey(p1, 0, all)).toBe('0-0');
+    expect(paramCellKey(p2, 0, all)).toBe('1-0');
+    expect(paramCellKey(p1, 0, all)).not.toBe(paramCellKey(p2, 0, all));
   });
 });

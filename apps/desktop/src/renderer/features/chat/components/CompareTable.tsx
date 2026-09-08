@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react';
 import { Check, Copy, ExternalLink } from 'lucide-react';
 import type { CompareCitation, CompareData, CompareParameter, SortDir } from './compareData';
-import { compareToTsv, isRangeValue, sortParameters } from './compareData';
+import { compareToTsv, isRangeValue, paramCellKey, sortParameters } from './compareData';
 import { DataTable, type DataTableCell } from './DataTable';
 
 /** 单元格文本超过该长度时折叠，点击该格内「展开」显示完整内容。 */
@@ -114,8 +114,9 @@ export function CompareTable({ data, rawText }: Props) {
   const renderValue = (p: CompareParameter, c: number) => {
     const raw = p.values?.[c] ?? '';
     if (!isLong(raw)) return raw || ' ';
-    // 展开 key 用「参数名 + 列」而非排序后的行号，保证排序后同一格仍展开。
-    const key = `${p.name}-${c}`;
+    // 展开 key 用「参数对象身份 + 列」而非 name 或排序后的行号，
+    // 同名参数不串、排序后同一格仍展开。
+    const key = paramCellKey(p, c, parameters);
     const isExpanded = expanded.has(key);
     return (
       <span className="flex flex-col">

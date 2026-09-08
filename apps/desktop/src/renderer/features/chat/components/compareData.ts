@@ -172,3 +172,11 @@ function escapeTsvCell(value: string): string {
   const normalized = value.replace(/[\t\r\n]+/g, ' ');
   return /^\s*[=+\-@]/.test(normalized) ? `'${normalized}` : normalized;
 }
+
+/**
+ * 展开状态的稳定 key：用参数对象在原始数组中的位置（对象同一性）而非 name，
+ * 保证同名参数（如两行都叫「压力」）不共用同一个展开 key。
+ */
+export function paramCellKey(p: CompareParameter, col: number, all: CompareParameter[]): string {
+  return `${all.indexOf(p)}-${col}`;
+}
