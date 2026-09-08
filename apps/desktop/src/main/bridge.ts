@@ -248,7 +248,19 @@ export class BridgeManager extends EventEmitter {
       const bridgeProcess = spawn(command, args, {
         cwd: this.projectRoot,
         stdio: ['pipe', 'pipe', 'pipe'],
-        env: { ...process.env, PYTHONUNBUFFERED: '1', PYTHONUTF8: '1', PYTHONIOENCODING: 'utf-8' },
+        // MIQI_PARENT_PID (#959): the bridge's parent-death watchdog watches
+        // this PID. On Windows the direct parent may be a `uv` shim that
+        // outlives Electron (and Windows never updates the parent PID), so
+        // the bridge must watch the real launcher. When Electron is killed
+        // hard (E2E force-kill / crash) the bridge hard-exits instead of
+        // lingering as an orphan that pollutes later runs.
+        env: {
+          ...process.env,
+          PYTHONUNBUFFERED: '1',
+          PYTHONUTF8: '1',
+          PYTHONIOENCODING: 'utf-8',
+          MIQI_PARENT_PID: String(process.pid),
+        },
         windowsHide: true,
       });
       this.process = bridgeProcess;

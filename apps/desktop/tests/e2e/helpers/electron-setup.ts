@@ -11,6 +11,7 @@ import type { ElectronApplication, Page } from '@playwright/test';
 import { resolve } from 'node:path';
 import { tmpdir, homedir } from 'node:os';
 import { join } from 'node:path';
+import { spawnSync } from 'node:child_process';
 import {
   existsSync,
   mkdtempSync,
@@ -831,7 +832,21 @@ export async function closeElectronApp(
       (async () => {
         await new Promise((r) => setTimeout(r, 15_000));
         try {
-          app.process().kill();
+          if (process.platform === 'win32') {
+            // #959: Playwright launches Electron through a cmd.exe shell
+            // wrapper on Windows, so app.process() is the cmd wrapper —
+            // killing it alone leaves the real app main (window + bridge +
+            // children) running to pollute later runs (mcps.list hangs).
+            // taskkill /T kills the whole tree: cmd → electron main →
+            // bridge → its MCP/exec children.
+            spawnSync('taskkill', ['/F', '/T', '/PID', String(app.process().pid)], {
+              windowsHide: true,
+            });
+          } else {
+            // POSIX: no shell wrapper — the main dies, and the bridge's
+            // parent-death watchdog (#959) hard-exits within ~1-2s.
+            app.process().kill('SIGKILL');
+          }
         } catch {
           /* already gone */
         }
