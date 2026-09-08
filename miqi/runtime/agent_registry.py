@@ -8,7 +8,6 @@ from pathlib import Path
 
 from loguru import logger
 
-
 # Structured comparison output convention (issue #878): the frontend renders a
 # ```compare JSON code block as a sortable/highlightable comparison table. This
 # is appended to the main agent's system prompt so the model emits the block
