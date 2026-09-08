@@ -21,7 +21,7 @@ import {
   sessionMsgsToUi,
   insertInterruptedTurns,
   _markUserTwinMatches,
-  _docFingerprint,
+  _sha256HexOfBase64,
 } from './ChatConsole';
 
 describe('ChatConsole thinking block regression (#858 → #905)', () => {
@@ -147,6 +147,7 @@ describe('_markUserTwinMatches 一对一去重匹配（#891 复核 + #968）', (
       type: 'image' | 'text' | 'document';
       content?: string;
       dataBase64?: string;
+      contentFp?: string;
     }[]
   ) => ({
     role: 'user' as const,
@@ -325,41 +326,59 @@ describe('_markUserTwinMatches 一对一去重匹配（#891 复核 + #968）', (
   });
 
   it('#968 复核：占位装饰指纹守卫——同名不同字节的不可提取附件不得互认（CodeRabbit #969）', () => {
-    const b64a = btoa('binary payload A');
-    const b64b = btoa('binary payload B');
-    const fpa = _docFingerprint(b64a);
-    const fpb = _docFingerprint(b64b);
-    expect(fpa).not.toBe(fpb); // 指纹本身能区分
+    // 守卫只比对装饰内 (fp:…) 与 live 附件暂存的 contentFp（SHA-256 由发送前
+    // 预计算写入附件），此处用合成的 64 位 hex 直接构造配对
+    const fpa = 'a'.repeat(64);
+    const fpb = 'b'.repeat(64);
+    expect(fpa).not.toBe(fpb);
     const placeA = `看\n\n[scan.pdf: scanned PDF (fp:${fpa}) — OCR will be attempted by the server]`;
     const placeB = `看\n\n[scan.pdf: scanned PDF (fp:${fpb}) — OCR will be attempted by the server]`;
-    // 内容不同 → 不认领
+    // 指纹不同 → 不认领
     expect(
       _markUserTwinMatches(
-        [u('看', T, [{ name: 'scan.pdf', type: 'document', dataBase64: b64b }])],
+        [u('看', T, [{ name: 'scan.pdf', type: 'document', contentFp: fpb }])],
         [u(placeA, T)]
       )
     ).toEqual([false]);
-    // 内容一致（指纹相同）→ 认领
+    // 指纹一致 → 认领
     expect(
       _markUserTwinMatches(
-        [u('看', T, [{ name: 'scan.pdf', type: 'document', dataBase64: b64a }])],
+        [u('看', T, [{ name: 'scan.pdf', type: 'document', contentFp: fpa }])],
         [u(placeA, T)]
       )
     ).toEqual([true]);
     // 旧版无指纹占位 → 不认领（无法验证内容，方向安全）
     expect(
       _markUserTwinMatches(
-        [u('看', T, [{ name: 'scan.pdf', type: 'document', dataBase64: b64a }])],
+        [u('看', T, [{ name: 'scan.pdf', type: 'document', contentFp: fpa }])],
         [u('看\n\n[scan.pdf: scanned PDF — OCR will be attempted by the server]', T)]
       )
+    ).toEqual([false]);
+    // live 附件无 contentFp → 不认领（方向安全）
+    expect(
+      _markUserTwinMatches([u('看', T, [{ name: 'scan.pdf', type: 'document' }])], [u(placeA, T)])
     ).toEqual([false]);
     // 解析失败占位（带大小 + 指纹）→ 指纹一致认领
     expect(
       _markUserTwinMatches(
-        [u('看', T, [{ name: 'a.pdf', type: 'document', dataBase64: b64a }])],
+        [u('看', T, [{ name: 'a.pdf', type: 'document', contentFp: fpa }])],
         [u(`看\n\n[a.pdf: 1.2 MB — parsing on server (fp:${fpa})]`, T)]
       )
     ).toEqual([true]);
+  });
+
+  it('#968 复核：SHA-256 覆盖全量内容——同名同首尾、仅中段不同的大附件指纹不同', async () => {
+    // CodeRabbit #969 回归要求：>8192 字符、长度与首尾 4KB 相同、中段不同的
+    // dataBase64 必须产生不同指纹（采样方案会被构造性绕过，全量摘要不会）
+    const s1 = 'a'.repeat(4096) + '1'.repeat(1024) + 'b'.repeat(4096); // 长度 9216
+    const s2 = 'a'.repeat(4096) + '2'.repeat(1024) + 'b'.repeat(4096);
+    expect(s1.length).toBe(s2.length);
+    const f1 = await _sha256HexOfBase64(s1);
+    const f2 = await _sha256HexOfBase64(s2);
+    expect(f1).toMatch(/^[0-9a-f]{64}$/);
+    expect(f1).not.toBe(f2);
+    // 同一内容 → 同一指纹
+    expect(await _sha256HexOfBase64(s1)).toBe(f1);
   });
 
   it('#968 复核：纯附件两张图 + 无文本（迭代剥离到空）', () => {
