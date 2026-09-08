@@ -42,6 +42,7 @@ describe('classifyWslFeatureState', () => {
         isWindows: false,
         featureWsl: false,
         featureVmp: false,
+        featureReadOk: true,
         wslInstalled: false,
         usableDistros: [],
         initialized: false,
@@ -55,6 +56,7 @@ describe('classifyWslFeatureState', () => {
         isWindows: true,
         featureWsl: false,
         featureVmp: false,
+        featureReadOk: true,
         wslInstalled: false,
         usableDistros: [],
         initialized: false,
@@ -68,6 +70,7 @@ describe('classifyWslFeatureState', () => {
         isWindows: true,
         featureWsl: true,
         featureVmp: true,
+        featureReadOk: true,
         wslInstalled: false,
         usableDistros: [],
         initialized: false,
@@ -81,6 +84,24 @@ describe('classifyWslFeatureState', () => {
         isWindows: true,
         featureWsl: true,
         featureVmp: false,
+        featureReadOk: true,
+        wslInstalled: false,
+        usableDistros: [],
+        initialized: false,
+      })
+    ).toBe('not-installed');
+  });
+
+  it('returns not-installed (not not-enabled) when the feature read failed', () => {
+    // Unreadable feature state must not be classified as not-enabled:
+    // enabling features would loop forever on a machine where the
+    // features are actually on but the kernel is missing.
+    expect(
+      classifyWslFeatureState({
+        isWindows: true,
+        featureWsl: false,
+        featureVmp: false,
+        featureReadOk: false,
         wslInstalled: false,
         usableDistros: [],
         initialized: false,
@@ -94,6 +115,7 @@ describe('classifyWslFeatureState', () => {
         isWindows: true,
         featureWsl: true,
         featureVmp: true,
+        featureReadOk: true,
         wslInstalled: true,
         usableDistros: [],
         initialized: false,
@@ -107,6 +129,7 @@ describe('classifyWslFeatureState', () => {
         isWindows: true,
         featureWsl: true,
         featureVmp: true,
+        featureReadOk: true,
         wslInstalled: true,
         usableDistros: ['Ubuntu'],
         initialized: false,
@@ -120,6 +143,7 @@ describe('classifyWslFeatureState', () => {
         isWindows: true,
         featureWsl: true,
         featureVmp: true,
+        featureReadOk: true,
         wslInstalled: true,
         usableDistros: ['Ubuntu'],
         initialized: true,
@@ -134,8 +158,7 @@ describe('readFeatureStates', () => {
   it('parses WMI InstallState output', () => {
     mockSpawn({
       status: 0,
-      stdout:
-        'Microsoft-Windows-Subsystem-Linux=1\r\nVirtualMachinePlatform=2\r\n',
+      stdout: 'Microsoft-Windows-Subsystem-Linux=1\r\nVirtualMachinePlatform=2\r\n',
     });
     expect(readFeatureStates()).toEqual({
       ok: true,

@@ -30,11 +30,11 @@ const WMI_FEATURE_CMD =
 
 export function readFeatureStates(timeoutMs = 15000): FeatureStates {
   try {
-    const r = spawnSync(
-      'powershell.exe',
-      ['-NoProfile', '-Command', WMI_FEATURE_CMD],
-      { timeout: timeoutMs, encoding: 'utf8', windowsHide: true }
-    );
+    const r = spawnSync('powershell.exe', ['-NoProfile', '-Command', WMI_FEATURE_CMD], {
+      timeout: timeoutMs,
+      encoding: 'utf8',
+      windowsHide: true,
+    });
     if (r.status !== 0 || !r.stdout) {
       return { ok: false, featureWsl: false, featureVmp: false };
     }
@@ -55,11 +55,11 @@ export function readFeatureStates(timeoutMs = 15000): FeatureStates {
 /** True when the distro can run bash (filters docker-desktop & friends). */
 export function isBashCapableDistro(distro: string, timeoutMs = 8000): boolean {
   try {
-    const r = spawnSync(
-      'wsl.exe',
-      ['-d', distro, '--', 'bash', '-c', 'echo ok'],
-      { timeout: timeoutMs, encoding: 'buffer', windowsHide: true }
-    );
+    const r = spawnSync('wsl.exe', ['-d', distro, '--', 'bash', '-c', 'echo ok'], {
+      timeout: timeoutMs,
+      encoding: 'buffer',
+      windowsHide: true,
+    });
     return r.status === 0;
   } catch {
     return false;
@@ -118,6 +118,8 @@ export function classifyWslFeatureState(opts: {
   isWindows: boolean;
   featureWsl: boolean;
   featureVmp: boolean;
+  /** Whether the feature read succeeded; false values are meaningless otherwise. */
+  featureReadOk: boolean;
   /** `wsl --status` succeeded. */
   wslInstalled: boolean;
   /** Distros that can actually run bash (docker-desktop filtered out). */
@@ -131,5 +133,10 @@ export function classifyWslFeatureState(opts: {
       ? 'installed-but-not-initialized'
       : 'ready';
   }
+  // Unreadable feature state must not be classified as not-enabled: on a
+  // machine where the features are actually on but the kernel is missing,
+  // that would loop the enable-features step forever.  The kernel install
+  // step repairs both cases.
+  if (!opts.featureReadOk) return 'not-installed';
   return opts.featureWsl || opts.featureVmp ? 'not-installed' : 'not-enabled';
 }

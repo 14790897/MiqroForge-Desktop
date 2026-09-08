@@ -923,10 +923,11 @@ for m in ("pydantic", "httpx", "loguru"):
       }
 
       if (distros.length > 0) {
-        // Probe the first usable distro for a non-root user (hasNonRootUser):
+        // Probe every usable distro for a non-root user (hasNonRootUser):
         // a distro that can still execute as root does not prove first-launch
-        // user creation has completed.
-        initialized = hasNonRootUser(distros[0]);
+        // user creation has completed, but any initialized distro proves the
+        // platform is usable.
+        initialized = distros.some((d) => hasNonRootUser(d));
       }
     }
 
@@ -934,6 +935,7 @@ for m in ("pydantic", "httpx", "loguru"):
       isWindows: true,
       featureWsl,
       featureVmp,
+      featureReadOk: features.ok,
       wslInstalled: installed,
       usableDistros: distros,
       initialized,
@@ -1058,12 +1060,13 @@ for m in ("pydantic", "httpx", "loguru"):
           { timeout: 120000, encoding: 'utf8', windowsHide: true }
         );
 
+        // Verification requires a successful read with the WSL feature on.
+        // VirtualMachinePlatform is intentionally not required: on machines
+        // with VBS/Core Isolation, WMI keeps VMP reported as Disabled while
+        // it is functional (observed in live testing) — gating on it would
+        // recreate the false-failure bug this step was fixed for.
         const featuresAfter = readFeatureStates();
-        if (
-          r.error ||
-          r.status !== 0 ||
-          (featuresAfter.ok && !featuresAfter.featureWsl)
-        ) {
+        if (r.error || r.status !== 0 || !featuresAfter.ok || !featuresAfter.featureWsl) {
           safeSend(IPC_EVENTS.WSL_INSTALL_PROGRESS, {
             phase: 'error',
             message: `启用 Windows 功能失败: ${r.error?.message ?? '功能状态未变化'}`,
