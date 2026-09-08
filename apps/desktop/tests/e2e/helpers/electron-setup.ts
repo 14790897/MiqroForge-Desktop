@@ -111,10 +111,12 @@ export async function sendUntilDoneOrProviderDown(
   const { maxAttempts = 2, perAttemptWaitMs = 150_000, silenceExtendMs = 150_000 } = opts;
   const errLocator = page.getByText(PROVIDER_UNAVAILABLE_TEXT);
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    await sendMessage(page, text);
-    // Error bubbles from EARLIER attempts stay in the message list, so match
-    // by count delta — only an error that appeared AFTER this send counts.
+    // Snapshot BEFORE the send: an error that surfaces during sendMessage
+    // itself must count as this attempt's error. Error bubbles from earlier
+    // attempts stay in the message list, so match by count delta — only an
+    // error that appeared after this snapshot counts.
     const errCountBefore = await errLocator.count();
+    await sendMessage(page, text);
     let sawError = false;
 
     let deadline = Date.now() + perAttemptWaitMs;
