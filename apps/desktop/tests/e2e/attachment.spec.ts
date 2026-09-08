@@ -391,7 +391,9 @@ test.describe('File Attachment Chips', () => {
     }
     const leftover = await removeBtn.count().catch(() => 0);
     if (leftover > 0) {
-      console.log(`[test] ⚠️ ${leftover} attachment chip(s) stuck in composer — continuing`);
+      // 失败而非继续：fixture 文件名跨用例复用，残留 chip 会让后续断言
+      // 误匹配旧 chip，把「新上传失败」伪装成通过。
+      throw new Error(`Attachment cleanup left ${leftover} chip(s) in the composer`);
     }
   });
 

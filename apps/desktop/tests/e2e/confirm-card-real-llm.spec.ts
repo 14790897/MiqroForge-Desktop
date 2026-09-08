@@ -57,7 +57,10 @@ test.describe('Confirm Card (real LLM)', () => {
           '调用后收到结果时直接回复 OK。',
         async () => (await cardArea.count()) > 0
       );
-      test.skip(!cardAppeared, 'provider unavailable on every attempt — no confirm card to verify');
+      test.skip(
+        !cardAppeared,
+        'no AI reply on every attempt (provider unavailable or too slow) — no confirm card to verify'
+      );
 
       // 真实模型往返（本地 deepseek / CI siliconflow）——给足超时
       await expect(cardArea).toBeVisible({ timeout: 30_000 });

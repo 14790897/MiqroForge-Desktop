@@ -98,30 +98,52 @@ export const PROVIDER_UNAVAILABLE_TEXT = '模型服务暂时不可用或过载';
  * runs) trigger rate limits and the turn dies with 「模型服务暂时不可用或
  * 过载」— no reply, so the feature can never render. One resend usually
  * lands after the burst. Returns false when every attempt ended in a
- * provider error; the caller should test.skip() then (the subject under
- * test never got a reply, failing is pure noise).
+ * provider error (or a silent timeout without reply); the caller should
+ * test.skip() then (the subject under test never got a reply, failing is
+ * pure noise).
  */
 export async function sendUntilDoneOrProviderDown(
   page: Page,
   text: string,
   isDone: () => Promise<boolean>,
-  opts: { maxAttempts?: number; perAttemptWaitMs?: number } = {}
+  opts: { maxAttempts?: number; perAttemptWaitMs?: number; silenceExtendMs?: number } = {}
 ): Promise<boolean> {
-  const { maxAttempts = 2, perAttemptWaitMs = 120_000 } = opts;
-  const errLocator = page.getByText(PROVIDER_UNAVAILABLE_TEXT).first();
+  const { maxAttempts = 2, perAttemptWaitMs = 150_000, silenceExtendMs = 150_000 } = opts;
+  const errLocator = page.getByText(PROVIDER_UNAVAILABLE_TEXT);
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     await sendMessage(page, text);
-    const deadline = Date.now() + perAttemptWaitMs;
+    // Error bubbles from EARLIER attempts stay in the message list, so match
+    // by count delta — only an error that appeared AFTER this send counts.
+    const errCountBefore = await errLocator.count();
+    let sawError = false;
+
+    let deadline = Date.now() + perAttemptWaitMs;
     while (Date.now() < deadline) {
       if (await isDone()) return true;
-      if (await errLocator.isVisible().catch(() => false)) {
-        console.log(
-          `[test] provider unavailable on attempt ${attempt}/${maxAttempts} — re-sending`
-        );
+      if ((await errLocator.count()) > errCountBefore) {
+        sawError = true;
         break;
       }
       await page.waitForTimeout(1000);
     }
+
+    if (!sawError) {
+      // Silence is NOT a provider error: a slow thinking model may simply not
+      // have replied yet, and re-sending would interrupt an in-flight turn.
+      // Extend the wait once instead of treating it as unavailability.
+      deadline = Date.now() + silenceExtendMs;
+      while (Date.now() < deadline) {
+        if (await isDone()) return true;
+        if ((await errLocator.count()) > errCountBefore) {
+          sawError = true;
+          break;
+        }
+        await page.waitForTimeout(1000);
+      }
+      if (!sawError) return false; // no reply and no provider error — give up
+    }
+
+    console.log(`[test] provider unavailable on attempt ${attempt}/${maxAttempts} — re-sending`);
   }
   return false;
 }

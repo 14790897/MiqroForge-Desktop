@@ -46,7 +46,7 @@ test.describe('Chat disclaimer (#836)', () => {
       '你好',
       async () => (await disclaimer.count()) > 0
     );
-    test.skip(!replied, 'provider unavailable on every attempt — no AI reply to verify');
+    test.skip(!replied, 'no AI reply on every attempt (provider unavailable or too slow)');
 
     // 等待 AI 流式回复完成
     await waitForResponseComplete(page, LLM_TIMEOUT);
