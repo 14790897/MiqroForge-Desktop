@@ -1,21 +1,17 @@
 /**
  * MiQroForge 平台账号登录（issue #726）。
  *
- * 设置页内的登录入口：手机号 + 密码（密码仅经 IPC 提交给主进程，
- * 前端不落任何存储、不打日志）→ 主进程完成平台登录 + 授权码流程 +
- * token 换取与安全存储。登录后展示账号信息与 token 到期/刷新时间，
- * 刷新失败时引导重新登录。
+ * 设置页内的登录入口：浏览器 OAuth 登录 —— 主进程打开 MiQroForge 授权页，
+ * 用户在平台页面完成登录并点击「同意」，授权码由 IPC 层拦截后换 token，
+ * 凭据安全存储。登录后展示账号信息与 token 到期/刷新时间，刷新失败时
+ * 引导重新登录。
  */
 
 import { useState, useEffect, useCallback } from 'react';
 import {
   CloudCog,
-  LogIn,
   LogOut,
   RefreshCw,
-  Eye,
-  EyeOff,
-  ChevronDown,
   UserRound,
   ShieldCheck,
   TriangleAlert,
@@ -25,8 +21,6 @@ import {
   Coins,
 } from 'lucide-react';
 import { Button } from '../../../components/ui/Button';
-import { Input } from '../../../components/ui/Input';
-import { cn } from '../../../lib/utils';
 import { gatewayStatusText } from '../../../lib/qraftGateway';
 import type {
   QraftBillingHistoryEntry,
@@ -80,16 +74,6 @@ export function QraftPage() {
   const [status, setStatus] = useState<QraftStatus | null>(null);
   const [loading, setLoading] = useState(true);
 
-  const [phone, setPhone] = useState('');
-  const [password, setPassword] = useState('');
-  const [showPassword, setShowPassword] = useState(false);
-  const [advancedOpen, setAdvancedOpen] = useState(false);
-  const [baseUrl, setBaseUrl] = useState('');
-  const [clientId, setClientId] = useState('');
-  const [clientSecret, setClientSecret] = useState('');
-  const [redirectUri, setRedirectUri] = useState('');
-
-  const [loggingIn, setLoggingIn] = useState(false);
   const [browserLoggingIn, setBrowserLoggingIn] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [loginError, setLoginError] = useState<string | null>(null);
@@ -128,38 +112,6 @@ export function QraftPage() {
     return () => unsubscribe?.();
   }, [loadStatus]);
 
-  const handleLogin = async () => {
-    setLoggingIn(true);
-    setLoginError(null);
-    try {
-      if (!phone.trim()) {
-        setLoginError('请输入手机号');
-        return;
-      }
-      if (!password) {
-        setLoginError('请输入密码');
-        return;
-      }
-      const result = await window.miqi.qraft.login(phone.trim(), password, {
-        env: 'test',
-        baseUrl: baseUrl.trim() || undefined,
-        clientId: clientId.trim() || undefined,
-        clientSecret: clientSecret.trim() || undefined,
-        redirectUri: redirectUri.trim() || undefined,
-      });
-      if (result.ok) {
-        setPassword('');
-        setStatus(await window.miqi.qraft.status());
-      } else {
-        setLoginError(errorText(result, '登录失败'));
-      }
-    } catch (e) {
-      setLoginError(e instanceof Error ? e.message : 'IPC 调用失败');
-    } finally {
-      setLoggingIn(false);
-    }
-  };
-
   /** 浏览器登录：打开 MiQroForge 授权页，用户在页面完成登录并点击"同意"。 */
   const handleBrowserLogin = async () => {
     setBrowserLoggingIn(true);
@@ -168,13 +120,8 @@ export function QraftPage() {
     try {
       const result = await window.miqi.qraft.browserLogin({
         env: 'test',
-        baseUrl: baseUrl.trim() || undefined,
-        clientId: clientId.trim() || undefined,
-        clientSecret: clientSecret.trim() || undefined,
-        redirectUri: redirectUri.trim() || undefined,
       });
       if (result.ok) {
-        setPassword('');
         setStatus(await window.miqi.qraft.status());
       } else if (result.code === 'LOGIN_CANCELLED') {
         setBrowserNotice(errorText(result, '已取消浏览器登录'));
@@ -269,22 +216,17 @@ export function QraftPage() {
         <div className="min-w-0">
           <h3 className="text-subheading text-[var(--text)]">MiQroForge 平台账号</h3>
           <p className="mt-1 text-xs leading-relaxed text-[var(--text-faint)]">
-            登录后 MiQroForge 将以你的身份调用 MiQroForge 平台接口（授权码流程，凭据安全存储，
-            到期自动刷新）。推荐使用浏览器登录：打开 MiQroForge 平台页面完成登录并点击
-            「同意」，MiQroForge 自动完成授权。
+            登录后 MiQroForge 将以你的身份调用 MiQroForge 平台接口（OAuth 授权码流程，
+            凭据安全存储，到期自动刷新）。点击下方按钮打开 MiQroForge 平台页面完成登录
+            并点击「同意」，MiQroForge 自动完成授权。
           </p>
         </div>
       </div>
 
       {!loggedIn ? (
-        <form
-          className="flex flex-col gap-4"
-          onSubmit={(e) => {
-            e.preventDefault();
-            void handleLogin();
-          }}
-        >
-          {/* 浏览器登录（MiQroForge 授权页修复后可用：用户在页面点击"同意"） */}
+        <div className="flex flex-col gap-4">
+          {/* 浏览器登录（OAuth）：当前唯一的登录入口 —— 手机号/密码表单、
+              环境选择与高级设置已隐藏，待后续需要时恢复。 */}
           <div className="flex flex-col gap-1.5">
             <Button
               type="button"
@@ -299,156 +241,11 @@ export function QraftPage() {
               ) : (
                 <Globe size={14} />
               )}
-              {browserLoggingIn
-                ? '等待授权中…（请在 MiQroForge 页面完成登录）'
-                : '浏览器登录（推荐）'}
+              {browserLoggingIn ? '等待授权中…（请在 MiQroForge 页面完成登录）' : '浏览器登录'}
             </Button>
             <p className="text-size-2xs text-[var(--text-faint)]">
               将打开 MiQroForge 平台授权页，在页面完成登录并点击「同意」后自动回到 MiQroForge。
             </p>
-          </div>
-
-          <div className="flex items-center gap-3">
-            <div className="h-px flex-1 bg-[var(--border-subtle)]" />
-            <span className="text-size-2xs text-[var(--text-faint)]">或使用手机号登录</span>
-            <div className="h-px flex-1 bg-[var(--border-subtle)]" />
-          </div>
-
-          <div className="flex flex-col gap-1.5">
-            <label
-              htmlFor="qraft-phone"
-              className="text-size-sm font-medium text-[var(--text-muted)]"
-            >
-              手机号
-            </label>
-            <Input
-              id="qraft-phone"
-              value={phone}
-              onChange={(e) => setPhone(e.target.value)}
-              placeholder="MiQroForge 平台账号手机号"
-              autoComplete="username"
-              inputMode="numeric"
-              data-testid="qraft-phone-input"
-            />
-          </div>
-
-          <div className="flex flex-col gap-1.5">
-            <label
-              htmlFor="qraft-password"
-              className="text-size-sm font-medium text-[var(--text-muted)]"
-            >
-              密码
-            </label>
-            <div className="flex gap-2">
-              <Input
-                id="qraft-password"
-                type={showPassword ? 'text' : 'password'}
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                placeholder="MiQroForge 平台密码"
-                autoComplete="current-password"
-                className="flex-1"
-                data-testid="qraft-password-input"
-              />
-              <Button
-                variant="ghost"
-                size="icon"
-                type="button"
-                onClick={() => setShowPassword((v) => !v)}
-                aria-label={showPassword ? '隐藏密码' : '显示密码'}
-              >
-                {showPassword ? <EyeOff size={14} /> : <Eye size={14} />}
-              </Button>
-            </div>
-          </div>
-
-          {/* 高级设置 */}
-          <div className="border-t border-[var(--border-subtle)] pt-3">
-            <button
-              type="button"
-              onClick={() => setAdvancedOpen((v) => !v)}
-              className="flex w-full items-center gap-1.5 text-xs font-medium text-[var(--text-muted)] hover:text-[var(--text)] transition-colors"
-            >
-              <ChevronDown
-                size={12}
-                className={cn('transition-transform duration-150', advancedOpen && 'rotate-180')}
-              />
-              高级设置（接入配置，默认按环境预填）
-            </button>
-            {advancedOpen && (
-              <div className="mt-3 flex flex-col gap-3">
-                <div className="flex flex-col gap-1.5">
-                  <label
-                    htmlFor="qraft-baseurl"
-                    className="text-size-xs font-medium text-[var(--text-faint)]"
-                  >
-                    API 基础地址（留空用环境默认）
-                  </label>
-                  <Input
-                    id="qraft-baseurl"
-                    value={baseUrl}
-                    onChange={(e) => setBaseUrl(e.target.value)}
-                    placeholder="https://test.forge.miqroera.com/api"
-                    className="font-mono text-xs"
-                    data-testid="qraft-baseurl-input"
-                  />
-                </div>
-                <div className="grid grid-cols-2 gap-3">
-                  <div className="flex flex-col gap-1.5">
-                    <label
-                      htmlFor="qraft-client-id"
-                      className="text-size-xs font-medium text-[var(--text-faint)]"
-                    >
-                      client_id
-                    </label>
-                    <Input
-                      id="qraft-client-id"
-                      value={clientId}
-                      onChange={(e) => setClientId(e.target.value)}
-                      placeholder="miqi"
-                      className="font-mono text-xs"
-                      data-testid="qraft-client-id-input"
-                    />
-                  </div>
-                  <div className="flex flex-col gap-1.5">
-                    <label
-                      htmlFor="qraft-client-secret"
-                      className="text-size-xs font-medium text-[var(--text-faint)]"
-                    >
-                      client_secret
-                    </label>
-                    <Input
-                      id="qraft-client-secret"
-                      type={showPassword ? 'text' : 'password'}
-                      value={clientSecret}
-                      onChange={(e) => setClientSecret(e.target.value)}
-                      placeholder="留空用默认值（测试阶段）"
-                      className="font-mono text-xs"
-                      data-testid="qraft-client-secret-input"
-                    />
-                  </div>
-                </div>
-                <div className="flex flex-col gap-1.5">
-                  <label
-                    htmlFor="qraft-redirect-uri"
-                    className="text-size-xs font-medium text-[var(--text-faint)]"
-                  >
-                    redirect_uri（留空自动生成 loopback 地址）
-                  </label>
-                  <Input
-                    id="qraft-redirect-uri"
-                    value={redirectUri}
-                    onChange={(e) => setRedirectUri(e.target.value)}
-                    placeholder="http://localhost:<随机端口>/callback"
-                    className="font-mono text-xs"
-                    data-testid="qraft-redirect-uri-input"
-                  />
-                </div>
-                <p className="text-size-2xs text-[var(--text-faint)]">
-                  当前为测试环境，不校验注册值。生产环境上线后再开放环境选择。
-                </p>
-              </div>
-            )}
           </div>
 
           {browserNotice && (
@@ -470,17 +267,7 @@ export function QraftPage() {
               <span className="min-w-0">{loginError}</span>
             </div>
           )}
-
-          <Button
-            type="submit"
-            disabled={loggingIn}
-            className="self-start"
-            data-testid="qraft-login-btn"
-          >
-            {loggingIn ? <RefreshCw size={14} className="animate-spin" /> : <LogIn size={14} />}
-            {loggingIn ? '登录中…（含授权流程，请稍候）' : '登录'}
-          </Button>
-        </form>
+        </div>
       ) : (
         <div className="flex flex-col gap-4">
           {needsRelogin && (

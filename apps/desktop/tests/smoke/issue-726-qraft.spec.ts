@@ -1,8 +1,8 @@
 /**
  * Issue #726 — MiQroForge 平台 OAuth2 登录设置页（smoke，mock bridge）。
  *
- * 覆盖：未登录表单、密码输入脱敏（type=password）、登录成功展示账号、
- * 登录失败错误提示、requiresRelogin 横幅、退出登录回到表单。
+ * 覆盖：未登录时只展示浏览器登录（OAuth）入口、登录成功展示账号、
+ * 登录失败错误提示、requiresRelogin 横幅、退出登录回到登录入口。
  */
 
 import { expect, test } from '@playwright/test';
@@ -23,27 +23,21 @@ async function gotoQraftTab(
 }
 
 test.describe('Issue #726 MiQroForge 平台登录设置页', () => {
-  test('未登录时显示登录表单：浏览器登录入口、手机号、密码（掩码输入）与高级设置', async ({
+  test('未登录时只展示浏览器登录（OAuth）入口，手机号/密码表单与高级设置已隐藏', async ({
     page,
   }) => {
     await gotoQraftTab(page);
 
-    const phoneInput = page.getByTestId('qraft-phone-input');
-    const passwordInput = page.getByTestId('qraft-password-input');
-    await expect(phoneInput).toBeVisible();
-    await expect(passwordInput).toBeVisible();
-    // 密码输入必须为掩码类型（凭据不在界面明文展示）
-    await expect(passwordInput).toHaveAttribute('type', 'password');
-    // 浏览器登录入口（MiQroForge 授权页修复后：页面点击"同意"）
+    // 浏览器登录入口（MiQroForge 授权页：用户在页面点击"同意"）
     await expect(page.getByTestId('qraft-browser-login-btn')).toBeVisible();
     await expect(page.getByTestId('qraft-browser-login-btn')).toContainText('浏览器登录');
-    await expect(page.getByTestId('qraft-login-btn')).toBeVisible();
-    // 环境选择已隐藏（生产域名未上线，仅测试环境可用）
+    // 手机号/密码表单、提交按钮、环境选择与高级设置均不渲染
+    await expect(page.getByTestId('qraft-phone-input')).toHaveCount(0);
+    await expect(page.getByTestId('qraft-password-input')).toHaveCount(0);
+    await expect(page.getByTestId('qraft-login-btn')).toHaveCount(0);
     await expect(page.getByRole('button', { name: '测试环境' })).toHaveCount(0);
     await expect(page.getByRole('button', { name: '生产环境' })).toHaveCount(0);
-    // 高级设置默认折叠
-    await expect(page.getByText('高级设置（接入配置，默认按环境预填）')).toBeVisible();
-    await expect(page.getByText('client_id')).not.toBeVisible();
+    await expect(page.getByText('高级设置（接入配置，默认按环境预填）')).toHaveCount(0);
 
     await page.screenshot({ path: 'test-results/issue-726/qraft-login-form.png', fullPage: true });
   });
@@ -79,9 +73,7 @@ test.describe('Issue #726 MiQroForge 平台登录设置页', () => {
   test('登录成功展示账号信息（nickname/username/脱敏手机号）与退出按钮', async ({ page }) => {
     await gotoQraftTab(page);
 
-    await page.getByTestId('qraft-phone-input').fill('18500000000');
-    await page.getByTestId('qraft-password-input').fill('test-password');
-    await page.getByTestId('qraft-login-btn').click();
+    await page.getByTestId('qraft-browser-login-btn').click();
 
     // 账号信息（nickname 来自 mock userinfo）
     await expect(page.getByText('MiQi测试').first()).toBeVisible({ timeout: 5000 });
@@ -106,9 +98,7 @@ test.describe('Issue #726 MiQroForge 平台登录设置页', () => {
       },
     });
 
-    await page.getByTestId('qraft-phone-input').fill('18500000000');
-    await page.getByTestId('qraft-password-input').fill('test-password');
-    await page.getByTestId('qraft-login-btn').click();
+    await page.getByTestId('qraft-browser-login-btn').click();
 
     await expect(page.getByTestId('qraft-points-balance')).toBeVisible({ timeout: 5000 });
     await expect(page.getByTestId('qraft-points-value')).toHaveText('270');
@@ -155,9 +145,7 @@ test.describe('Issue #726 MiQroForge 平台登录设置页', () => {
       },
     });
 
-    await page.getByTestId('qraft-phone-input').fill('18500000000');
-    await page.getByTestId('qraft-password-input').fill('x');
-    await page.getByTestId('qraft-login-btn').click();
+    await page.getByTestId('qraft-browser-login-btn').click();
 
     const errorBox = page.getByTestId('qraft-login-error');
     await expect(errorBox).toBeVisible({ timeout: 5000 });
@@ -187,7 +175,7 @@ test.describe('Issue #726 MiQroForge 平台登录设置页', () => {
     await expect(page.getByTestId('qraft-logout-btn')).toBeVisible();
   });
 
-  test('退出登录清除状态并回到登录表单', async ({ page }) => {
+  test('退出登录清除状态并回到登录入口', async ({ page }) => {
     await gotoQraftTab(page, {
       qraftStatus: {
         loggedIn: true,
@@ -206,7 +194,6 @@ test.describe('Issue #726 MiQroForge 平台登录设置页', () => {
     await expect(page.getByTestId('qraft-logout-btn')).toBeVisible();
     await page.getByTestId('qraft-logout-btn').click();
 
-    await expect(page.getByTestId('qraft-phone-input')).toBeVisible({ timeout: 5000 });
-    await expect(page.getByTestId('qraft-login-btn')).toBeVisible();
+    await expect(page.getByTestId('qraft-browser-login-btn')).toBeVisible({ timeout: 5000 });
   });
 });
