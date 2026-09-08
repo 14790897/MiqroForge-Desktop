@@ -20,7 +20,7 @@ import { _electron as electron, test, expect } from '@playwright/test';
 import type { ElectronApplication, Page } from '@playwright/test';
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { join } from 'node:path';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import {
   LLM_TIMEOUT,
   sendMessage,
@@ -176,97 +176,27 @@ test.describe('MCP 服务器集成', () => {
     }
   });
 
-  test(
-    '设置页添加 stdio MCP 服务器 → 列表显示并持久化到 config.json',
-    { timeout: 120_000 },
-    async () => {
-      // ── 打开设置 → MCP 服务 tab ──
-      const settingsBtn = page.locator('[data-testid="nav-system-settings"]');
-      await expect(settingsBtn).toBeVisible({ timeout: 15_000 });
-      await settingsBtn.click();
-      const mcpTab = page.getByRole('tab', { name: /MCP 服务/ }).first();
-      await expect(mcpTab).toBeVisible({ timeout: 10_000 });
-      await mcpTab.click();
-      await expect(page.getByRole('heading', { name: 'MCP 服务器' })).toBeVisible({
-        timeout: 10_000,
-      });
+  test('设置页已隐藏 MCP 配置入口（#974 收口）', { timeout: 60_000 }, async () => {
+    // ── 打开设置页 ──
+    const settingsBtn = page.locator('[data-testid="nav-system-settings"]');
+    await expect(settingsBtn).toBeVisible({ timeout: 15_000 });
+    await settingsBtn.click();
 
-      // 预置的 e2emcp（beforeAll 写入 config.json）已出现在列表里
-      await expect(page.getByText(SERVER_NAME, { exact: true })).toBeVisible({
-        timeout: 15_000,
-      });
+    // #974：MCP 配置界面已对普通用户收口——设置页不再出现「MCP 服务」tab，
+    // 也不存在 MCP 服务器管理界面。后端 mcp_servers 由 #951 内置默认预置，
+    // UI 侧已无任何写入/删除入口（config.json 手工修改不在收口范围）。
+    await expect(page.getByRole('tab', { name: /MCP 服务/ })).toHaveCount(0);
+    await expect(page.getByRole('heading', { name: 'MCP 服务器' })).toHaveCount(0);
 
-      // ── 添加服务器弹窗 ──
-      await page.getByRole('button', { name: '添加服务器' }).click();
-      await expect(page.getByRole('heading', { name: '添加 MCP 服务器' })).toBeVisible();
-
-      const uiName = 'uimcp';
-      await page.getByPlaceholder('my-mcp-server').fill(uiName);
-      await page.getByPlaceholder('npx').fill(mcpCommand.command);
-      const argsStr =
-        mcpCommand.args.length > 0 ? [...mcpCommand.args, SERVER_SCRIPT].join(', ') : SERVER_SCRIPT;
-      await page.getByPlaceholder('-y, @modelcontextprotocol/server-filesystem').fill(argsStr);
-      await page.screenshot({
-        path: `test-results/${test.info().title.replace(/\s+/g, '-')}-modal.png`,
-      });
-      await page.getByRole('button', { name: '保存', exact: true }).click();
-
-      // ── 列表出现新服务器卡片（stdio 徽标） ──
-      await expect(page.getByText(uiName, { exact: true })).toBeVisible({
-        timeout: 15_000,
-      });
-      await expect(page.getByText('stdio', { exact: true })).toHaveCount(2);
-      await page.screenshot({
-        path: `test-results/${test.info().title.replace(/\s+/g, '-')}-list.png`,
-        fullPage: true,
-      });
-      await postScreenshotToPr(
-        `test-results/${test.info().title.replace(/\s+/g, '-')}-list.png`,
-        '✅ E2E 通过：设置页添加 MCP 服务器（uimcp）→ 列表显示 + config.json 持久化'
-      );
-
-      // ── config.json 持久化（文件存 camelCase 键：tools.mcpServers） ──
-      const raw = readFileSync(join(miqiHome, 'config.json'), 'utf-8');
-      const saved = JSON.parse(raw);
-      const entry = saved?.tools?.mcpServers?.[uiName];
-      expect(entry, 'config.json 应包含 tools.mcpServers.uimcp').toBeTruthy();
-      expect(entry.command).toBe(mcpCommand.command);
-      const savedArgs = entry.args ?? [];
-      expect(savedArgs).toContain(SERVER_SCRIPT);
-
-      // ── #950 回归：重新打开「编辑」弹窗应回显已保存配置 ──
-      const uimcpCard = page.locator('.settings-hover-card').filter({ hasText: uiName });
-      await uimcpCard.getByTitle('编辑').click();
-      await expect(page.getByRole('heading', { name: '编辑 MCP 服务器' })).toBeVisible();
-      await expect(page.getByPlaceholder('my-mcp-server')).toHaveValue(uiName);
-      await expect(page.getByPlaceholder('npx')).toHaveValue(mcpCommand.command);
-      await expect(
-        page.getByPlaceholder('-y, @modelcontextprotocol/server-filesystem')
-      ).toHaveValue(argsStr);
-      await page.getByRole('button', { name: '取消' }).click();
-
-      // ── #950 报告场景：添加 SSE 服务器 → 徽标显示 sse → 编辑回显 URL/Headers ──
-      await page.getByRole('button', { name: '添加服务器' }).click();
-      const sseName = 'uisse';
-      const sseUrl = 'http://127.0.0.1:9/mcp'; // 丢弃端口：连接快速失败，不影响会话启动
-      const sseHeaders = 'X-Api-Key: mock-key';
-      await page.getByPlaceholder('my-mcp-server').fill(sseName);
-      await page.getByRole('button', { name: 'SSE' }).click();
-      await page.getByPlaceholder('http://localhost:8080/mcp').fill(sseUrl);
-      await page.getByPlaceholder('Authorization: Bearer token').fill(sseHeaders);
-      await page.getByRole('button', { name: '保存', exact: true }).click();
-      await expect(page.getByText(sseName, { exact: true })).toBeVisible({ timeout: 15_000 });
-      await expect(page.getByText('sse', { exact: true })).toBeVisible();
-
-      const sseCard = page.locator('.settings-hover-card').filter({ hasText: sseName });
-      await sseCard.getByTitle('编辑').click();
-      await expect(page.getByRole('heading', { name: '编辑 MCP 服务器' })).toBeVisible();
-      await expect(page.getByPlaceholder('my-mcp-server')).toHaveValue(sseName);
-      await expect(page.getByPlaceholder('http://localhost:8080/mcp')).toHaveValue(sseUrl);
-      await expect(page.getByPlaceholder('Authorization: Bearer token')).toHaveValue(sseHeaders);
-      await page.getByRole('button', { name: '取消' }).click();
-    }
-  );
+    await page.screenshot({
+      path: `test-results/${test.info().title.replace(/\s+/g, '-')}.png`,
+      fullPage: true,
+    });
+    await postScreenshotToPr(
+      `test-results/${test.info().title.replace(/\s+/g, '-')}.png`,
+      '✅ E2E 通过：设置页不再显示 MCP 服务配置入口（#974 收口）'
+    );
+  });
 
   test(
     '新建会话 → 模型调用 MCP 工具 → 最终回复含工具返回值标记',
