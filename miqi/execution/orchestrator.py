@@ -182,8 +182,10 @@ def _sanitize_exc_for_ui(exc: BaseException) -> str:
     # URL 必须先行替换成整体（前端 sanitizeUiMessage 同序）：先跑路径正则
     # 会把 https://user:secret@host/path 里的路径段先打码，URL 正则随后
     # 无法整体匹配，凭据 `secret` 泄漏（#991 review）。
+    # 大小写不敏感 + 不设长度上限：HTTPS:// 大写 scheme 与超长凭据 URL 也
+    # 必须整体替换。raw 已在上方截断到 300 字符，匹配长度天然有界。
     import re as _re
-    raw = _re.sub(r'https?://[^\s"\'<>]{1,200}', '[url]', raw)
+    raw = _re.sub(r'https?://[^\s"\'<>]+', '[url]', raw, flags=_re.IGNORECASE)
     # 负向后顾：斜杠段前面不能紧跟单词字符，避免把 deepseek/deepseek-v4-flash
     # 这类 provider/model id 误当 Unix 路径打码（前端 sanitizeUiMessage 同款修复）。
     raw = _re.sub(r'(?<![A-Za-z0-9_.-])(?:/[^\s"\'<>|:]{1,200})+', '[path]', raw)

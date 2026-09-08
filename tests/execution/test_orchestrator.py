@@ -235,6 +235,21 @@ class TestSanitizeExcForUi:
         assert "user" not in out
         assert "[url]" in out
 
+    def test_credential_url_uppercase_scheme_masked(self):
+        """大写 scheme 的凭据 URL 也必须整体替换（#991 review）。"""
+        out = self._sanitize("boom at HTTPS://user:secret@example.com/path")
+        assert "secret" not in out
+        assert "user" not in out
+        assert "[url]" in out
+
+    def test_credential_url_over_200_chars_masked(self):
+        """超过 200 字符的凭据 URL 不再因长度上限漏掉尾部（#991 review）。"""
+        long_url = "https://user:secret@example.com/" + "a" * 240
+        out = self._sanitize("boom at " + long_url)
+        assert "secret" not in out
+        assert "aaaa" not in out
+        assert "[url]" in out
+
     def test_real_paths_still_masked(self):
         out = self._sanitize("boom at C:/Users/test/data.json and /home/user/file.py")
         assert "Users" not in out

@@ -14,8 +14,10 @@ const MAX_LEN = 300;
  * Matches http(s) URLs.
  * Applied BEFORE the path regex so URLs are replaced as a whole unit,
  * rather than having their path segments fragmented into [path] markers.
+ * Case-insensitive (HTTPS:// … 同样整体替换)且不设长度上限 —— 截断在
+ * 上方先行执行,匹配长度天然有界（#991 review）。
  */
-const RE_URL = /https?:\/\/[^\s"'<>]{1,200}/g;
+const RE_URL = /https?:\/\/[^\s"'<>]+/gi;
 
 /**
  * Matches Unix / Windows absolute paths.

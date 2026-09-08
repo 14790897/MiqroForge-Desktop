@@ -78,4 +78,19 @@ describe('sanitizeUiMessage', () => {
     expect(out).toContain('deepseek/deepseek-v4-flash');
     expect(out).not.toContain('[path]');
   });
+
+  it('masks credential URLs with uppercase schemes (#991 review)', () => {
+    const out = sanitizeUiMessage('boom at HTTPS://user:secret@example.com/path');
+    expect(out).not.toContain('secret');
+    expect(out).not.toContain('user');
+    expect(out).toContain('[url]');
+  });
+
+  it('masks credential URLs longer than 200 chars entirely (#991 review)', () => {
+    const longUrl = 'https://user:secret@example.com/' + 'a'.repeat(240);
+    const out = sanitizeUiMessage('boom at ' + longUrl);
+    expect(out).not.toContain('secret');
+    expect(out).not.toContain('aaaa');
+    expect(out).toContain('[url]');
+  });
 });
