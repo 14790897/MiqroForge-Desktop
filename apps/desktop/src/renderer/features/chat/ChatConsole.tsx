@@ -1462,44 +1462,73 @@ export async function _sha256HexOfText(text: string): Promise<string> {
 // #968 复核：附件装饰内容守卫。key 会把装饰段（含嵌入的文件内容）整体剥掉，
 // 「同文本 + 同附件名」的消息 key 必然碰撞，名字级校验不足以区分内容差异
 // （CodeRabbit #969：同文本 + main.py 但 print(1)/print(2) 两种内容时，旧副本
-// 会误认领新气泡 → 新消息被吞）。守卫对每个附件做内容级验证：
-// - text：payload 原样嵌入 att.content → 要求持久化副本含完整的
-//   `[File: name]\n```\n${content}\n```` 段（逐字，含围栏锚点，长度/重叠不误判）
+// 会误认领新气泡 → 新消息被吞）。守卫采用「签名计数」语义：每条 live 附件
+// 换算成一条唯一装饰签名（相同签名 = 同名字同内容/同指纹的重复附件），持久化
+// 副本里每种签名的出现次数必须 ≥ live 条数——一条装饰只认领一个附件，杜绝
+// 重复附件共用同一条旧装饰（CodeRabbit #969 round 2：30s 内先发 1 张图再发
+// 同文本 2 张相同图时，1 条装饰的旧副本会误认领 2 附件气泡 → 吞真实消息）。
+// - text：payload 原样嵌入 att.content → 签名 = 完整 `[File: name]\n```\n
+//   ${content}\n```` 段（逐字，含围栏锚点，长度/重叠不误判）
 // - document：`--- Document: name ---` 块正文须与 att.dataBase64 重新解码结果
-//   （同一 _decodeDocData，50k 截断一致）逐字相等；占位装饰（扫描/二进制/解析
-//   失败）不承载内容 → 名字 + 类型短语校验（内容本就不可见）
-// - image：装饰只携带文件名（字节不走 content）→ 名字校验（同名异字节需名字+
-//   文本+30s+旧行已消失四重巧合，记为已知限制）
-// 校验失败一律不认领（方向安全：可能双显示，绝不吞消息）。空内容 text 附件在
-// 发送侧不产生装饰 → 同样不认领（安全方向）。
+//   （同一 _decodeDocData，50k 截断一致）逐字相等，签名 = 完整块；占位装饰
+//   （扫描/二进制/解析失败）无法构造完整文本 → 按 [name: 前缀定位、逐段数
+//   (fp:contentFp) 出现次数
+// - image：签名 = `[Image: name (fp:hex)]` 完整装饰（字节不走 content，内容
+//   以发送侧预计算的全量 SHA-256 指纹代偿）
+// 任一签名次数不足 / 无法换算（无指纹、空内容、解码失败）→ 一律不认领
+// （方向安全：可能双显示，绝不吞消息）。
+function _countOccurrences(haystack: string, needle: string): number {
+  let n = 0;
+  let from = 0;
+  for (;;) {
+    const i = haystack.indexOf(needle, from);
+    if (i < 0) return n;
+    n += 1;
+    from = i + needle.length;
+  }
+}
+
+// 数 [name: 前缀占位中出现指定 fp 的段数。收尾 ] 从段头+长度起找（文件名可含
+// ]，report].pdf 不会在文件名内部截断，CodeRabbit #969 Minor）；畸形段（无
+// 收尾/超长）跳过。
+function _countPlaceholderFp(pmContent: string, name: string, fp: string): number {
+  const ph = `[${name}: `;
+  let n = 0;
+  let searchFrom = 0;
+  for (;;) {
+    const phIdx = pmContent.indexOf(ph, searchFrom);
+    if (phIdx < 0) return n;
+    const closeIdx = pmContent.indexOf(']', phIdx + ph.length);
+    if (closeIdx >= 0 && closeIdx - phIdx <= 400) {
+      const seg = pmContent.slice(phIdx, closeIdx + 1);
+      if (seg.includes(`(fp:${fp})`)) n += 1;
+    }
+    searchFrom = phIdx + ph.length;
+  }
+}
+
 function _persistedCoversAttachments(
   pmContent: string,
   attachments: Attachment[] | undefined
 ): boolean {
   if (!attachments || attachments.length === 0) return true;
-  return attachments.every((a) => {
+  const need = new Map<string, number>();
+  const fpNeed = new Map<string, number>(); // `name|fp` → 需要条数（占位装饰）
+  for (const a of attachments) {
     switch (a.type) {
       case 'image': {
-        // 图片装饰 [Image: name (fp:…)]：发送侧内嵌内容指纹，这里比对区分同名
-        // 异字节图片（CodeRabbit #969）。无指纹的旧版装饰 / live 无 contentFp
-        // → 不认领（方向安全）。文件名可含 ]，故收尾 ] 从名字后找起；同名装饰
-        // 可能出现多次（同消息两张同名图 / 嵌入文本撞串）→ 扫描全部出现点。
-        const open = `[Image: ${a.name}`;
+        // 无指纹旧版 live 附件无法验证内容 → 不认领（方向安全）
         if (!a.contentFp) return false;
-        let searchFrom = 0;
-        for (;;) {
-          const openIdx = pmContent.indexOf(open, searchFrom);
-          if (openIdx < 0) return false;
-          const rest = pmContent.slice(openIdx + open.length, openIdx + open.length + 90);
-          const fpMatch = rest.match(/^ \(fp:([0-9a-f]{64})\)\]/);
-          if (fpMatch && fpMatch[1] === a.contentFp) return true;
-          searchFrom = openIdx + open.length;
-        }
+        const sig = `[Image: ${a.name} (fp:${a.contentFp})]`;
+        need.set(sig, (need.get(sig) ?? 0) + 1);
+        break;
       }
       case 'text': {
         const c = a.content ?? '';
         if (!c) return false;
-        return pmContent.includes(`[File: ${a.name}]\n\`\`\`\n${c}\n\`\`\``);
+        const sig = `[File: ${a.name}]\n\`\`\`\n${c}\n\`\`\``;
+        need.set(sig, (need.get(sig) ?? 0) + 1);
+        break;
       }
       case 'document': {
         const blockOpen = `--- Document: ${a.name} ---`;
@@ -1510,36 +1539,19 @@ function _persistedCoversAttachments(
             const { extracted } = _decodeDocData(a.dataBase64, a.name);
             const body = extracted && extracted.trim() ? extracted.slice(0, 50000) : '';
             if (!body) return false; // 空提取发送侧会走占位分支，不应出现块
-            return pmContent.includes(`${blockOpen}\n${body}\n--- End of ${a.name} ---`);
+            const sig = `${blockOpen}\n${body}\n--- End of ${a.name} ---`;
+            need.set(sig, (need.get(sig) ?? 0) + 1);
           } catch {
             return false; // 解码异常 → 发送侧走占位分支，不可能有 Document 块
           }
+        } else {
+          // 占位装饰：同名不同字节的不可提取文档生成相同占位 + 各自 (fp:…)，
+          // 按 name+fp 分组数出现条数（同名字同 fp 的重复附件不得共用一条）。
+          if (!a.contentFp) return false;
+          const key = `${a.name}|${a.contentFp}`;
+          fpNeed.set(key, (fpNeed.get(key) ?? 0) + 1);
         }
-        // 占位装饰（scanned PDF / binary file / parsing on server）不承载内容，
-        // 同名不同字节的文件会生成相同的占位 → 发送侧把全量 SHA-256 写进占位
-        // （(fp:…)），此处与 live 附件暂存的 contentFp 比对（CodeRabbit #969）。
-        // 同名占位可出现多次（同消息两张同名不同字节的不可提取文档）→ 扫描全部
-        // 出现点，任一 fp 一致即认领（CodeRabbit #969 Major：旧实现只看第一个，
-        // 第二个附件对到第一个的 fp → 误拒 → 双显示）。无指纹的旧版占位 / live
-        // 附件无法验证内容 → 一律不认领（方向安全）。
-        if (!a.contentFp) return false;
-        const ph = `[${a.name}: `;
-        let searchFrom = 0;
-        for (;;) {
-          const phIdx = pmContent.indexOf(ph, searchFrom);
-          if (phIdx < 0) return false;
-          // 收尾 ] 须从 phIdx + ph.length 起找：文件名可含 ]（report].pdf），从
-          // phIdx 起找会命中文件名内的 ]、把段截在文件名里丢掉 (fp:…)（CodeRabbit
-          // #969 Minor：合法同文件重发被误拒 → 双显示）。畸形段（无收尾/超长）
-          // 视为非装饰跳过，继续搜后续出现点。
-          const closeIdx = pmContent.indexOf(']', phIdx + ph.length);
-          if (closeIdx >= 0 && closeIdx - phIdx <= 400) {
-            const seg = pmContent.slice(phIdx, closeIdx + 1);
-            const fpMatch = seg.match(/\(fp:([0-9a-f]{64})\)/);
-            if (fpMatch && fpMatch[1] === a.contentFp) return true;
-          }
-          searchFrom = phIdx + ph.length;
-        }
+        break;
       }
       default:
         // 未知/未来扩展类型（audio/video/archive/…）无法验证内容 → 不认领。
@@ -1547,7 +1559,17 @@ function _persistedCoversAttachments(
         // 而漏补分支，仅凭 key（文本+时间+文件名）认领可能吞掉真实新消息。
         return false;
     }
-  });
+  }
+  for (const [sig, n] of need) {
+    if (_countOccurrences(pmContent, sig) < n) return false;
+  }
+  for (const [key, n] of fpNeed) {
+    const sep = key.indexOf('|');
+    const name = key.slice(0, sep);
+    const fp = key.slice(sep + 1);
+    if (_countPlaceholderFp(pmContent, name, fp) < n) return false;
+  }
+  return true;
 }
 
 // #891 深度审阅 #11：删 flag 门控与保留块须用同一匹配（两处不再手写漂移）。

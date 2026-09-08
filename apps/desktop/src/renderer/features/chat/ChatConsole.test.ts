@@ -470,6 +470,39 @@ describe('_markUserTwinMatches 一对一去重匹配（#891 复核 + #968）', (
     ).toEqual([true]);
   });
 
+  it('#968 复核：相同附件重复出现不得共用同一条持久化装饰（CodeRabbit #969 round 2）', () => {
+    // 30s 内先发 1 张图再发同文本 2 张相同图：1 条装饰的旧副本若同时满足两个
+    // identical 附件，第二气泡会被误认领 → 吞真实消息。每条装饰只认领一个附件。
+    const fpa = 'a'.repeat(64);
+    const two = [
+      { name: 'photo.png', type: 'image' as const, contentFp: fpa },
+      { name: 'photo.png', type: 'image' as const, contentFp: fpa },
+    ];
+    // 旧副本只有 1 条装饰 → 不认领
+    expect(
+      _markUserTwinMatches([u('看图', T, two)], [u(`看图\n\n[Image: photo.png (fp:${fpa})]`, T)])
+    ).toEqual([false]);
+    // 旧副本有 2 条相同装饰 → 认领
+    expect(
+      _markUserTwinMatches(
+        [u('看图', T, two)],
+        [u(`看图\n\n[Image: photo.png (fp:${fpa})]\n\n[Image: photo.png (fp:${fpa})]`, T)]
+      )
+    ).toEqual([true]);
+    // document 占位同型：1 条占位不得满足 2 个同指纹附件
+    expect(
+      _markUserTwinMatches(
+        [
+          u('看', T, [
+            { name: 'scan.pdf', type: 'document', contentFp: fpa },
+            { name: 'scan.pdf', type: 'document', contentFp: fpa },
+          ]),
+        ],
+        [u(`看\n\n[scan.pdf: scanned PDF (fp:${fpa}) — OCR will be attempted by the server]`, T)]
+      )
+    ).toEqual([false]);
+  });
+
   it('#968 复核：SHA-256 覆盖全量内容——同名同首尾、仅中段不同的大附件指纹不同', async () => {
     // CodeRabbit #969 回归要求：>8192 字符、长度与首尾 4KB 相同、中段不同的
     // dataBase64 必须产生不同指纹（采样方案会被构造性绕过，全量摘要不会）
