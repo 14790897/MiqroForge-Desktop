@@ -1392,15 +1392,33 @@ function _userContentDedupKey(content: string): string {
   return trimmed === '(attachment)' ? '' : trimmed;
 }
 
-// #968 复核：图片装饰名守卫。图片装饰只携带文件名（不嵌入文件内容），是跨轮
-// 「同文本 + 不同图」消息唯一能让 key 碰撞的向量（重新生成换图后，旧图副本会
-// 与新一轮在途气泡 key 相同）——若被旧副本认领，新问题会被吞（消失而非重复）。
-// 文本/文档附件把文件内容嵌进 content，key 本身即可区分，无需守卫。
-function _persistedCoversImages(pmContent: string, attachments: Attachment[] | undefined): boolean {
+// #968 复核：附件装饰名守卫。key 会把装饰段（含嵌入的文件内容）整体剥掉，所以
+// 「同文本 + 不同附件」的消息 key 必然碰撞——重新生成换附件后，旧回合副本会与
+// 新一轮在途气泡 key 相同。若被旧副本认领，新问题会被吞（消失而非重复，比双显示
+// 更糟）。守卫要求：气泡的每个附件在持久化副本里有同名的装饰标记，否则不认领。
+// 校验用原始 content 的子串匹配（不经过 key 剥离），文件名含 "]" 也不受影响。
+function _persistedCoversAttachments(
+  pmContent: string,
+  attachments: Attachment[] | undefined
+): boolean {
   if (!attachments || attachments.length === 0) return true;
-  const images = attachments.filter((a) => a.type === 'image');
-  if (images.length === 0) return true;
-  return images.every((img) => pmContent.includes(`[Image: ${img.name}]`));
+  return attachments.every((a) => {
+    switch (a.type) {
+      case 'image':
+        return pmContent.includes(`[Image: ${a.name}]`);
+      case 'text':
+        // text 附件装饰仅当 att.content 非空时追加；空内容附件装饰缺失 → 不认领
+        // （方向安全：气泡保留 → 潜在双显示，绝不吞消息）
+        return pmContent.includes(`[File: ${a.name}]`);
+      case 'document':
+        // 可提取正文 → --- Document: name ---；扫描/二进制/失败 → [name: …] 占位
+        return (
+          pmContent.includes(`--- Document: ${a.name} ---`) || pmContent.includes(`[${a.name}: `)
+        );
+      default:
+        return true; // 未知类型装饰规则不明 → 交由 key 决定
+    }
+  });
 }
 
 // #891 深度审阅 #11：删 flag 门控与保留块须用同一匹配（两处不再手写漂移）。
@@ -1410,7 +1428,7 @@ function _persistedCoversImages(pmContent: string, attachments: Attachment[] | u
 // 化而漏掉第二条。返回数组与 frontend 等长：matched[i]===true 表示该条乐观气泡
 // 已有专属持久化副本。匹配条件（按代价排序）：①时间相近 O(1) ②归一化 key（#968，
 // key 惰性缓存、每行只算一次——load() 在 UI 线程跑，避免每对候选做全文正则）
-// ③图片装饰名守卫。内容比对经 _userContentDedupKey 归一化（#968）。
+// ③附件装饰名守卫（#968 复核：图片/文本/文档三类都查，见 _persistedCoversAttachments）。内容比对经 _userContentDedupKey 归一化（#968）。
 export function _markUserTwinMatches(frontend: Message[], merged: Message[]): boolean[] {
   const matched = new Array<boolean>(frontend.length).fill(false);
   const keyCache = new Array<string | undefined>(frontend.length).fill(undefined);
@@ -1426,7 +1444,7 @@ export function _markUserTwinMatches(frontend: Message[], merged: Message[]): bo
       if (!_isPersistedCopyOf(m.timestamp, pm.timestamp)) continue;
       if (keyCache[i] === undefined) keyCache[i] = _userContentDedupKey(String(m.content ?? ''));
       if (keyCache[i] !== pmKey) continue;
-      if (!_persistedCoversImages(pmContent, m.attachments)) continue;
+      if (!_persistedCoversAttachments(pmContent, m.attachments)) continue;
       matched[i] = true;
       break;
     }

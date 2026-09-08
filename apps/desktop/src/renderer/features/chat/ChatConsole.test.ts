@@ -257,6 +257,60 @@ describe('_markUserTwinMatches 一对一去重匹配（#891 复核 + #968）', (
     ).toEqual([true]);
   });
 
+  it('#968 复核：文本附件守卫——旧回合的 a.py 副本不得认领换了 b.py 的新气泡', () => {
+    // key 剥离会去掉嵌入的文件内容，text 附件同文本不同文件一样碰撞 → 必须守卫
+    expect(
+      _markUserTwinMatches(
+        [u('看', T, [{ name: 'b.py', type: 'text' }])],
+        [u('看\n\n[File: a.py]\n```\nprint(1)\n```', T - 2_000)]
+      )
+    ).toEqual([false]);
+    // 同名同文件 → 认领
+    expect(
+      _markUserTwinMatches(
+        [u('看', T, [{ name: 'a.py', type: 'text' }])],
+        [u('看\n\n[File: a.py]\n```\nprint(1)\n```', T)]
+      )
+    ).toEqual([true]);
+  });
+
+  it('#968 复核：文档附件守卫——旧回合 A.pdf 副本不得认领换了 B.pdf 的新气泡', () => {
+    expect(
+      _markUserTwinMatches(
+        [u('看', T, [{ name: 'B.pdf', type: 'document' }])],
+        [u('看\n\n--- Document: A.pdf ---\n内容\n--- End of A.pdf ---', T - 2_000)]
+      )
+    ).toEqual([false]);
+    // 扫描 PDF（占位装饰 [name: …]）同名 → 认领
+    expect(
+      _markUserTwinMatches(
+        [u('看', T, [{ name: 'scan.pdf', type: 'document' }])],
+        [u('看\n\n[scan.pdf: scanned PDF — OCR will be attempted by the server]', T)]
+      )
+    ).toEqual([true]);
+  });
+
+  it('#968 复核：纯附件两张图 + 无文本（迭代剥离到空）', () => {
+    expect(
+      _markUserTwinMatches(
+        [
+          u('(attachment)', T, [
+            { name: 'A.png', type: 'image' },
+            { name: 'B.png', type: 'image' },
+          ]),
+        ],
+        [u('\n\n[Image: A.png]\n\n[Image: B.png]', T)]
+      )
+    ).toEqual([true]);
+  });
+
+  it('#968 复核：[File:] 内嵌内容以 ``` 结尾紧邻收尾围栏时仍正确剥离', () => {
+    // 文件内容为 'code\n```' → 块形如 [File: x.py]\n```\ncode\n```\n```（连续两个收尾围栏）
+    expect(_markUserTwinMatches([u('看')], [u('看\n\n[File: x.py]\n```\ncode\n```\n```')])).toEqual(
+      [true]
+    );
+  });
+
   it('#968 + #891 复核组合：同文本两条、persisted 带图 → 归一化后仍只认领最早一条', () => {
     expect(
       _markUserTwinMatches([u('看图', T), u('看图', T + 5_000)], [u('看图\n\n[Image: a.png]', T)])
