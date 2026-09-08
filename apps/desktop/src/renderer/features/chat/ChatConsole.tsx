@@ -1369,35 +1369,67 @@ function _isPersistedCopyOf(frontendTs: number | undefined, copyTs: number | und
   return Math.abs(copyTs - frontendTs) < _PERSISTED_COPY_TS_TOLERANCE_MS;
 }
 
-// #968: 附件消息的 content 归一化。发送侧把附件占位符/内嵌文本拼进 content 后
-// 落库（handleSend payload 构造：图片 [Image: name]、文件 [File: …] 块、
-// --- Document: … --- 段），而乐观气泡的 content 只有原始输入文本——直接字符串
-// 比对必失配，快照截住在途附件消息时会把它当"未落盘"保留 → 同一条消息渲染两遍。
-// 与渲染层共用同一套剥离规则（extractFileChips），两侧一致变换后即可正确互认；
-// 用户手打的形似占位符文本同样被剥离，与展示层语义一致。
-function _normalizeUserContentForMatch(content: string): string {
-  return extractFileChips(content).cleanContent;
+// #968: 用户消息去重 key——剥离发送侧追加进 content 的装饰段。handleSend 把
+// 每类附件/重试提示都追加在 content 尾部，故这里每条规则都「尾锚定」（节头
+// 限定为字符串头或前导 \n\n、节尾锚定 $）并迭代剥离：内嵌文件正文里的 ``` 围栏
+// 或 "--- End of … ---" 行无法再提前截断惰性匹配（回溯必须抵达真正的尾部），
+// 文件名含 "]" 也由贪婪捕获的回溯容忍。若某条剥离失手（如手打的形似装饰文本），
+// 后果是 key 不相等 → 气泡与其副本并存（#968 双显示，方向安全），绝不会让
+// 不同消息的 key 意外相等而吞掉真实消息（方向危险）。
+const _DEDUP_TAIL_SECTION_RES =
+  /(?:^|\n\n)(?:\[系统提示：[^\]]*\]|\[Image: [^\n]+\]|\[File: [^\n]+\]\n```\n[\s\S]*?\n```|--- Document: [^\n]+ ---\n[\s\S]*?\n--- End of [^\n]+ ---|\[[^\n]+?: (?:scanned PDF|binary file|parsing on server)[^\]]*\])\s*$/;
+
+function _userContentDedupKey(content: string): string {
+  let s = content;
+  let prev: string;
+  do {
+    prev = s;
+    s = s.replace(_DEDUP_TAIL_SECTION_RES, '');
+  } while (s !== prev);
+  // 无文本纯附件发送：乐观气泡显示 '(attachment)' 占位符，落库副本剥离装饰后
+  // 为空串——两侧统一映射到空串才能互认（#968 复核）。
+  const trimmed = s.trim();
+  return trimmed === '(attachment)' ? '' : trimmed;
+}
+
+// #968 复核：图片装饰名守卫。图片装饰只携带文件名（不嵌入文件内容），是跨轮
+// 「同文本 + 不同图」消息唯一能让 key 碰撞的向量（重新生成换图后，旧图副本会
+// 与新一轮在途气泡 key 相同）——若被旧副本认领，新问题会被吞（消失而非重复）。
+// 文本/文档附件把文件内容嵌进 content，key 本身即可区分，无需守卫。
+function _persistedCoversImages(pmContent: string, attachments: Attachment[] | undefined): boolean {
+  if (!attachments || attachments.length === 0) return true;
+  const images = attachments.filter((a) => a.type === 'image');
+  if (images.length === 0) return true;
+  return images.every((img) => pmContent.includes(`[Image: ${img.name}]`));
 }
 
 // #891 深度审阅 #11：删 flag 门控与保留块须用同一匹配（两处不再手写漂移）。
-// 唯一匹配改为一对一：merged 里每条持久化用户行只认领最早一条同内容、时间相近
+// 唯一匹配改为一对一：merged 里每条持久化用户行只认领最早一条同 key、时间相近
 // 的乐观气泡。此前 .some() 会让同一条持久化副本同时满足多条相同文本的气泡——
 // 用户 30s 内两次发送同一句、恢复快照时第二条尚未落盘，两条都会被误判为已持久
 // 化而漏掉第二条。返回数组与 frontend 等长：matched[i]===true 表示该条乐观气泡
-// 已有专属持久化副本。内容比对经 _normalizeUserContentForMatch 归一化（#968）。
+// 已有专属持久化副本。匹配条件（按代价排序）：①时间相近 O(1) ②归一化 key（#968，
+// key 惰性缓存、每行只算一次——load() 在 UI 线程跑，避免每对候选做全文正则）
+// ③图片装饰名守卫。内容比对经 _userContentDedupKey 归一化（#968）。
 export function _markUserTwinMatches(frontend: Message[], merged: Message[]): boolean[] {
   const matched = new Array<boolean>(frontend.length).fill(false);
+  const keyCache = new Array<string | undefined>(frontend.length).fill(undefined);
   for (const pm of merged) {
     if (pm.role !== 'user') continue;
-    const idx = frontend.findIndex(
-      (m, i) =>
-        !matched[i] &&
-        m.role === 'user' &&
-        _normalizeUserContentForMatch(String(pm.content)) ===
-          _normalizeUserContentForMatch(String(m.content)) &&
-        _isPersistedCopyOf(m.timestamp, pm.timestamp)
-    );
-    if (idx >= 0) matched[idx] = true;
+    const pmContent = String(pm.content ?? '');
+    const pmKey = _userContentDedupKey(pmContent);
+    for (let i = 0; i < frontend.length; i += 1) {
+      if (matched[i]) continue;
+      const m = frontend[i];
+      if (m.role !== 'user') continue;
+      // 时间门控最先（O(1)）——内容剥离是 O(content)，只对时间相近的候选执行
+      if (!_isPersistedCopyOf(m.timestamp, pm.timestamp)) continue;
+      if (keyCache[i] === undefined) keyCache[i] = _userContentDedupKey(String(m.content ?? ''));
+      if (keyCache[i] !== pmKey) continue;
+      if (!_persistedCoversImages(pmContent, m.attachments)) continue;
+      matched[i] = true;
+      break;
+    }
   }
   return matched;
 }

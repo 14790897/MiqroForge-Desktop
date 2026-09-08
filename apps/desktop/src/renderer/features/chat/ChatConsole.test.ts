@@ -138,7 +138,16 @@ describe('ChatConsole thinking block regression (#858 → #905)', () => {
 
 describe('_markUserTwinMatches 一对一去重匹配（#891 复核 + #968）', () => {
   const T = 1_700_000_000_000;
-  const u = (content: string, ts = T) => ({ role: 'user' as const, content, timestamp: ts });
+  const u = (
+    content: string,
+    ts = T,
+    attachments?: { name: string; type: 'image' | 'text' | 'document' }[]
+  ) => ({
+    role: 'user' as const,
+    content,
+    timestamp: ts,
+    ...(attachments ? { attachments: attachments.map((a) => ({ ...a, size: 0 })) } : {}),
+  });
 
   it('纯文本：持久化副本认领同内容乐观气泡', () => {
     expect(_markUserTwinMatches([u('你好')], [u('你好')])).toEqual([true]);
@@ -180,6 +189,72 @@ describe('_markUserTwinMatches 一对一去重匹配（#891 复核 + #968）', (
 
   it('时间相近限定：30s 外的同文本旧副本不误认', () => {
     expect(_markUserTwinMatches([u('再来一次', T)], [u('再来一次', T - 60_000)])).toEqual([false]);
+  });
+
+  it('#968 复核：正文内嵌 ``` 围栏的 [File:] 块不截断剥离（尾锚定回溯）', () => {
+    // 文件内容含 ``` 行时旧惰性正则在内部围栏截断留下残留；尾锚定 + 回溯
+    // 必须剥到真正的收尾围栏
+    expect(
+      _markUserTwinMatches(
+        [u('帮我看看')],
+        [u('帮我看看\n\n[File: a.py]\n```\nline1\n```\nline3\n```')]
+      )
+    ).toEqual([true]);
+  });
+
+  it('#968 复核：正文含 --- End of … --- 行的 Document 段不截断剥离', () => {
+    expect(
+      _markUserTwinMatches(
+        [u('解析这个')],
+        [
+          u(
+            '解析这个\n\n--- Document: report.pdf ---\n第一段\n--- End of report.pdf ---\n第二段\n--- End of report.pdf ---'
+          ),
+        ]
+      )
+    ).toEqual([true]);
+  });
+
+  it('#968 复核：文件名含 ] 的图片装饰（贪婪捕获回溯容忍）', () => {
+    expect(_markUserTwinMatches([u('看图')], [u('看图\n\n[Image: IMG[1].png]')])).toEqual([true]);
+  });
+
+  it('#968 复核：重试回合（persisted 带 [系统提示：…] 尾）可互认', () => {
+    expect(
+      _markUserTwinMatches(
+        [u('再来一次')],
+        [u('再来一次\n\n[系统提示：这是重试请求。请换一个角度重新回答，不要复述之前的答案。]')]
+      )
+    ).toEqual([true]);
+  });
+
+  it('#968 复核：纯附件无文本发送（live "(attachment)" ↔ 纯装饰副本）', () => {
+    expect(
+      _markUserTwinMatches(
+        [u('(attachment)', T, [{ name: 'photo.png', type: 'image' }])],
+        [u('\n\n[Image: photo.png]', T)]
+      )
+    ).toEqual([true]);
+  });
+
+  it('#968 复核：图片装饰名守卫——旧图副本不得认领换图后的新气泡（重新生成）', () => {
+    // 重新生成换了图：live 气泡带 B.png，merged 只有旧回合 A.png 的副本。
+    // key 相同（看图），但旧副本不含 [Image: B.png] → 不得认领（否则新问题被吞）
+    expect(
+      _markUserTwinMatches(
+        [u('看图', T, [{ name: 'B.png', type: 'image' }])],
+        [u('看图\n\n[Image: A.png]', T - 2_000)]
+      )
+    ).toEqual([false]);
+  });
+
+  it('#968 复核：同图真实副本可认领（装饰名守卫通过）', () => {
+    expect(
+      _markUserTwinMatches(
+        [u('看图', T, [{ name: 'A.png', type: 'image' }])],
+        [u('看图\n\n[Image: A.png]', T)]
+      )
+    ).toEqual([true]);
   });
 
   it('#968 + #891 复核组合：同文本两条、persisted 带图 → 归一化后仍只认领最早一条', () => {
