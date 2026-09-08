@@ -38,7 +38,6 @@ import {
   Bot,
   Palette,
   Wrench,
-  Plug,
   Database,
   BookOpen,
   ShieldCheck,
@@ -88,7 +87,6 @@ import { ChannelsPage } from '../channels/ChannelsPage';
 import { ApprovalsPage } from '../approvals/ApprovalsPage';
 import { WorkspacePage } from '../workspace/WorkspacePage';
 import { CronPage } from '../cron/CronPage';
-import { MCPsPage } from '../mcps/MCPsPage';
 import { ExperiencePage } from '../experience/ExperiencePage';
 import { SkillsPage } from '../skills/SkillsPage';
 import { MemoryPage } from '../memory/MemoryPage';
@@ -110,7 +108,6 @@ export type SettingsTab =
   | 'appearance'
   | 'agents'
   | 'skills'
-  | 'mcps'
   | 'memory'
   | 'experience'
   | 'permissions'
@@ -191,13 +188,6 @@ const SETTINGS_CATEGORIES: SettingsCategory[] = [
     id: 'integrations',
     label: '集成',
     items: [
-      {
-        value: 'mcps',
-        label: 'MCP 服务',
-        description: '外部工具协议服务',
-        keywords: ['mcp', 'tool', '协议'],
-        icon: Plug,
-      },
       {
         value: 'plugins',
         label: '插件',
@@ -2738,24 +2728,6 @@ export function SettingsPage({
             )}
           >
             <SkillsPage />
-          </ErrorBoundary>
-        </Tabs.Content>
-        <Tabs.Content value="mcps" className="flex-1 overflow-y-auto">
-          <ErrorBoundary
-            fallback={(error, reset) => (
-              <div className="p-6 text-sm" style={{ color: 'var(--danger)' }}>
-                ⚠️ MCP服务设置加载失败: {error.message}
-                <button
-                  onClick={reset}
-                  className="ml-2 underline"
-                  style={{ color: 'var(--accent)' }}
-                >
-                  重试
-                </button>
-              </div>
-            )}
-          >
-            <MCPsPage />
           </ErrorBoundary>
         </Tabs.Content>
         <Tabs.Content value="memory" className="flex-1 overflow-y-auto">

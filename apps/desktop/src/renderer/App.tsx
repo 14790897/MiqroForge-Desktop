@@ -9,7 +9,6 @@ import { SetupWizard } from './features/setup/SetupWizard';
 import { PrivacyConsentGate } from './features/setup/PrivacyConsentGate';
 import { ChatConsole } from './features/chat/ChatConsole';
 import { SettingsPage, type SettingsTab } from './features/settings/SettingsPage';
-import { MCPsPage } from './features/mcps/MCPsPage';
 import { ApprovalProvider } from './contexts/ApprovalContext';
 import { UserInputProvider } from './contexts/UserInputContext';
 import { RestartRequiredProvider } from './contexts/RestartRequiredContext';
@@ -35,7 +34,6 @@ type NavId =
   | 'workspace'
   | 'agents'
   | 'plan'
-  | 'mcps'
   | 'cron'
   | 'memory'
   | 'experience'
@@ -434,7 +432,6 @@ function AppShell() {
                     />
                   </div>
                   {activeNav === 'workspace' && <WorkspacePage />}
-                  {activeNav === 'mcps' && <SettingsPage tab="mcps" />}
                   {activeNav === 'cron' && <CronPage />}
                   {activeNav === 'memory' && <SettingsPage tab="memory" />}
                   {activeNav === 'experience' && <SettingsPage tab="experience" />}
