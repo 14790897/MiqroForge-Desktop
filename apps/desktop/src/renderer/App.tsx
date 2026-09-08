@@ -94,7 +94,18 @@ function AppShell() {
     hasActivityRef.current = false; // 切会话后重置活动信号
   }, [sessionKey]);
   const handleSessionActivityChange = useCallback((hasActivity: boolean) => {
+    const flipped = hasActivity && !hasActivityRef.current;
     hasActivityRef.current = hasActivity;
+    // 首条消息乐观挂载后立即刷新侧栏：会话此刻已向 bridge 落盘，但
+    // onChatFinished 要到回合结束才触发——慢模型（思考 1 分钟+）期间侧栏
+    // 会一直显示「暂无任务」，新会话卡片要等回合收尾才出现（macos-e2e
+    // session-rename 播种 60s 超时的根因）。落盘可能晚于乐观挂载一拍，
+    // 补 1.5s / 5s 两个延迟刷新兜底；都是纯读 sessions.list，无副作用。
+    if (flipped) {
+      setSessionRefreshKey((k) => k + 1);
+      window.setTimeout(() => setSessionRefreshKey((k) => k + 1), 1500);
+      window.setTimeout(() => setSessionRefreshKey((k) => k + 1), 5000);
+    }
   }, []);
   const sessionKeyRef = useRef(sessionKey);
 
