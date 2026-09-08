@@ -26,6 +26,37 @@ export function gatewayModelToAutoSet(config: unknown): string | null {
   return GATEWAY_MODEL_ID;
 }
 
+/** 保存结果：saved=false 表示后端因期望值不匹配跳过（用户已在间隙选了模型）。 */
+interface ConfigUpdateResult {
+  saved: boolean;
+  skipped?: string;
+}
+
+/**
+ * 自动同步的保存动作（独立导出以便无 DOM 单测，#991 review）。
+ *
+ * 用 expectModel: '' 做比较并设置：后端只在磁盘上的默认模型仍为空时写入。
+ * 配置快照读取与写入之间用户若已手动选了模型，后端返回 saved=false，
+ * 这里直接放弃，保留用户更新的选择。
+ */
+export async function saveGatewayModelIfBlank(
+  getConfig: () => Promise<unknown>,
+  updateConfig: (
+    config: Record<string, unknown>,
+    expectModel?: string
+  ) => Promise<ConfigUpdateResult | unknown>,
+  invalidate: () => void
+): Promise<void> {
+  const config = await getConfig();
+  const modelId = gatewayModelToAutoSet(config);
+  if (!modelId) return;
+  const result = await updateConfig({ agents: { defaults: { model: modelId } } }, '');
+  if (result && typeof result === 'object' && (result as ConfigUpdateResult).saved === false) {
+    return; // 被比较并设置拦截：用户的选择优先
+  }
+  invalidate();
+}
+
 export function GatewayModelAutoSync() {
   const { loggedIn, gatewayActive } = useQraftStatus();
   const { status } = useRuntime();
@@ -38,17 +69,13 @@ export function GatewayModelAutoSync() {
     }
     if (status.state !== 'running' || attemptedRef.current) return;
     attemptedRef.current = true;
-    void (async () => {
-      try {
-        const config = await window.miqi.config.get();
-        const modelId = gatewayModelToAutoSet(config);
-        if (!modelId) return;
-        await window.miqi.config.update({ agents: { defaults: { model: modelId } } });
-        invalidateConfigCache();
-      } catch {
-        attemptedRef.current = false; // 保存失败 → 等下一次状态变化重试
-      }
-    })();
+    void saveGatewayModelIfBlank(
+      () => window.miqi.config.get(),
+      (config, expectModel) => window.miqi.config.update(config, expectModel),
+      invalidateConfigCache
+    ).catch(() => {
+      attemptedRef.current = false; // 保存失败 → 等下一次状态变化重试
+    });
   }, [loggedIn, gatewayActive, status.state]);
 
   return null;

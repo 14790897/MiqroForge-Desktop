@@ -591,7 +591,12 @@ export function registerIpcHandlers(bridge: BridgeManager): void {
       return writeLocalConfig(input.config);
     }
     try {
-      return await bridge.send('config.update', { config: input.config });
+      // 比较并设置（#991）：expectModel 原样转发给桥下 config.update，
+      // 后端在磁盘当前模型与期望不一致时跳过写入。
+      return await bridge.send('config.update', {
+        config: input.config,
+        ...(input.expectModel !== undefined ? { expect_model: input.expectModel } : {}),
+      });
     } catch (error) {
       if ((error as Error)?.message?.includes('Bridge not running')) {
         if (!isApprovalBypassUpdate(input.config)) {

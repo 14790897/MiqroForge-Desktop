@@ -349,3 +349,79 @@ async def test_config_update_accepts_model_of_configured_provider(fake_config, f
         )
     assert result["result"]["saved"] is True
     assert registry.bridge_context["state"].config.agents.defaults.model == "deepseek/deepseek-v4-flash"
+
+
+# ── 比较并设置 expect_model（#991 review）────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_config_update_expect_model_match_saves(fake_config, fake_provider, tmp_path):
+    """期望值与磁盘当前模型一致时正常保存。"""
+    from unittest import mock
+
+    from miqi.runtime.config_handlers import config_update_handler
+
+    fake_config.providers.deepseek.api_key = "sk-ds-1234567890"
+    fake_config.agents.defaults.model = ""
+    registry = _setup_registry(fake_config, tmp_path)
+
+    with mock.patch("miqi.config.loader.save_config") as save:
+        result = await config_update_handler(
+            "req-1",
+            {
+                "config": {"agents": {"defaults": {"model": "deepseek/deepseek-v4-flash"}}},
+                "expect_model": "",
+            },
+            "client-1", None, registry,
+        )
+    assert result["result"]["saved"] is True
+    save.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_config_update_expect_model_mismatch_skips(fake_config, fake_provider, tmp_path):
+    """快照读取后用户已选了别的模型 → 跳过写入，保留更新的选择。"""
+    from unittest import mock
+
+    from miqi.runtime.config_handlers import config_update_handler
+
+    fake_config.providers.deepseek.api_key = "sk-ds-1234567890"
+    fake_config.agents.defaults.model = "deepseek/deepseek-v4-pro"  # 间隙中被用户改写
+    registry = _setup_registry(fake_config, tmp_path)
+
+    with mock.patch("miqi.config.loader.save_config") as save:
+        result = await config_update_handler(
+            "req-1",
+            {
+                "config": {"agents": {"defaults": {"model": "deepseek/deepseek-v4-flash"}}},
+                "expect_model": "",
+            },
+            "client-1", None, registry,
+        )
+    assert result["result"] == {"saved": False, "skipped": "expect_model_mismatch"}
+    save.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_config_update_expect_model_ignored_for_unrelated_fields(
+    fake_config, fake_provider, tmp_path,
+):
+    """不改写默认模型的更新不受期望值影响（只改名等字段时照常保存）。"""
+    from unittest import mock
+
+    from miqi.runtime.config_handlers import config_update_handler
+
+    fake_config.agents.defaults.model = "deepseek/deepseek-v4-pro"  # 与期望不一致
+    registry = _setup_registry(fake_config, tmp_path)
+
+    with mock.patch("miqi.config.loader.save_config") as save:
+        result = await config_update_handler(
+            "req-1",
+            {
+                "config": {"agents": {"defaults": {"name": "renamed"}}},
+                "expect_model": "",
+            },
+            "client-1", None, registry,
+        )
+    assert result["result"]["saved"] is True
+    save.assert_called_once()

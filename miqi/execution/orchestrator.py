@@ -178,12 +178,15 @@ def _sanitize_exc_for_ui(exc: BaseException) -> str:
     # Truncate to a reasonable length
     if len(raw) > 300:
         raw = raw[:300] + "…"
-    # Strip common sensitive patterns (absolute paths, URLs with credentials)
+    # Strip common sensitive patterns (absolute paths, URLs with credentials).
+    # URL 必须先行替换成整体（前端 sanitizeUiMessage 同序）：先跑路径正则
+    # 会把 https://user:secret@host/path 里的路径段先打码，URL 正则随后
+    # 无法整体匹配，凭据 `secret` 泄漏（#991 review）。
     import re as _re
+    raw = _re.sub(r'https?://[^\s"\'<>]{1,200}', '[url]', raw)
     # 负向后顾：斜杠段前面不能紧跟单词字符，避免把 deepseek/deepseek-v4-flash
     # 这类 provider/model id 误当 Unix 路径打码（前端 sanitizeUiMessage 同款修复）。
     raw = _re.sub(r'(?<![A-Za-z0-9_.-])(?:/[^\s"\'<>|:]{1,200})+', '[path]', raw)
-    raw = _re.sub(r'https?://[^\s"\'<>]{1,200}', '[url]', raw)
     raw = _re.sub(r'\b[A-Za-z0-9+/=]{40,}\b', '[token]', raw)
     return f"{type(exc).__name__}: {raw}" if raw else type(exc).__name__
 
