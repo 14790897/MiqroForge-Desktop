@@ -88,7 +88,12 @@ class HistoryRuntime:
     async def initialize(self) -> None:
         """Open persistent connection and create tables."""
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._db = await aiosqlite.connect(str(self.db_path), timeout=30)
+        # isolation_level=None (autocommit): see LedgerRuntime.initialize for
+        # the stranded-lock rationale — a cancelled turn task must never leave
+        # an open write transaction holding the shared DB file lock.
+        self._db = await aiosqlite.connect(
+            str(self.db_path), timeout=30, isolation_level=None
+        )
         await self._db.execute("PRAGMA journal_mode=WAL")
         self._db.row_factory = aiosqlite.Row
         await self._db.execute("""
