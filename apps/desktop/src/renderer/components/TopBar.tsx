@@ -1,5 +1,9 @@
 import { useEffect, useState } from 'react';
+import { useTranslation } from 'react-i18next';
+import type { TFunction } from 'i18next';
 import { useRuntime } from '../contexts/RuntimeContext';
+import { changeUILanguage } from '../i18n';
+import type { Language } from '../i18n';
 import { AlertTriangle, RefreshCw, Loader2, Folder } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { MiQroForgeLogo } from './MiQroForgeLogo';
@@ -34,21 +38,31 @@ function isAllBypassOn(status: ApprovalBypassStatus | null): boolean {
   );
 }
 
-function getBypassLabel(status: ApprovalBypassStatus | null, autoMode: boolean): string {
-  if (autoMode) return '自动';
-  if (isAllBypassOn(status)) return '全部绕过';
-  return '绕过';
+function getBypassLabel(
+  status: ApprovalBypassStatus | null,
+  autoMode: boolean,
+  t: TFunction
+): string {
+  if (autoMode) return t('topbar.bypass.labelAuto');
+  if (isAllBypassOn(status)) return t('topbar.bypass.labelAll');
+  return t('topbar.bypass.labelBypass');
 }
 
-function getBypassTitle(status: ApprovalBypassStatus | null, autoMode: boolean = false): string {
-  if (autoMode) return '自动模式：所有审批已绕过';
-  if (status?.bypassAll) return '所有审批类别已启用绕过';
+function getBypassTitle(
+  status: ApprovalBypassStatus | null,
+  autoMode: boolean = false,
+  t: TFunction
+): string {
+  if (autoMode) return t('topbar.bypass.titleAuto');
+  if (status?.bypassAll) return t('topbar.bypass.titleAll');
   const labels: string[] = [];
-  if (status?.bypassCommandApproval) labels.push('命令审批');
-  if (status?.bypassFileWriteApproval) labels.push('文件写入审批');
-  if (status?.bypassToolConfirmation) labels.push('工具确认');
-  if (status?.bypassNetworkApproval) labels.push('网络审批');
-  return labels.length > 0 ? `已绕过: ${labels.join('、')}` : '打开审批设置';
+  if (status?.bypassCommandApproval) labels.push(t('topbar.bypass.itemCommand'));
+  if (status?.bypassFileWriteApproval) labels.push(t('topbar.bypass.itemFileWrite'));
+  if (status?.bypassToolConfirmation) labels.push(t('topbar.bypass.itemTool'));
+  if (status?.bypassNetworkApproval) labels.push(t('topbar.bypass.itemNetwork'));
+  return labels.length > 0
+    ? t('topbar.bypass.joined', { list: labels.join(t('common.listSeparator')) })
+    : t('topbar.bypass.titleNone');
 }
 
 function formatWorkspace(workspace: string): string {
@@ -70,6 +84,7 @@ export function TopBar({
   workspace?: string;
 }) {
   const { status, start } = useRuntime();
+  const { t, i18n } = useTranslation();
   const [approvalBypass, setApprovalBypass] = useState<ApprovalBypassStatus | null>(null);
   const [bypassHovered, setBypassHovered] = useState(false);
   const [autoMode, setAutoMode] = useState(() => sessionStorage.getItem('miqi:mode:auto') === '1');
@@ -98,16 +113,19 @@ export function TopBar({
   // Build detail text for hover expansion
   const bypassDetails: string[] = [];
   if (autoMode) {
-    bypassDetails.push('自动模式');
+    bypassDetails.push(t('topbar.bypass.detailAuto'));
   } else if (isAllBypassOn(approvalBypass)) {
-    bypassDetails.push('全部操作');
+    bypassDetails.push(t('topbar.bypass.detailAll'));
   } else {
-    if (approvalBypass?.bypassCommandApproval) bypassDetails.push('命令执行');
-    if (approvalBypass?.bypassFileWriteApproval) bypassDetails.push('文件写入');
-    if (approvalBypass?.bypassToolConfirmation) bypassDetails.push('工具调用');
-    if (approvalBypass?.bypassNetworkApproval) bypassDetails.push('网络请求');
+    if (approvalBypass?.bypassCommandApproval) bypassDetails.push(t('topbar.bypass.detailCommand'));
+    if (approvalBypass?.bypassFileWriteApproval)
+      bypassDetails.push(t('topbar.bypass.detailFileWrite'));
+    if (approvalBypass?.bypassToolConfirmation) bypassDetails.push(t('topbar.bypass.detailTool'));
+    if (approvalBypass?.bypassNetworkApproval) bypassDetails.push(t('topbar.bypass.detailNetwork'));
   }
-  const bypassDetailText = bypassDetails.length ? ' · ' + bypassDetails.join(' · ') : '';
+  const bypassDetailText = bypassDetails.length
+    ? t('topbar.bypass.detailSeparator') + bypassDetails.join(t('topbar.bypass.detailSeparator'))
+    : '';
 
   useEffect(() => {
     let cancelled = false;
@@ -188,8 +206,8 @@ export function TopBar({
             onMouseLeave={() => setBypassHovered(false)}
             onFocus={() => setBypassHovered(true)}
             onBlur={() => setBypassHovered(false)}
-            aria-label={getBypassTitle(approvalBypass, autoMode)}
-            title={getBypassTitle(approvalBypass, autoMode)}
+            aria-label={getBypassTitle(approvalBypass, autoMode, t)}
+            title={getBypassTitle(approvalBypass, autoMode, t)}
             className="flex items-center rounded-full text-size-2xs font-medium overflow-hidden h-6 shrink-0"
             style={{
               color: 'var(--approval-warning)',
@@ -202,7 +220,7 @@ export function TopBar({
           >
             <span className="flex items-center gap-1 px-2.5 whitespace-nowrap shrink-0">
               <AlertTriangle size={10} className="shrink-0" />
-              <span>{getBypassLabel(approvalBypass, autoMode)}</span>
+              <span>{getBypassLabel(approvalBypass, autoMode, t)}</span>
             </span>
             {bypassDetailText && (
               <span
@@ -226,17 +244,17 @@ export function TopBar({
           disabled={isRunning || isStarting}
           title={
             isRunning
-              ? '运行时已连接'
+              ? t('topbar.runtime.connected')
               : isStarting
-                ? '正在启动/停止运行时…'
-                : '运行时未连接，点击重新连接'
+                ? t('topbar.runtime.startingDots')
+                : t('topbar.runtime.offlineTitle')
           }
           aria-label={
             isRunning
-              ? '运行时已连接'
+              ? t('topbar.runtime.connected')
               : isStarting
-                ? '正在启动/停止运行时'
-                : '运行时未连接，点击重新连接'
+                ? t('topbar.runtime.starting')
+                : t('topbar.runtime.offlineTitle')
           }
           className={cn(
             'flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-medium',
@@ -254,7 +272,13 @@ export function TopBar({
           }}
         >
           {isStarting ? <Loader2 size={11} className="animate-spin" /> : <RefreshCw size={11} />}
-          <span>{isRunning ? '已同步' : isStarting ? '同步中' : '离线'}</span>
+          <span>
+            {isRunning
+              ? t('topbar.runtime.synced')
+              : isStarting
+                ? t('topbar.runtime.syncing')
+                : t('topbar.runtime.offline')}
+          </span>
         </button>
       </div>
 
@@ -264,7 +288,7 @@ export function TopBar({
           className="text-xs font-medium hidden sm:block"
           style={{ color: 'var(--topbar-text)' }}
         >
-          MiQroForge 智能体
+          {t('topbar.agentLabel')}
         </span>
         <MiQroForgeLogo size={28} />
       </div>
