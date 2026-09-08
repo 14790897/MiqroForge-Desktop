@@ -367,6 +367,27 @@ describe('_markUserTwinMatches 一对一去重匹配（#891 复核 + #968）', (
     ).toEqual([true]);
   });
 
+  it('#968 复核：占位文件名含 ] 时指纹不被截断（CodeRabbit #969 Minor）', () => {
+    // 守卫切段此前从 phIdx 起找第一个 ]——文件名含 ]（report].pdf）会把段截在
+    // 文件名内、丢掉 (fp:…)，合法同文件重发也被误拒 → 双显示。须从段头 + 长度起找收尾 ]。
+    const fpa = 'a'.repeat(64);
+    const placeA = `看\n\n[report].pdf: scanned PDF (fp:${fpa}) — OCR will be attempted by the server]`;
+    // 指纹一致 → 认领（修复前因 ] 截断 seg 丢 fp 而误拒）
+    expect(
+      _markUserTwinMatches(
+        [u('看', T, [{ name: 'report].pdf', type: 'document', contentFp: fpa }])],
+        [u(placeA, T)]
+      )
+    ).toEqual([true]);
+    // 指纹不同 → 依旧不认领（修复不放松内容校验）
+    expect(
+      _markUserTwinMatches(
+        [u('看', T, [{ name: 'report].pdf', type: 'document', contentFp: 'b'.repeat(64) }])],
+        [u(placeA, T)]
+      )
+    ).toEqual([false]);
+  });
+
   it('#968 复核：SHA-256 覆盖全量内容——同名同首尾、仅中段不同的大附件指纹不同', async () => {
     // CodeRabbit #969 回归要求：>8192 字符、长度与首尾 4KB 相同、中段不同的
     // dataBase64 必须产生不同指纹（采样方案会被构造性绕过，全量摘要不会）

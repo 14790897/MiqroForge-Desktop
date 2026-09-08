@@ -1491,7 +1491,10 @@ function _persistedCoversAttachments(
         const ph = `[${a.name}: `;
         const phIdx = pmContent.indexOf(ph);
         if (phIdx < 0) return false;
-        const closeIdx = pmContent.indexOf(']', phIdx);
+        // 收尾 ] 须从 phIdx + ph.length 起找：文件名可含 ]（report].pdf），从
+        // phIdx 起找会命中文件名内的 ]、把段截在文件名里丢掉 (fp:…)（CodeRabbit
+        // #969 Minor：合法同文件重发被误拒 → 双显示）
+        const closeIdx = pmContent.indexOf(']', phIdx + ph.length);
         if (closeIdx < 0 || closeIdx - phIdx > 400) return false;
         const seg = pmContent.slice(phIdx, closeIdx + 1);
         const fpMatch = seg.match(/\(fp:([0-9a-f]{64})\)/);
