@@ -270,3 +270,45 @@ class TestDownloadBillingNoRegression:
         assert (tmp_path / ".miqi" / "downloads" / "cube.cube").read_bytes() == data
         # 摘要只含 5 字段（billing 视图与 materialize 完全解耦，互不污染）
         assert set(summary) == {"type", "name", "path", "size_bytes", "sha256"}
+
+
+# ── #975 logger 纪律回归网（C4）：成功/失败路径都不许把内容写进日志 ─────────
+
+
+async def test_wrapper_logs_never_contain_payload(tmp_path):
+    """loguru 捕获：一次成功下载 + 一次失败下载，捕获日志不得出现
+    base64/原始内容（本地日志/诊断包/support bundle 都是潜在二次泄漏出口）。"""
+    from loguru import logger as loguru_logger
+
+    records: list[str] = []
+    sink_id = loguru_logger.add(
+        lambda message, _f, _r: records.append(str(message)), level="DEBUG"
+    )
+    try:
+        data = os.urandom(64 * 1024)
+        payload = json.dumps(
+            {
+                "name": "logwatch.cube",
+                "size_bytes": len(data),
+                "sha256": hashlib.sha256(data).hexdigest(),
+                "content_base64": base64.b64encode(data).decode(),
+            }
+        )
+        b64_marker = base64.b64encode(data).decode()
+
+        # 成功路径
+        ok_session = _FakeSession(response=_mcp_text_result(payload))
+        w_ok = _wrapper(ok_session, "download_file", base_workspace=tmp_path)
+        await w_ok.execute(name="logwatch.cube", _session_key="cli:direct")
+
+        # 失败路径（校验不过 → 错误 JSON 文本，全程不许落日志内容）
+        bad = json.loads(payload)
+        bad["sha256"] = "ab" * 32
+        bad_session = _FakeSession(response=_mcp_text_result(json.dumps(bad)))
+        w_bad = _wrapper(bad_session, "download_file", base_workspace=tmp_path)
+        await w_bad.execute(name="logwatch.cube", _session_key="cli:direct")
+    finally:
+        loguru_logger.remove(sink_id)
+
+    joined = "\n".join(records)
+    assert b64_marker not in joined
