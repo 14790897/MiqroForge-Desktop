@@ -141,7 +141,12 @@ describe('_markUserTwinMatches 一对一去重匹配（#891 复核 + #968）', (
   const u = (
     content: string,
     ts = T,
-    attachments?: { name: string; type: 'image' | 'text' | 'document' }[]
+    attachments?: {
+      name: string;
+      type: 'image' | 'text' | 'document';
+      content?: string;
+      dataBase64?: string;
+    }[]
   ) => ({
     role: 'user' as const,
     content,
@@ -265,31 +270,58 @@ describe('_markUserTwinMatches 一对一去重匹配（#891 复核 + #968）', (
     ).toEqual([true]);
   });
 
-  it('#968 复核：文本附件守卫——旧回合的 a.py 副本不得认领换了 b.py 的新气泡', () => {
-    // key 剥离会去掉嵌入的文件内容，text 附件同文本不同文件一样碰撞 → 必须守卫
+  it('#968 复核：文本附件内容守卫——同文本同文件名、内容不同不得互认（CodeRabbit #969）', () => {
+    // 用户迭代工作流：改完 main.py 再发同文本——旧副本(print(1))认领新气泡
+    // (print(2)) 会吞掉新消息，名字级校验不够，必须逐字校验嵌入内容
     expect(
       _markUserTwinMatches(
-        [u('看', T, [{ name: 'b.py', type: 'text' }])],
-        [u('看\n\n[File: a.py]\n```\nprint(1)\n```', T - 2_000)]
+        [u('检查这个', T, [{ name: 'main.py', type: 'text', content: 'print(2)' }])],
+        [u('检查这个\n\n[File: main.py]\n```\nprint(1)\n```', T)]
       )
     ).toEqual([false]);
-    // 同名同文件 → 认领
+    // 内容一致 → 认领
     expect(
       _markUserTwinMatches(
-        [u('看', T, [{ name: 'a.py', type: 'text' }])],
-        [u('看\n\n[File: a.py]\n```\nprint(1)\n```', T)]
+        [u('检查这个', T, [{ name: 'main.py', type: 'text', content: 'print(1)' }])],
+        [u('检查这个\n\n[File: main.py]\n```\nprint(1)\n```', T)]
       )
     ).toEqual([true]);
   });
 
-  it('#968 复核：文档附件守卫——旧回合 A.pdf 副本不得认领换了 B.pdf 的新气泡', () => {
+  it('#968 复核：文本附件守卫——不同文件名不认领', () => {
+    expect(
+      _markUserTwinMatches(
+        [u('看', T, [{ name: 'b.py', type: 'text', content: 'print(1)' }])],
+        [u('看\n\n[File: a.py]\n```\nprint(1)\n```', T - 2_000)]
+      )
+    ).toEqual([false]);
+  });
+
+  it('#968 复核：文档附件内容守卫——同文件名内容不同不得互认（CodeRabbit #969）', () => {
+    const b64v1 = btoa('hello doc v1');
+    const b64v2 = btoa('hello doc v2');
+    // 内容不同 → 不认领
+    expect(
+      _markUserTwinMatches(
+        [u('看', T, [{ name: 'note.txt', type: 'document', dataBase64: b64v2 }])],
+        [u('看\n\n--- Document: note.txt ---\nhello doc v1\n--- End of note.txt ---', T)]
+      )
+    ).toEqual([false]);
+    // 内容一致 → 认领
+    expect(
+      _markUserTwinMatches(
+        [u('看', T, [{ name: 'note.txt', type: 'document', dataBase64: b64v1 }])],
+        [u('看\n\n--- Document: note.txt ---\nhello doc v1\n--- End of note.txt ---', T)]
+      )
+    ).toEqual([true]);
+    // 不同文件名 → 不认领
     expect(
       _markUserTwinMatches(
         [u('看', T, [{ name: 'B.pdf', type: 'document' }])],
         [u('看\n\n--- Document: A.pdf ---\n内容\n--- End of A.pdf ---', T - 2_000)]
       )
     ).toEqual([false]);
-    // 扫描 PDF（占位装饰 [name: …]）同名 → 认领
+    // 扫描 PDF 占位装饰（无内容可承载）→ 名字 + 短语校验通过即认领
     expect(
       _markUserTwinMatches(
         [u('看', T, [{ name: 'scan.pdf', type: 'document' }])],

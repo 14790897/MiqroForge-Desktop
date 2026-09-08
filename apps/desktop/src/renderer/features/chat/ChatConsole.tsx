@@ -1392,11 +1392,55 @@ function _userContentDedupKey(content: string): string {
   return trimmed === '(attachment)' ? '' : trimmed;
 }
 
-// #968 复核：附件装饰名守卫。key 会把装饰段（含嵌入的文件内容）整体剥掉，所以
-// 「同文本 + 不同附件」的消息 key 必然碰撞——重新生成换附件后，旧回合副本会与
-// 新一轮在途气泡 key 相同。若被旧副本认领，新问题会被吞（消失而非重复，比双显示
-// 更糟）。守卫要求：气泡的每个附件在持久化副本里有同名的装饰标记，否则不认领。
-// 校验用原始 content 的子串匹配（不经过 key 剥离），文件名含 "]" 也不受影响。
+// #968 复核（CodeRabbit #969）：文档附件内容解码的单一实现——handleSend 拼
+// Document 装饰段与去重守卫校验内容都用它，避免两侧解码逻辑漂移（ext 白名单、
+// atob/TextDecoder/extractPdfText 与 50k 截断必须完全一致，守卫才能逐字比对）。
+function _decodeDocData(dataBase64: string, name: string): { extracted: string; ext: string } {
+  const raw = Uint8Array.from(atob(dataBase64), (c) => c.charCodeAt(0));
+  const ext = name.split('.').pop()?.toLowerCase() ?? '';
+  let extracted = '';
+  if (ext === 'pdf') {
+    extracted = extractPdfText(raw.buffer);
+  } else if (
+    ext === 'md' ||
+    ext === 'markdown' ||
+    ext === 'mdown' ||
+    ext === 'txt' ||
+    ext === 'text' ||
+    ext === 'html' ||
+    ext === 'htm' ||
+    ext === 'csv' ||
+    ext === 'json' ||
+    ext === 'yaml' ||
+    ext === 'yml' ||
+    ext === 'xml' ||
+    ext === 'env' ||
+    ext === 'log' ||
+    ext === 'sql' ||
+    ext === 'ini' ||
+    ext === 'toml' ||
+    ext === 'htaccess' ||
+    ext === 'sh' ||
+    ext === 'bash'
+  ) {
+    extracted = new TextDecoder().decode(raw);
+  }
+  return { extracted, ext };
+}
+
+// #968 复核：附件装饰内容守卫。key 会把装饰段（含嵌入的文件内容）整体剥掉，
+// 「同文本 + 同附件名」的消息 key 必然碰撞，名字级校验不足以区分内容差异
+// （CodeRabbit #969：同文本 + main.py 但 print(1)/print(2) 两种内容时，旧副本
+// 会误认领新气泡 → 新消息被吞）。守卫对每个附件做内容级验证：
+// - text：payload 原样嵌入 att.content → 要求持久化副本含完整的
+//   `[File: name]\n```\n${content}\n```` 段（逐字，含围栏锚点，长度/重叠不误判）
+// - document：`--- Document: name ---` 块正文须与 att.dataBase64 重新解码结果
+//   （同一 _decodeDocData，50k 截断一致）逐字相等；占位装饰（扫描/二进制/解析
+//   失败）不承载内容 → 名字 + 类型短语校验（内容本就不可见）
+// - image：装饰只携带文件名（字节不走 content）→ 名字校验（同名异字节需名字+
+//   文本+30s+旧行已消失四重巧合，记为已知限制）
+// 校验失败一律不认领（方向安全：可能双显示，绝不吞消息）。空内容 text 附件在
+// 发送侧不产生装饰 → 同样不认领（安全方向）。
 function _persistedCoversAttachments(
   pmContent: string,
   attachments: Attachment[] | undefined
@@ -1406,15 +1450,32 @@ function _persistedCoversAttachments(
     switch (a.type) {
       case 'image':
         return pmContent.includes(`[Image: ${a.name}]`);
-      case 'text':
-        // text 附件装饰仅当 att.content 非空时追加；空内容附件装饰缺失 → 不认领
-        // （方向安全：气泡保留 → 潜在双显示，绝不吞消息）
-        return pmContent.includes(`[File: ${a.name}]`);
-      case 'document':
-        // 可提取正文 → --- Document: name ---；扫描/二进制/失败 → [name: …] 占位
-        return (
-          pmContent.includes(`--- Document: ${a.name} ---`) || pmContent.includes(`[${a.name}: `)
-        );
+      case 'text': {
+        const c = a.content ?? '';
+        if (!c) return false;
+        return pmContent.includes(`[File: ${a.name}]\n\`\`\`\n${c}\n\`\`\``);
+      }
+      case 'document': {
+        const blockOpen = `--- Document: ${a.name} ---`;
+        if (pmContent.includes(blockOpen)) {
+          // Document 块嵌内容 → 内容必须逐字一致才认领（CodeRabbit #969）
+          if (!a.dataBase64) return false;
+          try {
+            const { extracted } = _decodeDocData(a.dataBase64, a.name);
+            const body = extracted && extracted.trim() ? extracted.slice(0, 50000) : '';
+            if (!body) return false; // 空提取发送侧会走占位分支，不应出现块
+            return pmContent.includes(`${blockOpen}\n${body}\n--- End of ${a.name} ---`);
+          } catch {
+            return false; // 解码异常 → 发送侧走占位分支，不可能有 Document 块
+          }
+        }
+        // 占位装饰（scanned PDF / binary file / parsing on server）：名字 + 短语
+        const ph = `[${a.name}: `;
+        const phIdx = pmContent.indexOf(ph);
+        if (phIdx < 0) return false;
+        const phTail = pmContent.slice(phIdx, phIdx + 400);
+        return /(?:scanned PDF|binary file|parsing on server)/.test(phTail);
+      }
       default:
         return true; // 未知类型装饰规则不明 → 交由 key 决定
     }
@@ -4335,39 +4396,10 @@ export function ChatConsole({
       } else if (att.type === 'image' && att.dataUrl) {
         content += `\n\n[Image: ${att.name}]`;
       } else if (att.type === 'document' && att.dataBase64) {
-        // Decode and extract text client-side
+        // Decode and extract text client-side（解码逻辑与去重守卫共用 _decodeDocData，
+        // 见上——守卫需按相同规则重解以逐字校验内容，单一实现防漂移 #968 复核）
         try {
-          const raw = Uint8Array.from(atob(att.dataBase64), (c) => c.charCodeAt(0));
-          let extracted = '';
-          const ext = att.name.split('.').pop()?.toLowerCase() ?? '';
-
-          if (ext === 'pdf') {
-            extracted = extractPdfText(raw.buffer);
-          } else if (
-            ext === 'md' ||
-            ext === 'markdown' ||
-            ext === 'mdown' ||
-            ext === 'txt' ||
-            ext === 'text' ||
-            ext === 'html' ||
-            ext === 'htm' ||
-            ext === 'csv' ||
-            ext === 'json' ||
-            ext === 'yaml' ||
-            ext === 'yml' ||
-            ext === 'xml' ||
-            ext === 'env' ||
-            ext === 'log' ||
-            ext === 'sql' ||
-            ext === 'ini' ||
-            ext === 'toml' ||
-            ext === 'htaccess' ||
-            ext === 'sh' ||
-            ext === 'bash'
-          ) {
-            extracted = new TextDecoder().decode(raw);
-          }
-
+          const { extracted, ext } = _decodeDocData(att.dataBase64, att.name);
           if (extracted && extracted.trim()) {
             content += `\n\n--- Document: ${att.name} ---\n${extracted.slice(0, 50000)}\n--- End of ${att.name} ---`;
           } else if (ext === 'pdf') {
