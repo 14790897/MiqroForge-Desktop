@@ -236,23 +236,74 @@ describe('_markUserTwinMatches 一对一去重匹配（#891 复核 + #968）', (
   });
 
   it('#968 复核：纯附件无文本发送（live "(attachment)" ↔ 纯装饰副本）', () => {
+    const fpa = 'a'.repeat(64);
     expect(
       _markUserTwinMatches(
-        [u('(attachment)', T, [{ name: 'photo.png', type: 'image' }])],
-        [u('\n\n[Image: photo.png]', T)]
+        [u('(attachment)', T, [{ name: 'photo.png', type: 'image', contentFp: fpa }])],
+        [u(`\n\n[Image: photo.png (fp:${fpa})]`, T)]
       )
     ).toEqual([true]);
   });
 
-  it('#968 复核：图片装饰名守卫——旧图副本不得认领换图后的新气泡（重新生成）', () => {
-    // 重新生成换了图：live 气泡带 B.png，merged 只有旧回合 A.png 的副本。
-    // key 相同（看图），但旧副本不含 [Image: B.png] → 不得认领（否则新问题被吞）
+  it('#968 复核：图片内容指纹守卫——同名异字节图片不得互认、同字节可认领（CodeRabbit #969）', () => {
+    const fpa = 'a'.repeat(64);
+    const fpb = 'b'.repeat(64);
+    // 重新生成换了图（同名异字节）：live 带 fpB，merged 只有旧副本 fpA → 不认领
     expect(
       _markUserTwinMatches(
-        [u('看图', T, [{ name: 'B.png', type: 'image' }])],
-        [u('看图\n\n[Image: A.png]', T - 2_000)]
+        [u('看图', T, [{ name: 'B.png', type: 'image', contentFp: fpb }])],
+        [u(`看图\n\n[Image: A.png (fp:${fpa})]`, T - 2_000)]
       )
     ).toEqual([false]);
+    // 同名同字节 → 认领
+    expect(
+      _markUserTwinMatches(
+        [u('看图', T, [{ name: 'A.png', type: 'image', contentFp: fpa }])],
+        [u(`看图\n\n[Image: A.png (fp:${fpa})]`, T)]
+      )
+    ).toEqual([true]);
+    // 同名异字节 → 不认领（CodeRabbit 主场景）
+    expect(
+      _markUserTwinMatches(
+        [u('看图', T, [{ name: 'photo.png', type: 'image', contentFp: fpb }])],
+        [u(`看图\n\n[Image: photo.png (fp:${fpa})]`, T)]
+      )
+    ).toEqual([false]);
+    // 旧版无指纹装饰 → 不认领（无法验证内容，方向安全）
+    expect(
+      _markUserTwinMatches(
+        [u('看图', T, [{ name: 'photo.png', type: 'image', contentFp: fpa }])],
+        [u('看图\n\n[Image: photo.png]', T)]
+      )
+    ).toEqual([false]);
+    // live 无 contentFp → 不认领（方向安全）
+    expect(
+      _markUserTwinMatches(
+        [u('看图', T, [{ name: 'photo.png', type: 'image' }])],
+        [u(`看图\n\n[Image: photo.png (fp:${fpa})]`, T)]
+      )
+    ).toEqual([false]);
+  });
+
+  it('#968 复核：图片名称解析向后兼容——带 (fp:…) 尾的装饰还原纯文件名', () => {
+    const fpa = 'a'.repeat(64);
+    const ui = sessionMsgsToUi([
+      {
+        role: 'user',
+        content: `看图\n\n[Image: photo.png (fp:${fpa})]`,
+        timestamp: '2026-09-01T00:00:00Z',
+      },
+    ]);
+    expect(ui.find((m) => m.role === 'user')?.attachments?.[0]?.name).toBe('photo.png');
+    // 旧版无指纹装饰照常解析
+    const ui2 = sessionMsgsToUi([
+      {
+        role: 'user',
+        content: '看图\n\n[Image: photo.png]',
+        timestamp: '2026-09-01T00:00:00Z',
+      },
+    ]);
+    expect(ui2.find((m) => m.role === 'user')?.attachments?.[0]?.name).toBe('photo.png');
   });
 
   it('#968 复核：文档解析失败占位（[name: 大小 — parsing on server]）可剥离', () => {
@@ -263,11 +314,12 @@ describe('_markUserTwinMatches 一对一去重匹配（#891 复核 + #968）', (
     ).toEqual([true]);
   });
 
-  it('#968 复核：同图真实副本可认领（装饰名守卫通过）', () => {
+  it('#968 复核：同图真实副本可认领（内容指纹一致）', () => {
+    const fpa = 'a'.repeat(64);
     expect(
       _markUserTwinMatches(
-        [u('看图', T, [{ name: 'A.png', type: 'image' }])],
-        [u('看图\n\n[Image: A.png]', T)]
+        [u('看图', T, [{ name: 'A.png', type: 'image', contentFp: fpa }])],
+        [u(`看图\n\n[Image: A.png (fp:${fpa})]`, T)]
       )
     ).toEqual([true]);
   });
@@ -403,15 +455,17 @@ describe('_markUserTwinMatches 一对一去重匹配（#891 复核 + #968）', (
   });
 
   it('#968 复核：纯附件两张图 + 无文本（迭代剥离到空）', () => {
+    const fpa = 'a'.repeat(64);
+    const fpb = 'b'.repeat(64);
     expect(
       _markUserTwinMatches(
         [
           u('(attachment)', T, [
-            { name: 'A.png', type: 'image' },
-            { name: 'B.png', type: 'image' },
+            { name: 'A.png', type: 'image', contentFp: fpa },
+            { name: 'B.png', type: 'image', contentFp: fpb },
           ]),
         ],
-        [u('\n\n[Image: A.png]\n\n[Image: B.png]', T)]
+        [u(`\n\n[Image: A.png (fp:${fpa})]\n\n[Image: B.png (fp:${fpb})]`, T)]
       )
     ).toEqual([true]);
   });

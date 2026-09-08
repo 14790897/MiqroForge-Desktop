@@ -191,7 +191,9 @@ interface FileChip {
   category: ReturnType<typeof getDocCategory>;
 }
 
-const IMAGE_PLACEHOLDER_RES = /\[Image:\s*([^\]]+)\]/g;
+// 名称捕获容忍可选的内容指纹尾（(fp:64hex)，#968 复核 CodeRabbit #969）——
+// 旧版无指纹占位仍能解析（向后兼容）；惰性名称 + 回溯使带指纹的名字只取真名。
+const IMAGE_PLACEHOLDER_RES = /\[Image:\s*([^\]]+?)(?:\s*\(fp:[0-9a-f]{64}\))?\]/g;
 
 /** Extract image attachments from the "[Image: name]" placeholder the sender
  *  embeds. dataUrl stays undefined — it is re-read from the session files dir
@@ -1431,16 +1433,27 @@ function _decodeDocData(dataBase64: string, name: string): { extracted: string; 
   return { extracted, ext };
 }
 
+export async function _sha256HexOfBytes(bytes: Uint8Array<ArrayBuffer>): Promise<string> {
+  const digest = await crypto.subtle.digest('SHA-256', bytes);
+  return Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, '0')).join('');
+}
+
 // #968 复核（CodeRabbit #969）：附件内容指纹——全量 SHA-256（采样首尾会被
 // 「同名同首尾、仅中段不同」的附件构造性绕过）。渲染线程没有同步摘要，故：
 // 发送前由 handleSend 在 await 段调用本函数预计算，结果暂存到附件
-// contentFp 并写进占位装饰 (fp:…)；守卫侧只比对暂存值（load() 合并是同步
-// 路径，不能做摘要）。atob 解码失败会抛错，由调用方捕获（fp 缺失 → 占位
-// 无指纹 → 守卫不认领，方向安全）。
+// contentFp 并写进装饰 (fp:…)（doc 占位/图片）；守卫侧只比对暂存值（load()
+// 合并是同步路径，不能做摘要）。atob 解码失败会抛错，由调用方捕获（fp 缺失
+// → 装饰无指纹 → 守卫不认领，方向安全）。图片 dataUrl 不是纯 base64
+// （data:image/…;base64, 前缀），走 _sha256HexOfText 直接哈希整个字符串。
 export async function _sha256HexOfBase64(dataBase64: string): Promise<string> {
-  const raw = Uint8Array.from(atob(dataBase64), (c) => c.charCodeAt(0));
-  const digest = await crypto.subtle.digest('SHA-256', raw);
-  return Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, '0')).join('');
+  // new Uint8Array(…) 拷贝定型为 Uint8Array<ArrayBuffer>（TS 5.7 泛型数组：
+  // Uint8Array.from 返回 ArrayBufferLike，不满足 BufferSource）
+  const raw = new Uint8Array(Uint8Array.from(atob(dataBase64), (c) => c.charCodeAt(0)));
+  return _sha256HexOfBytes(raw);
+}
+
+export async function _sha256HexOfText(text: string): Promise<string> {
+  return _sha256HexOfBytes(new TextEncoder().encode(text));
 }
 
 // #968 复核：附件装饰内容守卫。key 会把装饰段（含嵌入的文件内容）整体剥掉，
@@ -1463,8 +1476,23 @@ function _persistedCoversAttachments(
   if (!attachments || attachments.length === 0) return true;
   return attachments.every((a) => {
     switch (a.type) {
-      case 'image':
-        return pmContent.includes(`[Image: ${a.name}]`);
+      case 'image': {
+        // 图片装饰 [Image: name (fp:…)]：发送侧内嵌内容指纹，这里比对区分同名
+        // 异字节图片（CodeRabbit #969）。无指纹的旧版装饰 / live 无 contentFp
+        // → 不认领（方向安全）。文件名可含 ]，故收尾 ] 从名字后找起；同名装饰
+        // 可能出现多次（同消息两张同名图 / 嵌入文本撞串）→ 扫描全部出现点。
+        const open = `[Image: ${a.name}`;
+        if (!a.contentFp) return false;
+        let searchFrom = 0;
+        for (;;) {
+          const openIdx = pmContent.indexOf(open, searchFrom);
+          if (openIdx < 0) return false;
+          const rest = pmContent.slice(openIdx + open.length, openIdx + open.length + 90);
+          const fpMatch = rest.match(/^ \(fp:([0-9a-f]{64})\)\]/);
+          if (fpMatch && fpMatch[1] === a.contentFp) return true;
+          searchFrom = openIdx + open.length;
+        }
+      }
       case 'text': {
         const c = a.content ?? '';
         if (!c) return false;
@@ -4429,6 +4457,14 @@ export function ChatConsole({
         } catch {
           /* 保留 undefined */
         }
+      } else if (att.type === 'image' && att.dataUrl && !att.contentFp) {
+        // 图片字节以 dataUrl 形式存在（#968 复核 CodeRabbit #969）：装饰只带
+        // 文件名无法区分同名异字节，同样预计算指纹写进 [Image: name (fp:…)]
+        try {
+          att.contentFp = await _sha256HexOfText(att.dataUrl);
+        } catch {
+          /* 保留 undefined */
+        }
       }
     }
 
@@ -4437,7 +4473,10 @@ export function ChatConsole({
       if (att.type === 'text' && att.content) {
         content += `\n\n[File: ${att.name}]\n\`\`\`\n${att.content}\n\`\`\``;
       } else if (att.type === 'image' && att.dataUrl) {
-        content += `\n\n[Image: ${att.name}]`;
+        // 图片装饰内嵌内容指纹 (fp:…)（CodeRabbit #969）——同名异字节图片
+        // 不得互认；IMAGE_PLACEHOLDER_RES 名称解析已容忍该尾（向后兼容）
+        const fpTag = att.contentFp ? ` (fp:${att.contentFp})` : '';
+        content += `\n\n[Image: ${att.name}${fpTag}]`;
       } else if (att.type === 'document' && att.dataBase64) {
         // Decode and extract text client-side（解码逻辑与去重守卫共用 _decodeDocData，
         // 见上——守卫需按相同规则重解以逐字校验内容，单一实现防漂移 #968 复核）
