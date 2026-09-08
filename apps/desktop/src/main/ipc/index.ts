@@ -54,6 +54,14 @@ import type {
   WslInstallAndProvisionResult,
 } from '../../shared/ipc';
 import { registerQraftIpcHandlers } from '../qraft/ipc';
+import {
+  classifyWslFeatureState,
+  hasNonRootUser,
+  isBashCapableDistro,
+  readFeatureStates,
+  wslPackageInstalled,
+  wslStatusWorks,
+} from './wsl-state';
 
 const { ipcMain, dialog, shell, app } = electron;
 
@@ -768,29 +776,16 @@ for m in ("pydantic", "httpx", "loguru"):
       } satisfies WslCheckResult;
     }
 
-    let featureWsl = false;
-    let featureVmp = false;
     let rebootRequired = false;
 
-    try {
-      const featureResult = spawnSync(
-        'powershell.exe',
-        [
-          '-NoProfile',
-          '-Command',
-          [
-            '(Get-WindowsOptionalFeature -Online -FeatureName Microsoft-Windows-Subsystem-Linux).State',
-            '(Get-WindowsOptionalFeature -Online -FeatureName VirtualMachinePlatform).State',
-          ].join(';'),
-        ],
-        { timeout: 15000, encoding: 'utf8', windowsHide: true }
-      );
-      if (featureResult.status === 0 && featureResult.stdout) {
-        const lines = featureResult.stdout.trim().split(/\r?\n/);
-        featureWsl = lines[0]?.trim() === 'Enabled';
-        featureVmp = lines[1]?.trim() === 'Enabled';
-      }
+    // DISM Get-WindowsOptionalFeature requires elevation and always fails
+    // inside the non-elevated app; read the feature states over WMI instead
+    // (readable unelevated, reflects pending DISM changes immediately).
+    const features = readFeatureStates();
+    const featureWsl = features.featureWsl;
+    const featureVmp = features.featureVmp;
 
+    try {
       try {
         const rb = spawnSync(
           'powershell.exe',
@@ -825,13 +820,13 @@ for m in ("pydantic", "httpx", "loguru"):
     }
 
     let featureState: WslCheckResult['featureState'] = 'not-supported';
-    if (!featureWsl && !featureVmp) featureState = 'not-enabled';
 
     let installed = false;
     let version: string | null = null;
     let distros: string[] = [];
     let defaultDistro: string | null = null;
     let running = false;
+    let initialized = false;
 
     try {
       const statusResult = spawnSync('wsl', ['--status'], {
@@ -888,7 +883,10 @@ for m in ("pydantic", "httpx", "loguru"):
             .split(/\r?\n/)
             .map((l) => l.trim())
             .filter(Boolean);
-          distros = lines;
+          // Keep only distros that can actually run bash: appliance distros
+          // like docker-desktop would otherwise count as a usable distro and
+          // block the wizard's "install Ubuntu" step.
+          distros = lines.filter((d) => isBashCapableDistro(d));
           if (!defaultDistro && distros.length > 0) defaultDistro = distros[0];
         }
       } catch {
@@ -924,34 +922,24 @@ for m in ("pydantic", "httpx", "loguru"):
         /* ignore */
       }
 
-      let initialized = false;
       if (distros.length > 0) {
-        const probeDistro = defaultDistro || distros[0];
-        try {
-          // Probe for a non-root user to verify the distribution has completed
-          // first-launch setup (username/password creation). A newly installed
-          // distribution can still execute `id -u` as root before that setup,
-          // so root-only access does not prove initialization is complete.
-          const idResult = spawnSync(
-            'wsl.exe',
-            ['-d', probeDistro, '--', 'bash', '-c', 'id -u 2>/dev/null || echo ""'],
-            { timeout: 10000, encoding: 'utf8', windowsHide: true }
-          );
-          if (idResult.status === 0 && idResult.stdout?.trim()) {
-            const uid = parseInt(idResult.stdout.trim(), 10);
-            // Require non-root uid (> 0) as signal of user creation complete
-            if (!Number.isNaN(uid) && uid > 0) initialized = true;
-          }
-        } catch {
-          /* ignore */
-        }
+        // Probe every usable distro for a non-root user (hasNonRootUser):
+        // a distro that can still execute as root does not prove first-launch
+        // user creation has completed, but any initialized distro proves the
+        // platform is usable.
+        initialized = distros.some((d) => hasNonRootUser(d));
       }
-
-      featureState =
-        distros.length === 0 || !initialized ? 'installed-but-not-initialized' : 'ready';
-    } else if (featureState !== 'not-enabled') {
-      featureState = featureWsl || featureVmp ? 'not-installed' : 'not-enabled';
     }
+
+    featureState = classifyWslFeatureState({
+      isWindows: true,
+      featureWsl,
+      featureVmp,
+      featureReadOk: features.ok,
+      wslInstalled: installed,
+      usableDistros: distros,
+      initialized,
+    });
 
     return {
       isWindows: true,
@@ -1055,6 +1043,10 @@ for m in ("pydantic", "httpx", "loguru"):
           message: '正在启用 Windows 可选功能 (WSL + 虚拟机平台)...',
         } satisfies WslInstallProgress);
 
+        // Exit codes of UAC-elevated processes cannot be read reliably
+        // (Select-Object ExitCode throws after RunAs elevation), so run
+        // without -PassThru and verify the result by re-reading the feature
+        // states afterwards.
         const r = spawnSync(
           'powershell.exe',
           [
@@ -1063,17 +1055,22 @@ for m in ("pydantic", "httpx", "loguru"):
             'Start-Process powershell -ArgumentList "-NoProfile -Command ' +
               'Enable-WindowsOptionalFeature -Online -FeatureName Microsoft-Windows-Subsystem-Linux -NoRestart; ' +
               'Enable-WindowsOptionalFeature -Online -FeatureName VirtualMachinePlatform -NoRestart" ' +
-              '-Verb RunAs -Wait -PassThru | Select-Object -ExpandProperty ExitCode',
+              '-Verb RunAs -Wait',
           ],
           { timeout: 120000, encoding: 'utf8', windowsHide: true }
         );
 
-        const exitCode = parseInt((r.stdout || '').trim(), 10);
-        if (r.error || r.status !== 0 || exitCode !== 0) {
+        // Verification requires a successful read with the WSL feature on.
+        // VirtualMachinePlatform is intentionally not required: on machines
+        // with VBS/Core Isolation, WMI keeps VMP reported as Disabled while
+        // it is functional (observed in live testing) — gating on it would
+        // recreate the false-failure bug this step was fixed for.
+        const featuresAfter = readFeatureStates();
+        if (r.error || r.status !== 0 || !featuresAfter.ok || !featuresAfter.featureWsl) {
           safeSend(IPC_EVENTS.WSL_INSTALL_PROGRESS, {
             phase: 'error',
-            message: `启用 Windows 功能失败 (code: ${exitCode || 'unknown'})`,
-            error: `DISM exit ${exitCode || 'error'}`,
+            message: `启用 Windows 功能失败: ${r.error?.message ?? '功能状态未变化'}`,
+            error: r.error?.message ?? 'feature state unchanged after enable',
           } satisfies WslInstallProgress);
           return {
             success: false,
@@ -1112,17 +1109,19 @@ for m in ("pydantic", "httpx", "loguru"):
           [
             '-NoProfile',
             '-Command',
-            'Start-Process wsl -ArgumentList "--install --no-distribution --no-launch" -Verb RunAs -Wait -PassThru | Select-Object -ExpandProperty ExitCode',
+            'Start-Process wsl -ArgumentList "--install --no-distribution --no-launch" -Verb RunAs -Wait',
           ],
           { timeout: 300000, encoding: 'utf8', windowsHide: true }
         );
 
-        const exitCode = parseInt((r.stdout || '').trim(), 10);
-        if (r.error || r.status !== 0 || exitCode !== 0) {
+        // Verify by system state: the WSL app package must exist after the
+        // install (wsl --status may keep failing until the next reboot).
+        const kernelOk = wslStatusWorks() || wslPackageInstalled();
+        if (r.error || r.status !== 0 || !kernelOk) {
           safeSend(IPC_EVENTS.WSL_INSTALL_PROGRESS, {
             phase: 'error',
-            message: `WSL2 内核安装失败 (code: ${exitCode || 'unknown'})`,
-            error: `wsl --install exit ${exitCode || 'error'}`,
+            message: `WSL2 内核安装失败: ${r.error?.message ?? '未检测到 WSL 包'}`,
+            error: r.error?.message ?? 'WSL package not found after install',
           } satisfies WslInstallProgress);
           return {
             success: false,
@@ -1161,17 +1160,17 @@ for m in ("pydantic", "httpx", "loguru"):
           [
             '-NoProfile',
             '-Command',
-            'Start-Process wsl -ArgumentList "--install -d Ubuntu --no-launch" -Verb RunAs -Wait -PassThru | Select-Object -ExpandProperty ExitCode',
+            'Start-Process wsl -ArgumentList "--install -d Ubuntu --no-launch" -Verb RunAs -Wait',
           ],
           { timeout: 300000, encoding: 'utf8', windowsHide: true }
         );
 
         const postCheck = runWslCheckInternal();
-        if (postCheck.distros.length === 0) {
+        if (r.error || r.status !== 0 || postCheck.distros.length === 0) {
           safeSend(IPC_EVENTS.WSL_INSTALL_PROGRESS, {
             phase: 'error',
             message: 'Ubuntu 安装失败',
-            error: 'DISTRO_INSTALL_FAILED',
+            error: r.error?.message ?? 'DISTRO_INSTALL_FAILED',
           } satisfies WslInstallProgress);
           return {
             success: false,
