@@ -1428,6 +1428,29 @@ function _decodeDocData(dataBase64: string, name: string): { extracted: string; 
   return { extracted, ext };
 }
 
+function _fnv1a(body: string, seed: number): number {
+  let h = seed >>> 0;
+  for (let i = 0; i < body.length; i += 1) {
+    h = Math.imul(h ^ body.charCodeAt(i), 0x01000193) >>> 0;
+  }
+  return h;
+}
+
+// #968 复核（CodeRabbit #969）：占位装饰的内容指纹——渲染线程内没有同步的
+// crypto 摘要，占位场景（扫描/二进制/解析失败）用它区分「同名不同内容」的
+// 附件（防误认领，非对抗场景）：对 b64 的 长度+首尾各 4KB 跑双种子 FNV-1a
+// 并拼成 16 位 hex。发送侧写占位与守卫校验共用，避免两侧算法漂移。
+export function _docFingerprint(dataBase64: string): string {
+  const head = dataBase64.slice(0, 4096);
+  const tail = dataBase64.length > 8192 ? dataBase64.slice(-4096) : dataBase64;
+  const body = `${dataBase64.length}:${head}:${tail}`;
+  const h1 = _fnv1a(body, 0x811c9dc5).toString(16).padStart(8, '0');
+  const h2 = _fnv1a(body, 0x811c9dc5 ^ 0x9e3779b9)
+    .toString(16)
+    .padStart(8, '0');
+  return h1 + h2;
+}
+
 // #968 复核：附件装饰内容守卫。key 会把装饰段（含嵌入的文件内容）整体剥掉，
 // 「同文本 + 同附件名」的消息 key 必然碰撞，名字级校验不足以区分内容差异
 // （CodeRabbit #969：同文本 + main.py 但 print(1)/print(2) 两种内容时，旧副本
@@ -1469,12 +1492,19 @@ function _persistedCoversAttachments(
             return false; // 解码异常 → 发送侧走占位分支，不可能有 Document 块
           }
         }
-        // 占位装饰（scanned PDF / binary file / parsing on server）：名字 + 短语
+        // 占位装饰（scanned PDF / binary file / parsing on server）不承载内容，
+        // 同名不同字节的文件会生成相同的占位 → 发送侧在占位内写入内容指纹
+        // （_docFingerprint），此处比对指纹区分（CodeRabbit #969）。无指纹的
+        // 旧版占位无法验证内容 → 一律不认领（方向安全）。
         const ph = `[${a.name}: `;
         const phIdx = pmContent.indexOf(ph);
         if (phIdx < 0) return false;
-        const phTail = pmContent.slice(phIdx, phIdx + 400);
-        return /(?:scanned PDF|binary file|parsing on server)/.test(phTail);
+        const closeIdx = pmContent.indexOf(']', phIdx);
+        if (closeIdx < 0 || closeIdx - phIdx > 400) return false;
+        const seg = pmContent.slice(phIdx, closeIdx + 1);
+        const fpMatch = seg.match(/\(fp:([0-9a-f]{16})\)/);
+        if (!fpMatch || !a.dataBase64) return false;
+        return fpMatch[1] === _docFingerprint(a.dataBase64);
       }
       default:
         return true; // 未知类型装饰规则不明 → 交由 key 决定
@@ -4402,13 +4432,18 @@ export function ChatConsole({
           const { extracted, ext } = _decodeDocData(att.dataBase64, att.name);
           if (extracted && extracted.trim()) {
             content += `\n\n--- Document: ${att.name} ---\n${extracted.slice(0, 50000)}\n--- End of ${att.name} ---`;
-          } else if (ext === 'pdf') {
-            content += `\n\n[${att.name}: scanned PDF — OCR will be attempted by the server]`;
           } else {
-            content += `\n\n[${att.name}: binary file, server will parse]`;
+            // 占位装饰内嵌内容指纹 (fp:…) —— 守卫按指纹区分同名不同内容的附件
+            //（CodeRabbit #969）；key 剥离的占位规则仍可整段移除。
+            const fp = `(fp:${_docFingerprint(att.dataBase64)})`;
+            if (ext === 'pdf') {
+              content += `\n\n[${att.name}: scanned PDF ${fp} — OCR will be attempted by the server]`;
+            } else {
+              content += `\n\n[${att.name}: binary file, server will parse ${fp}]`;
+            }
           }
         } catch {
-          content += `\n\n[${att.name}: ${formatFileSize(att.size)} — parsing on server]`;
+          content += `\n\n[${att.name}: ${formatFileSize(att.size)} — parsing on server (fp:${_docFingerprint(att.dataBase64)})]`;
         }
       }
     }

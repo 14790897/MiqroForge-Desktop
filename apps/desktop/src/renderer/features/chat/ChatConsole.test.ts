@@ -21,6 +21,7 @@ import {
   sessionMsgsToUi,
   insertInterruptedTurns,
   _markUserTwinMatches,
+  _docFingerprint,
 } from './ChatConsole';
 
 describe('ChatConsole thinking block regression (#858 → #905)', () => {
@@ -321,11 +322,42 @@ describe('_markUserTwinMatches 一对一去重匹配（#891 复核 + #968）', (
         [u('看\n\n--- Document: A.pdf ---\n内容\n--- End of A.pdf ---', T - 2_000)]
       )
     ).toEqual([false]);
-    // 扫描 PDF 占位装饰（无内容可承载）→ 名字 + 短语校验通过即认领
+  });
+
+  it('#968 复核：占位装饰指纹守卫——同名不同字节的不可提取附件不得互认（CodeRabbit #969）', () => {
+    const b64a = btoa('binary payload A');
+    const b64b = btoa('binary payload B');
+    const fpa = _docFingerprint(b64a);
+    const fpb = _docFingerprint(b64b);
+    expect(fpa).not.toBe(fpb); // 指纹本身能区分
+    const placeA = `看\n\n[scan.pdf: scanned PDF (fp:${fpa}) — OCR will be attempted by the server]`;
+    const placeB = `看\n\n[scan.pdf: scanned PDF (fp:${fpb}) — OCR will be attempted by the server]`;
+    // 内容不同 → 不认领
     expect(
       _markUserTwinMatches(
-        [u('看', T, [{ name: 'scan.pdf', type: 'document' }])],
+        [u('看', T, [{ name: 'scan.pdf', type: 'document', dataBase64: b64b }])],
+        [u(placeA, T)]
+      )
+    ).toEqual([false]);
+    // 内容一致（指纹相同）→ 认领
+    expect(
+      _markUserTwinMatches(
+        [u('看', T, [{ name: 'scan.pdf', type: 'document', dataBase64: b64a }])],
+        [u(placeA, T)]
+      )
+    ).toEqual([true]);
+    // 旧版无指纹占位 → 不认领（无法验证内容，方向安全）
+    expect(
+      _markUserTwinMatches(
+        [u('看', T, [{ name: 'scan.pdf', type: 'document', dataBase64: b64a }])],
         [u('看\n\n[scan.pdf: scanned PDF — OCR will be attempted by the server]', T)]
+      )
+    ).toEqual([false]);
+    // 解析失败占位（带大小 + 指纹）→ 指纹一致认领
+    expect(
+      _markUserTwinMatches(
+        [u('看', T, [{ name: 'a.pdf', type: 'document', dataBase64: b64a }])],
+        [u(`看\n\n[a.pdf: 1.2 MB — parsing on server (fp:${fpa})]`, T)]
       )
     ).toEqual([true]);
   });
