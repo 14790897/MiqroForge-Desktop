@@ -407,4 +407,13 @@ describe('_markUserTwinMatches 一对一去重匹配（#891 复核 + #968）', (
       _markUserTwinMatches([u('看图', T), u('看图', T + 5_000)], [u('看图\n\n[Image: a.png]', T)])
     ).toEqual([true, false]);
   });
+
+  it('#968 复核：未知/未来扩展附件类型——守卫默认不认领（不能仅凭 key 吞消息）', () => {
+    // type 联合目前闭合于 image/text/document；若未来扩展（audio/video/archive/…）
+    // 而 _persistedCoversAttachments 漏补对应分支，default 必须回落「不认领」——
+    // 正文/key 完全一致时旧实现 default:true 会直接认领（吞掉真实新消息）。
+    // as never 绕过闭合联合，模拟扩展后的运行时形态。
+    const frontend = u('听这段', T, [{ name: 'clip.wav', type: 'audio' } as never]);
+    expect(_markUserTwinMatches([frontend], [u('听这段', T)])).toEqual([false]);
+  });
 });

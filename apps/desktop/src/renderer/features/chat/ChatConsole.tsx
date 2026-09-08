@@ -1499,7 +1499,10 @@ function _persistedCoversAttachments(
         return fpMatch[1] === a.contentFp;
       }
       default:
-        return true; // 未知类型装饰规则不明 → 交由 key 决定
+        // 未知/未来扩展类型（audio/video/archive/…）无法验证内容 → 不认领。
+        // 与全守卫「宁可双显、绝不吞消息」的安全方向一致：若扩展 attachment type
+        // 而漏补分支，仅凭 key（文本+时间+文件名）认领可能吞掉真实新消息。
+        return false;
     }
   });
 }
