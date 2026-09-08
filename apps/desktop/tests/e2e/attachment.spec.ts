@@ -333,6 +333,13 @@ async function attachFile(page: Page, filePath: string) {
   await fileInput.setInputFiles(filePath);
 }
 
+/** Composer attachment chip area (parent of the chat input container).
+ *  Scoping filename lookups here avoids strict-mode collisions with the
+ *  file-info popover, which re-renders the filename in a Radix portal. */
+function composerChips(page: Page) {
+  return page.locator('[data-testid="chat-input-container"]').locator('xpath=..');
+}
+
 // ── Tests ───────────────────────────────────────────────────────────────
 test.describe('File Attachment Chips', () => {
   let electronApp: ElectronApplication;
@@ -352,15 +359,39 @@ test.describe('File Attachment Chips', () => {
     // earlier attach-only tests leave chips behind, which accumulate and
     // break strict-mode text assertions. Clear leftovers so every test
     // starts with an empty composer.
+    //
+    // The remove button now stops propagation (previously the click
+    // bubbled to the chip container and opened the file-preview modal,
+    // which then ate every further click → the old unbounded
+    // `while (count > 0)` spun forever → 600s hook timeout → Playwright
+    // force-kills the worker ("1 error was not a part of any test",
+    // electron-e2e exit 1)). The loop stays bounded with a no-progress
+    // bail-out for chips stuck mid-extraction.
     const removeBtn = page
       .locator('[data-testid="chat-input-container"]')
       .locator('xpath=..')
       .locator('button:has(svg.lucide-x)');
-    while ((await removeBtn.count()) > 0) {
+    let noProgress = 0;
+    for (let attempt = 0; attempt < 10 && noProgress < 3; attempt++) {
+      const before = await removeBtn.count().catch(() => 0);
+      if (before === 0) break;
       await removeBtn
         .first()
-        .click({ force: true })
+        .click({ force: true, timeout: 2000 })
         .catch(() => {});
+      try {
+        await expect
+          .poll(async () => removeBtn.count().catch(() => 0), { timeout: 2500 })
+          .toBeLessThan(before);
+        noProgress = 0;
+      } catch {
+        noProgress += 1;
+      }
+      await page.waitForTimeout(300);
+    }
+    const leftover = await removeBtn.count().catch(() => 0);
+    if (leftover > 0) {
+      console.log(`[test] ⚠️ ${leftover} attachment chip(s) stuck in composer — continuing`);
     }
   });
 
@@ -378,30 +409,42 @@ test.describe('File Attachment Chips', () => {
 
   test('PDF upload shows chip with checkmark', async () => {
     await attachFile(page, FILES.pdf);
-    await expect(page.getByText('board_report.pdf')).toBeVisible({ timeout: 15_000 });
+    await expect(composerChips(page).getByText('board_report.pdf')).toBeVisible({
+      timeout: 15_000,
+    });
   });
 
   test('DOCX upload shows chip with checkmark', async () => {
     await attachFile(page, FILES.docx);
-    await expect(page.getByText('bug_fix.docx')).toBeVisible({ timeout: 15_000 });
+    await expect(composerChips(page).getByText('bug_fix.docx')).toBeVisible({
+      timeout: 15_000,
+    });
   });
 
   test('XLSX upload shows chip with checkmark', async () => {
     await attachFile(page, FILES.xlsx);
-    await expect(page.getByText('test_xlsx_1.xlsx')).toBeVisible({ timeout: 15_000 });
+    await expect(composerChips(page).getByText('test_xlsx_1.xlsx')).toBeVisible({
+      timeout: 15_000,
+    });
   });
 
   test('PPTX upload shows chip with checkmark', async () => {
     await attachFile(page, FILES.pptx);
-    await expect(page.getByText('AI_guide.pptx')).toBeVisible({ timeout: 15_000 });
+    await expect(composerChips(page).getByText('AI_guide.pptx')).toBeVisible({
+      timeout: 15_000,
+    });
   });
 
   test('Multiple attachments show separate chips', async () => {
     await attachFile(page, FILES.pdf);
     await page.waitForTimeout(500);
     await attachFile(page, FILES.docx);
-    await expect(page.getByText('board_report.pdf')).toBeVisible({ timeout: 10_000 });
-    await expect(page.getByText('bug_fix.docx')).toBeVisible({ timeout: 10_000 });
+    await expect(composerChips(page).getByText('board_report.pdf')).toBeVisible({
+      timeout: 10_000,
+    });
+    await expect(composerChips(page).getByText('bug_fix.docx')).toBeVisible({
+      timeout: 10_000,
+    });
   });
 
   test('Send button disabled while extracting', async () => {

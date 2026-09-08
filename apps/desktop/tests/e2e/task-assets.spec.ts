@@ -8,48 +8,33 @@ import { _electron as electron, test, expect } from '@playwright/test';
 import type { ElectronApplication, Page } from '@playwright/test';
 import {
   LLM_TIMEOUT,
-  waitForInputReady,
+  sendMessage,
+  waitForResponseComplete,
   launchElectronApp,
   closeElectronApp,
 } from './helpers/electron-setup';
 
 // ─── Helpers ──────────────────────────────────────────────────────
 
-async function sendMessage(page: Page, text: string) {
-  const textarea = await waitForInputReady(page);
-  await textarea.fill(text);
-  await textarea.press('Enter');
-  await expect(page.getByText(text).first()).toBeVisible({ timeout: 10_000 });
-}
-
-async function waitForResponseComplete(page: Page, timeout = 120_000) {
-  await expect(page.locator('[data-testid="thinking-indicator"]')).toBeHidden({ timeout });
-}
-
-/** Wait for a file card with the given filename to appear in Task Assets.
- *  Uses multiple selector strategies for robustness. */
-async function waitForFileInPanel(page: Page, filename: string, timeout = 30_000) {
+/**
+ * Wait for a file card with the given filename to appear in Task Assets.
+ *
+ * One selector strategy: the innermost rounded card that contains the
+ * filename AND a file-preview-btn.  The old two-step approach first tried
+ * `.rounded-lg.p-2\\.5` (exact class) and fell back to a loose
+ * `[class*="rounded"][class*="p-"]` that can match the panel container
+ * itself — `.first()` then returned the panel (DOM order puts ancestors
+ * first) whose preview button belongs to some other card, or no button at
+ * all → 10s visibility timeout → flaky on slow macOS runners.
+ */
+async function waitForFileInPanel(page: Page, filename: string, timeout = 60_000) {
   const assetsPanel = page.getByTestId('task-assets-panel');
+  const card = assetsPanel
+    .locator('[class*="rounded"]', { hasText: filename })
+    .filter({ has: assetsPanel.getByTestId('file-preview-btn') })
+    .last();
 
-  // Strategy 1: Try the precise class selector
-  const cardSelector = assetsPanel.locator('.rounded-lg.p-2\\.5');
-  const card = cardSelector.filter({ hasText: filename }).first();
-
-  // Strategy 2: Fallback to more generic selectors
-  const fallbackCard = assetsPanel
-    .locator('[class*="rounded"][class*="p-"]')
-    .filter({ hasText: filename })
-    .first();
-
-  // Try primary selector first
-  try {
-    await expect(card).toBeVisible({ timeout });
-  } catch {
-    // Fallback to secondary selector
-    console.log('[test] Primary selector failed, trying fallback');
-    await expect(fallbackCard).toBeVisible({ timeout });
-    return fallbackCard;
-  }
+  await expect(card).toBeVisible({ timeout });
 
   // Panel should no longer show empty state
   await expect(page.locator('[data-testid="task-assets-empty"]')).not.toBeVisible({
