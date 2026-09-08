@@ -9,9 +9,7 @@ describe('gatewayModelToAutoSet', () => {
   });
 
   it('returns the gateway model id when the model field is missing', () => {
-    expect(gatewayModelToAutoSet({ agents: { defaults: {} } })).toBe(
-      'deepseek/deepseek-v4-flash'
-    );
+    expect(gatewayModelToAutoSet({ agents: { defaults: {} } })).toBe('deepseek/deepseek-v4-flash');
   });
 
   it('returns null when a non-empty model is already configured', () => {
