@@ -3463,6 +3463,31 @@ export function ChatConsole({
           if (_inFlight.length > 0) merged.push(..._inFlight);
         }
         setMessages(merged);
+        // #956: the persisted history is the authoritative answer.  When it
+        // ends with a completed reply and nothing is in flight (no live send
+        // for this session, no progress-without-final cached while we were
+        // away), the switch-back "生成中" state must not survive — otherwise a
+        // folder session whose reply was restored from the bound workspace
+        // root keeps the send button stuck as "中断当前生成并发送" forever.
+        const _histEndsComplete = (() => {
+          for (let _i = uiMsgs.length - 1; _i >= 0; _i -= 1) {
+            const _m = uiMsgs[_i];
+            if (_m.role === 'user') return false; // last turn has no reply yet
+            if (_m.role === 'assistant' && String(_m.content ?? '').trim().length > 0) {
+              return true;
+            }
+          }
+          return false;
+        })();
+        const _cacheStillLive =
+          !!cached &&
+          cached.events.some((e) => e.type === 'progress') &&
+          !cached.events.some(
+            (e) => e.type === 'final' || e.type === 'error' || e.type === 'aborted'
+          );
+        if (_histEndsComplete && !streamingBySession.has(sessionKey) && !_cacheStillLive) {
+          setStreaming(false);
+        }
         // Snapshot is now reconciled into `merged` — clear it so a later
         // load() (loadTrigger refresh) doesn't re-append stale transient
         // progress on top of history.
