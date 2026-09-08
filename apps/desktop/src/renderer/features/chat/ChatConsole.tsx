@@ -1369,13 +1369,23 @@ function _isPersistedCopyOf(frontendTs: number | undefined, copyTs: number | und
   return Math.abs(copyTs - frontendTs) < _PERSISTED_COPY_TS_TOLERANCE_MS;
 }
 
+// #968: 附件消息的 content 归一化。发送侧把附件占位符/内嵌文本拼进 content 后
+// 落库（handleSend payload 构造：图片 [Image: name]、文件 [File: …] 块、
+// --- Document: … --- 段），而乐观气泡的 content 只有原始输入文本——直接字符串
+// 比对必失配，快照截住在途附件消息时会把它当"未落盘"保留 → 同一条消息渲染两遍。
+// 与渲染层共用同一套剥离规则（extractFileChips），两侧一致变换后即可正确互认；
+// 用户手打的形似占位符文本同样被剥离，与展示层语义一致。
+function _normalizeUserContentForMatch(content: string): string {
+  return extractFileChips(content).cleanContent;
+}
+
 // #891 深度审阅 #11：删 flag 门控与保留块须用同一匹配（两处不再手写漂移）。
 // 唯一匹配改为一对一：merged 里每条持久化用户行只认领最早一条同内容、时间相近
 // 的乐观气泡。此前 .some() 会让同一条持久化副本同时满足多条相同文本的气泡——
 // 用户 30s 内两次发送同一句、恢复快照时第二条尚未落盘，两条都会被误判为已持久
 // 化而漏掉第二条。返回数组与 frontend 等长：matched[i]===true 表示该条乐观气泡
-// 已有专属持久化副本。
-function _markUserTwinMatches(frontend: Message[], merged: Message[]): boolean[] {
+// 已有专属持久化副本。内容比对经 _normalizeUserContentForMatch 归一化（#968）。
+export function _markUserTwinMatches(frontend: Message[], merged: Message[]): boolean[] {
   const matched = new Array<boolean>(frontend.length).fill(false);
   for (const pm of merged) {
     if (pm.role !== 'user') continue;
@@ -1383,7 +1393,8 @@ function _markUserTwinMatches(frontend: Message[], merged: Message[]): boolean[]
       (m, i) =>
         !matched[i] &&
         m.role === 'user' &&
-        String(pm.content) === String(m.content) &&
+        _normalizeUserContentForMatch(String(pm.content)) ===
+          _normalizeUserContentForMatch(String(m.content)) &&
         _isPersistedCopyOf(m.timestamp, pm.timestamp)
     );
     if (idx >= 0) matched[idx] = true;

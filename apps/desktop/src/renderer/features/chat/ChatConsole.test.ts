@@ -20,6 +20,7 @@ import {
   shouldRenderThinkingGroup,
   sessionMsgsToUi,
   insertInterruptedTurns,
+  _markUserTwinMatches,
 } from './ChatConsole';
 
 describe('ChatConsole thinking block regression (#858 → #905)', () => {
@@ -132,5 +133,58 @@ describe('ChatConsole thinking block regression (#858 → #905)', () => {
     const card = cards.find((m) => m.interrupted);
     expect(card?.reasoningMode).toBe('fast');
     expect(card?.reasoningElapsedS).toBe(4);
+  });
+});
+
+describe('_markUserTwinMatches 一对一去重匹配（#891 复核 + #968）', () => {
+  const T = 1_700_000_000_000;
+  const u = (content: string, ts = T) => ({ role: 'user' as const, content, timestamp: ts });
+
+  it('纯文本：持久化副本认领同内容乐观气泡', () => {
+    expect(_markUserTwinMatches([u('你好')], [u('你好')])).toEqual([true]);
+  });
+
+  it('#968 图片消息：persisted 带 [Image: …] 占位符也能互认（归一化后比对）', () => {
+    // 乐观气泡 content 只有输入文本；落库 content 追加了图片占位符（handleSend payload）
+    expect(
+      _markUserTwinMatches([u('看看这张图')], [u('看看这张图\n\n[Image: photo.png]')])
+    ).toEqual([true]);
+  });
+
+  it('#968 文件附件：persisted 带 [File: …] 代码块也能互认', () => {
+    expect(
+      _markUserTwinMatches([u('帮我看看')], [u('帮我看看\n\n[File: a.txt]\n```\nhello\n```')])
+    ).toEqual([true]);
+  });
+
+  it('#968 文档附件：--- Document: --- 段被剥离后互认', () => {
+    expect(
+      _markUserTwinMatches(
+        [u('解析这个 pdf')],
+        [u('解析这个 pdf\n\n--- Document: report.pdf ---\n正文\n--- End of report.pdf ---')]
+      )
+    ).toEqual([true]);
+  });
+
+  it('内容不同不互认', () => {
+    expect(_markUserTwinMatches([u('问题 A')], [u('问题 B')])).toEqual([false]);
+  });
+
+  it('#891 复核：同文本两条气泡只有最早一条被一对一认领', () => {
+    // 用户 30s 内连发同一句、快照只含第一条的持久化副本——第二条必须判为
+    // 未落盘（保留），不能再被同一条副本同时满足（.some() 的旧缺陷）
+    expect(
+      _markUserTwinMatches([u('再来一次', T), u('再来一次', T + 10_000)], [u('再来一次')])
+    ).toEqual([true, false]);
+  });
+
+  it('时间相近限定：30s 外的同文本旧副本不误认', () => {
+    expect(_markUserTwinMatches([u('再来一次', T)], [u('再来一次', T - 60_000)])).toEqual([false]);
+  });
+
+  it('#968 + #891 复核组合：同文本两条、persisted 带图 → 归一化后仍只认领最早一条', () => {
+    expect(
+      _markUserTwinMatches([u('看图', T), u('看图', T + 5_000)], [u('看图\n\n[Image: a.png]', T)])
+    ).toEqual([true, false]);
   });
 });
