@@ -40,8 +40,8 @@ Rules:
 - `schemes` = the column headers (one scheme / process per column).
 - `parameters[].values` = one value per scheme, in the same order as `schemes`.
 - `range` (optional) = the parameter's overall range, used for cell highlighting.
-- `source` (optional) = a citation id from `citations`; omit or set null when there is no source.
-- Emit only valid JSON inside the fence; the app falls back to plain text if it cannot parse.
+- `source` (optional) = a citation id from `citations`; omit it when there is no source.
+- Emit only valid JSON inside the fence; if it cannot be parsed, the block is shown as a plain code block.
 """
 
 
