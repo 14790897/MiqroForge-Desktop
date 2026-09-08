@@ -19,22 +19,20 @@ import {
 /**
  * Wait for a file card with the given filename to appear in Task Assets.
  *
- * One selector strategy: the innermost rounded card that contains the
- * filename AND a file-preview-btn.  The old two-step approach first tried
- * `.rounded-lg.p-2\\.5` (exact class) and fell back to a loose
- * `[class*="rounded"][class*="p-"]` that can match the panel container
- * itself — `.first()` then returned the panel (DOM order puts ancestors
- * first) whose preview button belongs to some other card, or no button at
- * all → 10s visibility timeout → flaky on slow macOS runners.
+ * The card root is TrackedFileCard's `.rounded-lg.p-2\.5` div (stable class
+ * in the component source). Wait for the card first, then for ITS OWN
+ * preview button — the buttons row renders in the same card, so the two
+ * waits together mean "file tracked AND previewable". A chained
+ * `filter({ has })` with a panel-rooted inner locator proved unreliable in
+ * CI (resolved to 0 elements while the card + 预览 button were on screen),
+ * so keep the locator flat.
  */
 async function waitForFileInPanel(page: Page, filename: string, timeout = 60_000) {
   const assetsPanel = page.getByTestId('task-assets-panel');
-  const card = assetsPanel
-    .locator('[class*="rounded"]', { hasText: filename })
-    .filter({ has: assetsPanel.getByTestId('file-preview-btn') })
-    .last();
+  const card = assetsPanel.locator('.rounded-lg.p-2\\.5', { hasText: filename }).last();
 
   await expect(card).toBeVisible({ timeout });
+  await expect(card.getByTestId('file-preview-btn')).toBeVisible({ timeout: 10_000 });
 
   // Panel should no longer show empty state
   await expect(page.locator('[data-testid="task-assets-empty"]')).not.toBeVisible({
