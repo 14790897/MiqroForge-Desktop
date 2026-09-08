@@ -25,6 +25,14 @@ export interface MockBridgeOptions {
   qraftLoggedInStatus?: Record<string, unknown>;
   /** qraft.pointsBalance 的返回结果。默认成功返回 270 可用积分。 */
   qraftPointsResult?: Record<string, unknown>;
+  /**
+   * 让 chat.send 挂起直到 mock 触发 terminal 事件（final/error/aborted），
+   * 保持回合 in-flight。真实桥接下 send promise 由 terminal 事件才 settle
+   * （src/main/bridge.ts TERMINAL_EVENT_TYPES），#918 改版后 ChatConsole 在
+   * send settle 时立即退订本轮监听器——立即 resolve 会让发送后注入的
+   * progress 事件被丢弃。默认关闭，保持其余用例的既有行为。
+   */
+  hangChatSend?: boolean;
   /** qraft.billingHistory 的返回结果。默认空列表。 */
   qraftBillingHistoryResult?: Array<Record<string, unknown>>;
 }
@@ -112,6 +120,7 @@ export function buildMockBridgeScript(opts: MockBridgeOptions = {}): string {
       points: { availablePoints: 270, heldPoints: 0, totalEarned: 300, totalSpent: 30 },
     }
   );
+  const hangChatSendJson = opts.hangChatSend === true ? 'true' : 'false';
   const qraftBillingHistoryJson = JSON.stringify(opts.qraftBillingHistoryResult || []);
 
   return `
@@ -200,7 +209,31 @@ export function buildMockBridgeScript(opts: MockBridgeOptions = {}): string {
     },
 
     chat: {
-      send: function() { return Promise.resolve({ accepted: true, req_id: 'req-test-001' }); },
+      // 默认立即 resolve（accepted）。hangChatSend 开启时挂起直到 terminal
+      // 事件，镜像真实桥接：主进程 bridge client 在 final/aborted 时 resolve、
+      // error 时 reject（src/main/bridge.ts TERMINAL_EVENT_TYPES）。只有挂起
+      // 时 ChatConsole 才会在整个回合期间保持 progress 监听器注册，测试才能
+      // 在发送后注入 progress 事件（#902 工具行渲染回归）。
+      send: function() {
+        if (!${hangChatSendJson}) {
+          return Promise.resolve({ accepted: true, req_id: 'req-test-001' });
+        }
+        return new Promise(function(resolve, reject) {
+          var settled = false;
+          var settleOk = function() {
+            if (settled) return;
+            settled = true;
+            resolve({ accepted: true, req_id: 'req-test-001' });
+          };
+          _on('final', settleOk);
+          _on('aborted', settleOk);
+          _on('error', function(data) {
+            if (settled) return;
+            settled = true;
+            reject(new Error((data && data.message) || 'Mock backend error'));
+          });
+        });
+      },
       abort: function() {
         _fire('aborted', {});
         return Promise.resolve({ aborted: true });
