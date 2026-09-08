@@ -15,16 +15,22 @@
   message、messages_delta、ledger、UI preview、logger。
 - **身份模型**：``ArtifactIdentity``（幂等/最终命名/复用，首片+请求参数即可
   确定）与 ``TransferIdentity``（staging/并发锁/单次传输，可携带服务端
-  request_id）分离。sha/size 是**校验谓词不是身份键**——形态乙分片下元数据
-  可能末片才到，身份中途不得漂移。
+  request_id）分离。sha/size 是**校验谓词不是身份键**——分片下元数据可能
+  末片才到，身份中途不得漂移。
+- **双形态分片**：形态甲（单次响应含全部 chunk）与形态乙（模型带
+  ``chunk_index`` 多次调用）走同一个组装状态机；未完成的中间态返回
+  ``download_pending``（可执行的下一步指引），不算错误。
 - **Foreign-file ownership**：最终文件无匹配 sidecar 且 hash 不符 = 外来文件，
   绝不覆盖，走唯一名；同身份重试恒走同一 path，不制造 ``(1)`` 垃圾。
 - **fail-closed**：任何契约异常（双源矛盾、缺内容、分片非法、校验失败）→
-  丢弃整份，错误以结构化 JSON 返回，绝不回传内容、绝不让模型凭
-  ``success=true`` 宣布交付。
+  丢弃整份并清理 staging，错误以结构化 JSON 返回，绝不回传内容、绝不让
+  模型凭 ``success=true`` 宣布交付。
 
 服务端真实字段命名/嵌套是**样例冻结边界**：alias 解析集中在
-``parse_mcp_result`` 一处，拿到真实响应后只改这里。
+``parse_mcp_result``/``_normalize_artifact_dict`` 一处，拿到真实响应后只改这里。
+v1 分片编码假设 = **每 chunk 独立 base64**；若真实协议是"一个 base64 串被
+切片"，assembler 需按真实样例补 trailing-byte 处理（在此之前遇切片编码会
+fail-closed 报 DOWNLOAD_BASE64_ERROR——比猜对更安全）。
 """
 
 from __future__ import annotations
@@ -36,7 +42,7 @@ import hashlib
 import json
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
@@ -72,6 +78,9 @@ DOWNLOAD_TOOL_GUIDANCE = (
     "禁止 read_file 读取 artifact 内容后 write_file 重建文件；"
     "需要移动/复制时使用文件系统级 copy/move，并在交付后校验目标文件大小与 sha256。"
 )
+
+# 形态乙传输参数——不参与 ArtifactIdentity（每次调用都不同；身份必须跨调用稳定）。
+_TRANSPORT_ARG_KEYS = frozenset({"chunk_index", "chunkIndex"})
 
 
 def is_download_tool(server_name: str, tool_name: str) -> bool:
@@ -196,17 +205,75 @@ class DownloadIoError(DownloadError):
         return "下载失败：本地写入失败。文件未交付，请重试。"
 
 
+class DownloadPendingError(DownloadError):
+    """形态乙中间态（v6.2 §6）：**不是错误**——内容未齐时返回可执行下一步。
+
+    code/retryable 字段对 wrapper 无意义（只走 to_model_text），但保持
+    DownloadError 子类形态让 wrapper 单一 ``except DownloadError`` 即可消化。
+    """
+
+    code = "DOWNLOAD_PENDING"
+    retryable = True
+
+    def __init__(
+        self,
+        *,
+        name: str,
+        received_chunks: int,
+        total_chunks: int | None,
+        next_chunk_index: int,
+    ):
+        self._name = name
+        self._received = received_chunks
+        self._total = total_chunks
+        self._next = next_chunk_index
+        super().__init__(
+            f"已接收下载文件的第 {received_chunks}"
+            + (f"/{total_chunks}" if total_chunks is not None else "")
+            + " 片。"
+        )
+
+    def to_model_text(self) -> str:
+        total = self._total
+        progress = (
+            f"已接收下载文件的第 {self._received}/{total} 片。"
+            if total is not None
+            else f"已接收下载文件的第 {self._received} 片。"
+        )
+        message = (
+            progress
+            + f"请继续调用同一个下载工具，并请求 chunk_index={self._next}。"
+            "不要中断当前下载，也不要根据当前结果判断文件已经交付。"
+        )
+        return json.dumps(
+            {
+                "type": "download_pending",
+                "name": self._name,
+                "received_chunks": self._received,
+                "total_chunks": self._total,
+                "next_chunk_index": self._next,
+                "message": message,
+            },
+            ensure_ascii=False,
+        )
+
+
 # ── 数据结构（v6.2 §4/§7）──────────────────────────────────────────────────
 
 
 def _canonical_args_hash(kwargs: dict[str, Any]) -> str:
-    """业务参数 canonical JSON hash：runtime 注入键（``_`` 前缀）剔除后
-    ``sort_keys`` 序列化再取 sha256 前 16 位。
+    """业务参数 canonical JSON hash：剔除 runtime 注入键（``_`` 前缀）与
+    形态乙传输参数（chunk_index——每次调用都变，进身份会毁掉跨调用关联），
+    其余 ``sort_keys`` 序列化后取 sha256 前 16 位。
 
     ``download_file(path=/a.cube)`` 与 ``download_file(path=/b.cube)``
-    因此必然产生不同身份。
+    因此必然产生不同身份；同一文件的 chunk 0/1/2 调用必然同身份。
     """
-    business = {k: v for k, v in kwargs.items() if not str(k).startswith("_")}
+    business = {
+        k: v
+        for k, v in kwargs.items()
+        if not str(k).startswith("_") and k not in _TRANSPORT_ARG_KEYS
+    }
     try:
         raw = json.dumps(business, sort_keys=True, ensure_ascii=False, default=str)
     except Exception:  # 极端不可序列化参数——字符串化兜底，身份仍稳定
@@ -219,7 +286,7 @@ class ArtifactIdentity:
     """幂等 / 最终命名 / 复用 的稳定键（v6.2 §4.1）。
 
     必须能在首片响应 + 请求参数上确定。``expected_sha256/expected_size``
-    是校验谓词不是键成员——形态乙分片下元数据可能末片才到。
+    是校验谓词不是键成员——分片下元数据可能末片才到。
     """
 
     session_key: str
@@ -230,7 +297,7 @@ class ArtifactIdentity:
 
     @property
     def artifact_key(self) -> str:
-        """sidecar 归属校验用的稳定键。"""
+        """sidecar 归属校验 + staging 命名用的稳定键。"""
         raw = "|".join(
             (self.session_key, self.server_name, self.tool_name,
              self.source_args_hash, self.filename)
@@ -240,7 +307,7 @@ class ArtifactIdentity:
 
 @dataclass(frozen=True)
 class TransferIdentity:
-    """单次传输身份：staging 命名 / 并发锁 / chunk 状态（C3 起使用）。
+    """单次传输身份：staging / 并发锁 / chunk 状态。
 
     同一 ArtifactIdentity 可挂多个 TransferIdentity——失败重试携带新的
     服务端 request_id 时，最终 path 仍由 ArtifactIdentity 决定。
@@ -273,6 +340,13 @@ class ParsedDownloadResponse:
     raw_source: Literal["structuredContent", "content"]
     error_text: str | None = None
 
+    @property
+    def multi_chunk(self) -> bool:
+        """需要走组装状态机（含形态甲 chunk 数组与形态乙跨调用续传）。"""
+        return len(self.chunks) > 1 or any(
+            c.chunk_index > 0 or (c.total_chunks or 1) > 1 for c in self.chunks
+        )
+
 
 @dataclass(frozen=True)
 class DownloadArtifact:
@@ -288,13 +362,13 @@ class DownloadArtifact:
     def to_model_text(self) -> str:
         """模型可见摘要——**只允许** type/name/path/size_bytes/sha256。
 
-        session/server/turn/tool_call/request_id 是内部追踪信息，进 sidecar
-        不进摘要（模型上下文最小化 + 本地审计可追踪）。
+        name 以最终落盘名为准（唯一化后可能带 `` (1)`` 后缀）；session/server/
+        turn/tool_call/request_id 是内部追踪信息，进 sidecar 不进摘要。
         """
         return json.dumps(
             {
                 "type": "download_artifact",
-                "name": self.identity.filename,
+                "name": self.path.name,
                 "path": str(self.path),
                 "size_bytes": self.size_bytes,
                 "sha256": self.sha256,
@@ -388,7 +462,7 @@ def _write_sidecar(final_path: Path, artifact: DownloadArtifact) -> None:
         "schema_version": _SIDECAR_SCHEMA_VERSION,
         "type": "download_artifact",
         "artifact_key": artifact.identity.artifact_key,
-        "name": artifact.identity.filename,
+        "name": final_path.name,
         "size_bytes": artifact.size_bytes,
         "sha256": artifact.sha256,
         "server_name": artifact.identity.server_name,
@@ -508,6 +582,10 @@ def plan_final_path(
 _SIZE_KEYS = ("size_bytes", "size", "byte_size")
 _SHA_KEYS = ("sha256", "sha", "hash")
 _B64_KEYS = ("content_base64", "base64", "data_b64")
+_NAME_KEYS = ("name", "suggested_filename", "filename", "file_name")
+_INDEX_KEYS = ("chunk_index", "chunkIndex", "index")
+_TOTAL_KEYS = ("total_chunks", "totalChunks", "total", "chunk_total")
+_REQUEST_KEYS = ("request_id", "requestId", "transfer_id", "transferId")
 
 
 def _first_key(payload: dict[str, Any], keys: tuple[str, ...]) -> Any:
@@ -531,7 +609,12 @@ def _as_size(value: Any) -> int | None:
 
 
 def _looks_like_artifact_dict(payload: Any) -> bool:
-    return isinstance(payload, dict) and any(k in payload for k in _B64_KEYS)
+    if not isinstance(payload, dict):
+        return False
+    if any(k in payload for k in _B64_KEYS):
+        return True
+    chunks_arr = payload.get("chunks")
+    return isinstance(chunks_arr, list) and bool(chunks_arr)
 
 
 def _looks_like_error_dict(payload: dict[str, Any]) -> bool:
@@ -541,12 +624,16 @@ def _looks_like_error_dict(payload: dict[str, Any]) -> bool:
     return _first_key(payload, ("error", "message", "reason")) is not None
 
 
+def _as_bool_flag(value: Any) -> bool | None:
+    return value if isinstance(value, bool) else None
+
+
 def _normalize_artifact_dict(
     payload: dict[str, Any],
     *,
     raw_source: Literal["structuredContent", "content"],
 ) -> ParsedDownloadResponse:
-    """把单包 artifact/错误 dict 归一到 ParsedDownloadResponse。
+    """把单包/分片 dict 归一到 ParsedDownloadResponse。
 
     ``success=false`` / ``ok=false`` 显式失败 → is_explicit_error（含错误文本，
     截断 200 字符防内容回传）。其余字段缺失/畸形由 materialize 的 fail-closed
@@ -561,16 +648,48 @@ def _normalize_artifact_dict(
             name=None, size_bytes=None, sha256=None, request_id=None,
             chunks=(), raw_source=raw_source, error_text=text,
         )
-    b64 = _first_key(payload, _B64_KEYS)
-    name = _first_key(payload, ("name", "suggested_filename", "filename", "file_name"))
+
+    name = _first_key(payload, _NAME_KEYS)
     size = _as_size(_first_key(payload, _SIZE_KEYS))
     sha = _first_key(payload, _SHA_KEYS)
-    request_id = _first_key(payload, ("request_id", "requestId", "transfer_id", "transferId"))
-    chunks: tuple[ParsedChunk, ...] = ()
-    if isinstance(b64, str) and b64:
-        # 缺 content_base64（success=true 但无内容）→ chunks 留空，由 materialize
-        # 的 C 类规则判 DOWNLOAD_PROTOCOL_ERROR——绝不把 None 当 "None" 解码。
-        chunks = (ParsedChunk(chunk_index=0, total_chunks=1, content_base64=b64),)
+    request_id = _first_key(payload, _REQUEST_KEYS)
+    b64 = _first_key(payload, _B64_KEYS)
+
+    # 分片解析：chunks 数组（形态甲整包）优先；其次单 content + 显式 index。
+    chunks_arr = payload.get("chunks")
+    outer_total = _as_size(_first_key(payload, _TOTAL_KEYS))
+    entries: list[ParsedChunk] = []
+    if isinstance(chunks_arr, list):
+        for item in chunks_arr:
+            if not isinstance(item, dict):
+                raise DownloadProtocolError(
+                    "下载失败：分片数组内含非对象条目，契约无法识别。文件未交付。"
+                )
+            item_b64 = _first_key(item, _B64_KEYS)
+            index = _as_size(_first_key(item, _INDEX_KEYS))
+            # per-item total 缺失时回退响应级 total_chunks（样例冻结边界）。
+            total = _as_size(_first_key(item, _TOTAL_KEYS)) or outer_total
+            ok_flag = _as_bool_flag(_first_key(item, ("success", "ok")))
+            entries.append(ParsedChunk(
+                chunk_index=index if index is not None else len(entries),
+                total_chunks=total,
+                content_base64=str(item_b64) if isinstance(item_b64, str) else "",
+                success=ok_flag,
+            ))
+        chunks: tuple[ParsedChunk, ...] = tuple(entries)
+    elif isinstance(b64, str) and b64:
+        index = _as_size(_first_key(payload, _INDEX_KEYS))
+        total = outer_total or _as_size(_first_key(payload, _TOTAL_KEYS))
+        chunks = (ParsedChunk(
+            chunk_index=index if index is not None else 0,
+            total_chunks=total if (total is not None or index is not None) else 1,
+            content_base64=b64,
+        ),)
+    else:
+        # success=true 但缺内容 → chunks 留空，由 materialize 判 C 类协议错误
+        #（绝不把 None 当 "None" 解码，也绝不让模型凭 success=true 宣布交付）。
+        chunks = ()
+
     return ParsedDownloadResponse(
         success=True,
         is_explicit_error=False,
@@ -680,11 +799,44 @@ def parse_mcp_result(result: Any) -> ParsedDownloadResponse:
     )
 
 
-# ── 落盘核心（单包路径先行；分片 assembler C3 接入）──────────────────────
+# ── 组装状态机（C3：staging + 跨调用续传 + fail-closed）────────────────────
+
+_STAGING_DIRNAME = ".staging"
+_STAGING_META_SCHEMA = 1
+
+
+@dataclass
+class _ActiveTransfer:
+    """一次跨调用的在途分片传输（进程内存态）。
+
+    v1 **不做跨重启续传**：进程重启后本表清空，staging 残留由
+    ``_sweep_stale_staging`` 在下一次写入前清掉——旧 chunk + 新 chunk 混合
+    的风险比"重新下载"大（v6.2 §R3）。
+    """
+
+    identity: ArtifactIdentity
+    request_id: str | None
+    staging_path: Path
+    meta_path: Path
+    total_chunks: int | None = None
+    next_chunk_index: int = 0
+    received_bytes: int = 0
+    seen: set[int] = field(default_factory=set)
+    declared_size: int | None = None
+    declared_sha256: str | None = None
+
+
+def _staging_dir(downloads_dir: Path) -> Path:
+    return downloads_dir / _STAGING_DIRNAME
+
+
+def _transfer_paths(downloads_dir: Path, artifact_key: str) -> tuple[Path, Path]:
+    staging = _staging_dir(downloads_dir)
+    return staging / f"{artifact_key}.part", staging / f"{artifact_key}.json"
 
 
 class DownloadSink:
-    """Artifact materialization 层：契约 → 校验 → 原子落盘 → 摘要。
+    """Artifact materialization 层：契约 → 组装 → 校验 → 原子落盘 → 摘要。
 
     只负责 ``protocol -> artifact``；MCP call/billing/progress/timeout/LLM
     消息编排都在 wrapper 侧。wrapper 对每个下载类工具持有一个 sink（按
@@ -693,6 +845,13 @@ class DownloadSink:
 
     def __init__(self, base_workspace: Path):
         self._base_workspace = Path(base_workspace)
+        # 在途传输表（进程内）：artifact_key → ActiveTransfer
+        self._active: dict[str, _ActiveTransfer] = {}
+        # 同身份并发互斥（v6.2 R3 增补 B）：同一 artifact 同时只允许一个传输
+        self._locks: dict[str, asyncio.Lock] = {}
+        self._swept: bool = False
+
+    # ── 入口 ────────────────────────────────────────────────────────────────
 
     async def materialize(
         self,
@@ -705,95 +864,24 @@ class DownloadSink:
         turn_id: str,
         tool_call_id: str,
     ) -> DownloadArtifact:
-        """单包 artifact 落盘（async 壳：文件 IO 放线程池，不阻塞事件循环）。"""
-        return await asyncio.to_thread(
-            self._materialize_sync,
-            result=result,
-            session_key=session_key,
-            server_name=server_name,
-            tool_name=tool_name,
-            request_kwargs=request_kwargs,
-            turn_id=turn_id,
-            tool_call_id=tool_call_id,
-        )
+        """下载响应 → 落盘/续传。单包与分片走同一身份锁；文件 IO 在线程池。
 
-    def _materialize_sync(
-        self,
-        *,
-        result: Any,
-        session_key: str,
-        server_name: str,
-        tool_name: str,
-        request_kwargs: dict[str, Any],
-        turn_id: str,
-        tool_call_id: str,
-    ) -> DownloadArtifact:
-        try:
-            return self._materialize_inner(
-                result=result, session_key=session_key,
-                server_name=server_name, tool_name=tool_name,
-                request_kwargs=request_kwargs,
-                turn_id=turn_id, tool_call_id=tool_call_id,
-            )
-        except DownloadError:
-            raise  # 协议/校验类错误原样上抛（wrapper 消化为 JSON）
-        except OSError as exc:
-            # 目录创建/读写/fsync/rename/sidecar 等本地 IO 失败统一归 IO 错误。
-            raise DownloadIoError(
-                "下载失败：本地写入失败（磁盘/权限）。文件未交付，请重试。"
-            ) from exc
-
-    def _materialize_inner(
-        self,
-        *,
-        result: Any,
-        session_key: str,
-        server_name: str,
-        tool_name: str,
-        request_kwargs: dict[str, Any],
-        turn_id: str,
-        tool_call_id: str,
-    ) -> DownloadArtifact:
+        解析在事件循环内（纯 CPU 且受 16MiB 门保护）；decode/写盘在
+        ``asyncio.to_thread``——大文件不阻塞主循环。
+        """
         downloads_dir = resolve_downloads_dir(self._base_workspace, session_key)
-        downloads_dir.mkdir(parents=True, exist_ok=True)
+        self._sweep_stale_once(downloads_dir)
 
         parsed = parse_mcp_result(result)
-        if parsed.is_explicit_error:
-            server_text = parsed.error_text or ""
-            msg = (
-                "下载失败：服务端明确返回错误。"
-                + (f"原因：{server_text}。" if server_text else "")
-                + "请检查远端文件后重新调用下载工具。"
-            )
-            raise DownloadServerError(msg)
 
-        if not parsed.chunks:
-            # 看似成功但没有内容 → 协议违例，绝不退回普通文本（C 类）。
-            raise DownloadProtocolError(
-                "下载失败：服务端标记成功但未返回文件内容。"
-                "不得据此判断文件已交付。请重新下载。"
-            )
-        if len(parsed.chunks) != 1:
-            # 分片（total_chunks > 1 / chunk_index > 0）由 C3 assembler 处理；
-            # 未实现前遇到即 fail-closed，绝不静默取第一片。
-            raise DownloadProtocolError(
-                "下载失败：服务端返回了分片响应，当前通道暂不支持分片重组。"
-                "文件未交付。"
-            )
-
-        chunk = parsed.chunks[0]
-        if len(chunk.content_base64) > MAX_CHUNK_BASE64_CHARS:
-            raise DownloadLimitError(
-                "下载失败：单次响应超过客户端下载限制"
-                f"（>{MAX_CHUNK_BASE64_CHARS} base64 字符）。"
-                "文件内容未交付，请使用分片下载方式重新请求。"
-            )
-
+        # identity 提前构造：错误分支也要能命中在途传输并清理（fail-closed——
+        # 服务端显式失败 = 当前 artifact 的传输作废，防半传输态卡死后续重试）。
         filename = parsed.name or sanitize_name(
-            str(request_kwargs.get("name") or request_kwargs.get("filename") or "download.bin")
+            str(request_kwargs.get("name")
+                or request_kwargs.get("filename")
+                or "download.bin")
         )
         filename = sanitize_name(filename)
-
         identity = ArtifactIdentity(
             session_key=session_key,
             server_name=server_name,
@@ -802,31 +890,389 @@ class DownloadSink:
             filename=filename,
         )
 
-        # decode（validate=True：非法输入 fail-closed，绝不宽容吞掉）
+        if parsed.is_explicit_error:
+            # 服务端显式失败 = 该 artifact 的传输作废（fail-closed，防半传输态
+            # 卡死后续重试）。错误响应常缺文件名，主键可能命不中 → 退化按
+            # (session, server, tool, args_hash) 前缀清理同一远端对象的在途传输。
+            if identity.artifact_key in self._active:
+                self._drop_transfer(downloads_dir, identity)
+            else:
+                self._drop_active_for(
+                    session_key=session_key,
+                    server_name=server_name,
+                    tool_name=tool_name,
+                    source_args_hash=identity.source_args_hash,
+                )
+            server_text = parsed.error_text or ""
+            msg = (
+                "下载失败：服务端明确返回错误。"
+                + (f"原因：{server_text}。" if server_text else "")
+                + "请检查远端文件后重新调用下载工具。"
+            )
+            raise DownloadServerError(msg)
+
+        lock = self._locks.setdefault(identity.artifact_key, asyncio.Lock())
+        async with lock:
+            if parsed.multi_chunk:
+                return await asyncio.to_thread(
+                    self._accept_chunks_sync,
+                    parsed=parsed, identity=identity,
+                    downloads_dir=downloads_dir,
+                    turn_id=turn_id, tool_call_id=tool_call_id,
+                )
+            return await asyncio.to_thread(
+                self._materialize_single_sync,
+                parsed=parsed, identity=identity,
+                downloads_dir=downloads_dir,
+                turn_id=turn_id, tool_call_id=tool_call_id,
+            )
+
+    # ── 单包路径（C1 语义不变，拆出入参以便与分片共享身份/目录决策）──────
+
+    def _materialize_single_sync(
+        self,
+        *,
+        parsed: ParsedDownloadResponse,
+        identity: ArtifactIdentity,
+        downloads_dir: Path,
+        turn_id: str,
+        tool_call_id: str,
+    ) -> DownloadArtifact:
         try:
-            decoded = base64.b64decode(chunk.content_base64, validate=True)
+            return self._single_inner(
+                parsed=parsed, identity=identity, downloads_dir=downloads_dir,
+                turn_id=turn_id, tool_call_id=tool_call_id,
+            )
+        except DownloadError:
+            raise
+        except OSError as exc:
+            raise DownloadIoError(
+                "下载失败：本地写入失败（磁盘/权限）。文件未交付，请重试。"
+            ) from exc
+
+    def _single_inner(
+        self,
+        *,
+        parsed: ParsedDownloadResponse,
+        identity: ArtifactIdentity,
+        downloads_dir: Path,
+        turn_id: str,
+        tool_call_id: str,
+    ) -> DownloadArtifact:
+        downloads_dir.mkdir(parents=True, exist_ok=True)
+        if not parsed.chunks:
+            raise DownloadProtocolError(
+                "下载失败：服务端标记成功但未返回文件内容。"
+                "不得据此判断文件已交付。请重新下载。"
+            )
+        chunk = parsed.chunks[0]
+        if chunk.chunk_index != 0:
+            raise DownloadProtocolError(
+                "下载失败：响应起始分片索引非 0，无法重组。文件未交付。"
+            )
+        self._gate_chunk_size(chunk)
+
+        decoded = self._decode_chunk(chunk)
+        # size/sha 是校验谓词不是身份键（v6.2 §4.3）——finalize 前求值。
+        actual_size, actual_sha = len(decoded), hashlib.sha256(decoded).hexdigest()
+        self._verify_integrity(parsed, actual_size, actual_sha)
+
+        plan = plan_final_path(
+            downloads_dir, identity,
+            expected_size=actual_size, expected_sha256=actual_sha,
+        )
+        if plan.reuse_existing:
+            if _read_sidecar(plan.final) is None:
+                # 内容一致复用 + sidecar 缺失：补写（provenance=本次断言）。
+                self._deliver_sidecar(plan.final, identity, parsed, actual_size,
+                                      actual_sha, turn_id, tool_call_id)
+            return DownloadArtifact(
+                identity=identity, path=plan.final,
+                size_bytes=actual_size, sha256=actual_sha,
+                request_id=parsed.request_id,
+                turn_id=turn_id, tool_call_id=tool_call_id,
+            )
+
+        _atomic_write(plan.final, decoded)
+        artifact = DownloadArtifact(
+            identity=identity, path=plan.final,
+            size_bytes=actual_size, sha256=actual_sha,
+            request_id=parsed.request_id,
+            turn_id=turn_id, tool_call_id=tool_call_id,
+        )
+        # 文件已交付；sidecar 失败不撤销 artifact（降级为无归属）。
+        try:
+            _write_sidecar(plan.final, artifact)
+        except OSError:
+            pass
+        return artifact
+
+    # ── 分片路径（形态甲整包 / 形态乙跨调用续传）────────────────────────
+
+    def _accept_chunks_sync(
+        self,
+        *,
+        parsed: ParsedDownloadResponse,
+        identity: ArtifactIdentity,
+        downloads_dir: Path,
+        turn_id: str,
+        tool_call_id: str,
+    ) -> DownloadArtifact:
+        try:
+            return self._accept_inner(
+                parsed=parsed, identity=identity, downloads_dir=downloads_dir,
+                turn_id=turn_id, tool_call_id=tool_call_id,
+            )
+        except DownloadPendingError:
+            # 中间态不是失败：传输在途，staging 与内存态**保留**，等下一片。
+            raise
+        except DownloadError:
+            self._drop_transfer(downloads_dir, identity)
+            raise
+        except OSError as exc:
+            self._drop_transfer(downloads_dir, identity)
+            raise DownloadIoError(
+                "下载失败：本地写入失败（磁盘/权限）。文件未交付，请重试。"
+            ) from exc
+
+    def _accept_inner(
+        self,
+        *,
+        parsed: ParsedDownloadResponse,
+        identity: ArtifactIdentity,
+        downloads_dir: Path,
+        turn_id: str,
+        tool_call_id: str,
+    ) -> DownloadArtifact:
+        downloads_dir.mkdir(parents=True, exist_ok=True)
+        transfer = self._active.get(identity.artifact_key)
+
+        if transfer is None:
+            # 全新传输：total_chunks 未知则要求本响应声明（否则不知道何时齐）。
+            total_hint = parsed.chunks[0].total_chunks
+            if any(c.total_chunks is not None and c.total_chunks != total_hint
+                   for c in parsed.chunks):
+                raise DownloadChunkError(
+                    "下载失败：同一响应的分片 total_chunks 自相矛盾。文件未交付。"
+                )
+            if parsed.chunks[0].chunk_index != 0:
+                raise DownloadChunkError(
+                    "下载失败：起始分片索引非 0（可能上一传输已中断）。"
+                    "文件未交付，请重新下载。"
+                )
+            if total_hint is None:
+                raise DownloadChunkError(
+                    "下载失败：分片响应未声明 total_chunks，客户端无法判定完成边界。"
+                    "文件未交付。"
+                )
+            staging_path, meta_path = _transfer_paths(downloads_dir, identity.artifact_key)
+            transfer = _ActiveTransfer(
+                identity=identity,
+                request_id=parsed.request_id,
+                total_chunks=total_hint,
+                staging_path=staging_path,
+                meta_path=meta_path,
+            )
+            self._active[identity.artifact_key] = transfer
+            self._write_meta(transfer, next_chunk_index=0)
+
+        try:
+            for chunk in parsed.chunks:
+                self._accept_one_chunk(transfer, parsed, chunk)
+        except DownloadError:
+            raise
+        except Exception as exc:
+            raise DownloadChunkError() from exc
+
+        # 完整性元数据连续性（v6.2 §4.3）：中途出现的 size/sha 与已记录值
+        # 不同 → 整份丢弃（同一规则覆盖 total_chunks 变更与 sha 变更）。
+        if parsed.size_bytes is not None:
+            if parsed.size_bytes > MAX_ARTIFACT_BYTES:
+                # 声明即超限 → 元数据阶段早拒，不必等 decode 完才发现。
+                raise DownloadLimitError(
+                    "下载失败：声明文件大小超过客户端上限（256 MiB）。文件未交付。"
+                )
+            if transfer.declared_size is None:
+                transfer.declared_size = parsed.size_bytes
+            elif parsed.size_bytes != transfer.declared_size:
+                raise DownloadChunkError(
+                    "下载失败：分片间的 size_bytes 声明不一致，传输已作废。"
+                    "文件未交付，请重新下载。"
+                )
+        if parsed.sha256 is not None:
+            if transfer.declared_sha256 is None:
+                transfer.declared_sha256 = parsed.sha256
+            elif parsed.sha256 != transfer.declared_sha256:
+                raise DownloadChunkError(
+                    "下载失败：分片间的 sha256 声明不一致，传输已作废。"
+                    "文件未交付，请重新下载。"
+                )
+        if parsed.name is not None and parsed.name != identity.filename:
+            raise DownloadChunkError(
+                "下载失败：分片间的文件名声明不一致，传输已作废。文件未交付。"
+            )
+
+        if transfer.total_chunks is not None and transfer.next_chunk_index >= transfer.total_chunks:
+            # 全部片齐 → 校验 → 原子改名出 staging → sidecar。
+            return self._finalize_transfer(
+                transfer, downloads_dir, parsed,
+                turn_id=turn_id, tool_call_id=tool_call_id,
+            )
+
+        # 未齐 → 中间态（对 orchestrator 仍是普通 tool result，含审计价值）。
+        raise DownloadPendingError(
+            name=identity.filename,
+            received_chunks=transfer.next_chunk_index,
+            total_chunks=transfer.total_chunks,
+            next_chunk_index=transfer.next_chunk_index,
+        )
+
+    def _accept_one_chunk(
+        self,
+        transfer: _ActiveTransfer,
+        parsed: ParsedDownloadResponse,
+        chunk: ParsedChunk,
+    ) -> None:
+        """单片校验 + 追加写盘（顺序/重复/跳号/总量一致性 → fail-closed）。"""
+        # success=false 任意片 → 整份作废
+        if chunk.success is False or parsed.success is False:
+            raise DownloadChunkError(
+                "下载失败：服务端在传输中途标记失败。整份文件未交付，请重新下载。"
+            )
+        if chunk.chunk_index != transfer.next_chunk_index:
+            raise DownloadChunkError(
+                "下载失败：分片索引不连续"
+                f"（期望 {transfer.next_chunk_index}，收到 {chunk.chunk_index}）。"
+                "文件未交付，请重新下载。"
+            )
+        if chunk.chunk_index in transfer.seen:
+            raise DownloadChunkError(
+                f"下载失败：分片 {chunk.chunk_index} 重复到达。文件未交付，请重新下载。"
+            )
+        if chunk.total_chunks is not None:
+            if transfer.total_chunks is None:
+                transfer.total_chunks = chunk.total_chunks
+            elif chunk.total_chunks != transfer.total_chunks:
+                raise DownloadChunkError(
+                    f"下载失败：total_chunks 中途变更"
+                    f"（{transfer.total_chunks} → {chunk.total_chunks}）。"
+                    "文件未交付，请重新下载。"
+                )
+        self._gate_chunk_size(chunk)
+
+        decoded = self._decode_chunk(chunk)
+        if transfer.received_bytes + len(decoded) > MAX_ARTIFACT_BYTES:
+            raise DownloadLimitError(
+                "下载失败：累计文件超过客户端大小上限（256 MiB）。文件未交付。"
+            )
+        transfer.staging_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(transfer.staging_path, "ab") as fh:
+            fh.write(decoded)
+            fh.flush()
+            os.fsync(fh.fileno())
+        transfer.received_bytes += len(decoded)
+
+        transfer.seen.add(chunk.chunk_index)
+        transfer.next_chunk_index = chunk.chunk_index + 1
+        self._write_meta(transfer, next_chunk_index=transfer.next_chunk_index)
+
+    def _finalize_transfer(
+        self,
+        transfer: _ActiveTransfer,
+        downloads_dir: Path,
+        parsed: ParsedDownloadResponse,
+        *,
+        turn_id: str,
+        tool_call_id: str,
+    ) -> DownloadArtifact:
+        """staging → 文件级校验 → ownership 决策 → 原子改名 → sidecar。"""
+        if transfer.declared_size is None and transfer.declared_sha256 is None:
+            raise DownloadProtocolError(
+                "下载失败：全部分片均未携带完整性字段（size_bytes/sha256），"
+                "无法校验。文件未交付。"
+            )
+        actual_size = transfer.staging_path.stat().st_size
+        actual_sha = _file_sha256(transfer.staging_path)
+        if transfer.declared_size is not None and actual_size != transfer.declared_size:
+            raise DownloadSizeMismatchError(
+                "下载失败：文件完整性校验未通过（大小不一致）。"
+                f"期望 {transfer.declared_size} bytes，实际 {actual_size} bytes。"
+                "文件未交付，请重新下载。"
+            )
+        if transfer.declared_sha256 and actual_sha != transfer.declared_sha256:
+            raise DownloadSha256MismatchError(
+                "下载失败：文件完整性校验未通过（SHA-256 不一致）。"
+                f"期望 {transfer.declared_sha256[:12]}... 实际 {actual_sha[:12]}...。"
+                "文件未交付，请重新下载。"
+            )
+
+        plan = plan_final_path(
+            downloads_dir, transfer.identity,
+            expected_size=actual_size, expected_sha256=actual_sha,
+        )
+        if plan.reuse_existing:
+            self._drop_staging(transfer)
+            if _read_sidecar(plan.final) is None:
+                self._deliver_sidecar(plan.final, transfer.identity, parsed,
+                                      actual_size, actual_sha, turn_id, tool_call_id)
+            return DownloadArtifact(
+                identity=transfer.identity, path=plan.final,
+                size_bytes=actual_size, sha256=actual_sha,
+                request_id=parsed.request_id or transfer.request_id,
+                turn_id=turn_id, tool_call_id=tool_call_id,
+            )
+
+        os.replace(transfer.staging_path, plan.final)  # 同卷原子改名（staging 清理内含）
+        self._drop_staging(transfer)
+        artifact = DownloadArtifact(
+            identity=transfer.identity, path=plan.final,
+            size_bytes=actual_size, sha256=actual_sha,
+            request_id=parsed.request_id or transfer.request_id,
+            turn_id=turn_id, tool_call_id=tool_call_id,
+        )
+        try:
+            _write_sidecar(plan.final, artifact)
+        except OSError:
+            pass
+        return artifact
+
+    # ── 共享小件 ────────────────────────────────────────────────────────────
+
+    def _gate_chunk_size(self, chunk: ParsedChunk) -> None:
+        """decode 前先拒：单 chunk base64 字符门（防内存放大）。"""
+        if len(chunk.content_base64) > MAX_CHUNK_BASE64_CHARS:
+            raise DownloadLimitError(
+                "下载失败：单片响应超过客户端下载限制"
+                f"（>{MAX_CHUNK_BASE64_CHARS} base64 字符）。"
+                "文件内容未交付。"
+            )
+
+    def _decode_chunk(self, chunk: ParsedChunk) -> bytes:
+        """v1 分片编码假设：每 chunk 独立 base64（validate=True 严格解码）。
+
+        若真实协议为"一个 base64 串按字符切片"，此处会 DOWNLOAD_BASE64_ERROR
+        fail-closed——拿到真实样例后补 trailing-byte 处理（见模块 docstring）。
+        """
+        try:
+            return base64.b64decode(chunk.content_base64, validate=True)
         except (binascii.Error, ValueError) as exc:
             raise DownloadBase64Error() from exc
 
-        if len(decoded) > MAX_ARTIFACT_BYTES:
-            raise DownloadLimitError(
-                "下载失败：文件超过客户端大小上限（256 MiB）。文件未交付。"
-            )
-
-        # size/sha 是校验谓词不是身份键（v6.2 §4.3）——finalize 前求值。
-        # 两者皆缺 = 无可交叉校验的完整性子段 → fail-closed（不信任裸内容）。
+    def _verify_integrity(
+        self, parsed: ParsedDownloadResponse, actual_size: int, actual_sha: str
+    ) -> None:
+        """size/sha 校验谓词（单包路径）。两者皆缺 = 无可交叉校验 → fail-closed。"""
         if parsed.size_bytes is None and parsed.sha256 is None:
             raise DownloadProtocolError(
                 "下载失败：响应缺少完整性字段（size_bytes/sha256 均缺失），"
                 "无法校验。文件未交付。"
             )
-        if parsed.size_bytes is not None and len(decoded) != parsed.size_bytes:
+        if parsed.size_bytes is not None and actual_size != parsed.size_bytes:
             raise DownloadSizeMismatchError(
                 "下载失败：文件完整性校验未通过（大小不一致）。"
-                f"期望 {parsed.size_bytes} bytes，实际 {len(decoded)} bytes。"
+                f"期望 {parsed.size_bytes} bytes，实际 {actual_size} bytes。"
                 "文件未交付，请重新下载。"
             )
-        actual_sha = hashlib.sha256(decoded).hexdigest()
         if parsed.sha256 and actual_sha != parsed.sha256:
             raise DownloadSha256MismatchError(
                 "下载失败：文件完整性校验未通过（SHA-256 不一致）。"
@@ -834,39 +1280,113 @@ class DownloadSink:
                 "文件未交付，请重新下载。"
             )
 
-        # ownership + 命名决策 → 写盘。
-        plan = plan_final_path(
-            downloads_dir, identity,
-            expected_size=parsed.size_bytes or len(decoded),
-            expected_sha256=actual_sha,
-        )
-        if plan.reuse_existing:
-            if _read_sidecar(plan.final) is None:
-                # 内容一致复用 + sidecar 缺失：补写（provenance=本次断言）。
-                _write_sidecar(plan.final, DownloadArtifact(
-                    identity=identity, path=plan.final,
-                    size_bytes=len(decoded), sha256=actual_sha,
-                    request_id=parsed.request_id,
-                    turn_id=turn_id, tool_call_id=tool_call_id,
-                ))
-            return DownloadArtifact(
-                identity=identity, path=plan.final,
-                size_bytes=len(decoded), sha256=actual_sha,
-                request_id=parsed.request_id,
-                turn_id=turn_id, tool_call_id=tool_call_id,
-            )
-
-        _atomic_write(plan.final, decoded)
-
+    def _deliver_sidecar(
+        self,
+        final: Path,
+        identity: ArtifactIdentity,
+        parsed: ParsedDownloadResponse,
+        size_bytes: int,
+        sha256: str,
+        turn_id: str,
+        tool_call_id: str,
+    ) -> None:
+        """复用/落盘成功后补写 sidecar（provenance=本次断言）。失败不撤销 artifact。"""
         artifact = DownloadArtifact(
-            identity=identity, path=plan.final,
-            size_bytes=len(decoded), sha256=actual_sha,
+            identity=identity, path=final,
+            size_bytes=size_bytes, sha256=sha256,
             request_id=parsed.request_id,
             turn_id=turn_id, tool_call_id=tool_call_id,
         )
-        # 文件已交付；sidecar 失败不撤销 artifact（降级为无归属，不抛）。
         try:
-            _write_sidecar(plan.final, artifact)
+            _write_sidecar(final, artifact)
         except OSError:
             pass
-        return artifact
+
+    def _write_meta(
+        self, transfer: _ActiveTransfer, *, next_chunk_index: int
+    ) -> None:
+        """staging 元数据（仅元数据，严禁 content_base64；崩溃残留诊断用）。"""
+        try:
+            transfer.meta_path.parent.mkdir(parents=True, exist_ok=True)
+            payload = {
+                "schema_version": _STAGING_META_SCHEMA,
+                "artifact_key": transfer.identity.artifact_key,
+                "session_key": transfer.identity.session_key,
+                "server_name": transfer.identity.server_name,
+                "tool_name": transfer.identity.tool_name,
+                "filename": transfer.identity.filename,
+                "request_id": transfer.request_id,
+                "next_chunk_index": next_chunk_index,
+                "total_chunks": transfer.total_chunks,
+                "expected_size": transfer.declared_size,
+                "expected_sha256": transfer.declared_sha256,
+            }
+            _atomic_write(
+                transfer.meta_path,
+                json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8"),
+            )
+        except OSError:
+            pass  # 元数据失败不阻断传输（诊断降级）
+
+    def _drop_staging(self, transfer: _ActiveTransfer) -> None:
+        """清理本传输的 staging 文件与内存态（成功改名后 / 失败时）。"""
+        for path in (transfer.staging_path, transfer.meta_path):
+            try:
+                if path.exists():
+                    path.unlink()
+            except OSError:
+                pass
+        self._active.pop(transfer.identity.artifact_key, None)
+
+    def _drop_transfer(self, downloads_dir: Path, identity: ArtifactIdentity) -> None:
+        """异常时整份丢弃（fail-closed：不留可拼接残片，绝不续用）。"""
+        transfer = self._active.pop(identity.artifact_key, None)
+        if transfer is not None:
+            self._drop_staging(transfer)
+        else:
+            staging_path, meta_path = _transfer_paths(downloads_dir, identity.artifact_key)
+            for path in (staging_path, meta_path):
+                try:
+                    if path.exists():
+                        path.unlink()
+                except OSError:
+                    pass
+
+    def _drop_active_for(
+        self,
+        *,
+        session_key: str,
+        server_name: str,
+        tool_name: str,
+        source_args_hash: str,
+    ) -> None:
+        """按远端对象前缀清理在途传输（服务端显式失败时文件名常缺失）。
+
+        同一 (session, server, tool, 业务参数) 只能对应一个远端 artifact——
+        前缀命中即整份作废，宁可多清不可留半传输态。
+        """
+        for transfer in list(self._active.values()):
+            idt = transfer.identity
+            if (
+                idt.session_key == session_key
+                and idt.server_name == server_name
+                and idt.tool_name == tool_name
+                and idt.source_args_hash == source_args_hash
+            ):
+                self._drop_staging(transfer)
+
+    def _sweep_stale_once(self, downloads_dir: Path) -> None:
+        """进程级清扫：第一次使用时清掉崩溃残留的 staging（v1 不恢复、只删
+        ``.staging/**``，绝不触碰 downloads 根下的 final artifact）。"""
+        if self._swept:
+            return
+        self._swept = True
+        staging = _staging_dir(downloads_dir)
+        if not staging.is_dir():
+            return
+        for entry in staging.iterdir():
+            if entry.is_file():
+                try:
+                    entry.unlink()
+                except OSError:
+                    pass

@@ -492,3 +492,293 @@ def test_error_json_never_contains_raw_content():
     text = err.to_model_text()
     assert "raw-secret-content-bytes" not in text
     assert base64.b64encode(data).decode() not in text
+
+
+# ── C3：分片组装（形态甲整包 / 形态乙跨调用续传 / fail-closed）─────────────
+
+
+def _chunk_payload(
+    pieces: list[bytes],
+    *,
+    declared_total: int | None = None,
+    start_index: int = 0,
+    name: str = "chunked.cube",
+    per_item_total: bool = True,
+    include_sha: bool = False,
+    include_size: bool = False,
+    totals: list[int | None] | None = None,
+) -> str:
+    """构造 chunks 数组响应（形态甲）。totals 可逐片覆盖（用于变更测试）。"""
+    full = b"".join(pieces)
+    items = []
+    for i, piece in enumerate(pieces):
+        item: dict = {
+            "chunk_index": start_index + i,
+            "content_base64": base64.b64encode(piece).decode(),
+        }
+        total = (totals[i] if totals else None)
+        if total is not None:
+            item["total_chunks"] = total
+        elif per_item_total:
+            item["total_chunks"] = declared_total if declared_total is not None else len(pieces)
+        if include_sha:
+            item["sha256"] = hashlib.sha256(full).hexdigest()
+        if include_size:
+            item["size_bytes"] = len(full)
+        items.append(item)
+    payload: dict = {"name": name, "chunks": items}
+    if declared_total is not None:
+        payload["total_chunks"] = declared_total
+    if include_sha:
+        payload["sha256"] = hashlib.sha256(full).hexdigest()
+    if include_size:
+        payload["size_bytes"] = len(full)
+    return json.dumps(payload)
+
+
+def _single_chunk_payload(
+    piece: bytes,
+    *,
+    chunk_index: int,
+    total_chunks: int,
+    name: str = "chunked.cube",
+    sha256: str | None = None,
+    size_bytes: int | None = None,
+    success: bool | None = None,
+) -> str:
+    """构造形态乙单响应（一次调用一片）。"""
+    payload: dict = {
+        "name": name,
+        "chunk_index": chunk_index,
+        "total_chunks": total_chunks,
+        "content_base64": base64.b64encode(piece).decode(),
+    }
+    if sha256 is not None:
+        payload["sha256"] = sha256
+    if size_bytes is not None:
+        payload["size_bytes"] = size_bytes
+    if success is not None:
+        payload["success"] = success
+    return json.dumps(payload)
+
+
+async def test_form_a_chunk_array_single_response(tmp_path):
+    """形态甲：一次响应含全部 3 片 → 直接组装完成，无中间态。"""
+    root, _, sink = _env(tmp_path)
+    pieces = [b"AAA", b"BBB", b"CCC"]
+    full = b"".join(pieces)
+    r = _result_from_text(_chunk_payload(pieces, include_sha=True, include_size=True))
+    artifact = await _materialize(sink, r, root, request_kwargs={"name": "chunked.cube"})
+    assert artifact.path.name == "chunked.cube"
+    assert artifact.path.read_bytes() == full
+    assert artifact.sha256 == hashlib.sha256(full).hexdigest()
+    staging = resolve_downloads_dir(root, SESSION_KEY) / ".staging"
+    assert not staging.exists() or not list(staging.glob("*"))
+
+
+async def test_form_b_cross_call_assembly(tmp_path):
+    """形态乙：模型带 chunk_index 三次调用 → pending → pending → 最终 artifact。"""
+    root, _, sink = _env(tmp_path)
+    pieces = [b"chunk-zero", b"chunk-one-", b"chunk-two!"]
+    full = b"".join(pieces)
+    sha = hashlib.sha256(full).hexdigest()
+
+    call_ctx = dict(
+        server_name="miqroforge", tool_name="download_file",
+        session_key=SESSION_KEY, turn_id="t1", tool_call_id="c1",
+    )
+
+    # 第 0 片：不齐 → pending（不是错误）
+    with pytest.raises(sink_mod.DownloadPendingError) as pe0:
+        await sink.materialize(
+            result=_result_from_text(_single_chunk_payload(
+                pieces[0], chunk_index=0, total_chunks=3, sha256=sha,
+                size_bytes=len(full), name="cube.cube")),
+            request_kwargs={"name": "cube.cube", "chunk_index": 0},
+            **call_ctx,
+        )
+    pend0 = json.loads(pe0.value.to_model_text())
+    assert pend0["type"] == "download_pending"
+    assert pend0["next_chunk_index"] == 1
+    assert pend0["total_chunks"] == 3
+    assert "不要中断" in pend0["message"]
+
+    # 第 1 片：仍是 pending
+    with pytest.raises(sink_mod.DownloadPendingError) as pe1:
+        await sink.materialize(
+            result=_result_from_text(_single_chunk_payload(
+                pieces[1], chunk_index=1, total_chunks=3, sha256=sha,
+                size_bytes=len(full), name="cube.cube")),
+            request_kwargs={"name": "cube.cube", "chunk_index": 1},
+            **call_ctx,
+        )
+    pend1 = json.loads(pe1.value.to_model_text())
+    assert pend1["received_chunks"] == 2
+    assert pend1["next_chunk_index"] == 2
+
+    # 第 2 片：齐 → artifact；内容 = 三片拼接
+    artifact = await sink.materialize(
+        result=_result_from_text(_single_chunk_payload(
+            pieces[2], chunk_index=2, total_chunks=3, sha256=sha,
+            size_bytes=len(full), name="cube.cube")),
+        request_kwargs={"name": "cube.cube", "chunk_index": 2},
+        **call_ctx,
+    )
+    assert artifact.path.read_bytes() == full
+    assert artifact.sha256 == sha
+    # staging 无残留、无 (1) 垃圾
+    staging = resolve_downloads_dir(root, SESSION_KEY) / ".staging"
+    assert not staging.exists() or not list(staging.glob("*"))
+
+
+async def test_chunk_index_param_excluded_from_identity(tmp_path):
+    """chunk_index 是传输参数：不同调用 kwargs 必须产生同一 ArtifactIdentity。"""
+    root, _, sink = _env(tmp_path)
+    data = b"identity-check-data"
+    r = _result_from_text(_artifact_payload(data, name="ident.cube"))
+    a = await _materialize(sink, r, root, request_kwargs={"name": "ident.cube"})
+    b = await _materialize(
+        sink, r, root, request_kwargs={"name": "ident.cube", "chunk_index": 5},
+    )
+    assert a.identity.artifact_key == b.identity.artifact_key
+    assert a.path == b.path  # 同一文件（幂等复用）
+
+
+async def test_chunk_skip_index_fails_closed(tmp_path):
+    root, _, sink = _env(tmp_path)
+    pieces = [b"A", b"B", b"C"]
+    with pytest.raises(sink_mod.DownloadError):
+        await _materialize(
+            sink, _result_from_text(_single_chunk_payload(
+                pieces[0], chunk_index=0, total_chunks=3, name="s.cube")),
+            root, request_kwargs={"name": "s.cube"},
+        )
+    with pytest.raises(sink_mod.DownloadChunkError) as ei:
+        await _materialize(
+            sink, _result_from_text(_single_chunk_payload(
+                pieces[2], chunk_index=2, total_chunks=3, name="s.cube")),
+            root, request_kwargs={"name": "s.cube"},
+        )
+    assert json.loads(ei.value.to_model_text())["code"] == "DOWNLOAD_CHUNK_ERROR"
+
+
+async def test_chunk_duplicate_fails_closed(tmp_path):
+    root, _, sink = _env(tmp_path)
+    pieces = [b"A", b"B", b"C"]
+    for idx in (0, 1, 1):  # 1 重复
+        with pytest.raises(sink_mod.DownloadError):
+            await _materialize(
+                sink, _result_from_text(_single_chunk_payload(
+                    pieces[idx], chunk_index=idx, total_chunks=3, name="d.cube")),
+                root, request_kwargs={"name": "d.cube"},
+            )
+    # 无残留可拼接残片
+    downloads = resolve_downloads_dir(root, SESSION_KEY)
+    assert not (downloads / ".staging").exists() or not list((downloads / ".staging").glob("*"))
+
+
+async def test_chunk_total_mutation_fails_closed(tmp_path):
+    root, _, sink = _env(tmp_path)
+    with pytest.raises(sink_mod.DownloadError):
+        await _materialize(
+            sink, _result_from_text(_single_chunk_payload(
+                b"A", chunk_index=0, total_chunks=3, name="t.cube")),
+            root, request_kwargs={"name": "t.cube"},
+        )
+    with pytest.raises(sink_mod.DownloadChunkError) as ei:  # total 3→4 变更
+        await _materialize(
+            sink, _result_from_text(_single_chunk_payload(
+                b"B", chunk_index=1, total_chunks=4, name="t.cube")),
+            root, request_kwargs={"name": "t.cube"},
+        )
+    assert json.loads(ei.value.to_model_text())["code"] == "DOWNLOAD_CHUNK_ERROR"
+
+
+async def test_chunk_mid_transfer_success_false_fails_closed(tmp_path):
+    root, _, sink = _env(tmp_path)
+    pieces = [b"A", b"B", b"C"]
+    # 先正常收第 0 片
+    with pytest.raises(sink_mod.DownloadPendingError):
+        await _materialize(
+            sink, _result_from_text(_single_chunk_payload(
+                pieces[0], chunk_index=0, total_chunks=3, name="f.cube")),
+            root, request_kwargs={"name": "f.cube"},
+        )
+    # 中途 success=false → 服务端显式失败：整份丢弃（含在途 staging）
+    with pytest.raises(sink_mod.DownloadServerError) as ei:
+        await _materialize(
+            sink, _result_from_text(_single_chunk_payload(
+                pieces[1], chunk_index=1, total_chunks=3, name="f.cube",
+                success=False)),
+            root, request_kwargs={"name": "f.cube"},
+        )
+    assert json.loads(ei.value.to_model_text())["code"] == "DOWNLOAD_SERVER_ERROR"
+    downloads = resolve_downloads_dir(root, SESSION_KEY)
+    staging = downloads / ".staging"
+    assert not staging.exists() or not list(staging.glob("*"))
+    # 失败后无卡死：重新从头收第 0 片可以再次启动传输（self-healing）
+    with pytest.raises(sink_mod.DownloadPendingError):
+        await _materialize(
+            sink, _result_from_text(_single_chunk_payload(
+                pieces[0], chunk_index=0, total_chunks=3, name="f.cube")),
+            root, request_kwargs={"name": "f.cube"},
+        )
+
+
+async def test_chunk_sha_continuity_mismatch_fails_closed(tmp_path):
+    root, _, sink = _env(tmp_path)
+    with pytest.raises(sink_mod.DownloadError):
+        await _materialize(
+            sink, _result_from_text(_single_chunk_payload(
+                b"A", chunk_index=0, total_chunks=3, name="sc.cube",
+                sha256="ab" * 32)),
+            root, request_kwargs={"name": "sc.cube"},
+        )
+    with pytest.raises(sink_mod.DownloadChunkError) as ei:  # sha 中途变更
+        await _materialize(
+            sink, _result_from_text(_single_chunk_payload(
+                b"B", chunk_index=1, total_chunks=3, name="sc.cube",
+                sha256="cd" * 32)),
+            root, request_kwargs={"name": "sc.cube"},
+        )
+    assert json.loads(ei.value.to_model_text())["code"] == "DOWNLOAD_CHUNK_ERROR"
+
+
+async def test_staging_sweep_never_touches_final(tmp_path):
+    """清扫只删 .staging/**，downloads 根下的 final artifact 原封不动。"""
+    root, _, sink = _env(tmp_path)
+    downloads = resolve_downloads_dir(root, SESSION_KEY)
+    (downloads / ".staging").mkdir(parents=True)
+    (downloads / ".staging" / "stale.part").write_bytes(b"stale")
+    (downloads / ".staging" / "stale.json").write_text("{}", encoding="utf-8")
+    genuine = downloads / "genuine.cube"
+    genuine.write_bytes(b"keep-me")
+
+    data = b"sweep-trigger"
+    await _materialize(sink, _result_from_text(_artifact_payload(data)), root)
+
+    assert not (downloads / ".staging" / "stale.part").exists()
+    assert not (downloads / ".staging" / "stale.json").exists()
+    assert genuine.read_bytes() == b"keep-me"
+
+
+async def test_concurrent_same_identity_does_not_corrupt(tmp_path):
+    """同身份并发（锁串行化）：两次同内容单包调用 → 单文件、内容一致。"""
+    import asyncio
+
+    root, _, sink = _env(tmp_path)
+    data = os.urandom(64 * 1024)
+    r = _result_from_text(_artifact_payload(data))
+
+    async def _call():
+        return await sink.materialize(
+            result=r, session_key=SESSION_KEY, server_name="miqroforge",
+            tool_name="download_file", request_kwargs={"name": "con.cube"},
+            turn_id="t", tool_call_id="c",
+        )
+
+    a1, a2 = await asyncio.gather(_call(), _call())
+    assert a1.path == a2.path
+    assert a1.path.read_bytes() == data
+    assert not list(root.glob("**/* (1).cube"))
+
