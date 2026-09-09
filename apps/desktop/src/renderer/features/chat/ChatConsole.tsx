@@ -621,6 +621,21 @@ function getDocIcon(name: string) {
   }
 }
 
+/** 消息时间戳(ChatGPT 式):今天 → "HH:MM",昨天 → "昨天 HH:MM",更早 → "M月D日 HH:MM" */
+function formatChatTime(timestamp?: number | string | null): string {
+  if (timestamp === undefined || timestamp === null) return '';
+  const value = typeof timestamp === 'number' ? timestamp : Date.parse(String(timestamp));
+  if (!Number.isFinite(value)) return '';
+  const d = new Date(value);
+  const now = new Date();
+  const hm = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+  const startOfDay = (x: Date) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
+  const dayDiff = Math.round((startOfDay(now) - startOfDay(d)) / 86400000);
+  if (dayDiff <= 0) return hm;
+  if (dayDiff === 1) return `昨天 ${hm}`;
+  return `${d.getMonth() + 1}月${d.getDate()}日 ${hm}`;
+}
+
 function relativeTimeLabel(timestamp?: number | string | null, now = Date.now()): string {
   if (timestamp === undefined || timestamp === null) return '尚未更新';
   const value = typeof timestamp === 'number' ? timestamp : Date.parse(timestamp);
@@ -6763,9 +6778,10 @@ export function ChatConsole({
             style={{ background: 'var(--background)' }}
           >
             <div
-              className={`max-w-[760px] mx-auto px-4 py-5 flex flex-col gap-2 ${
+              className={`max-w-[760px] mx-auto px-4 pt-5 flex flex-col gap-2 ${
                 historyLoaded && messages.length === 0 ? 'min-h-full' : ''
               }`}
+              style={{ paddingBottom: '20vh' }}
             >
               {/* Only show the "connecting" spinner while loading AND no messages
                   yet.  A user can send before the session's load() finishes
@@ -8323,7 +8339,6 @@ const MessageBubble = memo(function MessageBubble({
   // main path — React throws "Rendered fewer hooks than expected".
   const bubbleRef = useRef<HTMLDivElement>(null);
   const capturedSelectionRef = useRef('');
-  const [copyHovered, setCopyHovered] = useState(false);
   // #880: 消息渲染失败兜底——「显示原文」切换为查看原始 markdown/HTML 文本
   const [showRawOnError, setShowRawOnError] = useState(false);
 
@@ -8873,6 +8888,9 @@ const MessageBubble = memo(function MessageBubble({
                 >
                   MiQroForge
                 </span>
+                <span className="text-xs text-[var(--text-faint)] shrink-0">
+                  {formatChatTime(msg.timestamp)}
+                </span>
               </div>
             )}
 
@@ -8891,6 +8909,12 @@ const MessageBubble = memo(function MessageBubble({
                 isUser ? 'items-end max-w-[calc(100%-48px)]' : 'w-full'
               )}
             >
+              {/* 用户消息时间戳(ChatGPT 式,气泡上方右对齐小字) */}
+              {isUser && (
+                <span className="text-[11px] leading-none text-[var(--text-faint)] select-none">
+                  {formatChatTime(msg.timestamp)}
+                </span>
+              )}
               {/* image attachments */}
               {msg.attachments
                 ?.filter((a) => a.type === 'image')
@@ -9029,8 +9053,6 @@ const MessageBubble = memo(function MessageBubble({
                   ...(isUser
                     ? { background: 'var(--bubble-user-bg)', color: 'var(--bubble-user-text)' }
                     : { color: 'var(--bubble-ai-text)' }),
-                  // 经典蓝色框（#547 hover 复制预览）：跟随气泡/正文外框
-                  ...(copyHovered ? { boxShadow: '0 0 0 2px var(--accent)' } : {}),
                 }}
               >
                 {showRawOnError ? (
@@ -9123,30 +9145,23 @@ const MessageBubble = memo(function MessageBubble({
               )}
 
               {/* Message action bar — copy / regenerate / feedback / sources.
-                Restored from #547 (dropped by the #577 rewrite). */}
+                #828: 按钮放大(浅灰底大点击区)、复制不再 hover 选中/高亮框、
+                常驻显示(不随 hover 出现消失) */}
               {!isUser && msg.content !== '' && (
                 <div
-                  className="flex items-center gap-0.5 self-start opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 transition-opacity"
+                  className="flex items-center gap-1.5 self-start mt-3 mb-3"
                   data-testid="message-actions"
                 >
                   <button
                     onClick={() => onCopy(msg.content, copyIdx ?? turnIndex ?? 0)}
-                    onMouseEnter={() => {
-                      setCopyHovered(true);
-                      selectMessageText();
-                    }}
-                    onMouseLeave={() => {
-                      setCopyHovered(false);
-                      deselectMessageText();
-                    }}
                     title="复制"
                     aria-label="复制"
-                    className="p-1 rounded hover:bg-[var(--surface-muted)] hover:text-[var(--text)] transition-colors"
+                    className="flex items-center justify-center w-9 h-9 rounded-lg bg-[var(--surface-muted)]/70 text-[var(--text-muted)] hover:bg-[var(--surface-muted)] hover:text-[var(--text)] transition-colors"
                   >
                     {isCopied ? (
-                      <Check size={13} style={{ color: 'var(--success)' }} />
+                      <Check size={16} style={{ color: 'var(--success)' }} />
                     ) : (
-                      <Copy size={13} />
+                      <Copy size={16} />
                     )}
                   </button>
                   {onRegenerate && (
@@ -9154,9 +9169,9 @@ const MessageBubble = memo(function MessageBubble({
                       onClick={() => onRegenerate?.(msg)}
                       title="重新生成"
                       aria-label="重新生成"
-                      className="p-1 rounded hover:bg-[var(--surface-muted)] hover:text-[var(--text)] transition-colors"
+                      className="flex items-center justify-center w-9 h-9 rounded-lg bg-[var(--surface-muted)]/70 text-[var(--text-muted)] hover:bg-[var(--surface-muted)] hover:text-[var(--text)] transition-colors"
                     >
-                      <RefreshCw size={13} />
+                      <RefreshCw size={16} />
                     </button>
                   )}
                   <button
@@ -9167,11 +9182,11 @@ const MessageBubble = memo(function MessageBubble({
                     }}
                     title="喜欢"
                     aria-label="喜欢"
-                    className={`p-1 rounded hover:bg-[var(--surface-muted)] transition-colors ${
-                      feedback === 'up' ? 'text-[var(--accent)]' : ''
+                    className={`flex items-center justify-center w-9 h-9 rounded-lg border border-[var(--border-subtle)] bg-[var(--surface-muted)]/50 transition-colors ${
+                      feedback === 'up' ? 'text-[var(--accent)] bg-[var(--accent-soft)]' : 'text-[var(--text-muted)] hover:bg-[var(--surface-muted)] hover:text-[var(--text)]'
                     }`}
                   >
-                    <ThumbsUp size={13} />
+                    <ThumbsUp size={16} />
                   </button>
                   <button
                     onClick={() => {
@@ -9186,20 +9201,20 @@ const MessageBubble = memo(function MessageBubble({
                     }}
                     title="不喜欢"
                     aria-label="不喜欢"
-                    className={`p-1 rounded hover:bg-[var(--surface-muted)] transition-colors ${
-                      feedback === 'down' ? 'text-[var(--danger)]' : ''
+                    className={`flex items-center justify-center w-9 h-9 rounded-lg border border-[var(--border-subtle)] bg-[var(--surface-muted)]/50 transition-colors ${
+                      feedback === 'down' ? 'text-[var(--danger)] bg-[var(--danger-bg)]' : 'text-[var(--text-muted)] hover:bg-[var(--surface-muted)] hover:text-[var(--text)]'
                     }`}
                   >
-                    <ThumbsDown size={13} />
+                    <ThumbsDown size={16} />
                   </button>
                   {/* 查看来源 always visible (#547 原版行为) — 无来源时弹窗给提示 */}
                   <button
                     onClick={() => setShowSources(true)}
                     title="查看来源"
                     aria-label="查看来源"
-                    className="p-1 rounded hover:bg-[var(--surface-muted)] hover:text-[var(--text)] transition-colors"
+                    className="flex items-center justify-center w-9 h-9 rounded-lg bg-[var(--surface-muted)]/70 text-[var(--text-muted)] hover:bg-[var(--surface-muted)] hover:text-[var(--text)] transition-colors"
                   >
-                    <ExternalLink size={13} />
+                    <ExternalLink size={16} />
                   </button>
                 </div>
               )}
