@@ -511,6 +511,19 @@ class ExecTool(Tool):
         unconditionally — silently dropping one would revoke a grant the user
         just made; a missing source is reported with guidance instead (see
         :meth:`_missing_bind_sources`).
+
+        CONTRACT — every bind SOURCE here is fixed at CONSTRUCTION time.
+        Apart from ``user_roots`` (harness-injected; see
+        ``ToolOrchestrator._execute_in_sandbox``), the sources are instance
+        attributes set when the tool was built: ``self.working_dir`` and
+        ``self._shared_roots``.  The per-call ``working_dir`` argument of
+        :meth:`execute` selects the process cwd and the workspace-diff root
+        ONLY; it MUST NOT be folded into this set.  Were it honoured here, a
+        model-authored ``working_dir`` would re-open an arbitrary host
+        directory writable inside the sandbox with no grant at all, bypassing
+        the per-call ``_user_roots`` channel this issue exists to gate.
+        Locked by
+        ``tests/execution/test_exec_write_boundary_984.py::TestWorkingDirNotABindSource``.
         """
         out: list[str] = []
         seen: set[str] = set()

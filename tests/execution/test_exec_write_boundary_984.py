@@ -7,7 +7,9 @@ Covers the exec half of the sandbox write boundary:
   * a missing bind source failing the command WITHOUT falling back to host
     execution,
   * ``_execute_restricted``'s explicit ``_execute_direct`` call staying valid
-    without the new kwarg (plan v6 §3).
+    without the new kwarg (plan v6 §3),
+  * the per-call ``working_dir`` argument NEVER becoming a bind source (R3
+    contract hardening).
 """
 
 from __future__ import annotations
@@ -442,3 +444,90 @@ class TestUserRootsOwnership:
         )
         assert tool.last_kwargs is not None
         assert "_user_roots" not in tool.last_kwargs
+
+
+# ── #984 R3: the per-call ``working_dir`` is not a bind source ────────────
+
+
+class TestWorkingDirNotABindSource:
+    """``execute(working_dir=...)`` is model-controlled and must stay cwd-only.
+
+    It selects the process cwd (and the workspace-diff root); the rw bind set
+    is fixed at construction (``self.working_dir`` + ``self._shared_roots``)
+    plus the harness-injected ``_user_roots``.  If the per-call value leaked
+    into ``_exec_rw_binds``, a model could name ANY existing host directory as
+    ``working_dir`` and have it re-opened writable inside the sandbox with no
+    grant — the exact boundary #984 exists to enforce.  The contract is stated
+    in ``ExecTool._exec_rw_binds``'s docstring; this test locks it.
+    """
+
+    @pytest.mark.asyncio
+    async def test_per_call_working_dir_is_not_a_bind_source(
+        self, monkeypatch, tmp_path,
+    ) -> None:
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        shared = tmp_path / "static_shared"
+        shared.mkdir()
+        # An EXISTING directory outside the workspace — the shape a
+        # model-supplied ``working_dir`` takes when it is honoured as a bind
+        # source (a missing one would be skipped by the static-root check).
+        secret = tmp_path / "outside_secret"
+        secret.mkdir()
+        (secret / "credentials.txt").write_text("x", encoding="utf-8")
+
+        tool = ExecTool(timeout=5, working_dir=str(ws), shared_roots=[shared])
+        # Never walk the model-named cwd on disk during this test.
+        monkeypatch.setattr(tool, "_snapshot_workspace", lambda cwd: {})
+
+        before = tool._exec_rw_binds([])
+        assert before == [str(ws), str(shared)]
+
+        sandbox = _mock_sandbox()
+        mgr = MagicMock()
+        mgr.get_or_create = AsyncMock(return_value=sandbox)
+        mgr.active_sandbox = sandbox
+        tool._sandbox_manager = mgr
+
+        # Exactly the way the model reaches the tool: ``working_dir`` is a
+        # declared schema parameter, ``_sandbox``/``_session_key`` are
+        # harness-injected.
+        await tool.execute(
+            command="echo t",
+            working_dir=str(secret),
+            _sandbox=_selection(SandboxType.BWRAP),
+            _session_key="k",
+        )
+
+        # (1) what the sandbox was actually asked to re-open writable
+        binds = sandbox.run_command_streaming.await_args.kwargs["extra_rw_binds"]
+        assert binds == before
+        assert str(secret) not in binds
+        # (2) the instance's bind set is unchanged after the call
+        after = tool._exec_rw_binds([])
+        assert after == before
+        assert str(secret) not in after
+
+    @pytest.mark.asyncio
+    async def test_per_call_working_dir_still_sets_cwd(
+        self, monkeypatch, tmp_path,
+    ) -> None:
+        """The hardening must not break the parameter it constrains."""
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        other = tmp_path / "other_cwd"
+        other.mkdir()
+
+        tool = ExecTool(timeout=5, working_dir=str(ws))
+        seen: dict = {}
+
+        async def _fake_direct(command, cwd, **kwargs):
+            seen["cwd"] = cwd
+            return MagicMock(exit_code=0, output="ok", duration_ms=0,
+                             cancelled=False, timed_out=False)
+
+        monkeypatch.setattr(tool, "_execute_direct", _fake_direct)
+        monkeypatch.setattr(tool, "_snapshot_workspace", lambda cwd: {})
+
+        await tool.execute("echo t", working_dir=str(other))
+        assert seen["cwd"] == str(other)
