@@ -383,6 +383,11 @@ class MCPToolWrapper(Tool):
         except DownloadError as exc:
             # 结构化错误 JSON——只含 code/message/retryable，无内容、无 payload。
             return exc.to_model_text()
+        except OSError:
+            # resolve_downloads_dir/_sweep_stale_once 在 to_thread 之前执行，
+            # 其文件系统失败也必须消化为结构化错误（CodeRabbit 06-48 Major：
+            # 否则裸异常会漏到 orchestrator，违反"错误只以 download_error 出现"）。
+            return DownloadIoError().to_model_text()
 
 
 class MCPGatewayTool(Tool):

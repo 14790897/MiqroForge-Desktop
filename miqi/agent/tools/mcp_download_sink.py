@@ -42,6 +42,7 @@ import hashlib
 import json
 import os
 import re
+import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -804,6 +805,13 @@ def parse_mcp_result(result: Any) -> ParsedDownloadResponse:
     )
 
 
+# 命名分配互斥（#988 评审 P1a + CodeRabbit 06-48）：plan_final_path 的
+# "检查→决定→原子提交"临界区。用**进程级 threading.Lock 而非 per-instance
+# asyncio 锁**：不同 wrapper 实例（download_file/download_bulk 各持独立 sink）
+# 共享同一 downloads 目录，跨实例也要串行；且临界区在 to_thread 工作线程内，
+# asyncio.Lock 不可在此获取。临界区只包 plan→rename，decode/写盘在锁外。
+_NAMING_LOCK = threading.Lock()
+
 # ── 组装状态机（C3：staging + 跨调用续传 + fail-closed）────────────────────
 
 _STAGING_DIRNAME = ".staging"
@@ -854,12 +862,7 @@ class DownloadSink:
         self._active: dict[str, _ActiveTransfer] = {}
         # 同身份并发互斥（v6.2 R3 增补 B）：同一 artifact 同时只允许一个传输
         self._locks: dict[str, asyncio.Lock] = {}
-        # 落盘根级命名分配锁（#988 评审 P1a）：plan_final_path 的"检查→决定→
-        # 原子提交"对不同 ArtifactIdentity（最终文件名可能相同）不是全局原子的
-        # ——不同身份各自持 artifact 锁仍可能都看到 result.cube 空闲而双写。
-        # 以 downloads_dir 为粒度串行化 plan/落盘段：同目录内绝不并发分配文件名。
-        self._alloc_locks: dict[str, asyncio.Lock] = {}
-        self._swept: bool = False
+        self._swept: set[str] = set()
 
     # ── 入口 ────────────────────────────────────────────────────────────────
 
@@ -925,26 +928,21 @@ class DownloadSink:
                 )
                 raise DownloadServerError(msg)
 
-            # 命名分配锁：锁序恒为 artifact → downloads_dir（绝不反向获取），
-            # 无死锁；单目录内所有 plan/原子提交串行 → 不同身份同文件名
-            # 并发时后者必然看到前者已占名 → 走唯一名，绝不互覆。
-            alloc_lock = self._alloc_locks.setdefault(
-                str(downloads_dir), asyncio.Lock()
-            )
-            async with alloc_lock:
-                if parsed.multi_chunk:
-                    return await asyncio.to_thread(
-                        self._accept_chunks_sync,
-                        parsed=parsed, identity=identity,
-                        downloads_dir=downloads_dir,
-                        turn_id=turn_id, tool_call_id=tool_call_id,
-                    )
+            # 命名分配临界区在工作线程内的 plan→rename 段（_NAMING_LOCK），
+            # 锁外不持有任何全局互斥 → 并发下载的 decode/写盘不互相串行。
+            if parsed.multi_chunk:
                 return await asyncio.to_thread(
-                    self._materialize_single_sync,
+                    self._accept_chunks_sync,
                     parsed=parsed, identity=identity,
                     downloads_dir=downloads_dir,
                     turn_id=turn_id, tool_call_id=tool_call_id,
                 )
+            return await asyncio.to_thread(
+                self._materialize_single_sync,
+                parsed=parsed, identity=identity,
+                downloads_dir=downloads_dir,
+                turn_id=turn_id, tool_call_id=tool_call_id,
+            )
 
     # ── 单包路径（C1 语义不变，拆出入参以便与分片共享身份/目录决策）──────
 
@@ -1011,23 +1009,39 @@ class DownloadSink:
         actual_size, actual_sha = len(decoded), hashlib.sha256(decoded).hexdigest()
         self._verify_integrity(parsed, actual_size, actual_sha)
 
-        plan = plan_final_path(
-            downloads_dir, identity,
-            expected_size=actual_size, expected_sha256=actual_sha,
-        )
-        if plan.reuse_existing:
-            if _read_sidecar(plan.final) is None:
-                # 内容一致复用 + sidecar 缺失：补写（provenance=本次断言）。
-                self._deliver_sidecar(plan.final, identity, parsed, actual_size,
-                                      actual_sha, turn_id, tool_call_id)
-            return DownloadArtifact(
-                identity=identity, path=plan.final,
-                size_bytes=actual_size, sha256=actual_sha,
-                request_id=parsed.request_id,
-                turn_id=turn_id, tool_call_id=tool_call_id,
-            )
+        # 数据写入 staging（锁外：文件名含 artifact_key 天然唯一，跨工具不冲突；
+        # decode 大文件不被全局互斥串行化——CodeRabbit 06-48 nitpick）。
+        staging_path, _ = _transfer_paths(downloads_dir, identity.artifact_key)
+        staging_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(staging_path, "wb") as fh:
+            fh.write(decoded)
+            fh.flush()
+            os.fsync(fh.fileno())
 
-        _atomic_write(plan.final, decoded)
+        # 命名分配 + 提交临界区（模块级 threading 锁：跨 sink/跨工具同目录串行；
+        # 只包 plan→rename，不含数据写）。
+        with _NAMING_LOCK:
+            plan = plan_final_path(
+                downloads_dir, identity,
+                expected_size=actual_size, expected_sha256=actual_sha,
+            )
+            if plan.reuse_existing:
+                try:
+                    staging_path.unlink()  # 内容一致复用：staging 副本作废
+                except OSError:
+                    pass
+                if _read_sidecar(plan.final) is None:
+                    # 内容一致复用 + sidecar 缺失：补写（provenance=本次断言）。
+                    self._deliver_sidecar(plan.final, identity, parsed, actual_size,
+                                          actual_sha, turn_id, tool_call_id)
+                return DownloadArtifact(
+                    identity=identity, path=plan.final,
+                    size_bytes=actual_size, sha256=actual_sha,
+                    request_id=parsed.request_id,
+                    turn_id=turn_id, tool_call_id=tool_call_id,
+                )
+            os.replace(staging_path, plan.final)  # 原子提交（staging→final）
+
         artifact = DownloadArtifact(
             identity=identity, path=plan.final,
             size_bytes=actual_size, sha256=actual_sha,
@@ -1148,7 +1162,10 @@ class DownloadSink:
                     "下载失败：分片间的 sha256 声明不一致，传输已作废。"
                     "文件未交付，请重新下载。"
                 )
-        if parsed.name is not None and parsed.name != identity.filename:
+        if parsed.name is not None and sanitize_name(parsed.name) != identity.filename:
+            # identity.filename 是净化后的名字；后续片的名字也要先净化再比
+            # （CodeRabbit 06-48：raw 含非法字符时首片净化成功、续片永不匹配，
+            # 合法分片下载会被误判为协议错误）。
             raise DownloadChunkError(
                 "下载失败：分片间的文件名声明不一致，传输已作废。文件未交付。"
             )
@@ -1265,24 +1282,25 @@ class DownloadSink:
                 "文件未交付，请重新下载。"
             )
 
-        plan = plan_final_path(
-            downloads_dir, transfer.identity,
-            expected_size=actual_size, expected_sha256=actual_sha,
-        )
-        if plan.reuse_existing:
-            self._drop_staging(transfer)
-            if _read_sidecar(plan.final) is None:
-                self._deliver_sidecar(plan.final, transfer.identity, parsed,
-                                      actual_size, actual_sha, turn_id, tool_call_id)
-            return DownloadArtifact(
-                identity=transfer.identity, path=plan.final,
-                size_bytes=actual_size, sha256=actual_sha,
-                request_id=parsed.request_id or transfer.request_id,
-                turn_id=turn_id, tool_call_id=tool_call_id,
+        with _NAMING_LOCK:  # plan→提交临界区（跨 sink/跨工具同目录串行）
+            plan = plan_final_path(
+                downloads_dir, transfer.identity,
+                expected_size=actual_size, expected_sha256=actual_sha,
             )
+            if plan.reuse_existing:
+                self._drop_staging(transfer)
+                if _read_sidecar(plan.final) is None:
+                    self._deliver_sidecar(plan.final, transfer.identity, parsed,
+                                          actual_size, actual_sha, turn_id, tool_call_id)
+                return DownloadArtifact(
+                    identity=transfer.identity, path=plan.final,
+                    size_bytes=actual_size, sha256=actual_sha,
+                    request_id=parsed.request_id or transfer.request_id,
+                    turn_id=turn_id, tool_call_id=tool_call_id,
+                )
 
-        os.replace(transfer.staging_path, plan.final)  # 同卷原子改名（staging 清理内含）
-        self._drop_staging(transfer)
+            os.replace(transfer.staging_path, plan.final)  # 同卷原子改名
+            self._drop_staging(transfer)
         artifact = DownloadArtifact(
             identity=transfer.identity, path=plan.final,
             size_bytes=actual_size, sha256=actual_sha,
@@ -1435,11 +1453,13 @@ class DownloadSink:
                 self._drop_staging(transfer)
 
     def _sweep_stale_once(self, downloads_dir: Path) -> None:
-        """进程级清扫：第一次使用时清掉崩溃残留的 staging（v1 不恢复、只删
-        ``.staging/**``，绝不触碰 downloads 根下的 final artifact）。"""
-        if self._swept:
+        """按目录清扫：每个 downloads 目录第一次使用时清掉崩溃残留的 staging
+        （v1 不恢复、只删 ``.staging/**``，绝不触碰 final artifact）。单个 sink
+        可服务多个会话目录——清扫状态必须按目录记（CodeRabbit 06-48）。"""
+        key = str(downloads_dir)
+        if key in self._swept:
             return
-        self._swept = True
+        self._swept.add(key)
         staging = _staging_dir(downloads_dir)
         if not staging.is_dir():
             return

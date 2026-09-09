@@ -200,13 +200,15 @@ async def test_single_shot_materializes_with_summary(tmp_path):
     }
     # base64 不出现在摘要
     assert base64.b64encode(data).decode() not in artifact.to_model_text()
-    # sidecar 存在且不含 base64
+    # sidecar 存在且不含 base64/内容（CodeRabbit 06-48：原 or 短路恒真，收严）
     sidecar = artifact.path.with_name(artifact.path.name + ".download.json")
     assert sidecar.exists()
     sc = json.loads(sidecar.read_text(encoding="utf-8"))
     assert sc["artifact_key"] == artifact.identity.artifact_key
     assert sc["turn_id"] == "turn-1" and sc["tool_call_id"] == "call-1"
-    assert "base64" not in sidecar.read_text(encoding="utf-8").lower() or sc.get("content_base64") is None
+    sidecar_text = sidecar.read_text(encoding="utf-8")
+    assert "base64" not in sidecar_text.lower()
+    assert base64.b64encode(data).decode() not in sidecar_text
 
 
 async def test_materialize_1_6_mib_regression(tmp_path):

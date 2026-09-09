@@ -284,9 +284,7 @@ async def test_wrapper_logs_never_contain_payload(tmp_path):
     from loguru import logger as loguru_logger
 
     records: list[str] = []
-    sink_id = loguru_logger.add(
-        lambda message, _f, _r: records.append(str(message)), level="DEBUG"
-    )
+    sink_id = loguru_logger.add(lambda message: records.append(str(message)), level="DEBUG")
     try:
         data = os.urandom(64 * 1024)
         payload = json.dumps(

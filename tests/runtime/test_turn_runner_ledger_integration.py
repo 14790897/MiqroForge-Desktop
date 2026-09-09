@@ -227,12 +227,13 @@ async def test_mcp_download_turn_ledger_and_model_never_see_base64(fake_config, 
         items = await runtime.services.ledger_runtime.load_items("thread-975")
         completed = [it for it in items if it.item_type == "tool_call_completed"]
         assert completed, "ledger 缺少 tool_call_completed"
-        all_items = [
-            {"payload": it.payload, "content": it.content}
-            for it in items
-            if isinstance(it.payload, dict)
-        ]
-        joined = json.dumps(all_items, ensure_ascii=False)
+        # 全条目序列化（含非 dict payload——CodeRabbit 06-48：isinstance 过滤
+        # 会让写进非 dict 记录的 base64 漏检）。
+        joined = json.dumps(
+            [{"payload": it.payload, "content": it.content} for it in items],
+            ensure_ascii=False,
+            default=str,
+        )
         assert payload_b64 not in joined
         result_payload = json.loads(completed[0].payload["result"])
         assert result_payload["type"] == "download_artifact"
