@@ -335,6 +335,7 @@ def _build_pdf(
     page_size_name: str = "A4",
     title_style: dict[str, Any] | None = None,
     body_style: dict[str, Any] | None = None,
+    trusted_images: bool = False,
 ) -> None:
     """Build a PDF document using reportlab.
 
@@ -342,6 +343,12 @@ def _build_pdf(
     中途抛异常，已写入的半成品文件不会被清理（由调用方 ``execute`` 返回 Error）。
     本次只保证「解析阶段降级不产生半成品」——图片/文本在解析阶段降级为占位文字，
     不会走到异常分支。
+
+    ``trusted_images`` 是**不可由模型伪造**的图片可信通道：只有 ``content_path``
+    的内部转换路径（``_md_to_blocks`` 已逐张做过边界复校）才由 ``execute`` 传
+    ``True``；模型侧 ``content`` 手写的 image 块恒为 ``False`` → 一律降级为占位
+    文字 + ``logger.warning``，**不打开任何文件**。此前用块内 JSON 字段
+    ``validated`` 做判据，而该字段模型可自设 → 可绕过边界读任意文件（H1 破口）。
     """
     from reportlab.lib import colors
     from reportlab.lib.enums import TA_CENTER, TA_JUSTIFY, TA_LEFT, TA_RIGHT
@@ -484,9 +491,11 @@ def _build_pdf(
 
             elif block_type == "image":
                 # 仅接受 content_path 解析阶段校验过的图片块；content 里手写的
-                # 图片块一律降级，避免绕过边界检查读任意文件。
+                # 图片块一律降级，避免绕过边界检查读任意文件。可信标记来自函数
+                # 参数 trusted_images —— 模型无法通过 JSON 字段伪造（H1 修复：
+                # 原 `block.get("validated") is True` 判据模型可自设）。
                 flow = None
-                if block.get("validated") is True:
+                if trusted_images:
                     flow = _build_image_flowable(
                         str(block.get("path") or ""),
                         frame_width,
@@ -749,6 +758,11 @@ def _build_image_flowable(
     必须用构造参数 ``Image(path, width=W, height=H)``（而不是改 drawWidth），
     并在构造后复核「实际绘制尺寸 == 期望尺寸」——reportlab 在尺寸被静默重置时
     会产出坏 PDF 且不报错。任何异常/超限一律返回 None，由调用方降级为占位文字。
+
+    高度用 ``min(_MAX_IMAGE_HEIGHT_PT, max_height)`` **钳制（clamp ≤ 660pt）**，
+    不是「缩放后仍超 frame 高度 → 降级」：钳制后 ``height <= limit <= max_height``
+    恒成立，降级分支永远走不到（第二轮评审 M6 认定的死代码，已删除）。保留钳制
+    即可达成「不触发 LayoutError」的目标。此处与 plan §3.2 的措辞差异如实记录。
     """
     from reportlab.platypus import Image as ReportLabImage
 
@@ -786,15 +800,12 @@ def _build_image_flowable(
                 return None
             width = max_width
             height = width * ih / iw
+            # 高度钳制（clamp）：钳制后 height <= limit <= max_height，必然放得下，
+            # 不会触发 LayoutError。原「缩放后仍超 frame 高度 → 降级」分支恒假，已删。
             limit = min(_MAX_IMAGE_HEIGHT_PT, max_height)
             if height > limit:
                 width *= limit / height
                 height = limit
-            if width <= 0 or height <= 0 or height > max_height + 0.01:
-                logger.warning(
-                    f"PDF: 图片 {src} 缩放后仍超出可用高度 {max_height:.1f}pt，降级为占位文字"
-                )
-                return None
             target = _downsample_image(im, width, work_dir)
     except Exception as exc:  # noqa: BLE001 — 降级不抛异常（含 PIL DecompressionBombError）
         logger.warning(f"PDF: 图片 {src} 读取失败（{exc}），降级为占位文字")
@@ -842,6 +853,10 @@ def _md_to_blocks(
     并要求落在源稿自身通过校验的那个根之内（不接受跨根读取）；越界/损坏/超限/
     SVG 一律降级为占位文字 + ``logger.warning``，不抛异常。alt 文本渲染为图注，
     与降级占位保持同等信息量。
+
+    返回的 image 块**不带任何「已校验」标记字段**——模型可自设 JSON 键，信任只能由
+    调用方（``execute`` 的 ``content_path`` 分支）通过 ``_build_pdf(trusted_images=True)``
+    显式表达；``content`` 路径的块恒不可信（H1 修复）。
 
     这是**受支持的 Markdown 子集**，不是完整 Markdown renderer——只恢复结构骨架。
     已知限制：
@@ -971,13 +986,14 @@ def _md_to_blocks(
                     }
                 )
             else:
+                # 不写任何「已校验」标记字段——模型可自设 JSON 键，信任只能由
+                # 调用方通过 _build_pdf(trusted_images=True) 显式传递（H1 修复）。
                 blocks.append(
                     {
                         "type": "image",
                         "path": str(image_path),
                         "alt": label,
                         "caption": _md_inline(label),
-                        "validated": True,
                     }
                 )
             continue
@@ -1250,6 +1266,9 @@ class CreatePdfTool(Tool):
                 page_size_name=str(kwargs.get("page_size", "A4")),
                 title_style=title_style,
                 body_style=body_style,
+                # 只有 content_path 分支（content 已被 _md_to_blocks 替换、图片逐张
+                # 复校过边界）才可信；模型侧 content 的 image 块恒不可信（H1 修复）。
+                trusted_images=bool(content_path),
             )
             _persist_tracked_file(self._workspace, file_path, op="write", session_key=_sess_key)
             return f"Created: {file_path}"

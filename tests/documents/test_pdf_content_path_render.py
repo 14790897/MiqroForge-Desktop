@@ -3,7 +3,13 @@
 覆盖 plan_994_v2 §4 的用例：行内粗体/链接（含属性里的 "）、表格与代码围栏
 不转义、行首图片的相对/越界/空路径/特殊字符/损坏/SVG/重复引用、跨根读取拒绝、
 绘制尺寸断言、page_size 宽度、既有直调用兼容。
+
+第二轮评审返工补充：content 路径 image 块的可信通道（H1）、跨根守卫真触发
+（M1）、降采样像素宽度（M2）、JPEG 分支（M3）、字节/像素资源上限（M4）、
+「越界不读文件」用 PIL.Image.open 调用记录断言（M5）。
 """
+
+from contextlib import contextmanager
 
 import pytest
 
@@ -48,6 +54,51 @@ def _frame_width(page_size):
     from miqi.documents.pdf_create_tool import _FRAME_PADDING_PT, _get_page_size
 
     return _get_page_size(page_size)[0] - 3.17 * 2 * cm - 2 * _FRAME_PADDING_PT
+
+
+@contextmanager
+def _capture_warnings():
+    """捕获 loguru WARNING 消息——用于区分降级原因（跨根拒绝 vs 文件不存在）。"""
+    from loguru import logger
+
+    messages: list[str] = []
+    sink_id = logger.add(lambda m: messages.append(m.record["message"]), level="WARNING")
+    try:
+        yield messages
+    finally:
+        logger.remove(sink_id)
+
+
+@pytest.fixture
+def pil_open_spy(monkeypatch):
+    """记录 PIL.Image.open 的调用参数。
+
+    「未绘制图片」不等于「没读文件」——本 fixture 用来断言越界/超限路径**根本没打开**
+    文件（``_build_image_flowable`` 在 stat/size 阶段就返回 None）。
+    """
+    import PIL.Image
+
+    calls: list = []
+    real_open = PIL.Image.open
+
+    def _spy(fp, *args, **kwargs):
+        calls.append(fp)
+        return real_open(fp, *args, **kwargs)
+
+    monkeypatch.setattr(PIL.Image, "open", _spy)
+    return calls
+
+
+def _image_xref_info(pdf_path):
+    """返回 PDF 中第一张嵌入图的 (ext, 像素宽, 像素高, 颜色分量数)。"""
+    import pymupdf
+
+    doc = pymupdf.open(str(pdf_path))
+    images = doc[0].get_images(full=True)
+    assert len(images) == 1, images
+    info = doc.extract_image(images[0][0])
+    doc.close()
+    return info["ext"], info["width"], info["height"], info["colorspace"]
 
 
 @pytest.mark.asyncio
@@ -208,7 +259,7 @@ async def test_create_pdf_content_path_image_relative_embeds(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_create_pdf_content_path_image_relative_escape_rejected(tmp_path):
+async def test_create_pdf_content_path_image_relative_escape_rejected(tmp_path, pil_open_spy):
     """CreatePdfTool: ../ 越界图片 → 占位 + 不读文件（即使目标真实存在且是合法 PNG）。"""
     from miqi.documents.pdf_create_tool import CreatePdfTool
 
@@ -222,10 +273,11 @@ async def test_create_pdf_content_path_image_relative_escape_rejected(tmp_path):
 
     assert _drawn_images(ws / "o.pdf") == []
     assert "[图表：x（见源稿）]" in _pdf_text(ws / "o.pdf")
+    assert pil_open_spy == [], f"越界图片不应被打开: {pil_open_spy}"
 
 
 @pytest.mark.asyncio
-async def test_create_pdf_content_path_image_absolute_outside_rejected(tmp_path):
+async def test_create_pdf_content_path_image_absolute_outside_rejected(tmp_path, pil_open_spy):
     """CreatePdfTool: 绝对路径指向边界外 → 占位 + 不读文件。"""
     from miqi.documents.pdf_create_tool import CreatePdfTool
 
@@ -239,6 +291,7 @@ async def test_create_pdf_content_path_image_absolute_outside_rejected(tmp_path)
 
     assert _drawn_images(ws / "o.pdf") == []
     assert "[图表：x（见源稿）]" in _pdf_text(ws / "o.pdf")
+    assert pil_open_spy == [], f"越界图片不应被打开: {pil_open_spy}"
 
 
 @pytest.mark.asyncio
@@ -431,8 +484,13 @@ async def test_create_pdf_content_path_beats_content(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_create_pdf_content_path_image_user_root_same_root_only(tmp_path):
-    """CreatePdfTool: 源稿在用户授权根时，图片只能落在同一个根内（不接受跨根读取）。"""
+async def test_create_pdf_content_path_image_user_root_same_root_only(tmp_path, pil_open_spy):
+    """CreatePdfTool: 源稿在用户授权根时，图片只能落在同一个根内（不接受跨根读取）。
+
+    注意：跨根用例必须写成 ``../root_b/in_root_b.png``。写成 ``in_root_b.png`` 会被
+    join 成 ``root_a/in_root_b.png``——天然落在根内，走的是「文件不存在」分支，
+    跨根守卫根本没触发（第二轮评审指出的假绿用例）。
+    """
     from miqi.documents.pdf_create_tool import CreatePdfTool
 
     ws = tmp_path / "ws"
@@ -442,7 +500,7 @@ async def test_create_pdf_content_path_image_user_root_same_root_only(tmp_path):
     _png(root_a / "in_root_a.png")
     _png(root_b / "in_root_b.png")
     (root_a / "same.md").write_text("![同根](in_root_a.png)\n", encoding="utf-8")
-    (root_a / "cross.md").write_text("![跨根](in_root_b.png)\n", encoding="utf-8")
+    (root_a / "cross.md").write_text("![跨根](../root_b/in_root_b.png)\n", encoding="utf-8")
 
     tool = CreatePdfTool(workspace=ws, allowed_dir=ws, allow_user_roots=True)
     roots = [str(root_a), str(root_b)]
@@ -452,11 +510,18 @@ async def test_create_pdf_content_path_image_user_root_same_root_only(tmp_path):
     )
     assert len(_drawn_images(ws / "same.pdf")) == 1
 
-    assert "Created:" in await tool.execute(
-        filename="cross.pdf", content_path=str(root_a / "cross.md"), _user_roots=roots
-    )
+    # 目标图真实存在且可读（两个根都在 _user_roots 内），唯一拒绝理由是「跨根」
+    assert (root_b / "in_root_b.png").is_file()
+    pil_open_spy.clear()  # 同根用例已合法读过图，跨根用例从零开始计数
+    with _capture_warnings() as warnings:
+        assert "Created:" in await tool.execute(
+            filename="cross.pdf", content_path=str(root_a / "cross.md"), _user_roots=roots
+        )
     assert _drawn_images(ws / "cross.pdf") == []
     assert "[图表：跨根（见源稿）]" in _pdf_text(ws / "cross.pdf")
+    assert any("不在源稿授权根" in m for m in warnings), warnings
+    assert not any("不存在" in m for m in warnings), warnings
+    assert pil_open_spy == [], f"跨根图片不应被打开: {pil_open_spy}"
 
 
 def test_md_to_blocks_direct_call_backward_compatible():
@@ -484,3 +549,186 @@ async def test_create_pdf_content_keeps_bold_tags(tmp_path):
     text = _pdf_text(tmp_path / "o.pdf")
     assert "粗体" in text
     assert "<b>" not in text
+
+
+# ── H1：content 的 image 块不得成为读任意文件的通道 ─────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_create_pdf_content_image_block_cannot_forge_trust(tmp_path, pil_open_spy):
+    """CreatePdfTool: content 里 image 块自带 ``validated: true`` 不得成为可信通道。
+
+    回归 H1（第二轮评审实测：base 6f8b880b 无此行为，本 PR 新引入）：``validated``
+    曾是模型可写的普通 JSON 字段，伪造后能嵌入工作区外任意文件。现在「可信」只来自
+    ``_build_pdf(trusted_images=...)`` 函数参数（模型不可见），content 路径恒为 False
+    → 0 张图嵌入 + 占位 + warning，且 **根本没打开文件**。
+    """
+    from miqi.documents.pdf_create_tool import CreatePdfTool
+
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    outside = _png(tmp_path / "secret.png")
+    tool = CreatePdfTool(workspace=ws, allowed_dir=ws)
+    result = await tool.execute(
+        filename="o.pdf",
+        content=[
+            {
+                "type": "image",
+                "path": outside.as_posix(),
+                "alt": "x",
+                "validated": True,
+            }
+        ],
+    )
+
+    assert "Created:" in result
+    assert _drawn_images(ws / "o.pdf") == []
+    assert "[图表：x（见源稿）]" in _pdf_text(ws / "o.pdf")
+    assert pil_open_spy == [], f"边界外图片不应被打开: {pil_open_spy}"
+
+
+@pytest.mark.asyncio
+async def test_create_pdf_content_image_block_in_boundary_also_degraded(tmp_path, pil_open_spy):
+    """CreatePdfTool: 即使路径在边界内，content 路径也不再支持图片块（一律占位）。"""
+    from miqi.documents.pdf_create_tool import CreatePdfTool
+
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    inside = _png(ws / "in.png")
+    tool = CreatePdfTool(workspace=ws, allowed_dir=ws)
+    result = await tool.execute(
+        filename="o.pdf",
+        content=[
+            {
+                "type": "image",
+                "path": inside.as_posix(),
+                "alt": "y",
+                "validated": True,
+            }
+        ],
+    )
+
+    assert "Created:" in result
+    assert _drawn_images(ws / "o.pdf") == []
+    assert "[图表：y（见源稿）]" in _pdf_text(ws / "o.pdf")
+    assert pil_open_spy == [], f"content 路径不应嵌入图片: {pil_open_spy}"
+
+
+@pytest.mark.asyncio
+async def test_create_pdf_content_path_still_embeds_four_images(tmp_path):
+    """CreatePdfTool: H1 修复不得回归 content_path 的可信通道——4 张图仍全部嵌入。"""
+    from miqi.documents.pdf_create_tool import CreatePdfTool
+
+    (tmp_path / "r.md").write_text(
+        "".join(f"![图{i}](fig{i}.png)\n" for i in range(4)), encoding="utf-8"
+    )
+    for i in range(4):
+        _png(tmp_path / f"fig{i}.png")
+
+    tool = CreatePdfTool(workspace=tmp_path, allowed_dir=tmp_path)
+    assert "Created:" in await tool.execute(filename="o.pdf", content_path="r.md")
+
+    assert len(_drawn_images(tmp_path / "o.pdf")) == 4
+
+
+# ── M2：降采样后的实际像素宽度 ──────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_create_pdf_content_path_image_downsampled_to_target_dpi(tmp_path):
+    """CreatePdfTool: 嵌入图实际像素宽 == 200 DPI 换算值（A4 内容宽 403.55pt → 1121px）。
+
+    此前所有用例的测试图都是 400×200，``_downsample_image`` 的 resize 分支一次都没进。
+    """
+    from miqi.documents.pdf_create_tool import CreatePdfTool
+
+    _png(tmp_path / "big.png", size=(2700, 1639))
+    (tmp_path / "r.md").write_text("![x](big.png)\n", encoding="utf-8")
+    tool = CreatePdfTool(workspace=tmp_path, allowed_dir=tmp_path)
+    assert "Created:" in await tool.execute(filename="o.pdf", content_path="r.md")
+
+    expected_px = round(_frame_width("A4") / 72 * 200)
+    assert expected_px == 1121
+    ext, px_w, px_h, _ = _image_xref_info(tmp_path / "o.pdf")
+    assert ext == "png"
+    assert px_w == expected_px, (px_w, expected_px)
+    assert px_h == round(1639 * expected_px / 2700)
+
+
+# ── M3：JPEG 分支 ──────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_create_pdf_content_path_image_jpeg_rgb_embeds_and_downsampled(tmp_path):
+    """CreatePdfTool: RGB JPEG 走 JPEG 分支并按 200 DPI 降采样（PDF 内为 DCTDecode）。"""
+    from PIL import Image
+
+    from miqi.documents.pdf_create_tool import CreatePdfTool
+
+    Image.new("RGB", (2700, 1639), (10, 120, 200)).save(
+        tmp_path / "big.jpg", format="JPEG", quality=90
+    )
+    (tmp_path / "r.md").write_text("![x](big.jpg)\n", encoding="utf-8")
+    tool = CreatePdfTool(workspace=tmp_path, allowed_dir=tmp_path)
+    assert "Created:" in await tool.execute(filename="o.pdf", content_path="r.md")
+
+    assert len(_drawn_images(tmp_path / "o.pdf")) == 1
+    ext, px_w, _, colorspace = _image_xref_info(tmp_path / "o.pdf")
+    assert ext == "jpeg"
+    assert px_w == 1121
+    assert colorspace == 3
+
+
+@pytest.mark.asyncio
+async def test_create_pdf_content_path_image_jpeg_grayscale_converted_to_rgb(tmp_path):
+    """CreatePdfTool: 灰度 JPEG（mode L）走 ``convert("RGB")`` 分支，输出仍为 JPEG/RGB。"""
+    from PIL import Image
+
+    from miqi.documents.pdf_create_tool import CreatePdfTool
+
+    Image.new("L", (400, 200), 128).save(tmp_path / "gray.jpg", format="JPEG")
+    (tmp_path / "r.md").write_text("![x](gray.jpg)\n", encoding="utf-8")
+    tool = CreatePdfTool(workspace=tmp_path, allowed_dir=tmp_path)
+    assert "Created:" in await tool.execute(filename="o.pdf", content_path="r.md")
+
+    assert len(_drawn_images(tmp_path / "o.pdf")) == 1
+    ext, px_w, px_h, colorspace = _image_xref_info(tmp_path / "o.pdf")
+    assert ext == "jpeg"
+    assert (px_w, px_h) == (400, 200)
+    assert colorspace == 3
+
+
+# ── M4：资源上限守卫（字节 / 像素） ────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_create_pdf_content_path_image_bytes_limit_rejected(tmp_path, pil_open_spy):
+    """CreatePdfTool: 单图超过 20MB 字节上限 → 占位，且在打开图片前就被拒（不读文件）。"""
+    from miqi.documents.pdf_create_tool import _MAX_IMAGE_BYTES, CreatePdfTool
+
+    (tmp_path / "big.png").write_bytes(b"\0" * (_MAX_IMAGE_BYTES + 1))
+    (tmp_path / "r.md").write_text("![x](big.png)\n", encoding="utf-8")
+    tool = CreatePdfTool(workspace=tmp_path, allowed_dir=tmp_path)
+    assert "Created:" in await tool.execute(filename="o.pdf", content_path="r.md")
+
+    assert _drawn_images(tmp_path / "o.pdf") == []
+    assert "[图表：x（见源稿）]" in _pdf_text(tmp_path / "o.pdf")
+    assert pil_open_spy == [], f"超限图片不应被打开: {pil_open_spy}"
+
+
+@pytest.mark.asyncio
+async def test_create_pdf_content_path_image_pixels_limit_rejected(tmp_path):
+    """CreatePdfTool: 单图超过 40Mpx 像素上限 → 占位（防解压炸弹）。"""
+    from PIL import Image
+
+    from miqi.documents.pdf_create_tool import _MAX_IMAGE_PIXELS, CreatePdfTool
+
+    width, height = 7000, 5715  # 40,005,000 > 40,000,000
+    assert width * height > _MAX_IMAGE_PIXELS
+    Image.new("L", (width, height), 0).save(tmp_path / "huge.png")
+    (tmp_path / "r.md").write_text("![x](huge.png)\n", encoding="utf-8")
+    tool = CreatePdfTool(workspace=tmp_path, allowed_dir=tmp_path)
+    assert "Created:" in await tool.execute(filename="o.pdf", content_path="r.md")
+
+    assert _drawn_images(tmp_path / "o.pdf") == []
+    assert "[图表：x（见源稿）]" in _pdf_text(tmp_path / "o.pdf")

@@ -17,6 +17,16 @@
 #   * 图片必须落在源稿自身通过校验的那个根之内，不接受跨根读取
 #   * 越界/不存在/损坏/超限/SVG 一律降级为占位文字 + logger.warning，
 #     不读取文件、不抛异常
+#   * 可信通道是 _build_pdf(trusted_images=...) 函数参数（仅 content_path 内部
+#     转换路径传 True）；content 里手写 image 块一律降级，块内 JSON 字段
+#     （如 validated）不具任何语义——模型可自设，曾构成读任意文件的破口（H1）
+#
+# - 【运行时不对称，#994 第二轮评审 M7】上述「用户授权目录读」在 KUN 运行时**不可达**：
+#   miqi/kun_runtime/tool_host.py:112-115 的 _USER_ROOTS_TOOLS 不含 create_pdf，
+#   该路径下 _user_roots 从不注入 → content_path 的 user_roots 兜底分支永不生效；
+#   仅 legacy orchestrator 路径（miqi/execution/orchestrator.py:55-66 的
+#   _FILE_MUTATION_TOOLS 含 create_pdf）会注入。本 PR 不改 kun_runtime 代码，
+#   是否把 create_pdf 加入 _USER_ROOTS_TOOLS 见 issue #1004。
 #
 # 详细实现见 miqi/documents/path_utils.py 模块文档。
 path_semantics:
@@ -26,3 +36,5 @@ path_semantics:
   return_value: "成功创建后返回实际落盘路径"
   content_path_read: "content_path 源稿可读工作区/会话文件区 + 用户授权目录（#821），其余拒绝"
   content_path_image_read: "行首图片相对源稿目录解析并复校同一白名单，只能落在源稿自身通过校验的根内；跨根/越界降级为占位文字"
+  content_path_image_trust: "可信标记来自 _build_pdf(trusted_images=) 函数参数；content 手写 image 块与块内 JSON 字段一律不可信"
+  content_path_read_kun_gap: "KUN 运行时 _USER_ROOTS_TOOLS 不含 create_pdf → 用户授权目录读不可达；仅 legacy orchestrator 路径可达"
