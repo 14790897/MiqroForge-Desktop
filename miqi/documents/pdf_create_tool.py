@@ -609,9 +609,9 @@ class CreatePdfTool(Tool):
                 },
             },
             "anyOf": [
-                {"required": ["filename"]},
-                {"required": ["file_path"]},
-                {"required": ["path"]},
+                {"type": "object", "required": ["filename"]},
+                {"type": "object", "required": ["file_path"]},
+                {"type": "object", "required": ["path"]},
             ],
         }
 
