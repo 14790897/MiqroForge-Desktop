@@ -11,6 +11,12 @@
 # - create_pdf 的 content_path（可选）读取源文件：除上述边界外，额外接受
 #   tools.auto_user_dirs/_user_roots（#821 口径）授权的用户目录，与 ReadFileTool 一致；
 #   未授权目录一律拒绝（fail-closed，无读边界放宽）
+# - create_pdf 的 content_path 内行首图片 ![alt](path)（#994）：
+#   * 相对路径以源稿所在目录为基准，join 后仍进同一解析入口复校边界
+#     （../ 越界同样被拦截）
+#   * 图片必须落在源稿自身通过校验的那个根之内，不接受跨根读取
+#   * 越界/不存在/损坏/超限/SVG 一律降级为占位文字 + logger.warning，
+#     不读取文件、不抛异常
 #
 # 详细实现见 miqi/documents/path_utils.py 模块文档。
 path_semantics:
@@ -18,3 +24,5 @@ path_semantics:
   prefix_stripping: "以会话目录前缀开头的路径自动剥离前缀，避免嵌套"
   cross_session: "指向其他会话目录的路径会被拒绝（会话隔离）"
   return_value: "成功创建后返回实际落盘路径"
+  content_path_read: "content_path 源稿可读工作区/会话文件区 + 用户授权目录（#821），其余拒绝"
+  content_path_image_read: "行首图片相对源稿目录解析并复校同一白名单，只能落在源稿自身通过校验的根内；跨根/越界降级为占位文字"
