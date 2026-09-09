@@ -2416,6 +2416,9 @@ export function ChatConsole({
   // #1000: 首屏登录卡片与发送拦截共用登录态；旧 preload 无 qraft 命名空间时
   // useQraftStatus 内部兜底为空态（视为未登录）。
   const { loggedIn } = useQraftStatus();
+  // 流错误路径同步读取最新登录态：handleSend 闭包可能捕获旧值（CodeRabbit #1010）。
+  const loggedInRef = useRef(loggedIn);
+  loggedInRef.current = loggedIn;
   // #875 D1（外部评估 P0/A1）：系统包安装的 persist/runtime 失败标记只写在
   // 工具输出里，模型可能摘要掉——用户会误以为「允许并记住」已永久生效。
   // 扫描消息中的失败标记并发 window 事件，由 App 级 toast 呈现（不依赖模型）。
@@ -5290,7 +5293,10 @@ export function ChatConsole({
       setMessages((prev) => [
         ...prev.filter((m) => !m.isLiveReasoning),
         isProviderConfigurationProblem(message, data.code)
-          ? createProviderConfigMessage(message)
+          ? createProviderConfigMessage(
+              message,
+              loggedInRef.current ? 'open-provider-settings' : 'login'
+            )
           : { role: 'error', content: message, timestamp: Date.now() },
       ]);
       setStreaming(false);
@@ -5488,7 +5494,13 @@ export function ChatConsole({
       }
       const errMsg = sanitizeUiMessage(e?.message ?? String(e ?? '未知错误'));
       if (isProviderConfigurationProblem(errMsg, e?.code)) {
-        setMessages((prev) => [...prev, createProviderConfigMessage(errMsg)]);
+        setMessages((prev) => [
+          ...prev,
+          createProviderConfigMessage(
+            errMsg,
+            loggedInRef.current ? 'open-provider-settings' : 'login'
+          ),
+        ]);
       } else if (e?.code) {
         setMessages((prev) => [
           ...prev,

@@ -55,9 +55,8 @@ export function QraftLoginButton({
       //（CodeRabbit #1010）。
       const result = await window.miqi.qraft.browserLogin({});
       if (result.ok) {
-        // 状态事件会更新 useQraftStatus 订阅方；主动再取一次保证
-        // 依赖 status 快照的调用方（设置页账号卡）即时刷新。
-        await window.miqi.qraft.status().catch(() => {});
+        // 登录成功即由主进程 persistLogin 推送 qraft:statusChanged 事件，
+        // 各 useQraftStatus 订阅方随之更新，无需再主动拉一次快照。
         onLoggedIn?.();
       } else if (result.code === 'LOGIN_CANCELLED') {
         setFeedback({ kind: 'notice', text: qraftErrorText(result, '已取消浏览器登录') });
