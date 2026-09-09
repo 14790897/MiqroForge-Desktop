@@ -90,9 +90,10 @@ export function QraftPage() {
     setLoginError(null);
     setBrowserNotice(null);
     try {
-      const result = await window.miqi.qraft.browserLogin({
-        env: 'test',
-      });
+      // 不传 env：主进程 resolveConfig 回退到上次登录存储的环境
+      //（stored.env ?? 'test'），硬编码 'test' 会覆盖存量生产环境登录
+      //（CodeRabbit #1010）。
+      const result = await window.miqi.qraft.browserLogin({});
       if (result.ok) {
         setStatus(await window.miqi.qraft.status());
       } else if (result.code === 'LOGIN_CANCELLED') {

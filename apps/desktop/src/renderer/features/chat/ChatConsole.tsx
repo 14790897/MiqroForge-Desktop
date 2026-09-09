@@ -4284,6 +4284,34 @@ export function ChatConsole({
         typeof window.miqi.qraft?.status === 'function'
           ? await window.miqi.qraft.status().catch(() => null)
           : null;
+      // ── #922 AI 网关门禁 ──
+      // 登录后网关状态明确非 active（provisioning/failed/disabled）时拒绝发起
+      // 会话：把乐观气泡换成网关提示并恢复输入框。未登录 / 平台未下发网关状态
+      // 时放行（与模型面板语义一致）。先于无 provider 判定（CodeRabbit #1010）：
+      // 已登录但网关未就绪 + 无 provider 时给网关修复指引，而非泛泛的
+      // 「未配置模型服务」。
+      if (
+        gatewayStatus?.loggedIn === true &&
+        gatewayStatus.aiGateway &&
+        gatewayStatus.aiGateway.status !== 'active'
+      ) {
+        pendingSendIdsRef.current.delete(sendSessionKey);
+        streamingBySession.delete(sendSessionKey);
+        setSendingFor(sendSessionKey, null);
+        if (currentSessionRef.current === sendSessionKey) {
+          setStreaming(false);
+          setMessages((prev) => {
+            const last = prev[prev.length - 1];
+            if (last?.timestamp === userMsg.timestamp) {
+              return [...prev.slice(0, -1), createGatewayBlockedMessage()];
+            }
+            return prev;
+          });
+          setInput(text);
+          setAttachments(atts);
+        }
+        return;
+      }
       const result = await window.miqi.providers.list();
       const hasConfiguredProvider = result.providers.some((provider) => provider.configured);
       if (!hasConfiguredProvider) {
@@ -4312,33 +4340,6 @@ export function ChatConsole({
             const last = prev[prev.length - 1];
             if (last?.timestamp === userMsg.timestamp) {
               return [...prev.slice(0, -1), guidance];
-            }
-            return prev;
-          });
-          setInput(text);
-          setAttachments(atts);
-        }
-        return;
-      }
-
-      // ── #922 AI 网关门禁 ──
-      // 登录后网关状态明确非 active（provisioning/failed/disabled）时拒绝发起
-      // 会话：把乐观气泡换成网关提示并恢复输入框。未登录 / 平台未下发网关状态
-      // 时放行（与模型面板语义一致）。
-      if (
-        gatewayStatus?.loggedIn === true &&
-        gatewayStatus.aiGateway &&
-        gatewayStatus.aiGateway.status !== 'active'
-      ) {
-        pendingSendIdsRef.current.delete(sendSessionKey);
-        streamingBySession.delete(sendSessionKey);
-        setSendingFor(sendSessionKey, null);
-        if (currentSessionRef.current === sendSessionKey) {
-          setStreaming(false);
-          setMessages((prev) => {
-            const last = prev[prev.length - 1];
-            if (last?.timestamp === userMsg.timestamp) {
-              return [...prev.slice(0, -1), createGatewayBlockedMessage()];
             }
             return prev;
           });

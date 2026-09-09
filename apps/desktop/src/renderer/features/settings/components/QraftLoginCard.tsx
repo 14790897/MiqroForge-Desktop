@@ -50,7 +50,10 @@ export function QraftLoginButton({
         setFeedback({ kind: 'error', text: '登录功能不可用：预加载桥接缺失，请重启应用后重试。' });
         return;
       }
-      const result = await window.miqi.qraft.browserLogin({ env: 'test' });
+      // 不传 env：主进程 resolveConfig 回退到上次登录存储的环境
+      //（stored.env ?? 'test'），硬编码 'test' 会覆盖存量生产环境登录
+      //（CodeRabbit #1010）。
+      const result = await window.miqi.qraft.browserLogin({});
       if (result.ok) {
         // 状态事件会更新 useQraftStatus 订阅方；主动再取一次保证
         // 依赖 status 快照的调用方（设置页账号卡）即时刷新。
