@@ -621,7 +621,7 @@ function getDocIcon(name: string) {
   }
 }
 
-/** 消息时间戳(ChatGPT 式):今天 → "HH:MM",昨天 → "昨天 HH:MM",更早 → "M月D日 HH:MM" */
+/** 消息时间戳(ChatGPT 式):今天 → "今天 HH:MM",昨天 → "昨天 HH:MM",更早 → "M月D日 HH:MM" */
 function formatChatTime(timestamp?: number | string | null): string {
   if (timestamp === undefined || timestamp === null) return '';
   const value = typeof timestamp === 'number' ? timestamp : Date.parse(String(timestamp));
@@ -631,7 +631,7 @@ function formatChatTime(timestamp?: number | string | null): string {
   const hm = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
   const startOfDay = (x: Date) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
   const dayDiff = Math.round((startOfDay(now) - startOfDay(d)) / 86400000);
-  if (dayDiff <= 0) return hm;
+  if (dayDiff <= 0) return `今天 ${hm}`;
   if (dayDiff === 1) return `昨天 ${hm}`;
   return `${d.getMonth() + 1}月${d.getDate()}日 ${hm}`;
 }
@@ -6925,6 +6925,7 @@ export function ChatConsole({
                         hideHeader={group.kind === 'reply-content'}
                         sessionKey={sessionKey}
                         turnIndex={i}
+                        clockTick={clockTick}
                         execOutputs={execOutputs}
                         inlineExecOutput={inlineExecOutput}
                         sources={sourcesByMsg.get(group.msg) ?? []}
@@ -8239,6 +8240,8 @@ interface MessageBubbleProps {
   turnIndex?: number;
   /** Copy-feedback index — chatGroups index; chain rows reuse the group's. */
   copyIdx?: number;
+  /** Minute tick — re-renders memoized bubbles so HH:MM timestamps refresh. */
+  clockTick?: number;
   /** Timestamp of the pending optimistic user bubble (issue #364) — the
    *  spinner shows only on the bubble whose timestamp matches, so a session
    *  switch never shows it on another session's messages. */
@@ -8298,6 +8301,7 @@ const MessageBubble = memo(function MessageBubble({
   searchResults,
   turnIndex,
   copyIdx,
+  clockTick,
   sending,
   onResume,
   onRestart,
@@ -9321,6 +9325,7 @@ function areMessageBubblePropsEqual(a: MessageBubbleProps, b: MessageBubbleProps
     a.sessionKey === b.sessionKey &&
     a.turnIndex === b.turnIndex &&
     a.copyIdx === b.copyIdx &&
+    a.clockTick === b.clockTick &&
     a.execOutputs === b.execOutputs &&
     a.inlineExecOutput === b.inlineExecOutput &&
     a.isLast === b.isLast &&
