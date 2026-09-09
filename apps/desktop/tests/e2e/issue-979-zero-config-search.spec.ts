@@ -26,7 +26,7 @@
 
 import { _electron as electron, test, expect } from '@playwright/test';
 import type { ElectronApplication, Page } from '@playwright/test';
-import { spawn, type ChildProcess } from 'node:child_process';
+import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { join } from 'node:path';
 import {
   LLM_TIMEOUT,
@@ -41,29 +41,58 @@ import {
 // ── 真零配置：清除本机环境变量里的搜索 key ─────────────────────────────
 // WebSearchTool 构造时会把 DEEPSEEK_API_KEY/TAVILY_API_KEY/BRAVE_API_KEY
 // 环境变量当兜底配置（web.py）——不删掉它们，零配置就不成立。
-for (const k of ['DEEPSEEK_API_KEY', 'TAVILY_API_KEY', 'BRAVE_API_KEY']) {
-  delete process.env[k];
+// 原值先保存，beforeAll 清除、afterAll 恢复：Playwright worker 会串行跑
+// 多个 spec 文件，模块级永久删除会污染同 worker 后续 spec；本 spec 被
+// skip 时 beforeAll 不执行，环境不受扰动（CodeRabbit #996）。
+const SEARCH_ENV_KEYS = ['DEEPSEEK_API_KEY', 'TAVILY_API_KEY', 'BRAVE_API_KEY'] as const;
+const _savedSearchEnv: Record<string, string | undefined> = {};
+for (const k of SEARCH_ENV_KEYS) _savedSearchEnv[k] = process.env[k];
+
+function clearSearchEnvKeys() {
+  for (const k of SEARCH_ENV_KEYS) delete process.env[k];
+}
+
+function restoreSearchEnvKeys() {
+  for (const k of SEARCH_ENV_KEYS) {
+    if (_savedSearchEnv[k] === undefined) delete process.env[k];
+    else process.env[k] = _savedSearchEnv[k];
+  }
 }
 
 const REPO_ROOT = join(APPS_DESKTOP, '..', '..');
 
-/** 启动 scripts/mock_search_llm.py（stdlib only，ephemeral 端口）。 */
+/** 启动 scripts/mock_search_llm.py（stdlib only，port 0 由 OS 分配）。 */
 async function startMockSearchLLM(): Promise<{ proc: ChildProcess; mockUrl: string }> {
-  const python = process.env.MIQI_PYTHON_PATH || 'python';
-  const port = 20000 + Math.floor(Math.random() * 20000);
-  const proc = spawn(python, [join(REPO_ROOT, 'scripts', 'mock_search_llm.py'), String(port)], {
+  // MIQI_PYTHON_PATH 可能指向失效解释器——先探测，不可用回退 'python'
+  // （与 launchElectronApp 同策略），并挂 error 监听避免 spawn ENOENT
+  // 未处理异常（CodeRabbit #996）。
+  let python = process.env.MIQI_PYTHON_PATH || 'python';
+  const probe = spawnSync(python, ['-c', 'import sys; sys.exit(0)'], {
+    encoding: 'utf8',
+    timeout: 5000,
+    windowsHide: true,
+  });
+  if (probe.status !== 0) {
+    console.log(
+      `[test] MIQI_PYTHON_PATH unusable (status ${probe.status}) — mock falls back to 'python'`
+    );
+    python = 'python';
+  }
+  const proc = spawn(python, [join(REPO_ROOT, 'scripts', 'mock_search_llm.py'), '0'], {
     cwd: REPO_ROOT,
     stdio: ['ignore', 'pipe', 'pipe'],
     env: { ...process.env, PYTHONUNBUFFERED: '1' },
     windowsHide: true,
   });
+  proc.on('error', (e) => console.log(`[test] mock search server spawn error: ${e}`));
 
   let readyUrl = '';
+  let stdoutBuf = '';
   let stderrTail = '';
   proc.stdout?.on('data', (d) => {
-    const t = String(d);
-    console.log(`[mock] ${t.trim()}`);
-    const m = t.match(/http:\/\/127\.0\.0\.1:(\d+)\/v1/);
+    stdoutBuf += String(d); // 跨 chunk 累积匹配，URL 被拆包也能识别
+    console.log(`[mock] ${String(d).trim()}`);
+    const m = stdoutBuf.match(/http:\/\/127\.0\.0\.1:(\d+)\/v1/);
     if (m) readyUrl = `http://127.0.0.1:${m[1]}/v1`;
   });
   proc.stderr?.on('data', (d) => {
@@ -123,6 +152,7 @@ test.describe('Issue #979 场景 A：零配置搜索 DDGS 兜底', () => {
   let mockServer: ChildProcess;
 
   test.beforeAll(async () => {
+    clearSearchEnvKeys();
     const mock = await startMockSearchLLM();
     mockServer = mock.proc;
 
@@ -161,6 +191,7 @@ test.describe('Issue #979 场景 A：零配置搜索 DDGS 兜底', () => {
     } catch {
       /* already gone */
     }
+    restoreSearchEnvKeys();
   });
 
   test(
@@ -193,6 +224,7 @@ test.describe('Issue #979 场景 B：DeepSeek 中转站 base（搜索不可用�
   let mockServer: ChildProcess;
 
   test.beforeAll(async () => {
+    clearSearchEnvKeys();
     const mock = await startMockSearchLLM();
     mockServer = mock.proc;
 
@@ -230,6 +262,7 @@ test.describe('Issue #979 场景 B：DeepSeek 中转站 base（搜索不可用�
     } catch {
       /* already gone */
     }
+    restoreSearchEnvKeys();
   });
 
   test(
