@@ -266,6 +266,9 @@ export interface SessionClaimLegacyResult {
 
 export const ConfigUpdateInput = z.object({
   config: z.record(z.unknown()),
+  // 比较并设置（#991）：期望当前默认模型仍为此值，后端不一致时跳过写入。
+  // nullish：与 app-protocol.ts 契约（null | string）一致，null/缺省均放行
+  expectModel: z.string().nullish(),
 });
 
 export const ProviderTestInput = z.object({

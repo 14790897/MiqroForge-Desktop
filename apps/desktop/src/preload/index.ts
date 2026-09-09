@@ -220,8 +220,11 @@ const api = {
   // -- Config -----------------------------------------------------------------
   config: {
     get: (): Promise<Record<string, unknown>> => ipcRenderer.invoke(IPC.CONFIG_GET),
-    update: (config: Record<string, unknown>): Promise<unknown> =>
-      ipcRenderer.invoke(IPC.CONFIG_UPDATE, { config }),
+    update: (
+      config: Record<string, unknown>,
+      expectModel?: string
+    ): Promise<{ saved: boolean; skipped?: string } | unknown> =>
+      ipcRenderer.invoke(IPC.CONFIG_UPDATE, { config, expectModel }),
     // Issue #789: hot-reload broadcast after config.save. Payload:
     // { applied, newSessionsOnly, restartRequired, restartReasons }.
     onUpdated: (callback: (payload: ConfigUpdatedPayload) => void) => {

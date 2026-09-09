@@ -46,6 +46,7 @@ export interface ConfigGetParams {}
 
 export interface ConfigUpdateParams {
   config: Record<string, unknown>;
+  expectModel?: null | string;
 }
 
 export interface ConfigBatchWriteParams {

@@ -225,6 +225,21 @@ async def config_update_handler(
     state = get_bridge_state(registry)
 
     current = state.load_config()
+
+    # 比较并设置（#991）：本次更新改写默认模型且调用方声明了期望的当前
+    # 模型值时，只在磁盘当前值仍与期望一致时写入。登录后的网关模型自动
+    # 同步（GatewayModelAutoSync）读取快照与写入之间用户可能已手动选了
+    # 别的模型 —— 不一致时跳过，保留用户更新的选择。
+    expected_model = getattr(typed, "expect_model", None)
+    if expected_model is not None and _update_touches_model(updates):
+        current_model = getattr(current.agents.defaults, "model", "") or ""
+        if current_model != expected_model:
+            logger.info(
+                "config.update: skipped, expect_model mismatch (current={!r}, expected={!r})",
+                current_model, expected_model,
+            )
+            return {"result": {"saved": False, "skipped": "expect_model_mismatch"}}
+
     # Merge in snake_case (by_alias=False): the wire format accepts both
     # snake_case and camelCase keys, but Pydantic's alias takes precedence
     # when both exist.  Dumping snake_case means a snake_case update wins

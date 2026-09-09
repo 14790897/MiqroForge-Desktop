@@ -13,6 +13,7 @@ import { ApprovalProvider } from './contexts/ApprovalContext';
 import { UserInputProvider } from './contexts/UserInputContext';
 import { RestartRequiredProvider } from './contexts/RestartRequiredContext';
 import { ConfigHotReloadListener } from './components/ConfigHotReloadListener';
+import { GatewayModelAutoSync } from './components/GatewayModelAutoSync';
 import { InstallWarningToaster } from './components/InstallWarningToaster';
 import { ApprovalModal } from './features/approvals/ApprovalModal';
 import { CronPage } from './features/cron/CronPage';
@@ -352,6 +353,7 @@ function AppShell() {
     <TooltipProvider>
       <RestartRequiredProvider>
         <ConfigHotReloadListener />
+        <GatewayModelAutoSync />
         <InstallWarningToaster
           onOpenSandboxSettings={() => {
             setSettingsTab('general');
