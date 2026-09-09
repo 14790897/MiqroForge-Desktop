@@ -900,29 +900,31 @@ class DownloadSink:
             filename=filename,
         )
 
-        if parsed.is_explicit_error:
-            # 服务端显式失败 = 该 artifact 的传输作废（fail-closed，防半传输态
-            # 卡死后续重试）。错误响应常缺文件名，主键可能命不中 → 退化按
-            # (session, server, tool, args_hash) 前缀清理同一远端对象的在途传输。
-            if identity.artifact_key in self._active:
-                self._drop_transfer(downloads_dir, identity)
-            else:
-                self._drop_active_for(
-                    session_key=session_key,
-                    server_name=server_name,
-                    tool_name=tool_name,
-                    source_args_hash=identity.source_args_hash,
-                )
-            server_text = parsed.error_text or ""
-            msg = (
-                "下载失败：服务端明确返回错误。"
-                + (f"原因：{server_text}。" if server_text else "")
-                + "请检查远端文件后重新调用下载工具。"
-            )
-            raise DownloadServerError(msg)
-
         lock = self._locks.setdefault(identity.artifact_key, asyncio.Lock())
         async with lock:
+            # 服务端显式失败 = 该 artifact 的传输作废（fail-closed，防半传输态
+            # 卡死后续重试）。**清理必须在 artifact 锁内**（评审修复自查发现：
+            # 锁外 drop 会与同身份在途 accept 竞态——drop 删 staging 后 in-flight
+            # 片仍可能 reopen 'ab' 复活文件并走到 finalize）。错误响应常缺文件名，
+            # 主键可能命不中 → 退化按 (session, server, tool, args_hash) 前缀清理。
+            if parsed.is_explicit_error:
+                if identity.artifact_key in self._active:
+                    self._drop_transfer(downloads_dir, identity)
+                else:
+                    self._drop_active_for(
+                        session_key=session_key,
+                        server_name=server_name,
+                        tool_name=tool_name,
+                        source_args_hash=identity.source_args_hash,
+                    )
+                server_text = parsed.error_text or ""
+                msg = (
+                    "下载失败：服务端明确返回错误。"
+                    + (f"原因：{server_text}。" if server_text else "")
+                    + "请检查远端文件后重新调用下载工具。"
+                )
+                raise DownloadServerError(msg)
+
             # 命名分配锁：锁序恒为 artifact → downloads_dir（绝不反向获取），
             # 无死锁；单目录内所有 plan/原子提交串行 → 不同身份同文件名
             # 并发时后者必然看到前者已占名 → 走唯一名，绝不互覆。
