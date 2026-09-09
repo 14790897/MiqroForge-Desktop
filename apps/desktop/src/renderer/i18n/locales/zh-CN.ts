@@ -414,6 +414,21 @@ export const zhCN = {
   'skills.createSaving': '创建中...',
   'skills.createAction': '创建',
 
+  // ── SkillHubPage ───────────────────────────────────────────────────────────
+  'skillhub.subtitle': '浏览并安装来自社区注册表的技能',
+  'skillhub.errSearch': '搜索失败 ({{status}})',
+  'skillhub.errLoad': '加载失败',
+  'skillhub.errLoadStatus': '加载失败 ({{status}})',
+  'skillhub.errDownload': '下载失败 ({{status}})',
+  'skillhub.errInstall': '安装失败',
+  'skillhub.noMatchHint': '未找到匹配的技能，换个关键词试试',
+  'skillhub.empty': '技能市场暂无可安装技能，本地技能请在「我的技能」中查看',
+  'skillhub.installed': '已安装',
+  'skillhub.installing': '安装中',
+  'skillhub.install': '安装',
+  'skillhub.viewSource': '查看源文件',
+  'skillhub.sourcePrefix': '数据来源: ',
+
   // ── TopBar ─────────────────────────────────────────────────────────────────
   'topbar.agentLabel': 'MiQroForge 智能体',
   // approval bypass capsule

@@ -416,6 +416,21 @@ export const en: Record<I18nKey, string> = {
   'skills.createSaving': 'Creating...',
   'skills.createAction': 'Create',
 
+  // ── SkillHubPage ───────────────────────────────────────────────────────────
+  'skillhub.subtitle': 'Browse and install skills from the community registry',
+  'skillhub.errSearch': 'Search failed ({{status}})',
+  'skillhub.errLoad': 'Failed to load',
+  'skillhub.errLoadStatus': 'Failed to load ({{status}})',
+  'skillhub.errDownload': 'Download failed ({{status}})',
+  'skillhub.errInstall': 'Install failed',
+  'skillhub.noMatchHint': 'No matching skills — try different keywords',
+  'skillhub.empty': 'No installable skills in the market yet; manage local skills in "My skills"',
+  'skillhub.installed': 'Installed',
+  'skillhub.installing': 'Installing',
+  'skillhub.install': 'Install',
+  'skillhub.viewSource': 'View source',
+  'skillhub.sourcePrefix': 'Source: ',
+
   // ── TopBar ─────────────────────────────────────────────────────────────────
   'topbar.agentLabel': 'MiQroForge Agent',
   'topbar.bypass.labelAuto': 'Auto',
