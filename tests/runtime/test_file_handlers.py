@@ -341,7 +341,7 @@ async def test_files_accept_cross_client_rejected(fake_config, fake_provider, tm
 
 
 @pytest.mark.asyncio
-async def test_get_tracked_files_namespaced_key_reads_write_path_store(fake_config, fake_provider, tmp_path):
+async def test_get_tracked_files_namespaced_key_reads_write_path_store(tmp_path):
     """三段 namespaced key：读端必须与写端解析到同一目录。
 
     写端 ``_persist_tracked_file`` 按 ``_session_files_dir_key`` 落
@@ -381,7 +381,7 @@ async def test_get_tracked_files_namespaced_key_reads_write_path_store(fake_conf
 
 
 @pytest.mark.asyncio
-async def test_get_tracked_files_two_segment_key_behavior_unchanged(fake_config, fake_provider, tmp_path):
+async def test_get_tracked_files_two_segment_key_behavior_unchanged(tmp_path):
     """两段 key（现网唯一形态）：归一为恒等，读端行为逐字不变。"""
     from miqi.agent.tools.filesystem import _persist_tracked_file, _session_files_dir_key
     from miqi.runtime.app_server import ClientSessionRegistry
@@ -406,7 +406,7 @@ async def test_get_tracked_files_two_segment_key_behavior_unchanged(fake_config,
 
 
 @pytest.mark.asyncio
-async def test_clear_tracked_files_namespaced_key_clears_write_path_store(fake_config, fake_provider, tmp_path):
+async def test_clear_tracked_files_namespaced_key_clears_write_path_store(tmp_path):
     """三段 namespaced key 的 clear 必须删到写端落盘的那份 tracked_files.json。"""
     from miqi.agent.tools.filesystem import _persist_tracked_file, _session_files_dir_key
     from miqi.runtime.app_server import ClientSessionRegistry

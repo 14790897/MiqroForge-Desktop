@@ -215,6 +215,12 @@ async def test_custom_workspace_is_not_stripped(fake_config, tmp_path):
     tracked = _read_tracked(_store_path(store_root, key))
     assert "custom.docx" in tracked
     assert "custom.docx" in SessionManager(store_root).load_tracked_files(key)
+    # 面板读端根独立取一次：sessions.get_tracked_files → SessionManager(
+    # config.workspace_path)（session_handlers.py:32-41）——若 registry 的
+    # workspace 与 config 派生的读端根分叉，这里会红。
+    panel_root = fake_config.workspace_path
+    assert panel_root == custom
+    assert "custom.docx" in SessionManager(panel_root).load_tracked_files(key)
 
     # fail-closed 反例语义保留：默认工作区下不得出现该会话条目
     from miqi.paths import get_miqi_home

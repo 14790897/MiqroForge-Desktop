@@ -59,7 +59,8 @@ def _tracked_files_store_key(session_key: str) -> str:
     ``key.replace(":", "_")``（``get_session_dir`` 的目录名规则）逐字相同，
     故本次归一不改变既有行为；只有三段 key 才会分叉。
 
-    归一发生在 ownership 校验之前，校验仍由 ``load_tracked_files(key,
+    归一发生在 ownership 校验之前：读路径由 ``load_tracked_files(key,
+    client_id=...)`` 内部、清理路径由 ``clear_tracked_files(key,
     client_id=...)`` 内部的 ``_verify_ownership_for_mutation`` 完成，且落在
     「条目所在的那条会话记录」上（``get_session_dir(key)`` 同一条派生链），
     因此不削弱归属校验。
