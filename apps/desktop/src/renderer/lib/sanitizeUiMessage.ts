@@ -38,13 +38,15 @@ const RE_PATH =
 /** Matches long Base64-like tokens (40+ contiguous base64 chars). */
 const RE_TOKEN = /\b[A-Za-z0-9+/=]{40,}\b/g;
 
+import { i18n } from '../i18n';
+
 export function sanitizeUiMessage(raw: string): string {
   if (!raw) return '';
 
   let s = raw;
   const lower = s.toLowerCase();
   if (lower.includes('turn is already in progress') || lower.includes('turn_in_progress')) {
-    return '上一个任务还在进行中，请稍候片刻或新开一个会话。';
+    return i18n.t('sanitize.turnInProgress');
   }
   // Missing/invalid provider credential — must be checked BEFORE the bridge
   // checks: Electron wraps every chat:send failure as "Error invoking remote
@@ -55,7 +57,7 @@ export function sanitizeUiMessage(raw: string): string {
     lower.includes('no_api_key') ||
     lower.includes('api key not configured')
   ) {
-    return '未配置 API Key，请前往 设置 > 模型 配置后再试。';
+    return i18n.t('sanitize.noApiKey');
   }
   // Only treat genuine bridge-down signals as "runtime not started". The
   // generic "error invoking remote method 'chat:send'" prefix appears on ANY
@@ -70,16 +72,16 @@ export function sanitizeUiMessage(raw: string): string {
     lower.includes('bridge stopped') ||
     lower.includes('bridge restarted')
   ) {
-    return '运行时未启动或正在重启，请稍后再试。';
+    return i18n.t('sanitize.runtimeDown');
   }
   if (lower.includes('provider test failed')) {
-    return '连接测试失败，请检查 API Key、API Base、模型名称或网络。';
+    return i18n.t('sanitize.testFailed');
   }
   if (lower.includes('connection error')) {
-    return '连接模型服务失败，请检查网络或 API Base。';
+    return i18n.t('sanitize.connectionError');
   }
   if (lower.includes('request') && lower.includes('timed out')) {
-    return '请求超时，请稍后重试。';
+    return i18n.t('sanitize.timeout');
   }
   // 1) Truncate first (same order as Python _sanitize_exc_for_ui)
   if (s.length > MAX_LEN) {

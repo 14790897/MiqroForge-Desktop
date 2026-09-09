@@ -567,6 +567,17 @@ export const en: Record<I18nKey, string> = {
   'providers.testConnection': 'Test connection',
   'common.close': 'Close',
 
+  // ── lib/sanitizeUiMessage (error message mapping) ──────────────────────────
+  'sanitize.turnInProgress':
+    'A previous task is still running — wait a moment or start a new session.',
+  'sanitize.noApiKey': 'No API key configured — go to Settings > Models to configure one.',
+  'sanitize.runtimeDown': 'The runtime is not running or is restarting — try again in a moment.',
+  'sanitize.testFailed':
+    'Connection test failed — check your API key, API base, model name or network.',
+  'sanitize.connectionError':
+    'Could not connect to the model service — check your network or API base.',
+  'sanitize.timeout': 'Request timed out — please retry in a moment.',
+
   // ── TopBar ─────────────────────────────────────────────────────────────────
   'topbar.agentLabel': 'MiQroForge Agent',
   'topbar.bypass.labelAuto': 'Auto',

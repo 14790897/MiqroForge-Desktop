@@ -562,6 +562,14 @@ export const zhCN = {
   'providers.testConnection': '测试连接',
   'common.close': '关闭',
 
+  // ── lib/sanitizeUiMessage (错误文案映射) ────────────────────────────────────
+  'sanitize.turnInProgress': '上一个任务还在进行中，请稍候片刻或新开一个会话。',
+  'sanitize.noApiKey': '未配置 API Key，请前往 设置 > 模型 配置后再试。',
+  'sanitize.runtimeDown': '运行时未启动或正在重启，请稍后再试。',
+  'sanitize.testFailed': '连接测试失败，请检查 API Key、API Base、模型名称或网络。',
+  'sanitize.connectionError': '连接模型服务失败，请检查网络或 API Base。',
+  'sanitize.timeout': '请求超时，请稍后重试。',
+
   // ── TopBar ─────────────────────────────────────────────────────────────────
   'topbar.agentLabel': 'MiQroForge 智能体',
   // approval bypass capsule
