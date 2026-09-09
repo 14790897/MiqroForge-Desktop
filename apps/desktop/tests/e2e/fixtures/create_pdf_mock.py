@@ -26,7 +26,11 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 # The filename the spec puts into the user message (ASCII or CJK, one path
 # segment).  \w is Unicode-aware in Python, so 报告.pdf matches too.
-_PDF_RE = re.compile(r"[\w.\-]+\.pdf")
+# Bounded quantifier and NO '.' inside the class: the class cannot overlap the
+# literal '\.pdf' that follows, so scanning is linear on arbitrary message
+# text (CodeQL py/polynomial-redos).  A dotted name like a.v2.pdf still
+# resolves to its last segment — fine, the spec owns the filename.
+_PDF_RE = re.compile(r"[\w-]{1,64}\.pdf")
 
 _TOOL_NAME = "create_pdf"
 
