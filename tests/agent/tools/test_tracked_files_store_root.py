@@ -176,32 +176,56 @@ async def test_create_then_append_keeps_write_op():
     assert tracked["up.xlsx"]["op"] == "write"
 
 
-# ── 反例：自定义工作区（行为逐字不变）────────────────────────────────────
+# ── 反例：自定义工作区（真实生产形态）────────────────────────────────────
 
 
 @pytest.mark.asyncio
-async def test_custom_workspace_is_not_stripped(tmp_path):
-    """自定义工作区（非 ``MIQI_HOME/workspace``）：不剥，仍写
-    ``<files>/sessions/<key>/tracked_files.json`` —— 行为与修复前逐字相同。
+async def test_custom_workspace_is_not_stripped(fake_config, tmp_path):
+    """真实 custom workspace（sijie-Z 发现 1）：走 ``create_runtime_tool_registry()``
+    的生产调用链，而不是手工拼 ``sessions/<key>/files`` 形状。
 
-    key 必须用 desktop 形态：修复 B 对 ``cli:other`` 会改键，混进来会掩盖反例。
+    非默认工作区不启用 per-session files 隔离（``tool_registry_factory.py:310-316``）：
+    ``_write_workspace = workspace``，文档工具的 workspace 就是用户选定的 custom
+    根。此时 ``_tracked_store_root`` 不剥（fail-closed 反例语义保留），条目落
+    ``<custom>/sessions/<key>/tracked_files.json``；面板读端同根同 key。
     """
+    from miqi.runtime.tool_registry_factory import create_runtime_tool_registry
+    from miqi.session.manager import SessionManager
+
+    custom = tmp_path / "project"
+    custom.mkdir()
     key = "desktop:983custom"
-    files_dir = tmp_path / "proj" / "sessions" / _session_files_dir_key(key) / "files"
-    files_dir.mkdir(parents=True)
-    tool = _tool("miqi.documents.docx_tool:CreateDocxTool",
-                 workspace=files_dir, allowed_dir=files_dir)
+    # 生产：工作区选择器把选中目录写进 config.agents.defaults.workspace
+    # （apps/desktop/src/main/ipc/index.ts CONFIG_WRITE_INITIAL）→ 面板读端根 = custom
+    fake_config.agents.defaults.workspace = str(custom)
+
+    registry = create_runtime_tool_registry(
+        config=fake_config, workspace=custom, session_id=key,
+    )
+    tool = registry.get("create_docx")
+    assert tool is not None
+    # 生产形态：custom 下不嵌套 sessions/<key>/files
+    assert tool._workspace == custom
 
     result = await tool.execute(filename="custom.docx", title="T", _session_key=key)
     assert "Created:" in result, result
 
-    tracked = _read_tracked(_store_path(files_dir, key))
+    # tracked 存储根 == 工具 workspace == 面板读端根（同一个根，未被剥回默认根）
+    store_root = tool._workspace
+    tracked = _read_tracked(_store_path(store_root, key))
     assert "custom.docx" in tracked
+    assert "custom.docx" in SessionManager(store_root).load_tracked_files(key)
 
+    # fail-closed 反例语义保留：默认工作区下不得出现该会话条目
     from miqi.paths import get_miqi_home
 
     default_root = Path(get_miqi_home()) / "workspace"
     assert not _store_path(default_root, key).exists()
+    # 也不得出现「会话 files 目录被当仓库根」的嵌套孤儿路径
+    nested = _store_path(
+        store_root / "sessions" / _session_files_dir_key(key) / "files", key,
+    )
+    assert not nested.exists(), f"条目仍落嵌套孤儿路径：{nested}"
 
 
 def test_tracked_store_root_guard_matrix(tmp_path):
