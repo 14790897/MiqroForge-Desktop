@@ -165,7 +165,9 @@ class SearchResult:
 
 
 # Error categories that should trigger fallback in auto mode.
-_FALLBACK_ERRORS = {"RATE_LIMIT", "NETWORK", "SERVER_ERROR", "NO_RESULT"}
+# BALANCE_ERROR（余额不足）也回落——DeepSeek 配置了 key 但账户没钱时，
+# 用户仍应能得到搜索结果（#979：配置了不能搜索 → 自动切换兜底）。
+_FALLBACK_ERRORS = {"RATE_LIMIT", "NETWORK", "SERVER_ERROR", "NO_RESULT", "BALANCE_ERROR"}
 # Errors that must NOT silently fall back (config problems) — log, but
 # degrade to the keyless provider once so the user still gets an answer.
 _AUTH_ERRORS = {"AUTH_ERROR", "NO_KEY"}
