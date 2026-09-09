@@ -2,6 +2,7 @@ import { defineConfig } from 'vitest/config';
 
 export default defineConfig({
   test: {
+    setupFiles: ['src/renderer/i18n/vitest-setup.ts'],
     // Only run unit tests (not Playwright specs, not real E2E in CI)
     include: ['src/**/*.test.ts', 'tests/**/*.test.ts'],
     exclude: [

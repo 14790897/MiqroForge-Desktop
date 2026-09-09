@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
+import { useTranslation } from 'react-i18next';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import {
@@ -36,6 +37,7 @@ import { InputDialog } from '../../components/shared';
 // ---------------------------------------------------------------------------
 
 export function WorkspacePage() {
+  const { t } = useTranslation();
   const [tree, setTree] = useState<FileNode | null>(null);
   const [loading, setLoading] = useState(true);
   const [currentPath, setCurrentPath] = useState<string | null>(null);
@@ -256,7 +258,7 @@ export function WorkspacePage() {
   if (loading) {
     return (
       <div className="flex items-center justify-center h-full">
-        <div className="text-sm text-[var(--text-muted)]">正在加载工作区…</div>
+        <div className="text-sm text-[var(--text-muted)]">{t('workspace.loadingWorkspace')}</div>
       </div>
     );
   }
@@ -267,12 +269,12 @@ export function WorkspacePage() {
       <div className="w-[260px] shrink-0 border-r border-[var(--border-subtle)] bg-[var(--surface)] flex flex-col">
         <div className="px-3 py-3 border-b border-[var(--border-subtle)] flex items-center justify-between">
           <div className="text-xs font-semibold text-[var(--text-muted)] uppercase tracking-wider">
-            工作区文件
+            {t('workspace.filesTitle')}
           </div>
           <button
             onClick={loadTree}
             className="text-xs text-[var(--text-faint)] hover:text-[var(--text-muted)] transition-colors"
-            title="刷新"
+            title={t('common.refresh')}
           >
             <RefreshCw size={12} />
           </button>
@@ -291,7 +293,9 @@ export function WorkspacePage() {
               onDelete={(path, isDir) => setDeleteTarget({ path, isDir })}
             />
           ) : (
-            <div className="text-xs text-[var(--text-muted)] text-center mt-8">未找到文件</div>
+            <div className="text-xs text-[var(--text-muted)] text-center mt-8">
+              {t('workspace.noFiles')}
+            </div>
           )}
         </div>
       </div>
@@ -307,7 +311,7 @@ export function WorkspacePage() {
                 <span className="text-xs font-mono text-[var(--text)] truncate">{currentPath}</span>
                 {isUnsaved && (
                   <span className="text-size-2xs px-1.5 py-0.5 rounded font-medium bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400 shrink-0">
-                    未保存
+                    {t('workspace.unsaved')}
                   </span>
                 )}
                 {isPdfFile && (
@@ -321,19 +325,19 @@ export function WorkspacePage() {
                 <button
                   onClick={() => window.miqi.files.openExternal(currentPath)}
                   className="flex items-center gap-1 px-2 py-1 rounded text-xs text-[var(--accent)] hover:bg-[var(--accent-soft)] transition-colors"
-                  title="用系统默认应用打开"
+                  title={t('workspace.openWithSystemTitle')}
                 >
                   <ExternalLink size={12} />
-                  <span>系统应用打开</span>
+                  <span>{t('workspace.openWithSystem')}</span>
                 </button>
                 {/* Open containing folder */}
                 <button
                   onClick={() => window.miqi.files.openContainingFolder(currentPath)}
                   className="flex items-center gap-1 px-2 py-1 rounded text-xs text-[var(--text-muted)] hover:bg-[var(--surface-muted)] hover:text-[var(--text)] transition-colors"
-                  title="打开所在文件夹"
+                  title={t('workspace.openFolderTitle')}
                 >
                   <FolderSearch size={12} />
-                  <span>打开文件夹</span>
+                  <span>{t('workspace.openFolder')}</span>
                 </button>
                 {!isPdfFile && (
                   <>
@@ -343,7 +347,7 @@ export function WorkspacePage() {
                       className="flex items-center gap-1 px-2 py-1 rounded text-xs text-[var(--text-muted)] hover:bg-[var(--surface-muted)] hover:text-[var(--text)] transition-colors"
                     >
                       {copiedAll ? <Check size={12} /> : <Copy size={12} />}
-                      <span>{copiedAll ? '已复制' : '复制全部'}</span>
+                      <span>{copiedAll ? t('workspace.copied') : t('workspace.copyAll')}</span>
                     </button>
                     <button
                       onClick={handleSave}
@@ -355,7 +359,7 @@ export function WorkspacePage() {
                       }`}
                     >
                       <Save size={12} />
-                      {saving ? '保存中…' : '保存'}
+                      {saving ? t('workspace.saving') : t('common.save')}
                     </button>
                     {(isMdFile || isHtmlFile) && (
                       <div className="flex items-center gap-1 rounded-md border border-[var(--border-subtle)] overflow-hidden">
@@ -363,13 +367,13 @@ export function WorkspacePage() {
                           onClick={() => setPreviewMode(false)}
                           className={`px-2 py-0.5 text-xs ${!previewMode ? 'bg-[var(--accent)] text-white' : 'text-[var(--text-muted)] hover:bg-[var(--surface-muted)]'}`}
                         >
-                          编辑
+                          {t('workspace.edit')}
                         </button>
                         <button
                           onClick={() => setPreviewMode(true)}
                           className={`px-2 py-0.5 text-xs ${previewMode ? 'bg-[var(--accent)] text-white' : 'text-[var(--text-muted)] hover:bg-[var(--surface-muted)]'}`}
                         >
-                          预览
+                          {t('workspace.preview')}
                         </button>
                       </div>
                     )}
@@ -388,7 +392,9 @@ export function WorkspacePage() {
             <div className="flex-1 overflow-hidden">
               {fileLoading ? (
                 <div className="flex items-center justify-center h-full">
-                  <div className="text-sm text-[var(--text-muted)]">正在加载文件…</div>
+                  <div className="text-sm text-[var(--text-muted)]">
+                    {t('workspace.loadingFile')}
+                  </div>
                 </div>
               ) : isPdfFile && binaryUrl ? (
                 <iframe
@@ -413,7 +419,7 @@ export function WorkspacePage() {
                   className={`w-full h-full resize-none bg-transparent text-[var(--text)] outline-none font-mono p-5 leading-relaxed ${
                     isMdFile ? 'text-[15px] leading-[1.7]' : 'text-[13px]'
                   }`}
-                  placeholder="文件为空"
+                  placeholder={t('workspace.emptyFile')}
                   spellCheck={false}
                 />
               )}
@@ -422,7 +428,7 @@ export function WorkspacePage() {
         ) : (
           <div className="flex flex-col items-center justify-center h-full gap-3 text-[var(--text-muted)]">
             <FolderOpen size={32} strokeWidth={1.5} />
-            <div className="text-sm">从左侧选择文件进行编辑</div>
+            <div className="text-sm">{t('workspace.selectFileHint')}</div>
           </div>
         )}
       </div>
@@ -430,14 +436,15 @@ export function WorkspacePage() {
       {/* Unsaved-switch confirmation dialog */}
       {showConfirm && (
         <ConfirmDialog
-          title="有未保存的更改"
+          title={t('workspace.unsavedTitle')}
           message={
             <span>
-              文件 <code className="text-[var(--text)] font-mono">{currentPath}</code>{' '}
-              有未保存的更改，确认丢弃并打开其他文件？
+              {t('workspace.unsavedPrefix')}
+              <code className="text-[var(--text)] font-mono">{currentPath}</code>
+              {t('workspace.unsavedSuffix')}
             </span>
           }
-          confirmLabel="丢弃并切换"
+          confirmLabel={t('workspace.discardSwitch')}
           onConfirm={() => confirmSwitch(true)}
           onCancel={() => confirmSwitch(false)}
         />
@@ -450,8 +457,8 @@ export function WorkspacePage() {
           onOpenChange={(o) => {
             if (!o) setActionTarget(null);
           }}
-          title="重命名"
-          label="新名称"
+          title={t('workspace.rename')}
+          label={t('workspace.renameNameLabel')}
           defaultValue={actionTarget.currentName}
           onConfirm={handleRename}
         />
@@ -461,8 +468,14 @@ export function WorkspacePage() {
           onOpenChange={(o) => {
             if (!o) setActionTarget(null);
           }}
-          title={actionTarget.type === 'newFile' ? '新建文件' : '新建文件夹'}
-          label={actionTarget.type === 'newFile' ? '文件名' : '文件夹名'}
+          title={
+            actionTarget.type === 'newFile' ? t('workspace.newFile') : t('workspace.newFolder')
+          }
+          label={
+            actionTarget.type === 'newFile'
+              ? t('workspace.newFileNameLabel')
+              : t('workspace.newFolderNameLabel')
+          }
           onConfirm={handleCreate}
         />
       ) : null}
@@ -470,8 +483,11 @@ export function WorkspacePage() {
       {/* Delete confirm */}
       {deleteTarget && (
         <ConfirmDialog
-          title="删除"
-          message={`确定删除${deleteTarget.isDir ? '目录' : '文件'} "${deleteTarget.path}"？此操作不可撤销。`}
+          title={t('workspace.deleteTitle')}
+          message={t('workspace.confirmDelete', {
+            kind: deleteTarget.isDir ? t('workspace.kindDir') : t('workspace.kindFile'),
+            path: deleteTarget.path,
+          })}
           danger
           onConfirm={handleDelete}
           onCancel={() => setDeleteTarget(null)}
@@ -504,6 +520,7 @@ function FileTree({
   onDelete: (path: string, isDir: boolean) => void;
   depth?: number;
 }) {
+  const { t } = useTranslation();
   const [open, setOpen] = useState(depth < 1);
 
   if (node.is_dir) {
@@ -512,17 +529,24 @@ function FileTree({
       <div>
         <ContextMenu
           items={[
-            { label: '新建文件', onSelect: () => onNewFile(node.path) },
-            { label: '新建文件夹', onSelect: () => onNewFolder(node.path) },
-            { label: '重命名', divider: true, onSelect: () => onRename(node.path, node.name) },
-            { label: '复制路径', onSelect: () => navigator.clipboard.writeText(node.path) },
+            { label: t('workspace.newFile'), onSelect: () => onNewFile(node.path) },
+            { label: t('workspace.newFolder'), onSelect: () => onNewFolder(node.path) },
             {
-              label: '打开所在文件夹',
+              label: t('workspace.rename'),
+              divider: true,
+              onSelect: () => onRename(node.path, node.name),
+            },
+            {
+              label: t('workspace.copyPath'),
+              onSelect: () => navigator.clipboard.writeText(node.path),
+            },
+            {
+              label: t('workspace.openFolderTitle'),
               divider: true,
               onSelect: () => window.miqi.files.openContainingFolder(node.path),
             },
             {
-              label: '删除',
+              label: t('workspace.delete'),
               danger: true,
               divider: true,
               onSelect: () => onDelete(node.path, true),
@@ -547,7 +571,7 @@ function FileTree({
                     onNewFile(node.path);
                   }}
                   className="p-0.5 rounded text-[var(--text-faint)] hover:text-[var(--accent)] hover:bg-[var(--surface-muted)] transition-colors"
-                  title="新建文件"
+                  title={t('workspace.newFile')}
                 >
                   <FilePlus size={11} />
                 </button>
@@ -557,7 +581,7 @@ function FileTree({
                     onNewFolder(node.path);
                   }}
                   className="p-0.5 rounded text-[var(--text-faint)] hover:text-[var(--accent)] hover:bg-[var(--surface-muted)] transition-colors"
-                  title="新建文件夹"
+                  title={t('workspace.newFolder')}
                 >
                   <FolderPlus size={11} />
                 </button>
@@ -567,7 +591,7 @@ function FileTree({
                     onRename(node.path, node.name);
                   }}
                   className="p-0.5 rounded text-[var(--text-faint)] hover:text-[var(--info)] hover:bg-[var(--surface-muted)] transition-colors"
-                  title="重命名"
+                  title={t('workspace.rename')}
                 >
                   <Pencil size={11} />
                 </button>
@@ -577,7 +601,7 @@ function FileTree({
                     onDelete(node.path, true);
                   }}
                   className="p-0.5 rounded text-[var(--text-faint)] hover:text-[var(--danger)] hover:bg-[var(--surface-muted)] transition-colors"
-                  title="删除"
+                  title={t('workspace.delete')}
                 >
                   <Trash2 size={11} />
                 </button>
@@ -603,7 +627,9 @@ function FileTree({
           </div>
         )}
         {open && children.length === 0 && (
-          <div className="ml-7 text-size-2xs text-[var(--text-faint)] py-0.5">（空）</div>
+          <div className="ml-7 text-size-2xs text-[var(--text-faint)] py-0.5">
+            {t('workspace.emptyDir')}
+          </div>
         )}
       </div>
     );
@@ -613,15 +639,30 @@ function FileTree({
   return (
     <ContextMenu
       items={[
-        { label: '打开文件', onSelect: () => onSelect(node.path) },
-        { label: '在系统应用中打开', onSelect: () => window.miqi.files.openExternal(node.path) },
-        { label: '重命名', divider: true, onSelect: () => onRename(node.path, node.name) },
-        { label: '复制路径', onSelect: () => navigator.clipboard.writeText(node.path) },
+        { label: t('workspace.openFile'), onSelect: () => onSelect(node.path) },
         {
-          label: '打开所在文件夹',
+          label: t('workspace.openInSystemApp'),
+          onSelect: () => window.miqi.files.openExternal(node.path),
+        },
+        {
+          label: t('workspace.rename'),
+          divider: true,
+          onSelect: () => onRename(node.path, node.name),
+        },
+        {
+          label: t('workspace.copyPath'),
+          onSelect: () => navigator.clipboard.writeText(node.path),
+        },
+        {
+          label: t('workspace.openFolderTitle'),
           onSelect: () => window.miqi.files.openContainingFolder(node.path),
         },
-        { label: '删除', danger: true, divider: true, onSelect: () => onDelete(node.path, false) },
+        {
+          label: t('workspace.delete'),
+          danger: true,
+          divider: true,
+          onSelect: () => onDelete(node.path, false),
+        },
       ]}
     >
       {({ onContextMenu }) => (
@@ -645,7 +686,7 @@ function FileTree({
                 onRename(node.path, node.name);
               }}
               className="p-0.5 rounded text-[var(--text-faint)] hover:text-[var(--info)] hover:bg-[var(--surface-muted)] transition-colors"
-              title="重命名"
+              title={t('workspace.rename')}
             >
               <Pencil size={11} />
             </button>
@@ -655,7 +696,7 @@ function FileTree({
                 onDelete(node.path, false);
               }}
               className="p-0.5 rounded text-[var(--text-faint)] hover:text-[var(--danger)] hover:bg-[var(--surface-muted)] transition-colors"
-              title="删除"
+              title={t('workspace.delete')}
             >
               <Trash2 size={11} />
             </button>

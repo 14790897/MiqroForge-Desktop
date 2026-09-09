@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
+import { useTranslation } from 'react-i18next';
 import { cn } from '../lib/utils';
 import {
   Plus,
@@ -75,6 +76,7 @@ export function Sidebar({
   onRenamed,
   onSessionDeleted,
 }: SidebarProps) {
+  const { t } = useTranslation();
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
   const [initialLoading, setInitialLoading] = useState(true);
   const [filter, setFilter] = useState<FilterTab>('ALL');
@@ -145,11 +147,11 @@ export function Sidebar({
     };
   }, [loadSessions]);
 
-  const FILTER_TABS: Array<{ value: FilterTab; label: string }> = [
-    { value: 'ALL', label: '全部' },
-    { value: 'IN-PROGRESS', label: '进行中' },
-    { value: 'REVIEW', label: '待审阅' },
-    { value: 'COMPLETED', label: '已完成' },
+  const FILTER_TABS: Array<{ value: FilterTab; labelKey: string }> = [
+    { value: 'ALL', labelKey: 'sidebar.filterAll' },
+    { value: 'IN-PROGRESS', labelKey: 'sidebar.filterInProgress' },
+    { value: 'REVIEW', labelKey: 'sidebar.filterReview' },
+    { value: 'COMPLETED', labelKey: 'sidebar.filterCompleted' },
   ];
 
   // Single-pass: count per filter + compute filtered list (Copilot optimization)
@@ -211,12 +213,12 @@ export function Sidebar({
       <div className="flex items-center gap-2.5 px-4 py-3 shrink-0">
         <MiQroForgeLogo size={28} />
         <span className="text-sm font-semibold text-text" data-testid="nav-tasks-title">
-          任务
+          {t('sidebar.tasksTitle')}
         </span>
         <button
           onClick={onNewSession}
           className="ml-auto w-6 h-6 rounded flex items-center justify-center transition-colors hover:bg-[var(--surface-muted)]"
-          title="新建会话"
+          title={t('sidebar.newSession')}
           data-testid="nav-new-session"
         >
           <Plus size={14} style={{ color: 'var(--text-faint)' }} />
@@ -243,7 +245,7 @@ export function Sidebar({
                     : 'text-[var(--text-faint)] hover:text-[var(--text-muted)]'
                 )}
               >
-                {tab.label}
+                {t(tab.labelKey)}
                 {count > 0 && (
                   <span
                     className={cn(
@@ -271,12 +273,11 @@ export function Sidebar({
                   key={tab.value}
                   items={[
                     {
-                      label: '删除全部任务',
+                      label: t('sidebar.deleteAllTasks'),
                       icon: <Trash2 size={13} />,
                       danger: true,
                       onSelect: async () => {
-                        if (!window.confirm(`确认删除全部 ${count} 个任务？此操作不可撤销。`))
-                          return;
+                        if (!window.confirm(t('sidebar.confirmDeleteAll', { count }))) return;
                         window.dispatchEvent(new Event('miqi:chat-focus-regrant'));
                         for (const s of sessions) {
                           try {
@@ -295,7 +296,7 @@ export function Sidebar({
                       },
                     },
                     {
-                      label: '归档全部任务',
+                      label: t('sidebar.archiveAllTasks'),
                       icon: <Archive size={13} />,
                       onSelect: async () => {
                         for (const s of sessions) {
@@ -335,7 +336,7 @@ export function Sidebar({
         ) : sessions.length === 0 ? (
           <div className="flex flex-col items-center gap-2 py-8 text-center">
             <ListChecks size={20} style={{ color: 'var(--text-faint)', opacity: 0.4 }} />
-            <p className="text-xs text-text-faint">暂无任务</p>
+            <p className="text-xs text-text-faint">{t('sidebar.noTasks')}</p>
           </div>
         ) : (
           <div className="space-y-2">
@@ -351,22 +352,22 @@ export function Sidebar({
                   key={s.key}
                   items={[
                     {
-                      label: '标记为进行中',
+                      label: t('sidebar.markInProgress'),
                       icon: <Play size={13} />,
                       onSelect: () => setStatus(s.key, 'IN-PROGRESS'),
                     },
                     {
-                      label: '标记为待处理',
+                      label: t('sidebar.markPending'),
                       icon: <Clock size={13} />,
                       onSelect: () => setStatus(s.key, 'PENDING'),
                     },
                     {
-                      label: '标记为待审阅',
+                      label: t('sidebar.markReview'),
                       icon: <Eye size={13} />,
                       onSelect: () => setStatus(s.key, 'REVIEW'),
                     },
                     {
-                      label: '标记为已完成',
+                      label: t('sidebar.markCompleted'),
                       icon: <CheckCircle2 size={13} />,
                       divider: true,
                       onSelect: () => setStatus(s.key, 'COMPLETED'),
@@ -374,25 +375,25 @@ export function Sidebar({
                     ...(s.workspace
                       ? [
                           {
-                            label: '在文件管理器中打开',
+                            label: t('sidebar.openInFileManager'),
                             icon: <FolderOpen size={13} />,
                             onSelect: () => window.miqi.files.openContainingFolder(s.workspace!),
                           },
                         ]
                       : []),
                     {
-                      label: '重命名',
+                      label: t('sidebar.rename'),
                       icon: <Pencil size={13} />,
                       onSelect: () => setRenameTarget(s),
                     },
                     {
-                      label: '重置状态',
+                      label: t('sidebar.resetStatus'),
                       icon: <RotateCcw size={13} />,
                       danger: true,
                       onSelect: () => clearStatus(s.key),
                     },
                     {
-                      label: '归档',
+                      label: t('sidebar.archive'),
                       icon: <Archive size={13} />,
                       divider: true,
                       onSelect: async () => {
@@ -405,11 +406,15 @@ export function Sidebar({
                       },
                     },
                     {
-                      label: '删除对话',
+                      label: t('sidebar.deleteChat'),
                       icon: <Trash2 size={13} />,
                       danger: true,
                       onSelect: async () => {
-                        if (!window.confirm(`删除对话「${s.title || s.key}」？此操作不可撤销。`))
+                        if (
+                          !window.confirm(
+                            t('sidebar.confirmDeleteChat', { name: s.title || s.key })
+                          )
+                        )
                           return;
                         window.dispatchEvent(new Event('miqi:chat-focus-regrant'));
                         try {
@@ -477,7 +482,9 @@ export function Sidebar({
                       )}
                       {/* Description — small gray, multi-line */}
                       <p className="text-xs leading-relaxed text-text-muted">
-                        {s.message_count != null ? `${s.message_count} 条消息` : '暂无描述'}
+                        {s.message_count != null
+                          ? t('sidebar.messageCount', { count: s.message_count })
+                          : t('sidebar.noDescription')}
                       </p>
                     </button>
                   )}
@@ -501,7 +508,7 @@ export function Sidebar({
           data-testid="nav-system-settings"
         >
           <Settings size={13} />
-          <span>系统设置</span>
+          <span>{t('sidebar.systemSettings')}</span>
         </button>
         <span className="text-size-2xs font-mono text-text-faint">
           PRO v{typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : 'dev'}
@@ -514,8 +521,8 @@ export function Sidebar({
         onOpenChange={(open) => {
           if (!open) setRenameTarget(null);
         }}
-        title="重命名会话"
-        label="输入新的会话标题"
+        title={t('sidebar.renameDialogTitle')}
+        label={t('sidebar.renameDialogLabel')}
         defaultValue={renameTarget?.title ?? ''}
         onConfirm={handleRenameConfirm}
       />

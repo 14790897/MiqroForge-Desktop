@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { Settings, X } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { INSTALL_WARNING_EVENT, type InstallWarningKind } from '../features/chat/ChatConsole';
@@ -16,16 +17,16 @@ import { INSTALL_WARNING_EVENT, type InstallWarningKind } from '../features/chat
  *   主按钮近黑 #17171a（浅色）/ 自动反转（暗色），次按钮白底细边。
  *   所有颜色经应用令牌实现，暗色主题自动换肤；浅色观感即 mock 观感。
  */
-const DIALOG_COPY: Record<InstallWarningKind, { title: string; body: string; action: string }> = {
+const DIALOG_KEYS: Record<InstallWarningKind, { title: string; body: string; action: string }> = {
   persist: {
-    title: '授权未能保存',
-    body: '安装已完成，但「允许并记住」未保存——本次安装已放行，下次安装仍会询问你。如需长期免确认，请在设置中重新开启「允许系统包安装」。',
-    action: '去设置开启',
+    title: 'installWarn.persist.title',
+    body: 'installWarn.persist.body',
+    action: 'installWarn.persist.action',
   },
   runtime: {
-    title: '设置已保存，重启后生效',
-    body: '「允许并记住」已保存到配置，但需重启应用后才生效——重启后系统包安装不再询问。若重启后仍弹卡，请到设置中检查「允许系统包安装」开关。',
-    action: '去设置检查',
+    title: 'installWarn.runtime.title',
+    body: 'installWarn.runtime.body',
+    action: 'installWarn.runtime.action',
   },
 };
 
@@ -35,6 +36,7 @@ interface Props {
 }
 
 export function InstallWarningToaster({ onOpenSandboxSettings }: Props) {
+  const { t } = useTranslation();
   const [warn, setWarn] = useState<InstallWarningKind | null>(null);
 
   useEffect(() => {
@@ -47,7 +49,7 @@ export function InstallWarningToaster({ onOpenSandboxSettings }: Props) {
   }, []);
 
   if (!warn) return null;
-  const { title, body, action } = DIALOG_COPY[warn];
+  const { title, body, action } = DIALOG_KEYS[warn];
   const close = () => setWarn(null);
   const goSettings = () => {
     setWarn(null);
@@ -59,7 +61,7 @@ export function InstallWarningToaster({ onOpenSandboxSettings }: Props) {
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-[3px]"
       role="dialog"
       aria-modal="true"
-      aria-label={title}
+      aria-label={t(title)}
       data-testid="install-warning-dialog"
     >
       {/* 方案 B 卡体：无边框（边缘靠遮罩对比），无头带/底带 */}
@@ -68,22 +70,22 @@ export function InstallWarningToaster({ onOpenSandboxSettings }: Props) {
         <button
           type="button"
           onClick={close}
-          aria-label="关闭"
+          aria-label={t('installWarn.close')}
           className="absolute right-[14px] top-[14px] grid h-[30px] w-[30px] place-items-center rounded-full bg-[var(--surface-hover)] text-[var(--text-faint)] transition-colors hover:bg-[var(--border)] hover:text-[var(--text)]"
         >
           <X size={15} strokeWidth={2} />
         </button>
 
         {/* 标题：纯文字，无图标块 */}
-        <h2 className="pr-8 text-sm font-semibold text-[var(--text)]">{title}</h2>
+        <h2 className="pr-8 text-sm font-semibold text-[var(--text)]">{t(title)}</h2>
 
         {/* 正文：长文案自然叙述，不加粗锚点 */}
-        <p className="mt-[10px] text-[12.5px] leading-[1.6] text-[var(--text-muted)]">{body}</p>
+        <p className="mt-[10px] text-[12.5px] leading-[1.6] text-[var(--text-muted)]">{t(body)}</p>
 
         {/* 路径：浅灰信息条（灰底 + 细边 + 圆角） */}
         <div className="mt-2 flex items-center gap-[6px] rounded-lg border border-[var(--border-subtle)] bg-[var(--surface-muted)] px-[10px] py-2 text-[11.5px] text-[var(--text-faint)]">
           <Settings size={12} aria-hidden />
-          设置 → 沙箱隔离 → 允许系统包安装
+          {t('installWarn.path')}
         </div>
 
         {/* 操作区：白底细边次按钮 + 近黑主按钮 */}
@@ -93,7 +95,7 @@ export function InstallWarningToaster({ onOpenSandboxSettings }: Props) {
             onClick={close}
             className="rounded-md border border-[var(--border-subtle)] bg-transparent px-[14px] py-[6px] text-[12.5px] font-medium text-[var(--text-muted)] transition-colors hover:border-[var(--border-strong)] hover:text-[var(--text)]"
           >
-            知道了
+            {t('installWarn.gotIt')}
           </button>
           <button
             type="button"
@@ -103,7 +105,7 @@ export function InstallWarningToaster({ onOpenSandboxSettings }: Props) {
               'rounded-md border border-[var(--text)] bg-[var(--text)] px-[14px] py-[6px] text-[12.5px] font-semibold text-[var(--background)] transition-opacity hover:opacity-85'
             )}
           >
-            {action}
+            {t(action)}
           </button>
         </div>
       </div>

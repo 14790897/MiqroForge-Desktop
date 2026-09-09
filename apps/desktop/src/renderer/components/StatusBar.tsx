@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { cn } from '../lib/utils';
 import { useRuntime } from '../contexts/RuntimeContext';
 import { useRestartRequired } from '../contexts/RestartRequiredContext';
@@ -6,12 +7,12 @@ import { useQraftStatus } from '../hooks/useQraftStatus';
 import { Coins, Loader2, RefreshCw } from 'lucide-react';
 import type { QraftBillingHistoryEntry } from '../../shared/ipc';
 
-const STATES: Record<string, { label: string; color: string }> = {
-  stopped: { label: '已停止', color: 'var(--text-faint)' },
-  starting: { label: '启动中', color: 'var(--warning)' },
-  running: { label: '运行中', color: 'var(--success)' },
-  stopping: { label: '停止中', color: 'var(--warning)' },
-  error: { label: '错误', color: 'var(--danger)' },
+const STATES: Record<string, { labelKey: string; color: string }> = {
+  stopped: { labelKey: 'statusBar.stopped', color: 'var(--text-faint)' },
+  starting: { labelKey: 'statusBar.starting', color: 'var(--warning)' },
+  running: { labelKey: 'statusBar.running', color: 'var(--success)' },
+  stopping: { labelKey: 'statusBar.stopping', color: 'var(--warning)' },
+  error: { labelKey: 'statusBar.error', color: 'var(--danger)' },
 };
 
 function fmtDateTime(epochMs?: number): string {
@@ -22,6 +23,7 @@ function fmtDateTime(epochMs?: number): string {
 }
 
 export function StatusBar({ onOpenPoints }: { onOpenPoints?: () => void }) {
+  const { t } = useTranslation();
   const { status, start, stop } = useRuntime();
   const { restartRequired, restartReasons, clearRestartRequired } = useRestartRequired();
   const { status: qraftStatus, loggedIn } = useQraftStatus();
@@ -115,14 +117,14 @@ export function StatusBar({ onOpenPoints }: { onOpenPoints?: () => void }) {
       if (result?.state === 'running') {
         clearRestartRequired();
       } else if (result) {
-        setRestartError(`运行时状态：${result.state}`);
+        setRestartError(t('statusBar.runtimeState', { state: result.state }));
       }
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
       setRestartError(
         message.includes('Bridge not running')
-          ? '运行时正在重启，请稍后再试。'
-          : '重启失败，请稍后再试或重新打开应用。'
+          ? t('statusBar.restartBusy')
+          : t('statusBar.restartFailed')
       );
     } finally {
       setRestarting(false);
@@ -148,11 +150,13 @@ export function StatusBar({ onOpenPoints }: { onOpenPoints?: () => void }) {
             backgroundColor: restartRequired ? 'var(--warning)' : s.color,
           }}
         />
-        <span style={{ color: 'var(--text-muted)' }}>{restartRequired ? '需要重启' : s.label}</span>
+        <span style={{ color: 'var(--text-muted)' }}>
+          {restartRequired ? t('statusBar.needRestart') : t(s.labelKey)}
+        </span>
       </span>
 
       {status.configured && !restartRequired && (
-        <span style={{ color: 'var(--text-faint)' }}>已配置</span>
+        <span style={{ color: 'var(--text-faint)' }}>{t('statusBar.configured')}</span>
       )}
 
       {restartRequired && (
@@ -161,15 +165,17 @@ export function StatusBar({ onOpenPoints }: { onOpenPoints?: () => void }) {
           style={{ color: 'var(--warning)' }}
           title={
             restartReasons.length > 0
-              ? `需要重启的原因：${restartReasons.join('；')}`
-              : '部分配置需要重启应用后才能生效'
+              ? t('statusBar.reasonsTitle', {
+                  list: restartReasons.join(t('statusBar.reasonSeparator')),
+                })
+              : t('statusBar.restartHint')
           }
         >
-          配置已变更
+          {t('statusBar.configChanged')}
           {restartReasons.length > 0 && (
             <span
               className="text-[var(--text-faint)] max-w-[220px] truncate"
-              title={restartReasons.join('；')}
+              title={restartReasons.join(t('statusBar.reasonSeparator'))}
             >
               {restartReasons[0]}
             </span>
@@ -181,7 +187,7 @@ export function StatusBar({ onOpenPoints }: { onOpenPoints?: () => void }) {
             style={{ background: 'var(--accent)', color: 'var(--accent-text)' }}
           >
             {restarting ? <Loader2 size={10} className="animate-spin" /> : <RefreshCw size={10} />}
-            立即重启
+            {t('statusBar.restartNow')}
           </button>
         </span>
       )}
@@ -201,10 +207,14 @@ export function StatusBar({ onOpenPoints }: { onOpenPoints?: () => void }) {
               )}
               style={{ color: 'var(--text-muted)' }}
               data-testid="statusbar-points"
-              title={`可用积分 ${qraftStatus.points.availablePoints} · 累计获得 ${qraftStatus.points.totalEarned} · 累计支出 ${qraftStatus.points.totalSpent}（点击查看明细）`}
+              title={t('statusBar.pointsTitle', {
+                avail: qraftStatus.points.availablePoints,
+                earned: qraftStatus.points.totalEarned,
+                spent: qraftStatus.points.totalSpent,
+              })}
             >
               <Coins size={12} style={{ color: 'var(--accent)' }} />
-              积分 {qraftStatus.points.availablePoints}
+              {t('statusBar.pointsCount', { count: qraftStatus.points.availablePoints })}
             </button>
             {historyOpen && (
               <div
@@ -212,24 +222,30 @@ export function StatusBar({ onOpenPoints }: { onOpenPoints?: () => void }) {
                 data-testid="statusbar-points-popover"
               >
                 <div className="flex items-center justify-between border-b border-[var(--border-subtle)] px-3 py-2">
-                  <span className="text-xs font-medium text-[var(--text)]">积分明细</span>
+                  <span className="text-xs font-medium text-[var(--text)]">
+                    {t('statusBar.historyTitle')}
+                  </span>
                   <span className="text-size-2xs text-[var(--text-faint)]">
-                    累计获得 {qraftStatus.points.totalEarned} · 累计支出{' '}
-                    {qraftStatus.points.totalSpent}
+                    {t('statusBar.earnedSpent', {
+                      earned: qraftStatus.points.totalEarned,
+                      spent: qraftStatus.points.totalSpent,
+                    })}
                   </span>
                 </div>
                 {historyError ? (
                   <p className="px-3 py-3 text-size-2xs text-[var(--text-faint)]">
-                    扣费历史加载失败
+                    {t('statusBar.historyLoadError')}
                   </p>
                 ) : billingHistory === null ? (
-                  <p className="px-3 py-3 text-size-2xs text-[var(--text-faint)]">加载中…</p>
+                  <p className="px-3 py-3 text-size-2xs text-[var(--text-faint)]">
+                    {t('statusBar.loading')}
+                  </p>
                 ) : billingHistory.length === 0 ? (
                   <p
                     className="px-3 py-3 text-size-2xs text-[var(--text-faint)]"
                     data-testid="statusbar-billing-empty"
                   >
-                    暂无扣费记录
+                    {t('statusBar.noHistory')}
                   </p>
                 ) : (
                   <ul
@@ -245,7 +261,7 @@ export function StatusBar({ onOpenPoints }: { onOpenPoints?: () => void }) {
                           <p className="flex items-center text-[var(--text)]">
                             <span className="min-w-0 truncate">
                               {entry.jobId
-                                ? `作业 ${entry.jobId}`
+                                ? t('statusBar.job', { id: entry.jobId })
                                 : `${entry.serverName ?? ''}.${entry.toolName ?? ''}`}
                             </span>
                             <span className="ml-2 shrink-0 text-[var(--text-faint)]">
@@ -262,13 +278,15 @@ export function StatusBar({ onOpenPoints }: { onOpenPoints?: () => void }) {
                               <span className="text-[var(--danger)]">-{entry.cost}</span>
                               {entry.balanceAfter !== undefined && (
                                 <span className="ml-1 text-[var(--text-faint)]">
-                                  余额 {entry.balanceAfter}
+                                  {t('statusBar.balance', { count: entry.balanceAfter })}
                                 </span>
                               )}
                             </>
                           ) : (
                             <span className="text-[var(--warning)]">
-                              {entry.status === 'insufficient' ? '余额不足' : '扣费失败'}
+                              {entry.status === 'insufficient'
+                                ? t('statusBar.insufficient')
+                                : t('statusBar.billingFailed')}
                             </span>
                           )}
                         </div>
@@ -285,7 +303,7 @@ export function StatusBar({ onOpenPoints }: { onOpenPoints?: () => void }) {
                   className="w-full border-t border-[var(--border-subtle)] px-3 py-2 text-center text-xs text-[var(--accent)]"
                   data-testid="statusbar-points-open-settings"
                 >
-                  在设置中查看全部
+                  {t('statusBar.viewAllInSettings')}
                 </button>
               </div>
             )}

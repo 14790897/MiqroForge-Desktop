@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { useTranslation } from 'react-i18next';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '../ui/Dialog';
 
 interface InputDialogProps {
@@ -19,6 +20,7 @@ export function InputDialog({
   defaultValue = '',
   onConfirm,
 }: InputDialogProps) {
+  const { t } = useTranslation();
   const [value, setValue] = useState(defaultValue);
 
   // Sync the input with the latest defaultValue each time the dialog opens
@@ -58,14 +60,14 @@ export function InputDialog({
             onClick={() => onOpenChange(false)}
             className="px-3 py-1.5 text-sm text-[var(--text-muted)] hover:text-[var(--text)] transition-colors"
           >
-            取消
+            {t('common.cancel')}
           </button>
           <button
             onClick={handleConfirm}
             disabled={!value.trim()}
             className="px-4 py-1.5 rounded-lg bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-white text-sm font-medium transition-all disabled:opacity-50"
           >
-            确定
+            {t('common.ok')}
           </button>
         </div>
       </DialogContent>

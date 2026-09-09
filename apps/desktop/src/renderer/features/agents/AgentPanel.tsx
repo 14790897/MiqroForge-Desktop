@@ -1,8 +1,10 @@
 import React, { useEffect, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import type { LiveAgentInfo } from '../../../shared/ipc';
 import { Bot, Zap } from 'lucide-react';
 
 export default function AgentPanel() {
+  const { t } = useTranslation();
   const [agents, setAgents] = useState<LiveAgentInfo[]>([]);
   const [loading, setLoading] = useState(true);
 
@@ -46,17 +48,17 @@ export default function AgentPanel() {
   const statusLabel = (s: string) => {
     switch (s) {
       case 'idle':
-        return '空闲';
+        return t('agentPanel.idle');
       case 'thinking':
-        return '思考中';
+        return t('agentPanel.thinking');
       case 'executing':
-        return '执行中';
+        return t('agentPanel.executing');
       case 'completed':
-        return '已完成';
+        return t('agentPanel.completed');
       case 'error':
-        return '错误';
+        return t('agentPanel.error');
       case 'aborted':
-        return '已中止';
+        return t('agentPanel.aborted');
       default:
         return s;
     }
@@ -66,7 +68,7 @@ export default function AgentPanel() {
     return (
       <div className="p-4 flex items-center gap-2">
         <div className="w-4 h-4 border-2 border-[var(--border)] border-t-[var(--accent)] rounded-full animate-spin" />
-        <span className="text-xs text-[var(--text-faint)]">加载中...</span>
+        <span className="text-xs text-[var(--text-faint)]">{t('agentPanel.loading')}</span>
       </div>
     );
 
@@ -75,7 +77,7 @@ export default function AgentPanel() {
       <h2 className="text-sm font-semibold text-[var(--text)] mb-4 flex items-center gap-2">
         <Bot size={16} className="icon-mono" />
         <span className="icon-color text-base leading-none">🤖</span>
-        智能体
+        {t('agentPanel.title')}
       </h2>
       {agents.length === 0 ? (
         <div className="flex flex-col items-center justify-center py-10 px-4 rounded-xl border border-dashed border-[var(--border-subtle)] bg-[var(--surface-muted)]/30">
@@ -83,8 +85,10 @@ export default function AgentPanel() {
             <Zap size={18} className="icon-mono" />
             <span className="icon-color text-lg leading-none">⚡</span>
           </div>
-          <p className="text-sm font-medium text-[var(--text-muted)] mb-1">暂无运行中的智能体</p>
-          <p className="text-xs text-[var(--text-faint)]">发送消息即可自动启动智能体</p>
+          <p className="text-sm font-medium text-[var(--text-muted)] mb-1">
+            {t('agentPanel.empty')}
+          </p>
+          <p className="text-xs text-[var(--text-faint)]">{t('agentPanel.emptyHint')}</p>
         </div>
       ) : (
         <div className="space-y-2">

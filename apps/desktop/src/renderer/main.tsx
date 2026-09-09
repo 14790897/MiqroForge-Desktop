@@ -2,6 +2,7 @@ import React from 'react';
 import ReactDOM from 'react-dom/client';
 import App from './App';
 import { ErrorBoundary } from './components/ErrorBoundary';
+import './i18n'; // init i18next (sync, inline resources) before first render
 import './styles/globals.css';
 import { applyStoredUiPreferences } from './lib/uiPreferences';
 

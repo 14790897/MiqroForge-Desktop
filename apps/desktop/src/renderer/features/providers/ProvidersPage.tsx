@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
+import { useTranslation } from 'react-i18next';
 import { ErrorBoundary } from '../../components/ErrorBoundary';
 import { Server, Loader2 } from 'lucide-react';
 import type { ProviderInfo } from '../../../shared/ipc';
@@ -11,6 +12,7 @@ import { ModelQuickPanel } from './components/ModelQuickPanel';
  * 内置 DeepSeek 激活入口保留在「编辑当前模型」弹窗中。
  */
 export function ProvidersPage({ onGoToQraft }: { onGoToQraft: () => void }) {
+  const { t } = useTranslation();
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
   const [loading, setLoading] = useState(true);
   const [editProvider, setEditProvider] = useState<ProviderInfo | null>(null);
@@ -46,12 +48,14 @@ export function ProvidersPage({ onGoToQraft }: { onGoToQraft: () => void }) {
     <div className="flex flex-col h-full bg-[var(--background)]">
       <div className="flex items-center justify-between px-6 py-4 border-b border-[var(--border-subtle)] bg-[var(--surface)] shrink-0">
         <div>
-          <h1 className="text-base font-semibold text-[var(--text)]">模型</h1>
+          <h1 className="text-base font-semibold text-[var(--text)]">{t('providers.pageTitle')}</h1>
           <p
             className="text-xs text-[var(--text-muted)] mt-0.5"
             data-testid="providers-active-model"
           >
-            {loading ? '加载中…' : `当前默认模型：${activeModel || '未设置'}`}
+            {loading
+              ? t('statusBar.loading')
+              : t('providers.headerModel', { model: activeModel || t('providers.notSet') })}
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -60,7 +64,9 @@ export function ProvidersPage({ onGoToQraft }: { onGoToQraft: () => void }) {
               onClick={() => setEditProvider(editTarget)}
               className="text-xs text-[var(--accent)] hover:text-[var(--accent-hover)] transition-colors px-2 py-1 rounded bg-[var(--accent-soft)]"
             >
-              {editTarget === activeProviderInfo ? '编辑当前模型' : '激活内置模型'}
+              {editTarget === activeProviderInfo
+                ? t('providers.editCurrent')
+                : t('providers.activateBuiltin')}
             </button>
           )}
           <button
@@ -75,12 +81,12 @@ export function ProvidersPage({ onGoToQraft }: { onGoToQraft: () => void }) {
       <div className="flex-1 overflow-y-auto">
         {loading ? (
           <div className="flex items-center justify-center h-40 text-sm text-[var(--text-faint)]">
-            <Loader2 size={16} className="animate-spin mr-2" /> 正在加载…
+            <Loader2 size={16} className="animate-spin mr-2" /> {t('providers.loading')}
           </div>
         ) : providers.length === 0 ? (
           <div className="flex flex-col items-center justify-center h-40 gap-2 text-sm text-[var(--text-faint)]">
             <Server size={24} />
-            <span>MiQroForge 运行时未启动</span>
+            <span>{t('channels.runtimeNotStarted')}</span>
           </div>
         ) : (
           <ModelQuickPanel activeModel={activeModel} onSaved={load} onGoToQraft={onGoToQraft} />
@@ -93,21 +99,21 @@ export function ProvidersPage({ onGoToQraft }: { onGoToQraft: () => void }) {
             <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30">
               <div className="bg-[var(--surface-elevated)] border border-[var(--border)] rounded-xl shadow-xl p-6 max-w-sm">
                 <p className="text-sm text-[var(--danger)] mb-3">
-                  编辑面板加载失败: {error.message}
+                  {t('providers.sheetLoadFail', { message: error.message })}
                 </p>
                 <div className="flex gap-2">
                   <button
                     onClick={reset}
                     className="px-3 py-1.5 rounded-md bg-[var(--accent)] text-white text-xs"
                   >
-                    重试
+                    {t('common.retry')}
                   </button>
                   <button
                     onClick={() => setEditProvider(null)}
                     className="px-3 py-1.5 rounded-md border border-[var(--border)] text-xs"
                     style={{ color: 'var(--text-muted)' }}
                   >
-                    关闭
+                    {t('common.close')}
                   </button>
                 </div>
               </div>

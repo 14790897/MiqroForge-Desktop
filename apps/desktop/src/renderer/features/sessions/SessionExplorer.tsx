@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
+import { useTranslation } from 'react-i18next';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { Button } from '../../components/ui/Button';
@@ -64,6 +65,7 @@ export function SessionExplorer({
   onOpenSession: (key: string) => void;
   refreshKey?: number;
 }) {
+  const { t } = useTranslation();
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
   const [loading, setLoading] = useState(true);
   const [selected, setSelected] = useState<string | null>(null);
@@ -179,18 +181,18 @@ export function SessionExplorer({
                   key={s.key}
                   items={[
                     {
-                      label: '打开会话',
+                      label: t('sessionExplorer.open'),
                       onSelect: () => {
                         loadDetail(s.key);
                         onOpenSession?.(s.key);
                       },
                     },
                     {
-                      label: '复制 session key',
+                      label: t('sessionExplorer.copyKey'),
                       onSelect: () => navigator.clipboard.writeText(s.key),
                     },
                     {
-                      label: '删除会话',
+                      label: t('sessionExplorer.delete'),
                       danger: true,
                       divider: true,
                       onSelect: () => handleDelete(s.key),
@@ -334,9 +336,11 @@ export function SessionExplorer({
               <>
                 <KeyRound size={28} className="text-[var(--warning)]" />
                 <div>
-                  <p className="text-sm font-medium text-[var(--text)] mb-1">旧版未认领会话</p>
+                  <p className="text-sm font-medium text-[var(--text)] mb-1">
+                    {t('sessionExplorer.claimTitle')}
+                  </p>
                   <p className="text-xs text-[var(--text-muted)]">
-                    此会话创建于旧版 MiQi，尚未认领到当前桌面客户端。
+                    {t('sessionExplorer.claimBody')}
                   </p>
                 </div>
                 <Button
@@ -346,16 +350,18 @@ export function SessionExplorer({
                   onClick={() => handleClaim(selected)}
                   className="mt-1"
                 >
-                  {claiming ? '认领中...' : '认领此会话'}
+                  {claiming ? t('sessionExplorer.claiming') : t('sessionExplorer.claim')}
                 </Button>
               </>
             ) : detailError.kind === 'unauthorized' ? (
               <>
                 <ShieldAlert size={28} className="text-[var(--danger)]" />
                 <div>
-                  <p className="text-sm font-medium text-[var(--text)] mb-1">无权访问此会话</p>
+                  <p className="text-sm font-medium text-[var(--text)] mb-1">
+                    {t('sessionExplorer.unauthTitle')}
+                  </p>
                   <p className="text-xs text-[var(--text-muted)]">
-                    该会话属于其他客户端，当前桌面客户端无权访问。
+                    {t('sessionExplorer.unauthBody')}
                   </p>
                 </div>
               </>
@@ -363,9 +369,11 @@ export function SessionExplorer({
               <>
                 <ShieldAlert size={28} className="text-[var(--danger)]" />
                 <div>
-                  <p className="text-sm font-medium text-[var(--text)] mb-1">加载会话失败</p>
+                  <p className="text-sm font-medium text-[var(--text)] mb-1">
+                    {t('sessionExplorer.loadFail')}
+                  </p>
                   <p className="text-xs text-[var(--text-muted)] max-w-xs break-all">
-                    {detailError.message || '未知错误'}
+                    {detailError.message || t('sessionExplorer.unknownError')}
                   </p>
                 </div>
               </>

@@ -1,3 +1,4 @@
+import { useTranslation } from 'react-i18next';
 import { cn } from '../../lib/utils';
 
 export interface SpinnerProps {
@@ -12,10 +13,11 @@ const SIZE_CLASSES = {
 } as const;
 
 export function Spinner({ size = 'md', className }: SpinnerProps) {
+  const { t } = useTranslation();
   return (
     <div
       role="status"
-      aria-label="加载中"
+      aria-label={t('spinner.loading')}
       className={cn(
         'border-2 border-[var(--border)] border-t-[var(--accent)] rounded-full animate-spin',
         SIZE_CLASSES[size],

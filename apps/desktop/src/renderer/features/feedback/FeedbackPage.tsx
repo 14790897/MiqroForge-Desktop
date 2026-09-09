@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
+import { useTranslation } from 'react-i18next';
 import {
   MessageSquare,
   Plus,
@@ -30,17 +31,18 @@ interface ScreenshotFile {
 }
 
 const CATEGORY_OPTIONS = [
-  { value: 'bug', label: '🐛 缺陷报告', icon: Bug },
-  { value: 'question', label: '❓ 使用问题', icon: HelpCircle },
-  { value: 'suggestion', label: '💡 功能建议', icon: Lightbulb },
-  { value: 'other', label: '📝 其他', icon: FileText },
+  { value: 'bug', labelKey: 'feedback.catCard.bug', icon: Bug },
+  { value: 'question', labelKey: 'feedback.catCard.question', icon: HelpCircle },
+  { value: 'suggestion', labelKey: 'feedback.catCard.suggestion', icon: Lightbulb },
+  { value: 'other', labelKey: 'feedback.catCard.other', icon: FileText },
 ] as const;
 
-const CATEGORY_LABELS: Record<string, string> = {
-  bug: '缺陷报告',
-  question: '使用问题',
-  suggestion: '功能建议',
-  other: '其他',
+// Badge labels shown in the entry list (no emoji prefix).
+const CATEGORY_LABEL_KEYS: Record<string, string> = {
+  bug: 'feedback.catName.bug',
+  question: 'feedback.catName.question',
+  suggestion: 'feedback.catName.suggestion',
+  other: 'feedback.catName.other',
 };
 
 const CATEGORY_ICONS: Record<string, typeof Bug> = {
@@ -59,6 +61,7 @@ import { formatRelativeTime } from '../../lib/formatTime';
 import { Modal } from '../../components/shared';
 
 function SubmitModal({ onClose, onSubmitted }: { onClose: () => void; onSubmitted: () => void }) {
+  const { t } = useTranslation();
   const [category, setCategory] = useState<'bug' | 'question' | 'suggestion' | 'other'>('bug');
   const [title, setTitle] = useState('');
   const [content, setContent] = useState('');
@@ -81,17 +84,21 @@ function SubmitModal({ onClose, onSubmitted }: { onClose: () => void; onSubmitte
   const onBeforeClose = useCallback(() => {
     if (submitting) return true;
     if (!hasUnsavedContent || success) return false;
-    return !window.confirm('放弃已填写的内容？');
-  }, [hasUnsavedContent, submitting, success]);
+    return !window.confirm(t('feedback.confirmDiscard'));
+  }, [hasUnsavedContent, submitting, success, t]);
 
   const readFileAsDataUrl = (file: File): Promise<ScreenshotFile> =>
     new Promise((resolve, reject) => {
       if (!file.type.startsWith(ALLOWED_MIME_PREFIX)) {
-        reject(new Error(`不支持的文件类型: ${file.type || '未知'}`));
+        reject(
+          new Error(
+            t('feedback.errUnsupportedType', { type: file.type || t('feedback.errUnknownType') })
+          )
+        );
         return;
       }
       if (file.size > MAX_SCREENSHOT_BYTES) {
-        reject(new Error(`${file.name} 超过 10MB 限制`));
+        reject(new Error(t('feedback.errTooLarge', { name: file.name })));
         return;
       }
       const reader = new FileReader();
@@ -102,41 +109,44 @@ function SubmitModal({ onClose, onSubmitted }: { onClose: () => void; onSubmitte
           size: file.size,
         });
       };
-      reader.onerror = () => reject(new Error('读取文件失败'));
+      reader.onerror = () => reject(new Error(t('feedback.errReadFile')));
       reader.readAsDataURL(file);
     });
 
-  const addFiles = useCallback(async (files: FileList | File[]) => {
-    const list = Array.from(files);
-    setError(null);
-    try {
-      // Pre-decode all files (catching per-file errors so one bad file
-      // doesn't drop the whole batch); then commit against the LATEST
-      // state to enforce MAX_SCREENSHOTS under concurrent pastes/drops.
-      const results = await Promise.allSettled(list.map(readFileAsDataUrl));
-      const accepted: ScreenshotFile[] = [];
-      for (const r of results) {
-        if (r.status === 'fulfilled') accepted.push(r.value);
-      }
-      if (accepted.length < results.length) {
-        const rejected = results.length - accepted.length;
-        setError(`${rejected} 个文件未添加（不支持的类型或超过 10MB）`);
-      }
-      setScreenshots((prev) => {
-        const cap = Math.max(0, MAX_SCREENSHOTS - prev.length);
-        if (cap === 0) {
-          setError(`最多 ${MAX_SCREENSHOTS} 张截图`);
-          return prev;
+  const addFiles = useCallback(
+    async (files: FileList | File[]) => {
+      const list = Array.from(files);
+      setError(null);
+      try {
+        // Pre-decode all files (catching per-file errors so one bad file
+        // doesn't drop the whole batch); then commit against the LATEST
+        // state to enforce MAX_SCREENSHOTS under concurrent pastes/drops.
+        const results = await Promise.allSettled(list.map(readFileAsDataUrl));
+        const accepted: ScreenshotFile[] = [];
+        for (const r of results) {
+          if (r.status === 'fulfilled') accepted.push(r.value);
         }
-        if (accepted.length > cap) {
-          setError(`仅添加了前 ${cap} 张，已达 ${MAX_SCREENSHOTS} 张上限`);
+        if (accepted.length < results.length) {
+          const rejected = results.length - accepted.length;
+          setError(t('feedback.errRejected', { count: rejected }));
         }
-        return [...prev, ...accepted.slice(0, cap)];
-      });
-    } catch (e: any) {
-      setError(e?.message || '处理图片失败');
-    }
-  }, []);
+        setScreenshots((prev) => {
+          const cap = Math.max(0, MAX_SCREENSHOTS - prev.length);
+          if (cap === 0) {
+            setError(t('feedback.errMax', { count: MAX_SCREENSHOTS }));
+            return prev;
+          }
+          if (accepted.length > cap) {
+            setError(t('feedback.errPartial', { count: cap, max: MAX_SCREENSHOTS }));
+          }
+          return [...prev, ...accepted.slice(0, cap)];
+        });
+      } catch (e: any) {
+        setError(e?.message || t('feedback.errProcess'));
+      }
+    },
+    [t]
+  );
 
   // Paste from clipboard (Ctrl+V) when modal is open
   useEffect(() => {
@@ -181,7 +191,7 @@ function SubmitModal({ onClose, onSubmitted }: { onClose: () => void; onSubmitte
       // unexpected payload (e.g. from an older backend) is treated as a
       // failure rather than silently marking success.
       if (!result || result.ok !== true) {
-        throw new Error('提交未确认（后端返回 ok=false）');
+        throw new Error(t('feedback.errSubmitUnconfirmed'));
       }
       setSuccess(true);
       setTimeout(() => {
@@ -189,7 +199,7 @@ function SubmitModal({ onClose, onSubmitted }: { onClose: () => void; onSubmitte
         onClose();
       }, 1500);
     } catch (e: any) {
-      setError(e?.message || '提交失败，请重试');
+      setError(e?.message || t('feedback.errSubmit'));
     } finally {
       setSubmitting(false);
     }
@@ -209,7 +219,7 @@ function SubmitModal({ onClose, onSubmitted }: { onClose: () => void; onSubmitte
       >
         {/* Header */}
         <div className="flex items-center justify-between mb-5">
-          <h3 className="text-lg font-semibold">提交反馈</h3>
+          <h3 className="text-lg font-semibold">{t('feedback.submit')}</h3>
           <button
             onClick={() => {
               if (!submitting && !onBeforeClose()) onClose();
@@ -224,25 +234,23 @@ function SubmitModal({ onClose, onSubmitted }: { onClose: () => void; onSubmitte
         {success ? (
           <div className="flex flex-col items-center gap-3 py-8">
             <CheckCircle size={40} className="text-green-400" />
-            <p className="text-sm font-medium">提交成功！</p>
-            <p className="text-xs text-[var(--muted-foreground)]">日志已自动附加并发送到飞书</p>
+            <p className="text-sm font-medium">{t('feedback.successTitle')}</p>
+            <p className="text-xs text-[var(--muted-foreground)]">{t('feedback.successHint')}</p>
           </div>
         ) : (
           <>
             {/* Hints */}
             <div className="flex flex-col gap-1.5 mb-4 p-2.5 rounded-md bg-[var(--accent)]/5 border border-[var(--accent)]/15">
               <p className="text-size-2xs text-[var(--muted-foreground)]">
-                日志将在提交时自动附加并发送到飞书
+                {t('feedback.hintAutoAttach')}
               </p>
-              <p className="text-size-2xs text-[var(--warning)]">
-                提示：建议先复制已填写的提示词，避免因意外关闭而丢失
-              </p>
+              <p className="text-size-2xs text-[var(--warning)]">{t('feedback.hintCopyFirst')}</p>
             </div>
 
             {/* Category */}
             <div className="mb-4">
               <label className="block text-xs font-medium text-[var(--muted-foreground)] mb-1.5">
-                类别
+                {t('feedback.catLabel')}
               </label>
               <div className="grid grid-cols-2 gap-2">
                 {CATEGORY_OPTIONS.map((opt) => (
@@ -257,7 +265,7 @@ function SubmitModal({ onClose, onSubmitted }: { onClose: () => void; onSubmitte
                     )}
                   >
                     <opt.icon size={15} />
-                    {opt.label}
+                    {t(opt.labelKey)}
                   </button>
                 ))}
               </div>
@@ -266,12 +274,12 @@ function SubmitModal({ onClose, onSubmitted }: { onClose: () => void; onSubmitte
             {/* Title */}
             <div className="mb-4">
               <label className="block text-xs font-medium text-[var(--muted-foreground)] mb-1.5">
-                标题
+                {t('feedback.titleLabel')}
               </label>
               <input
                 value={title}
                 onChange={(e) => setTitle(e.target.value)}
-                placeholder="简要描述你的问题或建议"
+                placeholder={t('feedback.titlePlaceholder')}
                 maxLength={200}
                 className="w-full px-3 py-2 text-sm bg-[var(--muted)]/10 rounded-md border border-[var(--border)]
                            outline-none focus:border-[var(--border-strong)]"
@@ -281,12 +289,12 @@ function SubmitModal({ onClose, onSubmitted }: { onClose: () => void; onSubmitte
             {/* Content */}
             <div className="mb-4">
               <label className="block text-xs font-medium text-[var(--muted-foreground)] mb-1.5">
-                详细描述
+                {t('feedback.contentLabel')}
               </label>
               <textarea
                 value={content}
                 onChange={(e) => setContent(e.target.value)}
-                placeholder="请详细描述你的问题或建议..."
+                placeholder={t('feedback.contentPlaceholder')}
                 rows={5}
                 maxLength={10000}
                 className="w-full px-3 py-2 text-sm bg-[var(--muted)]/10 rounded-md border border-[var(--border)]
@@ -297,12 +305,12 @@ function SubmitModal({ onClose, onSubmitted }: { onClose: () => void; onSubmitte
             {/* Contact (optional) */}
             <div className="mb-4">
               <label className="block text-xs font-medium text-[var(--muted-foreground)] mb-1.5">
-                联系方式（选填）
+                {t('feedback.contactLabel')}
               </label>
               <input
                 value={contact}
                 onChange={(e) => setContact(e.target.value)}
-                placeholder="邮箱或飞书账号，方便我们联系你"
+                placeholder={t('feedback.contactPlaceholder')}
                 maxLength={200}
                 className="w-full px-3 py-2 text-sm bg-[var(--muted)]/10 rounded-md border border-[var(--border)]
                            outline-none focus:border-[var(--border-strong)]"
@@ -312,7 +320,7 @@ function SubmitModal({ onClose, onSubmitted }: { onClose: () => void; onSubmitte
             {/* Screenshots */}
             <div className="mb-4">
               <label className="flex items-center justify-between text-xs font-medium text-[var(--muted-foreground)] mb-1.5">
-                <span>截图（选填，可拖入 / 粘贴 / 点击上传）</span>
+                <span>{t('feedback.screenshotLabel')}</span>
                 <span className="text-size-2xs opacity-70">
                   {screenshots.length}/{MAX_SCREENSHOTS}
                 </span>
@@ -340,11 +348,9 @@ function SubmitModal({ onClose, onSubmitted }: { onClose: () => void; onSubmitte
                 )}
               >
                 <ImagePlus size={20} className="text-[var(--muted-foreground)]" />
-                <p className="text-xs text-[var(--muted-foreground)]">
-                  拖入图片 / 粘贴 (Ctrl+V) / 点击选择
-                </p>
+                <p className="text-xs text-[var(--muted-foreground)]">{t('feedback.dropHint')}</p>
                 <p className="text-size-2xs text-[var(--muted-foreground)] opacity-70">
-                  支持 PNG / JPG / GIF / WebP，单张 ≤ 10MB
+                  {t('feedback.supportedFormats')}
                 </p>
                 <input
                   ref={fileInputRef}
@@ -374,7 +380,7 @@ function SubmitModal({ onClose, onSubmitted }: { onClose: () => void; onSubmitte
                           removeScreenshot(idx);
                         }}
                         className="absolute top-1 right-1 p-1 rounded-full bg-black/60 text-white opacity-0 group-hover:opacity-100 transition-opacity"
-                        title="移除"
+                        title={t('feedback.remove')}
                       >
                         <X size={12} />
                       </button>
@@ -401,7 +407,7 @@ function SubmitModal({ onClose, onSubmitted }: { onClose: () => void; onSubmitte
                 disabled={submitting}
                 className="px-4 py-2 text-sm rounded-md border border-[var(--border)] hover:bg-[var(--muted)]/30 disabled:opacity-50"
               >
-                取消
+                {t('common.cancel')}
               </button>
               <button
                 onClick={handleSubmit}
@@ -416,10 +422,10 @@ function SubmitModal({ onClose, onSubmitted }: { onClose: () => void; onSubmitte
                 {submitting ? (
                   <>
                     <Loader2 size={14} className="animate-spin" />
-                    提交中...
+                    {t('feedback.submitting')}
                   </>
                 ) : (
-                  '提交'
+                  t('feedback.submitBtn')
                 )}
               </button>
             </div>
@@ -433,6 +439,7 @@ function SubmitModal({ onClose, onSubmitted }: { onClose: () => void; onSubmitte
 // ─── FeedbackPage ────────────────────────────────────────────────────────────
 
 export function FeedbackPage() {
+  const { t } = useTranslation();
   const [entries, setEntries] = useState<FeedbackEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [showSubmitModal, setShowSubmitModal] = useState(false);
@@ -445,11 +452,11 @@ export function FeedbackPage() {
       const res = await window.miqi.feedback.list({ limit: 50 });
       setEntries(res?.entries ?? []);
     } catch {
-      setError('加载反馈记录失败');
+      setError(t('feedback.loadError'));
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [t]);
 
   useEffect(() => {
     load();
@@ -460,19 +467,19 @@ export function FeedbackPage() {
       {/* Header */}
       <div className="flex items-center gap-4 px-5 py-3 border-b border-[var(--border)] shrink-0">
         <MessageSquare size={18} className="text-[var(--muted-foreground)]" />
-        <h2 className="text-lg font-semibold flex-1">用户反馈</h2>
+        <h2 className="text-lg font-semibold flex-1">{t('feedback.title')}</h2>
         <button
           onClick={() => setShowSubmitModal(true)}
           className="flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-md
                      bg-[var(--accent)]/10 hover:bg-[var(--accent)]/20 text-[var(--accent)] transition-colors"
         >
           <Plus size={15} />
-          提交反馈
+          {t('feedback.submit')}
         </button>
         <button
           onClick={load}
           className="p-1.5 rounded hover:bg-[var(--muted)]/20 text-[var(--muted-foreground)]"
-          title="刷新"
+          title={t('common.refresh')}
         >
           <RefreshCw size={15} className={loading ? 'animate-spin' : ''} />
         </button>
@@ -489,15 +496,15 @@ export function FeedbackPage() {
             <AlertTriangle size={24} className="text-[var(--muted-foreground)] opacity-40" />
             <p className="text-sm text-[var(--muted-foreground)]">{error}</p>
             <button onClick={load} className="text-xs text-[var(--accent)] hover:underline mt-1">
-              重试
+              {t('common.retry')}
             </button>
           </div>
         ) : entries.length === 0 ? (
           <div className="flex flex-col items-center gap-3 py-16 text-center">
             <MessageSquare size={28} className="text-[var(--muted-foreground)] opacity-30" />
-            <p className="text-sm text-[var(--muted-foreground)]">暂无反馈记录</p>
+            <p className="text-sm text-[var(--muted-foreground)]">{t('feedback.empty')}</p>
             <p className="text-xs text-[var(--muted-foreground)] opacity-60">
-              提交反馈将自动附加日志并发送到飞书
+              {t('feedback.emptyHint')}
             </p>
             <button
               onClick={() => setShowSubmitModal(true)}
@@ -505,7 +512,7 @@ export function FeedbackPage() {
                          bg-[var(--accent)]/10 hover:bg-[var(--accent)]/20 text-[var(--accent)]"
             >
               <Plus size={15} />
-              提交第一条反馈
+              {t('feedback.submitFirst')}
             </button>
           </div>
         ) : (
@@ -522,7 +529,9 @@ export function FeedbackPage() {
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center gap-2 mb-1">
                         <span className="text-xs px-1.5 py-0.5 rounded bg-[var(--muted)]/10 text-[var(--muted-foreground)]">
-                          {CATEGORY_LABELS[entry.category] || entry.category}
+                          {CATEGORY_LABEL_KEYS[entry.category]
+                            ? t(CATEGORY_LABEL_KEYS[entry.category])
+                            : entry.category}
                         </span>
                         <span className="text-sm font-medium truncate">{entry.title}</span>
                       </div>
