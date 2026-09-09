@@ -9183,7 +9183,9 @@ const MessageBubble = memo(function MessageBubble({
                     title="喜欢"
                     aria-label="喜欢"
                     className={`flex items-center justify-center w-9 h-9 rounded-lg border border-[var(--border-subtle)] bg-[var(--surface-muted)]/50 transition-colors ${
-                      feedback === 'up' ? 'text-[var(--accent)] bg-[var(--accent-soft)]' : 'text-[var(--text-muted)] hover:bg-[var(--surface-muted)] hover:text-[var(--text)]'
+                      feedback === 'up'
+                        ? 'text-[var(--accent)] bg-[var(--accent-soft)]'
+                        : 'text-[var(--text-muted)] hover:bg-[var(--surface-muted)] hover:text-[var(--text)]'
                     }`}
                   >
                     <ThumbsUp size={16} />
@@ -9202,7 +9204,9 @@ const MessageBubble = memo(function MessageBubble({
                     title="不喜欢"
                     aria-label="不喜欢"
                     className={`flex items-center justify-center w-9 h-9 rounded-lg border border-[var(--border-subtle)] bg-[var(--surface-muted)]/50 transition-colors ${
-                      feedback === 'down' ? 'text-[var(--danger)] bg-[var(--danger-bg)]' : 'text-[var(--text-muted)] hover:bg-[var(--surface-muted)] hover:text-[var(--text)]'
+                      feedback === 'down'
+                        ? 'text-[var(--danger)] bg-[var(--danger-bg)]'
+                        : 'text-[var(--text-muted)] hover:bg-[var(--surface-muted)] hover:text-[var(--text)]'
                     }`}
                   >
                     <ThumbsDown size={16} />
