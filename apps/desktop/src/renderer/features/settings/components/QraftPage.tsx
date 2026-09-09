@@ -22,34 +22,12 @@ import {
 } from 'lucide-react';
 import { Button } from '../../../components/ui/Button';
 import { gatewayStatusText } from '../../../lib/qraftGateway';
+import { qraftErrorText } from '../../../lib/qraftErrors';
 import type {
   QraftBillingHistoryEntry,
-  QraftErrorCode,
   QraftLoginResult,
   QraftStatus,
 } from '../../../../shared/ipc';
-
-/** 各错误码对应的修复指引（服务端 message 优先展示，这里只兜底）。 */
-const ERROR_GUIDANCE: Partial<Record<QraftErrorCode, string>> = {
-  IP_NOT_WHITELISTED:
-    '出口 IP 未加白：本机出口 IP 不在 MiQroForge 平台白名单内，请联系 MiQroForge 管理员加白后重试。',
-  NETWORK_UNREACHABLE:
-    '网络请求失败（多次重试后仍超时）。请检查网络连接后重试；如持续失败可能是出口线路抖动。',
-  PUBLIC_KEY_EXTRACT_FAILED:
-    '无法从 MiQroForge 登录页前端 bundle 提取 RSA 公钥。请确认 MiQroForge 基础地址正确、当前网络可访问登录页。',
-  SESSION_EXPIRED: 'MiQroForge 登录态已失效，请重新登录。',
-  AUTHORIZE_FAILED: '授权流程失败。可尝试退出后重新登录；如反复出现请查看日志排查。',
-  TOKEN_EXCHANGE_FAILED: '换取 token 失败。可尝试重新登录；如反复出现请查看日志排查。',
-  REFRESH_FAILED: 'token 刷新失败，登录已过期，请重新登录。',
-  REFRESH_TOKEN_INVALID:
-    'refresh_token 已失效（平台升级或安全策略变更可能导致登录态作废），请重新登录。',
-  USERINFO_FAILED: '获取用户信息失败（不影响已登录状态）。',
-  LOGIN_CANCELLED: '已取消：登录窗口在完成授权前被关闭。',
-  BROWSER_LOGIN_FAILED:
-    '浏览器登录失败：无法打开 MiQroForge 登录页或等待授权超时，请检查网络后重试。',
-  INVALID_CONFIG: '接入配置不完整或非法，请检查高级设置中的 client_secret 等项。',
-  INTERNAL: '发生未知错误，请查看日志排查。',
-};
 
 function maskPhone(phone: string): string {
   if (!phone) return '';
@@ -62,12 +40,6 @@ function fmtDateTime(epochMs?: number): string {
   const d = new Date(epochMs);
   const pad = (n: number) => String(n).padStart(2, '0');
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
-}
-
-function errorText(result: QraftLoginResult | null, fallback: string): string {
-  if (!result) return fallback;
-  if (result.message) return result.message;
-  return ERROR_GUIDANCE[result.code ?? 'INTERNAL'] ?? fallback;
 }
 
 export function QraftPage() {
@@ -124,9 +96,9 @@ export function QraftPage() {
       if (result.ok) {
         setStatus(await window.miqi.qraft.status());
       } else if (result.code === 'LOGIN_CANCELLED') {
-        setBrowserNotice(errorText(result, '已取消浏览器登录'));
+        setBrowserNotice(qraftErrorText(result, '已取消浏览器登录'));
       } else {
-        setLoginError(errorText(result, '浏览器登录失败'));
+        setLoginError(qraftErrorText(result, '浏览器登录失败'));
       }
     } catch (e) {
       setLoginError(e instanceof Error ? e.message : 'IPC 调用失败');
@@ -140,7 +112,7 @@ export function QraftPage() {
     setRefreshError(null);
     try {
       const result = await window.miqi.qraft.refresh();
-      if (!result.ok) setRefreshError(errorText(result, '刷新失败'));
+      if (!result.ok) setRefreshError(qraftErrorText(result, '刷新失败'));
       setStatus(await window.miqi.qraft.status());
     } catch (e) {
       setRefreshError(e instanceof Error ? e.message : 'IPC 调用失败');
@@ -241,7 +213,9 @@ export function QraftPage() {
               ) : (
                 <Globe size={14} />
               )}
-              {browserLoggingIn ? '等待授权中…（请在 MiQroForge 页面完成登录）' : '浏览器登录'}
+              {browserLoggingIn
+                ? '等待授权中…（请在 MiQroForge 页面完成登录）'
+                : '登录 MiQroForge 账号'}
             </Button>
             <p className="text-size-2xs text-[var(--text-faint)]">
               将打开 MiQroForge 平台授权页，在页面完成登录并点击「同意」后自动回到 MiQroForge。

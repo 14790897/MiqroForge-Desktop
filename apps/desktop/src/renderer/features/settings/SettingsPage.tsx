@@ -6,6 +6,7 @@ import { Input } from '../../components/ui/Input';
 import { cn } from '../../lib/utils';
 import { getCachedConfig, invalidateConfigCache } from '../../lib/configCache';
 import { sanitizeUiMessage } from '../../lib/sanitizeUiMessage';
+import { QraftLoginButton } from './components/QraftLoginCard';
 import {
   RefreshCw,
   Download,
@@ -580,15 +581,8 @@ function GeneralTab({
         ) : (
           <div className="flex items-center justify-between gap-3 rounded-lg border border-[var(--border-subtle)] bg-[var(--surface-muted)] px-3 py-2.5">
             <span className="text-sm text-[var(--text-muted)]">登录后使用平台内置模型</span>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={onGoToQraft}
-              data-testid="general-go-login"
-            >
-              <LogIn size={14} />
-              去登录
-            </Button>
+            {/* #1000 未登录拦截：一键浏览器登录（原「去登录」仅跳设置页） */}
+            <QraftLoginButton testId="general-login-btn" size="sm" busyLabel="等待授权中…" />
           </div>
         )}
       </div>

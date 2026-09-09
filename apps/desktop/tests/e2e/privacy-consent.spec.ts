@@ -137,9 +137,22 @@ test.describe.serial('Privacy consent gate (#837)', () => {
 
     await agreeBtn.click();
 
+    // #1000：同意后直接衔接登录页（协议 → 登录一气呵成），入口不再藏在设置页。
+    await expect(page.getByTestId('login-step')).toBeVisible({ timeout: 60_000 });
+    await expect(page.getByTestId('login-step-login-btn')).toBeVisible();
+    await page.screenshot({
+      path: `test-results/${test.info().title.replace(/\s+/g, '-')}-login-step.png`,
+      fullPage: true,
+    });
+
+    // 暂不登录进入应用
+    await page.getByTestId('login-step-skip').click();
+
     // CI 冷启动（bridge + python.check）较慢，给足时间
     await expect(page.getByTestId('app-title')).toBeVisible({ timeout: 120_000 });
     await expect(page.getByTestId('privacy-consent-gate')).toHaveCount(0);
+    // #1000：进入应用后首屏（空会话欢迎区）有登录卡片入口
+    await expect(page.getByTestId('chat-hero-login-card')).toBeVisible({ timeout: 60_000 });
     // 同意版本已写入 localStorage
     const stored = await page.evaluate(() => localStorage.getItem('miqi:privacyConsentVersion'));
     expect(stored).toBe('1.0');
@@ -154,6 +167,8 @@ test.describe.serial('Privacy consent gate (#837)', () => {
     await page.reload();
     await expect(page.getByTestId('app-title')).toBeVisible({ timeout: 120_000 });
     await expect(page.getByTestId('privacy-consent-gate')).toHaveCount(0);
+    // #1000：登录衔接页只在同意动作后出现一次，重挂载（已有同意记录）不再出现
+    await expect(page.getByTestId('login-step')).toHaveCount(0);
   });
 
   test('设置页可随时查阅隐私协议', { timeout: 90_000 }, async () => {

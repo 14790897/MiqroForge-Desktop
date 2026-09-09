@@ -9,12 +9,18 @@ access_token（安全存储 + 到期自动刷新），供后续以用户身份�
 
 ## 1. 使用方式
 
-设置 → **MiQroForge 平台**：
+登录入口（#1000 入口显性化，多处直达、无需深挖菜单）：
 
-| 路径 | 操作 | 适用场景 |
-| ---- | ---- | -------- |
-| 浏览器登录（推荐） | 点「浏览器登录」→ 应用内打开 MiQroForge 授权页 → 用户自行登录并点击「同意」→ 自动完成授权回到 MiQroForge | 默认首选，无需在 MiQroForge 输入密码 |
-| 密码登录 | 填手机号 + 密码（RSA 加密后传输） | 无法弹窗/自动化场景 |
+| 入口 | 位置 | 说明 |
+| ---- | ---- | ---- |
+| 隐私协议衔接（首次启动） | 同意隐私协议后自动进入「登录 MiQroForge 账号」页 | 协议 → 登录一气呵成；可「暂不登录」跳过 |
+| 首屏登录卡片 | 空会话欢迎区 | 未登录时展示「登录 MiQroForge 账号」卡片，一键发起浏览器登录 |
+| 顶栏登录 chip | 顶栏右侧 | 未登录常驻「登录 MiQroForge 账号」按钮；已登录显示账号 chip |
+| 未登录拦截引导 | 发送拦截气泡 / 模型面板 / 通用设置 | 需要登录才能使用的功能在拦截处直接给出一键登录按钮 |
+| 设置 → **MiQroForge 平台** | 账号管理页 | 完整账号信息：token 到期/刷新、积分余额、扣费历史、退出登录 |
+
+浏览器登录（推荐）：点「登录 MiQroForge 账号」→ 打开 MiQroForge 授权页 →
+用户自行登录并点击「同意」→ 自动完成授权回到 MiQroForge。无需在 MiQroForge 输入密码。
 
 登录后展示昵称、用户名、脱敏手机号、access_token 到期时间与计划自动刷新时间；
 「立即刷新」手动续期，「退出登录」清除 cookie 与 token。
@@ -36,6 +42,9 @@ MiQroForge 平台注册的 redirect_uri。
 | `apps/desktop/src/main/qraft/service.ts` | 登录态编排：登录/登出/自动刷新调度（到期前 15 分钟刷新；瞬时失败 30 分钟重试并引导重登；refresh_token 失效为永久错误，停止自动重试并引导重登）；生产环境强制注册 redirect_uri |
 | `apps/desktop/src/main/qraft/ipc.ts` | IPC 处理 + 浏览器登录窗口（独立 partition、导航白名单、回调 code 拦截、登录态 cookie 轮询带回授权） |
 | `apps/desktop/src/renderer/features/settings/components/QraftPage.tsx` | 设置页 UI（表单/账号展示/错误指引） |
+| `apps/desktop/src/renderer/features/settings/components/QraftLoginCard.tsx` | 登录入口共享组件（#1000）：`QraftLoginButton` 一键浏览器登录（各入口复用）+ `QraftLoginCard` 首屏登录卡片 |
+| `apps/desktop/src/renderer/features/setup/QraftLoginStep.tsx` | 隐私协议 → 登录衔接页（#1000）：同意协议后直接进入，可跳过 |
+| `apps/desktop/src/renderer/lib/qraftErrors.ts` | 错误码 → 用户修复指引（设置页与各登录入口共用） |
 
 IPC 通道：`qraft:login` / `qraft:browserLogin` / `qraft:status` / `qraft:refresh` /
 `qraft:logout` / `qraft:pointsBalance` + 事件 `qraft:statusChanged`（登录态变化
@@ -190,7 +199,8 @@ slurm MCP 工具（服务器名含 "slurm"）实际执行前，`MCPToolWrapper.e
 | 单测 | `cd apps/desktop && npx vitest run src/main/qraft` | mock 全流程/错误分类/重试/假时钟自动刷新/safeStorage 往返/脱敏 |
 | Smoke | `npx playwright test --config=playwright.config.ts --project=smoke issue-726-qraft.spec.ts` | 设置页 UI（mock bridge） |
 | Electron E2E（离线） | `npx playwright test tests/e2e/qraft-login.spec.ts --config=playwright.config.ts --project=electron` | 真实主进程：表单/错误分类/预置登录态与退出清盘；零网络依赖，CI 必跑 |
-| Electron E2E（真实环境） | `QRAFT_PHONE=… QRAFT_PASSWORD=… npx playwright test tests/e2e/qraft-browser-login.spec.ts --project=electron` | 打开真实 MiQroForge 页面完成登录全链路；CI 未配凭据自动跳过 |
+| Electron E2E（入口显性化 #1000） | `npx playwright test tests/e2e/qraft-login-entry.spec.ts tests/e2e/privacy-consent.spec.ts --project=electron` | 首屏卡片/顶栏/拦截按钮入口、协议 → 登录衔接页；零网络依赖，CI 必跑 |
+| Electron E2E（真实环境） | `QRAFT_PHONE=… QRAFT_PASSWORD=… npx playwright test tests/e2e/qraft-browser-login.spec.ts tests/e2e/qraft-login-entry.spec.ts --project=electron` | 打开真实 MiQroForge 页面完成登录全链路（设置页入口 + 首屏卡片入口）；CI 未配凭据自动跳过 |
 | live 集成 | `QRAFT_LIVE=1 QRAFT_PHONE=… QRAFT_PASSWORD=… npx vitest run src/main/qraft/live.integration.test.ts` | 平台登录→授权→token→userinfo→refresh 直连测试环境 |
 
 ## 9. 已知限制与后续计划
