@@ -603,6 +603,7 @@ export const zhCN = {
   // ── Feedback page ──────────────────────────────────────────────────────────
   'feedback.title': '用户反馈',
   'feedback.submit': '提交反馈',
+  'feedback.submitBtn': '提交',
   'feedback.submitFirst': '提交第一条反馈',
   'feedback.empty': '暂无反馈记录',
   'feedback.emptyHint': '提交反馈将自动附加日志并发送到飞书',

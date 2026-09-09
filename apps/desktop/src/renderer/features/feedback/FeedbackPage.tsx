@@ -425,7 +425,7 @@ function SubmitModal({ onClose, onSubmitted }: { onClose: () => void; onSubmitte
                     {t('feedback.submitting')}
                   </>
                 ) : (
-                  t('feedback.submit')
+                  t('feedback.submitBtn')
                 )}
               </button>
             </div>

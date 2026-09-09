@@ -614,6 +614,7 @@ export const en: Record<I18nKey, string> = {
   // ── Feedback page ──────────────────────────────────────────────────────────
   'feedback.title': 'User Feedback',
   'feedback.submit': 'Submit feedback',
+  'feedback.submitBtn': 'Submit',
   'feedback.submitFirst': 'Submit your first feedback',
   'feedback.empty': 'No feedback yet',
   'feedback.emptyHint': 'Submissions automatically attach logs and go to Feishu',
