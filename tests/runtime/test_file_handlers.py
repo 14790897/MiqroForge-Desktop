@@ -438,9 +438,14 @@ async def test_get_tracked_files_reads_sink_delivered_artifact(tmp_path):
     """``DownloadSink`` 交付的 MCP 下载产物必须出现在面板读端（真实 handler）。
 
     写端：sink 落盘 → ``_persist_tracked_file``（与 create_pdf 同机制）。
-    读端：``sessions.get_tracked_files``（#1003 finding ① 归一后）必须读到，
-    且条目键是会话根相对路径 ``.miqi/downloads/<name>``——面板
-    ``files.read(path, session_key)`` 按会话 files 目录拼得到产物本身。
+    读端两条真实链路：
+    - ``sessions.get_tracked_files``（#1003 finding ① 归一后）读到条目；
+    - ``files.read(path, session_key, as_binary)`` 按条目键取回字节
+      （面板「下载/另存为」走的就是这条，#877）。
+
+    产物名用 ``.pdf``：``files.read`` 只服务文本安全/可预览/可二进制读的
+    后缀集，非白名单后缀（如 ``.cube``）会在读取层被拒（既有读端门，见 PR
+    「后续计划」）——用白名单内的后缀才能证明端到端回路成立。
     """
     import base64
     import hashlib
@@ -449,13 +454,14 @@ async def test_get_tracked_files_reads_sink_delivered_artifact(tmp_path):
 
     from miqi.agent.tools.mcp_download_sink import DownloadSink
     from miqi.runtime.app_server import ClientSessionRegistry
+    from miqi.runtime.file_handlers import files_read_handler
     from miqi.runtime.session_handlers import sessions_get_tracked_files_handler
 
     key = "desktop:983downloads"
     sm, ws = _setup_session(key, "client-A")
-    data = b"artifact-bytes-983"
+    data = b"%PDF-1.4 artifact-bytes-983"
     payload = json.dumps({
-        "name": "report.cube",
+        "name": "report.pdf",
         "size_bytes": len(data),
         "sha256": hashlib.sha256(data).hexdigest(),
         "content_base64": base64.b64encode(data).decode(),
@@ -471,7 +477,7 @@ async def test_get_tracked_files_reads_sink_delivered_artifact(tmp_path):
         session_key=key,
         server_name="miqroforge",
         tool_name="download_file",
-        request_kwargs={"name": "report.cube"},
+        request_kwargs={"name": "report.pdf"},
         turn_id="turn-1",
         tool_call_id="call-1",
     )
@@ -482,12 +488,16 @@ async def test_get_tracked_files_reads_sink_delivered_artifact(tmp_path):
         "req-1", {"session_key": key}, "client-A", None, registry,
     )
     paths = {item["path"] for item in out["result"]["tracked_files"]}
-    assert ".miqi/downloads/report.cube" in paths, paths
-    # 面板 files.read 的相对路径基准 = 会话 files 目录 → 命中的就是产物
-    from miqi.agent.tools.filesystem import _session_files_dir_key
+    assert ".miqi/downloads/report.pdf" in paths, paths
 
-    files_dir = ws / "sessions" / _session_files_dir_key(key) / "files"
-    assert (files_dir / ".miqi/downloads/report.cube").resolve() == artifact.path.resolve()
+    # 面板「下载/另存为」链路：条目键 → files.read 取回原字节
+    read = await files_read_handler(
+        "req-2",
+        {"path": ".miqi/downloads/report.pdf", "session_key": key, "as_binary": True},
+        "client-A", None, registry,
+    )
+    assert base64.b64decode(read["result"]["data_base64"]) == data
+    assert read["result"]["size"] == len(data)
 
 
 # ── SandboxManager client-scoped namespace ───────────────────────────────────

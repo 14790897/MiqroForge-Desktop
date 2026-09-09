@@ -7,8 +7,19 @@
 
 修复：``materialize`` 在产物提交后调用 ``_persist_tracked_file``（与
 create_pdf/docx 同机制）。落盘根与登记根同源（``_downloads_root_base``），
-故条目键为 ``.miqi/downloads/<name>``——面板 ``files.read`` 按同一根解析得到
-产物本身（见 ``test_tracked_key_resolves_through_panel_read_path``）。
+故条目键为 ``.miqi/downloads/<name>``。
+
+面板读端两条链路（默认工作区布局，现网形态）：
+- 存储读端 ``sessions.get_tracked_files`` → ``SessionManager(<ws>)
+  .load_tracked_files(_session_files_dir_key(key))``；
+- 文件读端 ``files.read(path, session_key)`` → 相对路径锚在
+  ``<ws>/sessions/<key>/files``（``file_handlers._resolve_session_files_path``）。
+
+**边界（既有读端行为，非本改动引入）**：自选工作区布局下产物落
+``<custom>/.miqi/downloads``，而文件读端仍锚 ``<custom>/sessions/<key>/files``
+→ 条目可见但按相对路径取不到字节（create_pdf 等文档工具同此）。本文件只断言
+存储读端；文件读端的端到端回路见
+``tests/runtime/test_file_handlers.py::test_get_tracked_files_reads_sink_delivered_artifact``。
 
 判别性：去掉 ``materialize`` 里的 ``_track_delivered`` 调用后，本文件前 4 例
 全红（见 PR 证据「变异验证」）。
@@ -30,7 +41,10 @@ from miqi.agent.tools.mcp_download_sink import (
 
 # ── Helpers ────────────────────────────────────────────────────────────────
 
-SESSION_KEY = "miqi-desktop:desktop:983downloads"
+# 现网形态（两段 key，ChatConsole `desktop:${Date.now()}`）：文件读端的目录
+# 派生（safe_filename(key.replace(":", "_"))）与写端 `_session_files_dir_key`
+# 逐字相同，故本文件的相对路径断言与真实 handler 同源。
+SESSION_KEY = "desktop:983downloads"
 
 
 def _default_ws() -> Path:
@@ -152,8 +166,9 @@ async def test_single_shot_artifact_lands_in_session_tracked_store():
 
 @pytest.mark.asyncio
 async def test_tracked_key_resolves_through_panel_read_path():
-    """面板 ``files.read(path, session_key)`` 的解析语义：相对路径按会话
-    files 目录拼 → 命中的正是产物本身（条目键必须与落盘根同源）。"""
+    """面板 ``files.read(path, session_key)`` 的解析语义（两段 key = 现网形态）：
+    相对路径按 ``<ws>/sessions/<key>/files`` 拼 → 命中的正是产物本身
+    （条目键必须与落盘根同源）。"""
     ws = _default_ws()
     files_dir = _session_files_dir(ws)
     sink = DownloadSink(base_workspace=ws)
@@ -225,7 +240,13 @@ async def test_reuse_existing_artifact_is_tracked_again():
 @pytest.mark.asyncio
 async def test_custom_workspace_tracks_at_workspace_store_root(tmp_path):
     """自选项目目录：产物落 ``<custom>/.miqi/downloads``，条目落
-    ``<custom>/sessions/<key>/tracked_files.json``（面板读端同根同 key）。"""
+    ``<custom>/sessions/<key>/tracked_files.json``——与存储读端
+    （``SessionManager(config.workspace_path)``）同根同 key。
+
+    **只断言存储读端**：该布局下文件读端仍锚 ``<custom>/sessions/<key>/files``
+    （既有 ``_resolve_session_files_path`` 语义），按相对键取字节会落空；这是
+    文档工具同样存在的既有边界，不在本次改动范围（见 PR「后续计划」）。
+    """
     custom = tmp_path / "project"
     custom.mkdir()
     sink = DownloadSink(base_workspace=custom)
