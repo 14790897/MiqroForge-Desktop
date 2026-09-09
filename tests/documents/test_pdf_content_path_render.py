@@ -555,20 +555,21 @@ def test_md_to_blocks_direct_call_backward_compatible():
 async def test_create_pdf_content_markup_is_literal_text(tmp_path):
     """P1（行为变更）: content 手写 markup 不再被 reportlab 解析，原样作字面文本。
 
-    修复前 ``content`` 的 ``<b>粗体</b>`` 会渲染成粗体；转义后它与
+    修复前 ``content`` 的 ``<b>bold</b>`` 会渲染成粗体；转义后它与
     ``<img src=...>`` 一样只是文字——这是为堵住「模型提供的 markup 可读任意
-    文件」通道而付出的代价（见本文件 P1 小节）。
+    文件」通道而付出的代价（见本文件 P1 小节）。断言只用 ASCII：Ubuntu CI
+    runner 无 CJK 字体，中文断言会因缺字形而失败（与本 PR 无关的既有环境问题）。
     """
     from miqi.documents.pdf_create_tool import CreatePdfTool
 
     tool = CreatePdfTool(workspace=tmp_path, allowed_dir=tmp_path)
     result = await tool.execute(
-        filename="o.pdf", content=[{"type": "paragraph", "text": "<b>粗体</b>"}]
+        filename="o.pdf", content=[{"type": "paragraph", "text": "<b>bold</b>"}]
     )
 
     assert "Created:" in result
     text = _pdf_text(tmp_path / "o.pdf")
-    assert "<b>粗体</b>" in text, text
+    assert "<b>bold</b>" in text, text
 
 
 # ── H1：content 的 image 块不得成为读任意文件的通道 ─────────────────────────
