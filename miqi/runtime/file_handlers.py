@@ -456,12 +456,18 @@ def _find_in_sandbox_workspaces(
             logger.info("[files:read] sandbox fallback: sandbox manager disabled/absent")
             return None
 
-        # Build session-scoped suffix (same logic as _get_session_workspace)
+        # Build the session-scoped suffix with the canonical key derivation
+        # (``_session_files_dir_key``, #1003) — the same one
+        # ``_get_session_workspace`` uses.  Deriving it locally produced a
+        # divergent directory for two-segment channel keys
+        # (``desktop:<ts>`` → ``sessions/<ts>/files`` instead of
+        # ``sessions/desktop_<ts>/files``), so this fallback searched a
+        # directory no writer ever creates (issue #1005).
         session_suffix = ""
         if session_key:
-            from miqi.utils.helpers import safe_filename
-            key = session_key.split(":", 1)[-1] if ":" in session_key else session_key
-            safe_key = safe_filename(key.replace(":", "_"))
+            from miqi.agent.tools.filesystem import _session_files_dir_key
+
+            safe_key = _session_files_dir_key(session_key)
             session_suffix = f"sessions/{safe_key}/files"
 
         sandboxes = sm.list_sandboxes()
