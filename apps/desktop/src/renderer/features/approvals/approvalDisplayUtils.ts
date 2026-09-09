@@ -24,8 +24,10 @@ export function getApprovalDisplay(pending: {
 /**
  * Choose an appropriate title based on approval category.
  */
+import { i18n } from '../../i18n';
+
 export function getApprovalTitle(category?: string): string {
-  if (category === 'exec') return '命令审批';
-  if (category === 'file_write') return '文件操作审批';
-  return '操作审批';
+  if (category === 'exec') return i18n.t('approvals.titleCmd');
+  if (category === 'file_write') return i18n.t('approvals.titleFile');
+  return i18n.t('approvals.titleOp');
 }

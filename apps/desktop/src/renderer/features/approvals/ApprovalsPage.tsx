@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
+import { useTranslation } from 'react-i18next';
 import {
   Shield,
   Trash2,
@@ -96,17 +97,18 @@ function ToggleSwitch({
 }
 
 import { formatAbsoluteTime } from '../../lib/formatTime';
+import type { TFunction } from 'i18next';
 
-function decisionLabel(d: string): { text: string; color: string } {
+function decisionLabel(d: string, t: TFunction): { text: string; color: string } {
   switch (d) {
     case 'deny':
-      return { text: '已拒绝', color: 'text-[var(--danger)]' };
+      return { text: t('approvals.decideDeny'), color: 'text-[var(--danger)]' };
     case 'once':
-      return { text: '允许一次', color: 'text-[var(--info)]' };
+      return { text: t('approvals.decideOnce'), color: 'text-[var(--info)]' };
     case 'session':
-      return { text: '本次会话允许', color: 'text-[var(--success)]' };
+      return { text: t('approvals.decideSession'), color: 'text-[var(--success)]' };
     case 'always':
-      return { text: '永久允许', color: 'text-[var(--accent)]' };
+      return { text: t('approvals.decideAlways'), color: 'text-[var(--accent)]' };
     default:
       return { text: d, color: 'text-[var(--text-muted)]' };
   }
@@ -117,6 +119,7 @@ function decisionLabel(d: string): { text: string; color: string } {
 // ---------------------------------------------------------------------------
 
 export function ApprovalsPage() {
+  const { t } = useTranslation();
   const [data, setData] = useState<ApprovalsListResult | null>(null);
   const [history, setHistory] = useState<ApprovalHistoryEntry[]>([]);
   const [loading, setLoading] = useState(true);
@@ -136,10 +139,10 @@ export function ApprovalsPage() {
   // Category filter for pending tab
   const [categoryFilter, setCategoryFilter] = useState<string>('all');
   const CATEGORIES = [
-    { key: 'all', label: '全部' },
-    { key: 'exec', label: '命令' },
-    { key: 'file_write', label: '文件' },
-    { key: 'network', label: '网络' },
+    { key: 'all', label: t('approvals.catAll') },
+    { key: 'exec', label: t('approvals.catExec') },
+    { key: 'file_write', label: t('approvals.catFile') },
+    { key: 'network', label: t('approvals.catNet') },
   ];
 
   // Global bypass settings
@@ -321,7 +324,7 @@ export function ApprovalsPage() {
     } catch (e) {
       console.error('Failed to save approval bypass config:', e);
       setBypassConfig(previous);
-      setBypassError(e instanceof Error ? e.message : '保存失败');
+      setBypassError(e instanceof Error ? e.message : t('approvals.saveFail'));
     } finally {
       setBypassSaving(null);
     }
@@ -334,23 +337,23 @@ export function ApprovalsPage() {
   }> = [
     {
       key: 'bypassCommandApproval',
-      label: '命令审批',
-      description: '危险命令不再弹窗确认',
+      label: t('approvals.bpCmd'),
+      description: t('approvals.bpCmdDesc'),
     },
     {
       key: 'bypassFileWriteApproval',
-      label: '文件写入审批',
-      description: '敏感路径写入不再弹窗确认',
+      label: t('approvals.bpFile'),
+      description: t('approvals.bpFileDesc'),
     },
     {
       key: 'bypassToolConfirmation',
-      label: '工具确认',
-      description: '需要确认的工具调用直接放行',
+      label: t('approvals.bpTool'),
+      description: t('approvals.bpToolDesc'),
     },
     {
       key: 'bypassNetworkApproval',
-      label: '网络审批',
-      description: '网络类风险操作不再弹窗确认',
+      label: t('approvals.bpNet'),
+      description: t('approvals.bpNetDesc'),
     },
   ];
 
@@ -368,9 +371,9 @@ export function ApprovalsPage() {
   };
 
   const tabs = [
-    { key: 'whitelist' as const, label: '永久白名单', icon: Shield },
-    { key: 'history' as const, label: '历史记录', icon: History },
-    { key: 'pending' as const, label: '待审批', icon: List },
+    { key: 'whitelist' as const, label: t('approvals.tabWhitelist'), icon: Shield },
+    { key: 'history' as const, label: t('approvals.tabHistory'), icon: History },
+    { key: 'pending' as const, label: t('approvals.tabPending'), icon: List },
   ];
 
   return (
@@ -378,14 +381,14 @@ export function ApprovalsPage() {
       {/* Header */}
       <div className="flex items-center justify-between px-5 py-2.5 border-b border-[var(--border-subtle)] bg-[var(--surface)] shrink-0">
         <div>
-          <h1 className="text-base font-semibold text-[var(--text)]">命令审批</h1>
-          <p className="text-xs text-[var(--text-muted)] mt-0.5">智能体执行危险命令前需要授权。</p>
+          <h1 className="text-base font-semibold text-[var(--text)]">{t('approvals.title')}</h1>
+          <p className="text-xs text-[var(--text-muted)] mt-0.5">{t('approvals.subtitle')}</p>
         </div>
         <button
           onClick={load}
           className="text-xs text-[var(--text-faint)] hover:text-[var(--text-muted)] transition-colors px-2 py-1 rounded"
         >
-          刷新
+          {t('common.refresh')}
         </button>
       </div>
 
@@ -435,13 +438,17 @@ export function ApprovalsPage() {
                       : 'text-[var(--text-faint)]'
                   }
                 />
-                <h2 className="text-sm font-semibold text-[var(--text)]">审批绕过模式</h2>
+                <h2 className="text-sm font-semibold text-[var(--text)]">
+                  {t('approvals.bypassTitle')}
+                </h2>
                 {bypassSaved === 'bypassAll' && (
-                  <span className="text-size-2xs text-[var(--success)]">已保存</span>
+                  <span className="text-size-2xs text-[var(--success)]">
+                    {t('approvals.saved')}
+                  </span>
                 )}
               </div>
               <p className="text-size-2xs text-[var(--text-muted)] mt-0.5 leading-tight">
-                开启后跳过审批弹窗。⚡ 仅「允许编辑」模式生效。
+                {t('approvals.bypassHint')}
               </p>
             </div>
             <button
@@ -450,7 +457,9 @@ export function ApprovalsPage() {
               disabled={bypassLoading || autoMode}
               className="flex items-center gap-3 shrink-0 cursor-pointer disabled:cursor-not-allowed"
             >
-              <span className="text-xs font-medium text-[var(--text-muted)]">全部绕过</span>
+              <span className="text-xs font-medium text-[var(--text-muted)]">
+                {t('approvals.bypassAll')}
+              </span>
               <ToggleSwitch
                 checked={autoMode || bypassConfig.bypassAll}
                 disabled={bypassLoading || autoMode}
@@ -487,12 +496,14 @@ export function ApprovalsPage() {
                     <span className="flex items-center gap-2 text-xs font-medium text-[var(--text)]">
                       {row.label}
                       {bypassSaved === row.key && (
-                        <span className="text-size-2xs text-[var(--success)]">已保存</span>
+                        <span className="text-size-2xs text-[var(--success)]">
+                          {t('approvals.saved')}
+                        </span>
                       )}
                     </span>
                     <span className="block text-size-2xs text-[var(--text-muted)] mt-0.5">
                       {row.description}
-                      {bypassConfig.bypassAll ? '。当前由“全部绕过”统一控制' : ''}
+                      {bypassConfig.bypassAll ? t('approvals.bypassControlled') : ''}
                     </span>
                   </span>
                   <ToggleSwitch
@@ -509,12 +520,12 @@ export function ApprovalsPage() {
 
         {loading ? (
           <div className="flex items-center justify-center h-40 text-sm text-[var(--text-faint)]">
-            <Loader2 size={16} className="animate-spin mr-2" /> 加载中…
+            <Loader2 size={16} className="animate-spin mr-2" /> {t('statusBar.loading')}
           </div>
         ) : !data ? (
           <div className="flex flex-col items-center justify-center h-40 gap-2 text-sm text-[var(--text-faint)]">
             <Shield size={24} />
-            <span>MiQroForge 运行时未启动</span>
+            <span>{t('channels.runtimeNotStarted')}</span>
           </div>
         ) : (
           <>
@@ -525,17 +536,21 @@ export function ApprovalsPage() {
                   size={14}
                   className={data.enabled ? 'text-[var(--success)]' : 'text-[var(--text-faint)]'}
                 />
-                <span className="text-[var(--text-muted)]">审批系统</span>
+                <span className="text-[var(--text-muted)]">{t('approvals.system')}</span>
                 <span
                   className={data.enabled ? 'text-[var(--success)]' : 'text-[var(--text-faint)]'}
                 >
-                  {data.enabled ? '已启用' : '已禁用'}
+                  {data.enabled ? t('approvals.enabled') : t('approvals.disabled')}
                 </span>
               </div>
               <div className="text-[var(--text-faint)]">·</div>
-              <span className="text-[var(--text-muted)]">超时：{data.timeout ?? 60}秒</span>
+              <span className="text-[var(--text-muted)]">
+                {t('approvals.timeout', { count: data.timeout ?? 60 })}
+              </span>
               <div className="text-[var(--text-faint)]">·</div>
-              <span className="text-[var(--text-muted)]">{data.pending?.length ?? 0} 个待审批</span>
+              <span className="text-[var(--text-muted)]">
+                {t('approvals.pendingCount', { count: data.pending?.length ?? 0 })}
+              </span>
             </div>
 
             {/* ── TAB: Whitelist ──────────────────────────────────────── */}
@@ -543,7 +558,9 @@ export function ApprovalsPage() {
               <div className="settings-hover-card bg-[var(--surface)] border border-[var(--border-subtle)] rounded-xl overflow-hidden">
                 <div className="flex items-center justify-between px-5 py-2 border-b border-[var(--border-subtle)] bg-[var(--surface-muted)]">
                   <span className="text-xs font-semibold uppercase tracking-widest text-[var(--text-faint)]">
-                    永久白名单（{data.permanent_entries?.length ?? 0}）
+                    {t('approvals.whitelistTitle', {
+                      count: data.permanent_entries?.length ?? 0,
+                    })}
                   </span>
                   <div className="flex items-center gap-2">
                     {data.permanent_entries && data.permanent_entries.length > 0 && (
@@ -552,20 +569,20 @@ export function ApprovalsPage() {
                         disabled={clearing === 'all'}
                         className="text-xs text-[var(--danger)] hover:underline disabled:opacity-50"
                       >
-                        {clearing === 'all' ? '清除中…' : '全部清除'}
+                        {clearing === 'all' ? t('approvals.clearingAll') : t('approvals.clearAll')}
                       </button>
                     )}
                     <button
                       onClick={() => setShowAdd(true)}
                       className="flex items-center gap-1 text-xs text-[var(--text-muted)] hover:text-[var(--text)] hover:underline"
                     >
-                      <Plus size={12} /> 新增
+                      <Plus size={12} /> {t('approvals.add')}
                     </button>
                   </div>
                 </div>
                 {!data.permanent_entries || data.permanent_entries.length === 0 ? (
                   <div className="px-5 py-8 text-sm text-[var(--text-faint)] text-center">
-                    暂无永久白名单记录
+                    {t('approvals.noWhitelist')}
                   </div>
                 ) : (
                   <div className="divide-y divide-[var(--border-subtle)]">
@@ -621,14 +638,14 @@ export function ApprovalsPage() {
                                 <button
                                   onClick={() => startEdit(entry.pattern)}
                                   className="p-1 rounded text-[var(--text-faint)] hover:text-[var(--info)] transition-colors"
-                                  title="编辑"
+                                  title={t('approvals.edit')}
                                 >
                                   <Pencil size={12} />
                                 </button>
                                 <button
                                   onClick={() => clearOne(entry.pattern)}
                                   disabled={clearing === entry.pattern}
-                                  title="从白名单移除"
+                                  title={t('approvals.removeFromWhitelist')}
                                   className="p-1 rounded text-[var(--text-faint)] hover:text-[var(--danger)] transition-colors disabled:opacity-50"
                                 >
                                   {clearing === entry.pattern ? (
@@ -644,7 +661,7 @@ export function ApprovalsPage() {
                             <div className="px-10 py-2.5 bg-[var(--surface-muted)] text-xs text-[var(--text-muted)] space-y-1">
                               <div className="flex gap-2">
                                 <span className="text-[var(--text-faint)] shrink-0">
-                                  命令模式：
+                                  {t('approvals.commandMode')}
                                 </span>
                                 <code className="font-mono text-[var(--text)] break-all">
                                   {entry.pattern}
@@ -652,12 +669,12 @@ export function ApprovalsPage() {
                               </div>
                               <div className="flex gap-2">
                                 <span className="text-[var(--text-faint)] shrink-0">
-                                  添加时间：
+                                  {t('approvals.addedAt')}
                                 </span>
                                 <span>
                                   {entry.added_at
                                     ? formatAbsoluteTime(entry.added_at * 1000)
-                                    : '未知'}
+                                    : t('approvals.unknown')}
                                 </span>
                               </div>
                             </div>
@@ -675,17 +692,17 @@ export function ApprovalsPage() {
               <div className="settings-hover-card bg-[var(--surface)] border border-[var(--border-subtle)] rounded-xl overflow-hidden">
                 <div className="px-5 py-2 border-b border-[var(--border-subtle)] bg-[var(--surface-muted)]">
                   <span className="text-xs font-semibold uppercase tracking-widest text-[var(--text-faint)]">
-                    审批历史（{history.length}）
+                    {t('approvals.historyTitle', { count: history.length })}
                   </span>
                 </div>
                 {history.length === 0 ? (
                   <div className="px-5 py-8 text-sm text-[var(--text-faint)] text-center">
-                    暂无审批历史记录
+                    {t('approvals.noHistory')}
                   </div>
                 ) : (
                   <div className="divide-y divide-[var(--border-subtle)]">
                     {history.map((h) => {
-                      const d = decisionLabel(h.decision);
+                      const d = decisionLabel(h.decision, t);
                       const isExpanded = expandedHistory.has(h.id);
                       return (
                         <div key={h.id}>
@@ -711,29 +728,37 @@ export function ApprovalsPage() {
                           {isExpanded && (
                             <div className="px-10 py-2.5 bg-[var(--surface-muted)] text-xs text-[var(--text-muted)] space-y-1">
                               <div className="flex gap-2">
-                                <span className="text-[var(--text-faint)] shrink-0">决策：</span>
+                                <span className="text-[var(--text-faint)] shrink-0">
+                                  {t('approvals.decision')}
+                                </span>
                                 <span className={d.color}>{d.text}</span>
                               </div>
                               <div className="flex gap-2">
                                 <span className="text-[var(--text-faint)] shrink-0">
-                                  规则模式：
+                                  {t('approvals.rulePattern')}
                                 </span>
                                 <code className="font-mono text-[var(--text)] break-all">
                                   {h.pattern_key}
                                 </code>
                               </div>
                               <div className="flex gap-2">
-                                <span className="text-[var(--text-faint)] shrink-0">命令：</span>
+                                <span className="text-[var(--text-faint)] shrink-0">
+                                  {t('approvals.command')}
+                                </span>
                                 <code className="font-mono text-[var(--text)] break-all">
                                   {h.command}
                                 </code>
                               </div>
                               <div className="flex gap-2">
-                                <span className="text-[var(--text-faint)] shrink-0">会话：</span>
+                                <span className="text-[var(--text-faint)] shrink-0">
+                                  {t('approvals.session')}
+                                </span>
                                 <span className="font-mono">{h.session_key || '-'}</span>
                               </div>
                               <div className="flex gap-2">
-                                <span className="text-[var(--text-faint)] shrink-0">时间：</span>
+                                <span className="text-[var(--text-faint)] shrink-0">
+                                  {t('approvals.time')}
+                                </span>
                                 <span>{formatAbsoluteTime(h.timestamp * 1000)}</span>
                               </div>
                             </div>
@@ -759,7 +784,7 @@ export function ApprovalsPage() {
                   >
                     <div className="px-5 py-2 border-b border-[var(--border-subtle)] bg-[var(--surface-muted)] flex items-center justify-between">
                       <span className="text-xs font-semibold uppercase tracking-widest text-[var(--text-faint)]">
-                        待审批（{filtered.length}）
+                        {t('approvals.pendingTitle', { count: filtered.length })}
                       </span>
                       <div className="flex gap-1">
                         {CATEGORIES.map((c) => (
@@ -779,7 +804,7 @@ export function ApprovalsPage() {
                     </div>
                     {filtered.length === 0 ? (
                       <div className="px-5 py-8 text-sm text-[var(--text-faint)] text-center">
-                        暂无待审批命令
+                        {t('approvals.noPending')}
                       </div>
                     ) : (
                       <div className="divide-y divide-[var(--border-subtle)]">
@@ -834,19 +859,19 @@ export function ApprovalsPage() {
                                 <div className="px-10 py-2.5 bg-[var(--surface-muted)] text-xs text-[var(--text-muted)] space-y-1">
                                   <div className="flex gap-2">
                                     <span className="text-[var(--text-faint)] shrink-0">
-                                      审批ID：
+                                      {t('approvals.approvalId')}
                                     </span>
                                     <span className="font-mono">{p.approval_id}</span>
                                   </div>
                                   <div className="flex gap-2">
                                     <span className="text-[var(--text-faint)] shrink-0">
-                                      描述：
+                                      {t('approvals.description')}
                                     </span>
                                     <span>{p.description}</span>
                                   </div>
                                   <div className="flex gap-2">
                                     <span className="text-[var(--text-faint)] shrink-0">
-                                      命令：
+                                      {t('approvals.command')}
                                     </span>
                                     <code className="font-mono text-[var(--text)] break-all">
                                       {p.command}
@@ -854,15 +879,17 @@ export function ApprovalsPage() {
                                   </div>
                                   <div className="flex gap-2">
                                     <span className="text-[var(--text-faint)] shrink-0">
-                                      超时倒计时：
+                                      {t('approvals.timeoutCountdown')}
                                     </span>
                                     <span
                                       className={`font-mono tabular-nums ${isLow ? 'text-[var(--danger)] font-semibold' : ''}`}
                                     >
-                                      {remaining > 0 ? `${remaining}秒` : '已超时'}
+                                      {remaining > 0
+                                        ? t('approvals.seconds', { count: remaining })
+                                        : t('approvals.expired')}
                                     </span>
                                     <span className="text-[var(--text-faint)]">
-                                      / {data.timeout ?? 60}秒
+                                      {t('approvals.secondsTotal', { count: data.timeout ?? 60 })}
                                     </span>
                                   </div>
                                 </div>
@@ -893,10 +920,10 @@ export function ApprovalsPage() {
             onClick={(e) => e.stopPropagation()}
           >
             <div className="px-5 py-3 border-b border-[var(--border-subtle)]">
-              <h3 className="text-sm font-semibold text-[var(--text)]">新增白名单</h3>
-              <p className="text-xs text-[var(--text-muted)] mt-0.5">
-                输入匹配危险命令的正则表达式模式
-              </p>
+              <h3 className="text-sm font-semibold text-[var(--text)]">
+                {t('approvals.addTitle')}
+              </h3>
+              <p className="text-xs text-[var(--text-muted)] mt-0.5">{t('approvals.addHint')}</p>
             </div>
             <div className="px-5 py-3">
               <input
@@ -907,7 +934,7 @@ export function ApprovalsPage() {
                   if (e.key === 'Enter') handleAdd();
                   if (e.key === 'Escape') setShowAdd(false);
                 }}
-                placeholder="例如：rm\s+-rf\s+/tmp/build"
+                placeholder={t('approvals.addPlaceholder')}
                 className="w-full text-xs font-mono bg-[var(--surface)] border border-[var(--border)] rounded-lg px-3 py-2 focus:outline-none focus:border-[var(--border-strong)]"
                 autoFocus
               />
@@ -917,14 +944,14 @@ export function ApprovalsPage() {
                 onClick={() => setShowAdd(false)}
                 className="px-3 py-1.5 rounded-lg text-xs text-[var(--text-muted)] hover:bg-[var(--surface-muted)] transition-colors"
               >
-                取消
+                {t('common.cancel')}
               </button>
               <button
                 onClick={handleAdd}
                 disabled={adding || !newPattern.trim()}
                 className="px-3 py-1.5 rounded-lg text-xs font-medium bg-[var(--accent)] text-white hover:bg-[var(--accent-hover)] transition-colors disabled:opacity-50"
               >
-                {adding ? '添加中…' : '添加'}
+                {adding ? t('approvals.adding') : t('approvals.addAction')}
               </button>
             </div>
           </div>

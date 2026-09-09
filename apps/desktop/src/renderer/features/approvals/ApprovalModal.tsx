@@ -1,4 +1,5 @@
 import { Shield, Terminal, FileText, AlertTriangle, X, Clock } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
 import { useApproval } from '../../contexts/ApprovalContext';
 import { getApprovalDisplay, getApprovalTitle } from './approvalDisplayUtils';
 
@@ -14,6 +15,7 @@ function ApprovalIcon({ category }: { category?: string }) {
 }
 
 export function ApprovalModal() {
+  const { t } = useTranslation();
   const { pending, resolve, timeout, remainingSeconds } = useApproval();
   if (!pending) return null;
 
@@ -46,7 +48,7 @@ export function ApprovalModal() {
           <button
             onClick={() => resolve('deny')}
             className="ml-auto text-[var(--text-faint)] hover:text-[var(--text)] transition-colors"
-            title="拒绝"
+            title={t('approvals.denyAction')}
           >
             <X size={14} />
           </button>
@@ -63,7 +65,9 @@ export function ApprovalModal() {
               <span
                 className={`text-xs font-mono tabular-nums ${isLow ? 'text-[var(--danger)] font-semibold' : 'text-[var(--text-muted)]'}`}
               >
-                {remainingSeconds > 0 ? `${remainingSeconds}秒` : '已超时'}
+                {remainingSeconds > 0
+                  ? t('approvals.seconds', { count: remainingSeconds })
+                  : t('approvals.expired')}
               </span>
             </div>
             <div className="h-1.5 bg-[var(--surface-muted)] rounded-full overflow-hidden">
@@ -89,24 +93,26 @@ export function ApprovalModal() {
 
         {/* Actions */}
         <div className="flex items-center gap-2 px-5 py-3 border-t border-[var(--border-subtle)]">
-          <span className="text-xs text-[var(--text-faint)] flex-1">选择如何处理此命令：</span>
+          <span className="text-xs text-[var(--text-faint)] flex-1">
+            {t('approvals.chooseHow')}
+          </span>
           <button
             onClick={() => resolve('deny')}
             className="px-3 py-1.5 rounded-lg text-sm font-medium bg-[color-mix(in_srgb,var(--danger)_15%,transparent)] text-[var(--danger)] hover:bg-[color-mix(in_srgb,var(--danger)_25%,transparent)] transition-colors"
           >
-            拒绝
+            {t('approvals.denyAction')}
           </button>
           <button
             onClick={() => resolve('once')}
             className="px-3 py-1.5 rounded-lg text-sm font-medium bg-[var(--surface-muted)] text-[var(--text)] hover:bg-[var(--border-subtle)] transition-colors"
           >
-            允许一次
+            {t('approvals.decideOnce')}
           </button>
           <button
             onClick={() => resolve('session')}
             className="px-3 py-1.5 rounded-lg text-sm font-medium bg-[var(--surface-muted)] text-[var(--text)] hover:bg-[var(--border-subtle)] transition-colors"
           >
-            本次会话允许
+            {t('approvals.decideSession')}
           </button>
           {pending.allow_permanent && (
             <button
@@ -114,7 +120,7 @@ export function ApprovalModal() {
               className="px-3 py-1.5 rounded-lg text-sm font-medium bg-[var(--accent)] text-white hover:bg-[var(--accent-hover)] transition-colors"
               data-testid="approval-allow-permanent"
             >
-              永久允许
+              {t('approvals.decideAlways')}
             </button>
           )}
         </div>
