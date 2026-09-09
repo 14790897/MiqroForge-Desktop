@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from 'fs';
+import { existsSync, readFileSync, realpathSync } from 'fs';
 import { homedir } from 'os';
 import { isAbsolute, join, resolve } from 'path';
 
@@ -100,4 +100,24 @@ export function resolveWorkspacePath(raw: string): string {
   }
 
   return resolved;
+}
+
+/**
+ * Whether an existing host path resolves (symlinks/junctions followed) to a
+ * location inside the workspace root.  Returns true when the path cannot be
+ * resolved (e.g. it does not exist) — those are already covered by the lexical
+ * containment check in resolveWorkspacePath.
+ */
+export function isWithinCanonicalWorkspace(candidate: string, wsRoot: string): boolean {
+  try {
+    const realCandidate = realpathSync.native(candidate);
+    const realRoot = realpathSync.native(wsRoot);
+    const rel = realCandidate.replace(/\\/g, '/');
+    const root = realRoot.replace(/\\/g, '/');
+    const relCmp = process.platform === 'win32' ? rel.toLowerCase() : rel;
+    const rootCmp = process.platform === 'win32' ? root.toLowerCase() : root;
+    return relCmp === rootCmp || relCmp.startsWith(rootCmp + '/');
+  } catch {
+    return true;
+  }
 }

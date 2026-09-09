@@ -66,6 +66,7 @@ import {
   getConfigDir,
   getConfigPath,
   getWorkspacePath,
+  isWithinCanonicalWorkspace,
   readLocalConfig,
   resolveWorkspacePath,
 } from './workspace-path';
@@ -1891,6 +1892,12 @@ for m in ("pydantic", "httpx", "loguru"):
     for (const candidate of candidates) {
       try {
         if (!existsSync(candidate)) continue;
+        // WSL UNC paths live inside the sandbox distro, not on the host — skip
+        // the host-workspace canonical check (relPath was vetted above).
+        const isWslUnc = candidate.startsWith('\\\\wsl$');
+        if (!isWslUnc && !isWithinCanonicalWorkspace(candidate, getWorkspacePath())) {
+          continue;
+        }
         const error = await shell.openPath(candidate);
         if (!error) {
           opened = true;
@@ -1953,6 +1960,11 @@ for m in ("pydantic", "httpx", "loguru"):
     try {
       if (!existsSync(absolutePath)) {
         return { revealed: false, path: raw, error: `File not found: ${absolutePath}` };
+      }
+      // Follow symlinks/junctions so a link pointing outside the workspace can't
+      // reveal a host directory through the lexical containment check (#955).
+      if (!isWithinCanonicalWorkspace(absolutePath, getWorkspacePath())) {
+        return { revealed: false, path: raw, error: `Path outside workspace: ${raw}` };
       }
       shell.showItemInFolder(absolutePath);
       return { revealed: true, path: raw };

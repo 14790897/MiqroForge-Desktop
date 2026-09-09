@@ -1,7 +1,12 @@
 import { describe, expect, it, beforeEach, afterEach } from 'vitest';
+import { mkdirSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
-import { getWorkspacePath, resolveWorkspacePath } from './workspace-path';
+import {
+  getWorkspacePath,
+  isWithinCanonicalWorkspace,
+  resolveWorkspacePath,
+} from './workspace-path';
 
 const isWin = process.platform === 'win32';
 
@@ -83,5 +88,35 @@ describe('resolveWorkspacePath', () => {
       const escaped = toMnt(`${wsRoot}\\..\\..\\Windows\\System32\\calc.exe`);
       expect(() => resolveWorkspacePath(escaped)).toThrow(/outside workspace/);
     });
+  });
+});
+
+describe('isWithinCanonicalWorkspace', () => {
+  let wsRoot: string;
+
+  beforeEach(() => {
+    const home = join(
+      tmpdir(),
+      `miqi-ws-test-${Date.now()}-${Math.random().toString(36).slice(2)}`
+    );
+    process.env['MIQI_HOME'] = home;
+    wsRoot = getWorkspacePath();
+    mkdirSync(wsRoot, { recursive: true });
+  });
+
+  afterEach(() => {
+    delete process.env['MIQI_HOME'];
+  });
+
+  it('accepts a path inside the workspace', () => {
+    expect(isWithinCanonicalWorkspace(wsRoot, wsRoot)).toBe(true);
+  });
+
+  it('rejects a path outside the workspace', () => {
+    expect(isWithinCanonicalWorkspace(tmpdir(), wsRoot)).toBe(false);
+  });
+
+  it('accepts a non-existent path (lexical check covers it)', () => {
+    expect(isWithinCanonicalWorkspace(join(wsRoot, 'no-such-file.txt'), wsRoot)).toBe(true);
   });
 });
