@@ -682,6 +682,35 @@ async def test_auto_deepseek_falls_through(monkeypatch):
     assert result.success and calls == ["deepseek"]
 
 
+async def test_auto_deepseek_balance_error_falls_through(monkeypatch, caplog):
+    """auto 链：DeepSeek 余额不足（402）→ 自动切换兜底，不中断链（#979）。
+
+    DeepSeek 配置了 key 但账户余额耗尽时，搜索功能仍应可用——回落 ddgs。
+    """
+    calls = []
+
+    class _DS(DeepSeekSearchProvider):
+        async def search(self, query, count):
+            calls.append("deepseek")
+            return SearchResult(False, error_type="BALANCE_ERROR", provider="deepseek")
+
+    manager = SearchProviderManager(
+        "auto", model="deepseek/deepseek-v4-flash",
+        deepseek_api_key="ds-key",
+        deepseek_api_base="https://api.deepseek.com",
+    )
+    manager._chain = lambda: [_DS("ds-key"), DDGSProvider()]
+
+    async def _ok(self, query, count):
+        return SearchResult(True, [{"title": "ok", "url": "https://example.com", "snippet": "s"}])
+
+    monkeypatch.setattr(DDGSProvider, "search", _ok)
+    result = await manager.search("q", 5)
+    assert result.success
+    assert calls == ["deepseek"]
+    assert any("trying next provider" in r.message for r in caplog.records)
+
+
 async def test_execute_unsupported_exposes_message(monkeypatch):
     """显式 deepseek + 非官方 base → 透出\"不支持联网搜索\"（可操作文案）。"""
     tool = WebSearchTool(provider="deepseek", deepseek_api_key="k",
