@@ -120,7 +120,9 @@ class GatewayKunRuntime:
             registry = self._runtime.tool_host._registry
             self._mcp_keep_alive = asyncio.Event()
             self._mcp_tasks = await connect_mcp_servers(
-                self._mcp_servers, registry, self._mcp_keep_alive
+                self._mcp_servers, registry, self._mcp_keep_alive,
+                # #975：下载类工具需要 base_workspace 落盘（桌面/网关同源语义）。
+                workspace=self._workspace,
             )
             self._mcp_connected = True
         except Exception:
