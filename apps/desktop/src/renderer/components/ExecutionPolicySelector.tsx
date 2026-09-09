@@ -1,17 +1,17 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { createPortal } from 'react-dom';
+import { useTranslation } from 'react-i18next';
 import { cn } from '../lib/utils';
 
 export type ExecutionPolicy = 'plan' | 'manual' | 'edit' | 'auto';
 
-type P = { key: ExecutionPolicy; label: string; desc: string; color: string };
+type P = { key: ExecutionPolicy; labelKey: string; descKey: string; color: string };
 const ITEMS: P[] = [
-  { key: 'plan', label: '规划', desc: '只分析出方案，不动手', color: '#a855f7' },
-  { key: 'manual', label: '手动', desc: '每步说明并等待确认', color: '#0b7f91' },
-  { key: 'edit', label: '允许编辑', desc: '改文件自动放行，危险操作确认', color: '#3b82f6' },
-  { key: 'auto', label: '自动', desc: '完全自主执行，无需确认', color: '#f59e0b' },
+  { key: 'plan', labelKey: 'execPol.plan', descKey: 'execPol.planDesc', color: '#a855f7' },
+  { key: 'manual', labelKey: 'execPol.manual', descKey: 'execPol.manualDesc', color: '#0b7f91' },
+  { key: 'edit', labelKey: 'execPol.edit', descKey: 'execPol.editDesc', color: '#3b82f6' },
+  { key: 'auto', labelKey: 'execPol.auto', descKey: 'execPol.autoDesc', color: '#f59e0b' },
 ];
-const LABELS: Record<string, string> = Object.fromEntries(ITEMS.map((p) => [p.key, p.label]));
 
 interface Props {
   policy: ExecutionPolicy;
@@ -21,11 +21,12 @@ interface Props {
 }
 
 export function ExecutionPolicySelector({ policy, onChange, disabled, onOpenApprovals }: Props) {
+  const { t } = useTranslation();
   const [open, setOpen] = useState(false);
   const [confirmAuto, setConfirmAuto] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
   const ref = useRef<HTMLDivElement>(null);
-  const t = useRef(0);
+  const tmr = useRef(0);
   const cur = ITEMS.find((i) => i.key === policy)!;
 
   useEffect(() => {
@@ -39,10 +40,10 @@ export function ExecutionPolicySelector({ policy, onChange, disabled, onOpenAppr
 
   const toastFn = useCallback((msg: string) => {
     setToast(msg);
-    if (t.current) clearTimeout(t.current);
-    t.current = window.setTimeout(() => setToast(null), 2000);
+    if (tmr.current) clearTimeout(tmr.current);
+    tmr.current = window.setTimeout(() => setToast(null), 2000);
   }, []);
-  useEffect(() => () => clearTimeout(t.current), []);
+  useEffect(() => () => clearTimeout(tmr.current), []);
 
   const pick = useCallback(
     (p: ExecutionPolicy) => {
@@ -53,9 +54,10 @@ export function ExecutionPolicySelector({ policy, onChange, disabled, onOpenAppr
       }
       onChange(p);
       setOpen(false);
-      toastFn(`✓ ${LABELS[p]} 已启用`);
+      const item = ITEMS.find((i) => i.key === p)!;
+      toastFn(t('execPol.enabled', { label: t(item.labelKey) }));
     },
-    [onChange, toastFn]
+    [onChange, toastFn, t]
   );
 
   // Sync auto mode to sessionStorage so TopBar/ApprovalBypassBanner can react
@@ -124,7 +126,7 @@ export function ExecutionPolicySelector({ policy, onChange, disabled, onOpenAppr
           }}
         >
           <span style={{ width: 6, height: 6, borderRadius: '50%', background: cur.color }} />
-          <span>{cur.label}</span>
+          <span>{t(cur.labelKey)}</span>
           <span style={{ fontSize: 8, opacity: 0.3 }}>▾</span>
           {cur.key === 'auto' && <span style={{ fontSize: 13 }}>⚠</span>}
         </button>
@@ -154,7 +156,7 @@ export function ExecutionPolicySelector({ policy, onChange, disabled, onOpenAppr
               textTransform: 'uppercase',
             }}
           >
-            Agent 模式
+            {t('execPol.modeHeader')}
           </div>
           {ITEMS.map((p) => {
             const active = policy === p.key;
@@ -196,8 +198,8 @@ export function ExecutionPolicySelector({ policy, onChange, disabled, onOpenAppr
                   }}
                 />
                 <span style={{ flex: 1 }}>
-                  <span style={{ display: 'block' }}>{p.label}</span>
-                  <span style={{ fontSize: 10, color: 'var(--text-faint)' }}>{p.desc}</span>
+                  <span style={{ display: 'block' }}>{t(p.labelKey)}</span>
+                  <span style={{ fontSize: 10, color: 'var(--text-faint)' }}>{t(p.descKey)}</span>
                 </span>
                 <span
                   style={{
@@ -225,7 +227,9 @@ export function ExecutionPolicySelector({ policy, onChange, disabled, onOpenAppr
           })}
           <div style={{ padding: '6px 14px', borderTop: '1px solid var(--border-subtle)' }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-              <span style={{ fontSize: 10, color: 'var(--text-muted)' }}>保守</span>
+              <span style={{ fontSize: 10, color: 'var(--text-muted)' }}>
+                {t('execPol.conservative')}
+              </span>
               <div
                 style={{
                   flex: 1,
@@ -234,7 +238,7 @@ export function ExecutionPolicySelector({ policy, onChange, disabled, onOpenAppr
                   background: 'linear-gradient(to right, #a855f7, #0b7f91, #3b82f6, #f59e0b)',
                 }}
               />
-              <span style={{ fontSize: 10, color: 'var(--text-muted)' }}>自动</span>
+              <span style={{ fontSize: 10, color: 'var(--text-muted)' }}>{t('execPol.auto')}</span>
             </div>
             {onOpenApprovals && (
               <button
@@ -260,7 +264,7 @@ export function ExecutionPolicySelector({ policy, onChange, disabled, onOpenAppr
                 onMouseLeave={(e) => (e.currentTarget.style.color = 'var(--text-muted)')}
               >
                 <span style={{ fontSize: 12 }}>⚙</span>
-                <span>审批设置</span>
+                <span>{t('execPol.approvalSettings')}</span>
                 <span style={{ fontSize: 10, color: 'var(--text-faint)', marginLeft: 'auto' }}>
                   →
                 </span>
@@ -297,10 +301,10 @@ export function ExecutionPolicySelector({ policy, onChange, disabled, onOpenAppr
               }}
             >
               <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text)' }}>
-                开启自动模式
+                {t('execPol.autoModalTitle')}
               </div>
               <p style={{ fontSize: 11, color: 'var(--text-muted)', margin: '3px 0 0' }}>
-                Agent 将完全自主执行，不再弹窗确认
+                {t('execPol.autoModalBody')}
               </p>
               <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 10 }}>
                 <button
@@ -316,13 +320,13 @@ export function ExecutionPolicySelector({ policy, onChange, disabled, onOpenAppr
                     color: 'var(--text-muted)',
                   }}
                 >
-                  取消
+                  {t('common.cancel')}
                 </button>
                 <button
                   onClick={() => {
                     onChange('auto');
                     setConfirmAuto(false);
-                    toastFn('✓ 自主 已启用');
+                    toastFn(t('execPol.autoEnabled'));
                   }}
                   style={{
                     padding: '5px 14px',
@@ -335,7 +339,7 @@ export function ExecutionPolicySelector({ policy, onChange, disabled, onOpenAppr
                     color: '#fff',
                   }}
                 >
-                  确认
+                  {t('common.confirm')}
                 </button>
               </div>
             </div>
