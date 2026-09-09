@@ -336,7 +336,13 @@ def _build_pdf(
     title_style: dict[str, Any] | None = None,
     body_style: dict[str, Any] | None = None,
 ) -> None:
-    """Build a PDF document using reportlab."""
+    """Build a PDF document using reportlab.
+
+    已知架构限制（本次不改）：``SimpleDocTemplate`` 直接写入目标文件，若 ``build``
+    中途抛异常，已写入的半成品文件不会被清理（由调用方 ``execute`` 返回 Error）。
+    本次只保证「解析阶段降级不产生半成品」——图片/文本在解析阶段降级为占位文字，
+    不会走到异常分支。
+    """
     from reportlab.lib import colors
     from reportlab.lib.enums import TA_CENTER, TA_JUSTIFY, TA_LEFT, TA_RIGHT
     from reportlab.lib.styles import ParagraphStyle
@@ -839,7 +845,9 @@ def _md_to_blocks(
 
     这是**受支持的 Markdown 子集**，不是完整 Markdown renderer——只恢复结构骨架。
     已知限制：
-    1. 代码块按普通段落渲染（多行以空格拼接，不做等宽排版）；
+    1. 代码块按普通段落渲染（多行以空格拼接，不做等宽排版），且内容不做转义与
+       行内转换——围栏内的 ``&``/``<``/``>`` 仍交给 reportlab 解析（与 ``content``
+       路径同口径的既有风险，本 PR 未改）；
     2. 仅支持行首图片，段落中间的行内图按普通文字保留；不支持 SVG；
     3. 表格按标准 GFM 解析（分隔行单元格 ≥3 个短横线；不做转义管道 \\| 处理），
        表格内不支持加粗等行内标记。
