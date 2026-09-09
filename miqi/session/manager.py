@@ -15,6 +15,17 @@ from loguru import logger
 from miqi.paths import get_legacy_data_dir
 from miqi.utils.helpers import ensure_dir, safe_filename
 
+# Per-session-key locks shared by ALL SessionManager instances in the process.
+#
+# #1003: tracked_files.json 的写入是「整读整写」，而调用方（
+# ``_persist_tracked_file``、AppServer handler）每次各自新建 SessionManager —
+# 实例级锁锁不住同一 key 的并发写：两个实例读到同一份旧快照，后写者覆盖
+# 先写者 → 丢条目。锁提升为模块级后，同进程内不同实例对同一 key 串行化。
+#
+# 跨进程（多个 bridge 进程 / 外部编辑）协调仍缺失，见 PR #1003 说明。
+_session_locks: dict[str, threading.RLock] = {}
+_session_locks_guard = threading.Lock()
+
 
 def _normalize_datetime(value: datetime) -> datetime:
     if value.tzinfo is None:
@@ -143,8 +154,6 @@ class SessionManager:
         self.compact_threshold_bytes = max(1, compact_threshold_bytes)
         self.compact_keep_messages = max(1, compact_keep_messages)
         self._cache: dict[str, Session] = {}
-        self._session_locks: dict[str, threading.RLock] = {}
-        self._session_locks_guard = threading.Lock()
 
     def get_session_dir(self, key: str) -> Path:
         safe_key = safe_filename(key.replace(":", "_"))
@@ -155,11 +164,11 @@ class SessionManager:
         return self.get_session_dir(key) / "conversation.jsonl"
 
     def _get_session_lock(self, key: str) -> threading.RLock:
-        with self._session_locks_guard:
-            lock = self._session_locks.get(key)
+        with _session_locks_guard:
+            lock = _session_locks.get(key)
             if lock is None:
                 lock = threading.RLock()
-                self._session_locks[key] = lock
+                _session_locks[key] = lock
             return lock
 
     def _migrate_flat_to_dir(self, key: str) -> None:
@@ -407,31 +416,35 @@ class SessionManager:
         ``op`` is one of: read, write, edit, delete.
 
         When client_id is provided, ownership is verified first.
+
+        #1003 finding ③：读-改-写全程持 key 锁（模块级，跨实例共享），否则两个
+        SessionManager 实例各自读到旧快照，后写者覆盖先写者 → 丢条目。
         """
         if client_id is not None:
             self._verify_ownership_for_mutation(key, client_id)
-        files = self.load_tracked_files(key)
-        norm = file_path.replace("\\", "/")
-        existing = files.get(norm, {})
-        # Upgrade: read < edit < write < delete
-        rank = {"read": 0, "edit": 1, "write": 2, "delete": 3}
-        cur_rank = rank.get(existing.get("op", "read"), 0)
-        new_rank = rank.get(op, 0)
-        if new_rank >= cur_rank:
-            from pathlib import PurePosixPath
-            files[norm] = {
-                "op": op,
-                "name": name or PurePosixPath(norm).name,
-                "lastSeen": int(datetime.now().timestamp() * 1000),
-            }
-        path = self._get_tracked_files_path(key)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(".tmp")
-        tmp.write_text(
-            json.dumps({"version": 1, "files": files}, ensure_ascii=False),
-            encoding="utf-8",
-        )
-        tmp.replace(path)
+        with self._get_session_lock(key):
+            files = self.load_tracked_files(key)
+            norm = file_path.replace("\\", "/")
+            existing = files.get(norm, {})
+            # Upgrade: read < edit < write < delete
+            rank = {"read": 0, "edit": 1, "write": 2, "delete": 3}
+            cur_rank = rank.get(existing.get("op", "read"), 0)
+            new_rank = rank.get(op, 0)
+            if new_rank >= cur_rank:
+                from pathlib import PurePosixPath
+                files[norm] = {
+                    "op": op,
+                    "name": name or PurePosixPath(norm).name,
+                    "lastSeen": int(datetime.now().timestamp() * 1000),
+                }
+            path = self._get_tracked_files_path(key)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(".tmp")
+            tmp.write_text(
+                json.dumps({"version": 1, "files": files}, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            tmp.replace(path)
 
     def save_tracked_files_batch(
         self, key: str, entries: list[tuple[str, str]],
@@ -444,33 +457,37 @@ class SessionManager:
         exec artifact tracker (Phase 59 / #607): N files created by one
         command no longer cost N full read+rewrite cycles on the caller's
         thread (CodeRabbit #682 review).
+
+        #1003 finding ③：与 ``save_tracked_file`` 共用同一把模块级 key 锁，
+        跨实例的「批量写 vs 单条写」不再互相覆盖。
         """
         if client_id is not None:
             self._verify_ownership_for_mutation(key, client_id)
         if not entries:
             return
-        files = self.load_tracked_files(key)
-        rank = {"read": 0, "edit": 1, "write": 2, "delete": 3}
-        now = int(datetime.now().timestamp() * 1000)
-        from pathlib import PurePosixPath
+        with self._get_session_lock(key):
+            files = self.load_tracked_files(key)
+            rank = {"read": 0, "edit": 1, "write": 2, "delete": 3}
+            now = int(datetime.now().timestamp() * 1000)
+            from pathlib import PurePosixPath
 
-        for file_path, op in entries:
-            norm = file_path.replace("\\", "/")
-            existing = files.get(norm, {})
-            if rank.get(op, 0) >= rank.get(existing.get("op", "read"), 0):
-                files[norm] = {
-                    "op": op,
-                    "name": PurePosixPath(norm).name,
-                    "lastSeen": now,
-                }
-        path = self._get_tracked_files_path(key)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(".tmp")
-        tmp.write_text(
-            json.dumps({"version": 1, "files": files}, ensure_ascii=False),
-            encoding="utf-8",
-        )
-        tmp.replace(path)
+            for file_path, op in entries:
+                norm = file_path.replace("\\", "/")
+                existing = files.get(norm, {})
+                if rank.get(op, 0) >= rank.get(existing.get("op", "read"), 0):
+                    files[norm] = {
+                        "op": op,
+                        "name": PurePosixPath(norm).name,
+                        "lastSeen": now,
+                    }
+            path = self._get_tracked_files_path(key)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(".tmp")
+            tmp.write_text(
+                json.dumps({"version": 1, "files": files}, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            tmp.replace(path)
 
     def reset_tracked_file_op(
         self, key: str, file_path: str, op: str = "read",
@@ -485,20 +502,21 @@ class SessionManager:
         """
         if client_id is not None:
             self._verify_ownership_for_mutation(key, client_id)
-        files = self.load_tracked_files(key)
-        norm = file_path.replace("\\", "/")
-        if norm not in files:
-            return
-        files[norm]["op"] = op
-        files[norm]["lastSeen"] = int(datetime.now().timestamp() * 1000)
-        path = self._get_tracked_files_path(key)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(".tmp")
-        tmp.write_text(
-            json.dumps({"version": 1, "files": files}, ensure_ascii=False),
-            encoding="utf-8",
-        )
-        tmp.replace(path)
+        with self._get_session_lock(key):
+            files = self.load_tracked_files(key)
+            norm = file_path.replace("\\", "/")
+            if norm not in files:
+                return
+            files[norm]["op"] = op
+            files[norm]["lastSeen"] = int(datetime.now().timestamp() * 1000)
+            path = self._get_tracked_files_path(key)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(".tmp")
+            tmp.write_text(
+                json.dumps({"version": 1, "files": files}, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            tmp.replace(path)
 
     def remove_tracked_file(
         self, key: str, file_path: str, *, client_id: str | None = None,
@@ -509,19 +527,20 @@ class SessionManager:
         """
         if client_id is not None:
             self._verify_ownership_for_mutation(key, client_id)
-        files = self.load_tracked_files(key)
-        norm = file_path.replace("\\", "/")
-        files.pop(norm, None)
-        path = self._get_tracked_files_path(key)
-        if not files:
-            path.unlink(missing_ok=True)
-            return
-        tmp = path.with_suffix(".tmp")
-        tmp.write_text(
-            json.dumps({"version": 1, "files": files}, ensure_ascii=False),
-            encoding="utf-8",
-        )
-        tmp.replace(path)
+        with self._get_session_lock(key):
+            files = self.load_tracked_files(key)
+            norm = file_path.replace("\\", "/")
+            files.pop(norm, None)
+            path = self._get_tracked_files_path(key)
+            if not files:
+                path.unlink(missing_ok=True)
+                return
+            tmp = path.with_suffix(".tmp")
+            tmp.write_text(
+                json.dumps({"version": 1, "files": files}, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            tmp.replace(path)
 
     def clear_tracked_files(
         self, key: str, *, client_id: str | None = None,
