@@ -69,6 +69,19 @@ def test_session_lock_is_shared_across_instances(tmp_path):
     assert sm_a._get_session_lock("desktop:983") is not sm_a._get_session_lock("desktop:984")
 
 
+def test_session_lock_is_shared_by_alias_keys(tmp_path):
+    """``desktop:983`` 与 ``desktop_983`` 派生同一目录 → 必须同一把锁。
+
+    两条写链的 key 形态不同：``_persist_tracked_file`` 传派生名
+    （``desktop_983``），``file_handlers``（files.accept/revert/write）传客户端
+    原始 key（``desktop:983``）。按原始字符串取锁 = 同一文件两把锁。
+    """
+    sm = SessionManager(tmp_path)
+
+    assert sm.get_session_dir("desktop:983") == sm.get_session_dir("desktop_983")
+    assert sm._get_session_lock("desktop:983") is sm._get_session_lock("desktop_983")
+
+
 def test_two_instances_concurrent_single_writes_keep_both(tmp_path, monkeypatch):
     """两个不同实例并发写不同条目 → 两条都必须保留。"""
     _slow_read(monkeypatch)
@@ -103,3 +116,48 @@ def test_two_instances_concurrent_batch_and_single_keep_both(tmp_path, monkeypat
     assert errors == [], errors
     files = SessionManager(tmp_path).load_tracked_files(key)
     assert set(files) == {"batch1.md", "batch2.md", "single.md"}, files
+
+
+def test_concurrent_raw_and_derived_key_writes_keep_both(tmp_path, monkeypatch):
+    """别名 key 并发写同一文件：两条都要保留。
+
+    复刻生产的两条写链：工具写端 ``_persist_tracked_file`` 传派生 key
+    （``desktop_983alias``），面板写端 ``file_handlers`` 传客户端原始 key
+    （``desktop:983alias``）——两者落同一个 tracked_files.json。
+    """
+    _slow_read(monkeypatch)
+    sm_tool = SessionManager(tmp_path)
+    sm_panel = SessionManager(tmp_path)
+
+    errors = _run_two_threads(
+        lambda: sm_tool.save_tracked_file("desktop_983alias", "tool.md", op="write"),
+        lambda: sm_panel.save_tracked_file("desktop:983alias", "panel.md", op="write"),
+    )
+
+    assert errors == [], errors
+    files = SessionManager(tmp_path).load_tracked_files("desktop:983alias")
+    assert set(files) == {"tool.md", "panel.md"}, files
+
+
+def test_clear_tracked_files_waits_for_key_lock(tmp_path):
+    """clear 必须在 key 锁内：否则整文件删除会与在途的读-改-写交错。"""
+    key = "desktop:983clear"
+    sm = SessionManager(tmp_path)
+    sm.save_tracked_file(key, "a.md", op="write")
+    store = sm.get_session_dir(key) / "tracked_files.json"
+    assert store.exists()
+
+    done = threading.Event()
+    thread = threading.Thread(
+        target=lambda: (sm.clear_tracked_files(key), done.set()),
+        name="tracked-clearer",
+    )
+    with sm._get_session_lock(key):
+        thread.start()
+        time.sleep(0.1)
+        assert not done.is_set(), "clear 未等待 key 锁"
+        assert store.exists(), "clear 在持锁期间删除了文件"
+    thread.join(timeout=10)
+
+    assert done.is_set(), "clear 未退出"
+    assert not store.exists()

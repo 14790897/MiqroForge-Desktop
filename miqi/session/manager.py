@@ -164,11 +164,16 @@ class SessionManager:
         return self.get_session_dir(key) / "conversation.jsonl"
 
     def _get_session_lock(self, key: str) -> threading.RLock:
+        # 锁标识 = 磁盘上真实的会话目录（``get_session_dir``），而不是调用方传入
+        # 的 key 字符串：``desktop:983``（file_handlers 传客户端原始 key）与
+        # ``desktop_983``（_persist_tracked_file 传派生名）派生同一目录，按原始
+        # 字符串取锁会让两者写同一个 tracked_files.json 却各持一把锁。
+        lock_key = str(self.get_session_dir(key))
         with _session_locks_guard:
-            lock = _session_locks.get(key)
+            lock = _session_locks.get(lock_key)
             if lock is None:
                 lock = threading.RLock()
-                _session_locks[key] = lock
+                _session_locks[lock_key] = lock
             return lock
 
     def _migrate_flat_to_dir(self, key: str) -> None:
@@ -548,11 +553,16 @@ class SessionManager:
         """Remove the entire tracked_files.json for a session.
 
         When client_id is provided, ownership is verified first.
+
+        #1003 finding ③（复核）：clear 是整文件删除，必须在同一把 key 锁内，
+        否则会与在途的读-改-写交错（删除被随后的 ``tmp.replace`` 悄悄撤销，
+        或删掉刚写入的批次）。
         """
         if client_id is not None:
             self._verify_ownership_for_mutation(key, client_id)
-        path = self._get_tracked_files_path(key)
-        path.unlink(missing_ok=True)
+        with self._get_session_lock(key):
+            path = self._get_tracked_files_path(key)
+            path.unlink(missing_ok=True)
 
     # ── Archive ───────────────────────────────────────────────────────
 
