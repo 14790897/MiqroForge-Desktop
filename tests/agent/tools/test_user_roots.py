@@ -159,14 +159,22 @@ class TestExtractUserMentionedRoots:
 
 
 class TestProtectedPrefix:
-    """Subtree filtering: depth-1 system dirs were handled, deeper ones not."""
+    """Subtree filtering: depth-1 system dirs were handled, deeper ones not.
 
+    ``_is_protected_prefix`` walks ``Path.parts``, so drive-letter paths only
+    split into components on Windows; on POSIX they are one relative component
+    and the Windows-only cases below are skipped rather than asserted.
+    """
+
+    @pytest.mark.skipif(not _IS_WINDOWS, reason="drive-letter paths split only on Windows")
     def test_windows_system_subtree(self) -> None:
         assert _is_protected_prefix(Path(r"C:\Windows\Temp\x")) is True
 
+    @pytest.mark.skipif(not _IS_WINDOWS, reason="drive-letter paths split only on Windows")
     def test_programdata_subtree(self) -> None:
         assert _is_protected_prefix(Path(r"C:\ProgramData\pkg\out")) is True
 
+    @pytest.mark.skipif(not _IS_WINDOWS, reason="drive-letter paths split only on Windows")
     def test_appdata_anywhere(self) -> None:
         assert _is_protected_prefix(
             Path(r"C:\Users\x\AppData\Local\Temp\o")
