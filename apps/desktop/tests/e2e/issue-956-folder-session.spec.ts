@@ -23,7 +23,7 @@
 
 import { test, expect } from '@playwright/test';
 import type { ElectronApplication, Page } from '@playwright/test';
-import { mkdtempSync, existsSync, readFileSync, readdirSync } from 'node:fs';
+import { mkdtempSync, existsSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
@@ -127,7 +127,9 @@ test.describe('#956 folder-bound session', () => {
         if (existsSync(conv)) convFiles.push(conv);
       }
       expect(convFiles.length).toBeGreaterThan(0);
-      expect(readFileSync(convFiles[0], 'utf-8')).toContain('Q956A');
+      // readdirSync order is not guaranteed — assert on ANY collected file
+      // rather than convFiles[0] (a stray seed file could sort first).
+      expect(convFiles.some((f) => readFileSync(f, 'utf-8').includes('Q956A'))).toBe(true);
 
       // After the turn completes, the folder session must appear EXACTLY once
       // in the sidebar (the active registry + folder-scan must not duplicate it).
@@ -150,6 +152,8 @@ test.describe('#956 folder-bound session', () => {
       });
     } finally {
       await closeElectronApp(electronApp, miqiHome);
+      // Clean up the temp folder root (mkdtempSync'd outside miqiHome).
+      rmSync(folderRoot, { recursive: true, force: true });
     }
   });
 
@@ -199,6 +203,8 @@ test.describe('#956 folder-bound session', () => {
       });
     } finally {
       await closeElectronApp(electronApp, miqiHome);
+      // Clean up the temp folder root (mkdtempSync'd outside miqiHome).
+      rmSync(folderRoot, { recursive: true, force: true });
     }
   });
 });
