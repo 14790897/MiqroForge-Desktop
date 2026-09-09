@@ -6797,7 +6797,15 @@ export function ChatConsole({
 
                         {/* Remove */}
                         <button
-                          onClick={() => removeAttachment(i)}
+                          onClick={(e) => {
+                            // The chip container opens the preview on click —
+                            // without stopPropagation the remove click bubbles
+                            // up and pops the preview modal for the just-removed
+                            // file (and the modal then eats further input, e.g.
+                            // the attachment.spec cleanup loop in CI).
+                            e.stopPropagation();
+                            removeAttachment(i);
+                          }}
                           className="shrink-0 opacity-0 group-hover:opacity-100 transition-opacity hover:bg-[rgba(0,0,0,0.1)] rounded p-0.5"
                         >
                           <X size={11} style={{ color: 'var(--text-faint)' }} />

@@ -84,6 +84,72 @@ export async function sendMessage(page: Page, text: string) {
   await expect(page.locator('[data-testid="chat-input-container"] textarea')).toHaveValue('');
 }
 
+/** Frontend generic message shown when a turn fails on the provider side
+ *  (rate limit / overload / transient network) — the LLM never replied. */
+export const PROVIDER_UNAVAILABLE_TEXT = '模型服务暂时不可用或过载';
+
+/**
+ * Send `text` and wait until `isDone` observes the feature under test,
+ * re-sending up to `maxAttempts` times when the turn errors with the
+ * provider-unavailable message instead.
+ *
+ * Real-LLM specs (chat-disclaimer, confirm-card-real-llm) run against the
+ * shared CI provider key; parallel jobs (macos-e2e + electron-e2e + PR
+ * runs) trigger rate limits and the turn dies with 「模型服务暂时不可用或
+ * 过载」— no reply, so the feature can never render. One resend usually
+ * lands after the burst. Returns false when every attempt ended in a
+ * provider error (or a silent timeout without reply); the caller should
+ * test.skip() then (the subject under test never got a reply, failing is
+ * pure noise).
+ */
+export async function sendUntilDoneOrProviderDown(
+  page: Page,
+  text: string,
+  isDone: () => Promise<boolean>,
+  opts: { maxAttempts?: number; perAttemptWaitMs?: number; silenceExtendMs?: number } = {}
+): Promise<boolean> {
+  const { maxAttempts = 2, perAttemptWaitMs = 150_000, silenceExtendMs = 150_000 } = opts;
+  const errLocator = page.getByText(PROVIDER_UNAVAILABLE_TEXT);
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    // Snapshot BEFORE the send: an error that surfaces during sendMessage
+    // itself must count as this attempt's error. Error bubbles from earlier
+    // attempts stay in the message list, so match by count delta — only an
+    // error that appeared after this snapshot counts.
+    const errCountBefore = await errLocator.count();
+    await sendMessage(page, text);
+    let sawError = false;
+
+    let deadline = Date.now() + perAttemptWaitMs;
+    while (Date.now() < deadline) {
+      if (await isDone()) return true;
+      if ((await errLocator.count()) > errCountBefore) {
+        sawError = true;
+        break;
+      }
+      await page.waitForTimeout(1000);
+    }
+
+    if (!sawError) {
+      // Silence is NOT a provider error: a slow thinking model may simply not
+      // have replied yet, and re-sending would interrupt an in-flight turn.
+      // Extend the wait once instead of treating it as unavailability.
+      deadline = Date.now() + silenceExtendMs;
+      while (Date.now() < deadline) {
+        if (await isDone()) return true;
+        if ((await errLocator.count()) > errCountBefore) {
+          sawError = true;
+          break;
+        }
+        await page.waitForTimeout(1000);
+      }
+      if (!sawError) return false; // no reply and no provider error — give up
+    }
+
+    console.log(`[test] provider unavailable on attempt ${attempt}/${maxAttempts} — re-sending`);
+  }
+  return false;
+}
+
 /**
  * 空会话不再落盘 / 不再进 sessions.list(#774)后,list[0] 不再恒等于刚打开的
  * 当前空会话。本 helper 保证当前会话已是一条"真实"会话并返回其 key:先查
