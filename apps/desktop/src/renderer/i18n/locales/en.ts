@@ -207,6 +207,41 @@ export const en: Record<I18nKey, string> = {
   'memory.createFail': 'Failed to create file',
   'memory.deleteFail': 'Failed to delete file',
 
+  // ── AgentPanel / PluginMarket ──────────────────────────────────────────────
+  'agentPanel.title': 'Agents',
+  'agentPanel.loading': 'Loading...',
+  'agentPanel.idle': 'Idle',
+  'agentPanel.thinking': 'Thinking',
+  'agentPanel.executing': 'Executing',
+  'agentPanel.completed': 'Completed',
+  'agentPanel.error': 'Error',
+  'agentPanel.aborted': 'Aborted',
+  'agentPanel.empty': 'No agents running',
+  'agentPanel.emptyHint': 'Send a message to start an agent automatically',
+  'plugins.title': 'Plugin market',
+  'plugins.loading': 'Loading...',
+  'plugins.enabled': 'Enabled',
+  'plugins.disabled': 'Disabled',
+  'plugins.error': 'Error',
+  'plugins.empty': 'No plugins installed yet',
+  'plugins.emptyHint': 'Add plugins to ~/.miqi/plugins/ or <workspace>/.miqi/plugins/',
+  'plugins.confirmUninstall': 'Uninstall {{name}}?',
+
+  // ── SessionExplorer ────────────────────────────────────────────────────────
+  'sessionExplorer.open': 'Open session',
+  'sessionExplorer.copyKey': 'Copy session key',
+  'sessionExplorer.delete': 'Delete session',
+  'sessionExplorer.claimTitle': 'Legacy session not claimed',
+  'sessionExplorer.claimBody':
+    'This session was created by the legacy MiQi client and has not been claimed by this desktop client yet.',
+  'sessionExplorer.claiming': 'Claiming...',
+  'sessionExplorer.claim': 'Claim this session',
+  'sessionExplorer.unauthTitle': 'No access to this session',
+  'sessionExplorer.unauthBody':
+    'This session belongs to another client; the current desktop client has no access.',
+  'sessionExplorer.loadFail': 'Failed to load session',
+  'sessionExplorer.unknownError': 'Unknown error',
+
   // ── TopBar ─────────────────────────────────────────────────────────────────
   'topbar.agentLabel': 'MiQroForge Agent',
   'topbar.bypass.labelAuto': 'Auto',

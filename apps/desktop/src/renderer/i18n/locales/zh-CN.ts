@@ -207,6 +207,39 @@ export const zhCN = {
   'memory.createFail': '创建文件失败',
   'memory.deleteFail': '删除文件失败',
 
+  // ── AgentPanel / PluginMarket ──────────────────────────────────────────────
+  'agentPanel.title': '智能体',
+  'agentPanel.loading': '加载中...',
+  'agentPanel.idle': '空闲',
+  'agentPanel.thinking': '思考中',
+  'agentPanel.executing': '执行中',
+  'agentPanel.completed': '已完成',
+  'agentPanel.error': '错误',
+  'agentPanel.aborted': '已中止',
+  'agentPanel.empty': '暂无运行中的智能体',
+  'agentPanel.emptyHint': '发送消息即可自动启动智能体',
+  'plugins.title': '插件市场',
+  'plugins.loading': '加载中...',
+  'plugins.enabled': '已启用',
+  'plugins.disabled': '已禁用',
+  'plugins.error': '错误',
+  'plugins.empty': '暂无已安装插件',
+  'plugins.emptyHint': '将插件添加到 ~/.miqi/plugins/ 或 <workspace>/.miqi/plugins/',
+  'plugins.confirmUninstall': '确定卸载 {{name}}？',
+
+  // ── SessionExplorer ────────────────────────────────────────────────────────
+  'sessionExplorer.open': '打开会话',
+  'sessionExplorer.copyKey': '复制 session key',
+  'sessionExplorer.delete': '删除会话',
+  'sessionExplorer.claimTitle': '旧版未认领会话',
+  'sessionExplorer.claimBody': '此会话创建于旧版 MiQi，尚未认领到当前桌面客户端。',
+  'sessionExplorer.claiming': '认领中...',
+  'sessionExplorer.claim': '认领此会话',
+  'sessionExplorer.unauthTitle': '无权访问此会话',
+  'sessionExplorer.unauthBody': '该会话属于其他客户端，当前桌面客户端无权访问。',
+  'sessionExplorer.loadFail': '加载会话失败',
+  'sessionExplorer.unknownError': '未知错误',
+
   // ── TopBar ─────────────────────────────────────────────────────────────────
   'topbar.agentLabel': 'MiQroForge 智能体',
   // approval bypass capsule

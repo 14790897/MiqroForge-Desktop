@@ -392,7 +392,9 @@ export function WorkspacePage() {
             <div className="flex-1 overflow-hidden">
               {fileLoading ? (
                 <div className="flex items-center justify-center h-full">
-                  <div className="text-sm text-[var(--text-muted)]">{t('workspace.loadingFile')}</div>
+                  <div className="text-sm text-[var(--text-muted)]">
+                    {t('workspace.loadingFile')}
+                  </div>
                 </div>
               ) : isPdfFile && binaryUrl ? (
                 <iframe
@@ -466,7 +468,9 @@ export function WorkspacePage() {
           onOpenChange={(o) => {
             if (!o) setActionTarget(null);
           }}
-          title={actionTarget.type === 'newFile' ? t('workspace.newFile') : t('workspace.newFolder')}
+          title={
+            actionTarget.type === 'newFile' ? t('workspace.newFile') : t('workspace.newFolder')
+          }
           label={
             actionTarget.type === 'newFile'
               ? t('workspace.newFileNameLabel')
@@ -532,7 +536,10 @@ function FileTree({
               divider: true,
               onSelect: () => onRename(node.path, node.name),
             },
-            { label: t('workspace.copyPath'), onSelect: () => navigator.clipboard.writeText(node.path) },
+            {
+              label: t('workspace.copyPath'),
+              onSelect: () => navigator.clipboard.writeText(node.path),
+            },
             {
               label: t('workspace.openFolderTitle'),
               divider: true,
@@ -642,7 +649,10 @@ function FileTree({
           divider: true,
           onSelect: () => onRename(node.path, node.name),
         },
-        { label: t('workspace.copyPath'), onSelect: () => navigator.clipboard.writeText(node.path) },
+        {
+          label: t('workspace.copyPath'),
+          onSelect: () => navigator.clipboard.writeText(node.path),
+        },
         {
           label: t('workspace.openFolderTitle'),
           onSelect: () => window.miqi.files.openContainingFolder(node.path),

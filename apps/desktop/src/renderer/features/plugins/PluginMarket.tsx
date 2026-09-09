@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { useTranslation } from 'react-i18next';
 import { Package, ToggleLeft, ToggleRight, Trash2, Puzzle } from 'lucide-react';
 import { cn } from '../../lib/utils';
 
@@ -11,6 +12,7 @@ interface PluginInfo {
 }
 
 export function PluginMarket() {
+  const { t } = useTranslation();
   const [plugins, setPlugins] = useState<PluginInfo[]>([]);
   const [loading, setLoading] = useState(true);
 
@@ -38,7 +40,7 @@ export function PluginMarket() {
   };
 
   const handleUninstall = async (name: string) => {
-    if (!confirm(`确定卸载 ${name}？`)) return;
+    if (!confirm(t('plugins.confirmUninstall', { name }))) return;
     try {
       await window.miqi.plugins.uninstall(name);
       await load();
@@ -50,11 +52,11 @@ export function PluginMarket() {
   const statusLabel = (s: string) => {
     switch (s) {
       case 'active':
-        return '已启用';
+        return t('plugins.enabled');
       case 'error':
-        return '错误';
+        return t('plugins.error');
       default:
-        return '已禁用';
+        return t('plugins.disabled');
     }
   };
 
@@ -62,7 +64,7 @@ export function PluginMarket() {
     return (
       <div className="p-4 flex items-center gap-2">
         <div className="w-4 h-4 border-2 border-[var(--border)] border-t-[var(--accent)] rounded-full animate-spin" />
-        <span className="text-xs text-[var(--text-faint)]">加载中...</span>
+        <span className="text-xs text-[var(--text-faint)]">{t('plugins.loading')}</span>
       </div>
     );
 
@@ -70,16 +72,16 @@ export function PluginMarket() {
     <div className="p-4 max-w-2xl">
       <h2 className="text-sm font-semibold text-[var(--text)] mb-4 flex items-center gap-2">
         <Package size={16} />
-        插件市场
+        {t('plugins.title')}
       </h2>
       {plugins.length === 0 ? (
         <div className="flex flex-col items-center justify-center py-10 px-4 rounded-xl border border-dashed border-[var(--border-subtle)] bg-[var(--surface-muted)]/30">
           <div className="w-10 h-10 rounded-full bg-[var(--surface-muted)] flex items-center justify-center mb-3 text-text-faint">
             <Puzzle size={18} />
           </div>
-          <p className="text-sm font-medium text-[var(--text-muted)] mb-1">暂无已安装插件</p>
+          <p className="text-sm font-medium text-[var(--text-muted)] mb-1">{t('plugins.empty')}</p>
           <p className="text-xs text-[var(--text-faint)] text-center leading-relaxed">
-            将插件添加到 ~/.miqi/plugins/ 或 &lt;workspace&gt;/.miqi/plugins/
+            {t('plugins.emptyHint')}
           </p>
         </div>
       ) : (
