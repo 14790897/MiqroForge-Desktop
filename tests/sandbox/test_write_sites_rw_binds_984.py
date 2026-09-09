@@ -12,6 +12,7 @@ recorder, so these tests assert the plumbing, not bwrap itself.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -23,7 +24,26 @@ def _mock_wsl_sandbox(workspace: Path) -> MagicMock:
     sb._use_wsl = True
     sb.is_running = True
     sb.workspace = workspace
+    sb.workspace_path = str(workspace)
     sb.run_command = AsyncMock(return_value=(0, "", ""))
+    return sb
+
+
+def _render_sandbox(workspace: Path) -> MagicMock:
+    """WSL-shaped double whose ``test -d`` fails and ``test -f`` succeeds.
+
+    ``GraphRenderTool._collect_targets`` probes the source with both, so the
+    double must answer them differently or the JSON file is mistaken for a
+    directory and no write happens at all.
+    """
+    sb = _mock_wsl_sandbox(workspace)
+
+    async def _run(cmd: str, *args, **kwargs):
+        if cmd.startswith("test -d "):
+            return (1, "", "")
+        return (0, "", "")
+
+    sb.run_command = AsyncMock(side_effect=_run)
     return sb
 
 
@@ -138,24 +158,80 @@ async def test_apply_patch_passes_binds(monkeypatch, tmp_path: Path) -> None:
 
 # ── graph_render ─────────────────────────────────────────────────────────
 
+_GRAPH_JSON = {
+    "schema_version": "1.0",
+    "graph_type": "step-nodes",
+    "skill": "test",
+    "nodes": [{"id": "S1", "title": "步骤一", "category": "compute"}],
+    "edges": [],
+}
+
+
+def _write_recorder(captured: list):
+    async def _fake(sandbox, sandbox_path, content, **kwargs):
+        captured.append({
+            "sandbox_path": sandbox_path,
+            "extra_rw_binds": [
+                str(r) for r in (kwargs.get("extra_rw_binds") or [])
+            ],
+        })
+    return _fake
+
 
 @pytest.mark.asyncio
-async def test_graph_render_passes_binds(monkeypatch, tmp_path: Path) -> None:
+async def test_graph_render_execute_forwards_its_own_shared(
+    monkeypatch, tmp_path: Path,
+) -> None:
+    """Drives ``GraphRenderTool.execute`` — the real write site.
+
+    ``_write_text`` falls back to ``self._shared_roots`` when ``shared`` is
+    omitted, so calling it directly (as this test used to) stays green even if
+    ``execute`` stops forwarding ``shared=shared`` (graph_render.py:836/841/852).
+    Going through ``execute`` and asserting the forwarded set exactly is what
+    makes the 4th writer provable.
+    """
     import miqi.agent.tools.graph_render as gr
 
     ws = tmp_path / "ws"
     ws.mkdir()
     out = tmp_path / "out"
     out.mkdir()
-    captured: dict = {}
-    monkeypatch.setattr(gr, "_sandbox_write_file", _recorder(captured))
+    src = ws / "step-graph.json"
+    src.write_text(json.dumps(_GRAPH_JSON), encoding="utf-8")
+
+    seen_shared: list = []
+    writes: list = []
+    real_write_text = gr.GraphRenderTool._write_text
+
+    async def _spy(self, resolved, content, sandbox, **kwargs):
+        seen_shared.append(kwargs.get("shared"))
+        await real_write_text(self, resolved, content, sandbox, **kwargs)
+
+    monkeypatch.setattr(gr.GraphRenderTool, "_write_text", _spy)
+    monkeypatch.setattr(gr, "_sandbox_write_file", _write_recorder(writes))
+    monkeypatch.setattr(gr, "_sandbox_read_file", AsyncMock(
+        return_value=json.dumps(_GRAPH_JSON),
+    ))
 
     tool = gr.GraphRenderTool(
-        workspace=ws, sandbox_manager=_mock_manager(_mock_wsl_sandbox(ws)),
+        workspace=ws, sandbox_manager=_mock_manager(_render_sandbox(ws)),
         shared_roots=[ws],
     )
-    await tool._write_text(
-        out / "graph.svg", "<svg/>", _mock_wsl_sandbox(ws),
-        session_key="s1", shared=[ws, out],
-    )
-    _assert_binds(captured, ws, out)
+
+    # svg → 1 write (graph_render.py:852); html → 2 writes (:836, :841).
+    for fmt, expected_writes in (("svg", 1), ("html", 2)):
+        seen_shared.clear()
+        writes.clear()
+        result = await tool.execute(
+            str(src), format=fmt, out_dir=str(out),
+            _session_key="s1", _user_roots=[str(out)],
+        )
+        payload = json.loads(result)
+        assert payload["ok"] is True, result
+        assert len(seen_shared) == expected_writes, seen_shared
+        # EXACTLY workspace ∪ static roots ∪ gated user roots — the fallback
+        # (`self._shared_roots` = [ws]) would drop `out` and fail here.
+        assert all(shared == [ws, out] for shared in seen_shared), seen_shared
+        assert len(writes) == expected_writes, writes
+        for write in writes:
+            _assert_binds(write, ws, out)
