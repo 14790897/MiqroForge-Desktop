@@ -105,6 +105,41 @@ def pil_open_spy(monkeypatch):
     return calls
 
 
+@pytest.fixture
+def paragraph_texts(monkeypatch):
+    """记录传给 reportlab ``Paragraph`` 的**原始文本**（字体无关的渲染断言）。
+
+    「从 PDF 提取文本」依赖字体：无 CJK 字体的 runner 上中文会被提取成缺字形
+    （CI ubuntu-latest 实测 ``[图表：x（见源稿）]`` → ``[IIIxIIIII]``），因此中文
+    断言不能建立在提取结果上。而降级占位发生在构造 ``Paragraph`` **之前**，捕获
+    入参即可在任意字体环境下断言同一个字符串——且比提取结果更精确（保留 CJK
+    括号原文，提取结果在正常字体下也会被 pymupdf 按行折断）。
+
+    注意：``_build_pdf`` 是在函数内部 ``from reportlab.platypus import Paragraph``
+    的，所以必须补丁 ``reportlab.platypus`` 上的类本身；补丁
+    ``miqi.documents.pdf_create_tool.Paragraph`` 会被局部 import 覆盖，无效。
+    """
+    import reportlab.platypus as _platypus
+
+    texts: list[str] = []
+    real_paragraph = _platypus.Paragraph
+
+    class _RecordingParagraph(real_paragraph):  # type: ignore[misc, valid-type]
+        def __init__(self, *args, **kwargs):
+            raw = args[0] if args else kwargs.get("text", "")
+            texts.append(str(raw))
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr(_platypus, "Paragraph", _RecordingParagraph)
+    return texts
+
+
+def _assert_placeholder_rendered(texts, alt):
+    """断言降级占位 ``[图表：{alt}（见源稿）]`` 进入了渲染（字体无关）。"""
+    expected = _squash(f"[图表：{alt}（见源稿）]")
+    assert any(expected in _squash(t) for t in texts), (expected, texts)
+
+
 def _image_xref_info(pdf_path):
     """返回 PDF 中第一张嵌入图的 (ext, 像素宽, 像素高, 颜色分量数)。"""
     import pymupdf
@@ -118,20 +153,28 @@ def _image_xref_info(pdf_path):
 
 
 @pytest.mark.asyncio
-async def test_create_pdf_content_path_inline_bold_and_ampersand(tmp_path):
-    """CreatePdfTool: 段落内 **粗体** 转 <b>，R&D 转义后 PDF 文本仍是 R&D。"""
+async def test_create_pdf_content_path_inline_bold_and_ampersand(tmp_path, paragraph_texts):
+    """CreatePdfTool: 段落内 **粗体** 转 <b>，R&D 转义后 PDF 文本仍是 R&D。
+
+    断言只用 ASCII：样本文本改成 ASCII，`**` 的消费与 `&` 的转义都不依赖中文排版，
+    CI runner 无 CJK 字体也能判定。`<b>` 是否真的生成改用 Paragraph 入参断言
+    （字体无关，且比原来只看「`**` 消失」更强——原来没有直接验证粗体标签）。
+    """
     from miqi.documents.pdf_create_tool import CreatePdfTool
 
-    (tmp_path / "r.md").write_text("这是 **粗体** 与 R&D 文本。\n", encoding="utf-8")
+    (tmp_path / "r.md").write_text("This is **bold** and R&D text.\n", encoding="utf-8")
     tool = CreatePdfTool(workspace=tmp_path, allowed_dir=tmp_path)
     assert "Created:" in await tool.execute(filename="o.pdf", content_path="r.md")
 
     text = _pdf_text(tmp_path / "o.pdf")
-    assert "粗体" in text
+    assert "bold" in text
     assert "R&D" in text
     assert "**" not in text
     assert "&amp;" not in text
     assert "R&D;" not in text
+    # 渲染输入断言：**bold** 已转成 <b>bold</b>，R&D 已转义成 R&amp;D
+    assert any("<b>bold</b>" in t for t in paragraph_texts), paragraph_texts
+    assert any("R&amp;D" in t for t in paragraph_texts), paragraph_texts
 
 
 @pytest.mark.asyncio
@@ -139,12 +182,12 @@ async def test_create_pdf_content_path_heading_ampersand(tmp_path):
     """CreatePdfTool: 标题里的 & 必须正确渲染，不得出现 &amp; / &; 残留。"""
     from miqi.documents.pdf_create_tool import CreatePdfTool
 
-    (tmp_path / "r.md").write_text("## 研发 & 投入 R&D\n", encoding="utf-8")
+    (tmp_path / "r.md").write_text("## R&D & growth plan\n", encoding="utf-8")
     tool = CreatePdfTool(workspace=tmp_path, allowed_dir=tmp_path)
     assert "Created:" in await tool.execute(filename="o.pdf", content_path="r.md")
 
     text = _pdf_text(tmp_path / "o.pdf")
-    assert "研发 & 投入 R&D" in text
+    assert "R&D & growth plan" in text
     assert "&amp;" not in text
 
 
@@ -154,13 +197,13 @@ async def test_create_pdf_content_path_list_ampersand(tmp_path):
     from miqi.documents.pdf_create_tool import CreatePdfTool
 
     (tmp_path / "r.md").write_text(
-        "- R&D 经费与投入强度\n- 第二项\n", encoding="utf-8"
+        "- R&D budget and intensity\n- second item\n", encoding="utf-8"
     )
     tool = CreatePdfTool(workspace=tmp_path, allowed_dir=tmp_path)
     assert "Created:" in await tool.execute(filename="o.pdf", content_path="r.md")
 
     text = _pdf_text(tmp_path / "o.pdf")
-    assert "R&D 经费与投入强度" in text
+    assert "R&D budget and intensity" in text
     assert "R&D;" not in text
     assert "&amp;" not in text
 
@@ -171,13 +214,13 @@ async def test_create_pdf_content_path_table_ampersand_not_escaped(tmp_path):
     from miqi.documents.pdf_create_tool import CreatePdfTool
 
     (tmp_path / "r.md").write_text(
-        "| 项目 | 值 |\n| --- | --- |\n| R&D 经费 | 3.93 |\n", encoding="utf-8"
+        "| Item | Value |\n| --- | --- |\n| R&D budget | 3.93 |\n", encoding="utf-8"
     )
     tool = CreatePdfTool(workspace=tmp_path, allowed_dir=tmp_path)
     assert "Created:" in await tool.execute(filename="o.pdf", content_path="r.md")
 
     text = _pdf_text(tmp_path / "o.pdf")
-    assert "R&D 经费" in text
+    assert "R&D budget" in text
     assert "&amp;" not in text
 
 
@@ -187,14 +230,14 @@ async def test_create_pdf_content_path_link_quote_in_url(tmp_path):
     from miqi.documents.pdf_create_tool import CreatePdfTool
 
     (tmp_path / "r.md").write_text(
-        '见 [点我](https://example.com/a"b) 说明。\n', encoding="utf-8"
+        'see [click me](https://example.com/a"b) here.\n', encoding="utf-8"
     )
     tool = CreatePdfTool(workspace=tmp_path, allowed_dir=tmp_path)
     result = await tool.execute(filename="o.pdf", content_path="r.md")
 
     assert "Created:" in result
     assert "Error creating PDF" not in result
-    assert "点我" in _pdf_text(tmp_path / "o.pdf")
+    assert "click me" in _pdf_text(tmp_path / "o.pdf")
 
     import pymupdf
 
@@ -209,12 +252,12 @@ async def test_create_pdf_content_path_bold_wrapping_link(tmp_path):
     """CreatePdfTool: **加粗** 包裹链接时两者都要生效（嵌套不互相吞并）。"""
     from miqi.documents.pdf_create_tool import CreatePdfTool
 
-    (tmp_path / "r.md").write_text("**[文字](https://example.com/a)**\n", encoding="utf-8")
+    (tmp_path / "r.md").write_text("**[text](https://example.com/a)**\n", encoding="utf-8")
     tool = CreatePdfTool(workspace=tmp_path, allowed_dir=tmp_path)
     assert "Created:" in await tool.execute(filename="o.pdf", content_path="r.md")
 
     text = _pdf_text(tmp_path / "o.pdf")
-    assert "文字" in text
+    assert "text" in text
     assert "**" not in text
 
     import pymupdf
@@ -263,7 +306,7 @@ async def test_create_pdf_content_path_image_relative_embeds(tmp_path):
     _png(tmp_path / "step6_charts" / "assets" / "fig1.png")
     (tmp_path / "step7_report").mkdir()
     (tmp_path / "step7_report" / "r.md").write_text(
-        "![图1 说明](../step6_charts/assets/fig1.png)\n", encoding="utf-8"
+        "![fig1 caption](../step6_charts/assets/fig1.png)\n", encoding="utf-8"
     )
     tool = CreatePdfTool(workspace=tmp_path, allowed_dir=tmp_path)
     assert "Created:" in await tool.execute(
@@ -271,11 +314,13 @@ async def test_create_pdf_content_path_image_relative_embeds(tmp_path):
     )
 
     assert len(_drawn_images(tmp_path / "o.pdf")) == 1
-    assert "图1 说明" in _pdf_text(tmp_path / "o.pdf")
+    assert "fig1 caption" in _pdf_text(tmp_path / "o.pdf")
 
 
 @pytest.mark.asyncio
-async def test_create_pdf_content_path_image_relative_escape_rejected(tmp_path, pil_open_spy):
+async def test_create_pdf_content_path_image_relative_escape_rejected(
+    tmp_path, pil_open_spy, paragraph_texts
+):
     """CreatePdfTool: ../ 越界图片 → 占位 + 不读文件（即使目标真实存在且是合法 PNG）。"""
     from miqi.documents.pdf_create_tool import CreatePdfTool
 
@@ -288,12 +333,14 @@ async def test_create_pdf_content_path_image_relative_escape_rejected(tmp_path, 
     assert "Created:" in await tool.execute(filename="o.pdf", content_path="r.md")
 
     assert _drawn_images(ws / "o.pdf") == []
-    assert "[图表：x（见源稿）]" in _pdf_text(ws / "o.pdf")
+    _assert_placeholder_rendered(paragraph_texts, "x")
     assert pil_open_spy == [], f"越界图片不应被打开: {pil_open_spy}"
 
 
 @pytest.mark.asyncio
-async def test_create_pdf_content_path_image_absolute_outside_rejected(tmp_path, pil_open_spy):
+async def test_create_pdf_content_path_image_absolute_outside_rejected(
+    tmp_path, pil_open_spy, paragraph_texts
+):
     """CreatePdfTool: 绝对路径指向边界外 → 占位 + 不读文件。"""
     from miqi.documents.pdf_create_tool import CreatePdfTool
 
@@ -306,12 +353,12 @@ async def test_create_pdf_content_path_image_absolute_outside_rejected(tmp_path,
     assert "Created:" in await tool.execute(filename="o.pdf", content_path="r.md")
 
     assert _drawn_images(ws / "o.pdf") == []
-    assert "[图表：x（见源稿）]" in _pdf_text(ws / "o.pdf")
+    _assert_placeholder_rendered(paragraph_texts, "x")
     assert pil_open_spy == [], f"越界图片不应被打开: {pil_open_spy}"
 
 
 @pytest.mark.asyncio
-async def test_create_pdf_content_path_image_empty_dest(tmp_path):
+async def test_create_pdf_content_path_image_empty_dest(tmp_path, paragraph_texts):
     """CreatePdfTool: ![alt]() 空路径 → 占位，不抛异常。"""
     from miqi.documents.pdf_create_tool import CreatePdfTool
 
@@ -320,7 +367,7 @@ async def test_create_pdf_content_path_image_empty_dest(tmp_path):
     assert "Created:" in await tool.execute(filename="o.pdf", content_path="r.md")
 
     assert _drawn_images(tmp_path / "o.pdf") == []
-    assert "[图表：alt（见源稿）]" in _pdf_text(tmp_path / "o.pdf")
+    _assert_placeholder_rendered(paragraph_texts, "alt")
 
 
 @pytest.mark.asyncio
@@ -346,7 +393,7 @@ async def test_create_pdf_content_path_image_path_variants(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_create_pdf_content_path_image_corrupt_and_directory(tmp_path):
+async def test_create_pdf_content_path_image_corrupt_and_directory(tmp_path, paragraph_texts):
     """CreatePdfTool: 损坏图片与指向目录 → 占位，不抛异常。"""
     from miqi.documents.pdf_create_tool import CreatePdfTool
 
@@ -357,13 +404,12 @@ async def test_create_pdf_content_path_image_corrupt_and_directory(tmp_path):
     assert "Created:" in await tool.execute(filename="o.pdf", content_path="r.md")
 
     assert _drawn_images(tmp_path / "o.pdf") == []
-    text = _pdf_text(tmp_path / "o.pdf")
-    assert "[图表：a（见源稿）]" in text
-    assert "[图表：b（见源稿）]" in text
+    _assert_placeholder_rendered(paragraph_texts, "a")
+    _assert_placeholder_rendered(paragraph_texts, "b")
 
 
 @pytest.mark.asyncio
-async def test_create_pdf_content_path_image_svg_degraded(tmp_path):
+async def test_create_pdf_content_path_image_svg_degraded(tmp_path, paragraph_texts):
     """CreatePdfTool: SVG 不支持 → 占位 + 不嵌入（需 svglib/cairosvg）。"""
     from miqi.documents.pdf_create_tool import CreatePdfTool
 
@@ -375,7 +421,7 @@ async def test_create_pdf_content_path_image_svg_degraded(tmp_path):
     assert "Created:" in await tool.execute(filename="o.pdf", content_path="r.md")
 
     assert _drawn_images(tmp_path / "o.pdf") == []
-    assert "[图表：x（见源稿）]" in _pdf_text(tmp_path / "o.pdf")
+    _assert_placeholder_rendered(paragraph_texts, "x")
 
 
 @pytest.mark.asyncio
@@ -463,7 +509,7 @@ async def test_create_pdf_content_path_image_transparent_png(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_create_pdf_content_path_image_unvalidated_block_degraded(tmp_path):
+async def test_create_pdf_content_path_image_unvalidated_block_degraded(tmp_path, paragraph_texts):
     """CreatePdfTool: content 里手写的 image 块未经校验 → 降级，不得读任意文件。"""
     from miqi.documents.pdf_create_tool import CreatePdfTool
 
@@ -478,7 +524,7 @@ async def test_create_pdf_content_path_image_unvalidated_block_degraded(tmp_path
 
     assert "Created:" in result
     assert _drawn_images(ws / "o.pdf") == []
-    assert "[图表：x（见源稿）]" in _pdf_text(ws / "o.pdf")
+    _assert_placeholder_rendered(paragraph_texts, "x")
 
 
 @pytest.mark.asyncio
@@ -486,21 +532,23 @@ async def test_create_pdf_content_path_beats_content(tmp_path):
     """CreatePdfTool: content 与 content_path 同时给出时 content_path 优先。"""
     from miqi.documents.pdf_create_tool import CreatePdfTool
 
-    (tmp_path / "r.md").write_text("# 文件源标题\n", encoding="utf-8")
+    (tmp_path / "r.md").write_text("# File source title\n", encoding="utf-8")
     tool = CreatePdfTool(workspace=tmp_path, allowed_dir=tmp_path)
     assert "Created:" in await tool.execute(
         filename="o.pdf",
-        content="内联源标题",
+        content="Inline source title",
         content_path="r.md",
     )
 
     text = _pdf_text(tmp_path / "o.pdf")
-    assert "文件源标题" in text
-    assert "内联源标题" not in text
+    assert "File source title" in text
+    assert "Inline source title" not in text
 
 
 @pytest.mark.asyncio
-async def test_create_pdf_content_path_image_user_root_same_root_only(tmp_path, pil_open_spy):
+async def test_create_pdf_content_path_image_user_root_same_root_only(
+    tmp_path, pil_open_spy, paragraph_texts
+):
     """CreatePdfTool: 源稿在用户授权根时，图片只能落在同一个根内（不接受跨根读取）。
 
     注意：跨根用例必须写成 ``../root_b/in_root_b.png``。写成 ``in_root_b.png`` 会被
@@ -534,7 +582,7 @@ async def test_create_pdf_content_path_image_user_root_same_root_only(tmp_path, 
             filename="cross.pdf", content_path=str(root_a / "cross.md"), _user_roots=roots
         )
     assert _drawn_images(ws / "cross.pdf") == []
-    assert "[图表：跨根（见源稿）]" in _pdf_text(ws / "cross.pdf")
+    _assert_placeholder_rendered(paragraph_texts, "跨根")
     assert any("不在源稿授权根" in m for m in warnings), warnings
     assert not any("不存在" in m for m in warnings), warnings
     assert pil_open_spy == [], f"跨根图片不应被打开: {pil_open_spy}"
@@ -576,7 +624,9 @@ async def test_create_pdf_content_markup_is_literal_text(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_create_pdf_content_image_block_cannot_forge_trust(tmp_path, pil_open_spy):
+async def test_create_pdf_content_image_block_cannot_forge_trust(
+    tmp_path, pil_open_spy, paragraph_texts
+):
     """CreatePdfTool: content 里 image 块自带 ``validated: true`` 不得成为可信通道。
 
     回归 H1（第二轮评审实测：base 6f8b880b 无此行为，本 PR 新引入）：``validated``
@@ -604,12 +654,14 @@ async def test_create_pdf_content_image_block_cannot_forge_trust(tmp_path, pil_o
 
     assert "Created:" in result
     assert _drawn_images(ws / "o.pdf") == []
-    assert "[图表：x（见源稿）]" in _pdf_text(ws / "o.pdf")
+    _assert_placeholder_rendered(paragraph_texts, "x")
     assert pil_open_spy == [], f"边界外图片不应被打开: {pil_open_spy}"
 
 
 @pytest.mark.asyncio
-async def test_create_pdf_content_image_block_in_boundary_also_degraded(tmp_path, pil_open_spy):
+async def test_create_pdf_content_image_block_in_boundary_also_degraded(
+    tmp_path, pil_open_spy, paragraph_texts
+):
     """CreatePdfTool: 即使路径在边界内，content 路径也不再支持图片块（一律占位）。"""
     from miqi.documents.pdf_create_tool import CreatePdfTool
 
@@ -631,7 +683,7 @@ async def test_create_pdf_content_image_block_in_boundary_also_degraded(tmp_path
 
     assert "Created:" in result
     assert _drawn_images(ws / "o.pdf") == []
-    assert "[图表：y（见源稿）]" in _pdf_text(ws / "o.pdf")
+    _assert_placeholder_rendered(paragraph_texts, "y")
     assert pil_open_spy == [], f"content 路径不应嵌入图片: {pil_open_spy}"
 
 
@@ -723,7 +775,9 @@ async def test_create_pdf_content_path_image_jpeg_grayscale_converted_to_rgb(tmp
 
 
 @pytest.mark.asyncio
-async def test_create_pdf_content_path_image_bytes_limit_rejected(tmp_path, pil_open_spy):
+async def test_create_pdf_content_path_image_bytes_limit_rejected(
+    tmp_path, pil_open_spy, paragraph_texts
+):
     """CreatePdfTool: 单图超过 20MB 字节上限 → 占位，且在打开图片前就被拒（不读文件）。"""
     from miqi.documents.pdf_create_tool import _MAX_IMAGE_BYTES, CreatePdfTool
 
@@ -733,12 +787,12 @@ async def test_create_pdf_content_path_image_bytes_limit_rejected(tmp_path, pil_
     assert "Created:" in await tool.execute(filename="o.pdf", content_path="r.md")
 
     assert _drawn_images(tmp_path / "o.pdf") == []
-    assert "[图表：x（见源稿）]" in _pdf_text(tmp_path / "o.pdf")
+    _assert_placeholder_rendered(paragraph_texts, "x")
     assert pil_open_spy == [], f"超限图片不应被打开: {pil_open_spy}"
 
 
 @pytest.mark.asyncio
-async def test_create_pdf_content_path_image_pixels_limit_rejected(tmp_path):
+async def test_create_pdf_content_path_image_pixels_limit_rejected(tmp_path, paragraph_texts):
     """CreatePdfTool: 单图超过 40Mpx 像素上限 → 占位（防解压炸弹）。"""
     from PIL import Image
 
@@ -752,7 +806,7 @@ async def test_create_pdf_content_path_image_pixels_limit_rejected(tmp_path):
     assert "Created:" in await tool.execute(filename="o.pdf", content_path="r.md")
 
     assert _drawn_images(tmp_path / "o.pdf") == []
-    assert "[图表：x（见源稿）]" in _pdf_text(tmp_path / "o.pdf")
+    _assert_placeholder_rendered(paragraph_texts, "x")
 
 
 # ── P1：源稿/content 原文不得成为 reportlab markup 注入通道（第三轮评审） ────
