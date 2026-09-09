@@ -1,4 +1,5 @@
 import { AlertTriangle, type LucideIcon } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
 import { cn } from '../../lib/utils';
 
 import type { ReactNode } from 'react';
@@ -17,13 +18,16 @@ export interface ConfirmDialogProps {
 export function ConfirmDialog({
   title,
   message,
-  confirmLabel = '确认',
-  cancelLabel = '取消',
+  confirmLabel,
+  cancelLabel,
   danger = false,
   icon: Icon = AlertTriangle,
   onConfirm,
   onCancel,
 }: ConfirmDialogProps) {
+  const { t } = useTranslation();
+  const confirm = confirmLabel ?? t('common.confirm');
+  const cancel = cancelLabel ?? t('common.cancel');
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/30"
@@ -42,7 +46,7 @@ export function ConfirmDialog({
             onClick={onCancel}
             className="px-3 py-1.5 text-sm text-[var(--text-muted)] hover:text-[var(--text)] transition-colors"
           >
-            {cancelLabel}
+            {cancel}
           </button>
           <button
             onClick={onConfirm}
@@ -53,7 +57,7 @@ export function ConfirmDialog({
                 : 'bg-[var(--accent)] hover:bg-[var(--accent-hover)]'
             )}
           >
-            {confirmLabel}
+            {confirm}
           </button>
         </div>
       </div>
@@ -73,16 +77,18 @@ export function SaveConfirmDialog({
   onConfirm: () => void;
   onCancel: () => void;
 }) {
+  const { t } = useTranslation();
   return (
     <ConfirmDialog
-      title="覆盖文件"
+      title={t('saveConfirm.title')}
       message={
         <>
-          此操作将覆盖 <code className="text-[var(--text)] font-mono">{filePath}</code>{' '}
-          的内容，此操作不可撤销。
+          {t('saveConfirm.msgPrefix')}
+          <code className="text-[var(--text)] font-mono">{filePath}</code>
+          {t('saveConfirm.msgSuffix')}
         </>
       }
-      confirmLabel="确认覆盖"
+      confirmLabel={t('saveConfirm.confirm')}
       onConfirm={onConfirm}
       onCancel={onCancel}
     />
