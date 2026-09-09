@@ -898,8 +898,9 @@ class DownloadSink:
         ``asyncio.to_thread``——大文件不阻塞主循环。
         """
         # 落盘根与 tracked 登记根同源（#983 缺口 2）：tracking_base 是会话
-        # files 目录（默认工作区）或工作区根，条目键即 ``.miqi/downloads/<name>``，
-        # 面板 ``files.read`` 能按同一根解析到产物。
+        # files 目录（默认工作区）或工作区根，条目键即 ``.miqi/downloads/<name>``。
+        # 默认工作区布局下面板 ``files.read`` 按同一根解析到产物；自选工作区
+        # 布局下读端仍锚 ``<ws>/sessions/<key>/files``（既有语义，见 PR 后续计划）。
         tracking_base = _downloads_root_base(self._base_workspace, session_key)
         downloads_dir = tracking_base / _DOWNLOADS_RELDIR
         self._sweep_stale_once(downloads_dir)
