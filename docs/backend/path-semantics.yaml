@@ -20,6 +20,14 @@
 #   * 可信通道是 _build_pdf(trusted_images=...) 函数参数（仅 content_path 内部
 #     转换路径传 True）；content 里手写 image 块一律降级，块内 JSON 字段
 #     （如 validated）不具任何语义——模型可自设，曾构成读任意文件的破口（H1）
+# - 【单文件契约与 MD 副本，#993 第 2 条】create_pdf 不自动分卷：单次调用只输出
+#   一个单文件 PDF（引擎侧无内容长度上限；#993 实测 20KB→200KB 源稿全部单次成功）。
+#   * content（字符串）超过 _MAX_INLINE_CONTENT_CHARS=16000 时不静默渲染、也不报错，
+#     返回提示要求改用 content_path（阈值依据：maxTokens=8192 → 单次可产出 ~8–12K
+#     CJK 字符，16000 留 ≥1.3× 余量）；
+#   * content_path 渲染成功后，在 PDF 同目录落一份源稿副本 <PDF 同名>.md，内容为
+#     实际渲染源；同名已存在则跳过、不覆盖（用户可能已手工改过副本）；写失败只告警，
+#     不影响 PDF 交付。副本同样写入 tracked_files（#983 交付闭环）。
 # - 【文本转义，#994 第三轮评审 P1】源稿/content 的块文本进 reportlab Paragraph
 #   前统一 XML 转义（& < >）：raw <img src=...> 会被 paraparser 当图片标签直接
 #   打开文件、绕过上述图片边界校验（代码围栏与 content 段落/标题/列表/图注/title
@@ -44,3 +52,5 @@ path_semantics:
   content_path_image_trust: "可信标记来自 _build_pdf(trusted_images=) 函数参数；content 手写 image 块与块内 JSON 字段一律不可信"
   content_path_markup_escape: "源稿/content 的块文本进 Paragraph 前统一 XML 转义（& < >），只有工具自生成的 <b>/<link> 例外；raw <img src=...> 只是字面文字，不经 reportlab 读文件（P1）"
   content_path_read_kun_gap: "KUN 运行时 _USER_ROOTS_TOOLS 不含 create_pdf → 用户授权目录读不可达；仅 legacy orchestrator 路径可达"
+  pdf_single_file_contract: "create_pdf 不自动分卷：单次调用只输出一个单文件 PDF；content 字符串超过 16000 字符时不静默渲染、不报错，返回提示改用 content_path（源稿直渲不受该阈值约束）"
+  content_path_md_copy: "content_path 渲染成功后，在 PDF 同目录落源稿副本 <PDF 同名>.md（内容为实际渲染源）；同名已存在则跳过不覆盖；写失败只告警，不影响 PDF 交付"

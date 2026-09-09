@@ -1001,3 +1001,176 @@ async def test_create_pdf_content_angle_brackets_literal(tmp_path):
     assert "List<int>" in text, text
     assert "x < y" in text, text
     assert "R&D" in text and "R&D;" not in text and "&amp;" not in text, text
+
+
+# ── #993 第 2 条：单文件契约（不自动分卷）+ MD 源稿副本随产物落盘 ──────────────
+#
+# 第 2 条原文以「内容超引擎限制需要分卷」为前提，但 #993 实测（20KB→200KB 五档）
+# 证明工具从不分卷、引擎无长度上限 → 按重新定义实现：
+#   ① 工具显式声明单文件契约；超大 content 不静默渲染、不报错，改为提示 content_path；
+#   ② content_path 渲染成功后把源稿副本 <PDF 同名>.md 落到 PDF 同目录（同名跳过）。
+# 断言均为字体无关（只查返回文本/落盘文件字节，不查 PDF 提取文本）。
+
+
+def test_tool_description_declares_single_file_no_split():
+    """① 工具 description 必须显式声明「不自动分卷、单次调用输出单文件 PDF」。"""
+    from miqi.documents.pdf_create_tool import CreatePdfTool
+
+    desc = CreatePdfTool().description
+    assert "不自动分卷" in desc, desc
+    assert "单文件" in desc, desc
+    assert "content_path" in desc, desc
+
+
+def test_content_path_description_declares_md_copy():
+    """② content_path 参数说明必须写明「源稿副本随 PDF 落盘、同名不覆盖」。"""
+    from miqi.documents.pdf_create_tool import CreatePdfTool
+
+    prop = CreatePdfTool().parameters["properties"]["content_path"]["description"]
+    assert "源稿副本" in prop, prop
+    assert "不覆盖" in prop, prop
+
+
+@pytest.mark.asyncio
+async def test_content_over_limit_hints_content_path(tmp_path):
+    """① 超大 content：不静默渲染、不报错，返回文本提示改用 content_path。"""
+    from miqi.documents.pdf_create_tool import _MAX_INLINE_CONTENT_CHARS, CreatePdfTool
+
+    tool = CreatePdfTool(workspace=tmp_path, allowed_dir=tmp_path)
+    body = "A" * (_MAX_INLINE_CONTENT_CHARS + 1)
+    result = await tool.execute(filename="o.pdf", content=body)
+
+    assert not result.startswith("Error"), result
+    assert "Created:" not in result, result
+    assert "content_path" in result, result
+    assert "不自动分卷" in result, result
+    assert str(len(body)) in result, result
+    assert str(_MAX_INLINE_CONTENT_CHARS) in result, result
+    assert not (tmp_path / "o.pdf").exists(), "超限 content 不得静默产出 PDF"
+
+
+@pytest.mark.asyncio
+async def test_content_at_limit_still_renders(tmp_path):
+    """① 边界：恰好等于阈值仍按老行为渲染（只有**超过**阈值才提示）。"""
+    from miqi.documents.pdf_create_tool import _MAX_INLINE_CONTENT_CHARS, CreatePdfTool
+
+    tool = CreatePdfTool(workspace=tmp_path, allowed_dir=tmp_path)
+    result = await tool.execute(filename="o.pdf", content="A" * _MAX_INLINE_CONTENT_CHARS)
+
+    assert "Created:" in result, result
+    assert (tmp_path / "o.pdf").is_file()
+
+
+@pytest.mark.asyncio
+async def test_content_path_writes_md_source_copy(tmp_path):
+    """② content_path 渲染成功后：源稿副本 <PDF 同名>.md 落到 PDF 同目录，内容为渲染源。"""
+    from miqi.documents.pdf_create_tool import CreatePdfTool
+
+    src_text = "# Title\n\nBody with **bold** and R&D.\n"
+    (tmp_path / "src.md").write_text(src_text, encoding="utf-8")
+    tool = CreatePdfTool(workspace=tmp_path, allowed_dir=tmp_path)
+    result = await tool.execute(filename="report.pdf", content_path="src.md")
+
+    assert "Created:" in result, result
+    pdf, copy = tmp_path / "report.pdf", tmp_path / "report.md"
+    assert pdf.is_file() and copy.is_file(), sorted(p.name for p in tmp_path.iterdir())
+    assert copy.read_text(encoding="utf-8") == src_text
+    assert "源稿副本" in result, result
+
+
+@pytest.mark.asyncio
+async def test_content_path_md_copy_lands_next_to_pdf(tmp_path):
+    """② 副本落在 PDF 同目录（而非源稿目录）——源稿在子目录、PDF 在另一子目录时也成立。"""
+    from miqi.documents.pdf_create_tool import CreatePdfTool
+
+    sub = tmp_path / "src"
+    sub.mkdir()
+    (sub / "r.md").write_text("body\n", encoding="utf-8")
+    tool = CreatePdfTool(workspace=tmp_path, allowed_dir=tmp_path)
+    result = await tool.execute(filename="out/o.pdf", content_path="src/r.md")
+
+    assert "Created:" in result, result
+    assert (tmp_path / "out" / "o.pdf").is_file(), result
+    assert (tmp_path / "out" / "o.md").is_file(), result
+    assert not (sub / "o.md").exists(), "副本不得落在源稿目录"
+
+
+@pytest.mark.asyncio
+async def test_content_path_md_copy_not_overwritten(tmp_path):
+    """② 同名 md 已存在则跳过、不覆盖（用户可能已手工改过该副本）。"""
+    from miqi.documents.pdf_create_tool import CreatePdfTool
+
+    (tmp_path / "src.md").write_text("new source\n", encoding="utf-8")
+    (tmp_path / "report.md").write_text("user edited copy\n", encoding="utf-8")
+    tool = CreatePdfTool(workspace=tmp_path, allowed_dir=tmp_path)
+    result = await tool.execute(filename="report.pdf", content_path="src.md")
+
+    assert "Created:" in result, result
+    assert (tmp_path / "report.pdf").is_file(), result
+    assert (tmp_path / "report.md").read_text(encoding="utf-8") == "user edited copy\n"
+    assert "跳过" in result, result
+
+
+@pytest.mark.asyncio
+async def test_content_path_over_limit_source_renders_single_file(tmp_path):
+    """① content_path 源稿远超 content 阈值仍单次渲染单文件——不提示、不分卷。"""
+    from miqi.documents.pdf_create_tool import _MAX_INLINE_CONTENT_CHARS, CreatePdfTool
+
+    src = "# Title\n\n" + ("word " * (_MAX_INLINE_CONTENT_CHARS // 2 + 100))
+    assert len(src) > _MAX_INLINE_CONTENT_CHARS * 2
+    (tmp_path / "big.md").write_text(src, encoding="utf-8")
+    tool = CreatePdfTool(workspace=tmp_path, allowed_dir=tmp_path)
+    result = await tool.execute(filename="o.pdf", content_path="big.md")
+
+    assert "Created:" in result, result
+    assert (tmp_path / "o.pdf").is_file()
+    assert (tmp_path / "o.md").is_file()
+    assert (tmp_path / "o.pdf").stat().st_size > 0
+
+
+@pytest.mark.asyncio
+async def test_small_content_call_backward_compatible(tmp_path):
+    """③ 向后兼容：不带新参数的老调用（小 content / 标题）返回文本与落盘行为不变。"""
+    from miqi.documents.pdf_create_tool import CreatePdfTool
+
+    tool = CreatePdfTool(workspace=tmp_path, allowed_dir=tmp_path)
+    result = await tool.execute(
+        filename="o.pdf",
+        title="T",
+        content=[{"type": "paragraph", "text": "hello"}],
+    )
+
+    assert result == f"Created: {tmp_path / 'o.pdf'}", result
+    assert (tmp_path / "o.pdf").is_file()
+    # 老调用不得凭空多出 md 副本
+    assert not (tmp_path / "o.md").exists()
+
+
+@pytest.mark.asyncio
+async def test_content_path_md_copy_is_byte_exact(tmp_path):
+    """② 副本按原始字节落盘：CRLF/LF 原样保留（文本模式写盘会把 LF 改成 CRLF）。"""
+    from miqi.documents.pdf_create_tool import CreatePdfTool
+
+    raw = b"# Title\r\n\r\nline with LF\nline with CRLF\r\n"
+    (tmp_path / "src.md").write_bytes(raw)
+    tool = CreatePdfTool(workspace=tmp_path, allowed_dir=tmp_path)
+    result = await tool.execute(filename="report.pdf", content_path="src.md")
+
+    assert "Created:" in result, result
+    assert (tmp_path / "report.md").read_bytes() == raw
+
+
+@pytest.mark.asyncio
+async def test_content_path_md_copy_source_equals_target_skipped(tmp_path):
+    """② 源稿与副本同名（src.md → src.pdf）：副本路径即源稿本身 → 跳过，不自我覆盖。"""
+    from miqi.documents.pdf_create_tool import CreatePdfTool
+
+    src_text = "# Title\n\nbody\n"
+    (tmp_path / "src.md").write_text(src_text, encoding="utf-8")
+    tool = CreatePdfTool(workspace=tmp_path, allowed_dir=tmp_path)
+    result = await tool.execute(filename="src.pdf", content_path="src.md")
+
+    assert "Created:" in result, result
+    assert (tmp_path / "src.pdf").is_file(), result
+    assert (tmp_path / "src.md").read_text(encoding="utf-8") == src_text
+    assert "跳过" in result, result

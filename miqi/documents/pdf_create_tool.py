@@ -1075,6 +1075,40 @@ def _resolve_source_path(
     raise PermissionError(f"content_path '{content_path}' 不在用户授权目录内")
 
 
+# ── 单文件契约（#993 第 2 条）──────────────────────────────────────────────
+#
+# #993 实测（20KB→200KB 五档源稿全部单次成功）证明引擎侧没有内容长度上限、工具
+# 也从不自动分卷，因此第 2 条按「显式声明单文件契约 + 超大 content 引导到
+# content_path」重新定义（原措辞「确实需要分卷时告知卷数与理由」的前提不成立）。
+#
+# 阈值依据：agents.defaults.maxTokens=8192（#993 实测模型无法单次输出 30KB+ 中文），
+# CJK 约 1 token/字 → 单次调用能产出的 content 上限约 8K–12K 字符；取 16000
+# （≥1.3× 余量）保证正常单次调用不受影响，超过者必然是多轮拼接或已被截断，
+# 应改为落成源稿文件走 content_path。
+_MAX_INLINE_CONTENT_CHARS = 16_000
+
+
+def _write_md_source_copy(pdf_path: Path, md_bytes: bytes) -> tuple[Path | None, str]:
+    """把 content_path 源稿副本落到 PDF 同目录（``<PDF 同名>.md``，#993 第 2 条）。
+
+    按**原始字节**落盘（不做换行/编码转换），保证副本与源稿逐字节一致——文本模式
+    写盘会在 Windows 上把 LF 改成 CRLF。同名文件已存在则**跳过、不覆盖**（用户可能
+    已手工改过该副本）；写失败只告警、不影响 PDF 交付（PDF 才是主产物）。
+    返回 ``(副本路径或 None, 状态说明)``。
+    """
+    copy_path = pdf_path.with_suffix(".md")
+    if copy_path.exists():
+        logger.info(f"PDF: 源稿副本 {copy_path} 已存在，跳过不覆盖")
+        return copy_path, "已存在，跳过不覆盖"
+    try:
+        copy_path.write_bytes(md_bytes)
+    except OSError as exc:
+        logger.warning(f"PDF: 源稿副本 {copy_path} 写入失败（{exc}），PDF 已生成")
+        return None, f"写入失败（{exc}）"
+    logger.info(f"PDF: 源稿副本已落盘 {copy_path}（{len(md_bytes)} 字节）")
+    return copy_path, "已落盘"
+
+
 # ── Agent Tool ──────────────────────────────────────────────────────────
 
 class CreatePdfTool(Tool):
@@ -1083,6 +1117,9 @@ class CreatePdfTool(Tool):
     name = "create_pdf"
     description = (
         "Create a PDF document in the session files directory. "
+        "单文件契约：本工具不自动分卷，单次调用只输出一个单文件 PDF（引擎侧无内容长度上限）；"
+        f"content 超过 {_MAX_INLINE_CONTENT_CHARS} 字符时不会静默渲染、也不报错，"
+        "而是返回提示要求改用 content_path（长正文先落成 Markdown 源稿文件再传 content_path）。"
         "filename 的相对路径以会话 files 根目录为基准（例如 report.pdf 或 子目录/报告.pdf）；"
         "若传入 sessions/<当前会话ID>/files/... 这类以工作区根为基准的路径，会自动归一化到会话 files 目录，"
         "指向其他会话的路径会被拒绝。生成后返回实际落盘路径。"
@@ -1149,8 +1186,12 @@ class CreatePdfTool(Tool):
                         "Optional path to a source Markdown file to render directly "
                         "(workaround: long report bodies exceed what the model can emit "
                         "in a single call — render from the file instead). "
-                        "content_path 优先于 content；相对路径以会话 files 根目录/工作区为基准；"
-                        "仅可读取工作区/会话文件区或用户授权目录（#821 口径）内的文件。"
+                        "content_path 优先于 content（content 的 "
+                        f"{_MAX_INLINE_CONTENT_CHARS} 字符阈值对它不生效，"
+                        "源稿直渲无长度限制）；相对路径以会话 files 根目录/工作区为基准；"
+                        "仅可读取工作区/会话文件区或用户授权目录（#821 口径）内的文件；"
+                        "渲染成功后会在 PDF 同目录落一份源稿副本 <PDF 同名>.md（同名已存在则"
+                        "跳过、不覆盖）。"
                         "按受支持的 Markdown 子集渲染（不是完整 Markdown renderer）："
                         "① 行内 Markdown 支持 **粗体** 与 [文字](http(s)://…) 链接，"
                         "作用域仅段落/标题/列表（表格单元格与代码围栏不做行内转换）；"
@@ -1247,7 +1288,19 @@ class CreatePdfTool(Tool):
         if not has_title and not has_content:
             return "Error: 至少提供 title、content 或 content_path"
 
+        # 单文件契约（#993 第 2 条）：本工具不自动分卷。超大 content 不静默渲染
+        # （也不报错）——直接提示改用 content_path，由调用方重试。content_path
+        # 分支不受此阈值约束（源稿直渲无长度限制）。
+        if not content_path and isinstance(content, str) and len(content) > _MAX_INLINE_CONTENT_CHARS:
+            return (
+                f"未生成 PDF：content 长度 {len(content)} 字符，超过单次调用阈值 "
+                f"{_MAX_INLINE_CONTENT_CHARS} 字符。本工具不自动分卷——单次调用只输出一个"
+                "单文件 PDF。请先把内容写入 Markdown 源稿文件，再用 "
+                "content_path=<源稿路径> 重新调用（源稿直渲单文件，无此长度限制）。"
+            )
+
         # content_path 优先：直接从 Markdown 源稿渲染（绕开模型单次输出上限）
+        md_bytes: bytes | None = None
         if content_path:
             try:
                 src = _resolve_source_path(
@@ -1260,7 +1313,8 @@ class CreatePdfTool(Tool):
             except PermissionError as e:
                 return f"Error: {e}"
             try:
-                md_text = src.read_text(encoding="utf-8")
+                md_bytes = src.read_bytes()
+                md_text = md_bytes.decode("utf-8")
             except (OSError, UnicodeDecodeError) as e:
                 return f"Error: 无法读取内容源文件 {src}: {e}"
             content = _md_to_blocks(
@@ -1302,7 +1356,17 @@ class CreatePdfTool(Tool):
                 content_escaped=bool(content_path),
             )
             _persist_tracked_file(self._workspace, file_path, op="write", session_key=_sess_key)
-            return f"Created: {file_path}"
+            if md_bytes is None:
+                # 老调用（content/title）返回文本保持逐字节不变（向后兼容）。
+                return f"Created: {file_path}"
+            # #993 第 2 条：源稿副本随产物落盘（同名跳过不覆盖；写失败不影响 PDF）。
+            copy_path, copy_note = _write_md_source_copy(file_path, md_bytes)
+            if copy_path is not None:
+                _persist_tracked_file(self._workspace, copy_path, op="write", session_key=_sess_key)
+            return (
+                f"Created: {file_path}\n"
+                f"源稿副本: {copy_path or file_path.with_suffix('.md')}（{copy_note}）"
+            )
         except Exception as e:
             logger.exception(f"PDF creation failed for {raw_path}")
             return f"Error creating PDF {raw_path}: {e}"
@@ -1314,5 +1378,7 @@ class PdfWriteTool(CreatePdfTool):
     name = "pdf_write"
     description = (
         "Create a new PDF document with the given content. "
+        "单文件契约同 create_pdf：不自动分卷，单次调用只输出一个单文件 PDF；"
+        "超大 content 不渲染，返回提示要求改用 content_path。"
         "Prefer create_pdf for new calls."
     )
