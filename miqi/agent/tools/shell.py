@@ -760,6 +760,9 @@ class ExecTool(Tool):
                             ) is not None
                         )
                     ),
+                    # #984 layer 3: the same per-call grant layer 1 binds
+                    # rw — the guard must not refuse it.
+                    user_roots=_user_roots,
                 )
                 if guard_error:
                     return _ExecResult(output=guard_error, exit_code=1)
@@ -825,7 +828,9 @@ class ExecTool(Tool):
                 else:
                     # Legacy fallback (no sandbox): same host-semantics
                     # re-check as the BWRAP fallback (issue #811 review).
-                    fallback_guard = self._guard_host_fallback(command, cwd)
+                    fallback_guard = self._guard_host_fallback(
+                        command, cwd, user_roots=_user_roots,
+                    )
                     if fallback_guard is not None:
                         return fallback_guard
                     # Fall back to direct execution (no sandbox)
@@ -2751,6 +2756,7 @@ class ExecTool(Tool):
 
     def _guard_command(
         self, command: str, cwd: str, *, sandbox_active: bool = False,
+        user_roots: Any = None,
     ) -> str | None:
         """Path-aware capability guard for exec commands (issue #811).
 
@@ -2769,6 +2775,11 @@ class ExecTool(Tool):
         ``restrict_to_workspace`` string checks still apply to them.
         ``allow_patterns`` (when configured) still applies to the whole
         command.
+
+        ``user_roots`` is the per-call #821 grant (the output dirs the
+        user named).  It widens the engine's mutation scope exactly when
+        layer 1 binds them rw, so the guard never refuses a write the
+        kernel just granted (#984 layer 3).
         """
         from miqi.agent.command_guard import (
             FILE_OP_PATTERN_EXCLUSIONS,
@@ -2776,7 +2787,8 @@ class ExecTool(Tool):
         )
 
         verdict = evaluate_command(
-            command, self._guard_runtime_paths(cwd, sandbox_active),
+            command,
+            self._guard_runtime_paths(cwd, sandbox_active, user_roots),
         )
         if not verdict.allowed:
             return verdict.message
@@ -2815,7 +2827,7 @@ class ExecTool(Tool):
         return None
 
     def _guard_host_fallback(
-        self, command: str, cwd: str,
+        self, command: str, cwd: str, user_roots: Any = None,
     ) -> _ExecResult | None:
         """Re-check the guard with HOST path semantics before a
         host-fallback execution (issue #811 review).
@@ -2830,7 +2842,9 @@ class ExecTool(Tool):
         """
         if self.approval_callback is not None:
             return None
-        guard_error = self._guard_command(command, cwd, sandbox_active=False)
+        guard_error = self._guard_command(
+            command, cwd, sandbox_active=False, user_roots=user_roots,
+        )
         if guard_error:
             return _ExecResult(output=guard_error, exit_code=1)
         return None
@@ -2858,12 +2872,51 @@ class ExecTool(Tool):
 
         return None
 
-    def _guard_runtime_paths(self, cwd: str, sandbox_active: bool):
+    def _guard_write_roots(self, user_roots: Any) -> tuple[str, ...]:
+        """Per-call authorized roots the static guard may treat as writable.
+
+        Only the ``_user_roots`` grant (#821) qualifies, and only when
+        ``allow_user_dirs`` (``tools.auto_user_dirs``) is on — i.e. exactly
+        when :meth:`_exec_rw_binds` re-opens them inside the sandbox.
+        Without this the guard would refuse the very writes layer 1 just
+        granted (#984 layer 3: the tightening ships WITH the authorization
+        channel, never before it).
+
+        The static ``shared_roots`` and the workspace root are deliberately
+        NOT included: their guard semantics (Level 1 read-only outside the
+        session tree) are unchanged — an inline write into a configured
+        ``tools.extra_roots`` dir is still refused here and the refusal
+        points at the file tool.  Non-absolute entries are dropped, and
+        each root is RESOLVED: the classifier resolves every operand, so an
+        8.3 / symlink / case-variant spelling of the root would otherwise
+        silently fail the grant.
+        """
+        if not self._allow_user_dirs:
+            return ()
+        out: list[str] = []
+        for raw in user_roots or []:
+            try:
+                s = os.fspath(raw)
+            except TypeError:
+                continue
+            if not (isinstance(s, str) and s and os.path.isabs(s)):
+                continue
+            try:
+                out.append(str(Path(s).resolve()))
+            except (OSError, ValueError):
+                continue
+        return tuple(out)
+
+    def _guard_runtime_paths(
+        self, cwd: str, sandbox_active: bool, user_roots: Any = None,
+    ):
         """Build the RuntimePaths context for the capability engine.
 
         Resolves the host workspace root and the session files dir
         (``<workspace>/sessions/<key>/files``) so the engine can apply
-        the Level 0/1/2 path hierarchy from issue #811.
+        the Level 0/1/2 path hierarchy from issue #811.  ``user_roots``
+        (per-call #821 grant) becomes ``extra_write_roots`` — the engine's
+        extra mutation scope, matching layer 1's rw binds (#984).
         """
         from miqi.agent.command_guard import RuntimePaths
 
@@ -2908,6 +2961,7 @@ class ExecTool(Tool):
             sandbox_cwd=self._resolve_sandbox_cwd(cwd) if sandbox_active else "",
             miqi_home=miqi_home,
             host_home=str(Path.home()) if hasattr(Path, "home") else None,
+            extra_write_roots=self._guard_write_roots(user_roots),
         )
 
     async def _mirror_downloaded_files(
