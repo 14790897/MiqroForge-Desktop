@@ -18,6 +18,7 @@ from miqi.agent.tools.filesystem import _effective_shared_roots
 from miqi.agent.tools.user_roots import (
     DEFAULT_MAX_USER_ROOTS,
     _is_protected_extra_root,
+    _is_protected_prefix,
     _raw_mentions,
     extract_user_mentioned_roots,
 )
@@ -152,6 +153,65 @@ class TestExtractUserMentionedRoots:
         out = tmp_path / "out"
         out.mkdir()
         assert extract_user_mentioned_roots([str(out)], workspace=None) == [out.resolve()]
+
+
+# ── protected prefix table (#984) ────────────────────────────────────────
+
+
+class TestProtectedPrefix:
+    """Subtree filtering: depth-1 system dirs were handled, deeper ones not."""
+
+    def test_windows_system_subtree(self) -> None:
+        assert _is_protected_prefix(Path(r"C:\Windows\Temp\x")) is True
+
+    def test_programdata_subtree(self) -> None:
+        assert _is_protected_prefix(Path(r"C:\ProgramData\pkg\out")) is True
+
+    def test_appdata_anywhere(self) -> None:
+        assert _is_protected_prefix(
+            Path(r"C:\Users\x\AppData\Local\Temp\o")
+        ) is True
+
+    def test_posix_system_subtree(self) -> None:
+        assert _is_protected_prefix(Path("/etc/cron.d/x")) is True
+
+    def test_posix_tmp_subtree(self) -> None:
+        assert _is_protected_prefix(Path("/tmp/out")) is True
+
+    def test_user_desktop_not_protected(self) -> None:
+        # The primary #821 scenario must keep working.
+        assert _is_protected_prefix(Path(r"C:\Users\x\Desktop\test_result")) is False
+
+    def test_posix_home_not_protected(self) -> None:
+        assert _is_protected_prefix(Path("/home/alice/out")) is False
+
+    def test_config_home_subtree(self) -> None:
+        assert _is_protected_prefix(Path(get_config_path()).parent / "sub") is True
+
+    @pytest.mark.skipif(not _IS_WINDOWS, reason="drive-letter mentions Windows-only")
+    def test_windows_temp_mention_rejected(self) -> None:
+        roots = extract_user_mentioned_roots([r"结果放 C:\Windows\Temp\x 里"])
+        assert roots == []
+
+    @pytest.mark.skipif(not _IS_WINDOWS, reason="drive-letter mentions Windows-only")
+    def test_windows_programdata_mention_rejected(self) -> None:
+        roots = extract_user_mentioned_roots([r"输出到 C:\ProgramData\pkg\out"])
+        assert roots == []
+
+    def test_posix_system_subtree_mention_rejected(self) -> None:
+        assert extract_user_mentioned_roots(["看下 /etc/cron.d/backdoor"]) == []
+
+    @pytest.mark.skipif(_IS_WINDOWS, reason="POSIX host paths only")
+    def test_posix_home_mention_allowed(self, tmp_path: Path) -> None:
+        out = tmp_path / "out"
+        out.mkdir()
+        assert extract_user_mentioned_roots([f"输出到 {out}"]) == [out.resolve()]
+
+    def test_config_subtree_mention_rejected(self) -> None:
+        roots = extract_user_mentioned_roots(
+            [f"写到 {Path(get_config_path()).parent / 'evil'}"]
+        )
+        assert roots == []
 
 
 # ── _is_protected_extra_root ─────────────────────────────────────────────

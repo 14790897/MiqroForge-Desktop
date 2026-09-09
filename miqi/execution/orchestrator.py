@@ -63,6 +63,9 @@ _FILE_MUTATION_TOOLS = frozenset({
     # graph_render 写 svg/html 产物 + 读源 JSON——需 _session_key
     # 注入否则资产栏追踪永不生效（CodeRabbit #761）
     "graph_render",
+    # #984: spawn 是子 agent 的授权根继承入口——父 turn 的 _user_roots 经此
+    # 传到 AgentControl.spawn，否则子 agent 的 exec/文件工具拿不到任何根。
+    "spawn",
 })
 
 # Phase 31.4: max lengths for sanitized approval metadata fields

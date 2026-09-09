@@ -1092,15 +1092,88 @@ async def _sandbox_read_file(sandbox, sandbox_path: str) -> str:
     return stdout
 
 
-async def _sandbox_write_file(sandbox, sandbox_path: str, content: str) -> None:
-    """Write content to a file inside the sandbox via run_command."""
+def bootstrap_sandbox_roots(roots: Iterable[Path] | None) -> list[str]:
+    """Create authorized roots on the host so the sandbox can bind them (#984).
+
+    A per-call rw bind is a hard ``--bind``, so a missing source fails the
+    command.  The user may name an output directory that does not exist yet
+    ("输出到 新目录"), so the FILE tools — the write channel, whose roots are
+    already whitelisted — create it first.  ``exec`` deliberately does not
+    (plan v5 §5.1): it only accepts existing roots and points the model at a
+    file tool instead.
+
+    Boundaries (plan v5 §5.1):
+      * only roots the caller already whitelisted (the bind set) — nothing
+        outside it is ever created;
+      * only absolute host paths that map into the sandbox: UNC/WSL-native
+        (``\\\\wsl$\\…``) and relative paths are skipped;
+      * on Windows a POSIX path is a WSL-native path, not a host path, and is
+        skipped — ``windows_path_to_mnt`` could not map it either;
+      * the ``_user_roots`` component is already gated by
+        ``tools.auto_user_dirs`` in the caller (``_effective_shared_roots``).
+
+    Returns the paths actually created (for logging and tests).
+    """
+    import os as _os
+
+    created: list[str] = []
+    for raw in roots or []:
+        try:
+            p = Path(raw)
+        except (TypeError, ValueError):
+            continue
+        s = str(p).replace("\\", "/")
+        if s.startswith("//"):
+            continue  # UNC / WSL-native — no sandbox mapping
+        if len(s) >= 2 and s[1] == ":":
+            pass  # Windows drive path
+        elif s.startswith("/"):
+            if _os.name == "nt":
+                continue  # WSL-native path, invisible to the Windows host
+        else:
+            continue  # relative — never a bind source
+        try:
+            if p.exists():
+                continue
+            p.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            _log.warning("bootstrap_sandbox_roots: cannot create {}: {}", p, exc)
+            continue
+        created.append(str(p))
+    if created:
+        _log.info("bootstrap_sandbox_roots: created {}", created)
+    return created
+
+
+async def _sandbox_write_file(
+    sandbox,
+    sandbox_path: str,
+    content: str,
+    *,
+    extra_rw_binds: Iterable[Path] | None = None,
+) -> None:
+    """Write content to a file inside the sandbox via run_command.
+
+    ``extra_rw_binds`` (#984) are the caller's authorized roots, re-opened
+    writable for this one command — without them a write under the
+    read-only ``/mnt`` fails with EROFS.
+    """
     escaped_path = sandbox_path.replace("'", "'\\''")
+    # #984: compute the parent directory in Python.  The previous form
+    # ``mkdir -p '$(dirname "…")'`` kept the substitution inside SINGLE
+    # quotes, so bash created a literal directory named ``$(dirname "…")``
+    # and the redirect below failed with rc=1 for every new subdirectory.
+    # Do NOT move the outer quotes to double quotes: a Windows directory
+    # name containing $ or ` would then become command substitution.
+    parent = sandbox_path.rsplit("/", 1)[0] if "/" in sandbox_path else "."
+    escaped_parent = parent.replace("'", "'\\''") or "."
     # Use base64 encoding to safely transfer content through shell
     import base64
     encoded = base64.b64encode(content.encode("utf-8")).decode("ascii")
     rc, _, stderr = await sandbox.run_command(
-        f"mkdir -p '$(dirname \"{escaped_path}\")' && "
-        f"echo '{encoded}' | base64 -d > '{escaped_path}'"
+        f"mkdir -p '{escaped_parent}' && "
+        f"echo '{encoded}' | base64 -d > '{escaped_path}'",
+        extra_rw_binds=[str(r) for r in (extra_rw_binds or [])] or None,
     )
     if rc != 0:
         raise IOError(f"Cannot write {sandbox_path}: {stderr}")
@@ -1478,6 +1551,9 @@ class WriteFileTool(Tool):
         )
         if authorized is not None:
             shared = authorized
+        # #984: the sandbox binds these roots with a hard --bind, so a
+        # not-yet-created output dir must exist on the host first.
+        bootstrap_sandbox_roots(shared)
         if sandbox is not None and getattr(sandbox, "_use_wsl", False):
             # WSL sandbox — route file operations through the sandbox.
             # session_files_dir enforces cross-session isolation: a path
@@ -1488,7 +1564,9 @@ class WriteFileTool(Tool):
             )
             _log.info("write_file [sandbox]: %s → %s", path, sandbox_path)
             try:
-                await _sandbox_write_file(sandbox, sandbox_path, content)
+                await _sandbox_write_file(
+                    sandbox, sandbox_path, content, extra_rw_binds=shared,
+                )
             except IOError as e:
                 return f"Error: 沙箱中写入文件失败（path={sandbox_path}）：{e}"
             except Exception as e:
@@ -1711,6 +1789,8 @@ class EditFileTool(Tool):
         )
         if authorized is not None:
             shared = authorized
+        # #984: create authorized roots before the sandbox binds them.
+        bootstrap_sandbox_roots(shared)
         if sandbox is not None and getattr(sandbox, "_use_wsl", False):
             # WSL sandbox — route file operations through the sandbox.
             # session_files_dir enforces cross-session isolation: a path
@@ -1742,7 +1822,9 @@ class EditFileTool(Tool):
 
             new_content = content.replace(old_text, new_text, 1)
             try:
-                await _sandbox_write_file(sandbox, sandbox_path, new_content)
+                await _sandbox_write_file(
+                    sandbox, sandbox_path, new_content, extra_rw_binds=shared,
+                )
             except Exception as e:
                 return f"Error: 沙箱中写入编辑后文件失败（path={sandbox_path}）：{type(e).__name__}：{e}"
 

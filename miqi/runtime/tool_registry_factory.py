@@ -501,6 +501,11 @@ def create_runtime_tool_registry(
             env_passthrough=list(getattr(exec_cfg, "env_passthrough", [])) if exec_cfg is not None else [],
             approval_callback=approval_callback,
             sandbox_manager=_sbm,
+            # #984: workspace + static extra roots the sandbox must keep
+            # writable after /mnt went read-only; ``allow_user_dirs`` gates
+            # the per-call _user_roots component (tools.auto_user_dirs).
+            shared_roots=_shared_roots,
+            allow_user_dirs=_auto_user_dirs,
             # #854: 系统包安装授权确认卡——关闭状态下拦截点弹卡（once/always/deny）。
             # "允许并记住"走统一入口：runtime 属性 + config 持久化（外部审阅 #854）。
             system_install_approver=_make_system_install_approver(

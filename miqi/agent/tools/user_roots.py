@@ -79,8 +79,54 @@ _TOP_LEVEL_SYSTEM_DIRS = frozenset({
     "system", "library", "applications",
 })
 
+# #984: system subtrees that must never become writable roots even though
+# they sit deeper than the depth-1 filter above.  Without this, a mention of
+# ``C:\Windows\Temp\x`` or ``/etc/cron.d/x`` became a writable root, because
+# ``_is_top_level_system_dir`` only rejects the drive/dir root itself.
+# Matched against the first component below the anchor.
+# 'users'/'home'/'mnt'/'media' are deliberately ABSENT — the primary feature
+# (issue #821) is exactly "write to C:\Users\<u>\Desktop\<dir>".
+_PROTECTED_TOP_COMPONENTS = frozenset({
+    # Windows — drive-level system trees
+    "windows", "programdata", "program files", "program files (x86)",
+    "perflogs", "$recycle.bin", "system volume information", "recovery",
+    "temp",
+    # POSIX — system trees
+    "bin", "boot", "dev", "etc", "lib", "lib32", "lib64", "libx32",
+    "opt", "proc", "root", "run", "sbin", "srv", "sys", "usr", "var",
+    "tmp",
+})
+
+# Components that are protected anywhere in the path (Windows user-profile
+# internals: AppData\Local\Temp, AppData\Roaming, ...).
+_PROTECTED_ANY_COMPONENT = frozenset({"appdata"})
+
 # Default cap on auto-sensed roots per turn.
 DEFAULT_MAX_USER_ROOTS = 8
+
+
+def _is_protected_prefix(root: Path) -> bool:
+    """True when *root* sits inside a protected system subtree (#984).
+
+    Only message *mentions* are filtered here; explicit configuration
+    (``tools.extra_roots``) is unaffected — a user who lists a directory
+    there has made a deliberate choice.
+    """
+    parts = root.parts
+    # parts[0] is the anchor ("C:\\", "\\\\server\\share\\", "/" or "").
+    if len(parts) > 1 and parts[1].lower() in _PROTECTED_TOP_COMPONENTS:
+        return True
+    if _PROTECTED_ANY_COMPONENT & {p.lower() for p in parts[1:]}:
+        return True
+    # The host config directory (~/.miqi) and everything under it.  Roots
+    # that merely *contain* it are left to the existing guards: the home
+    # directory and drive roots are dropped above, and ``_is_protected_extra_root``
+    # rejects any root covering the config file once a workspace is known.
+    try:
+        config_home = get_config_path().resolve().parent
+    except (OSError, ValueError):
+        return False
+    return root == config_home or root.is_relative_to(config_home)
 
 
 def _is_protected_extra_root(root: Path, workspace: Path) -> bool:
@@ -233,6 +279,11 @@ def extract_user_mentioned_roots(
             continue
         # Top-level system directories of a drive.
         if _is_top_level_system_dir(root):
+            continue
+        # #984: protected system subtrees below the drive root
+        # (C:\Windows\Temp\x, /etc/…, ~/.miqi/…) — the depth-1 check above
+        # does not catch these.
+        if _is_protected_prefix(root):
             continue
         # Protected paths: config file / per-session files.
         if workspace is not None and _is_protected_extra_root(root, workspace):

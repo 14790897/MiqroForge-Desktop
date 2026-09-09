@@ -377,6 +377,8 @@ class ExecTool(Tool):
         approval_callback=None,
         sandbox_manager=None,
         system_install_approver=None,
+        shared_roots: list[Any] | None = None,
+        allow_user_dirs: bool = True,
     ):
         self.timeout = timeout
         self.max_timeout = max_timeout
@@ -420,6 +422,13 @@ class ExecTool(Tool):
         # "deny_no_channel"。fail-closed: 无通道/异常/超时一律 deny（外部
         # 审阅 #854；#875 review F3 增加 deny_no_channel 区分"卡从未出现"）。
         self.system_install_approver = system_install_approver
+        # #984: host roots this tool may re-open writable inside the bwrap
+        # sandbox (workspace root + tools.extra_roots + memory/skills dirs,
+        # resolved once by tool_registry_factory).  ``allow_user_dirs``
+        # mirrors tools.auto_user_dirs and gates the per-call ``_user_roots``
+        # component — same switch the file tools honour (issue #821).
+        self._shared_roots: list[Any] = list(shared_roots or [])
+        self._allow_user_dirs = allow_user_dirs
 
     @property
     def name(self) -> str:
@@ -484,6 +493,84 @@ class ExecTool(Tool):
             )
         return requested * 1000, None
 
+    # ── #984: per-call writable binds for the bwrap sandbox ─────────────
+
+    def _exec_rw_binds(self, user_roots: Any) -> list[str]:
+        """Host paths to re-open writable for ONE exec call (#984).
+
+        Set (plan v5 §2): workspace root ∪ static ``shared_roots`` ∪
+        per-call user-mentioned roots when ``tools.auto_user_dirs`` is on.
+        The #864 approval-card grants are deliberately NOT part of the exec
+        set — they live on the file-tool instances (``self._granted``) and
+        ExecTool holds no reference to them; exec still reaches user-mentioned
+        dirs through ``_user_roots`` (see the PR body for the residual gap).
+
+        Missing STATIC roots are skipped with a debug log: they come from
+        config, and before #984 they were never bound, so a stale entry must
+        not start failing every command.  Per-call user roots are kept
+        unconditionally — silently dropping one would revoke a grant the user
+        just made; a missing source is reported with guidance instead (see
+        :meth:`_missing_bind_sources`).
+        """
+        out: list[str] = []
+        seen: set[str] = set()
+
+        def _add(raw: Any, *, strict: bool) -> None:
+            try:
+                raw_str = os.fspath(raw)
+            except TypeError:
+                return
+            if not isinstance(raw_str, str) or not raw_str:
+                return
+            key = os.path.normcase(os.path.abspath(raw_str))
+            if key in seen:
+                return
+            if not strict:
+                try:
+                    if not os.path.exists(raw_str):
+                        logger.debug(
+                            "exec: skipping missing static rw bind {}", raw_str,
+                        )
+                        return
+                except OSError:
+                    return
+            seen.add(key)
+            out.append(raw_str)
+
+        if self.working_dir:
+            _add(self.working_dir, strict=False)
+        for root in self._shared_roots:
+            _add(root, strict=False)
+        if self._allow_user_dirs:
+            for root in user_roots or []:
+                _add(root, strict=True)
+        return out
+
+    @staticmethod
+    def _missing_bind_sources(binds: list[str] | None) -> list[str]:
+        """Bind sources that do not exist on the host, for a pre-flight error.
+
+        The per-call binds use a hard ``--bind``, so a missing source makes
+        bwrap fail the whole command.  Check the sources this process can
+        actually see (Windows drive paths on Windows, POSIX paths elsewhere)
+        and report them with guidance instead of surfacing a raw bwrap error.
+        WSL-native paths are not visible from the Windows host and are left
+        to bwrap — they are never produced by the root extractors.
+        """
+        missing: list[str] = []
+        for raw in binds or []:
+            s = str(raw).replace("\\", "/")
+            if s.startswith("//"):
+                missing.append(str(raw))
+                continue
+            if len(s) >= 2 and s[1] == ":":
+                if os.name == "nt" and not os.path.exists(str(raw)):
+                    missing.append(str(raw))
+            elif s.startswith("/") and os.name != "nt":
+                if not os.path.exists(str(raw)):
+                    missing.append(str(raw))
+        return missing
+
     @property
     def description(self) -> str:
         from miqi.sandbox.manager import describe_exec_environment
@@ -544,6 +631,13 @@ class ExecTool(Tool):
         # Phase 31: consume SandboxSelection injected by ToolOrchestrator.
         _sandbox = kwargs.pop("_sandbox", None)
         _session_key = kwargs.pop("_session_key", None)
+
+        # #984: per-call user-mentioned output dirs — the same channel the
+        # file tools consume.  They are re-opened writable in the bwrap
+        # sandbox for THIS command only, so a runtime write (`open(...)`,
+        # `write_text`, any spelling) succeeds where the user asked without
+        # making the whole of /mnt writable again.
+        _user_roots = kwargs.pop("_user_roots", None)
 
         # Resolve sandbox_type for the begin event from the actual selection
         if _sandbox is not None:
@@ -691,6 +785,9 @@ class ExecTool(Tool):
                 thread_id=thread_id,
                 # Session key for per-session sandbox isolation
                 session_key=_session_key,
+                # #984: per-call writable binds for the bwrap sandbox.
+                # Host execution paths accept and ignore them.
+                extra_rw_binds=self._exec_rw_binds(_user_roots),
             )
 
             # Phase 31: if ToolOrchestrator injected a SandboxSelection,
@@ -787,6 +884,8 @@ class ExecTool(Tool):
         ledger_runtime=None,
         thread_id: str = "",
         session_key: str | None = None,
+        # #984: per-call writable host paths (workspace + authorized dirs)
+        extra_rw_binds: list[str] | None = None,
     ) -> _ExecResult:
         """Execute a command inside the bwrap sandbox with streaming I/O.
 
@@ -812,6 +911,23 @@ class ExecTool(Tool):
                 exit_code=-1, cancelled=True,
             )
 
+        # #984: the per-call rw binds use a hard --bind, so a missing source
+        # fails the command.  Report it with guidance instead of a raw bwrap
+        # error, and NEVER fall back to host execution — the command was
+        # authorized for a sandboxed write it cannot get.
+        _missing_binds = self._missing_bind_sources(extra_rw_binds)
+        if _missing_binds:
+            return _ExecResult(
+                output=(
+                    "Error: 授权写入目录不存在，命令未执行："
+                    + "、".join(_missing_binds)
+                    + "\nHint: 请先在 Windows 侧创建该目录，"
+                    "或先用文件工具写入一次（文件工具会自动创建授权目录），"
+                    "再重试本条命令。"
+                ),
+                exit_code=1,
+            )
+
         start = time.monotonic()
 
         # Build sandbox env and cwd
@@ -827,6 +943,7 @@ class ExecTool(Tool):
         try:
             handle = await sandbox.run_command_streaming(
                 command, env=sandbox_env, cwd=sandbox_cwd,
+                extra_rw_binds=extra_rw_binds,
             )
         except Exception as e:
             duration_ms = int((time.monotonic() - start) * 1000)
@@ -1139,6 +1256,9 @@ class ExecTool(Tool):
         ledger_runtime=None,
         thread_id: str = "",
         session_key: str | None = None,
+        # #984: per-call writable host paths (bwrap paths only; ignored by
+        # the host-execution branches, which cannot mount anything).
+        extra_rw_binds: list[str] | None = None,
     ) -> _ExecResult:
         """Execute a command according to the ToolOrchestrator's SandboxSelection.
 
@@ -1169,6 +1289,9 @@ class ExecTool(Tool):
             # Phase 31.8: pass ledger runtime and thread_id to sub-executors
             ledger_runtime=ledger_runtime,
             thread_id=thread_id,
+            # #984: per-call rw binds — consumed by _execute_in_sandbox,
+            # accepted-and-ignored by the host paths.
+            extra_rw_binds=extra_rw_binds,
         )
 
         # ── NONE: orchestrator explicitly allowed direct execution ──────
@@ -1243,6 +1366,11 @@ class ExecTool(Tool):
         # Phase 31.8: ledger runtime for replay-persistent event recording
         ledger_runtime=None,
         thread_id: str = "",
+        # #984: accepted for call-site uniformity (``**common`` splat) and
+        # deliberately ignored — RESTRICTED executes on the host, where no
+        # bind exists to apply.  Its explicit _execute_direct call below
+        # must keep working without passing it (plan v6 §3).
+        extra_rw_binds: list[str] | None = None,
     ) -> _ExecResult:
         """Execute with RESTRICTED sandbox policy enforcement.
 
@@ -1645,6 +1773,11 @@ class ExecTool(Tool):
         ledger_runtime=None,
         thread_id: str = "",
         session_key: str | None = None,
+        # #984: accepted for call-site uniformity (``**exec_kwargs`` /
+        # ``**common`` splats) and deliberately ignored — host execution has
+        # no mount namespace to bind into.  Ignoring is NOT a silent
+        # downgrade: the bind only ever widened sandbox writes.
+        extra_rw_binds: list[str] | None = None,
     ) -> _ExecResult:
         """Execute a command directly on the host (no sandbox).
 

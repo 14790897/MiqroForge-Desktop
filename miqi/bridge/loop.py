@@ -1526,6 +1526,10 @@ class BridgeRuntimeLoop:
             agent_type=params.get("agent_type", "code-agent"),
             task=params.get("task", ""),
             label=params.get("label"),
+            # #984: the Desktop may forward the parent turn's authorized
+            # output roots; without them the sub-agent gets none (the server
+            # has no other root source for this channel).
+            user_roots=params.get("user_roots") or [],
         )
         return {"result": {"agent_id": agent.agent_id, "thread_id": agent.thread_id}}
 

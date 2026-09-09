@@ -58,6 +58,31 @@ class BwrapSandboxError(Exception):
     """Error raised when bwrap operations fail."""
 
 
+def _host_path_to_sandbox(path: str) -> str:
+    """Map a host path to the path bwrap must bind it at (#984).
+
+    ``C:\\x`` → ``/mnt/c/x``; a WSL-native path is already usable and is
+    returned unchanged.  Anything else (UNC, relative) cannot be mapped and
+    raises — a per-call writable bind must never be silently dropped, or the
+    command would run without the write access it was granted.
+
+    Deliberately local: importing ``miqi.sandbox.manager.windows_path_to_mnt``
+    at module scope is circular (``manager`` imports this module at line 45).
+    """
+    p = str(path).replace("\\", "/")
+    if len(p) >= 2 and p[1] == ":":
+        return "/mnt/" + p[0].lower() + p[2:]
+    if p.startswith("//"):
+        raise BwrapSandboxError(
+            f"Cannot bind UNC path into the sandbox: {path}"
+        )
+    if not p.startswith("/"):
+        raise BwrapSandboxError(
+            f"Cannot bind relative path into the sandbox: {path}"
+        )
+    return p
+
+
 _auto_install_cache: dict[str, bool] = {}
 """Cache auto-install results per distro to avoid repeated apt-get calls."""
 
@@ -1391,8 +1416,14 @@ class BwrapSandbox:
         timeout: float = 60.0,
         env: dict[str, str] | None = None,
         cwd: str | None = None,
+        extra_rw_binds: list[str] | None = None,
     ) -> tuple[int, str, str]:
         """Run a command inside the bwrap sandbox.
+
+        Args:
+            extra_rw_binds: PER-CALL host paths to bind writable for this
+                command only (#984) — the session's authorized output dirs.
+                They do not modify the sandbox; see :meth:`_build_bwrap_args`.
 
         Returns:
             (exit_code, stdout, stderr)
@@ -1422,7 +1453,9 @@ class BwrapSandbox:
                 )
             logger.info("Sandbox directories recreated for {}", self.session_key)
 
-        bwrap_args = self._build_bwrap_args(command, env=env, cwd=cwd)
+        bwrap_args = self._build_bwrap_args(
+            command, env=env, cwd=cwd, extra_rw_binds=extra_rw_binds,
+        )
 
         exit_code = -1
         stdout = ""
@@ -1519,6 +1552,7 @@ class BwrapSandbox:
         command: str,
         env: dict[str, str] | None = None,
         cwd: str | None = None,
+        extra_rw_binds: list[str] | None = None,
     ) -> BwrapCommandHandle:
         """Run a command inside the bwrap sandbox with streaming I/O.
 
@@ -1534,6 +1568,9 @@ class BwrapSandbox:
         The caller also owns timeout and cancellation — use
         :meth:`BwrapCommandHandle.kill` to stop a running command.
 
+        ``extra_rw_binds`` are per-call writable host paths (#984), same
+        semantics as :meth:`run_command`.
+
         Returns:
             BwrapCommandHandle with .stdout, .stderr, .wait(), .kill(),
             and .cleanup().
@@ -1544,7 +1581,9 @@ class BwrapSandbox:
         if not self._running or not self._bwrap_path:
             raise BwrapSandboxError("Sandbox not started")
 
-        bwrap_args = self._build_bwrap_args(command, env=env, cwd=cwd)
+        bwrap_args = self._build_bwrap_args(
+            command, env=env, cwd=cwd, extra_rw_binds=extra_rw_binds,
+        )
 
         if not hasattr(self, '_streaming_handles'):
             self._streaming_handles: list[BwrapCommandHandle] = []
@@ -1734,6 +1773,7 @@ class BwrapSandbox:
         command: str,
         env: dict[str, str] | None = None,
         cwd: str | None = None,
+        extra_rw_binds: list[str] | None = None,
     ) -> list[str]:
         """Build the full bwrap argument list.
 
@@ -1741,6 +1781,13 @@ class BwrapSandbox:
         shell quoting needed because each argument is passed separately.
 
         On WSL, this list is directly appended after ``wsl.exe -d distro --``.
+
+        ``extra_rw_binds`` are PER-CALL host paths (issue #984) that must be
+        writable for this one command — the workspace, static extra roots and
+        the turn's authorized output dirs.  They are converted to their
+        sandbox paths and hard ``--bind``-ed after the read-only ``/mnt``
+        mount, so a missing or unmappable source fails loudly instead of
+        silently running without the granted write access.
 
         The sandbox layout:
         /usr, /bin, /lib, etc — read-only bind mounts from host
@@ -1785,8 +1832,13 @@ class BwrapSandbox:
         # Windows files are accessible via /mnt/c, /mnt/d, etc. in WSL.
         # We need to bind-mount /mnt so the sandbox can access the
         # workspace files that live on the Windows filesystem.
+        # READ-ONLY since #984: the whole Windows user data area used to be
+        # writable through this one mount, so a python `open(..., "w")`
+        # bypassed the shell write guard.  Writable paths are re-opened
+        # below with an explicit hard --bind (workspace, extra roots,
+        # per-call authorized dirs).
         if self._use_wsl:
-            args.extend(["--bind-try", "/mnt", "/mnt"])
+            args.extend(["--ro-bind-try", "/mnt", "/mnt"])
 
         # ── Writable overlays ───────────────────────────────────────
         args.extend(["--tmpfs", "/tmp"])
@@ -1813,6 +1865,16 @@ class BwrapSandbox:
         for src in self.extra_ro_binds:
             args.extend(["--ro-bind", src, src])
         for src in self.extra_rw_binds:
+            args.extend(["--bind", src, src])
+
+        # ── Per-call writable binds (#984) ──────────────────────────
+        # These land AFTER the read-only ``/mnt`` mount above, so a later
+        # bind re-opens exactly the authorized subtrees.  Hard ``--bind``,
+        # never ``--bind-try``: a missing/unmappable source must fail the
+        # command loudly instead of silently running without the write
+        # access the caller granted (and without falling back to the host).
+        for raw in extra_rw_binds or []:
+            src = _host_path_to_sandbox(raw)
             args.extend(["--bind", src, src])
 
         # ── Die with parent ─────────────────────────────────────────
