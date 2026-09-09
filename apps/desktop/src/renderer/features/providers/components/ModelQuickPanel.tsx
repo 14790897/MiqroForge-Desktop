@@ -1,9 +1,11 @@
 import { useEffect, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { Check, Loader2, LogIn, Save, ShieldCheck } from 'lucide-react';
 import { invalidateConfigCache } from '../../../lib/configCache';
 import { sanitizeUiMessage } from '../../../lib/sanitizeUiMessage';
 import { gatewayStatusText } from '../../../lib/qraftGateway';
 import { useQraftStatus } from '../../../hooks/useQraftStatus';
+import { i18n } from '../../../i18n';
 import { ModelSelect } from './ModelSelect';
 
 /**
@@ -44,22 +46,25 @@ function gatewayUsageDisplay(
 ): GatewayUsageDisplay {
   if (!loggedIn) {
     return {
-      label: '未登录',
-      hint: '登录平台账号后，模型调用经平台 AI 网关转发。',
+      label: i18n.t('providers.gwNotLoggedIn'),
+      hint: i18n.t('providers.gwLoginHint'),
       badgeClass: BADGE_MUTED,
     };
   }
   if (gatewayActive) {
     if (activeModel === GATEWAY_MODEL_ID) {
       return {
-        label: '使用中',
-        hint: '当前默认模型经平台 AI 网关转发，计入平台消费组配额。',
+        label: i18n.t('providers.gwActive'),
+        hint: i18n.t('providers.gwActiveHint'),
         badgeClass: BADGE_SUCCESS,
       };
     }
     return {
-      label: '已开通',
-      hint: `当前默认模型 ${activeModel || '未设置'} 不走网关（仅 ${GATEWAY_MODEL_ID} 经平台网关路由）。`,
+      label: i18n.t('providers.gwOpen'),
+      hint: i18n.t('providers.gwOpenHint', {
+        model: activeModel || i18n.t('providers.notSet'),
+        gateway: GATEWAY_MODEL_ID,
+      }),
       badgeClass: BADGE_INFO,
     };
   }
@@ -68,8 +73,8 @@ function gatewayUsageDisplay(
     return { label: gw.label, hint: gw.hint, badgeClass: BADGE_WARNING };
   }
   return {
-    label: '未下发',
-    hint: '平台未下发网关状态，模型调用走直连。',
+    label: i18n.t('providers.gwNotIssued'),
+    hint: i18n.t('providers.gwNotIssuedHint'),
     badgeClass: BADGE_MUTED,
   };
 }
@@ -81,6 +86,7 @@ interface ModelQuickPanelProps {
 }
 
 export function ModelQuickPanel({ activeModel, onSaved, onGoToQraft }: ModelQuickPanelProps) {
+  const { t } = useTranslation();
   const [modelValue, setModelValue] = useState(activeModel || '');
   const [saving, setSaving] = useState(false);
   const [savedFlash, setSavedFlash] = useState(false);
@@ -104,14 +110,14 @@ export function ModelQuickPanel({ activeModel, onSaved, onGoToQraft }: ModelQuic
 
   const handleSave = async () => {
     if (!modelValue) {
-      setError('请先选择模型');
+      setError(t('providers.errNoModel'));
       return;
     }
     // 模型 id 必须带 provider 前缀（如 "deepseek/deepseek-v4-flash"）。
     // 用 config.update 深合并只改 agents.defaults.model，不触碰 provider 的
     // api_base / extra_headers（避免 model-only 保存误重置它们，CodeRabbit #907）。
     if (!modelValue.includes('/')) {
-      setError('请从下拉列表选择有效模型');
+      setError(t('providers.errPickValid'));
       return;
     }
     setSaving(true);
@@ -132,10 +138,12 @@ export function ModelQuickPanel({ activeModel, onSaved, onGoToQraft }: ModelQuic
   return (
     <div className="px-6 py-4 border-b border-[var(--border-subtle)] bg-[var(--surface)]">
       <div className="flex items-center justify-between mb-3">
-        <h2 className="text-sm font-semibold text-[var(--text)]">模型设置</h2>
+        <h2 className="text-sm font-semibold text-[var(--text)]">{t('providers.title')}</h2>
         <span className="text-xs text-[var(--text-faint)]">
-          当前默认模型：
-          <span className="font-mono text-[var(--text-muted)] ml-1">{activeModel || '未设置'}</span>
+          {t('providers.currentDefault')}
+          <span className="font-mono text-[var(--text-muted)] ml-1">
+            {activeModel || t('providers.notSet')}
+          </span>
         </span>
       </div>
 
@@ -146,7 +154,7 @@ export function ModelQuickPanel({ activeModel, onSaved, onGoToQraft }: ModelQuic
           data-testid="model-gateway-status"
         >
           <ShieldCheck size={13} className="shrink-0 text-[var(--text-faint)]" />
-          <span className="text-xs text-[var(--text-muted)]">AI 网关</span>
+          <span className="text-xs text-[var(--text-muted)]">{t('providers.aiGateway')}</span>
           <span className={gatewayDisplay.badgeClass}>{gatewayDisplay.label}</span>
           <span className="min-w-0 text-xs leading-relaxed text-[var(--text-faint)]">
             {gatewayDisplay.hint}
@@ -155,34 +163,32 @@ export function ModelQuickPanel({ activeModel, onSaved, onGoToQraft }: ModelQuic
 
         <div className="flex flex-col gap-1.5">
           <label className="text-xs font-medium text-[var(--text-muted)] uppercase tracking-wide">
-            默认模型
+            {t('providers.defaultModel')}
           </label>
           {canUseModel ? (
             <ModelSelect value={modelValue} onChange={setModelValue} />
           ) : gatewayBlocked ? (
             <div className="flex items-center justify-between gap-3 rounded-lg border border-[var(--border-subtle)] bg-[var(--surface-muted)] px-3 py-2.5">
-              <span className="text-sm text-[var(--text-muted)]">
-                AI 网关未就绪（平台开通中或不可用），暂不可选模型
-              </span>
+              <span className="text-sm text-[var(--text-muted)]">{t('providers.gwBlocked')}</span>
               <button
                 onClick={onGoToQraft}
                 data-testid="model-quickpanel-go-gateway"
                 className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-white transition-colors shrink-0"
               >
                 <LogIn size={13} />
-                查看平台账号
+                {t('providers.viewAccount')}
               </button>
             </div>
           ) : (
             <div className="flex items-center justify-between gap-3 rounded-lg border border-[var(--border-subtle)] bg-[var(--surface-muted)] px-3 py-2.5">
-              <span className="text-sm text-[var(--text-muted)]">登录后使用平台内置模型</span>
+              <span className="text-sm text-[var(--text-muted)]">{t('providers.loginHint')}</span>
               <button
                 onClick={onGoToQraft}
                 data-testid="model-quickpanel-go-login"
                 className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-white transition-colors shrink-0"
               >
                 <LogIn size={13} />
-                去登录
+                {t('providers.goLogin')}
               </button>
             </div>
           )}
@@ -202,10 +208,12 @@ export function ModelQuickPanel({ activeModel, onSaved, onGoToQraft }: ModelQuic
               ) : (
                 <Save size={14} />
               )}
-              {savedFlash ? '已保存' : '保存'}
+              {savedFlash ? t('providers.saved') : t('common.save')}
             </button>
             {savedFlash && (
-              <span className="text-xs text-[var(--success)]">已保存，新会话立即生效</span>
+              <span className="text-xs text-[var(--success)]">
+                {t('providers.savedNewSession')}
+              </span>
             )}
           </div>
         )}

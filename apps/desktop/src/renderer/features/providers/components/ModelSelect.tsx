@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { ChevronDown } from 'lucide-react';
 import type { ModelInfo } from '../../../../shared/ipc';
 import { PROVIDER_DISPLAY_NAMES } from '../../../lib/providers';
@@ -76,6 +77,7 @@ interface ModelSelectProps {
 }
 
 export function ModelSelect({ value, onChange, presets }: ModelSelectProps) {
+  const { t } = useTranslation();
   const [loaded, setLoaded] = useState<ModelInfo[] | null>(null);
   const [availableProviders, setAvailableProviders] = useState<Set<string> | null>(null);
   const [gatewayRouted, setGatewayRouted] = useState(false);
@@ -129,7 +131,7 @@ export function ModelSelect({ value, onChange, presets }: ModelSelectProps) {
         >
           {!isPreset && (
             <option value="" disabled>
-              请选择模型…
+              {t('providers.selectModelPlaceholder')}
             </option>
           )}
           {groups.map((g) => (

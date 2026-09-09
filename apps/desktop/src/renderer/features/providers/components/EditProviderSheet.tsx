@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { X, CheckCircle, Loader2, TestTube2, Save } from 'lucide-react';
 import { cn } from '../../../lib/utils';
 import { sanitizeUiMessage } from '../../../lib/sanitizeUiMessage';
@@ -20,6 +21,7 @@ interface EditSheetProps {
 }
 
 export function EditSheet({ provider, onClose, onSaved }: EditSheetProps) {
+  const { t } = useTranslation();
   const [model, setModel] = useState(provider.configured_model ?? '');
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
@@ -37,7 +39,7 @@ export function EditSheet({ provider, onClose, onSaved }: EditSheetProps) {
 
   const handleActivate = async (): Promise<boolean> => {
     if (!activationCode.trim()) {
-      setActivationError('请输入激活码');
+      setActivationError(t('providers.errActivationCode'));
       return false;
     }
     setActivating(true);
@@ -69,12 +71,12 @@ export function EditSheet({ provider, onClose, onSaved }: EditSheetProps) {
         onSaved();
         return true;
       } else {
-        setActivationError(result.error || '激活失败');
+        setActivationError(result.error || t('providers.activationFailed'));
         return false;
       }
     } catch (err: unknown) {
       const msg = sanitizeUiMessage(err instanceof Error ? err.message : String(err));
-      setActivationError(msg || '激活失败，请检查激活码');
+      setActivationError(msg || t('providers.activationCheck'));
       return false;
     } finally {
       setActivating(false);
@@ -90,7 +92,7 @@ export function EditSheet({ provider, onClose, onSaved }: EditSheetProps) {
         if (activationCode.trim()) {
           const activated = await handleActivate();
           if (!activated) {
-            setError('激活失败，请检查激活码后重试');
+            setError(t('providers.errActivationRetry'));
             return;
           }
           // handleActivate 已把默认模型设为内置 fallback 并刷新父级；
@@ -102,7 +104,7 @@ export function EditSheet({ provider, onClose, onSaved }: EditSheetProps) {
             return;
           }
         } else {
-          setError('请输入激活码并点击"激活"');
+          setError(t('providers.errActivationInput'));
           return;
         }
       }
@@ -119,7 +121,7 @@ export function EditSheet({ provider, onClose, onSaved }: EditSheetProps) {
 
   const handleTest = async () => {
     if (!provider.configured && !activationSuccess) {
-      setTestResult({ ok: false, message: '请先激活内置密钥' });
+      setTestResult({ ok: false, message: t('providers.testNeedActivate') });
       return;
     }
     setTesting(true);
@@ -133,7 +135,7 @@ export function EditSheet({ provider, onClose, onSaved }: EditSheetProps) {
       );
       setTestResult({
         ok: result.ok,
-        message: result.ok ? '连接成功，已记录验证状态。' : '连接失败',
+        message: result.ok ? t('providers.testOk') : t('providers.testFail'),
       });
       if (result.ok) onSaved();
     } catch (err: unknown) {
@@ -166,16 +168,16 @@ export function EditSheet({ provider, onClose, onSaved }: EditSheetProps) {
           {provider.builtin_available && (
             <div className="flex flex-col gap-3">
               <label className="text-xs font-medium text-[var(--text-muted)] uppercase tracking-wide">
-                API 来源
+                {t('providers.apiSource')}
               </label>
               <div className="flex items-start gap-3 p-3 rounded-lg border border-[var(--border-subtle)] bg-[var(--surface)]">
                 <div className="flex-1 min-w-0">
-                  <span className="text-sm text-[var(--text)]">推荐（无需API Key）</span>
+                  <span className="text-sm text-[var(--text)]">{t('providers.recommended')}</span>
                   {activationSuccess ? (
                     <div className="flex items-center gap-2 mt-1">
                       <p className="flex items-center gap-1.5 text-xs text-[var(--success)]">
                         <CheckCircle size={12} />
-                        已激活
+                        {t('providers.activated')}
                       </p>
                       <button
                         type="button"
@@ -191,12 +193,12 @@ export function EditSheet({ provider, onClose, onSaved }: EditSheetProps) {
                             const msg = sanitizeUiMessage(
                               err instanceof Error ? err.message : String(err)
                             );
-                            setError(msg || '取消激活失败');
+                            setError(msg || t('providers.deactivateFail'));
                           }
                         }}
                         className="text-xs text-[var(--text-faint)] hover:text-[var(--danger)] underline transition-colors"
                       >
-                        取消激活
+                        {t('providers.deactivate')}
                       </button>
                     </div>
                   ) : (
@@ -212,7 +214,7 @@ export function EditSheet({ provider, onClose, onSaved }: EditSheetProps) {
                           onKeyDown={(e) => {
                             if (e.key === 'Enter') handleActivate();
                           }}
-                          placeholder="输入激活码"
+                          placeholder={t('providers.activatePlaceholder')}
                           className="flex-1 px-3 py-1.5 rounded-md text-sm bg-[var(--surface-muted)] border border-[var(--border-subtle)] text-[var(--text)] placeholder-[var(--text-faint)] focus:outline-none focus:border-[var(--border-strong)] font-mono"
                           autoComplete="off"
                           spellCheck={false}
@@ -223,7 +225,11 @@ export function EditSheet({ provider, onClose, onSaved }: EditSheetProps) {
                           disabled={activating || !activationCode.trim()}
                           className="px-3 py-1.5 rounded-md bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-white text-xs font-medium transition-colors disabled:opacity-50 shrink-0"
                         >
-                          {activating ? <Loader2 size={13} className="animate-spin" /> : '激活'}
+                          {activating ? (
+                            <Loader2 size={13} className="animate-spin" />
+                          ) : (
+                            t('providers.activate')
+                          )}
                         </button>
                       </div>
                       {activationError && (
@@ -238,10 +244,10 @@ export function EditSheet({ provider, onClose, onSaved }: EditSheetProps) {
 
           <div className="flex flex-col gap-1.5">
             <label className="text-xs font-medium text-[var(--text-muted)] uppercase tracking-wide">
-              默认模型
+              {t('providers.defaultModel')}
             </label>
             <ModelSelect value={model} onChange={setModel} />
-            <p className="text-xs text-[var(--text-faint)]">修改此字段会更新全局默认模型</p>
+            <p className="text-xs text-[var(--text-faint)]">{t('providers.defaultModelHint')}</p>
           </div>
 
           {error && (
@@ -262,8 +268,7 @@ export function EditSheet({ provider, onClose, onSaved }: EditSheetProps) {
             </div>
           )}
           <div className="rounded-lg border border-[var(--border-subtle)] bg-[var(--surface-muted)] px-3 py-2 text-xs text-[var(--text-muted)] leading-relaxed">
-            保存 Provider
-            配置后，当前运行中的会话可能仍在使用旧实例；如需确认新配置生效，请重新测试并按提示重启运行时或新建会话。
+            {t('providers.saveProviderHint')}
           </div>
         </div>
 
@@ -274,14 +279,14 @@ export function EditSheet({ provider, onClose, onSaved }: EditSheetProps) {
             className="flex items-center gap-1.5 text-sm text-[var(--text-muted)] hover:text-[var(--accent)] transition-colors disabled:opacity-50"
           >
             {testing ? <Loader2 size={14} className="animate-spin" /> : <TestTube2 size={14} />}
-            测试连接
+            {t('providers.testConnection')}
           </button>
           <div className="flex items-center gap-2">
             <button
               onClick={onClose}
               className="px-3 py-1.5 text-sm text-[var(--text-muted)] hover:text-[var(--text)] transition-colors"
             >
-              取消
+              {t('common.cancel')}
             </button>
             <button
               onClick={handleSave}
@@ -289,7 +294,7 @@ export function EditSheet({ provider, onClose, onSaved }: EditSheetProps) {
               className="flex items-center gap-1.5 px-4 py-1.5 rounded-lg bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-white text-sm font-medium transition-colors disabled:opacity-50"
             >
               {saving ? <Loader2 size={14} className="animate-spin" /> : <Save size={14} />}
-              保存
+              {t('common.save')}
             </button>
           </div>
         </div>
