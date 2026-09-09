@@ -47,7 +47,6 @@ def test_sandbox_fallback_searches_canonical_session_dir(
 ):
     """文件只存在于 ``sessions/<canonical_key>/files`` 时，兜底必须命中它。"""
     import miqi.bridge.server as bridge_module
-
     from miqi.runtime.file_handlers import _find_in_sandbox_workspaces
 
     sandbox_ws = tmp_path / "sandbox_ws"
