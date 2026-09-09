@@ -73,5 +73,15 @@ describe('resolveWorkspacePath', () => {
       const target = join(lowerWs, 'report.md');
       expect(norm(resolveWorkspacePath(toMnt(target)))).toBe(norm(target));
     });
+
+    it('rejects an absolute path with literal .. traversal', () => {
+      const escaped = `${wsRoot}\\..\\..\\Windows\\System32\\calc.exe`;
+      expect(() => resolveWorkspacePath(escaped)).toThrow(/outside workspace/);
+    });
+
+    it('rejects a /mnt path with .. traversal escaping the workspace', () => {
+      const escaped = toMnt(`${wsRoot}\\..\\..\\Windows\\System32\\calc.exe`);
+      expect(() => resolveWorkspacePath(escaped)).toThrow(/outside workspace/);
+    });
   });
 });

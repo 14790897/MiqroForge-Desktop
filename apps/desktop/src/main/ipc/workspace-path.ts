@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from 'fs';
 import { homedir } from 'os';
-import { isAbsolute, join } from 'path';
+import { isAbsolute, join, normalize } from 'path';
 
 /** Directory holding the local config file (`~/.miqi` by default, overridable via MIQI_HOME). */
 export function getConfigDir(): string {
@@ -78,6 +78,12 @@ export function resolveWorkspacePath(raw: string): string {
   } else {
     resolved = join(wsRoot, normalised);
   }
+
+  // Collapse any ".." segments before the containment check.  An absolute
+  // path like C:\ws\..\..\Windows\calc.exe would otherwise pass the
+  // string-prefix check below (its literal ".." looks like it stays inside
+  // ws) while the filesystem resolves it outside the workspace (#955).
+  resolved = normalize(resolved);
 
   // Enforce workspace containment — prevent escape via .. or absolute
   // paths that land outside the workspace root.  Case-fold on Windows
