@@ -534,7 +534,7 @@ async def test_create_pdf_errors(tmp_path):
 
     # Missing content
     result = await tool.execute(filename="empty.pdf")
-    assert "Error: 至少提供 title 或 content" in result
+    assert "Error: 至少提供 title、content 或 content_path" in result
 
     # Permission denied (path traversal)
     result = await tool.execute(filename="../../escape.pdf", content="test")
@@ -574,3 +574,111 @@ async def test_create_pdf_reject_path_traversal(
 
     assert "权限被拒绝" in result
     assert not (tmp_path / expected_name).exists()
+
+
+@pytest.mark.asyncio
+async def test_create_pdf_content_path(tmp_path):
+    """CreatePdfTool: render directly from a Markdown source file (content_path)."""
+    from miqi.documents.pdf_create_tool import CreatePdfTool
+
+    src = tmp_path / "report.md"
+    src.write_text(
+        "# 报告标题\n\n"
+        "## 第一章\n\n"
+        "这是正文段落。\n\n"
+        "- 列表项一\n"
+        "- 列表项二\n\n"
+        "| 姓名 | 年龄 |\n"
+        "| --- | --- |\n"
+        "| 张三 | 28 |\n\n"
+        "![F001图表](step6_charts/assets/F001.svg)\n",
+        encoding="utf-8",
+    )
+    tool = CreatePdfTool(workspace=tmp_path, allowed_dir=tmp_path)
+    result = await tool.execute(filename="from_md.pdf", content_path=src.name)
+    path = tmp_path / "from_md.pdf"
+    assert "Created:" in result
+    assert path.exists()
+    assert path.stat().st_size > 200
+    with open(path, "rb") as f:
+        assert f.read(5) == b"%PDF-"
+
+
+@pytest.mark.asyncio
+async def test_create_pdf_title_only_no_none(tmp_path):
+    """CreatePdfTool: title-only 不得渲染出 'None' 段落（回归）。"""
+    from miqi.documents.pdf_create_tool import CreatePdfTool
+
+    tool = CreatePdfTool(workspace=tmp_path, allowed_dir=tmp_path)
+    result = await tool.execute(filename="title_only.pdf", title="唯一标题")
+    path = tmp_path / "title_only.pdf"
+    assert "Created:" in result
+    assert path.exists()
+    import pymupdf
+    doc = pymupdf.open(str(path))
+    text = "".join(p.get_text() for p in doc)
+    doc.close()
+    assert "None" not in text
+
+
+@pytest.mark.asyncio
+async def test_create_pdf_content_path_user_roots(tmp_path):
+    """CreatePdfTool: 注入 _user_roots 时允许读取用户授权目录内绝对路径；未注入拒绝。"""
+    from miqi.documents.pdf_create_tool import CreatePdfTool
+
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    user_dir = tmp_path / "user"  # 位于 workspace 之外的用户授权目录
+    user_dir.mkdir()
+    (user_dir / "report.md").write_text("# 授权目录报告\n\n正文。\n", encoding="utf-8")
+
+    tool = CreatePdfTool(workspace=ws, allowed_dir=ws, allow_user_roots=True)
+    # 注入 _user_roots → 成功
+    result = await tool.execute(
+        filename="granted.pdf",
+        content_path=str(user_dir / "report.md"),
+        _user_roots=[str(user_dir)],
+    )
+    assert "Created:" in result
+    assert (ws / "granted.pdf").exists()
+    # 未注入 → 拒绝
+    result2 = await tool.execute(
+        filename="denied.pdf",
+        content_path=str(user_dir / "report.md"),
+    )
+    assert "Error:" in result2
+    assert "不在" in result2
+
+
+@pytest.mark.asyncio
+async def test_create_pdf_content_path_list_then_paragraph(tmp_path):
+    """CreatePdfTool: 列表后无空行直接接段落，块顺序不得反转。"""
+    from miqi.documents.pdf_create_tool import _md_to_blocks
+
+    blocks = _md_to_blocks("- 项一\n- 项二\n紧接的段落\n")
+    types = [b["type"] for b in blocks]
+    assert types == ["list", "paragraph"]
+
+
+@pytest.mark.asyncio
+async def test_create_pdf_content_path_four_level_heading(tmp_path):
+    """CreatePdfTool: 四级标题按 heading 块处理，不当作普通段落。"""
+    from miqi.documents.pdf_create_tool import _md_to_blocks
+
+    blocks = _md_to_blocks("#### 四级小标题\n正文\n")
+    assert blocks[0]["type"] == "heading"
+    assert blocks[0]["level"] == 4
+
+
+@pytest.mark.asyncio
+async def test_create_pdf_content_path_refuses_outside(tmp_path):
+    """CreatePdfTool: content_path outside the allowed boundary is refused."""
+    from miqi.documents.pdf_create_tool import CreatePdfTool
+
+    (tmp_path.parent / "secret.md").write_text("out of boundary", encoding="utf-8")
+    tool = CreatePdfTool(workspace=tmp_path, allowed_dir=tmp_path)
+    result = await tool.execute(
+        filename="no.pdf", content_path=(tmp_path.parent / "secret.md").as_posix()
+    )
+    assert "Error:" in result
+    assert "不在" in result

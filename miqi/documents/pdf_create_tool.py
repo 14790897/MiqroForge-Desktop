@@ -7,6 +7,7 @@ directly to generate PDFs with consistent formatting and font handling.
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import time
 from pathlib import Path
@@ -501,6 +502,146 @@ def _build_pdf(
     doc.build(story)
 
 
+# ── Markdown source rendering (content_path) ────────────────────────────────
+
+_MD_HEAD_RE = re.compile(r"^(#{1,6})\s+(.*)$")
+_MD_LISTITEM_RE = re.compile(r"^([-\*]|\d+\.)\s+(.*)$")
+_MD_TBL_SEP_RE = re.compile(r"^:?-{1,3}:?$")
+_MD_IMG_RE = re.compile(r"^!\[([^\]]*)\]")
+
+
+def _md_to_blocks(text: str) -> list[dict[str, Any]]:
+    """最小 Markdown → 内容块转换（专供 content_path 直渲源稿）。
+
+    支持：# / ## / ### 标题、段落、连续 -/*/数字 列表、连续 | 表格行、
+    > 引用（按段落处理）、代码围栏（内容按段落处理）、图片行
+    （SVG/PNG 无法内嵌，保留"图表：xx（见源稿）"占位，不丢结构）。
+    表格分隔行（|---|）自动跳过。不做完整 md 渲染——仅恢复结构骨架。
+    已知极限：多行代码围栏按空格拼接、行内代码换行丢失；连续引用行拆为独立段落；
+    嵌套/缩进列表拍平；内联粗体/斜体由 reportlab 原样输出。
+    """
+    blocks: list[dict[str, Any]] = []
+    paragraph: list[str] = []
+    list_items: list[str] = []
+    table_rows: list[list[str]] = []
+    in_code = False
+
+    def flush_paragraph() -> None:
+        nonlocal paragraph
+        if paragraph:
+            txt = " ".join(x.strip() for x in paragraph).strip()
+            paragraph = []
+            if txt:
+                blocks.append({"type": "paragraph", "text": txt})
+
+    def flush_list() -> None:
+        nonlocal list_items
+        if list_items:
+            blocks.append({"type": "list", "items": list(list_items)})
+            list_items = []
+
+    def flush_table() -> None:
+        nonlocal table_rows
+        if table_rows:
+            clean: list[list[str]] = [
+                r for r in table_rows
+                if not all(_MD_TBL_SEP_RE.fullmatch(c) or c == "" for c in r)
+            ]
+            if clean:
+                blocks.append({"type": "table", "headers": clean[0], "rows": clean[1:]})
+            table_rows = []
+
+    for raw in text.splitlines():
+        line = raw.strip()
+        if line.startswith("```"):
+            in_code = not in_code
+            continue
+        if in_code:
+            paragraph.append(line)
+            continue
+        if not line:
+            flush_paragraph()
+            flush_list()
+            flush_table()
+            continue
+        m = _MD_HEAD_RE.match(line)
+        if m:
+            flush_paragraph()
+            flush_list()
+            flush_table()
+            blocks.append(
+                {"type": "heading", "text": m.group(2).strip(), "level": len(m.group(1))}
+            )
+            continue
+        if line.startswith("|"):
+            flush_paragraph()
+            flush_list()
+            table_rows.append([c.strip() for c in line.strip("|").split("|")])
+            continue
+        m = _MD_LISTITEM_RE.match(line)
+        if m:
+            flush_paragraph()
+            flush_table()
+            list_items.append(m.group(2).strip())
+            continue
+        if line.startswith("!["):
+            flush_paragraph()
+            flush_list()
+            flush_table()
+            cap = _MD_IMG_RE.match(line)
+            label = cap.group(1).strip() if cap else "图表"
+            blocks.append({"type": "paragraph", "text": f"[图表：{label}（见源稿）]"})
+            continue
+        if line.startswith(">"):
+            flush_paragraph()
+            flush_list()
+            flush_table()
+            blocks.append({"type": "paragraph", "text": line.lstrip("> ").strip()})
+            continue
+        # 默认段落分支：先闭合未完成的列表/表格，避免顺序反转（列表/表格后无空行直接接段落）
+        flush_list()
+        flush_table()
+        paragraph.append(line)
+
+    flush_paragraph()
+    flush_list()
+    flush_table()
+    return blocks
+
+
+def _resolve_source_path(
+    content_path: str,
+    workspace: Path | None,
+    allowed_dir: Path | None,
+    user_roots: Any,
+    allow_user_roots: bool,
+) -> Path:
+    """解析 content_path 源文件：工作区/会话文件区优先，用户授权目录兜底。
+
+    用户授权目录仅当 allow_user_roots 且已注入 _user_roots（#821 机制）时可用；
+    与 ReadFileTool 同口径，不额外放开任何边界（受 #955 约束）。
+    """
+    try:
+        return resolve_output_path(content_path, workspace, allowed_dir)
+    except (PermissionError, ValueError):
+        pass
+    if not allow_user_roots or not user_roots:
+        raise PermissionError(
+            f"content_path '{content_path}' 不在可读范围（工作区/会话文件区/用户授权目录）"
+        )
+    cand = Path(content_path)
+    if not cand.is_absolute():
+        raise PermissionError(f"content_path '{content_path}' 非绝对路径且不在工作区内")
+    cand = cand.resolve()
+    for r in user_roots:
+        try:
+            cand.relative_to(Path(str(r)).resolve())
+            return cand
+        except (TypeError, ValueError, OSError):
+            continue
+    raise PermissionError(f"content_path '{content_path}' 不在用户授权目录内")
+
+
 # ── Agent Tool ──────────────────────────────────────────────────────────
 
 class CreatePdfTool(Tool):
@@ -522,9 +663,11 @@ class CreatePdfTool(Tool):
         self,
         workspace: Path | None = None,
         allowed_dir: Path | None = None,
+        allow_user_roots: bool = False,
     ):
         self._workspace = workspace
         self._allowed_dir = allowed_dir
+        self._allow_user_roots = allow_user_roots
 
     @property
     def parameters(self) -> dict[str, Any]:
@@ -563,6 +706,16 @@ class CreatePdfTool(Tool):
                         "{type: 'list', items: ['...']}, "
                         "{type: 'spacer', height: 12}, "
                         "{type: 'page_break'}."
+                    ),
+                },
+                "content_path": {
+                    "type": "string",
+                    "description": (
+                        "Optional path to a source Markdown file to render directly "
+                        "(workaround: long report bodies exceed what the model can emit "
+                        "in a single call — render from the file instead). "
+                        "content_path 优先于 content；相对路径以会话 files 根目录/工作区为基准；"
+                        "仅可读取工作区/会话文件区或用户授权目录（#821 口径）内的文件。"
                     ),
                 },
                 "author": {
@@ -617,8 +770,10 @@ class CreatePdfTool(Tool):
 
     async def execute(self, **kwargs: Any) -> str:
         _sess_key = kwargs.pop("_session_key", None)
+        user_roots = kwargs.pop("_user_roots", None)
         raw_path = raw_output_path(kwargs)
-        content = kwargs.get("content", "")
+        content = kwargs.get("content") or ""
+        content_path = kwargs.get("content_path") or ""
 
         if not raw_path.strip():
             return "Error: 必须提供 filename"
@@ -643,9 +798,27 @@ class CreatePdfTool(Tool):
 
         # Validate content
         has_title = bool(kwargs.get("title"))
-        has_content = bool(content)
+        has_content = bool(content) or bool(content_path)
         if not has_title and not has_content:
-            return "Error: 至少提供 title 或 content"
+            return "Error: 至少提供 title、content 或 content_path"
+
+        # content_path 优先：直接从 Markdown 源稿渲染（绕开模型单次输出上限）
+        if content_path:
+            try:
+                src = _resolve_source_path(
+                    str(content_path),
+                    self._workspace,
+                    self._allowed_dir,
+                    user_roots,
+                    self._allow_user_roots,
+                )
+            except PermissionError as e:
+                return f"Error: {e}"
+            try:
+                md_text = src.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError) as e:
+                return f"Error: 无法读取内容源文件 {src}: {e}"
+            content = _md_to_blocks(md_text)
 
         # Parse styles
         title_style, body_style = _style_from_kwargs(kwargs)

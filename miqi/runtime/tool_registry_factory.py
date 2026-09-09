@@ -615,8 +615,20 @@ def create_runtime_tool_registry(
     from miqi.documents.pdf_read_tool import PdfReadTool
 
     registry.register(PdfReadTool(workspace=_write_workspace, allowed_dir=_write_workspace))
-    registry.register(CreatePdfTool(workspace=_write_workspace, allowed_dir=_write_workspace))
-    registry.register(PdfWriteTool(workspace=_write_workspace, allowed_dir=_write_workspace))
+    registry.register(
+        CreatePdfTool(
+            workspace=_write_workspace,
+            allowed_dir=_write_workspace,
+            allow_user_roots=_auto_user_dirs,
+        )
+    )
+    registry.register(
+        PdfWriteTool(
+            workspace=_write_workspace,
+            allowed_dir=_write_workspace,
+            allow_user_roots=_auto_user_dirs,
+        )
+    )
 
     # ── Optional tools (require external dependencies) ─────────────────
 

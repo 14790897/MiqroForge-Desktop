@@ -112,6 +112,7 @@ _SESSION_KEY_TOOLS = frozenset({
 _USER_ROOTS_TOOLS = frozenset({
     "write_file", "edit_file", "read_file", "list_dir",
     "apply_patch", "graph_render",
+    "create_pdf", "pdf_write",
 })
 
 
