@@ -109,7 +109,7 @@ export const en: Record<I18nKey, string> = {
   'channels.runtimeNotStarted': 'The MiQroForge runtime is not running',
   'channels.globalBehavior': 'Global behavior',
   'channels.sendProgress': 'Stream progress',
-  'channels.sendProgressDesc': 'Stream the Agent\'s text progress to the channel in real time',
+  'channels.sendProgressDesc': "Stream the Agent's text progress to the channel in real time",
   'channels.sendToolHints': 'Send tool hints',
   'channels.sendToolHintsDesc': 'Stream tool-call info to the channel (e.g. read_file(...))',
   'channels.queueNotify': 'Queue notifications',
@@ -411,7 +411,8 @@ export const en: Record<I18nKey, string> = {
   'skills.nameLabel': 'Skill name',
   'skills.descLabel': 'Description (optional)',
   'skills.descPlaceholder': 'Briefly describe this skill',
-  'skills.errNameRule': 'Name must start with a letter and use only lowercase letters, digits and hyphens',
+  'skills.errNameRule':
+    'Name must start with a letter and use only lowercase letters, digits and hyphens',
   'skills.createFail': 'Create failed',
   'skills.createSaving': 'Creating...',
   'skills.createAction': 'Create',
@@ -438,7 +439,8 @@ export const en: Record<I18nKey, string> = {
   'approvals.tabHistory': 'History',
   'approvals.tabPending': 'Pending',
   'approvals.bypassTitle': 'Approval bypass mode',
-  'approvals.bypassHint': 'Skips approval dialogs when enabled. ⚡ Only applies in "Edits allowed" mode.',
+  'approvals.bypassHint':
+    'Skips approval dialogs when enabled. ⚡ Only applies in "Edits allowed" mode.',
   'approvals.bypassAll': 'Bypass all',
   'approvals.bypassControlled': '. Currently controlled by "Bypass all"',
   'approvals.saved': 'Saved',
@@ -522,7 +524,8 @@ export const en: Record<I18nKey, string> = {
   'providers.aiGateway': 'AI gateway',
   'providers.defaultModel': 'Default model',
   'providers.gwNotLoggedIn': 'Not signed in',
-  'providers.gwLoginHint': 'After signing in, model calls are routed through the platform AI gateway.',
+  'providers.gwLoginHint':
+    'After signing in, model calls are routed through the platform AI gateway.',
   'providers.gwActive': 'In use',
   'providers.gwActiveHint':
     'The current default model is routed through the platform AI gateway and counts toward your platform quota.',
@@ -530,8 +533,10 @@ export const en: Record<I18nKey, string> = {
   'providers.gwOpenHint':
     'The current default model {{model}} does not use the gateway (only {{gateway}} routes through it).',
   'providers.gwNotIssued': 'Not issued',
-  'providers.gwNotIssuedHint': 'The platform has not issued a gateway status — model calls go direct.',
-  'providers.gwBlocked': 'The AI gateway is not ready (still provisioning or unavailable) — model selection is disabled',
+  'providers.gwNotIssuedHint':
+    'The platform has not issued a gateway status — model calls go direct.',
+  'providers.gwBlocked':
+    'The AI gateway is not ready (still provisioning or unavailable) — model selection is disabled',
   'providers.viewAccount': 'View platform account',
   'providers.loginHint': 'Sign in to use the built-in platform models',
   'providers.goLogin': 'Sign in',
