@@ -109,6 +109,9 @@ interface Attachment {
   status?: 'pending' | 'parsing' | 'done' | 'error';
   /** Server-parsed text content, shown inline after send */
   parsedContent?: string;
+  /** Client-side content fingerprint (SHA-256 hex of bytes, #968 复核)：发送前
+   * 由 handleSend 预计算暂存，占位装饰 (fp:…) 与去重守卫据此区分同名异内容附件 */
+  contentFp?: string;
   /** Parse error message if status === 'error' */
   parseError?: string;
 }
@@ -188,7 +191,12 @@ interface FileChip {
   category: ReturnType<typeof getDocCategory>;
 }
 
-const IMAGE_PLACEHOLDER_RES = /\[Image:\s*([^\]]+)\]/g;
+// #968 复核（CodeRabbit #969）：图片占位符解析——两分支交替：
+// ① 带内容指纹尾 (fp:64hex) 的新装饰：以 fp 尾为锚点反推名称（名称可含 "]"，
+//    如 IMG[1].png——旧式从首个 ] 截断会把整条装饰匹配崩坏、图片恢复丢失）；
+// ② 旧版无指纹装饰：回到 [^\]]+ 语义（名称含 ] 的旧版装饰维持历史限制）。
+// 名称与装饰均不含换行，捕获用 [^\n] 限定。
+const IMAGE_PLACEHOLDER_RES = /\[Image:\s*([^\n]*?)\s*\(fp:[0-9a-f]{64}\)\]|\[Image:\s*([^\]]+)\]/g;
 
 /** Extract image attachments from the "[Image: name]" placeholder the sender
  *  embeds. dataUrl stays undefined — it is re-read from the session files dir
@@ -198,7 +206,7 @@ const IMAGE_PLACEHOLDER_RES = /\[Image:\s*([^\]]+)\]/g;
 export const INSTALL_WARNING_EVENT = 'miqi:system-install-warning';
 export type InstallWarningKind = 'persist' | 'runtime';
 function extractImageAttachmentsFromContent(content: string): Attachment[] | undefined {
-  const names = [...content.matchAll(IMAGE_PLACEHOLDER_RES)].map((m) => m[1].trim());
+  const names = [...content.matchAll(IMAGE_PLACEHOLDER_RES)].map((m) => (m[1] ?? m[2]).trim());
   if (names.length === 0) return undefined;
   return names.map((name) => ({
     name,
@@ -1369,24 +1377,229 @@ function _isPersistedCopyOf(frontendTs: number | undefined, copyTs: number | und
   return Math.abs(copyTs - frontendTs) < _PERSISTED_COPY_TS_TOLERANCE_MS;
 }
 
+// #968: 用户消息去重 key——剥离发送侧追加进 content 的装饰段。handleSend 把
+// 每类附件/重试提示都追加在 content 尾部，故这里每条规则都「尾锚定」（节头
+// 限定为字符串头或前导 \n\n、节尾锚定 $）并迭代剥离：内嵌文件正文里的 ``` 围栏
+// 或 "--- End of … ---" 行无法再提前截断惰性匹配（回溯必须抵达真正的尾部），
+// 文件名含 "]" 也由贪婪捕获的回溯容忍。若某条剥离失手（如手打的形似装饰文本），
+// 后果是 key 不相等 → 气泡与其副本并存（#968 双显示，方向安全），绝不会让
+// 不同消息的 key 意外相等而吞掉真实消息（方向危险）。
+const _DEDUP_TAIL_SECTION_RES =
+  /(?:^|\n\n)(?:\[系统提示：[^\]]*\]|\[Image: [^\n]+\]|\[File: [^\n]+\]\n```\n[\s\S]*?\n```|--- Document: [^\n]+ ---\n[\s\S]*?\n--- End of [^\n]+ ---|\[[^\n]+?: [^\]]*?(?:scanned PDF|binary file|parsing on server)[^\]]*\])\s*$/;
+
+function _userContentDedupKey(content: string): string {
+  let s = content;
+  let prev: string;
+  do {
+    prev = s;
+    s = s.replace(_DEDUP_TAIL_SECTION_RES, '');
+  } while (s !== prev);
+  // 无文本纯附件发送：乐观气泡显示 '(attachment)' 占位符，落库副本剥离装饰后
+  // 为空串——两侧统一映射到空串才能互认（#968 复核）。
+  const trimmed = s.trim();
+  return trimmed === '(attachment)' ? '' : trimmed;
+}
+
+// #968 复核（CodeRabbit #969）：文档附件内容解码的单一实现——handleSend 拼
+// Document 装饰段与去重守卫校验内容都用它，避免两侧解码逻辑漂移（ext 白名单、
+// atob/TextDecoder/extractPdfText 与 50k 截断必须完全一致，守卫才能逐字比对）。
+function _decodeDocData(dataBase64: string, name: string): { extracted: string; ext: string } {
+  const raw = Uint8Array.from(atob(dataBase64), (c) => c.charCodeAt(0));
+  const ext = name.split('.').pop()?.toLowerCase() ?? '';
+  let extracted = '';
+  if (ext === 'pdf') {
+    extracted = extractPdfText(raw.buffer);
+  } else if (
+    ext === 'md' ||
+    ext === 'markdown' ||
+    ext === 'mdown' ||
+    ext === 'txt' ||
+    ext === 'text' ||
+    ext === 'html' ||
+    ext === 'htm' ||
+    ext === 'csv' ||
+    ext === 'json' ||
+    ext === 'yaml' ||
+    ext === 'yml' ||
+    ext === 'xml' ||
+    ext === 'env' ||
+    ext === 'log' ||
+    ext === 'sql' ||
+    ext === 'ini' ||
+    ext === 'toml' ||
+    ext === 'htaccess' ||
+    ext === 'sh' ||
+    ext === 'bash'
+  ) {
+    extracted = new TextDecoder().decode(raw);
+  }
+  return { extracted, ext };
+}
+
+export async function _sha256HexOfBytes(bytes: Uint8Array<ArrayBuffer>): Promise<string> {
+  const digest = await crypto.subtle.digest('SHA-256', bytes);
+  return Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+// #968 复核（CodeRabbit #969）：附件内容指纹——全量 SHA-256（采样首尾会被
+// 「同名同首尾、仅中段不同」的附件构造性绕过）。渲染线程没有同步摘要，故：
+// 发送前由 handleSend 在 await 段调用本函数预计算，结果暂存到附件
+// contentFp 并写进装饰 (fp:…)（doc 占位/图片）；守卫侧只比对暂存值（load()
+// 合并是同步路径，不能做摘要）。atob 解码失败会抛错，由调用方捕获（fp 缺失
+// → 装饰无指纹 → 守卫不认领，方向安全）。图片 dataUrl 不是纯 base64
+// （data:image/…;base64, 前缀），走 _sha256HexOfText 直接哈希整个字符串。
+export async function _sha256HexOfBase64(dataBase64: string): Promise<string> {
+  // new Uint8Array(…) 拷贝定型为 Uint8Array<ArrayBuffer>（TS 5.7 泛型数组：
+  // Uint8Array.from 返回 ArrayBufferLike，不满足 BufferSource）
+  const raw = new Uint8Array(Uint8Array.from(atob(dataBase64), (c) => c.charCodeAt(0)));
+  return _sha256HexOfBytes(raw);
+}
+
+export async function _sha256HexOfText(text: string): Promise<string> {
+  return _sha256HexOfBytes(new TextEncoder().encode(text));
+}
+
+// #968 复核：附件装饰内容守卫。key 会把装饰段（含嵌入的文件内容）整体剥掉，
+// 「同文本 + 同附件名」的消息 key 必然碰撞，名字级校验不足以区分内容差异
+// （CodeRabbit #969：同文本 + main.py 但 print(1)/print(2) 两种内容时，旧副本
+// 会误认领新气泡 → 新消息被吞）。守卫采用「签名计数」语义：每条 live 附件
+// 换算成一条唯一装饰签名（相同签名 = 同名字同内容/同指纹的重复附件），持久化
+// 副本里每种签名的出现次数必须 ≥ live 条数——一条装饰只认领一个附件，杜绝
+// 重复附件共用同一条旧装饰（CodeRabbit #969 round 2：30s 内先发 1 张图再发
+// 同文本 2 张相同图时，1 条装饰的旧副本会误认领 2 附件气泡 → 吞真实消息）。
+// - text：payload 原样嵌入 att.content → 签名 = 完整 `[File: name]\n```\n
+//   ${content}\n```` 段（逐字，含围栏锚点，长度/重叠不误判）
+// - document：`--- Document: name ---` 块正文须与 att.dataBase64 重新解码结果
+//   （同一 _decodeDocData，50k 截断一致）逐字相等，签名 = 完整块；占位装饰
+//   （扫描/二进制/解析失败）无法构造完整文本 → 按 [name: 前缀定位、逐段数
+//   (fp:contentFp) 出现次数
+// - image：签名 = `[Image: name (fp:hex)]` 完整装饰（字节不走 content，内容
+//   以发送侧预计算的全量 SHA-256 指纹代偿）
+// 任一签名次数不足 / 无法换算（无指纹、空内容、解码失败）→ 一律不认领
+// （方向安全：可能双显示，绝不吞消息）。
+function _countOccurrences(haystack: string, needle: string): number {
+  let n = 0;
+  let from = 0;
+  for (;;) {
+    const i = haystack.indexOf(needle, from);
+    if (i < 0) return n;
+    n += 1;
+    from = i + needle.length;
+  }
+}
+
+// 数 [name: 前缀占位中出现指定 fp 的段数。收尾 ] 从段头+长度起找（文件名可含
+// ]，report].pdf 不会在文件名内部截断，CodeRabbit #969 Minor）；畸形段（无
+// 收尾/超长）跳过。
+function _countPlaceholderFp(pmContent: string, name: string, fp: string): number {
+  const ph = `[${name}: `;
+  let n = 0;
+  let searchFrom = 0;
+  for (;;) {
+    const phIdx = pmContent.indexOf(ph, searchFrom);
+    if (phIdx < 0) return n;
+    const closeIdx = pmContent.indexOf(']', phIdx + ph.length);
+    if (closeIdx >= 0 && closeIdx - phIdx <= 400) {
+      const seg = pmContent.slice(phIdx, closeIdx + 1);
+      if (seg.includes(`(fp:${fp})`)) n += 1;
+    }
+    searchFrom = phIdx + ph.length;
+  }
+}
+
+function _persistedCoversAttachments(
+  pmContent: string,
+  attachments: Attachment[] | undefined
+): boolean {
+  if (!attachments || attachments.length === 0) return true;
+  const need = new Map<string, number>();
+  const fpNeed = new Map<string, number>(); // `name|fp` → 需要条数（占位装饰）
+  for (const a of attachments) {
+    switch (a.type) {
+      case 'image': {
+        // 无指纹旧版 live 附件无法验证内容 → 不认领（方向安全）
+        if (!a.contentFp) return false;
+        const sig = `[Image: ${a.name} (fp:${a.contentFp})]`;
+        need.set(sig, (need.get(sig) ?? 0) + 1);
+        break;
+      }
+      case 'text': {
+        const c = a.content ?? '';
+        if (!c) return false;
+        const sig = `[File: ${a.name}]\n\`\`\`\n${c}\n\`\`\``;
+        need.set(sig, (need.get(sig) ?? 0) + 1);
+        break;
+      }
+      case 'document': {
+        const blockOpen = `--- Document: ${a.name} ---`;
+        if (pmContent.includes(blockOpen)) {
+          // Document 块嵌内容 → 内容必须逐字一致才认领（CodeRabbit #969）
+          if (!a.dataBase64) return false;
+          try {
+            const { extracted } = _decodeDocData(a.dataBase64, a.name);
+            const body = extracted && extracted.trim() ? extracted.slice(0, 50000) : '';
+            if (!body) return false; // 空提取发送侧会走占位分支，不应出现块
+            const sig = `${blockOpen}\n${body}\n--- End of ${a.name} ---`;
+            need.set(sig, (need.get(sig) ?? 0) + 1);
+          } catch {
+            return false; // 解码异常 → 发送侧走占位分支，不可能有 Document 块
+          }
+        } else {
+          // 占位装饰：同名不同字节的不可提取文档生成相同占位 + 各自 (fp:…)，
+          // 按 name+fp 分组数出现条数（同名字同 fp 的重复附件不得共用一条）。
+          // key 分隔符用 \x1f（任何 OS 文件名都不合法），避免文件名含 | 解析错位。
+          if (!a.contentFp) return false;
+          const key = `${a.name}\x1f${a.contentFp}`;
+          fpNeed.set(key, (fpNeed.get(key) ?? 0) + 1);
+        }
+        break;
+      }
+      default:
+        // 未知/未来扩展类型（audio/video/archive/…）无法验证内容 → 不认领。
+        // 与全守卫「宁可双显、绝不吞消息」的安全方向一致：若扩展 attachment type
+        // 而漏补分支，仅凭 key（文本+时间+文件名）认领可能吞掉真实新消息。
+        return false;
+    }
+  }
+  for (const [sig, n] of need) {
+    if (_countOccurrences(pmContent, sig) < n) return false;
+  }
+  for (const [key, n] of fpNeed) {
+    const sep = key.indexOf('\x1f');
+    const name = key.slice(0, sep);
+    const fp = key.slice(sep + 1);
+    if (_countPlaceholderFp(pmContent, name, fp) < n) return false;
+  }
+  return true;
+}
+
 // #891 深度审阅 #11：删 flag 门控与保留块须用同一匹配（两处不再手写漂移）。
-// 唯一匹配改为一对一：merged 里每条持久化用户行只认领最早一条同内容、时间相近
+// 唯一匹配改为一对一：merged 里每条持久化用户行只认领最早一条同 key、时间相近
 // 的乐观气泡。此前 .some() 会让同一条持久化副本同时满足多条相同文本的气泡——
 // 用户 30s 内两次发送同一句、恢复快照时第二条尚未落盘，两条都会被误判为已持久
 // 化而漏掉第二条。返回数组与 frontend 等长：matched[i]===true 表示该条乐观气泡
-// 已有专属持久化副本。
-function _markUserTwinMatches(frontend: Message[], merged: Message[]): boolean[] {
+// 已有专属持久化副本。匹配条件（按代价排序）：①时间相近 O(1) ②归一化 key（#968，
+// key 惰性缓存、每行只算一次——load() 在 UI 线程跑，避免每对候选做全文正则）
+// ③附件装饰名守卫（#968 复核：图片/文本/文档三类都查，见 _persistedCoversAttachments）。内容比对经 _userContentDedupKey 归一化（#968）。
+export function _markUserTwinMatches(frontend: Message[], merged: Message[]): boolean[] {
   const matched = new Array<boolean>(frontend.length).fill(false);
+  const keyCache = new Array<string | undefined>(frontend.length).fill(undefined);
   for (const pm of merged) {
     if (pm.role !== 'user') continue;
-    const idx = frontend.findIndex(
-      (m, i) =>
-        !matched[i] &&
-        m.role === 'user' &&
-        String(pm.content) === String(m.content) &&
-        _isPersistedCopyOf(m.timestamp, pm.timestamp)
-    );
-    if (idx >= 0) matched[idx] = true;
+    const pmContent = String(pm.content ?? '');
+    const pmKey = _userContentDedupKey(pmContent);
+    for (let i = 0; i < frontend.length; i += 1) {
+      if (matched[i]) continue;
+      const m = frontend[i];
+      if (m.role !== 'user') continue;
+      // 时间门控最先（O(1)）——内容剥离是 O(content)，只对时间相近的候选执行
+      if (!_isPersistedCopyOf(m.timestamp, pm.timestamp)) continue;
+      if (keyCache[i] === undefined) keyCache[i] = _userContentDedupKey(String(m.content ?? ''));
+      if (keyCache[i] !== pmKey) continue;
+      if (!_persistedCoversAttachments(pmContent, m.attachments)) continue;
+      matched[i] = true;
+      break;
+    }
   }
   return matched;
 }
@@ -4267,55 +4480,58 @@ export function ChatConsole({
 
     let content = text + retryHint;
 
+    // #968 复核（CodeRabbit #969）：先为 document 附件预计算全量 SHA-256 内容
+    // 指纹并暂存到附件（contentFp）——渲染线程无同步摘要，只能在此 await 段算；
+    // 拼装饰与去重守卫都读暂存值（守卫在 load() 同步合并路径，不能做摘要）。
+    // 重试回合的附件已带 contentFp → 跳过重算。解码失败 → fp 缺失 → 占位无指纹
+    // → 守卫不认领（方向安全）。
+    for (const att of atts) {
+      if (att.type === 'document' && att.dataBase64 && !att.contentFp) {
+        try {
+          att.contentFp = await _sha256HexOfBase64(att.dataBase64);
+        } catch {
+          /* 保留 undefined */
+        }
+      } else if (att.type === 'image' && att.dataUrl && !att.contentFp) {
+        // 图片字节以 dataUrl 形式存在（#968 复核 CodeRabbit #969）：装饰只带
+        // 文件名无法区分同名异字节，同样预计算指纹写进 [Image: name (fp:…)]
+        try {
+          att.contentFp = await _sha256HexOfText(att.dataUrl);
+        } catch {
+          /* 保留 undefined */
+        }
+      }
+    }
+
     // Build message content with embedded document text
     for (const att of atts) {
       if (att.type === 'text' && att.content) {
         content += `\n\n[File: ${att.name}]\n\`\`\`\n${att.content}\n\`\`\``;
       } else if (att.type === 'image' && att.dataUrl) {
-        content += `\n\n[Image: ${att.name}]`;
+        // 图片装饰内嵌内容指纹 (fp:…)（CodeRabbit #969）——同名异字节图片
+        // 不得互认；IMAGE_PLACEHOLDER_RES 名称解析已容忍该尾（向后兼容）
+        const fpTag = att.contentFp ? ` (fp:${att.contentFp})` : '';
+        content += `\n\n[Image: ${att.name}${fpTag}]`;
       } else if (att.type === 'document' && att.dataBase64) {
-        // Decode and extract text client-side
+        // Decode and extract text client-side（解码逻辑与去重守卫共用 _decodeDocData，
+        // 见上——守卫需按相同规则重解以逐字校验内容，单一实现防漂移 #968 复核）
         try {
-          const raw = Uint8Array.from(atob(att.dataBase64), (c) => c.charCodeAt(0));
-          let extracted = '';
-          const ext = att.name.split('.').pop()?.toLowerCase() ?? '';
-
-          if (ext === 'pdf') {
-            extracted = extractPdfText(raw.buffer);
-          } else if (
-            ext === 'md' ||
-            ext === 'markdown' ||
-            ext === 'mdown' ||
-            ext === 'txt' ||
-            ext === 'text' ||
-            ext === 'html' ||
-            ext === 'htm' ||
-            ext === 'csv' ||
-            ext === 'json' ||
-            ext === 'yaml' ||
-            ext === 'yml' ||
-            ext === 'xml' ||
-            ext === 'env' ||
-            ext === 'log' ||
-            ext === 'sql' ||
-            ext === 'ini' ||
-            ext === 'toml' ||
-            ext === 'htaccess' ||
-            ext === 'sh' ||
-            ext === 'bash'
-          ) {
-            extracted = new TextDecoder().decode(raw);
-          }
-
+          const { extracted, ext } = _decodeDocData(att.dataBase64, att.name);
           if (extracted && extracted.trim()) {
             content += `\n\n--- Document: ${att.name} ---\n${extracted.slice(0, 50000)}\n--- End of ${att.name} ---`;
-          } else if (ext === 'pdf') {
-            content += `\n\n[${att.name}: scanned PDF — OCR will be attempted by the server]`;
           } else {
-            content += `\n\n[${att.name}: binary file, server will parse]`;
+            // 占位装饰内嵌内容指纹 (fp:…) —— 守卫按指纹区分同名不同内容的附件
+            //（CodeRabbit #969）；key 剥离的占位规则仍可整段移除。
+            const fpTag = att.contentFp ? ` (fp:${att.contentFp})` : '';
+            if (ext === 'pdf') {
+              content += `\n\n[${att.name}: scanned PDF${fpTag} — OCR will be attempted by the server]`;
+            } else {
+              content += `\n\n[${att.name}: binary file, server will parse${fpTag}]`;
+            }
           }
         } catch {
-          content += `\n\n[${att.name}: ${formatFileSize(att.size)} — parsing on server]`;
+          const fpTag = att.contentFp ? ` (fp:${att.contentFp})` : '';
+          content += `\n\n[${att.name}: ${formatFileSize(att.size)} — parsing on server${fpTag}]`;
         }
       }
     }
