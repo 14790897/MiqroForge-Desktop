@@ -8,10 +8,12 @@ export function getConfigDir(): string {
   return miqiHome ? miqiHome : join(homedir(), '.miqi');
 }
 
+/** Path to the config JSON file (inside the MIQI_HOME config dir). */
 export function getConfigPath(): string {
   return join(getConfigDir(), 'config.json');
 }
 
+/** Read and parse the local config JSON, returning `{}` when absent or malformed. */
 export function readLocalConfig(): Record<string, unknown> {
   const configPath = getConfigPath();
   try {
@@ -23,6 +25,7 @@ export function readLocalConfig(): Record<string, unknown> {
   }
 }
 
+/** Resolve the configured workspace root (default `~/.miqi/workspace`, rebased to MIQI_HOME). */
 export function getWorkspacePath(): string {
   const config = readLocalConfig();
   const agents = (config['agents'] as Record<string, unknown> | undefined) ?? {};
