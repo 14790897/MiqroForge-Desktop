@@ -682,3 +682,44 @@ async def test_create_pdf_content_path_refuses_outside(tmp_path):
     )
     assert "Error:" in result
     assert "不在" in result
+
+
+@pytest.mark.asyncio
+async def test_create_pdf_content_path_long_table_separator(tmp_path):
+    """CreatePdfTool: 分隔行单元格 >=3 个短横线（| ---- |）也必须跳过，不得渲染成数据行。"""
+    from miqi.documents.pdf_create_tool import _md_to_blocks
+
+    blocks = _md_to_blocks("| 姓名 | 年龄 |\n| ---- | ---- |\n| 张三 | 28 |\n")
+    assert [b["type"] for b in blocks] == ["table"]
+    assert blocks[0]["headers"] == ["姓名", "年龄"]
+    assert blocks[0]["rows"] == [["张三", "28"]]
+
+
+@pytest.mark.asyncio
+async def test_create_pdf_content_path_code_fence_separated(tmp_path):
+    """CreatePdfTool: 围栏代码块必须与相邻叙述分段，不得被合并进同一段落。"""
+    from miqi.documents.pdf_create_tool import _md_to_blocks
+
+    blocks = _md_to_blocks("前一段\n```\nprint(1)\n```\n后一段\n")
+    assert [b["text"] for b in blocks] == ["前一段", "print(1)", "后一段"]
+
+
+@pytest.mark.asyncio
+async def test_create_pdf_content_path_rerenders_after_source_change(tmp_path):
+    """CreatePdfTool: 源稿 30 秒内改写后同名再渲染，必须重渲染而非返回旧 PDF。"""
+    from miqi.documents.pdf_create_tool import CreatePdfTool
+
+    src = tmp_path / "report.md"
+    src.write_text("# 第一版\n\n旧内容标记AAA。\n", encoding="utf-8")
+    tool = CreatePdfTool(workspace=tmp_path, allowed_dir=tmp_path)
+    assert "Created:" in await tool.execute(filename="dedup.pdf", content_path=src.name)
+
+    src.write_text("# 第二版\n\n新内容标记BBB。\n", encoding="utf-8")
+    assert "Created:" in await tool.execute(filename="dedup.pdf", content_path=src.name)
+
+    import pymupdf
+    doc = pymupdf.open(str(tmp_path / "dedup.pdf"))
+    text = "".join(p.get_text() for p in doc)
+    doc.close()
+    assert "BBB" in text
+    assert "AAA" not in text

@@ -506,7 +506,7 @@ def _build_pdf(
 
 _MD_HEAD_RE = re.compile(r"^(#{1,6})\s+(.*)$")
 _MD_LISTITEM_RE = re.compile(r"^([-\*]|\d+\.)\s+(.*)$")
-_MD_TBL_SEP_RE = re.compile(r"^:?-{1,3}:?$")
+_MD_TBL_SEP_RE = re.compile(r"^:?-{3,}:?$")
 _MD_IMG_RE = re.compile(r"^!\[([^\]]*)\]")
 
 
@@ -514,14 +514,16 @@ def _md_to_blocks(text: str) -> list[dict[str, Any]]:
     """最小 Markdown → 内容块转换（专供 content_path 直渲源稿）。
 
     支持：# / ## / ### 标题、段落、连续 -/*/数字 列表、连续 | 表格行、
-    > 引用（按段落处理）、代码围栏（内容按段落处理）、图片行
-    （SVG/PNG 无法内嵌，保留"图表：xx（见源稿）"占位，不丢结构）。
-    表格分隔行（|---|）自动跳过。不做完整 md 渲染——仅恢复结构骨架。
+    > 引用（按段落处理）、代码围栏（内容按独立段落处理，不与相邻叙述合并）、
+    图片行（SVG/PNG 无法内嵌，保留"图表：xx（见源稿）"占位，不丢结构）。
+    表格分隔行（|---|，单元格至少 3 个短横线）自动跳过。
+    不做完整 md 渲染——仅恢复结构骨架。
     已知极限：多行代码围栏按空格拼接、行内代码换行丢失；连续引用行拆为独立段落；
     嵌套/缩进列表拍平；内联粗体/斜体由 reportlab 原样输出。
     """
     blocks: list[dict[str, Any]] = []
     paragraph: list[str] = []
+    code_lines: list[str] = []
     list_items: list[str] = []
     table_rows: list[list[str]] = []
     in_code = False
@@ -531,6 +533,14 @@ def _md_to_blocks(text: str) -> list[dict[str, Any]]:
         if paragraph:
             txt = " ".join(x.strip() for x in paragraph).strip()
             paragraph = []
+            if txt:
+                blocks.append({"type": "paragraph", "text": txt})
+
+    def flush_code() -> None:
+        nonlocal code_lines
+        if code_lines:
+            txt = " ".join(x.strip() for x in code_lines).strip()
+            code_lines = []
             if txt:
                 blocks.append({"type": "paragraph", "text": txt})
 
@@ -554,10 +564,17 @@ def _md_to_blocks(text: str) -> list[dict[str, Any]]:
     for raw in text.splitlines():
         line = raw.strip()
         if line.startswith("```"):
+            # 开/闭围栏都要先闭合正文缓冲，否则代码块会与相邻叙述合并成一段
+            if in_code:
+                flush_code()
+            else:
+                flush_paragraph()
+                flush_list()
+                flush_table()
             in_code = not in_code
             continue
         if in_code:
-            paragraph.append(line)
+            code_lines.append(line)
             continue
         if not line:
             flush_paragraph()
@@ -604,6 +621,7 @@ def _md_to_blocks(text: str) -> list[dict[str, Any]]:
         paragraph.append(line)
 
     flush_paragraph()
+    flush_code()
     flush_list()
     flush_table()
     return blocks
@@ -790,7 +808,8 @@ class CreatePdfTool(Tool):
 
         # Dedup: if the same file was already created within the past 30 seconds,
         # the AI likely called create_pdf twice — skip the duplicate.
-        if file_path.exists():
+        # content_path 例外：源稿文件可能在 30 秒内被改写，按同名跳过会返回旧 PDF。
+        if file_path.exists() and not content_path:
             age = (time.time() - file_path.stat().st_mtime)
             if age < 30:
                 _persist_tracked_file(self._workspace, file_path, op="write", session_key=_sess_key)
