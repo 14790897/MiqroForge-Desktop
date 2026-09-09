@@ -19,6 +19,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from miqi.agent.tools.shell import ExecTool
+from miqi.execution.orchestrator import ToolExecutionContext, ToolOrchestrator
 from miqi.execution.sandbox_policy import SandboxSelection, SandboxType
 from miqi.protocol.permissions import (
     FileSystemAccessMode,
@@ -337,3 +338,107 @@ class TestNoHostFallback:
         )
         binds = sandbox.run_command_streaming.await_args.kwargs["extra_rw_binds"]
         assert str(out_dir) not in binds
+
+
+# ── #984 R2: the harness owns ``_user_roots`` ────────────────────────────
+
+
+class _RecordingTool:
+    """Records the kwargs ToolOrchestrator._execute_in_sandbox injects."""
+
+    name = "write_file"
+    parameters = {"type": "object", "properties": {"path": {"type": "string"}}}
+
+    def __init__(self) -> None:
+        self.last_kwargs: dict | None = None
+
+    async def execute(self, **kwargs) -> str:
+        self.last_kwargs = dict(kwargs)
+        return "ok"
+
+
+class _Registry:
+    def __init__(self, tool: _RecordingTool) -> None:
+        self._tool = tool
+
+    def get(self, name: str) -> _RecordingTool:
+        return self._tool
+
+
+def _orchestrator(tool: _RecordingTool) -> ToolOrchestrator:
+    return ToolOrchestrator(
+        permission_engine=MagicMock(),
+        sandbox_engine=MagicMock(),
+        hook_runtime=MagicMock(),
+        tool_registry=_Registry(tool),
+        event_emitter=MagicMock(),
+    )
+
+
+def _ctx(arguments: dict, roots: list[str], tool_name: str = "write_file"):
+    return ToolExecutionContext(
+        tool_name=tool_name,
+        tool_call_id="c1",
+        arguments=arguments,
+        turn_id="t1",
+        thread_id="th1",
+        agent_type="primary",
+        user_mentioned_roots=roots,
+    )
+
+
+class TestUserRootsOwnership:
+    """``_user_roots`` is injected by the harness, never by the model.
+
+    It is in no tool schema, and object validation only walks declared keys
+    (base.py:112-114), so a model-authored ``_user_roots`` would otherwise
+    ride through ``ctx.arguments`` and re-open the write boundary the turn's
+    sensed roots are meant to gate.
+    """
+
+    @pytest.mark.asyncio
+    async def test_model_supplied_roots_dropped_when_turn_has_none(self) -> None:
+        tool = _RecordingTool()
+        ctx = _ctx(
+            {
+                "path": "C:/Users/me/Documents/report.md",
+                "_user_roots": ["C:/Users/me/Documents"],
+            },
+            roots=[],
+        )
+        await _orchestrator(tool)._execute_in_sandbox(
+            ctx, _selection(SandboxType.BWRAP),
+        )
+        assert tool.last_kwargs is not None
+        assert tool.last_kwargs["_user_roots"] == []
+
+    @pytest.mark.asyncio
+    async def test_harness_roots_win_over_model_supplied(self) -> None:
+        tool = _RecordingTool()
+        ctx = _ctx(
+            {
+                "path": "C:/Users/me/Desktop/out/report.md",
+                "_user_roots": ["C:/Users/me/Documents"],
+            },
+            roots=["C:/Users/me/Desktop/out"],
+        )
+        await _orchestrator(tool)._execute_in_sandbox(
+            ctx, _selection(SandboxType.BWRAP),
+        )
+        assert tool.last_kwargs is not None
+        assert tool.last_kwargs["_user_roots"] == ["C:/Users/me/Desktop/out"]
+
+    @pytest.mark.asyncio
+    async def test_model_supplied_roots_dropped_for_non_file_tools(self) -> None:
+        """The strip is unconditional — no tool name keeps a model-authored root."""
+        tool = _RecordingTool()
+        ctx = _ctx(
+            {"text": "hi", "_user_roots": ["C:/Users/me/Documents"]},
+            roots=[],
+            tool_name="message",
+        )
+        await _orchestrator(tool)._execute_in_sandbox(
+            ctx, _selection(SandboxType.BWRAP),
+        )
+        assert tool.last_kwargs is not None
+        assert "_user_roots" not in tool.last_kwargs

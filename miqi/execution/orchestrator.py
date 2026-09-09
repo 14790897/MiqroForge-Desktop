@@ -903,6 +903,14 @@ class ToolOrchestrator:
         # normally RESTRICTED.  Injecting even NONE is future-proofing
         # for tool-body sandbox enforcement and auditing.
         kwargs = {**ctx.arguments}
+        # #984 (R2): ``_user_roots`` is a harness-owned channel — it appears in
+        # no tool schema, and object validation only walks declared keys
+        # (base.py:112-114), so a model-supplied value would ride through
+        # ``ctx.arguments`` and re-open the write boundary this turn's sensed
+        # roots are meant to gate.  Drop it first, then inject the harness
+        # value below — empty list included, so "no roots this turn" is an
+        # explicit harness answer instead of a fall-through to the model's list.
+        kwargs.pop("_user_roots", None)
         if ctx.tool_name == "exec" or ctx.tool_name in _FILE_MUTATION_TOOLS:
             kwargs["_sandbox"] = sandbox
             # _session_key already includes client_id prefix (e.g. "miqi-desktop:desktop:xxx")
@@ -910,8 +918,7 @@ class ToolOrchestrator:
             # #821: auto-sensed user-mentioned output dirs — mirrors the KUN
             # tool host injection so file tools accept the user's explicitly
             # requested output location (e.g. Desktop/test_result).
-            if ctx.user_mentioned_roots:
-                kwargs["_user_roots"] = list(ctx.user_mentioned_roots)
+            kwargs["_user_roots"] = list(ctx.user_mentioned_roots or [])
         elif ctx.tool_name.startswith("mcp_"):
             # MCP 工具（issue #927）：注入会话上下文供 slurm 计费握手使用
             #（MCPToolWrapper 会 pop 掉，不传给 MCP 服务端）。

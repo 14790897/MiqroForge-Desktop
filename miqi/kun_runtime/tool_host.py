@@ -211,6 +211,13 @@ class MiQiToolHost:
                 args = json.loads(args)
             except (json.JSONDecodeError, ValueError):
                 args = {}
+        # #984 (R2): ``_user_roots`` is a harness-owned channel — it appears in
+        # no tool schema, and unknown keys pass validation (base.py:112-114),
+        # so a model-supplied copy would otherwise reach the tool verbatim (and
+        # collide with the injected kwarg in ``execute(**args, **extra)``).
+        # Drop it here; the harness value is injected below, empty list included.
+        if isinstance(args, dict):
+            args = {k: v for k, v in args.items() if k != "_user_roots"}
 
         if context.await_approval is not None and _requires_approval(tool_name, context.approval_policy):
             decision = await context.await_approval({
@@ -356,9 +363,11 @@ class MiQiToolHost:
             # User-mentioned output dirs (issue #821): pass the turn's
             # auto-sensed roots to file tools so the user's explicitly
             # requested output location (e.g. Desktop/test_result) works
-            # without static tools.extra_roots config.
-            if tool_name in _USER_ROOTS_TOOLS and context.user_mentioned_roots:
-                extra["_user_roots"] = list(context.user_mentioned_roots)
+            # without static tools.extra_roots config.  #984 (R2): injected
+            # unconditionally (empty list included) and after the model's copy
+            # has been stripped — same contract as the legacy orchestrator.
+            if tool_name in _USER_ROOTS_TOOLS:
+                extra["_user_roots"] = list(context.user_mentioned_roots or [])
             # Reasoning mode (issue #680): hand the fast-mode search strategy
             # to web_search so it can fan out (parallel queries + fetches).
             if tool_name == "web_search" and context.search_strategy is not None:
