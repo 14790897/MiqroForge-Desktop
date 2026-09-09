@@ -48,6 +48,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
 
+from loguru import logger
+
 # ── 限额（v6.2 §5.1）────────────────────────────────────────────────────────
 
 # 最终文件累计字节上限。
@@ -428,12 +430,15 @@ def sanitize_name(name: str) -> str:
     return cleaned
 
 
-def resolve_downloads_dir(base_workspace: Path, session_key: str) -> Path:
-    """会话落盘根（v6.2 §R1）：复用 filesystem 的会话目录权威逻辑。
+_DOWNLOADS_RELDIR = Path(".miqi") / "downloads"
 
-    默认 workspace → ``<ws>/sessions/<safe_key>/files/.miqi/downloads``
-    （文件工具合法根内，模型可直接读/搬，不跨会话互见）；自选项目目录 /
-    空 session_key → ``<ws>/.miqi/downloads``。**不在此文件自创目录算法**。
+
+def _downloads_root_base(base_workspace: Path, session_key: str) -> Path:
+    """会话落盘与 tracked 登记的共同根：会话 files 目录 / 工作区根。
+
+    默认 workspace → ``<ws>/sessions/<safe_key>/files``（文件工具合法根，
+    模型可直接读/搬，不跨会话互见）；自选项目目录 / 空 session_key →
+    ``<base_workspace>``。**不在此文件自创目录算法**。
     """
     from miqi.agent.tools.filesystem import _session_files_dir_for_key
 
@@ -441,7 +446,17 @@ def resolve_downloads_dir(base_workspace: Path, session_key: str) -> Path:
     base = session_files_dir if session_files_dir is not None else base_workspace
     if base is None:
         raise DownloadPathError("下载失败：会话工作区不可用（workspace 为空）。")
-    return base / ".miqi" / "downloads"
+    return base
+
+
+def resolve_downloads_dir(base_workspace: Path, session_key: str) -> Path:
+    """会话落盘根（v6.2 §R1）：复用 filesystem 的会话目录权威逻辑。
+
+    默认 workspace → ``<ws>/sessions/<safe_key>/files/.miqi/downloads``
+    （文件工具合法根内，模型可直接读/搬，不跨会话互见）；自选项目目录 /
+    空 session_key → ``<ws>/.miqi/downloads``。**不在此文件自创目录算法**。
+    """
+    return _downloads_root_base(base_workspace, session_key) / _DOWNLOADS_RELDIR
 
 
 def _ensure_contained(root: Path, target: Path) -> Path:
@@ -882,7 +897,11 @@ class DownloadSink:
         解析在事件循环内（纯 CPU 且受 16MiB 门保护）；decode/写盘在
         ``asyncio.to_thread``——大文件不阻塞主循环。
         """
-        downloads_dir = resolve_downloads_dir(self._base_workspace, session_key)
+        # 落盘根与 tracked 登记根同源（#983 缺口 2）：tracking_base 是会话
+        # files 目录（默认工作区）或工作区根，条目键即 ``.miqi/downloads/<name>``，
+        # 面板 ``files.read`` 能按同一根解析到产物。
+        tracking_base = _downloads_root_base(self._base_workspace, session_key)
+        downloads_dir = tracking_base / _DOWNLOADS_RELDIR
         self._sweep_stale_once(downloads_dir)
 
         parsed = parse_mcp_result(result)
@@ -931,17 +950,45 @@ class DownloadSink:
             # 命名分配临界区在工作线程内的 plan→rename 段（_NAMING_LOCK），
             # 锁外不持有任何全局互斥 → 并发下载的 decode/写盘不互相串行。
             if parsed.multi_chunk:
-                return await asyncio.to_thread(
+                artifact = await asyncio.to_thread(
                     self._accept_chunks_sync,
                     parsed=parsed, identity=identity,
                     downloads_dir=downloads_dir,
                     turn_id=turn_id, tool_call_id=tool_call_id,
                 )
-            return await asyncio.to_thread(
-                self._materialize_single_sync,
-                parsed=parsed, identity=identity,
-                downloads_dir=downloads_dir,
-                turn_id=turn_id, tool_call_id=tool_call_id,
+            else:
+                artifact = await asyncio.to_thread(
+                    self._materialize_single_sync,
+                    parsed=parsed, identity=identity,
+                    downloads_dir=downloads_dir,
+                    turn_id=turn_id, tool_call_id=tool_call_id,
+                )
+
+        # #983 缺口 2：产物已提交 → 登记进会话 tracked（任务附件面板可见，
+        # 用户可经 #877「下载/另存为」导出）。在身份锁外执行，且登记失败
+        # 只降级为「面板看不到」，绝不把已交付的文件报成下载失败。
+        await asyncio.to_thread(self._track_delivered, artifact, tracking_base)
+        return artifact
+
+    def _track_delivered(self, artifact: DownloadArtifact, tracking_base: Path) -> None:
+        """交付成功后写 tracked_files.json（与 create_pdf 同机制）。
+
+        ``_persist_tracked_file`` 内部按 ``_tracked_store_root`` 把默认工作区下
+        的会话 files 目录剥回存储根，故条目落
+        ``<ws>/sessions/<derived_key>/tracked_files.json``（面板读端同一份）。
+        """
+        try:
+            from miqi.agent.tools.filesystem import _persist_tracked_file
+
+            _persist_tracked_file(
+                tracking_base,
+                artifact.path,
+                op="write",
+                session_key=artifact.identity.session_key,
+            )
+        except Exception as exc:  # 登记是旁路，绝不改交付结果
+            logger.warning(
+                "download artifact tracking failed: path={} err={}", artifact.path, exc
             )
 
     # ── 单包路径（C1 语义不变，拆出入参以便与分片共享身份/目录决策）──────

@@ -430,6 +430,66 @@ async def test_clear_tracked_files_namespaced_key_clears_write_path_store(tmp_pa
     assert not store.exists(), f"clear 未删到写端落盘的文件：{store}"
 
 
+# ── #983 缺口 2：DownloadSink 产物进 tracked（面板读端回路）────────────────
+
+
+@pytest.mark.asyncio
+async def test_get_tracked_files_reads_sink_delivered_artifact(tmp_path):
+    """``DownloadSink`` 交付的 MCP 下载产物必须出现在面板读端（真实 handler）。
+
+    写端：sink 落盘 → ``_persist_tracked_file``（与 create_pdf 同机制）。
+    读端：``sessions.get_tracked_files``（#1003 finding ① 归一后）必须读到，
+    且条目键是会话根相对路径 ``.miqi/downloads/<name>``——面板
+    ``files.read(path, session_key)`` 按会话 files 目录拼得到产物本身。
+    """
+    import base64
+    import hashlib
+    import json
+    from types import SimpleNamespace
+
+    from miqi.agent.tools.mcp_download_sink import DownloadSink
+    from miqi.runtime.app_server import ClientSessionRegistry
+    from miqi.runtime.session_handlers import sessions_get_tracked_files_handler
+
+    key = "desktop:983downloads"
+    sm, ws = _setup_session(key, "client-A")
+    data = b"artifact-bytes-983"
+    payload = json.dumps({
+        "name": "report.cube",
+        "size_bytes": len(data),
+        "sha256": hashlib.sha256(data).hexdigest(),
+        "content_base64": base64.b64encode(data).decode(),
+    })
+    result = SimpleNamespace(
+        isError=False, structuredContent=None,
+        content=[SimpleNamespace(text=payload)],
+    )
+
+    sink = DownloadSink(base_workspace=ws)
+    artifact = await sink.materialize(
+        result=result,
+        session_key=key,
+        server_name="miqroforge",
+        tool_name="download_file",
+        request_kwargs={"name": "report.cube"},
+        turn_id="turn-1",
+        tool_call_id="call-1",
+    )
+    assert artifact.path.read_bytes() == data
+
+    registry = ClientSessionRegistry()
+    out = await sessions_get_tracked_files_handler(
+        "req-1", {"session_key": key}, "client-A", None, registry,
+    )
+    paths = {item["path"] for item in out["result"]["tracked_files"]}
+    assert ".miqi/downloads/report.cube" in paths, paths
+    # 面板 files.read 的相对路径基准 = 会话 files 目录 → 命中的就是产物
+    from miqi.agent.tools.filesystem import _session_files_dir_key
+
+    files_dir = ws / "sessions" / _session_files_dir_key(key) / "files"
+    assert (files_dir / ".miqi/downloads/report.cube").resolve() == artifact.path.resolve()
+
+
 # ── SandboxManager client-scoped namespace ───────────────────────────────────
 
 
