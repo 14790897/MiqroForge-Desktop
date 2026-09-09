@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
+import { useTranslation } from 'react-i18next';
 import { cn } from '../../lib/utils';
 import {
   BookOpen,
@@ -30,10 +31,10 @@ import remarkGfm from 'remark-gfm';
 // ── Types ───────────────────────────────────────────────────────────────────
 type TabId = 'facts' | 'rules' | 'history';
 
-const TABS: { id: TabId; label: string; icon: LucideIcon }[] = [
-  { id: 'facts', label: '事实', icon: BookOpen },
-  { id: 'rules', label: '规则', icon: Lightbulb },
-  { id: 'history', label: '历史', icon: History },
+const TABS: { id: TabId; labelKey: string; icon: LucideIcon }[] = [
+  { id: 'facts', labelKey: 'experience.tabFacts', icon: BookOpen },
+  { id: 'rules', labelKey: 'experience.tabRules', icon: Lightbulb },
+  { id: 'history', labelKey: 'experience.tabHistory', icon: History },
 ];
 
 // ── Files helpers ───────────────────────────────────────────────────────────
@@ -45,6 +46,7 @@ import { ConfirmDialog, SaveConfirmDialog, InputDialog } from '../../components/
 
 // ── Facts Tab ────────────────────────────────────────────────────────────────
 function FactsTab() {
+  const { t } = useTranslation();
   const [files, setFiles] = useState<MemoryFileInfo[]>([]);
   const [activeFile, setActiveFile] = useState<string | null>(null);
   const [fileContent, setFileContent] = useState('');
@@ -100,14 +102,14 @@ function FactsTab() {
       if (res.saved) {
         setFileContent(editorContent);
         setDirty(false);
-        setSuccess('已保存');
+        setSuccess(t('experience.saved'));
       }
     } catch (e: any) {
-      setError(e?.message || '保存失败');
+      setError(e?.message || t('experience.saveFail'));
     } finally {
       setSaving(false);
     }
-  }, [activeFile, editorContent]);
+  }, [activeFile, editorContent, t]);
 
   const createFile = useCallback(
     async (name: string) => {
@@ -118,10 +120,10 @@ function FactsTab() {
         await loadFiles();
         selectFile(finalName);
       } catch (e: any) {
-        setError(e?.message || '创建失败');
+        setError(e?.message || t('experience.createFail'));
       }
     },
-    [loadFiles, selectFile]
+    [loadFiles, selectFile, t]
   );
 
   const deleteFile = useCallback(
@@ -136,10 +138,10 @@ function FactsTab() {
         }
         await loadFiles();
       } catch (e: any) {
-        setError(e?.message || '删除失败');
+        setError(e?.message || t('experience.deleteFail'));
       }
     },
-    [activeFile, loadFiles]
+    [activeFile, loadFiles, t]
   );
 
   const agentFiles = files.filter((f) => fileScope(f.path) === 'agent');
@@ -155,20 +157,24 @@ function FactsTab() {
             className="w-full flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-md
                        bg-[var(--accent)]/10 hover:bg-[var(--accent)]/20 text-[var(--accent)] transition-colors"
           >
-            <Plus size={14} /> 新建笔记
+            <Plus size={14} /> {t('experience.newNote')}
           </button>
         </div>
         <div className="flex-1 overflow-y-auto">
           {agentFiles.length > 0 && (
             <div>
               <div className="px-3 py-1.5 text-size-2xs font-semibold text-[var(--muted-foreground)] uppercase tracking-wider">
-                Agent 记忆
+                {t('experience.scopeAgent')}
               </div>
               {agentFiles.map((f) => (
                 <ContextMenu
                   key={f.path}
                   items={[
-                    { label: '删除', danger: true, onSelect: () => setShowDeleteConfirm(f.path) },
+                    {
+                      label: t('experience.delete'),
+                      danger: true,
+                      onSelect: () => setShowDeleteConfirm(f.path),
+                    },
                   ]}
                 >
                   {({ onContextMenu }) => (
@@ -190,13 +196,17 @@ function FactsTab() {
           {workspaceFiles.length > 0 && (
             <div>
               <div className="px-3 py-1.5 text-size-2xs font-semibold text-[var(--muted-foreground)] uppercase tracking-wider">
-                日常笔记
+                {t('experience.scopeWorkspace')}
               </div>
               {workspaceFiles.map((f) => (
                 <ContextMenu
                   key={f.path}
                   items={[
-                    { label: '删除', danger: true, onSelect: () => setShowDeleteConfirm(f.path) },
+                    {
+                      label: t('experience.delete'),
+                      danger: true,
+                      onSelect: () => setShowDeleteConfirm(f.path),
+                    },
                   ]}
                 >
                   {({ onContextMenu }) => (
@@ -217,7 +227,7 @@ function FactsTab() {
           )}
           {files.length === 0 && !loading && (
             <div className="p-4 text-xs text-[var(--muted-foreground)] text-center">
-              暂无记忆文件
+              {t('experience.noFiles')}
             </div>
           )}
         </div>
@@ -239,7 +249,7 @@ function FactsTab() {
                   setTimeout(() => setCopiedAll(false), 2000);
                 }}
                 className="p-1 rounded hover:bg-[var(--muted)]/20 text-[var(--muted-foreground)]"
-                title="拷贝全部"
+                title={t('experience.copyAllTitle')}
               >
                 {copiedAll ? (
                   <CheckCircle size={14} className="text-green-400" />
@@ -266,7 +276,7 @@ function FactsTab() {
                     : 'bg-[var(--muted)]/20 text-[var(--muted-foreground)]'
                 )}
               >
-                <Save size={12} /> {saving ? '保存中...' : '保存'}
+                <Save size={12} /> {saving ? t('experience.saving') : t('common.save')}
               </button>
             </div>
             <div className="flex-1 overflow-y-auto p-4">
@@ -283,7 +293,7 @@ function FactsTab() {
                   }}
                   className="w-full h-full min-h-[300px] bg-transparent text-sm font-mono resize-none
                              outline-none text-[var(--foreground)] placeholder:text-[var(--muted-foreground)]"
-                  placeholder="输入内容..."
+                  placeholder={t('experience.inputPlaceholder')}
                   spellCheck={false}
                 />
               )}
@@ -293,7 +303,7 @@ function FactsTab() {
           </>
         ) : (
           <div className="flex-1 flex items-center justify-center text-sm text-[var(--muted-foreground)]">
-            选择一个文件查看或编辑
+            {t('experience.selectHint')}
           </div>
         )}
       </div>
@@ -311,8 +321,8 @@ function FactsTab() {
       )}
       {showDeleteConfirm && (
         <ConfirmDialog
-          title="删除文件"
-          message={`确定要删除 "${showDeleteConfirm}" 吗？此操作不可撤销。`}
+          title={t('experience.deleteFileTitle')}
+          message={t('experience.confirmDelete', { path: showDeleteConfirm })}
           onConfirm={() => deleteFile(showDeleteConfirm)}
           onCancel={() => setShowDeleteConfirm(null)}
         />
@@ -323,8 +333,8 @@ function FactsTab() {
           onOpenChange={(o) => {
             if (!o) setShowNewFileDialog(false);
           }}
-          title="新建笔记"
-          label="文件名（如 notes.md）"
+          title={t('experience.newNote')}
+          label={t('experience.newNoteLabel')}
           onConfirm={createFile}
         />
       )}
@@ -334,6 +344,7 @@ function FactsTab() {
 
 // ── Rules Tab ────────────────────────────────────────────────────────────────
 function RulesTab() {
+  const { t } = useTranslation();
   const [entries, setEntries] = useState<ExperienceEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [expandedId, setExpandedId] = useState<string | null>(null);
@@ -397,7 +408,11 @@ function RulesTab() {
                   : 'text-[var(--muted-foreground)] hover:text-[var(--foreground)]'
               )}
             >
-              {s === 'all' ? '全部' : s === 'global' ? '全局' : '会话'}
+              {s === 'all'
+                ? t('experience.filterAll')
+                : s === 'global'
+                  ? t('experience.filterGlobal')
+                  : t('experience.filterSession')}
             </button>
           ))}
         </div>
@@ -410,7 +425,7 @@ function RulesTab() {
           <input
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
-            placeholder="搜索规则..."
+            placeholder={t('experience.searchRules')}
             className="w-[160px] pl-7 pr-3 py-1 text-xs rounded-md bg-[var(--muted)]/10 border border-[var(--border)]
                        outline-none focus:border-[var(--border-strong)]"
           />
@@ -418,7 +433,7 @@ function RulesTab() {
         <button
           onClick={load}
           className="p-1.5 rounded hover:bg-[var(--muted)]/20 text-[var(--muted-foreground)]"
-          title="刷新"
+          title={t('common.refresh')}
         >
           <RefreshCw size={14} className={loading ? 'animate-spin' : ''} />
         </button>
@@ -427,10 +442,14 @@ function RulesTab() {
       {/* Rule list */}
       <div className="flex-1 overflow-y-auto">
         {loading && entries.length === 0 && (
-          <div className="p-8 text-center text-sm text-[var(--muted-foreground)]">加载中...</div>
+          <div className="p-8 text-center text-sm text-[var(--muted-foreground)]">
+            {t('experience.loading')}
+          </div>
         )}
         {!loading && filtered.length === 0 && (
-          <div className="p-8 text-center text-sm text-[var(--muted-foreground)]">暂无规则</div>
+          <div className="p-8 text-center text-sm text-[var(--muted-foreground)]">
+            {t('experience.noRules')}
+          </div>
         )}
         {filtered.map((entry) => (
           <div key={entry.id} className="border-b border-[var(--border-subtle)] last:border-0">
@@ -474,7 +493,7 @@ function RulesTab() {
                   handleToggle(entry.id, !entry.enabled);
                 }}
                 className="p-1 rounded hover:bg-[var(--muted)]/20"
-                title={entry.enabled ? '禁用' : '启用'}
+                title={entry.enabled ? t('experience.disable') : t('experience.enable')}
               >
                 {entry.enabled ? (
                   <ToggleRight size={16} className="text-green-400" />
@@ -488,7 +507,7 @@ function RulesTab() {
                   handleDelete(entry.id);
                 }}
                 className="p-1 rounded hover:bg-red-500/10 text-[var(--muted-foreground)] hover:text-red-400"
-                title="删除"
+                title={t('experience.delete')}
               >
                 <Trash2 size={14} />
               </button>
@@ -501,17 +520,30 @@ function RulesTab() {
             {expandedId === entry.id && (
               <div className="px-4 pb-3 pl-10 space-y-1.5 text-xs">
                 <div>
-                  <span className="text-[var(--muted-foreground)]">错误行为: </span>
+                  <span className="text-[var(--muted-foreground)]">
+                    {t('experience.badAction')}
+                  </span>
                   <span className="text-red-300">{entry.metadata?.bad_action as string}</span>
                 </div>
                 <div>
-                  <span className="text-[var(--muted-foreground)]">正确行为: </span>
+                  <span className="text-[var(--muted-foreground)]">
+                    {t('experience.betterAction')}
+                  </span>
                   <span className="text-green-300">{entry.metadata?.better_action as string}</span>
                 </div>
                 <div className="flex gap-4 text-[var(--muted-foreground)]">
-                  <span>来源: {entry.source}</span>
-                  <span>范围: {entry.scope}</span>
-                  <span>命中: {(entry.metadata?.hits as number) || 0}</span>
+                  <span>
+                    {t('experience.source')}
+                    {entry.source}
+                  </span>
+                  <span>
+                    {t('experience.scope')}
+                    {entry.scope}
+                  </span>
+                  <span>
+                    {t('experience.hits')}
+                    {(entry.metadata?.hits as number) || 0}
+                  </span>
                 </div>
               </div>
             )}
@@ -524,6 +556,7 @@ function RulesTab() {
 
 // ── History Tab ──────────────────────────────────────────────────────────────
 function HistoryTab() {
+  const { t } = useTranslation();
   const [entries, setEntries] = useState<ExperienceEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [expandedId, setExpandedId] = useState<string | null>(null);
@@ -572,12 +605,12 @@ function HistoryTab() {
   const formatRelativeTime = (ts: number) => {
     const diff = Date.now() - ts * 1000;
     const mins = Math.floor(diff / 60000);
-    if (mins < 1) return '刚刚';
-    if (mins < 60) return `${mins} 分钟前`;
+    if (mins < 1) return t('relative.justNow');
+    if (mins < 60) return t('relative.minutesAgo', { count: mins });
     const hours = Math.floor(mins / 60);
-    if (hours < 24) return `${hours} 小时前`;
+    if (hours < 24) return t('relative.hoursAgo', { count: hours });
     const days = Math.floor(hours / 24);
-    return `${days} 天前`;
+    return t('relative.daysAgo', { count: days });
   };
 
   return (
@@ -595,7 +628,7 @@ function HistoryTab() {
               setSearchQuery(e.target.value);
               setPage(0);
             }}
-            placeholder="搜索历史..."
+            placeholder={t('experience.searchHistory')}
             className="w-full pl-7 pr-3 py-1.5 text-xs rounded-md bg-[var(--muted)]/10 border border-[var(--border)]
                        outline-none focus:border-[var(--border-strong)]"
           />
@@ -603,7 +636,7 @@ function HistoryTab() {
         <button
           onClick={load}
           className="p-1.5 rounded hover:bg-[var(--muted)]/20 text-[var(--muted-foreground)]"
-          title="刷新"
+          title={t('common.refresh')}
         >
           <RefreshCw size={14} className={loading ? 'animate-spin' : ''} />
         </button>
@@ -612,10 +645,14 @@ function HistoryTab() {
       {/* Trace list */}
       <div className="flex-1 overflow-y-auto">
         {loading && entries.length === 0 && (
-          <div className="p-8 text-center text-sm text-[var(--muted-foreground)]">加载中...</div>
+          <div className="p-8 text-center text-sm text-[var(--muted-foreground)]">
+            {t('experience.loading')}
+          </div>
         )}
         {!loading && pagedEntries.length === 0 && (
-          <div className="p-8 text-center text-sm text-[var(--muted-foreground)]">暂无历史记录</div>
+          <div className="p-8 text-center text-sm text-[var(--muted-foreground)]">
+            {t('experience.noHistory')}
+          </div>
         )}
         {pagedEntries.map((entry) => (
           <div key={entry.id} className="border-b border-[var(--border-subtle)] last:border-0">
@@ -707,13 +744,14 @@ function HistoryTab() {
 
 // ── ExperiencePage ───────────────────────────────────────────────────────────
 export function ExperiencePage() {
+  const { t } = useTranslation();
   const [activeTab, setActiveTab] = useState<TabId>('facts');
 
   return (
     <div className="flex flex-col h-full">
       {/* Header */}
       <div className="flex items-center gap-4 px-5 py-3 border-b border-[var(--border-subtle)] bg-[var(--surface)] flex-shrink-0">
-        <h2 className="text-lg font-semibold">经验</h2>
+        <h2 className="text-lg font-semibold">{t('experience.title')}</h2>
         {/* Tab bar */}
         <div className="flex gap-0.5 bg-[var(--muted)]/10 rounded-lg p-0.5">
           {TABS.map((tab) => (
@@ -728,7 +766,7 @@ export function ExperiencePage() {
               )}
             >
               <tab.icon size={15} />
-              {tab.label}
+              {t(tab.labelKey)}
             </button>
           ))}
         </div>
