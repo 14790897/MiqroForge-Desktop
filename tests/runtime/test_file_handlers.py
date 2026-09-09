@@ -337,6 +337,99 @@ async def test_files_accept_cross_client_rejected(fake_config, fake_provider, tm
     assert exc_info.value.code == "UNAUTHORIZED"
 
 
+# ── sessions.get_tracked_files / clear_tracked_files（#1003 finding ①）───────
+
+
+@pytest.mark.asyncio
+async def test_get_tracked_files_namespaced_key_reads_write_path_store(fake_config, fake_provider, tmp_path):
+    """三段 namespaced key：读端必须与写端解析到同一目录。
+
+    写端 ``_persist_tracked_file`` 按 ``_session_files_dir_key`` 落
+    ``sessions/desktop_983namespaced/tracked_files.json``；读端（handler）若不
+    归一就会读 ``sessions/miqi-desktop_desktop_983namespaced/`` → 空。
+    """
+    from miqi.agent.tools.filesystem import _persist_tracked_file, _session_files_dir_key
+    from miqi.runtime.app_server import AppServerError, ClientSessionRegistry
+    from miqi.runtime.session_handlers import sessions_get_tracked_files_handler
+
+    key = "miqi-desktop:desktop:983namespaced"
+    derived = _session_files_dir_key(key)
+    assert derived == "desktop_983namespaced"
+    assert derived != key.replace(":", "_")  # 三段 key 才会分叉
+
+    # 归属记录落在派生目录（sessions/desktop_983namespaced/conversation.jsonl）
+    sm, ws = _setup_session("desktop:983namespaced", "client-A")
+    files_dir = ws / "sessions" / derived / "files"
+    files_dir.mkdir(parents=True, exist_ok=True)
+    target = files_dir / "ns.md"
+    target.write_text("x", encoding="utf-8")
+    _persist_tracked_file(files_dir, target, op="write", session_key=key)
+
+    registry = ClientSessionRegistry()
+    result = await sessions_get_tracked_files_handler(
+        "req-1", {"session_key": key}, "client-A", None, registry,
+    )
+    paths = {item["path"] for item in result["result"]["tracked_files"]}
+    assert "ns.md" in paths, paths
+
+    # 归一不削弱 ownership：同一 namespaced key 换 client 仍被拒
+    with pytest.raises(AppServerError) as exc_info:
+        await sessions_get_tracked_files_handler(
+            "req-2", {"session_key": key}, "client-B", None, registry,
+        )
+    assert exc_info.value.code in ("UNAUTHORIZED", "REQUIRES_CLAIM")
+
+
+@pytest.mark.asyncio
+async def test_get_tracked_files_two_segment_key_behavior_unchanged(fake_config, fake_provider, tmp_path):
+    """两段 key（现网唯一形态）：归一为恒等，读端行为逐字不变。"""
+    from miqi.agent.tools.filesystem import _persist_tracked_file, _session_files_dir_key
+    from miqi.runtime.app_server import ClientSessionRegistry
+    from miqi.runtime.session_handlers import sessions_get_tracked_files_handler
+
+    key = "desktop:983twoseg"
+    assert _session_files_dir_key(key) == key.replace(":", "_")  # 归一恒等
+
+    sm, ws = _setup_session(key, "client-A")
+    files_dir = ws / "sessions" / _session_files_dir_key(key) / "files"
+    files_dir.mkdir(parents=True, exist_ok=True)
+    target = files_dir / "two.md"
+    target.write_text("x", encoding="utf-8")
+    _persist_tracked_file(files_dir, target, op="write", session_key=key)
+
+    registry = ClientSessionRegistry()
+    result = await sessions_get_tracked_files_handler(
+        "req-1", {"session_key": key}, "client-A", None, registry,
+    )
+    paths = {item["path"] for item in result["result"]["tracked_files"]}
+    assert "two.md" in paths, paths
+
+
+@pytest.mark.asyncio
+async def test_clear_tracked_files_namespaced_key_clears_write_path_store(fake_config, fake_provider, tmp_path):
+    """三段 namespaced key 的 clear 必须删到写端落盘的那份 tracked_files.json。"""
+    from miqi.agent.tools.filesystem import _persist_tracked_file, _session_files_dir_key
+    from miqi.runtime.app_server import ClientSessionRegistry
+    from miqi.runtime.session_handlers import sessions_clear_tracked_files_handler
+
+    key = "miqi-desktop:desktop:983clear"
+    sm, ws = _setup_session("desktop:983clear", "client-A")
+    files_dir = ws / "sessions" / _session_files_dir_key(key) / "files"
+    files_dir.mkdir(parents=True, exist_ok=True)
+    target = files_dir / "clr.md"
+    target.write_text("x", encoding="utf-8")
+    _persist_tracked_file(files_dir, target, op="write", session_key=key)
+    store = ws / "sessions" / _session_files_dir_key(key) / "tracked_files.json"
+    assert store.exists()
+
+    registry = ClientSessionRegistry()
+    result = await sessions_clear_tracked_files_handler(
+        "req-1", {"session_key": key}, "client-A", None, registry,
+    )
+    assert result["result"]["cleared"] is True
+    assert not store.exists(), f"clear 未删到写端落盘的文件：{store}"
+
+
 # ── SandboxManager client-scoped namespace ───────────────────────────────────
 
 
