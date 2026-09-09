@@ -258,7 +258,8 @@ async def test_non_desktop_channel_key_lands_in_matching_dir():
 
 @pytest.mark.asyncio
 async def test_namespaced_desktop_key_matches_two_segment_dir():
-    """desktop 两形态派生同一目录名（``_session_files_dir_key`` 幂等）。"""
+    """三段 namespaced key（``miqi-desktop:desktop:983namespaced``）剥掉
+    client_id 后，与两段 key 派生同一目录名 ``desktop_983namespaced``。"""
     ws = _default_ws()
     key = "miqi-desktop:desktop:983namespaced"
     files_dir = _session_files_dir(ws, key)
@@ -272,6 +273,30 @@ async def test_namespaced_desktop_key_matches_two_segment_dir():
     tracked = _read_tracked(ws / "sessions" / "desktop_983namespaced" / "tracked_files.json")
     assert "ns.docx" in tracked
     assert not _store_path(files_dir, key).exists()
+
+
+@pytest.mark.parametrize(
+    "key, derived",
+    [
+        pytest.param("desktop:1786807046853", "desktop_1786807046853", id="desktop"),
+        pytest.param("cli:direct", "cli_direct", id="cli_direct"),
+        pytest.param("cli:other", "cli_other", id="cli_other"),
+        pytest.param("gateway:default", "gateway_default", id="gateway_default"),
+        pytest.param("miqi-desktop:desktop:1786807046853", "desktop_1786807046853",
+                     id="namespaced"),
+        pytest.param("thread_nomap", "thread_nomap", id="no_colon"),
+    ],
+)
+def test_session_files_dir_key_is_idempotent(key, derived):
+    """不变量：``_session_files_dir_key`` 幂等 —— 把已派生的 key 再喂进来
+    返回它本身，因此调用方传原始 key 或已派生 key 都可以
+    （``_tracked_store_root`` 的目录名一致性校验依赖这一点）。
+
+    期望表照抄 #1005：两种形态不会派生出第二个会话目录。
+    """
+    once = _session_files_dir_key(key)
+    assert once == derived
+    assert _session_files_dir_key(once) == once
 
 
 # ── exec 批量追踪（shell.py：统一的第 3 个文件）────────────────────────────

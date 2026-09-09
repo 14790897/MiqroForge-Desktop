@@ -546,6 +546,10 @@ def _session_files_dir_key(session_key: str) -> str:
     ``desktop_1786...``) and keeps the whole key for two-segment channel
     keys (``desktop:1786...`` → ``desktop_1786...``) — matching the disk
     convention used by ``files.read`` and attachment saving.
+
+    Idempotent: feeding an already-derived key back in returns it
+    unchanged, so callers may pass either the raw key or a derived key
+    (``_tracked_store_root`` relies on this for its dir-name check).
     """
     from miqi.utils.helpers import safe_filename
 
