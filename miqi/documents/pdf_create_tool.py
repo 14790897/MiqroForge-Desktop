@@ -336,6 +336,7 @@ def _build_pdf(
     title_style: dict[str, Any] | None = None,
     body_style: dict[str, Any] | None = None,
     trusted_images: bool = False,
+    content_escaped: bool = False,
 ) -> None:
     """Build a PDF document using reportlab.
 
@@ -349,6 +350,13 @@ def _build_pdf(
     ``True``；模型侧 ``content`` 手写的 image 块恒为 ``False`` → 一律降级为占位
     文字 + ``logger.warning``，**不打开任何文件**。此前用块内 JSON 字段
     ``validated`` 做判据，而该字段模型可自设 → 可绕过边界读任意文件（H1 破口）。
+
+    ``content_escaped`` 是**不可由模型伪造**的转义通道（P1 修复）：文本进入
+    ``Paragraph()`` 前一律 ``_md_escape``，否则源稿/``content`` 里的 raw
+    ``<img src=...>`` 会被 reportlab paraparser 当图片标签直接打开文件，绕过
+    ``_resolve_md_image`` 的边界校验。只有 ``content_path`` 分支传 ``True``
+    （``_md_to_blocks`` 已用 ``_md_inline``/``_md_escape`` 转过，再转一次会显示
+    成字面 ``&amp;``）；用函数参数而非块内 JSON 字段，理由同 H1。
     """
     from reportlab.lib import colors
     from reportlab.lib.enums import TA_CENTER, TA_JUSTIFY, TA_LEFT, TA_RIGHT
@@ -450,11 +458,22 @@ def _build_pdf(
     frame_height = page_size[1] - doc.topMargin - doc.bottomMargin - 2 * _FRAME_PADDING_PT
     image_work_dir = Path(tempfile.mkdtemp(prefix="miqi_pdf_img_"))
 
+    def _block_text(raw: Any) -> str:
+        """块文本进 ``Paragraph()`` 前统一转义（P1：源稿/content 均属不可信输入）。
+
+        ``content_escaped=True`` 表示文本已由 ``_md_to_blocks`` 转过，跳过以免
+        显示成字面 ``&amp;``；表格单元格不走本函数（``Table`` 用 drawString，
+        不解析 XML，转义反而会显示成 ``R&amp;D``）。
+        """
+        text = str(raw)
+        return text if content_escaped else _md_escape(text)
+
     story: list[Any] = []
 
     # Add title
     if title:
-        story.append(Paragraph(title, ptitle_style))
+        # title 恒为模型输入（content_path 分支也不例外），始终转义。
+        story.append(Paragraph(_md_escape(str(title)), ptitle_style))
         story.append(Spacer(1, 12))
 
     # Add content blocks
@@ -462,14 +481,14 @@ def _build_pdf(
     try:
         for block in blocks:
             if not isinstance(block, dict):
-                story.append(Paragraph(str(block), pbody_style))
+                story.append(Paragraph(_block_text(block), pbody_style))
                 continue
 
             block_type = str(block.get("type", "paragraph")).lower()
 
             if block_type == "heading":
                 level = int(block.get("level", 1))
-                text = str(block.get("text", ""))
+                text = _block_text(block.get("text", ""))
                 if level <= 2:
                     h_style = ParagraphStyle(
                         f"Heading{level}",
@@ -482,10 +501,11 @@ def _build_pdf(
                     )
                     story.append(Paragraph(text, h_style))
                 else:
+                    # <b> 由工具生成，只能包在已转义的文本外（顺序不能反）。
                     story.append(Paragraph(f"<b>{text}</b>", pbody_style))
 
             elif block_type == "paragraph":
-                text = str(block.get("text", ""))
+                text = _block_text(block.get("text", ""))
                 if text.strip():
                     story.append(Paragraph(text, pbody_style))
 
@@ -509,7 +529,7 @@ def _build_pdf(
                     story.append(Paragraph(_md_escape(f"[图表：{alt}（见源稿）]"), pbody_style))
                 else:
                     story.append(flow)
-                    caption = str(block.get("caption") or "")
+                    caption = _block_text(block.get("caption") or "")
                     if caption.strip():
                         story.append(Paragraph(caption, pcaption_style))
 
@@ -545,7 +565,7 @@ def _build_pdf(
             elif block_type == "list":
                 items = block.get("items", [])
                 for item in items:
-                    story.append(Paragraph(f"• {str(item)}", pbody_style))
+                    story.append(Paragraph(f"• {_block_text(item)}", pbody_style))
 
             elif block_type == "spacer":
                 height = float(block.get("height", 12))
@@ -844,10 +864,9 @@ def _md_to_blocks(
     行首图片 ``![alt](path)``（嵌入 PNG/JPEG）。
 
     行内 Markdown（仅 content_path 路径）：``**粗体**`` 与 ``[文字](http(s)://…)``
-    链接，作用域仅段落/标题/列表；表格单元格与代码围栏内容**不**做转义或行内转换
-    （表格走 Table/drawString 不解析 XML，转义会显示成字面量 ``R&amp;D``）。
-    这是 content_path 专属修复：``content`` 参数路径的 ``&`` 仍按原样输出
-    （既有行为，本次不修）。
+    链接，作用域仅段落/标题/列表；表格单元格**不**做转义或行内转换（表格走
+    Table/drawString 不解析 XML，转义会显示成字面量 ``R&amp;D``）；代码围栏
+    只转义、不做行内转换（``<img ...>`` 保留为字面文字，见下「已知限制 1」）。
 
     图片：相对路径先 join 源稿父目录，再进 ``_resolve_source_path`` 复校白名单，
     并要求落在源稿自身通过校验的那个根之内（不接受跨根读取）；越界/损坏/超限/
@@ -858,11 +877,15 @@ def _md_to_blocks(
     调用方（``execute`` 的 ``content_path`` 分支）通过 ``_build_pdf(trusted_images=True)``
     显式表达；``content`` 路径的块恒不可信（H1 修复）。
 
+    本函数产出的块文本**已全部 XML 转义**（段落/标题/列表/图注走 ``_md_inline``，
+    代码围栏走 ``_md_escape``），调用方必须传 ``_build_pdf(content_escaped=True)``
+    才不会二次转义；表格单元格除外（不走 Paragraph）。
+
     这是**受支持的 Markdown 子集**，不是完整 Markdown renderer——只恢复结构骨架。
     已知限制：
-    1. 代码块按普通段落渲染（多行以空格拼接，不做等宽排版），且内容不做转义与
-       行内转换——围栏内的 ``&``/``<``/``>`` 仍交给 reportlab 解析（与 ``content``
-       路径同口径的既有风险，本 PR 未改）；
+    1. 代码块按普通段落渲染（多行以空格拼接，不做等宽排版），且内容只转义、不做
+       行内转换——围栏内的 ``&``/``<``/``>`` 以字面文字输出，raw ``<img src=...>``
+       只是文字、**不会**触发读文件（P1 修复；此前未转义会被 reportlab 解析）；
     2. 仅支持行首图片，段落中间的行内图按普通文字保留；不支持 SVG；
     3. 表格按标准 GFM 解析（分隔行单元格 ≥3 个短横线；不做转义管道 \\| 处理），
        表格内不支持加粗等行内标记。
@@ -897,8 +920,10 @@ def _md_to_blocks(
             txt = " ".join(x.strip() for x in code_lines).strip()
             code_lines = []
             if txt:
-                # 代码围栏内容不做行内转换，也不转义（与表格同口径）
-                blocks.append({"type": "paragraph", "text": txt})
+                # 不做行内转换（保留 <img ...> 为字面文字），但**必须转义**：源稿是
+                # 不可信输入，未转义的 <img src=...> 会被 reportlab 当图片标签直接
+                # 打开文件，绕过 _resolve_md_image 的边界校验（P1 修复）。
+                blocks.append({"type": "paragraph", "text": _md_escape(txt)})
 
     def flush_list() -> None:
         nonlocal list_items
@@ -1113,7 +1138,9 @@ class CreatePdfTool(Tool):
                         "{type: 'table', headers: ['A','B'], rows: [[...]]}, "
                         "{type: 'list', items: ['...']}, "
                         "{type: 'spacer', height: 12}, "
-                        "{type: 'page_break'}."
+                        "{type: 'page_break'}. "
+                        "块文本按字面渲染（不解析 Markdown/HTML：<b>、<img src=...> 等"
+                        "标记会原样显示，不会生效）。"
                     ),
                 },
                 "content_path": {
@@ -1130,7 +1157,8 @@ class CreatePdfTool(Tool):
                         "② 行首 ![alt](path) 会嵌入图片（PNG/JPEG），相对路径基于源稿所在目录，"
                         "并复校工作区/会话文件区/用户授权目录边界（越界、损坏、SVG 降级为占位文字），"
                         "alt 渲染为图注；仅支持行首图片，段落中间的行内图不嵌入；"
-                        "③ 代码块按普通段落渲染（多行以空格拼接，不做等宽排版）；"
+                        "③ 代码块按普通段落渲染（多行以空格拼接，不做等宽排版），"
+                        "代码内容原样显示（raw <img src=...> 只是文字，不读文件）；"
                         "④ 表格按标准 GFM 解析（分隔行单元格 ≥3 个短横线；不做转义管道 \\| 处理）。"
                     ),
                 },
@@ -1269,6 +1297,9 @@ class CreatePdfTool(Tool):
                 # 只有 content_path 分支（content 已被 _md_to_blocks 替换、图片逐张
                 # 复校过边界）才可信；模型侧 content 的 image 块恒不可信（H1 修复）。
                 trusted_images=bool(content_path),
+                # 同理：_md_to_blocks 产出的文本已转义，content 手写文本没有 → 由
+                # _build_pdf 统一转义（P1 修复，函数参数而非块内 JSON 字段）。
+                content_escaped=bool(content_path),
             )
             _persist_tracked_file(self._workspace, file_path, op="write", session_key=_sess_key)
             return f"Created: {file_path}"

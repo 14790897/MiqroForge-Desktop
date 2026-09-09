@@ -47,6 +47,22 @@ def _drawn_images(path):
     return out
 
 
+def _squash(text):
+    """去掉全部空白——pymupdf 会把超长路径按行折断，字面文本断言需跨行匹配。"""
+    return "".join(str(text).split())
+
+
+def _has_image_xobject(path):
+    """PDF 字节里是否含图像 XObject（``/Subtype /Image``）。
+
+    不能用 ``b"/Image" in bytes`` 判定：reportlab 每份 PDF 的 ProcSet 都带
+    ``/ImageB /ImageC /ImageI``，裸子串判定对纯文字 PDF 也恒为 True（实测）。
+    """
+    import re
+
+    return bool(re.search(rb"/Subtype\s*/Image", path.read_bytes()))
+
+
 def _frame_width(page_size):
     """与 _build_pdf 同口径计算 frame 内宽。"""
     from reportlab.lib.units import cm
@@ -536,8 +552,13 @@ def test_md_to_blocks_direct_call_backward_compatible():
 
 
 @pytest.mark.asyncio
-async def test_create_pdf_content_keeps_bold_tags(tmp_path):
-    """CreatePdfTool: content 参数路径不经过行内转换，手写 <b> 标签仍生效。"""
+async def test_create_pdf_content_markup_is_literal_text(tmp_path):
+    """P1（行为变更）: content 手写 markup 不再被 reportlab 解析，原样作字面文本。
+
+    修复前 ``content`` 的 ``<b>粗体</b>`` 会渲染成粗体；转义后它与
+    ``<img src=...>`` 一样只是文字——这是为堵住「模型提供的 markup 可读任意
+    文件」通道而付出的代价（见本文件 P1 小节）。
+    """
     from miqi.documents.pdf_create_tool import CreatePdfTool
 
     tool = CreatePdfTool(workspace=tmp_path, allowed_dir=tmp_path)
@@ -547,8 +568,7 @@ async def test_create_pdf_content_keeps_bold_tags(tmp_path):
 
     assert "Created:" in result
     text = _pdf_text(tmp_path / "o.pdf")
-    assert "粗体" in text
-    assert "<b>" not in text
+    assert "<b>粗体</b>" in text, text
 
 
 # ── H1：content 的 image 块不得成为读任意文件的通道 ─────────────────────────
@@ -732,3 +752,197 @@ async def test_create_pdf_content_path_image_pixels_limit_rejected(tmp_path):
 
     assert _drawn_images(tmp_path / "o.pdf") == []
     assert "[图表：x（见源稿）]" in _pdf_text(tmp_path / "o.pdf")
+
+
+# ── P1：源稿/content 原文不得成为 reportlab markup 注入通道（第三轮评审） ────
+#
+# 根因：_md_inline 只覆盖段落/标题/列表/图注/引用，代码围栏与 content 路径的块
+# 文本直接进 Paragraph()。源稿里的 raw <img src="..."> 由 reportlab paraparser
+# → ImageReader 直接打开文件，绕过 _resolve_md_image 的边界校验（实测：PDF 里
+# 出现 /Subtype /Image XObject；非图片文件则整档 build 抛 OSError）。
+# 修复：文本进 Paragraph 前统一 XML 转义（& < >），<img ...> 只作字面文字。
+
+
+@pytest.mark.asyncio
+async def test_create_pdf_content_path_code_fence_raw_img_not_embedded(tmp_path, pil_open_spy):
+    """P1: 围栏代码块里的 <img src=边界外> 必须是字面文字——不读文件、不嵌入。"""
+    from miqi.documents.pdf_create_tool import CreatePdfTool
+
+    outside = _png(tmp_path.parent / "fence_secret.png")
+    (tmp_path / "f.md").write_text(
+        f'前一段\n```\n<img src="{outside.as_posix()}" width="100" height="50"/>\n```\n后一段\n',
+        encoding="utf-8",
+    )
+    tool = CreatePdfTool(workspace=tmp_path, allowed_dir=tmp_path)
+    result = await tool.execute(filename="o.pdf", content_path="f.md")
+
+    assert "Created:" in result, result
+    out = tmp_path / "o.pdf"
+    assert not _has_image_xobject(out), "围栏代码里的 <img> 不得产生图像 XObject"
+    assert _drawn_images(out) == []
+    assert pil_open_spy == [], f"边界外文件不得被打开: {pil_open_spy}"
+    text = _pdf_text(out)
+    assert _squash(f'<img src="{outside.as_posix()}" width="100" height="50"/>') in _squash(text), text
+
+
+@pytest.mark.asyncio
+async def test_create_pdf_content_path_code_fence_non_image_outside_not_read(tmp_path):
+    """P1: 边界外文件做成**非图片**——若被 reportlab 读取必抛错，PDF 必须仍正常生成。"""
+    from miqi.documents.pdf_create_tool import CreatePdfTool
+
+    outside = tmp_path.parent / "fence_not_an_image.png"
+    outside.write_text("not an image\n", encoding="utf-8")
+    (tmp_path / "f.md").write_text(
+        f'```\n<img src="{outside.as_posix()}"/>\n```\n', encoding="utf-8"
+    )
+    tool = CreatePdfTool(workspace=tmp_path, allowed_dir=tmp_path)
+
+    assert "Created:" in await tool.execute(filename="o.pdf", content_path="f.md")
+
+
+@pytest.mark.asyncio
+async def test_create_pdf_content_path_code_fence_angle_brackets_literal(tmp_path):
+    """P1(coderabbit): 围栏里的 List<int> / a < b 必须原样显示，不得被当标签吞掉。"""
+    from miqi.documents.pdf_create_tool import CreatePdfTool
+
+    (tmp_path / "c.md").write_text("```\nList<int> x;\nif a < b: pass\n```\n", encoding="utf-8")
+    tool = CreatePdfTool(workspace=tmp_path, allowed_dir=tmp_path)
+    result = await tool.execute(filename="o.pdf", content_path="c.md")
+
+    assert "Created:" in result, result
+    text = _pdf_text(tmp_path / "o.pdf")
+    assert "List<int> x;" in text, text
+    assert "a < b" in text, text
+
+
+@pytest.mark.asyncio
+async def test_create_pdf_content_paragraph_raw_img_not_embedded(tmp_path, pil_open_spy):
+    """P1: content 段落里的 <img src=边界外> 必须是字面文字——不读文件、不嵌入。"""
+    from miqi.documents.pdf_create_tool import CreatePdfTool
+
+    outside = _png(tmp_path.parent / "para_secret.png")
+    tool = CreatePdfTool(workspace=tmp_path, allowed_dir=tmp_path)
+    result = await tool.execute(
+        filename="o.pdf",
+        content=[
+            {
+                "type": "paragraph",
+                "text": f'<img src="{outside.as_posix()}" width="100" height="50"/>',
+            }
+        ],
+    )
+
+    assert "Created:" in result, result
+    out = tmp_path / "o.pdf"
+    assert not _has_image_xobject(out), "content 段落里的 <img> 不得产生图像 XObject"
+    assert _drawn_images(out) == []
+    assert pil_open_spy == [], f"边界外文件不得被打开: {pil_open_spy}"
+    text = _pdf_text(out)
+    assert _squash(f'<img src="{outside.as_posix()}" width="100" height="50"/>') in _squash(text), text
+
+
+@pytest.mark.asyncio
+async def test_create_pdf_content_heading_raw_img_not_embedded(tmp_path, pil_open_spy):
+    """P1: content 标题（level≤2 直渲 / level≥3 另包 <b>）里的 <img> 同样不得生效。"""
+    from miqi.documents.pdf_create_tool import CreatePdfTool
+
+    outside = _png(tmp_path.parent / "head_secret.png")
+    payload = f'<img src="{outside.as_posix()}"/>'
+    tool = CreatePdfTool(workspace=tmp_path, allowed_dir=tmp_path)
+    result = await tool.execute(
+        filename="o.pdf",
+        content=[
+            {"type": "heading", "text": payload, "level": 1},
+            {"type": "heading", "text": payload, "level": 3},
+        ],
+    )
+
+    assert "Created:" in result, result
+    out = tmp_path / "o.pdf"
+    assert not _has_image_xobject(out)
+    assert _drawn_images(out) == []
+    assert pil_open_spy == [], f"边界外文件不得被打开: {pil_open_spy}"
+    squashed = _squash(_pdf_text(out))
+    assert squashed.count(_squash(f'<img src="{outside.as_posix()}"/>')) >= 2, _pdf_text(out)
+
+
+@pytest.mark.asyncio
+async def test_create_pdf_content_list_raw_img_not_embedded(tmp_path, pil_open_spy):
+    """P1: content 列表项里的 <img src=边界外> 必须是字面文字——不读文件、不嵌入。"""
+    from miqi.documents.pdf_create_tool import CreatePdfTool
+
+    outside = _png(tmp_path.parent / "list_secret.png")
+    tool = CreatePdfTool(workspace=tmp_path, allowed_dir=tmp_path)
+    result = await tool.execute(
+        filename="o.pdf",
+        content=[{"type": "list", "items": [f'<img src="{outside.as_posix()}"/>']}],
+    )
+
+    assert "Created:" in result, result
+    out = tmp_path / "o.pdf"
+    assert not _has_image_xobject(out)
+    assert _drawn_images(out) == []
+    assert pil_open_spy == [], f"边界外文件不得被打开: {pil_open_spy}"
+    text = _pdf_text(out)
+    assert _squash(f'<img src="{outside.as_posix()}"/>') in _squash(text), text
+
+
+@pytest.mark.asyncio
+async def test_create_pdf_content_title_raw_img_not_embedded(tmp_path, pil_open_spy):
+    """P1: title 也走 Paragraph（_build_pdf 首个渲染点），同样不得让 <img> 生效。"""
+    from miqi.documents.pdf_create_tool import CreatePdfTool
+
+    outside = _png(tmp_path.parent / "title_secret.png")
+    tool = CreatePdfTool(workspace=tmp_path, allowed_dir=tmp_path)
+    result = await tool.execute(
+        filename="o.pdf",
+        title=f'<img src="{outside.as_posix()}"/>',
+        content=[{"type": "paragraph", "text": "正文"}],
+    )
+
+    assert "Created:" in result, result
+    out = tmp_path / "o.pdf"
+    assert not _has_image_xobject(out)
+    assert _drawn_images(out) == []
+    assert pil_open_spy == [], f"边界外文件不得被打开: {pil_open_spy}"
+    text = _pdf_text(out)
+    assert _squash(f'<img src="{outside.as_posix()}"/>') in _squash(text), text
+
+
+@pytest.mark.asyncio
+async def test_create_pdf_content_non_image_outside_not_read(tmp_path):
+    """P1: content 段落指向边界外**非图片**文件——若被读取必抛错，PDF 必须仍正常生成。"""
+    from miqi.documents.pdf_create_tool import CreatePdfTool
+
+    outside = tmp_path.parent / "content_not_an_image.png"
+    outside.write_text("not an image\n", encoding="utf-8")
+    tool = CreatePdfTool(workspace=tmp_path, allowed_dir=tmp_path)
+
+    result = await tool.execute(
+        filename="o.pdf",
+        content=[{"type": "paragraph", "text": f'<img src="{outside.as_posix()}"/>'}],
+    )
+    assert "Created:" in result, result
+
+
+@pytest.mark.asyncio
+async def test_create_pdf_content_angle_brackets_literal(tmp_path):
+    """P1: content 段落/标题/列表里的裸 < 必须原样显示，不得被当标签吞掉或补成实体。"""
+    from miqi.documents.pdf_create_tool import CreatePdfTool
+
+    tool = CreatePdfTool(workspace=tmp_path, allowed_dir=tmp_path)
+    result = await tool.execute(
+        filename="o.pdf",
+        content=[
+            {"type": "paragraph", "text": "a < b 与 R&D"},
+            {"type": "heading", "text": "List<int>", "level": 1},
+            {"type": "list", "items": ["x < y"]},
+        ],
+    )
+
+    assert "Created:" in result, result
+    text = _pdf_text(tmp_path / "o.pdf")
+    assert "a < b" in text, text
+    assert "List<int>" in text, text
+    assert "x < y" in text, text
+    assert "R&D" in text and "R&D;" not in text and "&amp;" not in text, text

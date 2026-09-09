@@ -20,6 +20,11 @@
 #   * 可信通道是 _build_pdf(trusted_images=...) 函数参数（仅 content_path 内部
 #     转换路径传 True）；content 里手写 image 块一律降级，块内 JSON 字段
 #     （如 validated）不具任何语义——模型可自设，曾构成读任意文件的破口（H1）
+# - 【文本转义，#994 第三轮评审 P1】源稿/content 的块文本进 reportlab Paragraph
+#   前统一 XML 转义（& < >）：raw <img src=...> 会被 paraparser 当图片标签直接
+#   打开文件、绕过上述图片边界校验（代码围栏与 content 段落/标题/列表/图注/title
+#   均受影响）。转义通道同样是 _build_pdf(content_escaped=...) 函数参数，块内
+#   JSON 字段不可伪造；content 手写 <b> 等标记因此不再生效，只作字面文本。
 #
 # - 【运行时不对称，#994 第二轮评审 M7】上述「用户授权目录读」在 KUN 运行时**不可达**：
 #   miqi/kun_runtime/tool_host.py:112-115 的 _USER_ROOTS_TOOLS 不含 create_pdf，
@@ -37,4 +42,5 @@ path_semantics:
   content_path_read: "content_path 源稿可读工作区/会话文件区 + 用户授权目录（#821），其余拒绝"
   content_path_image_read: "行首图片相对源稿目录解析并复校同一白名单，只能落在源稿自身通过校验的根内；跨根/越界降级为占位文字"
   content_path_image_trust: "可信标记来自 _build_pdf(trusted_images=) 函数参数；content 手写 image 块与块内 JSON 字段一律不可信"
+  content_path_markup_escape: "源稿/content 的块文本进 Paragraph 前统一 XML 转义（& < >），只有工具自生成的 <b>/<link> 例外；raw <img src=...> 只是字面文字，不经 reportlab 读文件（P1）"
   content_path_read_kun_gap: "KUN 运行时 _USER_ROOTS_TOOLS 不含 create_pdf → 用户授权目录读不可达；仅 legacy orchestrator 路径可达"
