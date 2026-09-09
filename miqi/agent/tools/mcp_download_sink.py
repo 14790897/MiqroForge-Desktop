@@ -22,9 +22,9 @@
   ``download_pending``（可执行的下一步指引），不算错误。
 - **Foreign-file ownership**：最终文件无匹配 sidecar 且 hash 不符 = 外来文件，
   绝不覆盖，走唯一名；同身份重试恒走同一 path，不制造 ``(1)`` 垃圾。
-- **fail-closed**：任何契约异常（双源矛盾、缺内容、分片非法、校验失败）→
-  丢弃整份并清理 staging，错误以结构化 JSON 返回，绝不回传内容、绝不让
-  模型凭 ``success=true`` 宣布交付。
+- **fail-closed**：任何契约异常（双源 success/error 语义矛盾、缺内容、分片
+  非法、校验失败）→ 丢弃整份并清理 staging，错误以结构化 JSON 返回，绝不
+  回传内容、绝不让模型凭 ``success=true`` 宣布交付。
 
 服务端真实字段命名/嵌套是**样例冻结边界**：alias 解析集中在
 ``parse_mcp_result``/``_normalize_artifact_dict`` 一处，拿到真实响应后只改这里。
@@ -60,13 +60,19 @@ MAX_CHUNK_BASE64_CHARS = MAX_RESPONSE_BASE64_CHARS
 
 # 代码常量白名单——"是否 binary artifact endpoint" 是 runtime protocol
 # semantics，不是用户偏好，不进用户 config（进 config = 允许把任意 MCP 工具
-# 标成下载端点，扩大攻击面）。
+# 标成下载端点，扩大攻击面）。**只信精确 (server_name, tool_name) 对**
+# （#988 评审 P2a）：任意第三方 server 里恰好叫 download_file 的工具不得仅凭
+# 名字进入 Artifact Boundary——名字约定不能升格为全局信任。
 DEFAULT_DOWNLOAD_TOOL_NAMES = frozenset({"download_file", "download_bulk"})
 
-# per-server 精确匹配优先于全局名匹配。
+# per-server 精确白名单。miqroforge = 平台托管网关（事故现场名）；
+# miqroforge-slurm = schema.DEFAULT_MCP_SERVERS 的默认键（两处都覆盖，
+# 防部署侧服务器名漂移导致边界静默失效）。
 _DOWNLOAD_TOOL_ALLOWLIST: tuple[tuple[str, str], ...] = (
     ("miqroforge", "download_file"),
     ("miqroforge", "download_bulk"),
+    ("miqroforge-slurm", "download_file"),
+    ("miqroforge-slurm", "download_bulk"),
 )
 
 # 分类命中后追加到 wrapper description 的指引段（构造期拼好，随工具定义进模型）。
@@ -84,14 +90,14 @@ _TRANSPORT_ARG_KEYS = frozenset({"chunk_index", "chunkIndex"})
 
 
 def is_download_tool(server_name: str, tool_name: str) -> bool:
-    """构造期分类：``(server_name, tool_name)`` 精确 > 全局工具名 > 非下载。
+    """构造期分类：**精确 (server_name, tool_name) 白名单**（#988 评审 P2a）。
 
-    ``content_base64`` 不作为识别判据——MCP 生态里 media/embedding 类工具
-    也可能返回 base64，误入下载路径会造成协议误判（只作第二重确认）。
+    未知 server 的 download_file **不**自动进入下载语义——第三方 MCP 工具
+    恰好同名可能返回普通文本/JSON/媒体，强制按 artifact contract 解析会
+    破坏其可用性。``content_base64`` 也不作为识别判据（media/embedding 类
+    工具同样可能返回 base64），只作第二重契约确认。
     """
-    if (server_name, tool_name) in _DOWNLOAD_TOOL_ALLOWLIST:
-        return True
-    return tool_name in DEFAULT_DOWNLOAD_TOOL_NAMES
+    return (server_name, tool_name) in _DOWNLOAD_TOOL_ALLOWLIST
 
 
 # ── 错误语义（v6.2 §5.2）───────────────────────────────────────────────────
@@ -741,11 +747,10 @@ def parse_mcp_result(result: Any) -> ParsedDownloadResponse:
     """双源适配入口（v6.2 R2/§0.1-5）。
 
     顺序：① ``isError``（SDK 规范错误位）→ DOWNLOAD_SERVER_ERROR 语义；
-    ② ``structuredContent`` 可解析出 artifact/error → canonical；
+    ② ``structuredContent`` 可解析出 artifact/error → canonical（#988 评审
+    P2c：structuredContent 是结构化数据源，content 只是渲染视图/fallback——
+    两者字段级差异不构成矛盾，只有 **success/error 语义冲突**才 fail-closed）；
     ③ ``content`` TextContent fallback（可跨块拼接后整体 JSON 解析）。
-
-    双源都解析出语义但**矛盾**（一成功一失败/描述不同）→ DownloadProtocolError
-    ——双源矛盾时宁可不交付，绝不猜哪个是真的（P0 fail-closed）。
     """
     # ① isError —— 先于任何文本解析（服务端显式报错的权威信号）。
     if bool(getattr(result, "isError", False)):
@@ -849,6 +854,11 @@ class DownloadSink:
         self._active: dict[str, _ActiveTransfer] = {}
         # 同身份并发互斥（v6.2 R3 增补 B）：同一 artifact 同时只允许一个传输
         self._locks: dict[str, asyncio.Lock] = {}
+        # 落盘根级命名分配锁（#988 评审 P1a）：plan_final_path 的"检查→决定→
+        # 原子提交"对不同 ArtifactIdentity（最终文件名可能相同）不是全局原子的
+        # ——不同身份各自持 artifact 锁仍可能都看到 result.cube 空闲而双写。
+        # 以 downloads_dir 为粒度串行化 plan/落盘段：同目录内绝不并发分配文件名。
+        self._alloc_locks: dict[str, asyncio.Lock] = {}
         self._swept: bool = False
 
     # ── 入口 ────────────────────────────────────────────────────────────────
@@ -913,19 +923,26 @@ class DownloadSink:
 
         lock = self._locks.setdefault(identity.artifact_key, asyncio.Lock())
         async with lock:
-            if parsed.multi_chunk:
+            # 命名分配锁：锁序恒为 artifact → downloads_dir（绝不反向获取），
+            # 无死锁；单目录内所有 plan/原子提交串行 → 不同身份同文件名
+            # 并发时后者必然看到前者已占名 → 走唯一名，绝不互覆。
+            alloc_lock = self._alloc_locks.setdefault(
+                str(downloads_dir), asyncio.Lock()
+            )
+            async with alloc_lock:
+                if parsed.multi_chunk:
+                    return await asyncio.to_thread(
+                        self._accept_chunks_sync,
+                        parsed=parsed, identity=identity,
+                        downloads_dir=downloads_dir,
+                        turn_id=turn_id, tool_call_id=tool_call_id,
+                    )
                 return await asyncio.to_thread(
-                    self._accept_chunks_sync,
+                    self._materialize_single_sync,
                     parsed=parsed, identity=identity,
                     downloads_dir=downloads_dir,
                     turn_id=turn_id, tool_call_id=tool_call_id,
                 )
-            return await asyncio.to_thread(
-                self._materialize_single_sync,
-                parsed=parsed, identity=identity,
-                downloads_dir=downloads_dir,
-                turn_id=turn_id, tool_call_id=tool_call_id,
-            )
 
     # ── 单包路径（C1 语义不变，拆出入参以便与分片共享身份/目录决策）──────
 
@@ -969,6 +986,21 @@ class DownloadSink:
         if chunk.chunk_index != 0:
             raise DownloadProtocolError(
                 "下载失败：响应起始分片索引非 0，无法重组。文件未交付。"
+            )
+        if chunk.chunk_index < 0 or (
+            chunk.total_chunks is not None and chunk.total_chunks < 1
+        ):
+            raise DownloadProtocolError(
+                "下载失败：分片元数据非法"
+                "（chunk_index 必须 >=0，total_chunks 必须为正整数或缺失）。"
+                "文件未交付。"
+            )
+        if chunk.total_chunks is not None and chunk.total_chunks != 1:
+            # 单包路径只接受 1 片声明；0/负数/多片声明均属契约违例
+            #（多片声明会走分片路径，这里兜底防旁路）。
+            raise DownloadProtocolError(
+                "下载失败：单包响应的 total_chunks 声明矛盾"
+                f"（收到 {chunk.total_chunks}，须为 1）。文件未交付。"
             )
         self._gate_chunk_size(chunk)
 
@@ -1065,6 +1097,13 @@ class DownloadSink:
                     "下载失败：分片响应未声明 total_chunks，客户端无法判定完成边界。"
                     "文件未交付。"
                 )
+            if total_hint < 1:
+                # #988 评审 P1b：total_chunks=0/-1 等非法声明不得进入状态机
+                #（0 >= 0 会把"空文件"误判为完整传输）。
+                raise DownloadChunkError(
+                    f"下载失败：total_chunks 声明非法（{total_hint}，必须为正整数）。"
+                    "文件未交付，请重新下载。"
+                )
             staging_path, meta_path = _transfer_paths(downloads_dir, identity.artifact_key)
             transfer = _ActiveTransfer(
                 identity=identity,
@@ -1133,7 +1172,25 @@ class DownloadSink:
         parsed: ParsedDownloadResponse,
         chunk: ParsedChunk,
     ) -> None:
-        """单片校验 + 追加写盘（顺序/重复/跳号/总量一致性 → fail-closed）。"""
+        """单片校验 + 追加写盘（顺序/重复/跳号/总量一致性/越界 → fail-closed）。"""
+        # #988 评审 P1b：索引/总量合法性（负数索引、索引越出声明总量都是
+        # 非法协议，绝不能靠"不等于期望索引"的错位错误含糊吞掉）。
+        if chunk.chunk_index < 0:
+            raise DownloadChunkError(
+                f"下载失败：分片索引非法（{chunk.chunk_index}，必须 >=0）。"
+                "文件未交付，请重新下载。"
+            )
+        if chunk.total_chunks is not None and chunk.total_chunks < 1:
+            raise DownloadChunkError(
+                f"下载失败：total_chunks 声明非法（{chunk.total_chunks}，必须为正整数）。"
+                "文件未交付，请重新下载。"
+            )
+        known_total = chunk.total_chunks if chunk.total_chunks is not None else transfer.total_chunks
+        if known_total is not None and chunk.chunk_index >= known_total:
+            raise DownloadChunkError(
+                f"下载失败：分片索引越界（{chunk.chunk_index} >= total {known_total}）。"
+                "文件未交付，请重新下载。"
+            )
         # success=false 任意片 → 整份作废
         if chunk.success is False or parsed.success is False:
             raise DownloadChunkError(

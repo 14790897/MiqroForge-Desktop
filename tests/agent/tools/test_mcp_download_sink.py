@@ -105,10 +105,14 @@ async def _materialize(sink: DownloadSink, result, root: Path, **kw):
 
 
 def test_is_download_tool_classification():
+    # 精确 (server, tool) 白名单（#988 评审 P2a：名字约定不得升格为全局信任）
     assert is_download_tool("miqroforge", "download_file") is True
     assert is_download_tool("miqroforge", "download_bulk") is True
-    # 全局名匹配（未入 per-server 白名单的服务器也识别）
-    assert is_download_tool("other-server", "download_file") is True
+    # schema.DEFAULT_MCP_SERVERS 的默认键也覆盖（部署侧服务器名防漂移）
+    assert is_download_tool("miqroforge-slurm", "download_file") is True
+    assert is_download_tool("miqroforge-slurm", "download_bulk") is True
+    # 未知 server 的同名工具**不**自动进入下载语义
+    assert is_download_tool("other-server", "download_file") is False
     # 非下载 / 返回 base64 的媒体类工具绝不误入
     assert is_download_tool("miqroforge", "check_job_status") is False
     assert is_download_tool("miqroforge", "render_image") is False
@@ -782,3 +786,99 @@ async def test_concurrent_same_identity_does_not_corrupt(tmp_path):
     assert a1.path.read_bytes() == data
     assert not list(root.glob("**/* (1).cube"))
 
+
+
+# ── #988 评审回归：并发覆盖 / 分片元数据合法性 ─────────────────────────────
+
+
+async def test_concurrent_different_identity_same_filename_no_overwrite(tmp_path):
+    """评审 P1a 回归：不同 ArtifactIdentity + 同目标文件名并发 finalize。
+
+    修复前（仅 artifact 级锁）两个身份可能同时看到 result.cube 空闲并双写，
+    后者静默覆盖前者——与"foreign/异身份绝不覆盖"设计原则直接冲突。
+    修复后（downloads-dir 级命名分配锁）：必得 result.cube + result (1).cube，
+    内容各自完整、sidecar 各归其主。
+    """
+    import asyncio
+
+    root, _, sink = _env(tmp_path)
+    data_a = b"identity-A-content-aaaaaaaaaaaaaaa"
+    data_b = b"identity-B-content-bbbbbbbbbbbbbbb"
+
+    async def _dl(data: bytes, remote_path: str):
+        return await sink.materialize(
+            result=_result_from_text(_artifact_payload(data)),
+            session_key=SESSION_KEY,
+            server_name="miqroforge",
+            tool_name="download_file",
+            request_kwargs={"name": "result.cube", "path": remote_path},
+            turn_id=f"turn-{remote_path[-1]}",
+            tool_call_id="c",
+        )
+
+    a, b = await asyncio.gather(
+        _dl(data_a, "/remote/a.cube"), _dl(data_b, "/remote/b.cube")
+    )
+
+    names = sorted(p.name for p in (a.path, b.path))
+    assert names == sorted(["result.cube", "result (1).cube"])
+    by_name = {p.name: p.read_bytes() for p in (a.path, b.path)}
+    assert set(by_name.values()) == {data_a, data_b}  # 两份内容都在，无覆盖
+    # sidecar 各归其主（文件名与 artifact_key 一一对应）
+    for artifact in (a, b):
+        sc = json.loads(
+            artifact.path.with_name(artifact.path.name + ".download.json")
+            .read_text(encoding="utf-8")
+        )
+        assert sc["artifact_key"] == artifact.identity.artifact_key
+        assert sc["name"] == artifact.path.name
+
+
+async def test_total_chunks_zero_rejected(tmp_path):
+    """评审 P1b 回归：total_chunks=0 不得被当作"0>=0 已完成"的完整传输。"""
+    root, _, sink = _env(tmp_path)
+    payload = {
+        "name": "z.cube",
+        "chunk_index": 0,
+        "total_chunks": 0,
+        "content_base64": base64.b64encode(b"data").decode(),
+    }
+    with pytest.raises(sink_mod.DownloadError) as ei:
+        await _materialize(sink, _result_from_text(json.dumps(payload)), root,
+                           request_kwargs={"name": "z.cube"})
+    assert json.loads(ei.value.to_model_text())["code"] in (
+        "DOWNLOAD_CHUNK_ERROR", "DOWNLOAD_PROTOCOL_ERROR",
+    )
+    downloads = resolve_downloads_dir(root, SESSION_KEY)
+    assert not (downloads / ".staging").exists() or not list((downloads / ".staging").glob("*"))
+
+
+async def test_total_chunks_negative_rejected(tmp_path):
+    """评审 P1b 回归：total_chunks=-1 必须 fail-closed。"""
+    root, _, sink = _env(tmp_path)
+    payload = {
+        "name": "neg.cube",
+        "chunk_index": 0,
+        "total_chunks": -1,
+        "content_base64": base64.b64encode(b"data").decode(),
+    }
+    with pytest.raises(sink_mod.DownloadError):
+        await _materialize(sink, _result_from_text(json.dumps(payload)), root,
+                           request_kwargs={"name": "neg.cube"})
+
+
+async def test_chunk_index_out_of_bounds_rejected(tmp_path):
+    """评审 P1b 回归：chunk_index >= total_chunks 的越界片必须 fail-closed。"""
+    root, _, sink = _env(tmp_path)
+    with pytest.raises(sink_mod.DownloadError):
+        await _materialize(
+            sink, _result_from_text(_single_chunk_payload(
+                b"A", chunk_index=0, total_chunks=3, name="ob.cube")),
+            root, request_kwargs={"name": "ob.cube"},
+        )
+    with pytest.raises(sink_mod.DownloadError):  # 3 >= 3 越界
+        await _materialize(
+            sink, _result_from_text(_single_chunk_payload(
+                b"B", chunk_index=3, total_chunks=3, name="ob.cube")),
+            root, request_kwargs={"name": "ob.cube"},
+        )

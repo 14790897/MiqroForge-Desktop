@@ -216,15 +216,16 @@ class MCPToolWrapper(Tool):
         # ── #975 Artifact Boundary 分支 ─────────────────────────────────────
         # 下载类工具：billing 副作用先执行（与 materialization 解耦，杜绝专用
         # 分支早退旁路 #927 计费），随后内容由 sink 消费——base64 绝不进最终
-        # output；任何异常消化为错误 JSON 文本，绝不上抛 orchestrator。
+        # output，也不为 billing 拼接全量文本（#988 评审 P2b：billing 只需
+        # state/job_id，逐块扫描即可，不为 2.1MB base64 制造第二份字符串拷贝）；
+        # 任何异常消化为错误 JSON 文本，绝不上抛 orchestrator。
         if self._is_download_tool:
-            billing_view = self._join_text_blocks(result.content)
             await self._handle_slurm_billing(
                 session_key=session_key,
                 turn_id=turn_id,
                 tool_call_id=tool_call_id,
                 kwargs=kwargs,
-                output=billing_view,
+                blocks=result.content,
             )
             return await self._materialize_download(
                 result=result,
@@ -240,7 +241,7 @@ class MCPToolWrapper(Tool):
             turn_id=turn_id,
             tool_call_id=tool_call_id,
             kwargs=kwargs,
-            output=output,
+            blocks=result.content,
         )
         return output
 
@@ -267,7 +268,7 @@ class MCPToolWrapper(Tool):
         turn_id: str,
         tool_call_id: str,
         kwargs: dict[str, Any],
-        output: str,
+        blocks: list,
     ) -> None:
         """Slurm 作业计费触发（issue #927，2026-09-04 产品确认）——**纯副作用**。
 
@@ -279,7 +280,13 @@ class MCPToolWrapper(Tool):
 
         只负责 inspect/dedupe/emit/mark，**不决定调用方最终返回什么**
         （v6.2 R4：与 download materialization 解耦，早退不会旁路计费）。
+
+        **输入是 ContentBlock 而非拼接字符串**（#988 评审 P2b）：billing 只
+        关心 state/job_id，逐块扫描即可——下载类大响应绝不为计费制造一份
+        全量文本副本（2.1MB+ base64 的 join 就是无谓的内存峰值）。
         """
+        from mcp import types
+
         from miqi.agent.billing_resolver import (
             billing_charge_emitter_for,
             is_slurm_server,
@@ -287,53 +294,60 @@ class MCPToolWrapper(Tool):
 
         if not (session_key and is_slurm_server(self._server_name)):
             return
-        job_state = _extract_job_state(output)
-        if not job_state or job_state.upper() != "RUNNING":
-            return
-        # 响应里的 job_id 优先；check_job_status 的响应可能只有
-        # state（作业 ID 在请求参数里），回退用请求参数保证去重键。
-        job_id = _extract_job_id(output) or str(
-            kwargs.get("job_id") or kwargs.get("jobId") or ""
-        )
-        # 无稳定作业 ID 时不发计费事件：空 job_id 无法去重，
-        # 轮询每次 RUNNING 都会再扣一次（数据完整性）。
-        if not job_id:
-            return
-        from miqi.agent.billing_resolver import job_reported, mark_job_reported
-
-        # 轮询会反复观察 RUNNING：同一会话同一服务器同一作业只
-        # 发一次。先发事件、送达成功才标记——发射失败不标记，
-        # 下一次 RUNNING 轮询重试（Desktop 侧去重兜底，重复送达无害）。
-        if job_reported(session_key, self._server_name, job_id):
-            return
-        emitter = billing_charge_emitter_for(session_key)
-        if emitter is None:
-            return
-        import uuid as _uuid
-
-        payload = {
-            "charge_id": _uuid.uuid4().hex,
-            "job_id": job_id or "",
-            "state": job_state,
-            "server_name": self._server_name,
-            "tool_name": self._original_name,
-            "args_summary": _summarize_args(kwargs),
-            "session_key": session_key,
-            "turn_id": turn_id,
-            "tool_call_id": tool_call_id,
-        }
-        delivered = False
-        try:
-            result = emitter(payload)
-            if asyncio.iscoroutine(result):
-                result = await result
-            delivered = bool(result)
-        except Exception:
-            logger.exception(
-                "billing: RUNNING 扣费事件发送失败（不标记，下次轮询重试）"
+        texts = [
+            block.text
+            for block in blocks or []
+            if isinstance(block, types.TextContent) and block.text
+        ]
+        for text in texts:
+            job_state = _extract_job_state(text)
+            if not job_state or job_state.upper() != "RUNNING":
+                continue
+            # 响应里的 job_id 优先；check_job_status 的响应可能只有
+            # state（作业 ID 在请求参数里），回退用请求参数保证去重键。
+            job_id = _extract_job_id(text) or str(
+                kwargs.get("job_id") or kwargs.get("jobId") or ""
             )
-        if delivered:
-            mark_job_reported(session_key, self._server_name, job_id)
+            # 无稳定作业 ID 时不发计费事件：空 job_id 无法去重，
+            # 轮询每次 RUNNING 都会再扣一次（数据完整性）。
+            if not job_id:
+                return
+            from miqi.agent.billing_resolver import job_reported, mark_job_reported
+
+            # 轮询会反复观察 RUNNING：同一会话同一服务器同一作业只
+            # 发一次。先发事件、送达成功才标记——发射失败不标记，
+            # 下一次 RUNNING 轮询重试（Desktop 侧去重兜底，重复送达无害）。
+            if job_reported(session_key, self._server_name, job_id):
+                return
+            emitter = billing_charge_emitter_for(session_key)
+            if emitter is None:
+                return
+            import uuid as _uuid
+
+            payload = {
+                "charge_id": _uuid.uuid4().hex,
+                "job_id": job_id or "",
+                "state": job_state,
+                "server_name": self._server_name,
+                "tool_name": self._original_name,
+                "args_summary": _summarize_args(kwargs),
+                "session_key": session_key,
+                "turn_id": turn_id,
+                "tool_call_id": tool_call_id,
+            }
+            delivered = False
+            try:
+                result = emitter(payload)
+                if asyncio.iscoroutine(result):
+                    result = await result
+                delivered = bool(result)
+            except Exception:
+                logger.exception(
+                    "billing: RUNNING 扣费事件发送失败（不标记，下次轮询重试）"
+                )
+            if delivered:
+                mark_job_reported(session_key, self._server_name, job_id)
+            return  # 一个 RUNNING 事件处理完即可（语义同旧 join 后单次处理）
 
     async def _materialize_download(
         self,

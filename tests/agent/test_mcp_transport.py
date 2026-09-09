@@ -157,9 +157,12 @@ class TestDownloadClassificationWiring:
         assert w.is_download_tool is False
 
     def test_classification_matches_sink_helper(self):
+        # #988 评审 P2a 后：精确白名单；未知 server 同名工具不再全局信任
         assert MCPToolWrapper is not None
-        for server, tool in (("miqroforge", "download_file"), ("x", "download_bulk")):
+        for server, tool in (("miqroforge", "download_file"),
+                             ("miqroforge-slurm", "download_file")):
             assert is_download_tool(server, tool)
+        assert is_download_tool("x", "download_bulk") is False
 
     def test_download_tool_description_appends_guidance(self):
         w = _wrapper(_FakeSession(), "download_file")
