@@ -723,3 +723,47 @@ async def test_create_pdf_content_path_rerenders_after_source_change(tmp_path):
     doc.close()
     assert "BBB" in text
     assert "AAA" not in text
+
+
+@pytest.mark.asyncio
+async def test_create_pdf_content_path_missing_file(tmp_path):
+    """CreatePdfTool: content_path 源文件不存在 → 返回 Error 且含可操作文案，不得抛未捕获异常。"""
+    from miqi.documents.pdf_create_tool import CreatePdfTool
+
+    tool = CreatePdfTool(workspace=tmp_path, allowed_dir=tmp_path)
+    result = await tool.execute(filename="missing.pdf", content_path="no_such_report.md")
+
+    assert result.startswith("Error:")
+    assert "无法读取内容源文件" in result
+    assert "no_such_report.md" in result
+    assert not (tmp_path / "missing.pdf").exists()
+
+
+@pytest.mark.asyncio
+async def test_create_pdf_content_path_directory(tmp_path):
+    """CreatePdfTool: content_path 指向目录 → 返回 Error（IsADirectoryError 属 OSError，应被捕获）。"""
+    from miqi.documents.pdf_create_tool import CreatePdfTool
+
+    sub = tmp_path / "a_dir"
+    sub.mkdir()
+    tool = CreatePdfTool(workspace=tmp_path, allowed_dir=tmp_path)
+    result = await tool.execute(filename="dir.pdf", content_path=sub.name)
+
+    assert result.startswith("Error:")
+    assert "无法读取内容源文件" in result
+    assert not (tmp_path / "dir.pdf").exists()
+
+
+@pytest.mark.asyncio
+async def test_create_pdf_content_path_non_utf8(tmp_path):
+    """CreatePdfTool: 源稿非 UTF-8（GBK 字节）→ 返回 Error（UnicodeDecodeError 应被捕获）。"""
+    from miqi.documents.pdf_create_tool import CreatePdfTool
+
+    src = tmp_path / "gbk.md"
+    src.write_bytes("# 报告\n\n正文。\n".encode("gbk"))
+    tool = CreatePdfTool(workspace=tmp_path, allowed_dir=tmp_path)
+    result = await tool.execute(filename="gbk.pdf", content_path=src.name)
+
+    assert result.startswith("Error:")
+    assert "无法读取内容源文件" in result
+    assert not (tmp_path / "gbk.pdf").exists()
