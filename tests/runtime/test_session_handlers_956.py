@@ -47,6 +47,32 @@ def _write_app_home_stub(app_home, key, client_id, workspace=None):
     return sm
 
 
+def test_load_existing_does_not_migrate_legacy_flat_file(tmp_path):
+    """load_existing must not migrate a legacy flat session file (#956 review).
+
+    _find_folder_session probes candidate workspace roots via load_existing;
+    if that mutated legacy files, a scan could silently move a session into
+    the wrong root.  load_existing must leave flat .jsonl files untouched.
+    """
+    from miqi.session.manager import SessionManager
+
+    sm = SessionManager(tmp_path)
+    key = "legacy-flat"
+    safe_key = "legacy-flat"  # no colon → dir/file name unchanged
+    flat = sm.sessions_dir / f"{safe_key}.jsonl"
+    flat.write_text(
+        '{"_type": "metadata", "metadata": {}, "owner_client_id": "client-1"}\n'
+        '{"role": "user", "content": "hi", "timestamp": "2026-01-01T00:00:00"}\n',
+        encoding="utf-8",
+    )
+
+    # Probing must not migrate: the directory-based path does not exist yet,
+    # so load_existing returns None and leaves the flat file alone.
+    assert sm.load_existing(key) is None
+    assert flat.exists()
+    assert not (sm.sessions_dir / safe_key).exists()
+
+
 # ── sessions.get ───────────────────────────────────────────────────────────
 
 
