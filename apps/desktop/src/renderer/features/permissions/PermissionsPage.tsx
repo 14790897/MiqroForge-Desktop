@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { useTranslation } from 'react-i18next';
 import { Shield, Plus, Trash2, Save } from 'lucide-react';
 import { cn } from '../../lib/utils';
 
@@ -30,6 +31,7 @@ const inputCls =
   'flex-1 px-2.5 py-1.5 text-xs rounded-lg border border-[var(--border-subtle)] bg-[var(--surface)] text-[var(--text)] placeholder:text-[var(--text-faint)] focus:outline-none focus:border-[var(--border-strong)]/50 transition-colors';
 
 export function PermissionsPage() {
+  const { t } = useTranslation();
   const [config, setConfig] = useState<PermissionsConfig>(DEFAULT_CONFIG);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -91,7 +93,7 @@ export function PermissionsPage() {
     return (
       <div className="p-4 flex items-center gap-2">
         <div className="w-4 h-4 border-2 border-[var(--border)] border-t-[var(--accent)] rounded-full animate-spin" />
-        <span className="text-xs text-[var(--text-faint)]">加载中...</span>
+        <span className="text-xs text-[var(--text-faint)]">{t('permissions.loading')}</span>
       </div>
     );
 
@@ -99,12 +101,14 @@ export function PermissionsPage() {
     <div className="p-4 max-w-2xl">
       <h2 className="text-sm font-semibold text-[var(--text)] mb-4 flex items-center gap-2">
         <Shield size={16} />
-        权限
+        {t('permissions.title')}
       </h2>
 
       {/* Filesystem Rules */}
       <section className="mb-5">
-        <h3 className="text-xs font-semibold text-[var(--text-muted)] mb-2">文件系统规则</h3>
+        <h3 className="text-xs font-semibold text-[var(--text-muted)] mb-2">
+          {t('permissions.fsRules')}
+        </h3>
         <div className="space-y-2 mb-2">
           {config.filesystem.rules.map((rule, i) => (
             <div key={i} className="flex items-center gap-2">
@@ -120,9 +124,9 @@ export function PermissionsPage() {
                 onChange={(e) => updateRule(i, 'mode', e.target.value)}
                 className={selectCls}
               >
-                <option value="read">读取</option>
-                <option value="write">写入</option>
-                <option value="none">禁止</option>
+                <option value="read">{t('permissions.modeRead')}</option>
+                <option value="write">{t('permissions.modeWrite')}</option>
+                <option value="none">{t('permissions.modeNone')}</option>
               </select>
               <label className="flex items-center gap-1.5 text-xs cursor-pointer text-text-muted">
                 <input
@@ -131,7 +135,7 @@ export function PermissionsPage() {
                   onChange={(e) => updateRule(i, 'recursive', e.target.checked)}
                   className="accent-[var(--accent)]"
                 />
-                递归
+                {t('permissions.recursive')}
               </label>
               <button
                 onClick={() => removeRule(i)}
@@ -147,13 +151,15 @@ export function PermissionsPage() {
           className="flex items-center gap-1 text-xs font-medium transition-colors hover:opacity-80"
           style={{ color: 'var(--accent)' }}
         >
-          <Plus size={12} /> 添加规则
+          <Plus size={12} /> {t('permissions.addRule')}
         </button>
       </section>
 
       {/* Network Policy */}
       <section className="mb-5">
-        <h3 className="text-xs font-semibold text-[var(--text-muted)] mb-2">网络策略</h3>
+        <h3 className="text-xs font-semibold text-[var(--text-muted)] mb-2">
+          {t('permissions.networkPolicy')}
+        </h3>
         <select
           value={config.network}
           onChange={(e) =>
@@ -164,15 +170,17 @@ export function PermissionsPage() {
           }
           className={selectCls}
         >
-          <option value="allow_all">允许所有</option>
-          <option value="block_all">全部阻止</option>
-          <option value="allow_list">白名单模式</option>
+          <option value="allow_all">{t('permissions.netAllowAll')}</option>
+          <option value="block_all">{t('permissions.netBlockAll')}</option>
+          <option value="allow_list">{t('permissions.netAllowList')}</option>
         </select>
       </section>
 
       {/* Exec Approval */}
       <section className="mb-6">
-        <h3 className="text-xs font-semibold text-[var(--text-muted)] mb-2">Shell 命令审批</h3>
+        <h3 className="text-xs font-semibold text-[var(--text-muted)] mb-2">
+          {t('permissions.execApproval')}
+        </h3>
         <select
           value={config.exec_approval}
           onChange={(e) =>
@@ -183,9 +191,9 @@ export function PermissionsPage() {
           }
           className={selectCls}
         >
-          <option value="never">无需审批</option>
-          <option value="dangerous">仅危险命令（默认）</option>
-          <option value="always">始终需要审批</option>
+          <option value="never">{t('permissions.execNever')}</option>
+          <option value="dangerous">{t('permissions.execDangerous')}</option>
+          <option value="always">{t('permissions.execAlways')}</option>
         </select>
       </section>
 
@@ -207,7 +215,7 @@ export function PermissionsPage() {
         ) : (
           <Save size={13} />
         )}
-        {saved ? '已保存' : '保存'}
+        {saved ? t('permissions.saved') : t('common.save')}
       </button>
     </div>
   );
