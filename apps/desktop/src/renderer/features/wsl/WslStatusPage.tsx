@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
+import { useTranslation } from 'react-i18next';
 import {
   Cpu,
   HardDrive,
@@ -82,10 +83,10 @@ function CircleRing({ pct, size = 112 }: { pct: number; size?: number }) {
 const AISHADOW_PREFIX = 'AIShadow';
 
 // ── Install phase definitions for the state machine ──────────────────
-const INSTALL_STEPS: { phase: string; label: string; icon: typeof CheckCircle2 }[] = [
-  { phase: 'enabling_features', label: '启用功能', icon: Cpu },
-  { phase: 'installing_wsl', label: '安装 WSL', icon: Download },
-  { phase: 'installing_distro', label: '安装发行版', icon: Download },
+const INSTALL_STEPS: { phase: string; labelKey: string; icon: typeof CheckCircle2 }[] = [
+  { phase: 'enabling_features', labelKey: 'wsl.stepEnableFeatures', icon: Cpu },
+  { phase: 'installing_wsl', labelKey: 'wsl.stepInstallWsl', icon: Download },
+  { phase: 'installing_distro', labelKey: 'wsl.stepInstallDistro', icon: Download },
 ];
 
 const PHASE_INDEX: Record<string, number> = {
@@ -98,6 +99,7 @@ const PHASE_INDEX: Record<string, number> = {
 };
 
 export default function WslStatusPage() {
+  const { t } = useTranslation();
   const [stats, setStats] = useState<WslStatsResult | null>(null);
   const [fetching, setFetching] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -123,8 +125,8 @@ export default function WslStatusPage() {
           (d: string) => d === AISHADOW_PREFIX || d.startsWith(AISHADOW_PREFIX)
         );
         if (idx > 0) {
-          const [t] = sorted.splice(idx, 1);
-          sorted.unshift(t);
+          const [aisDistro] = sorted.splice(idx, 1);
+          sorted.unshift(aisDistro);
         }
         setDistros(sorted);
 
@@ -151,15 +153,15 @@ export default function WslStatusPage() {
           setStats(r);
           setError(null);
         } else {
-          setError(r?.error ?? '无法获取 WSL 状态');
+          setError(r?.error ?? t('wsl.fetchFail'));
         }
       } catch (e: any) {
-        setError(e?.message ?? 'IPC 调用失败');
+        setError(e?.message ?? t('wsl.ipcFail'));
       } finally {
         setFetching(false);
       }
     },
-    [selected]
+    [selected, t]
   );
 
   // ── One-click install flow ─────────────────────────────────────────
@@ -169,7 +171,7 @@ export default function WslStatusPage() {
     setInstallRebootRequired(false);
     setInstallNextStep(null);
     setInstallPhase('checking');
-    setInstallMessage('正在检测 WSL 状态...');
+    setInstallMessage(t('wsl.checking'));
 
     try {
       const result = await window.miqi.wsl.installAndProvision();
@@ -179,22 +181,22 @@ export default function WslStatusPage() {
           setInstallNextStep(result.nextStep ?? null);
         } else {
           setInstallPhase('complete');
-          setInstallMessage('WSL2 安装配置完成！');
+          setInstallMessage(t('wsl.done'));
         }
       } else {
-        setInstallError(result.error ?? '安装失败');
+        setInstallError(result.error ?? t('wsl.installFail'));
         setInstallNextStep(result.nextStep ?? null);
         setInstallPhase('error');
       }
       // Refresh distro list
       await fetchDistros();
     } catch (e: any) {
-      setInstallError(e?.message ?? '安装过程出错');
+      setInstallError(e?.message ?? t('wsl.installError'));
       setInstallPhase('error');
     } finally {
       setInstalling(false);
     }
-  }, [fetchDistros]);
+  }, [fetchDistros, t]);
 
   // ── Listen for install progress events ─────────────────────────────
   useEffect(() => {
@@ -279,7 +281,7 @@ export default function WslStatusPage() {
                     <Circle size={10} />
                   )}
                 </div>
-                <span className="text-size-2xs text-[var(--text-muted)]">{step.label}</span>
+                <span className="text-size-2xs text-[var(--text-muted)]">{t(step.labelKey)}</span>
               </div>
             );
           })}
@@ -323,7 +325,7 @@ export default function WslStatusPage() {
           <div className="mt-3 p-2.5 rounded-lg bg-[var(--warning)]/10 border border-[var(--warning)]/25">
             <p className="text-xs text-[var(--text)] flex items-center gap-1.5">
               <TriangleAlert size={12} className="text-[var(--warning)]" />
-              需要重启系统以完成安装
+              {t('wsl.rebootNeeded')}
             </p>
             {installNextStep && (
               <p className="text-xs text-[var(--text-muted)] mt-1">{installNextStep}</p>
@@ -346,12 +348,12 @@ export default function WslStatusPage() {
       <div className="flex items-center justify-between px-6 py-4 border-b border-[var(--border-subtle)] bg-[var(--surface)] shrink-0">
         <div>
           <h1 className="text-base font-semibold text-[var(--text)] flex items-center gap-2">
-            <Cpu size={16} /> WSL 状态监控
+            <Cpu size={16} /> {t('wsl.title')}
           </h1>
           <p className="text-xs text-[var(--text-muted)] mt-0.5">
             {stats
-              ? `${stats.distro} · 已运行 ${fmtUptime(stats.uptime_sec)}`
-              : '实时监控系统资源使用情况'}
+              ? t('wsl.headerUptime', { distro: stats.distro, uptime: fmtUptime(stats.uptime_sec) })
+              : t('wsl.subtitleEmpty')}
           </p>
         </div>
 
@@ -369,13 +371,13 @@ export default function WslStatusPage() {
                 ) : (
                   <Download size={12} />
                 )}
-                一键安装 WSL2
+                {t('wsl.installBtn')}
               </button>
               <button
                 onClick={() => fetchDistros()}
                 disabled={installing}
                 className="p-2 rounded-lg bg-[var(--surface-muted)] border border-[var(--border-subtle)] text-[var(--text-muted)] hover:text-[var(--accent)] hover:border-[var(--accent)] transition-colors disabled:opacity-40"
-                title="重新检查"
+                title={t('wsl.recheck')}
               >
                 <RefreshCw size={14} />
               </button>
@@ -395,14 +397,14 @@ export default function WslStatusPage() {
           ) : distros.length === 1 ? (
             <span className="text-xs text-[var(--text-muted)]">{distros[0]}</span>
           ) : (
-            <span className="text-xs text-[var(--text-faint)]">未检测到 WSL 发行版</span>
+            <span className="text-xs text-[var(--text-faint)]">{t('wsl.noDistro')}</span>
           )}
           {distros.length > 0 && (
             <button
               onClick={() => fetchStats()}
               disabled={fetching || !selected}
               className="p-2 rounded-lg bg-[var(--surface-muted)] border border-[var(--border-subtle)] text-[var(--text-muted)] hover:text-[var(--accent)] hover:border-[var(--accent)] transition-colors disabled:opacity-40"
-              title="刷新"
+              title={t('common.refresh')}
             >
               <RefreshCw size={14} className={fetching ? 'animate-spin' : ''} />
             </button>
@@ -427,31 +429,27 @@ export default function WslStatusPage() {
               <>
                 <RefreshCw size={20} className="animate-spin text-text-faint" />
                 <p className="text-sm text-[var(--text-muted)]">
-                  正在获取 {selected || 'WSL'} 状态...
+                  {t('wsl.fetchingState', { name: selected || 'WSL' })}
                 </p>
-                <p className="text-xs text-[var(--text-faint)]">数据加载中，您可以切换发行版</p>
+                <p className="text-xs text-[var(--text-faint)]">{t('wsl.switchHint')}</p>
               </>
             ) : selected ? (
               <>
                 <Activity size={20} style={{ color: 'var(--text-faint)' }} />
-                <p className="text-sm text-[var(--text-muted)]">暂无数据</p>
-                <p className="text-xs text-[var(--text-faint)]">点击刷新按钮获取状态</p>
+                <p className="text-sm text-[var(--text-muted)]">{t('wsl.noData')}</p>
+                <p className="text-xs text-[var(--text-faint)]">{t('wsl.clickRefresh')}</p>
               </>
             ) : distros.length > 0 ? (
               <>
                 <Cpu size={20} style={{ color: 'var(--text-faint)' }} />
-                <p className="text-sm text-[var(--text-muted)]">请选择 WSL 发行版</p>
-                <p className="text-xs text-[var(--text-faint)]">
-                  在上方下拉菜单中选择发行版以查看状态
-                </p>
+                <p className="text-sm text-[var(--text-muted)]">{t('wsl.chooseDistro')}</p>
+                <p className="text-xs text-[var(--text-faint)]">{t('wsl.chooseDistroHint')}</p>
               </>
             ) : (
               <>
                 <Cpu size={20} style={{ color: 'var(--text-faint)' }} />
-                <p className="text-sm text-[var(--text-muted)]">未检测到 WSL 发行版</p>
-                <p className="text-xs text-[var(--text-faint)]">
-                  点击上方「一键安装 WSL2」自动完成安装和配置
-                </p>
+                <p className="text-sm text-[var(--text-muted)]">{t('wsl.noDistro')}</p>
+                <p className="text-xs text-[var(--text-faint)]">{t('wsl.installHint')}</p>
               </>
             )}
           </div>
@@ -468,11 +466,13 @@ export default function WslStatusPage() {
                       >
                         {mem.used_pct}%
                       </span>
-                      <span className="text-size-2xs text-[var(--text-faint)]">内存</span>
+                      <span className="text-size-2xs text-[var(--text-faint)]">
+                        {t('wsl.memShort')}
+                      </span>
                     </div>
                   </div>
                   <div className="text-center">
-                    <div className="text-xs text-[var(--text-muted)]">内存使用率</div>
+                    <div className="text-xs text-[var(--text-muted)]">{t('wsl.memUsage')}</div>
                     <div className="text-xs font-mono text-[var(--text)]">
                       {fmtMem(mem.used_mb)} / {fmtMem(mem.total_mb)}
                     </div>
@@ -489,12 +489,16 @@ export default function WslStatusPage() {
                       >
                         {cpu.usage_pct}%
                       </span>
-                      <span className="text-size-2xs text-[var(--text-faint)]">CPU</span>
+                      <span className="text-size-2xs text-[var(--text-faint)]">
+                        {t('wsl.cpuShort')}
+                      </span>
                     </div>
                   </div>
                   <div className="text-center">
-                    <div className="text-xs text-[var(--text-muted)]">CPU 使用率</div>
-                    <div className="text-xs font-mono text-[var(--text)]">{cpu.cores} 核</div>
+                    <div className="text-xs text-[var(--text-muted)]">{t('wsl.cpuUsage')}</div>
+                    <div className="text-xs font-mono text-[var(--text)]">
+                      {t('wsl.cores', { count: cpu.cores })}
+                    </div>
                   </div>
                 </div>
               )}
@@ -508,11 +512,13 @@ export default function WslStatusPage() {
                       >
                         {dsk.used_pct}%
                       </span>
-                      <span className="text-size-2xs text-[var(--text-faint)]">磁盘</span>
+                      <span className="text-size-2xs text-[var(--text-faint)]">
+                        {t('wsl.diskShort')}
+                      </span>
                     </div>
                   </div>
                   <div className="text-center">
-                    <div className="text-xs text-[var(--text-muted)]">磁盘使用率 (/)</div>
+                    <div className="text-xs text-[var(--text-muted)]">{t('wsl.diskUsage')}</div>
                     <div className="text-xs font-mono text-[var(--text)]">
                       {dsk.used_gb} / {dsk.total_gb} GB
                     </div>
@@ -523,26 +529,26 @@ export default function WslStatusPage() {
 
             <div className="bg-[var(--surface)] border border-[var(--border-subtle)] rounded-2xl overflow-hidden">
               <div className="px-5 py-3 border-b border-[var(--border-subtle)] bg-[var(--surface-muted)]">
-                <span className="text-xs font-semibold text-[var(--text)]">详细信息</span>
+                <span className="text-xs font-semibold text-[var(--text)]">{t('wsl.details')}</span>
               </div>
               <table className="w-full text-sm">
                 <tbody>
                   {[
-                    ['发行版', stats.distro],
+                    [t('wsl.distro'), stats.distro],
                     [
-                      '状态',
+                      t('wsl.status'),
                       <span className="flex items-center gap-1 text-[var(--accent)]">
-                        <CheckCircle2 size={11} /> 运行中
+                        <CheckCircle2 size={11} /> {t('wsl.running')}
                       </span>,
                     ],
-                    ['运行时间', fmtUptime(stats.uptime_sec)],
-                    ['CPU 核心数', `${cpu?.cores ?? 0} 核`],
-                    ['内存总量', fmtMem(mem?.total_mb ?? 0)],
-                    ['内存已用', `${fmtMem(mem?.used_mb ?? 0)} (${mem?.used_pct ?? 0}%)`],
-                    ['内存可用', fmtMem(mem?.free_mb ?? 0)],
-                    ['磁盘总量', `${dsk?.total_gb ?? 0} GB`],
-                    ['磁盘已用', `${dsk?.used_gb ?? 0} GB (${dsk?.used_pct ?? 0}%)`],
-                    ['磁盘可用', `${dsk?.free_gb ?? 0} GB`],
+                    [t('wsl.uptime'), fmtUptime(stats.uptime_sec)],
+                    [t('wsl.cpuCores'), t('wsl.cores', { count: cpu?.cores ?? 0 })],
+                    [t('wsl.memTotal'), fmtMem(mem?.total_mb ?? 0)],
+                    [t('wsl.memUsed'), `${fmtMem(mem?.used_mb ?? 0)} (${mem?.used_pct ?? 0}%)`],
+                    [t('wsl.memFree'), fmtMem(mem?.free_mb ?? 0)],
+                    [t('wsl.diskTotal'), `${dsk?.total_gb ?? 0} GB`],
+                    [t('wsl.diskUsed'), `${dsk?.used_gb ?? 0} GB (${dsk?.used_pct ?? 0}%)`],
+                    [t('wsl.diskFree'), `${dsk?.free_gb ?? 0} GB`],
                   ].map(([k, v], i) => (
                     <tr
                       key={String(k)}
