@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
+import { useTranslation } from 'react-i18next';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import {
@@ -32,8 +33,8 @@ const SCOPE_ICONS: Record<string, LucideIcon> = {
 };
 
 const SCOPE_LABELS: Record<string, string> = {
-  workspace: '日常笔记',
-  agent: 'Agent 记忆',
+  workspace: 'memory.scopeWorkspace',
+  agent: 'memory.scopeAgent',
 };
 
 function formatSize(bytes: number): string {
@@ -51,6 +52,7 @@ import { ConfirmDialog, SaveConfirmDialog, InputDialog } from '../../components/
 // ---------------------------------------------------------------------------
 
 export function MemoryPage() {
+  const { t } = useTranslation();
   const [files, setFiles] = useState<MemoryFileInfo[]>([]);
   const [lessons, setLessons] = useState<MemoryLessonEntry[]>([]);
   const [loading, setLoading] = useState(true);
@@ -100,7 +102,7 @@ export function MemoryPage() {
   const selectFile = useCallback(
     async (info: MemoryFileInfo) => {
       if (dirty && activeFile && info.path !== activeFile.path) {
-        const ok = confirm(`文件 ${activeFile.path} 有未保存的更改，确认丢弃？`);
+        const ok = confirm(t('memory.discardConfirm', { path: activeFile.path }));
         if (!ok) return;
       }
 
@@ -115,10 +117,10 @@ export function MemoryPage() {
         setFileContent(result.content);
         setEditorContent(result.content);
       } catch (err: unknown) {
-        setError(err instanceof Error ? err.message : '加载文件失败');
+        setError(err instanceof Error ? err.message : t('memory.loadFail'));
       }
     },
-    [dirty, activeFile]
+    [dirty, activeFile, t]
   );
 
   const handleSave = async () => {
@@ -130,10 +132,10 @@ export function MemoryPage() {
       await window.miqi.memory.update(activeFile.path, editorContent);
       setFileContent(editorContent);
       setDirty(false);
-      setSuccess(`已保存 ${activeFile.path}`);
+      setSuccess(t('memory.savedPath', { path: activeFile.path }));
       setTimeout(() => setSuccess(null), 2000);
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : '保存失败');
+      setError(err instanceof Error ? err.message : t('memory.saveFail'));
     } finally {
       setSaving(false);
     }
@@ -159,7 +161,7 @@ export function MemoryPage() {
       };
       selectFile(newFile);
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : '创建文件失败');
+      setError(err instanceof Error ? err.message : t('memory.createFail'));
     }
     setShowNewFileDialog(false);
   };
@@ -176,7 +178,7 @@ export function MemoryPage() {
       }
       await load();
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : '删除文件失败');
+      setError(err instanceof Error ? err.message : t('memory.deleteFail'));
     }
     setShowDeleteConfirm(null);
   };
@@ -199,9 +201,11 @@ export function MemoryPage() {
       {/* Header */}
       <div className="flex items-center justify-between px-6 py-4 border-b border-[var(--border-subtle)] bg-[var(--surface)] shrink-0">
         <div>
-          <h1 className="text-base font-semibold text-[var(--text)]">记忆</h1>
+          <h1 className="text-base font-semibold text-[var(--text)]">{t('memory.title')}</h1>
           <p className="text-xs text-[var(--text-muted)] mt-0.5">
-            {loading ? '加载中…' : `${files.length} 个文件，${lessons.length} 条 Lesson`}
+            {loading
+              ? t('memory.loading')
+              : t('memory.summary', { files: files.length, lessons: lessons.length })}
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -232,7 +236,7 @@ export function MemoryPage() {
             )}
           >
             {saving ? <Loader2 size={14} className="animate-spin" /> : <Save size={14} />}
-            {hasUnsaved ? '保存 *' : '保存'}
+            {hasUnsaved ? t('memory.saveDirty') : t('common.save')}
           </button>
         </div>
       </div>
@@ -248,7 +252,7 @@ export function MemoryPage() {
               className="flex items-center gap-1.5 w-full px-2 py-1.5 rounded-lg text-xs text-[var(--text-muted)] hover:bg-[var(--surface-muted)] hover:text-[var(--text)] transition-colors"
             >
               <Plus size={13} />
-              <span>新建</span>
+              <span>{t('memory.new')}</span>
             </button>
           </div>
           <div className="flex-1 overflow-y-auto">
@@ -259,12 +263,12 @@ export function MemoryPage() {
             ) : files.length === 0 ? (
               <div className="flex flex-col items-center justify-center h-20 gap-1.5 text-xs text-[var(--text-faint)]">
                 <FileText size={16} />
-                <span>暂无记忆文件</span>
+                <span>{t('memory.noFiles')}</span>
               </div>
             ) : (
               <div className="py-1">
                 <FileGroup
-                  label="Agent 记忆"
+                  label={t('memory.scopeAgent')}
                   icon={BookOpen}
                   files={agentFiles}
                   activePath={activeFile?.path ?? null}
@@ -272,7 +276,7 @@ export function MemoryPage() {
                   onDelete={(path) => setShowDeleteConfirm(path)}
                 />
                 <FileGroup
-                  label="日常笔记"
+                  label={t('memory.scopeWorkspace')}
                   icon={FileText}
                   files={workspaceFiles}
                   activePath={activeFile?.path ?? null}
@@ -289,7 +293,7 @@ export function MemoryPage() {
           {!activeFile ? (
             <div className="flex flex-col items-center justify-center flex-1 gap-3 text-sm text-[var(--text-faint)]">
               <BookOpen size={28} />
-              <span>从左侧选择文件查看和编辑</span>
+              <span>{t('memory.selectHint')}</span>
             </div>
           ) : (
             <>
@@ -303,7 +307,9 @@ export function MemoryPage() {
                   {formatAbsoluteTime(activeFile.updatedAtMs)}
                 </span>
                 {dirty && (
-                  <span className="text-xs text-[var(--warning)] font-medium ml-auto">未保存</span>
+                  <span className="text-xs text-[var(--warning)] font-medium ml-auto">
+                    {t('memory.unsaved')}
+                  </span>
                 )}
                 {/* Copy all button */}
                 <button
@@ -311,7 +317,7 @@ export function MemoryPage() {
                   className="ml-auto flex items-center gap-1 px-2 py-1 rounded text-xs text-[var(--text-muted)] hover:bg-[var(--surface-muted)] hover:text-[var(--text)] transition-colors"
                 >
                   {copiedAll ? <Check size={12} /> : <Copy size={12} />}
-                  <span>{copiedAll ? '已复制' : '复制全部'}</span>
+                  <span>{copiedAll ? t('workspace.copied') : t('workspace.copyAll')}</span>
                 </button>
                 {!dirty && (
                   <div className="flex items-center gap-1 rounded-md border border-[var(--border-subtle)] overflow-hidden">
@@ -324,7 +330,7 @@ export function MemoryPage() {
                           : 'text-[var(--text-muted)] hover:bg-[var(--surface-muted)]'
                       )}
                     >
-                      编辑
+                      {t('workspace.edit')}
                     </button>
                     <button
                       onClick={() => setPreviewMode(true)}
@@ -335,7 +341,7 @@ export function MemoryPage() {
                           : 'text-[var(--text-muted)] hover:bg-[var(--surface-muted)]'
                       )}
                     >
-                      预览
+                      {t('workspace.preview')}
                     </button>
                   </div>
                 )}
@@ -356,7 +362,7 @@ export function MemoryPage() {
                     }}
                     className="w-full h-full px-5 py-4 resize-none text-sm font-mono text-[var(--text)] placeholder-[var(--text-faint)] focus:outline-none leading-relaxed"
                     spellCheck={false}
-                    placeholder="文件内容…"
+                    placeholder={t('memory.contentPlaceholder')}
                   />
                 )}
               </div>
@@ -366,7 +372,7 @@ export function MemoryPage() {
                 <div className="flex items-center gap-2 px-5 py-2 bg-[var(--surface-muted)] border-b border-[var(--border-subtle)]">
                   <Lightbulb size={13} className="text-[var(--warning)]" />
                   <span className="text-xs font-semibold uppercase tracking-widest text-[var(--text-faint)]">
-                    自我优化 Lessons
+                    {t('memory.lessonsTitle')}
                   </span>
                   <span className="text-xs text-[var(--text-faint)] ml-auto">
                     {lessons.length} total
@@ -376,8 +382,8 @@ export function MemoryPage() {
                   {lessons.length === 0 ? (
                     <div className="flex flex-col items-center justify-center py-8 gap-2 text-xs text-[var(--text-faint)]">
                       <Lightbulb size={18} />
-                      <span>暂无 Lesson 记录。</span>
-                      <span>Agent 收到用户纠正后会自动记录 Lesson。</span>
+                      <span>{t('memory.noLessons')}</span>
+                      <span>{t('memory.lessonsHint')}</span>
                     </div>
                   ) : (
                     <div className="divide-y divide-[var(--border-subtle)]">
@@ -400,8 +406,8 @@ export function MemoryPage() {
           onOpenChange={(o) => {
             if (!o) setShowNewFileDialog(false);
           }}
-          title="新建记忆文件"
-          label="文件名（自动添加 .md）"
+          title={t('memory.newFileTitle')}
+          label={t('memory.newFileNameLabel')}
           onConfirm={handleCreateFile}
         />
       )}
@@ -409,8 +415,8 @@ export function MemoryPage() {
       {/* Delete confirm dialog */}
       {showDeleteConfirm && (
         <ConfirmDialog
-          title="删除文件"
-          message={`确定删除 ${showDeleteConfirm}？此操作不可撤销。`}
+          title={t('memory.deleteFileTitle')}
+          message={t('memory.confirmDelete', { path: showDeleteConfirm })}
           danger
           onConfirm={() => handleDeleteFile(showDeleteConfirm)}
           onCancel={() => setShowDeleteConfirm(null)}
@@ -451,6 +457,7 @@ function FileGroup({
   onSelect: (f: MemoryFileInfo) => void;
   onDelete: (path: string) => void;
 }) {
+  const { t } = useTranslation();
   if (files.length === 0) return null;
   return (
     <div>
@@ -465,9 +472,9 @@ function FileGroup({
             <ContextMenu
               key={f.path}
               items={[
-                { label: '打开编辑', onSelect: () => onSelect(f) },
+                { label: t('memory.openEdit'), onSelect: () => onSelect(f) },
                 {
-                  label: '复制文件内容',
+                  label: t('memory.copyContent'),
                   onSelect: async () => {
                     try {
                       const r = await window.miqi.memory.get(f.path);
@@ -478,7 +485,7 @@ function FileGroup({
                   },
                 },
                 {
-                  label: '删除文件',
+                  label: t('memory.deleteFileTitle'),
                   danger: true,
                   divider: true,
                   onSelect: () => onDelete(f.path),
@@ -517,7 +524,7 @@ function FileGroup({
                   <button
                     onClick={() => onDelete(f.path)}
                     className="shrink-0 pr-2 opacity-0 group-hover:opacity-100 text-[var(--text-faint)] hover:text-[var(--danger)] transition-all"
-                    title="删除文件"
+                    title={t('memory.deleteFileTitle')}
                   >
                     <Trash2 size={12} />
                   </button>
