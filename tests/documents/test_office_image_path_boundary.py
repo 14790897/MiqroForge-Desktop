@@ -110,10 +110,10 @@ async def _run_pptx(files_dir: Path, image_path, **kwargs) -> str:
 async def test_docx_out_of_bounds_image_is_not_read(tmp_path, monkeypatch):
     """工作区外的绝对路径图片：不读文件、产物无 media、返回串含「跳过」。"""
     files_dir = _session_files_dir(tmp_path)
-    secret = _write_png(tmp_path / "outside" / "secret.png")
+    outside_image = _write_png(tmp_path / "outside" / "outside.png")
     calls = _spy_image_from_file(monkeypatch, _DOCX_IMAGE)
 
-    result = await _run_docx(files_dir, secret)
+    result = await _run_docx(files_dir, outside_image)
 
     assert calls == []
     assert _media_entries(files_dir / "out.docx", "word/media/") == []
@@ -140,7 +140,7 @@ async def test_docx_cross_session_image_is_not_read(tmp_path, monkeypatch):
     """跨会话图片（绝对路径指向另一会话 files 根）：三元组断言。"""
     files_dir = _session_files_dir(tmp_path, key="desktop_A")
     other = _write_png(
-        _session_files_dir(tmp_path, key="desktop_B") / "secret.png"
+        _session_files_dir(tmp_path, key="desktop_B") / "outside.png"
     )
     calls = _spy_image_from_file(monkeypatch, _DOCX_IMAGE)
 
@@ -237,10 +237,10 @@ async def test_docx_user_roots_disabled_flag_is_skipped(tmp_path, monkeypatch):
 @pytest.mark.asyncio
 async def test_pptx_out_of_bounds_image_is_not_read(tmp_path, monkeypatch):
     files_dir = _session_files_dir(tmp_path)
-    secret = _write_png(tmp_path / "outside" / "secret.png")
+    outside_image = _write_png(tmp_path / "outside" / "outside.png")
     calls = _spy_image_from_file(monkeypatch, _PPTX_IMAGE)
 
-    result = await _run_pptx(files_dir, secret)
+    result = await _run_pptx(files_dir, outside_image)
 
     assert calls == []
     assert _media_entries(files_dir / "out.pptx", "ppt/media/") == []
@@ -265,7 +265,7 @@ async def test_pptx_in_bounds_image_is_embedded(tmp_path, monkeypatch):
 async def test_pptx_cross_session_image_is_not_read(tmp_path, monkeypatch):
     files_dir = _session_files_dir(tmp_path, key="desktop_A")
     other = _write_png(
-        _session_files_dir(tmp_path, key="desktop_B") / "secret.png"
+        _session_files_dir(tmp_path, key="desktop_B") / "outside.png"
     )
     calls = _spy_image_from_file(monkeypatch, _PPTX_IMAGE)
 
