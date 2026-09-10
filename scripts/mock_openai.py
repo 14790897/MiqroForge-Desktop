@@ -292,6 +292,11 @@ class Handler(BaseHTTPRequestHandler):
             (str(m.get("content", "")) for m in reversed(messages) if m.get("role") == "user"),
             "",
         )
+        # ── 截图/UI e2e 分支:直接文本回复(前缀 MOCK_REPLY:,不影响其他流程) ──
+        if "MOCK_REPLY:" in last_user:
+            reply = last_user.split("MOCK_REPLY:", 1)[1].strip() or "收到,这是模拟回复。"
+            self._respond(text(reply))
+            return
         if "写授权" in last_user:
             if n_write > 0:
                 self._respond(text("写授权流程结束。"))
