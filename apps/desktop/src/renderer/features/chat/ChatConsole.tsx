@@ -6305,15 +6305,15 @@ export function ChatConsole({
         retry: false,
       };
       setMessages((prev) => prev.slice(0, idx));
-      requestAnimationFrame(() => {
-        editSendOutcomeRef.current = null;
-        handleSendRef.current();
-        // handleSend 的同步段此时已执行完:被拒 → 回滚,避免"截断成功、重发失败"
-        if (editSendOutcomeRef.current === 'rejected') {
-          retryPayloadRef.current = null;
-          setMessages(snapshot);
-        }
-      });
+      // 同步原子调用:handleSend 经 retryPayload 读文本,不依赖 setInput 渲染
+      // flush —— 不排 RAF(窗口不可见时 RAF 可能不触发,导致"截断但不发送")。
+      editSendOutcomeRef.current = null;
+      handleSendRef.current();
+      // handleSend 的同步段此时已执行完:被拒 → 回滚,避免"截断成功、重发失败"
+      if (editSendOutcomeRef.current === 'rejected') {
+        retryPayloadRef.current = null;
+        setMessages(snapshot);
+      }
     },
     [streaming]
   );
@@ -9102,7 +9102,7 @@ const MessageBubble = memo(function MessageBubble({
               >
                 {isUser && editing ? (
                   /* 编辑态(#828):原地变输入框,提交 = 截断到此处并用新文本重新回答 */
-                  <div className="flex flex-col gap-2 min-w-[320px]">
+                  <div className="flex flex-col gap-2 min-w-[320px] max-w-full">
                     <textarea
                       value={editText}
                       onChange={(e) => setEditText(e.target.value)}
@@ -9232,8 +9232,9 @@ const MessageBubble = memo(function MessageBubble({
                 )}
               </div>
 
-              {/* 用户消息操作 — 复制 / 编辑(仅鼠标靠近/hover 消息时显示,#828) */}
-              {isUser && msg.content !== '' && (
+              {/* 用户消息操作 — 复制 / 编辑(仅鼠标靠近/hover 消息时显示,#828;
+                  编辑态下隐藏,避免与编辑框叠在一起) */}
+              {isUser && msg.content !== '' && !editing && (
                 <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity mt-1">
                   <button
                     onClick={() => onCopy(msg.content, copyIdx ?? turnIndex ?? 0)}
