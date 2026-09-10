@@ -207,19 +207,35 @@ class DDGSProvider(SearchProvider):
             return SearchResult(False, error_type="NETWORK")
 
         last_error = "UNKNOWN"
+
+        async def _query(backend: str, timeout: float) -> list:
+            """单后端查询 + 硬超时（ddgs 库自身无超时，国内网络下
+            lite/auto 后端会撞 Brave/Yandex 超时 20s+ —— #854 后实测：
+            html 3.1s / lite 22.4s 超时 / auto 20.0s 超时）。"""
+            return await asyncio.wait_for(
+                asyncio.to_thread(
+                    lambda: list(
+                        DDGS().text(query, max_results=count, backend=backend)
+                    )
+                ),
+                timeout=timeout,
+            )
+
         # Rate limits are usually short-lived (seconds) — retry once with a
         # small backoff before giving up and falling through the chain (#561).
         for attempt in (1, 2):
             try:
-                results = await asyncio.to_thread(
-                    lambda: list(
-                        DDGS().text(
-                            query,
-                            max_results=count,
-                            backend="html,lite",  # multiple endpoints, more resilient
-                        )
-                    )
-                )
+                # html 优先（国内网络稳定且快）；失败或无结果再试 lite（8s 上限）
+                results = []
+                try:
+                    results = await _query("html", 12.0)
+                except Exception:
+                    results = []
+                if not results:
+                    try:
+                        results = await _query("lite", 8.0)
+                    except Exception:
+                        results = []
                 if not results:
                     return SearchResult(True, error_type="NO_RESULT")
                 out = []
