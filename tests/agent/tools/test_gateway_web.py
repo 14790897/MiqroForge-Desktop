@@ -3,7 +3,7 @@
 import pytest
 
 from miqi.agent.tools.gateway_web import GatewaySearchProvider, GatewaySearchProviderManager
-from miqi.agent.tools.web import DDGSProvider, SearchResult, TavilyProvider
+from miqi.agent.tools.web import SearchResult, TavilyProvider
 
 
 async def test_gateway_search_success(monkeypatch):
