@@ -192,11 +192,20 @@ def make_resolver() -> Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]:
             # becomes pending: concurrent confirm cards in the same turn
             # queue in the gate (issue #714 follow-up), and a queued card
             # must not surface before the previous one resolved.
+            # 2026-08-27：载荷带 turn_id/thread_id——前端据此把卡内联进
+            # 对应 turn 的 AI 回答消息（用户：所有内容都在 AI 回答里面）
+            card_payload = {
+                **payload,
+                "input_id": input_id,
+                "prompt": prompt,
+                "turn_id": turn_id,
+                "thread_id": thread_id,
+            }
             try:
                 if asyncio.iscoroutinefunction(emitter):
-                    await emitter({**payload, "input_id": input_id, "prompt": prompt})
+                    await emitter(card_payload)
                 else:
-                    emitter({**payload, "input_id": input_id, "prompt": prompt})
+                    emitter(card_payload)
             except Exception:
                 pass  # emitter failure must not block the tool; timeout will cancel
 
