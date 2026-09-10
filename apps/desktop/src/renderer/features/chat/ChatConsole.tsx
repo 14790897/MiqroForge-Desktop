@@ -452,13 +452,14 @@ function isProviderConfigurationProblem(message: string, code?: string) {
 
 function createProviderConfigMessage(
   content?: string,
-  action: 'open-provider-settings' | 'login' = 'open-provider-settings'
+  action: 'open-provider-settings' | 'login' = 'open-provider-settings',
+  actionLabel?: string
 ): Message {
   return {
     role: 'error',
     content: content || '尚未配置模型服务。请先配置 Provider/API Key 后再发送消息。',
     action,
-    actionLabel: action === 'login' ? '登录 MiQroForge 账号' : '去配置模型',
+    actionLabel: actionLabel ?? (action === 'login' ? '登录 MiQroForge 账号' : '去配置模型'),
     timestamp: Date.now(),
   };
 }
@@ -4384,9 +4385,16 @@ export function ChatConsole({
         return;
       }
       const result = await window.miqi.providers.list();
-      const hasConfiguredProvider = result.providers.some((provider) => provider.configured);
-      if (!hasConfiguredProvider) {
-        // No configured provider — replace the optimistic bubble with the
+      // 判定「当前默认模型能否发起会话」而不是「有没有已配置的本地 provider」：
+      // 登录后经平台 AI 网关路由的默认模型不需要任何本地凭据（make_provider
+      // 的网关分支），只看 configured 会把「登录即可用」误拦成「未配置模型
+      // 服务」——用户登录后仍被要求配置模型即由此而来。后端用与运行时同一套
+      // 判定（含网关路由）给出 active_model_resolvable；旧版 bridge 无该字段
+      // 时回退到 configured（保持原行为）。
+      const modelServable =
+        result.active_model_resolvable ?? result.providers.some((provider) => provider.configured);
+      if (!modelServable) {
+        // No servable model — replace the optimistic bubble with the
         // provider-config guidance.  The send is refused: the user should
         // configure a provider before sending.  The draft is restored to the
         // input so they can re-send once configured.  Only touch the composer /
@@ -4395,9 +4403,14 @@ export function ChatConsole({
         // setAttachments / setMessages act on the currently displayed session.
         // #1000：未登录时没有 Provider 可配置（#835 合规收口后凭据配置已移除），
         // 拦截气泡直接给出一键登录按钮，登录后经网关自动获得平台内置模型。
+        // 已登录时凭据配置同样不存在，引导落点是「设置 → 模型」选平台内置模型。
         const guidance =
           gatewayStatus?.loggedIn === true
-            ? createProviderConfigMessage()
+            ? createProviderConfigMessage(
+                '当前默认模型没有可用的模型服务。请到 设置 → 模型 选择平台内置模型后重试。',
+                'open-provider-settings',
+                '去选择模型'
+              )
             : createProviderConfigMessage(
                 '尚未登录平台账号。登录 MiQroForge 账号后即可使用平台内置模型发起会话，模型调用将经平台 AI 网关转发。',
                 'login'
@@ -5365,7 +5378,11 @@ export function ChatConsole({
               requiresReloginRef.current ? RELOGIN_INTERCEPT_TEXT : message,
               loggedInRef.current && !requiresReloginRef.current
                 ? 'open-provider-settings'
-                : 'login'
+                : 'login',
+              // 已登录且凭据未失效时：凭据配置入口已不存在（#835 收口），
+              // NO_API_KEY 只可能是当前模型不走平台网关，落点是重选模型
+              // 而非「配置模型」。登录失效时走重登引导，不覆盖其标签。
+              loggedInRef.current && !requiresReloginRef.current ? '去选择模型' : undefined
             )
           : { role: 'error', content: message, timestamp: Date.now() },
       ]);

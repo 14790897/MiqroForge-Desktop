@@ -7,6 +7,8 @@ providers.update 的自定义凭据写入路径,该行为不再存在。替换�
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from miqi.runtime.app_server import AppServerError, ClientSessionRegistry
@@ -69,6 +71,80 @@ async def test_providers_list_reports_model_when_it_belongs_to_provider():
 
     deepseek = providers["deepseek"]
     assert deepseek["configured_model"] == "deepseek-v4-flash"
+
+
+# ── active_model_resolvable（#1010 后续）：发送门禁的判定依据 ──────────────
+
+
+@pytest.mark.asyncio
+async def test_providers_list_active_model_unresolvable_without_credentials(
+    tmp_path, monkeypatch
+):
+    """无任何凭据（未登录/无本地 key、无网关）时默认模型不可发起会话。"""
+    monkeypatch.delenv("QRAFT_GATEWAY_BASE", raising=False)
+    registry = _make_registry("deepseek/deepseek-v4-flash")
+    cfg = registry.bridge_context["state"].load_config()
+    cfg.agents.defaults.workspace = str(tmp_path)
+
+    result = await providers_list_handler("r1", {}, "client-1", None, registry)
+
+    assert result["result"]["active_model_resolvable"] is False
+
+
+@pytest.mark.asyncio
+async def test_providers_list_active_model_resolvable_via_ai_gateway(tmp_path, monkeypatch):
+    """登录后网关凭据 active 且默认模型为网关模型时，没有任何本地 provider
+    凭据也可发起会话 —— 前端发送门禁只看 configured 会把这条路径拦成
+    「尚未配置模型服务」（用户登录后仍被要求配置模型）。"""
+    monkeypatch.delenv("QRAFT_GATEWAY_BASE", raising=False)
+    registry = _make_registry("deepseek/deepseek-v4-flash")
+    cfg = registry.bridge_context["state"].load_config()
+    cfg.agents.defaults.workspace = str(tmp_path)
+
+    qraft_dir = tmp_path / ".qraft"
+    qraft_dir.mkdir()
+    (qraft_dir / "token.json").write_text(
+        json.dumps({
+            "aiGateway": {
+                "status": "active",
+                "encryptedApiKey": "enc-key",
+                "configVersion": 1,
+            }
+        }),
+        encoding="utf-8",
+    )
+
+    result = await providers_list_handler("r1", {}, "client-1", None, registry)
+
+    assert all(p["configured"] is False for p in result["result"]["providers"])
+    assert result["result"]["active_model_resolvable"] is True
+
+
+@pytest.mark.asyncio
+async def test_providers_list_gateway_creds_do_not_resolve_other_models(tmp_path, monkeypatch):
+    """网关只路由实测网关模型：默认模型是别的模型时仍不可发起会话
+    （make_provider 会落回直连并因无凭据报 NO_API_KEY）。"""
+    monkeypatch.delenv("QRAFT_GATEWAY_BASE", raising=False)
+    registry = _make_registry("openai/gpt-4o")
+    cfg = registry.bridge_context["state"].load_config()
+    cfg.agents.defaults.workspace = str(tmp_path)
+
+    qraft_dir = tmp_path / ".qraft"
+    qraft_dir.mkdir()
+    (qraft_dir / "token.json").write_text(
+        json.dumps({
+            "aiGateway": {
+                "status": "active",
+                "encryptedApiKey": "enc-key",
+                "configVersion": 1,
+            }
+        }),
+        encoding="utf-8",
+    )
+
+    result = await providers_list_handler("r1", {}, "client-1", None, registry)
+
+    assert result["result"]["active_model_resolvable"] is False
 
 
 # ── 后端收口（#835）：providers.update 拒绝自配凭据 ─────────────────────────
