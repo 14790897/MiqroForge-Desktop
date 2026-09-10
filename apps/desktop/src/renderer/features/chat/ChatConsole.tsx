@@ -2415,10 +2415,13 @@ export function ChatConsole({
   const [messages, setMessages] = useState<Message[]>([]);
   // #1000: 首屏登录卡片与发送拦截共用登录态；旧 preload 无 qraft 命名空间时
   // useQraftStatus 内部兜底为空态（视为未登录）。
-  const { loggedIn } = useQraftStatus();
+  const { loggedIn, status: qraftStatus } = useQraftStatus();
   // 流错误路径同步读取最新登录态：handleSend 闭包可能捕获旧值（CodeRabbit #1010）。
   const loggedInRef = useRef(loggedIn);
   loggedInRef.current = loggedIn;
+  // 登录已失效（token 刷新失败且未恢复）：流错误路径据此给重登引导而非模型配置指引。
+  const requiresReloginRef = useRef(qraftStatus?.requiresRelogin === true);
+  requiresReloginRef.current = qraftStatus?.requiresRelogin === true;
   // #875 D1（外部评估 P0/A1）：系统包安装的 persist/runtime 失败标记只写在
   // 工具输出里，模型可能摘要掉——用户会误以为「允许并记住」已永久生效。
   // 扫描消息中的失败标记并发 window 事件，由 App 级 toast 呈现（不依赖模型）。
@@ -4287,6 +4290,34 @@ export function ChatConsole({
         typeof window.miqi.qraft?.status === 'function'
           ? await window.miqi.qraft.status().catch(() => null)
           : null;
+      // ── 登录已失效拦截 ──
+      // token 刷新失败且未恢复（requiresRelogin）时拦截发送：把乐观气泡换成
+      // 重登引导（一键登录成功后气泡自动移除）。先于网关门禁/无 provider 判定
+      // —— 失效后网关状态仍是旧快照里的 active，必须优先给出重登指引。
+      if (gatewayStatus?.loggedIn === true && gatewayStatus.requiresRelogin === true) {
+        pendingSendIdsRef.current.delete(sendSessionKey);
+        streamingBySession.delete(sendSessionKey);
+        setSendingFor(sendSessionKey, null);
+        if (currentSessionRef.current === sendSessionKey) {
+          setStreaming(false);
+          setMessages((prev) => {
+            const last = prev[prev.length - 1];
+            if (last?.timestamp === userMsg.timestamp) {
+              return [
+                ...prev.slice(0, -1),
+                createProviderConfigMessage(
+                  'MiQroForge 平台登录已失效，请重新登录后继续会话。',
+                  'login'
+                ),
+              ];
+            }
+            return prev;
+          });
+          setInput(text);
+          setAttachments(atts);
+        }
+        return;
+      }
       // ── #922 AI 网关门禁 ──
       // 登录后网关状态明确非 active（provisioning/failed/disabled）时拒绝发起
       // 会话：把乐观气泡换成网关提示并恢复输入框。未登录 / 平台未下发网关状态
@@ -5295,7 +5326,9 @@ export function ChatConsole({
         isProviderConfigurationProblem(message, data.code)
           ? createProviderConfigMessage(
               message,
-              loggedInRef.current ? 'open-provider-settings' : 'login'
+              loggedInRef.current && !requiresReloginRef.current
+                ? 'open-provider-settings'
+                : 'login'
             )
           : { role: 'error', content: message, timestamp: Date.now() },
       ]);
@@ -5498,7 +5531,7 @@ export function ChatConsole({
           ...prev,
           createProviderConfigMessage(
             errMsg,
-            loggedInRef.current ? 'open-provider-settings' : 'login'
+            loggedInRef.current && !requiresReloginRef.current ? 'open-provider-settings' : 'login'
           ),
         ]);
       } else if (e?.code) {
