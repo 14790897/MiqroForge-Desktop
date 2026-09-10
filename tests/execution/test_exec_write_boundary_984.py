@@ -15,6 +15,7 @@ Covers the exec half of the sandbox write boundary:
 from __future__ import annotations
 
 import inspect
+import os
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -114,6 +115,161 @@ class TestExecRwBinds:
         ws.mkdir()
         tool = ExecTool(working_dir=str(ws))
         assert tool._exec_rw_binds([None, 123, b"x"]) == [str(ws)]
+
+
+# ── #1007 review: a UNC static root is not a bind source ─────────────────
+
+
+class TestUncStaticRoot:
+    """``\\\\wsl$\\…`` exists on the host but cannot be bound.
+
+    ``_add(strict=False)`` keeps a static root whose ``os.path.exists()``
+    succeeds — for a UNC entry that is true, and the resulting hard
+    ``--bind`` then died inside ``_host_path_to_sandbox`` (which raises on
+    UNC), surfacing as the generic 「沙箱执行失败」 for EVERY command.  The
+    root extractors never produce UNC, so such entries are dropped instead.
+    """
+
+    _UNC = r"\\wsl$\Ubuntu\home\out"
+
+    def _tool_with_unc_shared_root(self, ws: Path, monkeypatch) -> ExecTool:
+        """Build the tool with ``os.path.exists`` reporting the UNC as reachable."""
+        real_exists = os.path.exists
+
+        def _exists(p: object) -> bool:
+            if str(p).replace("\\", "/").startswith("//"):
+                return True  # a WSL share IS reachable from the Windows host
+            return real_exists(p)
+
+        monkeypatch.setattr(os.path, "exists", _exists)
+        return ExecTool(
+            timeout=5, working_dir=str(ws), shared_roots=[self._UNC],
+        )
+
+    def test_unc_static_root_not_bound(self, tmp_path: Path, monkeypatch) -> None:
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        tool = self._tool_with_unc_shared_root(ws, monkeypatch)
+        binds = tool._exec_rw_binds(None)
+        assert str(ws) in binds  # the reachable roots are untouched
+        assert not any(
+            str(b).replace("\\", "/").startswith(("//", "\\\\")) for b in binds
+        )
+
+    def test_unc_not_reported_as_missing_source(self) -> None:
+        """It is not a bind source at all — not a 'missing' one either.
+
+        The pre-flight report turned it into a hard refusal for every
+        command (and a missing bind never falls back to the host).
+        """
+        assert ExecTool._missing_bind_sources([self._UNC]) == []
+
+
+# ── #1007 review: the BWRAP→host fallback keeps the per-call grant ───────
+
+
+class TestHostFallbackRoots:
+    """``_execute_with_sandbox_selection`` must hand the per-call roots to
+    the host-fallback guard.
+
+    When BWRAP is selected but no sandbox is live, execution falls back to
+    the host and the guard is re-run with HOST path semantics.  That re-check
+    was called without ``user_roots``, so ``_guard_write_roots`` saw ``None``
+    and refused a write into the very directory the user had just authorized
+    (the legacy no-selection fallback already passed them).
+    """
+
+    def _tool(self, tmp_path: Path):
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        out = tmp_path / "out"
+        out.mkdir()
+        tool = ExecTool(timeout=5, working_dir=str(ws), allow_user_dirs=True)
+        mgr = MagicMock()
+        mgr.get_or_create = AsyncMock(return_value=None)  # sandbox never starts
+        mgr.active_sandbox = None
+        tool._sandbox_manager = mgr
+        return tool, out
+
+    @pytest.mark.asyncio
+    async def test_fallback_guard_receives_user_roots(
+        self, monkeypatch, tmp_path,
+    ) -> None:
+        tool, out = self._tool(tmp_path)
+        seen: dict = {}
+
+        def _fake_guard(command: str, cwd: str, user_roots=None):
+            seen["user_roots"] = user_roots
+            return None
+
+        async def _fake_direct(command, cwd, **kwargs):
+            return MagicMock(exit_code=0, output="host", duration_ms=0,
+                             cancelled=False, timed_out=False)
+
+        monkeypatch.setattr(tool, "_guard_host_fallback", _fake_guard)
+        monkeypatch.setattr(tool, "_execute_direct", _fake_direct)
+        monkeypatch.setattr(tool, "_snapshot_workspace", lambda cwd: {})
+
+        await tool.execute(
+            "echo hi",
+            _sandbox=_selection(SandboxType.BWRAP),
+            _user_roots=[str(out)],
+        )
+        assert seen["user_roots"] == [str(out)]
+
+    @pytest.mark.asyncio
+    async def test_authorized_write_not_refused_on_fallback(
+        self, monkeypatch, tmp_path,
+    ) -> None:
+        """Behavioural half: the real guard must let the granted write run."""
+        tool, out = self._tool(tmp_path)
+        target = (out / "result.txt").as_posix()
+        ran: dict = {}
+
+        async def _fake_direct(command, cwd, **kwargs):
+            ran["yes"] = True
+            return MagicMock(exit_code=0, output="ok", duration_ms=0,
+                             cancelled=False, timed_out=False)
+
+        monkeypatch.setattr(tool, "_execute_direct", _fake_direct)
+        monkeypatch.setattr(tool, "_snapshot_workspace", lambda cwd: {})
+
+        result = await tool.execute(
+            f'echo written > "{target}"',
+            _sandbox=_selection(SandboxType.BWRAP),
+            _user_roots=[str(out)],
+        )
+        assert ran.get("yes") is True, f"guard refused the granted write: {result}"
+
+    @pytest.mark.asyncio
+    async def test_ungranted_write_still_refused_on_fallback(
+        self, monkeypatch, tmp_path,
+    ) -> None:
+        """The opposite direction: no grant → the host re-check still fires.
+
+        ``/home/miqi/...`` is a legitimate in-sandbox path (the pre-flight
+        guard, running with SANDBOX semantics, allows it) that is a real
+        out-of-scope host path once the sandbox is gone — exactly what the
+        re-check exists for.  Emptying ``user_roots`` must not turn the
+        fallback guard off.
+        """
+        tool, _out = self._tool(tmp_path)
+        ran: dict = {}
+
+        async def _fake_direct(command, cwd, **kwargs):
+            ran["yes"] = True
+            return MagicMock(exit_code=0, output="ok", duration_ms=0,
+                             cancelled=False, timed_out=False)
+
+        monkeypatch.setattr(tool, "_execute_direct", _fake_direct)
+        monkeypatch.setattr(tool, "_snapshot_workspace", lambda cwd: {})
+
+        result = await tool.execute(
+            'echo written > "/home/miqi/out/x.txt"',
+            _sandbox=_selection(SandboxType.BWRAP),
+        )
+        assert ran.get("yes") is None, "ungranted host write must not run"
+        assert "拦截" in result
 
 
 # ── signatures + splat sites ─────────────────────────────────────────────

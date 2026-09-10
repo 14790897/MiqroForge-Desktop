@@ -79,6 +79,29 @@ class TestHostPathToSandbox:
         with pytest.raises(BwrapSandboxError):
             _host_path_to_sandbox("relative/dir")
 
+    # #1007 review: the drive test used to be ``p[1] == ":"`` alone, so a
+    # drive-RELATIVE spelling was silently mapped to a path nobody named
+    # (``C:relative`` → ``/mnt/crelative``, ``C:`` → ``/mnt/c``) instead of
+    # failing loudly as the docstring promises.  Only ``C:/…`` maps.
+
+    def test_drive_relative_raises(self) -> None:
+        with pytest.raises(BwrapSandboxError):
+            _host_path_to_sandbox("C:relative")
+
+    def test_bare_drive_letter_raises(self) -> None:
+        with pytest.raises(BwrapSandboxError):
+            _host_path_to_sandbox("C:")
+
+    def test_drive_relative_with_separator_raises(self) -> None:
+        with pytest.raises(BwrapSandboxError):
+            _host_path_to_sandbox(r"C:foo\bar")
+
+    def test_drive_absolute_forms_unchanged(self) -> None:
+        """The tightened condition must not change any absolute spelling."""
+        assert _host_path_to_sandbox("C:/") == "/mnt/c/"
+        assert _host_path_to_sandbox(r"C:\x") == "/mnt/c/x"
+        assert _host_path_to_sandbox("d:/data/mof") == "/mnt/d/data/mof"
+
 
 # ── layer 2: /mnt is read-only ───────────────────────────────────────────
 

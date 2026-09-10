@@ -66,11 +66,17 @@ def _host_path_to_sandbox(path: str) -> str:
     raises — a per-call writable bind must never be silently dropped, or the
     command would run without the write access it was granted.
 
+    A drive path must be drive-ABSOLUTE (``C:/…``).  The drive-relative
+    spellings Windows accepts (``C:``, ``C:relative``) mean "relative to
+    that drive's current directory" and have no fixed sandbox target; the
+    old ``p[1] == ":"`` test mapped them to ``/mnt/c`` / ``/mnt/crelative``
+    — a bind of a path nobody named (review #1007).
+
     Deliberately local: importing ``miqi.sandbox.manager.windows_path_to_mnt``
     at module scope is circular (``manager`` imports this module at line 45).
     """
     p = str(path).replace("\\", "/")
-    if len(p) >= 2 and p[1] == ":":
+    if len(p) >= 3 and p[1] == ":" and p[2] in "/\\":
         return "/mnt/" + p[0].lower() + p[2:]
     if p.startswith("//"):
         raise BwrapSandboxError(

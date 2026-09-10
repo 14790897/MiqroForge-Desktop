@@ -535,6 +535,17 @@ class ExecTool(Tool):
                 return
             if not isinstance(raw_str, str) or not raw_str:
                 return
+            # #984 review: a UNC / WSL-share source (``\\wsl$\…``) has no
+            # sandbox mapping — ``_host_path_to_sandbox`` raises on it, so a
+            # hard ``--bind`` would fail EVERY command with a generic sandbox
+            # error.  It is not a bind source at all (same rule as
+            # ``filesystem.bootstrap_sandbox_roots``); the root extractors
+            # cannot produce one.
+            if raw_str.replace("\\", "/").startswith("//"):
+                logger.debug(
+                    "exec: skipping UNC rw bind (no sandbox mapping) {}", raw_str,
+                )
+                return
             key = os.path.normcase(os.path.abspath(raw_str))
             if key in seen:
                 return
@@ -567,15 +578,20 @@ class ExecTool(Tool):
         bwrap fail the whole command.  Check the sources this process can
         actually see (Windows drive paths on Windows, POSIX paths elsewhere)
         and report them with guidance instead of surfacing a raw bwrap error.
-        WSL-native paths are not visible from the Windows host and are left
-        to bwrap — they are never produced by the root extractors.
+
+        UNC / WSL-share paths are not tested here: they are not bind sources
+        at all.  ``_host_path_to_sandbox`` cannot map them and raises, which
+        the sandbox path would surface as a generic 「沙箱执行失败」, so
+        :meth:`_exec_rw_binds` drops them before they reach this check — and
+        the root extractors never produce one.  WSL-native POSIX paths are
+        invisible from the Windows host and ARE left to bwrap: they bind
+        unchanged, and one that is genuinely missing fails loudly there.
         """
         missing: list[str] = []
         for raw in binds or []:
             s = str(raw).replace("\\", "/")
             if s.startswith("//"):
-                missing.append(str(raw))
-                continue
+                continue  # not a bind source — see above
             if len(s) >= 2 and s[1] == ":":
                 if os.name == "nt" and not os.path.exists(str(raw)):
                     missing.append(str(raw))
@@ -811,7 +827,12 @@ class ExecTool(Tool):
             # ExecTool MUST follow it — no independent sandbox decision.
             if _sandbox is not None:
                 result = await self._execute_with_sandbox_selection(
-                    _sandbox, command, cwd, **exec_kwargs,
+                    _sandbox, command, cwd,
+                    # #984 review: only the BWRAP fallback consumes it (the
+                    # other branches take no grant), so it is passed here
+                    # rather than through ``exec_kwargs``.
+                    user_roots=_user_roots,
+                    **exec_kwargs,
                 )
             # Legacy path (no orchestrator): session_key preferred, fall back to active sandbox
             elif self._sandbox_manager is not None:
@@ -1277,6 +1298,12 @@ class ExecTool(Tool):
         # #984: per-call writable host paths (bwrap paths only; ignored by
         # the host-execution branches, which cannot mount anything).
         extra_rw_binds: list[str] | None = None,
+        # #984 review: the per-call ``_user_roots`` grant itself, needed by
+        # the BWRAP→host fallback below so its guard re-check sees the same
+        # authorization the pre-flight guard did.  It is NOT splatted into
+        # ``exec_kwargs``: the host executors take no grant of their own and
+        # would reject the keyword.
+        user_roots: Any = None,
     ) -> _ExecResult:
         """Execute a command according to the ToolOrchestrator's SandboxSelection.
 
@@ -1334,7 +1361,14 @@ class ExecTool(Tool):
             # allowed sandbox-internal paths (/home/miqi/**, /tmp) that
             # mean something else on the host.  Re-check with HOST
             # semantics before falling back (issue #811 review).
-            fallback_guard = self._guard_host_fallback(command, cwd)
+            # #984 review: the per-call grant travels with it — without it
+            # ``_guard_write_roots`` sees None and refuses the very write the
+            # user just authorized (the legacy fallback below already passed
+            # them).  ``extra_rw_binds`` is NOT the right argument here: the
+            # guard contract only ever widens for the per-call roots.
+            fallback_guard = self._guard_host_fallback(
+                command, cwd, user_roots=user_roots,
+            )
             if fallback_guard is not None:
                 return fallback_guard
             # Fall back to direct execution (e.g. during first-time
