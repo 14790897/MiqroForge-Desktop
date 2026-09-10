@@ -1,13 +1,9 @@
 /**
- * Plan Card E2E（#646-v2）— ask_user_plan_confirm → ActionCard 全链路。
+ * Plan Card E2E（#646-v2）— plan workstream → execution → dangerous action.
  *
- * mock 状态机（scripts/mock_openai.py plan 分支）：用户消息含"计划" →
- * ask_user_plan_confirm（PlanCard）→ web_search → write_file →
- * request_action_confirmation（ActionCard）→ 完成。
- *
- * Run: cd apps/desktop && npx electron-vite build &&
- *      PLAYWRIGHT_SKIP_WEB_SERVER=1 npx playwright test \
- *      --config=playwright.config.ts --project=electron -g "plan card"
+ * The plan is part of the agent work stream. The user can execute the current
+ * plan or adjust it inline; adjustment feedback is returned to the model which
+ * produces a new plan before any mutation continues.
  */
 import { _electron as electron, test, expect } from '@playwright/test';
 import type { ElectronApplication, Page } from '@playwright/test';
@@ -61,99 +57,117 @@ async function startMockOpenAI(): Promise<{ proc: ChildProcess; mockUrl: string 
   return { proc, mockUrl: readyUrl };
 }
 
-test.describe('Plan Card (#646-v2)', () => {
-  let electronApp: ElectronApplication;
-  let page: Page;
-  let mockServer: ChildProcess;
-  let miqiHome: string;
-
-  test.beforeAll(async () => {
-    const mock = await startMockOpenAI();
-    mockServer = mock.proc;
-    const fixture = await launchElectronApp((config: any) => {
-      const providers = config.providers ?? {};
-      for (const [name, p] of Object.entries(providers)) {
-        if (p && typeof p === 'object') {
-          (p as any).apiBase = mock.mockUrl;
-          if (!(p as any).apiKey) (p as any).apiKey = 'mock-key';
-        }
+async function launchWithMock() {
+  const mock = await startMockOpenAI();
+  const fixture = await launchElectronApp((config: any) => {
+    const providers = config.providers ?? {};
+    for (const [name, provider] of Object.entries(providers)) {
+      if (provider && typeof provider === 'object') {
+        (provider as any).apiBase = mock.mockUrl;
+        if (!(provider as any).apiKey) (provider as any).apiKey = 'mock-key';
       }
-      config.providers = providers;
-    });
-    electronApp = fixture.electronApp;
-    page = fixture.page;
-    miqiHome = fixture.miqiHome;
-    // 监听前端错误（PlanCard 渲染崩溃排查）
-    page.on('console', (msg) => {
-      if (msg.type() === 'error' || msg.type() === 'warning') {
-        console.log(`[renderer-${msg.type()}] ${msg.text().slice(0, 300)}`);
-      }
-    });
-    page.on('pageerror', (err) => console.log(`[renderer-pageerror] ${String(err).slice(0, 400)}`));
-  }, 180_000);
-
-  test.afterAll(async () => {
-    await closeElectronApp(electronApp, miqiHome);
-    mockServer?.kill();
+    }
+    config.providers = providers;
   });
+  return { ...fixture, mockServer: mock.proc };
+}
 
+test.describe('Plan Card (#646-v2)', () => {
   test(
-    '计划卡全链路：PlanCard → 开始执行 → ActionCard → 确认 → 完成',
+    '计划工作流：当前方案执行 → ActionCard → 完成',
     { timeout: LLM_TIMEOUT },
     async () => {
-      await createNewConversation(page);
-      await sendMessage(page, '计划：生成 MOF-5 实验报告并上传');
+      const fixture = await launchWithMock();
+      const electronApp: ElectronApplication = fixture.electronApp;
+      const page: Page = fixture.page;
 
-      // ── PlanCard 出现（步骤文字 + 权限 + 按钮）──
-      const planCard = page.getByTestId('plan-card').first();
-      await expect(planCard).toBeVisible({ timeout: 60_000 });
-      await expect(planCard.getByText('生成 MOF-5 实验报告')).toBeVisible();
-      // 步骤为用户语言（无工具名）
-      await expect(planCard.getByText('搜集论文资料')).toBeVisible();
-      await expect(planCard.getByText('上传到 Qraft').first()).toBeVisible();
-      // 权限 pill
-      await expect(planCard.getByText('网络访问')).toBeVisible();
-      await expect(planCard.getByText('外部上传')).toBeVisible();
+      try {
+        await createNewConversation(page);
+        await sendMessage(page, '计划：生成 MOF-5 实验报告并上传');
 
-      await page.screenshot({ path: 'test-results/plan-card-waiting.png' });
+        const planCard = page.getByTestId('plan-card').first();
+        await expect(planCard).toBeVisible({ timeout: 60_000 });
+        await expect(planCard.getByText('生成 MOF-5 实验报告')).toBeVisible();
+        await expect(planCard.getByText('搜集论文资料')).toBeVisible();
+        await expect(planCard.getByText('上传到 Qraft')).toBeVisible();
+        await expect(planCard.getByText('网络')).toBeVisible();
+        await expect(planCard.getByText('外部')).toBeVisible();
+        await expect(planCard.getByTestId('plan-confirm')).toBeVisible();
+        await expect(planCard.getByTestId('confirm-modify')).toBeVisible();
 
-      // ── 点「开始执行」→ 执行（期间审批弹窗自动允许——E2E 环境差异）──
-      await planCard.getByRole('button', { name: '开始执行' }).click();
+        await page.screenshot({ path: 'test-results/plan-card-waiting.png' });
+        await planCard.getByTestId('plan-confirm').click();
 
-      // 自动批准审批弹窗（web_search 等在 E2E 环境触发——真实用户模式不弹）
-      const autoApprove = async () => {
-        try {
-          for (let i = 0; i < 60; i++) {
-            const dialog = page.getByRole('alertdialog').first();
-            if (await dialog.isVisible().catch(() => false)) {
-              const allow = dialog.getByRole('button', { name: /允许一次|允许/ }).first();
-              if (await allow.isVisible().catch(() => false)) {
-                await allow.click();
-                console.log('[test] 自动批准审批弹窗');
+        // E2E 环境自动处理工具审批，避免把环境差异混进计划工作流断言。
+        const autoApprove = async () => {
+          try {
+            for (let i = 0; i < 60; i++) {
+              const dialog = page.getByRole('alertdialog').first();
+              if (await dialog.isVisible().catch(() => false)) {
+                const allow = dialog.getByRole('button', { name: /允许一次|允许/ }).first();
+                if (await allow.isVisible().catch(() => false)) await allow.click();
               }
+              await page.waitForTimeout(500);
             }
-            await page.waitForTimeout(500);
+          } catch {
+            // App closed: nothing left to approve.
           }
-        } catch {
-          // 页面已关闭（测试结束）——静默退出
-        }
-      };
-      const approveTask = autoApprove();
+        };
+        const approveTask = autoApprove();
 
-      // ── ActionCard 出现（危险动作确认）──
-      const actionCard = page.getByTestId('action-card').first();
-      await expect(actionCard).toBeVisible({ timeout: 60_000 });
-      await expect(actionCard.getByText('☁ 上传').first()).toBeVisible();
-      await expect(actionCard.getByText('Qraft').first()).toBeVisible();
-      await expect(actionCard.getByText('mof-report.json').first()).toBeVisible();
-      await expect(actionCard.getByText(/23\.0 KB/)).toBeVisible();
+        const actionCard = page.getByTestId('action-card').first();
+        await expect(actionCard).toBeVisible({ timeout: 60_000 });
+        await expect(actionCard.getByText('☁ 上传').first()).toBeVisible();
+        await expect(actionCard.getByText('Qraft').first()).toBeVisible();
+        await expect(actionCard.getByText('mof-report.json').first()).toBeVisible();
+        await expect(actionCard.getByText(/23\.0 KB/)).toBeVisible();
 
-      await page.screenshot({ path: 'test-results/action-card-upload.png' });
+        await page.screenshot({ path: 'test-results/action-card-upload.png' });
+        await actionCard.getByRole('button', { name: '确认上传' }).click();
+        await waitForResponseComplete(page, LLM_TIMEOUT);
+        await expect(page.getByText(/已完成：MOF-5 实验报告/)).toBeVisible({ timeout: 30_000 });
 
-      // ── 确认上传 → 回合完成 ──
-      await actionCard.getByRole('button', { name: '确认上传' }).click();
-      await waitForResponseComplete(page, LLM_TIMEOUT);
-      await expect(page.getByText(/已完成：MOF-5 实验报告/)).toBeVisible({ timeout: 30_000 });
+        await approveTask;
+      } finally {
+        await closeElectronApp(electronApp, fixture.miqiHome);
+        fixture.mockServer.kill();
+      }
+    },
+  );
+
+  test(
+    '调整方案：内联输入意见 → Agent 重新规划 → 不执行旧方案',
+    { timeout: LLM_TIMEOUT },
+    async () => {
+      const fixture = await launchWithMock();
+      const electronApp: ElectronApplication = fixture.electronApp;
+      const page: Page = fixture.page;
+
+      try {
+        await createNewConversation(page);
+        await sendMessage(page, '计划：生成 MOF-5 实验报告并上传');
+
+        const planCard = page.getByTestId('plan-card').first();
+        await expect(planCard).toBeVisible({ timeout: 60_000 });
+        await planCard.getByTestId('confirm-modify').click();
+
+        const adjustment = planCard.getByTestId('plan-adjustment-input');
+        await expect(adjustment).toBeVisible();
+        await adjustment.fill('不要上传 Qraft，先完成本地报告并增加成本对比步骤。');
+        await planCard.getByTestId('plan-submit-adjustment').click();
+
+        const revised = page.getByTestId('plan-card').last();
+        await expect(revised).toBeVisible({ timeout: 60_000 });
+        await expect(revised.getByText('生成 MOF-5 实验报告（修改版）')).toBeVisible();
+        await expect(revised.getByText('对比合成成本')).toBeVisible();
+        await expect(page.getByTestId('action-card')).toHaveCount(0);
+
+        // 用户可以继续调整；这里取消收尾，验证不会无意执行旧计划。
+        await revised.getByTestId('plan-cancel').click();
+      } finally {
+        await closeElectronApp(electronApp, fixture.miqiHome);
+        fixture.mockServer.kill();
+      }
     },
   );
 });
