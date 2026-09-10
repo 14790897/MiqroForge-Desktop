@@ -4392,8 +4392,7 @@ export function ChatConsole({
       // 判定（含网关路由）给出 active_model_resolvable；旧版 bridge 无该字段
       // 时回退到 configured（保持原行为）。
       const modelServable =
-        result.active_model_resolvable ??
-        result.providers.some((provider) => provider.configured);
+        result.active_model_resolvable ?? result.providers.some((provider) => provider.configured);
       if (!modelServable) {
         // No servable model — replace the optimistic bubble with the
         // provider-config guidance.  The send is refused: the user should

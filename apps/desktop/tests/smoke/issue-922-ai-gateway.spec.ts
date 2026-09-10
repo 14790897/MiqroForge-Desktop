@@ -245,9 +245,7 @@ test.describe('Issue #922 — AI 网关状态门禁', () => {
     expect(sends).toBe(1);
   });
 
-  test('登录 + 网关 active + 无本地凭据 + 模型不可解析：拦截并引导去选择模型', async ({
-    page,
-  }) => {
+  test('登录 + 网关 active + 无本地凭据 + 模型不可解析：拦截并引导去选择模型', async ({ page }) => {
     // 已登录但默认模型运行时不可用（非网关模型且无本地凭据）——引导落点是
     // 重选平台内置模型，而不是「去配置模型」（#835 收口后凭据配置已不存在）。
     await page.addInitScript({
