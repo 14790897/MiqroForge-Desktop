@@ -1095,13 +1095,20 @@ def _write_md_source_copy(pdf_path: Path, md_bytes: bytes) -> tuple[Path | None,
     写盘会在 Windows 上把 LF 改成 CRLF。同名文件已存在则**跳过、不覆盖**（用户可能
     已手工改过该副本）；写失败只告警、不影响 PDF 交付（PDF 才是主产物）。
     返回 ``(副本路径或 None, 状态说明)``。
+
+    「不覆盖」用 ``"xb"``（``O_CREAT|O_EXCL``）独占创建实现，而不是先查 ``exists()``
+    再写：``exists()`` 跟随符号链接，目标位置是**悬空链接**时会判 False → 守卫不触发
+    → 写操作跟随链接落到输出边界之外（CWE-59）；且查与写之间的 TOCTOU 会让契约在
+    竞争下失效。``O_EXCL`` 对任何已存在的路径（含悬空链接本身）直接 ``EEXIST``。
     """
     copy_path = pdf_path.with_suffix(".md")
-    if copy_path.exists():
+    try:
+        # FileExistsError 是 OSError 子类，必须单独先捕获（否则会落进下面的写失败分支）。
+        with copy_path.open("xb") as copy_file:
+            copy_file.write(md_bytes)
+    except FileExistsError:
         logger.info(f"PDF: 源稿副本 {copy_path} 已存在，跳过不覆盖")
         return copy_path, "已存在，跳过不覆盖"
-    try:
-        copy_path.write_bytes(md_bytes)
     except OSError as exc:
         logger.warning(f"PDF: 源稿副本 {copy_path} 写入失败（{exc}），PDF 已生成")
         return None, f"写入失败（{exc}）"

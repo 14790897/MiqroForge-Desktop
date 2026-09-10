@@ -1174,3 +1174,108 @@ async def test_content_path_md_copy_source_equals_target_skipped(tmp_path):
     assert (tmp_path / "src.pdf").is_file(), result
     assert (tmp_path / "src.md").read_text(encoding="utf-8") == src_text
     assert "跳过" in result, result
+
+
+# ── CodeRabbit 安全意见（CWE-59）：源稿副本改独占创建 ─────────────────────────
+#
+# 旧实现先 `exists()` 再 `write_bytes()`：`exists()` 跟随符号链接，目标位置是**悬空
+# 链接**时判 False → 守卫不触发 → 写入跟随链接落到输出边界之外；且查与写之间存在
+# TOCTOU，竞争下「不覆盖」契约失效。改用 "xb"（O_CREAT|O_EXCL）后，路径为任何符号
+# 链接（含悬空）时内核直接 EEXIST，「不覆盖」不再依赖先查后写。
+#
+# 悬空链接用例的链接目标**父目录必须存在**——若父目录不存在，链接目标本就无法创建，
+# 旧实现也只是写入失败（返回 None），变异回 "wb" 时用例不会变红、失去判别力。
+
+
+def _dangling_symlink_or_skip(link, target):
+    """在 link 处建一个指向不存在 target 的符号链接；平台不允许时 skip。"""
+    try:
+        link.symlink_to(target)
+    except (OSError, NotImplementedError) as exc:  # Windows 未开开发者模式会失败
+        pytest.skip(f"平台不支持创建符号链接（{exc}）")
+
+
+def test_write_md_source_copy_creates_byte_exact(tmp_path):
+    """正常路径：.md 不存在 → 独占创建落盘，内容与源稿逐字节一致。"""
+    from miqi.documents.pdf_create_tool import _write_md_source_copy
+
+    raw = b"# Title\r\n\r\nraw bytes \xe4\xb8\xad\n"
+    copy_path, note = _write_md_source_copy(tmp_path / "o.pdf", raw)
+
+    assert copy_path == tmp_path / "o.md", copy_path
+    assert note == "已落盘", note
+    assert (tmp_path / "o.md").read_bytes() == raw
+
+
+def test_write_md_source_copy_existing_file_skipped(tmp_path):
+    """目标已是普通文件 → EEXIST → 跳过不覆盖，原文件内容与状态说明不变。"""
+    from miqi.documents.pdf_create_tool import _write_md_source_copy
+
+    (tmp_path / "o.md").write_bytes(b"user edited copy\n")
+    copy_path, note = _write_md_source_copy(tmp_path / "o.pdf", b"new source\n")
+
+    assert copy_path == tmp_path / "o.md", copy_path
+    assert note == "已存在，跳过不覆盖", note
+    assert (tmp_path / "o.md").read_bytes() == b"user edited copy\n"
+
+
+def test_write_md_source_copy_dangling_symlink_not_followed(tmp_path):
+    """悬空符号链接：EEXIST → 跳过；写操作不得跟随链接创建链接目标（CWE-59）。"""
+    from miqi.documents.pdf_create_tool import _write_md_source_copy
+
+    outside_dir = tmp_path / "outside"  # 父目录存在 → 旧实现真的能写穿链接
+    outside_dir.mkdir()
+    target = outside_dir / "escaped.md"
+    link = tmp_path / "o.md"
+    _dangling_symlink_or_skip(link, target)
+    assert not target.exists(), "前置条件：链接必须是悬空的"
+
+    copy_path, note = _write_md_source_copy(tmp_path / "o.pdf", b"payload\n")
+
+    assert copy_path == link, copy_path
+    assert note == "已存在，跳过不覆盖", note
+    assert not target.exists(), "写操作跟随了悬空链接，越界创建了链接目标"
+    assert list(outside_dir.iterdir()) == [], "输出边界之外不得出现任何新文件"
+    assert link.is_symlink(), "符号链接本身不得被替换/删除"
+
+
+def test_write_md_source_copy_symlink_to_existing_file_not_overwritten(tmp_path):
+    """指向已存在文件的符号链接：链接目标内容原样、链接本身保留。"""
+    from miqi.documents.pdf_create_tool import _write_md_source_copy
+
+    real = tmp_path / "user_notes.md"
+    real.write_bytes(b"irreplaceable\n")
+    link = tmp_path / "o.md"
+    try:
+        link.symlink_to(real)
+    except (OSError, NotImplementedError) as exc:
+        pytest.skip(f"平台不支持创建符号链接（{exc}）")
+
+    copy_path, note = _write_md_source_copy(tmp_path / "o.pdf", b"payload\n")
+
+    assert copy_path == link, copy_path
+    assert note == "已存在，跳过不覆盖", note
+    assert real.read_bytes() == b"irreplaceable\n"
+    assert link.is_symlink()
+
+
+@pytest.mark.asyncio
+async def test_content_path_md_copy_dangling_symlink_not_written_through(tmp_path):
+    """端到端：副本位置是悬空链接时 PDF 正常产出，链接目标不得被创建。"""
+    from miqi.documents.pdf_create_tool import CreatePdfTool
+
+    (tmp_path / "src.md").write_text("# T\n\nbody\n", encoding="utf-8")
+    outside_dir = tmp_path / "outside"
+    outside_dir.mkdir()
+    target = outside_dir / "escaped.md"
+    link = tmp_path / "report.md"
+    _dangling_symlink_or_skip(link, target)
+
+    tool = CreatePdfTool(workspace=tmp_path, allowed_dir=tmp_path)
+    result = await tool.execute(filename="report.pdf", content_path="src.md")
+
+    assert "Created:" in result, result
+    assert (tmp_path / "report.pdf").is_file(), result
+    assert not target.exists(), "源稿副本写穿悬空链接，落到了输出目录之外"
+    assert list(outside_dir.iterdir()) == [], result
+    assert "跳过" in result, result
