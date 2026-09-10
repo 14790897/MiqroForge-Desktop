@@ -599,12 +599,24 @@ def create_runtime_tool_registry(
     # Office write tools always write inside the workspace, independently
     # of the `restrict_to_workspace` config (which only controls
     # WriteFileTool / EditFileTool).
-    registry.register(CreateDocxTool(workspace=_write_workspace, allowed_dir=_write_workspace))
-    registry.register(DocxWriteTool(workspace=_write_workspace, allowed_dir=_write_workspace))
+    registry.register(CreateDocxTool(
+        workspace=_write_workspace, allowed_dir=_write_workspace,
+        allow_user_roots=_auto_user_dirs,
+    ))
+    registry.register(DocxWriteTool(
+        workspace=_write_workspace, allowed_dir=_write_workspace,
+        allow_user_roots=_auto_user_dirs,
+    ))
     registry.register(EditDocxTool(workspace=_write_workspace, allowed_dir=_write_workspace))
     registry.register(PptxReadTool(workspace=_write_workspace, allowed_dir=_write_workspace))
-    registry.register(CreatePptxTool(workspace=_write_workspace, allowed_dir=_write_workspace))
-    registry.register(PptxWriteTool(workspace=_write_workspace, allowed_dir=_write_workspace))
+    registry.register(CreatePptxTool(
+        workspace=_write_workspace, allowed_dir=_write_workspace,
+        allow_user_roots=_auto_user_dirs,
+    ))
+    registry.register(PptxWriteTool(
+        workspace=_write_workspace, allowed_dir=_write_workspace,
+        allow_user_roots=_auto_user_dirs,
+    ))
     registry.register(XlsxReadTool(workspace=_write_workspace, allowed_dir=_write_workspace))
     registry.register(CreateXlsxTool(workspace=_write_workspace, allowed_dir=_write_workspace))
     registry.register(XlsxWriteTool(workspace=_write_workspace, allowed_dir=_write_workspace))

@@ -30,7 +30,8 @@ test.describe('Issue #726 MiQroForge 平台登录设置页', () => {
 
     // 浏览器登录入口（MiQroForge 授权页：用户在页面点击"同意"）
     await expect(page.getByTestId('qraft-browser-login-btn')).toBeVisible();
-    await expect(page.getByTestId('qraft-browser-login-btn')).toContainText('浏览器登录');
+    // #1000：入口文案明确为「登录 MiQroForge 账号」
+    await expect(page.getByTestId('qraft-browser-login-btn')).toContainText('登录 MiQroForge 账号');
     // 手机号/密码表单、提交按钮、环境选择与高级设置均不渲染
     await expect(page.getByTestId('qraft-phone-input')).toHaveCount(0);
     await expect(page.getByTestId('qraft-password-input')).toHaveCount(0);

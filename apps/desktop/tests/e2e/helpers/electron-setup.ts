@@ -11,6 +11,7 @@ import type { ElectronApplication, Page } from '@playwright/test';
 import { resolve } from 'node:path';
 import { tmpdir, homedir } from 'node:os';
 import { join } from 'node:path';
+import { spawnSync } from 'node:child_process';
 import {
   existsSync,
   mkdtempSync,
@@ -514,23 +515,32 @@ export interface ElectronFixture {
  * 凭据经环境变量注入（QRAFT_PHONE / QRAFT_PASSWORD），调用方在未登录时
  * 才调用（dev userData 可能残留上次登录态，须先判断「已登录」徽标）。
  * 返回授权窗口的 Page（完成时主进程会自动关闭它）。
+ *
+ * opts.entryTestId（#1000）：自定义登录按钮入口（如首屏卡片
+ * chat-hero-login-btn）——跳过设置页导航，直接点击该按钮发起登录。
  */
 export async function browserLogin(
   page: Page,
   electronApp: ElectronApplication,
   phone: string,
-  password: string
+  password: string,
+  opts?: { entryTestId?: string }
 ): Promise<Page> {
-  await page.getByText(/^(System Settings|系统设置)$/).click();
-  await page
-    .getByRole('tab')
-    .filter({ hasText: /MiQroForge/ })
-    .first()
-    .click();
-  await expect(page.getByTestId('qraft-browser-login-btn')).toBeVisible({ timeout: 15_000 });
+  if (!opts?.entryTestId) {
+    await page.getByText(/^(System Settings|系统设置)$/).click();
+    await page
+      .getByRole('tab')
+      .filter({ hasText: /MiQroForge/ })
+      .first()
+      .click();
+  }
+  const loginBtn = opts?.entryTestId
+    ? page.getByTestId(opts.entryTestId)
+    : page.getByTestId('qraft-browser-login-btn');
+  await expect(loginBtn).toBeVisible({ timeout: 15_000 });
 
   const loginWindowPromise = electronApp.waitForEvent('window');
-  await page.getByTestId('qraft-browser-login-btn').click();
+  await loginBtn.click();
   const loginWin = await loginWindowPromise;
   await loginWin.waitForLoadState('domcontentloaded');
 
@@ -543,7 +553,11 @@ export async function browserLogin(
   await loginWin.fill('#login_password', password);
   await loginWin.getByRole('button', { name: /登\s*录/ }).click();
 
-  await expect(page.getByText('已登录')).toBeVisible({ timeout: 120_000 });
+  // 自定义入口（#1000）的成功态由调用方按入口断言（首屏卡片消失/顶栏账号
+  // chip 等）；设置页入口以页面上的「已登录」徽标为准。
+  if (!opts?.entryTestId) {
+    await expect(page.getByText('已登录')).toBeVisible({ timeout: 120_000 });
+  }
   return loginWin;
 }
 
@@ -897,7 +911,21 @@ export async function closeElectronApp(
       (async () => {
         await new Promise((r) => setTimeout(r, 15_000));
         try {
-          app.process().kill();
+          if (process.platform === 'win32') {
+            // #959: Playwright launches Electron through a cmd.exe shell
+            // wrapper on Windows, so app.process() is the cmd wrapper —
+            // killing it alone leaves the real app main (window + bridge +
+            // children) running to pollute later runs (mcps.list hangs).
+            // taskkill /T kills the whole tree: cmd → electron main →
+            // bridge → its MCP/exec children.
+            spawnSync('taskkill', ['/F', '/T', '/PID', String(app.process().pid)], {
+              windowsHide: true,
+            });
+          } else {
+            // POSIX: no shell wrapper — the main dies, and the bridge's
+            // parent-death watchdog (#959) hard-exits within ~1-2s.
+            app.process().kill('SIGKILL');
+          }
         } catch {
           /* already gone */
         }

@@ -40,6 +40,9 @@
 #   仅 legacy orchestrator 路径（miqi/execution/orchestrator.py:55-66 的
 #   _FILE_MUTATION_TOOLS 含 create_pdf）会注入。本 PR 不改 kun_runtime 代码，
 #   是否把 create_pdf 加入 _USER_ROOTS_TOOLS 见 issue #1004。
+# - 输入图片路径（docx 的 content 图片块 path / pptx 的 slides[].image_path）
+#   不是可信输入：解析后必须落在工作区 / 会话文件区 / 用户授权目录内，
+#   越界即不读该文件、跳过该图片并在返回串中报告（issue #1005 节 2）
 #
 # 详细实现见 miqi/documents/path_utils.py 模块文档。
 path_semantics:
@@ -54,3 +57,4 @@ path_semantics:
   content_path_read_kun_gap: "KUN 运行时 _USER_ROOTS_TOOLS 不含 create_pdf → 用户授权目录读不可达；仅 legacy orchestrator 路径可达"
   pdf_single_file_contract: "create_pdf 不自动分卷：单次调用只输出一个单文件 PDF；content 字符串超过 16000 字符时不静默渲染、不报错，返回提示改用 content_path（源稿直渲不受该阈值约束）"
   content_path_md_copy: "content_path 渲染成功后，在 PDF 同目录落源稿副本 <PDF 同名>.md（内容为实际渲染源）；同名已存在则跳过不覆盖；写失败只告警，不影响 PDF 交付"
+  input_images: "docx/pptx 的图片块走 resolve_read_path，与输出同一边界；越界/缺失/非图片跳过该图片（不读文件）并在返回串中报告"
