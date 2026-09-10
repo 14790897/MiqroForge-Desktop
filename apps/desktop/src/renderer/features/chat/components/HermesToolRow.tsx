@@ -84,6 +84,9 @@ export function HermesToolRow({
       >
         <span className={GLYPH_WRAP_CLASS}>{status ? <StatusGlyph status={status} /> : null}</span>
         <span className={LABEL_CLASS}>{title}</span>
+        {status === 'pending' && testid === 'confirm-card' && (
+          <span className={META_CLASS}>等待你的选择</span>
+        )}
         {meta && <span className={META_CLASS}>{meta}</span>}
         <span className="ml-auto flex shrink-0 items-center gap-1.5">
           {trailing}
