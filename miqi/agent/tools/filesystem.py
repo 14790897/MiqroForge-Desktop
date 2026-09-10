@@ -1106,7 +1106,8 @@ def bootstrap_sandbox_roots(roots: Iterable[Path] | None) -> list[str]:
       * only roots the caller already whitelisted (the bind set) — nothing
         outside it is ever created;
       * only absolute host paths that map into the sandbox: UNC/WSL-native
-        (``\\\\wsl$\\…``) and relative paths are skipped;
+        (``\\\\wsl$\\…``), relative and drive-relative (``C:``, ``C:relative``)
+        paths are skipped;
       * on Windows a POSIX path is a WSL-native path, not a host path, and is
         skipped — ``windows_path_to_mnt`` could not map it either;
       * the ``_user_roots`` component is already gated by
@@ -1125,8 +1126,15 @@ def bootstrap_sandbox_roots(roots: Iterable[Path] | None) -> list[str]:
         s = str(p).replace("\\", "/")
         if s.startswith("//"):
             continue  # UNC / WSL-native — no sandbox mapping
-        if len(s) >= 2 and s[1] == ":":
-            pass  # Windows drive path
+        # Drive-ABSOLUTE only (``C:/…``) — the same judge as
+        # ``miqi.sandbox.bwrap._host_path_to_sandbox`` (bwrap.py:79).  The
+        # drive-RELATIVE spellings Windows accepts (``C:``, ``C:relative``)
+        # mean "relative to that drive's current directory" and name no fixed
+        # root: the old ``len(s) >= 2 and s[1] == ":"`` test let them through,
+        # so bootstrap mkdir-ed a path nobody named and handed it to the
+        # sandbox as an rw bind source (review #1007).
+        if len(s) >= 3 and s[1] == ":" and s[2] in "/\\":
+            pass  # Windows drive-absolute path
         elif s.startswith("/"):
             if _os.name == "nt":
                 continue  # WSL-native path, invisible to the Windows host

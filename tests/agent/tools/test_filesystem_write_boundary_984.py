@@ -162,6 +162,37 @@ class TestBootstrapSandboxRoots:
         assert bootstrap_sandbox_roots([a, b]) == [str(a), str(b)]
         assert a.is_dir() and b.is_dir()
 
+    # ── #1007 review: drive-relative spellings name no fixed root ────────
+
+    @pytest.mark.parametrize("raw", ["C:out", "C:", "C:relative", r"C:foo\bar"])
+    def test_drive_relative_not_created(self, raw: str, monkeypatch) -> None:
+        """``C:out`` is relative to the C: drive's CWD — not a bind source.
+
+        The old ``len(s) >= 2 and s[1] == ":"`` judge treated it as a drive
+        path, so bootstrap mkdir-ed a directory nobody named and handed it to
+        the sandbox as an rw ``--bind`` source (the same tightening as
+        ``bwrap._host_path_to_sandbox``, 34907420).  ``Path.mkdir`` is
+        recorded, not run: the pre-fix code created the junk directory for
+        real (on POSIX it landed in the test runner's CWD).
+        """
+        calls: list = []
+        monkeypatch.setattr(
+            Path, "mkdir", lambda self, **kw: calls.append(self),
+        )
+        # Nothing exists yet — the "new output dir" case this function is
+        # written for.  Without it ``C:`` (the drive's current directory)
+        # short-circuits on ``exists()`` and the regression hides.
+        monkeypatch.setattr(Path, "exists", lambda self: False)
+        assert bootstrap_sandbox_roots([raw]) == []
+        assert calls == [], f"drive-relative {raw!r} reached mkdir"
+
+    @pytest.mark.skipif(not _IS_WINDOWS, reason="drive spellings are Windows-only")
+    def test_drive_absolute_still_created(self, tmp_path: Path) -> None:
+        """The tightened judge must not change any absolute spelling."""
+        target = tmp_path / "drive_abs" / "sub"
+        assert bootstrap_sandbox_roots([target]) == [str(target)]
+        assert target.is_dir()
+
 
 # ── #1007 review: the log calls are stdlib-logging, so ``%s`` not ``{}`` ──
 
