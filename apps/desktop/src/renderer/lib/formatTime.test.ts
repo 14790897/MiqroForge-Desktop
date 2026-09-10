@@ -53,6 +53,12 @@ describe('formatChatTime(#828)', () => {
     expect(formatChatTime(NaN)).toBe('');
   });
 
+  it('超范围数字(finite 但 Invalid Date)返回空串,不输出 NaN', () => {
+    expect(formatChatTime(1e20, now)).toBe('');
+    expect(formatChatTime(8.65e15, now)).toBe('');
+    expect(formatChatTime(-8.65e15, now)).toBe('');
+  });
+
   it('ISO 字符串输入可解析', () => {
     const iso = local(2026, 9, 10, 15, 45).toISOString();
     expect(formatChatTime(iso, now)).toBe('今天 15:45');
