@@ -234,8 +234,9 @@ export function DiagramViewer({
 
   const [copied, setCopied] = useState(false);
   const [rot, setRot] = useState(0); // 仅控制鸟瞰显隐等低频渲染；transform 走 rotRef
-  // 主图 DOM 修正后的完整 svg —— **唯一 effective source**：
-  // 鸟瞰背景 / 复制 / 下载全部用它（原始字符串 viewBox 会裁内容）
+  // 主图 DOM 修正后的完整 svg——用于**导出路径**（复制/下载；原始字符串
+  // viewBox 会裁内容）。显示路径不需要它：主图与鸟瞰各自渲染 fig.svg，
+  // 由同款 SvgBody 在 DOM 内幂等修正（渲染/导出分离，R5 P2 注释校正）
   const [fixedSvg, setFixedSvg] = useState<string | null>(null);
   const reportFixed = useCallback((s: string) => setFixedSvg(s), []);
   const effectiveSvg = fixedSvg ?? fig.svg;

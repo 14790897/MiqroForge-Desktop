@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { lastAssistantGroupIndex, type MinimalChatGroup } from './lastAssistantGroup';
+import {
+  hasUserGroupAfter,
+  lastAssistantGroupIndex,
+  type MinimalChatGroup,
+} from './lastAssistantGroup';
 
 /**
  * #843 回归（CodeRabbit L9031）：末尾追加子代理行 / 重复 assistant 后，
@@ -43,5 +47,28 @@ describe('lastAssistantGroupIndex', () => {
   it('无 assistant 返回 -1', () => {
     const groups: MinimalChatGroup[] = [{ kind: 'msg', msg: { role: 'user' } }];
     expect(lastAssistantGroupIndex(groups)).toBe(-1);
+  });
+});
+
+describe('hasUserGroupAfter（R5 P2 边界窗口）', () => {
+  it('assistant 之后出现 user → true（不回溯已完成 assistant）', () => {
+    const groups: MinimalChatGroup[] = [
+      { kind: 'msg', msg: { role: 'assistant' } },
+      { kind: 'msg', msg: { role: 'user' } },
+    ];
+    expect(hasUserGroupAfter(groups, 0)).toBe(true);
+  });
+
+  it('assistant 之后只有 chain/工具行 → false（仍在生成本回合）', () => {
+    const groups: MinimalChatGroup[] = [
+      { kind: 'msg', msg: { role: 'assistant' } },
+      { kind: 'chain' },
+    ];
+    expect(hasUserGroupAfter(groups, 0)).toBe(false);
+  });
+
+  it('index 为最后一项 → false', () => {
+    const groups: MinimalChatGroup[] = [{ kind: 'msg', msg: { role: 'assistant' } }];
+    expect(hasUserGroupAfter(groups, 0)).toBe(false);
   });
 });

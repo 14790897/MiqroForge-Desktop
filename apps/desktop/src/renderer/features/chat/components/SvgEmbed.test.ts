@@ -53,4 +53,21 @@ describe('SvgEmbed sanitization (CodeRabbit security regression)', () => {
     const markup = renderToStaticMarkup(createElement(SvgEmbed, { code: '' }));
     expect(markup).toContain('<pre');
   });
+
+  it('strips style attribute carrying external url() (审查 R5 P1)', () => {
+    // DOMPurify 非 CSS sanitizer——style 属性可携带 url(https://…) 触发
+    // 外部请求/数据外带；FORBID_ATTR: ['style'] 必须剥掉整个属性
+    const code =
+      '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 60 60">' +
+      '<rect width="50" height="50" style="fill:url(https://evil.example/x)"/>' +
+      '<circle cx="10" cy="10" r="5" style="stroke:red"/>' +
+      '<path d="M0 0 L10 10" stroke="#333"/>' +
+      '</svg>';
+    const markup = renderToStaticMarkup(createElement(SvgEmbed, { code }));
+    expect(markup).not.toContain('evil.example');
+    expect(markup).not.toContain('style=');
+    // 元素与合法属性保留（图仍渲染）
+    expect(markup).toContain('<rect');
+    expect(markup).toContain('<circle');
+  });
 });

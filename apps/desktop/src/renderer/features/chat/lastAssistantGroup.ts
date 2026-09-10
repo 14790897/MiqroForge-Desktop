@@ -19,3 +19,18 @@ export function lastAssistantGroupIndex(groups: MinimalChatGroup[]): number {
   }
   return -1;
 }
+
+/**
+ * index 之后是否已出现 user 分组（审查 R5 P2 边界窗口）：
+ * 「用户已发出下一条、新的 assistant 分组尚未挂上」的极短窗口里，
+ * streaming=true 但 lastAssistantGroupIndex 仍指向上一条**已完成**的
+ * assistant——若无此判定，它的 mermaid 会短暂闪回源码预览。
+ * 该窗口下应视为「无活跃 assistant」（其后有 user 即不回溯）。
+ */
+export function hasUserGroupAfter(groups: MinimalChatGroup[], index: number): boolean {
+  for (let i = index + 1; i < groups.length; i++) {
+    const g = groups[i];
+    if (g.kind === 'msg' && g.msg?.role === 'user') return true;
+  }
+  return false;
+}

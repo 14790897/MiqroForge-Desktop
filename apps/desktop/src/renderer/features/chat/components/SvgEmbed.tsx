@@ -27,6 +27,10 @@ export function SvgEmbed({ code }: { code: string }) {
       // 隐藏/伪造 UI（body{display:none}）或经属性选择器外带输入值。
       // 流程图不需要内嵌 CSS，直接禁掉整个 style 元素。
       FORBID_TAGS: ['feImage', 'image', 'use', 'style'],
+      // style 属性同样封死（审查 R5 P1）：DOMPurify 非 CSS sanitizer，
+      // style="fill:url(https://evil.example/x)" 会触发外部资源请求/数据
+      // 外带，不在其默认防护内——流程图不需要任意 CSS，整属性剥掉。
+      FORBID_ATTR: ['style'],
     });
   }, [code]);
 

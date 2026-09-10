@@ -10,7 +10,7 @@ import {
 import { AgentAvatar } from './components/Avatars';
 import { MiQroForgeLogo } from '../../components/MiQroForgeLogo';
 import { MarkdownContent } from './components/MarkdownContent';
-import { lastAssistantGroupIndex } from './lastAssistantGroup';
+import { hasUserGroupAfter, lastAssistantGroupIndex } from './lastAssistantGroup';
 import { SandboxHtmlFrame } from './components/SandboxHtmlFrame';
 import { ThinkBlock } from './components/ThinkBlock';
 import { InterruptedTurnCard } from './components/InterruptedTurnCard';
@@ -6123,6 +6123,12 @@ export function ChatConsole({
   const chatGroups = useMemo(() => groupChatMessages(messages), [messages]);
   // #843：活跃 assistant = 最后一条 assistant 分组（追加子代理行/重复 assistant 不影响）
   const lastAssistantIdx = useMemo(() => lastAssistantGroupIndex(chatGroups), [chatGroups]);
+  // R5 P2：其后已出现 user 分组时不回溯（新回合 assistant 未挂上的窗口内，
+  // 上一条已完成的回答不进入 streaming 态）
+  const assistantTailActive = useMemo(
+    () => lastAssistantIdx >= 0 && !hasUserGroupAfter(chatGroups, lastAssistantIdx),
+    [chatGroups, lastAssistantIdx]
+  );
 
   /** Retry a user message: rewind to it, resend automatically with a
    *  "answer differently" hint so the model doesn't repeat itself. */
@@ -6830,7 +6836,7 @@ export function ChatConsole({
                         sources={sourcesByMsg.get(group.msg) ?? []}
                         toolStepIndex={toolStepByMsg.get(group.msg)}
                         isLast={i === chatGroups.length - 1}
-                        streaming={streaming && i === lastAssistantIdx}
+                        streaming={streaming && i === lastAssistantIdx && assistantTailActive}
                         onResume={
                           group.msg.interrupted ? () => handleResumeTurn(group.msg) : undefined
                         }
