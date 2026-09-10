@@ -193,6 +193,109 @@ test.describe('Issue #922 — AI 网关状态门禁', () => {
     expect(sends).toBe(1);
   });
 
+  test('登录 + 网关 active + 无本地凭据：默认网关模型可直接发送（chat.send 被调用）', async ({
+    page,
+  }) => {
+    // 登录用户没有任何本地 provider 凭据 —— 此前只看 providers[].configured
+    // 会把这条路径拦成「尚未配置模型服务」（用户登录后仍被要求配置模型）。
+    await page.addInitScript({
+      content: buildMockBridgeScript({
+        providers: [],
+        // 真实后端按运行时判定：网关路由可用 → 模型可发起会话
+        activeModelResolvable: true,
+        qraftStatus: {
+          loggedIn: true,
+          account: {
+            phone: '18500000000',
+            sub: '19',
+            username: 'U-GW',
+            nickname: '网关用户',
+          },
+          env: 'test',
+          baseUrl: 'https://test.forge.miqroera.com/api',
+          aiGateway: { status: 'active', configVersion: 1 },
+        },
+      }),
+    });
+    await page.goto('/');
+    await page.waitForSelector('#root', { state: 'visible' });
+
+    await page.evaluate(() => {
+      (window as any).__chatSends = 0;
+      const orig = (window as any).miqi.chat.send.bind((window as any).miqi.chat);
+      (window as any).miqi.chat.send = (...args: unknown[]) => {
+        (window as any).__chatSends += 1;
+        return orig(...args);
+      };
+    });
+
+    const textarea = page.locator('[data-testid="chat-input-container"] textarea');
+    await expect(textarea).toBeVisible({ timeout: 10_000 });
+    await textarea.fill('hello gateway no local key');
+    await textarea.press('Enter');
+
+    // 用户气泡保留，未被替换为「未配置模型服务」或登录引导
+    await expect(
+      page.getByTestId('chat-message-user').getByText('hello gateway no local key')
+    ).toBeVisible({ timeout: 10_000 });
+    await expect(page.getByText(/尚未配置模型服务/)).not.toBeVisible();
+    await expect(page.getByText(/尚未登录平台账号/)).not.toBeVisible();
+    await page.waitForTimeout(500);
+    const sends = await page.evaluate(() => (window as any).__chatSends);
+    expect(sends).toBe(1);
+  });
+
+  test('登录 + 网关 active + 无本地凭据 + 模型不可解析：拦截并引导去选择模型', async ({
+    page,
+  }) => {
+    // 已登录但默认模型运行时不可用（非网关模型且无本地凭据）——引导落点是
+    // 重选平台内置模型，而不是「去配置模型」（#835 收口后凭据配置已不存在）。
+    await page.addInitScript({
+      content: buildMockBridgeScript({
+        providers: [],
+        activeModelResolvable: false,
+        qraftStatus: {
+          loggedIn: true,
+          account: {
+            phone: '18500000000',
+            sub: '19',
+            username: 'U-GW',
+            nickname: '网关用户',
+          },
+          env: 'test',
+          baseUrl: 'https://test.forge.miqroera.com/api',
+          aiGateway: { status: 'active', configVersion: 1 },
+        },
+      }),
+    });
+    await page.goto('/');
+    await page.waitForSelector('#root', { state: 'visible' });
+
+    await page.evaluate(() => {
+      (window as any).__chatSends = 0;
+      const orig = (window as any).miqi.chat.send.bind((window as any).miqi.chat);
+      (window as any).miqi.chat.send = (...args: unknown[]) => {
+        (window as any).__chatSends += 1;
+        return orig(...args);
+      };
+    });
+
+    const textarea = page.locator('[data-testid="chat-input-container"] textarea');
+    await expect(textarea).toBeVisible({ timeout: 10_000 });
+    await textarea.fill('ping unresolvable');
+    await textarea.press('Enter');
+
+    await expect(page.getByText(/当前默认模型没有可用的模型服务/)).toBeVisible({
+      timeout: 10_000,
+    });
+    await expect(page.getByRole('button', { name: '去选择模型' })).toBeVisible();
+    await expect(textarea).toHaveValue('ping unresolvable');
+
+    await page.waitForTimeout(500);
+    const sends = await page.evaluate(() => (window as any).__chatSends);
+    expect(sends).toBe(0);
+  });
+
   test('网关非 active（provisioning）：论文无直链的 AI 下载 fallback 同样被拦截（chat.send 零调用）', async ({
     page,
   }) => {
