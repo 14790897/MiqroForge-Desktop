@@ -197,12 +197,21 @@ test.describe('流程图图库 UI（真实 LLM，#843）', () => {
       console.log('[mmd-e2e] bird-pair=' + JSON.stringify(first));
       expect(first.mainVb).toBeTruthy();
       expect(first.mmVb).toBeTruthy();
+      // 数值比较（容差 0.5）：两侧独立计算的 bbox 存在 1e-14 级浮点尾差
+      // （实测 -8.5 vs -8.499999999999993），字符串严格相等会误报
+      const parseVb = (v: string | null) => (v ? v.split(/[\s,]+/).map(Number) : null);
       await expect
-        .poll(async () => (await mmPair()).mmVb, {
-          timeout: 8_000,
-          message: '鸟瞰 svg 未同步到修正后 viewBox',
-        })
-        .toBe(first.mainVb);
+        .poll(
+          async () => {
+            const r = await mmPair();
+            const a = parseVb(r.mainVb);
+            const b = parseVb(r.mmVb);
+            if (!a || !b || a.length !== 4 || b.length !== 4) return false;
+            return a.every((n, i) => Math.abs(n - b[i]) < 0.5);
+          },
+          { timeout: 8_000, message: '鸟瞰 svg 未同步到修正后 viewBox' }
+        )
+        .toBe(true);
 
       // 鸟瞰面板特写大图（人眼直接验证完整图）
       await viewer
