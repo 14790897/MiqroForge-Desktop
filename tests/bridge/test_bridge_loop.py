@@ -573,7 +573,7 @@ async def test_drain_loop_dispatches_concurrently() -> None:
         loop._shutdown_event.set()
 
 
-# ── agent.spawn must sanitize the IPC-supplied roots (#1007 review) ───────
+# ── agent.spawn never takes roots from the request (#1007 review) ─────────
 
 
 class _SpawnCapture:
@@ -611,13 +611,16 @@ def _spawn_loop_and_registry(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_agent_spawn_sanitizes_user_roots(tmp_path):
-    """A root that skips the mention filter must not reach AgentJob.  A UNC
-    path, a protected system subtree and the workspace itself are all
-    rejected; the legitimate output dir survives."""
+async def test_agent_spawn_ignores_request_user_roots(tmp_path):
+    """A ``user_roots`` field in the request must NOT become the sub-agent's
+    authorization scope.
+
+    The field is request-supplied, so it is forgeable — filtering it would
+    still let the caller pick the scope.  The handler passes no roots at
+    all, so a request that asks for an out-of-scope directory (and, for the
+    same reason, one that asks for a legitimate one) has no effect.
+    """
     loop, registry, ac = _spawn_loop_and_registry(tmp_path)
-    ws = tmp_path / "ws"
-    ws.mkdir()
     out = tmp_path / "out"
     out.mkdir()
 
@@ -626,14 +629,7 @@ async def test_agent_spawn_sanitizes_user_roots(tmp_path):
         {
             "agent_type": "code-agent",
             "task": "do the thing",
-            "user_roots": [
-                str(out),
-                str(ws),
-                str(ws / "sessions" / "k"),
-                r"\\wsl$\Ubuntu\home\out",
-                "relative/dir",
-                "C:relative",
-            ],
+            "user_roots": [str(out)],
         },
         "client-1",
         "session-1",
@@ -641,17 +637,50 @@ async def test_agent_spawn_sanitizes_user_roots(tmp_path):
     )
 
     assert len(ac.calls) == 1
-    assert ac.calls[0]["user_roots"] == [str(out.resolve())]
+    assert ac.calls[0]["user_roots"] is None
 
 
 @pytest.mark.asyncio
-async def test_agent_spawn_without_user_roots_passes_empty(tmp_path):
+async def test_agent_spawn_ignores_forged_roots_payload(tmp_path):
+    """The review's shape: every hostile spelling in the field — the very
+    ones the old ``sanitize_user_roots`` pass used to filter — is irrelevant
+    now, because none of them is read."""
     loop, registry, ac = _spawn_loop_and_registry(tmp_path)
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    hostile = tmp_path / "hostile"
+    hostile.mkdir()
+
     await loop._agent_spawn_handler(
         "req-2",
+        {
+            "agent_type": "code-agent",
+            "task": "x",
+            "user_roots": [
+                str(hostile),
+                str(ws),
+                str(ws / "sessions" / "k"),
+                r"\\wsl$\Ubuntu\home\out",
+                "relative/dir",
+                "C:relative",
+                "/etc",
+            ],
+        },
+        "client-1",
+        "session-1",
+        registry,
+    )
+    assert ac.calls[0]["user_roots"] is None
+
+
+@pytest.mark.asyncio
+async def test_agent_spawn_without_user_roots_passes_none(tmp_path):
+    loop, registry, ac = _spawn_loop_and_registry(tmp_path)
+    await loop._agent_spawn_handler(
+        "req-3",
         {"agent_type": "code-agent", "task": "x"},
         "client-1",
         "session-1",
         registry,
     )
-    assert ac.calls[0]["user_roots"] == []
+    assert ac.calls[0]["user_roots"] is None

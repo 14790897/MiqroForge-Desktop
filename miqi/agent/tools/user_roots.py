@@ -241,8 +241,8 @@ def _accept_root(root: Path, workspace: Path | None) -> bool:
     """True when *root* may become an authorized write root.
 
     Shared by :func:`extract_user_mentioned_roots` (#821, user message
-    mentions) and :func:`sanitize_user_roots` (#984 review, untrusted
-    ``agent.spawn`` params): both channels end up in
+    mentions) and :func:`sanitize_user_roots` (#984 review, root lists
+    arriving from outside the runtime): both channels end up in
     ``ToolExecutionContext.user_mentioned_roots`` — the exec rw binds and
     the command guard's write scope — so a root dropped on one of them must
     not slip in through the other.
@@ -310,16 +310,22 @@ def sanitize_user_roots(
 ) -> list[str]:
     """Filter untrusted root entries; returns canonical host path strings.
 
-    For roots that arrive from OUTSIDE the runtime — the ``agent.spawn``
-    IPC parameter (#984 review) — and would otherwise reach
-    ``TurnContext.user_mentioned_roots`` without ever passing through
+    For root lists that arrive from OUTSIDE the runtime and would otherwise
+    reach ``TurnContext.user_mentioned_roots`` without ever passing through
     :func:`extract_user_mentioned_roots`.  They feed the same two
     authorization channels there (the bwrap rw binds and the command guard's
     write scope), so they get the same guard rails as a mention.
 
+    NOTE (#1007 review): filtering a caller-supplied list does not make it
+    trustworthy — the caller still chooses the scope.  ``agent.spawn`` no
+    longer uses this function: it takes no roots from the request at all
+    (fail-closed) and must instead be handed roots from server-side state.
+    Keep this helper for a future server-held store; do NOT wire it back to
+    a request field.
+
     Entries that are not usable absolute paths (``None``, numbers, ``bytes``,
     relative / drive-relative / UNC strings) are dropped instead of raising:
-    the input is untrusted IPC data.
+    the input is untrusted data.
     """
     # A str/bytes/dict "list" is a malformed payload, not a root list:
     # iterating it would hand over characters or keys — and a non-iterable
