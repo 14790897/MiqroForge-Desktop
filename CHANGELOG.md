@@ -1,3 +1,40 @@
+# [0.29.0](https://github.com/14790897/MiqroForge-Desktop/compare/v0.28.0...v0.29.0) (2026-09-10)
+
+
+### Bug Fixes
+
+* **chat:** 用户消息去重前归一化附件占位符，避免带图/文件消息双显示 ([#968](https://github.com/14790897/MiqroForge-Desktop/issues/968)) ([#969](https://github.com/14790897/MiqroForge-Desktop/issues/969)) ([abb17c8](https://github.com/14790897/MiqroForge-Desktop/commit/abb17c83027d8c00200cd0fa54ad31446275563e)), closes [#659](https://github.com/14790897/MiqroForge-Desktop/issues/659)
+* **ci:** 修复 CI flaky——sqlite 写锁滞留、附件删除冒泡挂死、真实 LLM 限流硬失败 ([#992](https://github.com/14790897/MiqroForge-Desktop/issues/992)) ([c3b2ec7](https://github.com/14790897/MiqroForge-Desktop/commit/c3b2ec7938b09998137cf7110122d4d156b6a2fd))
+* **desktop:** WSL 向导提权安装改为状态后验并过滤不可用发行版 ([#972](https://github.com/14790897/MiqroForge-Desktop/issues/972)) ([2ab1621](https://github.com/14790897/MiqroForge-Desktop/commit/2ab16215a1a6c4913ededc44cc2fb56ca22913ad))
+* **desktop:** 侧边栏拖拽调宽失效——usePanelResize 依赖内联 computeWidth 致拖拽中途被 reset ([#977](https://github.com/14790897/MiqroForge-Desktop/issues/977)) ([#995](https://github.com/14790897/MiqroForge-Desktop/issues/995)) ([cfee266](https://github.com/14790897/MiqroForge-Desktop/commit/cfee2668ba1c055928c0e8150f514466f8c6326e))
+* **desktop:** 内置 slurm MCP 网关放行 http 连接与凭据注入 ([#1029](https://github.com/14790897/MiqroForge-Desktop/issues/1029)) ([ae1192d](https://github.com/14790897/MiqroForge-Desktop/commit/ae1192d1e7d92dffacfe4ef40ecff78412d51d60))
+* **desktop:** 堵住 openExternal/openContainingFolder 的路径校验绕过 ([#955](https://github.com/14790897/MiqroForge-Desktop/issues/955)) ([#999](https://github.com/14790897/MiqroForge-Desktop/issues/999)) ([a49dfba](https://github.com/14790897/MiqroForge-Desktop/commit/a49dfba4d74ed6a5e9066bb6b1c806d248a8e5e0))
+* **desktop:** 桥进程父死看门狗——Electron 硬杀后不再遗留孤儿 bridge ([#959](https://github.com/14790897/MiqroForge-Desktop/issues/959)) ([#982](https://github.com/14790897/MiqroForge-Desktop/issues/982)) ([0894a43](https://github.com/14790897/MiqroForge-Desktop/commit/0894a43beaad3f8982915aa19696a4489afbebab))
+* **desktop:** 登录后 AI 网关可直接生效——保存门控对齐运行时网关路由并自动设置网关模型 ([#991](https://github.com/14790897/MiqroForge-Desktop/issues/991)) ([86fa0e6](https://github.com/14790897/MiqroForge-Desktop/commit/86fa0e636ea0e65859faeca440c62a7d37e74660)), closes [#929](https://github.com/14790897/MiqroForge-Desktop/issues/929)
+* **desktop:** 登录后发送仍被拦成「未配置模型服务」——发送门禁改用 active_model_resolvable 判定 ([#1025](https://github.com/14790897/MiqroForge-Desktop/issues/1025)) ([f9d2b50](https://github.com/14790897/MiqroForge-Desktop/commit/f9d2b50c1f6638c21ded1f2e270a93faf59cc767)), closes [#922](https://github.com/14790897/MiqroForge-Desktop/issues/922) [#835](https://github.com/14790897/MiqroForge-Desktop/issues/835)
+* **documents:** 文档工具路径边界——会话 key 派生分叉 + docx/pptx 图片块无界读（[#1005](https://github.com/14790897/MiqroForge-Desktop/issues/1005)） ([#1006](https://github.com/14790897/MiqroForge-Desktop/issues/1006)) ([59b942d](https://github.com/14790897/MiqroForge-Desktop/commit/59b942dad61bda50b35efec0430f50011daf478c)), closes [#1003](https://github.com/14790897/MiqroForge-Desktop/issues/1003) [#994](https://github.com/14790897/MiqroForge-Desktop/issues/994) [#994](https://github.com/14790897/MiqroForge-Desktop/issues/994)
+* **e2e:** 隔离 qraft 登录态——E2E 继承开发机真实平台凭据致模型调用走真实网关而非 mock ([#952](https://github.com/14790897/MiqroForge-Desktop/issues/952)) ([#957](https://github.com/14790897/MiqroForge-Desktop/issues/957)) ([fae5288](https://github.com/14790897/MiqroForge-Desktop/commit/fae52884f25e9872a9bf3946cde3fe0bba87deaa))
+* **mcp:** [#975](https://github.com/14790897/MiqroForge-Desktop/issues/975) MCP binary artifact 可信交付（Artifact Boundary）——客户端消费端闭环 ([#988](https://github.com/14790897/MiqroForge-Desktop/issues/988)) ([e85bae6](https://github.com/14790897/MiqroForge-Desktop/commit/e85bae6d103c09eaba2095f76daa42bce8c12a3e)), closes [#927](https://github.com/14790897/MiqroForge-Desktop/issues/927)
+* **mcp:** 编辑弹窗不回显已保存配置——条件挂载重置表单 + upsert schema 补 type/insecure_http ([#950](https://github.com/14790897/MiqroForge-Desktop/issues/950)) ([#953](https://github.com/14790897/MiqroForge-Desktop/issues/953)) ([743c0e2](https://github.com/14790897/MiqroForge-Desktop/commit/743c0e23cbccd82ae98c12b226fd7fd70407fe71))
+* **providers:** 平台内容安全 403 被误判为认证失败——内容拦截独立分类并给出正确指引 ([#1027](https://github.com/14790897/MiqroForge-Desktop/issues/1027)) ([b5536b2](https://github.com/14790897/MiqroForge-Desktop/commit/b5536b21ee831314481647b2d6afbbcd0e6194c3))
+
+
+### Features
+
+* **agent:** DeepSeek 搜索不可用时 auto 链自动切换兜底 + 零配置搜索 E2E ([#979](https://github.com/14790897/MiqroForge-Desktop/issues/979)) ([#996](https://github.com/14790897/MiqroForge-Desktop/issues/996)) ([8a9db42](https://github.com/14790897/MiqroForge-Desktop/commit/8a9db42f013eee51f58ca41198243d3302cedd9b))
+* **desktop:** 参数对比表结构化展示组件([#878](https://github.com/14790897/MiqroForge-Desktop/issues/878)) ([#961](https://github.com/14790897/MiqroForge-Desktop/issues/961)) ([ae8bf3d](https://github.com/14790897/MiqroForge-Desktop/commit/ae8bf3d078ded0ff9496f356ca6d45967a0bb2ea))
+* **desktop:** 平台登录失效全局告知——横幅、顶栏失效 chip、发送拦截重登引导 ([#1016](https://github.com/14790897/MiqroForge-Desktop/issues/1016)) ([ce96217](https://github.com/14790897/MiqroForge-Desktop/commit/ce96217b701240908d096d9a37a013009fcc416f))
+* **desktop:** 登录入口显性化——首屏/顶栏入口、拦截一键登录、隐私协议衔接登录页 ([#1000](https://github.com/14790897/MiqroForge-Desktop/issues/1000)) ([#1010](https://github.com/14790897/MiqroForge-Desktop/issues/1010)) ([5ccf4bc](https://github.com/14790897/MiqroForge-Desktop/commit/5ccf4bc4a6f5a92ad31920ca1022da2eda565d09))
+* **desktop:** 设置页隐藏 MCP 配置界面收口([#974](https://github.com/14790897/MiqroForge-Desktop/issues/974)) ([#978](https://github.com/14790897/MiqroForge-Desktop/issues/978)) ([87c2693](https://github.com/14790897/MiqroForge-Desktop/commit/87c269383231cda8252e8c5a8255fdcc8fd34e38))
+
+---
+## 下载说明
+
+macOS 用户请按芯片架构选择安装包：
+
+- **Apple Silicon (M1/M2/M3/M4)**：下载 `0.29.0-arm64.dmg`（ARM 架构）
+- **Intel**：下载 `0.29.0.dmg`（x86 无后缀）
+
 # [0.28.0](https://github.com/14790897/MiqroForge-Desktop/compare/v0.27.0...v0.28.0) (2026-09-08)
 
 
