@@ -1195,6 +1195,34 @@ def _dangling_symlink_or_skip(link, target):
         pytest.skip(f"平台不支持创建符号链接（{exc}）")
 
 
+def test_write_md_source_copy_symlink_detected_without_real_link(tmp_path, monkeypatch):
+    """lstat 前置判断必须拦住（悬空）符号链接——用 monkeypatch 伪造，**本机可跑**。
+
+    真建链接的用例在 Windows 非管理员/未开开发者模式的机器上会被 skip，因此「判据
+    是否生效」此前只有有权限的 CI runner 才能验。本用例改为让目标路径的
+    ``Path.is_symlink()`` 返回 True（不碰文件系统、不需要任何权限）：若把
+    ``is_symlink()`` 前置判断去掉、只剩 ``"xb"``，本用例在 Windows 上必然变红
+    ——目标不存在时 ``"xb"`` 会成功写穿 reparse point（#994 Windows 回归）。
+    """
+    from pathlib import Path
+
+    from miqi.documents.pdf_create_tool import _write_md_source_copy
+
+    target = tmp_path / "o.md"
+    real_is_symlink = Path.is_symlink
+
+    def _fake_is_symlink(self):
+        return True if self == target else real_is_symlink(self)
+
+    monkeypatch.setattr(Path, "is_symlink", _fake_is_symlink)
+
+    copy_path, note = _write_md_source_copy(tmp_path / "o.pdf", b"payload\n")
+
+    assert copy_path == target, copy_path
+    assert note == "已存在，跳过不覆盖", note
+    assert not target.exists(), "is_symlink() 为 True 时不得写入任何文件"
+
+
 def test_write_md_source_copy_creates_byte_exact(tmp_path):
     """正常路径：.md 不存在 → 独占创建落盘，内容与源稿逐字节一致。"""
     from miqi.documents.pdf_create_tool import _write_md_source_copy

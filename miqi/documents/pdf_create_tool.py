@@ -1096,12 +1096,28 @@ def _write_md_source_copy(pdf_path: Path, md_bytes: bytes) -> tuple[Path | None,
     已手工改过该副本）；写失败只告警、不影响 PDF 交付（PDF 才是主产物）。
     返回 ``(副本路径或 None, 状态说明)``。
 
-    「不覆盖」用 ``"xb"``（``O_CREAT|O_EXCL``）独占创建实现，而不是先查 ``exists()``
-    再写：``exists()`` 跟随符号链接，目标位置是**悬空链接**时会判 False → 守卫不触发
-    → 写操作跟随链接落到输出边界之外（CWE-59）；且查与写之间的 TOCTOU 会让契约在
-    竞争下失效。``O_EXCL`` 对任何已存在的路径（含悬空链接本身）直接 ``EEXIST``。
+    「不覆盖」的判据分两层：
+
+    1. ``is_symlink()`` 前置（**lstat 语义**：对悬空链接也返回 True，两平台一致），
+       与 ``exists()`` 一起构成「路径已被占用」的前置判断；
+    2. ``"xb"``（``O_CREAT|O_EXCL``）独占创建，堵住判 1 与写入之间的 TOCTOU 竞态。
+
+    为什么判 1 不能只靠 ``"xb"``：Windows CRT 把 ``"xb"`` 映射为
+    ``CreateFileW(CREATE_NEW)``，它会**先解析 reparse point、再判断目标是否存在**——
+    目标位置是悬空链接时目标不存在 → ``CREATE_NEW`` 成功 → 照样写穿链接落到输出
+    边界之外（CWE-59）。POSIX 的 ``O_CREAT|O_EXCL`` 则对符号链接本身直接 ``EEXIST``，
+    语义不同，故此前只有 Windows 会漏（Linux 用例全绿掩盖了它）。
+
+    判 1 本身仍有极小的 TOCTOU 窗口（查与写之间链接可能被建出来），但写入目标位于
+    会话 files 目录内（**自有边界**），风险可接受；``"xb"`` 保留作为 POSIX 上的
+    竞态兜底，不声称「完全竞态安全」。
     """
     copy_path = pdf_path.with_suffix(".md")
+    # lstat 语义的前置判断：is_symlink() 对悬空链接也返回 True（不存在但仍是链接）。
+    # 这是 Windows 上唯一能挡住 reparse point 写穿的判据（"xb" 在 Windows 不挡）。
+    if copy_path.is_symlink() or copy_path.exists():
+        logger.info(f"PDF: 源稿副本 {copy_path} 已存在，跳过不覆盖")
+        return copy_path, "已存在，跳过不覆盖"
     try:
         # FileExistsError 是 OSError 子类，必须单独先捕获（否则会落进下面的写失败分支）。
         with copy_path.open("xb") as copy_file:
