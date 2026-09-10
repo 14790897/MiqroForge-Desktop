@@ -257,15 +257,6 @@ export function DiagramViewer({
 
   const svgW = useMemo(() => svgSize(effectiveSvg).width || 1, [effectiveSvg]);
 
-  // 鸟瞰背景图 data URL（用修正版；encodeURIComponent 全转义）
-  const mmDataUrl = useMemo(() => {
-    try {
-      return `url("data:image/svg+xml,${encodeURIComponent(effectiveSvg)}")`;
-    } catch {
-      return undefined;
-    }
-  }, [effectiveSvg]);
-
   // ── 命令式视觉同步：transform / 百分比 / 鸟瞰框 ────────────────────
   const applyVisuals = useCallback(() => {
     const { x, y, s } = tf.current;
@@ -731,18 +722,15 @@ export function DiagramViewer({
               onWheel={(e) => e.stopPropagation()}
               data-testid="diagram-minimap"
             >
-              {/* 整图缩略：修正版 data-URI + contain（viewBox 已含全部内容） */}
+              {/* 整图缩略：与主图同源的 SvgBody（自修正，无跨组件数据流） */}
               <div
-                className="absolute"
-                style={{
-                  inset: MINIMAP.INSET,
-                  pointerEvents: 'none',
-                  backgroundImage: mmDataUrl,
-                  backgroundSize: 'contain',
-                  backgroundRepeat: 'no-repeat',
-                  backgroundPosition: 'center',
-                }}
-              />
+                className="absolute overflow-hidden"
+                style={{ inset: MINIMAP.INSET, pointerEvents: 'none' }}
+              >
+                <div className="flex h-full w-full items-center justify-center [&_svg]:mx-auto [&_svg]:block [&_svg]:h-auto [&_svg]:max-h-full [&_svg]:max-w-full [&_svg]:pointer-events-none">
+                  <SvgBody svg={fig.svg} />
+                </div>
+              </div>
               {/* 视野框（命令式更新） */}
               <div
                 ref={mmBoxRef}

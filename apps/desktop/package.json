@@ -60,6 +60,7 @@
     "electron": "39.8.10",
     "electron-builder": "^26.15.3",
     "electron-vite": "^3.1.0",
+    "jsdom": "^25.0.1",
     "prettier": "^3.9.4",
     "tailwindcss": "^4.1.6",
     "typescript": "^5.8.3",

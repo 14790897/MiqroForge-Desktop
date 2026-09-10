@@ -178,54 +178,37 @@ test.describe('流程图图库 UI（真实 LLM，#843）', () => {
       console.log(`[mmd-e2e] zoom pct=${pctText}`);
       expect(pct).toBeGreaterThan(100);
 
-      // ② 鸟瞰底图为整图 background-image（contain），非裁切内嵌 svg
-      const hasBg = await viewer.getByTestId('diagram-minimap').evaluate((el) => {
-        const bg = el.querySelector('div[style*="background-image"]');
-        if (!bg) return false;
-        const cs = getComputedStyle(bg);
-        return cs.backgroundImage.includes('data:image/svg+xml') && cs.backgroundSize === 'contain';
-      });
-      expect(hasBg).toBe(true);
+      // ② 鸟瞰缩略为同源内嵌 SvgBody（渲染后各自修正 viewBox）——
+      //    断言：minimap svg 的 viewBox 与主图 svg 的 viewBox 一致
+      const mmPair = () =>
+        viewer.evaluate(() => {
+          const main = document.querySelector(
+            '[data-testid="diagram-viewer"] svg[id^="mmd-"]'
+          ) as SVGSVGElement | null;
+          const mm = document.querySelector(
+            '[data-testid="diagram-minimap"] svg'
+          ) as SVGSVGElement | null;
+          return {
+            mainVb: main ? main.getAttribute('viewBox') : null,
+            mmVb: mm ? mm.getAttribute('viewBox') : null,
+          };
+        });
+      const first = await mmPair();
+      console.log('[mmd-e2e] bird-pair=' + JSON.stringify(first));
+      expect(first.mainVb).toBeTruthy();
+      expect(first.mmVb).toBeTruthy();
+      await expect
+        .poll(async () => (await mmPair()).mmVb, {
+          timeout: 8_000,
+          message: '鸟瞰 svg 未同步到修正后 viewBox',
+        })
+        .toBe(first.mainVb);
+
       // 鸟瞰面板特写大图（人眼直接验证完整图）
       await viewer
         .getByTestId('diagram-minimap')
         .screenshot({ path: 'test-results/minimap-closeup.png' });
 
-      // 鸟瞰背景必须与主图修正后的 viewBox 一致（字符串路径同步完整版）
-      const mmSync = await viewer.evaluate(() => {
-        const main = document.querySelector(
-          '[data-testid="diagram-viewer"] svg[id^="mmd-"]'
-        ) as SVGSVGElement | null;
-        const mainVb = main ? main.getAttribute('viewBox') : null;
-        const bg = document.querySelector(
-          '[data-testid="diagram-minimap"] div[style*="background-image"]'
-        );
-        const bgImg = bg ? getComputedStyle(bg).backgroundImage : '';
-        const m = bgImg.match(/data:image\/svg\+xml,([^"\)]+)/);
-        const dec = m ? decodeURIComponent(m[1]) : '';
-        const vb = dec.match(/viewBox="([^"]+)"/);
-        return { mainVb, bgVb: vb ? vb[1] : null, hasBg2: !!m };
-      });
-      console.log('[mmd-e2e] bird-sync=' + JSON.stringify(mmSync));
-      expect(mmSync.hasBg2).toBe(true);
-      await expect
-        .poll(
-          async () => {
-            const vb = await viewer.evaluate(() => {
-              const bg = document.querySelector(
-                '[data-testid="diagram-minimap"] div[style*="background-image"]'
-              );
-              const bgImg = bg ? getComputedStyle(bg).backgroundImage : '';
-              const m = bgImg.match(new RegExp('data:image/svg\\+xml,([^)]+)'));
-              const dec = m ? decodeURIComponent(m[1]) : '';
-              const vb = new RegExp('viewBox="([^"]*)"').exec(dec);
-              return vb ? vb[1] : null;
-            });
-            return vb;
-          },
-          { timeout: 5_000, message: '鸟瞰背景未同步到修正后 viewBox' }
-        )
-        .toBe(mmSync.mainVb);
       // 适应窗口复位
       await viewer.getByRole('button', { name: '适应窗口' }).click();
 
