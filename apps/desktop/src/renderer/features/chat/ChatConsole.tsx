@@ -473,6 +473,43 @@ function createGatewayBlockedMessage(): Message {
   };
 }
 
+/** 登录失效时的统一拦截文案（发送拦截与流错误路径共用，避免气泡正文与登录按钮语义冲突）。 */
+export const RELOGIN_INTERCEPT_TEXT = 'MiQroForge 平台登录已失效，请重新登录后继续会话。';
+
+/**
+ * 登录失效拦截的消息列表变换（纯函数，便于单测）：
+ *  - 普通发送：乐观 user 气泡按（role + 时间戳）就地替换为重登引导。
+ *    从尾部向前查找——等待 qraft.status() 期间其他监听器（如子代理
+ *    持久事件）可能追加消息，尾部未必是 user 气泡；
+ *  - 恢复中断回合（#740）：无乐观 user 气泡，且 handleResumeTurn 已移除
+ *    中断卡——恢复卡片（resumeMsg）并追加重登引导，避免上下文丢失；
+ *  - 找不到匹配且无恢复卡片（会话已切换等）：原样返回。
+ */
+export function applyReloginIntercept(
+  prev: Message[],
+  userMsg: Message,
+  resumeMsg: Message | null
+): Message[] {
+  let userIndex = -1;
+  for (let i = prev.length - 1; i >= 0; i -= 1) {
+    if (prev[i].role === 'user' && prev[i].timestamp === userMsg.timestamp) {
+      userIndex = i;
+      break;
+    }
+  }
+  if (userIndex >= 0) {
+    return [
+      ...prev.slice(0, userIndex),
+      createProviderConfigMessage(RELOGIN_INTERCEPT_TEXT, 'login'),
+      ...prev.slice(userIndex + 1),
+    ];
+  }
+  if (resumeMsg) {
+    return [...prev, resumeMsg, createProviderConfigMessage(RELOGIN_INTERCEPT_TEXT, 'login')];
+  }
+  return prev;
+}
+
 /* ─── Tracked file from tool hints ───────────────────────────────── */
 interface TrackedFile {
   path: string;
@@ -2415,10 +2452,13 @@ export function ChatConsole({
   const [messages, setMessages] = useState<Message[]>([]);
   // #1000: 首屏登录卡片与发送拦截共用登录态；旧 preload 无 qraft 命名空间时
   // useQraftStatus 内部兜底为空态（视为未登录）。
-  const { loggedIn } = useQraftStatus();
+  const { loggedIn, status: qraftStatus } = useQraftStatus();
   // 流错误路径同步读取最新登录态：handleSend 闭包可能捕获旧值（CodeRabbit #1010）。
   const loggedInRef = useRef(loggedIn);
   loggedInRef.current = loggedIn;
+  // 登录已失效（token 刷新失败且未恢复）：流错误路径据此给重登引导而非模型配置指引。
+  const requiresReloginRef = useRef(qraftStatus?.requiresRelogin === true);
+  requiresReloginRef.current = qraftStatus?.requiresRelogin === true;
   // #875 D1（外部评估 P0/A1）：系统包安装的 persist/runtime 失败标记只写在
   // 工具输出里，模型可能摘要掉——用户会误以为「允许并记住」已永久生效。
   // 扫描消息中的失败标记并发 window 事件，由 App 级 toast 呈现（不依赖模型）。
@@ -4079,6 +4119,9 @@ export function ChatConsole({
    *  so the resume request flows through the full send pipeline (listeners,
    *  streaming render) instead of a bare chat.send call. */
   const resumeTurnIdRef = useRef<string | null>(null);
+  // 恢复中断回合时被移除的中断卡：登录失效拦截需恢复它并追加重登引导
+  //（resume 无乐观 user 气泡，否则上下文丢失、登录按钮无处可点）。
+  const resumeRemovedMsgRef = useRef<Message | null>(null);
   /** Per-session send id of the send currently in its pre-stream pending phase
    *  (issue #364).  A session is "pending" while its optimistic bubble waits on
    *  the non-blocking provider check / thread init.  The double-Enter guard
@@ -4102,7 +4145,9 @@ export function ChatConsole({
     const meta = msg.interruptedMeta;
     if (!meta?.turnId) return;
     resumeTurnIdRef.current = meta.turnId;
-    // 移除中断卡——resume 的新回复由流式事件接管渲染
+    // 移除中断卡——resume 的新回复由流式事件接管渲染。卡片暂存 ref：
+    // 若预检被登录失效拦截，需恢复卡片并追加重登引导（applyReloginIntercept）。
+    resumeRemovedMsgRef.current = msg;
     setMessages((prev) => prev.filter((m) => m !== msg));
     handleSendRef.current();
   }, []);
@@ -4287,6 +4332,29 @@ export function ChatConsole({
         typeof window.miqi.qraft?.status === 'function'
           ? await window.miqi.qraft.status().catch(() => null)
           : null;
+      // ── 登录已失效拦截 ──
+      // token 刷新失败且未恢复（requiresRelogin）时拦截发送：把乐观气泡换成
+      // 重登引导（一键登录成功后气泡自动移除）。先于网关门禁/无 provider 判定
+      // —— 失效后网关状态仍是旧快照里的 active，必须优先给出重登指引。
+      // 快照读取失败（qraft.status() 抛错）时回退到订阅状态 refs，拦截不失效。
+      const gatewayLoggedIn = gatewayStatus?.loggedIn ?? loggedInRef.current;
+      const gatewayRequiresRelogin = gatewayStatus?.requiresRelogin ?? requiresReloginRef.current;
+      if (gatewayLoggedIn && gatewayRequiresRelogin) {
+        pendingSendIdsRef.current.delete(sendSessionKey);
+        streamingBySession.delete(sendSessionKey);
+        setSendingFor(sendSessionKey, null);
+        if (currentSessionRef.current === sendSessionKey) {
+          setStreaming(false);
+          // 恢复中断回合（#740）：无乐观 user 气泡，取回被 handleResumeTurn
+          // 移除的中断卡并追加重登引导；随后复位 ref 防陈旧引用。
+          const resumeRemovedMsg = _resumeId ? resumeRemovedMsgRef.current : null;
+          resumeRemovedMsgRef.current = null;
+          setMessages((prev) => applyReloginIntercept(prev, userMsg, resumeRemovedMsg));
+          setInput(text);
+          setAttachments(atts);
+        }
+        return;
+      }
       // ── #922 AI 网关门禁 ──
       // 登录后网关状态明确非 active（provisioning/failed/disabled）时拒绝发起
       // 会话：把乐观气泡换成网关提示并恢复输入框。未登录 / 平台未下发网关状态
@@ -5294,8 +5362,10 @@ export function ChatConsole({
         ...prev.filter((m) => !m.isLiveReasoning),
         isProviderConfigurationProblem(message, data.code)
           ? createProviderConfigMessage(
-              message,
-              loggedInRef.current ? 'open-provider-settings' : 'login'
+              requiresReloginRef.current ? RELOGIN_INTERCEPT_TEXT : message,
+              loggedInRef.current && !requiresReloginRef.current
+                ? 'open-provider-settings'
+                : 'login'
             )
           : { role: 'error', content: message, timestamp: Date.now() },
       ]);
@@ -5497,8 +5567,8 @@ export function ChatConsole({
         setMessages((prev) => [
           ...prev,
           createProviderConfigMessage(
-            errMsg,
-            loggedInRef.current ? 'open-provider-settings' : 'login'
+            requiresReloginRef.current ? RELOGIN_INTERCEPT_TEXT : errMsg,
+            loggedInRef.current && !requiresReloginRef.current ? 'open-provider-settings' : 'login'
           ),
         ]);
       } else if (e?.code) {

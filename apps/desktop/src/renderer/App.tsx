@@ -16,6 +16,7 @@ import { RestartRequiredProvider } from './contexts/RestartRequiredContext';
 import { ConfigHotReloadListener } from './components/ConfigHotReloadListener';
 import { GatewayModelAutoSync } from './components/GatewayModelAutoSync';
 import { InstallWarningToaster } from './components/InstallWarningToaster';
+import { QraftReloginNotifier } from './components/QraftReloginNotifier';
 import { ApprovalModal } from './features/approvals/ApprovalModal';
 import { CronPage } from './features/cron/CronPage';
 import { MemoryPage } from './features/memory/MemoryPage';
@@ -383,6 +384,13 @@ function AppShell() {
         <InstallWarningToaster
           onOpenSandboxSettings={() => {
             setSettingsTab('general');
+            setActiveNav('settings');
+          }}
+        />
+        {/* 平台登录失效的全局告知：横幅常驻可关闭，顶栏 chip 持续提示 */}
+        <QraftReloginNotifier
+          onOpenQraft={() => {
+            setSettingsTab('qraft');
             setActiveNav('settings');
           }}
         />
