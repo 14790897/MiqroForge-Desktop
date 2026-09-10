@@ -6301,7 +6301,8 @@ export function ChatConsole({
       retryPayloadRef.current = {
         text,
         attachments: original.attachments ?? [],
-        retry: true,
+        // 编辑是"修改后重新提问",不是重试 — 不带"换角度重新回答"提示词
+        retry: false,
       };
       setMessages((prev) => prev.slice(0, idx));
       requestAnimationFrame(() => {
