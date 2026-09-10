@@ -20,6 +20,33 @@ describe('SvgEmbed sanitization (CodeRabbit security regression)', () => {
     expect(markup).toContain('<rect');
   });
 
+  it('strips external url() and href references but keeps local fragment references', () => {
+    const code = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 60">
+      <defs>
+        <linearGradient id="safeGradient"><stop offset="0" stop-color="#fff" /></linearGradient>
+        <marker id="arrowhead" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+          <path d="M0,0 L8,4 L0,8 z" />
+        </marker>
+      </defs>
+      <rect width="80" height="40"
+        fill="url(#safeGradient)"
+        filter="url(https://evil.example/filter)"
+        clip-path="url(\"https://evil.example/clip\")" />
+      <path d="M5 20 L70 20" stroke="#333" marker-end="url(#arrowhead)" />
+      <a href="#localTarget"><rect id="localTarget" x="5" y="5" width="8" height="8" /></a>
+      <a href="https://evil.example/page"><rect x="20" y="5" width="8" height="8" /></a>
+      <rect width="10" height="10" fill="url(#safeGradient)" />
+    </svg>`;
+    const markup = renderToStaticMarkup(createElement(SvgEmbed, { code }));
+
+    expect(markup).not.toContain('evil.example');
+    expect(markup).toContain('fill="url(#safeGradient)"');
+    expect(markup).toContain('marker-end="url(#arrowhead)"');
+    expect(markup).toContain('href="#localTarget"');
+    expect(markup).not.toContain('filter=');
+    expect(markup).not.toContain('clip-path=');
+  });
+
   it('strips script / event handlers / javascript: href', () => {
     const code = `<svg xmlns="http://www.w3.org/2000/svg">
       <script>alert(1)</script>
