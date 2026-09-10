@@ -27,10 +27,12 @@ class _FakeToolCall:
 def fake_orchestrator():
     orchestrator = MagicMock()
     orchestrator.execute = AsyncMock()
+
     async def _execute(ctx):
         ctx.result = "ok"
         ctx.duration_ms = 5
         return ctx
+
     orchestrator.execute.side_effect = _execute
     return orchestrator
 
@@ -71,6 +73,71 @@ async def test_tool_runtime_executes_parallel_calls_through_orchestrator(
 
     assert len(results) == 2
     assert fake_orchestrator.execute.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_confirmation_blocks_sibling_tools_until_explicit_confirm(
+    fake_turn_context,
+):
+    """A provider batch must never execute siblings before confirmation succeeds."""
+    orchestrator = MagicMock()
+    orchestrator.execute = AsyncMock()
+    started: list[str] = []
+
+    async def _execute(ctx):
+        started.append(ctx.tool_name)
+        if ctx.tool_name == "ask_user_plan_confirm":
+            ctx.result = '{"status":"confirmed","plan_confirmed":true,"choice_id":"confirm"}'
+        else:
+            ctx.result = "executed"
+        return ctx
+
+    orchestrator.execute.side_effect = _execute
+    runtime = ToolRuntime(orchestrator=orchestrator)
+    calls = [
+        _FakeToolCall("ask_user_plan_confirm", {"title": "计划", "goal": "修改文件"}, "plan-1"),
+        _FakeToolCall("write_file", {"path": "/tmp/x", "content": "x"}, "write-1"),
+        _FakeToolCall("exec", {"command": "pytest"}, "exec-1"),
+    ]
+
+    results = await runtime.execute_many(fake_turn_context, calls)
+
+    assert started == ["ask_user_plan_confirm", "write_file", "exec"]
+    assert [r.tool_call_id for r in results] == ["plan-1", "write-1", "exec-1"]
+    assert all(r.result != "未执行：前置确认未获用户明确批准。" for r in results[1:])
+
+
+@pytest.mark.asyncio
+async def test_confirmation_denial_never_starts_sibling_mutations(fake_turn_context):
+    """Cancel/timeout/error from a confirmation keeps all sibling calls unexecuted."""
+    orchestrator = MagicMock()
+    orchestrator.execute = AsyncMock()
+    started: list[str] = []
+
+    async def _execute(ctx):
+        started.append(ctx.tool_name)
+        if ctx.tool_name == "ask_user_plan_confirm":
+            ctx.result = '{"status":"cancelled","plan_confirmed":false,"choice_id":"cancel"}'
+        else:
+            ctx.result = "executed"
+        return ctx
+
+    orchestrator.execute.side_effect = _execute
+    runtime = ToolRuntime(orchestrator=orchestrator)
+    calls = [
+        _FakeToolCall("write_file", {"path": "/tmp/x", "content": "x"}, "write-1"),
+        _FakeToolCall("ask_user_plan_confirm", {"title": "计划", "goal": "修改文件"}, "plan-1"),
+        _FakeToolCall("exec", {"command": "pytest"}, "exec-1"),
+    ]
+
+    results = await runtime.execute_many(fake_turn_context, calls)
+
+    assert started == ["ask_user_plan_confirm"]
+    by_id = {r.tool_call_id: r for r in results}
+    assert by_id["write-1"].status.value == "denied_by_user"
+    assert by_id["exec-1"].status.value == "denied_by_user"
+    assert by_id["write-1"].result == "未执行：前置确认未获用户明确批准。"
+    assert by_id["exec-1"].result == "未执行：前置确认未获用户明确批准。"
 
 
 def test_tool_runtime_requires_orchestrator():
