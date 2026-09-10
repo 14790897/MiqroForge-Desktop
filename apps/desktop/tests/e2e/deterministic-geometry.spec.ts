@@ -72,6 +72,105 @@ test.describe('#843 几何确定性（fixture）', () => {
     expect(b.height).toBeGreaterThanOrEqual(49);
   });
 
+  test('零宽/零高 drawable：水平线 + stroke 完整计入（审查 R2）', async () => {
+    const r = await page.evaluate(() => {
+      const dbg = (
+        window as unknown as {
+          __miqiDiagramDebug?: {
+            getCompleteSvgBBox: (
+              s: SVGSVGElement
+            ) => { x: number; y: number; width: number; height: number } | null;
+          };
+        }
+      ).__miqiDiagramDebug!;
+      const holder = document.createElement('div');
+      holder.style.cssText =
+        'position:fixed;left:-100000px;top:0;width:2000px;height:2000px;visibility:hidden';
+      holder.innerHTML =
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 40" width="120" height="40">' +
+        '<line x1="10" y1="20" x2="100" y2="20" stroke="black" stroke-width="10"/>' +
+        '</svg>';
+      document.body.appendChild(holder);
+      const svg = holder.querySelector('svg') as SVGSVGElement;
+      const bbox = dbg.getCompleteSvgBBox(svg);
+      holder.remove();
+      return { bbox };
+    });
+    const b = r.bbox!;
+    expect(b).not.toBeNull();
+    // 线 10..100（y=20，零高）+ stroke 10(±5)
+    expect(b.x).toBeLessThanOrEqual(5.5);
+    expect(b.x + b.width).toBeGreaterThanOrEqual(104.5);
+    expect(b.y).toBeLessThanOrEqual(15.5);
+    expect(b.y + b.height).toBeGreaterThanOrEqual(24.5);
+  });
+
+  test('零宽/零高 drawable：垂直线 + stroke 完整计入（审查 R2）', async () => {
+    const r = await page.evaluate(() => {
+      const dbg = (
+        window as unknown as {
+          __miqiDiagramDebug?: {
+            getCompleteSvgBBox: (
+              s: SVGSVGElement
+            ) => { x: number; y: number; width: number; height: number } | null;
+          };
+        }
+      ).__miqiDiagramDebug!;
+      const holder = document.createElement('div');
+      holder.style.cssText =
+        'position:fixed;left:-100000px;top:0;width:2000px;height:2000px;visibility:hidden';
+      holder.innerHTML =
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 120" width="40" height="120">' +
+        '<line x1="20" y1="10" x2="20" y2="100" stroke="black" stroke-width="10"/>' +
+        '</svg>';
+      document.body.appendChild(holder);
+      const svg = holder.querySelector('svg') as SVGSVGElement;
+      const bbox = dbg.getCompleteSvgBBox(svg);
+      holder.remove();
+      return { bbox };
+    });
+    const b = r.bbox!;
+    expect(b).not.toBeNull();
+    expect(b.x).toBeLessThanOrEqual(15.5);
+    expect(b.x + b.width).toBeGreaterThanOrEqual(24.5);
+    expect(b.y).toBeLessThanOrEqual(5.5);
+    expect(b.y + b.height).toBeGreaterThanOrEqual(104.5);
+  });
+
+  test('line + marker-end 箭头外扩（真实 mermaid 箭头回归，审查 R2）', async () => {
+    const r = await page.evaluate(() => {
+      const dbg = (
+        window as unknown as {
+          __miqiDiagramDebug?: {
+            getCompleteSvgBBox: (
+              s: SVGSVGElement
+            ) => { x: number; y: number; width: number; height: number } | null;
+          };
+        }
+      ).__miqiDiagramDebug!;
+      const holder = document.createElement('div');
+      holder.style.cssText =
+        'position:fixed;left:-100000px;top:0;width:2000px;height:2000px;visibility:hidden';
+      holder.innerHTML =
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 140 40" width="140" height="40">' +
+        '<defs><marker id="arrowhead" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">' +
+        '<path d="M0,0 L8,4 L0,8 z"/></marker></defs>' +
+        '<line x1="10" y1="20" x2="120" y2="20" stroke="black" stroke-width="2" marker-end="url(#arrowhead)"/>' +
+        '</svg>';
+      document.body.appendChild(holder);
+      const svg = holder.querySelector('svg') as SVGSVGElement;
+      const bbox = dbg.getCompleteSvgBBox(svg);
+      holder.remove();
+      return { bbox };
+    });
+    const b = r.bbox!;
+    expect(b).not.toBeNull();
+    // 线端 x=120 + stroke 1 + marker 近似外扩 8 → 至少覆盖到 122
+    expect(b.x + b.width).toBeGreaterThanOrEqual(122);
+    // 箭头在线上（y=20），上下外扩至少到 stroke 边界
+    expect(b.y).toBeLessThanOrEqual(19);
+    expect(b.y + b.height).toBeGreaterThanOrEqual(21);
+  });
   test('getCompleteSvgBBox 跳过 defs 内容（不把模板算进可见区）', async () => {
     const r = await page.evaluate(() => {
       const dbg = (

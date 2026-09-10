@@ -89,7 +89,9 @@ export function getCompleteSvgBBox(
     } catch {
       continue;
     }
-    if (!(b.width > 0 && b.height > 0)) continue;
+    // 至少一维 > 0 才计入：水平/垂直 <line> 天然零高/零宽（视觉厚度来自
+    // stroke，靠下方外扩补全）——原 `width>0 && height>0` 会整条丢掉
+    if (!(b.width > 0 || b.height > 0)) continue;
     // 手动计入 stroke（半宽外扩）与 marker 箭头（近似 8px）——不依赖
     // getBBox(options) 的浏览器支持
     let ext = 0;
@@ -165,7 +167,7 @@ export const SvgBody = memo(function SvgBody({
       if (!el) return;
       try {
         const b = getCompleteSvgBBox(el);
-        if (!b || !(b.width > 0 && b.height > 0)) return; // 未布局——等 ResizeObserver 重试
+        if (!b || !(b.width > 0 || b.height > 0)) return; // 未布局——等 ResizeObserver 重试
         const pad = 8;
         const x = b.x - pad;
         const y = b.y - pad;
@@ -175,8 +177,9 @@ export const SvgBody = memo(function SvgBody({
         el.setAttribute('width', String(w));
         el.setAttribute('height', String(h));
         done = true;
-        // 内容尺寸变了 → 通知查看器重新 measure（rAF 后布局稳定）
-        requestAnimationFrame(() => window.dispatchEvent(new Event('resize')));
+        // 内容尺寸变了 → 通知查看器重新 measure（rAF 后布局稳定）。
+        // 专用事件而非伪造 window resize（审查 R2 P2：不惊动全局 resize 监听）
+        requestAnimationFrame(() => window.dispatchEvent(new Event('miqi:diagram-relayout')));
         // 每次 svg 变化都上报（切图不 remount，防重标记会残留下报失效）
         if (onFixed) onFixed(el.outerHTML);
       } catch {
@@ -362,9 +365,11 @@ export function DiagramViewer({
     const ro = new ResizeObserver(() => measure());
     ro.observe(stage);
     window.addEventListener('resize', measure);
+    window.addEventListener('miqi:diagram-relayout', measure);
     return () => {
       ro.disconnect();
       window.removeEventListener('resize', measure);
+      window.removeEventListener('miqi:diagram-relayout', measure);
     };
   }, [measure, fig.id, index]);
 

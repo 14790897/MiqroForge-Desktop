@@ -225,7 +225,8 @@ export function MarkdownContent({
         }
         // Codex-style block header: language left, copy right, a divider under
         // the header; the code body scrolls in the inner <pre> below it.
-        const langLabel = LANG_LABELS[lang] ?? lang;        return (
+        const langLabel = LANG_LABELS[lang] ?? lang;
+        return (
           <div
             className="group my-2 overflow-hidden rounded-lg"
             style={{ background: 'var(--code-bg)', border: '1px solid var(--border-subtle)' }}
@@ -312,5 +313,6 @@ export function MarkdownContent({
           {displayContent}
         </ReactMarkdown>
       </div>
-    </DiagramGalleryProvider>  );
+    </DiagramGalleryProvider>
+  );
 }
