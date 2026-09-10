@@ -20,7 +20,7 @@ import { _electron as electron, test, expect } from '@playwright/test';
 import type { ElectronApplication, Page } from '@playwright/test';
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { join } from 'node:path';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import {
   LLM_TIMEOUT,
   sendMessage,
@@ -176,65 +176,27 @@ test.describe('MCP 服务器集成', () => {
     }
   });
 
-  test(
-    '设置页添加 stdio MCP 服务器 → 列表显示并持久化到 config.json',
-    { timeout: 120_000 },
-    async () => {
-      // ── 打开设置 → MCP 服务 tab ──
-      const settingsBtn = page.locator('[data-testid="nav-system-settings"]');
-      await expect(settingsBtn).toBeVisible({ timeout: 15_000 });
-      await settingsBtn.click();
-      const mcpTab = page.getByRole('tab', { name: /MCP 服务/ }).first();
-      await expect(mcpTab).toBeVisible({ timeout: 10_000 });
-      await mcpTab.click();
-      await expect(page.getByRole('heading', { name: 'MCP 服务器' })).toBeVisible({
-        timeout: 10_000,
-      });
+  test('设置页已隐藏 MCP 配置入口（#974 收口）', { timeout: 60_000 }, async () => {
+    // ── 打开设置页 ──
+    const settingsBtn = page.locator('[data-testid="nav-system-settings"]');
+    await expect(settingsBtn).toBeVisible({ timeout: 15_000 });
+    await settingsBtn.click();
 
-      // 预置的 e2emcp（beforeAll 写入 config.json）已出现在列表里
-      await expect(page.getByText(SERVER_NAME, { exact: true })).toBeVisible({
-        timeout: 15_000,
-      });
+    // #974：MCP 配置界面已对普通用户收口——设置页不再出现「MCP 服务」tab，
+    // 也不存在 MCP 服务器管理界面。后端 mcp_servers 由 #951 内置默认预置，
+    // UI 侧已无任何写入/删除入口（config.json 手工修改不在收口范围）。
+    await expect(page.getByRole('tab', { name: /MCP 服务/ })).toHaveCount(0);
+    await expect(page.getByRole('heading', { name: 'MCP 服务器' })).toHaveCount(0);
 
-      // ── 添加服务器弹窗 ──
-      await page.getByRole('button', { name: '添加服务器' }).click();
-      await expect(page.getByRole('heading', { name: '添加 MCP 服务器' })).toBeVisible();
-
-      const uiName = 'uimcp';
-      await page.getByPlaceholder('my-mcp-server').fill(uiName);
-      await page.getByPlaceholder('npx').fill(mcpCommand.command);
-      const argsStr =
-        mcpCommand.args.length > 0 ? [...mcpCommand.args, SERVER_SCRIPT].join(', ') : SERVER_SCRIPT;
-      await page.getByPlaceholder('-y, @modelcontextprotocol/server-filesystem').fill(argsStr);
-      await page.screenshot({
-        path: `test-results/${test.info().title.replace(/\s+/g, '-')}-modal.png`,
-      });
-      await page.getByRole('button', { name: '保存', exact: true }).click();
-
-      // ── 列表出现新服务器卡片（stdio 徽标） ──
-      await expect(page.getByText(uiName, { exact: true })).toBeVisible({
-        timeout: 15_000,
-      });
-      await expect(page.getByText('stdio', { exact: true })).toHaveCount(2);
-      await page.screenshot({
-        path: `test-results/${test.info().title.replace(/\s+/g, '-')}-list.png`,
-        fullPage: true,
-      });
-      await postScreenshotToPr(
-        `test-results/${test.info().title.replace(/\s+/g, '-')}-list.png`,
-        '✅ E2E 通过：设置页添加 MCP 服务器（uimcp）→ 列表显示 + config.json 持久化'
-      );
-
-      // ── config.json 持久化（文件存 camelCase 键：tools.mcpServers） ──
-      const raw = readFileSync(join(miqiHome, 'config.json'), 'utf-8');
-      const saved = JSON.parse(raw);
-      const entry = saved?.tools?.mcpServers?.[uiName];
-      expect(entry, 'config.json 应包含 tools.mcpServers.uimcp').toBeTruthy();
-      expect(entry.command).toBe(mcpCommand.command);
-      const savedArgs = entry.args ?? [];
-      expect(savedArgs).toContain(SERVER_SCRIPT);
-    }
-  );
+    await page.screenshot({
+      path: `test-results/${test.info().title.replace(/\s+/g, '-')}.png`,
+      fullPage: true,
+    });
+    await postScreenshotToPr(
+      `test-results/${test.info().title.replace(/\s+/g, '-')}.png`,
+      '✅ E2E 通过：设置页不再显示 MCP 服务配置入口（#974 收口）'
+    );
+  });
 
   test(
     '新建会话 → 模型调用 MCP 工具 → 最终回复含工具返回值标记',
@@ -243,6 +205,22 @@ test.describe('MCP 服务器集成', () => {
       // ── 新建会话（离开设置页）→ 新 RuntimeSession 在 start() 时连接 MCP ──
       await createNewConversation(page);
       await expect(page.locator('[data-testid="chat-input-container"]')).toBeVisible();
+
+      // #952 回归守卫：E2E 应用不得继承开发机的平台登录态。开发模式
+      // userData 按仓库隔离（index.ts），若 launchElectronApp 未隔离 qraft
+      // store，登录态会恢复 → 真实网关凭据同步进临时 workspace 的
+      // .qraft/token.json → 模型调用走真实网关、mock 收不到请求。
+      const qraftState = await page.evaluate(async () => {
+        try {
+          return await (window as any).miqi.qraft.status();
+        } catch {
+          return null;
+        }
+      });
+      expect(
+        qraftState?.loggedIn,
+        'E2E app must not inherit the developer machine platform login (see #952)'
+      ).toBeFalsy();
 
       // ── 发送任务 → mock 第一轮即调用 mcp_e2emcp_e2e_echo ──
       await sendMessage(page, 'MCP 测试：请调用 MCP 工具并返回结果');

@@ -201,6 +201,10 @@ class ConfigBatchWriteParams(_CoreParams):
 
 class ConfigUpdateParams(_CoreParams):
     config: dict[str, Any]
+    # 比较并设置（#991）：调用方声明「期望当前默认模型仍为此值」，与磁盘
+    # 当前值不一致时 handler 跳过写入 —— 自动同步（登录后兜底写网关模型）
+    # 用它在模型被并发修改时不覆盖用户更新的选择。
+    expect_model: str | None = Field(default=None, validation_alias="expectModel")
 
     @field_validator("config")
     @classmethod

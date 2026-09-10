@@ -40,7 +40,8 @@ test('模型 tab 收口后显示默认模型下拉与登录门控（#835）', as
   );
   // 未登录（mock 默认 loggedIn:false）→ 显示登录门控而非模型下拉
   await expect(page.getByText('登录后使用平台内置模型')).toBeVisible();
-  await expect(page.getByText('去登录')).toBeVisible();
+  // #1000：一键浏览器登录按钮（按 testid 定位，页面顶栏/首屏有同名文案）
+  await expect(page.getByTestId('model-quickpanel-login-btn')).toBeVisible();
   // 内置 DeepSeek 激活入口仍保留
   await expect(page.getByText('编辑当前模型')).toBeVisible();
   // 收口后不再显示 provider 状态列表

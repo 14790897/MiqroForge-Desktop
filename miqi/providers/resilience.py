@@ -17,6 +17,7 @@ class ErrorKind(str, Enum):
     RATE_LIMIT = "rate_limit"
     AUTH = "auth"
     PAYMENT_REQUIRED = "payment_required"
+    CONTENT_BLOCKED = "content_blocked"
     CONTEXT_LENGTH = "context_length"
     INVALID_REQUEST = "invalid_request"
     FATAL = "fatal"
@@ -103,6 +104,10 @@ def _classify_by_message(exc: BaseException) -> ErrorKind | None:
     # "forbidden"-ish wording would otherwise be misread as authentication.
     if _is_payment_required_error(exc):
         return ErrorKind.PAYMENT_REQUIRED
+    # 平台内容安全拦截同样带 "forbidden"/403 特征（网关实测 403 + security_violation），
+    # 必须在 AUTH 之前判定，否则用户被引导去改 API Key（真因是内容被拦）。
+    if _is_content_policy_error(exc):
+        return ErrorKind.CONTENT_BLOCKED
     if "invalid api key" in message or "unauthorized" in message or "forbidden" in message:
         return ErrorKind.AUTH
     if _is_context_length_error(exc):
@@ -159,6 +164,28 @@ def _is_payment_required_error(exc: BaseException) -> bool:
     return any(s in message for s in _PAYMENT_REQUIRED_SIGNALS)
 
 
+# 内容安全/审核拦截的信号词。平台 AI 网关实测返回
+# ``403 {"code": "sensitive_word_detected", "type": "security_violation"}``
+# —— 403 在 AUTH 之前必须让位给本判定，否则用户看到「模型服务认证失败，
+# 请检查 API Key」并被引导去重选模型，而真因是提示词/附件触发了平台的
+# 敏感词过滤（改密钥永远修不好）。
+# 只收录审核专用词，不含宽泛的 "forbidden"：真正的 403 权限拒绝仍归 AUTH
+#（Azure 的 content_filter / OpenAI 的 content_policy_violation 一并覆盖）。
+_CONTENT_POLICY_SIGNALS = (
+    "sensitive_word_detected",
+    "security_violation",
+    "content_filter",
+    "content_policy",
+    "content policy violation",
+)
+
+
+def _is_content_policy_error(exc: BaseException) -> bool:
+    """Detect provider/gateway content-moderation rejections from message text."""
+    message = str(exc).lower()
+    return any(s in message for s in _CONTENT_POLICY_SIGNALS)
+
+
 def _classify_by_status_code(exc: BaseException) -> ErrorKind | None:
     """Classify a retry error by HTTP status code."""
     code = _status_code(exc)
@@ -168,6 +195,10 @@ def _classify_by_status_code(exc: BaseException) -> ErrorKind | None:
     if code == 429:
         return ErrorKind.RATE_LIMIT
     if code in (401, 403):
+        # 平台网关的内容安全拦截同样是 403：先按审核信号分流，否则会被当成
+        # 认证失败（用户被引导去改密钥/换模型，真因是内容被拦）。
+        if _is_content_policy_error(exc):
+            return ErrorKind.CONTENT_BLOCKED
         return ErrorKind.AUTH
     if code == 402:
         # Issue #528: Payment Required — balance/quota exhausted. Distinct
@@ -244,6 +275,10 @@ def classify_error(exc: BaseException) -> ErrorKind:
         if isinstance(exc, rate_limit_error):
             return ErrorKind.RATE_LIMIT
         if isinstance(exc, (authentication_error, permission_denied_error)):
+            # PermissionDeniedError 也承载内容审核 403（网关实测）：审核信号
+            # 优先，避免把内容拦截报成认证失败。
+            if _is_content_policy_error(exc):
+                return ErrorKind.CONTENT_BLOCKED
             return ErrorKind.AUTH
         if isinstance(exc, not_found_error):
             if _is_context_length_error(exc):
@@ -304,6 +339,10 @@ def classify_error(exc: BaseException) -> ErrorKind:
         if isinstance(exc, rate_limit_error):
             return ErrorKind.RATE_LIMIT
         if isinstance(exc, (authentication_error, permission_denied_error)):
+            # PermissionDeniedError 也承载内容审核 403（网关实测）：审核信号
+            # 优先，避免把内容拦截报成认证失败。
+            if _is_content_policy_error(exc):
+                return ErrorKind.CONTENT_BLOCKED
             return ErrorKind.AUTH
         if isinstance(exc, not_found_error):
             if _is_context_length_error(exc):

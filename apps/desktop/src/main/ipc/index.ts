@@ -5,7 +5,7 @@ import { promisify } from 'util';
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync, unlinkSync } from 'fs';
 import { homedir, tmpdir } from 'os';
 import { randomUUID } from 'crypto';
-import { isAbsolute, join } from 'path';
+import { join } from 'path';
 import type { BrowserWindow } from 'electron';
 import type { BridgeManager } from '../bridge';
 import {
@@ -54,6 +54,22 @@ import type {
   WslInstallAndProvisionResult,
 } from '../../shared/ipc';
 import { registerQraftIpcHandlers } from '../qraft/ipc';
+import {
+  classifyWslFeatureState,
+  hasNonRootUser,
+  isBashCapableDistro,
+  readFeatureStates,
+  wslPackageInstalled,
+  wslStatusWorks,
+} from './wsl-state';
+import {
+  getConfigDir,
+  getConfigPath,
+  getWorkspacePath,
+  isWithinCanonicalWorkspace,
+  readLocalConfig,
+  resolveWorkspacePath,
+} from './workspace-path';
 
 const { ipcMain, dialog, shell, app } = electron;
 
@@ -81,90 +97,8 @@ function readWorkspaceLogLines(
   return lines;
 }
 
-function getConfigDir(): string {
-  const miqiHome = process.env['MIQI_HOME']?.trim();
-  return miqiHome ? miqiHome : join(homedir(), '.miqi');
-}
-
-function getConfigPath(): string {
-  return join(getConfigDir(), 'config.json');
-}
-
-/** Strip sandbox prefix and resolve against the host workspace.
- *
- *  The bwrap sandbox mounts at /home/miqi/workspace/.  Paths reported
- *  by the agent (e.g. /home/miqi/workspace/report.md) are normalised
- *  to workspace-relative form and then joined with the host workspace
- *  root.  Absolute paths outside the workspace are rejected.
- */
-function resolveWorkspacePath(raw: string): string {
-  // Convert WSL /mnt/<drive>/ paths to Windows <drive>:\ paths
-  // (e.g. /mnt/c/Users/... -> C:\Users\...)
-  const mntMatch = raw.match(/^\/mnt\/([a-zA-Z])\/?(.*)$/);
-  if (mntMatch) {
-    return mntMatch[1].toUpperCase() + ':\\' + mntMatch[2];
-  }
-
-  const SANDBOX_WS = '/home/miqi/workspace';
-  let normalised = raw;
-  if (normalised === SANDBOX_WS) {
-    normalised = '.';
-  } else if (normalised.startsWith(SANDBOX_WS + '/')) {
-    normalised = normalised.slice(SANDBOX_WS.length + 1);
-  } else if (normalised.startsWith(SANDBOX_WS + '\\')) {
-    normalised = normalised.slice(SANDBOX_WS.length + 1);
-  }
-
-  const wsRoot = getWorkspacePath();
-  let resolved: string;
-  if (isAbsolute(normalised)) {
-    resolved = normalised;
-  } else {
-    resolved = join(wsRoot, normalised);
-  }
-
-  // Enforce workspace containment — prevent escape via .. or absolute
-  // paths that land outside the workspace root.
-  const rel = resolved.replace(/\\/g, '/');
-  const wsNorm = wsRoot.replace(/\\/g, '/');
-  if (!(rel + '/').startsWith(wsNorm + '/') && rel !== wsNorm) {
-    throw new Error(`Path outside workspace: ${raw}`);
-  }
-
-  return resolved;
-}
-
-export function getWorkspacePath(): string {
-  const config = readLocalConfig();
-  const agents = (config['agents'] as Record<string, unknown> | undefined) ?? {};
-  const defaults = (agents['defaults'] as Record<string, unknown> | undefined) ?? {};
-  const raw = (defaults['workspace'] as string) || '~/.miqi/workspace';
-
-  // When using the default path but MIQI_HOME is set, rebase like the Python side does
-  if (raw === '~/.miqi/workspace') {
-    const miqiHome = process.env['MIQI_HOME']?.trim();
-    if (miqiHome) return join(miqiHome, 'workspace');
-  }
-
-  // Expand ~ to home directory
-  if (raw.startsWith('~')) {
-    const stripSep = raw.startsWith('~/') || raw.startsWith('~\\');
-    return join(homedir(), raw.slice(stripSep ? 2 : 1));
-  }
-
-  return raw;
-}
-
-function readLocalConfig(): Record<string, unknown> {
-  const configPath = getConfigPath();
-  try {
-    if (!existsSync(configPath)) return {};
-    const raw = readFileSync(configPath, 'utf8');
-    return JSON.parse(raw) as Record<string, unknown>;
-  } catch {
-    return {};
-  }
-}
+// Re-exported for consumers that import from this module (e.g. qraft/ipc.ts).
+export { getWorkspacePath };
 
 function deepMergeConfig(
   base: Record<string, unknown>,
@@ -591,7 +525,12 @@ export function registerIpcHandlers(bridge: BridgeManager): void {
       return writeLocalConfig(input.config);
     }
     try {
-      return await bridge.send('config.update', { config: input.config });
+      // 比较并设置（#991）：expectModel 原样转发给桥下 config.update，
+      // 后端在磁盘当前模型与期望不一致时跳过写入。
+      return await bridge.send('config.update', {
+        config: input.config,
+        ...(input.expectModel !== undefined ? { expect_model: input.expectModel } : {}),
+      });
     } catch (error) {
       if ((error as Error)?.message?.includes('Bridge not running')) {
         if (!isApprovalBypassUpdate(input.config)) {
@@ -768,29 +707,16 @@ for m in ("pydantic", "httpx", "loguru"):
       } satisfies WslCheckResult;
     }
 
-    let featureWsl = false;
-    let featureVmp = false;
     let rebootRequired = false;
 
-    try {
-      const featureResult = spawnSync(
-        'powershell.exe',
-        [
-          '-NoProfile',
-          '-Command',
-          [
-            '(Get-WindowsOptionalFeature -Online -FeatureName Microsoft-Windows-Subsystem-Linux).State',
-            '(Get-WindowsOptionalFeature -Online -FeatureName VirtualMachinePlatform).State',
-          ].join(';'),
-        ],
-        { timeout: 15000, encoding: 'utf8', windowsHide: true }
-      );
-      if (featureResult.status === 0 && featureResult.stdout) {
-        const lines = featureResult.stdout.trim().split(/\r?\n/);
-        featureWsl = lines[0]?.trim() === 'Enabled';
-        featureVmp = lines[1]?.trim() === 'Enabled';
-      }
+    // DISM Get-WindowsOptionalFeature requires elevation and always fails
+    // inside the non-elevated app; read the feature states over WMI instead
+    // (readable unelevated, reflects pending DISM changes immediately).
+    const features = readFeatureStates();
+    const featureWsl = features.featureWsl;
+    const featureVmp = features.featureVmp;
 
+    try {
       try {
         const rb = spawnSync(
           'powershell.exe',
@@ -825,13 +751,13 @@ for m in ("pydantic", "httpx", "loguru"):
     }
 
     let featureState: WslCheckResult['featureState'] = 'not-supported';
-    if (!featureWsl && !featureVmp) featureState = 'not-enabled';
 
     let installed = false;
     let version: string | null = null;
     let distros: string[] = [];
     let defaultDistro: string | null = null;
     let running = false;
+    let initialized = false;
 
     try {
       const statusResult = spawnSync('wsl', ['--status'], {
@@ -888,7 +814,10 @@ for m in ("pydantic", "httpx", "loguru"):
             .split(/\r?\n/)
             .map((l) => l.trim())
             .filter(Boolean);
-          distros = lines;
+          // Keep only distros that can actually run bash: appliance distros
+          // like docker-desktop would otherwise count as a usable distro and
+          // block the wizard's "install Ubuntu" step.
+          distros = lines.filter((d) => isBashCapableDistro(d));
           if (!defaultDistro && distros.length > 0) defaultDistro = distros[0];
         }
       } catch {
@@ -924,34 +853,24 @@ for m in ("pydantic", "httpx", "loguru"):
         /* ignore */
       }
 
-      let initialized = false;
       if (distros.length > 0) {
-        const probeDistro = defaultDistro || distros[0];
-        try {
-          // Probe for a non-root user to verify the distribution has completed
-          // first-launch setup (username/password creation). A newly installed
-          // distribution can still execute `id -u` as root before that setup,
-          // so root-only access does not prove initialization is complete.
-          const idResult = spawnSync(
-            'wsl.exe',
-            ['-d', probeDistro, '--', 'bash', '-c', 'id -u 2>/dev/null || echo ""'],
-            { timeout: 10000, encoding: 'utf8', windowsHide: true }
-          );
-          if (idResult.status === 0 && idResult.stdout?.trim()) {
-            const uid = parseInt(idResult.stdout.trim(), 10);
-            // Require non-root uid (> 0) as signal of user creation complete
-            if (!Number.isNaN(uid) && uid > 0) initialized = true;
-          }
-        } catch {
-          /* ignore */
-        }
+        // Probe every usable distro for a non-root user (hasNonRootUser):
+        // a distro that can still execute as root does not prove first-launch
+        // user creation has completed, but any initialized distro proves the
+        // platform is usable.
+        initialized = distros.some((d) => hasNonRootUser(d));
       }
-
-      featureState =
-        distros.length === 0 || !initialized ? 'installed-but-not-initialized' : 'ready';
-    } else if (featureState !== 'not-enabled') {
-      featureState = featureWsl || featureVmp ? 'not-installed' : 'not-enabled';
     }
+
+    featureState = classifyWslFeatureState({
+      isWindows: true,
+      featureWsl,
+      featureVmp,
+      featureReadOk: features.ok,
+      wslInstalled: installed,
+      usableDistros: distros,
+      initialized,
+    });
 
     return {
       isWindows: true,
@@ -1055,6 +974,10 @@ for m in ("pydantic", "httpx", "loguru"):
           message: '正在启用 Windows 可选功能 (WSL + 虚拟机平台)...',
         } satisfies WslInstallProgress);
 
+        // Exit codes of UAC-elevated processes cannot be read reliably
+        // (Select-Object ExitCode throws after RunAs elevation), so run
+        // without -PassThru and verify the result by re-reading the feature
+        // states afterwards.
         const r = spawnSync(
           'powershell.exe',
           [
@@ -1063,17 +986,22 @@ for m in ("pydantic", "httpx", "loguru"):
             'Start-Process powershell -ArgumentList "-NoProfile -Command ' +
               'Enable-WindowsOptionalFeature -Online -FeatureName Microsoft-Windows-Subsystem-Linux -NoRestart; ' +
               'Enable-WindowsOptionalFeature -Online -FeatureName VirtualMachinePlatform -NoRestart" ' +
-              '-Verb RunAs -Wait -PassThru | Select-Object -ExpandProperty ExitCode',
+              '-Verb RunAs -Wait',
           ],
           { timeout: 120000, encoding: 'utf8', windowsHide: true }
         );
 
-        const exitCode = parseInt((r.stdout || '').trim(), 10);
-        if (r.error || r.status !== 0 || exitCode !== 0) {
+        // Verification requires a successful read with the WSL feature on.
+        // VirtualMachinePlatform is intentionally not required: on machines
+        // with VBS/Core Isolation, WMI keeps VMP reported as Disabled while
+        // it is functional (observed in live testing) — gating on it would
+        // recreate the false-failure bug this step was fixed for.
+        const featuresAfter = readFeatureStates();
+        if (r.error || r.status !== 0 || !featuresAfter.ok || !featuresAfter.featureWsl) {
           safeSend(IPC_EVENTS.WSL_INSTALL_PROGRESS, {
             phase: 'error',
-            message: `启用 Windows 功能失败 (code: ${exitCode || 'unknown'})`,
-            error: `DISM exit ${exitCode || 'error'}`,
+            message: `启用 Windows 功能失败: ${r.error?.message ?? '功能状态未变化'}`,
+            error: r.error?.message ?? 'feature state unchanged after enable',
           } satisfies WslInstallProgress);
           return {
             success: false,
@@ -1112,17 +1040,19 @@ for m in ("pydantic", "httpx", "loguru"):
           [
             '-NoProfile',
             '-Command',
-            'Start-Process wsl -ArgumentList "--install --no-distribution --no-launch" -Verb RunAs -Wait -PassThru | Select-Object -ExpandProperty ExitCode',
+            'Start-Process wsl -ArgumentList "--install --no-distribution --no-launch" -Verb RunAs -Wait',
           ],
           { timeout: 300000, encoding: 'utf8', windowsHide: true }
         );
 
-        const exitCode = parseInt((r.stdout || '').trim(), 10);
-        if (r.error || r.status !== 0 || exitCode !== 0) {
+        // Verify by system state: the WSL app package must exist after the
+        // install (wsl --status may keep failing until the next reboot).
+        const kernelOk = wslStatusWorks() || wslPackageInstalled();
+        if (r.error || r.status !== 0 || !kernelOk) {
           safeSend(IPC_EVENTS.WSL_INSTALL_PROGRESS, {
             phase: 'error',
-            message: `WSL2 内核安装失败 (code: ${exitCode || 'unknown'})`,
-            error: `wsl --install exit ${exitCode || 'error'}`,
+            message: `WSL2 内核安装失败: ${r.error?.message ?? '未检测到 WSL 包'}`,
+            error: r.error?.message ?? 'WSL package not found after install',
           } satisfies WslInstallProgress);
           return {
             success: false,
@@ -1161,17 +1091,17 @@ for m in ("pydantic", "httpx", "loguru"):
           [
             '-NoProfile',
             '-Command',
-            'Start-Process wsl -ArgumentList "--install -d Ubuntu --no-launch" -Verb RunAs -Wait -PassThru | Select-Object -ExpandProperty ExitCode',
+            'Start-Process wsl -ArgumentList "--install -d Ubuntu --no-launch" -Verb RunAs -Wait',
           ],
           { timeout: 300000, encoding: 'utf8', windowsHide: true }
         );
 
         const postCheck = runWslCheckInternal();
-        if (postCheck.distros.length === 0) {
+        if (r.error || r.status !== 0 || postCheck.distros.length === 0) {
           safeSend(IPC_EVENTS.WSL_INSTALL_PROGRESS, {
             phase: 'error',
             message: 'Ubuntu 安装失败',
-            error: 'DISTRO_INSTALL_FAILED',
+            error: r.error?.message ?? 'DISTRO_INSTALL_FAILED',
           } satisfies WslInstallProgress);
           return {
             success: false,
@@ -1962,6 +1892,12 @@ for m in ("pydantic", "httpx", "loguru"):
     for (const candidate of candidates) {
       try {
         if (!existsSync(candidate)) continue;
+        // WSL UNC paths live inside the sandbox distro, not on the host — skip
+        // the host-workspace canonical check (relPath was vetted above).
+        const isWslUnc = candidate.startsWith('\\\\wsl$');
+        if (!isWslUnc && !isWithinCanonicalWorkspace(candidate, getWorkspacePath())) {
+          continue;
+        }
         const error = await shell.openPath(candidate);
         if (!error) {
           opened = true;
@@ -2015,20 +1951,20 @@ for m in ("pydantic", "httpx", "loguru"):
     const raw = p.path;
     // Session metadata may store workspace as a string (Path str) —
     // resolve "Path('...')" wrapper to a plain path string before opening.
-    const { existsSync: fsExistsSync2 } = await import('node:fs');
     const clean = raw.replace(/^Path\(['"]/, '').replace(/['"]\)$/, '');
-    if (isAbsolute(clean) && fsExistsSync2(clean)) {
-      try {
-        shell.showItemInFolder(clean);
-        return { revealed: true, path: raw };
-      } catch (e: any) {
-        return { revealed: false, path: raw, error: e?.message ?? String(e) };
-      }
-    }
-    const absolutePath = resolveWorkspacePath(raw);
+    // Security: route through resolveWorkspacePath so the workspace-containment
+    // check always applies.  A previous fast path here (isAbsolute(clean) &&
+    // existsSync(clean) → showItemInFolder) skipped that check entirely, letting
+    // the renderer reveal any host directory (security regression #955).
+    const absolutePath = resolveWorkspacePath(clean);
     try {
       if (!existsSync(absolutePath)) {
         return { revealed: false, path: raw, error: `File not found: ${absolutePath}` };
+      }
+      // Follow symlinks/junctions so a link pointing outside the workspace can't
+      // reveal a host directory through the lexical containment check (#955).
+      if (!isWithinCanonicalWorkspace(absolutePath, getWorkspacePath())) {
+        return { revealed: false, path: raw, error: `Path outside workspace: ${raw}` };
       }
       shell.showItemInFolder(absolutePath);
       return { revealed: true, path: raw };

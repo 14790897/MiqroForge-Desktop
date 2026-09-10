@@ -60,7 +60,12 @@ class ThreadRuntime:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         # Same busy timeout as HistoryRuntime/StoredRuntime — see
         # LedgerRuntime.initialize for the cross-connection contention note.
-        self._db = await aiosqlite.connect(str(self.db_path), timeout=30)
+        # isolation_level=None (autocommit) also prevents a cancelled turn
+        # task from stranding an open write transaction on the shared DB.
+        self._db = await aiosqlite.connect(
+            str(self.db_path), timeout=30, isolation_level=None
+        )
+        await self._db.execute("PRAGMA journal_mode=WAL")
         self._db.row_factory = aiosqlite.Row
         await self._db.execute("""
             CREATE TABLE IF NOT EXISTS runtime_threads (

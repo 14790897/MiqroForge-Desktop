@@ -9,6 +9,13 @@ import httpx
 from loguru import logger
 
 from miqi.agent.tools.base import Tool
+from miqi.agent.tools.mcp_download_sink import (
+    DOWNLOAD_TOOL_GUIDANCE,
+    DownloadError,
+    DownloadIoError,
+    DownloadSink,
+    is_download_tool,
+)
 from miqi.agent.tools.registry import ToolRegistry
 
 _JOB_ID_PATTERNS = [
@@ -105,7 +112,7 @@ class MCPToolWrapper(Tool):
     """Wrap a single MCP server tool as a native runtime Tool."""
 
     def __init__(self, session, server_name: str, tool_def, tool_timeout: int = 30,
-                 progress_interval: int = 15):
+                 progress_interval: int = 15, base_workspace=None):
         self._session = session
         self._server_name = server_name
         self._original_name = tool_def.name
@@ -114,6 +121,22 @@ class MCPToolWrapper(Tool):
         self._parameters = tool_def.inputSchema or {"type": "object", "properties": {}}
         self._tool_timeout = tool_timeout
         self._progress_interval = progress_interval
+        # #975 下载类工具分类：构造期按 (server_name, tool_name) 判定（执行期零查找）。
+        # 命中后 description 追加 Artifact Boundary 指引（随工具定义进模型，不动
+        # system prompt），并装配 sink——base_workspace 与 MCP 连接同源
+        # （config.workspace_path，见 _connect_one_server / runtime/session.py）。
+        self._is_download_tool = is_download_tool(server_name, tool_def.name)
+        self._base_workspace = base_workspace
+        if self._is_download_tool:
+            self._description = self._description + DOWNLOAD_TOOL_GUIDANCE
+            self._download_sink = (
+                DownloadSink(base_workspace) if base_workspace is not None else None
+            )
+
+    @property
+    def is_download_tool(self) -> bool:
+        """构造期分类结果（供测试/审计检查）。"""
+        return self._is_download_tool
 
     @property
     def execution_timeout(self) -> float | None:
@@ -135,13 +158,6 @@ class MCPToolWrapper(Tool):
         return self._parameters
 
     async def execute(self, *, _on_progress=None, **kwargs: Any) -> str:
-        from mcp import types
-
-        from miqi.agent.billing_resolver import (
-            billing_charge_emitter_for,
-            is_slurm_server,
-        )
-
         # 运行上下文注入（orchestrator 对 mcp_ 工具注入；不传给 MCP 服务端）。
         session_key = str(kwargs.pop("_session_key", "") or "")
         turn_id = str(kwargs.pop("_turn_id", "") or "")
@@ -197,68 +213,181 @@ class MCPToolWrapper(Tool):
                 except asyncio.CancelledError:
                     pass
 
+        # ── #975 Artifact Boundary 分支 ─────────────────────────────────────
+        # 下载类工具：billing 副作用先执行（与 materialization 解耦，杜绝专用
+        # 分支早退旁路 #927 计费），随后内容由 sink 消费——base64 绝不进最终
+        # output，也不为 billing 拼接全量文本（#988 评审 P2b：billing 只需
+        # state/job_id，逐块扫描即可，不为 2.1MB base64 制造第二份字符串拷贝）；
+        # 任何异常消化为错误 JSON 文本，绝不上抛 orchestrator。
+        if self._is_download_tool:
+            await self._handle_slurm_billing(
+                session_key=session_key,
+                turn_id=turn_id,
+                tool_call_id=tool_call_id,
+                kwargs=kwargs,
+                blocks=result.content,
+            )
+            return await self._materialize_download(
+                result=result,
+                session_key=session_key,
+                turn_id=turn_id,
+                tool_call_id=tool_call_id,
+                request_kwargs=kwargs,
+            )
+
+        output = self._join_text_blocks(result.content)
+        await self._handle_slurm_billing(
+            session_key=session_key,
+            turn_id=turn_id,
+            tool_call_id=tool_call_id,
+            kwargs=kwargs,
+            blocks=result.content,
+        )
+        return output
+
+    def _join_text_blocks(self, blocks: list) -> str:
+        """把 MCP 响应块拼成文本——普通工具返回 / billing 解析视图共用。
+
+        **下载工具的内容解析不经此函数**（sink 直接消费 ContentBlock，
+        保留块结构；多块 JSON/错误块/分片块不会被 join 破坏）。
+        """
+        from mcp import types
+
         parts = []
-        for block in result.content:
+        for block in blocks:
             if isinstance(block, types.TextContent):
                 parts.append(block.text)
             else:
                 parts.append(str(block))
-        output = "\n".join(parts) or "(no output)"
+        return "\n".join(parts) or "(no output)"
 
-        # ── Slurm 作业计费触发（issue #927，2026-09-04 产品确认）──────
-        # 作业状态变为 RUNNING 时由 Desktop 发起扣费（10 分/次）：
-        # submit_slurm_job / check_job_status 的返回里 state=RUNNING 即
-        # 触发一次 fire-and-forget 扣费事件（Desktop 按作业 ID 去重）。
-        # 作业已在运行，扣费失败（如余额不足）不阻止作业，由 Desktop
-        # 记录到扣费历史并提示。
-        if session_key and is_slurm_server(self._server_name):
-            job_state = _extract_job_state(output)
-            if job_state and job_state.upper() == "RUNNING":
-                # 响应里的 job_id 优先；check_job_status 的响应可能只有
-                # state（作业 ID 在请求参数里），回退用请求参数保证去重键。
-                job_id = _extract_job_id(output) or str(
-                    kwargs.get("job_id") or kwargs.get("jobId") or ""
+    async def _handle_slurm_billing(
+        self,
+        *,
+        session_key: str,
+        turn_id: str,
+        tool_call_id: str,
+        kwargs: dict[str, Any],
+        blocks: list,
+    ) -> None:
+        """Slurm 作业计费触发（issue #927，2026-09-04 产品确认）——**纯副作用**。
+
+        作业状态变为 RUNNING 时由 Desktop 发起扣费（10 分/次）：
+        submit_slurm_job / check_job_status 的返回里 state=RUNNING 即
+        触发一次 fire-and-forget 扣费事件（Desktop 按作业 ID 去重）。
+        作业已在运行，扣费失败（如余额不足）不阻止作业，由 Desktop
+        记录到扣费历史并提示。
+
+        只负责 inspect/dedupe/emit/mark，**不决定调用方最终返回什么**
+        （v6.2 R4：与 download materialization 解耦，早退不会旁路计费）。
+
+        **输入是 ContentBlock 而非拼接字符串**（#988 评审 P2b）：billing 只
+        关心 state/job_id，逐块扫描即可——下载类大响应绝不为计费制造一份
+        全量文本副本（2.1MB+ base64 的 join 就是无谓的内存峰值）。
+        """
+        from mcp import types
+
+        from miqi.agent.billing_resolver import (
+            billing_charge_emitter_for,
+            is_slurm_server,
+        )
+
+        if not (session_key and is_slurm_server(self._server_name)):
+            return
+        texts = [
+            block.text
+            for block in blocks or []
+            if isinstance(block, types.TextContent) and block.text
+        ]
+        for text in texts:
+            job_state = _extract_job_state(text)
+            if not job_state or job_state.upper() != "RUNNING":
+                continue
+            # 响应里的 job_id 优先；check_job_status 的响应可能只有
+            # state（作业 ID 在请求参数里），回退用请求参数保证去重键。
+            job_id = _extract_job_id(text) or str(
+                kwargs.get("job_id") or kwargs.get("jobId") or ""
+            )
+            # 无稳定作业 ID 时不发计费事件：空 job_id 无法去重，
+            # 轮询每次 RUNNING 都会再扣一次（数据完整性）。
+            if not job_id:
+                return
+            from miqi.agent.billing_resolver import job_reported, mark_job_reported
+
+            # 轮询会反复观察 RUNNING：同一会话同一服务器同一作业只
+            # 发一次。先发事件、送达成功才标记——发射失败不标记，
+            # 下一次 RUNNING 轮询重试（Desktop 侧去重兜底，重复送达无害）。
+            if job_reported(session_key, self._server_name, job_id):
+                return
+            emitter = billing_charge_emitter_for(session_key)
+            if emitter is None:
+                return
+            import uuid as _uuid
+
+            payload = {
+                "charge_id": _uuid.uuid4().hex,
+                "job_id": job_id or "",
+                "state": job_state,
+                "server_name": self._server_name,
+                "tool_name": self._original_name,
+                "args_summary": _summarize_args(kwargs),
+                "session_key": session_key,
+                "turn_id": turn_id,
+                "tool_call_id": tool_call_id,
+            }
+            delivered = False
+            try:
+                result = emitter(payload)
+                if asyncio.iscoroutine(result):
+                    result = await result
+                delivered = bool(result)
+            except Exception:
+                logger.exception(
+                    "billing: RUNNING 扣费事件发送失败（不标记，下次轮询重试）"
                 )
-                # 无稳定作业 ID 时不发计费事件：空 job_id 无法去重，
-                # 轮询每次 RUNNING 都会再扣一次（数据完整性）。
-                if not job_id:
-                    return output
-                from miqi.agent.billing_resolver import job_reported, mark_job_reported
+            if delivered:
+                mark_job_reported(session_key, self._server_name, job_id)
+            return  # 一个 RUNNING 事件处理完即可（语义同旧 join 后单次处理）
 
-                # 轮询会反复观察 RUNNING：同一会话同一服务器同一作业只
-                # 发一次。先发事件、送达成功才标记——发射失败不标记，
-                # 下一次 RUNNING 轮询重试（Desktop 侧去重兜底，重复送达无害）。
-                if job_reported(session_key, self._server_name, job_id):
-                    return output
-                emitter = billing_charge_emitter_for(session_key)
-                if emitter is not None:
-                    import uuid as _uuid
+    async def _materialize_download(
+        self,
+        *,
+        result,
+        session_key: str,
+        turn_id: str,
+        tool_call_id: str,
+        request_kwargs: dict[str, Any],
+    ) -> str:
+        """#975 下载分支：sink 落盘 → 摘要 JSON；异常一律消化为错误 JSON。
 
-                    payload = {
-                        "charge_id": _uuid.uuid4().hex,
-                        "job_id": job_id or "",
-                        "state": job_state,
-                        "server_name": self._server_name,
-                        "tool_name": self._original_name,
-                        "args_summary": _summarize_args(kwargs),
-                        "session_key": session_key,
-                        "turn_id": turn_id,
-                        "tool_call_id": tool_call_id,
-                    }
-                    delivered = False
-                    try:
-                        result = emitter(payload)
-                        if asyncio.iscoroutine(result):
-                            result = await result
-                        delivered = bool(result)
-                    except Exception:
-                        logger.exception(
-                            "billing: RUNNING 扣费事件发送失败（不标记，下次轮询重试）"
-                        )
-                    if delivered:
-                        mark_job_reported(session_key, self._server_name, job_id)
-
-        return output
+        sink 抛出的 DownloadError / OSError 在这里转为安全文本返回，绝不带
+        traceback/repr/raw 内容上抛——否则会落入 orchestrator 的
+        ``[Analyze the error above]`` 套壳与 UI 清洗（语义污染）。
+        """
+        sink = self._download_sink if self._is_download_tool else None
+        if sink is None:
+            return DownloadIoError(
+                "下载失败：会话工作区不可用（MCP wrapper 未装配 base_workspace）。"
+            ).to_model_text()
+        try:
+            artifact = await sink.materialize(
+                result=result,
+                session_key=session_key,
+                server_name=self._server_name,
+                tool_name=self._original_name,
+                request_kwargs=request_kwargs,
+                turn_id=turn_id,
+                tool_call_id=tool_call_id,
+            )
+            return artifact.to_model_text()
+        except DownloadError as exc:
+            # 结构化错误 JSON——只含 code/message/retryable，无内容、无 payload。
+            return exc.to_model_text()
+        except OSError:
+            # resolve_downloads_dir/_sweep_stale_once 在 to_thread 之前执行，
+            # 其文件系统失败也必须消化为结构化错误（CodeRabbit 06-48 Major：
+            # 否则裸异常会漏到 orchestrator，违反"错误只以 download_error 出现"）。
+            return DownloadIoError().to_model_text()
 
 
 class MCPGatewayTool(Tool):
@@ -422,10 +551,22 @@ def _gateway_key_from_token_file(token_file) -> str | None:
 
 
 def _is_https_url(url: str) -> bool:
-    """URL 是否为 https（网关凭据只注入 https 端点，CWE-319）。"""
+    """URL 是否为 https。"""
     from urllib.parse import urlsplit
 
     return urlsplit(url or "").scheme.lower() == "https"
+
+
+def _inject_gateway_key_over_url(cfg) -> bool:
+    """登录态网关凭据是否允许随该端点发送。
+
+    https 一律允许；明文 http 仅在该服务器显式 opt-in ``insecure_http``
+    时允许（平台暂无 https 网关域名，内置网关默认 opt-in——共享 token
+    明文传输的已知权衡，见 schema.DEFAULT_MCP_SERVERS）。
+    """
+    return _is_https_url(getattr(cfg, "url", "")) or bool(
+        getattr(cfg, "insecure_http", False)
+    )
 
 
 def _url_matches_trusted_gateway(url: str) -> bool:
@@ -479,18 +620,18 @@ async def _connect_one_server(
                 if _url_error:
                     logger.error("MCP server '{}': {}", name, _url_error)
                     return
-            # 登录态注入（CodeRabbit #951 三重收口）：仅当 ① 默认网关
-            # 服务器未显式配置 headers；② 名称与 URL 都匹配内置可信
-            # 端点（防止同名服务器把 workspace 凭据导向其他地址）；
-            # ③ URL 为 https（网关 token 绝不随明文 http 发送，含
-            # opt-in 端点）。平台 https 上线前默认不注入、fail-closed。
+            # 登录态注入：仅当 ① 默认网关服务器未显式配置 headers；
+            # ② 名称与 URL 都匹配内置可信端点（防止同名服务器把
+            # workspace 凭据导向其他地址）；③ 端点允许携带凭据——https，
+            # 或该服务器已显式 opt-in insecure_http（平台暂无 https，内置
+            # 网关默认 opt-in 明文 http）。三者缺一即不注入、fail-closed。
             effective_headers = dict(getattr(cfg, "headers", None) or {})
             if (
                 not effective_headers
                 and name == _DEFAULT_GATEWAY_NAME
                 and workspace is not None
                 and _url_matches_trusted_gateway(getattr(cfg, "url", ""))
-                and _is_https_url(getattr(cfg, "url", ""))
+                and _inject_gateway_key_over_url(cfg)
             ):
                 _gw_key = _gateway_key_from_token_file(workspace / ".qraft" / "token.json")
                 if _gw_key:
@@ -536,6 +677,10 @@ async def _connect_one_server(
                     session, name, tool_def,
                     tool_timeout=cfg.tool_timeout,
                     progress_interval=progress_interval,
+                    # #975：下载类工具落盘的 base_workspace 与 MCP 连接同源
+                    # （config.workspace_path；会话目录在 execute 期按注入的
+                    # _session_key 解析，构造期不绑死具体会话）。
+                    base_workspace=workspace,
                 )
                 for tool_def in tools.tools
             ]

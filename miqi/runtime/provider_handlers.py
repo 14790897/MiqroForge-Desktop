@@ -83,6 +83,34 @@ def _pick_usable_default_model(config: Any, exclude: str | None = None) -> str:
     return ""
 
 
+def _qraft_gateway_routable(config: Any, model: str) -> bool:
+    """Whether the model is routed via the platform AI gateway at runtime.
+
+    镜像 factory.make_provider 的前置网关分支（#922）：登录凭据
+    （<workspace>/.qraft/token.json 的 aiGateway 块）active 且模型是网关
+    实测模型时，调用经平台网关转发（Anthropic Messages 兼容），不需要任何
+    本地 provider 凭据。保存门控必须认识这条路径，否则「已开通」状态下
+    唯一可用的网关模型会被拒之门外（实测复现：登录用户无任何本地 key，
+    保存 deepseek/deepseek-v4-flash 报 Unsupported model）。
+    """
+    if not model.startswith("deepseek/"):
+        return False
+    from miqi.providers.gateway import (
+        GATEWAY_MODEL,
+        gateway_origin,
+        gateway_token_file,
+        read_gateway_creds,
+    )
+
+    if model[len("deepseek/"):] != GATEWAY_MODEL:
+        return False
+    workspace = getattr(config, "workspace_path", None)
+    if not workspace:
+        return False
+    creds = read_gateway_creds(gateway_token_file(config))
+    return bool(creds and gateway_origin())
+
+
 def _model_provider_resolvable(config: Any, model: str) -> bool:
     """Whether the model resolves to a USABLE provider at runtime.
 
@@ -98,6 +126,10 @@ def _model_provider_resolvable(config: Any, model: str) -> bool:
         return False
     if model.lower().startswith("custom/"):
         return False  # custom provider 已移除（#835），网关兜底不得复活它（#933 review）
+    # 平台 AI 网关路由（#922）：登录凭据 active 时经平台网关转发，无需本地
+    # 凭据 —— 与 factory.make_provider 的路由前提保持一致。
+    if _qraft_gateway_routable(config, model):
+        return True
     model_prefix = model.split("/", 1)[0] if "/" in model else ""
     spec = find_by_name(model_prefix) if model_prefix else find_by_model(model)
     if spec is None:
@@ -233,6 +265,12 @@ async def providers_list_handler(
             "providers": providers_out,
             "active_model": model,
             "active_provider": model_provider,
+            # 发送门禁的判定依据（#1010 后续）：前端只看得见「本地 provider 是否
+            # 有凭据」，登录后经平台网关路由的默认模型却不需要任何本地凭据
+            # （make_provider 的网关分支），只看 configured 会把可用模型误判成
+            # 「未配置模型服务」。这里用与运行时同一套判定（含网关路由）告诉
+            # 前端当前默认模型是否可以真正发起会话。
+            "active_model_resolvable": _model_provider_resolvable(config, model),
         }
     }
 

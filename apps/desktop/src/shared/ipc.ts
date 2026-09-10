@@ -266,6 +266,9 @@ export interface SessionClaimLegacyResult {
 
 export const ConfigUpdateInput = z.object({
   config: z.record(z.unknown()),
+  // 比较并设置（#991）：期望当前默认模型仍为此值，后端不一致时跳过写入。
+  // nullish：与 app-protocol.ts 契约（null | string）一致，null/缺省均放行
+  expectModel: z.string().nullish(),
 });
 
 export const ProviderTestInput = z.object({
@@ -381,6 +384,12 @@ export interface ProvidersListResult {
   providers: ProviderInfo[];
   active_model?: string;
   active_provider?: string | null;
+  /**
+   * 当前默认模型在运行时是否真的能发起会话。登录后经平台 AI 网关路由的默认
+   * 模型不需要任何本地 provider 凭据，只看 `configured` 会误判为不可用。
+   * 旧版 bridge 不返回该字段时为 undefined（前端回退到 configured 判定）。
+   */
+  active_model_resolvable?: boolean;
 }
 
 export interface ProviderUpdateResult {
@@ -801,11 +810,13 @@ export interface McpServerInfo extends McpServerConfig {
 
 export const McpUpsertInput = z.object({
   name: z.string().min(1),
+  type: z.string().optional(),
   command: z.string().optional(),
   args: z.array(z.string()).optional(),
   env: z.record(z.string()).optional(),
   url: z.string().optional(),
   headers: z.record(z.string()).optional(),
+  insecure_http: z.boolean().optional(),
   tool_timeout: z.number().optional(),
   progress_interval_seconds: z.number().optional(),
   description: z.string().optional(),
