@@ -320,8 +320,11 @@ def sanitize_user_roots(
     trustworthy — the caller still chooses the scope.  ``agent.spawn`` no
     longer uses this function: it takes no roots from the request at all
     (fail-closed) and must instead be handed roots from server-side state.
-    Keep this helper for a future server-held store; do NOT wire it back to
-    a request field.
+
+    NOTE (#984 R6): this is consequently no longer the IPC path's filter point
+    and has NO production call site at all — it is kept as a public helper for
+    the tests and for wiring that server-held root store later on.  Do NOT
+    wire it back to a request field.
 
     Entries that are not usable absolute paths (``None``, numbers, ``bytes``,
     relative / drive-relative / UNC strings) are dropped instead of raising:
