@@ -81,8 +81,8 @@ class TodoState:
                     self.items.append(TodoItem(
                         id=item_id,
                         content=str(content),
-                        status=new_status,  # type: ignore[arg-type]
-                        kind=kind,  # type: ignore[arg-type]
+                        status=new_status,
+                        kind=kind,
                         source="model" if kind == "auxiliary" else "harness",
                     ))
                     self.revision += 1
@@ -110,7 +110,7 @@ class TodoState:
                     continue
             if status:
                 new_status = str(status)
-                if not validate_transition(existing.status, new_status):  # type: ignore[arg-type]
+                if not validate_transition(existing.status, new_status):
                     rejected.append({
                         "status": "rejected",
                         "reason": f"INVALID_TRANSITION: {existing.status} -> {status}",
@@ -136,7 +136,8 @@ class TodoState:
             "total": len(self.items),
             "completed": counts["completed"],
             "in_progress": in_progress,
-            "pending": counts["queued"] + counts["in_progress"],
+            # "pending" means not started; an in-progress item has its own field.
+            "pending": counts["queued"],
             "blocked": counts["blocked"],
         }
 
