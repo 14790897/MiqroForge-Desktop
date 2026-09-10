@@ -687,3 +687,49 @@ class TestWorkingDirNotABindSource:
 
         await tool.execute("echo t", working_dir=str(other))
         assert seen["cwd"] == str(other)
+
+
+# ── #1007 review: the cross-session guard reaches the sandbox ────────────
+
+
+class TestCrossSessionGuardWiring:
+    """``ExecTool`` must hand bwrap the workspace root + session files dir.
+
+    The mount ordering itself is asserted in
+    ``tests/sandbox/test_sandbox_write_boundary_984.py``; this locks the
+    shell.py half — both kwargs default to ``None`` in bwrap (old args), so a
+    dropped call site would silently leave ``<ws>/sessions/**`` writable.
+    """
+
+    @staticmethod
+    def _tool(tmp_path: Path):
+        ws = tmp_path / "ws"
+        files = ws / "sessions" / "desktop_1" / "files"
+        files.mkdir(parents=True)
+        tool = ExecTool(
+            timeout=5, working_dir=str(files), shared_roots=[ws],
+            workspace_root=str(ws), session_files_dir=str(files),
+        )
+        sandbox = _mock_sandbox()
+        mgr = MagicMock()
+        mgr.get_or_create = AsyncMock(return_value=sandbox)
+        mgr.active_sandbox = sandbox
+        tool._sandbox_manager = mgr
+        return tool, sandbox, ws, files
+
+    def test_defaults_disable_the_guard(self) -> None:
+        tool = ExecTool(timeout=5, working_dir=str(Path.cwd()))
+        assert tool._workspace_root is None
+        assert tool._session_files_dir is None
+
+    @pytest.mark.asyncio
+    async def test_execute_forwards_guard_paths(self, tmp_path) -> None:
+        tool, sandbox, ws, files = self._tool(tmp_path)
+        await tool.execute("echo hi", _sandbox=_selection(SandboxType.BWRAP))
+        kwargs = sandbox.run_command_streaming.await_args.kwargs
+        assert kwargs["workspace_root"] == str(ws)
+        assert kwargs["session_files_dir"] == str(files)
+        # The workspace root is still a bind source (the guard narrows it,
+        # it does not replace it) — and so is the session's own files dir.
+        assert str(ws) in kwargs["extra_rw_binds"]
+        assert str(files) in kwargs["extra_rw_binds"]

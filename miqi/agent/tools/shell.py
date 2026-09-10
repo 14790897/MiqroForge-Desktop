@@ -379,6 +379,8 @@ class ExecTool(Tool):
         system_install_approver=None,
         shared_roots: list[Any] | None = None,
         allow_user_dirs: bool = True,
+        workspace_root: str | None = None,
+        session_files_dir: str | None = None,
     ):
         self.timeout = timeout
         self.max_timeout = max_timeout
@@ -429,6 +431,16 @@ class ExecTool(Tool):
         # component — same switch the file tools honour (issue #821).
         self._shared_roots: list[Any] = list(shared_roots or [])
         self._allow_user_dirs = allow_user_dirs
+        # #1007 review: the workspace root is in the rw bind set (it is part
+        # of ``shared_roots``), and ``<workspace>/sessions/**`` lives under
+        # it — so every exec call re-opened OTHER sessions' files writable.
+        # These two host paths let the sandbox re-protect that subtree while
+        # keeping THIS session's own files dir writable (see
+        # ``bwrap._cross_session_guard_args``).  Both are fixed at
+        # construction, like every other bind source here; ``None`` (unknown
+        # workspace / no per-session layout) keeps the previous args exactly.
+        self._workspace_root = workspace_root
+        self._session_files_dir = session_files_dir
 
     @property
     def name(self) -> str:
@@ -524,6 +536,13 @@ class ExecTool(Tool):
         the per-call ``_user_roots`` channel this issue exists to gate.
         Locked by
         ``tests/execution/test_exec_write_boundary_984.py::TestWorkingDirNotABindSource``.
+
+        Because the workspace root is in this set, ``<ws>/sessions/**`` —
+        every OTHER session's files — is re-opened writable by that same
+        bind.  :meth:`_execute_in_sandbox` therefore also hands the sandbox
+        ``self._workspace_root`` / ``self._session_files_dir``, and bwrap
+        re-mounts ``<ws>/sessions`` READ-ONLY after the bind with only this
+        session's own files dir re-opened after that (#1007 review).
         """
         out: list[str] = []
         seen: set[str] = set()
@@ -983,6 +1002,12 @@ class ExecTool(Tool):
             handle = await sandbox.run_command_streaming(
                 command, env=sandbox_env, cwd=sandbox_cwd,
                 extra_rw_binds=extra_rw_binds,
+                # #1007 review: the workspace root above is re-opened
+                # writable, so <workspace>/sessions must be re-protected —
+                # read-only, with this session's own files dir re-opened
+                # after it.  Both are construction-time instance attributes.
+                workspace_root=self._workspace_root,
+                session_files_dir=self._session_files_dir,
             )
         except Exception as e:
             duration_ms = int((time.monotonic() - start) * 1000)

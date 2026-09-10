@@ -89,6 +89,82 @@ def _host_path_to_sandbox(path: str) -> str:
     return p
 
 
+def _bind_key(path: str) -> str:
+    """Comparison key for a bind path (``/``-joined, case-folded on Windows).
+
+    ``os.path.normcase`` is identity on POSIX (paths stay case-sensitive) and
+    lower-cases + flips separators on Windows — the same normalisation
+    ``ExecTool._exec_rw_binds`` uses to de-duplicate its bind set, so a
+    comparison here matches what actually reached the mount list.
+    """
+    return os.path.normcase(str(path)).replace("\\", "/").rstrip("/")
+
+
+def _is_same_or_ancestor(parent: str, child: str) -> bool:
+    """True when *child* is *parent* itself or lives under it.
+
+    Path-boundary aware: ``…/workspace`` is NOT an ancestor of
+    ``…/workspace-other`` (a plain ``startswith`` would say it is).
+    """
+    p = _bind_key(parent)
+    c = _bind_key(child)
+    return c == p or c.startswith(p.rstrip("/") + "/")
+
+
+def _cross_session_guard_args(
+    workspace_root: str | None,
+    session_files_dir: str | None,
+    rw_sources: list[str],
+) -> list[str]:
+    """Mount args that keep OTHER sessions' directories read-only (#1007).
+
+    Layer 1 re-opens the workspace root writable with a hard ``--bind``, and
+    ``<workspace>/sessions/**`` lives underneath it — so session A's exec
+    could write session B's files, undoing both the per-session containment
+    checks and layer 2's read-only ``/mnt``.  bwrap applies mounts in order,
+    so a later ``--ro-bind`` of ``<workspace>/sessions`` wins over the earlier
+    rw bind; the current session's own files dir is then re-opened with a
+    later ``--bind`` so normal work keeps working.
+
+    Deliberately conditional:
+
+    * only when the workspace root (or one of its ancestors) is actually in
+      the rw bind set — otherwise there is nothing to protect and the old arg
+      list is emitted unchanged;
+    * only when ``session_files_dir`` is given AND sits under
+      ``<workspace>/sessions``.  That is the per-session files layout, which
+      ``filesystem._session_files_dir_for_key`` establishes for the DEFAULT
+      workspace only; a custom workspace has no per-session files area, and
+      its ``<project>/sessions`` may be the project's own directory — turning
+      that read-only inside exec would break legitimate work.
+
+    The guard mount is ``--ro-bind-try``: it only ever NARROWS, and a missing
+    ``sessions`` dir means there are no session dirs to protect, so a hard
+    bind would fail every command for nothing.  The re-open is a hard
+    ``--bind`` and only for a path already in the rw set (an existing,
+    authorized source).
+    """
+    if not workspace_root or not session_files_dir:
+        return []
+    try:
+        ws = _host_path_to_sandbox(workspace_root)
+        own = _host_path_to_sandbox(session_files_dir)
+    except BwrapSandboxError:
+        # UNC / drive-relative / relative — not bindable, same rule the bind
+        # sources themselves follow.
+        return []
+    if not any(_is_same_or_ancestor(src, ws) for src in rw_sources):
+        return []
+    sessions = ws.rstrip("/") + "/sessions"
+    if not _is_same_or_ancestor(sessions, own):
+        return []
+    args = ["--ro-bind-try", sessions, sessions]
+    if any(_bind_key(src) == _bind_key(own) for src in rw_sources):
+        # After the ro-bind → the current session's area stays writable.
+        args.extend(["--bind", own, own])
+    return args
+
+
 _auto_install_cache: dict[str, bool] = {}
 """Cache auto-install results per distro to avoid repeated apt-get calls."""
 
@@ -1423,6 +1499,8 @@ class BwrapSandbox:
         env: dict[str, str] | None = None,
         cwd: str | None = None,
         extra_rw_binds: list[str] | None = None,
+        workspace_root: str | None = None,
+        session_files_dir: str | None = None,
     ) -> tuple[int, str, str]:
         """Run a command inside the bwrap sandbox.
 
@@ -1430,6 +1508,11 @@ class BwrapSandbox:
             extra_rw_binds: PER-CALL host paths to bind writable for this
                 command only (#984) — the session's authorized output dirs.
                 They do not modify the sandbox; see :meth:`_build_bwrap_args`.
+            workspace_root: Host path of the workspace root, when the caller
+                knows it — enables the cross-session read-only guard (#1007).
+            session_files_dir: Host path of THIS session's files dir; it is
+                re-opened writable after that guard.  Neither kwarg alone
+                disables anything else: ``None`` reproduces the old args.
 
         Returns:
             (exit_code, stdout, stderr)
@@ -1461,6 +1544,7 @@ class BwrapSandbox:
 
         bwrap_args = self._build_bwrap_args(
             command, env=env, cwd=cwd, extra_rw_binds=extra_rw_binds,
+            workspace_root=workspace_root, session_files_dir=session_files_dir,
         )
 
         exit_code = -1
@@ -1559,6 +1643,8 @@ class BwrapSandbox:
         env: dict[str, str] | None = None,
         cwd: str | None = None,
         extra_rw_binds: list[str] | None = None,
+        workspace_root: str | None = None,
+        session_files_dir: str | None = None,
     ) -> BwrapCommandHandle:
         """Run a command inside the bwrap sandbox with streaming I/O.
 
@@ -1575,7 +1661,9 @@ class BwrapSandbox:
         :meth:`BwrapCommandHandle.kill` to stop a running command.
 
         ``extra_rw_binds`` are per-call writable host paths (#984), same
-        semantics as :meth:`run_command`.
+        semantics as :meth:`run_command`; ``workspace_root`` /
+        ``session_files_dir`` feed the cross-session read-only guard
+        (#1007 review), same semantics as :meth:`run_command` too.
 
         Returns:
             BwrapCommandHandle with .stdout, .stderr, .wait(), .kill(),
@@ -1589,6 +1677,7 @@ class BwrapSandbox:
 
         bwrap_args = self._build_bwrap_args(
             command, env=env, cwd=cwd, extra_rw_binds=extra_rw_binds,
+            workspace_root=workspace_root, session_files_dir=session_files_dir,
         )
 
         if not hasattr(self, '_streaming_handles'):
@@ -1780,6 +1869,8 @@ class BwrapSandbox:
         env: dict[str, str] | None = None,
         cwd: str | None = None,
         extra_rw_binds: list[str] | None = None,
+        workspace_root: str | None = None,
+        session_files_dir: str | None = None,
     ) -> list[str]:
         """Build the full bwrap argument list.
 
@@ -1794,6 +1885,13 @@ class BwrapSandbox:
         sandbox paths and hard ``--bind``-ed after the read-only ``/mnt``
         mount, so a missing or unmappable source fails loudly instead of
         silently running without the granted write access.
+
+        ``workspace_root`` / ``session_files_dir`` (host paths, #1007 review)
+        feed the cross-session guard: when the workspace root is in the rw
+        set, ``<workspace>/sessions`` is re-mounted READ-ONLY after it (other
+        sessions live there) and this session's own files dir is re-opened
+        writable after THAT — see :func:`_cross_session_guard_args`.  Both
+        default to ``None``, which keeps the previous argument list exactly.
 
         The sandbox layout:
         /usr, /bin, /lib, etc — read-only bind mounts from host
@@ -1879,9 +1977,19 @@ class BwrapSandbox:
         # never ``--bind-try``: a missing/unmappable source must fail the
         # command loudly instead of silently running without the write
         # access the caller granted (and without falling back to the host).
+        rw_sources: list[str] = list(self.extra_rw_binds)
         for raw in extra_rw_binds or []:
             src = _host_path_to_sandbox(raw)
+            rw_sources.append(src)
             args.extend(["--bind", src, src])
+
+        # ── Cross-session guard (#1007 review) ──────────────────────
+        # ``<workspace>/sessions`` was re-opened writable by the bind above;
+        # close it again (later mount wins) and keep only THIS session's own
+        # files dir writable.
+        args.extend(_cross_session_guard_args(
+            workspace_root, session_files_dir, rw_sources,
+        ))
 
         # ── Die with parent ─────────────────────────────────────────
         args.append("--die-with-parent")

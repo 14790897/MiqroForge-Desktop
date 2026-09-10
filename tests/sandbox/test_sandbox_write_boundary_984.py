@@ -55,6 +55,14 @@ def _index_of_triplet(args: list[str], flag: str, src: str) -> int:
     raise AssertionError(f"{flag} {src} not in args")
 
 
+def _indexes_of_triplet(args: list[str], flag: str, src: str) -> list[int]:
+    """Every position of ``flag src src`` — a path bound twice needs both."""
+    return [
+        i for i, a in enumerate(args[:-1])
+        if a == flag and args[i + 1] == src
+    ]
+
+
 # ── _host_path_to_sandbox ────────────────────────────────────────────────
 
 
@@ -186,6 +194,121 @@ class TestPerCallRwBinds:
         assert ("/srv/data", "/srv/data") in _bind_pairs(args)
 
 
+# ── #1007 review: <ws>/sessions stays read-only ──────────────────────────
+
+
+class TestCrossSessionGuard:
+    """Re-opening the workspace root must not re-open other sessions.
+
+    ``_exec_rw_binds`` always includes the workspace root, and
+    ``<workspace>/sessions/**`` — every other session's files dir — lives
+    under it, so layer 1 quietly undid layer 2's read-only ``/mnt`` for the
+    cross-session subtree.  bwrap mounts in order, so the fix appends a
+    read-only ``<ws>/sessions`` AFTER the rw workspace bind and then re-opens
+    THIS session's own files dir after that.
+
+    Pure argument-construction assertions: the mount ORDER is the whole
+    mechanism, and it is observable without running bwrap (which needs
+    WSL + bubblewrap and cannot run on the Windows dev host).
+    """
+
+    _WS = r"C:\Users\x\.miqi\workspace"
+    _FILES = r"C:\Users\x\.miqi\workspace\sessions\desktop_1\files"
+    _OUT = r"C:\Users\x\Desktop\out"
+    _WS_SB = "/mnt/c/Users/x/.miqi/workspace"
+    _SESSIONS_SB = "/mnt/c/Users/x/.miqi/workspace/sessions"
+    _FILES_SB = "/mnt/c/Users/x/.miqi/workspace/sessions/desktop_1/files"
+
+    def _args(self, extra_rw_binds: list[str], **kwargs) -> list[str]:
+        sb = _make_sandbox(workspace=self._WS)
+        return sb._build_bwrap_args(
+            "echo hi",
+            extra_rw_binds=extra_rw_binds,
+            workspace_root=self._WS,
+            session_files_dir=self._FILES,
+            **kwargs,
+        )
+
+    def test_sessions_rebound_read_only_after_workspace(self) -> None:
+        """(a) + (b): the ro sessions bind exists and follows the rw ws bind."""
+        args = self._args([self._FILES, self._WS, self._OUT])
+        ws_idx = _index_of_triplet(args, "--bind", self._WS_SB)
+        ro_idx = _index_of_triplet(args, "--ro-bind-try", self._SESSIONS_SB)
+        assert ws_idx < ro_idx, "a later ro bind must override the rw workspace"
+        # The ro bind must not be a hard --ro-bind: the dir may legitimately
+        # not exist yet, and this mount only ever narrows.
+        assert ("--ro-bind", self._SESSIONS_SB) not in [
+            (args[i], args[i + 1]) for i in range(len(args) - 1)
+        ]
+
+    def test_own_session_dir_still_writable_after_the_guard(self) -> None:
+        """(c): this session's files dir is re-bound rw AFTER the ro bind."""
+        args = self._args([self._FILES, self._WS, self._OUT])
+        ro_idx = _index_of_triplet(args, "--ro-bind-try", self._SESSIONS_SB)
+        own_idx = _indexes_of_triplet(args, "--bind", self._FILES_SB)
+        assert len(own_idx) == 2, (
+            "expected the session dir in the rw set AND re-opened after the "
+            f"guard, got {own_idx}"
+        )
+        assert own_idx[-1] > ro_idx, "the session's own files dir must stay rw"
+
+    def test_other_roots_untouched(self) -> None:
+        """(4): memory/skills/extra roots keep their plain rw bind."""
+        args = self._args([self._FILES, self._WS, self._OUT])
+        assert _indexes_of_triplet(args, "--bind", "/mnt/c/Users/x/Desktop/out") == [
+            _index_of_triplet(args, "--bind", "/mnt/c/Users/x/Desktop/out"),
+        ]
+
+    def test_guard_absent_when_workspace_root_not_writable(self) -> None:
+        """(d): no rw bind of the ws root → the old arg list, unchanged."""
+        args = self._args([self._FILES])
+        assert self._SESSIONS_SB not in args
+
+    def test_guard_absent_without_a_workspace_root(self) -> None:
+        sb = _make_sandbox(workspace=self._WS)
+        args = sb._build_bwrap_args(
+            "echo hi", extra_rw_binds=[self._FILES, self._WS],
+        )
+        assert args == sb._build_bwrap_args(
+            "echo hi", extra_rw_binds=[self._FILES, self._WS],
+            workspace_root=None, session_files_dir=None,
+        )
+        assert self._SESSIONS_SB not in args
+
+    def test_guard_absent_without_session_files_dir(self) -> None:
+        """Custom workspace: no per-session layout, so none of it is touched.
+
+        ``<project>/sessions`` there is the project's own directory (only
+        snapshots live in miqi's subdirs), and making it read-only inside
+        exec would break legitimate writes.
+        """
+        sb = _make_sandbox(workspace=self._WS)
+        args = sb._build_bwrap_args(
+            "echo hi", extra_rw_binds=[self._WS],
+            workspace_root=self._WS, session_files_dir=None,
+        )
+        assert self._SESSIONS_SB not in args
+
+    def test_ancestor_bind_also_triggers_the_guard(self) -> None:
+        """A PARENT of the workspace re-opens sessions just as well."""
+        sb = _make_sandbox(workspace=self._WS)
+        args = sb._build_bwrap_args(
+            "echo hi", extra_rw_binds=[r"C:\Users\x\.miqi"],
+            workspace_root=self._WS, session_files_dir=self._FILES,
+        )
+        assert _index_of_triplet(args, "--ro-bind-try", self._SESSIONS_SB) >= 0
+
+    def test_sibling_dir_is_not_matched_as_workspace(self) -> None:
+        """Path-boundary check: ``…/workspace-other`` is not the workspace."""
+        sb = _make_sandbox(workspace=self._WS)
+        args = sb._build_bwrap_args(
+            "echo hi",
+            extra_rw_binds=[r"C:\Users\x\.miqi\workspace-other"],
+            workspace_root=self._WS, session_files_dir=self._FILES,
+        )
+        assert self._SESSIONS_SB not in args
+
+
 # ── run_command / run_command_streaming passthrough ──────────────────────
 
 
@@ -196,7 +319,10 @@ class TestRunCommandPassthrough:
         sb._running = True
         seen: dict = {}
 
-        def _fake_build(command, env=None, cwd=None, extra_rw_binds=None):
+        def _fake_build(
+            command, env=None, cwd=None, extra_rw_binds=None,
+            workspace_root=None, session_files_dir=None,
+        ):
             seen["binds"] = extra_rw_binds
             return ["/usr/bin/bwrap", "true"]
 
@@ -219,7 +345,10 @@ class TestRunCommandPassthrough:
         sb._running = True
         seen: dict = {}
 
-        def _fake_build(command, env=None, cwd=None, extra_rw_binds=None):
+        def _fake_build(
+            command, env=None, cwd=None, extra_rw_binds=None,
+            workspace_root=None, session_files_dir=None,
+        ):
             seen["binds"] = extra_rw_binds
             return ["/usr/bin/bwrap", "true"]
 
@@ -237,7 +366,10 @@ class TestRunCommandPassthrough:
         sb._running = True
         seen: dict = {}
 
-        def _fake_build(command, env=None, cwd=None, extra_rw_binds=None):
+        def _fake_build(
+            command, env=None, cwd=None, extra_rw_binds=None,
+            workspace_root=None, session_files_dir=None,
+        ):
             seen["binds"] = extra_rw_binds
             return ["/usr/bin/bwrap", "true"]
 
@@ -253,3 +385,39 @@ class TestRunCommandPassthrough:
 
         await sb.run_command("echo hi")
         assert seen["binds"] is None
+
+    @pytest.mark.asyncio
+    async def test_guard_kwargs_reach_build(self, monkeypatch) -> None:
+        """The guard is dead code unless the caller's paths arrive here."""
+        sb = _make_sandbox(use_wsl=False)
+        sb._running = True
+        seen: dict = {}
+
+        def _fake_build(
+            command, env=None, cwd=None, extra_rw_binds=None,
+            workspace_root=None, session_files_dir=None,
+        ):
+            seen["workspace_root"] = workspace_root
+            seen["session_files_dir"] = session_files_dir
+            return ["/usr/bin/bwrap", "true"]
+
+        monkeypatch.setattr(sb, "_build_bwrap_args", _fake_build)
+        monkeypatch.setattr(sb, "_run_linux_command", AsyncMock(return_value=(0, "", "")))
+        proc = MagicMock()
+        proc.communicate = AsyncMock(return_value=(b"", b""))
+        proc.returncode = 0
+        monkeypatch.setattr(
+            "miqi.sandbox.bwrap._create_subprocess_exec",
+            AsyncMock(return_value=proc),
+        )
+
+        await sb.run_command(
+            "echo hi",
+            extra_rw_binds=[r"C:\Users\x\.miqi\workspace"],
+            workspace_root=r"C:\Users\x\.miqi\workspace",
+            session_files_dir=r"C:\Users\x\.miqi\workspace\sessions\k\files",
+        )
+        assert seen["workspace_root"] == r"C:\Users\x\.miqi\workspace"
+        assert seen["session_files_dir"] == (
+            r"C:\Users\x\.miqi\workspace\sessions\k\files"
+        )
