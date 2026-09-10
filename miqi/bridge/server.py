@@ -20,7 +20,9 @@ from __future__ import annotations
 import asyncio
 import atexit
 import json
+import os
 import signal
+import subprocess
 import sys
 import threading
 import time
@@ -595,6 +597,21 @@ def _graceful_shutdown() -> None:
         _bridge_state = None
 
 
+def _clear_sandbox_state_file_fast() -> None:
+    """#959: 看门狗退出路径的状态文件快清理（不做 destroy_all —— 那正是
+    优雅关停的挂起向量）。防下一次启动读到 stale 条目。"""
+    global _bridge_state
+    if _bridge_state is None:
+        return
+    sandbox_mgr = getattr(_bridge_state, "_sandbox_manager", None)
+    if sandbox_mgr is None or sandbox_mgr == "disabled":
+        return
+    try:
+        sandbox_mgr._clear_state_file()
+    except Exception:
+        pass
+
+
 def main() -> None:
     global _bridge_state
 
@@ -658,6 +675,27 @@ def main() -> None:
     # instead of per-request asyncio.run(). Legacy handlers continue to
     # work via the _dispatch fallback path.
     from miqi.bridge.loop import BridgeRuntimeLoop
+
+    # #959: parent-death watchdog — Electron 被硬杀（E2E 15s 竞速超时/崩溃）
+    # 时 before-quit → BridgeManager.stop() 不会执行，桥若无此看门狗会成为
+    # 孤儿污染后续运行（mcps.list 挂起）。看门狗发现启动链死亡后硬退出
+    # （os._exit），故意绕过会挂起在 WSL teardown 的 _graceful_shutdown；
+    # 退出前只做状态文件快清理 + Windows 整树回收 MCP/exec 孙进程。
+    def _on_parent_death() -> None:
+        _clear_sandbox_state_file_fast()
+        if os.name == "nt":
+            try:
+                subprocess.run(
+                    ["taskkill", "/F", "/T", "/PID", str(os.getpid())],
+                    capture_output=True,
+                    timeout=10,
+                )
+            except Exception:
+                pass
+
+    from miqi.bridge.parent_watchdog import start_parent_watchdog
+
+    start_parent_watchdog(on_death=_on_parent_death)
 
     bridge = BridgeRuntimeLoop(
         send_func=_send,
