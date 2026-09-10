@@ -6274,6 +6274,27 @@ export function ChatConsole({
     [streaming]
   );
 
+  /* 编辑用户消息并重新回答(#828 学 Hermes edit → rewind → resubmit):
+     截断到该消息之前,用编辑后的文本重新发送 —— 复用 regenerate 机制 */
+  const handleEdit = useCallback(
+    async (original: Message, newText: string) => {
+      if (streaming) return;
+      const text = newText.trim();
+      if (!text) return;
+      const msgs = messagesRef.current;
+      const idx = msgs.indexOf(original);
+      if (idx < 0) return;
+      retryPayloadRef.current = {
+        text,
+        attachments: original.attachments ?? [],
+        retry: true,
+      };
+      setMessages((prev) => prev.slice(0, idx));
+      requestAnimationFrame(() => handleSendRef.current());
+    },
+    [streaming]
+  );
+
   /* session display name — persisted custom title wins, else first user
      message, else timestamp fallback */
   const sessionTitle = useMemo(() => {
@@ -6778,7 +6799,7 @@ export function ChatConsole({
             style={{ background: 'var(--background)' }}
           >
             <div
-              className={`max-w-[760px] mx-auto px-4 pt-5 flex flex-col gap-2 ${
+              className={`max-w-[760px] mx-auto px-4 pt-5 flex flex-col gap-4 ${
                 historyLoaded && messages.length === 0 ? 'min-h-full' : ''
               }`}
               style={{ paddingBottom: '20vh' }}
@@ -6926,6 +6947,7 @@ export function ChatConsole({
                         sessionKey={sessionKey}
                         turnIndex={i}
                         clockTick={clockTick}
+                        onEdit={handleEdit}
                         execOutputs={execOutputs}
                         inlineExecOutput={inlineExecOutput}
                         sources={sourcesByMsg.get(group.msg) ?? []}
@@ -8273,6 +8295,8 @@ interface MessageBubbleProps {
   isLastToolRow?: boolean;
   /** web_search result text for this row (click-to-expand cards). */
   searchResults?: string;
+  /** 编辑用户消息并重新回答(#828)。 */
+  onEdit?: (msg: Message, newText: string) => void;
   /** #740: resume/restart an interrupted turn (half-generated reply). */
   onResume?: () => void;
   onRestart?: () => void;
@@ -8303,12 +8327,16 @@ const MessageBubble = memo(function MessageBubble({
   copyIdx,
   clockTick,
   sending,
+  onEdit,
   onResume,
   onRestart,
   reasoningMode,
 }: MessageBubbleProps) {
   const [expanded, setExpanded] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
+  // 编辑态(#828):用户消息原地变输入框,提交后截断重发
+  const [editing, setEditing] = useState(false);
+  const [editText, setEditText] = useState('');
   // Message action bar (copy/regenerate/feedback/sources) — restored from
   // #547 after #577 dropped the whole bar, leaving only a hover-only copy
   // button (#577 功能回归修复).  Feedback is persisted to localStorage
@@ -8865,6 +8893,14 @@ const MessageBubble = memo(function MessageBubble({
 
   return (
     <>
+      {/* 用户消息时间戳——居中显示在上一回答与本提问之间(ChatGPT 式) */}
+      {isUser && formatChatTime(msg.timestamp) && (
+        <div className="w-full text-center pt-1 pb-0.5">
+          <span className="text-[11px] leading-none text-[var(--text-faint)] select-none">
+            {formatChatTime(msg.timestamp)}
+          </span>
+        </div>
+      )}
       <ContextMenu items={contextItems}>
         {({ onContextMenu }) => (
           <div
@@ -8892,9 +8928,6 @@ const MessageBubble = memo(function MessageBubble({
                 >
                   MiQroForge
                 </span>
-                <span className="text-xs text-[var(--text-faint)] shrink-0">
-                  {formatChatTime(msg.timestamp)}
-                </span>
               </div>
             )}
 
@@ -8913,12 +8946,6 @@ const MessageBubble = memo(function MessageBubble({
                 isUser ? 'items-end max-w-[calc(100%-48px)]' : 'w-full'
               )}
             >
-              {/* 用户消息时间戳(ChatGPT 式,气泡上方右对齐小字) */}
-              {isUser && (
-                <span className="text-[11px] leading-none text-[var(--text-faint)] select-none">
-                  {formatChatTime(msg.timestamp)}
-                </span>
-              )}
               {/* image attachments */}
               {msg.attachments
                 ?.filter((a) => a.type === 'image')
@@ -9059,7 +9086,50 @@ const MessageBubble = memo(function MessageBubble({
                     : { color: 'var(--bubble-ai-text)' }),
                 }}
               >
-                {showRawOnError ? (
+                {isUser && editing ? (
+                  /* 编辑态(#828):原地变输入框,提交 = 截断到此处并用新文本重新回答 */
+                  <div className="flex flex-col gap-2 min-w-[320px]">
+                    <textarea
+                      value={editText}
+                      onChange={(e) => setEditText(e.target.value)}
+                      autoFocus
+                      rows={3}
+                      data-testid="edit-message-input"
+                      className="w-full resize-none rounded-lg px-3 py-2 text-sm bg-[var(--surface)] text-[var(--text)] border border-[var(--border)] focus:outline-none focus:border-[var(--accent)]"
+                      style={{ lineHeight: 'var(--leading-relaxed)' }}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Escape') setEditing(false);
+                        if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+                          if (editText.trim() && editText.trim() !== msg.content.trim()) {
+                            onEdit?.(msg, editText);
+                          }
+                          setEditing(false);
+                        }
+                      }}
+                    />
+                    <div className="flex items-center justify-end gap-2">
+                      <button
+                        onClick={() => setEditing(false)}
+                        className="px-3 py-1.5 text-xs rounded-lg bg-[var(--surface)] text-[var(--text-muted)] hover:text-[var(--text)] transition-colors"
+                      >
+                        取消
+                      </button>
+                      <button
+                        onClick={() => {
+                          if (editText.trim() && editText.trim() !== msg.content.trim()) {
+                            onEdit?.(msg, editText);
+                          }
+                          setEditing(false);
+                        }}
+                        disabled={!editText.trim() || editText.trim() === msg.content.trim()}
+                        data-testid="edit-message-submit"
+                        className="px-3 py-1.5 text-xs rounded-lg bg-[var(--accent)] text-white disabled:opacity-40 transition-opacity"
+                      >
+                        重新回答
+                      </button>
+                    </div>
+                  </div>
+                ) : showRawOnError ? (
                   <div>
                     <pre
                       className="p-3 text-xs font-mono leading-relaxed whitespace-pre-wrap break-all overflow-auto"
@@ -9138,6 +9208,38 @@ const MessageBubble = memo(function MessageBubble({
                   </ErrorBoundary>
                 )}
               </div>
+
+              {/* 用户消息操作 — 复制 / 编辑(仅鼠标靠近/hover 消息时显示,#828) */}
+              {isUser && msg.content !== '' && (
+                <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity mt-1">
+                  <button
+                    onClick={() => onCopy(msg.content, copyIdx ?? turnIndex ?? 0)}
+                    title="复制"
+                    aria-label="复制"
+                    className="flex items-center justify-center w-8 h-8 rounded-lg bg-[var(--surface-muted)]/70 text-[var(--text-muted)] hover:bg-[var(--surface-muted)] hover:text-[var(--text)] transition-colors"
+                  >
+                    {isCopied ? (
+                      <Check size={14} style={{ color: 'var(--success)' }} />
+                    ) : (
+                      <Copy size={14} />
+                    )}
+                  </button>
+                  {onEdit && (
+                    <button
+                      onClick={() => {
+                        setEditing(true);
+                        setEditText(msg.content);
+                      }}
+                      title="编辑并重新回答"
+                      aria-label="编辑并重新回答"
+                      data-testid="edit-message-btn"
+                      className="flex items-center justify-center w-8 h-8 rounded-lg bg-[var(--surface-muted)]/70 text-[var(--text-muted)] hover:bg-[var(--surface-muted)] hover:text-[var(--text)] transition-colors"
+                    >
+                      <Pencil size={14} />
+                    </button>
+                  )}
+                </div>
+              )}
 
               {/* 常驻免责声明（#836）—— 每条 AI 回答正文底部 */}
               {!isUser && msg.content !== '' && (
@@ -9342,7 +9444,8 @@ function areMessageBubblePropsEqual(a: MessageBubbleProps, b: MessageBubbleProps
     a.onRetryLoad === b.onRetryLoad &&
     a.onRegenerate === b.onRegenerate &&
     a.onOpenProviderSettings === b.onOpenProviderSettings &&
-    a.onDownloadPaper === b.onDownloadPaper
+    a.onDownloadPaper === b.onDownloadPaper &&
+    a.onEdit === b.onEdit
   );
 }
 
