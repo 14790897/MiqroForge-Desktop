@@ -473,6 +473,31 @@ function createGatewayBlockedMessage(): Message {
   };
 }
 
+/** 登录失效时的统一拦截文案（发送拦截与流错误路径共用，避免气泡正文与登录按钮语义冲突）。 */
+export const RELOGIN_INTERCEPT_TEXT = 'MiQroForge 平台登录已失效，请重新登录后继续会话。';
+
+/**
+ * 登录失效拦截的消息列表变换（纯函数，便于单测）：
+ *  - 普通发送：乐观 user 气泡按时间戳匹配替换为重登引导；
+ *  - 恢复中断回合（#740）：无乐观 user 气泡，且 handleResumeTurn 已移除
+ *    中断卡——恢复卡片（resumeMsg）并追加重登引导，避免上下文丢失；
+ *  - 时间戳不匹配且无恢复卡片（会话已切换等）：原样返回。
+ */
+export function applyReloginIntercept(
+  prev: Message[],
+  userMsg: Message,
+  resumeMsg: Message | null
+): Message[] {
+  const last = prev[prev.length - 1];
+  if (last?.timestamp === userMsg.timestamp) {
+    return [...prev.slice(0, -1), createProviderConfigMessage(RELOGIN_INTERCEPT_TEXT, 'login')];
+  }
+  if (resumeMsg) {
+    return [...prev, resumeMsg, createProviderConfigMessage(RELOGIN_INTERCEPT_TEXT, 'login')];
+  }
+  return prev;
+}
+
 /* ─── Tracked file from tool hints ───────────────────────────────── */
 interface TrackedFile {
   path: string;
@@ -4082,6 +4107,9 @@ export function ChatConsole({
    *  so the resume request flows through the full send pipeline (listeners,
    *  streaming render) instead of a bare chat.send call. */
   const resumeTurnIdRef = useRef<string | null>(null);
+  // 恢复中断回合时被移除的中断卡：登录失效拦截需恢复它并追加重登引导
+  //（resume 无乐观 user 气泡，否则上下文丢失、登录按钮无处可点）。
+  const resumeRemovedMsgRef = useRef<Message | null>(null);
   /** Per-session send id of the send currently in its pre-stream pending phase
    *  (issue #364).  A session is "pending" while its optimistic bubble waits on
    *  the non-blocking provider check / thread init.  The double-Enter guard
@@ -4105,7 +4133,9 @@ export function ChatConsole({
     const meta = msg.interruptedMeta;
     if (!meta?.turnId) return;
     resumeTurnIdRef.current = meta.turnId;
-    // 移除中断卡——resume 的新回复由流式事件接管渲染
+    // 移除中断卡——resume 的新回复由流式事件接管渲染。卡片暂存 ref：
+    // 若预检被登录失效拦截，需恢复卡片并追加重登引导（applyReloginIntercept）。
+    resumeRemovedMsgRef.current = msg;
     setMessages((prev) => prev.filter((m) => m !== msg));
     handleSendRef.current();
   }, []);
@@ -4294,25 +4324,20 @@ export function ChatConsole({
       // token 刷新失败且未恢复（requiresRelogin）时拦截发送：把乐观气泡换成
       // 重登引导（一键登录成功后气泡自动移除）。先于网关门禁/无 provider 判定
       // —— 失效后网关状态仍是旧快照里的 active，必须优先给出重登指引。
-      if (gatewayStatus?.loggedIn === true && gatewayStatus.requiresRelogin === true) {
+      // 快照读取失败（qraft.status() 抛错）时回退到订阅状态 refs，拦截不失效。
+      const gatewayLoggedIn = gatewayStatus?.loggedIn ?? loggedInRef.current;
+      const gatewayRequiresRelogin = gatewayStatus?.requiresRelogin ?? requiresReloginRef.current;
+      if (gatewayLoggedIn && gatewayRequiresRelogin) {
         pendingSendIdsRef.current.delete(sendSessionKey);
         streamingBySession.delete(sendSessionKey);
         setSendingFor(sendSessionKey, null);
         if (currentSessionRef.current === sendSessionKey) {
           setStreaming(false);
-          setMessages((prev) => {
-            const last = prev[prev.length - 1];
-            if (last?.timestamp === userMsg.timestamp) {
-              return [
-                ...prev.slice(0, -1),
-                createProviderConfigMessage(
-                  'MiQroForge 平台登录已失效，请重新登录后继续会话。',
-                  'login'
-                ),
-              ];
-            }
-            return prev;
-          });
+          // 恢复中断回合（#740）：无乐观 user 气泡，取回被 handleResumeTurn
+          // 移除的中断卡并追加重登引导；随后复位 ref 防陈旧引用。
+          const resumeRemovedMsg = _resumeId ? resumeRemovedMsgRef.current : null;
+          resumeRemovedMsgRef.current = null;
+          setMessages((prev) => applyReloginIntercept(prev, userMsg, resumeRemovedMsg));
           setInput(text);
           setAttachments(atts);
         }
@@ -5325,7 +5350,7 @@ export function ChatConsole({
         ...prev.filter((m) => !m.isLiveReasoning),
         isProviderConfigurationProblem(message, data.code)
           ? createProviderConfigMessage(
-              message,
+              requiresReloginRef.current ? RELOGIN_INTERCEPT_TEXT : message,
               loggedInRef.current && !requiresReloginRef.current
                 ? 'open-provider-settings'
                 : 'login'
@@ -5530,7 +5555,7 @@ export function ChatConsole({
         setMessages((prev) => [
           ...prev,
           createProviderConfigMessage(
-            errMsg,
+            requiresReloginRef.current ? RELOGIN_INTERCEPT_TEXT : errMsg,
             loggedInRef.current && !requiresReloginRef.current ? 'open-provider-settings' : 'login'
           ),
         ]);
