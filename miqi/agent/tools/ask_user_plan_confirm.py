@@ -1,18 +1,11 @@
-"""ask_user_plan_confirm — 任务计划确认工具（#646-v2，GPT 评审拍板）。
+"""ask_user_plan_confirm — 任务计划确认工具（#646-v2）。
 
-与 ask_user_confirm_card 的分工：
-- ask_user_confirm_card   → 危险动作最后确认（上传/支付/删除/外发）
-- ask_user_plan_confirm   → **任务开始前一次**的计划确认（Plan Card）
+本工具表达的是 Agent 与用户协作，而不是逐工具权限审批：
+- ask_user_plan_confirm → 多步骤任务的工作计划/协作节点
+- ask_user_confirm_card / request_action_confirmation → 真正危险动作的最后确认
 
-Plan Card 触发（Agent 判断，非工具级）：
-- 多工具调用 / Skill 执行 / 外部副作用组合 / 预计超过 30 秒
-
-payload（schema）：
-    title       任务标题（用户可理解，非工具名）
-    goal        目标描述
-    steps       [{name, tools[]}] 执行计划步骤
-    permissions [network_read | workspace_write | external_upload | exec]
-    timeout_seconds（可选）
+当用户选择“调整方案”时，修改意见必须原样回传给模型；模型据此重新规划，
+再次调用本工具，直到用户确认或取消。
 """
 
 from __future__ import annotations
@@ -25,21 +18,19 @@ from miqi.agent.tools.base import Tool
 DEFAULT_TIMEOUT_SECONDS = 180
 
 ASK_PLAN_CONFIRM_INSTRUCTION = (
-    "执行**多步骤任务**前（预计多个工具调用、执行 Skill、涉及外部副作用、"
-    "或超过 30 秒），必须先调用 ask_user_plan_confirm 工具展示任务计划卡，"
-    "等待用户确认后再开始执行。计划卡展示：任务标题、目标、执行步骤、所需权限。\n"
+    "开始明显的多步骤任务前，可以先调用 ask_user_plan_confirm 展示工作计划，让用户参与规划；"
+    "单个简单工具调用不要为了审批而弹计划卡。\n"
     "规则：\n"
-    "1. 单个工具调用**不要**调用本工具（直接执行）；\n"
-    "2. 上传/支付/删除等危险动作执行前系统会单独弹确认卡，无需在本计划中重复确认；\n"
-    "3. 用户拒绝计划（status=cancelled）时停止任务并说明；\n"
-    "4. **choice_id=modify 时重新规划**：用户要求修改计划——根据用户的修改意见"
-    "调整步骤（可以更换/新增工具，包括调用 Skill），然后**再次调用本工具**展示新计划，"
-    "循环直到用户确认或明确取消。"
+    "1. 计划用于表达 Agent 准备怎么完成目标，不等同于逐工具权限审批；\n"
+    "2. 上传/支付/删除/对外发送等危险动作执行前，系统单独处理最终安全确认，计划里不要重复确认；\n"
+    "3. 用户确认后开始执行；用户取消后停止；\n"
+    "4. 用户选择 choice_id=modify 时，必须读取 choice_label 中的修改意见，"
+    "   按这些意见重新规划，并再次调用本工具展示新计划；不要假装修改成功后直接执行旧方案。"
 )
 
 
 class AskUserPlanConfirmTool(Tool):
-    """Tool for the model to present a task plan and await user approval."""
+    """Present a task plan, allow the user to adjust it, and await a decision."""
 
     def __init__(
         self,
@@ -54,8 +45,7 @@ class AskUserPlanConfirmTool(Tool):
     @property
     def description(self) -> str:
         return (
-            "在开始多步骤任务前展示任务计划卡（标题/目标/步骤/所需权限），"
-            "等待用户确认。用户确认后开始执行；拒绝则停止。"
+            "在多步骤任务的关键规划节点展示工作计划。用户可以按当前方案执行、调整方案后重新规划，或取消。"
         )
 
     @property
@@ -73,7 +63,7 @@ class AskUserPlanConfirmTool(Tool):
                 },
                 "steps": {
                     "type": "array",
-                    "description": "执行计划步骤（3-8 步）",
+                    "description": "执行计划步骤（建议 3-8 步）",
                     "items": {
                         "type": "object",
                         "properties": {
@@ -81,7 +71,7 @@ class AskUserPlanConfirmTool(Tool):
                             "tools": {
                                 "type": "array",
                                 "items": {"type": "string"},
-                                "description": "该步骤预计使用的工具",
+                                "description": "该步骤预计使用的工具（可选，仅作透明度信息）",
                             },
                         },
                         "required": ["name"],
@@ -89,12 +79,12 @@ class AskUserPlanConfirmTool(Tool):
                 },
                 "permissions": {
                     "type": "array",
-                    "description": "所需权限清单：network_read / workspace_write / external_upload / exec",
+                    "description": "计划可能涉及的边界：network_read / workspace_write / external_upload / exec 等",
                     "items": {"type": "string"},
                 },
                 "timeout_seconds": {
                     "type": "integer",
-                    "description": "（可选）等待秒数，默认 180",
+                    "description": "等待用户输入秒数，默认 180",
                     "minimum": 5,
                     "maximum": 600,
                     "default": DEFAULT_TIMEOUT_SECONDS,
@@ -105,14 +95,20 @@ class AskUserPlanConfirmTool(Tool):
 
     def normalize_args(self, args: dict[str, Any]) -> dict[str, Any]:
         steps = []
-        for i, s in enumerate(args.get("steps") or []):
-            if not isinstance(s, dict):
+        for i, step in enumerate(args.get("steps") or []):
+            if not isinstance(step, dict):
                 continue
-            steps.append({
-                "name": str(s.get("name", f"步骤 {i + 1}")),
-                "tools": [str(t) for t in (s.get("tools") or []) if isinstance(t, str)],
-            })
-        perms = [str(p) for p in (args.get("permissions") or []) if isinstance(p, str)]
+            steps.append(
+                {
+                    "name": str(step.get("name", f"步骤 {i + 1}")),
+                    "tools": [str(t) for t in (step.get("tools") or []) if isinstance(t, str)],
+                }
+            )
+        permissions = [
+            str(permission)
+            for permission in (args.get("permissions") or [])
+            if isinstance(permission, str)
+        ]
         try:
             timeout_raw = int(args.get("timeout_seconds", DEFAULT_TIMEOUT_SECONDS))
         except (TypeError, ValueError):
@@ -121,7 +117,7 @@ class AskUserPlanConfirmTool(Tool):
             "title": str(args.get("title", "任务计划")),
             "goal": str(args.get("goal", "")),
             "steps": steps,
-            "permissions": perms,
+            "permissions": permissions,
             "timeout_seconds": max(5, min(600, timeout_raw)),
         }
 
@@ -129,28 +125,41 @@ class AskUserPlanConfirmTool(Tool):
     def build_result(gate_result: dict[str, Any]) -> str:
         status = gate_result.get("status", "cancelled")
         answers = gate_result.get("answers") or {}
-        choice_id = answers.get("choice_id") or "cancel"
+        choice_id = str(answers.get("choice_id") or "cancel")
+        choice_label = str(answers.get("choice_label") or "")
+
         if status == "submitted" and choice_id == "confirm":
-            return json.dumps({
-                "status": "confirmed",
-                "plan_confirmed": True,
-                "choice_id": "confirm",
-                "remembered": gate_result.get("remembered", False),
-            }, ensure_ascii=False)
-        if status == "submitted" and choice_id == "modify":
-            # 用户要求修改计划 → 模型重新规划并再次调用本工具（新计划卡）
-            return json.dumps({
-                "status": "modify_requested",
+            return json.dumps(
+                {
+                    "status": "confirmed",
+                    "plan_confirmed": True,
+                    "choice_id": "confirm",
+                    "remembered": gate_result.get("remembered", False),
+                },
+                ensure_ascii=False,
+            )
+
+        if status == "submitted" and choice_id in {"modify", "adjust"}:
+            return json.dumps(
+                {
+                    "status": "modify_requested",
+                    "plan_confirmed": False,
+                    "choice_id": "modify",
+                    "adjustment": choice_label,
+                    "reason": "用户要求调整计划。请结合 adjustment 重新规划后再次调用 ask_user_plan_confirm。",
+                },
+                ensure_ascii=False,
+            )
+
+        return json.dumps(
+            {
+                "status": "cancelled",
                 "plan_confirmed": False,
-                "choice_id": "modify",
-                "reason": "用户要求修改计划，请重新规划后再次调用 ask_user_plan_confirm",
-            }, ensure_ascii=False)
-        return json.dumps({
-            "status": "cancelled",
-            "plan_confirmed": False,
-            "choice_id": choice_id,
-            "reason": "用户未确认任务计划",
-        }, ensure_ascii=False)
+                "choice_id": choice_id,
+                "reason": "用户未确认任务计划",
+            },
+            ensure_ascii=False,
+        )
 
     async def execute(self, **kwargs: Any) -> str:
         if self._resolver is not None:
