@@ -1,5 +1,5 @@
 import { useEffect, useState, type ReactNode } from 'react';
-import { copySvgAsPng, normalizeSvgSize } from '../../../lib/svgImage';
+import { normalizeSvgSize } from '../../../lib/svgImage';
 import { DiagramCard } from './DiagramCard';
 
 /**
@@ -163,6 +163,7 @@ export function MermaidBlock({ code, streaming, fallback }: MermaidBlockProps) {
   if (!svg) return <SourcePreview code={code} muted />;
 
   return (
-    <DiagramCard svg={svg} label={diagramTypeLabel(code)} onCopy={async () => copySvgAsPng(svg)} />
+    // 审查 R6：不传 onCopy——卡片内部统一用修正后的 displaySvg 复制
+    <DiagramCard svg={svg} label={diagramTypeLabel(code)} />
   );
 }

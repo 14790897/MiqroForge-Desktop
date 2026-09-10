@@ -1,6 +1,5 @@
 import DOMPurifyImport from 'dompurify';
 import { useMemo } from 'react';
-import { copySvgAsPng } from '../../../lib/svgImage';
 import { DiagramCard } from './DiagramCard';
 
 // vite/node 下 dompurify 的 default 导出可能是嵌套的（ESM/CJS interop）
@@ -65,5 +64,6 @@ export function SvgEmbed({ code }: { code: string }) {
     );
   }
 
-  return <DiagramCard svg={clean} label="SVG 图" onCopy={async () => copySvgAsPng(clean)} />;
+  // 审查 R6：不传 onCopy——卡片内部统一用修正后的 displaySvg 复制
+  return <DiagramCard svg={clean} label="SVG 图" />;
 }

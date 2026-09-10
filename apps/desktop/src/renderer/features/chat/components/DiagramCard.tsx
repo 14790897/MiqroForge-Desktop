@@ -26,8 +26,10 @@ interface DiagramCardProps {
   svg: string;
   /** 图名（如「合成流程图」），缺省「流程图」 */
   label?: string;
-  /** hover 复制动作（返回是否成功）；缺省走 copySvgAsPng */
-  onCopy?: () => Promise<boolean>;
+  /** hover 复制动作；接收**修正后**的 SVG（displaySvg）——调用方不得
+   *  用闭包里的原始 svg 绕过（审查 R6 P1：卡片复制曾绕过修正版导致 PNG
+   *  仍被 bbox/viewBox 裁切）。缺省走 copySvgAsPng(displaySvg)。 */
+  onCopy?: (svg: string) => Promise<boolean>;
 }
 
 export function DiagramCard({ svg, label = '流程图', onCopy }: DiagramCardProps) {
@@ -78,7 +80,7 @@ export function DiagramCard({ svg, label = '流程图', onCopy }: DiagramCardPro
   };
 
   const quickCopy = async () => {
-    const ok = onCopy ? await onCopy() : await copySvgAsPng(displaySvg);
+    const ok = onCopy ? await onCopy(displaySvg) : await copySvgAsPng(displaySvg);
     if (ok) {
       setCopied(true);
       window.setTimeout(() => setCopied(false), 1500);
