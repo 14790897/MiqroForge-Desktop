@@ -1,7 +1,8 @@
 /**
- * 诊断（临时）：getCompleteSvgBBox 对 mermaid 常见结构的覆盖——
- * ① foreignObject（htmlLabels 文本节点）② 嵌套 <svg> ③ filter 阴影。
- * 输出每类子元素的 getBBox 行为，定位"部分内容缺失"来源。
+ * #843 几何回归（正式）：getCompleteSvgBBox 对 mermaid 常见结构的覆盖——
+ * ① foreignObject（htmlLabels 文本节点，内容超 viewBox 时必须计入）
+ * ② 嵌套 <svg>（经 getCTM 映射后计入）。
+ * 由 CDP 实测根因（历史卡片 display:none 时 getBBox 全 0）引入，长期保留。
  */
 import { test, expect } from '@playwright/test';
 import type { ElectronApplication, Page } from '@playwright/test';

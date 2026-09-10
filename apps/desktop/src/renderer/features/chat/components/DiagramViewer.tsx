@@ -31,9 +31,11 @@ import { cn } from '../../../lib/utils';
  * - transform 层（tfElRef）**只包内容**（白卡 + svg），不是 viewport——
  *   clamp 的 cw/ch = tfEl.offsetWidth/Height（真正被 transform 的尺寸），
  *   结构上保证 ±(content*s - viewport)/2 的边界公式成立；
- * - svg 视觉完整：SvgBody 用「drawable descendants getBBox(stroke/markers)
- *   + getCTM 映射 + union」求完整 bbox（root.getBBox 不含 stroke/markers/
- *   自身 transform，会漏内容）；useLayoutEffect 在 paint 前修正 viewBox；
+ * - svg 视觉完整性：SvgBody 用「drawable descendants getBBox + stroke 精确
+ *   外扩 + marker 近似外扩(8px) + getCTM 映射 + union」求近完整 bbox
+ *   （root.getBBox 不含 stroke/markers/自身 transform，会漏内容）。
+ *   注意：marker 外扩是启发式（未解析 markerWidth/Height/units/refX），
+ *   对 mermaid 默认箭头足够，但不宣称对任意 SVG 严格完整（审查 R2/R3）；
  * - minimap 投影用 sw/sh（svg 基准布局尺寸），pan/clamp 用 cw/ch（卡片），
  *   两套尺寸不再混用；MINIMAP 常量单一来源；
  * - 拖拽/滚轮命令式 DOM 更新（零 React 渲染）；滚轮朝光标缩放。
@@ -62,9 +64,10 @@ const DRAWABLE_TAGS = new Set([
 ]);
 
 /**
- * 完整视觉 bbox：遍历可绘制后代，getBBox() 取局部盒并**手动外扩 stroke 与
- * marker**（Chromium 实测 getBBox(options)/默认均不含 stroke；mermaid 大量
- * 使用 marker-end 箭头），getCTM 映射到根用户坐标系后 union。
+ * 视觉 bbox（近完整）：遍历可绘制后代，getBBox() 取局部盒，stroke 按
+ * strokeWidth/2 精确外扩（Chromium 实测 getBBox 不含 stroke）；marker
+ * 按 8px 启发式外扩（mermaid 箭头实测足够，非严格几何——见模块头注
+ * 释）；getCTM 映射到根用户坐标系后 union。
  * root.getBBox() 不含 stroke/markers、不考虑自身 transform —— 直接用它
  * 无法保证"内容全进 viewBox"（fixture E2E 实证）。
  */
@@ -134,7 +137,8 @@ export function getCompleteSvgBBox(
   return { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
 }
 
-// E2E 确定性几何测试入口（fixture bbox 断言用；无副作用）
+// E2E 几何回归测试入口（deterministic-geometry / bbox-blindspot spec 调用）：
+// 仅挂纯函数只读引用，不改变任何运行时行为，无副作用
 if (typeof window !== 'undefined') {
   (window as unknown as Record<string, unknown>).__miqiDiagramDebug = { getCompleteSvgBBox };
 }
