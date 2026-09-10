@@ -478,19 +478,31 @@ export const RELOGIN_INTERCEPT_TEXT = 'MiQroForge 平台登录已失效，请重
 
 /**
  * 登录失效拦截的消息列表变换（纯函数，便于单测）：
- *  - 普通发送：乐观 user 气泡按时间戳匹配替换为重登引导；
+ *  - 普通发送：乐观 user 气泡按（role + 时间戳）就地替换为重登引导。
+ *    从尾部向前查找——等待 qraft.status() 期间其他监听器（如子代理
+ *    持久事件）可能追加消息，尾部未必是 user 气泡；
  *  - 恢复中断回合（#740）：无乐观 user 气泡，且 handleResumeTurn 已移除
  *    中断卡——恢复卡片（resumeMsg）并追加重登引导，避免上下文丢失；
- *  - 时间戳不匹配且无恢复卡片（会话已切换等）：原样返回。
+ *  - 找不到匹配且无恢复卡片（会话已切换等）：原样返回。
  */
 export function applyReloginIntercept(
   prev: Message[],
   userMsg: Message,
   resumeMsg: Message | null
 ): Message[] {
-  const last = prev[prev.length - 1];
-  if (last?.timestamp === userMsg.timestamp) {
-    return [...prev.slice(0, -1), createProviderConfigMessage(RELOGIN_INTERCEPT_TEXT, 'login')];
+  let userIndex = -1;
+  for (let i = prev.length - 1; i >= 0; i -= 1) {
+    if (prev[i].role === 'user' && prev[i].timestamp === userMsg.timestamp) {
+      userIndex = i;
+      break;
+    }
+  }
+  if (userIndex >= 0) {
+    return [
+      ...prev.slice(0, userIndex),
+      createProviderConfigMessage(RELOGIN_INTERCEPT_TEXT, 'login'),
+      ...prev.slice(userIndex + 1),
+    ];
   }
   if (resumeMsg) {
     return [...prev, resumeMsg, createProviderConfigMessage(RELOGIN_INTERCEPT_TEXT, 'login')];

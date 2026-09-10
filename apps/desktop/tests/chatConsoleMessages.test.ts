@@ -486,4 +486,16 @@ describe('applyReloginIntercept (平台登录失效拦截)', () => {
     expect(next).toHaveLength(2);
     expect(next[1].role).toBe('error');
   });
+
+  it('等待预检期间其他监听器追加消息：就地替换 user 气泡并保留后续消息', () => {
+    // qraft.status() 等待期间子代理等监听器可能把消息追加到 user 气泡之后，
+    // 尾部不再匹配——必须按 role+时间戳定位原气泡就地替换（CodeRabbit #1016）。
+    const laterMsg = { role: 'assistant' as const, content: '子代理持久事件', timestamp: 43 };
+    const next = applyReloginIntercept([prevMsg, userMsg, laterMsg], userMsg, null);
+    expect(next).toHaveLength(3);
+    expect(next[0]).toBe(prevMsg);
+    expect(next[1].role).toBe('error');
+    expect(next[1].content).toBe(RELOGIN_INTERCEPT_TEXT);
+    expect(next[2]).toBe(laterMsg);
+  });
 });
