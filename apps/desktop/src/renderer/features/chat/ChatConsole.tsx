@@ -31,7 +31,7 @@ import { Tooltip } from '../../components/ui/Tooltip';
 import { ContextMenu, type ContextMenuAction } from '../../components/ContextMenu';
 import { cn } from '../../lib/utils';
 import { Modal } from '../../components/shared';
-import { formatRelativeTime } from '../../lib/formatTime';
+import { formatRelativeTime, formatChatTime } from '../../lib/formatTime';
 import {
   ExecutionPolicySelector,
   type ExecutionPolicy,
@@ -621,20 +621,22 @@ function getDocIcon(name: string) {
   }
 }
 
-/** 消息时间戳(ChatGPT 式):今天 → "今天 HH:MM",昨天 → "昨天 HH:MM",更早 → "M月D日 HH:MM" */
-function formatChatTime(timestamp?: number | string | null): string {
-  if (timestamp === undefined || timestamp === null) return '';
-  const value = typeof timestamp === 'number' ? timestamp : Date.parse(String(timestamp));
-  if (!Number.isFinite(value)) return '';
-  const d = new Date(value);
-  const now = new Date();
-  const hm = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
-  const startOfDay = (x: Date) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
-  const dayDiff = Math.round((startOfDay(now) - startOfDay(d)) / 86400000);
-  if (dayDiff <= 0) return `今天 ${hm}`;
-  if (dayDiff === 1) return `昨天 ${hm}`;
-  return `${d.getMonth() + 1}月${d.getDate()}日 ${hm}`;
-}
+/** 用户消息时间标签——自身维护分钟级 tick,避免 clockTick 传遍整棵
+ *  MessageBubble 树导致全局 memo 失效(外部审查 P2)。 */
+const TimestampLabel = memo(function TimestampLabel({ timestamp }: { timestamp: number }) {
+  const [, forceTick] = useState(0);
+  useEffect(() => {
+    const timer = window.setInterval(() => forceTick((n) => n + 1), 60_000);
+    return () => window.clearInterval(timer);
+  }, []);
+  const label = formatChatTime(timestamp);
+  if (!label) return null;
+  return (
+    <div className="w-full text-center pt-1 pb-0.5">
+      <span className="text-[11px] leading-none text-[var(--text-faint)] select-none">{label}</span>
+    </div>
+  );
+});
 
 function relativeTimeLabel(timestamp?: number | string | null, now = Date.now()): string {
   if (timestamp === undefined || timestamp === null) return '尚未更新';
@@ -4146,6 +4148,9 @@ export function ChatConsole({
    *  session's pending send.  Comparing the stored id against this closure's
    *  own id lets a superseded / re-sent / cancelled send know it lost the turn. */
   const pendingSendIdsRef = useRef<Map<string, number>>(new Map());
+  /** 编辑重答原子化(#828):handleSend 同步段的接受结果——
+   *  被 pending guard 等预检拒绝时标 'rejected',handleEdit 据此回滚截断。 */
+  const editSendOutcomeRef = useRef<'accepted' | 'rejected' | null>(null);
   /** Monotonic id for pendingSendIdsRef — distinguishes "this send" from any
    *  newer send that started for the same session. */
   const sendSeqRef = useRef(0);
@@ -4206,6 +4211,7 @@ export function ChatConsole({
     const atts = payload?.attachments ?? attachments;
     if (!text && atts.length === 0 && !_resumeId) {
       retryPayloadRef.current = null;
+      editSendOutcomeRef.current = 'rejected';
       return;
     }
     // 复杂问题 + 极速模式 → 提示建议切 🧠 深度研究（不阻断，可忽略）
@@ -4223,6 +4229,7 @@ export function ChatConsole({
       // A blocked regenerate must not leak its payload into the next manual
       // send — clear it before bailing (CodeRabbit #681).
       retryPayloadRef.current = null;
+      editSendOutcomeRef.current = 'rejected';
       return;
     }
     // Retry/regenerate: nudge the model to answer differently — the stored
@@ -4272,6 +4279,7 @@ export function ChatConsole({
 
     const wasStreaming = streaming;
     retryPayloadRef.current = null;
+    editSendOutcomeRef.current = 'accepted';
     // Unique id for THIS send, stored in the pending map.  A later send for
     // the same session overwrites it, so this closure can tell it lost the
     // turn (its provider check must not proceed).
@@ -6275,22 +6283,36 @@ export function ChatConsole({
   );
 
   /* 编辑用户消息并重新回答(#828 学 Hermes edit → rewind → resubmit):
-     截断到该消息之前,用编辑后的文本重新发送 —— 复用 regenerate 机制 */
+     截断到该消息之前,用编辑后的文本重新发送 —— 复用 regenerate 机制。
+     原子化(外部审查 P1):发送前预检 pending guard;handleSend 若在同步段
+     被拒(editSendOutcomeRef='rejected'),回滚截断恢复原消息列表。 */
   const handleEdit = useCallback(
     async (original: Message, newText: string) => {
       if (streaming) return;
-      const text = newText.trim();
-      if (!text) return;
+      // 预检:同 session 有 pending 发送时不得截断(截断后必然被 handleSend 拒绝)
+      if (pendingSendIdsRef.current.has(currentSessionRef.current)) return;
+      const text = newText;
+      // 仅用 trim 判空,不改变实际 payload(保留用户刻意换行/空格)
+      if (!text.trim()) return;
       const msgs = messagesRef.current;
       const idx = msgs.indexOf(original);
       if (idx < 0) return;
+      const snapshot = msgs;
       retryPayloadRef.current = {
         text,
         attachments: original.attachments ?? [],
         retry: true,
       };
       setMessages((prev) => prev.slice(0, idx));
-      requestAnimationFrame(() => handleSendRef.current());
+      requestAnimationFrame(() => {
+        editSendOutcomeRef.current = null;
+        handleSendRef.current();
+        // handleSend 的同步段此时已执行完:被拒 → 回滚,避免"截断成功、重发失败"
+        if (editSendOutcomeRef.current === 'rejected') {
+          retryPayloadRef.current = null;
+          setMessages(snapshot);
+        }
+      });
     },
     [streaming]
   );
@@ -6946,7 +6968,6 @@ export function ChatConsole({
                         hideHeader={group.kind === 'reply-content'}
                         sessionKey={sessionKey}
                         turnIndex={i}
-                        clockTick={clockTick}
                         onEdit={handleEdit}
                         execOutputs={execOutputs}
                         inlineExecOutput={inlineExecOutput}
@@ -8262,8 +8283,6 @@ interface MessageBubbleProps {
   turnIndex?: number;
   /** Copy-feedback index — chatGroups index; chain rows reuse the group's. */
   copyIdx?: number;
-  /** Minute tick — re-renders memoized bubbles so HH:MM timestamps refresh. */
-  clockTick?: number;
   /** Timestamp of the pending optimistic user bubble (issue #364) — the
    *  spinner shows only on the bubble whose timestamp matches, so a session
    *  switch never shows it on another session's messages. */
@@ -8325,7 +8344,6 @@ const MessageBubble = memo(function MessageBubble({
   searchResults,
   turnIndex,
   copyIdx,
-  clockTick,
   sending,
   onEdit,
   onResume,
@@ -8893,14 +8911,9 @@ const MessageBubble = memo(function MessageBubble({
 
   return (
     <>
-      {/* 用户消息时间戳——居中显示在上一回答与本提问之间(ChatGPT 式) */}
-      {isUser && formatChatTime(msg.timestamp) && (
-        <div className="w-full text-center pt-1 pb-0.5">
-          <span className="text-[11px] leading-none text-[var(--text-faint)] select-none">
-            {formatChatTime(msg.timestamp)}
-          </span>
-        </div>
-      )}
+      {/* 用户消息时间戳——居中显示在上一回答与本提问之间(ChatGPT 式),
+          组件自维护分钟 tick,不牵动整棵 memo 气泡树 */}
+      {isUser && <TimestampLabel timestamp={msg.timestamp} />}
       <ContextMenu items={contextItems}>
         {({ onContextMenu }) => (
           <div
@@ -9427,7 +9440,6 @@ function areMessageBubblePropsEqual(a: MessageBubbleProps, b: MessageBubbleProps
     a.sessionKey === b.sessionKey &&
     a.turnIndex === b.turnIndex &&
     a.copyIdx === b.copyIdx &&
-    a.clockTick === b.clockTick &&
     a.execOutputs === b.execOutputs &&
     a.inlineExecOutput === b.inlineExecOutput &&
     a.isLast === b.isLast &&
