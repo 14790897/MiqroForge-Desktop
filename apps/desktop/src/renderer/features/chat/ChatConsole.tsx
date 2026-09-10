@@ -2389,6 +2389,23 @@ function splitCachedMessages(events: InFlightEvent[]): {
 
 /* ─── Main component ─────────────────────────────────────────────── */
 
+/** #989 标题区右侧三件操作（工作目录 / 分享 / 文件面板）共用的一套 ghost 规格：
+ *  28px 高、7px 圆角、11px 中黑、无边框无底色，只有 hover 才浮出浅底。此前三者
+ *  是三种视觉（橙描边胶囊 / 灰描边分体按钮 / 裸图标），同规格后标题重新成为这一行
+ *  的视觉第一，压缩态也天然一致。 */
+const HDR_CTL =
+  'shrink-0 inline-flex items-center justify-center h-7 rounded-[7px] text-[11px] font-medium ' +
+  'text-[var(--text-muted)] transition-colors hover:bg-[var(--surface-muted)] ' +
+  'disabled:opacity-45 disabled:hover:bg-transparent';
+/** 带文字的形态（宽版）。 */
+const HDR_CTL_LABEL = `${HDR_CTL} gap-1 px-[9px]`;
+/** 纯图标形态（压缩态，以及文件面板按钮）。 */
+const HDR_CTL_ICON = `${HDR_CTL} w-7 px-0`;
+/** 分享右侧的折叠箭头：贴住分享按钮，所以只有 20px 宽。 */
+const HDR_CTL_CARET =
+  'shrink-0 inline-flex items-center justify-center h-7 w-5 rounded-[7px] ' +
+  'text-[var(--text-muted)] transition-colors hover:bg-[var(--surface-muted)]';
+
 /** Upper bound for waiting on a superseded turn's chat.send to settle after
  *  abort(). Normal aborts resolve in well under a second (the send promise
  *  settles at the abort terminal event); the bound only guards against a
@@ -6531,8 +6548,6 @@ export function ChatConsole({
           : '分享任务';
 
   const shareButtonTone = shareStatus === 'idle' ? 'var(--text-muted)' : 'var(--success)';
-  const shareButtonBackground = 'var(--surface-muted)';
-  const shareButtonBorder = 'var(--border-subtle)';
 
   return (
     <div
@@ -6747,7 +6762,7 @@ export function ChatConsole({
                 <h2
                   role="button"
                   tabIndex={0}
-                  className="text-[16px] font-semibold truncate leading-[1.35] text-text cursor-pointer hover:text-[var(--accent)] transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)] rounded max-w-[220px]"
+                  className="text-[16px] font-semibold truncate leading-[1.35] text-text cursor-pointer hover:text-[var(--accent)] transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)] rounded"
                   data-testid="chat-title"
                   title="\u70b9\u51fb\u91cd\u547d\u540d"
                   onClick={() => setEditingTitle(true)}
@@ -6761,7 +6776,10 @@ export function ChatConsole({
                   {sessionTitle}
                 </h2>
               )}
-              <span className="tag-inprogress shrink-0">{'\u8fdb\u884c\u4e2d'}</span>
+              {/* \u300c\u8fdb\u884c\u4e2d\u300d\u53ea\u5728\u56de\u5408\u771f\u7684\u5728\u8dd1\u65f6\u51fa\u73b0\u2014\u2014\u4e4b\u524d\u662f\u786c\u7f16\u7801\u5e38\u663e\uff0c\u4f1a\u8bdd\u7a7a\u95f2
+                  \u4e5f\u6302\u7740\u72b6\u6001\u6807\u7b7e\uff08E2E \u7684 waitForResponseComplete \u4e00\u76f4\u6309\u300c\u56de\u5408\u7ed3\u675f
+                  \u540e\u5e94\u9690\u85cf\u300d\u5199\u7684\uff0c\u53ea\u662f\u88ab try/catch \u541e\u4e86\uff09\u3002 */}
+              {streaming && <span className="tag-inprogress shrink-0">{'\u8fdb\u884c\u4e2d'}</span>}
               {/* \u66f4\u65b0\u65f6\u95f4\uff1a\u653e\u5728\u5de5\u4f5c\u76ee\u5f55\u80f6\u56ca\u524d\u9762\u3001\u968f\u4f1a\u8bdd\u8eab\u4efd\u5c55\u793a\uff08\u53f3\u4fa7\u53ea\u7559\u7ed9\u64cd\u4f5c\uff09\u3002
                   \u53ea\u9732\u65f6\u95f4\uff0c\u5b8c\u6574 \u6587\u4ef6/\u63d2\u4ef6 \u7edf\u8ba1\u6536\u8fdb tooltip\u3002 */}
               {messages.length > 0 && (
@@ -6786,6 +6804,9 @@ export function ChatConsole({
             {/* \u5bf9\u8bdd\u6001\u5de5\u4f5c\u76ee\u5f55\u80f6\u56ca\uff08B \u65b9\u6848\uff09\uff1a\u4f1a\u8bdd\u5df2\u4ea7\u751f\u6d88\u606f\u540e\u5728\u5b50\u6807\u9898\u680f\u5c55\u793a\u5f53\u524d\u76ee\u5f55\uff0c
                   \u7a7a\u6001\u4e0d\u6e32\u67d3\uff08\u6b22\u8fce\u9875\u80f6\u56ca\u72ec\u7acb\u5728\u8f93\u5165\u6846\u4e0a\u65b9\uff09\u3002\u70b9\u51fb\u6362\u76ee\u5f55 \u2192 \u73b0\u6709 picker\uff0c
                   \u9009\u62e9\u5373\u5efa\u7ed1\u5230\u65b0\u76ee\u5f55\u7684\u4f1a\u8bdd\u3002 */}
+            {/* 对话态工作目录胶囊（#989 A 方案「安静工具条」）：会话已产生消息后在子标题栏
+                展示当前目录，空态不渲染（欢迎页胶囊独立在输入框上方）。点击换目录 → 现有
+                picker，选择即建绑到新目录的会话。 */}
             {messages.length > 0 && (
               <button
                 type="button"
@@ -6793,93 +6814,75 @@ export function ChatConsole({
                   if (!streaming) void handleOpenWorkspacePicker(e.currentTarget);
                 }}
                 disabled={streaming}
-                title={
-                  workspace
-                    ? `\u5de5\u4f5c\u76ee\u5f55\uff1a${workspace}`
-                    : '\u9ed8\u8ba4\u5de5\u4f5c\u76ee\u5f55'
-                }
-                aria-label="\u5de5\u4f5c\u76ee\u5f55"
+                title={workspace ? `工作目录：${workspace}` : '默认工作目录'}
+                aria-label="工作目录"
                 data-testid="chat-header-workspace-capsule"
-                className={cn(
-                  'shrink-0 inline-flex items-center rounded-md border transition-colors disabled:opacity-45',
-                  subHeaderCompact
-                    ? 'h-6 w-6 justify-center'
-                    : 'gap-1 px-2 py-[3px] text-[11px] font-medium',
-                  workspace ? 'border-[var(--accent)]' : 'border-[var(--border-subtle)]'
-                )}
+                className={cn(subHeaderCompact ? HDR_CTL_ICON : `${HDR_CTL_LABEL} min-w-0`)}
                 style={{
-                  background: workspace
-                    ? 'color-mix(in srgb, var(--surface-muted) 45%, var(--accent-soft))'
-                    : 'var(--surface-muted)',
-                  color: workspace ? 'var(--accent)' : 'var(--text-muted)',
+                  // 压缩态只剩一个文件夹图标：已选目录用正文色、默认目录用更浅的 faint，
+                  // 两种状态仍能分辨（不再靠橙色描边 + 橙点这一套）。
+                  color: subHeaderCompact
+                    ? workspace
+                      ? 'var(--text)'
+                      : 'var(--text-faint)'
+                    : workspace
+                      ? 'var(--text-muted)'
+                      : 'var(--text-faint)',
                 }}
               >
-                <Folder
-                  size={12}
-                  className="shrink-0"
-                  style={{ color: workspace ? 'var(--accent)' : 'var(--text-muted)' }}
-                />
+                <Folder size={12} className="shrink-0" />
                 {!subHeaderCompact && (
                   <span className="truncate max-w-[170px]" data-testid="chat-header-workspace-path">
-                    {workspace ?? '\u9ed8\u8ba4\u5de5\u4f5c\u76ee\u5f55'}
+                    {workspace ?? '默认工作目录'}
                   </span>
                 )}
-                {!subHeaderCompact && workspace && (
-                  <span
-                    className="shrink-0 w-[5px] h-[5px] rounded-full"
-                    style={{ background: 'var(--accent)' }}
-                  />
-                )}
-                {!subHeaderCompact && <ChevronDown size={12} className="shrink-0 opacity-70" />}
+                {!subHeaderCompact && <ChevronDown size={12} className="shrink-0 opacity-50" />}
               </button>
             )}
-            <div
-              className="flex shrink-0 items-stretch overflow-hidden rounded-md shadow-[0_1px_0_rgba(18,18,18,0.05)]"
-              style={{
-                background: shareButtonBackground,
-                border: `1px solid ${shareButtonBorder}`,
-              }}
-            >
-              <Tooltip content={shareButtonLabel}>
-                <button
-                  onClick={handleCopyTaskSummary}
-                  className={cn(
-                    'flex items-center justify-center gap-1 transition-colors hover:brightness-95',
-                    subHeaderCompact
-                      ? 'h-6 w-6'
-                      : 'px-2 py-[3px] text-[11px] font-medium whitespace-nowrap'
-                  )}
-                  style={{
-                    color: shareButtonTone,
-                    cursor: 'pointer',
-                  }}
-                  title={shareButtonLabel}
-                  aria-label={shareButtonLabel}
-                >
-                  {shareStatus === 'idle' ? <Send size={12} /> : <Check size={12} />}
-                  {!subHeaderCompact && <span>{shareButtonLabel}</span>}
-                </button>
-              </Tooltip>
+            {/* 分享：宽版是「图标 + 文字 + 折叠箭头」，压缩态只剩一个图标——右键仍可打开
+                分享菜单，不会因为收起而丢功能。 */}
+            <ContextMenu items={shareMenuItems} minWidth={180}>
+              {({ onContextMenu }) => (
+                <Tooltip content={shareButtonLabel}>
+                  <button
+                    onClick={handleCopyTaskSummary}
+                    onContextMenu={subHeaderCompact ? onContextMenu : undefined}
+                    className={subHeaderCompact ? HDR_CTL_ICON : HDR_CTL_LABEL}
+                    style={{
+                      color: shareButtonTone,
+                      cursor: 'pointer',
+                    }}
+                    title={shareButtonLabel}
+                    aria-label={shareButtonLabel}
+                  >
+                    {shareStatus === 'idle' ? <Send size={12} /> : <Check size={12} />}
+                    {!subHeaderCompact && (
+                      <span className="whitespace-nowrap">{shareButtonLabel}</span>
+                    )}
+                  </button>
+                </Tooltip>
+              )}
+            </ContextMenu>
+            {!subHeaderCompact && (
               <ContextMenu items={shareMenuItems} minWidth={180}>
                 {({ onContextMenu }) => (
                   <Tooltip content="复制摘要、导出 Markdown 或复制上下文">
                     <button
                       onClick={onContextMenu}
-                      className="flex w-6 items-center justify-center transition-colors hover:brightness-95"
+                      className={HDR_CTL_CARET}
                       style={{
-                        borderLeft: `1px solid ${shareButtonBorder}`,
-                        color: shareStatus === 'idle' ? 'var(--text-muted)' : 'var(--success)',
+                        color: shareStatus === 'idle' ? 'var(--text-faint)' : 'var(--success)',
                       }}
                       title="更多分享方式"
                       aria-label="更多分享方式"
                       aria-haspopup="menu"
                     >
-                      <ChevronDown size={12} />
+                      <ChevronDown size={11} />
                     </button>
                   </Tooltip>
                 )}
               </ContextMenu>
-            </div>
+            )}
             <Tooltip content="显示或隐藏文件面板">
               <button
                 onClick={() => {
@@ -6888,12 +6891,12 @@ export function ChatConsole({
                   panelSync.request(opening ? panelWidth : 0);
                   setPanelOpen(opening);
                 }}
-                className="flex h-6 w-6 items-center justify-center rounded hover:bg-[var(--surface-muted)] transition-colors shrink-0 ml-1"
+                className={cn(HDR_CTL_ICON, 'ml-1')}
                 title="显示或隐藏文件面板"
                 aria-label="显示或隐藏文件面板"
                 data-testid="toggle-assets-panel-btn"
               >
-                <LayoutGrid size={12} style={{ color: 'var(--text-muted)' }} />
+                <LayoutGrid size={13} />
               </button>
             </Tooltip>
           </div>
@@ -7315,67 +7318,39 @@ export function ChatConsole({
               <ConfirmCardArea />
 
               {/* 欢迎态工作目录胶囊：独立于输入框、在它正上方（同宽左对齐，不嵌进卡内）。
-                  首条消息后隐藏——会话进行中改由子标题栏胶囊（B）承接。 */}
+                  首条消息后隐藏——会话进行中改由子标题栏胶囊承接。与子标题栏用同一套
+                  ghost 规格（28px / 圆角 7 / 11px），只是这里常驻一层浅底色——空态下它
+                  是这一屏唯一的目录入口，全透明会看不见。整体是一个按钮：原先「外层
+                  div role=button 里再嵌一个 button」是嵌套交互元素，读屏会念成两个控件。 */}
               {historyLoaded && messages.length === 0 && (
                 <div className="flex items-center pb-2.5" data-testid="inline-workspace-selector">
-                  <div
-                    role="button"
-                    tabIndex={0}
+                  <button
+                    type="button"
                     aria-label="工作目录"
                     title={workspace ? `工作目录：${workspace}` : '默认工作目录'}
                     onClick={(e) => {
                       if (!streaming) void handleOpenWorkspacePicker(e.currentTarget);
                     }}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter' || e.key === ' ') {
-                        e.preventDefault();
-                        if (!streaming) void handleOpenWorkspacePicker(e.currentTarget);
-                      }
-                    }}
+                    disabled={streaming}
+                    data-testid="inline-workspace-change-btn"
                     className={cn(
-                      'inline-flex items-center gap-1 rounded-md px-2 py-[3px] text-[11px] font-medium border cursor-pointer select-none transition-colors',
-                      workspace ? 'border-[var(--accent)]' : 'border-[var(--border-subtle)]'
+                      HDR_CTL_LABEL,
+                      'min-w-0 bg-[var(--surface-muted)] hover:bg-[var(--surface-hover)]'
                     )}
                     style={{
-                      background: workspace
-                        ? 'color-mix(in srgb, var(--surface-muted) 45%, var(--accent-soft))'
-                        : 'var(--surface-muted)',
-                      color: workspace ? 'var(--accent)' : 'var(--text-muted)',
+                      color: workspace ? 'var(--text-muted)' : 'var(--text-faint)',
                     }}
                   >
-                    <Folder
-                      size={12}
-                      className="shrink-0"
-                      style={{ color: workspace ? 'var(--accent)' : 'var(--text-muted)' }}
-                    />
+                    <Folder size={12} className="shrink-0" />
                     <span
-                      className="hidden md:inline truncate max-w-[220px]"
+                      className="truncate max-w-[220px]"
                       title={workspace ?? undefined}
                       data-testid="inline-workspace-path"
                     >
                       {workspace ?? '默认工作目录'}
                     </span>
-                    {workspace && (
-                      <span
-                        className="hidden md:inline shrink-0 w-[5px] h-[5px] rounded-full"
-                        style={{ background: 'var(--accent)' }}
-                      />
-                    )}
-                    <button
-                      type="button"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        if (!streaming)
-                          void handleOpenWorkspacePicker(e.currentTarget.parentElement);
-                      }}
-                      disabled={streaming}
-                      aria-label="更换工作目录"
-                      data-testid="inline-workspace-change-btn"
-                      className="flex shrink-0 items-center justify-center rounded p-0.5 opacity-70 hover:opacity-100 hover:text-[var(--text-muted)] disabled:opacity-40"
-                    >
-                      <ChevronDown size={12} />
-                    </button>
-                  </div>
+                    <ChevronDown size={12} className="shrink-0 opacity-50" />
+                  </button>
                 </div>
               )}
 
@@ -9414,19 +9389,28 @@ function WorkspacePickerMenu({
     return { left: anchor.left, top: anchor.bottom + 6 };
   });
 
+  // 摆放：先在胶囊下方就位，渲染后按视口收边。用 ResizeObserver 而不是把尺寸塞进
+  // deps——「最近使用」是异步拉回来的，面板高度在打开后还会长一次；只在挂载时量
+  // 一次会漏掉那次增长，面板会从胶囊下方一路长到视口外，底下几行点不到。
   useEffect(() => {
     const node = panelRef.current;
     if (!node || !anchor) return;
-    const rect = node.getBoundingClientRect();
-    const vw = document.documentElement.clientWidth;
-    const vh = document.documentElement.clientHeight;
-    const left = Math.max(8, Math.min(anchor.left, vw - rect.width - 8));
-    const below = anchor.bottom + 6;
-    const above = anchor.top - rect.height - 6;
-    // 下方放不下再整体翻到胶囊上方
-    const top = below + rect.height <= vh - 8 || above < 8 ? below : Math.max(8, above);
-    setPos((p) => (p.left === left && p.top === top ? p : { left, top }));
-  }, [anchor, pos]);
+    const place = () => {
+      const rect = node.getBoundingClientRect();
+      const vw = document.documentElement.clientWidth;
+      const vh = document.documentElement.clientHeight;
+      const left = Math.max(8, Math.min(anchor.left, vw - rect.width - 8));
+      const below = anchor.bottom + 6;
+      const above = anchor.top - rect.height - 6;
+      // 下方放不下再整体翻到胶囊上方
+      const top = below + rect.height <= vh - 8 || above < 8 ? below : Math.max(8, above);
+      setPos((p) => (p.left === left && p.top === top ? p : { left, top }));
+    };
+    place();
+    const ro = new ResizeObserver(place);
+    ro.observe(node);
+    return () => ro.disconnect();
+  }, [anchor]);
 
   // Esc / 滚动 / 窗口尺寸变化时收起
   useEffect(() => {

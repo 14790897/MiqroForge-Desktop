@@ -48,8 +48,13 @@ function makeHarness() {
     },
     applyWidth: (width) => widths.push(width),
     commitWidth: (width) => committed.push(width),
-    schedule: (cb) => scheduled.push(cb) as unknown as number,
-    cancel: () => {},
+    schedule: (cb) => {
+      scheduled.push(cb);
+      return scheduled.length; // 句柄 = 下标 + 1
+    },
+    cancel: (handle) => {
+      if (handle > 0) scheduled[handle - 1] = () => {};
+    },
   });
   /** 跑掉排队的 rAF 回调。 */
   const flush = () => scheduled.splice(0).forEach((cb) => cb());
@@ -187,11 +192,24 @@ describe('panelWindowSync 拖拽队列', () => {
     expect(h.sync.applied).toBe(0);
   });
 
-  it('dispose 后不再发请求', () => {
+  it('dispose 取消已排队的请求', () => {
     const h = makeHarness();
-    h.sync.dispose();
     h.sync.request(300);
+    h.sync.dispose(); // 卸载时撤销排队中的 rAF
     h.flush();
     expect(h.sent).toEqual([]);
+  });
+
+  it('dispose 之后实例仍可复用（React StrictMode 的 mount → 卸载 → 再 mount）', async () => {
+    // dev 下 main.tsx 常开 StrictMode，effect 会被跑成 mount → cleanup → mount。
+    // dispose 若置永久停用标志，第二次挂载后面板就再也不跟随窗口了。
+    const h = makeHarness();
+    h.sync.dispose();
+    h.sync.beginDrag({ clientX: 500, width: 280 });
+    h.sync.dragTo(360);
+    h.flush();
+    expect(h.sent).toEqual([80]);
+    await h.respond(0, { applied: 80 });
+    expect(h.widths).toEqual([360]);
   });
 });

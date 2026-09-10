@@ -81,7 +81,7 @@ export interface PanelWindowSync {
   endDrag(): void;
   /** 与拖拽无关的窗口加宽请求（开/关面板）。 */
   request(extra: number): void;
-  /** 停掉队列（组件卸载）。 */
+  /** 停掉排队的请求并清掉拖拽锚点（组件卸载）。 */
   dispose(): void;
 }
 
@@ -94,7 +94,6 @@ export function createPanelWindowSync(options: PanelWindowSyncOptions): PanelWin
     cancel = (handle) => cancelAnimationFrame(handle),
   } = options;
 
-  let cancelled = false;
   let raf = 0;
   /** 待发的窗口加宽目标（NaN = 无）。 */
   let pending = NaN as number;
@@ -131,7 +130,7 @@ export function createPanelWindowSync(options: PanelWindowSyncOptions): PanelWin
   };
 
   const maybeQueue = () => {
-    if (cancelled || raf || inFlight) return;
+    if (raf || inFlight) return;
     raf = schedule(() => {
       raf = 0;
       const target = pending;
@@ -210,9 +209,14 @@ export function createPanelWindowSync(options: PanelWindowSyncOptions): PanelWin
       maybeQueue();
     },
     dispose() {
-      cancelled = true;
+      // 只停掉**当前排队**的请求 + 撤掉锚点，不置永久停用标志：React StrictMode
+      // （dev 下 main.tsx 常开）会把 effect 跑成 mount → 卸载 → 再 mount，永久
+      // 停用会让第二次挂载之后面板再也不跟随窗口。真正的卸载之后也不会再有人
+      // 调 request/dragTo（事件监听随组件一起拆掉），因此无需额外熔断。
       if (raf) cancel(raf);
       raf = 0;
+      pending = NaN;
+      pendingWidth = NaN;
       anchor = null;
     },
   };
