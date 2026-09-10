@@ -1,8 +1,4 @@
-"""Tool runtime — the sole adapter for single and parallel tool execution.
-
-All tool calls (single and concurrent batches) go through this adapter,
-which creates ToolExecutionContext and routes through ToolOrchestrator.
-"""
+"""Tool runtime — the sole adapter for single and parallel tool execution."""
 
 from __future__ import annotations
 
@@ -12,10 +8,6 @@ from typing import Any
 
 from miqi.execution.orchestrator import OrchestrationResult, ToolExecutionContext
 
-
-# Interactive confirmations are transaction boundaries. A provider response
-# may contain a confirmation call and sibling mutations; no mutation may start
-# before the confirmation has explicitly been approved.
 _INTERACTIVE_CONFIRM_TOOLS = frozenset({
     "ask_user_confirm_card",
     "ask_user_plan_confirm",
@@ -32,7 +24,6 @@ class ToolRuntime:
         self._orchestrator = orchestrator
 
     async def execute_one(self, turn: Any, tool_call: Any) -> ToolExecutionContext:
-        """Execute one tool call through the orchestrator."""
         ctx = ToolExecutionContext(
             tool_name=tool_call.name,
             tool_call_id=tool_call.id,
@@ -55,20 +46,20 @@ class ToolRuntime:
 
     @staticmethod
     def _confirmation_approved(ctx: ToolExecutionContext) -> bool:
-        """Only a structured, explicit confirm result releases siblings."""
         if not isinstance(ctx.result, str):
             return False
         try:
             payload = json.loads(ctx.result)
         except (TypeError, ValueError):
             return False
-        if not isinstance(payload, dict):
-            return False
-        return payload.get("status") == "confirmed" and payload.get("choice_id") == "confirm"
+        return (
+            isinstance(payload, dict)
+            and payload.get("status") == "confirmed"
+            and payload.get("choice_id") == "confirm"
+        )
 
     @staticmethod
-    def _blocked_context(turn: Any, tool_call: Any, reason: str = "未执行：前置确认未获用户明确批准。") -> ToolExecutionContext:
-        """Build a non-executed result for a tool blocked by an interaction gate."""
+    def _blocked_context(turn: Any, tool_call: Any, reason: str) -> ToolExecutionContext:
         return ToolExecutionContext(
             tool_name=tool_call.name,
             tool_call_id=tool_call.id,
@@ -85,7 +76,6 @@ class ToolRuntime:
 
     @staticmethod
     def _is_mutating_tool(tool_name: str) -> bool:
-        """Treat unknown tools conservatively; reads may continue after a rejected plan."""
         try:
             from miqi.execution.task_policy import tool_risk
             return tool_risk(tool_name) >= 2
@@ -93,38 +83,62 @@ class ToolRuntime:
             return True
 
     async def execute_many(self, turn: Any, tool_calls: list[Any]) -> list[ToolExecutionContext]:
-        """Execute a batch while serializing confirmation boundaries."""
         if not tool_calls:
             return []
 
-        confirmation_calls = [
-            call for call in tool_calls if call.name in _INTERACTIVE_CONFIRM_TOOLS
-        ]
-        sibling_calls = [
-            call for call in tool_calls if call.name not in _INTERACTIVE_CONFIRM_TOOLS
-        ]
+        confirmation_calls = [c for c in tool_calls if c.name in _INTERACTIVE_CONFIRM_TOOLS]
+        sibling_calls = [c for c in tool_calls if c.name not in _INTERACTIVE_CONFIRM_TOOLS]
 
-        # A rejected/modified plan closes the mutation gate for the rest of the
-        # turn. Read-only inspection is still allowed so the agent can revise a
-        # plan intelligently, but another write/exec cannot sneak through in a
-        # later model round without a fresh explicit plan confirmation.
         plan_gate_blocked = bool(getattr(turn, "_plan_gate_blocked", False))
-        if not confirmation_calls and plan_gate_blocked:
-            contexts = [
+        adjustment = str(getattr(turn, "_plan_adjustment_pending", "") or "").strip()
+
+        # A harness-generated plan was adjusted before the model had a chance
+        # to produce a new plan. The current model batch belongs to the old
+        # plan, so reads may inspect state but mutations must not run. Returning
+        # the feedback as a tool result makes the next model round aware of why.
+        if adjustment and plan_gate_blocked and not confirmation_calls:
+            reason = (
+                "未执行：用户刚刚要求调整任务方案。"
+                f"用户意见：{adjustment}\n"
+                "请基于这条意见重新规划，并在执行任何修改前获得新的计划确认。"
+            )
+            contexts: list[ToolExecutionContext | None] = []
+            for call in tool_calls:
+                if self._is_mutating_tool(call.name):
+                    contexts.append(self._blocked_context(turn, call, reason))
+                else:
+                    contexts.append(None)
+            executable = [c for c, ctx in zip(tool_calls, contexts) if ctx is None]
+            executable_contexts = await asyncio.gather(
+                *(self.execute_one(turn, c) for c in executable)
+            ) if executable else []
+            by_id: dict[str, ToolExecutionContext] = {}
+            for call, ctx in zip(tool_calls, contexts):
+                if ctx is not None:
+                    by_id[call.id] = ctx
+            for call, ctx in zip(executable, executable_contexts):
+                by_id[call.id] = ctx
+            # The next provider round must be allowed to ask for a fresh plan.
+            setattr(turn, "_plan_confirm_done", False)
+            setattr(turn, "_plan_adjustment_pending", "")
+            return [by_id[call.id] for call in tool_calls]
+
+        # A rejected or modified plan closes the mutation gate for subsequent
+        # rounds. Read-only inspection can continue so the model can revise it.
+        if plan_gate_blocked and not confirmation_calls:
+            contexts: list[ToolExecutionContext | None] = [
                 self._blocked_context(
                     turn,
                     call,
-                    "未执行：任务计划尚未重新获用户明确批准。请先重新提交调整后的计划。"
-                    if self._is_mutating_tool(call.name)
-                    else "",
+                    "未执行：任务计划尚未重新获用户明确批准。请先重新提交调整后的计划。",
                 ) if self._is_mutating_tool(call.name) else None
                 for call in tool_calls
             ]
-            executable = [call for call, ctx in zip(tool_calls, contexts) if ctx is None]
+            executable = [c for c, ctx in zip(tool_calls, contexts) if ctx is None]
             executable_contexts = await asyncio.gather(
-                *[self.execute_one(turn, call) for call in executable]
+                *(self.execute_one(turn, c) for c in executable)
             ) if executable else []
-            by_id = {}
+            by_id: dict[str, ToolExecutionContext] = {}
             for call, ctx in zip(tool_calls, contexts):
                 if ctx is not None:
                     by_id[call.id] = ctx
@@ -133,7 +147,7 @@ class ToolRuntime:
             return [by_id[call.id] for call in tool_calls]
 
         if not confirmation_calls:
-            return await asyncio.gather(*[self.execute_one(turn, call) for call in tool_calls])
+            return await asyncio.gather(*(self.execute_one(turn, call) for call in tool_calls))
 
         confirmation_contexts: list[ToolExecutionContext] = []
         all_confirmed = True
@@ -144,6 +158,7 @@ class ToolRuntime:
             if call.name == "ask_user_plan_confirm":
                 if approved:
                     setattr(turn, "_plan_gate_blocked", False)
+                    setattr(turn, "_plan_adjustment_pending", "")
                 else:
                     setattr(turn, "_plan_gate_blocked", True)
             if not approved:
@@ -152,13 +167,10 @@ class ToolRuntime:
 
         if all_confirmed:
             sibling_contexts = await asyncio.gather(
-                *[self.execute_one(turn, call) for call in sibling_calls]
+                *(self.execute_one(turn, call) for call in sibling_calls)
             )
         else:
-            sibling_contexts = [
-                self._blocked_context(turn, call)
-                for call in sibling_calls
-            ]
+            sibling_contexts = [self._blocked_context(turn, call, "未执行：前置确认未获用户明确批准。") for call in sibling_calls]
 
         by_id = {ctx.tool_call_id: ctx for ctx in [*confirmation_contexts, *sibling_contexts]}
         return [by_id[call.id] for call in tool_calls if call.id in by_id]
