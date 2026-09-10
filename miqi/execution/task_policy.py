@@ -1,54 +1,27 @@
-"""TaskPolicy / ActionPolicy — #646-v2 冻结版（GPT 第二轮评审拍板，2026-08-18）。
+"""Task and action policy for #646.
 
-两个分数**完全分离**（GPT：工具数量≠复杂度，复杂度和风险必须拆开）：
+The product boundary is intentionally small:
 
-1. complexity_score —— 决定是否弹 PlanCard（任务规模 + 阶段）
-    complexity = 0
-    if 1~2 tools:          +0   工具数量阶梯（数量≠复杂度，只是弱信号）
-    if 3~5 tools:          +1
-    if >5 tools:           +2
-    if len(unique(phases))>=2:  +2   阶段跨类型（READ→WRITE 跨轮累计，
-                                     TaskContext.phase_history——GPT 第二轮）
-    if produces_artifact:  +2   产生文件产物
-    if uses_skill:         +3   Skill 执行
-    >= COMPLEXITY_THRESHOLD(4) → Plan Card
-
-    （GPT 第二轮：删除 estimated_duration_min——无 Planner 前是伪信号；
-      删除 multi_stage_reasoning——用 phase_history 替代）
-
-2. action_risk_score —— 决定是否弹 ActionCard（危险动作，永远阻塞）
-    upload:    10
-    delete:    10（分级：临时文件删除由模式放行，破坏性删除确认）
-    payment:   10
-    exec:       5
-    write:      2
-    read:       0
-
-3. mutation gate（GPT 第二轮 P0-2）：PlanCard 确认前——
-    READ_ONLY 工具允许执行；WRITE/EXEC/EXTERNAL 禁止（必须经过 PlanCard）。
-
-Mode 语义（最终冻结表，GPT 第二轮）：
-    Plan      ：PlanCard 展示（非阻塞）、Timeline 无、Action 禁止
-    Manual    ：PlanCard 确认、Timeline 有、Action 确认
-    Edit(默认)：PlanCard 确认、Timeline 有、Action 确认——不看到文件/shell/web 审批
-    Auto      ：无阻塞 Timeline（always visible，complex 定详细度）、Action 确认
+1. Plan is a task-level collaboration decision, not a per-write permission
+   prompt. Explicitly simple tasks should execute directly in Edit mode.
+2. Action confirmation is reserved for high-impact external/destructive
+   actions and is independent from Plan.
+3. Unknown tools are treated conservatively for task classification.
 """
 
 from __future__ import annotations
 
 from enum import IntEnum
+from pathlib import Path
 
 
 class TaskIntentRisk(IntEnum):
-    """工具风险等级（Action Risk 用，GPT 第五轮数值表）。"""
-
     READ_ONLY = 0
-    MODIFY_LOCAL = 2      # write
-    EXECUTE = 5           # exec
-    EXTERNAL_EFFECT = 10  # upload / payment / destructive delete
+    MODIFY_LOCAL = 2
+    EXECUTE = 5
+    EXTERNAL_EFFECT = 10
 
 
-# 工具 → 风险值（Action Guard 依据）
 TOOL_RISK: dict[str, int] = {
     # read = 0
     "web_search": 0,
@@ -61,12 +34,21 @@ TOOL_RISK: dict[str, int] = {
     "grep": 0,
     "memory_search": 0,
     "session_search": 0,
+    "trace_search": 0,
     # write = 2
     "write_file": 2,
     "edit_file": 2,
     "apply_patch": 2,
     "create_doc": 2,
     "append_file": 2,
+    "docx_write": 2,
+    "pptx_write": 2,
+    "xlsx_write": 2,
+    "create_docx": 2,
+    "create_pptx": 2,
+    "create_xlsx": 2,
+    "edit_docx": 2,
+    "append_xlsx": 2,
     # exec = 5
     "exec": 5,
     "run_script": 5,
@@ -86,11 +68,15 @@ TOOL_RISK: dict[str, int] = {
 
 
 def tool_risk(tool_name: str) -> int:
-    # CodeRabbit Major：fail-closed——未注册工具保守非零（未知工具不当只读）
-    return TOOL_RISK.get(tool_name, 1)
+    """Return a conservative task risk for an explicitly classified tool.
+
+    Unknown tools are non-zero so a newly introduced mutating tool cannot be
+    silently treated as read-only by Plan detection. Action confirmation still
+    requires an explicit high-risk classification.
+    """
+    return TOOL_RISK.get(tool_name, 2)
 
 
-# ── 阶段分类（GPT 第二轮：READ/WRITE/EXEC/EXTERNAL，不要 THINK）──
 PHASE_READ = "READ"
 PHASE_WRITE = "WRITE"
 PHASE_EXEC = "EXEC"
@@ -108,12 +94,21 @@ TOOL_PHASE: dict[str, str] = {
     "grep": PHASE_READ,
     "memory_search": PHASE_READ,
     "session_search": PHASE_READ,
+    "trace_search": PHASE_READ,
     # WRITE
     "write_file": PHASE_WRITE,
     "edit_file": PHASE_WRITE,
     "apply_patch": PHASE_WRITE,
     "create_doc": PHASE_WRITE,
     "append_file": PHASE_WRITE,
+    "docx_write": PHASE_WRITE,
+    "pptx_write": PHASE_WRITE,
+    "xlsx_write": PHASE_WRITE,
+    "create_docx": PHASE_WRITE,
+    "create_pptx": PHASE_WRITE,
+    "create_xlsx": PHASE_WRITE,
+    "edit_docx": PHASE_WRITE,
+    "append_xlsx": PHASE_WRITE,
     # EXEC
     "exec": PHASE_EXEC,
     "run_script": PHASE_EXEC,
@@ -124,6 +119,8 @@ TOOL_PHASE: dict[str, str] = {
     "qraft_upload": PHASE_EXTERNAL,
     "delete_file": PHASE_EXTERNAL,
     "delete_dir": PHASE_EXTERNAL,
+    "remove_file": PHASE_EXTERNAL,
+    "rm": PHASE_EXTERNAL,
     "payment": PHASE_EXTERNAL,
     "send_message": PHASE_EXTERNAL,
     "spawn": PHASE_EXTERNAL,
@@ -131,17 +128,14 @@ TOOL_PHASE: dict[str, str] = {
 
 
 def phase_for_tool(tool_name: str) -> str | None:
-    """工具 → 阶段（未知工具返回 None——不计阶段，不弹阶段分）。"""
     return TOOL_PHASE.get(tool_name)
 
 
 def is_mutation_tool(tool_name: str) -> bool:
-    """mutation gate（GPT P0-2）：WRITE/EXEC/EXTERNAL → True（PlanCard 前禁止）。"""
     phase = phase_for_tool(tool_name)
     return phase in (PHASE_WRITE, PHASE_EXEC, PHASE_EXTERNAL)
 
 
-# 工具 → 用户语言（PlanCard 展示行为短语——GPT：绝对不要工具名）
 TOOL_DESCRIPTION: dict[str, str] = {
     "web_search": "搜集资料",
     "web_fetch": "读取网页内容",
@@ -153,14 +147,27 @@ TOOL_DESCRIPTION: dict[str, str] = {
     "grep": "搜索文件内容",
     "memory_search": "检索记忆",
     "session_search": "检索历史会话",
+    "trace_search": "检索执行记录",
     "write_file": "创建文档",
     "edit_file": "修改文件",
     "apply_patch": "修改代码",
     "create_doc": "生成文档",
     "append_file": "追加写入",
+    "docx_write": "创建 Word 文档",
+    "pptx_write": "创建演示文稿",
+    "xlsx_write": "创建表格",
+    "create_docx": "创建 Word 文档",
+    "create_pptx": "创建演示文稿",
+    "create_xlsx": "创建表格",
+    "edit_docx": "修改 Word 文档",
+    "append_xlsx": "追加表格内容",
     "exec": "运行命令",
     "run_script": "运行脚本",
     "python": "执行 Python",
+    "delete_file": "删除文件",
+    "delete_dir": "删除目录",
+    "remove_file": "删除文件",
+    "rm": "删除文件",
     "upload": "上传结果到外部平台",
     "upload_run": "上传运行结果",
     "qraft_upload": "上传到 Qraft",
@@ -171,48 +178,37 @@ TOOL_DESCRIPTION: dict[str, str] = {
 
 
 def describe_tool(tool_name: str) -> str:
-    return TOOL_DESCRIPTION.get(tool_name, tool_name)
+    return TOOL_DESCRIPTION.get(tool_name, "执行操作")
 
 
-# ── ActionPolicy：危险动作确认（ActionCard，永远阻塞）──────────
-ACTION_CONFIRM_THRESHOLD = 10  # upload/delete-destructive/payment/外发
+ACTION_CONFIRM_THRESHOLD = 10
 
 
 def action_risk_score(tool_names: list[str]) -> int:
-    """危险动作风险分（GPT 数值表：upload 10 / delete 10 / exec 5 / write 2）。"""
     if not tool_names:
         return 0
     return max(tool_risk(t) for t in tool_names)
 
 
 def should_confirm_action(tool_name: str, arguments: dict | None = None) -> bool:
-    """危险动作最后确认判定（GPT 第五轮：delete 分级——临时删除放行、
-    破坏性删除确认；其余风险 >= 10 确认；敏感路径强制确认——copy Hermes
-    edit_approval._is_sensitive_auto_approve_path）。"""
     risk = tool_risk(tool_name)
     if risk < ACTION_CONFIRM_THRESHOLD:
         return False
-    # Hermes 敏感路径（.git/.ssh）——即使命中自动批准/删除放行也强制确认
     if _is_sensitive_path(arguments or {}):
         return True
     if tool_name in ("delete_file", "delete_dir", "remove_file", "rm"):
-        # 分级：删除刚刚生成的临时文件 → 模式放行；破坏性删除（目录/通配/递归/关键路径）→ 确认
         if tool_name == "delete_dir":
-            return True  # 目录删除本身即破坏性
+            return True
         return _is_destructive_delete(arguments or {})
     return True
 
 
 def _is_sensitive_path(args: dict) -> bool:
-    """Hermes 敏感路径强制确认（copy edit_approval._is_sensitive_auto_approve_path）：
-    .git/.ssh 目录——即使会话内已批准也总是确认。"""
-    from pathlib import Path as _P
-
     path = str(args.get("path") or args.get("file_path") or args.get("target") or "")
     if not path:
         return False
     try:
-        parts = _P(path).expanduser().parts
+        parts = Path(path).expanduser().parts
     except Exception:
         return False
     lowered = {part.lower() for part in parts}
@@ -220,7 +216,6 @@ def _is_sensitive_path(args: dict) -> bool:
 
 
 def _is_destructive_delete(args: dict) -> bool:
-    """破坏性删除判定：目录删除 / 通配符 / 递归 / 关键路径。"""
     path = str(args.get("path") or args.get("file_path") or "")
     if args.get("recursive") or args.get("rec"):
         return True
@@ -235,7 +230,6 @@ def _is_destructive_delete(args: dict) -> bool:
     return False
 
 
-# ── TaskPolicy：任务复杂度 → 是否弹 PlanCard（GPT 第二轮冻结公式）──
 COMPLEXITY_THRESHOLD = 4
 
 
@@ -246,23 +240,14 @@ def complexity_score(
     produces_artifact: bool = False,
     phase_history: list[str] | None = None,
 ) -> int:
-    """GPT 第二轮冻结公式：
-
-    - 工具数量阶梯：1~2:+0 / 3~5:+1 / >5:+2（数量是弱信号，不是复杂度本身）
-    - 阶段跨类型：len(unique(phase_history)) >= 2 → +2（READ→WRITE 任务升级）
-    - 产生 artifact：+2
-    - Skill：+3
-    - 删除了 estimated_duration_min（无 Planner 前是伪信号）与
-      multi_stage_reasoning（用 phase_history 替代）
-    """
+    """Calculate task complexity as a weak signal, not a permission gate."""
     score = 0
     if n_tool_calls >= 6:
         score += 2
     elif n_tool_calls >= 3:
         score += 1
-    if phase_history:
-        if len(set(p for p in phase_history if p)) >= 2:
-            score += 2
+    if phase_history and len({p for p in phase_history if p}) >= 2:
+        score += 2
     if produces_artifact:
         score += 2
     if uses_skill:
@@ -278,32 +263,22 @@ def should_plan_confirm(
     produces_artifact: bool | None = None,
     phase_history: list[str] | None = None,
 ) -> bool:
-    """PlanCard 触发判定（GPT 第二轮冻结版）。
+    """Decide whether a task deserves a single collaboration Plan step.
 
-    - Plan/Auto 模式：不阻塞（展示由 Timeline 处理）——这里返回 False（确认类）
-    - Manual/Edit：complexity_score >= 4 → 确认
-    - 阶段历史跨轮累计（TaskContext.phase_history）——任务升级（READ→WRITE）弹
+    Explicitly simple Edit-mode operations stay direct. A local write by itself
+    is not a reason to stop the user. Multi-step, cross-phase, skill-driven or
+    otherwise genuinely complex work can still trigger the plan gate.
     """
     if mode in ("plan", "auto"):
-        return False  # 展示型（Timeline），不阻塞
+        return False
     if produces_artifact is None:
-        produces_artifact = any(
-            tool_risk(t) >= 2 for t in tool_calls  # 含写/执行/外发 → 有产物倾向
-        )
-    # 用户（2026-08-24）：plan 需常态出现——edit 模式任何执行类任务
-    # （有产物倾向——写/执行/外发）都先弹计划卡确认；纯读（无产物）不弹
-    # （直接回答）。复杂任务（>=阈值）同样弹。
-    if produces_artifact:
-        return True
-    return (
-        complexity_score(
-            n_tool_calls=len(tool_calls),
-            uses_skill=uses_skill,
-            produces_artifact=produces_artifact,
-            phase_history=phase_history,
-        )
-        >= COMPLEXITY_THRESHOLD
-    )
+        produces_artifact = any(tool_risk(t) >= 2 for t in tool_calls)
+    return complexity_score(
+        n_tool_calls=len(tool_calls),
+        uses_skill=uses_skill,
+        produces_artifact=produces_artifact,
+        phase_history=phase_history,
+    ) >= COMPLEXITY_THRESHOLD
 
 
 def should_show_timeline(
@@ -312,25 +287,18 @@ def should_show_timeline(
     produces_artifact: bool | None = None,
     phase_history: list[str] | None = None,
 ) -> bool:
-    """Auto 模式 Timeline 展示判定（GPT 第二轮 Q6：always visible 但分级）。
-
-    复杂任务（复杂度 >= 4）→ 完整 Timeline（步骤列表 ✓⟳○）；
-    简单任务（< 4）→ 不展示（靠工具行/文本流——"正在搜索…"由现有 UI 覆盖）。
-    """
+    """Show Timeline only for work substantial enough to benefit from it."""
     if produces_artifact is None:
         produces_artifact = any(tool_risk(t) >= 2 for t in tool_calls)
-    return (
-        complexity_score(
-            n_tool_calls=len(tool_calls),
-            produces_artifact=produces_artifact,
-            phase_history=phase_history,
-        )
-        >= COMPLEXITY_THRESHOLD
-    )
+    return complexity_score(
+        n_tool_calls=len(tool_calls),
+        produces_artifact=produces_artifact,
+        phase_history=phase_history,
+    ) >= COMPLEXITY_THRESHOLD
 
 
 def plan_card_steps(tool_calls: list[tuple[str, str]]) -> list[dict[str, str]]:
-    """工具序列 → PlanCard 步骤（行为短语，不显示工具名）。"""
+    """Turn tool calls into short user-facing behavior labels."""
     seen: set[str] = set()
     steps: list[dict[str, str]] = []
     for name, _arg_hint in tool_calls:
@@ -340,21 +308,21 @@ def plan_card_steps(tool_calls: list[tuple[str, str]]) -> list[dict[str, str]]:
         if not label or label in seen:
             continue
         seen.add(label)
-        steps.append({"name": label, "tools": [name]})
+        steps.append({"name": label, "tools": []})
     return steps
 
 
 def permissions_for_tools(tool_calls: list[str]) -> list[str]:
-    """工具序列 → 权限清单（PlanCard「需要」——GPT：允许权限图标，不要工具名）。"""
+    """Convert tool capabilities into user-facing permission categories."""
     perms: list[str] = []
-    for t in tool_calls:
-        risk = tool_risk(t)
-        if risk >= 10 and "external_upload" not in perms:
+    for tool_name in tool_calls:
+        phase = phase_for_tool(tool_name)
+        if phase == PHASE_EXTERNAL and "external_upload" not in perms:
             perms.append("external_upload")
-        elif risk == 5 and "exec" not in perms:
+        elif phase == PHASE_EXEC and "exec" not in perms:
             perms.append("exec")
-        elif risk == 2 and "workspace_write" not in perms:
+        elif phase == PHASE_WRITE and "workspace_write" not in perms:
             perms.append("workspace_write")
-        elif risk == 0 and "network_read" not in perms and t.startswith(("web_", "paper_")):
+        elif phase == PHASE_READ and tool_name.startswith(("web_", "paper_")) and "network_read" not in perms:
             perms.append("network_read")
     return perms
