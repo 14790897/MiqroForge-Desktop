@@ -25,6 +25,11 @@ function compactPermissions(permissions: string[]): string[] {
   return [...new Set(permissions.map((p) => PERM_LABELS[p] ?? p).filter(Boolean))];
 }
 
+function displayGoal(goal: string): string {
+  // Keep the destination in the step list instead of repeating it in the goal.
+  return goal.replace(/[，,]\s*上传到\s+Qraft\s*$/, '').trim();
+}
+
 /**
  * PlanCard is intentionally a part of the agent work stream, not a modal-like
  * permission surface. The plan explains intent, can be edited inline, and then
@@ -66,6 +71,8 @@ export function PlanCard({
     onResolve('modify', text);
   };
 
+  const goal = entry.goal ? displayGoal(entry.goal) : '';
+
   return (
     <section
       data-testid="plan-card"
@@ -105,9 +112,9 @@ export function PlanCard({
             </span>
           </div>
 
-          {entry.goal && (
+          {goal && (
             <p className="mt-1 text-[12px] leading-5" style={{ color: 'var(--text-muted, #6b7280)' }}>
-              {entry.goal}
+              {goal}
             </p>
           )}
 
