@@ -131,6 +131,7 @@ export function HermesConfirmBar({
         <button
           onClick={() => respond('confirm')}
           disabled={busyNow}
+          data-testid="confirm-run"
           className="h-full gap-1 rounded-none px-3 text-xs font-medium cursor-pointer hover:opacity-85 disabled:opacity-50"
           style={{ background: 'none', border: 'none', color: btnStyle.color, fontFamily: 'inherit' }}
         >
@@ -209,6 +210,7 @@ export function HermesConfirmBar({
         <button
           onClick={() => respond('modify')}
           disabled={busyNow}
+          data-testid="confirm-modify"
           className="px-3 py-[6px] rounded-[6px] text-[12px] font-medium cursor-pointer hover:opacity-80 disabled:opacity-50"
           style={{
             background: 'none',
@@ -225,6 +227,7 @@ export function HermesConfirmBar({
       <button
         onClick={() => respond('deny')}
         disabled={busyNow}
+        data-testid="confirm-deny"
         title={denyTitle}
         className="h-6 rounded-md px-1.5 text-xs cursor-pointer hover:opacity-80 disabled:opacity-50"
         style={{

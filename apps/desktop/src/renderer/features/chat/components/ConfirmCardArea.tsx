@@ -7,15 +7,21 @@ import { ConfirmCard } from './ConfirmCard';
 
 /** #646-v2: 判定是否为任务计划卡——显式判别器优先（toolName），
  *  goal/permissions 启发式仅作 legacy 兜底（CodeRabbit）。 */
-function isPlanCard(entry: { request: { goal?: string; permissions?: string[]; toolName?: string } }): boolean {
+export function isPlanCard(entry: { request: { goal?: string; permissions?: string[]; toolName?: string } }): boolean {
   if (entry.request.toolName === 'ask_user_plan_confirm') return true;
   if (entry.request.toolName === 'ask_user_confirm_card') return false;
   return typeof entry.request.goal === 'string' || (entry.request.permissions?.length ?? 0) > 0;
 }
 
 /** #646-v2: 判定是否为危险动作卡（request_action_confirmation 载荷带 action/target） */
-function isActionCard(entry: { request: { action?: string; target?: string } }): boolean {
+export function isActionCard(entry: { request: { action?: string; target?: string } }): boolean {
   return typeof entry.request.action === 'string' && typeof entry.request.target === 'string';
+}
+
+/** 2026-08-27：确认卡（ask_user_confirm_card 的普通卡）——由工具链行渲染
+ *  （Hermes 式：审批条在工具行下），inline/兜底都跳过防重复 */
+export function isConfirmCard(entry: { request: Record<string, unknown> }): boolean {
+  return !isPlanCard(entry as never) && !isActionCard(entry as never);
 }
 
 /**
@@ -104,7 +110,12 @@ export function ConfirmCardItem({
         ) : (
           <ConfirmCard
             entry={entry as never}
-            onResolve={(choiceId, choiceLabel, remember) => resolve(id, choiceId, choiceLabel, remember, 'session')}
+            onResolve={(choiceId: string, rememberMode?: 'session' | 'always' | null) => {
+              const req = entry.request as unknown as { choices?: { id: string; label?: string }[] };
+              const label = req.choices?.find((c) => c.id === choiceId)?.label ?? choiceId;
+              const remember = rememberMode === 'always' || rememberMode === 'session';
+              resolve(id, choiceId, label, remember, rememberMode ?? 'session');
+            }}
             onTimeout={timeoutCard}
           />
         )}
@@ -120,18 +131,19 @@ export function ConfirmCardItem({
  * 后面（turn_id 关联）；这里只渲染**尚未关联到消息**的卡（turn 还在进行中
  * 时卡先出现，turn 完成后 ChatConsole 把它内联到消息后，此处自动消失）。
  */
-export function ConfirmCardArea({ renderedIds }: { renderedIds?: Set<string> }) {
+export function ConfirmCardArea({ matchedTurnIds }: { matchedTurnIds?: Set<string> }) {
   const { pending, resolved, timelines, resolve, timeoutCard } = useUserInput();
 
   const allEntries = useMemo(() => {
-    const merged = [...Object.values(resolved), ...Object.values(pending)];
+    let merged = [...Object.values(resolved), ...Object.values(pending)];
     merged.sort((a, b) => (a.createdAt ?? 0) - (b.createdAt ?? 0));
-    // 已插入消息流的卡（ChatConsole 按 createdAt 渲染）不再兜底
-    if (renderedIds && renderedIds.size > 0) {
-      return merged.filter((e) => !renderedIds.has(e.request.input_id));
+    // 已内联到 AI 消息的卡（turn_id 匹配）不再兜底渲染
+    if (matchedTurnIds && matchedTurnIds.size > 0) {
+      merged = merged.filter((e) => !(e.request.turn_id && matchedTurnIds.has(e.request.turn_id)));
     }
-    return merged;
-  }, [pending, resolved, renderedIds]);
+    // 2026-08-27：确认卡由工具链行渲染（Hermes 式）——兜底区只留 plan/action 卡
+    return merged.filter((e) => !isConfirmCard(e as never));
+  }, [pending, resolved, matchedTurnIds]);
 
   if (allEntries.length === 0 && Object.keys(timelines).length === 0) return null;
 
