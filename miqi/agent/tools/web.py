@@ -574,6 +574,10 @@ class SearchProviderManager:
         for provider in chain:
             result = await provider.search(query, count)
             if result.success:
+                # Tag the producing provider so structured sources carry it
+                # even for keyless DDGS results (#879).
+                if not result.provider:
+                    result.provider = provider.name
                 return result
             # Tag the failing provider for error surfacing (#804).
             if not result.provider:
