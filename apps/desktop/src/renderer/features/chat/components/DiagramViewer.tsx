@@ -138,9 +138,14 @@ if (typeof window !== 'undefined') {
 }
 
 /**
- * SVG 内容体（memo）：渲染后 useLayoutEffect（paint 前）按完整 bbox 重写
- * viewBox/width/height（+8px padding）；onFixed 回传修正后 outerHTML——
- * 卡片/Gallery/鸟瞰/复制/下载必须统一使用该修正版（单一 effective source）。
+ * SVG 内容体（memo）：渲染后按完整 bbox 重写 viewBox/width/height（+8px
+ * padding）；onFixed 回传修正后 outerHTML——卡片/Gallery/鸟瞰/复制/下载
+ * 必须统一使用该修正版（单一 effective source）。
+ *
+ * 延迟布局重试（CDP 实测根因）：历史消息里的卡片在 display:none/未布局时
+ * mount——getBBox() 全为 0，一次性的 useLayoutEffect 会跳过修正；之后滚到
+ * 该消息时 effect 不再跑，卡片永远保持原始 viewBox（"往下滚的图只有一部分"
+ * 的根因）。用 ResizeObserver 在元素获得布局（0 → 有尺寸/可见）时重试。
  */
 export const SvgBody = memo(function SvgBody({
   svg,
@@ -151,26 +156,39 @@ export const SvgBody = memo(function SvgBody({
 }) {
   const ref = useRef<HTMLDivElement>(null);
   useLayoutEffect(() => {
-    const el = ref.current?.querySelector('svg') as SVGSVGElement | null;
-    if (!el) return;
-    try {
-      const b = getCompleteSvgBBox(el);
-      if (!b || !(b.width > 0 && b.height > 0)) return;
-      const pad = 8;
-      const x = b.x - pad;
-      const y = b.y - pad;
-      const w = b.width + pad * 2;
-      const h = b.height + pad * 2;
-      el.setAttribute('viewBox', `${x} ${y} ${w} ${h}`);
-      el.setAttribute('width', String(w));
-      el.setAttribute('height', String(h));
-      // 内容尺寸变了 → 通知查看器重新 measure（rAF 后布局稳定）
-      requestAnimationFrame(() => window.dispatchEvent(new Event('resize')));
-      // 每次 svg 变化都上报（切图不 remount，防重标记会残留下报失效）
-      if (onFixed) onFixed(el.outerHTML);
-    } catch {
-      /* 非 svg 或无布局时忽略 */
-    }
+    const holder = ref.current;
+    if (!holder) return;
+    let done = false;
+    const tryFix = () => {
+      if (done) return;
+      const el = holder.querySelector('svg') as SVGSVGElement | null;
+      if (!el) return;
+      try {
+        const b = getCompleteSvgBBox(el);
+        if (!b || !(b.width > 0 && b.height > 0)) return; // 未布局——等 ResizeObserver 重试
+        const pad = 8;
+        const x = b.x - pad;
+        const y = b.y - pad;
+        const w = b.width + pad * 2;
+        const h = b.height + pad * 2;
+        el.setAttribute('viewBox', `${x} ${y} ${w} ${h}`);
+        el.setAttribute('width', String(w));
+        el.setAttribute('height', String(h));
+        done = true;
+        // 内容尺寸变了 → 通知查看器重新 measure（rAF 后布局稳定）
+        requestAnimationFrame(() => window.dispatchEvent(new Event('resize')));
+        // 每次 svg 变化都上报（切图不 remount，防重标记会残留下报失效）
+        if (onFixed) onFixed(el.outerHTML);
+      } catch {
+        /* 非 svg 时忽略 */
+      }
+    };
+    tryFix();
+    const ro = new ResizeObserver(() => {
+      if (!done) tryFix();
+    });
+    ro.observe(holder);
+    return () => ro.disconnect();
   }, [svg, onFixed]);
   return <div ref={ref} dangerouslySetInnerHTML={{ __html: svg }} />;
 });
