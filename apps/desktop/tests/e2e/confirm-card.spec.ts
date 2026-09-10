@@ -130,6 +130,8 @@ test.describe('Confirm Card (ask_user_confirm_card)', () => {
     async () => {
       // 2026-08-27：卡插入消息流（AI 回答流程的一部分）——断言页面级
       const cardArea = page;
+      // 隔离：清掉上一轮测试的卡残留（卡现在内联在消息里会残留 testid）
+      await createNewConversation(page);
 
       // ── 发送任务 → 模型第一轮即调用 ask_user_confirm_card ──
       // 触发词避开 mof-synthesis-price-agent 技能（本机私有——走真实 provider
@@ -137,17 +139,17 @@ test.describe('Confirm Card (ask_user_confirm_card)', () => {
       await sendMessage(page, '帮我整理季度销售数据报告并确认执行');
 
       await expect(cardArea.getByText('确认执行方案？')).toBeVisible({ timeout: 60_000 });
-      await expect(cardArea.getByText('搜索并下载相关论文')).toBeVisible(); // steps 渲染
-      await expect(page.getByTestId('confirm-card').getByRole('button', { name: '确认执行' })).toBeVisible();
-      await expect(page.getByTestId('confirm-card').getByRole('button', { name: '调整方案' })).toBeVisible();
-      await expect(page.getByTestId('confirm-card').getByRole('button', { name: '取消' })).toBeVisible();
+      // 步骤在展开区（Hermes 工具行默认收起——点击行展开）
+      await expect(page.getByTestId('confirm-card').getByTestId('confirm-run')).toBeVisible();
+      await expect(page.getByTestId('confirm-card').getByTestId('confirm-modify')).toBeVisible();
+      await expect(page.getByTestId('confirm-card').getByTestId('confirm-deny')).toBeVisible();
 
       await page.screenshot({
         path: `test-results/${test.info().title.replace(/\s+/g, '-')}-card1.png`,
       });
 
       // ── 点击「确认执行」→ 决议回传 → mock 推进到 web_search/read_file ──
-      await page.getByTestId('confirm-card').getByRole('button', { name: '确认执行' }).click();
+      await page.getByTestId('confirm-card').getByTestId('confirm-run').click();
       // 真实工具（web_search/read_file）在 E2E 环境可能触发审批弹窗——
       // 后台轮询自动批准（plan-card.spec 同款；真实用户模式不弹）。
       const autoApprove = async () => {
@@ -179,14 +181,14 @@ test.describe('Confirm Card (ask_user_confirm_card)', () => {
       await expect(cardArea.getByText('方案已完成，是否上传到 MiQroForge？')).toBeVisible({
         timeout: 180_000,
       });
-      await expect(page.getByTestId('confirm-card').getByRole('button', { name: '确认上传' })).toBeVisible();
+      await expect(page.getByTestId('confirm-card').getByTestId('confirm-run')).toBeVisible();
 
       await page.screenshot({
         path: `test-results/${test.info().title.replace(/\s+/g, '-')}-card2.png`,
       });
 
       // 卡片 msgIn 动画（.35s）期间 click 会因元素移动超时——force 点击
-      await page.getByTestId('confirm-card').getByRole('button', { name: '确认上传' }).click({ force: true, timeout: 15_000 });
+      await page.getByTestId('confirm-card').getByTestId('confirm-run').click({ force: true, timeout: 15_000 });
       // 两张卡均留在消息流原位：第一张"已确认执行方案"，第二张转"已确认"态
       await expect(cardArea.getByText('已确认执行方案')).toBeVisible({ timeout: 30_000 });
       await expect(cardArea.getByText('方案已完成，是否上传到 MiQroForge')).toBeVisible({
@@ -237,7 +239,7 @@ test.describe('Confirm Card (ask_user_confirm_card)', () => {
       });
 
       // ── 取消第一张 → 第二张才弹出 ──
-      await cardArea.getByRole('button', { name: '取消' }).click();
+      await cardArea.getByTestId('confirm-deny').click();
       await expect(cardArea.getByText('确认创建文档？')).toBeVisible({
         timeout: 30_000,
       });
@@ -250,7 +252,7 @@ test.describe('Confirm Card (ask_user_confirm_card)', () => {
       });
 
       // ── 取消第二张 → 全部关闭 ──
-      await cardArea.getByRole('button', { name: '取消' }).click();
+      await cardArea.getByTestId('confirm-deny').click();
       await expect(cardArea.getByText('等待你的选择')).toHaveCount(0, {
         timeout: 30_000,
       });

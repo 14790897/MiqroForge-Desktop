@@ -44,8 +44,8 @@ test.describe('Confirm Card (real LLM)', () => {
     '真实模型调用 ask_user_confirm_card — 弹卡、点击确认、tool result 回传、回合完成',
     { timeout: LLM_TIMEOUT },
     async () => {
-      const cardArea = page.getByTestId('confirm-card-area');
-      const resolvedArea = page.getByTestId('confirm-card-resolved');
+      // 2026-08-28：卡并进工具链（Hermes 式）——断言页面级 + 回执
+      const cardArea = page;
 
       // 显式指令模型调用工具（真实 HTTP 请求到 provider）
       await sendMessage(
@@ -56,23 +56,19 @@ test.describe('Confirm Card (real LLM)', () => {
       );
 
       // 真实模型往返（本地 deepseek / CI siliconflow）——给足超时
-      await expect(cardArea).toBeVisible({ timeout: 120_000 });
-      await expect(cardArea.getByText('确认执行方案？')).toBeVisible();
-      await expect(cardArea.getByRole('button', { name: '确认执行' })).toBeVisible();
+      await expect(cardArea.getByText('确认执行方案？')).toBeVisible({ timeout: 120_000 });
+      await expect(page.getByTestId('confirm-run')).toBeVisible();
 
       await page.screenshot({
         path: `test-results/${test.info().title.replace(/\s+/g, '-')}-real-card.png`,
       });
 
-      // 点击确认 → 选择回传模型 → 模型继续完成回合
-      await cardArea.getByRole('button', { name: '确认执行' }).click();
-      // v5/WorkBuddy 语义：确认即关闭——默认只留"已处理 N 张"折叠入口；
-      // 点击展开后可追溯决议记录
-      await expect(resolvedArea.getByText('已处理 1 张确认卡（点击查看）')).toBeVisible({
+      // 点击确认 → tool result 回传模型 → 模型继续完成回合
+      await page.getByTestId('confirm-run').click();
+      // 2026-08-28 Hermes 式：审批条消失，回执留原位（已确认）
+      await expect(page.getByText('已确认执行方案')).toBeVisible({
         timeout: 30_000,
       });
-      await resolvedArea.getByText('已处理 1 张确认卡（点击查看）').click();
-      await expect(resolvedArea.getByText('已选择「确认执行」')).toBeVisible();
 
       await waitForResponseComplete(page, LLM_TIMEOUT);
       // 回合正常收尾：至少有一条 assistant 回复（内容由真实模型生成，不断言文案）
