@@ -823,6 +823,24 @@ async def test_web_search_no_sources_on_failure(monkeypatch):
     assert emitter.events == []
 
 
+async def test_web_search_ddgs_source_has_provider(monkeypatch):
+    """默认 DDGS 兜底成功结果也带 provider（结构化 sources 不留空 #879）。"""
+
+    async def _fake_search(self, query, count):
+        # DDGSProvider 成功时不带 provider —— manager 应补打 provider 标签
+        return SearchResult(True, [
+            {"title": "T1", "url": "https://example.com/a", "snippet": "s1"},
+        ])
+
+    monkeypatch.setattr(DDGSProvider, "search", _fake_search)
+    emitter = _FakeEmitter()
+    tool = WebSearchTool(provider="ddgs")
+    await tool.execute("hello", _event_emitter=emitter, _turn_id="t1", _tool_call_id="c1")
+    assert len(emitter.events) == 1
+    payload = json.loads(emitter.events[0].delta)
+    assert payload["payload"]["sources"][0]["provider"] == "ddgs"
+
+
 async def test_web_fetch_emits_structured_source(monkeypatch):
     """web_fetch 成功后 emit 单个结构化 source（title 取自抓取结果）。"""
 
