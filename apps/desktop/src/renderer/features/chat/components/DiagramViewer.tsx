@@ -7,7 +7,6 @@ import {
   useRef,
   useState,
   type PointerEvent as RPointerEvent,
-  type WheelEvent as RWheelEvent,
 } from 'react';
 import {
   Check,
@@ -350,8 +349,11 @@ export function DiagramViewer({
       sw: rotated ? sh0 : sw0,
       sh: rotated ? sw0 : sh0,
     };
+    // 审查 R4：geometry 更新后立即 re-clamp 既有 transform——stage resize /
+    // relayout 后旧平移量可能越出新边界，内容会暂时不可达
+    tf.current = clampT(tf.current);
     applyVisuals();
-  }, [applyVisuals]);
+  }, [applyVisuals, clampT]);
 
   useLayoutEffect(() => {
     measure();
@@ -424,13 +426,17 @@ export function DiagramViewer({
     e.currentTarget.style.cursor = 'grab';
   }, []);
 
-  // 滚轮：朝光标缩放（标准看图器行为）
-  const onWheel = useCallback(
-    (e: RWheelEvent<HTMLDivElement>) => {
+  // 滚轮：朝光标缩放（标准看图器行为）。审查 R4：React 委托 wheel 为
+  // passive，preventDefault 无法取消祖先滚动——改原生 non-passive 监听；
+  // 鸟瞰/胶片内部由 data-wheel-guard 排除，避免其滚动触发缩放。
+  useEffect(() => {
+    const stage = stageRef.current;
+    if (!stage) return;
+    const onNativeWheel = (e: WheelEvent) => {
+      const t = e.target as HTMLElement | null;
+      if (t?.closest?.('[data-wheel-guard]')) return;
       e.preventDefault();
       e.stopPropagation();
-      const stage = stageRef.current;
-      if (!stage) return;
       const rect = stage.getBoundingClientRect();
       const cx = e.clientX - (rect.left + rect.width / 2);
       const cy = e.clientY - (rect.top + rect.height / 2);
@@ -438,10 +444,10 @@ export function DiagramViewer({
       const nextScale = Math.min(MAX_S, Math.max(MIN_S, prev.s * (e.deltaY < 0 ? 1.1 : 1 / 1.1)));
       const k = nextScale / prev.s;
       setT({ s: nextScale, x: cx - k * (cx - prev.x), y: cy - k * (cy - prev.y) });
-    },
-    [setT]
-  );
-
+    };
+    stage.addEventListener('wheel', onNativeWheel, { passive: false });
+    return () => stage.removeEventListener('wheel', onNativeWheel);
+  }, [setT]);
   const onDoubleClick = useCallback(() => {
     if (tf.current.s > 1.1) resetT();
     else zoomBy(2);
@@ -658,7 +664,6 @@ export function DiagramViewer({
           onPointerUp={endPan}
           onPointerCancel={endPan}
           onPointerLeave={endPan}
-          onWheel={onWheel}
           onDoubleClick={onDoubleClick}
         >
           <div className="absolute inset-0 flex items-center justify-center p-10">
@@ -680,8 +685,8 @@ export function DiagramViewer({
           <div className="pointer-events-none absolute inset-x-0 bottom-4 z-10 flex justify-center">
             <div
               className="pointer-events-auto flex items-center gap-1.5 rounded-xl border border-[#e4e6ea] bg-white/95 px-2.5 py-1.5 shadow-[0_4px_18px_rgba(0,0,0,0.08)]"
+              data-wheel-guard
               onPointerDown={(e) => e.stopPropagation()}
-              onWheel={(e) => e.stopPropagation()}
             >
               {figs.map((f, i) => (
                 <button
@@ -719,7 +724,7 @@ export function DiagramViewer({
               className="relative cursor-crosshair overflow-hidden bg-white"
               style={{ width: 190, height: 116 }}
               onPointerDown={jumpMinimap}
-              onWheel={(e) => e.stopPropagation()}
+              data-wheel-guard
               data-testid="diagram-minimap"
             >
               {/* 整图缩略：与主图同源的 SvgBody（自修正，无跨组件数据流） */}

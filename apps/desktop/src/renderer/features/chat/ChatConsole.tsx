@@ -10,6 +10,7 @@ import {
 import { AgentAvatar } from './components/Avatars';
 import { MiQroForgeLogo } from '../../components/MiQroForgeLogo';
 import { MarkdownContent } from './components/MarkdownContent';
+import { lastAssistantGroupIndex } from './lastAssistantGroup';
 import { SandboxHtmlFrame } from './components/SandboxHtmlFrame';
 import { ThinkBlock } from './components/ThinkBlock';
 import { InterruptedTurnCard } from './components/InterruptedTurnCard';
@@ -6120,6 +6121,8 @@ export function ChatConsole({
 
   // Tool rows grouped into collapsible「工具调用 · N」chains for rendering.
   const chatGroups = useMemo(() => groupChatMessages(messages), [messages]);
+  // #843：活跃 assistant = 最后一条 assistant 分组（追加子代理行/重复 assistant 不影响）
+  const lastAssistantIdx = useMemo(() => lastAssistantGroupIndex(chatGroups), [chatGroups]);
 
   /** Retry a user message: rewind to it, resend automatically with a
    *  "answer differently" hint so the model doesn't repeat itself. */
@@ -6827,7 +6830,7 @@ export function ChatConsole({
                         sources={sourcesByMsg.get(group.msg) ?? []}
                         toolStepIndex={toolStepByMsg.get(group.msg)}
                         isLast={i === chatGroups.length - 1}
-                        streaming={streaming}
+                        streaming={streaming && i === lastAssistantIdx}
                         onResume={
                           group.msg.interrupted ? () => handleResumeTurn(group.msg) : undefined
                         }
@@ -9028,7 +9031,7 @@ const MessageBubble = memo(function MessageBubble({
                             CodeRabbit 修订：改用真实生成信号 streaming（2722/2724 由
                             turn 生命周期驱动），不再用乐观 sending 时间戳 ——
                             sending 是用户回合信号，assistant 回复期间可能已为 null。 */}
-                        <MarkdownContent content={msg.content} streaming={streaming && isLast} />
+                        <MarkdownContent content={msg.content} streaming={streaming} />
                       </>
                     ) : (
                       renderContent((msg as any).__cleanContent ?? msg.content)
@@ -9229,6 +9232,7 @@ function areMessageBubblePropsEqual(a: MessageBubbleProps, b: MessageBubbleProps
     a.execOutputs === b.execOutputs &&
     a.inlineExecOutput === b.inlineExecOutput &&
     a.isLast === b.isLast &&
+    a.streaming === b.streaming &&
     a.sources === b.sources &&
     a.toolStepIndex === b.toolStepIndex &&
     a.isLastToolRow === b.isLastToolRow &&

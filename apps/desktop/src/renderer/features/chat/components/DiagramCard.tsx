@@ -41,14 +41,19 @@ export function DiagramCard({ svg, label = '流程图', onCopy }: DiagramCardPro
   if (regId.current === null) regId.current = newDiagramId();
 
   const [copied, setCopied] = useState(false);
-  // 显示/注册统一用 displaySvg（SvgBody 修正后回写）
-  const [displaySvg, setDisplaySvg] = useState(svg);
-  useEffect(() => {
-    setDisplaySvg(svg);
-  }, [svg]);
-  const handleFixed = useCallback((fixed: string) => {
-    setDisplaySvg((prev) => (prev === fixed ? prev : fixed));
-  }, []);
+  // 修正缓存（审查 R4 Major）：记录「哪个源 svg 被修正为完整版」——
+  // 仅当源变化时失效。原先 svg 变化即 setDisplaySvg(raw) 的同步会在
+  // SvgBody.onFixed 之后把修正值覆盖回原始 svg（gallery/local viewer
+  // 拿到未修正版）。派生值替代 state，无需 reset effect。
+  const [fixed, setFixed] = useState<{ src: string; svg: string } | null>(null);
+  const displaySvg = fixed && fixed.src === svg ? fixed.svg : svg;
+  const handleFixed = useCallback(
+    (f: string) =>
+      setFixed((prev) =>
+        prev && prev.src === svg && prev.svg === f ? prev : { src: svg, svg: f }
+      ),
+    [svg]
+  );
 
   // 注册/更新（依赖稳定 callback；无变化时 provider 内部不触发 state）
   useEffect(() => {

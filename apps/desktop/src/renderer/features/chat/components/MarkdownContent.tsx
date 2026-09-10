@@ -223,6 +223,12 @@ export function MarkdownContent({
             />
           );
         }
+        if (lang === 'svg' && !disableDiagrams) {
+          // ```svg：与 mermaid 同款在 pre 层直接返回（审查 R4）——经 code
+          // 分支返回会被通用代码块 wrapper 的 overflow-hidden/overflow-x-auto
+          // 包裹并作用到 DiagramCard
+          return <SvgEmbed code={codeText} />;
+        }
         // Codex-style block header: language left, copy right, a divider under
         // the header; the code body scrolls in the inner <pre> below it.
         const langLabel = LANG_LABELS[lang] ?? lang;
@@ -267,12 +273,6 @@ export function MarkdownContent({
         const isBlock =
           /language-[\w+-]+/.test(cls) || (typeof children === 'string' && children.endsWith('\n'));
         if (isBlock) {
-          // ```svg 代码块 → SvgEmbed 渲染（issue #671）。
-          // 高亮后 children 是 span 树——extractText 还原纯文本（审查：
-          // String(children) 会输出 "[object Object]" 导致 svg 内容丢失）
-          if (cls.includes('language-svg') && !disableDiagrams) {
-            return <SvgEmbed code={extractText(children).replace(/\n$/, '')} />;
-          }
           return (
             <code className={cn('block text-[13px] leading-[1.6] font-mono p-3', cls)} {...props}>
               {children}
