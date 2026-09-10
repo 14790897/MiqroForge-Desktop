@@ -38,6 +38,7 @@ import {
   type ExecutionPolicy,
 } from '../../components/ExecutionPolicySelector';
 import { ReasoningModeSwitch, type ReasoningMode } from './components/ReasoningModeSwitch';
+import { clampPanelWidth, createPanelWindowSync } from './panelWindowSync';
 import {
   Send,
   Square,
@@ -2614,16 +2615,26 @@ export function ChatConsole({
   const [panelOpen, setPanelOpen] = useState(true);
   const [panelWidth, setPanelWidth] = useState(280);
   const panelResizing = useRef(false);
-  /** 拖拽锚点:按下时的鼠标 x 与面板宽。拖动量 = 锚点宽 + 鼠标位移,不用
-   *  拖拽中实时变化的 window.innerWidth 反推——窗口跟随加宽会改变
-   *  innerWidth,实时反推会把「已加宽」反馈回量宽,来回拖产生追尾/发粘。 */
-  const panelDragAnchor = useRef<{ clientX: number; width: number; applied: number } | null>(null);
   /** 面板 DOM 节点:拖拽中直改其宽度,避免每帧 setPanelWidth 让整个 ChatConsole
    *  (含长回复消息树)重建 VDOM——内容多的对话会因此卡。 */
   const assetsPanelRef = useRef<HTMLDivElement | null>(null);
   const panelWidthRef = useRef(panelWidth);
-  /** 拖拽过程中的最新目标面板宽(供 mouseup 收尾用,避免闭包捕获旧值)。 */
-  const lastDragTargetRef = useRef(280);
+  /** 资产面板拖宽的「窗口跟随」串行队列（#989，实现与竞态回归见
+   *  panelWindowSync.ts / panelWindowSync.test.ts）：面板变宽就请求主进程把原生
+   *  窗口同量加宽，聊天列 flex-1 分到新增宽度而保持原宽。拖拽锚点、latest-wins
+   *  合并、松手收尾都在队列里，这里只负责喂鼠标位移与把它接到 DOM/state 上。 */
+  const [panelSync] = useState(() =>
+    createPanelWindowSync({
+      send: (extra) => window.miqi.app.setPanelWindowExtra(extra),
+      applyWidth: (width) => {
+        const el = assetsPanelRef.current;
+        if (el) el.style.width = `${width}px`;
+      },
+      commitWidth: (width) => {
+        if (width !== panelWidthRef.current) setPanelWidth(width);
+      },
+    })
+  );
   /** 顶部工作目录胶囊:窄的不是视口而是「聊天列」(被资产面板挤窄、窗口又有 minWidth),
    *  原 md: 视口断点永不触发。量聊天列宽,过窄时把目录路径收成一个小图标。 */
   const chatColRef = useRef<HTMLDivElement | null>(null);
@@ -2693,115 +2704,50 @@ export function ChatConsole({
     },
     []
   );
-  // 资产面板推开聊天区 → 请求主进程把窗口加宽相应 px,聊天列(flex-1)分到新增
-  // 宽度而保持原宽、内容不重排; extra=0 还原(面板关闭)。最大化/满屏由主进程跳过。
-  // 资产面板拖宽/开合 → 窗口跟随加宽(syncPanelWindowExtra)。
-  // latest-wins 合并:每帧至多发一次 IPC + 原生 setBounds,且同一时刻至多一个在途;
-  // 快速来回拖时不会把几十个窗口 resize 塞进主进程排队(鼠标停手后窗口不再追着动)。
-  const panelSyncRef = useRef<{
-    cancelled: boolean;
-    raf: number;
-    pending: number;
-    inFlight: boolean;
-    applied: number;
-  }>({ cancelled: false, raf: 0, pending: NaN, inFlight: false, applied: 0 });
-
-  const syncPanelWindowExtra = useCallback((extra: number) => {
-    const st = panelSyncRef.current;
-    st.pending = Math.round(extra);
-    const maybeQueue = () => {
-      if (st.cancelled || st.raf || st.inFlight) return;
-      st.raf = requestAnimationFrame(() => {
-        st.raf = 0;
-        const target = st.pending;
-        if (!Number.isFinite(target)) return;
-        st.pending = NaN;
-        if (target === st.applied) return; // 主进程当前已停在此宽度,无需再 resize
-        st.inFlight = true;
-        window.miqi.app
-          .setPanelWindowExtra(target)
-          .then((r) => {
-            st.applied = r.applied;
-            // 拖拽中:面板宽度只按主进程实际应用到的增量走,不超前于窗口扩出。
-            // 面板是消息树兄弟节点、聊天列 flex-1——若 DOM 先于窗口加宽,聊天列被
-            // 瞬时压扁,长回复对话里拖拽即「输入/对话模块压缩变形」。跟随 applied
-            // 则聊天列宽度恒定、分隔条贴住鼠标,仅剩 1 帧内的轻微追尾。
-            const a = panelDragAnchor.current;
-            const el = assetsPanelRef.current;
-            if (a && el) {
-              el.style.width = `${Math.max(120, Math.round(a.width + (r.applied - a.applied)))}px`;
-            }
-          })
-          .catch(() => {})
-          .finally(() => {
-            st.inFlight = false;
-            maybeQueue(); // 在途期间又收到更新宽度 → 补发到最新
-          });
-      });
-    };
-    maybeQueue();
-  }, []);
-
-  // 卸载(nav 离开聊天页)时若窗口被面板加宽过则还原,避免残宽影响其它页面;
-  // 冷启动默认面板开启,基线即当前宽度,此还原为 no-op。
+  // 卸载(nav 离开聊天页)时停掉窗口跟随队列,并把窗口还原到未加宽状态,
+  // 避免残宽影响其它页面;冷启动默认面板开启,基线即当前宽度,此还原为 no-op。
   useEffect(
     () => () => {
-      const st = panelSyncRef.current;
-      st.cancelled = true;
-      if (st.raf) cancelAnimationFrame(st.raf);
-      st.raf = 0;
-      // 卸载(nav 离开聊天页)时若窗口被面板加宽过则还原,避免残宽影响其它页面;
-      // 冷启动默认面板开启,基线即当前宽度,此还原为 no-op。
+      panelSync.dispose();
       void window.miqi.app.setPanelWindowExtra(0).catch(() => {});
     },
-    []
+    [panelSync]
   );
 
   // Task Assets panel resize
-  const handlePanelResizeStart = useCallback((e: React.MouseEvent) => {
-    e.preventDefault();
-    const el = assetsPanelRef.current;
-    // 按下点即当前分隔条:记锚点实际面板宽 + 主进程此刻已应用的窗口加宽,
-    // 拖动时两者作为相对基准,不用绝对宽(冷启动默认面板已占空间,绝对宽会让窗口多扩整块)。
-    const width = el ? el.getBoundingClientRect().width : window.innerWidth - e.clientX;
-    panelResizing.current = true;
-    panelDragAnchor.current = { clientX: e.clientX, width, applied: panelSyncRef.current.applied };
-    document.body.style.cursor = 'col-resize';
-    document.body.style.userSelect = 'none';
-  }, []);
+  const handlePanelResizeStart = useCallback(
+    (e: React.MouseEvent) => {
+      e.preventDefault();
+      const el = assetsPanelRef.current;
+      // 按下点即当前分隔条:队列届时记下实际面板宽 + 主进程此刻已应用的窗口加宽,
+      // 拖动时两者作为相对基准,不用绝对宽(冷启动默认面板已占空间,绝对宽会让窗口多扩整块)。
+      panelResizing.current = true;
+      panelSync.beginDrag({
+        clientX: e.clientX,
+        width: el ? el.getBoundingClientRect().width : window.innerWidth - e.clientX,
+      });
+      document.body.style.cursor = 'col-resize';
+      document.body.style.userSelect = 'none';
+    },
+    [panelSync]
+  );
 
   useEffect(() => {
     const handleMouseMove = (e: MouseEvent) => {
-      const anchor = panelDragAnchor.current;
+      const anchor = panelSync.anchor;
       if (!panelResizing.current || !anchor) return;
-      // 以按下点为锚按鼠标位移增减面板宽(向右移收窄、向左移加宽)。
-      const newWidth = Math.max(200, Math.min(500, anchor.width + (anchor.clientX - e.clientX)));
-      // 窗口加宽请求 = 锚点 applied + 宽度增量(相对量);面板 DOM 由 IPC 解析后的
-      // applied 增量在 syncPanelWindowExtra 里跟随,本处不直改 DOM。
-      syncPanelWindowExtra(anchor.applied + (newWidth - anchor.width));
-      lastDragTargetRef.current = newWidth;
+      // 以按下点为锚按鼠标位移增减面板宽(向右移收窄、向左移加宽)。窗口加宽请求与
+      // 面板 DOM 宽度都由队列按主进程实际应用到的增量推进,本处不直改 DOM。
+      panelSync.dragTo(clampPanelWidth(anchor.width + (anchor.clientX - e.clientX)));
     };
     const handleMouseUp = () => {
       if (!panelResizing.current) return;
       panelResizing.current = false;
       document.body.style.cursor = '';
       document.body.style.userSelect = '';
-      const anchor = panelDragAnchor.current;
-      if (anchor) {
-        const finalWidth = lastDragTargetRef.current;
-        // 拖拽中窗口从未响应(最大化/满屏被主进程跳过,applied 未动)→ 面板不生效,
-        // 还原锚点宽、不改 state;否则收尾到最终宽并提交 state 供开关面板等复用。
-        const el = assetsPanelRef.current;
-        if (panelSyncRef.current.applied === anchor.applied) {
-          if (el) el.style.width = `${anchor.width}px`;
-        } else {
-          if (el) el.style.width = `${finalWidth}px`;
-          if (Math.round(finalWidth) !== panelWidthRef.current) setPanelWidth(finalWidth);
-        }
-        // 收尾兜底:让窗口停在面板最终宽度(relative 到锚点)。
-        syncPanelWindowExtra(anchor.applied + (finalWidth - anchor.width));
-      }
-      panelDragAnchor.current = null;
+      // 松手不在此刻定格面板:可能还有一次 IPC 在途、applied 还是旧值,按旧值写
+      // DOM 会把面板钉住,等窗口真的动完就错位。交给队列在静默后统一收尾。
+      panelSync.endDrag();
     };
     document.addEventListener('mousemove', handleMouseMove);
     document.addEventListener('mouseup', handleMouseUp);
@@ -2810,11 +2756,10 @@ export function ChatConsole({
       document.removeEventListener('mouseup', handleMouseUp);
       // cleanup if unmounted during drag
       panelResizing.current = false;
-      panelDragAnchor.current = null;
       document.body.style.cursor = '';
       document.body.style.userSelect = '';
     };
-  }, [syncPanelWindowExtra]);
+  }, [panelSync]);
   /** Current in-flight request ID (for abort) */
   const [currentReqId, setCurrentReqId] = useState<string | null>(null);
   /** Per-session timestamp of the pending optimistic user bubble (issue #364)
@@ -6940,7 +6885,7 @@ export function ChatConsole({
                 onClick={() => {
                   const opening = !panelOpen;
                   // 打开:窗口加宽到与面板等宽 → 聊天列原宽不变;关闭:还原。
-                  syncPanelWindowExtra(opening ? panelWidth : 0);
+                  panelSync.request(opening ? panelWidth : 0);
                   setPanelOpen(opening);
                 }}
                 className="flex h-6 w-6 items-center justify-center rounded hover:bg-[var(--surface-muted)] transition-colors shrink-0 ml-1"
