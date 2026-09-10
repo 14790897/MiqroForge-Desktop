@@ -67,7 +67,7 @@ export function Timeline({ entry }: { entry: TimelineEntry }) {
         title={<span className="min-w-0 truncate">{entry.title}</span>}
         status={running ? 'pending' : 'success'}
         meta={running ? '执行中' : entry.phase === 'cancelled' ? '已取消' : '已完成'}
-        defaultOpen={false}
+        defaultOpen={running}
       >
         <div className="w-full min-w-0 pl-5">
           {entry.goal && <div className="mb-1 truncate text-[11.5px] text-(--conversation-scaffold-text, #6b7280)" title={entry.goal}>{entry.goal}</div>}
