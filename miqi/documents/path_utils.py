@@ -151,3 +151,63 @@ def resolve_output_path(
                 f"'{effective_dir}'（相对路径基准：会话 files 根目录，即 '{workspace}'）"
             )
     return resolved
+
+
+def resolve_read_path(
+    read_path: str,
+    workspace: Path | None,
+    allowed_dir: Path | None,
+    user_roots: Any = None,
+    allow_user_roots: bool = False,
+) -> Path:
+    """Resolve an **input** path (a file to read/embed) under the same boundary.
+
+    Output paths go through :func:`resolve_output_path`; input paths need the
+    same containment check *after* resolution, otherwise a model-controlled
+    argument such as ``content=[{"type": "image", "path": "/etc/passwd"}]``
+    lets a document tool read and embed files outside the workspace (issue
+    #1005 节 2, same class of hole as #994 H1 for ``create_pdf``).
+
+    Resolution order, fail-closed:
+
+    1. :func:`resolve_output_path` — workspace / session files root, with the
+       workspace-base prefix normalization and cross-session rejection.
+    2. User-authorized directories (``_user_roots``, the #821 injection),
+       **only** when *allow_user_roots* is true and roots were actually
+       injected.  Absolute paths only — a relative path that failed step 1 is
+       never joined onto a user root.
+
+    Anything else raises :class:`PermissionError`; callers must skip the file
+    rather than embed it.
+
+    Semantics are intentionally identical to
+    ``pdf_create_tool._resolve_source_path`` (the source of truth on the #994
+    branch, ``pdf_create_tool.py:1020-1050``).  This module must not import
+    that tool (import cycle); once #994 lands, a follow-up should make pdf
+    delegate here instead of duplicating the rule.
+
+    Raises:
+        PermissionError: if the path is outside every allowed root.
+    """
+    try:
+        return resolve_output_path(read_path, workspace, allowed_dir)
+    except (PermissionError, ValueError, OSError):
+        pass
+    if not allow_user_roots or not user_roots:
+        raise PermissionError(
+            f"路径 '{read_path}' 不在可读范围（工作区/会话文件区/用户授权目录）"
+        )
+    cand = Path(read_path)
+    if not cand.is_absolute():
+        raise PermissionError(f"路径 '{read_path}' 非绝对路径且不在工作区内")
+    try:
+        cand = cand.resolve()
+    except OSError as e:
+        raise PermissionError(f"路径 '{read_path}' 不在可读范围（无法解析：{e}）")
+    for root in user_roots:
+        try:
+            cand.relative_to(Path(str(root)).resolve())
+            return cand
+        except (TypeError, ValueError, OSError):
+            continue
+    raise PermissionError(f"路径 '{read_path}' 不在用户授权目录内")

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -12,7 +13,10 @@ from miqi.documents.path_utils import (
     ensure_suffix,
     raw_output_path,
     resolve_output_path,
+    resolve_read_path,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class PptxReadTool(Tool):
@@ -95,16 +99,21 @@ class CreatePptxTool(Tool):
     name = "create_pptx"
     description = (
         "Create a PowerPoint (.pptx) presentation in the workspace files directory. "
-        "Supports multiple slides with titles, bullets, body text, and images."
+        "Supports multiple slides with titles, bullets, body text, and images. "
+        "Each slide's image_path must resolve inside the session files directory "
+        "(or a user-authorized directory); an image outside those roots is "
+        "skipped, not embedded, and reported in the result."
     )
 
     def __init__(
         self,
         workspace: Path | None = None,
         allowed_dir: Path | None = None,
+        allow_user_roots: bool = False,
     ):
         self._workspace = workspace
         self._allowed_dir = allowed_dir
+        self._allow_user_roots = allow_user_roots
 
     @property
     def parameters(self) -> dict[str, Any]:
@@ -152,6 +161,7 @@ class CreatePptxTool(Tool):
         from pptx.util import Inches
 
         _sess_key = kwargs.pop("_session_key", None)
+        user_roots = kwargs.pop("_user_roots", None)
         raw_path = raw_output_path(kwargs)
         slides = kwargs.get("slides") or []
         if not raw_path.strip():
@@ -170,6 +180,7 @@ class CreatePptxTool(Tool):
         if not slides:
             return "Error: 必须提供 slides"
 
+        skipped_images: list[str] = []
         try:
             prs = Presentation()
             for slide_data in slides:
@@ -204,17 +215,39 @@ class CreatePptxTool(Tool):
                         paragraph.level = 0
                 image_path = slide_data.get("image_path")
                 if image_path:
-                    slide.shapes.add_picture(
-                        str(image_path),
-                        Inches(float(slide_data.get("image_left", 5.5))),
-                        Inches(float(slide_data.get("image_top", 1.5))),
-                        width=Inches(float(slide_data.get("image_width", 3.0))),
-                    )
+                    try:
+                        resolved = resolve_read_path(
+                            str(image_path),
+                            self._workspace,
+                            self._allowed_dir,
+                            user_roots,
+                            self._allow_user_roots,
+                        )
+                        slide.shapes.add_picture(
+                            str(resolved),
+                            Inches(float(slide_data.get("image_left", 5.5))),
+                            Inches(float(slide_data.get("image_top", 1.5))),
+                            width=Inches(float(slide_data.get("image_width", 3.0))),
+                        )
+                    except Exception as e:
+                        # Out-of-bounds, missing, or not-an-image: skip this
+                        # slide's picture and keep building the deck
+                        # (issue #1005 节 2).
+                        logger.warning(
+                            "create_pptx: 跳过图片 %s：%s", image_path, e,
+                        )
+                        skipped_images.append(f"{image_path}（{e}）")
 
             file_path.parent.mkdir(parents=True, exist_ok=True)
             prs.save(str(file_path))
             _persist_tracked_file(self._workspace, file_path, op="write", session_key=_sess_key)
-            return f"Created: {file_path} ({len(slides)} slides)"
+            result = f"Created: {file_path} ({len(slides)} slides)"
+            if skipped_images:
+                result += (
+                    f"（跳过 {len(skipped_images)} 个图片："
+                    f"{'；'.join(skipped_images)}）"
+                )
+            return result
         except Exception as e:
             return f"Error writing {raw_path}: {e}"
 
@@ -223,4 +256,9 @@ class PptxWriteTool(CreatePptxTool):
     """Backward-compatible alias for create_pptx."""
 
     name = "pptx_write"
-    description = "Create a new PowerPoint (.pptx) file. Prefer create_pptx for new calls."
+    description = (
+        "Create a new PowerPoint (.pptx) file. Each slide's image_path must "
+        "resolve inside the session files directory (or a user-authorized "
+        "directory); out-of-bounds images are skipped and reported. "
+        "Prefer create_pptx for new calls."
+    )
