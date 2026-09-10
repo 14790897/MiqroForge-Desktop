@@ -552,16 +552,16 @@ class MCPServerConfig(Base):
 # 写入 workspace/.qraft/token.json（0600，字段 mcpGatewayKey；未来平台
 # 按用户下发时 userinfo 字段优先覆盖），Python 连接本服务器时自动注入
 # Authorization Bearer（见 _connect_one_server）。
-# 默认 fail-closed（CWE-319，CodeRabbit #949 评审）：非回环 http 且未
-# 显式 opt-in 时连接被拒、绝不发送登录凭据——用户在设置页勾选
-# 「允许非回环 HTTP」或平台提供 https 后启用。键名含 "slurm" 使作业
-# 进入计费范围（#936：RUNNING 时扣 10 分）。用户显式配置 mcp_servers
-# （含空对象）即覆盖此默认。
+# insecure_http 默认 true（2026-09-10）：平台暂无 https 网关域名，上线
+# 需走明文 http；内置条目显式 opt-in（共享 token 明文传输的已知权衡，
+# 用户可改回 false 关闭）。键名含 "slurm" 使作业进入计费范围
+# （#936：RUNNING 时扣 10 分）。用户显式配置 mcp_servers（含空对象）
+# 即覆盖此默认。
 DEFAULT_MCP_SERVERS: dict = {
     "miqroforge-slurm": {
         "type": "sse",
         "url": "http://124.220.57.194:9000/sse",
-        "insecure_http": False,
+        "insecure_http": True,
         "tool_timeout": 90,
         "description": "MiQroForge 平台托管 SLURM 集群：作业提交/状态监控/取消、分区查询、输出与文件传输",
     },
