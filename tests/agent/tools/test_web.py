@@ -761,3 +761,90 @@ async def test_parallel_search_auto_still_falls_back(monkeypatch):
                          deepseek_api_key="k", deepseek_api_base="https://api.deepseek.com")
     blocks = await tool._parallel_search("hello", n_queries=2, n=5)
     assert len(blocks) == 1 and "ddgs结果" in blocks[0]
+
+
+# ── #1023 评审修正回归：DDGS 后端超时/失败分类 ─────────────────────────────
+
+
+def _install_fake_ddgs(monkeypatch, behavior):
+    """注入假的 ddgs 模块；behavior(backend, timeout) → list | Exception。"""
+    import sys
+    import types
+
+    captured: list[tuple[str, float]] = []
+
+    class FakeDDGS:
+        def __init__(self, timeout=None):
+            self._timeout = timeout
+
+        def text(self, query, max_results=None, backend=None, **kw):
+            captured.append((backend, self._timeout))
+            result = behavior(backend, self._timeout)
+            if isinstance(result, Exception):
+                raise result
+            return result
+
+    fake = types.ModuleType("ddgs")
+    fake.DDGS = FakeDDGS
+    monkeypatch.setitem(sys.modules, "ddgs", fake)
+    return captured
+
+
+async def test_ddgs_timeout_passed_to_library(monkeypatch):
+    """评审要求①：deadline 必须传给 DDGS(timeout=...)（wait_for 停不了线程）。"""
+    captured = _install_fake_ddgs(
+        monkeypatch,
+        lambda backend, timeout: [
+            {"title": "T", "href": "https://example.com", "body": "b"}
+        ],
+    )
+    r = await DDGSProvider().search("q", 5)
+    assert r.success and r.results
+    assert captured and captured[0][0] == "html"
+    assert captured[0][1] == 12.0  # html 后端 deadline 传入库
+
+
+async def test_ddgs_html_failure_falls_back_to_lite(monkeypatch):
+    """评审要求②：html 超时 → lite 成功 → 返回 lite 结果。"""
+
+    def behavior(backend, timeout):
+        if backend == "html":
+            raise TimeoutError("html timeout")
+        return [{"title": "L", "href": "https://lite.example.com", "body": "lb"}]
+
+    captured = _install_fake_ddgs(monkeypatch, behavior)
+    r = await DDGSProvider().search("q", 5)
+    assert r.success and r.results[0]["url"] == "https://lite.example.com"
+    assert [c[0] for c in captured[:2]] == ["html", "lite"]
+
+
+async def test_ddgs_both_backends_fail_keeps_real_error(monkeypatch):
+    """评审要求③：html/lite 均失败 → 真实失败分类（NETWORK），而非 NO_RESULT 伪装成功。"""
+
+    def behavior(backend, timeout):
+        raise TimeoutError(f"{backend} timeout")
+
+    _install_fake_ddgs(monkeypatch, behavior)
+    r = await DDGSProvider().search("q", 5)
+    assert r.success is False  # 不是 success + NO_RESULT
+    assert r.error_type == "NETWORK"  # Timeout → NETWORK 分类保留
+
+
+async def test_ddgs_failure_falls_through_manager_chain(monkeypatch):
+    """评审要求④：DDGS 失败后 manager 语义正确——链路耗尽返回失败（不伪装成功）。"""
+    manager = SearchProviderManager("ddgs")
+
+    def behavior(backend, timeout):
+        raise TimeoutError("all down")
+
+    _install_fake_ddgs(monkeypatch, behavior)
+    r = await manager.search("q", 5)
+    assert r.success is False
+    assert r.error_type == "NETWORK"
+
+
+async def test_ddgs_success_but_empty_is_no_result(monkeypatch):
+    """边界：后端成功但确实无结果 → NO_RESULT（success=True，可回落下一级）。"""
+    _install_fake_ddgs(monkeypatch, lambda backend, timeout: [])
+    r = await DDGSProvider().search("q", 5)
+    assert r.success is True and r.error_type == "NO_RESULT"

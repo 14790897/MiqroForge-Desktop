@@ -207,19 +207,49 @@ class DDGSProvider(SearchProvider):
             return SearchResult(False, error_type="NETWORK")
 
         last_error = "UNKNOWN"
+
+        async def _query(backend: str, timeout: float) -> list:
+            """单后端查询。
+
+            timeout 同时承担两个角色（#1023 评审修正）：
+            ① `DDGS(timeout=...)` 库自身 HTTP 超时——到点终止运行中的同步
+               请求、释放线程池容量（wait_for 只能停止等待，停不了线程）；
+            ② 外层 wall-clock guard（略宽于库超时，优先由库到点释放）。
+            国内实测：html 3.1s / lite 22.4s 超时 / auto 20.0s 超时。
+            """
+            return await asyncio.wait_for(
+                asyncio.to_thread(
+                    lambda: list(
+                        DDGS(timeout=timeout).text(
+                            query, max_results=count, backend=backend,
+                        )
+                    )
+                ),
+                timeout=timeout + 2.0,
+            )
+
         # Rate limits are usually short-lived (seconds) — retry once with a
         # small backoff before giving up and falling through the chain (#561).
         for attempt in (1, 2):
             try:
-                results = await asyncio.to_thread(
-                    lambda: list(
-                        DDGS().text(
-                            query,
-                            max_results=count,
-                            backend="html,lite",  # multiple endpoints, more resilient
-                        )
-                    )
-                )
+                # html 优先（国内网络稳定且快）；失败再试 lite（8s 上限）。
+                # 评审修正：失败分类不得丢失——两个后端都失败时抛最后异常，
+                # 走失败分类 + 重试 + 下游 fallback；只有后端成功但确实
+                # 无结果时才返回 NO_RESULT。
+                last_exc: Exception | None = None
+                results = None
+                try:
+                    results = await _query("html", 12.0)
+                except Exception as e:  # noqa: BLE001 - 分类前暂存
+                    last_exc = e
+                if not results:
+                    try:
+                        results = await _query("lite", 8.0)
+                        last_exc = None  # lite 成功（即使空结果）
+                    except Exception as e:  # noqa: BLE001
+                        last_exc = e
+                if not results and last_exc is not None:
+                    raise last_exc  # 真实失败 → 分类 + 重试 + 下游 fallback
                 if not results:
                     return SearchResult(True, error_type="NO_RESULT")
                 out = []

@@ -65,7 +65,10 @@ async def _ddgs_regional_search(query: str, n_queries: int, n: int) -> list[str]
 
     def _one(region: str) -> list[dict[str, Any]]:
         try:
-            return list(DDGS().text(query, region=region, max_results=n))
+            # backend="html"：国内网络下 auto/lite 会撞 Brave/Yandex 超时
+            # 20s+（#854 后实测：html 3.1s / lite 22.4s / auto 20.0s），
+            # html 后端稳定且快；region 参数不受影响。
+            return list(DDGS().text(query, region=region, max_results=n, backend="html"))
         except Exception as e:  # ddgs rate-limit / network — degrade per-region
             logger.warning("ddgs region=%s failed: %s", region, e)
             return []
