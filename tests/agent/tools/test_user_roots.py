@@ -21,6 +21,7 @@ from miqi.agent.tools.user_roots import (
     _is_protected_prefix,
     _raw_mentions,
     extract_user_mentioned_roots,
+    sanitize_user_roots,
 )
 from miqi.paths import get_config_path
 
@@ -273,3 +274,92 @@ class TestEffectiveSharedRoots:
         base = [tmp_path / "ws"]
         merged = _effective_shared_roots(base, [None, 123, b"bytes"], True)
         assert merged == base
+
+
+# ── sanitize_user_roots (#1007 review) ───────────────────────────────────
+
+
+class TestSanitizeUserRoots:
+    """Untrusted root strings (an IPC ``user_roots`` param) get the same
+    filtering the mention extractor applies.
+
+    They travel the job path straight into ``ToolExecutionContext
+    .user_mentioned_roots`` — no ``extract_user_mentioned_roots`` call sits
+    on that hop — so they reach both the bwrap rw binds and the command
+    guard's write scope unfiltered.
+    """
+
+    def test_protected_system_subtrees_dropped(self, tmp_path: Path) -> None:
+        assert sanitize_user_roots(
+            [r"C:\Windows\Temp\x", r"C:\ProgramData\pkg\out"],
+            workspace=tmp_path / "ws",
+        ) == []
+
+    def test_relative_and_bare_drive_forms_dropped(self) -> None:
+        assert sanitize_user_roots(
+            ["relative/dir", "C:", "C:relative", r"\\wsl$\Ubuntu\home\out", ""],
+            workspace=None,
+        ) == []
+
+    def test_invalid_entries_dropped(self) -> None:
+        assert sanitize_user_roots(
+            [None, 123, b"bytes", {"a": 1}], workspace=None,
+        ) == []
+
+    def test_malformed_payload_dropped_not_raised(self) -> None:
+        """A non-list payload must not crash the IPC handler — nor have its
+        characters / keys read as roots."""
+        out = str(Path.home() / "Desktop" / "out")
+        assert sanitize_user_roots(out, workspace=None) == []
+        assert sanitize_user_roots(5, workspace=None) == []
+        assert sanitize_user_roots({out: 1}, workspace=None) == []
+        assert sanitize_user_roots(None, workspace=None) == []
+
+    def test_config_home_dropped(self) -> None:
+        config_dir = Path(get_config_path()).parent
+        assert sanitize_user_roots([str(config_dir)], workspace=None) == []
+
+    def test_workspace_root_dropped(self, tmp_path: Path) -> None:
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        assert sanitize_user_roots([str(ws)], workspace=ws) == []
+
+    def test_workspace_child_outside_sessions_dropped(self, tmp_path: Path) -> None:
+        """Anything already inside the workspace needs no extra root."""
+        ws = tmp_path / "ws"
+        (ws / "sub").mkdir(parents=True)
+        assert sanitize_user_roots([str(ws / "sub")], workspace=ws) == []
+
+    def test_sessions_subtree_dropped(self, tmp_path: Path) -> None:
+        ws = tmp_path / "ws"
+        (ws / "sessions" / "k").mkdir(parents=True)
+        assert sanitize_user_roots([str(ws / "sessions" / "k")], workspace=ws) == []
+
+    def test_ordinary_output_dir_kept(self, tmp_path: Path) -> None:
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        out = tmp_path / "out"
+        out.mkdir()
+        assert sanitize_user_roots([str(out)], workspace=ws) == [str(out.resolve())]
+
+    def test_not_yet_created_output_dir_kept(self, tmp_path: Path) -> None:
+        """The #821 scenario: the user's output dir may not exist yet."""
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        out = tmp_path / "not_yet"
+        assert sanitize_user_roots([str(out)], workspace=ws) == [str(out.resolve())]
+
+    def test_duplicates_and_cap(self, tmp_path: Path) -> None:
+        dirs = [tmp_path / f"d{i}" for i in range(DEFAULT_MAX_USER_ROOTS + 3)]
+        for d in dirs:
+            d.mkdir()
+        paths = [str(d) for d in dirs] + [str(dirs[0])]
+        roots = sanitize_user_roots(paths, workspace=tmp_path / "ws", max_roots=4)
+        assert len(roots) == 4
+        assert len(set(roots)) == 4
+
+    def test_posix_system_subtree_dropped(self) -> None:
+        assert sanitize_user_roots(["/etc/cron.d/x"], workspace=None) == []
+
+    def test_home_root_dropped(self) -> None:
+        assert sanitize_user_roots([str(Path.home())], workspace=None) == []

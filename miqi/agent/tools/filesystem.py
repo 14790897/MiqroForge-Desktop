@@ -1137,11 +1137,13 @@ def bootstrap_sandbox_roots(roots: Iterable[Path] | None) -> list[str]:
                 continue
             p.mkdir(parents=True, exist_ok=True)
         except OSError as exc:
-            _log.warning("bootstrap_sandbox_roots: cannot create {}: {}", p, exc)
+            # stdlib logger: ``%s``, not ``{}`` (str.format placeholders make
+            # logging raise TypeError internally and DROP the message).
+            _log.warning("bootstrap_sandbox_roots: cannot create %s: %s", p, exc)
             continue
         created.append(str(p))
     if created:
-        _log.info("bootstrap_sandbox_roots: created {}", created)
+        _log.info("bootstrap_sandbox_roots: created %s", created)
     return created
 
 

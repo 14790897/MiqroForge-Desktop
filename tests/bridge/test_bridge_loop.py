@@ -571,3 +571,87 @@ async def test_drain_loop_dispatches_concurrently() -> None:
         pass
     if loop._shutdown_event is not None:
         loop._shutdown_event.set()
+
+
+# ── agent.spawn must sanitize the IPC-supplied roots (#1007 review) ───────
+
+
+class _SpawnCapture:
+    """Fake AgentControl recording the spawn() kwargs."""
+
+    def __init__(self, workspace) -> None:
+        self.workspace = workspace
+        self.calls: list[dict] = []
+
+    async def spawn(self, **kwargs):
+        self.calls.append(kwargs)
+        handle = type("_Agent", (), {"agent_id": "a1", "thread_id": "t1"})()
+        return handle
+
+
+class _SpawnRegistry:
+    def __init__(self, session) -> None:
+        self._session = session
+
+    async def get_session(self, client_id, session_id):
+        return self._session
+
+
+def _spawn_loop_and_registry(tmp_path):
+    from miqi.bridge.loop import BridgeRuntimeLoop
+
+    loop = BridgeRuntimeLoop(
+        send_func=_CaptureSend().send,
+        dispatch_legacy_func=_dispatch_legacy,
+        dev_mode=False,
+    )
+    ac = _SpawnCapture(tmp_path / "ws")
+    session = type("_Session", (), {"services": type("_S", (), {"agent_control": ac})()})()
+    return loop, _SpawnRegistry(session), ac
+
+
+@pytest.mark.asyncio
+async def test_agent_spawn_sanitizes_user_roots(tmp_path):
+    """A root that skips the mention filter must not reach AgentJob.  A UNC
+    path, a protected system subtree and the workspace itself are all
+    rejected; the legitimate output dir survives."""
+    loop, registry, ac = _spawn_loop_and_registry(tmp_path)
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    out = tmp_path / "out"
+    out.mkdir()
+
+    await loop._agent_spawn_handler(
+        "req-1",
+        {
+            "agent_type": "code-agent",
+            "task": "do the thing",
+            "user_roots": [
+                str(out),
+                str(ws),
+                str(ws / "sessions" / "k"),
+                r"\\wsl$\Ubuntu\home\out",
+                "relative/dir",
+                "C:relative",
+            ],
+        },
+        "client-1",
+        "session-1",
+        registry,
+    )
+
+    assert len(ac.calls) == 1
+    assert ac.calls[0]["user_roots"] == [str(out.resolve())]
+
+
+@pytest.mark.asyncio
+async def test_agent_spawn_without_user_roots_passes_empty(tmp_path):
+    loop, registry, ac = _spawn_loop_and_registry(tmp_path)
+    await loop._agent_spawn_handler(
+        "req-2",
+        {"agent_type": "code-agent", "task": "x"},
+        "client-1",
+        "session-1",
+        registry,
+    )
+    assert ac.calls[0]["user_roots"] == []

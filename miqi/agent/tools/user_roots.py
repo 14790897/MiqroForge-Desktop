@@ -29,7 +29,7 @@ import os as _os
 import re as _re
 import sys as _sys
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable
 
 from miqi.paths import get_config_path
 
@@ -221,6 +221,138 @@ def _candidate_root(host: str) -> Path | None:
         return None
 
 
+def _root_for(cand: Path) -> Path:
+    """The writable root a candidate path implies.
+
+    An existing file's parent is the writable root; a directory (or a
+    not-yet-existing path, i.e. a future output dir) roots itself.
+    """
+    try:
+        if cand.is_dir():
+            return cand
+        if cand.is_file():
+            return cand.parent
+    except OSError:
+        pass
+    return cand
+
+
+def _accept_root(root: Path, workspace: Path | None) -> bool:
+    """True when *root* may become an authorized write root.
+
+    Shared by :func:`extract_user_mentioned_roots` (#821, user message
+    mentions) and :func:`sanitize_user_roots` (#984 review, untrusted
+    ``agent.spawn`` params): both channels end up in
+    ``ToolExecutionContext.user_mentioned_roots`` — the exec rw binds and
+    the command guard's write scope — so a root dropped on one of them must
+    not slip in through the other.
+    """
+    # Drive root (e.g. C:\) — Path.parent of a drive root is itself.
+    if root.parent == root:
+        return False
+    # The user profile root itself is too broad.
+    if root == Path.home().resolve():
+        return False
+    # Top-level system directories of a drive.
+    if _is_top_level_system_dir(root):
+        return False
+    # #984: protected system subtrees below the drive root
+    # (C:\Windows\Temp\x, /etc/…, ~/.miqi/…) — the depth-1 check above
+    # does not catch these.
+    if _is_protected_prefix(root):
+        return False
+    if workspace is not None:
+        # Protected paths: config file / per-session files.
+        if _is_protected_extra_root(root, workspace):
+            return False
+        # Already covered by the workspace root — no need to add.
+        try:
+            root.relative_to(workspace.resolve())
+            return False
+        except ValueError:
+            pass
+    return True
+
+
+def _grant_to_host_path(raw: Any) -> str | None:
+    """Absolute host path from one untrusted root entry, or None.
+
+    Only spellings that name ONE fixed location qualify: POSIX-absolute
+    (``/…``) or drive-ABSOLUTE (``C:/…``).  Rejected, as they cannot name a
+    fixed root: relative paths, bare drives / drive-relative forms (``C:``,
+    ``C:relative`` — relative to that drive's current directory, see
+    ``bwrap._host_path_to_sandbox``) and UNC shares (no sandbox mapping).
+    Drive paths on a POSIX host are dropped by :func:`_to_host_path`, the
+    same way a drive-letter mention is.
+    """
+    try:
+        s = _os.fspath(raw)
+    except TypeError:
+        return None
+    if not isinstance(s, str) or not s:
+        return None
+    s = s.replace("\\", "/")
+    if s.startswith("//"):
+        return None  # UNC / WSL share — not bindable
+    if not (
+        s.startswith("/")
+        or (len(s) >= 3 and s[0].isalpha() and s[1] == ":" and s[2] == "/")
+    ):
+        return None
+    return _to_host_path(s)
+
+
+def sanitize_user_roots(
+    paths: Iterable[Any],
+    *,
+    workspace: Path | None = None,
+    max_roots: int = DEFAULT_MAX_USER_ROOTS,
+) -> list[str]:
+    """Filter untrusted root entries; returns canonical host path strings.
+
+    For roots that arrive from OUTSIDE the runtime — the ``agent.spawn``
+    IPC parameter (#984 review) — and would otherwise reach
+    ``TurnContext.user_mentioned_roots`` without ever passing through
+    :func:`extract_user_mentioned_roots`.  They feed the same two
+    authorization channels there (the bwrap rw binds and the command guard's
+    write scope), so they get the same guard rails as a mention.
+
+    Entries that are not usable absolute paths (``None``, numbers, ``bytes``,
+    relative / drive-relative / UNC strings) are dropped instead of raising:
+    the input is untrusted IPC data.
+    """
+    # A str/bytes/dict "list" is a malformed payload, not a root list:
+    # iterating it would hand over characters or keys — and a non-iterable
+    # would raise inside the handler.
+    if paths is None or isinstance(paths, (str, bytes, dict)):
+        return []
+    try:
+        entries = list(paths)
+    except TypeError:
+        return []
+
+    roots: list[str] = []
+    seen: set[str] = set()
+    for raw in entries:
+        host = _grant_to_host_path(raw)
+        if host is None:
+            continue
+        cand = _candidate_root(host)
+        if cand is None:
+            continue
+        root = _root_for(cand)
+        if not _accept_root(root, workspace):
+            continue
+        key = _os.path.normcase(str(root))
+        if key in seen:
+            continue
+        seen.add(key)
+        roots.append(str(root))
+        if len(roots) >= max_roots:
+            break
+    return roots
+
+
 def extract_user_mentioned_roots(
     texts: Iterable[str],
     *,
@@ -259,42 +391,9 @@ def extract_user_mentioned_roots(
         if cand is None:
             continue
 
-        # An existing file's parent is the writable root; a directory (or a
-        # not-yet-existing path, i.e. a future output dir) roots itself.
-        try:
-            if cand.is_dir():
-                root = cand
-            elif cand.is_file():
-                root = cand.parent
-            else:
-                root = cand
-        except OSError:
-            root = cand
-
-        # Drive root (e.g. C:\) — Path.parent of a drive root is itself.
-        if root.parent == root:
+        root = _root_for(cand)
+        if not _accept_root(root, workspace):
             continue
-        # The user profile root itself is too broad.
-        if root == Path.home().resolve():
-            continue
-        # Top-level system directories of a drive.
-        if _is_top_level_system_dir(root):
-            continue
-        # #984: protected system subtrees below the drive root
-        # (C:\Windows\Temp\x, /etc/…, ~/.miqi/…) — the depth-1 check above
-        # does not catch these.
-        if _is_protected_prefix(root):
-            continue
-        # Protected paths: config file / per-session files.
-        if workspace is not None and _is_protected_extra_root(root, workspace):
-            continue
-        # Already covered by the workspace root — no need to add.
-        if workspace is not None:
-            try:
-                root.relative_to(workspace.resolve())
-                continue
-            except ValueError:
-                pass
 
         key = _os.path.normcase(str(root))
         if key in seen:

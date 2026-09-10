@@ -12,6 +12,7 @@ Two fixes:
 from __future__ import annotations
 
 import base64
+import logging
 import shutil
 import subprocess
 import sys
@@ -26,6 +27,7 @@ from miqi.agent.tools.filesystem import (
 
 _IS_WINDOWS = sys.platform == "win32"
 _BASH = shutil.which("bash")
+_FS_LOGGER = "miqi.agent.tools.filesystem"
 
 
 class _RecordingSandbox:
@@ -159,3 +161,47 @@ class TestBootstrapSandboxRoots:
         a, b = tmp_path / "a", tmp_path / "b"
         assert bootstrap_sandbox_roots([a, b]) == [str(a), str(b)]
         assert a.is_dir() and b.is_dir()
+
+
+# ── #1007 review: the log calls are stdlib-logging, so ``%s`` not ``{}`` ──
+
+
+class TestBootstrapSandboxRootsLogging:
+    """``_log`` is a ``logging.Logger`` (filesystem.py:16): it formats with
+    ``msg % args``.  The ``{}`` placeholders raised ``TypeError: not all
+    arguments converted`` INSIDE logging, so the message was dropped and only
+    a bare ``--- Logging error ---`` reached stderr — the operator saw neither
+    the path nor the reason.
+    """
+
+    _LOGGER = _FS_LOGGER
+
+    @staticmethod
+    def _messages(caplog) -> list[str]:
+        return [r.getMessage() for r in caplog.records if r.name == _FS_LOGGER]
+
+    def test_create_failure_logs_path_and_reason(
+        self, tmp_path: Path, monkeypatch, caplog,
+    ) -> None:
+        target = tmp_path / "sub" / "out"
+
+        def _boom(self, *args, **kwargs):
+            raise OSError("disk full")
+
+        monkeypatch.setattr(Path, "mkdir", _boom)
+        with caplog.at_level(logging.WARNING, logger=self._LOGGER):
+            assert bootstrap_sandbox_roots([target]) == []
+        assert "cannot create" in caplog.text
+        assert self._messages(caplog) == [
+            f"bootstrap_sandbox_roots: cannot create {target}: disk full"
+        ]
+
+    def test_created_roots_are_logged(self, tmp_path: Path, caplog) -> None:
+        target = tmp_path / "made" / "later"
+        with caplog.at_level(logging.INFO, logger=self._LOGGER):
+            created = bootstrap_sandbox_roots([target])
+        assert created == [str(target)]
+        assert "bootstrap_sandbox_roots: created" in caplog.text
+        assert self._messages(caplog) == [
+            f"bootstrap_sandbox_roots: created {[str(target)]}"
+        ]

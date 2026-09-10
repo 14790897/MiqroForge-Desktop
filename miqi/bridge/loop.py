@@ -1522,6 +1522,20 @@ class BridgeRuntimeLoop:
                 "Agent control not initialized", code="INTERNAL",
             )
 
+        # #984 review: roots arriving over IPC bypass
+        # ``extract_user_mentioned_roots`` and would reach
+        # ``TurnContext.user_mentioned_roots`` — i.e. both the bwrap rw binds
+        # and the command guard's write scope — unfiltered.  They are
+        # re-filtered here, at the trust boundary, before they are stored on
+        # the job.  (Defence in depth: the Desktop IPC has no ``user_roots``
+        # field yet, so this path is not reachable from the shipped client.)
+        from miqi.agent.tools.user_roots import sanitize_user_roots
+
+        user_roots = sanitize_user_roots(
+            params.get("user_roots") or [],
+            workspace=getattr(ac, "workspace", None),
+        )
+
         agent = await ac.spawn(
             agent_type=params.get("agent_type", "code-agent"),
             task=params.get("task", ""),
@@ -1529,7 +1543,7 @@ class BridgeRuntimeLoop:
             # #984: the Desktop may forward the parent turn's authorized
             # output roots; without them the sub-agent gets none (the server
             # has no other root source for this channel).
-            user_roots=params.get("user_roots") or [],
+            user_roots=user_roots,
         )
         return {"result": {"agent_id": agent.agent_id, "thread_id": agent.thread_id}}
 
