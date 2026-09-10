@@ -1,0 +1,56 @@
+// @vitest-environment jsdom
+import { describe, it, expect } from 'vitest';
+import { renderToStaticMarkup } from 'react-dom/server';
+import { createElement } from 'react';
+import { SvgEmbed } from './SvgEmbed';
+
+describe('SvgEmbed sanitization (CodeRabbit security regression)', () => {
+  it('strips external resource elements (image/use/feImage) — no outbound request path', () => {
+    const code = `<svg viewBox="0 0 100 50" xmlns="http://www.w3.org/2000/svg">
+      <image href="https://evil.example/x.png" x="0" y="0" width="50" height="50" />
+      <use href="https://evil.example/defs.svg#a" />
+      <filter id="f"><feImage href="https://evil.example/f.png" /></filter>
+      <rect x="10" y="10" width="20" height="20" />
+    </svg>`;
+    const markup = renderToStaticMarkup(createElement(SvgEmbed, { code }));
+    expect(markup).not.toContain('evil.example');
+    expect(markup).not.toContain('<image');
+    expect(markup).not.toContain('<use');
+    expect(markup).not.toContain('feImage');
+    expect(markup).toContain('<rect');
+  });
+
+  it('strips script / event handlers / javascript: href', () => {
+    const code = `<svg xmlns="http://www.w3.org/2000/svg">
+      <script>alert(1)</script>
+      <rect onclick="alert(2)" href="javascript:alert(3)" x="0" y="0" width="10" height="10" />
+    </svg>`;
+    const markup = renderToStaticMarkup(createElement(SvgEmbed, { code }));
+    expect(markup).not.toContain('script');
+    expect(markup).not.toContain('alert');
+    expect(markup).not.toContain('onclick');
+    expect(markup).not.toContain('javascript:');
+  });
+
+  it('keeps benign internal shapes', () => {
+    const code = `<svg viewBox="0 0 100 50" xmlns="http://www.w3.org/2000/svg"><rect x="10" y="10" width="40" height="20" fill="#4f8" /></svg>`;
+    const markup = renderToStaticMarkup(createElement(SvgEmbed, { code }));
+    expect(markup).toContain('<rect');
+    expect(markup).toContain('fill="#4f8"');
+  });
+
+  it('falls back to source code when sanitization strips everything (审查 P3)', () => {
+    // script-only / 纯事件处理器被整块剥离（含空壳 <svg>）→ 显示源码
+    // 而非空白卡：用户能看到模型输出了什么（源码文本被转义，无执行面）
+    const code = '<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>';
+    const markup = renderToStaticMarkup(createElement(SvgEmbed, { code }));
+    expect(markup).toContain('<pre');
+    expect(markup).not.toContain('<script>alert'); // 未转义的原始标签不存在
+    expect(markup).not.toContain('diagram-card'); // 不渲染空壳卡
+  });
+
+  it('renders empty input as source fallback (no blank card)', () => {
+    const markup = renderToStaticMarkup(createElement(SvgEmbed, { code: '' }));
+    expect(markup).toContain('<pre');
+  });
+});

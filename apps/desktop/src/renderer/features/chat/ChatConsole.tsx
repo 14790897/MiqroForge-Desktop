@@ -956,7 +956,7 @@ export function ThinkingBlockGroup({
         defaultOpen={thinking.isLiveReasoning}
         elapsedSeconds={thinking.reasoningElapsedS}
         live={thinking.isLiveReasoning}
-        mode={thinking.reasoningMode ?? fallbackMode}
+        mode={(thinking.reasoningMode ?? fallbackMode) as 'fast' | 'think'}
       />
     </div>
   );
@@ -6827,6 +6827,7 @@ export function ChatConsole({
                         sources={sourcesByMsg.get(group.msg) ?? []}
                         toolStepIndex={toolStepByMsg.get(group.msg)}
                         isLast={i === chatGroups.length - 1}
+                        streaming={streaming}
                         onResume={
                           group.msg.interrupted ? () => handleResumeTurn(group.msg) : undefined
                         }
@@ -8140,6 +8141,10 @@ interface MessageBubbleProps {
    *  spinner shows only on the bubble whose timestamp matches, so a session
    *  switch never shows it on another session's messages. */
   sending?: number | null;
+  /** Whether this session currently has a turn in flight (ChatConsole
+   *  streaming state, mirrored from streamingBySession). Used to render the
+   *  streaming mermaid source preview only on the message being generated. */
+  streaming?: boolean;
   execOutputs: Record<string, { stdout: string; stderr: string; running: boolean }>;
   inlineExecOutput: boolean;
   isLast: boolean;
@@ -8179,6 +8184,7 @@ const MessageBubble = memo(function MessageBubble({
   execOutputs,
   inlineExecOutput,
   isLast,
+  streaming,
   onCopy,
   isCopied,
   onRetry,
@@ -9017,7 +9023,12 @@ const MessageBubble = memo(function MessageBubble({
                               🚀
                             </span>
                           )}
-                        <MarkdownContent content={msg.content} />
+                        {/* #671: streaming = 本条是最后一条且会话正在生成 ——
+                            正在生成的回答流式期间 mermaid/svg 显示源码；历史消息不塌回。
+                            CodeRabbit 修订：改用真实生成信号 streaming（2722/2724 由
+                            turn 生命周期驱动），不再用乐观 sending 时间戳 ——
+                            sending 是用户回合信号，assistant 回复期间可能已为 null。 */}
+                        <MarkdownContent content={msg.content} streaming={streaming && isLast} />
                       </>
                     ) : (
                       renderContent((msg as any).__cleanContent ?? msg.content)
