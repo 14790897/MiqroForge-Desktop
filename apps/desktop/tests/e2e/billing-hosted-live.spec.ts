@@ -56,9 +56,12 @@ describeFn('托管 slurm MCP 网关计费 live E2E（opt-in）', () => {
   let page: Page;
 
   test.beforeAll(async () => {
-    // 清掉开发机 config 残留的 mcpServers（让内置默认 miqroforge-slurm 生效），
-    // 并注入官方 DeepSeek provider + 官方模型（本机 config 无 provider；
-    // 默认模型 deepseek-v4-flash 是平台网关模型，官方 API 用 deepseek-chat）。
+    // 清掉开发机 config 残留的 mcpServers（让内置默认 miqroforge-slurm 生效）。
+    // 登录后平台会自动下发 AI 网关 encryptedApiKey（token.json 的 aiGateway 块），
+    // 默认模型 deepseek-v4-flash 走网关即可回复 LLM；但网关真实 LLM 对「调用
+    // submit_slurm_job」这类工具调用推理慢、方差大无法收敛（见记忆
+    // slurm-mcp-billing-map），故这里注入官方 DeepSeek + deepseek-chat，让工具
+    // 调用确定性收敛、测试快——不是「登录后无 key」。
     fixture = await launchElectronApp((config: any) => {
       if (config.tools && typeof config.tools === 'object') {
         delete config.tools.mcpServers;
