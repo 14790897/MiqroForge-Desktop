@@ -4,6 +4,7 @@ import { invalidateConfigCache } from '../../../lib/configCache';
 import { sanitizeUiMessage } from '../../../lib/sanitizeUiMessage';
 import { gatewayStatusText } from '../../../lib/qraftGateway';
 import { useQraftStatus } from '../../../hooks/useQraftStatus';
+import { QraftLoginButton } from '../../settings/components/QraftLoginCard';
 import { ModelSelect } from './ModelSelect';
 
 /**
@@ -176,14 +177,12 @@ export function ModelQuickPanel({ activeModel, onSaved, onGoToQraft }: ModelQuic
           ) : (
             <div className="flex items-center justify-between gap-3 rounded-lg border border-[var(--border-subtle)] bg-[var(--surface-muted)] px-3 py-2.5">
               <span className="text-sm text-[var(--text-muted)]">登录后使用平台内置模型</span>
-              <button
-                onClick={onGoToQraft}
-                data-testid="model-quickpanel-go-login"
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-white transition-colors shrink-0"
-              >
-                <LogIn size={13} />
-                去登录
-              </button>
+              {/* #1000 未登录拦截：一键浏览器登录（原「去登录」仅跳设置页，入口过深） */}
+              <QraftLoginButton
+                testId="model-quickpanel-login-btn"
+                size="sm"
+                busyLabel="等待授权中…"
+              />
             </div>
           )}
         </div>
