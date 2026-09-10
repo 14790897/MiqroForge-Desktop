@@ -305,12 +305,40 @@ _REMOVAL_CALL_RE = re.compile(
 _COPY_CALL_RE = re.compile(r"\bshutil\.copy\w*\s*\(")
 
 
+#: ``src=`` keyword of the copy family, anchored at the start of a depth-0
+#: argument.  Every call this regex (:data:`_COPY_CALL_RE`) matches names its
+#: first parameter ``src`` — ``copy``, ``copy2``, ``copyfile`` and
+#: ``copytree`` alike (``shutil.move`` is deliberately not matched there).
+_COPY_SRC_KEYWORD_RE = re.compile(r"\s*src\s*=\s*")
+
+
 def _copy_source_spans(payload: str) -> list[tuple[int, int]]:
-    """Spans of the SOURCE argument of every ``shutil.copy*`` call."""
+    """Spans of the SOURCE argument of every ``shutil.copy*`` call.
+
+    Positional form: the first argument is the source
+    (``shutil.copy('/etc/x', out)``).  Keyword form: the argument values
+    are looked at by NAME, because the first argument is then NOT
+    necessarily the source — ``shutil.copy(dst=out, src=p)`` writes the
+    argument that ``args[0]`` would have labelled a read, letting an
+    out-of-scope target through as "just a cp source".
+
+    Only when no ``src=`` argument is present does the first argument
+    count as the source, so every positional payload keeps its previous
+    classification verbatim.  A malformed ``src=`` (no value) yields an
+    empty span, which matches no literal — i.e. it degrades to "this
+    literal is a mutation", never to a read.
+    """
     spans: list[tuple[int, int]] = []
     for m in _COPY_CALL_RE.finditer(payload):
         args = _top_level_call_arg_spans(payload, m.end())
-        if args:
+        if not args:
+            continue
+        for a, b in args:
+            keyword = _COPY_SRC_KEYWORD_RE.match(payload[a:b])
+            if keyword:
+                spans.append((a + keyword.end(), b))
+                break
+        else:
             spans.append(args[0])
     return spans
 

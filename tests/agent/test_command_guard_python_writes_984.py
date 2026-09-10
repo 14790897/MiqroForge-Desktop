@@ -187,6 +187,60 @@ class TestWriteSpellingsDenied:
             rt,
         ).allowed
 
+    @pytest.mark.parametrize(
+        "call",
+        ["copy", "copy2", "copyfile", "copytree"],
+    )
+    def test_copy_keyword_dst_first_target_is_still_a_write(self, tmp_path, call):
+        """``dst=`` may be written BEFORE ``src=`` (#1007 review).
+
+        The guard used to take ``args[0]`` as the source unconditionally,
+        so in this order it labelled the out-of-scope TARGET a copy source
+        → ``for_write=False`` → "reads anywhere else are unrestricted" →
+        the write was allowed.  The source here is in-scope (the ordinary
+        case: the agent copies a file it may write to a directory it may
+        not), which is what makes the target the only thing the guard has
+        to get right.
+        """
+        rt = sandbox_rt(tmp_path)
+        payload = (
+            f"import shutil; shutil.{call}(dst='{SIBLING}/evil.txt', "
+            "src='./in.txt')"
+        )
+        verdict = v(f'python3 -c "{payload}"', rt)
+        assert not verdict.allowed, payload
+        assert verdict.reason_code == "outside_workspace", payload
+
+    def test_copy_keyword_order_does_not_matter(self, tmp_path):
+        """Both keyword orders classify identically to the positional form:
+        source = read, target = write."""
+        rt = sandbox_rt(tmp_path)
+        for payload in (
+            f"import shutil; shutil.copy('./in.txt','{SIBLING}/evil.txt')",
+            f"import shutil; shutil.copy(src='./in.txt', dst='{SIBLING}/evil.txt')",
+            f"import shutil; shutil.copy(dst='{SIBLING}/evil.txt', src='./in.txt')",
+        ):
+            verdict = v(f'python3 -c "{payload}"', rt)
+            assert not verdict.allowed, payload
+            assert verdict.reason_code == "outside_workspace", payload
+        # ...and an in-scope target stays allowed in either order
+        for payload in (
+            "import shutil; shutil.copy(src='/etc/hostname', dst='./out.txt')",
+            "import shutil; shutil.copy(dst='./out.txt', src='/etc/hostname')",
+        ):
+            assert v(f'python3 -c "{payload}"', rt).allowed, payload
+
+    def test_copy_keyword_source_is_read_even_when_dst_first(self, tmp_path):
+        """The authorised-root parity case: keyword order must not turn the
+        granted target into a read and the read source into a write."""
+        rt = sandbox_rt(tmp_path, roots=(AUTH,))
+        for payload in (
+            f"import shutil; shutil.copy(src='/etc/hostname', dst='{AUTH}/a.txt')",
+            f"import shutil; shutil.copy(dst='{AUTH}/a.txt', src='/etc/hostname')",
+        ):
+            verdict = v(f'python3 -c "{payload}"', rt)
+            assert verdict.allowed, payload
+
 
 # ── fail-open：读写法与无法识别的写法不得误报 ───────────────────────────
 
