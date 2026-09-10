@@ -722,22 +722,30 @@ class SessionManager:
         When client_id is provided, ownership is verified first.
         Unowned sessions raise REQUIRES_CLAIM.
         Sessions owned by other clients raise UNAUTHORIZED.
+
+        #1003 finding ④（CodeRabbit 复审）：落盘删除与 tracked 读-改-写共用同一把
+        key 锁。否则 ``save_tracked_file`` 在 ``rmtree`` 之后才跑到
+        ``path.parent.mkdir(...)`` + ``tmp.replace``，会把刚删掉的会话目录连同
+        ``tracked_files.json`` 一起重建（已删会话复活）；反向交错则让写端抛
+        ``FileNotFoundError``。锁是 ``threading.RLock``（可重入），本路径内不再
+        获取其它锁，无锁序问题。
         """
         if client_id is not None:
             self._verify_ownership_for_mutation(key, client_id)
         self._cache.pop(key, None)
-        self._migrate_flat_to_dir(key)
-        session_dir = self.get_session_dir(key)
-        if session_dir.exists():
-            shutil.rmtree(session_dir)
-            return True
-        # Fallback: old flat file that was never migrated
-        safe_key = safe_filename(key.replace(":", "_"))
-        old_flat = self.sessions_dir / f"{safe_key}.jsonl"
-        if old_flat.exists():
-            old_flat.unlink()
-            return True
-        return False
+        with self._get_session_lock(key):
+            self._migrate_flat_to_dir(key)
+            session_dir = self.get_session_dir(key)
+            if session_dir.exists():
+                shutil.rmtree(session_dir)
+                return True
+            # Fallback: old flat file that was never migrated
+            safe_key = safe_filename(key.replace(":", "_"))
+            old_flat = self.sessions_dir / f"{safe_key}.jsonl"
+            if old_flat.exists():
+                old_flat.unlink()
+                return True
+            return False
 
     def rename(self, key: str, title: str, *, client_id: str | None = None) -> str:
         """Set a custom display title for a session, persisted in metadata.title.
