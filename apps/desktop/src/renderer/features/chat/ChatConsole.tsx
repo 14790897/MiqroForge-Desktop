@@ -4151,6 +4151,9 @@ export function ChatConsole({
   /** 编辑重答原子化(#828):handleSend 同步段的接受结果——
    *  被 pending guard 等预检拒绝时标 'rejected',handleEdit 据此回滚截断。 */
   const editSendOutcomeRef = useRef<'accepted' | 'rejected' | null>(null);
+  /** 编辑重答回滚点:异步预派发失败(无 provider / 网关非 active)时,
+   *  恢复截断前的完整消息列表并给出错误提示(CodeRabbit #1011)。 */
+  const editRollbackRef = useRef<{ snapshot: Message[]; sessionKey: string } | null>(null);
   /** Monotonic id for pendingSendIdsRef — distinguishes "this send" from any
    *  newer send that started for the same session. */
   const sendSeqRef = useRef(0);
@@ -4207,9 +4210,11 @@ export function ChatConsole({
     // setInput 后的渲染 flush（旧闭包读到的 input state 是旧值）。
     const programmaticText = programmaticTextRef.current;
     programmaticTextRef.current = null;
-    const text = (payload?.text ?? programmaticText ?? input).trim();
+    // payload(编辑重答/重试)文本原样发送,不经 trim —— 保留用户刻意的
+    // 首尾空格/换行(CodeRabbit #1011);trim 仅用于空输入校验。
+    const text = payload?.text ?? (programmaticText ?? input).trim();
     const atts = payload?.attachments ?? attachments;
-    if (!text && atts.length === 0 && !_resumeId) {
+    if (!text.trim() && atts.length === 0 && !_resumeId) {
       retryPayloadRef.current = null;
       editSendOutcomeRef.current = 'rejected';
       return;
@@ -4394,14 +4399,21 @@ export function ChatConsole({
         streamingBySession.delete(sendSessionKey);
         setSendingFor(sendSessionKey, null);
         if (currentSessionRef.current === sendSessionKey) {
+          const rollback = editRollbackRef.current;
+          editRollbackRef.current = null;
           setStreaming(false);
-          setMessages((prev) => {
-            const last = prev[prev.length - 1];
-            if (last?.timestamp === userMsg.timestamp) {
-              return [...prev.slice(0, -1), createGatewayBlockedMessage()];
-            }
-            return prev;
-          });
+          if (rollback && rollback.sessionKey === sendSessionKey) {
+            // 编辑重答:恢复截断前的完整列表,错误提示追加在末尾(#1011)
+            setMessages([...rollback.snapshot, createGatewayBlockedMessage()]);
+          } else {
+            setMessages((prev) => {
+              const last = prev[prev.length - 1];
+              if (last?.timestamp === userMsg.timestamp) {
+                return [...prev.slice(0, -1), createGatewayBlockedMessage()];
+              }
+              return prev;
+            });
+          }
           setInput(text);
           setAttachments(atts);
         }
@@ -4442,14 +4454,21 @@ export function ChatConsole({
         streamingBySession.delete(sendSessionKey);
         setSendingFor(sendSessionKey, null);
         if (currentSessionRef.current === sendSessionKey) {
+          const rollback = editRollbackRef.current;
+          editRollbackRef.current = null;
           setStreaming(false);
-          setMessages((prev) => {
-            const last = prev[prev.length - 1];
-            if (last?.timestamp === userMsg.timestamp) {
-              return [...prev.slice(0, -1), guidance];
-            }
-            return prev;
-          });
+          if (rollback && rollback.sessionKey === sendSessionKey) {
+            // 编辑重答:恢复截断前的完整列表,错误提示追加在末尾(#1011)
+            setMessages([...rollback.snapshot, guidance]);
+          } else {
+            setMessages((prev) => {
+              const last = prev[prev.length - 1];
+              if (last?.timestamp === userMsg.timestamp) {
+                return [...prev.slice(0, -1), guidance];
+              }
+              return prev;
+            });
+          }
           setInput(text);
           setAttachments(atts);
         }
@@ -4470,16 +4489,26 @@ export function ChatConsole({
       streamingBySession.delete(sendSessionKey);
       setSendingFor(sendSessionKey, null);
       if (currentSessionRef.current === sendSessionKey) {
-        setMessages((prev) => {
-          const last = prev[prev.length - 1];
-          if (last?.timestamp === userMsg.timestamp) return prev.slice(0, -1);
-          return prev;
-        });
+        const rollback = editRollbackRef.current;
+        editRollbackRef.current = null;
+        if (rollback && rollback.sessionKey === sendSessionKey) {
+          // 编辑重答被 stop/superseded:恢复截断前的完整列表(#1011)
+          setMessages(rollback.snapshot);
+        } else {
+          setMessages((prev) => {
+            const last = prev[prev.length - 1];
+            if (last?.timestamp === userMsg.timestamp) return prev.slice(0, -1);
+            return prev;
+          });
+        }
         setInput(text);
         setAttachments(atts);
       }
       return;
     }
+
+    // 所有预派发检查通过 —— 发送真正开始,清掉编辑回滚点(防陈旧)
+    editRollbackRef.current = null;
 
     // If a reveal animation is still running from the previous response,
     // cancel it and abort the in-flight request so we can start fresh.  A
@@ -6305,6 +6334,8 @@ export function ChatConsole({
         retry: false,
       };
       setMessages((prev) => prev.slice(0, idx));
+      // 记录回滚点:异步预派发失败时恢复(见 handleSend 的 provider/网关检查)
+      editRollbackRef.current = { snapshot, sessionKey: currentSessionRef.current };
       // 同步原子调用:handleSend 经 retryPayload 读文本,不依赖 setInput 渲染
       // flush —— 不排 RAF(窗口不可见时 RAF 可能不触发,导致"截断但不发送")。
       editSendOutcomeRef.current = null;
@@ -6313,6 +6344,7 @@ export function ChatConsole({
       if (editSendOutcomeRef.current === 'rejected') {
         retryPayloadRef.current = null;
         setMessages(snapshot);
+        editRollbackRef.current = null;
       }
     },
     [streaming]
@@ -9235,12 +9267,12 @@ const MessageBubble = memo(function MessageBubble({
               {/* 用户消息操作 — 复制 / 编辑(仅鼠标靠近/hover 消息时显示,#828;
                   编辑态下隐藏,避免与编辑框叠在一起) */}
               {isUser && msg.content !== '' && !editing && (
-                <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity mt-1">
+                <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 transition-opacity mt-1">
                   <button
                     onClick={() => onCopy(msg.content, copyIdx ?? turnIndex ?? 0)}
                     title="复制"
                     aria-label="复制"
-                    className="flex items-center justify-center w-8 h-8 rounded-lg bg-[var(--surface-muted)]/70 text-[var(--text-muted)] hover:bg-[var(--surface-muted)] hover:text-[var(--text)] transition-colors"
+                    className="flex items-center justify-center w-8 h-8 rounded-lg bg-[var(--surface-muted)]/70 text-[var(--text-muted)] hover:bg-[var(--surface-muted)] hover:text-[var(--text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)] transition-colors"
                   >
                     {isCopied ? (
                       <Check size={14} style={{ color: 'var(--success)' }} />
@@ -9259,7 +9291,7 @@ const MessageBubble = memo(function MessageBubble({
                       title="编辑并重新回答"
                       aria-label="编辑并重新回答"
                       data-testid="edit-message-btn"
-                      className="flex items-center justify-center w-8 h-8 rounded-lg bg-[var(--surface-muted)]/70 text-[var(--text-muted)] hover:bg-[var(--surface-muted)] hover:text-[var(--text)] transition-colors"
+                      className="flex items-center justify-center w-8 h-8 rounded-lg bg-[var(--surface-muted)]/70 text-[var(--text-muted)] hover:bg-[var(--surface-muted)] hover:text-[var(--text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)] transition-colors"
                     >
                       <Pencil size={14} />
                     </button>

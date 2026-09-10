@@ -99,6 +99,9 @@ export function formatChatTime(timestamp?: number | string | null, now: Date = n
   const value = typeof timestamp === 'number' ? timestamp : Date.parse(String(timestamp));
   if (!Number.isFinite(value)) return '';
   const d = new Date(value);
+  // 超大/超范围数字构造出的 Date 是 Invalid(getTime() = NaN)——提前返回,
+  // 避免输出 "今天 NaN:NaN"(CodeRabbit #1011)
+  if (!Number.isFinite(d.getTime())) return '';
   const hm = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
   const sameDay = (a: Date, b: Date) =>
     a.getFullYear() === b.getFullYear() &&
