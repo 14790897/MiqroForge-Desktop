@@ -9114,7 +9114,10 @@ const MessageBubble = memo(function MessageBubble({
                       onKeyDown={(e) => {
                         if (e.key === 'Escape') setEditing(false);
                         if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
-                          if (editText.trim() && editText.trim() !== msg.content.trim()) {
+                          if (
+                            editText.trim() &&
+                            editText.trim() !== extractFileChips(msg.content).cleanContent.trim()
+                          ) {
                             onEdit?.(msg, editText);
                           }
                           setEditing(false);
@@ -9130,12 +9133,18 @@ const MessageBubble = memo(function MessageBubble({
                       </button>
                       <button
                         onClick={() => {
-                          if (editText.trim() && editText.trim() !== msg.content.trim()) {
+                          if (
+                            editText.trim() &&
+                            editText.trim() !== extractFileChips(msg.content).cleanContent.trim()
+                          ) {
                             onEdit?.(msg, editText);
                           }
                           setEditing(false);
                         }}
-                        disabled={!editText.trim() || editText.trim() === msg.content.trim()}
+                        disabled={
+                          !editText.trim() ||
+                          editText.trim() === extractFileChips(msg.content).cleanContent.trim()
+                        }
                         data-testid="edit-message-submit"
                         className="px-3 py-1.5 text-xs rounded-lg bg-[var(--accent)] text-white disabled:opacity-40 transition-opacity"
                       >
@@ -9242,7 +9251,9 @@ const MessageBubble = memo(function MessageBubble({
                     <button
                       onClick={() => {
                         setEditing(true);
-                        setEditText(msg.content);
+                        // 附件消息的 content 含序列化文件块 — 编辑器只带可见文本,
+                        // 附件原样保留在 original.attachments(CodeRabbit #1011)
+                        setEditText(extractFileChips(msg.content).cleanContent);
                       }}
                       title="编辑并重新回答"
                       aria-label="编辑并重新回答"
