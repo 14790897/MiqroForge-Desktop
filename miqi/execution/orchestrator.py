@@ -930,8 +930,9 @@ class ToolOrchestrator:
 
         # Phase 21: pass runtime event emitter and cancellation to tools that
         # need it (exec for streaming output, paper_download for progress,
-        # paper_search for card rendering)
-        if ctx.tool_name in {"exec", "paper_download", "paper_search"}:
+        # paper_search for card rendering, web_search/web_fetch for structured
+        # source cards — #879)
+        if ctx.tool_name in {"exec", "paper_download", "paper_search", "web_search", "web_fetch"}:
             kwargs["_event_emitter"] = self.events
             kwargs["_turn_id"] = ctx.turn_id
             kwargs["_tool_call_id"] = ctx.tool_call_id

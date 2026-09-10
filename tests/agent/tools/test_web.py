@@ -6,6 +6,8 @@ the model-facing string format, and the legacy api_key → brave_api_key
 config migration.
 """
 
+import json
+
 from miqi.agent.tools.web import (
     BraveProvider,
     DDGSProvider,
@@ -13,6 +15,7 @@ from miqi.agent.tools.web import (
     SearchProviderManager,
     SearchResult,
     TavilyProvider,
+    WebFetchTool,
     WebSearchTool,
 )
 from miqi.config.loader import _migrate_config
@@ -761,3 +764,106 @@ async def test_parallel_search_auto_still_falls_back(monkeypatch):
                          deepseek_api_key="k", deepseek_api_base="https://api.deepseek.com")
     blocks = await tool._parallel_search("hello", n_queries=2, n=5)
     assert len(blocks) == 1 and "ddgs结果" in blocks[0]
+
+
+# ── structured sources emission (#879) ───────────────────────────────────
+
+
+class _FakeEmitter:
+    """Captures ToolCallOutputDeltaEvent emissions for assertions."""
+
+    def __init__(self) -> None:
+        self.events: list = []
+
+    async def emit(self, event) -> None:
+        self.events.append(event)
+
+
+async def test_web_search_emits_structured_sources(monkeypatch):
+    """web_search 成功时通过事件通道 emit 结构化 sources，返回字符串不变。"""
+
+    async def _fake_search(self, query, count):
+        return SearchResult(True, [
+            {"title": "T1", "url": "https://example.com/a", "snippet": "s1"},
+            {"title": "T2", "url": "https://example.com/b", "snippet": "s2"},
+        ], provider="brave")
+
+    monkeypatch.setattr(SearchProviderManager, "search", _fake_search)
+    emitter = _FakeEmitter()
+    tool = WebSearchTool(provider="auto")
+    out = await tool.execute(
+        "hello", _event_emitter=emitter, _turn_id="t1", _tool_call_id="c1",
+    )
+    # 模型契约保持不变
+    assert out.startswith("Results for: hello")
+    assert "1. T1" in out and "https://example.com/a" in out
+    # 结构化 sources 已 emit
+    assert len(emitter.events) == 1
+    payload = json.loads(emitter.events[0].delta)
+    assert payload["type"] == "web_sources"
+    assert payload["payload"]["query"] == "hello"
+    assert payload["payload"]["sources"] == [
+        {"title": "T1", "url": "https://example.com/a", "snippet": "s1",
+         "tool": "web_search", "provider": "brave"},
+        {"title": "T2", "url": "https://example.com/b", "snippet": "s2",
+         "tool": "web_search", "provider": "brave"},
+    ]
+
+
+async def test_web_search_no_sources_on_failure(monkeypatch):
+    """web_search 失败时不 emit sources（无来源可展示）。"""
+
+    async def _fake_search(self, query, count):
+        return SearchResult(False, error_type="NETWORK", provider="ddgs")
+
+    monkeypatch.setattr(SearchProviderManager, "search", _fake_search)
+    emitter = _FakeEmitter()
+    tool = WebSearchTool(provider="auto")
+    await tool.execute("hello", _event_emitter=emitter, _turn_id="t1", _tool_call_id="c1")
+    assert emitter.events == []
+
+
+async def test_web_fetch_emits_structured_source(monkeypatch):
+    """web_fetch 成功后 emit 单个结构化 source（title 取自抓取结果）。"""
+
+    async def _fake_builtin_fetch(self, url, extract_mode="markdown", max_chars=None):
+        return json.dumps({
+            "url": "https://example.com/x",
+            "finalUrl": "https://example.com/final",
+            "title": "A page",
+            "text": "body",
+        })
+
+    monkeypatch.setattr(WebFetchTool, "_builtin_fetch", _fake_builtin_fetch)
+    emitter = _FakeEmitter()
+    tool = WebFetchTool()
+    out = await tool.execute(
+        "https://example.com/x",
+        _event_emitter=emitter, _turn_id="t1", _tool_call_id="c1",
+    )
+    # 返回仍是 JSON 字符串（契约不变）
+    assert json.loads(out)["title"] == "A page"
+    assert len(emitter.events) == 1
+    payload = json.loads(emitter.events[0].delta)
+    assert payload["type"] == "web_sources"
+    assert payload["payload"]["sources"] == [
+        {"title": "A page", "url": "https://example.com/final", "snippet": "",
+         "tool": "web_fetch"},
+    ]
+
+
+async def test_web_fetch_no_source_on_error(monkeypatch):
+    """web_fetch 失败时不 emit source。"""
+
+    async def _fake_builtin_fetch(self, url, extract_mode="markdown", max_chars=None):
+        return json.dumps({"error": "boom", "url": "https://example.com/x"})
+
+    monkeypatch.setattr(WebFetchTool, "_builtin_fetch", _fake_builtin_fetch)
+    emitter = _FakeEmitter()
+    tool = WebFetchTool()
+    await tool.execute(
+        "https://example.com/x",
+        _event_emitter=emitter, _turn_id="t1", _tool_call_id="c1",
+    )
+    assert emitter.events == []
+
