@@ -1,5 +1,4 @@
-import { ChevronRight, Loader2 } from 'lucide-react';
-import { useState } from 'react';
+import { Loader2 } from 'lucide-react';
 
 import type { UserInputCardRequest } from '../../../../shared/ipc';
 import { HermesToolRow } from './HermesToolRow';
@@ -52,9 +51,7 @@ function StepList({ entry }: { entry: TimelineEntry }) {
 }
 
 export function Timeline({ entry }: { entry: TimelineEntry }) {
-  const [open, setOpen] = useState(false);
   const running = entry.phase !== 'completed' && entry.phase !== 'cancelled';
-
   const permissionNodes = entry.permissions.map((p) => {
     const meta = PERM_META[p] ?? { icon: '🔐', label: p };
     return (
@@ -71,10 +68,9 @@ export function Timeline({ entry }: { entry: TimelineEntry }) {
         status={running ? 'pending' : 'success'}
         meta={running ? '执行中' : entry.phase === 'cancelled' ? '已取消' : '已完成'}
         defaultOpen={false}
-        trailing={<ChevronRight size={12} className="opacity-60" style={{ transform: open ? 'rotate(90deg)' : 'none' }} />}
       >
         <div className="w-full min-w-0 pl-5">
-          {entry.goal && <div className="mb-1 text-[11.5px] text-(--conversation-scaffold-text, #6b7280) truncate" title={entry.goal}>{entry.goal}</div>}
+          {entry.goal && <div className="mb-1 truncate text-[11.5px] text-(--conversation-scaffold-text, #6b7280)" title={entry.goal}>{entry.goal}</div>}
           <StepList entry={entry} />
           {permissionNodes.length > 0 && <div className="mt-1.5 flex flex-wrap gap-1">{permissionNodes}</div>}
         </div>
