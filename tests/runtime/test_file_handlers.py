@@ -372,12 +372,15 @@ async def test_get_tracked_files_namespaced_key_reads_write_path_store(tmp_path)
     paths = {item["path"] for item in result["result"]["tracked_files"]}
     assert "ns.md" in paths, paths
 
-    # 归一不削弱 ownership：同一 namespaced key 换 client 仍被拒
+    # 归一不削弱 ownership：同一 namespaced key 换 client 仍被拒。
+    # 精确到 UNAUTHORIZED：会话归属元数据已由 _setup_session(client-A) 落在归一
+    # 后的同一个会话目录里，读到 REQUIRES_CLAIM 只会意味着「目录解析错到了没有
+    # ownership 元数据的地方」，是回归而不是可接受分支（CodeRabbit #1003）。
     with pytest.raises(AppServerError) as exc_info:
         await sessions_get_tracked_files_handler(
             "req-2", {"session_key": key}, "client-B", None, registry,
         )
-    assert exc_info.value.code in ("UNAUTHORIZED", "REQUIRES_CLAIM")
+    assert exc_info.value.code == "UNAUTHORIZED"
 
 
 @pytest.mark.asyncio
