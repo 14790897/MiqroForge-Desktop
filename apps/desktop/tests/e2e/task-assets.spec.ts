@@ -8,48 +8,31 @@ import { _electron as electron, test, expect } from '@playwright/test';
 import type { ElectronApplication, Page } from '@playwright/test';
 import {
   LLM_TIMEOUT,
-  waitForInputReady,
+  sendMessage,
+  waitForResponseComplete,
   launchElectronApp,
   closeElectronApp,
 } from './helpers/electron-setup';
 
 // ─── Helpers ──────────────────────────────────────────────────────
 
-async function sendMessage(page: Page, text: string) {
-  const textarea = await waitForInputReady(page);
-  await textarea.fill(text);
-  await textarea.press('Enter');
-  await expect(page.getByText(text).first()).toBeVisible({ timeout: 10_000 });
-}
-
-async function waitForResponseComplete(page: Page, timeout = 120_000) {
-  await expect(page.locator('[data-testid="thinking-indicator"]')).toBeHidden({ timeout });
-}
-
-/** Wait for a file card with the given filename to appear in Task Assets.
- *  Uses multiple selector strategies for robustness. */
-async function waitForFileInPanel(page: Page, filename: string, timeout = 30_000) {
+/**
+ * Wait for a file card with the given filename to appear in Task Assets.
+ *
+ * The card root is TrackedFileCard's `.rounded-lg.p-2\.5` div (stable class
+ * in the component source). Wait for the card first, then for ITS OWN
+ * preview button — the buttons row renders in the same card, so the two
+ * waits together mean "file tracked AND previewable". A chained
+ * `filter({ has })` with a panel-rooted inner locator proved unreliable in
+ * CI (resolved to 0 elements while the card + 预览 button were on screen),
+ * so keep the locator flat.
+ */
+async function waitForFileInPanel(page: Page, filename: string, timeout = 60_000) {
   const assetsPanel = page.getByTestId('task-assets-panel');
+  const card = assetsPanel.locator('.rounded-lg.p-2\\.5', { hasText: filename }).last();
 
-  // Strategy 1: Try the precise class selector
-  const cardSelector = assetsPanel.locator('.rounded-lg.p-2\\.5');
-  const card = cardSelector.filter({ hasText: filename }).first();
-
-  // Strategy 2: Fallback to more generic selectors
-  const fallbackCard = assetsPanel
-    .locator('[class*="rounded"][class*="p-"]')
-    .filter({ hasText: filename })
-    .first();
-
-  // Try primary selector first
-  try {
-    await expect(card).toBeVisible({ timeout });
-  } catch {
-    // Fallback to secondary selector
-    console.log('[test] Primary selector failed, trying fallback');
-    await expect(fallbackCard).toBeVisible({ timeout });
-    return fallbackCard;
-  }
+  await expect(card).toBeVisible({ timeout });
+  await expect(card.getByTestId('file-preview-btn')).toBeVisible({ timeout: 10_000 });
 
   // Panel should no longer show empty state
   await expect(page.locator('[data-testid="task-assets-empty"]')).not.toBeVisible({

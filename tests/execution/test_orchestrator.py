@@ -209,3 +209,61 @@ async def test_graph_render_receives_session_key_injection(orch, mock_orch_compo
     assert captured.get("_session_key") == "miqi-desktop:desktop:1787046883657"
     assert "_sandbox" in captured
     assert captured.get("path") == "graph-demo/bvse-mof-run/output"
+
+
+# ── _sanitize_exc_for_ui（#991 review）───────────────────────────────────
+
+
+class TestSanitizeExcForUi:
+    """错误消毒：URL 先整体打码、模型 id 不被误伤、真实路径仍打码。"""
+
+    def _sanitize(self, text: str) -> str:
+        from miqi.execution.orchestrator import _sanitize_exc_for_ui
+
+        return _sanitize_exc_for_ui(ValueError(text))
+
+    def test_model_id_not_mangled_by_path_regex(self):
+        """deepseek/deepseek-v4-flash 不得被误当 Unix 路径打码。"""
+        out = self._sanitize("Unsupported model: deepseek/deepseek-v4-flash (INVALID_PARAMS)")
+        assert "deepseek/deepseek-v4-flash" in out
+        assert "[path]" not in out
+
+    def test_credential_url_masked_as_whole_unit(self):
+        """带凭据的 URL 必须整体替换为 [url]，不得残留密码（URL 先于路径打码）。"""
+        out = self._sanitize("boom at https://user:secret@example.com/path")
+        assert "secret" not in out
+        assert "user" not in out
+        assert "[url]" in out
+
+    def test_credential_url_uppercase_scheme_masked(self):
+        """大写 scheme 的凭据 URL 也必须整体替换（#991 review）。"""
+        out = self._sanitize("boom at HTTPS://user:secret@example.com/path")
+        assert "secret" not in out
+        assert "user" not in out
+        assert "[url]" in out
+
+    def test_credential_url_over_200_chars_masked(self):
+        """超过 200 字符的凭据 URL 不再因长度上限漏掉尾部（#991 review）。"""
+        long_url = "https://user:secret@example.com/" + "a" * 240
+        out = self._sanitize("boom at " + long_url)
+        assert "secret" not in out
+        assert "aaaa" not in out
+        assert "[url]" in out
+
+    def test_real_paths_still_masked(self):
+        out = self._sanitize("boom at C:/Users/test/data.json and /home/user/file.py")
+        assert "Users" not in out
+        assert "/home/user/file.py" not in out
+        assert out.count("[path]") == 2
+
+    def test_sessions_guidance_not_swallowed(self):
+        """filesystem.py 会话隔离报文的指导文字不得整段被吞成 sessions[path]。"""
+        msg = (
+            "路径位于其他会话的 files 目录内——会话隔离禁止跨会话访问。 "
+            "不要重试或枚举 sessions/；请使用当前会话的工作区，"
+            "或请用户通过文件面板分享文件。"
+        )
+        out = self._sanitize(msg)
+        assert "sessions/；" in out
+        assert "工作区" in out
+        assert "[path]" not in out

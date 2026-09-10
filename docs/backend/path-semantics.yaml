@@ -8,6 +8,9 @@
 #   解析器会自动剥离该前缀，不会产生目录嵌套（修复 issue #806 的嵌套落盘问题）
 # - 指向其他会话目录的路径会被拒绝（会话隔离）
 # - 成功创建后返回实际落盘路径
+# - 输入图片路径（docx 的 content 图片块 path / pptx 的 slides[].image_path）
+#   不是可信输入：解析后必须落在工作区 / 会话文件区 / 用户授权目录内，
+#   越界即不读该文件、跳过该图片并在返回串中报告（issue #1005 节 2）
 #
 # 详细实现见 miqi/documents/path_utils.py 模块文档。
 path_semantics:
@@ -15,3 +18,4 @@ path_semantics:
   prefix_stripping: "以会话目录前缀开头的路径自动剥离前缀，避免嵌套"
   cross_session: "指向其他会话目录的路径会被拒绝（会话隔离）"
   return_value: "成功创建后返回实际落盘路径"
+  input_images: "docx/pptx 的图片块走 resolve_read_path，与输出同一边界；越界/缺失/非图片跳过该图片（不读文件）并在返回串中报告"

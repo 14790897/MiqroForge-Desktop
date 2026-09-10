@@ -58,7 +58,9 @@ const DANGER_COLORS = ['rgb(255, 97, 97)', 'rgb(192, 64, 64)'];
 const ISOLATION_PHRASE = '会话隔离禁止跨会话访问';
 
 /** The exact ToolErrorEvent payload the backend sends for the session-
- *  isolation PermissionError (message shaped by _sanitize_exc_for_ui). */
+ *  isolation PermissionError (message shaped by _sanitize_exc_for_ui).
+ *  修复前 sessions/ 后的指导文字被路径正则吞成 [path]；负向后顾修复后
+ *  完整保留。 */
 const TOOL_ERROR_PAYLOAD = {
   event: 'ToolErrorEvent',
   data: {
@@ -66,7 +68,7 @@ const TOOL_ERROR_PAYLOAD = {
     tool_name: 'read_file',
     tool_call_id: 'call_cross_read',
     message:
-      'PermissionError: 路径位于其他会话的 files 目录内——会话隔离禁止跨会话访问。 不要重试或枚举 sessions[path]',
+      'PermissionError: 路径位于其他会话的 files 目录内——会话隔离禁止跨会话访问。 不要重试或枚举 sessions/；请使用当前会话的工作区，或请用户通过文件面板分享文件。',
     recoverable: true,
   },
 };

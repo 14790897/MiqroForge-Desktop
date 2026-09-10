@@ -264,7 +264,9 @@ class SubagentManager:
                         ):
                             result = (
                                 result[: self.max_tool_result_chars]
-                                + f"\n... [truncated: original {len(result)} chars]"
+                                + f"\n\n结果已被截断，内容不完整（原始 {len(result)} 字符）。"
+                                "禁止根据截断内容推断、补全、恢复或声称任务已完成；"
+                                "如需完整文件请重新调用下载/文件系统工具获取。"
                             )
                         messages.append({
                             "role": "tool",

@@ -44,7 +44,8 @@ test('模型收口 UI 截图评估（#929）', async ({ page }) => {
     '当前默认模型：deepseek-chat'
   );
   await expect(page.getByText('登录后使用平台内置模型')).toBeVisible();
-  await expect(page.getByText('去登录')).toBeVisible();
+  // #1000：一键浏览器登录按钮（按 testid 定位，页面顶栏/首屏有同名文案）
+  await expect(page.getByTestId('model-quickpanel-login-btn')).toBeVisible();
   await expect(page.getByText('编辑当前模型')).toBeVisible();
   // 收口：不再有自配入口 / 状态列表
   await expect(page.getByText('验证成功')).not.toBeVisible();
@@ -53,7 +54,7 @@ test('模型收口 UI 截图评估（#929）', async ({ page }) => {
 
   // ── 2. 未登录 → 通用 tab：登录门控 ────────────────────────────────────
   await page.getByRole('tab', { name: '通用' }).click();
-  await expect(page.getByTestId('general-go-login')).toBeVisible();
+  await expect(page.getByTestId('general-login-btn')).toBeVisible();
   await expect(page.getByText('登录后使用平台内置模型')).toBeVisible();
   await page.screenshot({ path: 'test-results/929-shots/02-general-tab-login-gate.png' });
 
