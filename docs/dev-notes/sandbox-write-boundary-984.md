@@ -96,9 +96,27 @@ exec 侧  = 工作区根 ∪ 静态 _shared_roots ∪ (auto_user_dirs ? _user_ro
 4. **提及但未创建**的目录：exec 的硬 `--bind` 直接失败（ExecTool 产出引导文案：
    先用文件工具写一次）；文件工具会**宿主侧 mkdir bootstrap**，所以顺序敏感——
    先文件工具、后 exec。
-5. **子 agent 重启丢根**：`AgentJob.user_roots` 只在内存（`AgentGraphStore`
-   schema 固定，不持久化）。AppServer `agent.spawn` 由 Desktop 传
-   `params["user_roots"]`，不发则子 agent 无根。
+5. **子 agent 重启丢根，且 `agent.spawn` 不再从请求里取根**：
+
+   - **只为内存**：`AgentJob.user_roots`（`agent_jobs.py:39`）不落库——
+     `AgentGraphStore` schema 固定、`save_job` 只收显式关键字。子 agent
+     重启/重载后丢根，这一点**仍然成立**。
+   - **请求参数不是授权**：AppServer `agent.spawn`（`bridge/loop.py:1508`）
+     自 `a17d2812` 起固定传 `user_roots=None`（fail-closed），原先那句
+     "re-filtered here" 的 sanitize 已随该提交删除。理由是 roots 同时喂给
+     bwrap 的 rw bind 与命令护栏的写范围，而 `params` 由调用方自带——
+     把请求里的列表「过滤一遍」也只是让调用方继续挑范围，所以宁可**不给根**：
+     该通道**没有服务端 root store**（父回合的授权根没按 session/turn 记录），
+     等服务端状态接入后再注入。
+   - **该 IPC 路径当前不可达**：Desktop `AgentSpawnInput`
+     （`apps/desktop/src/shared/ipc.ts:299`）不含 `user_roots`，
+     `apps/desktop/src/main/ipc/index.ts:2164` 在 Zod parse 之后只转发
+     `agent_type`/`task`/`label`/`session_key`。
+     **当前可达的路径**是模型侧 `SpawnTool._user_roots`
+     （`miqi/agent/tools/spawn.py:88`）→ `AgentControl.spawn` →
+     `AgentJobRuntime.start` → `AgentJob.user_roots`：roots 走的是
+     **harness-only 的 `_user_roots`/extra 通道**（`ToolRegistry` 会把模型自带
+     参数里的 `_user_roots` 剥掉）。
 
 ## 顺手修掉的 bug
 
