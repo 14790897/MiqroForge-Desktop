@@ -86,3 +86,27 @@ export function formatShortDateTime(date: string | number | Date | null | undefi
     minute: '2-digit',
   }).format(new Date(ts));
 }
+
+/**
+ * 聊天消息时间戳(ChatGPT 式,#828):今天 → "今天 HH:MM",昨天 → "昨天 HH:MM",
+ * 更早 → "M月D日 HH:MM"。日差按 年月日 比较,避免 DST 23/25 小时日下的毫秒除误差。
+ *
+ * @param timestamp epoch ms 或可解析的日期字符串,null/无效返回空串
+ * @param now       参考时间(默认 Date.now(),测试可注入)
+ */
+export function formatChatTime(timestamp?: number | string | null, now: Date = new Date()): string {
+  if (timestamp === undefined || timestamp === null) return '';
+  const value = typeof timestamp === 'number' ? timestamp : Date.parse(String(timestamp));
+  if (!Number.isFinite(value)) return '';
+  const d = new Date(value);
+  const hm = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+  const sameDay = (a: Date, b: Date) =>
+    a.getFullYear() === b.getFullYear() &&
+    a.getMonth() === b.getMonth() &&
+    a.getDate() === b.getDate();
+  if (sameDay(d, now)) return `今天 ${hm}`;
+  const yesterday = new Date(now);
+  yesterday.setDate(now.getDate() - 1);
+  if (sameDay(d, yesterday)) return `昨天 ${hm}`;
+  return `${d.getMonth() + 1}月${d.getDate()}日 ${hm}`;
+}
