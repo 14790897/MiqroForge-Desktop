@@ -160,9 +160,28 @@ class ApprovedScope:
     external_actions: tuple[ExternalAction, ...] = ()
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "sources", tuple(self.sources))
-        object.__setattr__(self, "artifacts", tuple(self.artifacts))
-        object.__setattr__(self, "external_actions", tuple(self.external_actions))
+        object.__setattr__(self, "sources", tuple(str(v) for v in self.sources))
+        object.__setattr__(
+            self,
+            "artifacts",
+            tuple(
+                value if isinstance(value, ArtifactRef)
+                else ArtifactRef(type=str(value.get("type", "")), name=str(value.get("name", "")))
+                for value in self.artifacts
+            ),
+        )
+        object.__setattr__(
+            self,
+            "external_actions",
+            tuple(
+                value if isinstance(value, ExternalAction)
+                else ExternalAction(
+                    provider=str(value.get("provider", "")),
+                    operation=str(value.get("operation", "")),
+                )
+                for value in self.external_actions
+            ),
+        )
 
 
 @dataclasses.dataclass(frozen=True)
