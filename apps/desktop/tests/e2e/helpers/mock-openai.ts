@@ -2,7 +2,7 @@
  * mock OpenAI server 启动 helper —— plan-card / auto-timeline 共享
  * （CodeRabbit 8-24 nitpick：原两处 byte-identical 副本合并）。
  */
-import { spawn, type ChildProcess } from 'node:child_process';
+import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { createConnection } from 'node:net';
 import { join } from 'node:path';
 import { APPS_DESKTOP } from './electron-setup';
@@ -53,6 +53,18 @@ export async function startMockOpenAI(): Promise<{ proc: ChildProcess; mockUrl: 
   // Windows 用 python；MIQI_PYTHON_PATH 始终优先。
   const python =
     process.env.MIQI_PYTHON_PATH || (process.platform === 'win32' ? 'python' : 'python3');
+  // 前置诊断：python 是否可执行（macos CI 上 mock 起不来的根因定位）
+  {
+    const probe = spawnSync(python, ['-c', 'import sys; print(sys.version)'], {
+      encoding: 'utf-8',
+      timeout: 15_000,
+    });
+    console.log(
+      `[test] python probe (${python} @ ${process.platform}/${process.arch}): ` +
+        `status=${probe.status} out=${(probe.stdout || '').trim()} ` +
+        `err=${(probe.stderr || '').trim().slice(0, 300)} error=${probe.error?.message ?? ''}`
+    );
+  }
   const port = 20000 + Math.floor(Math.random() * 20000);
   const proc = spawn(python, [join(REPO_ROOT, 'scripts', 'mock_openai.py'), String(port)], {
     cwd: REPO_ROOT,
