@@ -144,13 +144,13 @@ export function ConfirmCardArea({ matchedTurnIds }: { matchedTurnIds?: Set<strin
     let merged = [...Object.values(resolved), ...Object.values(pending)];
     merged.sort((a, b) => (a.createdAt ?? 0) - (b.createdAt ?? 0));
     if (matchedTurnIds && matchedTurnIds.size > 0) {
+      // #646-v2（CI strict violation 修复）：确认/计划卡由消息内联与工具链
+      // 负责渲染（含确认卡的工具链默认不收起，卡始终可见）——兜底区必须排除
+      // 所有已匹配 turn 的卡。此前「pending 保留」的实现会让同一张卡在工具链
+      // 与兜底区各出一个 DOM 实例（strict mode: resolved to 2 elements）。
       merged = merged.filter((entry) => {
         const turnId = entry.request.turn_id;
-        if (!turnId || !matchedTurnIds.has(turnId)) return true;
-        // A pending confirmation still needs a fallback render until its
-        // originating ToolChainGroup is actually visible. Resolved confirmations
-        // can be omitted because the originating row owns their history card.
-        return entry.state === 'pending';
+        return !turnId || !matchedTurnIds.has(turnId);
       });
     }
     return merged;
