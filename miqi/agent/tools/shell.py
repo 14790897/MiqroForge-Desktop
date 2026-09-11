@@ -377,6 +377,10 @@ class ExecTool(Tool):
         approval_callback=None,
         sandbox_manager=None,
         system_install_approver=None,
+        shared_roots: list[Any] | None = None,
+        allow_user_dirs: bool = True,
+        workspace_root: str | None = None,
+        session_files_dir: str | None = None,
     ):
         self.timeout = timeout
         self.max_timeout = max_timeout
@@ -420,6 +424,23 @@ class ExecTool(Tool):
         # "deny_no_channel"。fail-closed: 无通道/异常/超时一律 deny（外部
         # 审阅 #854；#875 review F3 增加 deny_no_channel 区分"卡从未出现"）。
         self.system_install_approver = system_install_approver
+        # #984: host roots this tool may re-open writable inside the bwrap
+        # sandbox (workspace root + tools.extra_roots + memory/skills dirs,
+        # resolved once by tool_registry_factory).  ``allow_user_dirs``
+        # mirrors tools.auto_user_dirs and gates the per-call ``_user_roots``
+        # component — same switch the file tools honour (issue #821).
+        self._shared_roots: list[Any] = list(shared_roots or [])
+        self._allow_user_dirs = allow_user_dirs
+        # #1007 review: the workspace root is in the rw bind set (it is part
+        # of ``shared_roots``), and ``<workspace>/sessions/**`` lives under
+        # it — so every exec call re-opened OTHER sessions' files writable.
+        # These two host paths let the sandbox re-protect that subtree while
+        # keeping THIS session's own files dir writable (see
+        # ``bwrap._cross_session_guard_args``).  Both are fixed at
+        # construction, like every other bind source here; ``None`` (unknown
+        # workspace / no per-session layout) keeps the previous args exactly.
+        self._workspace_root = workspace_root
+        self._session_files_dir = session_files_dir
 
     @property
     def name(self) -> str:
@@ -484,6 +505,120 @@ class ExecTool(Tool):
             )
         return requested * 1000, None
 
+    # ── #984: per-call writable binds for the bwrap sandbox ─────────────
+
+    def _exec_rw_binds(self, user_roots: Any) -> list[str]:
+        """Host paths to re-open writable for ONE exec call (#984).
+
+        Set (plan v5 §2): workspace root ∪ static ``shared_roots`` ∪
+        per-call user-mentioned roots when ``tools.auto_user_dirs`` is on.
+        The #864 approval-card grants are deliberately NOT part of the exec
+        set — they live on the file-tool instances (``self._granted``) and
+        ExecTool holds no reference to them; exec still reaches user-mentioned
+        dirs through ``_user_roots`` (see the PR body for the residual gap).
+
+        Missing STATIC roots are skipped with a debug log: they come from
+        config, and before #984 they were never bound, so a stale entry must
+        not start failing every command.  Per-call user roots are kept
+        unconditionally — silently dropping one would revoke a grant the user
+        just made; a missing source is reported with guidance instead (see
+        :meth:`_missing_bind_sources`).
+
+        CONTRACT — every bind SOURCE here is fixed at CONSTRUCTION time.
+        Apart from ``user_roots`` (harness-injected; see
+        ``ToolOrchestrator._execute_in_sandbox``), the sources are instance
+        attributes set when the tool was built: ``self.working_dir`` and
+        ``self._shared_roots``.  The per-call ``working_dir`` argument of
+        :meth:`execute` selects the process cwd and the workspace-diff root
+        ONLY; it MUST NOT be folded into this set.  Were it honoured here, a
+        model-authored ``working_dir`` would re-open an arbitrary host
+        directory writable inside the sandbox with no grant at all, bypassing
+        the per-call ``_user_roots`` channel this issue exists to gate.
+        Locked by
+        ``tests/execution/test_exec_write_boundary_984.py::TestWorkingDirNotABindSource``.
+
+        Because the workspace root is in this set, ``<ws>/sessions/**`` —
+        every OTHER session's files — is re-opened writable by that same
+        bind.  :meth:`_execute_in_sandbox` therefore also hands the sandbox
+        ``self._workspace_root`` / ``self._session_files_dir``, and bwrap
+        re-mounts ``<ws>/sessions`` READ-ONLY after the bind with only this
+        session's own files dir re-opened after that (#1007 review).
+        """
+        out: list[str] = []
+        seen: set[str] = set()
+
+        def _add(raw: Any, *, strict: bool) -> None:
+            try:
+                raw_str = os.fspath(raw)
+            except TypeError:
+                return
+            if not isinstance(raw_str, str) or not raw_str:
+                return
+            # #984 review: a UNC / WSL-share source (``\\wsl$\…``) has no
+            # sandbox mapping — ``_host_path_to_sandbox`` raises on it, so a
+            # hard ``--bind`` would fail EVERY command with a generic sandbox
+            # error.  It is not a bind source at all (same rule as
+            # ``filesystem.bootstrap_sandbox_roots``); the root extractors
+            # cannot produce one.
+            if raw_str.replace("\\", "/").startswith("//"):
+                logger.debug(
+                    "exec: skipping UNC rw bind (no sandbox mapping) {}", raw_str,
+                )
+                return
+            key = os.path.normcase(os.path.abspath(raw_str))
+            if key in seen:
+                return
+            if not strict:
+                try:
+                    if not os.path.exists(raw_str):
+                        logger.debug(
+                            "exec: skipping missing static rw bind {}", raw_str,
+                        )
+                        return
+                except OSError:
+                    return
+            seen.add(key)
+            out.append(raw_str)
+
+        if self.working_dir:
+            _add(self.working_dir, strict=False)
+        for root in self._shared_roots:
+            _add(root, strict=False)
+        if self._allow_user_dirs:
+            for root in user_roots or []:
+                _add(root, strict=True)
+        return out
+
+    @staticmethod
+    def _missing_bind_sources(binds: list[str] | None) -> list[str]:
+        """Bind sources that do not exist on the host, for a pre-flight error.
+
+        The per-call binds use a hard ``--bind``, so a missing source makes
+        bwrap fail the whole command.  Check the sources this process can
+        actually see (Windows drive paths on Windows, POSIX paths elsewhere)
+        and report them with guidance instead of surfacing a raw bwrap error.
+
+        UNC / WSL-share paths are not tested here: they are not bind sources
+        at all.  ``_host_path_to_sandbox`` cannot map them and raises, which
+        the sandbox path would surface as a generic 「沙箱执行失败」, so
+        :meth:`_exec_rw_binds` drops them before they reach this check — and
+        the root extractors never produce one.  WSL-native POSIX paths are
+        invisible from the Windows host and ARE left to bwrap: they bind
+        unchanged, and one that is genuinely missing fails loudly there.
+        """
+        missing: list[str] = []
+        for raw in binds or []:
+            s = str(raw).replace("\\", "/")
+            if s.startswith("//"):
+                continue  # not a bind source — see above
+            if len(s) >= 2 and s[1] == ":":
+                if os.name == "nt" and not os.path.exists(str(raw)):
+                    missing.append(str(raw))
+            elif s.startswith("/") and os.name != "nt":
+                if not os.path.exists(str(raw)):
+                    missing.append(str(raw))
+        return missing
+
     @property
     def description(self) -> str:
         from miqi.sandbox.manager import describe_exec_environment
@@ -544,6 +679,13 @@ class ExecTool(Tool):
         # Phase 31: consume SandboxSelection injected by ToolOrchestrator.
         _sandbox = kwargs.pop("_sandbox", None)
         _session_key = kwargs.pop("_session_key", None)
+
+        # #984: per-call user-mentioned output dirs — the same channel the
+        # file tools consume.  They are re-opened writable in the bwrap
+        # sandbox for THIS command only, so a runtime write (`open(...)`,
+        # `write_text`, any spelling) succeeds where the user asked without
+        # making the whole of /mnt writable again.
+        _user_roots = kwargs.pop("_user_roots", None)
 
         # Resolve sandbox_type for the begin event from the actual selection
         if _sandbox is not None:
@@ -653,6 +795,9 @@ class ExecTool(Tool):
                             ) is not None
                         )
                     ),
+                    # #984 layer 3: the same per-call grant layer 1 binds
+                    # rw — the guard must not refuse it.
+                    user_roots=_user_roots,
                 )
                 if guard_error:
                     return _ExecResult(output=guard_error, exit_code=1)
@@ -691,6 +836,9 @@ class ExecTool(Tool):
                 thread_id=thread_id,
                 # Session key for per-session sandbox isolation
                 session_key=_session_key,
+                # #984: per-call writable binds for the bwrap sandbox.
+                # Host execution paths accept and ignore them.
+                extra_rw_binds=self._exec_rw_binds(_user_roots),
             )
 
             # Phase 31: if ToolOrchestrator injected a SandboxSelection,
@@ -698,7 +846,12 @@ class ExecTool(Tool):
             # ExecTool MUST follow it — no independent sandbox decision.
             if _sandbox is not None:
                 result = await self._execute_with_sandbox_selection(
-                    _sandbox, command, cwd, **exec_kwargs,
+                    _sandbox, command, cwd,
+                    # #984 review: only the BWRAP fallback consumes it (the
+                    # other branches take no grant), so it is passed here
+                    # rather than through ``exec_kwargs``.
+                    user_roots=_user_roots,
+                    **exec_kwargs,
                 )
             # Legacy path (no orchestrator): session_key preferred, fall back to active sandbox
             elif self._sandbox_manager is not None:
@@ -715,7 +868,9 @@ class ExecTool(Tool):
                 else:
                     # Legacy fallback (no sandbox): same host-semantics
                     # re-check as the BWRAP fallback (issue #811 review).
-                    fallback_guard = self._guard_host_fallback(command, cwd)
+                    fallback_guard = self._guard_host_fallback(
+                        command, cwd, user_roots=_user_roots,
+                    )
                     if fallback_guard is not None:
                         return fallback_guard
                     # Fall back to direct execution (no sandbox)
@@ -787,6 +942,8 @@ class ExecTool(Tool):
         ledger_runtime=None,
         thread_id: str = "",
         session_key: str | None = None,
+        # #984: per-call writable host paths (workspace + authorized dirs)
+        extra_rw_binds: list[str] | None = None,
     ) -> _ExecResult:
         """Execute a command inside the bwrap sandbox with streaming I/O.
 
@@ -812,6 +969,23 @@ class ExecTool(Tool):
                 exit_code=-1, cancelled=True,
             )
 
+        # #984: the per-call rw binds use a hard --bind, so a missing source
+        # fails the command.  Report it with guidance instead of a raw bwrap
+        # error, and NEVER fall back to host execution — the command was
+        # authorized for a sandboxed write it cannot get.
+        _missing_binds = self._missing_bind_sources(extra_rw_binds)
+        if _missing_binds:
+            return _ExecResult(
+                output=(
+                    "Error: 授权写入目录不存在，命令未执行："
+                    + "、".join(_missing_binds)
+                    + "\nHint: 请先在 Windows 侧创建该目录，"
+                    "或先用文件工具写入一次（文件工具会自动创建授权目录），"
+                    "再重试本条命令。"
+                ),
+                exit_code=1,
+            )
+
         start = time.monotonic()
 
         # Build sandbox env and cwd
@@ -827,6 +1001,13 @@ class ExecTool(Tool):
         try:
             handle = await sandbox.run_command_streaming(
                 command, env=sandbox_env, cwd=sandbox_cwd,
+                extra_rw_binds=extra_rw_binds,
+                # #1007 review: the workspace root above is re-opened
+                # writable, so <workspace>/sessions must be re-protected —
+                # read-only, with this session's own files dir re-opened
+                # after it.  Both are construction-time instance attributes.
+                workspace_root=self._workspace_root,
+                session_files_dir=self._session_files_dir,
             )
         except Exception as e:
             duration_ms = int((time.monotonic() - start) * 1000)
@@ -1139,6 +1320,15 @@ class ExecTool(Tool):
         ledger_runtime=None,
         thread_id: str = "",
         session_key: str | None = None,
+        # #984: per-call writable host paths (bwrap paths only; ignored by
+        # the host-execution branches, which cannot mount anything).
+        extra_rw_binds: list[str] | None = None,
+        # #984 review: the per-call ``_user_roots`` grant itself, needed by
+        # the BWRAP→host fallback below so its guard re-check sees the same
+        # authorization the pre-flight guard did.  It is NOT splatted into
+        # ``exec_kwargs``: the host executors take no grant of their own and
+        # would reject the keyword.
+        user_roots: Any = None,
     ) -> _ExecResult:
         """Execute a command according to the ToolOrchestrator's SandboxSelection.
 
@@ -1169,6 +1359,9 @@ class ExecTool(Tool):
             # Phase 31.8: pass ledger runtime and thread_id to sub-executors
             ledger_runtime=ledger_runtime,
             thread_id=thread_id,
+            # #984: per-call rw binds — consumed by _execute_in_sandbox,
+            # accepted-and-ignored by the host paths.
+            extra_rw_binds=extra_rw_binds,
         )
 
         # ── NONE: orchestrator explicitly allowed direct execution ──────
@@ -1193,7 +1386,14 @@ class ExecTool(Tool):
             # allowed sandbox-internal paths (/home/miqi/**, /tmp) that
             # mean something else on the host.  Re-check with HOST
             # semantics before falling back (issue #811 review).
-            fallback_guard = self._guard_host_fallback(command, cwd)
+            # #984 review: the per-call grant travels with it — without it
+            # ``_guard_write_roots`` sees None and refuses the very write the
+            # user just authorized (the legacy fallback below already passed
+            # them).  ``extra_rw_binds`` is NOT the right argument here: the
+            # guard contract only ever widens for the per-call roots.
+            fallback_guard = self._guard_host_fallback(
+                command, cwd, user_roots=user_roots,
+            )
             if fallback_guard is not None:
                 return fallback_guard
             # Fall back to direct execution (e.g. during first-time
@@ -1243,6 +1443,11 @@ class ExecTool(Tool):
         # Phase 31.8: ledger runtime for replay-persistent event recording
         ledger_runtime=None,
         thread_id: str = "",
+        # #984: accepted for call-site uniformity (``**common`` splat) and
+        # deliberately ignored — RESTRICTED executes on the host, where no
+        # bind exists to apply.  Its explicit _execute_direct call below
+        # must keep working without passing it (plan v6 §3).
+        extra_rw_binds: list[str] | None = None,
     ) -> _ExecResult:
         """Execute with RESTRICTED sandbox policy enforcement.
 
@@ -1645,6 +1850,11 @@ class ExecTool(Tool):
         ledger_runtime=None,
         thread_id: str = "",
         session_key: str | None = None,
+        # #984: accepted for call-site uniformity (``**exec_kwargs`` /
+        # ``**common`` splats) and deliberately ignored — host execution has
+        # no mount namespace to bind into.  Ignoring is NOT a silent
+        # downgrade: the bind only ever widened sandbox writes.
+        extra_rw_binds: list[str] | None = None,
     ) -> _ExecResult:
         """Execute a command directly on the host (no sandbox).
 
@@ -2605,6 +2815,7 @@ class ExecTool(Tool):
 
     def _guard_command(
         self, command: str, cwd: str, *, sandbox_active: bool = False,
+        user_roots: Any = None,
     ) -> str | None:
         """Path-aware capability guard for exec commands (issue #811).
 
@@ -2623,6 +2834,11 @@ class ExecTool(Tool):
         ``restrict_to_workspace`` string checks still apply to them.
         ``allow_patterns`` (when configured) still applies to the whole
         command.
+
+        ``user_roots`` is the per-call #821 grant (the output dirs the
+        user named).  It widens the engine's mutation scope exactly when
+        layer 1 binds them rw, so the guard never refuses a write the
+        kernel just granted (#984 layer 3).
         """
         from miqi.agent.command_guard import (
             FILE_OP_PATTERN_EXCLUSIONS,
@@ -2630,7 +2846,8 @@ class ExecTool(Tool):
         )
 
         verdict = evaluate_command(
-            command, self._guard_runtime_paths(cwd, sandbox_active),
+            command,
+            self._guard_runtime_paths(cwd, sandbox_active, user_roots),
         )
         if not verdict.allowed:
             return verdict.message
@@ -2669,7 +2886,7 @@ class ExecTool(Tool):
         return None
 
     def _guard_host_fallback(
-        self, command: str, cwd: str,
+        self, command: str, cwd: str, user_roots: Any = None,
     ) -> _ExecResult | None:
         """Re-check the guard with HOST path semantics before a
         host-fallback execution (issue #811 review).
@@ -2684,7 +2901,9 @@ class ExecTool(Tool):
         """
         if self.approval_callback is not None:
             return None
-        guard_error = self._guard_command(command, cwd, sandbox_active=False)
+        guard_error = self._guard_command(
+            command, cwd, sandbox_active=False, user_roots=user_roots,
+        )
         if guard_error:
             return _ExecResult(output=guard_error, exit_code=1)
         return None
@@ -2712,12 +2931,51 @@ class ExecTool(Tool):
 
         return None
 
-    def _guard_runtime_paths(self, cwd: str, sandbox_active: bool):
+    def _guard_write_roots(self, user_roots: Any) -> tuple[str, ...]:
+        """Per-call authorized roots the static guard may treat as writable.
+
+        Only the ``_user_roots`` grant (#821) qualifies, and only when
+        ``allow_user_dirs`` (``tools.auto_user_dirs``) is on — i.e. exactly
+        when :meth:`_exec_rw_binds` re-opens them inside the sandbox.
+        Without this the guard would refuse the very writes layer 1 just
+        granted (#984 layer 3: the tightening ships WITH the authorization
+        channel, never before it).
+
+        The static ``shared_roots`` and the workspace root are deliberately
+        NOT included: their guard semantics (Level 1 read-only outside the
+        session tree) are unchanged — an inline write into a configured
+        ``tools.extra_roots`` dir is still refused here and the refusal
+        points at the file tool.  Non-absolute entries are dropped, and
+        each root is RESOLVED: the classifier resolves every operand, so an
+        8.3 / symlink / case-variant spelling of the root would otherwise
+        silently fail the grant.
+        """
+        if not self._allow_user_dirs:
+            return ()
+        out: list[str] = []
+        for raw in user_roots or []:
+            try:
+                s = os.fspath(raw)
+            except TypeError:
+                continue
+            if not (isinstance(s, str) and s and os.path.isabs(s)):
+                continue
+            try:
+                out.append(str(Path(s).resolve()))
+            except (OSError, ValueError):
+                continue
+        return tuple(out)
+
+    def _guard_runtime_paths(
+        self, cwd: str, sandbox_active: bool, user_roots: Any = None,
+    ):
         """Build the RuntimePaths context for the capability engine.
 
         Resolves the host workspace root and the session files dir
         (``<workspace>/sessions/<key>/files``) so the engine can apply
-        the Level 0/1/2 path hierarchy from issue #811.
+        the Level 0/1/2 path hierarchy from issue #811.  ``user_roots``
+        (per-call #821 grant) becomes ``extra_write_roots`` — the engine's
+        extra mutation scope, matching layer 1's rw binds (#984).
         """
         from miqi.agent.command_guard import RuntimePaths
 
@@ -2762,6 +3020,7 @@ class ExecTool(Tool):
             sandbox_cwd=self._resolve_sandbox_cwd(cwd) if sandbox_active else "",
             miqi_home=miqi_home,
             host_home=str(Path.home()) if hasattr(Path, "home") else None,
+            extra_write_roots=self._guard_write_roots(user_roots),
         )
 
     async def _mirror_downloaded_files(

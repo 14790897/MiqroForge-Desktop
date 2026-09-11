@@ -36,6 +36,7 @@ from miqi.agent.tools.filesystem import (
     _resolve_session_dir,
     _sandbox_read_file,
     _sandbox_write_file,
+    bootstrap_sandbox_roots,
 )
 
 # ── 图文件自动发现名称 ──────────────────────────────────────────────────
@@ -698,12 +699,21 @@ class GraphRenderTool(Tool):
         if sandbox is not None and getattr(sandbox, "_use_wsl", False):
             from miqi.agent.tools.filesystem import _sandbox_to_host_path
 
+            # #984: create authorized roots before the sandbox binds them.
+            bootstrap_sandbox_roots(
+                shared if shared is not None else self._shared_roots
+            )
             sandbox_path = _resolve_sandbox_path(
                 str(resolved), self._workspace, sandbox,
                 extra_roots=list(shared) if shared is not None else self._shared_roots,
                 session_files_dir=session_dir,
             )
-            await _sandbox_write_file(sandbox, sandbox_path, content)
+            await _sandbox_write_file(
+                sandbox, sandbox_path, content,
+                extra_rw_binds=(
+                    list(shared) if shared is not None else self._shared_roots
+                ),
+            )
             # 镜像到宿主 workspace，供 files.read 读取（与 WriteFileTool 一致）
             host_path = _sandbox_to_host_path(sandbox_path, self._workspace, sandbox)
             if not sandbox_path.startswith("/mnt/"):

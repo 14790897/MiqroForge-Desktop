@@ -55,3 +55,9 @@ class TurnContext:
     # (auto-sensed by the turn runner; injected into file tools as
     # ``_user_roots`` via ToolRuntime/orchestrator).  Host Paths.
     user_mentioned_roots: list[Path] = field(default_factory=list)
+    # #984: True for sub-agent turns.  Their roots are inherited from the
+    # parent job (``AgentJob.user_roots``), so the turn runner must NOT
+    # re-extract them from the sub-agent's own text — that text is
+    # model-authored, and extraction would re-open the injection channel
+    # #821 deliberately closed.
+    is_subagent: bool = False

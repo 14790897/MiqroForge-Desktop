@@ -386,6 +386,12 @@ export interface ProvidersListResult {
   providers: ProviderInfo[];
   active_model?: string;
   active_provider?: string | null;
+  /**
+   * 当前默认模型在运行时是否真的能发起会话。登录后经平台 AI 网关路由的默认
+   * 模型不需要任何本地 provider 凭据，只看 `configured` 会误判为不可用。
+   * 旧版 bridge 不返回该字段时为 undefined（前端回退到 configured 判定）。
+   */
+  active_model_resolvable?: boolean;
 }
 
 export interface ProviderUpdateResult {

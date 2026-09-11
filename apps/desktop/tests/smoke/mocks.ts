@@ -16,6 +16,12 @@ export interface MockBridgeOptions {
   models?: Array<Record<string, unknown>>;
   activeModel?: string;
   activeProvider?: string | null;
+  /**
+   * providers.list 的 active_model_resolvable（真实后端按运行时判定计算，
+   * 含登录后经平台 AI 网关路由的模型）。省略时镜像「任一 provider 已配置」——
+   * 无本地凭据的场景需显式传 true 才等价于网关路由可用。
+   */
+  activeModelResolvable?: boolean;
   config?: Record<string, unknown>;
   /** MiQroForge 登录态（issue #726 设置页）。默认未登录。 */
   qraftStatus?: Record<string, unknown>;
@@ -84,6 +90,9 @@ export function buildMockBridgeScript(opts: MockBridgeOptions = {}): string {
   );
   const activeModelJson = JSON.stringify(opts.activeModel || '');
   const activeProviderJson = JSON.stringify(opts.activeProvider ?? null);
+  // null → 每次调用按「任一 provider 已配置」动态计算（镜像无网关时的真实后端）
+  const activeModelResolvableJson =
+    opts.activeModelResolvable === undefined ? 'null' : String(opts.activeModelResolvable);
   const configJson = JSON.stringify(opts.config || {});
   const qraftStatusJson = JSON.stringify(opts.qraftStatus || { loggedIn: false });
   const qraftLoginResultJson = JSON.stringify(
@@ -153,6 +162,7 @@ export function buildMockBridgeScript(opts: MockBridgeOptions = {}): string {
   var _providers = ${providersJson};
   var _activeModel = ${activeModelJson};
   var _activeProvider = ${activeProviderJson};
+  var _activeModelResolvableOpt = ${activeModelResolvableJson};
 
   // ── Interactive helpers ──────────────────────────────────────────
   var _callbacks = {
@@ -304,7 +314,14 @@ export function buildMockBridgeScript(opts: MockBridgeOptions = {}): string {
       onUpdated: function(cb) { return _on('config:updated', cb); },    },
 
     providers: {
-      list: function() { return Promise.resolve({ providers: JSON.parse(JSON.stringify(_providers)), active_model: _activeModel, active_provider: _activeProvider }); },
+      list: function() {
+        var providersCopy = JSON.parse(JSON.stringify(_providers));
+        var resolvable = _activeModelResolvableOpt;
+        if (resolvable === null) {
+          resolvable = providersCopy.some(function(p) { return !!p.configured; });
+        }
+        return Promise.resolve({ providers: providersCopy, active_model: _activeModel, active_provider: _activeProvider, active_model_resolvable: resolvable });
+      },
       test: function() { return Promise.resolve({ ok: true }); },
       update: function(providerName, apiKey, apiBase, headers, model) {
         // 镜像真实后端：model 覆盖写为默认模型，并归属 provider
