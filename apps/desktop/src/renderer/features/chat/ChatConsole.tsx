@@ -2527,10 +2527,17 @@ export function ChatConsole({
   // 卡高亮——否则空态下先选了「代码任务」再从输入条切 fast,welcomeMode 停在 code、
   // 发送却用 fast,高亮与真实模式不一致(CodeRabbit)。会话已有消息后 welcome 卡不
   // 再渲染,只在 messages.length===0 时回写 welcomeMode。
-  const changeReasoningMode = (m: ReasoningMode) => {
-    setReasoningMode(m);
-    if (messages.length === 0) setWelcomeMode(m);
-  };
+  // useCallback (#1042): Composer is memoized, so this prop must be
+  // referentially stable or the memo is defeated on every ChatConsole render.
+  // Depends on the message COUNT only — the array identity changes on every
+  // streaming frame, the count does not change while typing.
+  const changeReasoningMode = useCallback(
+    (m: ReasoningMode) => {
+      setReasoningMode(m);
+      if (messages.length === 0) setWelcomeMode(m);
+    },
+    [messages.length]
+  );
   // 切到新会话时按当前 reasoningMode 重新派生选中卡：避免沿用上个会话的 code 选择，
   // 却因中途切到 fast 而高亮与发送模式不一致（CodeRabbit）。仅随 sessionKey 触发，
   // 不在同一会话内用 reasoningMode 变化覆盖用户手动选卡。
@@ -3909,7 +3916,8 @@ export function ChatConsole({
     [clearFinalCleanupTimer]
   );
 
-  const handleAttachClick = () => fileInputRef.current?.click();
+  // useCallback (#1042): stable prop for the memoized Composer.
+  const handleAttachClick = useCallback(() => fileInputRef.current?.click(), []);
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     Array.from(e.target.files ?? []).forEach((file) => {
@@ -5616,6 +5624,18 @@ export function ChatConsole({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [handleSend]);
 
+  // #1042: stable props for the memoized Composer. handleSend is a useCallback
+  // and programmaticTextRef is a ref, so handleComposerSubmit only changes when
+  // handleSend itself does.
+  const handleComposerSubmit = useCallback(
+    (text: string) => {
+      programmaticTextRef.current = text;
+      handleSend();
+    },
+    [handleSend]
+  );
+  const handleComplexHintDismiss = useCallback(() => setComplexHint(false), []);
+
   // ── Download paper via chat ─────────────────────────────────────
   const handleDownloadPaper = useCallback(
     (paper: PaperItem) => {
@@ -6825,12 +6845,8 @@ export function ChatConsole({
                         sources={sourcesByMsg.get(group.msg) ?? EMPTY_SOURCES}
                         toolStepIndex={toolStepByMsg.get(group.msg)}
                         isLast={i === chatGroups.length - 1}
-                        onResume={
-                          group.msg.interrupted ? () => handleResumeTurn(group.msg) : undefined
-                        }
-                        onRestart={
-                          group.msg.interrupted ? () => handleRestartTurn(group.msg) : undefined
-                        }
+                        onResume={group.msg.interrupted ? handleResumeTurn : undefined}
+                        onRestart={group.msg.interrupted ? handleRestartTurn : undefined}
                         reasoningMode={reasoningMode}
                         searchResults={
                           group.msg.toolCallId
@@ -7095,12 +7111,9 @@ export function ChatConsole({
                 reasoningMode={reasoningMode}
                 onReasoningModeChange={changeReasoningMode}
                 complexHint={complexHint}
-                onComplexHintDismiss={() => setComplexHint(false)}
+                onComplexHintDismiss={handleComplexHintDismiss}
                 onAttachClick={handleAttachClick}
-                onSubmit={(text) => {
-                  programmaticTextRef.current = text;
-                  handleSend();
-                }}
+                onSubmit={handleComposerSubmit}
                 onAbort={handleAbort}
               />
             </div>
@@ -8047,9 +8060,12 @@ interface MessageBubbleProps {
   isLastToolRow?: boolean;
   /** web_search result text for this row (click-to-expand cards). */
   searchResults?: string;
-  /** #740: resume/restart an interrupted turn (half-generated reply). */
-  onResume?: () => void;
-  onRestart?: () => void;
+  /** #740: resume/restart an interrupted turn (half-generated reply).
+   *  Takes the message (#1042) so the render site can pass its stable
+   *  useCallback reference instead of building an inline lambda — that keeps
+   *  the comparator below honest (every prop it compares is stable). */
+  onResume?: (msg: Message) => void;
+  onRestart?: (msg: Message) => void;
 }
 
 const MessageBubble = memo(function MessageBubble({
@@ -8168,8 +8184,8 @@ const MessageBubble = memo(function MessageBubble({
         content={String(msg.content ?? '')}
         elapsedSeconds={msg.reasoningElapsedS}
         mode={msg.reasoningMode}
-        onResume={onResume}
-        onRestart={onRestart}
+        onResume={onResume ? () => onResume(msg) : undefined}
+        onRestart={onRestart ? () => onRestart(msg) : undefined}
       />
     );
   }
@@ -9111,7 +9127,12 @@ function areMessageBubblePropsEqual(a: MessageBubbleProps, b: MessageBubbleProps
     a.onRetryLoad === b.onRetryLoad &&
     a.onRegenerate === b.onRegenerate &&
     a.onOpenProviderSettings === b.onOpenProviderSettings &&
-    a.onDownloadPaper === b.onDownloadPaper
+    a.onDownloadPaper === b.onDownloadPaper &&
+    // #1042: both are now stable references (the render site passes the
+    // useCallback and MessageBubble binds the message itself), so comparing
+    // them is safe and closes the last gap in this comparator.
+    a.onResume === b.onResume &&
+    a.onRestart === b.onRestart
   );
 }
 
