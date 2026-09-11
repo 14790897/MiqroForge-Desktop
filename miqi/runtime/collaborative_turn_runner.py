@@ -48,5 +48,8 @@ class CollaborativeTurnRunner(TurnRunner):
             # the blocked result carries the feedback into the model context.
             turn._plan_adjustment_pending = adjustment
             turn._plan_gate_blocked = True
-            return "confirm"
+            # CodeRabbit（9-11）：不得回报 "confirm"——基础循环会据此冻结旧
+            # PlanSnapshot/初始化旧 TodoState 并注入「已批准」系统消息（与用户
+            # 决定矛盾）。返回真实决定 "modify"，走 TurnRunner 既有的 modify 分支。
+            return "modify"
         return choice
