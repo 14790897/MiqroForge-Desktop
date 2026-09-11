@@ -251,14 +251,14 @@ export async function approvePlanCardIfAny(page: Page, timeoutMs = 90_000) {
   let checked = 0;
   while (Date.now() < deadline) {
     try {
-      const card = page.getByTestId('plan-card').first();
-      if (await card.isVisible({ timeout: 400 }).catch(() => false)) {
-        const btn = card.getByRole('button', { name: '开始执行' });
-        if (await btn.isVisible({ timeout: 400 }).catch(() => false)) {
-          await btn.click({ force: true, timeout: 5_000 });
-          console.log('[test] 自动批准计划卡（开始执行）');
-          return;
-        }
+      // CodeRabbit（9-11）：按 testid 定位等待态计划卡的确认钮（plan-confirm
+      // 仅在 waiting && !editing 渲染——天然排除历史已处理卡）；按钮可访问名
+      // 为「按当前方案执行」（PlanCard 重写后），旧 name:'开始执行' 匹配不到。
+      const btn = page.getByTestId('plan-confirm').first();
+      if (await btn.isVisible({ timeout: 400 }).catch(() => false)) {
+        await btn.click({ force: true, timeout: 5_000 });
+        console.log('[test] 自动批准计划卡（按当前方案执行）');
+        return;
       }
       checked += 1;
       if (checked % 20 === 1) {
@@ -295,13 +295,11 @@ export async function approveLoop(page: Page, timeout = 180_000) {
       console.log('[test] Auto-approved tool');
     }
     // #646-v2 plan 常态：edit 模式 produces_artifact 工具 → 计划卡——自动点"开始执行"
-    const planCard = page.getByTestId('plan-card').first();
-    if (await planCard.isVisible({ timeout: 1000 }).catch(() => false)) {
-      const go = planCard.getByRole('button', { name: '开始执行' });
-      if (await go.isVisible({ timeout: 1000 }).catch(() => false)) {
-        await go.click({ force: true, timeout: 5_000 });
-        console.log('[test] Auto-approved plan card (开始执行)');
-      }
+    // CodeRabbit（9-11）：同上——testid 定位等待态确认钮
+    const go = page.getByTestId('plan-confirm').first();
+    if (await go.isVisible({ timeout: 1000 }).catch(() => false)) {
+      await go.click({ force: true, timeout: 5_000 });
+      console.log('[test] Auto-approved plan card (按当前方案执行)');
     }
     const text = await page
       .locator('main')
