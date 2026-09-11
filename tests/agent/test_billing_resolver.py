@@ -1,8 +1,8 @@
-"""Slurm MCP 计费桥测试（issue #927；2026-09-11 起 RUNNING + 已执行终态触发）。
+"""Slurm MCP 计费桥测试（issue #927；2026-09-11 起 RUNNING + COMPLETED 触发）。
 
 覆盖：服务器名匹配 / 状态检测（JSON 与文本）/ 扣费事件发射（submit 与
 check_job_status）/ 可扣费状态（RUNNING、COMPLETED）触发 / 不可扣费状态
-（PENDING、CANCELLED）不触发 / 非 slurm 服务器
+（PENDING、CANCELLED、FAILED、TIMEOUT）不触发 / 非 slurm 服务器
 不受影响 / 无 Desktop 通道静默跳过 / 注入参数不传给 MCP 服务端 /
 作业 ID 提取。
 """
@@ -62,6 +62,8 @@ RUNNING_JSON = '{"job_id": "187654", "state": "RUNNING", "name": "lammps"}'
 PENDING_JSON = '{"job_id": "187654", "state": "PENDING", "name": "lammps"}'
 COMPLETED_JSON = '{"job_id": "187654", "state": "COMPLETED", "name": "lammps"}'
 CANCELLED_JSON = '{"job_id": "187654", "state": "CANCELLED", "name": "lammps"}'
+FAILED_JSON = '{"job_id": "187654", "state": "FAILED", "name": "lammps"}'
+TIMEOUT_JSON = '{"job_id": "187654", "state": "TIMEOUT", "name": "lammps"}'
 
 
 class TestServerMatching:
@@ -217,6 +219,34 @@ class TestMCPWrapperBilling:
 
         set_billing_charge_emitter("desktop:s1", _emit)
         await wrapper.execute(_session_key="desktop:s1")
+        assert emitted == []
+
+    async def test_failed_does_not_emit(self):
+        # 作业失败（未成功完成）——不计费（产品确认 2026-09-11）。
+        session = _FakeSession(result_text=FAILED_JSON)
+        wrapper = _make_wrapper("slurm", session, tool_name="check_job_status")
+        emitted: list[dict] = []
+
+        async def _emit(payload):
+            emitted.append(payload)
+            return True
+
+        set_billing_charge_emitter("desktop:s1", _emit)
+        await wrapper.execute(_session_key="desktop:s1", job_id="187654")
+        assert emitted == []
+
+    async def test_timeout_does_not_emit(self):
+        # 超时作业——不计费（产品确认 2026-09-11）。
+        session = _FakeSession(result_text=TIMEOUT_JSON)
+        wrapper = _make_wrapper("slurm", session, tool_name="check_job_status")
+        emitted: list[dict] = []
+
+        async def _emit(payload):
+            emitted.append(payload)
+            return True
+
+        set_billing_charge_emitter("desktop:s1", _emit)
+        await wrapper.execute(_session_key="desktop:s1", job_id="187654")
         assert emitted == []
 
     async def test_non_slurm_server_skips_billing(self):

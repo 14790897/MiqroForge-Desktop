@@ -6,9 +6,9 @@
  *   确认 → 作业提交并执行。
  *
  * 断言「模型能自主发现 mcp_miqroforge-slurm_* 工具并提交作业」+「出现扣费提示」。
- * 计费在作业进入可扣费状态（RUNNING 或已执行终态 COMPLETED/FAILED/TIMEOUT）时触发——
- * 快作业从 PENDING 直接到 COMPLETED 也能扣分（2026-09-11 修复：原先只认 RUNNING，
- * 快作业漏扣）。
+ * 计费在作业进入可扣费状态（RUNNING 或 COMPLETED）时触发——快作业从 PENDING
+ * 直接到 COMPLETED 也能扣分（2026-09-11 修复：原先只认 RUNNING，快作业漏扣；
+ * FAILED/TIMEOUT/CANCELLED 不计费）。
  *
  * 与 billing-live.spec.ts 的区别：后者走自部署本地回环服务器（127.0.0.1）
  * + 显式 Bearer header；本 spec 走 #1029 开启的内置托管网关（登录态注入
