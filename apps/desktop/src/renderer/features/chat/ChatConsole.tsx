@@ -26,25 +26,19 @@ import { ErrorBoundary } from '../../components/ErrorBoundary';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { Button } from '../../components/ui/Button';
-import { Textarea } from '../../components/ui/Textarea';
 import { Tooltip } from '../../components/ui/Tooltip';
 import { ContextMenu, type ContextMenuAction } from '../../components/ContextMenu';
 import { cn } from '../../lib/utils';
 import { Modal } from '../../components/shared';
 import { formatRelativeTime } from '../../lib/formatTime';
-import {
-  ExecutionPolicySelector,
-  type ExecutionPolicy,
-} from '../../components/ExecutionPolicySelector';
-import { ReasoningModeSwitch, type ReasoningMode } from './components/ReasoningModeSwitch';
+import { type ExecutionPolicy } from '../../components/ExecutionPolicySelector';
+import { type ReasoningMode } from './components/ReasoningModeSwitch';
 import {
   Send,
-  Square,
   Loader2,
   Copy,
   Check,
   CheckCircle,
-  Paperclip,
   X,
   FileText,
   Image,
@@ -74,8 +68,6 @@ import {
   ThumbsUp,
   ThumbsDown,
   RefreshCw,
-  Scissors,
-  ClipboardPaste,
   Star,
   Download,
 } from 'lucide-react';
@@ -98,6 +90,7 @@ import PaperSearchResult, {
   type PaperSearchPayload,
   type PaperItem,
 } from './PaperSearchResult';
+import { Composer, type ComposerHandle } from './Composer';
 
 interface Attachment {
   name: string;
@@ -287,6 +280,11 @@ interface MessageSource {
   tool: string;
   url: string;
 }
+
+// Stable empty array for messages without sources — keeps the `sources` prop
+// referentially equal so MessageBubble's memo isn't defeated by a fresh `[]`
+// on every keystroke (#1021).
+const EMPTY_SOURCES: MessageSource[] = [];
 
 const TOOL_LABELS: Record<string, string> = {
   web_fetch: '网页抓取',
@@ -2492,7 +2490,6 @@ export function ChatConsole({
   // #570: bump to force a manual reload of the current session's history
   // (used by the "重试" button on the load-failure error bubble).
   const [retryTick, setRetryTick] = useState(0);
-  const [input, setInput] = useState('');
   const [executionPolicy, setExecutionPolicy] = useState<ExecutionPolicy>('edit');
 
   // Reasoning mode (issue #680): ⚡极速回答 / 🧠深度研究. Default fast
@@ -2817,7 +2814,7 @@ export function ChatConsole({
   const userScrolledUp = useRef(false);
   const justOpened = useRef(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const composerRef = useRef<ComposerHandle>(null);
   // 会话活动感知（restored from pre-#577, issue #677）：流式/消息变化时
   // 上报 App，让"+"能感知未落盘的活动
   useEffect(() => {
@@ -2844,7 +2841,7 @@ export function ChatConsole({
   }, [lastAdjustAt]);
   useEffect(() => {
     if (!adjustHint || streaming) return;
-    textareaRef.current?.focus();
+    composerRef.current?.focus();
   }, [adjustHint, streaming]);
   // 原生 window.confirm 模态框关闭后，Chromium 可能不把“真实的 OS 激活”交还
   // renderer：键盘事件被吞、点输入条无光标，刷新重建页面才恢复（手动复现）。
@@ -2862,7 +2859,7 @@ export function ChatConsole({
     if (messages.length === 0 && welcomeFocusedFor.current !== sessionKey) {
       welcomeFocusedFor.current = sessionKey ?? null;
       const prevHadMessages = (lastMsgCountRef.current ?? 0) > 0;
-      const focusInput = () => textareaRef.current?.focus();
+      const focusInput = () => composerRef.current?.focus();
       focusInput();
       void window.miqi.app?.focus?.();
       const t1 = window.setTimeout(focusInput, 120);
@@ -2898,10 +2895,10 @@ export function ChatConsole({
   const pendingRegrantRef = useRef(false);
   useEffect(() => {
     const runRegrant = () => {
-      textareaRef.current?.focus();
+      composerRef.current?.focus();
       window.setTimeout(() => {
         void window.miqi.app?.focus?.({ hard: true }).then(() => {
-          window.setTimeout(() => textareaRef.current?.focus(), 80);
+          window.setTimeout(() => composerRef.current?.focus(), 80);
         });
       }, 60);
     };
@@ -2924,10 +2921,10 @@ export function ChatConsole({
   useEffect(() => {
     if (historyLoaded && messages.length === 0 && pendingRegrantRef.current) {
       pendingRegrantRef.current = false;
-      textareaRef.current?.focus();
+      composerRef.current?.focus();
       window.setTimeout(() => {
         void window.miqi.app?.focus?.({ hard: true }).then(() => {
-          window.setTimeout(() => textareaRef.current?.focus(), 80);
+          window.setTimeout(() => composerRef.current?.focus(), 80);
         });
       }, 60);
     }
@@ -3273,7 +3270,7 @@ export function ChatConsole({
         setStreaming(false);
       }
       setCurrentReqId(null);
-      setInput('');
+      composerRef.current?.clear();
       setThreads([{ threadId: 'main', agentType: 'main', label: '主线程' }]);
       setActiveThreadId('main');
       setPlan(null);
@@ -4113,8 +4110,9 @@ export function ChatConsole({
     retry?: boolean;
   } | null>(null);
   const handleSendRef = useRef<() => void>(() => {});
-  /** 程序化发送（论文下载 fallback 等）经此 ref 显式传文本，handleSend
-   *  一次性消费。不依赖 setInput 后的渲染 flush（旧闭包读 input 是旧值）。 */
+  /** 发送文本经此 ref 显式传入 handleSend 并一次性消费：既承载程序化发送
+   *  （论文下载 fallback 等），也承载 Composer 的用户输入（#1021 下沉后
+   *  input 状态不再住在 ChatConsole）。不依赖 state 更新后的渲染 flush。 */
   const programmaticTextRef = useRef<string | null>(null);
   /** #740: pending resume-turn id — set by 继续执行, consumed by handleSend
    *  so the resume request flows through the full send pipeline (listeners,
@@ -4183,11 +4181,11 @@ export function ChatConsole({
     const _resumeId = resumeTurnIdRef.current;
     resumeTurnIdRef.current = null;
     const payload = retryPayloadRef.current;
-    // 程序化发送（论文下载 fallback 等）经 ref 显式传文本：不依赖
-    // setInput 后的渲染 flush（旧闭包读到的 input state 是旧值）。
+    // 发送文本经 ref 显式传入（程序化发送 + Composer 用户输入）：不依赖
+    // state 更新后的渲染 flush（旧闭包读到的 input state 是旧值）。
     const programmaticText = programmaticTextRef.current;
     programmaticTextRef.current = null;
-    const text = (payload?.text ?? programmaticText ?? input).trim();
+    const text = (payload?.text ?? programmaticText ?? '').trim();
     const atts = payload?.attachments ?? attachments;
     if (!text && atts.length === 0 && !_resumeId) {
       retryPayloadRef.current = null;
@@ -4268,13 +4266,7 @@ export function ChatConsole({
     // the streamed reply takes over rendering) — skip the optimistic push.
     if (!_resumeId) setMessages((prev) => [...prev, userMsg]);
     userScrolledUp.current = false;
-    setInput('');
-    // Reset textarea height after sending
-    setTimeout(() => {
-      if (textareaRef.current) {
-        textareaRef.current.style.height = 'auto';
-      }
-    }, 0);
+    composerRef.current?.clear();
     setAttachments([]);
     // Save a snapshot before clearing — chat.send needs it later.  Use the
     // resolved `atts` (which handles the retry-payload path), not the state,
@@ -4351,7 +4343,7 @@ export function ChatConsole({
           const resumeRemovedMsg = _resumeId ? resumeRemovedMsgRef.current : null;
           resumeRemovedMsgRef.current = null;
           setMessages((prev) => applyReloginIntercept(prev, userMsg, resumeRemovedMsg));
-          setInput(text);
+          composerRef.current?.setText(text);
           setAttachments(atts);
         }
         return;
@@ -4379,7 +4371,7 @@ export function ChatConsole({
             }
             return prev;
           });
-          setInput(text);
+          composerRef.current?.setText(text);
           setAttachments(atts);
         }
         return;
@@ -4399,7 +4391,7 @@ export function ChatConsole({
         // configure a provider before sending.  The draft is restored to the
         // input so they can re-send once configured.  Only touch the composer /
         // message list if THIS session is still displayed — the user may have
-        // switched away while providers.list was pending, and setInput /
+        // switched away while providers.list was pending, and the composer /
         // setAttachments / setMessages act on the currently displayed session.
         // #1000：未登录时没有 Provider 可配置（#835 合规收口后凭据配置已移除），
         // 拦截气泡直接给出一键登录按钮，登录后经网关自动获得平台内置模型。
@@ -4427,7 +4419,7 @@ export function ChatConsole({
             }
             return prev;
           });
-          setInput(text);
+          composerRef.current?.setText(text);
           setAttachments(atts);
         }
         return;
@@ -4441,7 +4433,7 @@ export function ChatConsole({
     // optimistic bubble and restore the composer (the send never started).
     // Only touch the composer / message list if THIS session is still
     // displayed — the user may have switched away while the check was pending,
-    // and setInput / setAttachments / setMessages act on the current session.
+    // and the composer / setAttachments / setMessages act on the current session.
     if (!isCurrentPendingSend(sendSessionKey, thisSendId)) {
       pendingSendIdsRef.current.delete(sendSessionKey);
       streamingBySession.delete(sendSessionKey);
@@ -4452,7 +4444,7 @@ export function ChatConsole({
           if (last?.timestamp === userMsg.timestamp) return prev.slice(0, -1);
           return prev;
         });
-        setInput(text);
+        composerRef.current?.setText(text);
         setAttachments(atts);
       }
       return;
@@ -4540,7 +4532,7 @@ export function ChatConsole({
       setSendingFor(sendSessionKey, null);
       // Only restore the composer / message list if THIS session is still
       // displayed — the user may have switched away while the aborts were
-      // awaited, and setInput / setAttachments / setMessages act on the
+      // awaited, and the composer / setAttachments / setMessages act on the
       // currently displayed session.
       if (currentSessionRef.current === sendSessionKey) {
         setStreaming(false);
@@ -4549,7 +4541,7 @@ export function ChatConsole({
           if (last?.timestamp === userMsg.timestamp) return prev.slice(0, -1);
           return prev;
         });
-        setInput(text);
+        composerRef.current?.setText(text);
         setAttachments(atts);
       }
       settleLifecycle();
@@ -5609,7 +5601,6 @@ export function ChatConsole({
       sendInvocationRegistryRef.current.delete(thisSendId);
     }
   }, [
-    input,
     attachments,
     streaming,
     cleanupListeners,
@@ -5709,7 +5700,7 @@ export function ChatConsole({
     const instruction = `请下载论文《${title}》的 PDF 文件。paperId: ${pid}`;
     setDownloadingPaperId(paper.id || null);
     // Set input and trigger send on next tick so React state propagates
-    setInput(instruction);
+    composerRef.current?.setText(instruction);
     setTimeout(() => {
       const text = instruction.trim();
       if (!text) {
@@ -5725,21 +5716,6 @@ export function ChatConsole({
       // 失败，指示都不悬挂；流式回复由 handleSend 的监听链负责渲染。
       setDownloadingPaperId(null);
     }, 0);
-  };
-
-  /** Auto-resize textarea to fit content */
-  const adjustTextareaHeight = useCallback(() => {
-    const el = textareaRef.current;
-    if (!el) return;
-    el.style.height = 'auto';
-    el.style.height = `${el.scrollHeight}px`;
-  }, []);
-
-  const handleKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
-      handleSend();
-    }
   };
 
   /** Normalise a sandbox-internal path to a host path that can be opened.
@@ -6064,75 +6040,6 @@ export function ChatConsole({
     [sessionKey]
   );
 
-  // Composer right-click edit menu (剪切/复制/粘贴/全选) — restored from
-  // #547 after the #577 rewrite dropped it.
-  const inputContextItems = useMemo<ContextMenuAction[]>(
-    () => [
-      {
-        label: '剪切',
-        icon: <Scissors size={14} />,
-        shortcut: 'Ctrl+X',
-        onSelect: () => {
-          const el = textareaRef.current;
-          if (!el) return;
-          const s = el.selectionStart,
-            e = el.selectionEnd;
-          if (s === e) return;
-          navigator.clipboard.writeText(el.value.slice(s, e)).catch(() => {});
-          el.setRangeText('', s, e, 'end');
-          // Let React's onChange pick up the new value — manual setInput can
-          // drift from the DOM (deleting then requires two passes).
-          el.dispatchEvent(new Event('input', { bubbles: true }));
-          el.focus();
-        },
-      },
-      {
-        label: '复制',
-        icon: <Copy size={14} />,
-        shortcut: 'Ctrl+C',
-        onSelect: () => {
-          const el = textareaRef.current;
-          if (!el) return;
-          const txt = el.value.slice(el.selectionStart, el.selectionEnd);
-          if (txt) navigator.clipboard.writeText(txt).catch(() => {});
-        },
-      },
-      {
-        label: '粘贴',
-        icon: <ClipboardPaste size={14} />,
-        shortcut: 'Ctrl+V',
-        onSelect: () => {
-          const el = textareaRef.current;
-          if (!el) return;
-          navigator.clipboard
-            .readText()
-            .then((text) => {
-              if (!text) return;
-              // Insert at the caret like native Ctrl+V — replace the current
-              // selection range instead of always appending at the end.
-              const s = el.selectionStart ?? el.value.length;
-              const e = el.selectionEnd ?? s;
-              el.setRangeText(text, s, e, 'end');
-              // Let React's onChange pick up the new value (single source of
-              // truth for state vs DOM — avoids double-delete drift).
-              el.dispatchEvent(new Event('input', { bubbles: true }));
-              el.focus();
-            })
-            .catch(() => {});
-        },
-      },
-      {
-        label: '全选',
-        icon: <CheckCircle size={14} />,
-        shortcut: 'Ctrl+A',
-        divider: true,
-        onSelect: () => textareaRef.current?.select(),
-      },
-    ],
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    []
-  );
-
   // Associate each assistant answer with the tool URLs that preceded it in
   // the same turn. Memoized — extractMessageSources scans full tool outputs,
   // which would otherwise re-run on every animation frame while streaming.
@@ -6142,11 +6049,15 @@ export function ChatConsole({
   // React.memo on MessageBubble below.  Tool rows update their content while
   // streaming, so their content length IS part of the signature; assistant
   // body length is NOT (extraction never depends on it).
-  const sourcesSig = messages
-    .map((m) =>
-      m.role === 'progress' ? `${m.toolCallId ?? ''}:${m.content?.length ?? 0}` : m.role
-    )
-    .join('|');
+  const sourcesSig = useMemo(
+    () =>
+      messages
+        .map((m) =>
+          m.role === 'progress' ? `${m.toolCallId ?? ''}:${m.content?.length ?? 0}` : m.role
+        )
+        .join('|'),
+    [messages]
+  );
   const sourcesByMsg = useMemo(() => {
     if (sourcesCacheRef.current?.sig === sourcesSig) return sourcesCacheRef.current.map;
     const map = new Map<Message, MessageSource[]>();
@@ -6222,7 +6133,7 @@ export function ChatConsole({
         // rewinding and dropping the "已停止" context.
         setMessages((prev) => (wasTurnStopped(prev, idx) ? prev : prev.slice(0, idx)));
       }
-      setInput(msg.content);
+      composerRef.current?.setText(msg.content);
       setAttachments(msg.attachments ?? []);
     },
     [streaming, cleanupListeners]
@@ -6252,7 +6163,7 @@ export function ChatConsole({
       // the interrupted round — keep it and let handleSend append the new
       // attempt after it.  Only a completed answer is replaced in place.
       setMessages((prev) => (wasTurnStopped(prev, userIdx) ? prev : prev.slice(0, userIdx)));
-      setInput(userMsg.content);
+      composerRef.current?.setText(userMsg.content);
       setAttachments(userMsg.attachments ?? []);
       requestAnimationFrame(() => handleSendRef.current());
     },
@@ -6911,7 +6822,7 @@ export function ChatConsole({
                         turnIndex={i}
                         execOutputs={execOutputs}
                         inlineExecOutput={inlineExecOutput}
-                        sources={sourcesByMsg.get(group.msg) ?? []}
+                        sources={sourcesByMsg.get(group.msg) ?? EMPTY_SOURCES}
                         toolStepIndex={toolStepByMsg.get(group.msg)}
                         isLast={i === chatGroups.length - 1}
                         onResume={
@@ -7173,143 +7084,25 @@ export function ChatConsole({
               {/* AI-initiated user confirmation cards (issue #646) */}
               <ConfirmCardArea />
 
-              <div
-                className="flex flex-col rounded-3xl px-7 py-3.5 transition-all"
-                data-testid="chat-input-container"
-                style={{
-                  background: 'color-mix(in srgb, var(--surface) 85%, transparent)',
-                  backdropFilter: 'blur(16px)',
-                  WebkitBackdropFilter: 'blur(16px)',
-                  border: '1px solid color-mix(in srgb, var(--border) 60%, transparent)',
-                  outline: 'none',
-                  boxShadow: '0 -4px 20px rgba(0,0,0,0.06), 0 2px 8px rgba(0,0,0,0.04)',
+              <Composer
+                ref={composerRef}
+                streaming={streaming}
+                hasAttachments={attachments.length > 0}
+                adjustHint={adjustHint}
+                executionPolicy={executionPolicy}
+                onExecutionPolicyChange={setExecutionPolicy}
+                onOpenApprovals={onOpenApprovals}
+                reasoningMode={reasoningMode}
+                onReasoningModeChange={changeReasoningMode}
+                complexHint={complexHint}
+                onComplexHintDismiss={() => setComplexHint(false)}
+                onAttachClick={handleAttachClick}
+                onSubmit={(text) => {
+                  programmaticTextRef.current = text;
+                  handleSend();
                 }}
-              >
-                {/* Textarea on top — grows up to 1/3 of viewport (DeepSeek style) */}
-                <ContextMenu items={inputContextItems} minWidth={160}>
-                  {({ onContextMenu }) => (
-                    <Textarea
-                      ref={textareaRef}
-                      value={input}
-                      onChange={(e) => {
-                        setInput(e.target.value);
-                      }}
-                      onKeyDown={handleKeyDown}
-                      onContextMenu={onContextMenu}
-                      placeholder={
-                        adjustHint
-                          ? '请输入调整要求（例如：市场改为海外、步骤精简到 3 步…）'
-                          : '请输入消息或拖入文件...'
-                      }
-                      rows={1}
-                      allowResize={true}
-                      className="w-full border-0 bg-transparent p-0! leading-7! focus:ring-0 focus:border-0 min-h-[52px] max-h-[25vh] text-[15px]"
-                      style={{ color: 'var(--text)', fieldSizing: 'content' }}
-                    />
-                  )}
-                </ContextMenu>
-                {/* Icon row at the bottom — no text, like DeepSeek */}
-                <div className="flex items-center gap-3 pt-1.5 mt-0.5 border-t border-[var(--border-subtle)]">
-                  <ExecutionPolicySelector
-                    policy={executionPolicy}
-                    onChange={setExecutionPolicy}
-                    onOpenApprovals={onOpenApprovals}
-                  />
-                  {/* 复杂问题角标（#680 跟进）：轻量气泡挂在模式按钮上，
-                      3 秒自动消失，不占输入区。 */}
-                  <div className="relative">
-                    <ReasoningModeSwitch mode={reasoningMode} onChange={changeReasoningMode} />
-                    {complexHint && reasoningMode === 'fast' && (
-                      <div
-                        className="absolute left-full ml-2 top-1/2 -translate-y-1/2 z-50 flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] whitespace-nowrap"
-                        style={{
-                          background: '#2f2f3a',
-                          border: '1px solid rgba(157,106,223,.45)',
-                          color: '#c9a5ef',
-                          boxShadow: '0 4px 14px rgba(0,0,0,.35)',
-                        }}
-                      >
-                        {/* 指向按钮的小箭头（左侧） */}
-                        <span
-                          className="absolute -left-[5px] top-1/2 -translate-y-1/2 w-2 h-2"
-                          style={{
-                            background: '#2f2f3a',
-                            borderLeft: '1px solid rgba(157,106,223,.45)',
-                            borderBottom: '1px solid rgba(157,106,223,.45)',
-                            transform: 'translateY(-50%) rotate(45deg)',
-                          }}
-                        />
-                        <span>💡 建议</span>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            changeReasoningMode('think');
-                            setComplexHint(false);
-                          }}
-                          className="font-semibold cursor-pointer"
-                          style={{ color: '#d9b8f5' }}
-                        >
-                          🧠 深度研究
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => setComplexHint(false)}
-                          className="opacity-60 hover:opacity-100 cursor-pointer"
-                          aria-label="关闭提示"
-                        >
-                          ✕
-                        </button>
-                      </div>
-                    )}
-                  </div>
-                  {/* AI disclaimer — centered in the mode row, fades when typing */}
-                  <div className="flex-1 flex items-center justify-center">
-                    <span
-                      className="text-size-2xs leading-relaxed tracking-wide text-[var(--text-faint)] italic select-none transition-opacity duration-300"
-                      style={{ opacity: !input.trim() && attachments.length === 0 ? 1 : 0 }}
-                    >
-                      AI 也会犯错误，对于重要答案请谨慎验证
-                    </span>
-                  </div>
-                  <button
-                    onClick={handleAttachClick}
-                    className="shrink-0 p-1.5 rounded hover:bg-[var(--surface-muted)] transition-colors"
-                    title="附件或图片"
-                    aria-label="附件或图片"
-                  >
-                    <Paperclip size={15} style={{ color: 'var(--text-faint)' }} />
-                  </button>
-                  {streaming && !input.trim() && attachments.length === 0 ? (
-                    <button
-                      onClick={handleAbort}
-                      title="停止生成"
-                      aria-label="停止生成"
-                      className="shrink-0 w-8 h-8 rounded-full flex items-center justify-center transition-all duration-200 hover:bg-[var(--surface-muted)] active:scale-95"
-                    >
-                      <Square
-                        size={12}
-                        style={{ color: 'var(--text-muted)' }}
-                        fill="currentColor"
-                      />
-                    </button>
-                  ) : (
-                    <button
-                      onClick={handleSend}
-                      disabled={!input.trim() && attachments.length === 0}
-                      title={streaming ? '中断当前生成并发送' : '发送'}
-                      aria-label={streaming ? '中断当前生成并发送' : '发送'}
-                      className="shrink-0 w-8 h-8 rounded-full flex items-center justify-center transition-all duration-200 hover:brightness-110 hover:-translate-y-px active:scale-95 disabled:opacity-30 disabled:hover:brightness-100 disabled:hover:translate-y-0 disabled:shadow-none"
-                      style={{
-                        background:
-                          'linear-gradient(135deg, var(--accent), color-mix(in srgb, var(--accent) 65%, #000))',
-                        boxShadow: '0 2px 10px color-mix(in srgb, var(--accent) 35%, transparent)',
-                      }}
-                    >
-                      <Send size={14} style={{ color: '#fff' }} />
-                    </button>
-                  )}
-                </div>
-              </div>
+                onAbort={handleAbort}
+              />
             </div>
 
             {/* Inline workspace selector — only before the conversation starts */}
@@ -8194,7 +7987,7 @@ function ToolChainGroup({
               <MessageBubble
                 key={`${row.timestamp}-${i}`}
                 msg={row}
-                sources={sourcesByMsg.get(row) ?? []}
+                sources={sourcesByMsg.get(row) ?? EMPTY_SOURCES}
                 toolStepIndex={i + 1}
                 isLastToolRow={i === rows.length - 1}
                 isLast={false}
