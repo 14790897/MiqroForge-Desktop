@@ -17,10 +17,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from contextvars import ContextVar
 from typing import Any, Awaitable, Callable
 
 from miqi.kun_runtime.user_input_gate import UserInputGate
+
+_logger = logging.getLogger(__name__)
 
 _gate = UserInputGate()
 # One emitter slot per session (thread_id == session_key on the desktop
@@ -89,9 +92,23 @@ def resolve_user_input(
     input_id: str,
     answers: dict[str, Any] | None = None,
     remember: bool = False,
+    remember_mode: str = "session",
 ) -> bool:
     """Resolve a pending user-input request (called by the app handler)."""
-    return _gate.resolve(input_id, answers or {}, remember=remember)
+    # 审计只记录稳定元数据，避免把卡片正文或用户自由文本写入日志。
+    req = _gate.pending_request(input_id)
+    if req is not None:
+        choice_id = str((answers or {}).get("choice_id", ""))
+        choice_role = str((answers or {}).get("choice_role", ""))
+        _logger.info(
+            "audit confirm-card resolved: input_id=%s request_type=%s choice_id=%s choice_role=%s remember=%s",
+            input_id,
+            type(req).__name__,
+            choice_id,
+            choice_role,
+            remember,
+        )
+    return _gate.resolve(input_id, answers or {}, remember=remember, remember_mode=remember_mode)
 
 
 def pending_thread_for_input(input_id: str) -> str | None:
@@ -181,11 +198,20 @@ def make_resolver() -> Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]:
             # becomes pending: concurrent confirm cards in the same turn
             # queue in the gate (issue #714 follow-up), and a queued card
             # must not surface before the previous one resolved.
+            # 2026-08-27：载荷带 turn_id/thread_id——前端据此把卡内联进
+            # 对应 turn 的 AI 回答消息（用户：所有内容都在 AI 回答里面）
+            card_payload = {
+                **payload,
+                "input_id": input_id,
+                "prompt": prompt,
+                "turn_id": turn_id,
+                "thread_id": thread_id,
+            }
             try:
                 if asyncio.iscoroutinefunction(emitter):
-                    await emitter({**payload, "input_id": input_id, "prompt": prompt})
+                    await emitter(card_payload)
                 else:
-                    emitter({**payload, "input_id": input_id, "prompt": prompt})
+                    emitter(card_payload)
             except Exception:
                 pass  # emitter failure must not block the tool; timeout will cancel
 

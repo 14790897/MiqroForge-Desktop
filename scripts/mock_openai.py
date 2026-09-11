@@ -236,6 +236,7 @@ class Handler(BaseHTTPRequestHandler):
                         calls_seen.append(name)
         n_search = calls_seen.count("web_search")
         n_write = calls_seen.count("write_file")
+        n_read = calls_seen.count("read_file")
         n_confirm_cards = sum(1 for r in results if r.get("status") == "confirmed")
 
         def tc(name, args, cid="call_x"):
@@ -348,6 +349,101 @@ class Handler(BaseHTTPRequestHandler):
                 self._respond(text("双卡流程结束：两张确认卡均已处理完毕。"))
             return
 
+        # ── #646-v2 plan-card branch（用户消息含"计划"）──────────────
+        # 独立状态机：ask_user_plan_confirm → web_search → write_file →
+        # request_action_confirmation（ActionCard）→ 完成
+        n_plan = calls_seen.count("ask_user_plan_confirm")
+        n_action = calls_seen.count("request_action_confirmation")
+        last = results[-1] if results else {}
+        # ── auto 分支（用户消息含"自动"）——不弹卡，直接执行序列 ──
+        if "自动" in last_user:
+            n_search = calls_seen.count("list_dir")
+            n_write = calls_seen.count("write_file")
+            n_action = calls_seen.count("request_action_confirmation")
+            if n_search == 0:
+                # 用 list_dir（本地快、READ 阶段）替代 web_search——E2E 里
+                # 真实网络搜索慢会卡住回合（web_search 是真实工具非 mock）
+                print("  [mock] Auto 分支 → list_dir", flush=True)
+                self._respond(tc("list_dir", {"path": "."}, "call_a_search"))
+                return
+            if n_write == 0:
+                print("  [mock] Auto 分支 → write_file", flush=True)
+                self._respond(tc("write_file", {
+                    "path": "mof-report.json",
+                    "content": json.dumps({"title": "MOF-5 调研报告", "findings": []}, ensure_ascii=False),
+                }, "call_a_write"))
+                return
+            if n_action == 0:
+                print("  [mock] Auto 分支 → ActionCard", flush=True)
+                self._respond(tc("request_action_confirmation", {
+                    "action": "upload", "target": "Qraft", "file_name": "mof-report.json",
+                    "size_bytes": 23552, "sha256": "deadbeef1234567890abcdef1234567890",
+                    "description": "上传 MOF-5 实验报告到 Qraft",
+                }, "call_a_action"))
+                return
+            print("  [mock] Auto 分支 → 完成", flush=True)
+            self._respond(text("✅ 已完成：MOF-5 实验报告已生成并上传 Qraft。"))
+            return
+        if "计划" in last_user:
+            # CodeRabbit（9-11）：计划被取消后不得继续推进状态机
+            # （cancelled 也满足 n_plan>=1 会误发 web_search）
+            if last.get("status") == "cancelled":
+                print("  [mock] PlanCard 取消 → 结束", flush=True)
+                self._respond(text("好的，已取消该计划。"))
+                return
+            if n_plan == 0:
+                print("  [mock] PlanCard 分支 → ask_user_plan_confirm", flush=True)
+                self._respond(tc("ask_user_plan_confirm", {
+                    "title": "生成 MOF-5 实验报告",
+                    "goal": "搜索论文并生成报告，上传到 Qraft",
+                    "steps": [
+                        {"name": "搜集论文资料", "tools": ["web_search"]},
+                        {"name": "创建实验报告", "tools": ["write_file"]},
+                        {"name": "上传到 Qraft", "tools": ["upload"]},
+                    ],
+                    "permissions": ["network_read", "workspace_write", "external_upload"],
+                    "timeout_seconds": 120,
+                }, "call_plan"))
+                return
+            if last.get("choice_id") == "modify":
+                print("  [mock] 计划 modify → 重新规划弹新卡", flush=True)
+                self._respond(tc("ask_user_plan_confirm", {
+                    "title": "生成 MOF-5 实验报告（修改版）",
+                    "goal": "按用户意见调整：增加成本对比步骤",
+                    "steps": [
+                        {"name": "搜集论文资料", "tools": ["web_search"]},
+                        {"name": "对比合成成本", "tools": ["web_search"]},
+                        {"name": "创建实验报告", "tools": ["write_file"]},
+                        {"name": "上传到 Qraft", "tools": ["upload"]},
+                    ],
+                    "permissions": ["network_read", "workspace_write", "external_upload"],
+                    "timeout_seconds": 120,
+                }, "call_plan2"))
+                return
+            if n_plan >= 1 and n_search == 0:
+                print("  [mock] PlanCard 确认 → R2 web_search", flush=True)
+                self._respond(tc("web_search", {"query": "MOF-5 metal-organic framework synthesis", "max_results": 3}, "call_search2"))
+                return
+            if n_plan >= 1 and n_write == 0:
+                print("  [mock] R3 → write_file", flush=True)
+                self._respond(tc("write_file", {
+                    "path": "mof-report.json",
+                    "content": json.dumps({"title": "MOF-5 调研报告", "findings": []}, ensure_ascii=False),
+                }, "call_write2"))
+                return
+            if n_plan >= 1 and n_action == 0:
+                print("  [mock] R4 → ActionCard（上传确认）", flush=True)
+                self._respond(tc("request_action_confirmation", {
+                    "action": "upload", "target": "Qraft", "file_name": "mof-report.json",
+                    "size_bytes": 23552, "sha256": "deadbeef1234567890abcdef1234567890",
+                    "description": "上传 MOF-5 实验报告到 Qraft",
+                }, "call_action"))
+                return
+            if n_plan >= 1 and n_action >= 1:
+                print("  [mock] R5 → 完成", flush=True)
+                self._respond(text("✅ 已完成：MOF-5 实验报告已生成并上传 Qraft。"))
+                return
+
         # ── state machine（按工具调用序列推进） ──
         if not results:
             print("  [mock] R1 → 确认执行方案卡（4 步骤）")
@@ -394,12 +490,13 @@ class Handler(BaseHTTPRequestHandler):
             print("  [mock] R2 → 真实执行 web_search（MOF-5 合成价格）", flush=True)
             self._respond(tc("web_search", {"query": "MOF-5 metal-organic framework synthesis cost price", "max_results": 3}, "call_search"))
             return
-        if n_confirm_cards == 1 and n_write == 0:
-            print("  [mock] R3 → 真实执行 write_file（生成 WorkflowDefinition JSON）", flush=True)
-            self._respond(tc("write_file", {
-                "path": "mof-price-report.workflow.json",
-                "content": json.dumps(WORKFLOW_JSON, ensure_ascii=False, indent=2),
-            }, "call_write"))
+        if n_confirm_cards == 1 and n_read == 0:
+            # R3 → 真实执行 read_file（无副作用、本地快）——验证"确认后
+            # 真实工具执行 → 回合继续 → 第二张卡"完整链路（127 根因已定位：
+            # turn_runner 循环无 bug——后端复现 PASS；此前卡住是 E2E 审批
+            # 弹窗环境差异。恢复真实工具覆盖真链路）
+            print("  [mock] R3 → 真实执行 read_file（校验生成物）", flush=True)
+            self._respond(tc("read_file", {"path": "README.md"}, "call_write"))
             return
         if n_confirm_cards == 1:
             print("  [mock] R4 → 上传确认卡", flush=True)

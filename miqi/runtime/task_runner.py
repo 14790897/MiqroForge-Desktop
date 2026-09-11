@@ -10,6 +10,7 @@ import asyncio
 import dataclasses
 import inspect
 import uuid
+from pathlib import Path
 from typing import Any
 
 from loguru import logger
@@ -468,7 +469,7 @@ class TaskRunner:
             await self._events.put(ErrorEvent(
                 turn_id=turn_id,
                 severity=EventSeverity.ERROR,
-                message="An internal error occurred while running the shell command.",
+                message="执行 shell 命令时发生内部错误，请查看运行时日志后重试。",
                 recoverable=False,
             ))
         finally:
@@ -563,6 +564,22 @@ class TaskRunner:
             turn.bypass_approval = True
         elif turn.execution_policy == "manual":
             turn.force_approval = True
+        elif turn.execution_policy == "edit":
+            # #646-v2（GPT 评审）: 协作（允许编辑）模式默认——文件修改自动放行，
+            # exec/危险操作仍确认。注意：Phase 13 已 attach 默认 profile——
+            # 这里必须【设置 approval_policy】，不能因 profile 非 None 跳过
+            # （否则文件审批照弹——实测反馈）。
+            from miqi.execution.approval_policy import ApprovalMode, ApprovalPolicy
+            from miqi.runtime.permission_profile import PermissionProfile
+
+            if getattr(turn, "permission_profile", None) is None:
+                turn.permission_profile = PermissionProfile(
+                    workspace=getattr(turn, "workspace", Path(".")),
+                )
+            turn.permission_profile.approval_policy = ApprovalPolicy(
+                mode=ApprovalMode.GRANULAR,
+                granular={"file_write": "never"},
+            )
         # edit: both flags False → normal approval flow
 
         mode_prompt = _MODE_PROMPTS.get(turn.execution_policy, "")
@@ -596,15 +613,23 @@ class TaskRunner:
         # ask_user_confirm_card usage guidance (issue #646, 功能描述④) —
         # mirrors the KUN loop injection: when the tool is exposed to the
         # model, the prompt must tell it WHEN to call it.
-        if any(
-            (t.get("function", {}) or {}).get("name") == "ask_user_confirm_card"
-            or t.get("name") == "ask_user_confirm_card"
+        # CodeRabbit（9-11）：两个工具各自独立 gate——能力集只暴露
+        # ask_user_plan_confirm（不含 confirm_card）时也要注入计划卡引导，
+        # 否则模型不知道何时弹计划卡。
+        _tool_names = {
+            (t.get("function", {}) or {}).get("name") or t.get("name")
             for t in tools
             if isinstance(t, dict)
-        ):
+        }
+        if "ask_user_confirm_card" in _tool_names:
             from miqi.agent.tools.ask_user_confirm import ASK_USER_CONFIRM_INSTRUCTION
 
             effective_system_prompt += "\n\n" + ASK_USER_CONFIRM_INSTRUCTION
+        if "ask_user_plan_confirm" in _tool_names:
+            from miqi.agent.tools.ask_user_plan_confirm import ASK_PLAN_CONFIRM_INSTRUCTION
+
+            # #646-v2: 多步骤任务先弹任务计划卡（Task Plan Card）
+            effective_system_prompt += "\n\n" + ASK_PLAN_CONFIRM_INSTRUCTION
 
         # ── Inject session workspace into the prompt ─────────────────────
         # The AI must know its working directory without needing `pwd`.
@@ -770,10 +795,15 @@ class TaskRunner:
         # ── End Execution Policy ─────────────────────────────────────
 
         # Phase 13: attach permission profile for orchestrator
+        # CodeRabbit（9-11）：edit-mode 的 granular ApprovalPolicy 在此前已挂到
+        # turn.permission_profile 上——这里无条件重建会把 policy 丢弃
+        # （edit 模式退回每次写都弹审批）。仅在缺失时才创建。
         from miqi.runtime.permission_profile import PermissionProfile
-        turn.permission_profile = PermissionProfile(
-            workspace=self.services.workspace,
-        )
+
+        if getattr(turn, "permission_profile", None) is None:
+            turn.permission_profile = PermissionProfile(
+                workspace=self.services.workspace,
+            )
 
         try:
             # Phase 17: load history and start turn tracking

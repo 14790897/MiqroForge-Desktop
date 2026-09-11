@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<title>MiQi 卡片 UI 原型（参考图风格）</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+    background: #f6f7f8;
+    padding: 40px;
+    display: flex; flex-direction: column; gap: 32px; align-items: center;
+  }
+  .chat {
+    width: 720px; background: #fff; border-radius: 16px;
+    box-shadow: 0 4px 24px rgba(0,0,0,.06);
+    padding: 24px 28px; display: flex; flex-direction: column; gap: 20px;
+  }
+  /* AI 消息：头像在上、正文无框 */
+  .ai-msg { display: flex; flex-direction: column; gap: 8px; }
+  .ai-head { display: flex; align-items: center; gap: 10px; }
+  .ai-avatar {
+    width: 32px; height: 32px; border-radius: 50%;
+    background: linear-gradient(135deg,#e3edf9,#e9e3f7);
+    display: flex; align-items: center; justify-content: center;
+    position: relative;
+  }
+  /* 抽象光点（无字母——自然感） */
+  .ai-avatar::after {
+    content: ''; width: 10px; height: 10px; border-radius: 50%;
+    background: linear-gradient(135deg,#8fb8e8,#a89ad9);
+  }
+  .ai-name { font-size: 13px; color: #8a8a8a; font-weight: 500; }
+  .ai-body { font-size: 14px; line-height: 1.7; color: #1f1f1f; }
+
+  /* 计划卡（嵌在 AI 消息流中——无边框无框感——只有极淡背景） */
+  .plan-card {
+    margin-top: 4px; border-radius: 16px; background: #fafafa;
+    padding: 16px 18px; display: flex; flex-direction: column; gap: 12px;
+  }
+  .pc-title { font-size: 15px; font-weight: 600; color: #1f1f1f; }
+  .pc-goal { font-size: 13px; color: #9a9a9a; margin-top: 2px; }
+  .pc-steps { display: flex; flex-direction: column; gap: 2px; }
+  .pc-step {
+    display: flex; align-items: center; gap: 12px;
+    padding: 6px 10px; border-radius: 10px; font-size: 13.5px; color: #333;
+  }
+  .pc-step:hover { background: #f0f0f0; }
+  .pc-dot { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; background: #d4d4d4; }
+  .pc-step .tools { margin-left: auto; font-size: 11px; color: #c0c0c0; }
+  .pc-perms { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 2px; }
+  .perm {
+    padding: 3px 12px; border-radius: 999px; font-size: 11px;
+    background: #f0f0f0; color: #7a7a7a; border: none;
+  }
+  .pc-footer {
+    display: flex; align-items: center; justify-content: space-between;
+    border-top: 1px solid #f2f2f2; padding-top: 12px;
+  }
+  .pc-hint { font-size: 12px; color: #9a9a9a; }
+  .pc-btns { display: flex; gap: 8px; }
+  .btn-skip {
+    padding: 7px 16px; border-radius: 999px; border: none; background: none;
+    font-size: 13px; color: #8a8a8a; cursor: pointer;
+  }
+  .btn-skip:hover { background: #f2f2f2; }
+  .btn-primary {
+    padding: 7px 20px; border-radius: 999px; border: none;
+    background: #1f1f1f; color: #fff; font-size: 13px; font-weight: 500; cursor: pointer;
+  }
+  .btn-primary:hover { background: #000; }
+
+  /* Timeline（执行进度——同风格：无框、灰调、状态柔和） */
+  .tl-card {
+    border-radius: 16px; background: #fafafa; padding: 14px 18px;
+  }
+  .tl-head { display: flex; align-items: center; justify-content: space-between; }
+  .tl-title { font-size: 14px; font-weight: 600; color: #1f1f1f; }
+  .tl-status { font-size: 11px; color: #a0a0a0; display: flex; align-items: center; gap: 6px; }
+  .tl-dot { width: 6px; height: 6px; border-radius: 50%; background: #9db8d8; animation: pulse 1.2s infinite; }
+  @keyframes pulse { 50% { opacity: .4; } }
+  .tl-steps { margin-top: 10px; display: flex; flex-direction: column; gap: 4px; }
+  .tl-step { display: flex; align-items: center; gap: 12px; font-size: 13px; padding: 5px 8px; border-radius: 10px; }
+  .tl-step:hover { background: #f0f0f0; }
+  .tl-ic {
+    width: 16px; height: 16px; border-radius: 50%; display: flex; align-items: center;
+    justify-content: center; font-size: 9px; flex-shrink: 0;
+  }
+  .done { background: rgba(47,178,123,.12); color: #7fc8a3; }
+  .active { background: rgba(120,160,205,.18); color: #6a8fb8; }
+  .pending { background: #ececec; color: #bdbdbd; }
+  .blocked { background: rgba(180,150,90,.15); color: #b8a06a; }
+  .tl-step .t { color: #444; }
+  .tl-step.done-step .t { color: #a8a8a8; }
+  .tl-step.active-step .t { color: #2b2b2b; font-weight: 500; }
+  .tl-perm { margin-left: auto; font-size: 10.5px; color: #c4c4c4; }
+
+  /* ActionCard（危险确认——同风格：无框） */
+  .ac-card {
+    border-radius: 16px; background: #fafafa; padding: 16px 18px;
+  }
+  .ac-title { font-size: 14px; font-weight: 600; color: #1f1f1f; display: flex; align-items: center; gap: 8px; }
+  .ac-desc { font-size: 13px; color: #8a8a8a; margin-top: 6px; }
+  .ac-meta { display: flex; gap: 16px; margin-top: 10px; font-size: 12px; color: #a8a8a8; }
+  .ac-footer { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; padding-top: 10px; border-top: 1px solid #ececec; }
+
+  .label { font-size: 12px; color: #b0b0b0; letter-spacing: 1px; margin-bottom: 8px; }
+</style>
+</head>
+<body>
+
+<!-- ===== 场景 1：AI 消息 + 计划卡（等待确认）===== -->
+<div class="chat">
+  <div class="label">场景 1 · 计划卡（等待确认——嵌 AI 消息流）</div>
+  <div class="ai-msg">
+    <div class="ai-head"><div class="ai-avatar"></div><div class="ai-name">MiQi</div></div>
+    <div class="ai-body">好的，我将为你完成 MOF-5 实验调研。以下是执行计划：</div>
+  </div>
+  <div class="plan-card">
+    <div>
+      <div class="pc-title">确认执行「MOF-5 合成方法检索」？</div>
+      <div class="pc-goal">调研 MOF-5 合成方法并生成报告</div>
+    </div>
+    <div class="pc-steps">
+      <div class="pc-step"><span class="pc-dot"></span>搜集论文资料<span class="tools">web_search</span></div>
+      <div class="pc-step"><span class="pc-dot"></span>分析实验条件<span class="tools">read_file</span></div>
+      <div class="pc-step"><span class="pc-dot"></span>生成报告<span class="tools">write_file</span></div>
+      <div class="pc-step"><span class="pc-dot"></span>上传 Qraft<span class="tools">upload</span></div>
+    </div>
+    <div class="pc-perms">
+      <span class="perm">🌐 网络访问</span><span class="perm">📄 创建文件</span><span class="perm">☁ 外部上传</span>
+    </div>
+    <div class="pc-footer">
+      <span class="pc-hint">请确认以上执行计划</span>
+      <div class="pc-btns">
+        <button class="btn-skip">跳过</button>
+        <button class="btn-primary">开始执行</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ===== 场景 2：Timeline（执行进度）===== -->
+<div class="chat">
+  <div class="label">场景 2 · Timeline（执行中——Todo 投影）</div>
+  <div class="ai-msg">
+    <div class="ai-head"><div class="ai-avatar"></div><div class="ai-name">MiQi</div></div>
+  </div>
+  <div class="tl-card">
+    <div class="tl-head">
+      <span class="tl-title">AI 正在执行任务</span>
+      <span class="tl-status"><span class="tl-dot"></span>执行中</span>
+    </div>
+    <div class="tl-steps">
+      <div class="tl-step done-step"><span class="tl-ic done">✓</span><span class="t">搜集论文资料</span><span class="tl-perm">✓ 完成</span></div>
+      <div class="tl-step active-step"><span class="tl-ic active">⟳</span><span class="t">分析实验条件</span><span class="tl-perm">进行中</span></div>
+      <div class="tl-step"><span class="tl-ic pending">3</span><span class="t">生成报告</span></div>
+      <div class="tl-step"><span class="tl-ic pending">4</span><span class="t">上传 Qraft</span></div>
+    </div>
+  </div>
+</div>
+
+<!-- ===== 场景 3：ActionCard（上传确认）===== -->
+<div class="chat">
+  <div class="label">场景 3 · ActionCard（危险动作确认）</div>
+  <div class="ai-msg">
+    <div class="ai-head"><div class="ai-avatar"></div><div class="ai-name">MiQi</div></div>
+  </div>
+  <div class="ac-card">
+    <div class="ac-title">☁ 即将上传数据</div>
+    <div class="ac-desc">将 workflow.json 上传至 Qraft（外部服务）——此操作不可撤销。</div>
+    <div class="ac-meta">
+      <span>文件：workflow.json</span><span>大小：4.2 KB</span><span>指纹：a3f9…c2e1</span>
+    </div>
+    <div class="ac-footer">
+      <button class="btn-skip">跳过</button>
+      <button class="btn-primary">确认上传</button>
+    </div>
+  </div>
+</div>
+
+</body>
+</html>

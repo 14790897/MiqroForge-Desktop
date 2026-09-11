@@ -516,8 +516,11 @@ class AgentLoop:
         # ask_user_confirm_card usage guidance (issue #646, 功能描述④)
         if any(t.name == ASK_USER_CONFIRM_TOOL for t in tool_specs):
             from miqi.agent.tools.ask_user_confirm import ASK_USER_CONFIRM_INSTRUCTION
+            from miqi.agent.tools.ask_user_plan_confirm import ASK_PLAN_CONFIRM_INSTRUCTION
             request.context_instructions = request.context_instructions or []
             request.context_instructions.append(ASK_USER_CONFIRM_INSTRUCTION)
+            # #646-v2: 多步骤任务先弹任务计划卡
+            request.context_instructions.append(ASK_PLAN_CONFIRM_INSTRUCTION)
 
         await self._record_pipeline(thread_id, turn_id, "pre_send", {
             "model": model, "historyItems": len(history), "toolCount": len(tools),

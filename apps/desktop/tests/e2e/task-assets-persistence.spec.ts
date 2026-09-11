@@ -20,6 +20,7 @@ import {
   closeElectronApp,
   switchToSessionWithMarker,
   waitForBridgeInitialized,
+  approvePlanCardIfAny,
 } from './helpers/electron-setup';
 
 // ─── Helpers ──────────────────────────────────────────────────────────
@@ -30,6 +31,7 @@ async function sendMessage(page: Page, text: string) {
   const before = await userBubbles.count();
   await textarea.fill(text);
   await textarea.press('Enter');
+  void approvePlanCardIfAny(page);
   // The optimistic-UI send (#364) mounts the user bubble immediately and
   // clears the input BEFORE the backend (providers:list) resolves — so the
   // reliable signal is a count increase plus the input clearing.

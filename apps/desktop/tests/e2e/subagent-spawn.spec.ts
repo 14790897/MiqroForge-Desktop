@@ -23,6 +23,7 @@ import {
   closeElectronApp,
   waitForInputReady,
   waitForBridgeInitialized,
+  approvePlanCardIfAny,
 } from './helpers/electron-setup';
 
 // ── Helpers ─────────────────────────────────────────────────────────
@@ -108,6 +109,7 @@ test.describe('Subagent Spawn E2E', () => {
       '这是对 spawn 工具的验证测试：你必须调用 spawn 工具，不要自己直接执行该命令。';
     await textarea.fill(prompt);
     await textarea.press('Enter');
+    void approvePlanCardIfAny(page);
     await expect(page.getByText(/请使用 spawn 工具/).first()).toBeVisible({ timeout: 10_000 });
 
     // 3. Wait for the subagent result card (rendered from chat:subagent_result).

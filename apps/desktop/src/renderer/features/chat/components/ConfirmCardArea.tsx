@@ -1,114 +1,180 @@
-import { useState } from 'react';
+import { useMemo } from 'react';
 import { useUserInput } from '../../../contexts/UserInputContext';
+import { Timeline } from './Timeline';
+import { PlanCard } from './PlanCard';
+import { ActionCard } from './ActionCard';
 import { ConfirmCard } from './ConfirmCard';
 
-/**
- * ConfirmCardArea — renders ask_user_confirm_card cards at the tail of the
- * message flow, right above the composer (issue #646).
- *
- * - The pending card (blue, strongest) blocks the turn until the user picks.
- * - Resolved cards stay in the flow, de-emphasized, as a traceable record of
- *   what the user confirmed/cancelled (v5 semantics: cancelled is a neutral
- *   end state, NOT an error).
- * - Resolved history collapses beyond 3 entries ("已处理 N 张确认卡") to avoid
- *   stacking noise during adjust loops.
- */
-export function ConfirmCardArea() {
-  const { pending, resolved, resolve, timeoutCard } = useUserInput();
-  const [historyExpanded, setHistoryExpanded] = useState(false);
+export function isPlanCard(entry: {
+  request: { goal?: string; permissions?: string[]; toolName?: string };
+}): boolean {
+  if (entry.request.toolName === 'ask_user_plan_confirm') return true;
+  if (entry.request.toolName === 'ask_user_confirm_card') return false;
+  return typeof entry.request.goal === 'string' || (entry.request.permissions?.length ?? 0) > 0;
+}
 
-  const pendingIds = Object.keys(pending);
-  const resolvedIds = Object.keys(resolved);
+export function isActionCard(entry: { request: { action?: string; target?: string } }): boolean {
+  return typeof entry.request.action === 'string' && typeof entry.request.target === 'string';
+}
 
-  const MAX_VISIBLE_RESOLVED = 3;
-  const collapsed = resolvedIds.length > MAX_VISIBLE_RESOLVED && !historyExpanded;
-  const visibleResolved = collapsed ? resolvedIds.slice(-MAX_VISIBLE_RESOLVED) : resolvedIds;
+export function isConfirmCard(entry: { request: Record<string, unknown> }): boolean {
+  return !isPlanCard(entry as never) && !isActionCard(entry as never);
+}
 
-  if (pendingIds.length === 0 && resolvedIds.length === 0) return null;
+export function ConfirmCardItem({
+  entry,
+  resolve,
+  timeoutCard,
+}: {
+  entry: { state: string; request: Record<string, any> };
+  resolve: (
+    inputId: string,
+    choiceId: string,
+    choiceLabel: string,
+    remember?: boolean,
+    rememberMode?: 'session' | 'always'
+  ) => Promise<void> | void;
+  timeoutCard: (inputId: string) => void;
+}) {
+  const id = entry.request.input_id as string;
+  const resolvedEntry = entry.state !== 'pending';
+
+  if (isActionCard(entry as never) && resolvedEntry) return null;
+
+  let planPhase:
+    'wait_confirm' | 'running' | 'completed' | 'cancelled' | 'wait_dangerous' | 'modified' =
+    'wait_confirm';
+  if (resolvedEntry) {
+    if (entry.state === 'cancelled') planPhase = 'cancelled';
+    else if (entry.state === 'modify') planPhase = 'modified';
+    else if (entry.state === 'confirmed') {
+      const statuses = Object.values(
+        (entry as never as { stepsStatus?: Record<string, { status: string }> }).stepsStatus ?? {}
+      );
+      planPhase =
+        statuses.length > 0 && statuses.every((s) => s.status === 'success')
+          ? 'completed'
+          : 'running';
+    }
+  }
+
+  return (
+    <div className="flex flex-col items-start w-full animate-[msgIn_.35s_cubic-bezier(.22,.8,.32,1)]">
+      <div className="min-w-0 w-full">
+        {isActionCard(entry as never) ? (
+          <ActionCard
+            entry={{
+              action: (entry.request.action as string) ?? 'external',
+              target: (entry.request.target as string) ?? '',
+              fileName: entry.request.file_name as string | undefined,
+              sizeBytes: entry.request.size_bytes as number | undefined,
+              sha256: entry.request.sha256 as string | undefined,
+              description:
+                (entry.request.message as string) ||
+                (entry.request.description as string | undefined),
+            }}
+            onResolve={(choiceId, rememberMode) =>
+              resolve(
+                id,
+                choiceId,
+                choiceId === 'confirm' ? '确认' : choiceId === 'modify' ? '修改计划' : '取消',
+                rememberMode !== null,
+                rememberMode ?? 'session'
+              )
+            }
+          />
+        ) : isPlanCard(entry as never) ? (
+          <PlanCard
+            entry={{
+              title: (entry.request.title as string) ?? '',
+              goal: (entry.request.goal as string) ?? '',
+              steps: (
+                (entry.request.steps as {
+                  id?: string;
+                  name?: string;
+                  title?: string;
+                  tools?: string[];
+                }[]) ?? []
+              ).map((step, index) => ({
+                name: step.name ?? step.title ?? `步骤 ${index + 1}`,
+                tools: Array.isArray(step.tools) ? step.tools : [],
+              })),
+              permissions: (entry.request.permissions as string[]) ?? [],
+              phase: planPhase,
+            }}
+            // The second argument is intentionally the user's adjustment text.
+            onResolve={(choiceId, choiceLabel) =>
+              resolve(
+                id,
+                choiceId,
+                choiceLabel ??
+                  (choiceId === 'confirm'
+                    ? '按当前方案执行'
+                    : choiceId === 'modify'
+                      ? '调整方案'
+                      : '取消任务'),
+                false,
+                'session'
+              )
+            }
+          />
+        ) : (
+          <ConfirmCard
+            entry={entry as never}
+            onResolve={(choiceId: string, rememberMode?: 'session' | 'always' | null) => {
+              const choices =
+                (entry.request.choices as { id: string; label?: string }[] | undefined) ?? [];
+              const label = choices.find((choice) => choice.id === choiceId)?.label ?? choiceId;
+              const remember = rememberMode === 'always' || rememberMode === 'session';
+              resolve(id, choiceId, label, remember, rememberMode ?? 'session');
+            }}
+            onTimeout={timeoutCard}
+          />
+        )}
+      </div>
+    </div>
+  );
+}
+
+/** ConfirmCardArea is the fallback for cards not already attached to their originating assistant turn. */
+export function ConfirmCardArea({ matchedTurnIds }: { matchedTurnIds?: Set<string> }) {
+  const { pending, resolved, timelines, resolve, timeoutCard } = useUserInput();
+
+  const allEntries = useMemo(() => {
+    let merged = [...Object.values(resolved), ...Object.values(pending)];
+    merged.sort((a, b) => (a.createdAt ?? 0) - (b.createdAt ?? 0));
+    if (matchedTurnIds && matchedTurnIds.size > 0) {
+      // #646-v2（CI strict violation 修复）：确认/计划卡由消息内联与工具链
+      // 负责渲染（含确认卡的工具链默认不收起，卡始终可见）——兜底区必须排除
+      // 所有已匹配 turn 的卡。此前「pending 保留」的实现会让同一张卡在工具链
+      // 与兜底区各出一个 DOM 实例（strict mode: resolved to 2 elements）。
+      merged = merged.filter((entry) => {
+        const turnId = entry.request.turn_id;
+        return !turnId || !matchedTurnIds.has(turnId);
+      });
+    }
+    return merged;
+  }, [pending, resolved, matchedTurnIds]);
+
+  if (allEntries.length === 0 && Object.keys(timelines).length === 0) return null;
 
   return (
     <div className="w-full flex flex-col gap-2" data-testid="confirm-card-area">
-      {/* Active card(s) — full interactive ConfirmCard */}
-      {pendingIds.map((id) => {
-        const entry = pending[id];
-        return (
-          <div key={id} className="flex gap-2.5 animate-[msgIn_.35s_cubic-bezier(.22,.8,.32,1)]">
-            <span
-              className="w-8 h-8 rounded-[9px] mt-0.5 flex items-center justify-center text-xs shrink-0"
-              style={{
-                background: 'linear-gradient(135deg, var(--accent), var(--accent-hover))',
-                color: '#fff',
-                boxShadow: '0 1px 2px rgba(18,18,18,.04),0 2px 10px rgba(18,18,18,.06)',
-              }}
-            >
-              AI
-            </span>
-            <div className="min-w-0">
-              <ConfirmCard
-                entry={entry}
-                onResolve={(choiceId, choiceLabel, remember) =>
-                  resolve(id, choiceId, choiceLabel, remember)
-                }
-                onTimeout={() => timeoutCard(id)}
-              />
-            </div>
+      {Object.entries(timelines).map(([turnId, timeline]) => (
+        <div key={turnId} className="flex flex-col items-start w-full">
+          <div className="min-w-0 w-full">
+            <Timeline entry={timeline as never} />
           </div>
-        );
-      })}
-
-      {/* Resolved history — compact, de-emphasized, collapses beyond 3 */}
-      {resolvedIds.length > 0 && (
-        <div className="flex flex-col gap-1.5 mt-1" data-testid="confirm-card-resolved">
-          {collapsed && (
-            <button
-              onClick={() => setHistoryExpanded(true)}
-              className="text-[11.5px] cursor-pointer hover:underline self-start px-1"
-              style={{
-                color: 'var(--text-faint)',
-                background: 'none',
-                border: 'none',
-                fontFamily: 'inherit',
-              }}
-            >
-              已处理 {resolvedIds.length} 张确认卡（点击展开）
-            </button>
-          )}
-          {visibleResolved.map((id) => {
-            const entry = resolved[id];
-            const cancelled = entry.state === 'cancelled';
-            return (
-              <div
-                key={id}
-                className="flex items-center gap-2 px-3 py-2 rounded-lg text-[12px] max-w-[560px]"
-                style={{
-                  border: '1px solid var(--border-subtle)',
-                  background: 'var(--surface-muted)',
-                  opacity: 0.85,
-                }}
-              >
-                <span className="shrink-0 text-[11px]">
-                  {entry.backendReleased ? '⏹' : entry.timedOut ? '⏱' : cancelled ? '○' : '✓'}
-                </span>
-                <span className="font-medium truncate" style={{ color: 'var(--text-muted)' }}>
-                  {entry.request.title}
-                </span>
-                <span
-                  className="font-semibold ml-auto shrink-0"
-                  style={{ color: cancelled ? 'var(--text-muted)' : 'var(--success-text)' }}
-                >
-                  {entry.backendReleased
-                    ? '已关闭（后端已释放）'
-                    : entry.timedOut
-                      ? '已超时'
-                      : cancelled
-                        ? '已取消'
-                        : `已选择「${entry.choiceLabel ?? '确认'}」`}
-                </span>
-              </div>
-            );
-          })}
         </div>
-      )}
+      ))}
+      {allEntries.map((entry) => (
+        <ConfirmCardItem
+          key={entry.request.input_id}
+          entry={entry as never}
+          resolve={resolve}
+          timeoutCard={timeoutCard}
+        />
+      ))}
     </div>
   );
 }

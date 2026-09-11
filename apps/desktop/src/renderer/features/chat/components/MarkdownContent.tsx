@@ -124,7 +124,9 @@ export function MarkdownContent({ content }: { content: string }) {
           style={{ color: 'var(--accent)' }}
           onClick={(e) => {
             e.preventDefault();
-            if (href) window.open(href, '_blank');
+            // CodeRabbit（9-11）：外链不可信（模型/后端产出）——必须 noopener
+            // 防 reverse tabnabbing（window.opener 反向导航本渲染器）
+            if (href) window.open(href, '_blank', 'noopener,noreferrer');
           }}
         >
           {children}

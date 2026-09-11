@@ -65,10 +65,21 @@ def create_default_orchestrator(
         "exec:echo sandbox_e2e_OK", "exec:echo hello",
     }
 
+    # Action Guard（外部复核 9-11）：注入用户确认通道（桌面端弹卡）。
+    # 无通道环境（headless/CLI/测试）保持 None → check() 返回 APPROVAL_REQUIRED
+    # （fail-closed，不静默放行危险动作）。
+    try:
+        from miqi.agent.user_input_resolver import make_resolver as _make_guard_resolver
+
+        _action_guard_resolver = _make_guard_resolver()
+    except Exception:  # noqa: BLE001
+        _action_guard_resolver = None
+
     return ToolOrchestrator(
         permission_engine=PermissionEngine(
             permanent_allowlist=_safe_defaults | (permanent_allowlist or set()),
             approval_bypass=approval_bypass,
+            action_guard_resolver=_action_guard_resolver,
         ),
         sandbox_engine=SandboxPolicyEngine(
             bwrap_available=bwrap_available,

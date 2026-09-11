@@ -431,10 +431,12 @@ class BridgeRuntimeLoop:
             choice_id = params.get("choice_id", "")
             choice_label = params.get("choice_label", "")
             remember = bool(params.get("remember", False))
+            # Hermes 式：always 跨会话持久
+            remember_mode = str(params.get("remember_mode") or "session")
             answers = {}
             if choice_id:
                 answers = {"choice_id": choice_id, "choice_label": choice_label}
-            resolved = resolve_user_input(input_id, answers, remember=remember)
+            resolved = resolve_user_input(input_id, answers, remember=remember, remember_mode=remember_mode)
             return {"result": {"resolved": resolved}}
 
         self._app_server.register_method("userInput.resolve", _user_input_resolve_handler)
