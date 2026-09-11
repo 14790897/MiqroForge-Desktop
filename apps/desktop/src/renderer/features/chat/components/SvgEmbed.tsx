@@ -32,7 +32,13 @@ function stripExternalSvgReferences(code: string): string {
         const value = attr.value.trim();
 
         if (name === 'href' || name === 'xlink:href') {
-          if (value && !LOCAL_FRAGMENT_RE.test(value)) element.removeAttribute(attr.name);
+          if (value && !LOCAL_FRAGMENT_RE.test(value)) {
+            if (element.tagName.toLowerCase() === 'use') {
+              element.remove();
+              break;
+            }
+            element.removeAttribute(attr.name);
+          }
           continue;
         }
 
@@ -62,14 +68,15 @@ export function SvgEmbed({ code }: { code: string }) {
     const referenceSafeCode = stripExternalSvgReferences(code);
     return DOMPurify.sanitize(referenceSafeCode, {
       USE_PROFILES: { svg: true, svgFilters: true },
-      // 禁外部资源元素：feImage/image/use 可携带 href 引用外部 URL，
-      // 渲染时触发对外请求（IP/网络探测）——审查 P3 + CodeRabbit Major。
+      // 禁外部资源元素：feImage/image 可携带 href 引用外部 URL；<use> 则在
+      // 预清洗阶段仅允许 fragment-only 引用，合法内部 symbol/marker 引用仍保留。
+      // 渲染时触发对外请求（IP/网络探测）——外部引用已在属性边界拦截。
       // style 也必须禁（审查 P3 实证）：DOMPurify 的 CSS 过滤只剥
       // @import/javascript:/expression() 等，任意选择器和 url() 探测放行
       // ——内联 style 的 CSS 作用于整个文档（非 SVG 局部），模型输出可
       // 隐藏/伪造 UI（body{display:none}）或经属性选择器外带输入值。
       // 流程图不需要内嵌 CSS，直接禁掉整个 style 元素。
-      FORBID_TAGS: ['feImage', 'image', 'use', 'style'],
+      FORBID_TAGS: ['feImage', 'image', 'style'],
       // style 属性同样封死（审查 R5 P1）：DOMPurify 非 CSS sanitizer，
       // style="fill:url(https://evil.example/x)" 会触发外部资源请求/数据
       // 外带，不在其默认防护内——流程图不需要任意 CSS，整属性剥掉。
