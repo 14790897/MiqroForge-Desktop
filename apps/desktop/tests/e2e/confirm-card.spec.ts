@@ -42,7 +42,9 @@ const REPO_ROOT = join(APPS_DESKTOP, '..', '..');
  * port makes parallel workers / retries immune to 8899 collisions.
  */
 async function startMockOpenAI(): Promise<{ proc: ChildProcess; mockUrl: string }> {
-  const python = process.env.MIQI_PYTHON_PATH || 'python';
+  // macOS 无 'python' 别名（只有 python3）——POSIX 用 python3，Windows 用 python
+  const python =
+    process.env.MIQI_PYTHON_PATH || (process.platform === 'win32' ? 'python' : 'python3');
   // High ephemeral range: avoids the app's own ports and 8899 legacy uses.
   const port = 20000 + Math.floor(Math.random() * 20000);
   const proc = spawn(python, [join(REPO_ROOT, 'scripts', 'mock_openai.py'), String(port)], {

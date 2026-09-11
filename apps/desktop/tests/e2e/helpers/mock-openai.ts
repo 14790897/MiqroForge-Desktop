@@ -49,7 +49,10 @@ export async function waitForTcpListener(port: number): Promise<void> {
 }
 
 export async function startMockOpenAI(): Promise<{ proc: ChildProcess; mockUrl: string }> {
-  const python = process.env.MIQI_PYTHON_PATH || 'python';
+  // macOS 无 'python' 别名（只有 python3）——POSIX 平台用 python3，
+  // Windows 用 python；MIQI_PYTHON_PATH 始终优先。
+  const python =
+    process.env.MIQI_PYTHON_PATH || (process.platform === 'win32' ? 'python' : 'python3');
   const port = 20000 + Math.floor(Math.random() * 20000);
   const proc = spawn(python, [join(REPO_ROOT, 'scripts', 'mock_openai.py'), String(port)], {
     cwd: REPO_ROOT,
@@ -58,6 +61,10 @@ export async function startMockOpenAI(): Promise<{ proc: ChildProcess; mockUrl: 
     windowsHide: true,
   });
   let stderrTail = '';
+  proc.on('error', (err: NodeJS.ErrnoException) => {
+    // spawn 失败（如 ENOENT: python 不存在）不会走 exit——必须显式记录
+    console.log(`[test] mock server spawn error: ${err?.code ?? ''} ${err?.message ?? err}`);
+  });
   proc.stdout?.on('data', (d) => console.log(`[mock] ${String(d).trim()}`));
   proc.stderr?.on('data', (d) => {
     stderrTail = (stderrTail + String(d)).slice(-2000);
