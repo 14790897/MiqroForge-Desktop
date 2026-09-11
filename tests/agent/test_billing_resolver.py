@@ -310,6 +310,26 @@ class TestMCPWrapperBilling:
         )
         assert len(emitted) == 2
 
+    async def test_running_then_completed_emits_once(self):
+        """同一作业先 RUNNING 后 COMPLETED（两者都是可扣费状态）只扣一次——
+        去重键是「服务器::作业 ID」不含 state（2026-09-11 放宽终态后新增回归）。"""
+        session = _FakeSession(result_text=RUNNING_JSON)
+        wrapper = _make_wrapper("slurm", session, tool_name="check_job_status")
+        emitted: list[dict] = []
+        set_billing_charge_emitter("desktop:s1", lambda p: emitted.append(p) or True)
+
+        await wrapper.execute(
+            _session_key="desktop:s1", _turn_id="t", _tool_call_id="c", job_id="187654"
+        )
+        # 作业跑完：同一 job_id，状态由 RUNNING 变 COMPLETED
+        session._result = COMPLETED_JSON
+        await wrapper.execute(
+            _session_key="desktop:s1", _turn_id="t", _tool_call_id="c", job_id="187654"
+        )
+
+        assert len(emitted) == 1
+        assert emitted[0]["state"] == "RUNNING"
+
     async def test_same_job_id_two_servers_both_reported(self):
         """不同 MCP 服务器的相同 job_id 互不遮蔽（CodeRabbit #936）。
 
