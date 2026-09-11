@@ -8,6 +8,38 @@
 #   解析器会自动剥离该前缀，不会产生目录嵌套（修复 issue #806 的嵌套落盘问题）
 # - 指向其他会话目录的路径会被拒绝（会话隔离）
 # - 成功创建后返回实际落盘路径
+# - create_pdf 的 content_path（可选）读取源文件：除上述边界外，额外接受
+#   tools.auto_user_dirs/_user_roots（#821 口径）授权的用户目录，与 ReadFileTool 一致；
+#   未授权目录一律拒绝（fail-closed，无读边界放宽）
+# - create_pdf 的 content_path 内行首图片 ![alt](path)（#994）：
+#   * 相对路径以源稿所在目录为基准，join 后仍进同一解析入口复校边界
+#     （../ 越界同样被拦截）
+#   * 图片必须落在源稿自身通过校验的那个根之内，不接受跨根读取
+#   * 越界/不存在/损坏/超限/SVG 一律降级为占位文字 + logger.warning，
+#     不读取文件、不抛异常
+#   * 可信通道是 _build_pdf(trusted_images=...) 函数参数（仅 content_path 内部
+#     转换路径传 True）；content 里手写 image 块一律降级，块内 JSON 字段
+#     （如 validated）不具任何语义——模型可自设，曾构成读任意文件的破口（H1）
+# - 【单文件契约与 MD 副本，#993 第 2 条】create_pdf 不自动分卷：单次调用只输出
+#   一个单文件 PDF（引擎侧无内容长度上限；#993 实测 20KB→200KB 源稿全部单次成功）。
+#   * content（字符串）超过 _MAX_INLINE_CONTENT_CHARS=16000 时不静默渲染、也不报错，
+#     返回提示要求改用 content_path（阈值依据：maxTokens=8192 → 单次可产出 ~8–12K
+#     CJK 字符，16000 留 ≥1.3× 余量）；
+#   * content_path 渲染成功后，在 PDF 同目录落一份源稿副本 <PDF 同名>.md，内容为
+#     实际渲染源；同名已存在则跳过、不覆盖（用户可能已手工改过副本）；写失败只告警，
+#     不影响 PDF 交付。副本同样写入 tracked_files（#983 交付闭环）。
+# - 【文本转义，#994 第三轮评审 P1】源稿/content 的块文本进 reportlab Paragraph
+#   前统一 XML 转义（& < >）：raw <img src=...> 会被 paraparser 当图片标签直接
+#   打开文件、绕过上述图片边界校验（代码围栏与 content 段落/标题/列表/图注/title
+#   均受影响）。转义通道同样是 _build_pdf(content_escaped=...) 函数参数，块内
+#   JSON 字段不可伪造；content 手写 <b> 等标记因此不再生效，只作字面文本。
+#
+# - 【运行时不对称，#994 第二轮评审 M7】上述「用户授权目录读」在 KUN 运行时**不可达**：
+#   miqi/kun_runtime/tool_host.py:112-115 的 _USER_ROOTS_TOOLS 不含 create_pdf，
+#   该路径下 _user_roots 从不注入 → content_path 的 user_roots 兜底分支永不生效；
+#   仅 legacy orchestrator 路径（miqi/execution/orchestrator.py:55-66 的
+#   _FILE_MUTATION_TOOLS 含 create_pdf）会注入。本 PR 不改 kun_runtime 代码，
+#   是否把 create_pdf 加入 _USER_ROOTS_TOOLS 见 issue #1004。
 # - 输入图片路径（docx 的 content 图片块 path / pptx 的 slides[].image_path）
 #   不是可信输入：解析后必须落在工作区 / 会话文件区 / 用户授权目录内，
 #   越界即不读该文件、跳过该图片并在返回串中报告（issue #1005 节 2）
@@ -18,4 +50,11 @@ path_semantics:
   prefix_stripping: "以会话目录前缀开头的路径自动剥离前缀，避免嵌套"
   cross_session: "指向其他会话目录的路径会被拒绝（会话隔离）"
   return_value: "成功创建后返回实际落盘路径"
+  content_path_read: "content_path 源稿可读工作区/会话文件区 + 用户授权目录（#821），其余拒绝"
+  content_path_image_read: "行首图片相对源稿目录解析并复校同一白名单，只能落在源稿自身通过校验的根内；跨根/越界降级为占位文字"
+  content_path_image_trust: "可信标记来自 _build_pdf(trusted_images=) 函数参数；content 手写 image 块与块内 JSON 字段一律不可信"
+  content_path_markup_escape: "源稿/content 的块文本进 Paragraph 前统一 XML 转义（& < >），只有工具自生成的 <b>/<link> 例外；raw <img src=...> 只是字面文字，不经 reportlab 读文件（P1）"
+  content_path_read_kun_gap: "KUN 运行时 _USER_ROOTS_TOOLS 不含 create_pdf → 用户授权目录读不可达；仅 legacy orchestrator 路径可达"
+  pdf_single_file_contract: "create_pdf 不自动分卷：单次调用只输出一个单文件 PDF；content 字符串超过 16000 字符时不静默渲染、不报错，返回提示改用 content_path（源稿直渲不受该阈值约束）"
+  content_path_md_copy: "content_path 渲染成功后，在 PDF 同目录落源稿副本 <PDF 同名>.md（内容为实际渲染源）；同名已存在则跳过不覆盖；写失败只告警，不影响 PDF 交付"
   input_images: "docx/pptx 的图片块走 resolve_read_path，与输出同一边界；越界/缺失/非图片跳过该图片（不读文件）并在返回串中报告"
