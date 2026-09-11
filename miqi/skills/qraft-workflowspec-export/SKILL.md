@@ -248,17 +248,14 @@ python <skill_dir>/scripts/validate_run.py <落盘文件> --schema <权威版或
 #    （pip 安装是临时的，沙箱销毁后不保留，每次新沙箱都要重装）
 python -c "import httpx" 2>/dev/null || pip install httpx
 
-# 1) 检查登录态（auth.py 只输出 {ok, source, expiresAt}，不输出登录信息本身；使用 --no-token）
-python <skill_dir>/scripts/auth.py token --json --no-token
-
-# 2) 上传：登录态由 upload_run.py 内部自动解析，无需额外传参
+# 上传：登录态由 upload_run.py 内部自动解析，无需额外传参
 python <skill_dir>/scripts/upload_run.py <workflowspec.definition.YYYYMMDD.json> --json
 ```
 
-- `auth.py` 返回 `NOT_LOGGED_IN` → 提示用户：「请到 MiQroForge 设置 → 平台账号 完成登录，登录后会自动使用你的登录态」，不要自行填写任何登录信息；
 - `upload_run.py` 返回 `ok:true` → Step 9；
+- 返回 `NOT_LOGGED_IN` → 提示用户：「请到 MiQroForge 设置 → 平台账号 完成登录，登录后会自动使用你的登录态」，不要自行填写任何登录信息；
 - 返回 `IP_NOT_WHITELISTED` → 提示「出口 IP 未加白，请联系 MiQroForge 管理员」；
-- 返回 `TOKEN_EXPIRED` → 提示用户到设置 → 平台账号 重新登录后重试；
+- 返回登录态过期 → 提示用户到设置 → 平台账号 重新登录后重试；
 - 返回 `BAD_REQUEST` → 把服务端 message 展示给用户，结合校验报告给修正指引；
 - 返回 `SERVER_ERROR` → 平台侧问题（如服务端业务错误/缺表），把响应里的 originalMessage 转给用户并建议联系 MiQroForge 管理员；
 - 网络类错误（`NETWORK_UNREACHABLE`）→ 脚本已自动重试，仍失败则提示稍后重试。
@@ -268,7 +265,7 @@ python <skill_dir>/scripts/upload_run.py <workflowspec.definition.YYYYMMDD.json>
 在沙箱（bwrap/WSL）内运行本技能时有两个已知坑：
 
 - **httpx 依赖缺失**：`auth.py` / `upload_run.py` 顶层 `import httpx`，沙箱 Python 环境未预装，直接跑会 `ModuleNotFoundError`。运行前自检：`python -c "import httpx" 2>/dev/null || pip install httpx`。注意 pip 安装是**临时**的——沙箱销毁后不保留，每次新沙箱都要重装一次（兜底登录方式还会用到 `cryptography`，同样按需临时安装）。
-- **登录态自动探测路径不可靠**：自动探测基于 cwd / `MIQI_HOME` / `miqi.paths` 三个候选（沙箱内 `import miqi` 失败即跳过），沙箱内三者都定位不到桌面端实际写入位置，会误报 `NOT_LOGGED_IN`。沙箱内**显式传** `--token-file /home/miqi/workspace/.qraft/token.json`（`auth.py` 与 `upload_run.py` 都要传；或先 `export QRAFT_TOKEN_FILE=/home/miqi/workspace/.qraft/token.json`）。
+- **登录态自动探测路径不可靠**：自动探测基于 cwd / `MIQI_HOME` / `miqi.paths` 三个候选（沙箱内 `import miqi` 失败即跳过），沙箱内三者都定位不到桌面端实际写入位置，会误报 `NOT_LOGGED_IN`。沙箱内需**显式指定登录态文件路径**（`auth.py` 与 `upload_run.py` 都支持路径参数，具体参数名与默认文件位置见脚本 `--help`）。
 
 ### Step 9: 结果展示与下一步提示
 
