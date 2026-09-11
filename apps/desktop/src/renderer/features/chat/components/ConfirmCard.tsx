@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef } from 'react';
 import { Check, X } from 'lucide-react';
 import type { ConfirmChoice, ConfirmStep, UserInputCardRequest } from '../../../../shared/ipc';
 import type { StepExecStatus, UserInputCardEntry } from '../../../contexts/UserInputContext';
@@ -30,9 +30,8 @@ export function ConfirmCard({
   const timeout = typeof req.timeout_seconds === 'number' ? req.timeout_seconds : 60;
   const isWaiting = state === 'pending';
 
-  // ── 倒计时（超时自动取消）────────────────────────────
-  const [remaining, setRemaining] = useState(timeout);
-  const [countdownDone, setCountdownDone] = useState(false);
+  const [remaining, setRemaining] = React.useState(timeout);
+  const [countdownDone, setCountdownDone] = React.useState(false);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   useEffect(() => {
     if (!isWaiting) return;
@@ -71,7 +70,6 @@ export function ConfirmCard({
     return `${m}:${sec.toString().padStart(2, '0')}`;
   };
 
-  // ── 状态字形 + meta（Hermes 语义）────────────────────
   const status: ToolRowStatus = effectiveWaiting ? 'pending' : 'success';
   const resolvedTitle =
     effectiveState === 'pending'
@@ -84,9 +82,6 @@ export function ConfirmCard({
               .replace(/^确认/, effectiveState === 'confirmed' ? '已确认' : '已取消')
               .replace(/[？?]$/, '');
 
-  // ── resolved 回执（assistant-ui/tool-ui ApprovalCardReceipt 样式——
-  //    2026-08-28 用户"看看人家怎么设计的轮子"：确认后卡留原位变紧凑回执）──
-  //    注意：必须放在所有 hooks 之后（React #300 hook 顺序）——见组件末尾 return
   const receiptJsx = !effectiveWaiting ? (
     <div
       className="flex w-full items-center gap-3 rounded-xl border px-4 py-2.5"
@@ -128,9 +123,6 @@ export function ConfirmCard({
     </span>
   );
 
-  // ── choices → HermesConfirmBar 映射 ─────────────────
-  // ConfirmChoice.role 类型只有 'cancel' | 'adjust'（confirm 是默认/未标注）；
-  // 生产/测试数据可能只传 id（如 adjust/cancel）——id 兜底
   const roleOf = (r: string | undefined) => r as 'adjust' | 'cancel' | undefined;
   const isAdjust = (c: { id: string; role?: string }) =>
     roleOf(c.role) === 'adjust' || c.id === 'adjust';
@@ -139,7 +131,6 @@ export function ConfirmCard({
   const adjustChoice = choices.find(isAdjust);
   const cancelChoice = choices.find(isCancel);
   const confirmChoice = choices.find((c) => !isAdjust(c) && !isCancel(c));
-  // 未映射到 确认/修改/取消 三键的选项 → 展开区按钮行
   const customChoices = choices.filter(
     (c) => c.id !== confirmChoice?.id && c.id !== adjustChoice?.id && c.id !== cancelChoice?.id
   );
@@ -148,8 +139,6 @@ export function ConfirmCard({
     choice: HermesConfirmChoice,
     rememberMode?: 'session' | 'always' | null
   ) => {
-    // CodeRabbit（9-11）：'session'/'always' 档此前无分支——卡挂死到超时；
-    // 语义等同确认（rememberMode 作为记忆档传下去）。
     if (choice === 'confirm' || choice === 'session' || choice === 'always') {
       onResolve(confirmChoice?.id ?? choices[0]?.id ?? '', rememberMode);
     } else if (choice === 'modify') {
@@ -160,21 +149,7 @@ export function ConfirmCard({
   };
 
   const runLabel = confirmChoice?.label ?? '确认';
-
-  // ── 展开区：说明 + 步骤（Hermes pre 等宽区风格）────────
-  const stepsStatusMap = (entry.stepsStatus ?? {}) as Record<string, { status?: string }>;
-  const stepsPending = steps.some((s) => stepsStatusMap[s.id]?.status === 'running');
-  const hasLiveStep = steps.some((s) => stepsStatusMap[s.id]?.status === 'running');
-  const [detailsOpen, setDetailsOpen] = useState(initialExpanded ?? false);
-  const resolvedCompact = !effectiveWaiting && !hasLiveStep && !detailsOpen;
-
-  const stepIcon = (s: ConfirmStep): string => {
-    const st = stepsStatusMap[s.id]?.status;
-    if (st === 'running') return '◌';
-    if (st === 'done' || st === 'success') return '✓';
-    if (st === 'failed') return '✕';
-    return '·';
-  };
+  const stepsStatusMap = (entry.stepsStatus ?? {}) as Record<string, StepExecStatus | { status?: string }>;
 
   if (receiptJsx) return receiptJsx;
 
@@ -197,7 +172,6 @@ export function ConfirmCard({
         ) : undefined
       }
     >
-      {/* 展开区：说明 + 步骤 + 自定义选项（Hermes 等宽 pre 风格） */}
       <div className="flex flex-col gap-1.5 w-full min-w-0">
         {req.message && (
           <div className="text-[11.5px] leading-[1.6] break-words" style={{ color: '#6b7280' }}>
@@ -209,7 +183,7 @@ export function ConfirmCard({
             {steps.map((s, i) => (
               <div key={s.id} className="flex items-center gap-1.5 min-w-0">
                 <span className="shrink-0 text-[11px] tabular-nums" style={{ color: '#a0a6b0' }}>
-                  {stepIcon(s)} {String(i + 1).padStart(2, '0')}
+                  {(stepsStatusMap[s.id]?.status === 'running' ? '◌' : stepsStatusMap[s.id]?.status === 'done' || stepsStatusMap[s.id]?.status === 'success' ? '✓' : stepsStatusMap[s.id]?.status === 'failed' ? '✕' : '·')} {String(i + 1).padStart(2, '0')}
                 </span>
                 <span className="text-[11.5px] break-words" style={{ color: '#333' }}>
                   {(s as { name?: string }).name ?? (s as { title?: string }).title ?? ''}
