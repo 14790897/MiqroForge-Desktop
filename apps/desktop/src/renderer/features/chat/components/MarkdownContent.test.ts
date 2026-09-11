@@ -27,6 +27,50 @@ describe('MarkdownContent HTML preview swap', () => {
     expect(markup).not.toContain('<iframe');
     expect(markup).toContain('加粗');
   });
+
+  it('renders mermaid fenced block with MermaidBlock (issue #671)', () => {
+    const markup = renderToStaticMarkup(
+      createElement(MarkdownContent, {
+        content: '```mermaid\nflowchart TD\nA[开始] --> B[成型]\n```',
+      })
+    );
+    // SSR 下 useEffect 不执行 → 未渲染前显示源码（muted 预览）
+    expect(markup).toContain('flowchart TD');
+    expect(markup).toContain('A[开始]');
+  });
+
+  it('shows mermaid source while streaming (no render attempt, issue #671)', () => {
+    // streaming 期间 MermaidBlock 直接显示源码，不尝试渲染（流式部分语法必失败）
+    const markup = renderToStaticMarkup(
+      createElement(MarkdownContent, {
+        content: '```mermaid\nflowchart TD\nA-->B\n```',
+        streaming: true,
+      })
+    );
+    expect(markup).toContain('flowchart TD');
+    expect(markup).toContain('A--&gt;B');
+  });
+
+  it('keeps normal code block for non-mermaid fenced blocks', () => {
+    const markup = renderToStaticMarkup(
+      createElement(MarkdownContent, { content: '```python\nprint(1)\n```' })
+    );
+    // develop 版 pre 是 Codex-style header + rehype-highlight 拆分文本
+    expect(markup).toContain('language-python');
+    expect(markup).toContain('print');
+    expect(markup).toContain('hljs');
+  });
+
+  it('handles svg fenced block safely in SSR (renders in browser, issue #671)', () => {
+    // SSR 无 window → SvgEmbed 返回空（渲染器在浏览器执行 DOMPurify 消毒）
+    const markup = renderToStaticMarkup(
+      createElement(MarkdownContent, {
+        content:
+          '```svg\n<svg viewBox="0 0 100 50" xmlns="http://www.w3.org/2000/svg"><rect x="10" y="10" width="40" height="20" /></svg>\n```',
+      })
+    );
+    expect(markup).not.toContain('viewBox="0 0 100 50"');
+  });
 });
 
 describe('MarkdownContent syntax highlighting', () => {

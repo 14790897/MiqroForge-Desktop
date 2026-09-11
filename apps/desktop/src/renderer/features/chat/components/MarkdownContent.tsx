@@ -7,29 +7,15 @@ import { cn } from '../../../lib/utils';
 import { HtmlPreviewCard, detectHtmlDocument } from './HtmlPreviewCard';
 import { CompareTable } from './CompareTable';
 import { isCompareLang, parseCompareJson } from './compareData';
-
+import { DiagramGalleryProvider } from './DiagramGallery';
+import { MermaidBlock } from './MermaidBlock';
+import { SvgEmbed } from './SvgEmbed';
 /** Strip <think>...</think> reasoning blocks before rendering. */
 function stripThinkBlocks(text: string): string {
   let result = text.replace(/<\/?think>/gi, '');
   return result.trim();
 }
 
-/** Flatten highlighted <span> tokens back to plain code text (for copy). */
-function extractText(node: ReactNode): string {
-  if (typeof node === 'string' || typeof node === 'number') return String(node);
-  if (Array.isArray(node)) return node.map(extractText).join('');
-  if (
-    node &&
-    typeof node === 'object' &&
-    'props' in node &&
-    (node as any).props?.children != null
-  ) {
-    return extractText((node as any).props.children);
-  }
-  return '';
-}
-
-/** Display names for common language codes shown in the code-block header. */
 const LANG_LABELS: Record<string, string> = {
   ts: 'TypeScript',
   tsx: 'TSX',
@@ -71,9 +57,34 @@ const LANG_LABELS: Record<string, string> = {
   env: 'ENV',
   plaintext: 'Plain text',
   text: 'Plain text',
+  // issue #671：mermaid 流程图自定义标签
+  mermaid: 'mermaid 流程图',
 };
 
-export function MarkdownContent({ content }: { content: string }) {
+function extractText(node: unknown): string {
+  if (node == null) return '';
+  if (typeof node === 'string') return node;
+  if (Array.isArray(node)) return node.map(extractText).join('');
+  if (
+    node &&
+    typeof node === 'object' &&
+    'props' in node &&
+    (node as any).props?.children != null
+  ) {
+    return extractText((node as any).props.children);
+  }
+  return '';
+}
+
+export function MarkdownContent({
+  content,
+  streaming,
+  disableDiagrams,
+}: {
+  content: string;
+  streaming?: boolean;
+  disableDiagrams?: boolean;
+}) {
   const [copiedCode, setCopiedCode] = useState<string | null>(null);
   const displayContent = stripThinkBlocks(content);
   const htmlDoc = detectHtmlDocument(displayContent);
@@ -148,8 +159,7 @@ export function MarkdownContent({ content }: { content: string }) {
       ),
       td: ({ children }: any) => <td className="px-3 py-2">{children}</td>,
       pre: ({ children }: any) => {
-        // Codex-style block header: language left, copy right, a divider under
-        // the header; the code body scrolls in the inner <pre> below it.
+        // Mermaid 流程图（issue #671）：pre 层拦截，不走代码块容器
         const child = Array.isArray(children) ? children[0] : children;
         const codeProps =
           child && typeof child === 'object' && 'props' in child
@@ -158,7 +168,6 @@ export function MarkdownContent({ content }: { content: string }) {
         const lang = (
           (codeProps.className ?? '').match(/language-([\w+-]+)/)?.[1] ?? ''
         ).toLowerCase();
-        const langLabel = LANG_LABELS[lang] ?? lang;
         const codeText = extractText(codeProps.children).replace(/\n$/, '');
 
         // ```compare 结构化对比数据（issue #878）：解析成功渲染对比表，
@@ -168,6 +177,61 @@ export function MarkdownContent({ content }: { content: string }) {
           if (data) return <CompareTable data={data} rawText={codeText} />;
         }
 
+        if (lang === 'mermaid' && !disableDiagrams) {
+          return (
+            <MermaidBlock
+              code={codeText}
+              streaming={streaming}
+              fallback={
+                <div
+                  className="group my-2 overflow-hidden rounded-lg"
+                  style={{
+                    background: 'var(--code-bg)',
+                    border: '1px solid var(--border-subtle)',
+                  }}
+                >
+                  <div
+                    className="flex items-center gap-2 pl-3 pr-2 h-8"
+                    style={{ borderBottom: '1px solid var(--border-subtle)' }}
+                  >
+                    <span
+                      className="text-[11px] font-medium select-none"
+                      style={{ color: 'var(--text-faint)' }}
+                    >
+                      mermaid
+                    </span>
+                    <button
+                      onClick={() => handleCopyCode(codeText)}
+                      className="ml-auto rounded p-1 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100 hover:opacity-100"
+                      style={{
+                        color: copiedCode === codeText ? 'var(--success)' : 'var(--text-muted)',
+                      }}
+                      aria-label="复制代码"
+                      title="复制"
+                    >
+                      {copiedCode === codeText ? <Check size={14} /> : <Copy size={14} />}
+                    </button>
+                  </div>
+                  <pre
+                    className="m-0 overflow-x-auto max-w-full"
+                    style={{ background: 'transparent', border: 0, padding: 0 }}
+                  >
+                    {children}
+                  </pre>
+                </div>
+              }
+            />
+          );
+        }
+        if (lang === 'svg' && !disableDiagrams) {
+          // ```svg：与 mermaid 同款在 pre 层直接返回（审查 R4）——经 code
+          // 分支返回会被通用代码块 wrapper 的 overflow-hidden/overflow-x-auto
+          // 包裹并作用到 DiagramCard
+          return <SvgEmbed code={codeText} />;
+        }
+        // Codex-style block header: language left, copy right, a divider under
+        // the header; the code body scrolls in the inner <pre> below it.
+        const langLabel = LANG_LABELS[lang] ?? lang;
         return (
           <div
             className="group my-2 overflow-hidden rounded-lg"
@@ -226,7 +290,7 @@ export function MarkdownContent({ content }: { content: string }) {
         );
       },
     }),
-    [copiedCode]
+    [copiedCode, streaming, disableDiagrams]
   );
 
   // All hooks above run unconditionally — this early return must come after
@@ -236,15 +300,19 @@ export function MarkdownContent({ content }: { content: string }) {
     return <HtmlPreviewCard html={htmlDoc} />;
   }
 
+  // DiagramGalleryProvider：#671 图集——本条消息内的所有 mermaid/svg 图
+  // 注册到 provider，点卡打开图集查看器（多图 ←/→ + 胶片切换）
   return (
-    <div className="min-w-0 break-words" style={{ overflowWrap: 'anywhere' }}>
-      <ReactMarkdown
-        remarkPlugins={[remarkGfm]}
-        rehypePlugins={[[rehypeHighlight, { plainText: ['compare', 'compare-json'] }]]}
-        components={components}
-      >
-        {displayContent}
-      </ReactMarkdown>
-    </div>
+    <DiagramGalleryProvider>
+      <div className="min-w-0 break-words" style={{ overflowWrap: 'anywhere' }}>
+        <ReactMarkdown
+          remarkPlugins={[remarkGfm]}
+          rehypePlugins={[[rehypeHighlight, { plainText: ['compare', 'compare-json'] }]]}
+          components={components}
+        >
+          {displayContent}
+        </ReactMarkdown>
+      </div>
+    </DiagramGalleryProvider>
   );
 }
