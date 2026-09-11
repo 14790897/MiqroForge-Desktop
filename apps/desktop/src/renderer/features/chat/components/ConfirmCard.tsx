@@ -149,7 +149,10 @@ export function ConfirmCard({
   };
 
   const runLabel = confirmChoice?.label ?? '确认';
-  const stepsStatusMap = (entry.stepsStatus ?? {}) as Record<string, StepExecStatus | { status?: string }>;
+  const stepsStatusMap = (entry.stepsStatus ?? {}) as Record<
+    string,
+    StepExecStatus | { status?: string }
+  >;
 
   if (receiptJsx) return receiptJsx;
 
@@ -183,7 +186,15 @@ export function ConfirmCard({
             {steps.map((s, i) => (
               <div key={s.id} className="flex items-center gap-1.5 min-w-0">
                 <span className="shrink-0 text-[11px] tabular-nums" style={{ color: '#a0a6b0' }}>
-                  {(stepsStatusMap[s.id]?.status === 'running' ? '◌' : stepsStatusMap[s.id]?.status === 'done' || stepsStatusMap[s.id]?.status === 'success' ? '✓' : stepsStatusMap[s.id]?.status === 'failed' ? '✕' : '·')} {String(i + 1).padStart(2, '0')}
+                  {stepsStatusMap[s.id]?.status === 'running'
+                    ? '◌'
+                    : stepsStatusMap[s.id]?.status === 'done' ||
+                        stepsStatusMap[s.id]?.status === 'success'
+                      ? '✓'
+                      : stepsStatusMap[s.id]?.status === 'failed'
+                        ? '✕'
+                        : '·'}{' '}
+                  {String(i + 1).padStart(2, '0')}
                 </span>
                 <span className="text-[11.5px] break-words" style={{ color: '#333' }}>
                   {(s as { name?: string }).name ?? (s as { title?: string }).title ?? ''}

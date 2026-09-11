@@ -7,10 +7,7 @@ import {
   useRef,
   type ReactNode,
 } from 'react';
-import type {
-  UserInputCardRequest,
-  UserInputResolvedData,
-} from '../../shared/ipc';
+import type { UserInputCardRequest, UserInputResolvedData } from '../../shared/ipc';
 import type { TimelineEntry } from '../features/chat/components/Timeline';
 
 export type UserInputCardState = 'pending' | 'confirmed' | 'cancelled' | 'modify';
@@ -39,7 +36,13 @@ interface UserInputContextValue {
   pending: Record<string, UserInputCardEntry>;
   resolved: Record<string, UserInputCardEntry>;
   timelines: Record<string, TimelineEntry>;
-  resolve: (inputId: string, choiceId: string, choiceLabel: string, remember?: boolean, rememberMode?: 'session' | 'always') => Promise<void>;
+  resolve: (
+    inputId: string,
+    choiceId: string,
+    choiceLabel: string,
+    remember?: boolean,
+    rememberMode?: 'session' | 'always'
+  ) => Promise<void>;
   timeoutCard: (inputId: string) => void;
   lastAdjustAt?: number;
   activeSession?: string;
@@ -83,7 +86,14 @@ export function UserInputProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const moveToResolved = useCallback(
-    (inputId: string, state: UserInputCardState, choiceId?: string, choiceLabel?: string, timedOut = false, role?: string) => {
+    (
+      inputId: string,
+      state: UserInputCardState,
+      choiceId?: string,
+      choiceLabel?: string,
+      timedOut = false,
+      role?: string
+    ) => {
       const entry = pendingRef.current[inputId];
       if (!entry) return;
       const done: UserInputCardEntry = {
@@ -101,14 +111,14 @@ export function UserInputProvider({ children }: { children: ReactNode }) {
       const isAdjust = role === 'adjust' || (role === undefined && choiceId === 'adjust');
       if (isAdjust) setLastAdjustAt(Date.now());
     },
-    [],
+    []
   );
 
   const timeoutCard = useCallback(
     (inputId: string) => {
       moveToResolved(inputId, 'cancelled', undefined, undefined, true);
     },
-    [moveToResolved],
+    [moveToResolved]
   );
 
   const markBackendReleased = useCallback((inputId: string) => {
@@ -162,7 +172,8 @@ export function UserInputProvider({ children }: { children: ReactNode }) {
                     status: String(it?.status ?? 'queued'),
                   }))
                 : [],
-              phase: (raw.phase as TimelineEntry['phase'] | undefined) ?? current?.phase ?? 'running',
+              phase:
+                (raw.phase as TimelineEntry['phase'] | undefined) ?? current?.phase ?? 'running',
               todoRevision: revision,
             },
           };
@@ -186,9 +197,12 @@ export function UserInputProvider({ children }: { children: ReactNode }) {
                     name: String(s?.name ?? s?.title ?? ''),
                     tools: Array.isArray(s?.tools) ? s.tools : [],
                   }))
-                : current?.steps ?? [],
-              permissions: Array.isArray(raw.permissions) ? raw.permissions : current?.permissions ?? [],
-              phase: (raw.phase as TimelineEntry['phase'] | undefined) ?? current?.phase ?? 'running',
+                : (current?.steps ?? []),
+              permissions: Array.isArray(raw.permissions)
+                ? raw.permissions
+                : (current?.permissions ?? []),
+              phase:
+                (raw.phase as TimelineEntry['phase'] | undefined) ?? current?.phase ?? 'running',
               todoRevision: revision,
             },
           };
@@ -207,7 +221,7 @@ export function UserInputProvider({ children }: { children: ReactNode }) {
           data.input_id,
           'confirmed',
           typeof res.choice_id === 'string' ? res.choice_id : undefined,
-          typeof res.choice_label === 'string' ? res.choice_label : undefined,
+          typeof res.choice_label === 'string' ? res.choice_label : undefined
         );
       }
     });
@@ -218,15 +232,34 @@ export function UserInputProvider({ children }: { children: ReactNode }) {
   }, [upsertPending, moveToResolved, activeSession]);
 
   const resolve = useCallback(
-    async (inputId: string, choiceId: string, choiceLabel: string, remember = false, rememberMode = 'session') => {
+    async (
+      inputId: string,
+      choiceId: string,
+      choiceLabel: string,
+      remember = false,
+      rememberMode = 'session'
+    ) => {
       const miqi = (window as any).miqi;
       const entry = pendingRef.current[inputId];
       const role = entry?.request.choices?.find((c) => c.id === choiceId)?.role;
       const isCancel = role === 'cancel' || (role === undefined && choiceId === 'cancel');
       const isModify = role === 'adjust' || choiceId === 'modify' || choiceId === 'adjust';
-      moveToResolved(inputId, isCancel ? 'cancelled' : isModify ? 'modify' : 'confirmed', choiceId, choiceLabel, false, role);
+      moveToResolved(
+        inputId,
+        isCancel ? 'cancelled' : isModify ? 'modify' : 'confirmed',
+        choiceId,
+        choiceLabel,
+        false,
+        role
+      );
       try {
-        const res = await miqi?.userInput?.resolve(inputId, choiceId, choiceLabel, remember, rememberMode);
+        const res = await miqi?.userInput?.resolve(
+          inputId,
+          choiceId,
+          choiceLabel,
+          remember,
+          rememberMode
+        );
         if (res && res.resolved === false && entry) {
           markBackendReleased(inputId);
         }
@@ -242,11 +275,22 @@ export function UserInputProvider({ children }: { children: ReactNode }) {
         }
       }
     },
-    [moveToResolved, upsertPending, markBackendReleased],
+    [moveToResolved, upsertPending, markBackendReleased]
   );
 
   return (
-    <UserInputContext.Provider value={{ pending, resolved, timelines, resolve, timeoutCard, lastAdjustAt, activeSession, setActiveSession }}>
+    <UserInputContext.Provider
+      value={{
+        pending,
+        resolved,
+        timelines,
+        resolve,
+        timeoutCard,
+        lastAdjustAt,
+        activeSession,
+        setActiveSession,
+      }}
+    >
       {children}
     </UserInputContext.Provider>
   );
