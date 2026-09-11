@@ -20,6 +20,19 @@ describe('SvgEmbed sanitization (CodeRabbit security regression)', () => {
     expect(markup).toContain('<rect');
   });
 
+  it('preserves local fragment-only use references', () => {
+    const code = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 60">
+      <defs><g id="node"><rect width="20" height="10" /></g></defs>
+      <use href="#node" x="10" y="10" />
+      <use xlink:href="#node" x="40" y="10" xmlns:xlink="http://www.w3.org/1999/xlink" />
+    </svg>`;
+    const markup = renderToStaticMarkup(createElement(SvgEmbed, { code }));
+
+    expect(markup).toContain('<use');
+    expect(markup).toContain('href="#node"');
+    expect(markup).toContain('xlink:href="#node"');
+  });
+
   it('strips external url() and href references but keeps local fragment references', () => {
     const code = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 60">
       <defs>
