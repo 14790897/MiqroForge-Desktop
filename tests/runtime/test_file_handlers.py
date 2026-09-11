@@ -337,6 +337,172 @@ async def test_files_accept_cross_client_rejected(fake_config, fake_provider, tm
     assert exc_info.value.code == "UNAUTHORIZED"
 
 
+# ── sessions.get_tracked_files / clear_tracked_files（#1003 finding ①）───────
+
+
+@pytest.mark.asyncio
+async def test_get_tracked_files_namespaced_key_reads_write_path_store(tmp_path):
+    """三段 namespaced key：读端必须与写端解析到同一目录。
+
+    写端 ``_persist_tracked_file`` 按 ``_session_files_dir_key`` 落
+    ``sessions/desktop_983namespaced/tracked_files.json``；读端（handler）若不
+    归一就会读 ``sessions/miqi-desktop_desktop_983namespaced/`` → 空。
+    """
+    from miqi.agent.tools.filesystem import _persist_tracked_file, _session_files_dir_key
+    from miqi.runtime.app_server import AppServerError, ClientSessionRegistry
+    from miqi.runtime.session_handlers import sessions_get_tracked_files_handler
+
+    key = "miqi-desktop:desktop:983namespaced"
+    derived = _session_files_dir_key(key)
+    assert derived == "desktop_983namespaced"
+    assert derived != key.replace(":", "_")  # 三段 key 才会分叉
+
+    # 归属记录落在派生目录（sessions/desktop_983namespaced/conversation.jsonl）
+    sm, ws = _setup_session("desktop:983namespaced", "client-A")
+    files_dir = ws / "sessions" / derived / "files"
+    files_dir.mkdir(parents=True, exist_ok=True)
+    target = files_dir / "ns.md"
+    target.write_text("x", encoding="utf-8")
+    _persist_tracked_file(files_dir, target, op="write", session_key=key)
+
+    registry = ClientSessionRegistry()
+    result = await sessions_get_tracked_files_handler(
+        "req-1", {"session_key": key}, "client-A", None, registry,
+    )
+    paths = {item["path"] for item in result["result"]["tracked_files"]}
+    assert "ns.md" in paths, paths
+
+    # 归一不削弱 ownership：同一 namespaced key 换 client 仍被拒。
+    # 精确到 UNAUTHORIZED：会话归属元数据已由 _setup_session(client-A) 落在归一
+    # 后的同一个会话目录里，读到 REQUIRES_CLAIM 只会意味着「目录解析错到了没有
+    # ownership 元数据的地方」，是回归而不是可接受分支（CodeRabbit #1003）。
+    with pytest.raises(AppServerError) as exc_info:
+        await sessions_get_tracked_files_handler(
+            "req-2", {"session_key": key}, "client-B", None, registry,
+        )
+    assert exc_info.value.code == "UNAUTHORIZED"
+
+
+@pytest.mark.asyncio
+async def test_get_tracked_files_two_segment_key_behavior_unchanged(tmp_path):
+    """两段 key（现网唯一形态）：归一为恒等，读端行为逐字不变。"""
+    from miqi.agent.tools.filesystem import _persist_tracked_file, _session_files_dir_key
+    from miqi.runtime.app_server import ClientSessionRegistry
+    from miqi.runtime.session_handlers import sessions_get_tracked_files_handler
+
+    key = "desktop:983twoseg"
+    assert _session_files_dir_key(key) == key.replace(":", "_")  # 归一恒等
+
+    sm, ws = _setup_session(key, "client-A")
+    files_dir = ws / "sessions" / _session_files_dir_key(key) / "files"
+    files_dir.mkdir(parents=True, exist_ok=True)
+    target = files_dir / "two.md"
+    target.write_text("x", encoding="utf-8")
+    _persist_tracked_file(files_dir, target, op="write", session_key=key)
+
+    registry = ClientSessionRegistry()
+    result = await sessions_get_tracked_files_handler(
+        "req-1", {"session_key": key}, "client-A", None, registry,
+    )
+    paths = {item["path"] for item in result["result"]["tracked_files"]}
+    assert "two.md" in paths, paths
+
+
+@pytest.mark.asyncio
+async def test_clear_tracked_files_namespaced_key_clears_write_path_store(tmp_path):
+    """三段 namespaced key 的 clear 必须删到写端落盘的那份 tracked_files.json。"""
+    from miqi.agent.tools.filesystem import _persist_tracked_file, _session_files_dir_key
+    from miqi.runtime.app_server import ClientSessionRegistry
+    from miqi.runtime.session_handlers import sessions_clear_tracked_files_handler
+
+    key = "miqi-desktop:desktop:983clear"
+    sm, ws = _setup_session("desktop:983clear", "client-A")
+    files_dir = ws / "sessions" / _session_files_dir_key(key) / "files"
+    files_dir.mkdir(parents=True, exist_ok=True)
+    target = files_dir / "clr.md"
+    target.write_text("x", encoding="utf-8")
+    _persist_tracked_file(files_dir, target, op="write", session_key=key)
+    store = ws / "sessions" / _session_files_dir_key(key) / "tracked_files.json"
+    assert store.exists()
+
+    registry = ClientSessionRegistry()
+    result = await sessions_clear_tracked_files_handler(
+        "req-1", {"session_key": key}, "client-A", None, registry,
+    )
+    assert result["result"]["cleared"] is True
+    assert not store.exists(), f"clear 未删到写端落盘的文件：{store}"
+
+
+# ── #983 缺口 2：DownloadSink 产物进 tracked（面板读端回路）────────────────
+
+
+@pytest.mark.asyncio
+async def test_get_tracked_files_reads_sink_delivered_artifact(tmp_path):
+    """``DownloadSink`` 交付的 MCP 下载产物必须出现在面板读端（真实 handler）。
+
+    写端：sink 落盘 → ``_persist_tracked_file``（与 create_pdf 同机制）。
+    读端两条真实链路：
+    - ``sessions.get_tracked_files``（#1003 finding ① 归一后）读到条目；
+    - ``files.read(path, session_key, as_binary)`` 按条目键取回字节
+      （面板「下载/另存为」走的就是这条，#877）。
+
+    产物名用 ``.pdf``：``files.read`` 只服务文本安全/可预览/可二进制读的
+    后缀集，非白名单后缀（如 ``.cube``）会在读取层被拒（既有读端门，见 PR
+    「后续计划」）——用白名单内的后缀才能证明端到端回路成立。
+    """
+    import base64
+    import hashlib
+    import json
+    from types import SimpleNamespace
+
+    from miqi.agent.tools.mcp_download_sink import DownloadSink
+    from miqi.runtime.app_server import ClientSessionRegistry
+    from miqi.runtime.file_handlers import files_read_handler
+    from miqi.runtime.session_handlers import sessions_get_tracked_files_handler
+
+    key = "desktop:983downloads"
+    sm, ws = _setup_session(key, "client-A")
+    data = b"%PDF-1.4 artifact-bytes-983"
+    payload = json.dumps({
+        "name": "report.pdf",
+        "size_bytes": len(data),
+        "sha256": hashlib.sha256(data).hexdigest(),
+        "content_base64": base64.b64encode(data).decode(),
+    })
+    result = SimpleNamespace(
+        isError=False, structuredContent=None,
+        content=[SimpleNamespace(text=payload)],
+    )
+
+    sink = DownloadSink(base_workspace=ws)
+    artifact = await sink.materialize(
+        result=result,
+        session_key=key,
+        server_name="miqroforge",
+        tool_name="download_file",
+        request_kwargs={"name": "report.pdf"},
+        turn_id="turn-1",
+        tool_call_id="call-1",
+    )
+    assert artifact.path.read_bytes() == data
+
+    registry = ClientSessionRegistry()
+    out = await sessions_get_tracked_files_handler(
+        "req-1", {"session_key": key}, "client-A", None, registry,
+    )
+    paths = {item["path"] for item in out["result"]["tracked_files"]}
+    assert ".miqi/downloads/report.pdf" in paths, paths
+
+    # 面板「下载/另存为」链路：条目键 → files.read 取回原字节
+    read = await files_read_handler(
+        "req-2",
+        {"path": ".miqi/downloads/report.pdf", "session_key": key, "as_binary": True},
+        "client-A", None, registry,
+    )
+    assert base64.b64decode(read["result"]["data_base64"]) == data
+    assert read["result"]["size"] == len(data)
+
+
 # ── SandboxManager client-scoped namespace ───────────────────────────────────
 
 

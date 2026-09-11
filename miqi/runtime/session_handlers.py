@@ -46,6 +46,30 @@ def _client_session_id(client_id: str, session_key: str) -> str:
     return f"{client_id}:{session_key}"
 
 
+def _tracked_files_store_key(session_key: str) -> str:
+    """Derive the on-disk key for ``tracked_files.json`` (write/read 同源).
+
+    #1003 finding ①：写端 ``_persist_tracked_file`` 用
+    ``_session_files_dir_key`` 派生目录名（``sessions/<derived>/tracked_files.json``），
+    读端必须用同一派生，否则三段 namespaced key（``miqi-desktop:desktop:983``）
+    会读到 ``sessions/miqi-desktop_desktop_983/``，而条目实际落在
+    ``sessions/desktop_983/``。
+
+    两段 key（现网唯一形态，如 ``desktop:1786...``）派生结果与
+    ``key.replace(":", "_")``（``get_session_dir`` 的目录名规则）逐字相同，
+    故本次归一不改变既有行为；只有三段 key 才会分叉。
+
+    归一发生在 ownership 校验之前：读路径由 ``load_tracked_files(key,
+    client_id=...)`` 内部、清理路径由 ``clear_tracked_files(key,
+    client_id=...)`` 内部的 ``_verify_ownership_for_mutation`` 完成，且落在
+    「条目所在的那条会话记录」上（``get_session_dir(key)`` 同一条派生链），
+    因此不削弱归属校验。
+    """
+    from miqi.agent.tools.filesystem import _session_files_dir_key
+
+    return _session_files_dir_key(session_key)
+
+
 # ── sessions.list ──────────────────────────────────────────────────────────
 
 
@@ -481,7 +505,7 @@ async def sessions_get_tracked_files_handler(
 ) -> dict[str, Any]:
     """Return tracked files for a session from tracked_files.json (client-scoped)."""
     typed = validate_session_params("sessions.get_tracked_files", params)
-    session_key = typed.session_key
+    session_key = _tracked_files_store_key(typed.session_key)
 
     sm = _get_session_manager()
     try:
@@ -508,7 +532,7 @@ async def sessions_clear_tracked_files_handler(
 ) -> dict[str, Any]:
     """Remove all tracked file entries for a session (client-scoped)."""
     typed = validate_session_params("sessions.clear_tracked_files", params)
-    session_key = typed.session_key
+    session_key = _tracked_files_store_key(typed.session_key)
 
     sm = _get_session_manager()
     try:
