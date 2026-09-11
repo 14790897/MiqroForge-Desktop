@@ -1,15 +1,8 @@
-"""request_action_confirmation — 危险动作最后确认工具（#646-v2，GPT 第五轮拍板）。
+"""request_action_confirmation — final confirmation for high-impact actions.
 
-与 ask_user_confirm_card 的关系：**语义独立**——本工具是 Action Guard 专用：
-上传/支付/破坏性删除/外发数据执行前**最后一道确认**（永远阻塞，所有模式）。
-ask_user_confirm_card 保留为兼容层（内部路由到 ActionCard UI）。
-
-payload（schema）：
-    action      动作类型：upload / payment / delete / external
-    target      目标（如 Qraft / 外部平台）
-    file_name   文件（upload 时）
-    size_bytes  大小
-    sha256      文件指纹（防 TOCTOU——确认 A 上传 B）
+This tool is deliberately separate from the task-plan collaboration step.
+It is used immediately before upload, payment, destructive delete, or other
+external side effects.
 """
 
 from __future__ import annotations
@@ -22,12 +15,8 @@ from miqi.agent.tools.base import Tool
 DEFAULT_TIMEOUT_SECONDS = 120
 
 REQUEST_ACTION_CONFIRM_INSTRUCTION = (
-    "执行**危险动作**前（向外部平台上传、支付/产生费用、破坏性删除、外发数据），"
-    "必须调用 request_action_confirmation 工具弹确认卡，等待用户确认。\n"
-    "规则：\n"
-    "1. 单次删除临时文件/普通写文件**不要**调用本工具；\n"
-    "2. 多步骤任务开始前的计划确认使用 ask_user_plan_confirm（本工具只管危险动作）；\n"
-    "3. 用户取消（status=cancelled）时停止该动作并说明。"
+    "执行危险动作前（向外部平台上传、支付/产生费用、破坏性删除、外发数据），"
+    "必须调用 request_action_confirmation 工具弹确认卡并等待用户确认。"
 )
 
 
@@ -48,8 +37,7 @@ class RequestActionConfirmationTool(Tool):
     def description(self) -> str:
         return (
             "危险动作执行前的最后确认：向外部平台上传、支付、破坏性删除、外发数据。"
-            "展示动作目标/文件/指纹，等待用户[确认上传]/[取消]。"
-            "（多步骤任务计划确认用 ask_user_plan_confirm，两者不混用）"
+            "展示动作目标/文件/指纹，等待用户确认。"
         )
 
     @property
@@ -65,12 +53,25 @@ class RequestActionConfirmationTool(Tool):
                 "target": {"type": "string", "description": "目标（如 Qraft / 外部平台 / 文件系统）"},
                 "file_name": {"type": "string", "description": "（upload/delete 时）文件名"},
                 "size_bytes": {"type": "integer", "description": "（upload 时）文件大小字节"},
-                "sha256": {"type": "string", "description": "（upload 时）文件指纹——确认绑定，防确认 A 上传 B"},
+                "sha256": {"type": "string", "description": "（upload 时）文件指纹"},
                 "description": {"type": "string", "description": "动作描述（用户可理解）"},
-                "timeout_seconds": {"type": "integer", "default": DEFAULT_TIMEOUT_SECONDS, "minimum": 5, "maximum": 600},
+                "timeout_seconds": {
+                    "type": "integer",
+                    "default": DEFAULT_TIMEOUT_SECONDS,
+                    "minimum": 5,
+                    "maximum": 600,
+                },
             },
             "required": ["action", "target"],
         }
+
+    @staticmethod
+    def _timeout(args: dict[str, Any]) -> int:
+        try:
+            raw = int(args.get("timeout_seconds", DEFAULT_TIMEOUT_SECONDS))
+        except (TypeError, ValueError):
+            raw = DEFAULT_TIMEOUT_SECONDS
+        return max(5, min(600, raw))
 
     def normalize_args(self, args: dict[str, Any]) -> dict[str, Any]:
         return {
@@ -80,7 +81,7 @@ class RequestActionConfirmationTool(Tool):
             "size_bytes": args.get("size_bytes"),
             "sha256": str(args.get("sha256") or ""),
             "description": str(args.get("description") or ""),
-            "timeout_seconds": max(5, min(600, int(args.get("timeout_seconds", DEFAULT_TIMEOUT_SECONDS)))),
+            "timeout_seconds": self._timeout(args),
         }
 
     @staticmethod
@@ -110,7 +111,4 @@ class RequestActionConfirmationTool(Tool):
                 return self.build_result(gate_result)
             except Exception as exc:  # noqa: BLE001
                 return f"错误：request_action_confirmation 执行失败：{exc}"
-        return (
-            "错误：request_action_confirmation 需要桌面端用户输入通道，当前环境未接线。"
-            "请先向用户说明危险动作并等待确认。"
-        )
+        return "错误：request_action_confirmation 需要桌面端用户输入通道，当前环境未接线。"

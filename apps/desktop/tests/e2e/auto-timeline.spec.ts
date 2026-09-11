@@ -16,6 +16,7 @@
 import { _electron as electron, test, expect } from '@playwright/test';
 import type { ElectronApplication, Page } from '@playwright/test';
 import { spawn, type ChildProcess } from 'node:child_process';
+import { createConnection } from 'node:net';
 import { join } from 'node:path';
 import {
   LLM_TIMEOUT,
@@ -29,6 +30,30 @@ import {
 
 const REPO_ROOT = join(APPS_DESKTOP, '..', '..');
 
+async function waitForTcpListener(port: number): Promise<void> {
+  const deadline = Date.now() + 30_000;
+  while (Date.now() < deadline) {
+    const connected = await new Promise<boolean>((resolve) => {
+      const socket = createConnection({ host: '127.0.0.1', port });
+      socket.once('connect', () => {
+        socket.destroy();
+        resolve(true);
+      });
+      socket.once('error', () => {
+        socket.destroy();
+        resolve(false);
+      });
+      socket.setTimeout(1000, () => {
+        socket.destroy();
+        resolve(false);
+      });
+    });
+    if (connected) return;
+    await new Promise((r) => setTimeout(r, 250));
+  }
+  throw new Error(`mock OpenAI server did not accept TCP connections on 127.0.0.1:${port} within 30s`);
+}
+
 async function startMockOpenAI(): Promise<{ proc: ChildProcess; mockUrl: string }> {
   const python = process.env.MIQI_PYTHON_PATH || 'python';
   const port = 20000 + Math.floor(Math.random() * 20000);
@@ -38,31 +63,27 @@ async function startMockOpenAI(): Promise<{ proc: ChildProcess; mockUrl: string 
     env: { ...process.env, PYTHONUNBUFFERED: '1' },
     windowsHide: true,
   });
-  let readyUrl = '';
   let stderrTail = '';
-  proc.stdout?.on('data', (d) => {
-    const t = String(d);
-    console.log(`[mock] ${t.trim()}`);
-    const m = t.match(/http:\/\/127\.0\.0\.1:(\d+)\/v1/);
-    if (m) readyUrl = `http://127.0.0.1:${m[1]}/v1`;
-  });
+  proc.stdout?.on('data', (d) => console.log(`[mock] ${String(d).trim()}`));
   proc.stderr?.on('data', (d) => {
     stderrTail = (stderrTail + String(d)).slice(-2000);
     console.log(`[mock-err] ${String(d).trim()}`);
   });
   proc.on('exit', (code) => console.log(`[test] mock server exited: ${code}`));
-  const deadline = Date.now() + 30_000;
-  while (!readyUrl && Date.now() < deadline) {
+
+  try {
+    await waitForTcpListener(port);
+  } catch (error) {
     if (proc.exitCode !== null) {
       throw new Error(`mock OpenAI server exited early (code ${proc.exitCode}): ${stderrTail}`);
     }
-    await new Promise((r) => setTimeout(r, 250));
-  }
-  if (!readyUrl) {
     proc.kill();
-    throw new Error(`mock OpenAI server startup line not seen in 30s: ${stderrTail}`);
+    throw error;
   }
-  return { proc, mockUrl: readyUrl };
+
+  const mockUrl = `http://127.0.0.1:${port}/v1`;
+  console.log(`[test] mock OpenAI server ready at ${mockUrl}`);
+  return { proc, mockUrl };
 }
 
 test.describe('Auto Timeline (#646-v2)', () => {
@@ -104,66 +125,50 @@ test.describe('Auto Timeline (#646-v2)', () => {
     async () => {
       await createNewConversation(page);
 
-      // ── 切模式到「自动」：点选项 → 二次确认弹窗 → 确认 ──
       const modeBtn = page.getByRole('button', { name: /允许编辑/ }).first();
       await modeBtn.click();
       const autoOpt = page.getByRole('button', { name: /自动.*完全自主执行/ }).first();
       await expect(autoOpt).toBeVisible({ timeout: 10_000 });
       await autoOpt.click();
-      // 二次确认弹窗（auto 模式确认：Agent 将完全自主执行）
       const confirmBtn = page.getByRole('button', { name: /^确认$/ }).first();
       await expect(confirmBtn).toBeVisible({ timeout: 10_000 });
       await confirmBtn.click();
       await expect(page.getByText(/✓ 自主 已启用/)).toBeVisible({ timeout: 10_000 });
       await page.waitForTimeout(600);
 
-      // ── 发任务（mock auto 分支）──
       await sendMessage(page, '自动：生成 MOF-5 实验报告并上传');
 
-      // 自动批准审批弹窗（E2E 环境差异——真实用户模式不弹）
       const autoApprove = async () => {
         try {
           for (let i = 0; i < 60; i++) {
             const dialog = page.getByRole('alertdialog').first();
             if (await dialog.isVisible().catch(() => false)) {
               const allow = dialog.getByRole('button', { name: /允许一次|允许/ }).first();
-              if (await allow.isVisible().catch(() => false)) {
-                await allow.click();
-                console.log('[test] 自动批准审批弹窗');
-              }
+              if (await allow.isVisible().catch(() => false)) { await allow.click(); }
             }
             await page.waitForTimeout(500);
           }
         } catch {
-          // 页面已关闭——静默退出
+          // App closed: nothing left to approve.
         }
       };
       const approveTask = autoApprove();
 
-      // Timeline 出现（非阻塞展示）
-      const timeline = page.getByTestId('timeline').first();
-      await expect(timeline).toBeVisible({ timeout: 60_000 });
-      await expect(timeline.getByText('AI 正在执行任务')).toBeVisible();
-      // 步骤为用户语言（list_dir→查看目录 / write_file→创建文档）
-      await expect(timeline.getByText('查看目录')).toBeVisible();
-      await expect(timeline.getByText('创建文档')).toBeVisible();
-
-      // 无 PlanCard（确认卡不出现）
-      const planCard = page.getByTestId('plan-card');
-      await expect(planCard).toHaveCount(0);
-
-      await page.screenshot({ path: 'test-results/auto-timeline-running.png' });
-
-      // 危险动作仍弹 ActionCard（确认）——auto 不豁免安全
       const actionCard = page.getByTestId('action-card').first();
       await expect(actionCard).toBeVisible({ timeout: 60_000 });
       await expect(actionCard.getByText('☁ 上传').first()).toBeVisible();
-      await actionCard.getByRole('button', { name: '确认上传' }).click();
+      await expect(actionCard.getByText('Qraft').first()).toBeVisible();
+      await expect(actionCard.getByText('mof-report.json').first()).toBeVisible();
+      await expect(actionCard.getByText(/23\.0 KB/)).toBeVisible();
 
-      // 回合完成
+      await page.screenshot({ path: 'test-results/auto-timeline-action-card.png' });
+      await actionCard.getByRole('button', { name: '确认上传' }).click();
       await waitForResponseComplete(page, LLM_TIMEOUT);
       await expect(page.getByText(/已完成：MOF-5 实验报告/)).toBeVisible({ timeout: 30_000 });
-      await page.screenshot({ path: 'test-results/auto-timeline-done.png' });
+      await expect(page.getByTestId('plan-card')).toHaveCount(0);
+      await expect(page.getByTestId('timeline')).toBeVisible();
+
+      await approveTask;
     },
   );
 });

@@ -3,9 +3,9 @@ import { HermesConfirmBar, type HermesConfirmChoice } from './HermesConfirmBar';
 import { HermesToolRow, TOOL_PRE_CLASS } from './HermesToolRow';
 
 /**
- * ActionCard — 危险动作确认（Hermes 工具行结构，2026-08-26 用户"抄 Hermes"）。
- * 工具行：标题 + spinner + 行下审批条（Hermes 无独立危险卡——审批是工具行的
- * chrome）。确认/拒绝后审批条消失（工具行接管状态）。
+ * ActionCard — final confirmation for actions with external or destructive
+ * effects. The approval is intentionally explicit and cannot be silently
+ * converted into a session-wide allow rule.
  */
 interface ActionCardProps {
   entry: {
@@ -26,16 +26,17 @@ function formatSize(bytes?: number): string {
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }
 
-const ACTION_META: Record<string, { icon: string; title: string }> = {
-  upload: { icon: '☁', title: '上传' },
-  payment: { icon: '💳', title: '支付' },
-  external_send: { icon: '💬', title: '对外发送' },
+const ACTION_META: Record<string, { icon: string; title: string; tone: 'normal' | 'danger' }> = {
+  upload: { icon: '☁', title: '上传', tone: 'normal' },
+  payment: { icon: '💳', title: '支付', tone: 'danger' },
+  external: { icon: '↗', title: '对外发送', tone: 'danger' },
+  external_send: { icon: '↗', title: '对外发送', tone: 'danger' },
+  delete: { icon: '⌫', title: '删除', tone: 'danger' },
 };
 
 export function ActionCard({ entry, onResolve }: ActionCardProps) {
   const [submitting, setSubmitting] = useState<string | null>(null);
-  const highRisk = entry.action === 'payment';
-  const meta = ACTION_META[entry.action] ?? { icon: '⚠', title: '执行' };
+  const meta = ACTION_META[entry.action] ?? { icon: '⚠', title: '高风险操作', tone: 'danger' as const };
 
   const handleResolve = (choice: HermesConfirmChoice, rememberMode?: 'session' | 'always' | null) => {
     if (submitting) return;
@@ -46,8 +47,8 @@ export function ActionCard({ entry, onResolve }: ActionCardProps) {
     else onResolve(choice, rememberMode ?? null);
   };
 
-  // 危险色左条（Hermes 无此概念但保留安全语义——细条不是卡）
-  const dangerAccent = highRisk ? '#c0392b' : 'rgba(0,0,0,.12)';
+  const dangerAccent = meta.tone === 'danger' ? '#c0392b' : 'rgba(0,0,0,.12)';
+  const target = entry.target.length > 120 ? `${entry.target.slice(0, 117)}…` : entry.target;
 
   return (
     <div
@@ -57,13 +58,17 @@ export function ActionCard({ entry, onResolve }: ActionCardProps) {
     >
       <HermesToolRow
         title={
-          <span style={{ color: highRisk ? '#c0392b' : '#333' }}>
-            {meta.icon} {meta.title}：{entry.target}
+          <span
+            className="min-w-0 truncate"
+            title={entry.target}
+            style={{ color: meta.tone === 'danger' ? '#c0392b' : '#333' }}
+          >
+            {meta.icon} {meta.title}：{target}
           </span>
         }
         status="pending"
         meta={
-          <span className="break-all">
+          <span className="shrink-0 break-all">
             {entry.fileName ? `${entry.fileName}${formatSize(entry.sizeBytes) ? ` · ${formatSize(entry.sizeBytes)}` : ''}` : formatSize(entry.sizeBytes) || ''}
             {entry.sha256 ? ` · ${entry.sha256.slice(0, 12)}…` : ''}
           </span>
@@ -71,13 +76,23 @@ export function ActionCard({ entry, onResolve }: ActionCardProps) {
         approval={
           <div className="pl-5 pt-1">
             <HermesConfirmBar
-              tone={highRisk ? 'danger' : 'accent'}
-              runLabel={`确认${entry.action === 'upload' ? '上传' : entry.action === 'payment' ? '支付' : '执行'}`}
+              tone={meta.tone === 'danger' ? 'danger' : 'accent'}
+              runLabel={
+                entry.action === 'upload'
+                  ? '确认上传'
+                  : entry.action === 'payment'
+                    ? '确认支付'
+                    : entry.action === 'delete' || entry.action === 'external_send' || entry.action === 'external'
+                      ? `确认${meta.title}`
+                      : '确认执行'
+              }
+              allowSession={false}
+              allowAlways={false}
               onResolve={handleResolve}
               description={entry.description || `${meta.title}：${entry.target}`}
               expandableText={
-                entry.sha256
-                  ? `目标：${entry.target}\n文件：${entry.fileName ?? ''}${formatSize(entry.sizeBytes) ? ` · ${formatSize(entry.sizeBytes)}` : ''}\n指纹：${entry.sha256}`
+                entry.sha256 || entry.fileName || entry.sizeBytes
+                  ? `目标：${entry.target}\n文件：${entry.fileName ?? ''}${formatSize(entry.sizeBytes) ? ` · ${formatSize(entry.sizeBytes)}` : ''}${entry.sha256 ? `\n指纹：${entry.sha256}` : ''}`
                   : undefined
               }
               expandLabel="详情"

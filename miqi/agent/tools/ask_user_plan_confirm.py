@@ -1,19 +1,4 @@
-"""ask_user_plan_confirm — 任务计划确认工具（#646-v2，GPT 评审拍板）。
-
-与 ask_user_confirm_card 的分工：
-- ask_user_confirm_card   → 危险动作最后确认（上传/支付/删除/外发）
-- ask_user_plan_confirm   → **任务开始前一次**的计划确认（Plan Card）
-
-Plan Card 触发（Agent 判断，非工具级）：
-- 多工具调用 / Skill 执行 / 外部副作用组合 / 预计超过 30 秒
-
-payload（schema）：
-    title       任务标题（用户可理解，非工具名）
-    goal        目标描述
-    steps       [{name, tools[]}] 执行计划步骤
-    permissions [network_read | workspace_write | external_upload | exec]
-    timeout_seconds（可选）
-"""
+"""ask_user_plan_confirm — editable task-plan collaboration tool (#646-v2)."""
 
 from __future__ import annotations
 
@@ -25,26 +10,21 @@ from miqi.agent.tools.base import Tool
 DEFAULT_TIMEOUT_SECONDS = 180
 
 ASK_PLAN_CONFIRM_INSTRUCTION = (
-    "执行**多步骤任务**前（预计多个工具调用、执行 Skill、涉及外部副作用、"
-    "或超过 30 秒），必须先调用 ask_user_plan_confirm 工具展示任务计划卡，"
-    "等待用户确认后再开始执行。计划卡展示：任务标题、目标、执行步骤、所需权限。\n"
+    "开始明显的多步骤任务前，可以先调用 ask_user_plan_confirm 展示工作计划，让用户参与规划；"
+    "单个简单工具调用不要为了审批而弹计划卡。\n"
     "规则：\n"
-    "1. 单个工具调用**不要**调用本工具（直接执行）；\n"
-    "2. 上传/支付/删除等危险动作执行前系统会单独弹确认卡，无需在本计划中重复确认；\n"
-    "3. 用户拒绝计划（status=cancelled）时停止任务并说明；\n"
-    "4. **choice_id=modify 时重新规划**：用户要求修改计划——根据用户的修改意见"
-    "调整步骤（可以更换/新增工具，包括调用 Skill），然后**再次调用本工具**展示新计划，"
-    "循环直到用户确认或明确取消。"
+    "1. 计划用于表达 Agent 准备怎么完成目标，不等同于逐工具权限审批；\n"
+    "2. 上传/支付/删除/对外发送等危险动作执行前，系统单独处理最终安全确认，计划里不要重复确认；\n"
+    "3. 用户确认后开始执行；用户取消后停止；\n"
+    "4. 用户选择 choice_id=modify 时，必须读取 choice_label 中的修改意见，"
+    "按这些意见重新规划，并再次调用本工具展示新计划；不要执行旧方案。"
 )
 
 
 class AskUserPlanConfirmTool(Tool):
-    """Tool for the model to present a task plan and await user approval."""
+    """Present a canonical, editable task plan and await a user decision."""
 
-    def __init__(
-        self,
-        resolver: Callable[[dict[str, Any]], Awaitable[dict[str, Any]]] | None = None,
-    ):
+    def __init__(self, resolver: Callable[[dict[str, Any]], Awaitable[dict[str, Any]]] | None = None):
         self._resolver = resolver
 
     @property
@@ -53,50 +33,36 @@ class AskUserPlanConfirmTool(Tool):
 
     @property
     def description(self) -> str:
-        return (
-            "在开始多步骤任务前展示任务计划卡（标题/目标/步骤/所需权限），"
-            "等待用户确认。用户确认后开始执行；拒绝则停止。"
-        )
+        return "在多步骤任务的规划节点展示工作计划。用户可以按当前方案执行、调整方案后重新规划，或取消。"
 
     @property
     def parameters(self) -> dict[str, Any]:
         return {
             "type": "object",
             "properties": {
-                "title": {
-                    "type": "string",
-                    "description": "任务标题（用户可理解的描述，非工具名）",
-                },
-                "goal": {
-                    "type": "string",
-                    "description": "目标描述：本次任务要完成什么",
-                },
+                "title": {"type": "string", "description": "任务标题（用户可理解的描述，非工具名）"},
+                "goal": {"type": "string", "description": "本次任务要完成什么"},
                 "steps": {
                     "type": "array",
-                    "description": "执行计划步骤（3-8 步）",
+                    "description": "执行计划步骤（建议 3-8 步）",
                     "items": {
                         "type": "object",
                         "properties": {
+                            "id": {"type": "string", "description": "稳定步骤 ID；缺失时由客户端规范化生成"},
                             "name": {"type": "string", "description": "步骤名（用户可理解）"},
-                            "tools": {
-                                "type": "array",
-                                "items": {"type": "string"},
-                                "description": "该步骤预计使用的工具",
-                            },
+                            "title": {"type": "string", "description": "步骤名的标准 wire 字段；与 name 二选一"},
+                            "tools": {"type": "array", "items": {"type": "string"}},
                         },
-                        "required": ["name"],
+                        "anyOf": [{"required": ["name"]}, {"required": ["title"]}],
                     },
                 },
                 "permissions": {
                     "type": "array",
-                    "description": "所需权限清单：network_read / workspace_write / external_upload / exec",
                     "items": {"type": "string"},
+                    "description": "计划可能涉及的边界，例如 network_read / workspace_write / external_upload / exec",
                 },
                 "timeout_seconds": {
-                    "type": "integer",
-                    "description": "（可选）等待秒数，默认 180",
-                    "minimum": 5,
-                    "maximum": 600,
+                    "type": "integer", "minimum": 5, "maximum": 600,
                     "default": DEFAULT_TIMEOUT_SECONDS,
                 },
             },
@@ -104,15 +70,24 @@ class AskUserPlanConfirmTool(Tool):
         }
 
     def normalize_args(self, args: dict[str, Any]) -> dict[str, Any]:
-        steps = []
-        for i, s in enumerate(args.get("steps") or []):
-            if not isinstance(s, dict):
+        raw_steps = args.get("steps") or []
+        steps: list[dict[str, Any]] = []
+        for index, step in enumerate(raw_steps, start=1):
+            if not isinstance(step, dict):
                 continue
+            title = str(step.get("title") or step.get("name") or "").strip()
+            if not title:
+                continue
+            step_id = str(step.get("id") or f"step_{index}").strip() or f"step_{index}"
             steps.append({
-                "name": str(s.get("name", f"步骤 {i + 1}")),
-                "tools": [str(t) for t in (s.get("tools") or []) if isinstance(t, str)],
+                "id": step_id,
+                "title": title,
+                "tools": [str(t) for t in (step.get("tools") or []) if isinstance(t, str)],
             })
-        perms = [str(p) for p in (args.get("permissions") or []) if isinstance(p, str)]
+        if not steps:
+            raise ValueError("计划至少需要一个有效步骤")
+
+        permissions = [str(p) for p in (args.get("permissions") or []) if isinstance(p, str)]
         try:
             timeout_raw = int(args.get("timeout_seconds", DEFAULT_TIMEOUT_SECONDS))
         except (TypeError, ValueError):
@@ -121,7 +96,7 @@ class AskUserPlanConfirmTool(Tool):
             "title": str(args.get("title", "任务计划")),
             "goal": str(args.get("goal", "")),
             "steps": steps,
-            "permissions": perms,
+            "permissions": permissions,
             "timeout_seconds": max(5, min(600, timeout_raw)),
         }
 
@@ -129,7 +104,9 @@ class AskUserPlanConfirmTool(Tool):
     def build_result(gate_result: dict[str, Any]) -> str:
         status = gate_result.get("status", "cancelled")
         answers = gate_result.get("answers") or {}
-        choice_id = answers.get("choice_id") or "cancel"
+        choice_id = str(answers.get("choice_id") or "cancel")
+        choice_label = str(answers.get("choice_label") or "")
+
         if status == "submitted" and choice_id == "confirm":
             return json.dumps({
                 "status": "confirmed",
@@ -137,14 +114,24 @@ class AskUserPlanConfirmTool(Tool):
                 "choice_id": "confirm",
                 "remembered": gate_result.get("remembered", False),
             }, ensure_ascii=False)
-        if status == "submitted" and choice_id == "modify":
-            # 用户要求修改计划 → 模型重新规划并再次调用本工具（新计划卡）
+
+        if status == "submitted" and choice_id in {"modify", "adjust"}:
+            if not choice_label.strip():
+                return json.dumps({
+                    "status": "modify_requested",
+                    "plan_confirmed": False,
+                    "choice_id": "modify",
+                    "adjustment": "",
+                    "reason": "用户选择调整方案，但没有提供调整意见；请询问用户希望修改哪些内容。",
+                }, ensure_ascii=False)
             return json.dumps({
                 "status": "modify_requested",
                 "plan_confirmed": False,
                 "choice_id": "modify",
-                "reason": "用户要求修改计划，请重新规划后再次调用 ask_user_plan_confirm",
+                "adjustment": choice_label,
+                "reason": "用户要求调整计划。请结合 adjustment 重新规划后再次调用 ask_user_plan_confirm。",
             }, ensure_ascii=False)
+
         return json.dumps({
             "status": "cancelled",
             "plan_confirmed": False,
@@ -153,14 +140,11 @@ class AskUserPlanConfirmTool(Tool):
         }, ensure_ascii=False)
 
     async def execute(self, **kwargs: Any) -> str:
-        if self._resolver is not None:
-            try:
-                payload = self.normalize_args(kwargs)
-                gate_result = await self._resolver(payload)
-                return self.build_result(gate_result)
-            except Exception as exc:  # noqa: BLE001
-                return f"Error: ask_user_plan_confirm failed: {exc}"
-        return (
-            "Error: ask_user_plan_confirm 需要桌面端用户输入通道，当前环境未接线。"
-            "请先向用户展示计划并等待聊天内确认。"
-        )
+        if self._resolver is None:
+            return "Error: ask_user_plan_confirm 需要桌面端用户输入通道，当前环境未接线。请先向用户展示计划并等待聊天内确认。"
+        try:
+            payload = self.normalize_args(kwargs)
+            gate_result = await self._resolver(payload)
+            return self.build_result(gate_result)
+        except Exception as exc:  # noqa: BLE001
+            return f"Error: ask_user_plan_confirm failed: {exc}"

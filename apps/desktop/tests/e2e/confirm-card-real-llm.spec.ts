@@ -62,23 +62,23 @@ test.describe('Confirm Card (real LLM)', () => {
         'no AI reply on every attempt (provider unavailable or too slow) — no confirm card to verify'
       );
 
-      // 真实模型往返（本地 deepseek / CI siliconflow）——给足超时
-      await expect(cardArea.getByText('确认执行方案？')).toBeVisible({ timeout: 120_000 });
-      await expect(page.getByTestId('confirm-run')).toBeVisible();
+      const confirmCard = page.getByTestId('confirm-card').first();
+      await expect(confirmCard.getByText('确认执行方案？', { exact: true })).toBeVisible({
+        timeout: 120_000,
+      });
+      await expect(confirmCard.getByTestId('confirm-run')).toBeVisible();
 
       await page.screenshot({
         path: `test-results/${test.info().title.replace(/\s+/g, '-')}-real-card.png`,
       });
 
       // 点击确认 → tool result 回传模型 → 模型继续完成回合
-      await page.getByTestId('confirm-run').click();
-      // 2026-08-28 Hermes 式：审批条消失，回执留原位（已确认）
-      await expect(page.getByText('已确认执行方案')).toBeVisible({
+      await confirmCard.getByTestId('confirm-run').click();
+      await expect(page.getByText('已确认执行方案', { exact: true })).toBeVisible({
         timeout: 30_000,
       });
 
       await waitForResponseComplete(page, LLM_TIMEOUT);
-      // 回合正常收尾：至少有一条 assistant 回复（内容由真实模型生成，不断言文案）
       const assistantBubbles = page.getByTestId('chat-message-assistant');
       await expect(assistantBubbles.first()).toBeVisible({ timeout: 30_000 });
 
