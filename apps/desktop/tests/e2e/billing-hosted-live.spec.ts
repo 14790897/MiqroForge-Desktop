@@ -5,10 +5,10 @@
  *   真实 LLM 在**自然提示词**下自主发现并调用 slurm MCP 提交作业 → 确认卡
  *   确认 → 作业提交并执行。
  *
- * 断言「模型能自主发现 mcp_miqroforge-slurm_* 工具并提交作业」（真实用户路径），
- * **不**断言扣分：计费当前仅在观测到 state=RUNNING 时触发，自然提示词下模型
- * 常提交快作业（PENDING→COMPLETED，从未观测到 RUNNING）→ 不扣分（已知计费漏洞，
- * 见 issue）。故本 spec 只断言 MCP 工具被发现并成功提交。
+ * 断言「模型能自主发现 mcp_miqroforge-slurm_* 工具并提交作业」+「出现扣费提示」。
+ * 计费在作业进入可扣费状态（RUNNING 或已执行终态 COMPLETED/FAILED/TIMEOUT）时触发——
+ * 快作业从 PENDING 直接到 COMPLETED 也能扣分（2026-09-11 修复：原先只认 RUNNING，
+ * 快作业漏扣）。
  *
  * 与 billing-live.spec.ts 的区别：后者走自部署本地回环服务器（127.0.0.1）
  * + 显式 Bearer header；本 spec 走 #1029 开启的内置托管网关（登录态注入
@@ -121,24 +121,34 @@ describeFn('托管 slurm MCP 网关 live E2E（opt-in）', () => {
       // 3. 自然提示词——不点名工具名，模型需自行发现 slurm MCP 并提交
       await sendMessage(page, '使用slurm提交任意一个任务');
 
-      // 4. 驱动确认卡/审批，直到出现 submit_slurm_job 工具调用记录
-      const submitted = await driveUntilReady(page, async () =>
-        (await page
-          .locator('main')
-          .textContent()
-          .catch(() => ''))!.includes('mcp_miqroforge-slurm_submit_slurm_job')
+      // 4. 驱动确认卡/审批，直到扣费提示出现（作业进入可扣费状态：
+      //    RUNNING 或已执行终态 COMPLETED/FAILED/TIMEOUT）
+      const charged = await driveUntilReady(
+        page,
+        async () =>
+          await page
+            .getByText(/已扣 10 积分/)
+            .first()
+            .isVisible()
+            .catch(() => false)
       );
-      expect(submitted, '模型应自主发现并调用 mcp_miqroforge-slurm_submit_slurm_job').toBe(true);
+      expect(charged, '应出现「已扣 10 积分」扣费提示').toBe(true);
 
-      // 5. 无内容安全拦截 / 错误
+      // 5. 模型自主发现并调用了 slurm MCP 提交作业
       const text =
         (await page
           .locator('main')
           .textContent()
           .catch(() => '')) ?? '';
+      expect(text).toContain('mcp_miqroforge-slurm_submit_slurm_job');
       expect(text).not.toContain('内容安全策略拦截');
 
-      await page.screenshot({ path: 'test-results/slurm-mcp-hosted-live.png', fullPage: true });
+      await page.screenshot({
+        path: 'test-results/slurm-billing-hosted-charge.png',
+        fullPage: true,
+      });
+      await expect(page.getByText(/已扣 10 积分/).first()).toBeVisible({ timeout: 30_000 });
+      await page.screenshot({ path: 'test-results/slurm-billing-hosted-live.png', fullPage: true });
     }
   );
 });

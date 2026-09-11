@@ -1,7 +1,8 @@
-"""Slurm MCP 计费桥测试（issue #927，RUNNING 触发版）。
+"""Slurm MCP 计费桥测试（issue #927；2026-09-11 起 RUNNING + 已执行终态触发）。
 
-覆盖：服务器名匹配 / RUNNING 检测（JSON 与文本）/ 扣费事件发射
-（submit 与 check_job_status）/ 非 RUNNING 不触发 / 非 slurm 服务器
+覆盖：服务器名匹配 / 状态检测（JSON 与文本）/ 扣费事件发射（submit 与
+check_job_status）/ 可扣费状态（RUNNING、COMPLETED）触发 / 不可扣费状态
+（PENDING、CANCELLED）不触发 / 非 slurm 服务器
 不受影响 / 无 Desktop 通道静默跳过 / 注入参数不传给 MCP 服务端 /
 作业 ID 提取。
 """
@@ -59,6 +60,8 @@ def _make_wrapper(server_name: str, session: _FakeSession, tool_name: str = "sub
 
 RUNNING_JSON = '{"job_id": "187654", "state": "RUNNING", "name": "lammps"}'
 PENDING_JSON = '{"job_id": "187654", "state": "PENDING", "name": "lammps"}'
+COMPLETED_JSON = '{"job_id": "187654", "state": "COMPLETED", "name": "lammps"}'
+CANCELLED_JSON = '{"job_id": "187654", "state": "CANCELLED", "name": "lammps"}'
 
 
 class TestServerMatching:
@@ -178,6 +181,39 @@ class TestMCPWrapperBilling:
         async def _emit(payload):
             emitted.append(payload)
             return True  # 模拟桥接：返回送达数（truthy = 已送达）
+
+        set_billing_charge_emitter("desktop:s1", _emit)
+        await wrapper.execute(_session_key="desktop:s1")
+        assert emitted == []
+
+    async def test_completed_emits_charge_event(self):
+        # 快作业常在两次轮询间从 PENDING 直接到 COMPLETED、永不被观测到
+        # RUNNING —— 终态也必须扣费，否则跑完的作业漏扣（2026-09-11）。
+        session = _FakeSession(result_text=COMPLETED_JSON)
+        wrapper = _make_wrapper("slurm", session, tool_name="check_job_status")
+        emitted: list[dict] = []
+
+        async def _emit(payload):
+            emitted.append(payload)
+            return True
+
+        set_billing_charge_emitter("desktop:s1", _emit)
+        await wrapper.execute(
+            _session_key="desktop:s1", _turn_id="t", _tool_call_id="c", job_id="187654"
+        )
+        assert len(emitted) == 1
+        assert emitted[0]["state"] == "COMPLETED"
+        assert emitted[0]["job_id"] == "187654"
+
+    async def test_cancelled_does_not_emit(self):
+        # 排队中被取消的作业未必实际运行 —— 不计费。
+        session = _FakeSession(result_text=CANCELLED_JSON)
+        wrapper = _make_wrapper("slurm", session, tool_name="cancel_slurm_job")
+        emitted: list[dict] = []
+
+        async def _emit(payload):
+            emitted.append(payload)
+            return True
 
         set_billing_charge_emitter("desktop:s1", _emit)
         await wrapper.execute(_session_key="desktop:s1")
