@@ -2,12 +2,10 @@
 
 from __future__ import annotations
 
-from typing import Any
-
+import miqi.runtime.protocol_specs as protocol_specs
 from miqi.runtime.app_server import AppServer, AppServerError, get_bridge_state
 from miqi.runtime.core_request_models import validate_core_params
 from miqi.runtime.model_catalog import ModelCatalog
-import miqi.runtime.protocol_specs as protocol_specs
 
 
 def register_model_app_handlers(server: AppServer) -> None:

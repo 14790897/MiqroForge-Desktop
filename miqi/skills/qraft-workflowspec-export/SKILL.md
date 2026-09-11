@@ -4,17 +4,35 @@ description: >
   Export a WorkflowRun JSON (per workflowspec.schema.json) that organizes the
   scattered outputs of an agent problem-solving session — files, numbers,
   evidence, and conclusions — into a structured, schema-validated run record,
-  then confirm the plan with the user and upload it to the MiQroForge platform via
-  the dataUpload API (#674). Use when a session that invoked other skills has
-  finished and the user wants its products organized, archived, or unified
-  (e.g. "整理这次会话的产物", "把结果归档成 JSON", "export the workflow run",
-  "上传方案到 MiQroForge", "upload the workflow"). Also use when an existing
-  WorkflowRun needs to be updated with additional artifacts or conclusions.
-  Trigger on post-task archiving regardless of which skills produced the
-  outputs.
+  then confirm the plan with the user and upload it to the MiQroForge cloud
+  platform via its dataUpload API (#674). Use when a session that invoked other
+  skills has finished and the user wants its products organized, archived, or
+  unified (e.g. "整理这次会话的产物", "把结果归档成 JSON", "export the workflow run",
+  "上传方案到 MiQroForge", "上传到 MiQroForge 云平台", "把方案上传到平台",
+  "upload the workflow"). Also use when an existing WorkflowRun needs to be
+  updated with additional artifacts or conclusions. Trigger on post-task
+  archiving regardless of which skills produced the outputs. IMPORTANT: the
+  MiQroForge platform is an EXTERNAL cloud website, not yourself — "upload to
+  MiQroForge" means uploading via the dataUpload API (scripts/upload_run.py),
+  never sending a message/attachment to the miqroforge channel.
 ---
 
 # qraft-workflowspec-export
+
+## ⚠️ 上传红线（必读，先于一切步骤）
+
+**MiQroForge 平台是外部云平台网站，不是你自己。**
+
+- 你（桌面 AI 助手）恰好也叫 MiQroForge，但用户说「上传到 MiQroForge / MiQroForge 云平台」时，
+  指的是外部平台网站（测试环境 `https://test.forge.miqroera.com`），**不是**「给你自己发消息」。
+- **上传的唯一通道是平台的 dataUpload 接口**：`python <skill_dir>/scripts/upload_run.py <json> --json`（Step 8）。
+  只有该脚本返回 `ok:true` 才算「已上传到平台」。
+- **严禁用 `message` 工具冒充上传**：`message(channel="miqroforge"/"desktop", media=[...])` 只是把文件作为
+  聊天附件发给当前会话（等于发给自己）。文件不会进入平台，平台上看不到任何东西；
+  「Message sent to ...」返回 ≠ 上传成功，二者没有任何等价性。
+- 平台只接受 **JSON 文件**（`document_kind` = `workflow_definition` / `workflow_run`，≤5MB）。
+  Word/PDF 等附件不能直接上传——把方案内容组织成 workflow_definition JSON 后走 dataUpload。
+  如需把 Word 文档交给用户，可另外用 `message` 发给用户本地留档；但「上传到平台」这一步必须走 dataUpload。
 
 把一次 agent 问题解决会话的产物整理为 **WorkflowDefinition（上传目标）** 或 **WorkflowRun（归档记录）**：按 `references/workflowspec.schema.json` 定义的结构构建 JSON，完成 schema + 语义校验后，渲染方案视图经用户确认，上传到 MiQroForge 平台（dataUpload 接口）。上传目标默认是 `workflow_definition`（官方 OAuth2 文档 8.4 节），仅当用户明确要求归档运行记录时才导出 `workflow_run`。
 
@@ -226,7 +244,13 @@ python <skill_dir>/scripts/validate_run.py <落盘文件> --schema <权威版或
 
 ### Step 8: 凭据检查 + 上传
 
+自检：上传只能通过 `upload_run.py`（dataUpload）完成——`message` 工具发附件只是聊天附件，不是上传，不得替代本步骤。
+
 ```bash
+# 0) 依赖自检：两个脚本顶层 import httpx，沙箱内可能未安装
+#    （pip 安装是临时的，沙箱销毁后不保留，每次新沙箱都要重装）
+python -c "import httpx" 2>/dev/null || pip install httpx
+
 # 1) 检查登录态（只输出 {ok, source, expiresAt}，不含 token —— 防止完整凭据进入
 #    工具输出与日志；不要运行不带 --no-token 的 auth.py token）
 python <skill_dir>/scripts/auth.py token --json --no-token
@@ -244,6 +268,13 @@ python <skill_dir>/scripts/upload_run.py <workflowspec.definition.YYYYMMDD.json>
 - 返回 `SERVER_ERROR` → 平台侧问题（如服务端业务错误/缺表），把响应里的 originalMessage 转给用户并建议联系 MiQroForge 管理员；
 - 网络类错误（`NETWORK_UNREACHABLE`）→ 脚本已自动重试，仍失败则提示稍后重试。
 
+### 沙箱环境注意事项（实测 2026-09）
+
+在沙箱（bwrap/WSL）内运行本技能时有两个已知坑：
+
+- **httpx 依赖缺失**：`auth.py` / `upload_run.py` 顶层 `import httpx`，沙箱 Python 环境未预装，直接跑会 `ModuleNotFoundError`。运行前自检：`python -c "import httpx" 2>/dev/null || pip install httpx`。注意 pip 安装是**临时**的——沙箱销毁后不保留，每次新沙箱都要重装一次（自管登录兜底路径还会用到 `cryptography`，同样按需临时安装）。
+- **token 自动探测路径不可靠**：自动探测基于 cwd / `MIQI_HOME` / `miqi.paths` 三个候选（沙箱内 `import miqi` 失败即跳过），沙箱内三者都定位不到桌面端实际写入位置，会误报 `NOT_LOGGED_IN`。沙箱内**显式传** `--token-file /home/miqi/workspace/.qraft/token.json`（`auth.py` 与 `upload_run.py` 都要传；或先 `export QRAFT_TOKEN_FILE=/home/miqi/workspace/.qraft/token.json`）。
+
 ### Step 9: 结果展示与下一步提示
 
 - 成功：展示脱敏后的上传响应原文（实测 body 为纯文本 `ok`），并提示「上传成功，可在 MiQroForge 平台查看方案」；
@@ -252,7 +283,7 @@ python <skill_dir>/scripts/upload_run.py <workflowspec.definition.YYYYMMDD.json>
 
 ## 凭据管理约定（#674 功能描述 3）
 
-- **主路径**：读取 MiQroForge Desktop 登录态生成的 token 文件 `<workspace>/.qraft/token.json`（沙箱内 `/home/miqi/workspace/.qraft/token.json`），存在且未临期（`expiresAt - now > 5min`）直接使用——用户在设置 → 平台账号 登录后无需任何额外配置；
+- **主路径**：读取 MiQroForge Desktop 登录态生成的 token 文件 `<workspace>/.qraft/token.json`（沙箱内 `/home/miqi/workspace/.qraft/token.json`），存在且未临期（`expiresAt - now > 5min`）直接使用——用户在设置 → 平台账号 登录后无需任何额外配置（沙箱内自动探测不可靠，需显式 `--token-file`，见上文「沙箱环境注意事项」）；
 - **兜底**：环境变量 `QRAFT_ACCESS_TOKEN`（直接可用）；`QRAFT_PHONE` + `QRAFT_PASSWORD`（走自管 RSA 登录，测试阶段；client_secret 有硬编码默认值，可用 `QRAFT_CLIENT_SECRET` 覆盖，转正式接入前移除默认值）；
 - **安全**：SKILL.md 与脚本不硬编码任何真实凭据；token/密码/手机号在界面与日志中一律脱敏；
 - 读取策略与安全权衡详见 `docs/frontend/qraft-oauth2-login.md` 第 6 节。

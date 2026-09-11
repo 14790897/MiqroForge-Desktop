@@ -7,12 +7,13 @@ import pytest
 
 @pytest.mark.asyncio
 async def test_stored_inspector_builds_thread_document(tmp_path):
+    import time
+
     from miqi.runtime.history_runtime import HistoryItem
     from miqi.runtime.ledger_runtime import LedgerRuntime
     from miqi.runtime.replay_inspector import ReplayInspector
     from miqi.runtime.stored_runtime import StoredRuntimeReader
     from miqi.runtime.thread_runtime import ThreadRuntime
-    import time
 
     db = tmp_path / ".miqi-runtime" / "runtime.db"
     threads = ThreadRuntime(db, session_id="client-a:default")
@@ -81,6 +82,7 @@ async def test_integrity_detects_history_ledger_provider_message_mismatch(tmp_pa
 @pytest.mark.asyncio
 async def test_integrity_detects_duplicate_or_non_monotonic_seq(tmp_path):
     import aiosqlite
+
     from miqi.runtime.replay_inspector import ReplayInspector
     from miqi.runtime.stored_runtime import StoredRuntimeReader
 

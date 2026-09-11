@@ -23,6 +23,20 @@ permissions:
   contents: read
 
 jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install uv
+        run: python -m pip install uv
+      - name: Install dependencies
+        run: uv sync --extra dev
+      - name: Run ruff lint
+        run: uv run ruff check .
+
   test:
     strategy:
       fail-fast: false
@@ -112,7 +126,9 @@ jobs:
       group: wsl-e2e-${{ github.ref }}
       cancel-in-progress: true
     runs-on: windows-latest
-    timeout-minutes: 30
+    # 冷 runner 预算：one-click-install(15) + WSL 回退安装 + 清理 + 沙箱 E2E(20)
+    # ——30 分钟连续多次被砍（#891/#875 CI 实测），放宽到 45
+    timeout-minutes: 45
     defaults:
       run:
         working-directory: apps/desktop
@@ -121,7 +137,7 @@ jobs:
         with:
           persist-credentials: false
 
-      # ── Build environment (before WSL — MiqroForge will install it) ────
+      # ── Build environment (before WSL — MiQroForge will install it) ────
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -178,18 +194,24 @@ jobs:
           }
           CONFEOF
 
-      # ── E2E: MiqroForge auto-installs WSL via installAndProvision ───────
-      - name: Run WSL one-click-install E2E (MiqroForge auto-installs WSL)
+      # ── E2E: MiQroForge auto-installs WSL via installAndProvision ───────
+      - name: Run WSL one-click-install E2E (MiQroForge auto-installs WSL)
         if: steps.build.outcome == 'success'
         run: |
           npx playwright test --config=playwright.config.ts --project=electron wsl-one-click-install.spec.ts --workers=1
         env:
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
           DEEPSEEK_API_BASE: ${{ secrets.DEEPSEEK_API_BASE }}
-        timeout-minutes: 10
+        # 冷 runner 上 MiQroForge 自动装 WSL 依赖（apt 等）可能超过 10 分钟
+        # （#891 CI 实测：连续四次卡 10 分钟上限/超时被砍）——放宽到 15 分钟
+        timeout-minutes: 15
 
       # ── Fallback: ensure WSL + sandbox distro ready ──────────────
+      # if: always()：one-click-install 步骤失败（冷 runner 超时）不能跳过
+      # WSL 准备——否则沙箱 E2E 在无 WSL 状态下硬跑（#891 CI 实测修正，
+      # 与 #875 4b4672b 同一修复）
       - name: Install WSL Ubuntu distro (fallback)
+        if: always()
         shell: pwsh
         run: |
           Write-Host "Installing WSL Ubuntu..."
@@ -201,6 +223,7 @@ jobs:
           wsl -l -v
 
       - name: Clean sandbox state (force auto-export)
+        if: always()
         shell: pwsh
         run: |
           Write-Host "Removing bubblewrap from Ubuntu..."

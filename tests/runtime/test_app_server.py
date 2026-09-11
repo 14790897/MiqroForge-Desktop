@@ -4,7 +4,6 @@ import asyncio
 
 import pytest
 
-
 # ── ClientSessionRegistry ─────────────────────────────────────────────────
 
 
@@ -335,8 +334,7 @@ async def test_app_server_handler_error_is_caught_and_sanitized(fake_registry_wi
 
 def test_registry_missing_client_id_raises_error():
     """Phase 27.5: missing client_id raises AppServerError."""
-    from miqi.runtime.app_server import AppServerError
-    from miqi.runtime.app_server import ClientSessionRegistry
+    from miqi.runtime.app_server import AppServerError, ClientSessionRegistry
 
     registry = ClientSessionRegistry()
     with pytest.raises(AppServerError, match="client_id is required"):
@@ -356,7 +354,6 @@ def test_registry_explicit_client_id_accepted():
 
 @pytest.mark.asyncio
 async def test_app_server_cancels_owned_background_tasks_on_stop():
-    import asyncio
 
     from miqi.runtime.app_server import AppServer, ClientSessionRegistry
 

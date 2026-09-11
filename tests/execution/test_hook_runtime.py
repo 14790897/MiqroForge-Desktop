@@ -3,10 +3,11 @@
 import asyncio
 
 import pytest
+
 from miqi.execution.hook_runtime import (
-    HookRuntime,
-    HookRegistration,
     HookPoint,
+    HookRegistration,
+    HookRuntime,
 )
 
 
@@ -211,7 +212,7 @@ def test_hook_points_include_codex_runtime_lifecycle():
 
 def test_hook_runtime_accepts_new_hook_points():
     """HookRuntime._hooks dict has entries for all new HookPoint values."""
-    from miqi.execution.hook_runtime import HookRuntime, HookPoint
+    from miqi.execution.hook_runtime import HookPoint, HookRuntime
 
     runtime = HookRuntime()
     for point in HookPoint:

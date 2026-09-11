@@ -8,7 +8,6 @@ from miqi.protocol.commands import UserMessage
 from miqi.runtime.services import RuntimeServices
 from miqi.runtime.session import RuntimeSession
 
-
 # ── Task 11.1: RuntimeServices ──────────────────────────────────────────
 
 def test_runtime_services_builds_orchestrator(fake_config, fake_provider):
@@ -421,6 +420,7 @@ async def test_runtime_session_start_initializes_history_stores(
 async def test_runtime_session_handles_user_shell_command_during_active_turn(fake_config):
     """RunUserShellCommand arriving during an active turn must not be queued behind it."""
     import asyncio as _asyncio
+
     from miqi.protocol.commands import RunUserShellCommand, UserMessage
     from miqi.providers.base import LLMResponse, LLMStreamEvent
     from miqi.runtime.session import RuntimeSession
@@ -489,6 +489,7 @@ async def test_shell_command_during_active_turn_does_not_block_abort(fake_config
       - no aux tasks leak after stop
     """
     import asyncio as _asyncio
+
     from miqi.protocol.commands import AbortTurn, RunUserShellCommand, UserMessage
     from miqi.providers.base import LLMResponse, LLMStreamEvent
     from miqi.runtime.session import RuntimeSession

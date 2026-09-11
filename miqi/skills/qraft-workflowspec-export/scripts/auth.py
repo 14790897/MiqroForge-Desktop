@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """Qraft OAuth2 凭据解析（#674 功能描述 3）。
 
-优先读取 MiqroForge Desktop 登录态提供的 token 文件（#747 token 通道）：
+优先读取 MiQroForge Desktop 登录态提供的 token 文件（#747 token 通道）：
     <workspace>/.qraft/token.json  →  {"accessToken": ..., "expiresAt": <epoch 毫秒>}
 存在且未临期（expiresAt - now > 5min）直接使用；否则按序降级：
 
 1. QRAFT_ACCESS_TOKEN 环境变量（无有效期，视为可用）；
 2. QRAFT_PHONE + QRAFT_PASSWORD 环境变量 → 自管凭据流程兜底
    （RSA 加密登录 → authorize → doConfirm → 换 token，测试阶段）；
-3. 都没有 → 提示用户到「设置 → Qraft 平台」完成登录（#728 内置登录）。
+3. 都没有 → 提示用户到「设置 → MiQroForge 平台」完成登录（#728 内置登录）。
 
 凭据脱敏：stderr 日志不写入任何凭据（含片段、密码、手机号）。
 注意：stdout（含 --json 的 accessToken 字段）返回完整 token 供脚本组合消费，
@@ -174,7 +174,7 @@ def fetch_public_key(client: httpx.Client, base_url: str) -> str:
         lambda: client.get(f"{origin}/login", timeout=DEFAULT_TIMEOUT_S)
     )
     if login_page.status_code == 403:
-        raise AuthError("IP_NOT_WHITELISTED", "出口 IP 未加白，请联系 Qraft 管理员")
+        raise AuthError("IP_NOT_WHITELISTED", "出口 IP 未加白，请联系 MiQroForge 管理员")
     bundle_urls = re.findall(
         r'<script\b[^>]*\bsrc=["\']([^"\']+)["\'][^>]*>', login_page.text
     )
@@ -193,7 +193,7 @@ def fetch_public_key(client: httpx.Client, base_url: str) -> str:
 
 def rsa_encrypt(password: str, public_key_pem: str) -> str:
     """PKCS#1 v1.5 填充 RSA 加密（与 JSEncrypt 默认一致），结果 Base64。"""
-    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives import serialization
     from cryptography.hazmat.primitives.asymmetric import padding
 
     key = serialization.load_pem_public_key(public_key_pem.encode("utf-8"))
@@ -215,7 +215,7 @@ def platform_login(
         )
     )
     if resp.status_code == 403:
-        raise AuthError("IP_NOT_WHITELISTED", "出口 IP 未加白，请联系 Qraft 管理员")
+        raise AuthError("IP_NOT_WHITELISTED", "出口 IP 未加白，请联系 MiQroForge 管理员")
     cookie = resp.headers.get("set-cookie", "")
     match = re.search(r"Authorization=([^;]+)", cookie)
     if not match:
@@ -358,7 +358,7 @@ def resolve_token(base_url: str, token_file_arg: str | None) -> dict[str, Any]:
 
     raise AuthError(
         "NOT_LOGGED_IN",
-        "未找到可用的 Qraft 登录态：请到 MiqroForge 设置 → Qraft 平台 完成登录"
+        "未找到可用的 MiQroForge 登录态：请到 MiQroForge 设置 → MiQroForge 平台 完成登录"
         "（登录后自动生成 token 文件），或配置 QRAFT_ACCESS_TOKEN / QRAFT_PHONE+QRAFT_PASSWORD 环境变量",
     )
 

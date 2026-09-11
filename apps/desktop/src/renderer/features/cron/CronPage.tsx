@@ -294,7 +294,7 @@ function CreateEditModal({
 
         <div className="flex items-center justify-between px-5 py-3 border-t border-[var(--border-subtle)]">
           <span className="text-xs text-[var(--text-faint)]">
-            {isEdit ? '更新此定时任务' : '任务在 MiqroForge 运行时中执行'}
+            {isEdit ? '更新此定时任务' : '任务在 MiQroForge 运行时中执行'}
           </span>
           <div className="flex items-center gap-2">
             <button

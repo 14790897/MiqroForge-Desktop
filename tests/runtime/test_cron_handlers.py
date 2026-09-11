@@ -9,7 +9,6 @@ import pytest
 
 from miqi.runtime.app_server import ClientSessionRegistry
 
-
 # ── cron.list ────────────────────────────────────────────────────────────────
 
 
@@ -30,8 +29,8 @@ async def test_cron_list_returns_jobs():
 @pytest.mark.asyncio
 async def test_cron_create_requires_name():
     """cron.create should reject empty name."""
-    from miqi.runtime.cron_handlers import cron_create_handler
     from miqi.runtime.app_server import AppServerError
+    from miqi.runtime.cron_handlers import cron_create_handler
 
     registry = ClientSessionRegistry()
     with pytest.raises(AppServerError, match="name is required"):
@@ -41,8 +40,8 @@ async def test_cron_create_requires_name():
 @pytest.mark.asyncio
 async def test_cron_create_invalid_schedule_kind():
     """cron.create should reject invalid schedule kind."""
-    from miqi.runtime.cron_handlers import cron_create_handler
     from miqi.runtime.app_server import AppServerError
+    from miqi.runtime.cron_handlers import cron_create_handler
 
     registry = ClientSessionRegistry()
     with pytest.raises(AppServerError, match="Invalid schedule kind"):
@@ -55,8 +54,8 @@ async def test_cron_create_invalid_schedule_kind():
 @pytest.mark.asyncio
 async def test_cron_create_at_requires_at_ms():
     """cron.create with 'at' schedule kind requires atMs."""
-    from miqi.runtime.cron_handlers import cron_create_handler
     from miqi.runtime.app_server import AppServerError
+    from miqi.runtime.cron_handlers import cron_create_handler
 
     registry = ClientSessionRegistry()
     with pytest.raises(AppServerError, match="atMs is required"):
@@ -72,8 +71,8 @@ async def test_cron_create_at_requires_at_ms():
 @pytest.mark.asyncio
 async def test_cron_update_requires_job_id():
     """cron.update should reject empty jobId."""
-    from miqi.runtime.cron_handlers import cron_update_handler
     from miqi.runtime.app_server import AppServerError
+    from miqi.runtime.cron_handlers import cron_update_handler
 
     registry = ClientSessionRegistry()
     with pytest.raises(AppServerError, match="jobId is required"):
@@ -83,8 +82,8 @@ async def test_cron_update_requires_job_id():
 @pytest.mark.asyncio
 async def test_cron_update_not_found():
     """cron.update should raise for nonexistent job."""
-    from miqi.runtime.cron_handlers import cron_update_handler
     from miqi.runtime.app_server import AppServerError
+    from miqi.runtime.cron_handlers import cron_update_handler
 
     registry = ClientSessionRegistry()
     with pytest.raises(AppServerError, match="Job not found"):
@@ -99,8 +98,8 @@ async def test_cron_update_not_found():
 @pytest.mark.asyncio
 async def test_cron_delete_requires_job_id():
     """cron.delete should reject empty jobId."""
-    from miqi.runtime.cron_handlers import cron_delete_handler
     from miqi.runtime.app_server import AppServerError
+    from miqi.runtime.cron_handlers import cron_delete_handler
 
     registry = ClientSessionRegistry()
     with pytest.raises(AppServerError, match="jobId is required"):
@@ -113,8 +112,8 @@ async def test_cron_delete_requires_job_id():
 @pytest.mark.asyncio
 async def test_cron_toggle_requires_job_id():
     """cron.toggle should reject empty jobId."""
-    from miqi.runtime.cron_handlers import cron_toggle_handler
     from miqi.runtime.app_server import AppServerError
+    from miqi.runtime.cron_handlers import cron_toggle_handler
 
     registry = ClientSessionRegistry()
     with pytest.raises(AppServerError, match="jobId is required"):
@@ -127,8 +126,8 @@ async def test_cron_toggle_requires_job_id():
 @pytest.mark.asyncio
 async def test_cron_run_requires_job_id():
     """cron.run should reject empty jobId."""
-    from miqi.runtime.cron_handlers import cron_run_handler
     from miqi.runtime.app_server import AppServerError
+    from miqi.runtime.cron_handlers import cron_run_handler
 
     registry = ClientSessionRegistry()
     with pytest.raises(AppServerError, match="jobId is required"):

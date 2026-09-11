@@ -11,7 +11,6 @@ from pathlib import Path
 
 import miqi.agent
 
-
 ROOT = Path(__file__).resolve().parents[2]
 MIQI = ROOT / "miqi"
 

@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from miqi.paths import get_miqi_home
 from tests.conftest import (
     _AUTO_BASETEMP_ATTR,
     _is_safe_to_clean,
@@ -13,7 +14,6 @@ from tests.conftest import (
     pytest_configure,
     pytest_unconfigure,
 )
-from miqi.paths import get_miqi_home
 
 
 def test_pytest_basetemp_is_inside_repo(request, tmp_path):

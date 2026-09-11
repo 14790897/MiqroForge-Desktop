@@ -22,7 +22,6 @@ from miqi.providers.base import LLMResponse, LLMStreamEvent
 from miqi.providers.resilience import ErrorKind, ProviderError
 from miqi.runtime.turn_runner import TurnRunner
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -398,15 +397,15 @@ async def test_task_runner_raw_rate_limit_exception_surfaces_kind(error_services
     falls back to the generic one because the raw exception has no clean
     message — that's acceptable; the category + recoverability are what
     matter for this path.)"""
-    from miqi.providers.resilience import ErrorKind  # noqa: F401  (clarity)
     from miqi.protocol.events import ErrorEvent
+    from miqi.providers.resilience import ErrorKind  # noqa: F401  (clarity)
 
-    class _RateLimit(Exception):
+    class _RateLimitError(Exception):
         status_code = 429
 
     emitted, _history, ledger = await _run_turn_expect_error(
         error_services,
-        _RateLimit("rate limited"),
+        _RateLimitError("rate limited"),
     )
 
     err = next(e for e in emitted if isinstance(e, ErrorEvent))
@@ -449,12 +448,12 @@ async def test_task_runner_raw_auth_exception_surfaces_fixed_message(error_servi
     non-leaking message (never the raw exception text)."""
     from miqi.protocol.events import ErrorEvent
 
-    class _Auth(Exception):
+    class _AuthError(Exception):
         status_code = 401
 
     emitted, _history, ledger = await _run_turn_expect_error(
         error_services,
-        _Auth("invalid api key leaked: sk-xxxx"),
+        _AuthError("invalid api key leaked: sk-xxxx"),
     )
 
     err = next(e for e in emitted if isinstance(e, ErrorEvent))
@@ -476,7 +475,7 @@ async def test_task_runner_raw_payment_required_surfaces_billing_message(error_s
     balance."""
     from miqi.protocol.events import ErrorEvent
 
-    class _PaymentRequired(Exception):
+    class _PaymentRequiredError(Exception):
         status_code = 402
 
     # Neutral body (no _PAYMENT_REQUIRED_SIGNALS match) so the
@@ -484,7 +483,7 @@ async def test_task_runner_raw_payment_required_surfaces_billing_message(error_s
     # layer (CodeRabbit #528).
     emitted, _history, ledger = await _run_turn_expect_error(
         error_services,
-        _PaymentRequired("upstream response"),
+        _PaymentRequiredError("upstream response"),
     )
 
     err = next(e for e in emitted if isinstance(e, ErrorEvent))

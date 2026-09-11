@@ -110,7 +110,7 @@ async def test_stderr_streaming_emits_delta_events(require_subprocess, tmp_path)
     emitter = _EventCollector()
     tool = ExecTool(timeout=10, working_dir=str(tmp_path))
 
-    output = await tool.execute(
+    await tool.execute(
         "python -c \"import sys; sys.stderr.write('err-msg'); sys.stderr.flush()\"",
         _event_emitter=emitter,
         _turn_id="t-stream-err",
@@ -515,7 +515,6 @@ async def test_exec_tool_writes_ledger_begin_and_end(require_subprocess, tmp_pat
 @pytest.mark.asyncio
 async def test_exec_tool_writes_output_deltas_to_ledger(require_subprocess, tmp_path):
     """ExecTool must write exec_output_delta for each stdout/stderr chunk."""
-    import asyncio as _asyncio
 
     from miqi.execution.sandbox_policy import SandboxSelection, SandboxType
     from miqi.protocol.permissions import (
@@ -527,7 +526,7 @@ async def test_exec_tool_writes_output_deltas_to_ledger(require_subprocess, tmp_
     emitter = _EventCollector()
 
     tool = ExecTool(timeout=5)
-    result = await tool.execute(
+    await tool.execute(
         "echo line1 && echo line2",
         _event_emitter=emitter,
         _turn_id="turn-delta",
@@ -561,7 +560,7 @@ async def test_exec_tool_launch_failure_recorded_in_ledger(require_subprocess):
 
     tool = ExecTool(timeout=5)
     # Use a command that will fail to launch (invalid shell syntax on Windows)
-    result = await tool.execute(
+    await tool.execute(
         "nonexistent_command_xyz_12345",
         _event_emitter=emitter,
         _turn_id="turn-fail",
@@ -1380,8 +1379,8 @@ async def test_exec_started_ledger_includes_user_shell_source(require_subprocess
 def test_turn_event_adapter_drops_empty_delta():
     """CodexTurnEventAdapter must not emit outputDelta notifications
     when ExecCommandOutputDeltaEvent.delta is empty."""
-    from miqi.runtime.turn_event_adapter import CodexTurnEventAdapter
     from miqi.protocol.events import ExecCommandOutputDeltaEvent
+    from miqi.runtime.turn_event_adapter import CodexTurnEventAdapter
 
     adapter = CodexTurnEventAdapter(
         thread_id="thread-1",
@@ -1406,8 +1405,8 @@ def test_turn_event_adapter_drops_empty_delta():
 
 def test_turn_event_adapter_passes_non_empty_delta():
     """CodexTurnEventAdapter must emit outputDelta for non-empty deltas."""
-    from miqi.runtime.turn_event_adapter import CodexTurnEventAdapter
     from miqi.protocol.events import ExecCommandOutputDeltaEvent
+    from miqi.runtime.turn_event_adapter import CodexTurnEventAdapter
 
     adapter = CodexTurnEventAdapter(
         thread_id="thread-1",
@@ -1432,8 +1431,8 @@ def test_turn_event_adapter_passes_non_empty_delta():
 
 def test_turn_event_adapter_allows_stderr_delta():
     """CodexTurnEventAdapter must pass stderr deltas through."""
-    from miqi.runtime.turn_event_adapter import CodexTurnEventAdapter
     from miqi.protocol.events import ExecCommandOutputDeltaEvent
+    from miqi.runtime.turn_event_adapter import CodexTurnEventAdapter
 
     adapter = CodexTurnEventAdapter(
         thread_id="thread-1",

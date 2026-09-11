@@ -381,3 +381,79 @@ class TestSandboxToHostPath:
         sb = _make_wsl_sandbox()
         assert _sandbox_to_host_path("", tmp_path, sb) == ""
         assert _sandbox_to_host_path(None, tmp_path, sb) is None
+
+
+# ── Issue #821: _user_roots injection into WriteFileTool ────────────────
+
+class TestWriteFileUserRootsWSL:
+    """Per-call user-mentioned roots authorize the user's output dirs under
+    the WSL sandbox (issue #821), and are ignored when disabled."""
+
+    def _make_manager(self, ws: Path):
+        from unittest.mock import AsyncMock
+
+        sb = _make_wsl_sandbox()
+        sb.is_running = True
+        sb.workspace = ws
+        sb.run_command = AsyncMock(return_value=(0, "", ""))
+        manager = MagicMock()
+        manager.active_sandbox = sb
+        manager.get_or_create = AsyncMock(return_value=sb)
+        return manager
+
+    @pytest.mark.skipif(not _IS_WINDOWS, reason="WSL containment Windows-only")
+    @pytest.mark.asyncio
+    async def test_user_roots_allow_write_outside_workspace(self, tmp_path):
+        from miqi.agent.tools.filesystem import WriteFileTool
+
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        out = tmp_path / "Desktop_out"
+        out.mkdir()
+        manager = self._make_manager(ws)
+        tool = WriteFileTool(
+            workspace=ws, sandbox_manager=manager, shared_roots=[ws],
+        )
+        target = out / "report.md"
+        result = await tool.execute(
+            str(target), "hello", _session_key="s1", _user_roots=[str(out)],
+        )
+        assert result.startswith("Successfully wrote")
+
+    @pytest.mark.skipif(not _IS_WINDOWS, reason="WSL containment Windows-only")
+    @pytest.mark.asyncio
+    async def test_without_user_roots_write_rejected(self, tmp_path):
+        from miqi.agent.tools.filesystem import WriteFileTool
+
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        out = tmp_path / "Desktop_out"
+        out.mkdir()
+        manager = self._make_manager(ws)
+        tool = WriteFileTool(
+            workspace=ws, sandbox_manager=manager, shared_roots=[ws],
+        )
+        with pytest.raises(PermissionError, match="超出|不在|根目录"):
+            await tool.execute(
+                str(out / "report.md"), "hello", _session_key="s1",
+            )
+
+    @pytest.mark.skipif(not _IS_WINDOWS, reason="WSL containment Windows-only")
+    @pytest.mark.asyncio
+    async def test_disabled_flag_ignores_user_roots(self, tmp_path):
+        from miqi.agent.tools.filesystem import WriteFileTool
+
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        out = tmp_path / "Desktop_out"
+        out.mkdir()
+        manager = self._make_manager(ws)
+        tool = WriteFileTool(
+            workspace=ws, sandbox_manager=manager, shared_roots=[ws],
+            allow_user_roots=False,
+        )
+        with pytest.raises(PermissionError, match="超出|不在|根目录"):
+            await tool.execute(
+                str(out / "report.md"), "hello", _session_key="s1",
+                _user_roots=[str(out)],
+            )

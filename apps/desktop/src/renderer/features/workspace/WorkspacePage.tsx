@@ -447,7 +447,9 @@ export function WorkspacePage() {
       {actionTarget && actionTarget.type === 'rename' ? (
         <InputDialog
           open={!!actionTarget}
-          onOpenChange={(o) => { if (!o) setActionTarget(null); }}
+          onOpenChange={(o) => {
+            if (!o) setActionTarget(null);
+          }}
           title="重命名"
           label="新名称"
           defaultValue={actionTarget.currentName}
@@ -456,7 +458,9 @@ export function WorkspacePage() {
       ) : actionTarget && (actionTarget.type === 'newFile' || actionTarget.type === 'newFolder') ? (
         <InputDialog
           open={!!actionTarget}
-          onOpenChange={(o) => { if (!o) setActionTarget(null); }}
+          onOpenChange={(o) => {
+            if (!o) setActionTarget(null);
+          }}
           title={actionTarget.type === 'newFile' ? '新建文件' : '新建文件夹'}
           label={actionTarget.type === 'newFile' ? '文件名' : '文件夹名'}
           onConfirm={handleCreate}

@@ -1,0 +1,54 @@
+MiQroForge Desktop Privacy Agreement
+
+Version: 1.0
+Effective date: August 28, 2026
+
+Welcome to MiQroForge Desktop ("the Software"). We respect your privacy. This Agreement describes how we handle your information when you use the Software. Please read this Agreement carefully before installing or using the Software. By clicking "I Agree", you confirm that you have read and agreed to all terms of this Agreement.
+
+1. Information We Process
+
+1.1 Account Information
+When you sign in with a MiQroForge platform account, including OAuth-based sign-in, the Software processes your account identifier, sign-in credentials, and tokens for authentication and session maintenance. Sign-in credentials are stored only on your local device.
+
+1.2 Conversation Content
+Your conversations with the AI agents in the Software (including your input, AI replies, and tool-call records) are stored on your local device for session management, history review, and product functionality. Please use reasonable care when conversations contain sensitive information.
+
+1.3 Workspace Files
+To complete the tasks you request, the Software may access, read, modify, or create files in your workspace directory, and may send relevant file content to third-party model service providers to generate responses. File processing is performed on your device or in the environment you configure, and only to the extent necessary to fulfill your request.
+
+1.4 Model Invocation Data
+To provide AI features, the Software sends necessary context (including your input, relevant file content, and system prompts) to the model service provider you configure (e.g., OpenRouter, Anthropic, OpenAI, DeepSeek, etc.). Such data is handled in accordance with the respective provider's own privacy policy. The Software does not separately store this invocation data unless it is part of conversation content.
+
+1.5 Logs
+The Software generates runtime logs (including error messages, operation records, and performance data) for troubleshooting and product improvement. Logs are stored on your local device by default and are not uploaded automatically without your consent. Some logs may contain information related to your operations.
+
+2. Third-Party Data Flows
+
+2.1 MiQroForge Platform: When you sign in with a platform account, the Software communicates with MiQroForge platform servers for authentication, authorization, and account services. The platform's own privacy policy applies to its server-side processing of your data.
+2.2 Model Service Providers: As described in Section 1.4, request data necessary for generating responses is sent to the model service provider you configure.
+2.3 Other Integrations: When you enable integrations such as MCP services, plugins, messaging channels, or web tools, relevant data may be sent to the corresponding third-party services according to your configuration.
+
+3. Purposes of Processing
+
+We process the above information only for the following purposes:
+- Providing and improving the AI assistant features of the Software;
+- Ensuring service security and stability (troubleshooting and abuse prevention);
+- Complying with applicable laws and regulations.
+
+4. Data Retention and Deletion
+
+4.1 Local Data: Conversation content, workspace files, and logs are stored on your local device. You may delete them at any time through the Software's features (deleting conversations, clearing logs) or by manually deleting the Software's local data directories. Deletion is irreversible. Please note that uninstalling the Software does not automatically delete this local data; delete it manually before uninstalling if you wish to remove it completely.
+4.2 Account Data: You may manage and delete your account data through the features provided by the MiQroForge platform.
+4.3 We do not retain your data beyond the purposes described above for an extended period.
+
+5. Data Security
+
+The Software takes reasonable technical and organizational measures to protect your data, including local encrypted storage of sensitive configuration (such as API keys) and log redaction. Please note that no network transmission or local storage can be guaranteed to be absolutely secure.
+
+6. Updates to This Agreement
+
+We may update this Agreement from time to time. When the version of this Agreement is updated, the Software will present it to you again for re-confirmation; your continued use of the Software constitutes acceptance of the updated Agreement. You may review the current version at any time under "Settings → Privacy".
+
+7. Contact Us
+
+If you have any questions about this Agreement or our privacy practices, please contact us through the feedback channels in the Software or our open-source repository (https://github.com/14790897/MiqroForge-Desktop).

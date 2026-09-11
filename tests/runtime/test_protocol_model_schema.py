@@ -90,6 +90,7 @@ def test_command_exec_cwd_is_wire_string_schema():
 
 def test_result_schema_from_model_preserves_wire_names():
     from pydantic import BaseModel, Field
+
     from miqi.runtime.protocol_model_schema import result_schema_from_model
 
     class ExampleResult(BaseModel):

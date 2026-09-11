@@ -5,8 +5,8 @@ from __future__ import annotations
 import uuid
 from typing import Any
 
-from miqi.protocol.commands import RunUserShellCommand
 import miqi.runtime.protocol_specs as protocol_specs
+from miqi.protocol.commands import RunUserShellCommand
 from miqi.runtime.app_server import AppServer, AppServerError
 from miqi.runtime.turn_app_handlers import drain_turn_events
 

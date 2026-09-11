@@ -20,7 +20,7 @@ export class ErrorBoundary extends Component<Props, State> {
   }
 
   componentDidCatch(error: Error, info: ErrorInfo) {
-    console.error('[MiqroForge] React error caught by boundary:', error, info.componentStack);
+    console.error('[MiQroForge] React error caught by boundary:', error, info.componentStack);
   }
 
   reset = () => {
@@ -42,7 +42,8 @@ export class ErrorBoundary extends Component<Props, State> {
             justifyContent: 'center',
             height: '100vh',
             padding: '24px',
-            fontFamily: 'Inter, "PingFang SC", "Microsoft YaHei", ui-sans-serif, system-ui, sans-serif',
+            fontFamily:
+              'Inter, "PingFang SC", "Microsoft YaHei", ui-sans-serif, system-ui, sans-serif',
             background: 'var(--background)',
             color: 'var(--text)',
           }}
@@ -67,7 +68,7 @@ export class ErrorBoundary extends Component<Props, State> {
                 justifyContent: 'center',
                 margin: '0 auto',
                 fontSize: '20px',
-                color: '#b84a4a',
+                color: 'var(--danger)',
                 fontWeight: 700,
               }}
             >
@@ -81,7 +82,7 @@ export class ErrorBoundary extends Component<Props, State> {
                 style={{
                   margin: 0,
                   fontSize: '13px',
-                  color: '#766b5f',
+                  color: 'var(--text-faint)',
                   lineHeight: 1.5,
                 }}
               >
@@ -119,7 +120,7 @@ export class ErrorBoundary extends Component<Props, State> {
             >
               重试 / Retry
             </button>
-            <p style={{ margin: 0, fontSize: '11px', color: '#9a8e80' }}>
+            <p style={{ margin: 0, fontSize: '11px', color: 'var(--text-faint)' }}>
               按 Ctrl+Shift+I 打开 DevTools 查看完整错误
             </p>
           </div>

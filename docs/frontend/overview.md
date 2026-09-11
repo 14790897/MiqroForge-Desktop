@@ -1,6 +1,6 @@
 # 前端概览
 
-MiqroForge Desktop 前端基于 Electron + React + TypeScript 构建，提供原生桌面级的 AI 助手交互体验。
+MiQroForge Desktop 前端基于 Electron + React + TypeScript 构建，提供原生桌面级的 AI 助手交互体验。
 
 ## 技术栈
 

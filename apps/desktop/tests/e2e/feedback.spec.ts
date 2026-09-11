@@ -18,10 +18,7 @@
 
 import { test, expect } from '@playwright/test';
 import type { ElectronApplication, Page } from '@playwright/test';
-import {
-  launchElectronApp,
-  closeElectronApp,
-} from './helpers/electron-setup';
+import { launchElectronApp, closeElectronApp } from './helpers/electron-setup';
 
 /** Helper: navigate from current page to Settings → 反馈 tab. */
 async function openFeedbackTab(page: Page) {
@@ -105,9 +102,7 @@ test.describe('Feedback Page E2E', () => {
 
     // Fill title and content
     await page.getByPlaceholder('简要描述你的问题或建议').fill('E2E 测试标题');
-    await page
-      .getByPlaceholder('请详细描述你的问题或建议...')
-      .fill('E2E 测试内容 - 验证表单收集');
+    await page.getByPlaceholder('请详细描述你的问题或建议...').fill('E2E 测试内容 - 验证表单收集');
 
     // Submit button should now be enabled
     await expect(submitButton).toBeEnabled();
@@ -115,16 +110,22 @@ test.describe('Feedback Page E2E', () => {
 
   test('Escape key closes the submit modal', async () => {
     await openFeedbackTab(page);
-    const headerBtn = page.locator('div.flex.items-center.gap-4').getByRole('button', { name: '提交反馈', exact: true });
+    const headerBtn = page
+      .locator('div.flex.items-center.gap-4')
+      .getByRole('button', { name: '提交反馈', exact: true });
     await headerBtn.click();
     await expect(page.getByRole('heading', { name: '提交反馈' })).toBeVisible();
     await page.keyboard.press('Escape');
-    await expect(page.getByRole('heading', { name: '提交反馈' })).not.toBeVisible({ timeout: 2_000 });
+    await expect(page.getByRole('heading', { name: '提交反馈' })).not.toBeVisible({
+      timeout: 2_000,
+    });
   });
 
   test('unsaved content guard: dismiss keeps modal open, accept closes', async () => {
     await openFeedbackTab(page);
-    const headerBtn = page.locator('div.flex.items-center.gap-4').getByRole('button', { name: '提交反馈', exact: true });
+    const headerBtn = page
+      .locator('div.flex.items-center.gap-4')
+      .getByRole('button', { name: '提交反馈', exact: true });
     await headerBtn.click();
     const modalHeading = page.getByRole('heading', { name: '提交反馈' });
     await expect(modalHeading).toBeVisible();
@@ -133,8 +134,12 @@ test.describe('Feedback Page E2E', () => {
     // Esc: dismiss keeps open, accept closes
     let dismissCalled = false;
     const onDialog = (dialog: any) => {
-      if (!dismissCalled) { dismissCalled = true; dialog.dismiss(); }
-      else { dialog.accept(); }
+      if (!dismissCalled) {
+        dismissCalled = true;
+        dialog.dismiss();
+      } else {
+        dialog.accept();
+      }
     };
     page.on('dialog', onDialog);
     try {
@@ -158,8 +163,12 @@ test.describe('Feedback Page E2E', () => {
 
     let overlayDismissed = false;
     const onDialog2 = (dialog: any) => {
-      if (!overlayDismissed) { overlayDismissed = true; dialog.dismiss(); }
-      else { dialog.accept(); }
+      if (!overlayDismissed) {
+        overlayDismissed = true;
+        dialog.dismiss();
+      } else {
+        dialog.accept();
+      }
     };
     page.on('dialog', onDialog2);
     try {
@@ -180,14 +189,18 @@ test.describe('Feedback Page E2E', () => {
 
   test('empty form closes on Escape and overlay click without confirm', async () => {
     await openFeedbackTab(page);
-    const headerBtn = page.locator('div.flex.items-center.gap-4').getByRole('button', { name: '提交反馈', exact: true });
+    const headerBtn = page
+      .locator('div.flex.items-center.gap-4')
+      .getByRole('button', { name: '提交反馈', exact: true });
     const modalHeading = page.getByRole('heading', { name: '提交反馈' });
 
     // Escape
     await headerBtn.click();
     await expect(modalHeading).toBeVisible();
     let dialogFired = false;
-    const onDialog = () => { dialogFired = true; };
+    const onDialog = () => {
+      dialogFired = true;
+    };
     page.on('dialog', onDialog);
     try {
       await page.keyboard.press('Escape');
@@ -201,7 +214,9 @@ test.describe('Feedback Page E2E', () => {
     await headerBtn.click();
     await expect(modalHeading).toBeVisible();
     let overlayDialog = false;
-    const onDialog2 = () => { overlayDialog = true; };
+    const onDialog2 = () => {
+      overlayDialog = true;
+    };
     page.on('dialog', onDialog2);
     try {
       await page.mouse.click(10, 10);
@@ -215,22 +230,30 @@ test.describe('Feedback Page E2E', () => {
 
   test('hints are visible in the submit modal', async () => {
     await openFeedbackTab(page);
-    const headerBtn = page.locator('div.flex.items-center.gap-4').getByRole('button', { name: '提交反馈', exact: true });
+    const headerBtn = page
+      .locator('div.flex.items-center.gap-4')
+      .getByRole('button', { name: '提交反馈', exact: true });
     await headerBtn.click();
     await expect(page.getByRole('heading', { name: '提交反馈' })).toBeVisible();
     await expect(page.getByText('日志将在提交时自动附加并发送到飞书')).toBeVisible();
-    await expect(page.getByText('提示：建议先复制已填写的提示词，避免因意外关闭而丢失')).toBeVisible();
+    await expect(
+      page.getByText('提示：建议先复制已填写的提示词，避免因意外关闭而丢失')
+    ).toBeVisible();
   });
 
   test('submit feedback shows validation error when disabled', async () => {
     await openFeedbackTab(page);
-    const headerBtn = page.locator('div.flex.items-center.gap-4').getByRole('button', { name: '提交反馈', exact: true });
+    const headerBtn = page
+      .locator('div.flex.items-center.gap-4')
+      .getByRole('button', { name: '提交反馈', exact: true });
     await headerBtn.click();
 
     await page.getByPlaceholder('简要描述你的问题或建议').fill('E2E test title');
     await page.getByPlaceholder('请详细描述你的问题或建议...').fill('E2E test content');
 
-    const submitButton = page.locator('div.bg-\\[var\\(--surface\\)\\]').getByRole('button', { name: '提交', exact: true });
+    const submitButton = page
+      .locator('div.bg-\\[var\\(--surface\\)\\]')
+      .getByRole('button', { name: '提交', exact: true });
     await submitButton.click();
 
     const errorBox = page.locator('[class*="bg-red-500"]');
@@ -344,12 +367,10 @@ test.describe('Feedback Page E2E', () => {
     // Upload a small PNG via the hidden file input (scoped to the modal)
     const tinyPng = Buffer.from(
       '89504E470D0A1A0A0000000D49484452000000010000000108060000001F15C489' +
-      '0000000D49444154789C636000000000050001A5F645400000000049454E44AE426082',
-      'hex',
+        '0000000D49444154789C636000000000050001A5F645400000000049454E44AE426082',
+      'hex'
     );
-    const fileInput = page
-      .locator('div.bg-\\[var\\(--surface\\)\\]')
-      .locator('input[type="file"]');
+    const fileInput = page.locator('div.bg-\\[var\\(--surface\\)\\]').locator('input[type="file"]');
     await fileInput.setInputFiles({
       name: 'test.png',
       mimeType: 'image/png',

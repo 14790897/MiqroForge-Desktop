@@ -36,10 +36,7 @@ const INPUT = '[data-testid="chat-input-container"] textarea';
  *  onChange per keystroke, so `input` state is committed before Enter fires —
  *  fill() can race streaming re-renders and leave handleSend reading a stale
  *  empty input (the #542 resend path). */
-async function sendPrompt(
-  page: import('@playwright/test').Page,
-  text: string,
-): Promise<void> {
+async function sendPrompt(page: import('@playwright/test').Page, text: string): Promise<void> {
   const inputX = page.locator(INPUT);
   await inputX.click();
   await inputX.fill('');
@@ -97,9 +94,7 @@ test.describe('Issue #542: input usable while AI streams / interrupt-resend', ()
       // phase ends and pendingSendIds is cleared. We must NOT resend earlier —
       // while the send is still pending the #364 double-Enter guard correctly
       // swallows a resend, which is not the scenario under test.
-      const pendingSpinner = page.locator(
-        '[data-testid="chat-message-user"] svg.animate-spin',
-      );
+      const pendingSpinner = page.locator('[data-testid="chat-message-user"] svg.animate-spin');
       await expect(pendingSpinner.last()).toBeHidden({ timeout: 120_000 });
 
       // ── #542 core: the input must be ENABLED while the AI is streaming
@@ -114,9 +109,7 @@ test.describe('Issue #542: input usable while AI streams / interrupt-resend', ()
       //    we fire the correction — the scenario is "reply partially generated,
       //    user interrupts mid-output", not "resend during the pre-stream
       //    pending phase". ──
-      const firstAssistant = page
-        .getByTestId('chat-message-assistant')
-        .first();
+      const firstAssistant = page.getByTestId('chat-message-assistant').first();
       await expect(firstAssistant).toBeVisible({ timeout: 180_000 });
       await expect(firstAssistant).toHaveText(/\S/, { timeout: 120_000 });
 
@@ -148,9 +141,9 @@ test.describe('Issue #542: input usable while AI streams / interrupt-resend', ()
       const assistantCount = await page.getByTestId('chat-message-assistant').count();
       expect(
         assistantCount,
-        'the resend should produce an assistant reply (turn completed, not wedged)',
+        'the resend should produce an assistant reply (turn completed, not wedged)'
       ).toBeGreaterThan(0);
       await expect(inputX).toBeEnabled({ timeout: 5_000 });
-    },
+    }
   );
 });

@@ -1,6 +1,6 @@
 # 会话管理
 
-MiqroForge 的会话管理分为两层：底层的 `SessionManager`（`miqi/session/manager.py`）负责磁盘持久化，上层的 `RuntimeSession`（`miqi/runtime/session.py`）负责运行时服务图构造和执行。
+MiQroForge 的会话管理分为两层：底层的 `SessionManager`（`miqi/session/manager.py`）负责磁盘持久化，上层的 `RuntimeSession`（`miqi/runtime/session.py`）负责运行时服务图构造和执行。
 
 ## RuntimeSession
 

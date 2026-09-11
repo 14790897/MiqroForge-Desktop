@@ -17,24 +17,24 @@ from typing import Any
 
 import aiosqlite
 
+from miqi.runtime.history_runtime import HistoryItem
 from miqi.runtime.ledger_runtime import LedgerItem
 from miqi.runtime.thread_runtime import RuntimeThread
-from miqi.runtime.history_runtime import HistoryItem
 
 
 class StoredThreadError(Exception):
     """Base class for stored-thread lookup failures."""
 
 
-class StoredThreadNotFound(StoredThreadError):
+class StoredThreadNotFoundError(StoredThreadError):
     """Raised when no owned stored thread matches the request."""
 
 
-class StoredThreadAmbiguous(StoredThreadError):
+class StoredThreadAmbiguousError(StoredThreadError):
     """Raised when the same thread id exists in multiple owned sessions."""
 
 
-class StoredThreadUnauthorized(StoredThreadError):
+class StoredThreadUnauthorizedError(StoredThreadError):
     """Raised when the requested session does not belong to the client."""
 
 
@@ -175,7 +175,7 @@ class StoredRuntimeReader:
         self, thread_id: str, *, session_id: str | None = None
     ) -> RuntimeThread:
         if session_id is not None and not session_belongs_to_client(session_id, self.client_id):
-            raise StoredThreadUnauthorized(session_id)
+            raise StoredThreadUnauthorizedError(session_id)
 
         matches: list[RuntimeThread] = []
         for thread in await self.list_threads(include_archived=True, session_id=session_id):
@@ -183,9 +183,9 @@ class StoredRuntimeReader:
                 matches.append(thread)
 
         if not matches:
-            raise StoredThreadNotFound(thread_id)
+            raise StoredThreadNotFoundError(thread_id)
         if len(matches) > 1:
-            raise StoredThreadAmbiguous(thread_id)
+            raise StoredThreadAmbiguousError(thread_id)
         return matches[0]
 
     async def load_ledger_items(self, thread: RuntimeThread) -> list[LedgerItem]:
@@ -376,8 +376,8 @@ class StoredRuntimeReader:
         where the export document carries both ledgerItems and the
         previously-exported providerMessages.
         """
-        import uuid as _uuid
         import time as _time
+        import uuid as _uuid
         items: list[HistoryItem] = []
         for li in ledger_items:
             if li.item_type != "message" or li.role is None:
@@ -444,7 +444,7 @@ class StoredRuntimeReader:
         source = await self.resolve_thread(source_thread_id)
         dest_session = target_session_id or source.session_id
         if not session_belongs_to_client(dest_session, self.client_id):
-            raise StoredThreadUnauthorized(dest_session)
+            raise StoredThreadUnauthorizedError(dest_session)
         dest_thread_id = new_thread_id or f"thread-{str(_uuid.uuid4())[:12]}"
         now = _time.time()
 
@@ -580,7 +580,7 @@ class StoredRuntimeReader:
         overwrite: bool = False,
     ) -> str:
         if not session_belongs_to_client(session_id, self.client_id):
-            raise StoredThreadUnauthorized(session_id)
+            raise StoredThreadUnauthorizedError(session_id)
         from miqi.runtime.thread_export import validate_import_document
 
         doc = validate_import_document(document)

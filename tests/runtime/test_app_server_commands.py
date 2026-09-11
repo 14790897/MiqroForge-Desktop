@@ -2,7 +2,6 @@
 
 import pytest
 
-
 # ── Helpers ──────────────────────────────────────────────────────────────
 
 
@@ -189,6 +188,116 @@ async def test_abort_resolves_thread_from_session_key(fake_config, fake_provider
     sub = session._submissions.get_nowait()
     assert isinstance(sub, AbortTurn)
     assert sub.thread_id == "default"
+
+    await registry.stop_all()
+
+
+@pytest.mark.asyncio
+async def test_abort_releases_bridge_turn_lock(fake_config, fake_provider, tmp_path):
+    """#797: chat.abort must release the bridge-side turn lock so the user
+    can immediately resend — the lock lives in BridgeRuntimeLoop
+    (`_session_drain_tasks`) and is NOT freed by AbortTurn alone when the
+    runtime is stuck on a blocking tool call."""
+    from miqi.runtime.app_server import register_command_handlers
+
+    server, registry = _setup_server_with_session(fake_config, fake_provider, tmp_path)
+    session = await registry.create_session(
+        client_id="c1", session_key="s1",
+        config=fake_config, provider=fake_provider, workspace=tmp_path,
+    )
+    register_command_handlers(server)
+
+    released: list[str] = []
+
+    def _release(session_id):
+        released.append(session_id)
+        return True
+
+    registry.bridge_context["release_turn_lock"] = _release
+
+    response = await server.dispatch(
+        request_id="r-abort", method="chat.abort",
+        params={"session_key": "s1"},
+        client_id="c1", session_id=session.session_id,
+    )
+    assert "result" in response
+    assert response["result"]["aborted"] is True
+    assert released == [session.session_id]
+
+    await registry.stop_all()
+
+
+@pytest.mark.asyncio
+async def test_abort_without_release_hook_still_works(fake_config, fake_provider, tmp_path):
+    """#797: no bridge_context release hook (TUI/legacy) → abort behaves as
+    before; the hook is optional DI, not a hard dependency."""
+    from miqi.runtime.app_server import register_command_handlers
+
+    server, registry = _setup_server_with_session(fake_config, fake_provider, tmp_path)
+    session = await registry.create_session(
+        client_id="c1", session_key="s1",
+        config=fake_config, provider=fake_provider, workspace=tmp_path,
+    )
+    register_command_handlers(server)
+
+    response = await server.dispatch(
+        request_id="r-abort", method="chat.abort",
+        params={"thread_id": "default"},
+        client_id="c1", session_id=session.session_id,
+    )
+    assert "result" in response
+    assert response["result"]["aborted"] is True
+
+    await registry.stop_all()
+
+
+@pytest.mark.asyncio
+async def test_abort_submit_failure_returns_recoverable_error_but_still_releases_lock(
+    fake_config, fake_provider, tmp_path,
+):
+    """#797 / CodeRabbit: an AbortTurn submission failure must NOT report a
+    successful abort (the turn keeps running — a false "stopped" state lets
+    work continue under the hood).  The turn-lock release stays best-effort:
+    it runs even when the submission failed, so the session is not left
+    locked either way.  The error is recoverable so the client can retry.
+    """
+    from miqi.runtime.app_server import register_command_handlers
+
+    server, registry = _setup_server_with_session(fake_config, fake_provider, tmp_path)
+    session = await registry.create_session(
+        client_id="c1", session_key="s1",
+        config=fake_config, provider=fake_provider, workspace=tmp_path,
+    )
+    register_command_handlers(server)
+
+    released: list[str] = []
+
+    def _release(session_id):
+        released.append(session_id)
+        return True
+
+    registry.bridge_context["release_turn_lock"] = _release
+
+    async def _broken_submit(*args, **kwargs):
+        raise RuntimeError("session teardown race")
+
+    # Simulate the runtime rejecting the AbortTurn (e.g. teardown race).
+    session.submit = _broken_submit
+
+    # dispatch converts AppServerError into an error envelope (it does not
+    # raise) — the client must see ABORT_FAILED + recoverable, NOT a
+    # successful {"aborted": true}.
+    response = await server.dispatch(
+        request_id="r-abort", method="chat.abort",
+        params={"session_key": "s1"},
+        client_id="c1", session_id=session.session_id,
+    )
+    assert "result" not in response
+    assert response["error"] == "Failed to abort turn; the turn may still be running"
+    assert response["code"] == "ABORT_FAILED"
+    assert response["recoverable"] is True
+    # The lock release is still best-effort-performed.
+    assert released == [session.session_id]
 
     await registry.stop_all()
 

@@ -10,7 +10,6 @@ import pytest
 
 from miqi.config.schema import Config
 
-
 _AUTO_BASETEMP_ATTR = "_miqi_auto_basetemp"
 
 
@@ -250,10 +249,10 @@ def _has_wsl_bwrap() -> bool:
         if result.returncode != 0:
             return False
         distros = [
-            l.strip().replace("\x00", "")
-            for l in result.stdout.splitlines()
-            if l.strip().replace("\x00", "")
-            and "docker-desktop" not in l.lower()
+            line.strip().replace("\x00", "")
+            for line in result.stdout.splitlines()
+            if line.strip().replace("\x00", "")
+            and "docker-desktop" not in line.lower()
         ]
         for distro in distros:
             check = subprocess.run(

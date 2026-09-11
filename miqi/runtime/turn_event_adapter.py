@@ -1,5 +1,8 @@
 """Project MiQi runtime events into Codex turn/item notifications."""
 
+# ruff: noqa: N802 — handler names mirror event class names; the dispatcher
+# resolves them dynamically via getattr(self, f"_on_{type(event).__name__}").
+
 from __future__ import annotations
 
 from typing import Any

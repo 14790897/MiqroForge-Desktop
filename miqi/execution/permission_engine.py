@@ -17,9 +17,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
-from miqi.execution.approval_policy import ApprovalPolicy
 from miqi.execution.exec_policy import PolicyVerdict
-
 
 # Shell metacharacters that indicate command chaining or injection
 _SHELL_METACHAR_PATTERN = re.compile(r"[;&|`$(){}\[\]<>!\n\r]")

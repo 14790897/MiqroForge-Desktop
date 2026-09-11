@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import pytest
 
+from miqi.runtime.app_server import AppServerError
 from miqi.runtime.thread_request_models import (
     THREAD_METHOD_PARAM_MODELS,
     validate_thread_params,
 )
-from miqi.runtime.app_server import AppServerError
 
 
 class TestAllMethodsExist:
@@ -40,12 +40,12 @@ class TestThreadStart:
 
 
 class TestThreadResume:
-    def test_rejects_missing_threadId(self):
+    def test_rejects_missing_thread_id(self):
         with pytest.raises(AppServerError) as exc:
             validate_thread_params("thread/resume", {})
         assert exc.value.code == "INVALID_PARAMS"
 
-    def test_rejects_empty_threadId(self):
+    def test_rejects_empty_thread_id(self):
         with pytest.raises(AppServerError) as exc:
             validate_thread_params("thread/resume", {"threadId": ""})
         assert exc.value.code == "INVALID_PARAMS"
@@ -59,7 +59,7 @@ class TestThreadList:
 
 
 class TestThreadRollback:
-    def test_rejects_zero_dropLastTurns(self):
+    def test_rejects_zero_drop_last_turns(self):
         with pytest.raises(AppServerError) as exc:
             validate_thread_params("thread/rollback", {"threadId": "t1", "dropLastTurns": 0})
         assert exc.value.code == "INVALID_PARAMS"

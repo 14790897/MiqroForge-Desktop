@@ -2,10 +2,7 @@
 
 from __future__ import annotations
 
-import asyncio
 from types import SimpleNamespace
-
-import pytest
 
 from miqi.agent.agent_mode import FAST, THINK, get_mode_config, mode_names
 from miqi.agent.search_orchestrator import (
@@ -13,7 +10,6 @@ from miqi.agent.search_orchestrator import (
     _dedup_urls,
     _normalize_url,
 )
-
 
 # ── AgentModeConfig ──────────────────────────────────────────────────────────
 

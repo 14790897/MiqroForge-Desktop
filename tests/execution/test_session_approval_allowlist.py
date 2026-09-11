@@ -7,11 +7,9 @@ Validates that:
 """
 
 import asyncio
-import time
 from unittest.mock import MagicMock
 
 import pytest
-
 
 # ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -118,7 +116,7 @@ async def test_session_allowlist_does_not_match_different_path():
 async def test_resolve_approval_session_records_pattern():
     """resolve_approval with 'session' adds pattern to session allowlist."""
     from miqi.execution.orchestrator import ToolOrchestrator
-    from miqi.execution.permission_engine import PermissionEngine, PermissionVerdict
+    from miqi.execution.permission_engine import PermissionEngine
 
     permission_engine = PermissionEngine()
     orchestrator = ToolOrchestrator(
@@ -274,7 +272,7 @@ async def test_resolve_approval_once_does_not_add_to_allowlist():
 async def test_session_allowlists_are_independent():
     """Two orchestrators have independent session allowlists (no cross-session leak)."""
     from miqi.execution.orchestrator import ToolOrchestrator
-    from miqi.execution.permission_engine import PermissionEngine, PermissionVerdict
+    from miqi.execution.permission_engine import PermissionEngine
 
     # Session A
     engine_a = PermissionEngine()
@@ -298,7 +296,7 @@ async def test_session_allowlists_are_independent():
 
     # Session B
     engine_b = PermissionEngine()
-    orch_b = ToolOrchestrator(
+    ToolOrchestrator(
         permission_engine=engine_b,
         sandbox_engine=MagicMock(),
         hook_runtime=MagicMock(),

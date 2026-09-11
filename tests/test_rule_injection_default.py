@@ -1,6 +1,6 @@
 """Phase 3: lessons inject enabled by default with confidence threshold = 3."""
-from miqi.config.schema import AgentSelfImprovementConfig
 from miqi.agent.memory.store import MemoryStore
+from miqi.config.schema import AgentSelfImprovementConfig
 
 
 def test_default_inject_enabled():

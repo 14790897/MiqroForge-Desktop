@@ -45,10 +45,7 @@ async function chatTurn(page: Page, text: string): Promise<string> {
  *  also rendered in A's prior history; this scopes to the model's reply so the
  *  check is real (the model produced the secret, not the DOM echoing it). */
 async function lastAssistantReply(page: Page): Promise<string> {
-  return (await page
-    .locator('[data-testid="chat-message-assistant"]')
-    .last()
-    .textContent()) || '';
+  return (await page.locator('[data-testid="chat-message-assistant"]').last().textContent()) || '';
 }
 
 test.describe('Session Context Recall E2E (#490)', () => {
@@ -88,7 +85,7 @@ test.describe('Session Context Recall E2E (#490)', () => {
       console.log('[recall] Session A: planting secret', secret);
       const aFirst = await chatTurn(
         page,
-        `请记住我的秘密词，一会儿我要考你。我的秘密词是 ${secret}。现在只回复"好的，记住了"。`,
+        `请记住我的秘密词，一会儿我要考你。我的秘密词是 ${secret}。现在只回复"好的，记住了"。`
       );
       expect(aFirst).toContain('记住');
 
@@ -111,15 +108,12 @@ test.describe('Session Context Recall E2E (#490)', () => {
       // must reload A's history so the model answers with the secret. Assert on
       // the LAST assistant reply (not whole <main>) — the secret also sits in
       // A's rendered history, so the model must actually produce it.
-      await chatTurn(
-        page,
-        `我上一句告诉你的秘密词是什么？只回复那个词，不要别的。`,
-      );
+      await chatTurn(page, `我上一句告诉你的秘密词是什么？只回复那个词，不要别的。`);
       const recallReply = await lastAssistantReply(page);
       console.log('[recall] Recall reply (last 200 chars):', recallReply.slice(-200));
       expect(recallReply).toContain(secret);
       console.log('[recall] ✅ Model recalled A’s previous turn after A→B→A');
-    },
+    }
   );
 
   // restart-recall test (#490): macOS ARM64 runners have a known issue
@@ -134,8 +128,7 @@ test.describe('Session Context Recall E2E (#490)', () => {
   // IPC race on cold start).  Skip here to avoid blocking CI; the
   // non-restart recall test (above) still validates session-switch recall
   // on macOS.
-  const SKIP_RESTART_ON_MACOS =
-    process.env.CI && process.platform === 'darwin';
+  const SKIP_RESTART_ON_MACOS = process.env.CI && process.platform === 'darwin';
 
   test(
     'remembers the previous turn across a full app restart',
@@ -143,7 +136,7 @@ test.describe('Session Context Recall E2E (#490)', () => {
     async () => {
       test.skip(
         SKIP_RESTART_ON_MACOS,
-        'macOS: session history fails to render after restart (see comment above)',
+        'macOS: session history fails to render after restart (see comment above)'
       );
       // Seeds one session with a secret, closes the app, relaunches on the
       // SAME miqiHome, switches to the session, and asks about the prior turn.
@@ -155,7 +148,7 @@ test.describe('Session Context Recall E2E (#490)', () => {
       console.log('[restart] Session: planting secret', secret);
       const first = await chatTurn(
         page,
-        `请记住我的秘密词，一会儿考你。我的秘密词是 ${secret}。现在只回复"好的"。`,
+        `请记住我的秘密词，一会儿考你。我的秘密词是 ${secret}。现在只回复"好的"。`
       );
       expect(first).toContain('好');
 
@@ -175,14 +168,11 @@ test.describe('Session Context Recall E2E (#490)', () => {
       expect(found).toBeTruthy();
       console.log('[restart] Switched to the prior session after restart');
 
-      await chatTurn(
-        page,
-        `重启前我告诉你的秘密词是什么？只回复那个词。`,
-      );
+      await chatTurn(page, `重启前我告诉你的秘密词是什么？只回复那个词。`);
       const recallReply = await lastAssistantReply(page);
       console.log('[restart] Recall reply (last 200 chars):', recallReply.slice(-200));
       expect(recallReply).toContain(secret);
       console.log('[restart] ✅ Model recalled prior turn after full restart');
-    },
+    }
   );
 });

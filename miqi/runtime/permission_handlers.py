@@ -33,9 +33,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from loguru import logger
-
-from miqi.runtime.app_server import AppServerError, get_bridge_context
+from miqi.runtime.app_server import get_bridge_context
 
 
 def _get_orchestrator(registry: Any) -> Any:

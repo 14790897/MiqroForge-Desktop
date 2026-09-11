@@ -3,7 +3,7 @@ import { defineConfig, devices } from '@playwright/test';
 export default defineConfig({
   testDir: './tests/smoke',
   testMatch: '**/*.spec.ts',
-  testIgnore: '**/*.test.ts',  // Exclude vitest files from Playwright scan
+  testIgnore: '**/*.test.ts', // Exclude vitest files from Playwright scan
   fullyParallel: true,
   retries: 0,
   workers: 4,
@@ -26,7 +26,7 @@ export default defineConfig({
       use: {
         ...devices['Desktop Chrome'],
         baseURL: 'http://localhost:3458',
-        headless: true,  // CI runs headless; use --headed locally
+        headless: true, // CI runs headless; use --headed locally
       },
     },
     // ② Electron E2E: launches real desktop app via _electron.launch()
@@ -36,8 +36,8 @@ export default defineConfig({
       name: 'electron',
       testDir: './tests/e2e',
       testMatch: ['*.spec.ts'],
-      timeout: 600_000,  // 10 min — pptx-generator + LLM can be slow
-      retries: process.env.CI ? 2 : 0,  // CI: 3 attempts for transient WSL/LLM flakiness
+      timeout: 600_000, // 10 min — pptx-generator + LLM can be slow
+      retries: process.env.CI ? 2 : 0, // CI: 3 attempts for transient WSL/LLM flakiness
       use: {
         video: 'on',
         screenshot: 'on',
@@ -47,12 +47,13 @@ export default defineConfig({
 
   // ---- webServer (only needed by smoke project) ---------------------------
   // Electron project does NOT need a webServer — skip via env var.
-  webServer: process.env.PLAYWRIGHT_SKIP_WEB_SERVER === '1'
-    ? undefined
-    : {
-        command: 'python -m http.server 3458 --directory out/renderer',
-        url: 'http://localhost:3458',
-        reuseExistingServer: true,
-        timeout: 180_000,  // macOS CI can be slow to start
-      },
+  webServer:
+    process.env.PLAYWRIGHT_SKIP_WEB_SERVER === '1'
+      ? undefined
+      : {
+          command: 'python -m http.server 3458 --directory out/renderer',
+          url: 'http://localhost:3458',
+          reuseExistingServer: true,
+          timeout: 180_000, // macOS CI can be slow to start
+        },
 });

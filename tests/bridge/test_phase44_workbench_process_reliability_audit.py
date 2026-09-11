@@ -10,7 +10,6 @@ from pathlib import Path
 
 import pytest
 
-
 # ── Helpers ──────────────────────────────────────────────────────────────
 
 
@@ -56,7 +55,7 @@ def test_method_workbench_process_list_registered():
     from miqi.bridge.loop import BridgeRuntimeLoop
 
     capturer = type("_Cap", (), {"messages": [], "send": lambda s, d: s.messages.append(d)})()
-    loop = BridgeRuntimeLoop(
+    BridgeRuntimeLoop(
         send_func=capturer.send,
         dispatch_legacy_func=lambda a, b, c: None,
     )
@@ -558,8 +557,6 @@ async def test_killed_process_appears_in_history_with_termination_reason():
     )
     register_workbench_process_state_handlers(server)
 
-    wpr = registry.bridge_context["workbench_process_runtime"]
-
     # Spawn a long-running process
     await _dispatch(server, registry, "process/spawn", {
         "experimentalApi": True,
@@ -842,7 +839,6 @@ async def test_history_kind_filter_works():
     resp_cmd = await _dispatch(server, registry, "workbench/process/history", {
         "kind": "commandExec",
     })
-    cmd_handles = [p.get("handleId") for p in resp_cmd["result"]["processes"]]
     assert all(
         p["kind"] == "commandExec" for p in resp_cmd["result"]["processes"]
     ), f"All should be commandExec, got: {resp_cmd['result']['processes']}"

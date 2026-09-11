@@ -48,11 +48,11 @@ async function agentSpawn(
   agentType: string,
   task: string,
   label?: string,
-  sessionKey?: string,
+  sessionKey?: string
 ): Promise<any> {
   const raw: any = await page.evaluate(
     ({ at, t, l, sk }: any) => (window as any).miqi.agents.spawn(at, t, l, sk),
-    { at: agentType, t: task, l: label ?? undefined, sk: sessionKey },
+    { at: agentType, t: task, l: label ?? undefined, sk: sessionKey }
   );
   console.log('[test] agentSpawn raw result:', JSON.stringify(raw));
   return raw;
@@ -72,7 +72,7 @@ async function spawnWithRetry(
   agentType: string,
   task: string,
   label: string,
-  sessionKey: string,
+  sessionKey: string
 ): Promise<any> {
   let spawnResult: any = null;
   for (let attempt = 0; attempt < 2; attempt++) {
@@ -86,7 +86,9 @@ async function spawnWithRetry(
   // loopback/network → agent.spawn never returns a handle). This is an
   // environment restriction, not a code bug — skip rather than fail. The
   // subagent feature is verified on healthy runners and by unit tests.
-  console.log('[test] ⚠️ agent.spawn returned null twice with a live bridge — broken sandbox on this runner, skipping');
+  console.log(
+    '[test] ⚠️ agent.spawn returned null twice with a live bridge — broken sandbox on this runner, skipping'
+  );
   test.skip(true, 'sandbox runtime broken on this CI runner (agent.spawn returns null)');
   return spawnResult;
 }
@@ -94,7 +96,7 @@ async function spawnWithRetry(
 async function agentList(page: Page, sessionKey?: string): Promise<any> {
   const raw: any = await page.evaluate(
     (sk?: string) => (window as any).miqi.agents.list(sk),
-    sessionKey,
+    sessionKey
   );
   console.log('[test] agentList raw result:', JSON.stringify(raw));
   return raw;
@@ -114,9 +116,7 @@ async function agentList(page: Page, sessionKey?: string): Promise<any> {
  * `{result: {agent: ...}}`) defensively in case the handler shape changes,
  * but the flat shape is the contract we assert on.
  */
-function resolveSpawnedAgent(
-  spawnResult: any,
-): { agent_id: string; thread_id: string } | null {
+function resolveSpawnedAgent(spawnResult: any): { agent_id: string; thread_id: string } | null {
   const r = spawnResult ?? {};
   for (const candidate of [r, r.result, r.agent, r.result?.agent]) {
     if (candidate && typeof candidate.agent_id === 'string') {
@@ -132,14 +132,10 @@ function resolveSpawnedAgent(
  * made this suite green while verifying nothing).  Returns a non-null handle
  * so callers avoid repeating `!` non-null assertions.
  */
-function resolveSpawnedAgentOrThrow(
-  spawnResult: any,
-): { agent_id: string; thread_id: string } {
+function resolveSpawnedAgentOrThrow(spawnResult: any): { agent_id: string; thread_id: string } {
   const agent = resolveSpawnedAgent(spawnResult);
   if (agent === null) {
-    throw new Error(
-      'agent.spawn returned no agent handle: ' + JSON.stringify(spawnResult),
-    );
+    throw new Error('agent.spawn returned no agent handle: ' + JSON.stringify(spawnResult));
   }
   return agent;
 }
@@ -149,7 +145,7 @@ async function waitForAgentCompleted(
   page: Page,
   agentId: string,
   sessionKey: string,
-  timeoutMs = 120_000,
+  timeoutMs = 120_000
 ): Promise<LiveAgentInfo> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -176,17 +172,19 @@ async function waitForSubagentRender(
   page: Page,
   label: string,
   icon: string,
-  timeoutMs = 60_000,
+  timeoutMs = 60_000
 ): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    const mainText = (await page.locator('main').textContent().catch(() => '')) || '';
+    const mainText =
+      (await page
+        .locator('main')
+        .textContent()
+        .catch(() => '')) || '';
     if (mainText.includes(label) && mainText.includes(icon)) return;
     await page.waitForTimeout(500);
   }
-  throw new Error(
-    `Subagent result (${icon} "${label}") did not render within ${timeoutMs}ms`,
-  );
+  throw new Error(`Subagent result (${icon} "${label}") did not render within ${timeoutMs}ms`);
 }
 
 /** Ensure a session exists by sending a simple chat message and
@@ -199,11 +197,19 @@ async function ensureSession(page: Page): Promise<void> {
 
   // Wait for the thinking indicator to appear and then disappear.
   try {
-    await expect(page.locator('[data-testid="thinking-indicator"]')).toBeVisible({ timeout: 15_000 });
-  } catch { /* may appear faster than we can catch */ }
+    await expect(page.locator('[data-testid="thinking-indicator"]')).toBeVisible({
+      timeout: 15_000,
+    });
+  } catch {
+    /* may appear faster than we can catch */
+  }
   try {
-    await expect(page.locator('[data-testid="thinking-indicator"]')).toBeHidden({ timeout: 60_000 });
-  } catch { /* already hidden */ }
+    await expect(page.locator('[data-testid="thinking-indicator"]')).toBeHidden({
+      timeout: 60_000,
+    });
+  } catch {
+    /* already hidden */
+  }
 
   // Give the runtime a moment to fully settle after the turn completes.
   await page.waitForTimeout(2000);
@@ -223,7 +229,7 @@ test.describe('Subagent Bridge API', () => {
 
     // Verify the agents bridge API is present.
     const hasAgents = await page.evaluate(
-      () => typeof (window as any).miqi?.agents?.spawn === 'function',
+      () => typeof (window as any).miqi?.agents?.spawn === 'function'
     );
     if (!hasAgents) {
       console.log('[test] agents API not available — skipping suite');
@@ -255,7 +261,7 @@ test.describe('Subagent Bridge API', () => {
       'code-agent',
       'Run the command "echo hello-from-subagent" and report the output. Keep it very short.',
       'e2e-hello-test',
-      sessionKey,
+      sessionKey
     );
 
     // The bridge resolves agent.spawn to the flat { agent_id, thread_id }
@@ -295,7 +301,7 @@ test.describe('Subagent Bridge API', () => {
       'code-agent',
       'Run "echo ok" and report the result. One sentence only.',
       'e2e-status-test',
-      sessionKey,
+      sessionKey
     );
 
     const agent = resolveSpawnedAgentOrThrow(spawnResult);
@@ -342,7 +348,7 @@ test.describe('Subagent Bridge API', () => {
       'code-agent',
       'Run "echo listed-agent" and output the result.',
       'e2e-list-test',
-      sessionKey,
+      sessionKey
     );
 
     const agent = resolveSpawnedAgentOrThrow(spawnResult);
@@ -361,7 +367,8 @@ test.describe('Subagent Bridge API', () => {
 
     // 5. After completion, the list still contains the agent (now completed).
     const finalListResult = await agentList(page, sessionKey);
-    const finalAgents: LiveAgentInfo[] = finalListResult?.agents ?? finalListResult?.result?.agents ?? [];
+    const finalAgents: LiveAgentInfo[] =
+      finalListResult?.agents ?? finalListResult?.result?.agents ?? [];
     const finalAgent = finalAgents.find((a) => a.agent_id === agent.agent_id);
     expect(finalAgent).toBeDefined();
     expect(finalAgent!.status).toBe('completed');
@@ -393,13 +400,13 @@ test.describe('Subagent Bridge API', () => {
       'code-agent',
       'Run the command "ping -n 5 127.0.0.1" and report the output.',
       'e2e-kill-test',
-      sessionKey,
+      sessionKey
     );
     const agent = resolveSpawnedAgentOrThrow(spawnResult);
 
     const killResult: any = await page.evaluate(
       ({ id, sk }: any) => (window as any).miqi.agents.kill(id, sk),
-      { id: agent.agent_id, sk: sessionKey },
+      { id: agent.agent_id, sk: sessionKey }
     );
     console.log('[test] kill-result:', JSON.stringify(killResult));
     expect(killResult?.killed ?? killResult?.result?.killed).toBe(true);

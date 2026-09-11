@@ -7,8 +7,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from miqi.runtime.app_server import AppServer, ClientSessionRegistry
 from miqi.protocol.events import TurnCompleteEvent
+from miqi.runtime.app_server import AppServer, ClientSessionRegistry
 
 
 class _FakeRuntime:

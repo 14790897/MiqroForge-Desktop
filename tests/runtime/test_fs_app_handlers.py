@@ -19,7 +19,6 @@ import pytest
 from miqi.runtime.app_server import AppServer, ClientSessionRegistry
 from miqi.runtime.fs_app_handlers import register_fs_handlers
 
-
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 
@@ -360,7 +359,7 @@ class TestFsGetMetadata:
                 link.unlink()
 
     @pytest.mark.asyncio
-    async def test_symlink_inside_workspace_reports_isSymlink_true(self, tmp_path):
+    async def test_symlink_inside_workspace_reports_is_symlink_true(self, tmp_path):
         """Regression: fs/getMetadata on a symlink inside workspace returns isSymlink=True.
 
         resolve_workspace_absolute_path with resolve_symlinks=False must

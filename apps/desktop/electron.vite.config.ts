@@ -1,7 +1,7 @@
-import { resolve } from 'path'
-import { defineConfig, externalizeDepsPlugin } from 'electron-vite'
-import tailwindcss from '@tailwindcss/vite'
-import pkg from './package.json'
+import { resolve } from 'path';
+import { defineConfig, externalizeDepsPlugin } from 'electron-vite';
+import tailwindcss from '@tailwindcss/vite';
+import pkg from './package.json';
 
 export default defineConfig({
   main: {
@@ -31,6 +31,9 @@ export default defineConfig({
   },
   renderer: {
     root: resolve(__dirname, 'src/renderer'),
+    server: {
+      host: '127.0.0.1',
+    },
     define: {
       __APP_VERSION__: JSON.stringify(pkg.version),
     },
@@ -51,4 +54,4 @@ export default defineConfig({
       },
     },
   },
-})
+});

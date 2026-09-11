@@ -1,7 +1,7 @@
 /**
  * Skill 精确调用量化评估（真实 LLM）
  *
- * 目的：量化 MiqroForge 自带 skills 能否被 agent 精确调用。用一组不含技能名的
+ * 目的：量化 MiQroForge 自带 skills 能否被 agent 精确调用。用一组不含技能名的
  * 直接自然语言提示词（"帮我做个PPT"式），观察 agent 是否：
  *   1. 通过 skill_manage(list) 发现技能清单
  *   2. 加载了期望的 SKILL.md（skill_manage view name=X 或 read_file <skill>/SKILL.md）
@@ -52,7 +52,8 @@ const CORPUS: EvalCase[] = [
   {
     id: 'pptx',
     expectedSkill: 'pptx-generator',
-    prompt: '帮我做一个关于「2026年AI行业趋势」的PPT，要有封面、目录、3页内容页和总结页，保存到工作区。',
+    prompt:
+      '帮我做一个关于「2026年AI行业趋势」的PPT，要有封面、目录、3页内容页和总结页，保存到工作区。',
   },
   {
     id: 'docx',
@@ -62,7 +63,8 @@ const CORPUS: EvalCase[] = [
   {
     id: 'xlsx',
     expectedSkill: 'xlsx',
-    prompt: '帮我把这几条销售数据整理成Excel表格并加上合计行：产品A 100件、产品B 200件、产品C 150件。',
+    prompt:
+      '帮我把这几条销售数据整理成Excel表格并加上合计行：产品A 100件、产品B 200件、产品C 150件。',
   },
   {
     id: 'pdf',
@@ -93,7 +95,7 @@ const CORPUS: EvalCase[] = [
     id: 'summarize',
     expectedSkill: 'summarize',
     prompt:
-      '帮我把下面这段话总结成3个要点：MiqroForge是一个桌面AI助手，支持代码编写、文档处理和网络研究。' +
+      '帮我把下面这段话总结成3个要点：MiQroForge是一个桌面AI助手，支持代码编写、文档处理和网络研究。' +
       '它内置了技能系统，让AI可以按工作流完成复杂任务。用户可以通过聊天界面与它交互，' +
       '所有文件操作都在本地工作区完成，数据不会上传到第三方。',
   },
@@ -126,15 +128,19 @@ const CORPUS: EvalCase[] = [
 
 // ─── 配置 ───────────────────────────────────────────────────────────
 
-const CASE_TIMEOUT_MS = (parseInt(process.env.MIQI_SKILL_EVAL_CASE_TIMEOUT_MIN || '7', 10)) * 60_000;
-const GLOBAL_DEADLINE_MS =
-  (parseInt(process.env.MIQI_SKILL_EVAL_DEADLINE_MIN || '100', 10)) * 60_000;
+const CASE_TIMEOUT_MS = parseInt(process.env.MIQI_SKILL_EVAL_CASE_TIMEOUT_MIN || '7', 10) * 60_000;
+const GLOBAL_DEADLINE_MS = parseInt(process.env.MIQI_SKILL_EVAL_DEADLINE_MIN || '100', 10) * 60_000;
 const REPORT_PATH = join(__dirname, '..', '..', 'test-results', 'skill-eval-report.json');
 
 function selectedCorpus(): EvalCase[] {
   const filter = process.env.MIQI_SKILL_EVAL_CASES;
   if (!filter) return CORPUS;
-  const ids = new Set(filter.split(',').map((s) => s.trim()).filter(Boolean));
+  const ids = new Set(
+    filter
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean)
+  );
   const selected = CORPUS.filter((c) => ids.has(c.id));
   return selected.length ? selected : CORPUS;
 }
@@ -220,7 +226,7 @@ function decideVerdict(a: CaseAnalysis, terminal: { kind: string } | null): Verd
 test.describe('Skill 精确调用量化评估（真实 LLM）', () => {
   test.skip(
     !!process.env.CI && process.env.MIQI_RUN_SKILL_EVAL !== '1',
-    '真实 LLM 评估；CI 上需 MIQI_RUN_SKILL_EVAL=1 才会运行（本地默认运行）。',
+    '真实 LLM 评估；CI 上需 MIQI_RUN_SKILL_EVAL=1 才会运行（本地默认运行）。'
   );
 
   let electronApp: ElectronApplication;
@@ -273,8 +279,7 @@ test.describe('Skill 精确调用量化评估（真实 LLM）', () => {
         w.miqi.userInput.onRequest((d: any) => {
           const choices: Array<{ id: string; label: string; role?: string }> = d?.choices || [];
           const pick =
-            choices.find((c) => c.role !== 'cancel' && c.role !== 'adjust') ??
-            choices[0];
+            choices.find((c) => c.role !== 'cancel' && c.role !== 'adjust') ?? choices[0];
           if (!pick || !d?.input_id) return;
           w.__skillEval?.cards.push({ title: d?.title, picked: pick.label });
           w.miqi.userInput.resolve(d.input_id, pick.id, pick.label, false);
@@ -289,7 +294,12 @@ test.describe('Skill 精确调用量化评估（真实 LLM）', () => {
       if (Date.now() >= globalDeadline) {
         console.log('[skill-eval] 达到整体截止，跳过剩余用例');
         for (const rest of corpus.slice(corpus.indexOf(c))) {
-          results.push({ id: rest.id, expectedSkill: rest.expectedSkill, verdict: 'timeout', note: 'global deadline' });
+          results.push({
+            id: rest.id,
+            expectedSkill: rest.expectedSkill,
+            verdict: 'timeout',
+            note: 'global deadline',
+          });
         }
         break;
       }
@@ -301,15 +311,21 @@ test.describe('Skill 精确调用量化评估（真实 LLM）', () => {
       if (c.id === 'cleanup') {
         const wsDir = join(miqiHome, 'workspace');
         mkdirSync(wsDir, { recursive: true });
-        for (const f of ['old_logs.txt', 'temp_notes.md', 'draft_backup_copy.txt', 'meeting_notes_202601.md']) {
-          if (!existsSync(join(wsDir, f))) writeFileSync(join(wsDir, f), `# ${f}\n\n评估播种的临时文件。\n`);
+        for (const f of [
+          'old_logs.txt',
+          'temp_notes.md',
+          'draft_backup_copy.txt',
+          'meeting_notes_202601.md',
+        ]) {
+          if (!existsSync(join(wsDir, f)))
+            writeFileSync(join(wsDir, f), `# ${f}\n\n评估播种的临时文件。\n`);
         }
       }
 
       // 新建会话（隔离上下文），拿到 session key
       await createNewConversation(page);
       const sessionKey = await page.evaluate(
-        () => localStorage.getItem('miqi:lastSession') || 'desktop:default',
+        () => localStorage.getItem('miqi:lastSession') || 'desktop:default'
       );
 
       // 重置收集器并发送
@@ -318,12 +334,16 @@ test.describe('Skill 精确调用量化评估（真实 LLM）', () => {
       });
       await page.evaluate(
         ([text, key]: [string, string]) => (window as any).miqi.chat.send(text, key),
-        [c.prompt, sessionKey],
+        [c.prompt, sessionKey]
       );
 
       // 轮询终态
       const caseDeadline = Date.now() + CASE_TIMEOUT_MS;
-      let state: { tools: RawToolCall[]; cards: Array<{ title: string; picked: string }>; terminal: { kind: string; content?: string; message?: string; reason?: string } | null } | null = null;
+      let state: {
+        tools: RawToolCall[];
+        cards: Array<{ title: string; picked: string }>;
+        terminal: { kind: string; content?: string; message?: string; reason?: string } | null;
+      } | null = null;
       while (Date.now() < caseDeadline) {
         state = await page.evaluate(() => {
           const s = (window as any).__skillEval;
@@ -360,17 +380,25 @@ test.describe('Skill 精确调用量化评估（真实 LLM）', () => {
         confirmCards: cards,
         durationMs,
         terminalKind: terminal?.kind ?? 'none',
-        finalSnippet: String(terminal?.content ?? terminal?.message ?? terminal?.reason ?? '').slice(-200),
+        finalSnippet: String(
+          terminal?.content ?? terminal?.message ?? terminal?.reason ?? ''
+        ).slice(-200),
       };
       results.push(entry);
 
       const flag =
-        verdict === 'hit' ? '✅' : verdict === 'wrong_skill' ? '⚠️' : verdict === 'no_skill' ? '❌' : '⏱️';
+        verdict === 'hit'
+          ? '✅'
+          : verdict === 'wrong_skill'
+            ? '⚠️'
+            : verdict === 'no_skill'
+              ? '❌'
+              : '⏱️';
       console.log(
         `[skill-eval] ${flag} ${c.id}: verdict=${verdict}, ` +
           `skillsLoaded=[${analysis.skillsLoaded.join(', ') || '无'}], ` +
           `discovery=${analysis.discoveryCalls}, tools=${tools.length}, ` +
-          `${Math.round(durationMs / 1000)}s`,
+          `${Math.round(durationMs / 1000)}s`
       );
       console.log(`[skill-eval] toolChain: ${analysis.toolChain.slice(0, 10).join(' → ')}`);
 
@@ -413,7 +441,9 @@ test.describe('Skill 精确调用量化评估（真实 LLM）', () => {
     console.log(`[skill-eval] ⏱️ 错误/超时: ${counts.error} / ${counts.timeout}`);
     console.log(`[skill-eval] 召回率(期望技能被加载): ${(recall * 100).toFixed(1)}%`);
     console.log(`[skill-eval] 精确率(碰技能时选对): ${(precision * 100).toFixed(1)}%`);
-    console.log(`[skill-eval] 清单发现率(skill_manage list): ${(summary.discoveryRate * 100).toFixed(1)}%`);
+    console.log(
+      `[skill-eval] 清单发现率(skill_manage list): ${(summary.discoveryRate * 100).toFixed(1)}%`
+    );
     console.log(`[skill-eval] 报告: ${REPORT_PATH}`);
 
     // 评估本身不硬性失败（数据驱动观察），但打印未命中清单便于定位
@@ -422,7 +452,7 @@ test.describe('Skill 精确调用量化评估（真实 LLM）', () => {
         console.log(
           `[skill-eval] 未命中 ${r.id}: verdict=${r.verdict} firstSkill=${r.firstSkill} ` +
             `skillsLoaded=[${(r.skillsLoaded as string[]).join(', ')}] ` +
-            `final="${(r.finalSnippet as string).replace(/\s+/g, ' ').slice(-120)}"`,
+            `final="${(r.finalSnippet as string).replace(/\s+/g, ' ').slice(-120)}"`
         );
       }
     }
@@ -430,7 +460,9 @@ test.describe('Skill 精确调用量化评估（真实 LLM）', () => {
     expect(true).toBe(true);
 
     function writeReport(cases: Array<Record<string, unknown>>, sum?: typeof summary) {
-      const report = sum ? { generatedAt: new Date().toISOString(), summary: sum, cases } : { cases };
+      const report = sum
+        ? { generatedAt: new Date().toISOString(), summary: sum, cases }
+        : { cases };
       mkdirSync(join(__dirname, '..', '..', 'test-results'), { recursive: true });
       writeFileSync(REPORT_PATH, JSON.stringify(report, null, 2));
     }

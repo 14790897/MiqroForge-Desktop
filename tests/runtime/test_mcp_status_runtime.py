@@ -1,4 +1,4 @@
-from miqi.runtime.mcp_status_runtime import McpServerStatus, McpStatusRuntime
+from miqi.runtime.mcp_status_runtime import McpStatusRuntime
 
 
 def test_mcp_status_runtime_lists_config_and_plugin_servers():

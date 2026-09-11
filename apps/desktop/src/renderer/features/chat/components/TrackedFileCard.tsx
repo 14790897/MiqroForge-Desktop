@@ -65,13 +65,20 @@ export function TrackedFileCard({
                 style={{ color: 'var(--accent)' }}
               />
             )}
-            <span className="text-size-2xs font-medium truncate" style={{ color: 'var(--text)' }} title={displayPath}>
+            <span
+              className="text-size-2xs font-medium truncate"
+              style={{ color: 'var(--text)' }}
+              title={displayPath}
+            >
               {file.name.length > 30 ? file.name.slice(0, 28) + '…' : file.name}
             </span>
             <span
               className="text-size-2xs px-1.5 py-0.5 rounded font-semibold shrink-0"
               data-testid={`file-op-${file.op}`}
-              style={{ background: `color-mix(in srgb, ${opColor[file.op]} 15%, transparent)`, color: opColor[file.op] }}
+              style={{
+                background: `color-mix(in srgb, ${opColor[file.op]} 15%, transparent)`,
+                color: opColor[file.op],
+              }}
             >
               {OP_LABELS[file.op]}
             </span>
@@ -79,7 +86,10 @@ export function TrackedFileCard({
               <span
                 className="text-size-2xs px-1.5 py-0.5 rounded font-semibold shrink-0"
                 data-testid="file-result-badge"
-                style={{ background: 'color-mix(in srgb, var(--accent) 15%, transparent)', color: 'var(--accent)' }}
+                style={{
+                  background: 'color-mix(in srgb, var(--accent) 15%, transparent)',
+                  color: 'var(--accent)',
+                }}
               >
                 结果
               </span>
@@ -97,33 +107,56 @@ export function TrackedFileCard({
         </div>
       </div>
       {file.truncated ? (
-        <div className="w-full flex items-center justify-center gap-1 py-1 rounded-md text-size-2xs"
-             style={{ border: '1px solid var(--border-subtle)', color: 'var(--text-faint)', background: 'var(--surface-muted)' }}
-             title="路径在进度消息中被截断">
+        <div
+          className="w-full flex items-center justify-center gap-1 py-1 rounded-md text-size-2xs"
+          style={{
+            border: '1px solid var(--border-subtle)',
+            color: 'var(--text-faint)',
+            background: 'var(--surface-muted)',
+          }}
+          title="路径在进度消息中被截断"
+        >
           <span className="text-size-2xs">路径不完整</span>
         </div>
       ) : (
         <div className="flex gap-1.5">
           {onReveal && isResult && (
-            <button onClick={onReveal}
-                    className="flex-1 flex items-center justify-center gap-1 py-1 rounded-md text-size-2xs transition-colors"
-                    style={{ border: '1px solid var(--border)', color: 'var(--text-muted)' }}
-                    title="在文件管理器中定位" data-testid="file-reveal-btn">
-              <FolderOpen size={10} />定位
+            <button
+              onClick={onReveal}
+              className="flex-1 flex items-center justify-center gap-1 py-1 rounded-md text-size-2xs transition-colors"
+              style={{ border: '1px solid var(--border)', color: 'var(--text-muted)' }}
+              title="在文件管理器中定位"
+              data-testid="file-reveal-btn"
+            >
+              <FolderOpen size={10} />
+              定位
             </button>
           )}
           {onDiff && (file.op === 'write' || file.op === 'edit') && (
-            <button onClick={onDiff} disabled={isOfficeFile}
-                    className="flex-1 flex items-center justify-center gap-1 py-1 rounded-md text-size-2xs transition-colors"
-                    style={{ border: '1px solid var(--border)', color: isOfficeFile ? 'var(--text-faint)' : 'var(--warning)', opacity: isOfficeFile ? 0.55 : 1 }}
-                    title="二进制 Office 文件不支持差异对比">
-              <GitCompare size={10} />差异
+            <button
+              onClick={onDiff}
+              disabled={isOfficeFile}
+              className="flex-1 flex items-center justify-center gap-1 py-1 rounded-md text-size-2xs transition-colors"
+              style={{
+                border: '1px solid var(--border)',
+                color: isOfficeFile ? 'var(--text-faint)' : 'var(--warning)',
+                opacity: isOfficeFile ? 0.55 : 1,
+              }}
+              title="二进制 Office 文件不支持差异对比"
+            >
+              <GitCompare size={10} />
+              差异
             </button>
           )}
-          <button onClick={onPreview} className="flex-1 flex items-center justify-center gap-1 py-1 rounded-md text-size-2xs transition-colors"
-                  style={{ border: '1px solid var(--border)', color: 'var(--text-muted)' }}
-                  title="预览文件" data-testid="file-preview-btn">
-            <Eye size={10} />预览
+          <button
+            onClick={onPreview}
+            className="flex-1 flex items-center justify-center gap-1 py-1 rounded-md text-size-2xs transition-colors"
+            style={{ border: '1px solid var(--border)', color: 'var(--text-muted)' }}
+            title="预览文件"
+            data-testid="file-preview-btn"
+          >
+            <Eye size={10} />
+            预览
           </button>
         </div>
       )}

@@ -1,6 +1,7 @@
 """Phase 1: TraceStore.record_step() accumulates steps that end_task persists."""
-import asyncio, time
+import time
 from pathlib import Path
+
 from miqi.agent.trace.store import TraceStore
 
 

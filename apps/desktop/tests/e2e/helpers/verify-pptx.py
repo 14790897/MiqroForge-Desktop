@@ -1,9 +1,9 @@
 """Verify latest pptx-generator output in workspace matches prompt spec."""
+import glob as _glob
 import json
 import os
 import sys
-import glob as _glob
-from pathlib import Path
+
 from pptx import Presentation
 
 # Force UTF-8 stdout so Unicode bullets/symbols don't crash on GBK Windows

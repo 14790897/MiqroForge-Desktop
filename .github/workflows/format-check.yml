@@ -1,0 +1,38 @@
+name: Format Check (prettier)
+
+on:
+  push:
+    branches: [develop]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  # ────────────────────────────────────────────────────────────
+  # 格式检查 — 与 pre-commit lint-staged 同一份 .prettierrc，
+  # 漂移在 PR 阶段直接失败，而不是提交时被静默改写
+  # ────────────────────────────────────────────────────────────
+  check-format:
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+      cancel-in-progress: true
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: apps/desktop
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Check formatting (prettier)
+        run: npm run format:check

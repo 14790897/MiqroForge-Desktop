@@ -8,7 +8,6 @@ from miqi.runtime.core_request_models import (
     ConfigBatchWriteParams,
     ExperimentalFeatureEnablementSetParams,
     InitializeParams,
-    ModelListParams,
     PermissionProfileListParams,
     validate_core_params,
 )

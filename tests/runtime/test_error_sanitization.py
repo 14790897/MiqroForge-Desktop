@@ -8,7 +8,6 @@ All error messages should be fixed, safe strings.
 from __future__ import annotations
 
 import re
-from pathlib import Path
 
 import pytest
 
@@ -107,7 +106,7 @@ async def test_providers_test_error_is_sanitized():
     try:
         await providers_test_handler(
             "req-1",
-            {"provider_name": "nonexistent-provider-xyz", "api_key": "sk-fake-key-for-test"},
+            {"provider_name": "nonexistent-provider-xyz"},
             "client-1", None, registry,
         )
     except AppServerError as exc:
@@ -115,6 +114,21 @@ async def test_providers_test_error_is_sanitized():
         assert exc.code == "NOT_FOUND"
         assert_error_is_sanitized(exc, "providers_test")
         # Message must NOT contain the fake API key (but provider name is fine)
+
+
+@pytest.mark.asyncio
+async def test_providers_test_rejects_custom_api_key():
+    """后端收口（#835）：providers.test 拒绝非空自配 api_key。"""
+    from miqi.runtime.provider_handlers import providers_test_handler
+
+    registry = ClientSessionRegistry()
+    with pytest.raises(AppServerError) as exc:
+        await providers_test_handler(
+            "req-1",
+            {"provider_name": "deepseek", "api_key": "sk-fake-key-for-test"},
+            "client-1", None, registry,
+        )
+    assert exc.value.code == "NOT_SUPPORTED"
 
 
 @pytest.mark.asyncio

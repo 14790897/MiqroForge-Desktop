@@ -511,6 +511,7 @@ async def test_create_pdf_report_preset(tmp_path):
 async def test_create_pdf_chinese_font_discovery(tmp_path):
     """CreatePdfTool: font discovery finds a Chinese font."""
     from pathlib import Path
+
     from miqi.documents.pdf_create_tool import _get_chinese_font
 
     name, path = _get_chinese_font()

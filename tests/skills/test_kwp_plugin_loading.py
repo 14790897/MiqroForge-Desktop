@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-import tempfile
 import shutil
-
-import pytest
+import tempfile
+from pathlib import Path
 
 from miqi.agent.skills import SkillsLoader
 
@@ -129,7 +127,7 @@ class TestKWPPlaceholderResolution:
     """Verify placeholder resolution in context builder."""
 
     def test_placeholder_in_skill_body(self):
-        from miqi.agent.context import _resolve_placeholders, _PLACEHOLDER_RESOLVE
+        from miqi.agent.context import _resolve_placeholders
 
         body = "Use ~~CRM and ~~email for outreach."
         resolved = _resolve_placeholders(body)
@@ -148,7 +146,8 @@ class TestKWPPlaceholderResolution:
 
     def test_skills_summary_gets_resolved(self):
         """Integration: verify build_skills_summary resolves placeholders."""
-        import tempfile, shutil
+        import shutil
+        import tempfile
         from pathlib import Path
 
         tmp = Path(tempfile.mkdtemp())

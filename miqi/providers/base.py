@@ -24,6 +24,8 @@ class LLMResponse:
     finish_reason: str = "stop"
     usage: dict[str, int] = field(default_factory=dict)
     reasoning_content: str | None = None  # Kimi, DeepSeek-R1 etc.
+    reasoning_elapsed_s: float | None = None  # request-start → first reasoning delta
+    reasoning_elapsed_suppressed: bool = False  # #834: streaming CoT — proxy invalid
     error_kind: str | None = None
 
     @property

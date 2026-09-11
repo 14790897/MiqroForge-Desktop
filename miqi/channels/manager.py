@@ -104,11 +104,9 @@ class ChannelManager:
 
                 channel = self.channels.get(msg.channel)
                 if channel:
-                    sent = False
                     for attempt in range(1, 4):
                         try:
                             await channel.send(msg)
-                            sent = True
                             break
                         except Exception as e:
                             if attempt < 3:

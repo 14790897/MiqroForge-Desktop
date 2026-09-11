@@ -133,7 +133,10 @@ export function PermissionsPage() {
                 />
                 递归
               </label>
-              <button onClick={() => removeRule(i)} className="text-[var(--danger)] hover:opacity-70 transition-opacity shrink-0">
+              <button
+                onClick={() => removeRule(i)}
+                className="text-[var(--danger)] hover:opacity-70 transition-opacity shrink-0"
+              >
                 <Trash2 size={14} />
               </button>
             </div>
@@ -194,7 +197,7 @@ export function PermissionsPage() {
           'flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-medium transition duration-200',
           saved
             ? 'bg-[var(--success-bg)] text-[var(--success)]'
-            : 'bg-[var(--accent)] text-[var(--accent-text)] hover:opacity-90',
+            : 'bg-[var(--accent)] text-[var(--accent-text)] hover:opacity-90'
         )}
       >
         {saving ? (

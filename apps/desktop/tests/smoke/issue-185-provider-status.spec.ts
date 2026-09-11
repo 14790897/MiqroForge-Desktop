@@ -1,7 +1,9 @@
 import { test, expect } from '@playwright/test';
 import { buildMockBridgeScript } from './mocks';
 
-test('Provider settings shows filled, verified, failed, and active provider states', async ({ page }) => {
+// 原 issue #185 测试 provider 状态列表；#835 合规收口后该列表已移除，
+// 改为验证「模型」tab 只剩「默认模型」下拉 + 登录门控。
+test('模型 tab 收口后显示默认模型下拉与登录门控（#835）', async ({ page }) => {
   await page.addInitScript({
     content: buildMockBridgeScript({
       activeModel: 'deepseek-chat',
@@ -20,47 +22,8 @@ test('Provider settings shows filled, verified, failed, and active provider stat
           api_base: null,
           configured_model: 'deepseek-chat',
           verification_status: 'success',
-          verified_at: '2026-07-09T00:00:00+00:00',
-        },
-        {
-          name: 'openrouter',
-          display_name: 'OpenRouter',
-          env_key: 'OPENROUTER_API_KEY',
-          provider_type: 'openai',
-          is_gateway: true,
-          is_local: false,
-          default_api_base: 'https://openrouter.ai/api/v1',
-          configured: true,
-          api_key_hint: 'sk-o...uter',
-          api_base: 'https://openrouter.ai/api/v1',
-          verification_status: 'unverified',
-        },
-        {
-          name: 'openai',
-          display_name: 'OpenAI',
-          env_key: 'OPENAI_API_KEY',
-          provider_type: 'openai',
-          is_gateway: false,
-          is_local: false,
-          default_api_base: '',
-          configured: true,
-          api_key_hint: 'sk-o...enai',
-          api_base: null,
-          verification_status: 'failed',
-          verification_message: 'Provider test failed',
-        },
-        {
-          name: 'anthropic',
-          display_name: 'Anthropic',
-          env_key: 'ANTHROPIC_API_KEY',
-          provider_type: 'anthropic',
-          is_gateway: false,
-          is_local: false,
-          default_api_base: '',
-          configured: false,
-          api_key_hint: null,
-          api_base: null,
-          verification_status: 'missing',
+          builtin_available: true,
+          builtin_activated: false,
         },
       ],
     }),
@@ -71,12 +34,17 @@ test('Provider settings shows filled, verified, failed, and active provider stat
   await page.getByText(/^(System Settings|系统设置)$/).click();
   await page.getByRole('tab', { name: '模型' }).click();
 
-  await expect(page.getByText('模型提供商')).toBeVisible();
-  await expect(page.getByText(/当前默认模型：deepseek-chat/)).toBeVisible();
-  await expect(page.getByText(/匹配 Provider：DeepSeek/)).toBeVisible();
-  await expect(page.getByText('当前使用')).toBeVisible();
-  await expect(page.getByText('验证成功', { exact: true })).toBeVisible();
-  await expect(page.getByText('已填写，未验证', { exact: true })).toBeVisible();
-  await expect(page.getByText('验证失败', { exact: true })).toBeVisible();
-  await expect(page.getByText('未填写', { exact: true })).toBeVisible();
+  // 用 data-testid 定位唯一的头部「当前默认模型」，避免与 ModelQuickPanel 里的同名字段重复匹配
+  await expect(page.getByTestId('providers-active-model')).toHaveText(
+    '当前默认模型：deepseek-chat'
+  );
+  // 未登录（mock 默认 loggedIn:false）→ 显示登录门控而非模型下拉
+  await expect(page.getByText('登录后使用平台内置模型')).toBeVisible();
+  // #1000：一键浏览器登录按钮（按 testid 定位，页面顶栏/首屏有同名文案）
+  await expect(page.getByTestId('model-quickpanel-login-btn')).toBeVisible();
+  // 内置 DeepSeek 激活入口仍保留
+  await expect(page.getByText('编辑当前模型')).toBeVisible();
+  // 收口后不再显示 provider 状态列表
+  await expect(page.getByText('验证成功')).not.toBeVisible();
+  await expect(page.getByText(/匹配 Provider/)).not.toBeVisible();
 });

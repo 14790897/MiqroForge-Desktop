@@ -87,6 +87,7 @@ def test_tool_runtime_requires_orchestrator():
 async def test_tool_runtime_propagates_permission_profile_to_ctx(fake_orchestrator):
     """ToolRuntime must pass turn.permission_profile into ToolExecutionContext."""
     from pathlib import Path
+
     from miqi.runtime.permission_profile import PermissionProfile
     from miqi.runtime.tool_runtime import ToolRuntime
 

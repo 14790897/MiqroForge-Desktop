@@ -565,6 +565,17 @@
             "config": {
               "additionalProperties": true,
               "type": "object"
+            },
+            "expectModel": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
             }
           },
           "required": [
@@ -3303,6 +3314,21 @@
         "description": "Legacy untyped method; migrate to an explicit spec in a later plan.",
         "emits": [],
         "eventSchemas": {},
+        "method": "providers.deactivate",
+        "paramsSchema": {
+          "type": "object"
+        },
+        "resultSchema": {
+          "type": "object"
+        },
+        "scope": "session",
+        "stability": "legacy"
+      },
+      {
+        "deprecatedBy": null,
+        "description": "Legacy untyped method; migrate to an explicit spec in a later plan.",
+        "emits": [],
+        "eventSchemas": {},
         "method": "providers.list",
         "paramsSchema": {
           "type": "object"
@@ -3443,6 +3469,21 @@
         },
         "scope": "debug",
         "stability": "stable"
+      },
+      {
+        "deprecatedBy": null,
+        "description": "Legacy untyped method; migrate to an explicit spec in a later plan.",
+        "emits": [],
+        "eventSchemas": {},
+        "method": "sandbox.setAllowSystemInstalls",
+        "paramsSchema": {
+          "type": "object"
+        },
+        "resultSchema": {
+          "type": "object"
+        },
+        "scope": "session",
+        "stability": "legacy"
       },
       {
         "deprecatedBy": null,
@@ -5563,12 +5604,12 @@
   "catalogVersion": 1,
   "generatedTypes": {
     "outputPath": "apps/desktop/src/shared/app-protocol.ts",
-    "sha256": "04a895db4f40f7c767a3628211a8f445cfb14aed53e4bb004d066ab1a04b743e",
+    "sha256": "b6d0d8780463370d4ed07b5638b72acdd18b6f856d86dc3598c7034457a4a25e",
     "source": "miqi.runtime.export_app_protocol_ts.render_typescript_contract"
   },
   "methodCounts": {
-    "legacy": 78,
-    "total": 162,
+    "legacy": 80,
+    "total": 164,
     "typed": 84
   },
   "schemaVersion": 1

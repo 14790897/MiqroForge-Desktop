@@ -1,5 +1,6 @@
 """Tests for TraceStore lifecycle — independent of AgentLoop (Phase 48)."""
 from pathlib import Path
+
 from miqi.agent.trace.store import TraceStore
 
 

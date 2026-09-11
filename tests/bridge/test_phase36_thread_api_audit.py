@@ -9,7 +9,6 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-
 _ROOT = Path(__file__).parents[2]
 _MIQI = _ROOT / "miqi"
 

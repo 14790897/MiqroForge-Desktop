@@ -1,15 +1,12 @@
 """Integration tests: full execution policy pipeline + approval relationship.
 
-Simulates: chat.send → UserMessage → TurnContext → turn_runner flags → 
+Simulates: chat.send → UserMessage → TurnContext → turn_runner flags →
 tool_runtime → ToolExecutionContext → permission_engine → verdict.
 """
 import asyncio
-import pytest
-from unittest.mock import MagicMock, AsyncMock, patch
-from pathlib import Path
 
-from miqi.execution.permission_engine import PermissionEngine, PermissionVerdict
 from miqi.execution.orchestrator import ToolExecutionContext
+from miqi.execution.permission_engine import PermissionEngine, PermissionVerdict
 
 
 class TestFullPipelineBypass:

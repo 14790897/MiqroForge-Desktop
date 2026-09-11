@@ -33,7 +33,11 @@ export function ApprovalModal() {
         {/* Header */}
         <div className="flex items-center gap-2 px-5 py-3 bg-[color-mix(in_srgb,var(--danger)_12%,transparent)] border-b border-[var(--danger)]">
           <Shield size={16} className="text-[var(--danger)] shrink-0" />
-          <span id="approval-title" className="text-sm font-semibold text-[var(--danger)]" data-testid="approval-title">
+          <span
+            id="approval-title"
+            className="text-sm font-semibold text-[var(--danger)]"
+            data-testid="approval-title"
+          >
             {title}
           </span>
           <span className="ml-2 text-xs text-[var(--text-muted)] font-normal">

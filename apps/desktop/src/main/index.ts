@@ -32,13 +32,17 @@ function createWindow(): void {
     height: 860,
     minWidth: 900,
     minHeight: 760,
-    title: 'MiqroForge Desktop',
+    title: 'MiQroForge Desktop',
     icon: getIconPath(),
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
       preload: join(__dirname, '../preload/index.js'),
+      // E2E 专用标记：helper 设 MIQI_E2E=1 时随 argv 下发到 sandbox preload，
+      // 渲染层据此跳过隐私协议确认门（#837），避免 E2E 被全屏确认页阻断。
+      // 仅限未打包环境——打包产物被外部注入 MIQI_E2E=1 不得绕过确认门。
+      additionalArguments: !app.isPackaged && process.env['MIQI_E2E'] === '1' ? ['--miqi-e2e'] : [],
     },
   });
 

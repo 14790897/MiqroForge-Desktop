@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from miqi.runtime.filesystem_response_models import (
+    FILESYSTEM_EVENT_MODELS,
+    FILESYSTEM_METHOD_RESULT_MODELS,
     DirectoryEntry,
     EmptyResult,
     FsChangedEvent,
@@ -10,8 +12,6 @@ from miqi.runtime.filesystem_response_models import (
     FuzzyMatch,
     FuzzySessionCompletedEvent,
     FuzzySessionUpdatedEvent,
-    FILESYSTEM_EVENT_MODELS,
-    FILESYSTEM_METHOD_RESULT_MODELS,
 )
 
 

@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import pytest
 
+from miqi.runtime.app_server import AppServerError
 from miqi.runtime.plugin_skill_request_models import (
     PLUGIN_SKILL_METHOD_PARAM_MODELS,
     validate_plugin_skill_params,
 )
-from miqi.runtime.app_server import AppServerError
 
 
 class TestAllMethodsExist:
@@ -31,7 +31,7 @@ class TestAllMethodsExist:
 
 
 class TestPluginRead:
-    def test_accepts_pluginName(self):
+    def test_accepts_camel_case_plugin_name(self):
         typed = validate_plugin_skill_params("plugin/read", {"pluginName": "my-plugin"})
         assert typed.plugin_name == "my-plugin"
 
@@ -43,17 +43,17 @@ class TestPluginRead:
         typed = validate_plugin_skill_params("plugin/read", {"name": "my-plugin"})
         assert typed.plugin_name == "my-plugin"
 
-    def test_rejects_empty_pluginName(self):
+    def test_rejects_empty_plugin_name(self):
         with pytest.raises(AppServerError) as exc:
             validate_plugin_skill_params("plugin/read", {"pluginName": ""})
         assert exc.value.code == "INVALID_PARAMS"
 
-    def test_rejects_missing_pluginName(self):
+    def test_rejects_missing_plugin_name(self):
         with pytest.raises(AppServerError) as exc:
             validate_plugin_skill_params("plugin/read", {})
         assert exc.value.code == "INVALID_PARAMS"
 
-    def test_accepts_marketplaceName(self):
+    def test_accepts_camel_case_marketplace_name(self):
         typed = validate_plugin_skill_params("plugin/read", {"pluginName": "p", "marketplaceName": "gh"})
         assert typed.marketplace_name == "gh"
 
@@ -63,7 +63,7 @@ class TestPluginRead:
 
 
 class TestPluginSkillRead:
-    def test_rejects_missing_skillName(self):
+    def test_rejects_missing_skill_name(self):
         with pytest.raises(AppServerError) as exc:
             validate_plugin_skill_params("plugin/skill/read", {"pluginName": "p"})
         assert exc.value.code == "INVALID_PARAMS"

@@ -8,22 +8,14 @@ import pytest
 from miqi.runtime.app_server import AppServer, ClientSessionRegistry
 from miqi.runtime.thread_app_handlers import register_codex_thread_handlers
 
-
 # ── helpers ─────────────────────────────────────────────────────────────
 
 
 def _make_mock_session(session_id: str):
     """Create a mock RuntimeSession with thread/ledger/replay services."""
-    from miqi.runtime.thread_runtime import ThreadRuntime
-    from miqi.runtime.ledger_runtime import LedgerRuntime
-    from miqi.runtime.replay_runtime import ReplayRuntime
-    from miqi.runtime.history_runtime import HistoryRuntime
 
     session = MagicMock()
     session.session_id = session_id
-
-    # We need real runtimes that share a database
-    db_path = session_id  # used as key later
 
     session.services = MagicMock()
     session.services.session_id = session_id
@@ -35,10 +27,10 @@ def _make_mock_session(session_id: str):
 
 def _make_mock_session_with_real_runtimes(session_id: str, db_base: Path):
     """Create a mock session with real ThreadRuntime/LedgerRuntime/ReplayRuntime."""
-    from miqi.runtime.thread_runtime import ThreadRuntime
+    from miqi.runtime.history_runtime import HistoryRuntime
     from miqi.runtime.ledger_runtime import LedgerRuntime
     from miqi.runtime.replay_runtime import ReplayRuntime
-    from miqi.runtime.history_runtime import HistoryRuntime
+    from miqi.runtime.thread_runtime import ThreadRuntime
 
     db_path = db_base / "runtime.db"
     threads = ThreadRuntime(db_path, session_id=session_id)

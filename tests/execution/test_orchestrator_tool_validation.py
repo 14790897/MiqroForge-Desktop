@@ -6,18 +6,19 @@ must return a structured error message, must NOT invoke tool.execute(), and
 must NOT trigger approval.
 """
 
-import pytest
 from unittest.mock import AsyncMock, MagicMock
 
-from miqi.execution.orchestrator import (
-    ToolOrchestrator,
-    ToolExecutionContext,
-)
+import pytest
+
 from miqi.execution.hook_runtime import (
-    HookRuntime,
+    HookOutcome,
     HookPoint,
     HookRegistration,
-    HookOutcome,
+    HookRuntime,
+)
+from miqi.execution.orchestrator import (
+    ToolExecutionContext,
+    ToolOrchestrator,
 )
 from miqi.execution.permission_engine import (
     PermissionDecision,

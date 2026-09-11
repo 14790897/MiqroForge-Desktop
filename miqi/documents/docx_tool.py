@@ -2,13 +2,22 @@
 
 from __future__ import annotations
 
-from pathlib import Path
+import logging
 import re
+from pathlib import Path
 from typing import Any
 
 from miqi.agent.tools.base import Tool
 from miqi.agent.tools.filesystem import _persist_tracked_file
+from miqi.documents.path_utils import (
+    enforce_boundary,
+    ensure_suffix,
+    raw_output_path,
+    resolve_output_path,
+    resolve_read_path,
+)
 
+logger = logging.getLogger(__name__)
 
 _MARKDOWN_HEADING_RE = re.compile(r"^(#{1,6})\s+(.+)$")
 
@@ -61,37 +70,24 @@ _CHINESE_SIZE_TO_PT = {
 }
 
 
-def _raw_output_path(kwargs: dict[str, Any]) -> str:
-    return str(
-        kwargs.get("filename")
-        or kwargs.get("file_path")
-        or kwargs.get("path")
-        or ""
-    )
+def _add_docx_content(
+    doc: Any,
+    content: Any,
+    *,
+    workspace: Path | None = None,
+    allowed_dir: Path | None = None,
+    user_roots: Any = None,
+    allow_user_roots: bool = False,
+    skipped: list[str] | None = None,
+) -> int:
+    """Add supported structured content to a python-docx document.
 
-
-def _ensure_suffix(path: Path, suffix: str) -> Path:
-    if not path.name or path.name in {".", ".."}:
-        raise ValueError("必须提供输出文件名")
-    if path.suffix.lower() == suffix:
-        return path
-    return path.with_suffix(suffix)
-
-
-def _enforce_boundary(path: Path, allowed_dir: Path | None, workspace: Path | None) -> None:
-    effective_dir = allowed_dir or workspace
-    if effective_dir is None:
-        return
-    try:
-        path.resolve().relative_to(effective_dir.resolve())
-    except ValueError:
-        raise PermissionError(
-            f"Path '{path}' resolves outside allowed directory '{effective_dir}'"
-        )
-
-
-def _add_docx_content(doc: Any, content: Any) -> int:
-    """Add supported structured content to a python-docx document."""
+    Image blocks carry a model-controlled path, so each one is resolved
+    through :func:`resolve_read_path` (workspace / session files / authorized
+    user roots only) and a failure skips *that block* — never the whole
+    document.  Reasons are appended to *skipped* for the caller's return
+    string.
+    """
     blocks = content if isinstance(content, list) else [{"type": "paragraph", "text": str(content)}]
     count = 0
     for block in blocks:
@@ -116,8 +112,24 @@ def _add_docx_content(doc: Any, content: Any) -> int:
         elif block_type == "image":
             image_path = block.get("path")
             if image_path:
-                doc.add_picture(str(image_path))
-                count += 1
+                try:
+                    resolved = resolve_read_path(
+                        str(image_path),
+                        workspace,
+                        allowed_dir,
+                        user_roots,
+                        allow_user_roots,
+                    )
+                    doc.add_picture(str(resolved))
+                    count += 1
+                except Exception as e:
+                    # Out-of-bounds, missing, or not-an-image: skip this block
+                    # and keep building the document (issue #1005 节 2).
+                    logger.warning(
+                        "create_docx: 跳过图片块 %s：%s", image_path, e,
+                    )
+                    if skipped is not None:
+                        skipped.append(f"{image_path}（{e}）")
         else:
             doc.add_paragraph(str(block.get("text", "")))
             count += 1
@@ -380,15 +392,15 @@ class DocxReadTool(Tool):
         }
 
     async def execute(self, **kwargs: Any) -> str:
-        raw_path = _raw_output_path(kwargs)
+        raw_path = raw_output_path(kwargs)
         if not raw_path.strip():
             return "Error: 必须提供 filename"
         try:
-            file_path = _resolve_output_path(
+            file_path = resolve_output_path(
                 raw_path, self._workspace, self._allowed_dir,
             )
-            file_path = _ensure_suffix(file_path, ".docx")
-            _enforce_boundary(file_path, self._allowed_dir, self._workspace)
+            file_path = ensure_suffix(file_path, ".docx")
+            enforce_boundary(file_path, self._allowed_dir, self._workspace)
         except PermissionError as e:
             return f"Error: 权限被拒绝：{e}"
         except ValueError as e:
@@ -407,46 +419,6 @@ class DocxReadTool(Tool):
             return f"Error reading {file_path.name}: {e}"
 
 
-def _resolve_output_path(
-    file_path: str,
-    workspace: Path | None,
-    allowed_dir: Path | None,
-) -> Path:
-    """Resolve an output path and enforce workspace/directory bounds.
-
-    Office document write tools always write inside the workspace:
-    - Relative paths are resolved against *workspace*.
-    - If *allowed_dir* is ``None`` but *workspace* is set, *workspace*
-      is used as the effective boundary (defense-in-depth default).
-    - Absolute paths outside the effective boundary are rejected.
-
-    Raises:
-        PermissionError: if the resolved path is outside the effective boundary.
-    """
-    p = Path(file_path).expanduser()
-    if not p.is_absolute() and workspace is not None:
-        p = workspace / p
-    resolved = p.resolve()
-
-    # Defense-in-depth: when no explicit allowed_dir is given, office
-    # write tools default to workspace as the boundary.  This is
-    # independent of the `restrict_to_workspace` config (which only
-    # controls WriteFileTool / EditFileTool).
-    effective_dir = allowed_dir
-    if effective_dir is None and workspace is not None:
-        effective_dir = workspace.resolve()
-
-    if effective_dir is not None:
-        try:
-            resolved.relative_to(effective_dir.resolve())
-        except ValueError:
-            raise PermissionError(
-                f"Path '{file_path}' resolves outside allowed directory "
-                f"'{effective_dir}'"
-            )
-    return resolved
-
-
 class CreateDocxTool(Tool):
     """Create or overwrite a Word (.docx) document."""
 
@@ -455,16 +427,21 @@ class CreateDocxTool(Tool):
         "Create a Word (.docx) document in the workspace files directory. "
         "Supports title, paragraphs, headings, tables, images, and common "
         "Word formatting such as Chinese fonts, font sizes, alignment, bold, "
-        "and line spacing."
+        "and line spacing. "
+        "Image blocks' path must resolve inside the session files directory "
+        "(or a user-authorized directory); an image outside those roots is "
+        "skipped, not embedded, and reported in the result."
     )
 
     def __init__(
         self,
         workspace: Path | None = None,
         allowed_dir: Path | None = None,
+        allow_user_roots: bool = False,
     ):
         self._workspace = workspace
         self._allowed_dir = allowed_dir
+        self._allow_user_roots = allow_user_roots
 
     @property
     def parameters(self) -> dict[str, Any]:
@@ -555,17 +532,18 @@ class CreateDocxTool(Tool):
         from docx import Document
 
         _sess_key = kwargs.pop("_session_key", None)
-        raw_path = _raw_output_path(kwargs)
+        user_roots = kwargs.pop("_user_roots", None)
+        raw_path = raw_output_path(kwargs)
         content = kwargs.get("content", "")
         if not raw_path.strip():
             return "Error: 必须提供 filename"
 
         try:
-            file_path = _resolve_output_path(
+            file_path = resolve_output_path(
                 raw_path, self._workspace, self._allowed_dir,
             )
-            file_path = _ensure_suffix(file_path, ".docx")
-            _enforce_boundary(file_path, self._allowed_dir, self._workspace)
+            file_path = ensure_suffix(file_path, ".docx")
+            enforce_boundary(file_path, self._allowed_dir, self._workspace)
         except PermissionError as e:
             return f"Error: 权限被拒绝：{e}"
         except ValueError as e:
@@ -582,8 +560,17 @@ class CreateDocxTool(Tool):
             doc = Document()
             if kwargs.get("title"):
                 doc.add_heading(str(kwargs["title"]), level=0)
+            skipped_images: list[str] = []
             if isinstance(content, list):
-                _add_docx_content(doc, content)
+                _add_docx_content(
+                    doc,
+                    content,
+                    workspace=self._workspace,
+                    allowed_dir=self._allowed_dir,
+                    user_roots=user_roots,
+                    allow_user_roots=self._allow_user_roots,
+                    skipped=skipped_images,
+                )
             elif content:
                 _add_markdown_like_text(doc, content)
             for paragraph in kwargs.get("paragraphs", []) or []:
@@ -597,7 +584,13 @@ class CreateDocxTool(Tool):
             file_path.parent.mkdir(parents=True, exist_ok=True)
             doc.save(str(file_path))
             _persist_tracked_file(self._workspace, file_path, op="write", session_key=_sess_key)
-            return f"Created: {file_path}"
+            result = f"Created: {file_path}"
+            if skipped_images:
+                result += (
+                    f"（跳过 {len(skipped_images)} 个图片："
+                    f"{'；'.join(skipped_images)}）"
+                )
+            return result
         except Exception as e:
             return f"Error writing {raw_path}: {e}"
 
@@ -608,6 +601,9 @@ class DocxWriteTool(CreateDocxTool):
     name = "docx_write"
     description = (
         "Create a new Word (.docx) document with the given content. "
+        "Image blocks' path must resolve inside the session files directory "
+        "(or a user-authorized directory); out-of-bounds images are skipped "
+        "and reported. "
         "Prefer create_docx for new calls."
     )
 
@@ -710,16 +706,16 @@ class EditDocxTool(Tool):
         from docx import Document
 
         _sess_key = kwargs.pop("_session_key", None)
-        raw_path = _raw_output_path(kwargs)
+        raw_path = raw_output_path(kwargs)
         if not raw_path.strip():
             return "Error: 必须提供 filename"
 
         try:
-            file_path = _resolve_output_path(
+            file_path = resolve_output_path(
                 raw_path, self._workspace, self._allowed_dir,
             )
-            file_path = _ensure_suffix(file_path, ".docx")
-            _enforce_boundary(file_path, self._allowed_dir, self._workspace)
+            file_path = ensure_suffix(file_path, ".docx")
+            enforce_boundary(file_path, self._allowed_dir, self._workspace)
         except PermissionError as e:
             return f"Error: 权限被拒绝：{e}"
         except ValueError as e:

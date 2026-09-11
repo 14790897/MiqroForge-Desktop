@@ -22,7 +22,7 @@ const TIMEOUT = 180_000; // 3 min per test (real LLM calls are slow)
 
 /** Run miqi agent and return stdout as a Promise */
 function runMiqiAgent(message: string, sessionKey: string): Promise<string> {
-  const escaped = message.replace(/"/g, '\\"');
+  const escaped = message.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
   const cmd = `uv run miqi agent -m "${escaped}" -s "${sessionKey}" --no-logs --no-markdown`;
   return new Promise((resolve, reject) => {
     exec(cmd, { cwd: ROOT, timeout: TIMEOUT, encoding: 'utf-8' }, (err, stdout, stderr) => {
@@ -175,7 +175,7 @@ async function setupRealE2E(page: import('@playwright/test').Page) {
 
 /**
  * 在聊天界面发送消息并等待显示
- * 
+ *
  * @param page - Playwright 页面对象
  * @param text - 要发送的消息文本
  */
@@ -197,15 +197,12 @@ async function waitForReady(page: import('@playwright/test').Page, timeout = 120
 // ---------------------------------------------------------------------------
 
 test.describe('Real Agent E2E (UI)', () => {
-
   test('basic greeting through UI', { timeout: TIMEOUT }, async ({ page }) => {
     await setupRealE2E(page);
     await sendMessage(page, '回复一个字：好');
 
     // Wait for the real response to render (with timeout for LLM)
-    await expect(
-      page.getByText('好')
-    ).toBeVisible({ timeout: 120000 });
+    await expect(page.getByText('好')).toBeVisible({ timeout: 120000 });
   });
 
   test('web search through UI', { timeout: TIMEOUT }, async ({ page }) => {
@@ -214,9 +211,7 @@ test.describe('Real Agent E2E (UI)', () => {
 
     // The real agent will use web_search → web_fetch → respond
     // Verify weather-related content appears
-    await expect(
-      page.getByText(/天气|weather|温度|℃/i).first()
-    ).toBeVisible({ timeout: 120000 });
+    await expect(page.getByText(/天气|weather|温度|℃/i).first()).toBeVisible({ timeout: 120000 });
 
     // Also verify the source of data is mentioned
     // (the agent typically cites weather.cma.cn or similar)
@@ -227,18 +222,13 @@ test.describe('Real Agent E2E (UI)', () => {
 
     // Turn 1
     await sendMessage(page, '记住：我最喜欢的编程语言是Python');
-    await expect(
-      page.getByText(/python/i).first()
-    ).toBeVisible({ timeout: 120000 });
+    await expect(page.getByText(/python/i).first()).toBeVisible({ timeout: 120000 });
 
     // Wait for streaming to finish before next turn
     await waitForReady(page);
 
     // Turn 2 — verify memory works
     await sendMessage(page, '我刚才说我最喜欢的编程语言是什么？');
-    await expect(
-      page.getByText(/python/i).first()
-    ).toBeVisible({ timeout: 120000 });
+    await expect(page.getByText(/python/i).first()).toBeVisible({ timeout: 120000 });
   });
-
 });

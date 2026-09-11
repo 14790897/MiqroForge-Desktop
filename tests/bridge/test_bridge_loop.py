@@ -4,7 +4,6 @@ import asyncio
 
 import pytest
 
-
 # ── Helpers ──────────────────────────────────────────────────────────────
 
 
@@ -147,7 +146,7 @@ async def test_event_sink_translates_appserver_to_bridge_format():
     from miqi.bridge.loop import BridgeRuntimeLoop
 
     capturer = _CaptureSend()
-    loop = BridgeRuntimeLoop(
+    BridgeRuntimeLoop(
         send_func=capturer.send,
         dispatch_legacy_func=_dispatch_legacy,
     )

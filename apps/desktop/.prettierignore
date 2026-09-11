@@ -1,0 +1,3 @@
+# 由 miqi/runtime/export_app_protocol_ts.py 生成，内容必须与生成器输出逐字节一致
+# （tests/runtime/test_phase66_generated_types_audit.py 审计），勿格式化
+src/shared/app-protocol.ts

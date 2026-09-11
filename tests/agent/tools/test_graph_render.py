@@ -15,7 +15,6 @@ import pytest
 from miqi.agent.tools.graph_render import (
     GraphDataError,
     GraphRenderTool,
-    _PAD,
     _display_width,
     _wrap_text,
     parse_graph_json,
@@ -518,4 +517,42 @@ class TestCodeRabbitFixes:
         src.write_text(json.dumps(g, ensure_ascii=False), encoding="utf-8")
         tool = make_tool(tmp_path)
         result = json.loads(await tool.execute(path=str(src)))
+        assert result["ok"] is True
+
+
+# ── 跨会话隔离（CodeRabbit #851）────────────────────────────────────────
+class TestSessionIsolation:
+    """graph_render 不得读取/写入其他会话的 files 目录（#689 红线）。"""
+
+    @pytest.mark.asyncio
+    async def test_foreign_session_graphs_rejected(self) -> None:
+        from miqi.paths import get_miqi_home
+
+        ws = Path(get_miqi_home()) / "workspace"
+        other = ws / "sessions" / "other-session-851" / "files"
+        other.mkdir(parents=True, exist_ok=True)
+        (other / "step-graph.json").write_text(
+            json.dumps(STEP_GRAPH, ensure_ascii=False), encoding="utf-8",
+        )
+        tool = GraphRenderTool(workspace=ws, base_workspace=ws)
+        result = json.loads(
+            await tool.execute(str(other), _session_key="desktop:own-session-851")
+        )
+        assert result["ok"] is False
+        assert "权限拒绝" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_own_session_graphs_allowed(self) -> None:
+        from miqi.paths import get_miqi_home
+
+        ws = Path(get_miqi_home()) / "workspace"
+        own = ws / "sessions" / "desktop_own-session-851" / "files"
+        own.mkdir(parents=True, exist_ok=True)
+        (own / "step-graph.json").write_text(
+            json.dumps(STEP_GRAPH, ensure_ascii=False), encoding="utf-8",
+        )
+        tool = GraphRenderTool(workspace=ws, base_workspace=ws)
+        result = json.loads(
+            await tool.execute(str(own), _session_key="desktop:own-session-851")
+        )
         assert result["ok"] is True

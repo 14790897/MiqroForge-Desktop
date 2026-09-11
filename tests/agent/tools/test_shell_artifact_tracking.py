@@ -7,7 +7,6 @@ journey e2e.
 """
 
 import json
-import os
 from pathlib import Path
 
 import pytest
@@ -96,7 +95,10 @@ async def test_track_persists_new_files_as_write(exec_tool, fake_workspace, monk
     tf = fake_workspace / "sessions" / "desktop_test" / "tracked_files.json"
     assert tf.exists(), "tracked_files.json written via batch persist"
     files = json.loads(tf.read_text(encoding="utf-8"))["files"]
-    norm = lambda p: str(p).replace("\\", "/")
+
+    def norm(p):
+        return str(p).replace("\\", "/")
+
     assert files[norm(fake_workspace / "output" / "report.md")]["op"] == "write"
     assert files[norm(fake_workspace / "data.csv")]["op"] == "write"
 
@@ -151,7 +153,10 @@ async def test_track_empty_before_diffs_everything(exec_tool, fake_workspace, mo
     tf = fake_workspace / "sessions" / "desktop_test" / "tracked_files.json"
     assert tf.exists()
     files = json.loads(tf.read_text(encoding="utf-8"))["files"]
-    norm = lambda p: str(p).replace("\\", "/")
+
+    def norm(p):
+        return str(p).replace("\\", "/")
+
     assert norm(fake_workspace / "output" / "deliverable.md") in files
 
 

@@ -2,11 +2,12 @@ import importlib.util
 import json
 import time
 from pathlib import Path
+
 import pytest
 
 from miqi.agent.context import ContextBuilder
-from miqi.agent.trace.migrate import migrate_lessons_to_traces
 from miqi.agent.trace import store as trace_store_module
+from miqi.agent.trace.migrate import migrate_lessons_to_traces
 from miqi.agent.trace.model import TaskStep
 from miqi.agent.trace.store import TraceStore
 

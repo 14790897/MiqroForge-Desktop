@@ -1,6 +1,6 @@
 # Runtime 引擎
 
-`miqi/runtime/` 是 MiqroForge 的核心运行时引擎，负责管理会话生命周期、将任务映射到执行、驱动 LLM 调用与工具循环。
+`miqi/runtime/` 是 MiQroForge 的核心运行时引擎，负责管理会话生命周期、将任务映射到执行、驱动 LLM 调用与工具循环。
 
 > **Historical**: 旧版 `AgentLoop` (`miqi/agent/loop.py`) 已在 Phase 48 移除，由 RuntimeSession / TaskRunner / TurnRunner 取代。
 

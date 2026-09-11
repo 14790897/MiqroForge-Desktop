@@ -1,4 +1,4 @@
-site_name: MiqroForge Desktop
+site_name: MiQroForge Desktop
 site_description: 基于 Electron 的轻量级个人 AI 助手桌面应用 — 完整技术文档
 # site_url: https://14790897.github.io/miqi/
 repo_url: https://github.com/14790897/miqi
@@ -91,5 +91,6 @@ nav:
       - 桌面打包: deployment/packaging.md
   - 开发指南:
       - 开发环境搭建: developer-guide.md
+      - E2E 截图自动贴 PR 评论: e2e-pr-image-posting.md
       - 贡献指南: contributing.md
   - 更新日志: changelog.md

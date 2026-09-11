@@ -26,7 +26,7 @@ import sys
 from pathlib import Path
 
 try:
-    import jsonschema
+    import jsonschema  # noqa: F401 (availability probe; validator used below)
     from jsonschema import Draft202012Validator
 
 except ImportError:  # pragma: no cover

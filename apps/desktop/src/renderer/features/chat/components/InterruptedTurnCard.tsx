@@ -12,6 +12,8 @@ export function InterruptedTurnCard({
   meta,
   reasoning,
   content,
+  elapsedSeconds,
+  mode,
   onResume,
   onRestart,
 }: {
@@ -22,6 +24,12 @@ export function InterruptedTurnCard({
   };
   reasoning?: string;
   content: string;
+  /** #834: server-measured thinking proxy from the snapshot; falls back to
+   *  1s only when no measurement was ever taken. */
+  elapsedSeconds?: number;
+  /** #905: reasoning mode persisted on the snapshot — fast rounds restore
+   *  as 🚀/快速思考, not ThinkBlock's default 🧠/深度思考. */
+  mode?: 'fast' | 'think';
   onResume?: () => void;
   onRestart?: () => void;
 }) {
@@ -65,11 +73,14 @@ export function InterruptedTurnCard({
           className="mb-2 max-w-[600px] rounded-xl border p-3.5"
           style={{ borderColor: 'var(--border-subtle)', background: 'var(--surface)' }}
         >
-          <div className="flex items-center gap-2 text-[13.5px] font-bold" style={{ color: 'var(--text)' }}>
+          <div
+            className="flex items-center gap-2 text-[13.5px] font-bold"
+            style={{ color: 'var(--text)' }}
+          >
             <span>⚠️ 任务被中断</span>
             <span
               className="inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-[11px] font-semibold"
-              style={{ background: 'rgba(180,83,9,.12)', color: '#b45309' }}
+              style={{ background: 'rgba(245,158,11,0.12)', color: 'var(--warning)' }}
             >
               <span
                 className="inline-block h-[6px] w-[6px] rounded-full"
@@ -121,7 +132,8 @@ export function InterruptedTurnCard({
           <ThinkBlock
             reasoning={reasoning}
             defaultOpen={false}
-            elapsedSeconds={1}
+            elapsedSeconds={elapsedSeconds}
+            mode={mode}
           />
         ) : null}
 

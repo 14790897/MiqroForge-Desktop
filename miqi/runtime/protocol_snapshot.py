@@ -11,7 +11,6 @@ from typing import Any
 from miqi.bridge.loop import BridgeRuntimeLoop
 from miqi.runtime.export_app_protocol_ts import render_typescript_contract
 
-
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_SNAPSHOT = ROOT / "tests" / "fixtures" / "protocol" / "app_protocol_snapshot.v1.json"
 SNAPSHOT_SCHEMA_VERSION = 1

@@ -47,11 +47,11 @@ If you've connected your CRM, email, or other tools, I'll pull context automatic
 
 ---
 
-## MiqroForge Tools (Standalone Mode)
+## MiQroForge Tools (Standalone Mode)
 
-> 💡 This skill works **standalone** with MiqroForge's built-in tools. 
+> 💡 This skill works **standalone** with MiQroForge's built-in tools. 
 > For the **supercharged** experience, connect MCP servers for 
-> external tools via MiqroForge's MCP configuration. 
+> external tools via MiQroForge's MCP configuration. 
 > See the plugin's `.mcp.json` and `CONNECTORS.md` for available connectors.
 
 
@@ -266,8 +266,8 @@ Run **call-follow-up** to:
 
 ---
 
-## Using This Skill with MiqroForge
+## Using This Skill with MiQroForge
 
-MiqroForge includes built-in tools that cover most standalone needs: `web_search`, `web_fetch`, `read_file`, `write_file`, `edit_file`, `create_docx`, `create_pptx`, `create_xlsx`, `create_pdf`, `exec`.
+MiQroForge includes built-in tools that cover most standalone needs: `web_search`, `web_fetch`, `read_file`, `write_file`, `edit_file`, `create_docx`, `create_pptx`, `create_xlsx`, `create_pdf`, `exec`.
 
-To add MCP connectors for supercharged mode, configure MCP servers in MiqroForge's MCP settings page or add them via `config.json`.
+To add MCP connectors for supercharged mode, configure MCP servers in MiQroForge's MCP settings page or add them via `config.json`.

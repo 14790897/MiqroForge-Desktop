@@ -4,8 +4,8 @@ import pytest
 
 
 def test_runtime_services_creates_ledger_runtime(fake_config, fake_provider, tmp_path):
-    from miqi.runtime.services import RuntimeServices
     from miqi.runtime.ledger_runtime import LedgerRuntime
+    from miqi.runtime.services import RuntimeServices
 
     services = RuntimeServices.from_config(
         config=fake_config,

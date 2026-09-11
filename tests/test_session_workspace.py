@@ -1,8 +1,7 @@
 """Phase 1: Session-scoped file operations write to sessions/{key}/files/ by default."""
 import asyncio
-from pathlib import Path
 
-from miqi.agent.tools.filesystem import WriteFileTool, EditFileTool, ReadFileTool
+from miqi.agent.tools.filesystem import ReadFileTool, WriteFileTool
 from miqi.config.schema import AgentSessionConfig
 
 

@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from miqi.runtime.thread_response_models import THREAD_METHOD_RESULT_MODELS
 from miqi.runtime.protocol_model_schema import result_schema_from_model
+from miqi.runtime.thread_response_models import THREAD_METHOD_RESULT_MODELS
 
 
 class TestAllMethodsExist:
@@ -24,7 +24,7 @@ class TestWireFieldNames:
         schema = result_schema_from_model(THREAD_METHOD_RESULT_MODELS["thread/start"])
         assert "thread" in schema["properties"]
 
-    def test_page_result_has_nextCursor(self):
+    def test_page_result_has_next_cursor(self):
         schema = result_schema_from_model(THREAD_METHOD_RESULT_MODELS["thread/turns/list"])
         assert "nextCursor" in schema["properties"]
         assert "items" in schema["properties"]
@@ -33,6 +33,6 @@ class TestWireFieldNames:
         schema = result_schema_from_model(THREAD_METHOD_RESULT_MODELS["thread/export"])
         assert "document" in schema["properties"]
 
-    def test_loaded_list_result_has_threadIds(self):
+    def test_loaded_list_result_has_thread_ids(self):
         schema = result_schema_from_model(THREAD_METHOD_RESULT_MODELS["thread/loaded/list"])
         assert "threadIds" in schema["properties"]

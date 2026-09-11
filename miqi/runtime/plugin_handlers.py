@@ -78,7 +78,7 @@ async def plugins_install_handler(
         )
 
     try:
-        plugin = pm.install_plugin(name, url)
+        pm.install_plugin(name, url)
         # Update MCP servers from newly installed plugin
         new_servers = pm.get_mcp_servers()
         if new_servers:

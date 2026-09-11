@@ -15,10 +15,10 @@ from miqi.runtime.app_server import AppServer, AppServerError, get_bridge_state
 from miqi.runtime.replay_document import diff_replay_documents
 from miqi.runtime.replay_inspector import ReplayInspector
 from miqi.runtime.stored_runtime import (
-    StoredThreadAmbiguous,
+    StoredThreadAmbiguousError,
     StoredThreadError,
-    StoredThreadNotFound,
-    StoredThreadUnauthorized,
+    StoredThreadNotFoundError,
+    StoredThreadUnauthorizedError,
 )
 
 
@@ -173,11 +173,11 @@ def _inspector(registry: Any, client_id: str) -> ReplayInspector:
 def _stored_error(exc: Exception) -> AppServerError:
     if isinstance(exc, AppServerError):
         raise exc
-    if isinstance(exc, StoredThreadUnauthorized):
+    if isinstance(exc, StoredThreadUnauthorizedError):
         return AppServerError("Not authorized", code="UNAUTHORIZED")
-    if isinstance(exc, StoredThreadAmbiguous):
+    if isinstance(exc, StoredThreadAmbiguousError):
         return AppServerError("Multiple stored threads match; provide sessionId", code="AMBIGUOUS_THREAD")
-    if isinstance(exc, StoredThreadNotFound):
+    if isinstance(exc, StoredThreadNotFoundError):
         return AppServerError("Thread not found", code="NOT_FOUND")
     if isinstance(exc, StoredThreadError):
         return AppServerError("Stored replay failed", code="INTERNAL")

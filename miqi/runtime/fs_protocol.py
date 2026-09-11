@@ -14,7 +14,6 @@ from typing import Any
 
 from miqi.runtime.app_server import AppServerError, get_bridge_state
 
-
 # ── Workspace resolution ─────────────────────────────────────────────────────
 
 

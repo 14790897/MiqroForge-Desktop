@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import pytest
 
-from miqi.config.schema import ApprovalBypassConfig
 from miqi.agent.tools.base import Tool
 from miqi.agent.tools.registry import ToolRegistry
+from miqi.config.schema import ApprovalBypassConfig
 from miqi.kun_runtime.approval_gate import ApprovalGate
 from miqi.kun_runtime.tool_host import (
     _MAX_PARALLEL_TOOL_CALLS,
@@ -409,3 +410,70 @@ class TestFakeToolHost:
             ToolCallLike(call_id="c2", tool_name="read", arguments={}),
         ]
         assert host.should_parallelize(calls) is True
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Issue #821 — user-mentioned roots injection
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class _RecordingWriteTool(Tool):
+    """Captures the kwargs injected by MiQiToolHost.execute."""
+
+    name = "write_file"
+    description = "Write a file"
+    parameters = {"type": "object", "properties": {"path": {"type": "string"}}}
+
+    def __init__(self) -> None:
+        self.last_kwargs: dict[str, object] | None = None
+
+    async def execute(self, path: str = "", content: str = "", **kwargs: Any) -> str:
+        self.last_kwargs = dict(kwargs)
+        return f"wrote {path}"
+
+
+class TestUserRootsInjection:
+    @pytest.mark.asyncio
+    async def test_user_roots_injected_for_file_tools(self) -> None:
+        tool = _RecordingWriteTool()
+        reg = ToolRegistry()
+        reg.register(tool)
+        host = MiQiToolHost(reg)
+
+        ctx = ToolHostContext(
+            thread_id="th1",
+            turn_id="t1",
+            workspace="/tmp",
+            user_mentioned_roots=["C:/Users/x/Desktop/test_result"],
+        )
+        call = ToolCallLike(
+            call_id="c1", tool_name="write_file",
+            arguments={"path": "C:/Users/x/Desktop/test_result/report.md"},
+        )
+        result = await host.execute(call, ctx)
+        assert result.item["isError"] is False
+        assert tool.last_kwargs is not None
+        assert tool.last_kwargs["_user_roots"] == ["C:/Users/x/Desktop/test_result"]
+        # Session key is injected alongside (KUN file-tool contract).
+        assert "_session_key" in tool.last_kwargs
+
+    @pytest.mark.asyncio
+    async def test_no_user_roots_when_context_empty(self) -> None:
+        tool = _RecordingWriteTool()
+        reg = ToolRegistry()
+        reg.register(tool)
+        host = MiQiToolHost(reg)
+
+        ctx = ToolHostContext(thread_id="th1", turn_id="t1", workspace="/tmp")
+        call = ToolCallLike(call_id="c1", tool_name="write_file", arguments={"path": "a.txt"})
+        await host.execute(call, ctx)
+        assert tool.last_kwargs is not None
+        assert "_user_roots" not in tool.last_kwargs
+
+    def test_graph_render_receives_session_key(self) -> None:
+        # Parity with the legacy orchestrator (CodeRabbit #761): graph_render
+        # writes artifacts and reads source JSON, so it must be in the
+        # session-key injection set on the KUN tool host.
+        from miqi.kun_runtime.tool_host import _SESSION_KEY_TOOLS
+
+        assert "graph_render" in _SESSION_KEY_TOOLS

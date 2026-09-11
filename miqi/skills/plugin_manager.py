@@ -30,6 +30,9 @@ from miqi.execution.hook_runtime import (
 
 _PLUGIN_NAME_RE = re.compile(r"^[a-zA-Z0-9]([a-zA-Z0-9_.-]{0,62}[a-zA-Z0-9])?$")
 
+# Hosts allowed for direct plugin installation via URL.
+ALLOWED_HOSTS = {"github.com", "gitlab.com", "bitbucket.org"}
+
 
 def validate_plugin_name(name: str) -> None:
     """Validate a plugin name for safe filesystem and registry use.
@@ -413,8 +416,8 @@ class PluginManager:
         and returns the loaded plugin. Raises ValueError on invalid input
         or subprocess.CalledProcessError on clone failure.
         """
-        import subprocess
         import shutil
+        import subprocess
         from urllib.parse import urlparse
 
         # Validate plugin name
@@ -431,7 +434,6 @@ class PluginManager:
 
         # Validate URL
         parsed = urlparse(url)
-        ALLOWED_HOSTS = {"github.com", "gitlab.com", "bitbucket.org"}
         if parsed.scheme != "https":
             raise ValueError("Only HTTPS URLs are supported")
         if parsed.hostname not in ALLOWED_HOSTS:

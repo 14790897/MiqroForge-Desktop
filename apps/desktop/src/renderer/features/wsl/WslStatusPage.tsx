@@ -12,7 +12,11 @@ import {
   Circle,
 } from 'lucide-react';
 import { cn } from '../../lib/utils';
-import type { WslStatsResult, WslInstallProgress, WslInstallAndProvisionResult } from '../../../shared/ipc';
+import type {
+  WslStatsResult,
+  WslInstallProgress,
+  WslInstallAndProvisionResult,
+} from '../../../shared/ipc';
 
 const REFRESH_MS = 3_000;
 
@@ -51,10 +55,24 @@ function CircleRing({ pct, size = 112 }: { pct: number; size?: number }) {
 
   return (
     <svg width={size} height={size} className="-rotate-90">
-      <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke="var(--surface-muted)" strokeWidth="9" />
       <circle
-        cx={size / 2} cy={size / 2} r={r} fill="none" stroke={color} strokeWidth="9"
-        strokeLinecap="round" strokeDasharray={c} strokeDashoffset={offset}
+        cx={size / 2}
+        cy={size / 2}
+        r={r}
+        fill="none"
+        stroke="var(--surface-muted)"
+        strokeWidth="9"
+      />
+      <circle
+        cx={size / 2}
+        cy={size / 2}
+        r={r}
+        fill="none"
+        stroke={color}
+        strokeWidth="9"
+        strokeLinecap="round"
+        strokeDasharray={c}
+        strokeDashoffset={offset}
         className="transition-all duration-700"
       />
     </svg>
@@ -101,32 +119,48 @@ export default function WslStatusPage() {
       const r = await window.miqi.wsl.check();
       if (r?.installed && r.distros?.length > 0) {
         const sorted = [...r.distros];
-        const idx = sorted.findIndex((d: string) => d === AISHADOW_PREFIX || d.startsWith(AISHADOW_PREFIX));
-        if (idx > 0) { const [t] = sorted.splice(idx, 1); sorted.unshift(t); }
+        const idx = sorted.findIndex(
+          (d: string) => d === AISHADOW_PREFIX || d.startsWith(AISHADOW_PREFIX)
+        );
+        if (idx > 0) {
+          const [t] = sorted.splice(idx, 1);
+          sorted.unshift(t);
+        }
         setDistros(sorted);
 
         if (!initialFetch.current) {
-          const auto = sorted.find((d: string) => d === AISHADOW_PREFIX || d.startsWith(AISHADOW_PREFIX)) ?? r.defaultDistro;
+          const auto =
+            sorted.find((d: string) => d === AISHADOW_PREFIX || d.startsWith(AISHADOW_PREFIX)) ??
+            r.defaultDistro;
           if (auto) setSelected(auto);
           initialFetch.current = true;
         }
       }
-    } catch { /* ignore */ }
+    } catch {
+      /* ignore */
+    }
   }, []);
 
-  const fetchStats = useCallback(async (silent = false) => {
-    if (!selected) return;
-    if (!silent) setFetching(true);
-    try {
-      const r = await window.miqi.wsl.getStats(selected);
-      if (r?.ok) { setStats(r); setError(null); }
-      else { setError(r?.error ?? '无法获取 WSL 状态'); }
-    } catch (e: any) {
-      setError(e?.message ?? 'IPC 调用失败');
-    } finally {
-      setFetching(false);
-    }
-  }, [selected]);
+  const fetchStats = useCallback(
+    async (silent = false) => {
+      if (!selected) return;
+      if (!silent) setFetching(true);
+      try {
+        const r = await window.miqi.wsl.getStats(selected);
+        if (r?.ok) {
+          setStats(r);
+          setError(null);
+        } else {
+          setError(r?.error ?? '无法获取 WSL 状态');
+        }
+      } catch (e: any) {
+        setError(e?.message ?? 'IPC 调用失败');
+      } finally {
+        setFetching(false);
+      }
+    },
+    [selected]
+  );
 
   // ── One-click install flow ─────────────────────────────────────────
   const handleInstall = useCallback(async () => {
@@ -181,7 +215,9 @@ export default function WslStatusPage() {
     };
   }, [fetchDistros]);
 
-  useEffect(() => { fetchDistros(); }, [fetchDistros]);
+  useEffect(() => {
+    fetchDistros();
+  }, [fetchDistros]);
   useEffect(() => {
     if (selected) {
       setStats(null);
@@ -192,7 +228,9 @@ export default function WslStatusPage() {
   useEffect(() => {
     if (!selected) return;
     timerRef.current = setInterval(() => fetchStats(true), REFRESH_MS);
-    return () => { if (timerRef.current) clearInterval(timerRef.current); };
+    return () => {
+      if (timerRef.current) clearInterval(timerRef.current);
+    };
   }, [selected, fetchStats]);
 
   const mem = stats?.memory;
@@ -210,7 +248,7 @@ export default function WslStatusPage() {
         {/* Progress steps */}
         <div className="flex items-center justify-between mb-3">
           {INSTALL_STEPS.map((step, i) => {
-            const isComplete = installPhase === 'complete' || (currentIdx > i);
+            const isComplete = installPhase === 'complete' || currentIdx > i;
             const isCurrent = currentIdx === i;
             const isError = installPhase === 'error' && currentIdx === i;
 
@@ -220,9 +258,15 @@ export default function WslStatusPage() {
                   className={cn(
                     'w-8 h-8 rounded-full flex items-center justify-center text-xs',
                     isComplete && 'bg-[var(--accent)] text-white',
-                    isCurrent && !isError && 'bg-[var(--accent)]/20 text-[var(--accent)] ring-2 ring-[var(--accent)]/40',
-                    isError && 'bg-[var(--danger)]/20 text-[var(--danger)] ring-2 ring-[var(--danger)]/40',
-                    !isComplete && !isCurrent && !isError && 'bg-[var(--surface-muted)] text-[var(--text-faint)]',
+                    isCurrent &&
+                      !isError &&
+                      'bg-[var(--accent)]/20 text-[var(--accent)] ring-2 ring-[var(--accent)]/40',
+                    isError &&
+                      'bg-[var(--danger)]/20 text-[var(--danger)] ring-2 ring-[var(--danger)]/40',
+                    !isComplete &&
+                      !isCurrent &&
+                      !isError &&
+                      'bg-[var(--surface-muted)] text-[var(--text-faint)]'
                   )}
                 >
                   {isComplete ? (
@@ -246,7 +290,9 @@ export default function WslStatusPage() {
           {currentIdx >= 0 && (
             <div
               className="absolute inset-y-0 left-0 bg-[var(--accent)] rounded-full transition-all duration-500"
-              style={{ width: `${Math.min((currentIdx / (INSTALL_STEPS.length - 1)) * 100, 100)}%` }}
+              style={{
+                width: `${Math.min((currentIdx / (INSTALL_STEPS.length - 1)) * 100, 100)}%`,
+              }}
             />
           )}
         </div>
@@ -340,7 +386,11 @@ export default function WslStatusPage() {
               onChange={(e) => setSelected(e.target.value)}
               className="text-xs px-3 py-1.5 rounded-lg bg-[var(--surface-muted)] border border-[var(--border-subtle)] text-[var(--text)]"
             >
-              {distros.map((d) => <option key={d} value={d}>{d}</option>)}
+              {distros.map((d) => (
+                <option key={d} value={d}>
+                  {d}
+                </option>
+              ))}
             </select>
           ) : distros.length === 1 ? (
             <span className="text-xs text-[var(--text-muted)]">{distros[0]}</span>
@@ -376,7 +426,9 @@ export default function WslStatusPage() {
             {fetching ? (
               <>
                 <RefreshCw size={20} className="animate-spin text-text-faint" />
-                <p className="text-sm text-[var(--text-muted)]">正在获取 {selected || 'WSL'} 状态...</p>
+                <p className="text-sm text-[var(--text-muted)]">
+                  正在获取 {selected || 'WSL'} 状态...
+                </p>
                 <p className="text-xs text-[var(--text-faint)]">数据加载中，您可以切换发行版</p>
               </>
             ) : selected ? (
@@ -389,13 +441,17 @@ export default function WslStatusPage() {
               <>
                 <Cpu size={20} style={{ color: 'var(--text-faint)' }} />
                 <p className="text-sm text-[var(--text-muted)]">请选择 WSL 发行版</p>
-                <p className="text-xs text-[var(--text-faint)]">在上方下拉菜单中选择发行版以查看状态</p>
+                <p className="text-xs text-[var(--text-faint)]">
+                  在上方下拉菜单中选择发行版以查看状态
+                </p>
               </>
             ) : (
               <>
                 <Cpu size={20} style={{ color: 'var(--text-faint)' }} />
                 <p className="text-sm text-[var(--text-muted)]">未检测到 WSL 发行版</p>
-                <p className="text-xs text-[var(--text-faint)]">点击上方「一键安装 WSL2」自动完成安装和配置</p>
+                <p className="text-xs text-[var(--text-faint)]">
+                  点击上方「一键安装 WSL2」自动完成安装和配置
+                </p>
               </>
             )}
           </div>
@@ -407,13 +463,19 @@ export default function WslStatusPage() {
                   <div className="relative">
                     <CircleRing pct={mem.used_pct} size={112} />
                     <div className="absolute inset-0 flex flex-col items-center justify-center">
-                      <span className={`text-xl font-bold tabular-nums ${pctColorText(mem.used_pct)}`}>{mem.used_pct}%</span>
+                      <span
+                        className={`text-xl font-bold tabular-nums ${pctColorText(mem.used_pct)}`}
+                      >
+                        {mem.used_pct}%
+                      </span>
                       <span className="text-size-2xs text-[var(--text-faint)]">内存</span>
                     </div>
                   </div>
                   <div className="text-center">
                     <div className="text-xs text-[var(--text-muted)]">内存使用率</div>
-                    <div className="text-xs font-mono text-[var(--text)]">{fmtMem(mem.used_mb)} / {fmtMem(mem.total_mb)}</div>
+                    <div className="text-xs font-mono text-[var(--text)]">
+                      {fmtMem(mem.used_mb)} / {fmtMem(mem.total_mb)}
+                    </div>
                   </div>
                 </div>
               )}
@@ -422,7 +484,11 @@ export default function WslStatusPage() {
                   <div className="relative">
                     <CircleRing pct={cpu.usage_pct} size={112} />
                     <div className="absolute inset-0 flex flex-col items-center justify-center">
-                      <span className={`text-xl font-bold tabular-nums ${pctColorText(cpu.usage_pct)}`}>{cpu.usage_pct}%</span>
+                      <span
+                        className={`text-xl font-bold tabular-nums ${pctColorText(cpu.usage_pct)}`}
+                      >
+                        {cpu.usage_pct}%
+                      </span>
                       <span className="text-size-2xs text-[var(--text-faint)]">CPU</span>
                     </div>
                   </div>
@@ -437,13 +503,19 @@ export default function WslStatusPage() {
                   <div className="relative">
                     <CircleRing pct={dsk.used_pct} size={112} />
                     <div className="absolute inset-0 flex flex-col items-center justify-center">
-                      <span className={`text-xl font-bold tabular-nums ${pctColorText(dsk.used_pct)}`}>{dsk.used_pct}%</span>
+                      <span
+                        className={`text-xl font-bold tabular-nums ${pctColorText(dsk.used_pct)}`}
+                      >
+                        {dsk.used_pct}%
+                      </span>
                       <span className="text-size-2xs text-[var(--text-faint)]">磁盘</span>
                     </div>
                   </div>
                   <div className="text-center">
                     <div className="text-xs text-[var(--text-muted)]">磁盘使用率 (/)</div>
-                    <div className="text-xs font-mono text-[var(--text)]">{dsk.used_gb} / {dsk.total_gb} GB</div>
+                    <div className="text-xs font-mono text-[var(--text)]">
+                      {dsk.used_gb} / {dsk.total_gb} GB
+                    </div>
                   </div>
                 </div>
               )}
@@ -457,7 +529,12 @@ export default function WslStatusPage() {
                 <tbody>
                   {[
                     ['发行版', stats.distro],
-                    ['状态', <span className="flex items-center gap-1 text-[var(--accent)]"><CheckCircle2 size={11} /> 运行中</span>],
+                    [
+                      '状态',
+                      <span className="flex items-center gap-1 text-[var(--accent)]">
+                        <CheckCircle2 size={11} /> 运行中
+                      </span>,
+                    ],
                     ['运行时间', fmtUptime(stats.uptime_sec)],
                     ['CPU 核心数', `${cpu?.cores ?? 0} 核`],
                     ['内存总量', fmtMem(mem?.total_mb ?? 0)],
@@ -467,7 +544,10 @@ export default function WslStatusPage() {
                     ['磁盘已用', `${dsk?.used_gb ?? 0} GB (${dsk?.used_pct ?? 0}%)`],
                     ['磁盘可用', `${dsk?.free_gb ?? 0} GB`],
                   ].map(([k, v], i) => (
-                    <tr key={String(k)} className={i % 2 === 0 ? 'bg-[var(--surface)]' : 'bg-[var(--surface-muted)]'}>
+                    <tr
+                      key={String(k)}
+                      className={i % 2 === 0 ? 'bg-[var(--surface)]' : 'bg-[var(--surface-muted)]'}
+                    >
                       <td className="px-5 py-2.5 text-xs text-[var(--text-muted)] w-40">{k}</td>
                       <td className="px-5 py-2.5 text-xs text-[var(--text)] font-mono">{v}</td>
                     </tr>

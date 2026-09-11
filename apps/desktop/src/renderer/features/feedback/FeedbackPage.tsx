@@ -58,13 +58,7 @@ import { formatRelativeTime } from '../../lib/formatTime';
 
 import { Modal } from '../../components/shared';
 
-function SubmitModal({
-  onClose,
-  onSubmitted,
-}: {
-  onClose: () => void;
-  onSubmitted: () => void;
-}) {
+function SubmitModal({ onClose, onSubmitted }: { onClose: () => void; onSubmitted: () => void }) {
   const [category, setCategory] = useState<'bug' | 'question' | 'suggestion' | 'other'>('bug');
   const [title, setTitle] = useState('');
   const [content, setContent] = useState('');
@@ -79,7 +73,10 @@ function SubmitModal({
   const canSubmit = title.trim().length > 0 && content.trim().length > 0 && !submitting;
 
   const hasUnsavedContent =
-    title.trim().length > 0 || content.trim().length > 0 || contact.trim().length > 0 || screenshots.length > 0;
+    title.trim().length > 0 ||
+    content.trim().length > 0 ||
+    contact.trim().length > 0 ||
+    screenshots.length > 0;
 
   const onBeforeClose = useCallback(() => {
     if (submitting) return true;
@@ -109,44 +106,37 @@ function SubmitModal({
       reader.readAsDataURL(file);
     });
 
-  const addFiles = useCallback(
-    async (files: FileList | File[]) => {
-      const list = Array.from(files);
-      setError(null);
-      try {
-        // Pre-decode all files (catching per-file errors so one bad file
-        // doesn't drop the whole batch); then commit against the LATEST
-        // state to enforce MAX_SCREENSHOTS under concurrent pastes/drops.
-        const results = await Promise.allSettled(list.map(readFileAsDataUrl));
-        const accepted: ScreenshotFile[] = [];
-        for (const r of results) {
-          if (r.status === 'fulfilled') accepted.push(r.value);
-        }
-        if (accepted.length < results.length) {
-          const rejected = results.length - accepted.length;
-          setError(
-            `${rejected} 个文件未添加（不支持的类型或超过 10MB）`,
-          );
-        }
-        setScreenshots((prev) => {
-          const cap = Math.max(0, MAX_SCREENSHOTS - prev.length);
-          if (cap === 0) {
-            setError(`最多 ${MAX_SCREENSHOTS} 张截图`);
-            return prev;
-          }
-          if (accepted.length > cap) {
-            setError(
-              `仅添加了前 ${cap} 张，已达 ${MAX_SCREENSHOTS} 张上限`,
-            );
-          }
-          return [...prev, ...accepted.slice(0, cap)];
-        });
-      } catch (e: any) {
-        setError(e?.message || '处理图片失败');
+  const addFiles = useCallback(async (files: FileList | File[]) => {
+    const list = Array.from(files);
+    setError(null);
+    try {
+      // Pre-decode all files (catching per-file errors so one bad file
+      // doesn't drop the whole batch); then commit against the LATEST
+      // state to enforce MAX_SCREENSHOTS under concurrent pastes/drops.
+      const results = await Promise.allSettled(list.map(readFileAsDataUrl));
+      const accepted: ScreenshotFile[] = [];
+      for (const r of results) {
+        if (r.status === 'fulfilled') accepted.push(r.value);
       }
-    },
-    [],
-  );
+      if (accepted.length < results.length) {
+        const rejected = results.length - accepted.length;
+        setError(`${rejected} 个文件未添加（不支持的类型或超过 10MB）`);
+      }
+      setScreenshots((prev) => {
+        const cap = Math.max(0, MAX_SCREENSHOTS - prev.length);
+        if (cap === 0) {
+          setError(`最多 ${MAX_SCREENSHOTS} 张截图`);
+          return prev;
+        }
+        if (accepted.length > cap) {
+          setError(`仅添加了前 ${cap} 张，已达 ${MAX_SCREENSHOTS} 张上限`);
+        }
+        return [...prev, ...accepted.slice(0, cap)];
+      });
+    } catch (e: any) {
+      setError(e?.message || '处理图片失败');
+    }
+  }, []);
 
   // Paste from clipboard (Ctrl+V) when modal is open
   useEffect(() => {
@@ -184,8 +174,7 @@ function SubmitModal({
         title: title.trim(),
         content: content.trim(),
         contact: contact.trim() || undefined,
-        app_version:
-          typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : 'dev',
+        app_version: typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : 'dev',
         screenshots: screenshots.map((s) => s.dataUrl),
       });
       // The bridge always returns ok=true for successful submissions.  An
@@ -236,9 +225,7 @@ function SubmitModal({
           <div className="flex flex-col items-center gap-3 py-8">
             <CheckCircle size={40} className="text-green-400" />
             <p className="text-sm font-medium">提交成功！</p>
-            <p className="text-xs text-[var(--muted-foreground)]">
-              日志已自动附加并发送到飞书
-            </p>
+            <p className="text-xs text-[var(--muted-foreground)]">日志已自动附加并发送到飞书</p>
           </div>
         ) : (
           <>
@@ -349,7 +336,7 @@ function SubmitModal({
                   'flex flex-col items-center justify-center gap-1.5 py-4 px-3 rounded-md border border-dashed cursor-pointer transition-colors',
                   dragOver
                     ? 'border-[var(--accent)] bg-[var(--accent)]/5'
-                    : 'border-[var(--border)] hover:border-[var(--accent)]/50 hover:bg-[var(--muted)]/5',
+                    : 'border-[var(--border)] hover:border-[var(--accent)]/50 hover:bg-[var(--muted)]/5'
                 )}
               >
                 <ImagePlus size={20} className="text-[var(--muted-foreground)]" />
@@ -379,11 +366,7 @@ function SubmitModal({
                       key={idx}
                       className="relative group rounded-md overflow-hidden border border-[var(--border)] aspect-video bg-[var(--muted)]/10"
                     >
-                      <img
-                        src={s.dataUrl}
-                        alt={s.name}
-                        className="w-full h-full object-cover"
-                      />
+                      <img src={s.dataUrl} alt={s.name} className="w-full h-full object-cover" />
                       <button
                         type="button"
                         onClick={(e) => {
@@ -505,10 +488,7 @@ export function FeedbackPage() {
           <div className="flex flex-col items-center gap-2 py-12 text-center">
             <AlertTriangle size={24} className="text-[var(--muted-foreground)] opacity-40" />
             <p className="text-sm text-[var(--muted-foreground)]">{error}</p>
-            <button
-              onClick={load}
-              className="text-xs text-[var(--accent)] hover:underline mt-1"
-            >
+            <button onClick={load} className="text-xs text-[var(--accent)] hover:underline mt-1">
               重试
             </button>
           </div>
@@ -565,10 +545,7 @@ export function FeedbackPage() {
 
       {/* Submit modal */}
       {showSubmitModal && (
-        <SubmitModal
-          onClose={() => setShowSubmitModal(false)}
-          onSubmitted={load}
-        />
+        <SubmitModal onClose={() => setShowSubmitModal(false)} onSubmitted={load} />
       )}
     </div>
   );

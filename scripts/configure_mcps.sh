@@ -42,7 +42,7 @@ step() { STEP=$((STEP+1)); echo -e "\n${GREEN}[configure_mcps]${NC} ── Step 
 # ──────────────────────────────────────────────────────────────────────────────
 
 echo ""
-info "MiqroForge MCP configure — registering 7 MCP servers into miqi config"
+info "MiQroForge MCP configure — registering 7 MCP servers into miqi config"
 
 step "Pre-flight: verify miqi is installed and submodules are set up"
 command -v miqi &>/dev/null || error \

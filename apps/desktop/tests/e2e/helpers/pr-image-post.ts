@@ -11,9 +11,10 @@
  * checked-out PR branch (PR number resolved via `gh pr view`).
  */
 
+import { createHash } from 'node:crypto';
 import { execSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
-import { basename, dirname, join } from 'node:path';
+import { basename } from 'node:path';
 
 const REPO = process.env.MIQI_IMG_REPO ?? '14790897/MiQi';
 const RELEASE_TAG = '_gh-imgup';
@@ -35,10 +36,7 @@ function token(): string | null {
   );
 }
 
-async function api(
-  path: string,
-  init: RequestInit = {},
-): Promise<Response> {
+async function api(path: string, init: RequestInit = {}): Promise<Response> {
   const tok = token();
   if (!tok) throw new Error('no GitHub token available');
   const res = await fetch(`https://api.github.com/${path}`, {
@@ -52,7 +50,7 @@ async function api(
   });
   if (!res.ok) {
     throw new Error(
-      `GitHub API ${init.method ?? 'GET'} ${path} → ${res.status}: ${await res.text()}`,
+      `GitHub API ${init.method ?? 'GET'} ${path} → ${res.status}: ${await res.text()}`
     );
   }
   return res;
@@ -109,12 +107,12 @@ async function uploadImage(imagePath: string): Promise<string> {
   const uploadUrl = uploadUrlTemplate.replace('{?name,label}', '');
   const stem = basename(imagePath).replace(/\.[^.]+$/, '');
   const ext = basename(imagePath).split('.').pop() ?? 'png';
-  const hash = execSync(`sha256sum "${imagePath}" | cut -c1-8`, {
-    encoding: 'utf8',
-    windowsHide: true,
-  }).trim();
-  const name = `${stem}-${hash}.${ext}`;
+  // Content hash in-process: shelling out to `sha256sum` breaks on Windows
+  // Git Bash with non-ASCII filenames (octal-escaped args → empty hash →
+  // mangled asset names like `A-session-.-rm--rf-.-.--.png`).
   const buf = readFileSync(imagePath);
+  const hash = createHash('sha256').update(buf).digest('hex').slice(0, 8);
+  const name = `${stem}-${hash}.${ext}`;
   const up = await fetch(`${uploadUrl}?name=${name}`, {
     method: 'POST',
     headers: {
@@ -126,9 +124,7 @@ async function uploadImage(imagePath: string): Promise<string> {
   if (up.status === 422) {
     // Identical content → identical name → asset already exists.
     // Reuse the existing asset instead of failing.
-    const assets = await api(
-      `repos/${REPO}/releases/${releaseId}/assets?per_page=100`,
-    );
+    const assets = await api(`repos/${REPO}/releases/${releaseId}/assets?per_page=100`);
     const list = (await assets.json()) as Array<{
       name: string;
       browser_download_url: string;
@@ -145,10 +141,7 @@ async function uploadImage(imagePath: string): Promise<string> {
 }
 
 /** Upload an image and post it into the PR comments. No-op without a PR. */
-export async function postScreenshotToPr(
-  imagePath: string,
-  caption: string,
-): Promise<void> {
+export async function postScreenshotToPr(imagePath: string, caption: string): Promise<void> {
   if (!imagePostingEnabled()) return;
   const n = prNumber();
   if (n === null) return;
@@ -162,6 +155,3 @@ export async function postScreenshotToPr(
     body: JSON.stringify({ body }),
   });
 }
-
-/** Internal helpers exposed for the upload script path. */
-export const _internal = { join, dirname };

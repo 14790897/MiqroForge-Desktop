@@ -9,7 +9,6 @@ Validates:
 
 import pytest
 
-
 # ── _METHODS audit ─────────────────────────────────────────────────────────
 
 
@@ -114,8 +113,6 @@ def test_no_agentloop_in_production_paths():
 
     The only valid location is miqi/agent/loop.py (the class definition itself).
     """
-    import subprocess
-    import sys
     from pathlib import Path
 
     miqi_dir = Path(__file__).parent.parent.parent / "miqi"

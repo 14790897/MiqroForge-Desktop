@@ -37,12 +37,18 @@ test.describe('Execution Policy E2E', () => {
 
   test('mode selector is visible in input area', async () => {
     // The ExecutionPolicySelector button should be near the input
-    const modeBtn = page.locator('button').filter({ hasText: /规划|手动|允许编辑|自动/ }).first();
+    const modeBtn = page
+      .locator('button')
+      .filter({ hasText: /规划|手动|允许编辑|自动/ })
+      .first();
     await expect(modeBtn).toBeVisible({ timeout: 10_000 });
   });
 
   test('clicking mode button opens dropdown with 4 modes', async () => {
-    const modeBtn = page.locator('button').filter({ hasText: /规划|手动|允许编辑|自动/ }).first();
+    const modeBtn = page
+      .locator('button')
+      .filter({ hasText: /规划|手动|允许编辑|自动/ })
+      .first();
     await modeBtn.click();
     await page.waitForTimeout(300);
 
@@ -59,7 +65,10 @@ test.describe('Execution Policy E2E', () => {
   });
 
   test('switching mode updates the button label', async () => {
-    const modeBtn = page.locator('button').filter({ hasText: /规划|手动|允许编辑|自动/ }).first();
+    const modeBtn = page
+      .locator('button')
+      .filter({ hasText: /规划|手动|允许编辑|自动/ })
+      .first();
 
     // Click to open.  Slow CI runners / leftover overlays can make the
     // button unclickable — bounded wait + skip instead of a 30s blind
@@ -98,7 +107,10 @@ test.describe('Execution Policy E2E', () => {
   });
 
   test('bypass mode shows confirmation dialog', async () => {
-    const modeBtn = page.locator('button').filter({ hasText: /规划|手动|允许编辑|自动/ }).first();
+    const modeBtn = page
+      .locator('button')
+      .filter({ hasText: /规划|手动|允许编辑|自动/ })
+      .first();
     await modeBtn.click();
     await page.waitForTimeout(300);
 
@@ -116,10 +128,18 @@ test.describe('Execution Policy E2E', () => {
   });
 
   test('keyboard shortcuts 1-4 switch modes', async () => {
+    // 空态 welcome 自动聚焦输入框(welcome-page delete-all fix),而
+    // ExecutionPolicySelector 故意忽略 INPUT/TEXTAREA 上的按键——否则在输入框
+    // 里打 "1" 会切模式。先 blur 让 1-4 落到 document handler。
+    await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur?.());
+
     // Press '1' = Plan
     await page.keyboard.press('1');
     await page.waitForTimeout(300);
-    const modeBtn = page.locator('button').filter({ hasText: /规划|手动|允许编辑|自动/ }).first();
+    const modeBtn = page
+      .locator('button')
+      .filter({ hasText: /规划|手动|允许编辑|自动/ })
+      .first();
     await expect(modeBtn).toContainText('规划', { timeout: 3_000 });
 
     // Press '3' = Accept edits
@@ -129,7 +149,10 @@ test.describe('Execution Policy E2E', () => {
   });
 
   test('toast appears on mode switch', async () => {
-    const modeBtn = page.locator('button').filter({ hasText: /规划|手动|允许编辑|自动/ }).first();
+    const modeBtn = page
+      .locator('button')
+      .filter({ hasText: /规划|手动|允许编辑|自动/ })
+      .first();
     await modeBtn.click();
     await page.waitForTimeout(300);
 

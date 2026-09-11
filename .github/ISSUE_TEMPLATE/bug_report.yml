@@ -28,7 +28,7 @@ body:
         curl -sSL https://raw.githubusercontent.com/14790897/MiQi/main/scripts/diagnose.sh | bash
         ```
       placeholder: |
-        --- MIQROFORGE DIAGNOSTIC ---
+        --- MiQroForge DIAGNOSTIC ---
         ## OS
         ...
         --- END DIAGNOSTIC ---
@@ -43,7 +43,7 @@ body:
       label: 复现步骤
       description: 从零开始的精确操作步骤，让维护者可以照做复现
       placeholder: |
-        1. 启动 MiqroForge，打开默认会话
+        1. 启动 MiQroForge，打开默认会话
         2. 输入消息 "ls /mnt/c/Users/xxx"
         3. 观察沙箱内路径
         4. 路径少了一层目录

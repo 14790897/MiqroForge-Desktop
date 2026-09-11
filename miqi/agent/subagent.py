@@ -153,6 +153,10 @@ class SubagentManager:
             tools.register(ExecTool(
                 working_dir=str(self.workspace),
                 timeout=self.exec_config.timeout,
+                max_timeout=self.exec_config.max_timeout,
+                idle_timeout=self.exec_config.idle_timeout,
+                heartbeat_interval=self.exec_config.heartbeat_interval,
+                kill_grace_seconds=self.exec_config.kill_grace_seconds,
                 restrict_to_workspace=self.restrict_to_workspace,
                 env_passthrough=list(self.exec_config.env_passthrough),
             ))
@@ -260,7 +264,9 @@ class SubagentManager:
                         ):
                             result = (
                                 result[: self.max_tool_result_chars]
-                                + f"\n... [truncated: original {len(result)} chars]"
+                                + f"\n\n结果已被截断，内容不完整（原始 {len(result)} 字符）。"
+                                "禁止根据截断内容推断、补全、恢复或声称任务已完成；"
+                                "如需完整文件请重新调用下载/文件系统工具获取。"
                             )
                         messages.append({
                             "role": "tool",

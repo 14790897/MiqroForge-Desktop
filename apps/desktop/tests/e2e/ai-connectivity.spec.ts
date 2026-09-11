@@ -82,23 +82,20 @@ test.describe('AI Connectivity', () => {
         };
       });
 
-      console.log(
-        '[ai-connectivity] providers.list result:',
-        JSON.stringify(providerInfo),
-      );
+      console.log('[ai-connectivity] providers.list result:', JSON.stringify(providerInfo));
 
       if (providerInfo.configuredCount === 0) {
         throw new Error(
           'AI connectivity check failed (stage=list): ' +
             'No configured providers found in ~/.miqi/config.json. ' +
-            'Check DEEPSEEK_API_KEY / DEEPSEEK_API_BASE secrets.',
+            'Check DEEPSEEK_API_KEY / DEEPSEEK_API_BASE secrets.'
         );
       }
 
       console.log(
         `[ai-connectivity] Active provider: ${providerInfo.activeProvider ?? '?'}, ` +
           `model: ${providerInfo.activeModel ?? '?'}, ` +
-          `${providerInfo.configuredCount} configured provider(s)`,
+          `${providerInfo.configuredCount} configured provider(s)`
       );
 
       // ── Phase 3: full chat pipeline ───────────────────────────
@@ -129,8 +126,8 @@ test.describe('AI Connectivity', () => {
       console.log(
         `[ai-connectivity] ✅ Full chat pipeline verified: ` +
           `${providerInfo.activeProvider ?? '?'} / ${providerInfo.activeModel ?? '?'} ` +
-          `returned "${marker}"`,
+          `returned "${marker}"`
       );
-    },
+    }
   );
 });

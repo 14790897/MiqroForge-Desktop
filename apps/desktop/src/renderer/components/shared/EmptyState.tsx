@@ -20,22 +20,10 @@ export function EmptyState({
   className,
 }: EmptyStateProps) {
   return (
-    <div
-      className={cn(
-        'flex flex-col items-center justify-center gap-2 py-12 px-4',
-        className
-      )}
-    >
-      {Icon && (
-        <Icon
-          size={iconSize}
-          className="text-[var(--text-faint)] opacity-40"
-        />
-      )}
+    <div className={cn('flex flex-col items-center justify-center gap-2 py-12 px-4', className)}>
+      {Icon && <Icon size={iconSize} className="text-[var(--text-faint)] opacity-40" />}
       <p className="text-sm text-[var(--text-muted)]">{title}</p>
-      {description && (
-        <p className="text-xs text-[var(--text-faint)]">{description}</p>
-      )}
+      {description && <p className="text-xs text-[var(--text-faint)]">{description}</p>}
       {action && <div className="mt-2">{action}</div>}
     </div>
   );

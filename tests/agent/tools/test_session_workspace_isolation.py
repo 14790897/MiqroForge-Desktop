@@ -28,7 +28,6 @@ from miqi.agent.tools.filesystem import (
     _session_files_dir_key,
 )
 
-
 # ── Helpers ────────────────────────────────────────────────────────────────
 
 
@@ -93,7 +92,7 @@ def test_redirect_path_handles_windows_83_short_names(tmp_path):
     no spaces need no 8.3 munging) — the redirect assertion still holds."""
     import ctypes
 
-    GetShortPathNameW = ctypes.windll.kernel32.GetShortPathNameW
+    GetShortPathNameW = ctypes.windll.kernel32.GetShortPathNameW  # noqa: N806
 
     def short_name(p: Path) -> str:
         buf = ctypes.create_unicode_buffer(512)
@@ -170,6 +169,10 @@ async def test_write_file_absolute_root_path_lands_in_session_dir(tmp_path):
     result = await write.execute(path=target, content="hi")
     assert "Successfully wrote" in result
     assert str(session_dir) in result
+    # Delivery truthfulness (miqibug 路径归一化): the message states BOTH the
+    # real session-dir path and the requested path it was normalized from.
+    assert str(target) in result
+    assert "已按会话隔离归一化到会话 files 目录" in result
     assert (session_dir / "welcome.md").read_text(encoding="utf-8") == "hi"
     assert not (root / "welcome.md").exists()
 
@@ -179,6 +182,9 @@ async def test_write_file_relative_path_lands_in_session_dir(tmp_path):
     root, session_dir, write, _ = _mk_env(tmp_path)
     result = await write.execute(path="rel.md", content="hi")
     assert "Successfully wrote" in result
+    # Relative paths anchor to the session dir by convention — no redirect
+    # note needed (the legacy prompt documents relative = session dir).
+    assert "已按会话隔离归一化" not in result
     assert (session_dir / "rel.md").exists()
     assert not (root / "rel.md").exists()
 
@@ -227,6 +233,9 @@ async def test_edit_file_by_original_root_path_edits_session_copy(tmp_path):
         path=str(root / "note.md"), old_text="hello", new_text="bye",
     )
     assert "Successfully edited" in result
+    # Delivery truthfulness: the message states the requested path too.
+    assert str(root / "note.md") in result
+    assert "已按会话隔离归一化到会话 files 目录" in result
     assert (session_dir / "note.md").read_text(encoding="utf-8") == "bye world"
     assert not (root / "note.md").exists()
 
@@ -439,6 +448,9 @@ async def test_kun_tool_host_injects_session_key(fake_config):
             ctx,
         )
         assert "Successfully wrote" in result.item["output"]
+        # Delivery truthfulness: the absolute requested path is restated
+        # alongside the real session-dir path.
+        assert "已按会话隔离归一化到会话 files 目录" in result.item["output"]
         assert (ws / "sessions" / "desktop_456" / "files" / "k.md").read_text(encoding="utf-8") == "kun"
         assert not (ws / "k.md").exists()
     finally:
@@ -463,6 +475,7 @@ async def test_kun_tool_host_uses_thread_id_without_mapping(fake_config):
         ctx,
     )
     assert "Successfully wrote" in result.item["output"]
+    assert "已按会话隔离归一化到会话 files 目录" in result.item["output"]
     assert (ws / "sessions" / "thread_nomap" / "files" / "n.md").exists()
     assert not (ws / "n.md").exists()
 
@@ -480,6 +493,7 @@ async def test_native_write_with_session_key_derives_session_dir(tmp_path):
         path=str(ws / "native.md"), content="hi", _session_key="desktop:789",
     )
     assert "Successfully wrote" in result
+    assert "已按会话隔离归一化到会话 files 目录" in result
     assert (ws / "sessions" / "desktop_789" / "files" / "native.md").exists()
     assert not (ws / "native.md").exists()
 

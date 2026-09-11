@@ -9,6 +9,8 @@ import json
 import tempfile
 from pathlib import Path
 
+import pytest
+
 
 def _make_plugin_dir(parent: Path, name: str, manifest: dict) -> Path:
     """Create a minimal plugin directory with plugin.json."""
@@ -134,7 +136,6 @@ def test_invalid_plugin_names_rejected():
 
 def test_uninstall_plugin_removes_installed_plugin():
     """uninstall_plugin removes the plugin directory and unregisters it."""
-    import shutil
 
     from miqi.skills.plugin_manager import PluginManager
 
@@ -339,6 +340,7 @@ def test_install_plugin_rejects_manifest_name_mismatch_and_cleans_directory(tmp_
     """Install must reject a plugin.json whose name differs from the requested name,
     and the cloned directory must be removed."""
     import subprocess
+
     import pytest
 
     from miqi.skills.plugin_manager import PluginManager
@@ -378,6 +380,7 @@ def test_install_plugin_rejects_invalid_manifest_name_and_cleans_directory(tmp_p
     """Install must reject a plugin.json with a name that fails validation,
     and the cloned directory must be removed."""
     import subprocess
+
     import pytest
 
     from miqi.skills.plugin_manager import PluginManager
@@ -469,8 +472,6 @@ def test_install_plugin_registers_under_requested_name_only(tmp_path, monkeypatc
 # ---------------------------------------------------------------------------
 # Issue #88: plugin name must not end with a separator (- _ .)
 # ---------------------------------------------------------------------------
-
-import pytest
 
 
 @pytest.mark.parametrize("name", [

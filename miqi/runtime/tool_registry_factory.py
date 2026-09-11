@@ -14,26 +14,199 @@ from pathlib import Path
 from typing import Any
 
 from miqi.agent.tools.registry import ToolRegistry
+from miqi.agent.tools.user_roots import _is_protected_extra_root
 from miqi.paths import get_config_path
 
 _log = logging.getLogger(__name__)
 
 
-def _is_protected_extra_root(root: Path, workspace: Path) -> bool:
-    """Return True when *root* would make protected paths writable.
+def _default_read_roots() -> list[Path]:
+    """Read-whitelist expansion for the file tools (issue #864).
 
-    User-configured extra roots must never cover the host config file or
-    per-session files, otherwise a broad root (e.g. ``~/.miqi`` or the
-    workspace itself) could bypass read-only config handling and session
-    isolation.
+    Reads are widened to the user's home directory and, on Windows, every
+    mounted drive root (whole-disk read-only).  Writes keep the narrow
+    ``_shared_roots`` whitelist — this asymmetry matches Codex/Gemini/Cursor
+    (workspace-write + workspace-external read-only).
     """
-    config = get_config_path().resolve()
-    sessions = (workspace / "sessions").resolve()
-    if config.is_relative_to(root):
-        return True
-    if sessions.is_relative_to(root) or root.is_relative_to(sessions):
-        return True
-    return False
+    import sys as _sys
+
+    roots: list[Path] = []
+    try:
+        roots.append(Path.home())
+    except Exception:
+        pass
+    if _sys.platform == "win32":
+        for drive in "ABCDEFGHIJKLMNOPQRSTUVWXYZ":
+            p = Path(f"{drive}:\\")
+            if p.exists():
+                roots.append(p)
+    else:
+        roots.append(Path("/"))
+    return roots
+
+
+def apply_system_installs_toggle(
+    enabled: bool, sandbox_manager: Any | None,
+) -> tuple[bool, bool]:
+    """#854: 系统包安装开关统一入口——config 持久化在前、runtime 在后。
+
+    设置页开关（loop.py ``sandbox.setAllowSystemInstalls`` handler）与确认卡
+    「允许并记住」（:func:`_make_system_install_approver`）共享同一实现，
+    两条路径不得漂移（#875 review 09-02 P2：validation / audit / cache /
+    event 等后续演进只落在这里一处）。
+
+    Returns ``(persist_failed, runtime_failed)``：
+    - ``persist_failed``：config 写盘失败（调用方决定透出或 raise）
+    - ``runtime_failed``：config 已持久化但 runtime 属性切换失败（重启自愈）
+    """
+    from miqi.config.loader import update_config_field
+
+    # 统一入口：**config 持久化在前，runtime 在后**。先开 runtime 会让
+    # 「保存失败」时权限在本会话仍然生效（fail-open），与本 PR 的
+    # fail-closed 原则矛盾（#875 review P2）。持久化走 loader.
+    # update_config_field：共享锁 + legacy 路径回退 + 迁移（#875 review
+    # F1/F2——裸 get_config_path() 会丢 legacy 配置、无锁并发写会互相覆盖）。
+    try:
+        persist_failed = not update_config_field(
+            lambda cfg: setattr(
+                cfg.tools.sandbox, "allow_system_installs", enabled,
+            )
+        )
+    except Exception as exc:  # noqa: BLE001 - 失败仅透出，不放行 runtime
+        _log.error("system install allow persist error: %s", exc)
+        persist_failed = True
+    # 持久化成功才开 runtime（fail-closed 方向）
+    runtime_failed = False
+    if not persist_failed and sandbox_manager is not None:
+        try:
+            sandbox_manager.allow_system_installs = enabled
+        except Exception as exc:  # noqa: BLE001 - config 已持久化，重启自愈
+            # #875 review: this is an AUTHOR-recognized failure mode —
+            # surface it instead of swallowing it, or the user sees
+            # "允许并记住" accepted while the current runtime still denies
+            # installs (config=true / runtime=false).
+            _log.warning(
+                "system install allow: runtime update failed (config "
+                "persisted, restart will apply): %s", exc,
+            )
+            runtime_failed = True
+    return persist_failed, runtime_failed
+
+
+def _make_system_install_approver(*, resolver, sandbox_manager):
+    """#854: 系统包安装授权确认卡 approver（once/always/deny）。
+
+    - 复用 #646/#864 的 user-input 通道（同一 gate，桌面端渲染确认卡）
+    - 卡片展示结构化信息：操作/命令/权限(root)/范围(WSL)/持久性/风险
+      ——命令由拦截点传入**归一化后**的最终执行命令（显示 = 执行，
+      #875 review P3-3），并预告批准后仍会经过命令安全审批（P3-5）
+    - "允许本次"（once）= 调用级授权，不修改任何全局状态
+    - "允许并记住"（always）走统一入口：**config 持久化在前，runtime
+      属性在后**——持久化失败时 runtime 保持关闭（fail-closed 方向，
+      #875 review P2），本次安装仍放行但 persist_failed=True 透出；
+      runtime 切换失败时 runtime_failed=True 透出（重启后生效，P4）
+    - 决策契约（#875 review F3）："once" / "always" / "deny"（用户拒绝
+      或超时）/ "deny_no_channel"（无桌面通道——shell 据此给出设置页指引
+      而非"去用刚拒绝的卡"）；返回三元组 (decision, persist_failed,
+      runtime_failed)（#875 review P4）
+    - 任何异常 / 未知选项 → deny（fail-closed）；卡等待有 120s 墙钟上限
+      （含排队时间，#875 review F5：gate 的 per-slot 等待无超时）
+    """
+    import logging
+
+    logger = logging.getLogger(__name__)
+
+    async def _approver(command: str) -> tuple[str, bool, bool]:
+        if resolver is None:
+            return ("deny_no_channel", False, False)
+        payload = {
+            "title": "系统包安装授权",
+            "message": (
+                "AI 请求执行系统包安装：\n\n"
+                f"操作：系统包安装\n"
+                f"命令：{command}\n"
+                "权限：root（WSL 发行版）\n"
+                "范围：Windows + WSL 环境\n"
+                "持久性：仅「允许并记住」跨会话持续生效；「允许本次安装」仅本次有效\n"
+                "风险：会修改系统软件环境；软件包安装脚本可能以 root 权限执行代码\n"
+                "注意：批准后命令仍会经过命令安全审批，可能再次弹出确认"
+            ),
+            "choices": [
+                {"id": "allow_once", "label": "允许本次安装"},
+                {"id": "allow_always", "label": "允许并记住（开启开关）"},
+                {"id": "deny", "label": "拒绝"},
+            ],
+            "timeout_seconds": 120,
+        }
+        # 统一 120s 墙钟上限由 shell 层（_request_system_install_approval 的
+        # wait_for 覆盖锁等待 + 本调用全程）保证——此处不再设第二个独立
+        # 超时，避免排队请求获得二次独立 120s（CodeRabbit #875 09-01 Minor）。
+        # 卡文案的 timeout_seconds=120 仅为 gate 内的卡片倒计时展示。
+        try:
+            gate_result = await resolver(payload)
+        except Exception as exc:  # noqa: BLE001 - fail-closed
+            logger.warning("system install card resolver failed: %s — deny", exc)
+            return ("deny", False, False)
+        if gate_result.get("status") != "submitted":
+            # 无桌面通道（emitter 未注册）→ 卡从未出现——shell 应给设置页
+            # 指引而非"去用刚拒绝的卡"（#875 review F3）。
+            reason = str(gate_result.get("reason") or "")
+            if "no user-input channel" in reason:
+                return ("deny_no_channel", False, False)
+            return ("deny", False, False)
+        choice_id = str((gate_result.get("answers") or {}).get("choice_id") or "")
+        if choice_id == "allow_always":
+            # 统一入口（#875 review 09-02 P2）：与设置页开关共享
+            # apply_system_installs_toggle——config 持久化在前、runtime 在后
+            # （fail-closed 方向），两条路径同一实现防止行为漂移。
+            persist_failed, runtime_failed = apply_system_installs_toggle(
+                True, sandbox_manager,
+            )
+            # (decision, persist_failed, runtime_failed)：shell 拦截点据此
+            # 向用户透出"本次已放行但未记住/未生效"（#875 review P2/P4）。
+            return ("always", persist_failed, runtime_failed)
+        if choice_id == "allow_once":
+            return ("once", False, False)
+        return ("deny", False, False)
+
+    return _approver
+
+
+def _make_extra_root_persister():
+    """Build an async callback that appends a directory to ``tools.extra_roots``.
+
+    Used by the write authorization card's [本目录不再询问] choice (issue #864).
+    Persisting is best-effort and guarded: a protected path is never added, and
+    any failure must not fail the write that already succeeded.
+
+    The read-modify-write goes through :func:`loader.update_config_field`
+    (shared lock + fresh disk read, #875 review F12) — ``load_config``
+    returns a 5-second-cached ``Config``, so a cached read could clobber a
+    concurrent config change, and per-instance locks don't serialize
+    cross-session writers.
+    """
+    from miqi.agent.tools.user_roots import _is_protected_extra_root
+    from miqi.config.loader import update_config_field
+
+    async def persist(root: Path) -> None:
+        resolved = Path(root).expanduser().resolve(strict=False)
+
+        def _mutate(cfg) -> None:
+            if _is_protected_extra_root(resolved, cfg.workspace_path):
+                _log.warning("extra_root persister: refusing protected path %s", resolved)
+                return
+            tools_cfg = getattr(cfg, "tools", None)
+            extra = list(getattr(tools_cfg, "extra_roots", []) or [])
+            root_str = str(resolved)
+            if root_str not in extra:
+                extra.append(root_str)
+                tools_cfg.extra_roots = extra
+
+        # 失败静默（best-effort）：读不到配置不覆盖（update_config_field 返回
+        # False，不抛出）——单个 root 不值得毁掉用户配置。
+        update_config_field(_mutate)
+
+    return persist
 
 
 def _resolve_default_shared_dir(workspace: Path, sub: str) -> Path | None:
@@ -101,7 +274,6 @@ def create_runtime_tool_registry(
     Returns:
         ToolRegistry populated with the runtime's default tool set.
     """
-    from miqi.utils.helpers import safe_filename
 
     defaults = getattr(config, "agents", None)
     defaults = getattr(defaults, "defaults", None) if defaults is not None else None
@@ -185,10 +357,20 @@ def create_runtime_tool_registry(
             continue
         _shared_roots.append(_root)
 
+    # Auto-sensed user-mentioned output dirs (issue #821): the KUN runtime
+    # injects them per tool call (``_user_roots``); this flag gates the
+    # tools' acceptance of that injection.
+    _auto_user_dirs = (
+        bool(getattr(tools_cfg, "auto_user_dirs", True))
+        if tools_cfg is not None else True
+    )
+
     # Read-only whitelist for the host config file (issue #553): agents may
     # inspect settings, but write/edit/patch tools keep rejecting it so the
     # config (API keys, model setup) can never be tampered with.
-    _read_shared_roots = [*_shared_roots, get_config_path()]
+    # Issue #864: reads are further widened to home + whole disk (read/write
+    # asymmetry), while writes keep the narrow _shared_roots whitelist below.
+    _read_shared_roots = [*_shared_roots, get_config_path(), *_default_read_roots()]
 
     # Resolve config sections
     restrict_to_workspace = getattr(tools_cfg, "restrict_to_workspace", False) if tools_cfg is not None else False
@@ -232,6 +414,22 @@ def create_runtime_tool_registry(
     # #646-v2 (GPT 第五轮): 危险动作最后确认（Action Guard）——独立工具
     registry.register(RequestActionConfirmationTool(resolver=make_resolver()))
 
+    # Write authorization card (issue #864): the file write tools pop a
+    # confirm card when a target escapes the write whitelist.  They share the
+    # same user-input gate as ask_user_confirm_card; "本目录不再询问" persists
+    # the directory into tools.extra_roots via the persister.
+    # The approval-bypass switches (approvals.bypass_all /
+    # approvals.bypass_file_write_approval) also skip the card — the target
+    # dir is granted session-scoped but never persisted to extra_roots.
+    _write_resolver = make_resolver()
+    _persist_extra_root = _make_extra_root_persister()
+    _bypass = getattr(config, "effective_approval_bypass", None)
+    _bypass = _bypass() if callable(_bypass) else _bypass
+    _bypass_approval = bool(
+        getattr(_bypass, "bypasses_category", None)
+        and _bypass.bypasses_category("file_write")
+    )
+
     # 1. Filesystem tools
     registry.register(
         ListDirTool(
@@ -239,6 +437,7 @@ def create_runtime_tool_registry(
             allowed_dir=allowed_dir,
             sandbox_manager=_sbm,
             shared_roots=_read_shared_roots,
+            allow_user_roots=_auto_user_dirs,
         )
     )
     # ReadFileTool additionally gets the per-session files dir so reads of
@@ -251,6 +450,7 @@ def create_runtime_tool_registry(
             sandbox_manager=_sbm,
             shared_roots=_read_shared_roots,
             session_files_dir=_work_dir,
+            allow_user_roots=_auto_user_dirs,
         )
     )
     registry.register(
@@ -262,6 +462,10 @@ def create_runtime_tool_registry(
             shared_roots=_shared_roots,
             session_files_dir=_work_dir,
             base_workspace=workspace,
+            allow_user_roots=_auto_user_dirs,
+            write_resolver=_write_resolver,
+            persist_extra_root=_persist_extra_root,
+            bypass_approval=_bypass_approval,
         )
     )
     registry.register(
@@ -273,6 +477,10 @@ def create_runtime_tool_registry(
             shared_roots=_shared_roots,
             session_files_dir=_work_dir,
             base_workspace=workspace,
+            allow_user_roots=_auto_user_dirs,
+            write_resolver=_write_resolver,
+            persist_extra_root=_persist_extra_root,
+            bypass_approval=_bypass_approval,
         )
     )
     registry.register(
@@ -284,6 +492,10 @@ def create_runtime_tool_registry(
             shared_roots=_shared_roots,
             session_files_dir=_work_dir,
             base_workspace=workspace,
+            allow_user_roots=_auto_user_dirs,
+            write_resolver=_write_resolver,
+            persist_extra_root=_persist_extra_root,
+            bypass_approval=_bypass_approval,
         )
     )
 
@@ -292,10 +504,19 @@ def create_runtime_tool_registry(
         ExecTool(
             working_dir=str(_work_dir or workspace),
             timeout=getattr(exec_cfg, "timeout", 60) if exec_cfg is not None else 60,
+            max_timeout=getattr(exec_cfg, "max_timeout", 1800) if exec_cfg is not None else 1800,
+            idle_timeout=getattr(exec_cfg, "idle_timeout", 90) if exec_cfg is not None else 90,
+            heartbeat_interval=getattr(exec_cfg, "heartbeat_interval", 30) if exec_cfg is not None else 30,
+            kill_grace_seconds=getattr(exec_cfg, "kill_grace_seconds", 5) if exec_cfg is not None else 5,
             restrict_to_workspace=restrict_to_workspace,
             env_passthrough=list(getattr(exec_cfg, "env_passthrough", [])) if exec_cfg is not None else [],
             approval_callback=approval_callback,
             sandbox_manager=_sbm,
+            # #854: 系统包安装授权确认卡——关闭状态下拦截点弹卡（once/always/deny）。
+            # "允许并记住"走统一入口：runtime 属性 + config 持久化（外部审阅 #854）。
+            system_install_approver=_make_system_install_approver(
+                resolver=_write_resolver, sandbox_manager=_sbm,
+            ),
         )
     )
 
@@ -309,12 +530,25 @@ def create_runtime_tool_registry(
         search_cfg = None
         fetch_cfg = None
 
+    # DeepSeek 联网搜索复用 LLM key（零配置；仅官方 base 生效）——从 providers 配置读取
+    _ds_cfg = getattr(getattr(config, "providers", None), "deepseek", None)
+    deepseek_api_key = getattr(_ds_cfg, "api_key", "") if _ds_cfg is not None else ""
+    deepseek_api_base = getattr(_ds_cfg, "api_base", "") if _ds_cfg is not None else ""
+    # 当前对话模型名（"对应模型的联网搜索"：如 DeepSeek 模型 → DeepSeek 搜索）。
+    # 用回调每次读取——配置改动（换模型）即时生效，不在注册表构建时冻结（外部审阅 #844）
+    def _current_model_name() -> str:
+        _defaults = getattr(getattr(config, "agents", None), "defaults", None)
+        return getattr(_defaults, "model", "") if _defaults is not None else ""
+
     registry.register(
         WebSearchTool(
             provider=getattr(search_cfg, "provider", "auto") if search_cfg is not None else "auto",
             api_key=getattr(search_cfg, "api_key", None) if search_cfg is not None else None,
             tavily_api_key=getattr(search_cfg, "tavily_api_key", None) if search_cfg is not None else None,
             brave_api_key=getattr(search_cfg, "brave_api_key", None) if search_cfg is not None else None,
+            deepseek_api_key=deepseek_api_key or None,
+            deepseek_api_base=deepseek_api_base or "https://api.deepseek.com",
+            model_provider=_current_model_name,
             max_results=getattr(search_cfg, "max_results", 5) if search_cfg is not None else 5,
         )
     )
@@ -376,12 +610,24 @@ def create_runtime_tool_registry(
     # Office write tools always write inside the workspace, independently
     # of the `restrict_to_workspace` config (which only controls
     # WriteFileTool / EditFileTool).
-    registry.register(CreateDocxTool(workspace=_write_workspace, allowed_dir=_write_workspace))
-    registry.register(DocxWriteTool(workspace=_write_workspace, allowed_dir=_write_workspace))
+    registry.register(CreateDocxTool(
+        workspace=_write_workspace, allowed_dir=_write_workspace,
+        allow_user_roots=_auto_user_dirs,
+    ))
+    registry.register(DocxWriteTool(
+        workspace=_write_workspace, allowed_dir=_write_workspace,
+        allow_user_roots=_auto_user_dirs,
+    ))
     registry.register(EditDocxTool(workspace=_write_workspace, allowed_dir=_write_workspace))
     registry.register(PptxReadTool(workspace=_write_workspace, allowed_dir=_write_workspace))
-    registry.register(CreatePptxTool(workspace=_write_workspace, allowed_dir=_write_workspace))
-    registry.register(PptxWriteTool(workspace=_write_workspace, allowed_dir=_write_workspace))
+    registry.register(CreatePptxTool(
+        workspace=_write_workspace, allowed_dir=_write_workspace,
+        allow_user_roots=_auto_user_dirs,
+    ))
+    registry.register(PptxWriteTool(
+        workspace=_write_workspace, allowed_dir=_write_workspace,
+        allow_user_roots=_auto_user_dirs,
+    ))
     registry.register(XlsxReadTool(workspace=_write_workspace, allowed_dir=_write_workspace))
     registry.register(CreateXlsxTool(workspace=_write_workspace, allowed_dir=_write_workspace))
     registry.register(XlsxWriteTool(workspace=_write_workspace, allowed_dir=_write_workspace))
@@ -466,6 +712,7 @@ def create_runtime_tool_registry(
             sandbox_manager=_sbm,
             shared_roots=_shared_roots,
             base_workspace=workspace,
+            allow_user_roots=_auto_user_dirs,
         )
     )
 

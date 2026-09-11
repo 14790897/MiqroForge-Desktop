@@ -15,7 +15,6 @@ from pathlib import Path
 
 import pytest
 
-
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 
@@ -92,13 +91,13 @@ async def test_initialize_response_contains_server_info():
     register_initialize_handler(server)
 
     resp = await _dispatch(server, registry, "initialize", {
-        "clientInfo": {"name": "miqi_desktop", "title": "MiqroForge Desktop", "version": "0.1.0"},
+        "clientInfo": {"name": "miqi_desktop", "title": "MiQroForge Desktop", "version": "0.1.0"},
     })
 
     result = resp["result"]
     server_info = result["serverInfo"]
     assert server_info["name"] == "miqi"
-    assert server_info["title"] == "MiqroForge"
+    assert server_info["title"] == "MiQroForge"
     assert isinstance(server_info["version"], str)
 
 
@@ -346,6 +345,7 @@ async def test_experimental_api_from_initialize_grants_process_spawn():
 
     # Set up WorkbenchProcessRuntime
     from unittest.mock import MagicMock
+
     from miqi.runtime.workbench_process_runtime import WorkbenchProcessRuntime
     registry.bridge_context["state"] = MagicMock()
     registry.bridge_context["workbench_process_runtime"] = WorkbenchProcessRuntime(workspace=Path.cwd())

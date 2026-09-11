@@ -16,14 +16,13 @@ from unittest.mock import MagicMock
 import pytest
 
 from miqi.runtime.app_server import AppServer, ClientCapabilities, ClientSessionRegistry
+from miqi.runtime.fuzzy_file_search_app_handlers import (
+    register_fuzzy_file_search_handlers,
+)
 from miqi.runtime.fuzzy_file_search_runtime import (
     FuzzyFileSearchRuntime,
     fuzzy_match_score,
 )
-from miqi.runtime.fuzzy_file_search_app_handlers import (
-    register_fuzzy_file_search_handlers,
-)
-
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 

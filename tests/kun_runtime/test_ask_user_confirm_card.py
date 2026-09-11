@@ -13,8 +13,8 @@ from miqi.agent.tools.ask_user_confirm import (
     DEFAULT_CHOICES,
     AskUserConfirmCardTool,
 )
+from miqi.agent.tools.registry import _NEVER_PARALLEL_TOOLS, ToolRegistry
 from miqi.agent.user_input_resolver import make_resolver
-from miqi.agent.tools.registry import ToolRegistry, _NEVER_PARALLEL_TOOLS
 from miqi.kun_runtime.contracts import TurnStatus, UserInputItem, UserInputRequestedEvent
 from miqi.kun_runtime.tool_host import (
     ASK_USER_CONFIRM_TOOL,
@@ -424,7 +424,11 @@ class TestGateTurnQueue:
 
 class TestUserInputHistory:
     def test_record_and_query(self):
-        from miqi.agent.user_input_history import add_user_input_history, clear_history, get_user_input_history
+        from miqi.agent.user_input_history import (
+            add_user_input_history,
+            clear_history,
+            get_user_input_history,
+        )
 
         clear_history()
         add_user_input_history(
@@ -485,11 +489,11 @@ class TestLegacyResolverPath:
     """Legacy desktop path: tool resolver → shared gate → emit → resolve."""
 
     def test_tool_blocks_then_resolves(self):
+        from miqi.agent.tools.ask_user_confirm import AskUserConfirmCardTool
         from miqi.agent.user_input_resolver import (
             resolve_user_input,
             set_user_input_emitter,
         )
-        from miqi.agent.tools.ask_user_confirm import AskUserConfirmCardTool
 
         emitted = {}
 
@@ -533,11 +537,11 @@ class TestLegacyResolverPath:
         live cards."""
         import json as _json
 
+        from miqi.agent.tools.ask_user_confirm import AskUserConfirmCardTool
         from miqi.agent.user_input_resolver import (
             resolve_user_input,
             set_user_input_emitter,
         )
-        from miqi.agent.tools.ask_user_confirm import AskUserConfirmCardTool
 
         emissions: list[dict] = []
 
@@ -590,8 +594,8 @@ class TestLegacyResolverPath:
         """Resolver exists but no emitter wired → safe cancelled, never a fake confirm."""
         import json as _json
 
-        from miqi.agent.user_input_resolver import set_user_input_emitter
         from miqi.agent.tools.ask_user_confirm import AskUserConfirmCardTool
+        from miqi.agent.user_input_resolver import set_user_input_emitter
 
         set_user_input_emitter("", None)
         tool = AskUserConfirmCardTool(resolver=make_resolver())
@@ -611,11 +615,11 @@ class TestLegacyResolverPath:
         """Legacy resolver reuses the remembered choice without re-emitting."""
         import json as _json
 
+        from miqi.agent.tools.ask_user_confirm import AskUserConfirmCardTool
         from miqi.agent.user_input_resolver import (
             resolve_user_input,
             set_user_input_emitter,
         )
-        from miqi.agent.tools.ask_user_confirm import AskUserConfirmCardTool
 
         emissions = []
 
@@ -673,7 +677,7 @@ class TestLegacyResolverPath:
 class TestAwaitUserInputGateFailure:
     @pytest.mark.asyncio
     async def test_gate_error_surfaces_original_and_cleans_up(self, tmp_path):
-        from pathlib import Path as _P
+        from pathlib import Path
 
         from miqi.kun_runtime.cancellation import InflightTracker
         from miqi.kun_runtime.compactor import ContextCompactor
@@ -687,7 +691,7 @@ class TestAwaitUserInputGateFailure:
         from miqi.kun_runtime.usage import UsageService
         from miqi.kun_runtime.user_input_gate import UserInputGate
 
-        FIXED = "2026-08-15T00:00:00Z"
+        fixed = "2026-08-15T00:00:00Z"
 
         class ExplodingGate(UserInputGate):
             async def request(self, *args, **kwargs):
@@ -718,13 +722,13 @@ class TestAwaitUserInputGateFailure:
                     yield ModelStreamChunk(kind="assistant_text_delta", text="完成")
                     yield ModelStreamChunk(kind="completed", stopReason="stop")
 
-        data_dir = _P(tmp_path) / "data"
+        data_dir = Path(tmp_path) / "data"
         thread_store = FileThreadStore(data_dir)
         session_store = FileSessionStore(data_dir)
         bus = EventBus()
-        events = RuntimeEventRecorder(bus, now_iso=lambda: FIXED)
+        events = RuntimeEventRecorder(bus, now_iso=lambda: fixed)
         turns = TurnService(
-            thread_store, session_store, events, InflightTracker(), now_iso=lambda: FIXED
+            thread_store, session_store, events, InflightTracker(), now_iso=lambda: fixed
         )
 
         registry = ToolRegistry()
@@ -741,14 +745,14 @@ class TestAwaitUserInputGateFailure:
             turns=turns,
             inflight=InflightTracker(),
             compactor=ContextCompactor(soft_threshold=100, hard_threshold=500),
-            now_iso=lambda: FIXED,
+            now_iso=lambda: fixed,
             user_input_gate=ExplodingGate(),
         )
 
         th = {
             "id": "th1",
             "title": "Test Thread",
-            "workspace": str(_P(tmp_path) / "ws"),
+            "workspace": str(Path(tmp_path) / "ws"),
             "model": "fake-model",
             "mode": "agent",
             "status": "idle",
@@ -756,8 +760,8 @@ class TestAwaitUserInputGateFailure:
             "sandboxMode": "workspace-write",
             "relation": "primary",
             "costBudgetWarningSent": False,
-            "createdAt": FIXED,
-            "updatedAt": FIXED,
+            "createdAt": fixed,
+            "updatedAt": fixed,
             "turns": [],
         }
         await thread_store.upsert(th)
@@ -793,7 +797,7 @@ class TestMultipleCardsOneTurn:
 
     @pytest.mark.asyncio
     async def test_cards_serialize_and_never_stack(self, tmp_path):
-        from pathlib import Path as _P
+        from pathlib import Path
 
         from miqi.kun_runtime.cancellation import InflightTracker
         from miqi.kun_runtime.compactor import ContextCompactor
@@ -807,8 +811,8 @@ class TestMultipleCardsOneTurn:
         from miqi.kun_runtime.usage import UsageService
         from miqi.kun_runtime.user_input_gate import UserInputGate
 
-        FIXED = "2026-08-15T00:00:00Z"
-        TITLES = ["确认执行方案？", "是否上传到 MiQroForge？"]
+        fixed = "2026-08-15T00:00:00Z"
+        titles = ["确认执行方案？", "是否上传到 MiQroForge？"]
 
         class TwoCardsOneStepModel(FakeModelClient):
             """One model step carrying TWO confirm cards, then plain text."""
@@ -820,7 +824,7 @@ class TestMultipleCardsOneTurn:
             async def stream(self, request):
                 self._n += 1
                 if self._n == 1:
-                    for i, title in enumerate(TITLES, 1):
+                    for i, title in enumerate(titles, 1):
                         yield ModelStreamChunk(
                             kind="tool_call_complete",
                             callId=f"call_{i}",
@@ -832,13 +836,13 @@ class TestMultipleCardsOneTurn:
                     yield ModelStreamChunk(kind="assistant_text_delta", text="完成")
                     yield ModelStreamChunk(kind="completed", stopReason="stop")
 
-        data_dir = _P(tmp_path) / "data"
+        data_dir = Path(tmp_path) / "data"
         thread_store = FileThreadStore(data_dir)
         session_store = FileSessionStore(data_dir)
         bus = EventBus()
-        events = RuntimeEventRecorder(bus, now_iso=lambda: FIXED)
+        events = RuntimeEventRecorder(bus, now_iso=lambda: fixed)
         turns = TurnService(
-            thread_store, session_store, events, InflightTracker(), now_iso=lambda: FIXED
+            thread_store, session_store, events, InflightTracker(), now_iso=lambda: fixed
         )
         gate = UserInputGate()
 
@@ -856,14 +860,14 @@ class TestMultipleCardsOneTurn:
             turns=turns,
             inflight=InflightTracker(),
             compactor=ContextCompactor(soft_threshold=100, hard_threshold=500),
-            now_iso=lambda: FIXED,
+            now_iso=lambda: fixed,
             user_input_gate=gate,
         )
 
         th = {
             "id": "th1",
             "title": "Test Thread",
-            "workspace": str(_P(tmp_path) / "ws"),
+            "workspace": str(Path(tmp_path) / "ws"),
             "model": "fake-model",
             "mode": "agent",
             "status": "idle",
@@ -871,8 +875,8 @@ class TestMultipleCardsOneTurn:
             "sandboxMode": "workspace-write",
             "relation": "primary",
             "costBudgetWarningSent": False,
-            "createdAt": FIXED,
-            "updatedAt": FIXED,
+            "createdAt": fixed,
+            "updatedAt": fixed,
             "turns": [],
         }
         await thread_store.upsert(th)
@@ -898,7 +902,7 @@ class TestMultipleCardsOneTurn:
         # resolve until the loop's finally pops it — exclude it so the same
         # card is never resolved twice.)
         resolved_ids: set[str] = set()
-        for title in TITLES:
+        for title in titles:
             input_id = await wait_for_pending(resolved_ids)
             assert input_id is not None, f"card {title} never became pending"
             assert gate.pending_request(input_id) is not None
@@ -911,7 +915,7 @@ class TestMultipleCardsOneTurn:
 
         history = bus.history("th1")
         requested = [e for e in history if e["kind"] == "user_input_requested"]
-        assert [e["title"] for e in requested] == TITLES
+        assert [e["title"] for e in requested] == titles
         kinds = [e["kind"] for e in history]
         reqs = [i for i, k in enumerate(kinds) if k == "user_input_requested"]
         ress = [i for i, k in enumerate(kinds) if k == "user_input_resolved"]

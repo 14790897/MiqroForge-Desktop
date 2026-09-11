@@ -78,16 +78,16 @@ function dibToPng(dibData) {
     const row = Buffer.alloc(rowLen);
     for (let x = 0; x < biWidth; x++) {
       const p = rowOff + x * 4;
-      row[x * 4] = pixelData[p + 2];     // R ← B
+      row[x * 4] = pixelData[p + 2]; // R ← B
       row[x * 4 + 1] = pixelData[p + 1]; // G ← G
-      row[x * 4 + 2] = pixelData[p];     // B ← R
+      row[x * 4 + 2] = pixelData[p]; // B ← R
       row[x * 4 + 3] = pixelData[p + 3]; // A ← A
     }
     rows.push(row);
   }
 
   // Build raw (uncompressed) image data with filter byte per row
-  const rawChunks = rows.map(row => Buffer.concat([Buffer.from([0]), row]));
+  const rawChunks = rows.map((row) => Buffer.concat([Buffer.from([0]), row]));
   const raw = Buffer.concat(rawChunks);
 
   // Deflate
@@ -144,7 +144,8 @@ for (const entry of entries) {
   }
 
   const rawData = buf.slice(entry.offset, entry.offset + entry.size);
-  const isPng = rawData[0] === 0x89 && rawData[1] === 0x50 && rawData[2] === 0x4e && rawData[3] === 0x47;
+  const isPng =
+    rawData[0] === 0x89 && rawData[1] === 0x50 && rawData[2] === 0x4e && rawData[3] === 0x47;
 
   let pngData;
   if (isPng) {
@@ -153,7 +154,9 @@ for (const entry of entries) {
   } else {
     // DIB/BMP → PNG
     pngData = dibToPng(rawData);
-    console.log(`  ${entry.w}x${entry.h} → ${typeKey} (converted DIB → PNG, ${pngData.length} bytes)`);
+    console.log(
+      `  ${entry.w}x${entry.h} → ${typeKey} (converted DIB → PNG, ${pngData.length} bytes)`
+    );
   }
 
   const entryHeader = Buffer.alloc(8);
@@ -170,7 +173,10 @@ for (const entry of entries) {
 
 const icnsHeader = Buffer.alloc(8);
 icnsHeader.writeUInt32BE(
-  ('i'.charCodeAt(0) << 24) | ('c'.charCodeAt(0) << 16) | ('n'.charCodeAt(0) << 8) | 's'.charCodeAt(0),
+  ('i'.charCodeAt(0) << 24) |
+    ('c'.charCodeAt(0) << 16) |
+    ('n'.charCodeAt(0) << 8) |
+    's'.charCodeAt(0),
   0
 );
 const totalLen = 8 + icnsEntries.reduce((s, e) => s + e.length, 0);

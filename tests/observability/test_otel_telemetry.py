@@ -13,20 +13,18 @@ from __future__ import annotations
 
 import asyncio
 from typing import Any
-from unittest.mock import MagicMock
 
 import pytest
 
 from miqi.config.schema import Config, ObservabilityConfig
-from miqi.observability.otel import TelemetrySink, build_telemetry_sink
-
+from miqi.observability.otel import build_telemetry_sink
 
 # ── In-memory span exporter for testing ────────────────────────
 
 
 def _make_in_memory_exporter():
     """Create an in-memory span exporter for tests."""
-    opentelemetry = pytest.importorskip("opentelemetry")
+    pytest.importorskip("opentelemetry")
     from opentelemetry.sdk.trace.export import SpanExportResult
 
     class _InMemoryExporter:
@@ -89,7 +87,6 @@ class TestNoOpPaths:
 
     def test_disabled_never_imports_otel(self, monkeypatch):
         """When disabled, no opentelemetry import is attempted."""
-        import sys
 
         original_import = __builtins__["__import__"] if hasattr(__builtins__, "__import__") else __import__
 
@@ -493,7 +490,6 @@ class TestRuntimeServicesTee:
 
     def test_default_config_leaves_sink_unchanged(self):
         """When observability is disabled, from_config uses the original sink."""
-        from miqi.runtime.services import RuntimeServices
 
         # We can't fully construct RuntimeServices without a real provider + DB,
         # so we test the tee logic in isolation by verifying the config path.

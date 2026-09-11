@@ -12,8 +12,6 @@ import sys
 import types
 from types import SimpleNamespace
 
-import pytest
-
 # recalc.py is a script that imports a sibling `office` package via
 # `from office.soffice import get_soffice_env` (it runs with scripts/ on
 # sys.path). Stub it out before importing recalc so the test does not depend

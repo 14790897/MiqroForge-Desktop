@@ -1,16 +1,16 @@
-# Knowledge Work Plugins for MiqroForge
+# Knowledge Work Plugins for MiQroForge
 
-Skills adapted from [anthropics/knowledge-work-plugins](https://github.com/anthropics/knowledge-work-plugins) for use with MiqroForge Desktop Agent.
+Skills adapted from [anthropics/knowledge-work-plugins](https://github.com/anthropics/knowledge-work-plugins) for use with MiQroForge Desktop Agent.
 
 ## How to use
 
-These skills appear automatically in MiqroForge when placed under `miqi/skills/kwp/`. The agent can read them via `read_file` when the skill description matches the current task.
+These skills appear automatically in MiQroForge when placed under `miqi/skills/kwp/`. The agent can read them via `read_file` when the skill description matches the current task.
 
 ## Standalone vs Supercharged
 
-All skills work **standalone** with MiqroForge's built-in tools (`web_search`, `web_fetch`, `write_file`, `exec`, `create_docx`, `create_pptx`, `create_xlsx`, `create_pdf`).
+All skills work **standalone** with MiQroForge's built-in tools (`web_search`, `web_fetch`, `write_file`, `exec`, `create_docx`, `create_pptx`, `create_xlsx`, `create_pdf`).
 
-For the **supercharged** experience described in the original plugin docs, configure MCP servers via MiqroForge's MCP settings.
+For the **supercharged** experience described in the original plugin docs, configure MCP servers via MiQroForge's MCP settings.
 
 ## Included Plugins
 
@@ -34,4 +34,4 @@ For the **supercharged** experience described in the original plugin docs, confi
 ## License
 
 Original content: Apache 2.0 — [anthropics/knowledge-work-plugins](https://github.com/anthropics/knowledge-work-plugins)
-Adaptation: MIT — [MiqroForge Desktop](http://git.miqroera.com/intership/miqi-desktop.git)
+Adaptation: MIT — [MiQroForge Desktop](http://git.miqroera.com/intership/miqi-desktop.git)

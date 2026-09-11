@@ -104,9 +104,7 @@ test.describe.serial('Session Rename E2E', () => {
           viewport: { w: window.innerWidth, h: window.innerHeight },
         };
       });
-      console.log(
-        '[diagnostic] chat-title actionability failed; layout: ' + JSON.stringify(diag)
-      );
+      console.log('[diagnostic] chat-title actionability failed; layout: ' + JSON.stringify(diag));
       await title.dispatchEvent('click');
     }
   }
@@ -116,212 +114,196 @@ test.describe.serial('Session Rename E2E', () => {
     return page.locator('input[type="text"]').last();
   }
 
-  test(
-    '01: chat header inline edit — click title, type new name, Enter confirms',
-    async () => {
-      // Fresh launch → exactly one session already exists.  On slow CI the
-      // sidebar may not have rendered its session cards yet, so wait for at
-      // least one to appear instead of asserting the count immediately.
-      // 60s: macOS CI runners can take >15s to cold-start the Python bridge
-      // and return the first sessions.list (observed "暂无任务" at 15s on a
-      // loaded runner — the cards appear a few seconds later).  If the list
-      // never populates (heavily loaded macOS runner), the rename flow can't
-      // be exercised — environment limitation, skip instead of failing
-      // (session-rename 在 macos-e2e 反复误报).
-      try {
-        await expect
-          .poll(async () => getSidebarSessionCount(page), { timeout: 60_000 })
-          .toBeGreaterThanOrEqual(1);
-      } catch (e) {
-        // Only the polling timeout means "environment too slow" — rethrow any
-        // real locator/page error so genuine failures stay visible.
-        if (!(e instanceof Error) || !/timed out|exceeded/i.test(e.message)) {
-          throw e;
-        }
-        console.log('[test] ⚠️ sidebar session list never populated — skipping (environment)');
-        test.skip(true, 'sidebar session list unavailable on this runner');
-        return;
+  /**
+   * Empty sessions are ephemeral now — they are never persisted nor listed,
+   * so a fresh launch has ZERO sidebar cards until the first real message is
+   * sent (before that the chat shows the welcome hero).  Ensure a real,
+   * titled session exists to rename by seeding one message if none is there.
+   */
+  async function ensureSeededSession(): Promise<void> {
+    if ((await getSidebarSessionCount(page)) > 0) return;
+    await waitForInputReady(page);
+    await page.locator('textarea').first().fill(`seed-${Date.now()} 请创建会话`);
+    await page.locator('textarea').first().press('Enter');
+    try {
+      await expect
+        .poll(async () => getSidebarSessionCount(page), { timeout: 60_000 })
+        .toBeGreaterThanOrEqual(1);
+    } catch (e) {
+      // 播种 60s 未完成直接 rethrow：若「空会话不落盘」回归，会表现为永远播种
+      // 不出卡片，test.skip 会把这种真回归藏成跳过（CodeRabbit）。
+      console.log('[test] ⚠️ seeding a session never completed within 60s — failing');
+      throw e;
+    }
+  }
+
+  test('01: chat header inline edit — click title, type new name, Enter confirms', async () => {
+    // Seed a real session first (fresh launch no longer shows an empty
+    // default card — only conversations with a message are listed).  On slow
+    // CI the sidebar may not have rendered its cards yet, so the seeding step
+    // itself polls up to 60s (macOS runners can take >15s to cold-start the
+    // Python bridge — observed "暂无任务" at 15s on a loaded runner).
+    await ensureSeededSession();
+
+    // Header shows the auto-extracted title (first user message, no custom
+    // title yet).
+    await expect(chatTitle()).toBeVisible();
+    const original = (await chatTitle().textContent()) || '';
+    expect(original.trim().length).toBeGreaterThan(0);
+
+    // Click the title → inline input appears, pre-filled with current title.
+    await clickChatTitle();
+    await expect(titleInput()).toBeVisible();
+    await expect(titleInput()).toHaveValue(original);
+
+    // Type a new name and confirm with Enter.
+    const newTitle = `Renamed-${Date.now()}`;
+    await titleInput().fill('');
+    await titleInput().type(newTitle);
+    await titleInput().press('Enter');
+
+    // Inline input closes; header shows the new name.
+    await expect(titleInput()).toBeHidden();
+    await expect(chatTitle()).toHaveText(newTitle);
+    console.log(`[test] ✅ Header inline rename → ${newTitle}`);
+
+    // The sidebar card reflects the new title too.
+    await expect(getSidebarSessionItems(page).filter({ hasText: newTitle })).toHaveCount(1);
+  });
+
+  test('02: chat header inline edit — Esc cancels without saving', async () => {
+    // Take the current header title.
+    const before = (await chatTitle().textContent()) || '';
+
+    await clickChatTitle();
+    await expect(titleInput()).toBeVisible();
+    await titleInput().fill('Should Not Persist');
+    await titleInput().press('Escape');
+
+    // Input closes and the title is unchanged.
+    await expect(titleInput()).toBeHidden();
+    await expect(chatTitle()).toHaveText(before);
+    console.log('[test] ✅ Esc cancels inline edit');
+  });
+
+  test('03: sidebar context menu rename — right-click → 重命名 → dialog confirms', async () => {
+    // Right-click the first sidebar session (the active session on a fresh
+    // launch).  The card text mixes in status/message metadata, so we don't
+    // pre-match its full text.  Same environment tolerance as test 01: a
+    // loaded macOS runner may never populate the sidebar list — skip rather
+    // than fail on count=0 (session-rename 03 在 macos-e2e 反复误报).
+    const items = getSidebarSessionItems(page);
+    try {
+      await expect.poll(async () => items.count(), { timeout: 60_000 }).toBeGreaterThanOrEqual(1);
+    } catch (e) {
+      // Only the polling timeout means "environment too slow" — rethrow any
+      // real locator/page error so genuine failures stay visible.
+      if (!(e instanceof Error) || !/timed out|exceeded/i.test(e.message)) {
+        throw e;
       }
-      const initialCount = await getSidebarSessionCount(page);
+      console.log('[test] ⚠️ sidebar session list never populated — skipping (environment)');
+      test.skip(true, 'sidebar session list unavailable on this runner');
+      return;
+    }
+    await items.nth(0).click({ button: 'right' });
 
-      // Header shows the auto-extracted title (no custom title yet).
-      await expect(chatTitle()).toBeVisible();
-      const original = (await chatTitle().textContent()) || '';
-      expect(original.trim().length).toBeGreaterThan(0);
+    await expect(contextMenuItem('重命名')).toBeVisible();
+    await contextMenuItem('重命名').click();
 
-      // Click the title → inline input appears, pre-filled with current title.
-      await clickChatTitle();
-      await expect(titleInput()).toBeVisible();
-      await expect(titleInput()).toHaveValue(original);
+    // InputDialog appears, pre-filled with the current title (non-empty).
+    await expect(renameDialogInput()).toBeVisible();
+    const prefilled = (await renameDialogInput().inputValue()) || '';
+    expect(prefilled.trim().length).toBeGreaterThan(0);
 
-      // Type a new name and confirm with Enter.
-      const newTitle = `Renamed-${Date.now()}`;
-      await titleInput().fill('');
-      await titleInput().type(newTitle);
-      await titleInput().press('Enter');
+    const newTitle = `SidebarRenamed-${Date.now()}`;
+    await renameDialogInput().fill('');
+    await renameDialogInput().type(newTitle);
+    await renameDialogInput().press('Enter');
 
-      // Inline input closes; header shows the new name.
-      await expect(titleInput()).toBeHidden();
-      await expect(chatTitle()).toHaveText(newTitle);
-      console.log(`[test] ✅ Header inline rename → ${newTitle}`);
+    // Dialog closes; the sidebar card shows the new title.
+    await expect(renameDialogInput()).toBeHidden();
+    await expect(getSidebarSessionItems(page).filter({ hasText: newTitle })).toHaveCount(1);
 
-      // The sidebar card reflects the new title too.
-      await expect(
-        getSidebarSessionItems(page).filter({ hasText: newTitle })
-      ).toHaveCount(1);
-    },
-  );
+    // The renamed session is the active one → the chat header stays in sync.
+    await expect(chatTitle()).toHaveText(newTitle);
+    console.log(`[test] ✅ Sidebar context-menu rename → ${newTitle}`);
+  });
 
-  test(
-    '02: chat header inline edit — Esc cancels without saving',
-    async () => {
-      // Take the current header title.
-      const before = (await chatTitle().textContent()) || '';
+  test('04: title persists in session metadata — verified via sessions.get', async () => {
+    // After test 03, the active session's header title is the custom name.
+    // 03 may have been skipped on a loaded macOS runner (sidebar list never
+    // populated) — in that case the title is not the custom name and this
+    // metadata check cannot run.  Skip instead of failing (test coupling,
+    // session-rename 04 在 macos-e2e 反复误报).
+    const activeTitle = (await chatTitle().textContent()) || '';
+    if (!activeTitle.includes('SidebarRenamed-')) {
+      console.log(
+        '[test] ⚠️ prior rename step (03) skipped on this runner — skipping metadata check'
+      );
+      test.skip(true, 'prior rename step not executed on this runner');
+      return;
+    }
+    expect(activeTitle).toContain('SidebarRenamed-');
 
-      await clickChatTitle();
-      await expect(titleInput()).toBeVisible();
-      await titleInput().fill('Should Not Persist');
-      await titleInput().press('Escape');
-
-      // Input closes and the title is unchanged.
-      await expect(titleInput()).toBeHidden();
-      await expect(chatTitle()).toHaveText(before);
-      console.log('[test] ✅ Esc cancels inline edit');
-    },
-  );
-
-  test(
-    '03: sidebar context menu rename — right-click → 重命名 → dialog confirms',
-    async () => {
-      // Right-click the first sidebar session (the active session on a fresh
-      // launch).  The card text mixes in status/message metadata, so we don't
-      // pre-match its full text.  Same environment tolerance as test 01: a
-      // loaded macOS runner may never populate the sidebar list — skip rather
-      // than fail on count=0 (session-rename 03 在 macos-e2e 反复误报).
-      const items = getSidebarSessionItems(page);
-      try {
-        await expect
-          .poll(async () => items.count(), { timeout: 60_000 })
-          .toBeGreaterThanOrEqual(1);
-      } catch (e) {
-        // Only the polling timeout means "environment too slow" — rethrow any
-        // real locator/page error so genuine failures stay visible.
-        if (!(e instanceof Error) || !/timed out|exceeded/i.test(e.message)) {
-          throw e;
+    const found = (await page.evaluate(async (title) => {
+      const all = await (window as any).miqi.sessions.list();
+      const sessions: any[] = all.sessions || all || [];
+      for (const s of sessions) {
+        const detail = await (window as any).miqi.sessions.get(s.key);
+        const metaTitle = detail?.metadata?.title;
+        if (metaTitle === title) {
+          return { key: s.key, title: s.title, metaTitle };
         }
-        console.log('[test] ⚠️ sidebar session list never populated — skipping (environment)');
-        test.skip(true, 'sidebar session list unavailable on this runner');
-        return;
       }
-      await items.nth(0).click({ button: 'right' });
+      return null;
+    }, activeTitle)) as { key: string; title: string; metaTitle: string } | null;
 
-      await expect(contextMenuItem('重命名')).toBeVisible();
-      await contextMenuItem('重命名').click();
+    expect(found, 'sessions.get should expose the custom title in metadata').toBeTruthy();
+    if (!found) throw new Error('Custom title not found via sessions.get');
+    expect(found.metaTitle).toBe(activeTitle);
+    expect(found.title, 'list_sessions should prefer metadata.title').toBe(activeTitle);
+    console.log(`[test] ✅ metadata.title persisted: ${found.metaTitle}`);
+  });
 
-      // InputDialog appears, pre-filled with the current title (non-empty).
-      await expect(renameDialogInput()).toBeVisible();
-      const prefilled = (await renameDialogInput().inputValue()) || '';
-      expect(prefilled.trim().length).toBeGreaterThan(0);
+  test('05: empty title rejected — stays on the original name', async () => {
+    const before = (await chatTitle().textContent()) || '';
 
-      const newTitle = `SidebarRenamed-${Date.now()}`;
-      await renameDialogInput().fill('');
-      await renameDialogInput().type(newTitle);
-      await renameDialogInput().press('Enter');
+    await clickChatTitle();
+    await expect(titleInput()).toBeVisible();
+    await titleInput().fill('   '); // whitespace-only → trimmed empty
+    await titleInput().press('Enter');
 
-      // Dialog closes; the sidebar card shows the new title.
-      await expect(renameDialogInput()).toBeHidden();
-      await expect(
-        getSidebarSessionItems(page).filter({ hasText: newTitle })
-      ).toHaveCount(1);
+    // Input closes; the title falls back to the previous value.
+    await expect(titleInput()).toBeHidden();
+    await expect(chatTitle()).toHaveText(before);
+    console.log('[test] ✅ Empty title falls back to previous name');
+  });
 
-      // The renamed session is the active one → the chat header stays in sync.
-      await expect(chatTitle()).toHaveText(newTitle);
-      console.log(`[test] ✅ Sidebar context-menu rename → ${newTitle}`);
-    },
-  );
+  test('06: rename survives app relaunch (persistence across restart)', async () => {
+    // Pick a title and set it on the active session.
+    const persistedTitle = `Persisted-${Date.now()}`;
+    await clickChatTitle();
+    await expect(titleInput()).toBeVisible();
+    await titleInput().fill('');
+    await titleInput().type(persistedTitle);
+    await titleInput().press('Enter');
+    await expect(chatTitle()).toHaveText(persistedTitle);
 
-  test(
-    '04: title persists in session metadata — verified via sessions.get',
-    async () => {
-      // After test 03, the active session's header title is the custom name.
-      // 03 may have been skipped on a loaded macOS runner (sidebar list never
-      // populated) — in that case the title is not the custom name and this
-      // metadata check cannot run.  Skip instead of failing (test coupling,
-      // session-rename 04 在 macos-e2e 反复误报).
-      const activeTitle = (await chatTitle().textContent()) || '';
-      if (!activeTitle.includes('SidebarRenamed-')) {
-        console.log('[test] ⚠️ prior rename step (03) skipped on this runner — skipping metadata check');
-        test.skip(true, 'prior rename step not executed on this runner');
-        return;
-      }
-      expect(activeTitle).toContain('SidebarRenamed-');
+    // Close the app and relaunch on the SAME MIQI_HOME.
+    await closeElectronApp(electronApp, miqiHome, true);
+    const fixture = await relaunchElectronApp(miqiHome);
+    electronApp = fixture.electronApp;
+    page = fixture.page;
+    await waitForBridgeInitialized(page);
+    await waitForInputReady(page);
 
-      const found = await page.evaluate(async (title) => {
-        const all = await (window as any).miqi.sessions.list();
-        const sessions: any[] = all.sessions || all || [];
-        for (const s of sessions) {
-          const detail = await (window as any).miqi.sessions.get(s.key);
-          const metaTitle = detail?.metadata?.title;
-          if (metaTitle === title) {
-            return { key: s.key, title: s.title, metaTitle };
-          }
-        }
-        return null;
-      }, activeTitle) as { key: string; title: string; metaTitle: string } | null;
-
-      expect(found, 'sessions.get should expose the custom title in metadata').toBeTruthy();
-      if (!found) throw new Error('Custom title not found via sessions.get');
-      expect(found.metaTitle).toBe(activeTitle);
-      expect(found.title, 'list_sessions should prefer metadata.title').toBe(activeTitle);
-      console.log(`[test] ✅ metadata.title persisted: ${found.metaTitle}`);
-    },
-  );
-
-  test(
-    '05: empty title rejected — stays on the original name',
-    async () => {
-      const before = (await chatTitle().textContent()) || '';
-
-      await clickChatTitle();
-      await expect(titleInput()).toBeVisible();
-      await titleInput().fill('   '); // whitespace-only → trimmed empty
-      await titleInput().press('Enter');
-
-      // Input closes; the title falls back to the previous value.
-      await expect(titleInput()).toBeHidden();
-      await expect(chatTitle()).toHaveText(before);
-      console.log('[test] ✅ Empty title falls back to previous name');
-    },
-  );
-
-  test(
-    '06: rename survives app relaunch (persistence across restart)',
-    async () => {
-      // Pick a title and set it on the active session.
-      const persistedTitle = `Persisted-${Date.now()}`;
-      await clickChatTitle();
-      await expect(titleInput()).toBeVisible();
-      await titleInput().fill('');
-      await titleInput().type(persistedTitle);
-      await titleInput().press('Enter');
-      await expect(chatTitle()).toHaveText(persistedTitle);
-
-      // Close the app and relaunch on the SAME MIQI_HOME.
-      await closeElectronApp(electronApp, miqiHome, true);
-      const fixture = await relaunchElectronApp(miqiHome);
-      electronApp = fixture.electronApp;
-      page = fixture.page;
-      await waitForBridgeInitialized(page);
-      await waitForInputReady(page);
-
-      // The session list still exposes the custom title.
-      const found = await page.evaluate(async (title) => {
-        const all = await (window as any).miqi.sessions.list();
-        const sessions: any[] = all.sessions || all || [];
-        return sessions.some((s) => s.title === title);
-      }, persistedTitle);
-      expect(found, `Title "${persistedTitle}" should survive restart`).toBe(true);
-      console.log(`[test] ✅ Title "${persistedTitle}" survived relaunch`);
-    },
-  );
+    // The session list still exposes the custom title.
+    const found = await page.evaluate(async (title) => {
+      const all = await (window as any).miqi.sessions.list();
+      const sessions: any[] = all.sessions || all || [];
+      return sessions.some((s) => s.title === title);
+    }, persistedTitle);
+    expect(found, `Title "${persistedTitle}" should survive restart`).toBe(true);
+    console.log(`[test] ✅ Title "${persistedTitle}" survived relaunch`);
+  });
 });

@@ -51,7 +51,21 @@ class LedgerRuntime:
 
     async def initialize(self) -> None:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._db = await aiosqlite.connect(str(self.db_path))
+        # Same busy timeout as HistoryRuntime/StoredRuntime: all runtime
+        # stores open independent connections on the same DB file, and a
+        # cancelled turn's in-flight write can hold the file lock while a
+        # retry turn's mirror write waits. The default 5s is too short and
+        # surfaces as "database is locked" (flaky test_issue_886).
+        #
+        # isolation_level=None (autocommit) closes the OTHER lock-leak:
+        # with implicit transactions, a turn task cancelled between the
+        # INSERT await and the commit await leaves an open transaction
+        # holding the write lock indefinitely — the busy timeout only
+        # bounds the wait, it does not release the stranded lock.
+        self._db = await aiosqlite.connect(
+            str(self.db_path), timeout=30, isolation_level=None
+        )
+        await self._db.execute("PRAGMA journal_mode=WAL")
         await self._db.execute("""
             CREATE TABLE IF NOT EXISTS runtime_ledger_items (
                 item_id TEXT PRIMARY KEY,

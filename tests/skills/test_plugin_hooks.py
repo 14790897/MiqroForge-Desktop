@@ -6,7 +6,6 @@ Covers:
 - unregister_source / uninstall / toggle semantics
 """
 
-import asyncio
 import json
 import sys
 from pathlib import Path
@@ -14,7 +13,6 @@ from pathlib import Path
 import pytest
 
 from miqi.execution.hook_runtime import (
-    HookOutcome,
     HookPoint,
     HookRuntime,
 )

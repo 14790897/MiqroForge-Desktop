@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import time
 from typing import Any
 from urllib.parse import urlparse, urlunparse
 
@@ -313,7 +314,7 @@ class OpenAIProvider(LLMProvider):
         reasoning_content = getattr(message, "reasoning_content", None) or None
         if reasoning_content:
             logger.info(
-                "chat: got reasoning len=%d",
+                "chat: got reasoning len={}",
                 len(reasoning_content),
             )
         else:
@@ -387,6 +388,11 @@ class OpenAIProvider(LLMProvider):
 
         spec = self._selected_spec or find_by_model(original_model)
         keep_reasoning = bool(spec and spec.supports_reasoning_history)
+        # #834 / CodeRabbit: models that STREAM reasoning CoT (Kimi/Qwen/GPT-5)
+        # invalidate the request→first-delta thinking proxy up front — do not
+        # wait for interleaving to show up in the delta order (a reasoning-first
+        # stream would otherwise slip through the content_parts check).
+        streams_reasoning = bool(spec and spec.streams_reasoning)
 
         kwargs: dict[str, Any] = {
             "model": resolved,
@@ -417,8 +423,18 @@ class OpenAIProvider(LLMProvider):
             kwargs["tool_choice"] = "auto"
 
         try:
+            request_started = time.monotonic()
+
+            def _do_create() -> Any:
+                """Per-attempt create wrapper: restarts the timing window on retry (#834)."""
+                nonlocal request_started
+                # Per-attempt start: a retry after a timeout still measures
+                # the attempt that actually produced the reasoning stream.
+                request_started = time.monotonic()
+                return self._client.chat.completions.create(**kwargs)
+
             stream = await resilience.with_retry(
-                lambda: self._client.chat.completions.create(**kwargs),
+                _do_create,
                 max_attempts=3,
             )
         except Exception as e:
@@ -440,6 +456,14 @@ class OpenAIProvider(LLMProvider):
 
         content_parts: list[str] = []
         reasoning_parts: list[str] = []
+        reasoning_chunks = 0
+        # Time from request start to the FIRST reasoning delta — the closest
+        # host-side proxy for server-side thinking time (DeepSeek etc. buffer
+        # the whole reasoning pass server-side, so the first delta arrives
+        # only after thinking finished; transport latency is negligible).
+        # Suppressed for streaming CoT models (see interleaved_reasoning).
+        first_reasoning_elapsed: float | None = None
+        interleaved_reasoning = False
         # Accumulate tool calls incrementally (OpenAI sends index + fragments)
         tool_call_accum: dict[int, dict[str, Any]] = {}
         finish_reason: str | None = None
@@ -456,7 +480,7 @@ class OpenAIProvider(LLMProvider):
                 break
             except asyncio.TimeoutError:
                 if is_first:
-                    logger.warning("LLM first-token timeout for model %s (%.0fs)", resolved, timeout)
+                    logger.warning("LLM first-token timeout for model {} ({:.0f}s)", resolved, timeout)
                     yield LLMStreamEvent(
                         kind="completed",
                         response=LLMResponse(
@@ -466,7 +490,7 @@ class OpenAIProvider(LLMProvider):
                         ),
                     )
                 else:
-                    logger.warning("LLM stream idle timeout for model %s", resolved)
+                    logger.warning("LLM stream idle timeout for model {}", resolved)
                     yield LLMStreamEvent(
                         kind="completed",
                         response=LLMResponse(
@@ -477,7 +501,7 @@ class OpenAIProvider(LLMProvider):
                     )
                 return
             except Exception as e:
-                logger.exception("LLM streaming error for model %s", resolved)
+                logger.exception("LLM streaming error for model {}", resolved)
                 kind = resilience.classify_error(e)
                 yield LLMStreamEvent(
                     kind="completed",
@@ -515,11 +539,28 @@ class OpenAIProvider(LLMProvider):
             # Reasoning delta (Kimi, DeepSeek-R1, etc.)
             reasoning_text = getattr(delta, "reasoning_content", None) or ""
             if reasoning_text:
+                if first_reasoning_elapsed is None:
+                    first_reasoning_elapsed = time.monotonic() - request_started
+                # #834 / review: request→first-reasoning-delta only equals the
+                # thinking duration for BUFFERED reasoning providers (DeepSeek
+                # emits reasoning only after the whole pass finished).  Streaming
+                # CoT models (Kimi, Qwen, GPT-5) interleave reasoning and content
+                # deltas — for them the frontend's local first→last span is the
+                # correct total, and our proxy would show a tiny first-token
+                # latency instead.  Suppress when the provider capability says
+                # streaming (up front, covers reasoning-first streams too) OR
+                # when interleaving is observed in the delta order.
+                if streams_reasoning:
+                    interleaved_reasoning = True
+                elif content_parts:
+                    interleaved_reasoning = True
                 reasoning_parts.append(reasoning_text)
-                logger.info(
-                    "stream_chat: got reasoning delta len=%d for model=%s",
-                    len(reasoning_text), resolved,
-                )
+                reasoning_chunks += 1
+                if reasoning_chunks % 10 == 0:
+                    logger.info(
+                        "stream_chat: got reasoning delta #{} len={} for model={}",
+                        reasoning_chunks, len(reasoning_text), resolved,
+                    )
                 yield LLMStreamEvent(kind="reasoning_delta", delta=reasoning_text)
 
             # Tool calls — incremental accumulation
@@ -547,6 +588,11 @@ class OpenAIProvider(LLMProvider):
         # Build final response
         full_content = "".join(content_parts) or None
         full_reasoning = "".join(reasoning_parts) or None
+        if reasoning_parts:
+            logger.info(
+                "stream_chat: reasoning complete chunks={} chars={} for model={}",
+                reasoning_chunks, len(full_reasoning or ""), resolved,
+            )
 
         # Parse accumulated tool calls
         parsed_tool_calls: list[ToolCallRequest] = []
@@ -569,6 +615,13 @@ class OpenAIProvider(LLMProvider):
                 finish_reason=finish_reason or "stop",
                 usage=usage,
                 reasoning_content=full_reasoning,
+                # Streaming CoT models interleave reasoning/content — the
+                # first-delta proxy would under-report badly, so suppress it
+                # and let the frontend use its local first→last span.
+                reasoning_elapsed_s=(
+                    None if interleaved_reasoning else first_reasoning_elapsed
+                ),
+                reasoning_elapsed_suppressed=interleaved_reasoning,
             ),
         )
 

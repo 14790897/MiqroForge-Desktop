@@ -137,6 +137,7 @@ def test_agent_job_dataclass_defaults():
 async def test_persisted_job_survives_restart(tmp_path, fake_services_for_jobs):
     """A completed job persisted to the store must be visible in a fresh runtime."""
     import asyncio as _asyncio
+
     from miqi.runtime.agent_graph_store import AgentGraphStore
     from miqi.runtime.agent_jobs import AgentJobRuntime
     from miqi.runtime.turn_runner import TurnResult
@@ -170,6 +171,7 @@ async def test_persisted_job_survives_restart(tmp_path, fake_services_for_jobs):
 async def test_running_job_resumed_as_interrupted(tmp_path):
     """A 'running' job row must be loaded as 'interrupted' on restart."""
     import time
+
     from miqi.runtime.agent_graph_store import AgentGraphStore
     from miqi.runtime.agent_jobs import AgentJobRuntime
 
@@ -197,6 +199,7 @@ async def test_running_job_resumed_as_interrupted(tmp_path):
 async def test_without_store_behavior_unchanged(fake_services_for_jobs):
     """Constructing AgentJobRuntime without a store must preserve existing behaviour."""
     import asyncio as _asyncio
+
     from miqi.runtime.agent_jobs import AgentJobRuntime
 
     runtime = AgentJobRuntime(services=fake_services_for_jobs)

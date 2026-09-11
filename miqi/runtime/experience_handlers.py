@@ -29,8 +29,8 @@ def _get_experience_store() -> Any:
     if state is None:
         raise AppServerError("Bridge state not available", code="INTERNAL")
 
-    from miqi.agent.memory.experience_store import ExperienceStore
     from miqi.agent.memory import MemoryStore
+    from miqi.agent.memory.experience_store import ExperienceStore
     from miqi.agent.trace.store import TraceStore
 
     config = state.load_config()

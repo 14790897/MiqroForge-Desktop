@@ -23,12 +23,12 @@
  * ══════════════════════════════════════════════════════════
  *
  * Manual verification steps:
- *   1. Ensure WSL sandbox is configured in MiqroForge settings
+ *   1. Ensure WSL sandbox is configured in MiQroForge settings
  *   2. cd apps/desktop
  *   3. npx playwright test --config=playwright.config.ts --project=electron wsl-inplace-file-write.spec.ts
  *
  * To verify path mapping directly from Python:
- *   cd MiqroForge
+ *   cd MiQroForge
  *   .venv\Scripts\pytest tests/sandbox/test_wsl_sandbox_path_mapping.py -v
  *
  * What the fix does (PR #493):
@@ -55,8 +55,7 @@ import {
 import { resolve } from 'node:path';
 import { existsSync, writeFileSync, readFileSync, unlinkSync, mkdirSync } from 'node:fs';
 
-const SKIP_SANDBOX_E2E =
-  !!process.env.CI && process.env.MIQI_RUN_SANDBOX_E2E !== '1';
+const SKIP_SANDBOX_E2E = !!process.env.CI && process.env.MIQI_RUN_SANDBOX_E2E !== '1';
 
 test.describe('WSL Sandbox In-Place File Write (#474)', () => {
   let electronApp: ElectronApplication;
@@ -64,7 +63,10 @@ test.describe('WSL Sandbox In-Place File Write (#474)', () => {
   let miqiHome: string;
 
   // Skip entire suite when WSL is not available (non-Windows / CI without flag)
-  test.skip(() => SKIP_SANDBOX_E2E || process.platform !== 'win32', 'WSL E2E tests require Windows + WSL sandbox');
+  test.skip(
+    () => SKIP_SANDBOX_E2E || process.platform !== 'win32',
+    'WSL E2E tests require Windows + WSL sandbox'
+  );
 
   test.beforeAll(async () => {
     const fixture = await launchElectronApp();
@@ -91,9 +93,7 @@ test.describe('WSL Sandbox In-Place File Write (#474)', () => {
         throw new Error('Sandbox manager did not become ready within 300s');
       }
 
-      await page.evaluate(() =>
-        (window as any).miqi.approvals.addPermanent('*:*', 'always'),
-      );
+      await page.evaluate(() => (window as any).miqi.approvals.addPermanent('*:*', 'always'));
 
       // Create a unique file name and content
       const timestamp = Date.now();
@@ -112,7 +112,7 @@ test.describe('WSL Sandbox In-Place File Write (#474)', () => {
       // Ask AI to write to the file — should use write_file tool
       await sendMessage(
         page,
-        `使用 write_file 工具写入文件 ${fname}，内容为 "${content}"。只回复操作结果，不要添加解释。`,
+        `使用 write_file 工具写入文件 ${fname}，内容为 "${content}"。只回复操作结果，不要添加解释。`
       );
       await approveLoop(page, 240_000);
       await waitForResponseComplete(page, 240_000);
@@ -130,11 +130,13 @@ test.describe('WSL Sandbox In-Place File Write (#474)', () => {
       console.log('[test] ✅ write_file wrote in-place to host workspace');
 
       // Cleanup
-      try { unlinkSync(hostFilePath); } catch {}
+      try {
+        unlinkSync(hostFilePath);
+      } catch {}
       await page.screenshot({
         path: `test-results/wsl-inplace-write-01-result.png`,
       });
-    },
+    }
   );
 
   // ═════════════════════════════════════════════════════════════════
@@ -150,9 +152,7 @@ test.describe('WSL Sandbox In-Place File Write (#474)', () => {
         throw new Error('Sandbox manager did not become ready within 300s');
       }
 
-      await page.evaluate(() =>
-        (window as any).miqi.approvals.addPermanent('*:*', 'always'),
-      );
+      await page.evaluate(() => (window as any).miqi.approvals.addPermanent('*:*', 'always'));
 
       const timestamp = Date.now();
       const fname = `e2e_edit_test_${timestamp}.txt`;
@@ -171,7 +171,7 @@ test.describe('WSL Sandbox In-Place File Write (#474)', () => {
       // Ask AI to edit the file
       await sendMessage(
         page,
-        `使用 edit_file 工具修改 ${fname}：将 "Line 2: ${timestamp}" 替换为 "${newLine2}"。只回复操作结果。`,
+        `使用 edit_file 工具修改 ${fname}：将 "Line 2: ${timestamp}" 替换为 "${newLine2}"。只回复操作结果。`
       );
       await approveLoop(page, 240_000);
       await waitForResponseComplete(page, 240_000);
@@ -179,49 +179,46 @@ test.describe('WSL Sandbox In-Place File Write (#474)', () => {
       // Verify the modification persisted on host
       await page.waitForTimeout(5000);
 
-      expect(existsSync(hostFilePath), `Host file not found after edit: ${hostFilePath}`).toBe(true);
+      expect(existsSync(hostFilePath), `Host file not found after edit: ${hostFilePath}`).toBe(
+        true
+      );
       const actualContent = readFileSync(hostFilePath, 'utf-8');
       console.log(`[test] File after edit: "${actualContent}"`);
       expect(actualContent).toContain('MODIFIED by #474');
       expect(actualContent).not.toContain(`Line 2: ${timestamp}`);
       console.log('[test] ✅ edit_file modified host file in-place');
 
-      try { unlinkSync(hostFilePath); } catch {}
+      try {
+        unlinkSync(hostFilePath);
+      } catch {}
       await page.screenshot({
         path: `test-results/wsl-inplace-edit-02-result.png`,
       });
-    },
+    }
   );
 
   // ═════════════════════════════════════════════════════════════════
   //  Test 3: Manual verification placeholder (matches pdf-generator pattern)
   // ═════════════════════════════════════════════════════════════════
 
-  test(
-    'wsl sandbox in-place file write — manual verification',
-    { timeout: 600_000 },
-    async () => {
-      test.skip(
-        SKIP_SANDBOX_E2E,
-        'Run with MIQI_RUN_SANDBOX_E2E=1 for manual verification.',
-      );
+  test('wsl sandbox in-place file write — manual verification', { timeout: 600_000 }, async () => {
+    test.skip(SKIP_SANDBOX_E2E, 'Run with MIQI_RUN_SANDBOX_E2E=1 for manual verification.');
 
-      // This test is a placeholder for manual E2E verification.
-      // The primary validation is in:
-      //   tests/sandbox/test_wsl_sandbox_path_mapping.py (20 tests)
-      //   tests/sandbox/test_bwrap_auto_install.py (2 WSL integration tests)
-      //
-      // To verify manually:
-      //   1. Open the app in WSL sandbox mode
-      //   2. Type "帮我写一个文件 test_474.txt，内容为 hello"
-      //   3. Check that the file appears in your workspace directory
-      //   4. Type "帮我把 test_474.txt 里的 hello 改成 world"
-      //   5. Verify the file was modified in-place
-      //
-      // Python test command:
-      //   cd MiqroForge
-      //   .venv\Scripts\pytest tests/sandbox/test_wsl_sandbox_path_mapping.py -v
-      test.skip();
-    },
-  );
+    // This test is a placeholder for manual E2E verification.
+    // The primary validation is in:
+    //   tests/sandbox/test_wsl_sandbox_path_mapping.py (20 tests)
+    //   tests/sandbox/test_bwrap_auto_install.py (2 WSL integration tests)
+    //
+    // To verify manually:
+    //   1. Open the app in WSL sandbox mode
+    //   2. Type "帮我写一个文件 test_474.txt，内容为 hello"
+    //   3. Check that the file appears in your workspace directory
+    //   4. Type "帮我把 test_474.txt 里的 hello 改成 world"
+    //   5. Verify the file was modified in-place
+    //
+    // Python test command:
+    //   cd MiQroForge
+    //   .venv\Scripts\pytest tests/sandbox/test_wsl_sandbox_path_mapping.py -v
+    test.skip();
+  });
 });

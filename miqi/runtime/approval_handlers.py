@@ -219,18 +219,46 @@ async def approvals_clear_permanent_handler(
     """
     from miqi.agent.command_approval import (
         _lock,
-        _permanent_approved,
         _permanent_added_at,
+        _permanent_approved,
     )
 
     pattern = params.get("pattern")
+    # Snapshot before mutating so a failed persist can roll the in-memory
+    # list back — memory and disk must stay consistent (2026-08-31 review).
     with _lock:
+        snapshot_approved = set(_permanent_approved)
+        snapshot_added_at = dict(_permanent_added_at)
         if pattern:
             _permanent_approved.discard(pattern)
             _permanent_added_at.pop(pattern, None)
         else:
             _permanent_approved.clear()
             _permanent_added_at.clear()
+
+    # Persist the cleared state (#7 review): clear_permanent used to only
+    # touch memory, leaving the removed patterns in config.json — the next
+    # permanent-approvals save would resurrect them via the hot-reload
+    # allowlist replace.  Persist now so memory and disk stay in sync.
+    from miqi.agent.command_approval import _save_permanent_allowlist
+
+    if not _save_permanent_allowlist():
+        # Roll back the in-memory change — the on-disk list is unchanged, so
+        # reporting cleared:true would lie to the caller and the next hot
+        # reload would resurrect the "cleared" patterns.
+        with _lock:
+            _permanent_approved.clear()
+            _permanent_approved.update(snapshot_approved)
+            _permanent_added_at.clear()
+            _permanent_added_at.update(snapshot_added_at)
+        logger.error(
+            "approvals.clear_permanent: persist failed, rolled back "
+            "(pattern={}, client={})", pattern or "<all>", client_id,
+        )
+        raise AppServerError(
+            "Failed to persist permanent approval changes",
+            code="INTERNAL",
+        )
 
     logger.info(
         "approvals.clear_permanent: pattern={} (client={})",
@@ -248,16 +276,39 @@ async def approvals_add_permanent_handler(
 ) -> dict[str, Any]:
     """Add a permanent approval pattern."""
     from miqi.agent.command_approval import (
-        approve_permanent,
+        _lock,
+        _permanent_added_at,
+        _permanent_approved,
         _save_permanent_allowlist,
+        approve_permanent,
     )
 
     pattern = params.get("pattern", "").strip()
     if not pattern:
         raise AppServerError("pattern is required", code="INVALID_PARAMS")
 
+    # Snapshot before mutating — a failed persist rolls the in-memory list
+    # back so memory matches the unchanged on-disk state (2026-09-01 review;
+    # same contract as clear_permanent).
+    with _lock:
+        snapshot_approved = set(_permanent_approved)
+        snapshot_added_at = dict(_permanent_added_at)
+
     approve_permanent(pattern)
-    _save_permanent_allowlist()
+    if not _save_permanent_allowlist():
+        with _lock:
+            _permanent_approved.clear()
+            _permanent_approved.update(snapshot_approved)
+            _permanent_added_at.clear()
+            _permanent_added_at.update(snapshot_added_at)
+        logger.error(
+            "approvals.add_permanent: persist failed, rolled back "
+            "(pattern={}, client={})", pattern, client_id,
+        )
+        raise AppServerError(
+            "Failed to persist permanent approval changes",
+            code="INTERNAL",
+        )
 
     logger.info(
         "approvals.add_permanent: pattern={} (client={})",

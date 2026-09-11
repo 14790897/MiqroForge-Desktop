@@ -2,7 +2,6 @@
 
 import pytest
 
-
 # ── Session-level isolation ───────────────────────────────────────────────
 
 
@@ -184,7 +183,7 @@ async def test_app_server_stop_stops_all_sessions(fake_config, fake_provider, tm
     await server.start()
 
     # Create a session through the registry
-    session = await registry.create_session(
+    await registry.create_session(
         client_id="c1", session_key="s1",
         config=fake_config, provider=fake_provider, workspace=tmp_path,
     )

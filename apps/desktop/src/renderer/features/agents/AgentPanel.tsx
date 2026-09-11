@@ -26,25 +26,39 @@ export default function AgentPanel() {
 
   const statusColor = (s: string) => {
     switch (s) {
-      case 'idle': return 'bg-[var(--text-faint)]';
-      case 'thinking': return 'bg-[var(--warning)] animate-pulse';
-      case 'executing': return 'bg-[var(--info)] animate-pulse';
-      case 'completed': return 'bg-[var(--success)]';
-      case 'error': return 'bg-[var(--danger)]';
-      case 'aborted': return 'bg-[var(--warning)]';
-      default: return 'bg-[var(--text-faint)]';
+      case 'idle':
+        return 'bg-[var(--text-faint)]';
+      case 'thinking':
+        return 'bg-[var(--warning)] animate-pulse';
+      case 'executing':
+        return 'bg-[var(--info)] animate-pulse';
+      case 'completed':
+        return 'bg-[var(--success)]';
+      case 'error':
+        return 'bg-[var(--danger)]';
+      case 'aborted':
+        return 'bg-[var(--warning)]';
+      default:
+        return 'bg-[var(--text-faint)]';
     }
   };
 
   const statusLabel = (s: string) => {
     switch (s) {
-      case 'idle': return '空闲';
-      case 'thinking': return '思考中';
-      case 'executing': return '执行中';
-      case 'completed': return '已完成';
-      case 'error': return '错误';
-      case 'aborted': return '已中止';
-      default: return s;
+      case 'idle':
+        return '空闲';
+      case 'thinking':
+        return '思考中';
+      case 'executing':
+        return '执行中';
+      case 'completed':
+        return '已完成';
+      case 'error':
+        return '错误';
+      case 'aborted':
+        return '已中止';
+      default:
+        return s;
     }
   };
 
@@ -85,19 +99,11 @@ export default function AgentPanel() {
             >
               <div className="flex items-center gap-2">
                 <span className={`w-2 h-2 rounded-full shrink-0 ${statusColor(a.status)}`} />
-                <span className="text-xs font-medium text-text">
-                  {a.type}
-                </span>
-                <span className="text-size-2xs text-text-faint">
-                  {statusLabel(a.status)}
-                </span>
+                <span className="text-xs font-medium text-text">{a.type}</span>
+                <span className="text-size-2xs text-text-faint">{statusLabel(a.status)}</span>
               </div>
-              <p className="text-xs mt-1 text-text-muted">
-                {a.label}
-              </p>
-              <p className="text-size-2xs mt-0.5 text-text-faint">
-                {a.agent_id}
-              </p>
+              <p className="text-xs mt-1 text-text-muted">{a.label}</p>
+              <p className="text-size-2xs mt-0.5 text-text-faint">{a.agent_id}</p>
             </div>
           ))}
         </div>

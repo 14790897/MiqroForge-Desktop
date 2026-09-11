@@ -1,18 +1,16 @@
 """Tests for workbench command/exec* AppServer handlers (Phase 43.4)."""
 
-import asyncio
 import sys
 
 import pytest
-
 
 # ── Helpers ──────────────────────────────────────────────────────────────
 
 
 def _make_server():
     """Create an AppServer with WorkbenchProcessRuntime in bridge_context."""
-    from unittest.mock import MagicMock
     from pathlib import Path
+    from unittest.mock import MagicMock
 
     from miqi.runtime.app_server import AppServer, ClientSessionRegistry
     from miqi.runtime.workbench_process_runtime import WorkbenchProcessRuntime
@@ -73,7 +71,6 @@ async def test_command_exec_buffered_returns_stdout_stderr_exit_code(server_and_
 @pytest.mark.asyncio
 async def test_command_exec_streaming_emits_output_delta(server_and_registry):
     """Streaming command/exec emits command/exec/outputDelta before response."""
-    import asyncio as _asyncio
 
     server, registry = server_and_registry
 

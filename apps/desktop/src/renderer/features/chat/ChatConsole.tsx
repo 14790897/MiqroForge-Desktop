@@ -1,5 +1,15 @@
-import { useState, useEffect, useRef, useCallback, useMemo, memo, Fragment, type ComponentProps } from 'react';
-import { AgentAvatar, UserAvatar } from './components/Avatars'
+import {
+  useState,
+  useEffect,
+  useRef,
+  useCallback,
+  useMemo,
+  memo,
+  Fragment,
+  type ComponentProps,
+} from 'react';
+import { AgentAvatar } from './components/Avatars';
+import { MiQroForgeLogo } from '../../components/MiQroForgeLogo';
 import { MarkdownContent } from './components/MarkdownContent';
 import { SandboxHtmlFrame } from './components/SandboxHtmlFrame';
 import { ThinkBlock } from './components/ThinkBlock';
@@ -9,6 +19,9 @@ import { renderContent } from './components/renderContent';
 import { TrackedFileCard } from './components/TrackedFileCard';
 import { ConfirmCardArea, ConfirmCardItem, isConfirmCard } from './components/ConfirmCardArea';
 import { TurnStatusBar } from './components/TurnStatusBar';
+import { QraftLoginButton, QraftLoginCard } from '../settings/components/QraftLoginCard';
+import { useQraftStatus } from '../../hooks/useQraftStatus';
+import { ToolCommandBlock } from './components/ToolCommandBlock';
 import { useUserInput, type UserInputCardEntry } from '../../contexts/UserInputContext';
 import { ErrorBoundary } from '../../components/ErrorBoundary';
 import ReactMarkdown from 'react-markdown';
@@ -65,6 +78,7 @@ import {
   Scissors,
   ClipboardPaste,
   Star,
+  Download,
 } from 'lucide-react';
 import type {
   ChatProgress,
@@ -72,10 +86,14 @@ import type {
   ChatError,
   ChatAborted,
   ChatSubagentResult,
+  SpreadsheetData,
+  DocumentBlocks,
 } from '../../../shared/ipc';
 import { extractProgressMessage, type ProgressPayload } from './progressUtils';
 import { sanitizeUiMessage } from '../../lib/sanitizeUiMessage';
 import { classifyTrackedFiles } from '../../lib/taskAssetClassification';
+import { SpreadsheetPreview } from './components/SpreadsheetPreview';
+import { DocxPreview } from './components/DocxPreview';
 import PaperSearchResult, {
   tryParsePaperSearchResult,
   type PaperSearchPayload,
@@ -94,6 +112,9 @@ interface Attachment {
   status?: 'pending' | 'parsing' | 'done' | 'error';
   /** Server-parsed text content, shown inline after send */
   parsedContent?: string;
+  /** Client-side content fingerprint (SHA-256 hex of bytes, #968 复核)：发送前
+   * 由 handleSend 预计算暂存，占位装饰 (fp:…) 与去重守卫据此区分同名异内容附件 */
+  contentFp?: string;
   /** Parse error message if status === 'error' */
   parseError?: string;
 }
@@ -104,37 +125,37 @@ const DOCUMENT_SUFFIXES_RE =
 function getDocCategory(name: string): { label: string; color: string; bg: string } {
   const ext = name.split('.').pop()?.toLowerCase() ?? '';
   const map: Record<string, { label: string; color: string; bg: string }> = {
-    pdf: { label: 'PDF', color: '#ef4444', bg: 'rgba(239,68,68,0.12)' },
+    pdf: { label: 'PDF', color: 'var(--danger)', bg: 'rgba(255,97,97,0.12)' },
     docx: { label: 'DOC', color: '#3b82f6', bg: 'rgba(59,130,246,0.12)' },
     doc: { label: 'DOC', color: '#3b82f6', bg: 'rgba(59,130,246,0.12)' },
     pptx: { label: 'PPT', color: '#f97316', bg: 'rgba(249,115,22,0.12)' },
     ppt: { label: 'PPT', color: '#f97316', bg: 'rgba(249,115,22,0.12)' },
-    xlsx: { label: 'XLS', color: '#22c55e', bg: 'rgba(34,197,94,0.12)' },
-    xls: { label: 'XLS', color: '#22c55e', bg: 'rgba(34,197,94,0.12)' },
+    xlsx: { label: 'XLS', color: 'var(--success)', bg: 'rgba(16,185,129,0.12)' },
+    xls: { label: 'XLS', color: 'var(--success)', bg: 'rgba(16,185,129,0.12)' },
     md: { label: 'MD', color: '#a855f7', bg: 'rgba(168,85,247,0.12)' },
     markdown: { label: 'MD', color: '#a855f7', bg: 'rgba(168,85,247,0.12)' },
     mdown: { label: 'MD', color: '#a855f7', bg: 'rgba(168,85,247,0.12)' },
-    html: { label: 'HTML', color: '#f59e0b', bg: 'rgba(245,158,11,0.12)' },
-    htm: { label: 'HTML', color: '#f59e0b', bg: 'rgba(245,158,11,0.12)' },
-    csv: { label: 'CSV', color: '#10b981', bg: 'rgba(16,185,129,0.12)' },
-    json: { label: 'JSON', color: '#f59e0b', bg: 'rgba(245,158,11,0.12)' },
+    html: { label: 'HTML', color: 'var(--warning)', bg: 'rgba(245,158,11,0.12)' },
+    htm: { label: 'HTML', color: 'var(--warning)', bg: 'rgba(245,158,11,0.12)' },
+    csv: { label: 'CSV', color: 'var(--success)', bg: 'rgba(16,185,129,0.12)' },
+    json: { label: 'JSON', color: 'var(--warning)', bg: 'rgba(245,158,11,0.12)' },
     xml: { label: 'XML', color: '#6366f1', bg: 'rgba(99,102,241,0.12)' },
-    yaml: { label: 'YAML', color: '#06b6d4', bg: 'rgba(6,182,212,0.12)' },
-    yml: { label: 'YAML', color: '#06b6d4', bg: 'rgba(6,182,212,0.12)' },
+    yaml: { label: 'YAML', color: 'var(--info)', bg: 'rgba(59,130,246,0.12)' },
+    yml: { label: 'YAML', color: 'var(--info)', bg: 'rgba(59,130,246,0.12)' },
     env: { label: 'ENV', color: '#84cc16', bg: 'rgba(132,204,22,0.12)' },
-    log: { label: 'LOG', color: '#64748b', bg: 'rgba(100,116,139,0.12)' },
+    log: { label: 'LOG', color: 'var(--text-faint)', bg: 'rgba(138,143,152,0.12)' },
     sql: { label: 'SQL', color: '#0ea5e9', bg: 'rgba(14,165,233,0.12)' },
     ini: { label: 'INI', color: '#8b5cf6', bg: 'rgba(139,92,246,0.12)' },
     toml: { label: 'TOML', color: '#e11d48', bg: 'rgba(225,29,72,0.12)' },
     htaccess: { label: 'HTA', color: '#d946ef', bg: 'rgba(217,70,239,0.12)' },
-    sh: { label: 'SH', color: '#14b8a6', bg: 'rgba(20,184,166,0.12)' },
-    bash: { label: 'SH', color: '#14b8a6', bg: 'rgba(20,184,166,0.12)' },
-    txt: { label: 'TXT', color: '#6b7280', bg: 'rgba(107,114,128,0.12)' },
-    text: { label: 'TXT', color: '#6b7280', bg: 'rgba(107,114,128,0.12)' },
+    sh: { label: 'SH', color: 'var(--info)', bg: 'rgba(59,130,246,0.12)' },
+    bash: { label: 'SH', color: 'var(--info)', bg: 'rgba(59,130,246,0.12)' },
+    txt: { label: 'TXT', color: 'var(--text-faint)', bg: 'rgba(138,143,152,0.12)' },
+    text: { label: 'TXT', color: 'var(--text-faint)', bg: 'rgba(138,143,152,0.12)' },
     rtf: { label: 'RTF', color: '#ec4899', bg: 'rgba(236,72,153,0.12)' },
-    odt: { label: 'DOC', color: '#3b82f6', bg: 'rgba(59,130,246,0.12)' },
+    odt: { label: 'DOC', color: 'var(--info)', bg: 'rgba(59,130,246,0.12)' },
     odp: { label: 'PPT', color: '#f97316', bg: 'rgba(249,115,22,0.12)' },
-    ods: { label: 'XLS', color: '#22c55e', bg: 'rgba(34,197,94,0.12)' },
+    ods: { label: 'XLS', color: 'var(--success)', bg: 'rgba(16,185,129,0.12)' },
   };
   return (
     map[ext] ?? {
@@ -173,13 +194,22 @@ interface FileChip {
   category: ReturnType<typeof getDocCategory>;
 }
 
-const IMAGE_PLACEHOLDER_RES = /\[Image:\s*([^\]]+)\]/g;
+// #968 复核（CodeRabbit #969）：图片占位符解析——两分支交替：
+// ① 带内容指纹尾 (fp:64hex) 的新装饰：以 fp 尾为锚点反推名称（名称可含 "]"，
+//    如 IMG[1].png——旧式从首个 ] 截断会把整条装饰匹配崩坏、图片恢复丢失）；
+// ② 旧版无指纹装饰：回到 [^\]]+ 语义（名称含 ] 的旧版装饰维持历史限制）。
+// 名称与装饰均不含换行，捕获用 [^\n] 限定。
+const IMAGE_PLACEHOLDER_RES = /\[Image:\s*([^\n]*?)\s*\(fp:[0-9a-f]{64}\)\]|\[Image:\s*([^\]]+)\]/g;
 
 /** Extract image attachments from the "[Image: name]" placeholder the sender
  *  embeds. dataUrl stays undefined — it is re-read from the session files dir
  *  lazily after load (#659). */
+
+// #875 D1：系统包安装 persist/runtime 失败 → App 级 toast 的 window 事件。
+export const INSTALL_WARNING_EVENT = 'miqi:system-install-warning';
+export type InstallWarningKind = 'persist' | 'runtime';
 function extractImageAttachmentsFromContent(content: string): Attachment[] | undefined {
-  const names = [...content.matchAll(IMAGE_PLACEHOLDER_RES)].map((m) => m[1].trim());
+  const names = [...content.matchAll(IMAGE_PLACEHOLDER_RES)].map((m) => (m[1] ?? m[2]).trim());
   if (names.length === 0) return undefined;
   return names.map((name) => ({
     name,
@@ -224,7 +254,7 @@ interface Message {
   toolData?: unknown;
   /** Original tool-call arguments (e.g. web_fetch's url) — real references */
   toolArgs?: unknown;
-  action?: 'open-provider-settings' | 'retry-load';
+  action?: 'open-provider-settings' | 'retry-load' | 'login';
   actionLabel?: string;
   /** When true the message is collapsed by default (user can click to expand) */
   collapsed?: boolean;
@@ -311,8 +341,8 @@ function extractMessageSources(msg: Message): MessageSource[] {
     'duckduckgo.com/html',
     'search.brave.com',
     'google.com/search',
-    'so.com/s?q=',      // 360 搜索调用
-    'so.com/link?',     // 360 搜索结果跳转链接
+    'so.com/s?q=', // 360 搜索调用
+    'so.com/link?', // 360 搜索结果跳转链接
     'sogou.com/web?query=',
     'user.guancha.cn/main/search',
     'beian.miit.gov.cn',
@@ -324,10 +354,10 @@ function extractMessageSources(msg: Message): MessageSource[] {
     'lh3.googleusercontent.com',
     'ichef.bbci.co.uk',
     's.rfi.fr/media',
-    'news.google.com',          // 聚合页 + 转发链，无直接文章
-    'rsshub.app',               // RSSHub 聚合源
-    'feeds.',                   // feeds.bbci.co.uk 等 RSS 源域名
-    'www.81.cn',                // 军网栏目页（被抓的聚合列表）
+    'news.google.com', // 聚合页 + 转发链，无直接文章
+    'rsshub.app', // RSSHub 聚合源
+    'feeds.', // feeds.bbci.co.uk 等 RSS 源域名
+    'www.81.cn', // 军网栏目页（被抓的聚合列表）
   ];
   // 图片/静态资源 + RSS 文件（*.xml / /rss）不是文章来源。纯域名首页保留
   // ——用户要求工具行能看到具体 URL（#539 反馈）。
@@ -335,8 +365,7 @@ function extractMessageSources(msg: Message): MessageSource[] {
   const rssPathRe = /\/rss[?/]|\.rss([?#]|$)/i;
   const isNoise = (u: string) =>
     noiseRe.test(u) || rssPathRe.test(u) || skip.some((s) => u.includes(s));
-  const clean = (raw: string): string =>
-    raw.split('{')[0].replace(/[.,;:!?。，；：、）\]]+$/, '');
+  const clean = (raw: string): string => raw.split('{')[0].replace(/[.,;:!?。，；：、）\]]+$/, '');
   // Deduplicate across all branches + cap: duplicate URLs produce duplicate
   // React keys and one checkUrl request each (CodeRabbit #564 review).
   const seen = new Set<string>();
@@ -425,14 +454,65 @@ function isProviderConfigurationProblem(message: string, code?: string) {
   );
 }
 
-function createProviderConfigMessage(content?: string): Message {
+function createProviderConfigMessage(
+  content?: string,
+  action: 'open-provider-settings' | 'login' = 'open-provider-settings',
+  actionLabel?: string
+): Message {
   return {
     role: 'error',
     content: content || '尚未配置模型服务。请先配置 Provider/API Key 后再发送消息。',
-    action: 'open-provider-settings',
-    actionLabel: '去配置模型',
+    action,
+    actionLabel: actionLabel ?? (action === 'login' ? '登录 MiQroForge 账号' : '去配置模型'),
     timestamp: Date.now(),
   };
+}
+
+/** #922：登录但 AI 网关未 active 时的发送阻断提示（不含可点 action，指向平台页文案）。 */
+function createGatewayBlockedMessage(): Message {
+  return {
+    role: 'error',
+    content:
+      'AI 网关未就绪（平台开通中或不可用），暂时无法发起会话。请到 设置 → MiQroForge 平台 查看网关状态或重新登录后重试。',
+    timestamp: Date.now(),
+  };
+}
+
+/** 登录失效时的统一拦截文案（发送拦截与流错误路径共用，避免气泡正文与登录按钮语义冲突）。 */
+export const RELOGIN_INTERCEPT_TEXT = 'MiQroForge 平台登录已失效，请重新登录后继续会话。';
+
+/**
+ * 登录失效拦截的消息列表变换（纯函数，便于单测）：
+ *  - 普通发送：乐观 user 气泡按（role + 时间戳）就地替换为重登引导。
+ *    从尾部向前查找——等待 qraft.status() 期间其他监听器（如子代理
+ *    持久事件）可能追加消息，尾部未必是 user 气泡；
+ *  - 恢复中断回合（#740）：无乐观 user 气泡，且 handleResumeTurn 已移除
+ *    中断卡——恢复卡片（resumeMsg）并追加重登引导，避免上下文丢失；
+ *  - 找不到匹配且无恢复卡片（会话已切换等）：原样返回。
+ */
+export function applyReloginIntercept(
+  prev: Message[],
+  userMsg: Message,
+  resumeMsg: Message | null
+): Message[] {
+  let userIndex = -1;
+  for (let i = prev.length - 1; i >= 0; i -= 1) {
+    if (prev[i].role === 'user' && prev[i].timestamp === userMsg.timestamp) {
+      userIndex = i;
+      break;
+    }
+  }
+  if (userIndex >= 0) {
+    return [
+      ...prev.slice(0, userIndex),
+      createProviderConfigMessage(RELOGIN_INTERCEPT_TEXT, 'login'),
+      ...prev.slice(userIndex + 1),
+    ];
+  }
+  if (resumeMsg) {
+    return [...prev, resumeMsg, createProviderConfigMessage(RELOGIN_INTERCEPT_TEXT, 'login')];
+  }
+  return prev;
 }
 
 /* ─── Tracked file from tool hints ───────────────────────────────── */
@@ -473,6 +553,40 @@ function extractPdfText(buffer: ArrayBuffer): string {
     pos = et + 2;
   }
   return results.join(' ') || '';
+}
+
+/** Decode base64 → Blob URL (PDF rich preview, #877). Caller revokes the URL. */
+function base64ToBlobUrl(dataBase64: string, mimeType: string): string {
+  const binary = atob(dataBase64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return URL.createObjectURL(new Blob([bytes], { type: mimeType }));
+}
+
+/** UTF-8-safe bytes → base64 (#877「下载/另存为」text fallback). */
+function bytesToBase64(bytes: Uint8Array): string {
+  let bin = '';
+  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+  return btoa(bin);
+}
+
+/** #880: 根据文件路径与内容给出「格式不支持」的具体原因。 */
+export function unsupportedPreviewReason(path: string, content?: string): string {
+  if (content && /^\(Could not open file/.test(content)) {
+    return '文件无法打开，可能已被删除或路径无效';
+  }
+  const ext = (path.split('.').pop() || '').toLowerCase();
+  if (
+    /^(png|jpe?g|gif|bmp|webp|ico|svg|tiff?|zip|rar|7z|tar|gz|exe|dll|bin|iso|mp3|mp4|avi|mov|mkv|wav)$/.test(
+      ext
+    )
+  ) {
+    return '该文件是二进制/媒体格式，应用内无法预览其内容';
+  }
+  if (/^(xls|ppt|rtf)$/.test(ext)) {
+    return '该 Office 文件为旧格式，应用内暂不支持解析';
+  }
+  return '该文件格式暂不支持应用内预览';
 }
 
 function getMimeTypeFromName(name: string): string {
@@ -552,7 +666,7 @@ export function buildTaskShareText({
   const messageLines =
     visibleMessages.length > 0
       ? visibleMessages.map((message) => {
-          const role = message.role === 'user' ? '用户' : 'MiqroForge';
+          const role = message.role === 'user' ? '用户' : 'MiQroForge';
           const content = message.content.trim().replace(/\s+/g, ' ');
           return `- ${role}: ${content || '(空消息)'}`;
         })
@@ -592,7 +706,7 @@ export function buildTaskReproContext({
   const messageLines =
     visibleMessages.length > 0
       ? visibleMessages.map((message) => {
-          const role = message.role === 'user' ? '用户' : 'MiqroForge';
+          const role = message.role === 'user' ? '用户' : 'MiQroForge';
           const content = message.content.trim().replace(/\s+/g, ' ');
           return `- ${role}: ${content || '(空消息)'}`;
         })
@@ -603,7 +717,7 @@ export function buildTaskReproContext({
       : ['- 暂无文件'];
 
   return [
-    '# MiqroForge 任务复现上下文',
+    '# MiQroForge 任务复现上下文',
     '',
     `- 会话: ${sessionKey}`,
     `- 标题: ${title}`,
@@ -831,6 +945,65 @@ function normalizeSandboxPath(p: string): string {
 
 const DEFAULT_SESSION = 'desktop:default';
 
+/** #858/#905 门控决策点：reply-head 思考块组是否渲染。
+ *
+ * 历史教训：#858 在调用处加了 `reasoningMode !== 'fast'` 门控，fast
+ * （极速回答，默认模式）下思考过程整体消失。决策收拢成单点并导出，
+ * 让回归测试直接锁定——任何模式都必须渲染（#783 决策），门控若被
+ * 加回此处，测试立即失败。
+ *
+ * 约定（2026-09 复审 P2）：reply-head 渲染必须经本函数判断后再渲染
+ * ThinkingBlockGroup——勿改成直接渲染（绕过决策点）或在本函数之外
+ * 另加条件（门控改写在别处时本测试无法拦截）。任何对渲染条件的
+ * 改动都必须同步更新 ChatConsole.test.ts 的门控决策用例。
+ */
+export function shouldRenderThinkingGroup(_mode: ReasoningMode): boolean {
+  return true;
+}
+
+/** 思考块消息组：Agent 头像头部 + ThinkBlock（#858/#905 回归点）。
+ * 两种模式（fast/think）都渲染——fast 隐藏思考块的过度修复已被移除，
+ * 图标跟随消息自身模式。导出以便回归测试直接覆盖渲染路径。 */
+export function ThinkingBlockGroup({
+  thinking,
+  fallbackMode,
+}: {
+  thinking: {
+    reasoning?: string;
+    isLiveReasoning?: boolean;
+    reasoningElapsedS?: number;
+    reasoningMode?: 'fast' | 'think';
+  };
+  fallbackMode?: 'fast' | 'think';
+}) {
+  return (
+    // 保持原始两层结构（#905 review）：头部行（头像 + 名字）与
+    // ThinkBlock 是平级块——ThinkBlock 自身是 flex 容器（flex-1 /
+    // self-stretch / 垂直线），塞进头部 flex row 会破坏宽度与折叠布局。
+    <div>
+      <div className="flex items-center gap-2 mb-3 pl-2">
+        <AgentAvatar />
+        <span
+          className="text-[16px] font-semibold shrink-0 whitespace-nowrap"
+          style={{ color: 'var(--text)' }}
+        >
+          MiQroForge
+        </span>
+      </div>
+      {/* 思考块两种模式都展示（#783: 极速/深度都展示思考过程，
+        fast 隐藏过度已修复）——图标跟随消息自身模式：
+        fast 🚀 快速思考 / think 🧠 深度思考（#680 跟进）。 */}
+      <ThinkBlock
+        reasoning={thinking.reasoning ?? ''}
+        defaultOpen={thinking.isLiveReasoning}
+        elapsedSeconds={thinking.reasoningElapsedS}
+        live={thinking.isLiveReasoning}
+        mode={thinking.reasoningMode ?? fallbackMode}
+      />
+    </div>
+  );
+}
+
 function messageContentToString(content: unknown): string {
   return typeof content === 'string' ? content : JSON.stringify(content);
 }
@@ -844,8 +1017,41 @@ function toolDisplayName(name: string): string {
   return TOOL_LABELS[name] ?? name;
 }
 
-const TASK_VERBS = ['写', '生成', '设计', '分析', '对比', '比较', '规划', '研究', '总结', '翻译', '编程', '实现', '构建', '开发', '评估', '论证', '调研', '优化', '解决', '制定'];
-const REQUIRE_HINTS = ['保存到', '导出', '写成', '生成文档', '做成', '分点', '列出', '引用', '附上', '桌面', '文件'];
+const TASK_VERBS = [
+  '写',
+  '生成',
+  '设计',
+  '分析',
+  '对比',
+  '比较',
+  '规划',
+  '研究',
+  '总结',
+  '翻译',
+  '编程',
+  '实现',
+  '构建',
+  '开发',
+  '评估',
+  '论证',
+  '调研',
+  '优化',
+  '解决',
+  '制定',
+];
+const REQUIRE_HINTS = [
+  '保存到',
+  '导出',
+  '写成',
+  '生成文档',
+  '做成',
+  '分点',
+  '列出',
+  '引用',
+  '附上',
+  '桌面',
+  '文件',
+];
 const OPEN_QUERIES = ['为什么', '如何', '什么原因', '怎么', '有何影响', '怎样'];
 
 /** 复杂问题多维打分（#680 跟进 v2）：任务动词/对象规模/附加要求/开放问句/
@@ -930,11 +1136,7 @@ function parseToolActivity(content: string): ToolActivity[] {
       const sec = line.match(/\((\d+(?:\.\d+)?)\s*s\)/i)?.[1];
       return {
         name,
-        duration: ms
-          ? formatToolDuration(Number(ms))
-          : sec
-            ? `${sec}s`
-            : undefined,
+        duration: ms ? formatToolDuration(Number(ms)) : sec ? `${sec}s` : undefined,
       };
     });
 }
@@ -982,12 +1184,21 @@ function toolCallDetail(args: unknown): string | undefined {
   return undefined;
 }
 
+/** Full exec command from tool-call arguments — the untruncated text hidden
+ *  behind the 60-char collapsed summary (issue #902). Merged groups carry
+ *  toolArgs as an array, so walk the list like toolCallDetail does. */
+export function toolCommandText(args: unknown): string | undefined {
+  const list = Array.isArray(args) ? args : args !== undefined ? [args] : [];
+  for (const item of list) {
+    if (!item || typeof item !== 'object') continue;
+    const v = (item as Record<string, unknown>).command;
+    if (typeof v === 'string' && v.trim()) return v;
+  }
+  return undefined;
+}
+
 /** Tool-chain row label: tool name · concrete target · duration. */
-function toolChainLabel(
-  activities: ToolActivity[],
-  args: unknown,
-  fallback?: string,
-): string {
+function toolChainLabel(activities: ToolActivity[], args: unknown, fallback?: string): string {
   const detail = toolCallDetail(args);
   if (activities.length === 1) {
     const act = activities[0];
@@ -1075,10 +1286,23 @@ function collapseAssistantMessagesWithinTurns(rawMsgs: any[]): any[] {
     });
 
     if (reasoningParts.length > 0) {
+      // #905 review: carry the message-level reasoning mode so history
+      // restore renders the correct 🚀/🧠 label per message instead of
+      // falling back to the current global mode.
+      //
+      // NOTE: `turnBuffer` holds RAW persisted messages (sessions.get
+      // returns them as-is), whose fields are backend snake_case —
+      // reasoning_mode, NOT reasoningMode.  Reading the camelCase field
+      // here silently dropped the mode on every history restore.
+      const reasoningMode = turnBuffer.find(
+        (msg) =>
+          msg.role === 'assistant' && (msg.reasoning_content || msg.reasoning) && msg.reasoning_mode
+      )?.reasoning_mode;
       result.push({
         role: 'progress',
         content: mergeReasoningParts(reasoningParts),
         reasoning: mergeReasoningParts(reasoningParts),
+        reasoningMode,
         timestamp: firstReasoningTs ?? Date.now(),
       });
     }
@@ -1106,6 +1330,327 @@ function collapseAssistantMessagesWithinTurns(rawMsgs: any[]): any[] {
  *  into the hint instead of a concise call summary (issue #532). */
 const HINT_VALUE_KEYS = ['path', 'file_path', 'filename', 'outPath', 'command', 'url', 'query'];
 
+/** #886: whether the user round starting at *userIdx* was manually stopped.
+ *  A stopped round carries the frontend's "已停止。" progress marker between
+ *  the user message and the next user message.  When the user regenerates or
+ *  retries such a round, the interrupted half-reply must be preserved in the
+ *  timeline (the new attempt appends after it) instead of being rewound away.
+ */
+export function wasTurnStopped(messages: Message[], userIdx: number): boolean {
+  let end = messages.length;
+  for (let i = userIdx + 1; i < messages.length; i += 1) {
+    if (messages[i].role === 'user') {
+      end = i;
+      break;
+    }
+  }
+  for (let i = userIdx + 1; i < end; i += 1) {
+    const m = messages[i];
+    if (m.role === 'progress' && String(m.content ?? '').includes('已停止')) return true;
+  }
+  return false;
+}
+
+/** #886: convert backend interrupted-turn snapshots into resumable cards and
+ *  insert each at its chronological position (right after its own user
+ *  message, before the later successful turns) instead of appending at the
+ *  end — the old push put the 中断卡 after the retry's answer, leaving a
+ *  duplicate "ghost" user message and a visual discontinuity. */
+export function insertInterruptedTurns(merged: Message[], interruptedTurns: any[]): Message[] {
+  const cards: Message[] = [];
+  for (const _it of interruptedTurns) {
+    const _halfContent = String(_it.assistant_content ?? '');
+    cards.push({
+      role: 'assistant',
+      content: _halfContent,
+      reasoning: String(_it.reasoning_content ?? '') || undefined,
+      // #834: server-measured thinking proxy persisted on the snapshot —
+      // the resume card must not fall back to 1s.
+      reasoningElapsedS:
+        _it.reasoning_elapsed_s != null
+          ? Math.max(1, Math.round(Number(_it.reasoning_elapsed_s)))
+          : undefined,
+      // #905 review / CodeRabbit: persist the mode on the snapshot so an
+      // interrupted FAST turn restores with the 🚀/快速思考 label instead of
+      // ThinkBlock's default 🧠/深度思考.
+      reasoningMode: (_it.reasoning_mode as 'fast' | 'think' | undefined) ?? undefined,
+      interrupted: true,
+      interruptedMeta: {
+        turnId: String(_it.turn_id ?? ''),
+        status: String(_it.status ?? 'interrupted'),
+        assistantContent: _halfContent,
+        reasoningContent: String(_it.reasoning_content ?? ''),
+        updatedAt: Number(_it.updated_at ?? 0) * 1000,
+        tokenEstimate: _halfContent ? Math.round(_halfContent.length / 4) : 0,
+      },
+      timestamp: Number(_it.updated_at ?? Date.now() / 1000) * 1000,
+    });
+  }
+  if (cards.length === 0) return merged;
+  // Oldest first so each card lands in its own slot in order.
+  cards.sort((a, b) => a.timestamp - b.timestamp);
+  const out = merged.slice();
+  for (const card of cards) {
+    let ins = out.length;
+    for (let i = 0; i < out.length; i += 1) {
+      if (out[i].timestamp > card.timestamp) {
+        ins = i;
+        break;
+      }
+    }
+    out.splice(ins, 0, card);
+  }
+  return out;
+}
+
+// #891 深度审阅：messagesRef 里的用户消息是否已在 merged 中存在持久化副本。
+// 判定 = merged 中存在【任一条】同内容用户消息且时间戳相近（同一机器时钟：
+// 前端乐观气泡 Date.now()，后端副本经 sessionMsgsToUi 转 epoch ms，同一次
+// 发送的收发时间差秒级）。任一条命中即视为已持久化——保留块运行在完整
+// 恢复快照之上，若只对比 merged 最后一条会把旧历史行（内容不同）误判为
+// in-flight 而整段重复渲染。时间差大（≥30s）的旧文本副本不算命中——
+// 跨轮重复发送的相同文本不会被误判为已持久化。
+const _PERSISTED_COPY_TS_TOLERANCE_MS = 30_000;
+
+function _isPersistedCopyOf(frontendTs: number | undefined, copyTs: number | undefined): boolean {
+  if (
+    frontendTs === undefined ||
+    !Number.isFinite(frontendTs) ||
+    copyTs === undefined ||
+    !Number.isFinite(copyTs)
+  ) {
+    return false; // 无可靠时间戳 → 保守：不判为已持久化副本（保留前端气泡）
+  }
+  return Math.abs(copyTs - frontendTs) < _PERSISTED_COPY_TS_TOLERANCE_MS;
+}
+
+// #968: 用户消息去重 key——剥离发送侧追加进 content 的装饰段。handleSend 把
+// 每类附件/重试提示都追加在 content 尾部，故这里每条规则都「尾锚定」（节头
+// 限定为字符串头或前导 \n\n、节尾锚定 $）并迭代剥离：内嵌文件正文里的 ``` 围栏
+// 或 "--- End of … ---" 行无法再提前截断惰性匹配（回溯必须抵达真正的尾部），
+// 文件名含 "]" 也由贪婪捕获的回溯容忍。若某条剥离失手（如手打的形似装饰文本），
+// 后果是 key 不相等 → 气泡与其副本并存（#968 双显示，方向安全），绝不会让
+// 不同消息的 key 意外相等而吞掉真实消息（方向危险）。
+const _DEDUP_TAIL_SECTION_RES =
+  /(?:^|\n\n)(?:\[系统提示：[^\]]*\]|\[Image: [^\n]+\]|\[File: [^\n]+\]\n```\n[\s\S]*?\n```|--- Document: [^\n]+ ---\n[\s\S]*?\n--- End of [^\n]+ ---|\[[^\n]+?: [^\]]*?(?:scanned PDF|binary file|parsing on server)[^\]]*\])\s*$/;
+
+function _userContentDedupKey(content: string): string {
+  let s = content;
+  let prev: string;
+  do {
+    prev = s;
+    s = s.replace(_DEDUP_TAIL_SECTION_RES, '');
+  } while (s !== prev);
+  // 无文本纯附件发送：乐观气泡显示 '(attachment)' 占位符，落库副本剥离装饰后
+  // 为空串——两侧统一映射到空串才能互认（#968 复核）。
+  const trimmed = s.trim();
+  return trimmed === '(attachment)' ? '' : trimmed;
+}
+
+// #968 复核（CodeRabbit #969）：文档附件内容解码的单一实现——handleSend 拼
+// Document 装饰段与去重守卫校验内容都用它，避免两侧解码逻辑漂移（ext 白名单、
+// atob/TextDecoder/extractPdfText 与 50k 截断必须完全一致，守卫才能逐字比对）。
+function _decodeDocData(dataBase64: string, name: string): { extracted: string; ext: string } {
+  const raw = Uint8Array.from(atob(dataBase64), (c) => c.charCodeAt(0));
+  const ext = name.split('.').pop()?.toLowerCase() ?? '';
+  let extracted = '';
+  if (ext === 'pdf') {
+    extracted = extractPdfText(raw.buffer);
+  } else if (
+    ext === 'md' ||
+    ext === 'markdown' ||
+    ext === 'mdown' ||
+    ext === 'txt' ||
+    ext === 'text' ||
+    ext === 'html' ||
+    ext === 'htm' ||
+    ext === 'csv' ||
+    ext === 'json' ||
+    ext === 'yaml' ||
+    ext === 'yml' ||
+    ext === 'xml' ||
+    ext === 'env' ||
+    ext === 'log' ||
+    ext === 'sql' ||
+    ext === 'ini' ||
+    ext === 'toml' ||
+    ext === 'htaccess' ||
+    ext === 'sh' ||
+    ext === 'bash'
+  ) {
+    extracted = new TextDecoder().decode(raw);
+  }
+  return { extracted, ext };
+}
+
+export async function _sha256HexOfBytes(bytes: Uint8Array<ArrayBuffer>): Promise<string> {
+  const digest = await crypto.subtle.digest('SHA-256', bytes);
+  return Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+// #968 复核（CodeRabbit #969）：附件内容指纹——全量 SHA-256（采样首尾会被
+// 「同名同首尾、仅中段不同」的附件构造性绕过）。渲染线程没有同步摘要，故：
+// 发送前由 handleSend 在 await 段调用本函数预计算，结果暂存到附件
+// contentFp 并写进装饰 (fp:…)（doc 占位/图片）；守卫侧只比对暂存值（load()
+// 合并是同步路径，不能做摘要）。atob 解码失败会抛错，由调用方捕获（fp 缺失
+// → 装饰无指纹 → 守卫不认领，方向安全）。图片 dataUrl 不是纯 base64
+// （data:image/…;base64, 前缀），走 _sha256HexOfText 直接哈希整个字符串。
+export async function _sha256HexOfBase64(dataBase64: string): Promise<string> {
+  // new Uint8Array(…) 拷贝定型为 Uint8Array<ArrayBuffer>（TS 5.7 泛型数组：
+  // Uint8Array.from 返回 ArrayBufferLike，不满足 BufferSource）
+  const raw = new Uint8Array(Uint8Array.from(atob(dataBase64), (c) => c.charCodeAt(0)));
+  return _sha256HexOfBytes(raw);
+}
+
+export async function _sha256HexOfText(text: string): Promise<string> {
+  return _sha256HexOfBytes(new TextEncoder().encode(text));
+}
+
+// #968 复核：附件装饰内容守卫。key 会把装饰段（含嵌入的文件内容）整体剥掉，
+// 「同文本 + 同附件名」的消息 key 必然碰撞，名字级校验不足以区分内容差异
+// （CodeRabbit #969：同文本 + main.py 但 print(1)/print(2) 两种内容时，旧副本
+// 会误认领新气泡 → 新消息被吞）。守卫采用「签名计数」语义：每条 live 附件
+// 换算成一条唯一装饰签名（相同签名 = 同名字同内容/同指纹的重复附件），持久化
+// 副本里每种签名的出现次数必须 ≥ live 条数——一条装饰只认领一个附件，杜绝
+// 重复附件共用同一条旧装饰（CodeRabbit #969 round 2：30s 内先发 1 张图再发
+// 同文本 2 张相同图时，1 条装饰的旧副本会误认领 2 附件气泡 → 吞真实消息）。
+// - text：payload 原样嵌入 att.content → 签名 = 完整 `[File: name]\n```\n
+//   ${content}\n```` 段（逐字，含围栏锚点，长度/重叠不误判）
+// - document：`--- Document: name ---` 块正文须与 att.dataBase64 重新解码结果
+//   （同一 _decodeDocData，50k 截断一致）逐字相等，签名 = 完整块；占位装饰
+//   （扫描/二进制/解析失败）无法构造完整文本 → 按 [name: 前缀定位、逐段数
+//   (fp:contentFp) 出现次数
+// - image：签名 = `[Image: name (fp:hex)]` 完整装饰（字节不走 content，内容
+//   以发送侧预计算的全量 SHA-256 指纹代偿）
+// 任一签名次数不足 / 无法换算（无指纹、空内容、解码失败）→ 一律不认领
+// （方向安全：可能双显示，绝不吞消息）。
+function _countOccurrences(haystack: string, needle: string): number {
+  let n = 0;
+  let from = 0;
+  for (;;) {
+    const i = haystack.indexOf(needle, from);
+    if (i < 0) return n;
+    n += 1;
+    from = i + needle.length;
+  }
+}
+
+// 数 [name: 前缀占位中出现指定 fp 的段数。收尾 ] 从段头+长度起找（文件名可含
+// ]，report].pdf 不会在文件名内部截断，CodeRabbit #969 Minor）；畸形段（无
+// 收尾/超长）跳过。
+function _countPlaceholderFp(pmContent: string, name: string, fp: string): number {
+  const ph = `[${name}: `;
+  let n = 0;
+  let searchFrom = 0;
+  for (;;) {
+    const phIdx = pmContent.indexOf(ph, searchFrom);
+    if (phIdx < 0) return n;
+    const closeIdx = pmContent.indexOf(']', phIdx + ph.length);
+    if (closeIdx >= 0 && closeIdx - phIdx <= 400) {
+      const seg = pmContent.slice(phIdx, closeIdx + 1);
+      if (seg.includes(`(fp:${fp})`)) n += 1;
+    }
+    searchFrom = phIdx + ph.length;
+  }
+}
+
+function _persistedCoversAttachments(
+  pmContent: string,
+  attachments: Attachment[] | undefined
+): boolean {
+  if (!attachments || attachments.length === 0) return true;
+  const need = new Map<string, number>();
+  const fpNeed = new Map<string, number>(); // `name|fp` → 需要条数（占位装饰）
+  for (const a of attachments) {
+    switch (a.type) {
+      case 'image': {
+        // 无指纹旧版 live 附件无法验证内容 → 不认领（方向安全）
+        if (!a.contentFp) return false;
+        const sig = `[Image: ${a.name} (fp:${a.contentFp})]`;
+        need.set(sig, (need.get(sig) ?? 0) + 1);
+        break;
+      }
+      case 'text': {
+        const c = a.content ?? '';
+        if (!c) return false;
+        const sig = `[File: ${a.name}]\n\`\`\`\n${c}\n\`\`\``;
+        need.set(sig, (need.get(sig) ?? 0) + 1);
+        break;
+      }
+      case 'document': {
+        const blockOpen = `--- Document: ${a.name} ---`;
+        if (pmContent.includes(blockOpen)) {
+          // Document 块嵌内容 → 内容必须逐字一致才认领（CodeRabbit #969）
+          if (!a.dataBase64) return false;
+          try {
+            const { extracted } = _decodeDocData(a.dataBase64, a.name);
+            const body = extracted && extracted.trim() ? extracted.slice(0, 50000) : '';
+            if (!body) return false; // 空提取发送侧会走占位分支，不应出现块
+            const sig = `${blockOpen}\n${body}\n--- End of ${a.name} ---`;
+            need.set(sig, (need.get(sig) ?? 0) + 1);
+          } catch {
+            return false; // 解码异常 → 发送侧走占位分支，不可能有 Document 块
+          }
+        } else {
+          // 占位装饰：同名不同字节的不可提取文档生成相同占位 + 各自 (fp:…)，
+          // 按 name+fp 分组数出现条数（同名字同 fp 的重复附件不得共用一条）。
+          // key 分隔符用 \x1f（任何 OS 文件名都不合法），避免文件名含 | 解析错位。
+          if (!a.contentFp) return false;
+          const key = `${a.name}\x1f${a.contentFp}`;
+          fpNeed.set(key, (fpNeed.get(key) ?? 0) + 1);
+        }
+        break;
+      }
+      default:
+        // 未知/未来扩展类型（audio/video/archive/…）无法验证内容 → 不认领。
+        // 与全守卫「宁可双显、绝不吞消息」的安全方向一致：若扩展 attachment type
+        // 而漏补分支，仅凭 key（文本+时间+文件名）认领可能吞掉真实新消息。
+        return false;
+    }
+  }
+  for (const [sig, n] of need) {
+    if (_countOccurrences(pmContent, sig) < n) return false;
+  }
+  for (const [key, n] of fpNeed) {
+    const sep = key.indexOf('\x1f');
+    const name = key.slice(0, sep);
+    const fp = key.slice(sep + 1);
+    if (_countPlaceholderFp(pmContent, name, fp) < n) return false;
+  }
+  return true;
+}
+
+// #891 深度审阅 #11：删 flag 门控与保留块须用同一匹配（两处不再手写漂移）。
+// 唯一匹配改为一对一：merged 里每条持久化用户行只认领最早一条同 key、时间相近
+// 的乐观气泡。此前 .some() 会让同一条持久化副本同时满足多条相同文本的气泡——
+// 用户 30s 内两次发送同一句、恢复快照时第二条尚未落盘，两条都会被误判为已持久
+// 化而漏掉第二条。返回数组与 frontend 等长：matched[i]===true 表示该条乐观气泡
+// 已有专属持久化副本。匹配条件（按代价排序）：①时间相近 O(1) ②归一化 key（#968，
+// key 惰性缓存、每行只算一次——load() 在 UI 线程跑，避免每对候选做全文正则）
+// ③附件装饰名守卫（#968 复核：图片/文本/文档三类都查，见 _persistedCoversAttachments）。内容比对经 _userContentDedupKey 归一化（#968）。
+export function _markUserTwinMatches(frontend: Message[], merged: Message[]): boolean[] {
+  const matched = new Array<boolean>(frontend.length).fill(false);
+  const keyCache = new Array<string | undefined>(frontend.length).fill(undefined);
+  for (const pm of merged) {
+    if (pm.role !== 'user') continue;
+    const pmContent = String(pm.content ?? '');
+    const pmKey = _userContentDedupKey(pmContent);
+    for (let i = 0; i < frontend.length; i += 1) {
+      if (matched[i]) continue;
+      const m = frontend[i];
+      if (m.role !== 'user') continue;
+      // 时间门控最先（O(1)）——内容剥离是 O(content)，只对时间相近的候选执行
+      if (!_isPersistedCopyOf(m.timestamp, pm.timestamp)) continue;
+      if (keyCache[i] === undefined) keyCache[i] = _userContentDedupKey(String(m.content ?? ''));
+      if (keyCache[i] !== pmKey) continue;
+      if (!_persistedCoversAttachments(pmContent, m.attachments)) continue;
+      matched[i] = true;
+      break;
+    }
+  }
+  return matched;
+}
+
 export function sessionMsgsToUi(rawMsgs: any[]): Message[] {
   const result: Message[] = [];
   for (const m of collapseAssistantMessagesWithinTurns(rawMsgs)) {
@@ -1117,6 +1662,7 @@ export function sessionMsgsToUi(rawMsgs: any[]): Message[] {
         content: String(m.content ?? ''),
         reasoning: m.reasoning ? String(m.reasoning) : undefined,
         reasoningElapsedS: m.reasoningElapsedS,
+        reasoningMode: m.reasoningMode, // #905 review: preserve per-message mode
         timestamp: ts,
       });
       continue;
@@ -1139,13 +1685,18 @@ export function sessionMsgsToUi(rawMsgs: any[]): Message[] {
         // Restore image attachments from the "[Image: name]" placeholder the
         // sender embeds (dataUrl is not persisted — it is re-read from the
         // session files dir lazily after load, see loadSession #659).
-        const attachments = m.role === 'user'
-          ? extractImageAttachmentsFromContent(contentStr)
-          : undefined;
+        const attachments =
+          m.role === 'user' ? extractImageAttachmentsFromContent(contentStr) : undefined;
         result.push({
           role: m.role as 'user' | 'assistant',
           content: contentStr,
           reasoning: reasoningContent,
+          // #905 review / CodeRabbit: preserve the message's own mode even
+          // when it has no reasoning_content — the inline 🚀/🧠 badge on the
+          // reply must follow the SENT mode, not the live global one
+          // (switching the selector then reopening history showed the wrong
+          // badge). Raw persisted field is snake_case.
+          reasoningMode: m.reasoning_mode,
           timestamp: ts,
           attachments,
         });
@@ -1311,7 +1862,9 @@ function removeTransientTurnMessagesSinceLastUser(messages: Message[]): Message[
 
 type ChatGroup =
   | { kind: 'msg'; msg: Message }
-  | { kind: 'chain'; rows: Message[]; done: boolean };
+  | { kind: 'chain'; rows: Message[]; done: boolean }
+  | { kind: 'reply-head'; thinking: Message }
+  | { kind: 'reply-content'; msg: Message };
 
 /** Group consecutive tool rows into a single chain so the final rendering can
  *  collapse them into one「工具调用 · N」block (live rows stay expanded while
@@ -1320,6 +1873,10 @@ function groupChatMessages(messages: Message[]): ChatGroup[] {
   const out: ChatGroup[] = [];
   let chain: Message[] | null = null;
   let chainDone = false;
+  // A progress+reasoning message starts a reply header (avatar + name +
+  // "已深度思考") that stays at the TOP of the turn, above any tool rows —
+  // the reply's body is emitted later as reply-content, after the tools.
+  let pendingReply = false;
   const flush = () => {
     if (chain) {
       out.push({ kind: 'chain', rows: chain, done: chainDone });
@@ -1336,6 +1893,17 @@ function groupChatMessages(messages: Message[]): ChatGroup[] {
     }
     if (chain) chainDone = true;
     flush();
+    if (m.role === 'progress' && m.reasoning) {
+      out.push({ kind: 'reply-head', thinking: m });
+      pendingReply = true;
+      continue;
+    }
+    if (m.role === 'assistant' && pendingReply) {
+      out.push({ kind: 'reply-content', msg: m });
+      pendingReply = false;
+      continue;
+    }
+    if (m.role === 'user') pendingReply = false;
     out.push({ kind: 'msg', msg: m });
   }
   flush();
@@ -1360,10 +1928,32 @@ function dedupeReasoningBlocks(messages: Message[]): Message[] {
       out.push(pending);
       continue;
     }
-    pending = null;
+    // Agentic turns think between tool calls, so only a user boundary (or the
+    // final assistant message) ends the merge chain — tool rows (progress with
+    // toolHint) and subagent/error rows stay inside the same turn's thinking.
+    if (m.role === 'user' || m.role === 'assistant') pending = null;
     out.push(m);
   }
   return out;
+}
+
+/** Drop snapshot rows already represented in `merged`.  The backend persists
+ *  reasoning on assistant messages, so sessionMsgsToUi re-creates a completed
+ *  turn's thinking block — splicing the snapshot's copy back in would add one
+ *  more "已深度思考" header on every window switch-back.  Live/in-flight
+ *  thinking (not yet persisted) has no counterpart in `merged` and is kept. */
+function dedupeSnapshotRows(merged: Message[], rows: Message[]): Message[] {
+  return rows.filter((row) => {
+    if (row.role === 'progress' && row.reasoning) {
+      return !merged.some(
+        (m) =>
+          m.role === 'progress' &&
+          m.reasoning &&
+          (m.content.startsWith(row.content) || row.content.startsWith(m.content))
+      );
+    }
+    return !merged.some((m) => m.role === row.role && m.content === row.content);
+  });
 }
 
 /** Promote an existing thinking block, or insert one after the user message.
@@ -1371,7 +1961,7 @@ function dedupeReasoningBlocks(messages: Message[]): Message[] {
 export function insertStandaloneReasoning(
   messages: Message[],
   reasoning: string,
-  elapsedSeconds?: number,
+  elapsedSeconds?: number
 ): Message[] {
   for (let i = messages.length - 1; i >= 0; i -= 1) {
     if (messages[i].role === 'user') break;
@@ -1409,7 +1999,7 @@ export function appendReasoningDelta(
   messages: Message[],
   delta: string,
   ts = Date.now(),
-  mode?: ReasoningMode,
+  mode?: ReasoningMode
 ): Message[] {
   let idx = -1;
   for (let i = messages.length - 1; i >= 0; i -= 1) {
@@ -1421,7 +2011,12 @@ export function appendReasoningDelta(
   if (idx >= 0) {
     const next = [...messages];
     const appended = next[idx].content + delta;
-    next[idx] = { ...next[idx], content: appended, reasoning: appended, reasoningMode: next[idx].reasoningMode ?? mode };
+    next[idx] = {
+      ...next[idx],
+      content: appended,
+      reasoning: appended,
+      reasoningMode: next[idx].reasoningMode ?? mode,
+    };
     return next;
   }
   return [
@@ -1667,11 +2262,45 @@ const streamingBySession = new Set<string>();
  *  on session switch so there is no blank-window gap while sessions.get()
  *  resolves.  Exec inline output and doc_progress attachment status are
  *  handled by the load() replay (they update execOutputs/attachments). */
+/**
+ * 平台积分计费事件 → 消息行。billed 为安静活动行、blocked 为醒目错误行。
+ * 供实时处理器与缓存回放（cachedEventsToMessages / splitCachedMessages）
+ * 共用，保证切会话后计费通知不丢。
+ */
+function pointsEventToMessage(pd: ChatProgress): Message | null {
+  if (pd.stream !== 'points' || typeof pd.type !== 'string') return null;
+  const pointsCost = typeof pd.points_cost === 'number' ? pd.points_cost : 0;
+  const pointsBalance = typeof pd.balance === 'number' ? pd.balance : null;
+  if (pd.type === 'billed') {
+    return {
+      role: 'progress',
+      content:
+        pointsBalance === null
+          ? `本次任务已扣 ${pointsCost} 积分`
+          : `本次任务已扣 ${pointsCost} 积分，可用余额 ${pointsBalance}`,
+      timestamp: Date.now(),
+    };
+  }
+  return {
+    role: 'error',
+    content:
+      typeof pd.message === 'string' && pd.message
+        ? pd.message
+        : '平台积分不足，任务未执行。请到 设置 → Qraft 平台账号 查看余额。',
+    timestamp: Date.now(),
+  };
+}
+
 function cachedEventsToMessages(events: InFlightEvent[], mode?: ReasoningMode): Message[] {
   const out: Message[] = [];
   for (const ev of events) {
     if (ev.type === 'progress') {
       const pd = ev.data as ChatProgress;
+      const pointsMessage = pointsEventToMessage(pd);
+      if (pointsMessage) {
+        out.push(pointsMessage);
+        continue;
+      }
       if (pd?.text && !pd?.stream) {
         out.push({
           role: 'progress',
@@ -1710,12 +2339,24 @@ function cachedEventsToMessages(events: InFlightEvent[], mode?: ReasoningMode): 
 function splitCachedMessages(events: InFlightEvent[]): {
   thinking: Message[];
   finalReply: string | null;
+  /** #834: server-measured thinking proxy, preserved across the off-session
+   *  final cache so the restored thinking block doesn't fall back to the
+   *  local delta-span approximation. */
+  finalReasoning?: string;
+  finalReasoningElapsedS?: number;
 } {
   const thinking: Message[] = [];
   let finalReply: string | null = null;
+  let finalReasoning: string | undefined;
+  let finalReasoningElapsedS: number | undefined;
   for (const ev of events) {
     if (ev.type === 'progress') {
       const pd = ev.data as ChatProgress;
+      const pointsMessage = pointsEventToMessage(pd);
+      if (pointsMessage) {
+        thinking.push(pointsMessage);
+        continue;
+      }
       if (pd?.text && !pd?.stream) {
         thinking.push({
           role: 'progress',
@@ -1737,10 +2378,18 @@ function splitCachedMessages(events: InFlightEvent[]): {
       thinking.push({ role: 'progress', content: '已停止。', timestamp: Date.now() });
     } else if (ev.type === 'final') {
       const fd = ev.data as ChatFinal;
+      // CR #856-6: capture reasoning even when content is empty (pure
+      // thinking turn) — dropping it loses the thinking block entirely.
       if (fd?.content) finalReply = fd.content;
+      if (fd?.reasoning) {
+        finalReasoning = fd.reasoning;
+        if (fd.reasoning_elapsed_s != null) {
+          finalReasoningElapsedS = Math.max(1, Math.round(fd.reasoning_elapsed_s));
+        }
+      }
     }
   }
-  return { thinking, finalReply };
+  return { thinking, finalReply, finalReasoning, finalReasoningElapsedS };
 }
 
 /* ─── Main component ─────────────────────────────────────────────── */
@@ -1754,12 +2403,15 @@ const TURN_ABORT_SETTLE_MS = 3000;
 /** Fallback for aborted events WITHOUT a turn_id (legacy/mock bridges): a
  *  stale aborted event from a superseded turn arriving this soon after a new
  *  send started is dropped. Bridges that emit turn ids use the authoritative
- *  activeTurnIdRef match instead — no time window involved (#542).
+ *  invocation-local turn id match instead — no time window involved (#542).
  *  LIMITATION: under this fallback, a legitimately fast backend abort of the
  *  NEW turn within the window is also dropped, leaving streaming=true until
  *  the 60s watchdog fires. Production bridges all emit turn ids, so this is
  *  degradation protection, not a correctness guarantee. */
 const TURN_TERMINAL_GRACE_MS = 500;
+
+// 常驻免责声明文案（#836）—— 法务/产品最终确认后替换；后续接入 i18n 时可迁移
+const CHAT_DISCLAIMER_ZH = 'AI 生成内容仅供参考，可能存在错误，请自行核实关键信息';
 
 export function ChatConsole({
   sessionKey = DEFAULT_SESSION,
@@ -1773,8 +2425,10 @@ export function ChatConsole({
   renameVersion,
   onRename,
   onOpenProviderSettings,
+  onOpenQraftSettings,
   onOpenApprovals,
   onWorkspaceLoaded,
+  onSessionsChanged,
 }: {
   sessionKey?: string;
   /** Increment to force a session history reload (e.g. after bridge becomes ready) */
@@ -1787,6 +2441,9 @@ export function ChatConsole({
   onSessionActivityChange?: (hasActivity: boolean) => void;
   pendingWorkspace?: { current: { sessionKey: string; workspace: string } | null };
   onChatFinished?: () => void;
+  /** Called after an empty session is garbage-collected on switch-away, so
+   *  the parent can refresh the sidebar list. */
+  onSessionsChanged?: () => void;
   /** Increment to force a title reload after the session is renamed from
    *  the sidebar, so the active header stays in sync. */
   renameVersion?: number;
@@ -1794,10 +2451,40 @@ export function ChatConsole({
    *  refresh the sidebar (which reads titles from the backend). */
   onRename?: () => void;
   onOpenProviderSettings?: () => void;
+  /** #1000: 跳转设置 → MiQroForge 平台（首屏登录卡片次级入口）。 */
+  onOpenQraftSettings?: () => void;
   onOpenApprovals?: () => void;
   onWorkspaceLoaded?: (workspace: string | null) => void;
 }) {
   const [messages, setMessages] = useState<Message[]>([]);
+  // #1000: 首屏登录卡片与发送拦截共用登录态；旧 preload 无 qraft 命名空间时
+  // useQraftStatus 内部兜底为空态（视为未登录）。
+  const { loggedIn, status: qraftStatus } = useQraftStatus();
+  // 流错误路径同步读取最新登录态：handleSend 闭包可能捕获旧值（CodeRabbit #1010）。
+  const loggedInRef = useRef(loggedIn);
+  loggedInRef.current = loggedIn;
+  // 登录已失效（token 刷新失败且未恢复）：流错误路径据此给重登引导而非模型配置指引。
+  const requiresReloginRef = useRef(qraftStatus?.requiresRelogin === true);
+  requiresReloginRef.current = qraftStatus?.requiresRelogin === true;
+  // #875 D1（外部评估 P0/A1）：系统包安装的 persist/runtime 失败标记只写在
+  // 工具输出里，模型可能摘要掉——用户会误以为「允许并记住」已永久生效。
+  // 扫描消息中的失败标记并发 window 事件，由 App 级 toast 呈现（不依赖模型）。
+  const warnedInstallWarnRef = useRef(new Map<string, number>());
+  // 2026-08-27：当前 turn 的 id——final 消息打 turnId 标记（卡内联关联用）
+  const activeTurnIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    const warned = warnedInstallWarnRef.current;
+    for (const m of messages) {
+      const text = String(m.content ?? '');
+      let kind: 'persist' | 'runtime' | null = null;
+      if (text.includes('授权保存失败')) kind = 'persist';
+      else if (text.includes('未能立即生效')) kind = 'runtime';
+      if (kind && warned.get(kind) !== m.timestamp) {
+        warned.set(kind, m.timestamp);
+        window.dispatchEvent(new CustomEvent(INSTALL_WARNING_EVENT, { detail: kind }));
+      }
+    }
+  }, [messages]);
   // 2026-08-26 用户裁决：有确认/计划卡时输入框隐藏（WorkBuddy 式）
   // 2026-08-27：计划/确认是 AI 回答的一部分——卡片内联在产生它的消息后
   const { pending: pendingCards, resolved: resolvedCards, resolve: resolveCard, timeoutCard } = useUserInput();
@@ -1867,6 +2554,31 @@ export function ChatConsole({
       // ignore
     }
   }, [reasoningMode]);
+  // EB-1 欢迎页模式卡选中态：独立于 reasoningMode（深度研究与代码任务都映射 think，
+  // 若用 reasoningMode 推导会同时高亮两张卡）。welcomeMode 是组件级 state，跨会话
+  // 不随欢迎页重挂而重置（ChatConsole 常驻），见下方 sessionKey effect。
+  const [welcomeMode, setWelcomeMode] = useState<'fast' | 'think' | 'code'>(
+    reasoningMode === 'think' ? 'think' : 'fast'
+  );
+  const selectWelcomeMode = (k: 'fast' | 'think' | 'code') => {
+    setWelcomeMode(k);
+    setReasoningMode(k === 'code' ? 'think' : k);
+  };
+  // Composer 侧的推理模式切换(ReasoningModeSwitch / 建议提示)同样要同步 welcome
+  // 卡高亮——否则空态下先选了「代码任务」再从输入条切 fast,welcomeMode 停在 code、
+  // 发送却用 fast,高亮与真实模式不一致(CodeRabbit)。会话已有消息后 welcome 卡不
+  // 再渲染,只在 messages.length===0 时回写 welcomeMode。
+  const changeReasoningMode = (m: ReasoningMode) => {
+    setReasoningMode(m);
+    if (messages.length === 0) setWelcomeMode(m);
+  };
+  // 切到新会话时按当前 reasoningMode 重新派生选中卡：避免沿用上个会话的 code 选择，
+  // 却因中途切到 fast 而高亮与发送模式不一致（CodeRabbit）。仅随 sessionKey 触发，
+  // 不在同一会话内用 reasoningMode 变化覆盖用户手动选卡。
+  useEffect(() => {
+    setWelcomeMode(reasoningMode === 'think' ? 'think' : 'fast');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionKey]);
   const [streaming, setStreaming] = useState(false);
   const [copiedIdx, setCopiedIdx] = useState<number | null>(null);
   const [attachments, setAttachments] = useState<Attachment[]>([]);
@@ -1877,7 +2589,9 @@ export function ChatConsole({
     Record<string, { status: 'done' | 'failed'; savePath?: string; error?: string }>
   >({});
   /** #696 补：下载完成 toast（成功提示 + 打开文件夹，居中 + 淡入淡出 + 2s） */
-  const [downloadToast, setDownloadToast] = useState<{ filename: string; savePath: string } | null>(null);
+  const [downloadToast, setDownloadToast] = useState<{ filename: string; savePath: string } | null>(
+    null
+  );
   const [toastVisible, setToastVisible] = useState(false);
 
   // Lazily re-read image attachments after session load: the sender embeds
@@ -1916,9 +2630,7 @@ export function ChatConsole({
                 ? {
                     ...m,
                     attachments: m.attachments.map((a) =>
-                      a === att
-                        ? { ...a, dataUrl, status: 'done' as const, size: res.size }
-                        : a
+                      a === att ? { ...a, dataUrl, status: 'done' as const, size: res.size } : a
                     ),
                   }
                 : m
@@ -2029,17 +2741,33 @@ export function ChatConsole({
     });
   }, []);
   /** Timestamp of the pending bubble for `key`, or null. */
-  const sendingFor = useCallback((key: string): number | null => sendingBySession.get(key) ?? null, [sendingBySession]);
+  const sendingFor = useCallback(
+    (key: string): number | null => sendingBySession.get(key) ?? null,
+    [sendingBySession]
+  );
   /** files touched by the agent during this session */
   const [trackedFiles, setTrackedFiles] = useState<TrackedFile[]>([]);
   /** preview modal */
   const [previewFile, setPreviewFile] = useState<{
     path: string;
-    content: string;
+    content?: string;
     dataBase64?: string;
+    /** #877: rich render kind — pdf iframe / spreadsheet table / docx blocks. */
+    kind?: 'pdf' | 'spreadsheet' | 'document';
+    pdfUrl?: string;
+    spreadsheet?: SpreadsheetData;
+    docBlocks?: DocumentBlocks;
   } | null>(null);
   /** File preview modal: show HTML source instead of the rendered iframe. */
   const [htmlSourceMode, setHtmlSourceMode] = useState(false);
+
+  // Revoke the previous PDF blob URL whenever the preview changes or closes
+  // (#877) — mirrors the WorkspacePage blob lifecycle.
+  useEffect(() => {
+    return () => {
+      if (previewFile?.pdfUrl) URL.revokeObjectURL(previewFile.pdfUrl);
+    };
+  }, [previewFile?.pdfUrl]);
 
   // When preview is open, lock the entire page body so no clicks fall through
   // to elements behind the modal (sidebar, chat area, etc.)
@@ -2061,6 +2789,14 @@ export function ChatConsole({
     return () => {
       activeSendCleanupRef.current?.();
       cleanupListeners();
+      // Dispose EVERY active send invocation — the unsubsRef singleton only
+      // tracks the latest one; cross-session invocations outlive it and must
+      // not keep firing watchdogs or calling setMessages after unmount.
+      for (const entry of sendInvocationRegistryRef.current.values()) {
+        entry.cleanup();
+        for (const unsub of entry.unsubs) unsub();
+      }
+      sendInvocationRegistryRef.current.clear();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -2124,8 +2860,7 @@ export function ChatConsole({
   // 上报 App，让"+"能感知未落盘的活动
   useEffect(() => {
     const hasActivity =
-      streaming ||
-      messages.some((m) => m.role === 'user' || m.role === 'assistant');
+      streaming || messages.some((m) => m.role === 'user' || m.role === 'assistant');
     onSessionActivityChange?.(hasActivity);
   }, [streaming, messages, onSessionActivityChange]);
   const { lastAdjustAt, setActiveSession } = useUserInput();
@@ -2149,6 +2884,97 @@ export function ChatConsole({
     if (!adjustHint || streaming) return;
     textareaRef.current?.focus();
   }, [adjustHint, streaming]);
+  // 原生 window.confirm 模态框关闭后，Chromium 可能不把“真实的 OS 激活”交还
+  // renderer：键盘事件被吞、点输入条无光标，刷新重建页面才恢复（手动复现）。
+  // 早期版本里空/非空输入条是两棵子树，删除对话时旧 textarea 卸载重挂会顺带
+  // 触发一次真实焦点重授，故能靠“document.hasFocus() 为 false 再硬激活”兜住。
+  // 现在输入条统一为常驻一棵，confirm 关闭时 Chromium 会把焦点“还”给仍挂载的
+  // textarea —— document.hasFocus() 读 true，但击键从未被重新授予，仅凭
+  // hasFocus() 判据会漏。因此凡从“有内容的会话”落到空欢迎页（删光会话/删除
+  // 当前会话），无条件硬激活一次（主进程 blur→focus 逼出真正的激活，重新下发
+  // 页面焦点）；其余空态仍按 hasFocus() 缺失才硬激活，避免无谓闪烁。
+  const welcomeFocusedFor = useRef<string | null>(null);
+  const lastMsgCountRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (!historyLoaded || streaming) return;
+    if (messages.length === 0 && welcomeFocusedFor.current !== sessionKey) {
+      welcomeFocusedFor.current = sessionKey ?? null;
+      const prevHadMessages = (lastMsgCountRef.current ?? 0) > 0;
+      const focusInput = () => textareaRef.current?.focus();
+      focusInput();
+      void window.miqi.app?.focus?.();
+      const t1 = window.setTimeout(focusInput, 120);
+      const t2 = window.setTimeout(() => {
+        focusInput();
+        void window.miqi.app?.focus?.();
+        const needsHard = prevHadMessages || !document.hasFocus();
+        if (needsHard) {
+          window.setTimeout(() => {
+            void window.miqi.app?.focus?.({ hard: true }).then(() => {
+              window.setTimeout(focusInput, 80);
+            });
+          }, 60);
+        }
+      }, 420);
+      return () => {
+        window.clearTimeout(t1);
+        window.clearTimeout(t2);
+      };
+    }
+  }, [historyLoaded, streaming, messages, sessionKey]);
+  // 从侧栏删除「非当前」会话时不会发生会话切换，上面的入口 effect 不会重跑；但
+  // 原生 window.confirm 模态同样会偷走 OS 键盘授予（hasFocus() 读 true、击键却被
+  // 吞）。删除路径在 confirm 通过后派发本事件，这里若处于空欢迎页就重发一次硬激活
+  // （主进程 blur→focus），与上面 9ad436c7 的修法同源。
+  // 监听器无条件注册：若删除发生在历史加载完成前（空态还没就绪），事件不会丢——
+  // 记下 pending，等当前会话加载完成且为空时再消费执行（CodeRabbit）。非空会话里
+  // 删除其它会话本就不该动当前输入框（入口 effect 只在落到空态时接管），直接忽略。
+  const historyLoadedRef = useRef(historyLoaded);
+  historyLoadedRef.current = historyLoaded;
+  const messageCountRef = useRef(messages.length);
+  messageCountRef.current = messages.length;
+  const pendingRegrantRef = useRef(false);
+  useEffect(() => {
+    const runRegrant = () => {
+      textareaRef.current?.focus();
+      window.setTimeout(() => {
+        void window.miqi.app?.focus?.({ hard: true }).then(() => {
+          window.setTimeout(() => textareaRef.current?.focus(), 80);
+        });
+      }, 60);
+    };
+    const regrant = () => {
+      if (messageCountRef.current > 0) return;
+      if (!historyLoadedRef.current) {
+        pendingRegrantRef.current = true;
+        return;
+      }
+      runRegrant();
+    };
+    window.addEventListener('miqi:chat-focus-regrant', regrant);
+    return () => window.removeEventListener('miqi:chat-focus-regrant', regrant);
+  }, []);
+  // 切换会话会重建空态，加载途中攒下的 pending 只属于旧会话——先于消费 effect
+  // 清掉，别在别的会话里误触发一次硬激活（同源：消费 effect 仅在「空 + 已加载」时跑）。
+  useEffect(() => {
+    pendingRegrantRef.current = false;
+  }, [sessionKey]);
+  useEffect(() => {
+    if (historyLoaded && messages.length === 0 && pendingRegrantRef.current) {
+      pendingRegrantRef.current = false;
+      textareaRef.current?.focus();
+      window.setTimeout(() => {
+        void window.miqi.app?.focus?.({ hard: true }).then(() => {
+          window.setTimeout(() => textareaRef.current?.focus(), 80);
+        });
+      }, 60);
+    }
+  }, [historyLoaded, messages, sessionKey]);
+  // 记录上一次提交的 messages 长度（声明于聚焦 effect 之后：effect 按声明顺序
+  // 逐个执行，聚焦 effect 先跑、读到的仍是旧值；本 effect 无依赖、每次提交都跑）。
+  useEffect(() => {
+    lastMsgCountRef.current = messages.length;
+  });
   const toolArgsByCallId = useRef<Map<string, unknown>>(new Map());
   /** web_search tool outputs (by tool_call_id) for click-to-expand result
    *  cards on the live tool row (#539). State, not ref — cards must re-render
@@ -2156,19 +2982,25 @@ export function ChatConsole({
   const [searchResultsByCallId, setSearchResultsByCallId] = useState<Record<string, string>>({});
   const previewJustClosed = useRef(false);
   const unsubsRef = useRef<Array<() => void>>([]);
+  // Which send invocation the unsubs in unsubsRef belong to — a new send must
+  // only auto-unsubscribe the PREVIOUS invocation when both target the same
+  // session; otherwise a send in session B silently kills session A's
+  // in-flight listeners and its terminal events are never processed.
+  const unsubsSessionRef = useRef<string | null>(null);
+  // EVERY active send invocation's cleanup resources, keyed by its unique
+  // send id.  The unsubsRef singleton only remembers the latest invocation —
+  // without this registry, cross-session invocations outlive it and their
+  // watchdogs/listeners would keep calling setMessages after unmount.  The
+  // session key lets abort/stop dispose only the invocation of the session
+  // being stopped instead of the latest one.
+  const sendInvocationRegistryRef = useRef<
+    Map<number, { unsubs: Array<() => void>; cleanup: () => void; sessionKey: string }>
+  >(new Map());
   const finalCleanupTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Shared across handleSend closures: a new send aborts the previous turn's
   // typewriter reveal (its RAF is closure-local and otherwise leaks a ghost
   // assistant bubble into the next turn).
   const revealAnimIdRef = useRef<number | null>(null);
-  // Timestamp of the newest handleSend start. Fallback guard for terminal
-  // events WITHOUT a turn_id (legacy/mock bridges) arriving from a superseded
-  // turn — the turn_id path is authoritative (see the onAborted guard).
-  const currentSendStartedAtRef = useRef(0);
-  // Backend-issued turn id of the active turn, learned from the turn_started
-  // progress event. Terminal events tagged with a different turn id are
-  // dropped — a session key cannot distinguish two turns in one session.
-  const activeTurnIdRef = useRef<string | null>(null);
   // The live turn's watchdog interval. Shared across closures so an interrupt
   // (handleAbort / interrupt-and-resend) can stop the superseded turn's timer —
   // its own sendCleanup never runs because its listeners are already removed.
@@ -2180,7 +3012,9 @@ export function ChatConsole({
   // exited, so the new chat.send is not rejected with TURN_IN_PROGRESS.
   // Kept after a manual stop (only cleared by the owning handleSend in its
   // identity-checked finally) so stop-then-quick-send still serializes.
-  const lifecycleRef = useRef<{ id: number; promise: Promise<void>; sessionKey: string } | null>(null);
+  const lifecycleRef = useRef<{ id: number; promise: Promise<void>; sessionKey: string } | null>(
+    null
+  );
   // Monotonic id for lifecycleRef identity checks.
   const turnSeqRef = useRef(0);
   const liveReasoningTsRef = useRef<number | null>(null);
@@ -2364,7 +3198,27 @@ export function ChatConsole({
     // take the LIVE path (in `messages`), never moduleInFlightCache — so
     // without this snapshot they'd be lost when setMessages([]) runs below.
     if (_sessionChanged && currentSessionRef.current) {
-      moduleMessagesSnapshot.set(currentSessionRef.current, messagesRef.current);
+      const leavingKey = currentSessionRef.current;
+      moduleMessagesSnapshot.set(leavingKey, messagesRef.current);
+      // GC 空会话（对齐 WorkBuddy）：没提问的新对话切走后不应残留在会话
+      // 列表。messagesRef 为空只说明当前渲染无内容——加载是异步的，切走太
+      // 快时磁盘可能已有消息，所以删前用后端再确认一次，避免误删。
+      if (messagesRef.current.length === 0) {
+        window.miqi.sessions
+          .get(leavingKey)
+          .then((d) => {
+            if (d && Array.isArray(d.messages) && d.messages.length > 0) return null;
+            // get 返回前用户可能已切回 leavingKey 并发出首条消息（已落盘）；
+            // 此刻 currentSessionRef 若已指回该 key，删除会误删这条新会话
+            // （CodeRabbit）。竞态窗口极窄但护栏成本为零。
+            if (currentSessionRef.current === leavingKey) return null;
+            return window.miqi.sessions.delete(leavingKey);
+          })
+          .then(() => onSessionsChanged?.())
+          .catch(() => {
+            /* bridge 离线时跳过清理，空会话保留 */
+          });
+      }
     }
     // Update the ref FIRST so the per-handler session_key guard on the
     // CURRENT listeners (from the previous session's handleSend) sees the
@@ -2393,7 +3247,9 @@ export function ChatConsole({
       const _cacheLiveTurn =
         !!_targetCache &&
         _targetCache.events.some((e) => e.type === 'progress') &&
-        !_targetCache.events.some((e) => e.type === 'final' || e.type === 'error' || e.type === 'aborted');
+        !_targetCache.events.some(
+          (e) => e.type === 'final' || e.type === 'error' || e.type === 'aborted'
+        );
       let _snapLiveTurn = false;
       if (_snapshot && _snapshot.length > 0) {
         const _snapLastUser = (() => {
@@ -2404,7 +3260,9 @@ export function ChatConsole({
         })();
         const _after = _snapshot.slice(_snapLastUser + 1);
         const _hasThinking = _after.some((_m) => _m.role === 'progress' || _m.role === 'subagent');
-        const _hasFinalReply = _after.some((_m) => _m.role === 'assistant' && String(_m.content ?? '').trim().length > 0);
+        const _hasFinalReply = _after.some(
+          (_m) => _m.role === 'assistant' && String(_m.content ?? '').trim().length > 0
+        );
         // A turn is also live if the typewriter is still revealing a reply
         // (the assistant bubble holds partial text).  Many backends emit no
         // progress events — the "thinking" the user sees is the half-typed
@@ -2423,8 +3281,7 @@ export function ChatConsole({
       // bubble and no progress text / typewriter exists yet — the exact phase
       // where the heuristics below (cache progress, snapshot thinking, active
       // typewriter) all report false and the thinking indicator wrongly dies.
-      const _hasLiveTurn =
-        streamingBySession.has(sessionKey) || _cacheLiveTurn || _snapLiveTurn;
+      const _hasLiveTurn = streamingBySession.has(sessionKey) || _cacheLiveTurn || _snapLiveTurn;
       if (_snapshot && _snapshot.length > 0) {
         // Exact last-rendered view — best fidelity.
         setMessages(_snapshot);
@@ -2525,11 +3382,39 @@ export function ChatConsole({
         // for the blank empty state with no explanation.  Surface an explicit
         // error so the user knows the session failed to load.
         setHistoryLoaded(true);
+        // #872: don't erase in-flight content — a message sent while the bridge
+        // was still down (with any thinking/tool rows already streamed) would
+        // otherwise vanish.  Retain the full current-turn sequence ahead of the
+        // error banner.  Only the ACTIVE turn's assistant half-reply is dropped
+        // (no backend to replay it); earlier history — including prior turns'
+        // assistant replies — is kept unchanged (CodeRabbit #891).
+        const _errInFlight = streamingBySession.has(sessionKey)
+          ? (() => {
+              const _msgs = messagesRef.current;
+              // Locate the last user message; anything before it is settled
+              // history and is preserved verbatim.
+              let _lastUserIdx = -1;
+              for (let _i = _msgs.length - 1; _i >= 0; _i -= 1) {
+                if (_msgs[_i].role === 'user') {
+                  _lastUserIdx = _i;
+                  break;
+                }
+              }
+              if (_lastUserIdx < 0) return _msgs; // no user yet — keep as-is
+              // Keep history up to & including the last user; drop assistant
+              // content after it (the half-typed reply of the active turn),
+              // but keep non-assistant rows after it (thinking/tool lines).
+              return [
+                ..._msgs.slice(0, _lastUserIdx + 1),
+                ..._msgs.slice(_lastUserIdx + 1).filter((m) => m.role !== 'assistant'),
+              ];
+            })()
+          : [];
         setMessages([
+          ..._errInFlight,
           {
             role: 'error',
-            content:
-              '会话加载失败：无法连接后台服务，请稍后重试或重启应用。',
+            content: '会话加载失败：无法连接后台服务，请稍后重试或重启应用。',
             action: 'retry-load',
             actionLabel: '重试',
             timestamp: Date.now(),
@@ -2578,7 +3463,9 @@ export function ChatConsole({
         // least don't cancel it below).
         const _revealState = revealBySession.get(sessionKey);
         const _typewriterHasContent = !!_revealState && _revealState.fullContent.length > 0;
-        const _revealActive = _typewriterHasContent && _revealState!.displayed.length < _revealState!.fullContent.length;
+        const _revealActive =
+          _typewriterHasContent &&
+          _revealState!.displayed.length < _revealState!.fullContent.length;
         var merged = uiMsgs.slice();
         if (_typewriterHasContent && _snap && _snap.length > 0) {
           // Keep the snapshot (which holds the partial reply the typewriter is
@@ -2600,14 +3487,15 @@ export function ChatConsole({
               _snapNonReply.push(_sm);
             }
           }
-          if (_snapNonReply.length > 0) {
+          const _snapNonReplyDeduped = dedupeSnapshotRows(merged, _snapNonReply);
+          if (_snapNonReplyDeduped.length > 0) {
             const insIdx = (() => {
               for (let _i = merged.length - 1; _i >= 0; _i -= 1) {
                 if (merged[_i].role === 'user') return _i + 1;
               }
               return merged.length;
             })();
-            merged.splice(insIdx, 0, ..._snapNonReply);
+            merged.splice(insIdx, 0, ..._snapNonReplyDeduped);
           }
         }
 
@@ -2636,9 +3524,13 @@ export function ChatConsole({
             // otherwise a permanently-stuck "思考中…" appears under the answer.
             const turnDone = !!cached?.events.some((e) => e.type === 'final');
             const _snapThinkingClean = turnDone
-              ? _snapThinking.map((_sm) => (_sm.isLiveReasoning ? { ..._sm, isLiveReasoning: false } : _sm))
+              ? _snapThinking.map((_sm) =>
+                  _sm.isLiveReasoning ? { ..._sm, isLiveReasoning: false } : _sm
+                )
               : _snapThinking;
-            merged.splice(insIdx, 0, ..._snapThinkingClean);
+            // Dedupe against already-merged rows so a switch-back never
+            // duplicates the "已深度思考" header.
+            merged.splice(insIdx, 0, ...dedupeSnapshotRows(merged, _snapThinkingClean));
           }
         }
 
@@ -2655,22 +3547,78 @@ export function ChatConsole({
           const _alreadyPersisted =
             _revealActive ||
             (_finalContent !== '' &&
-              merged.some((_m) => _m.role === 'assistant' && String(_m.content ?? '') === _finalContent.trim()));
-          if (!_alreadyPersisted) {
-            // Append cached thinking that isn't already represented in merged
-            // (same toolCallId OR same content prefix — plain thinking lines
-            // carry no toolCallId, so fall back to content comparison).
-            for (const _ctm of _split.thinking) {
-              const _dup = merged.some(
-                (_m) =>
-                  _m.role === 'progress' &&
+              merged.some(
+                (_m) => _m.role === 'assistant' && String(_m.content ?? '') === _finalContent.trim()
+              ));
+          // 计费通知等 thinking 行独立于 final 去重：final 已持久化时
+          // 也要回放（否则切会话返回后只看到回复、看不到"已扣分/余额
+          // 不足"提示）。快照行已并入 merged，按 toolCallId/内容前缀去重。
+          for (const _ctm of _split.thinking) {
+            const _dup = merged.some(
+              (_m) =>
+                (_m.role === 'progress' &&
                   ((_m.toolCallId != null && _m.toolCallId === _ctm.toolCallId) ||
-                    (_m.content.startsWith(_ctm.content) || _ctm.content.startsWith(_m.content)))
-              );
-              if (!_dup) merged.push(_ctm);
-            }
+                    _m.content.startsWith(_ctm.content) ||
+                    _ctm.content.startsWith(_m.content))) ||
+                (_m.role === 'error' && _ctm.role === 'error' && _m.content === _ctm.content)
+            );
+            if (!_dup) merged.push(_ctm);
+          }
+          if (!_alreadyPersisted) {
             if (_split.finalReply) {
-              merged.push({ role: 'assistant', content: _split.finalReply, timestamp: Date.now() });
+              merged.push({
+                role: 'assistant',
+                content: _split.finalReply,
+                timestamp: Date.now(),
+              });
+            }
+            // #834 / CR #856-2 + #856-6: the cached final carries the
+            // server-measured thinking proxy, but only role==='progress'
+            // renders a ThinkBlock.  Attach it to the LAST reasoning block of
+            // the CURRENT turn (scan stops at the last user boundary, matching
+            // insertStandaloneReasoning) — or insert a standalone block
+            // BEFORE the final assistant reply so the thinking stays visually
+            // above the answer.
+            if (_split.finalReasoning) {
+              let _attached = false;
+              for (let _ti = merged.length - 1; _ti >= 0; _ti -= 1) {
+                if (merged[_ti].role === 'user') break; // current-turn boundary
+                const _tm = merged[_ti];
+                if (_tm.role === 'progress' && _tm.reasoning) {
+                  if (_tm.reasoningElapsedS === undefined) {
+                    merged[_ti] = {
+                      ..._tm,
+                      reasoningElapsedS: _split.finalReasoningElapsedS,
+                    };
+                  }
+                  _attached = true;
+                  break;
+                }
+              }
+              if (!_attached) {
+                const _standalone: Message = {
+                  role: 'progress',
+                  content: _split.finalReasoning,
+                  reasoning: _split.finalReasoning,
+                  reasoningElapsedS: _split.finalReasoningElapsedS,
+                  // #905 review: an in-flight cached turn was sent in the
+                  // CURRENT mode — stamp it so the restored block shows the
+                  // correct 🚀/🧠 instead of whatever mode is live later.
+                  reasoningMode,
+                  timestamp: Date.now(),
+                };
+                // Insert before the final assistant reply (the last non-user
+                // message of the turn), keeping the visual order thinking →
+                // answer.
+                let _insAt = merged.length;
+                for (let _ti = merged.length - 1; _ti >= 0; _ti -= 1) {
+                  if (merged[_ti].role === 'user') {
+                    _insAt = _ti + 1;
+                    break;
+                  }
+                }
+                merged.splice(_insAt, 0, _standalone);
+              }
             }
           }
           // Exec inline output → merge into execOutputs for the session
@@ -2684,11 +3632,14 @@ export function ChatConsole({
                   var _out = _cur.stdout;
                   var _err = _cur.stderr;
                   if (_epd.stream === 'stdout') {
-                    _out += (_epd.delta || '');
+                    _out += _epd.delta || '';
                   } else {
-                    _err += (_epd.delta || '');
+                    _err += _epd.delta || '';
                   }
-                  return { ..._prev, [_epd.tool_call_id!]: { stdout: _out, stderr: _err, running: true } };
+                  return {
+                    ..._prev,
+                    [_epd.tool_call_id!]: { stdout: _out, stderr: _err, running: true },
+                  };
                 });
               } else if (_epd?.type === 'doc_progress' && _epd?.file) {
                 // Apply attachment status directly to `merged` — a nested
@@ -2698,8 +3649,17 @@ export function ChatConsole({
                   if (_m.role === 'user' && _m.attachments) {
                     var _upd = _m.attachments.map(function (_a) {
                       if (_a.name !== _epd.file || _a.type !== 'document') return _a;
-                      var _st: Attachment['status'] = _epd.stage === 'ready' || _epd.stage === 'done' ? 'done' : _epd.stage === 'error' ? 'error' : 'parsing';
-                      return { ..._a, status: _st, parseError: _st === 'error' ? (_epd.message ?? '') : _a.parseError };
+                      var _st: Attachment['status'] =
+                        _epd.stage === 'ready' || _epd.stage === 'done'
+                          ? 'done'
+                          : _epd.stage === 'error'
+                            ? 'error'
+                            : 'parsing';
+                      return {
+                        ..._a,
+                        status: _st,
+                        parseError: _st === 'error' ? (_epd.message ?? '') : _a.parseError,
+                      };
                     });
                     return { ..._m, attachments: _upd };
                   }
@@ -2710,15 +3670,29 @@ export function ChatConsole({
           }
           inFlightCacheRef.current.delete(sessionKey);
         }
+        // 单一判定：把 messagesRef 每条用户乐观行与其 merged 持久化副本一一
+        // 对应（谓词见 _markUserTwinMatches），缓存 final 门控与保留块共用。
+        const _userTwinMatches = _markUserTwinMatches(messagesRef.current, merged);
         // A cached final (or persisted history) now renders the full reply —
         // mark the session so the old send listener's live onFinal doesn't
         // append a duplicate when it fires for the same reply.
         if (cached && cached.events.some((e) => e.type === 'final')) {
-          finalHandledSessions.add(sessionKey);
-          // Audit #3: the cached-final path never runs the live cleanup —
-          // clear the streaming flag here so the stop button disappears and
-          // the 60s watchdog can't re-arm over a completed turn.
-          streamingBySession.delete(sessionKey);
+          // #891 深度审阅 #3：add 与 delete 必须同一守卫——load 窗口内发了
+          // 新消息时，不能重新打上"final 已处理"标记（否则新回合的 live
+          // final 会被吞、回复不渲染）。
+          const _newInflightUser = messagesRef.current.some(
+            (m, i) => m.role === 'user' && !_userTwinMatches[i]
+          );
+          if (!_newInflightUser) {
+            finalHandledSessions.add(sessionKey);
+            // Audit #3: the cached-final path never runs the live cleanup —
+            // clear the streaming flag here so the stop button disappears and
+            // the 60s watchdog can't re-arm over a completed turn.  Only clear
+            // the flag when every user message in `messagesRef` is already
+            // persisted (any-match + time proximity, #891 深度审阅 #1/#2 ——
+            // 快照恢复的旧历史行各自都有相近副本，不会被误判为 in-flight）。
+            streamingBySession.delete(sessionKey);
+          }
         }
         // If a cached final was merged, the FULL reply is already rendered in
         // `merged` — stop this session's typewriter so the revealNext RAF loop
@@ -2738,7 +3712,11 @@ export function ChatConsole({
           !!_revealNow &&
           _revealNow.fullContent.length > 0 &&
           _lastAsstContent === _revealNow.fullContent;
-        if (_revealNow && (_mergedHasFullReply || (!_typewriterHasContent && (_revealNow.finalDone || _revealNow.displayed.length > 0)))) {
+        if (
+          _revealNow &&
+          (_mergedHasFullReply ||
+            (!_typewriterHasContent && (_revealNow.finalDone || _revealNow.displayed.length > 0)))
+        ) {
           if (_revealNow.animId !== null) {
             cancelAnimationFrame(_revealNow.animId);
             _revealNow.animId = null;
@@ -2747,29 +3725,48 @@ export function ChatConsole({
             setStreaming(false);
           }
         }
-        // #740: append interrupted-turn snapshots — half-generated replies
-        // the user saw before an interruption (process exit / abort) — as
-        // resumable assistant bubbles with the 中断卡 + 继续执行/重新开始 actions.
+        // #740/#886: interrupted-turn snapshots — half-generated replies the
+        // user saw before an interruption (process exit / abort) — render as
+        // resumable assistant bubbles (中断卡 + 继续执行/重新开始).  Insert each
+        // at its chronological position (after its own user message) so a
+        // later successful retry appends AFTER the interrupted round instead of
+        // the card landing at the end of history.
         const _interruptedTurns = (detail as any)?.interrupted_turns ?? [];
-        if (Array.isArray(_interruptedTurns) && _interruptedTurns.length > 0) {
-          for (const _it of _interruptedTurns) {
-            const _halfContent = String(_it.assistant_content ?? '');
-            merged.push({
-              role: 'assistant',
-              content: _halfContent,
-              reasoning: String(_it.reasoning_content ?? '') || undefined,
-              interrupted: true,
-              interruptedMeta: {
-                turnId: String(_it.turn_id ?? ''),
-                status: String(_it.status ?? 'interrupted'),
-                assistantContent: _halfContent,
-                reasoningContent: String(_it.reasoning_content ?? ''),
-                updatedAt: Number(_it.updated_at ?? 0) * 1000,
-                tokenEstimate: _halfContent ? Math.round(_halfContent.length / 4) : 0,
-              },
-              timestamp: Number(_it.updated_at ?? Date.now() / 1000) * 1000,
-            });
-          }
+        merged = insertInterruptedTurns(
+          merged,
+          Array.isArray(_interruptedTurns) ? _interruptedTurns : []
+        );
+        // #872: preserve in-flight streaming content across load()'s overwrite.
+        // With the render gate relaxed, a message sent while the session is
+        // still loading is now VISIBLE — but `merged` is built from persisted
+        // history only, so `setMessages(merged)` would erase the optimistic user
+        // bubble AND any thinking/tool rows already streamed, leaving the reply
+        // with no question and the thinking half-rendered.  Re-append every
+        // non-assistant message not yet in the persisted history so the stream
+        // that follows still lands after it.
+        if (streamingBySession.has(sessionKey)) {
+          // Dedup key: role + content, refined with time proximity for user
+          // messages (#891 深度审阅)。持久化副本与前端气泡同属机器时钟
+          // （后端 ISO 经 sessionMsgsToUi 转 epoch ms），同一次发送的收发
+          // 时间差秒级。
+          // - 用户行：与其专属持久化副本一一对应（_markUserTwinMatches，整体
+          //   快照匹配而非只比最后一条——否则旧历史行被整段重复渲染，审阅 #1；
+          //   时间相近限定保证跨轮重复的旧文本不被误判，审阅 #5）。同文本多条
+          //   气泡共有一条持久化副本时只认领一条，余下按未落盘保留（#891 复核）。
+          // - error 行：不保留——错误横幅是 load 失败的瞬时 UI，成功的
+          //   retry load 应移除而非被永久嵌入历史（审阅 #8）。
+          // - thinking/tool 行：保持内容去重（部分更新导致的瞬时双副本为
+          //   已知限制，审阅 #4）。
+          const _inFlight = messagesRef.current.filter((m, i) => {
+            if (m.role === 'assistant' || m.role === 'error') return false;
+            if (m.role === 'user') {
+              return !_userTwinMatches[i];
+            }
+            return !merged.some(
+              (pm) => pm.role === m.role && String(pm.content) === String(m.content)
+            );
+          });
+          if (_inFlight.length > 0) merged.push(..._inFlight);
         }
         setMessages(merged);
         // Snapshot is now reconciled into `merged` — clear it so a later
@@ -2928,15 +3925,30 @@ export function ChatConsole({
     }, 2000);
   }, []);
 
-  const cleanupListeners = useCallback(() => {
-    clearFinalCleanupTimer();
-    if (shareFeedbackTimerRef.current) {
-      clearTimeout(shareFeedbackTimerRef.current);
-      shareFeedbackTimerRef.current = null;
-    }
-    for (const unsub of unsubsRef.current) unsub();
-    unsubsRef.current = [];
-  }, [clearFinalCleanupTimer]);
+  const cleanupListeners = useCallback(
+    (onlyMine?: Array<() => void>) => {
+      clearFinalCleanupTimer();
+      if (shareFeedbackTimerRef.current) {
+        clearTimeout(shareFeedbackTimerRef.current);
+        shareFeedbackTimerRef.current = null;
+      }
+      if (onlyMine) {
+        // Identity-scoped: unsubscribe THIS invocation's listeners only.  The
+        // shared unsubsRef may already point at a NEWER send's listeners
+        // (overlapping sends across sessions) — those must survive.
+        for (const unsub of onlyMine) unsub();
+        if (unsubsRef.current === onlyMine) {
+          unsubsRef.current = [];
+          unsubsSessionRef.current = null;
+        }
+        return;
+      }
+      for (const unsub of unsubsRef.current) unsub();
+      unsubsRef.current = [];
+      unsubsSessionRef.current = null;
+    },
+    [clearFinalCleanupTimer]
+  );
 
   const handleAttachClick = () => fileInputRef.current?.click();
 
@@ -3026,14 +4038,20 @@ export function ChatConsole({
     setAttachments((prev) => prev.filter((_, i) => i !== idx));
 
   const handleAbort = useCallback(async () => {
-    cleanupListeners();
+    // Scope cleanup to THIS session's invocation(s): unsubsRef and
+    // watchdogTimerRef point at the LATEST send overall — a newer send in
+    // another session must not lose its listeners/watchdog when the user
+    // stops this one (send in A → send in B → back to A → stop A).
+    for (const [sendId, entry] of sendInvocationRegistryRef.current) {
+      if (entry.sessionKey !== currentSessionRef.current) continue;
+      entry.cleanup();
+      for (const unsub of entry.unsubs) unsub();
+      sendInvocationRegistryRef.current.delete(sendId);
+    }
+    clearFinalCleanupTimer();
     if (revealAnimIdRef.current !== null) {
       cancelAnimationFrame(revealAnimIdRef.current);
       revealAnimIdRef.current = null;
-    }
-    if (watchdogTimerRef.current !== null) {
-      clearInterval(watchdogTimerRef.current);
-      watchdogTimerRef.current = null;
     }
     // Keep the lifecycle promise in place — a stop-then-quick-send must still
     // await the aborted turn's settlement so its terminal event (and the
@@ -3075,7 +4093,7 @@ export function ChatConsole({
         { role: 'progress', content: '已停止。', timestamp: Date.now() },
       ]);
     }
-  }, [cleanupListeners, currentReqId]);
+  }, [clearFinalCleanupTimer, currentReqId]);
 
   // Respond to new-session trigger from App/Sidebar — create directly, no picker.
   // NOTE: this intentionally does NOT gate on `streaming`. Switching sessions
@@ -3091,24 +4109,28 @@ export function ChatConsole({
 
   // Opens the workspace picker modal — called by the inline "更换" button
   const handleOpenWorkspacePicker = useCallback(async () => {
-    const workspaces = await window.miqi.sessions.listRecentWorkspaces()
-      .then(r => r?.workspaces ?? [])
+    const workspaces = await window.miqi.sessions
+      .listRecentWorkspaces()
+      .then((r) => r?.workspaces ?? [])
       .catch(() => [] as string[]);
     setRecentWorkspaces(workspaces);
     setWorkspacePickerOpen(true);
   }, []);
 
-  const createSession = useCallback((workspace?: string | null) => {
-    // Close the workspace picker explicitly.  App.tsx removed key={sessionKey}
-    // so ChatConsole stays mounted across session switches — there is no
-    // remount to reset workspacePickerOpen, so the modal would otherwise stay
-    // open after choosing a workspace (#378).
-    setWorkspacePickerOpen(false);
-    const newKey = `desktop:${Date.now()}`;
-    currentThreadIdRef.current = null;
-    cleanupListeners();
-    onNewSession?.(newKey, workspace ?? null);
-  }, [cleanupListeners, onNewSession]);
+  const createSession = useCallback(
+    (workspace?: string | null) => {
+      // Close the workspace picker explicitly.  App.tsx removed key={sessionKey}
+      // so ChatConsole stays mounted across session switches — there is no
+      // remount to reset workspacePickerOpen, so the modal would otherwise stay
+      // open after choosing a workspace (#378).
+      setWorkspacePickerOpen(false);
+      const newKey = `desktop:${Date.now()}`;
+      currentThreadIdRef.current = null;
+      cleanupListeners();
+      onNewSession?.(newKey, workspace ?? null);
+    },
+    [cleanupListeners, onNewSession]
+  );
 
   const handleDeleteSession = useCallback(async () => {
     const key = currentSessionRef.current;
@@ -3123,12 +4145,22 @@ export function ChatConsole({
   }, [createSession]);
 
   /** Payload for programmatic sends (e.g. regenerate) — bypasses input state */
-  const retryPayloadRef = useRef<{ text: string; attachments: Attachment[]; retry?: boolean } | null>(null);
+  const retryPayloadRef = useRef<{
+    text: string;
+    attachments: Attachment[];
+    retry?: boolean;
+  } | null>(null);
   const handleSendRef = useRef<() => void>(() => {});
+  /** 程序化发送（论文下载 fallback 等）经此 ref 显式传文本，handleSend
+   *  一次性消费。不依赖 setInput 后的渲染 flush（旧闭包读 input 是旧值）。 */
+  const programmaticTextRef = useRef<string | null>(null);
   /** #740: pending resume-turn id — set by 继续执行, consumed by handleSend
    *  so the resume request flows through the full send pipeline (listeners,
    *  streaming render) instead of a bare chat.send call. */
   const resumeTurnIdRef = useRef<string | null>(null);
+  // 恢复中断回合时被移除的中断卡：登录失效拦截需恢复它并追加重登引导
+  //（resume 无乐观 user 气泡，否则上下文丢失、登录按钮无处可点）。
+  const resumeRemovedMsgRef = useRef<Message | null>(null);
   /** Per-session send id of the send currently in its pre-stream pending phase
    *  (issue #364).  A session is "pending" while its optimistic bubble waits on
    *  the non-blocking provider check / thread init.  The double-Enter guard
@@ -3152,7 +4184,9 @@ export function ChatConsole({
     const meta = msg.interruptedMeta;
     if (!meta?.turnId) return;
     resumeTurnIdRef.current = meta.turnId;
-    // 移除中断卡——resume 的新回复由流式事件接管渲染
+    // 移除中断卡——resume 的新回复由流式事件接管渲染。卡片暂存 ref：
+    // 若预检被登录失效拦截，需恢复卡片并追加重登引导（applyReloginIntercept）。
+    resumeRemovedMsgRef.current = msg;
     setMessages((prev) => prev.filter((m) => m !== msg));
     handleSendRef.current();
   }, []);
@@ -3187,7 +4221,11 @@ export function ChatConsole({
     const _resumeId = resumeTurnIdRef.current;
     resumeTurnIdRef.current = null;
     const payload = retryPayloadRef.current;
-    const text = (payload?.text ?? input).trim();
+    // 程序化发送（论文下载 fallback 等）经 ref 显式传文本：不依赖
+    // setInput 后的渲染 flush（旧闭包读到的 input state 是旧值）。
+    const programmaticText = programmaticTextRef.current;
+    programmaticTextRef.current = null;
+    const text = (payload?.text ?? programmaticText ?? input).trim();
     const atts = payload?.attachments ?? attachments;
     if (!text && atts.length === 0 && !_resumeId) {
       retryPayloadRef.current = null;
@@ -3286,7 +4324,12 @@ export function ChatConsole({
     // turn's live final render.
     streamingBySession.add(sendSessionKey);
     finalHandledSessions.delete(sendSessionKey);
-    cleanupListeners();
+    // Only auto-unsubscribe the previous invocation's listeners when it was
+    // THIS session's send (same-session supersede).  Unsubscribing across
+    // sessions strands the other session's in-flight turn: its terminal
+    // events are never processed, its send cleanup never runs, and its 60s
+    // watchdog survives to fire a false "后端 60s 无响应" later.
+    if (unsubsSessionRef.current === sendSessionKey) cleanupListeners();
     // A new send supersedes any in-flight typewriter for this session — cancel
     // the RAF chain so the previous reply stops typing the moment a new message
     // is sent, and reset its state so the new turn does NOT inherit the old
@@ -3321,16 +4364,47 @@ export function ChatConsole({
     // the background.  If it rejects, the send proceeds anyway — the bridge
     // surfaces the underlying runtime error through the stream/error path.
     try {
-      const result = await window.miqi.providers.list();
-      const hasConfiguredProvider = result.providers.some((provider) => provider.configured);
-      if (!hasConfiguredProvider) {
-        // No configured provider — replace the optimistic bubble with the
-        // provider-config guidance.  The send is refused: the user should
-        // configure a provider before sending.  The draft is restored to the
-        // input so they can re-send once configured.  Only touch the composer /
-        // message list if THIS session is still displayed — the user may have
-        // switched away while providers.list was pending, and setInput /
-        // setAttachments / setMessages act on the currently displayed session.
+      // #922/#1000：网关状态先取一次，供「未登录 → 登录引导」与
+      // 「已登录但网关未就绪 → 网关提示」两个分支共用。旧 preload/
+      // smoke mock 无 qraft 命名空间时为 null（视为未登录）。
+      const gatewayStatus =
+        typeof window.miqi.qraft?.status === 'function'
+          ? await window.miqi.qraft.status().catch(() => null)
+          : null;
+      // ── 登录已失效拦截 ──
+      // token 刷新失败且未恢复（requiresRelogin）时拦截发送：把乐观气泡换成
+      // 重登引导（一键登录成功后气泡自动移除）。先于网关门禁/无 provider 判定
+      // —— 失效后网关状态仍是旧快照里的 active，必须优先给出重登指引。
+      // 快照读取失败（qraft.status() 抛错）时回退到订阅状态 refs，拦截不失效。
+      const gatewayLoggedIn = gatewayStatus?.loggedIn ?? loggedInRef.current;
+      const gatewayRequiresRelogin = gatewayStatus?.requiresRelogin ?? requiresReloginRef.current;
+      if (gatewayLoggedIn && gatewayRequiresRelogin) {
+        pendingSendIdsRef.current.delete(sendSessionKey);
+        streamingBySession.delete(sendSessionKey);
+        setSendingFor(sendSessionKey, null);
+        if (currentSessionRef.current === sendSessionKey) {
+          setStreaming(false);
+          // 恢复中断回合（#740）：无乐观 user 气泡，取回被 handleResumeTurn
+          // 移除的中断卡并追加重登引导；随后复位 ref 防陈旧引用。
+          const resumeRemovedMsg = _resumeId ? resumeRemovedMsgRef.current : null;
+          resumeRemovedMsgRef.current = null;
+          setMessages((prev) => applyReloginIntercept(prev, userMsg, resumeRemovedMsg));
+          setInput(text);
+          setAttachments(atts);
+        }
+        return;
+      }
+      // ── #922 AI 网关门禁 ──
+      // 登录后网关状态明确非 active（provisioning/failed/disabled）时拒绝发起
+      // 会话：把乐观气泡换成网关提示并恢复输入框。未登录 / 平台未下发网关状态
+      // 时放行（与模型面板语义一致）。先于无 provider 判定（CodeRabbit #1010）：
+      // 已登录但网关未就绪 + 无 provider 时给网关修复指引，而非泛泛的
+      // 「未配置模型服务」。
+      if (
+        gatewayStatus?.loggedIn === true &&
+        gatewayStatus.aiGateway &&
+        gatewayStatus.aiGateway.status !== 'active'
+      ) {
         pendingSendIdsRef.current.delete(sendSessionKey);
         streamingBySession.delete(sendSessionKey);
         setSendingFor(sendSessionKey, null);
@@ -3339,7 +4413,55 @@ export function ChatConsole({
           setMessages((prev) => {
             const last = prev[prev.length - 1];
             if (last?.timestamp === userMsg.timestamp) {
-              return [...prev.slice(0, -1), createProviderConfigMessage()];
+              return [...prev.slice(0, -1), createGatewayBlockedMessage()];
+            }
+            return prev;
+          });
+          setInput(text);
+          setAttachments(atts);
+        }
+        return;
+      }
+      const result = await window.miqi.providers.list();
+      // 判定「当前默认模型能否发起会话」而不是「有没有已配置的本地 provider」：
+      // 登录后经平台 AI 网关路由的默认模型不需要任何本地凭据（make_provider
+      // 的网关分支），只看 configured 会把「登录即可用」误拦成「未配置模型
+      // 服务」——用户登录后仍被要求配置模型即由此而来。后端用与运行时同一套
+      // 判定（含网关路由）给出 active_model_resolvable；旧版 bridge 无该字段
+      // 时回退到 configured（保持原行为）。
+      const modelServable =
+        result.active_model_resolvable ?? result.providers.some((provider) => provider.configured);
+      if (!modelServable) {
+        // No servable model — replace the optimistic bubble with the
+        // provider-config guidance.  The send is refused: the user should
+        // configure a provider before sending.  The draft is restored to the
+        // input so they can re-send once configured.  Only touch the composer /
+        // message list if THIS session is still displayed — the user may have
+        // switched away while providers.list was pending, and setInput /
+        // setAttachments / setMessages act on the currently displayed session.
+        // #1000：未登录时没有 Provider 可配置（#835 合规收口后凭据配置已移除），
+        // 拦截气泡直接给出一键登录按钮，登录后经网关自动获得平台内置模型。
+        // 已登录时凭据配置同样不存在，引导落点是「设置 → 模型」选平台内置模型。
+        const guidance =
+          gatewayStatus?.loggedIn === true
+            ? createProviderConfigMessage(
+                '当前默认模型没有可用的模型服务。请到 设置 → 模型 选择平台内置模型后重试。',
+                'open-provider-settings',
+                '去选择模型'
+              )
+            : createProviderConfigMessage(
+                '尚未登录平台账号。登录 MiQroForge 账号后即可使用平台内置模型发起会话，模型调用将经平台 AI 网关转发。',
+                'login'
+              );
+        pendingSendIdsRef.current.delete(sendSessionKey);
+        streamingBySession.delete(sendSessionKey);
+        setSendingFor(sendSessionKey, null);
+        if (currentSessionRef.current === sendSessionKey) {
+          setStreaming(false);
+          setMessages((prev) => {
+            const last = prev[prev.length - 1];
+            if (last?.timestamp === userMsg.timestamp) {
+              return [...prev.slice(0, -1), guidance];
             }
             return prev;
           });
@@ -3477,10 +4599,12 @@ export function ChatConsole({
     pendingSendIdsRef.current.delete(sendSessionKey);
     setSendingFor(sendSessionKey, null);
     // Stamp this turn now (BEFORE any await below) so listeners registered
-    // later can drop terminal events from the superseded turn.
+    // later can drop terminal events from the superseded turn.  The turn id
+    // and start time are invocation-local: overlapping sends across sessions
+    // used to overwrite the shared refs, making each other's terminals look
+    // stale.
     const sendStartedAt = Date.now();
-    currentSendStartedAtRef.current = sendStartedAt;
-    activeTurnIdRef.current = null;
+    let myTurnId: string | null = null;
 
     // Generate a client-side req_id so we can abort this specific request
     const reqId = `req_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
@@ -3502,55 +4626,58 @@ export function ChatConsole({
 
     let content = text + retryHint;
 
+    // #968 复核（CodeRabbit #969）：先为 document 附件预计算全量 SHA-256 内容
+    // 指纹并暂存到附件（contentFp）——渲染线程无同步摘要，只能在此 await 段算；
+    // 拼装饰与去重守卫都读暂存值（守卫在 load() 同步合并路径，不能做摘要）。
+    // 重试回合的附件已带 contentFp → 跳过重算。解码失败 → fp 缺失 → 占位无指纹
+    // → 守卫不认领（方向安全）。
+    for (const att of atts) {
+      if (att.type === 'document' && att.dataBase64 && !att.contentFp) {
+        try {
+          att.contentFp = await _sha256HexOfBase64(att.dataBase64);
+        } catch {
+          /* 保留 undefined */
+        }
+      } else if (att.type === 'image' && att.dataUrl && !att.contentFp) {
+        // 图片字节以 dataUrl 形式存在（#968 复核 CodeRabbit #969）：装饰只带
+        // 文件名无法区分同名异字节，同样预计算指纹写进 [Image: name (fp:…)]
+        try {
+          att.contentFp = await _sha256HexOfText(att.dataUrl);
+        } catch {
+          /* 保留 undefined */
+        }
+      }
+    }
+
     // Build message content with embedded document text
     for (const att of atts) {
       if (att.type === 'text' && att.content) {
         content += `\n\n[File: ${att.name}]\n\`\`\`\n${att.content}\n\`\`\``;
       } else if (att.type === 'image' && att.dataUrl) {
-        content += `\n\n[Image: ${att.name}]`;
+        // 图片装饰内嵌内容指纹 (fp:…)（CodeRabbit #969）——同名异字节图片
+        // 不得互认；IMAGE_PLACEHOLDER_RES 名称解析已容忍该尾（向后兼容）
+        const fpTag = att.contentFp ? ` (fp:${att.contentFp})` : '';
+        content += `\n\n[Image: ${att.name}${fpTag}]`;
       } else if (att.type === 'document' && att.dataBase64) {
-        // Decode and extract text client-side
+        // Decode and extract text client-side（解码逻辑与去重守卫共用 _decodeDocData，
+        // 见上——守卫需按相同规则重解以逐字校验内容，单一实现防漂移 #968 复核）
         try {
-          const raw = Uint8Array.from(atob(att.dataBase64), (c) => c.charCodeAt(0));
-          let extracted = '';
-          const ext = att.name.split('.').pop()?.toLowerCase() ?? '';
-
-          if (ext === 'pdf') {
-            extracted = extractPdfText(raw.buffer);
-          } else if (
-            ext === 'md' ||
-            ext === 'markdown' ||
-            ext === 'mdown' ||
-            ext === 'txt' ||
-            ext === 'text' ||
-            ext === 'html' ||
-            ext === 'htm' ||
-            ext === 'csv' ||
-            ext === 'json' ||
-            ext === 'yaml' ||
-            ext === 'yml' ||
-            ext === 'xml' ||
-            ext === 'env' ||
-            ext === 'log' ||
-            ext === 'sql' ||
-            ext === 'ini' ||
-            ext === 'toml' ||
-            ext === 'htaccess' ||
-            ext === 'sh' ||
-            ext === 'bash'
-          ) {
-            extracted = new TextDecoder().decode(raw);
-          }
-
+          const { extracted, ext } = _decodeDocData(att.dataBase64, att.name);
           if (extracted && extracted.trim()) {
             content += `\n\n--- Document: ${att.name} ---\n${extracted.slice(0, 50000)}\n--- End of ${att.name} ---`;
-          } else if (ext === 'pdf') {
-            content += `\n\n[${att.name}: scanned PDF — OCR will be attempted by the server]`;
           } else {
-            content += `\n\n[${att.name}: binary file, server will parse]`;
+            // 占位装饰内嵌内容指纹 (fp:…) —— 守卫按指纹区分同名不同内容的附件
+            //（CodeRabbit #969）；key 剥离的占位规则仍可整段移除。
+            const fpTag = att.contentFp ? ` (fp:${att.contentFp})` : '';
+            if (ext === 'pdf') {
+              content += `\n\n[${att.name}: scanned PDF${fpTag} — OCR will be attempted by the server]`;
+            } else {
+              content += `\n\n[${att.name}: binary file, server will parse${fpTag}]`;
+            }
           }
         } catch {
-          content += `\n\n[${att.name}: ${formatFileSize(att.size)} — parsing on server]`;
+          const fpTag = att.contentFp ? ` (fp:${att.contentFp})` : '';
+          content += `\n\n[${att.name}: ${formatFileSize(att.size)} — parsing on server${fpTag}]`;
         }
       }
     }
@@ -3640,7 +4767,11 @@ export function ChatConsole({
           const ts = userMsg.timestamp + 1;
           setMessages((prev) => {
             const last = prev[prev.length - 1];
-            if (last?.role === 'assistant' && last.timestamp === ts && last.content !== fullContent) {
+            if (
+              last?.role === 'assistant' &&
+              last.timestamp === ts &&
+              last.content !== fullContent
+            ) {
               return [...prev.slice(0, -1), { ...last, content: fullContent, turnId: activeTurnIdRef.current ?? last.turnId }];
             }
             if (last?.role === 'assistant' && last.content !== fullContent) {
@@ -3685,6 +4816,16 @@ export function ChatConsole({
       revealAnimIdRef.current = animId;
       persistReveal();
     };
+
+    // The exact routing key this invocation passes to chat.send.  For
+    // thread-scoped sessions it differs from sendSessionKey
+    // (`desktop:<threadId>` vs the session key), so the handlers must filter
+    // on THIS value, not sendSessionKey.  Every IPC handler drops events
+    // tagged with a different key before the cache/live branch — otherwise
+    // overlapping sends across sessions would each process (and settle on)
+    // the other's events.
+    const routingKey =
+      activeThreadId === 'main' ? currentSessionRef.current : `desktop:${activeThreadId}`;
 
     // Track last progress event time for watchdog
     let lastEventAt = Date.now();
@@ -3736,7 +4877,13 @@ export function ChatConsole({
     }, 5_000); // check every 5s
     watchdogTimerRef.current = watchdogTimer;
 
-    const sendCleanup = () => {
+    // Kill ONLY this invocation's watchdog interval.  The success path uses
+    // this instead of sendCleanup(): by the time the send promise resolves,
+    // onFinal has already run (the bridge dispatches the terminal event
+    // before settling the promise) and scheduled the typewriter reveal — a
+    // full sendCleanup() there would cancel that animation frame and freeze
+    // the final answer mid-reveal.
+    const clearWatchdogTimer = () => {
       if (watchdogTimer) {
         clearInterval(watchdogTimer);
         // Identity check BEFORE nulling the local — the shared ref may
@@ -3744,13 +4891,21 @@ export function ChatConsole({
         if (watchdogTimerRef.current === watchdogTimer) watchdogTimerRef.current = null;
         watchdogTimer = null;
       }
+    };
+
+    const sendCleanup = () => {
+      clearWatchdogTimer();
       // Also stop the typewriter frame — otherwise an unmount while a send is
       // in flight leaves the RAF loop scheduling on an unmounted component.
       if (animId !== null) {
         cancelAnimationFrame(animId);
         animId = null;
       }
-      activeSendCleanupRef.current = null;
+      // Identity check BEFORE nulling the shared ref — a newer send may have
+      // already claimed it, and a settled old invocation's cleanup must not
+      // strand the newer send's watchdog (which relies on this ref for
+      // unmount cleanup).
+      if (activeSendCleanupRef.current === sendCleanup) activeSendCleanupRef.current = null;
       // NOTE: cleanupListeners() is deliberately NOT called here.
       // The typewriter completing does not mean the turn is over —
       // another final may still arrive (e.g. tool-call then final-text).
@@ -3768,14 +4923,21 @@ export function ChatConsole({
     };
 
     const unsubProgress = window.miqi.chat.onProgress((data: ChatProgress) => {
-      // session_key is optional (back-compat); a missing one belongs to this
-      // send's own session (sendSessionKey).  Without the fallback, a
-      // session_key-less event arriving after a switch-away would be applied
-      // to whatever session is now active — leaking A's stream into B.
-      const _owner = data.session_key ?? sendSessionKey;
+      // Foreign-session event — another invocation's stream.  Drop it here;
+      // the owning invocation's handlers process it.  Untagged legacy events
+      // fall through (back-compat: treated as this send's own).
+      if (data.session_key && data.session_key !== routingKey) return;
+      // Accepted events route under THIS invocation's UI session owner.  The
+      // routing key can differ from the session key for thread-scoped sends
+      // (desktop:<threadId>) — routing by it would cache events under a key
+      // load() never looks up, silently dropping the stream on switch-back.
+      const _owner = sendSessionKey;
       if (_owner !== currentSessionRef.current) {
         var buf = inFlightCacheRef.current.get(_owner);
-        if (!buf) { buf = { events: [], userMsgTimestamp: 0 }; inFlightCacheRef.current.set(_owner, buf); }
+        if (!buf) {
+          buf = { events: [], userMsgTimestamp: 0 };
+          inFlightCacheRef.current.set(_owner, buf);
+        }
         buf.events.push({ type: 'progress', data, timestamp: Date.now() });
         return;
       }
@@ -3786,7 +4948,7 @@ export function ChatConsole({
         const retracted = warnMsgId;
         warnMsgId = null;
         setMessages((prev) =>
-          prev.filter((m) => !(m.role === 'error' && m.timestamp === retracted)),
+          prev.filter((m) => !(m.role === 'error' && m.timestamp === retracted))
         );
       }
       // The backend has started streaming — the send was accepted.  Clear the
@@ -3818,12 +4980,29 @@ export function ChatConsole({
         return;
       }
 
+      // ── Platform points billing notices ─────────────────────────
+      // 平台计费事件（当前仅 Slurm MCP 作业运行扣 10 分）通过 progress
+      // 事件推送结果：billed = 已扣费（安静的活动行）；blocked = 扣费
+      // 未完成（余额不足/登录过期/计费服务不可用，醒目错误行）——作业已
+      // 进入运行，扣费失败不阻断任务（见 main/ipc/index.ts 的
+      // slurm_job_running 处理）。渲染逻辑与缓存回放共用
+      // pointsEventToMessage，保证切会话后通知不丢。
+      {
+        const pointsMessage = pointsEventToMessage(data);
+        if (pointsMessage) {
+          setMessages((prev) => [...prev, pointsMessage]);
+          return;
+        }
+      }
+
       // ── Turn start (turn lifecycle) ─────────────────────────────────
       // The backend announces the active turn id when it starts. Terminal
       // events (final/aborted/error) tagged with a different turn id are
       // stale and dropped — see the guards in the final/aborted/error
-      // listeners (#542).
+      // listeners (#542).  Tracked per invocation so another session's
+      // turn_started can't make this turn's terminals look stale.
       if (data.stream === 'turn' && typeof data.turn_id === 'string') {
+        myTurnId = data.turn_id;
         activeTurnIdRef.current = data.turn_id;
         return;
       }
@@ -3981,26 +5160,33 @@ export function ChatConsole({
     });
 
     const unsubFinal = window.miqi.chat.onFinal((data: ChatFinal) => {
-      const _owner = data.session_key ?? sendSessionKey;
+      // Foreign-session terminal — another invocation's turn; its handler
+      // settles it.  Untagged legacy events fall through (back-compat).
+      if (data.session_key && data.session_key !== routingKey) return;
+      // Route under the UI session owner — see the progress listener.
+      const _owner = sendSessionKey;
       if (_owner !== currentSessionRef.current) {
         var buf = inFlightCacheRef.current.get(_owner);
-        if (!buf) { buf = { events: [], userMsgTimestamp: 0 }; inFlightCacheRef.current.set(_owner, buf); }
+        if (!buf) {
+          buf = { events: [], userMsgTimestamp: 0 };
+          inFlightCacheRef.current.set(_owner, buf);
+        }
         buf.events.push({ type: 'final', data, timestamp: Date.now() });
         return;
       }
       // Final from a superseded turn (e.g. a pre-abort final racing a quick
       // resend): the backend's turn id is authoritative — drop it so the
       // replacement turn's UI state is untouched (#542). Strict match: a
-      // tagged event must equal the active turn id; while the replacement
-      // turn's turn_started has not arrived yet (activeTurnIdRef is null),
-      // any tagged terminal event is by definition stale. The superseded
-      // turn's lifecycle promise is settled by its own closure.
+      // tagged event must equal THIS invocation's own turn id; while the
+      // turn's turn_started has not arrived yet (id is null), any tagged
+      // terminal event is by definition stale. The superseded turn's
+      // lifecycle promise is settled by its own closure.
       //
       // BACKEND CONTRACT: turn_started (task_runner.py emits TurnStartedEvent
       // before any model call) always precedes every terminal event of a turn.
       // If that ever changes (e.g. an error emitted before turn creation),
       // this strict-match logic silently drops the legitimate event.
-      if (data.turn_id && data.turn_id !== activeTurnIdRef.current) {
+      if (data.turn_id && data.turn_id !== myTurnId) {
         return;
       }
       clearFinalCleanupTimer();
@@ -4040,18 +5226,25 @@ export function ChatConsole({
       // bubble never re-renders reasoning, so there is no layout jump.
       const hadLiveReasoning = liveReasoningTsRef.current !== null;
       const finalReasoningElapsedS =
-        data.reasoning || hadLiveReasoning
-          ? // Pure thinking span: first→last reasoning delta. Falls back to the
-            // final-event time when no live reasoning was seen. Never 0s.
-            Math.max(
-              1,
-              Math.round(
-                ((lastReasoningDeltaAtRef.current ?? Date.now()) -
-                  (thinkingStartedAtRef.current ?? turnStartMs)) /
-                  1000
+        // CR #856-7: normalize the server value the same way as the cache /
+        // snapshot paths (≥1s, rounded) so live and restored views agree.
+        data.reasoning_elapsed_s != null
+          ? Math.max(1, Math.round(data.reasoning_elapsed_s))
+          : data.reasoning || hadLiveReasoning
+            ? // Pure thinking span: first→last reasoning delta. Falls back to the
+              // final-event time when no live reasoning was seen. Never 0s.
+              // (#834) Server-measured value arrives as reasoning_elapsed_s and
+              // is preferred — this local span is only the transport-time
+              // fallback for buffered providers.
+              Math.max(
+                1,
+                Math.round(
+                  ((lastReasoningDeltaAtRef.current ?? Date.now()) -
+                    (thinkingStartedAtRef.current ?? turnStartMs)) /
+                    1000
+                )
               )
-            )
-          : undefined;
+            : undefined;
       thinkingStartedAtRef.current = null;
       lastReasoningDeltaAtRef.current = null;
       // Close any live reasoning block — whether or not this render's session
@@ -4084,7 +5277,12 @@ export function ChatConsole({
           const cleaned = _closeLiveReasoning(prev);
           if (hadLiveReasoning) return cleaned;
           // data.reasoning present without a live block → insert standalone.
-          if (data.reasoning && !cleaned.some((m) => m.role === 'progress' && m.reasoning && m.reasoning === data.reasoning)) {
+          if (
+            data.reasoning &&
+            !cleaned.some(
+              (m) => m.role === 'progress' && m.reasoning && m.reasoning === data.reasoning
+            )
+          ) {
             return insertStandaloneReasoning(cleaned, data.reasoning, finalReasoningElapsedS);
           }
           return cleaned;
@@ -4187,17 +5385,24 @@ export function ChatConsole({
     });
 
     const unsubError = window.miqi.chat.onError((data: ChatError) => {
-      const _owner = data.session_key ?? sendSessionKey;
+      // Foreign-session terminal — another invocation's turn; its handler
+      // settles it.  Untagged legacy events fall through (back-compat).
+      if (data.session_key && data.session_key !== routingKey) return;
+      // Route under the UI session owner — see the progress listener.
+      const _owner = sendSessionKey;
       if (_owner !== currentSessionRef.current) {
         var buf = inFlightCacheRef.current.get(_owner);
-        if (!buf) { buf = { events: [], userMsgTimestamp: 0 }; inFlightCacheRef.current.set(_owner, buf); }
+        if (!buf) {
+          buf = { events: [], userMsgTimestamp: 0 };
+          inFlightCacheRef.current.set(_owner, buf);
+        }
         buf.events.push({ type: 'error', data, timestamp: Date.now() });
         return;
       }
       // Error from a superseded turn (e.g. an abort-induced error racing a
       // quick resend): drop it so the replacement turn's UI state is
       // untouched (#542). Strict match — see the final listener.
-      if (data.turn_id && data.turn_id !== activeTurnIdRef.current) {
+      if (data.turn_id && data.turn_id !== myTurnId) {
         return;
       }
       streamErrorHandled = true;
@@ -4208,21 +5413,40 @@ export function ChatConsole({
       setMessages((prev) => [
         ...prev.filter((m) => !m.isLiveReasoning),
         isProviderConfigurationProblem(message, data.code)
-          ? createProviderConfigMessage(message)
+          ? createProviderConfigMessage(
+              requiresReloginRef.current ? RELOGIN_INTERCEPT_TEXT : message,
+              loggedInRef.current && !requiresReloginRef.current
+                ? 'open-provider-settings'
+                : 'login',
+              // 已登录且凭据未失效时：凭据配置入口已不存在（#835 收口），
+              // NO_API_KEY 只可能是当前模型不走平台网关，落点是重选模型
+              // 而非「配置模型」。登录失效时走重登引导，不覆盖其标签。
+              loggedInRef.current && !requiresReloginRef.current ? '去选择模型' : undefined
+            )
           : { role: 'error', content: message, timestamp: Date.now() },
       ]);
       setStreaming(false);
       setSendingFor(sendSessionKey, null);
       streamingBySession.delete(sendSessionKey);
       sendCleanup();
-      cleanupListeners();
+      // Identity-scoped: only THIS invocation's listeners — the shared
+      // unsubsRef may point at a newer overlapping send.
+      cleanupListeners(myUnsubs);
+      sendInvocationRegistryRef.current.delete(thisSendId);
     });
 
     const unsubAborted = window.miqi.chat.onAborted((_data: ChatAborted) => {
-      const _owner = _data.session_key ?? sendSessionKey;
+      // Foreign-session terminal — another invocation's turn; its handler
+      // settles it.  Untagged legacy events fall through (back-compat).
+      if (_data.session_key && _data.session_key !== routingKey) return;
+      // Route under the UI session owner — see the progress listener.
+      const _owner = sendSessionKey;
       if (_owner !== currentSessionRef.current) {
         var buf = inFlightCacheRef.current.get(_owner);
-        if (!buf) { buf = { events: [], userMsgTimestamp: 0 }; inFlightCacheRef.current.set(_owner, buf); }
+        if (!buf) {
+          buf = { events: [], userMsgTimestamp: 0 };
+          inFlightCacheRef.current.set(_owner, buf);
+        }
         buf.events.push({ type: 'aborted', data: _data, timestamp: Date.now() });
         return;
       }
@@ -4232,13 +5456,13 @@ export function ChatConsole({
       // The backend's turn id is authoritative; the grace window is only a
       // fallback for bridges that don't emit turn ids (legacy/mocks).
       if (_data.turn_id) {
-        // Strict match — a tagged event must equal the active turn id; while
-        // the replacement turn's turn_started has not arrived yet (ref is
+        // Strict match — a tagged event must equal THIS invocation's own
+        // turn id; while the turn's turn_started has not arrived yet (id is
         // null), any tagged terminal event is by definition stale.
-        if (_data.turn_id !== activeTurnIdRef.current) {
+        if (_data.turn_id !== myTurnId) {
           return;
         }
-      } else if (Date.now() - currentSendStartedAtRef.current < TURN_TERMINAL_GRACE_MS) {
+      } else if (Date.now() - sendStartedAt < TURN_TERMINAL_GRACE_MS) {
         return;
       }
       if (animId !== null) cancelAnimationFrame(animId);
@@ -4255,7 +5479,19 @@ export function ChatConsole({
       sendCleanup();
     });
 
-    unsubsRef.current = [unsubProgress, unsubFinal, unsubError, unsubAborted];
+    // Capture THIS invocation's unsubs locally: by the time this send's
+    // promise settles, unsubsRef may point at a NEWER send's listeners, so
+    // self-cleanup must never go through the shared ref.
+    const myUnsubs = [unsubProgress, unsubFinal, unsubError, unsubAborted];
+    unsubsRef.current = myUnsubs;
+    unsubsSessionRef.current = sendSessionKey;
+    // Register this invocation so unmount (and settle) can dispose its
+    // resources even when it is no longer the latest send.
+    sendInvocationRegistryRef.current.set(thisSendId, {
+      unsubs: myUnsubs,
+      cleanup: sendCleanup,
+      sessionKey: sendSessionKey,
+    });
 
     try {
       // On first message for a new conversation, create a thread with
@@ -4291,20 +5527,16 @@ export function ChatConsole({
         }
       }
 
-      const key =
-        activeThreadId === 'main' ? currentSessionRef.current : `desktop:${activeThreadId}`;
+      // Same routing key the listeners filter on — the send call and the
+      // handlers must agree, or this turn's own stream would be dropped as
+      // foreign before it reaches the cache/live branch.
+      const key = routingKey;
       const chatAttachments = sentAttachments
-        .filter(
-          (a) =>
-            (a.type === 'document' && a.dataBase64) ||
-            (a.type === 'image' && a.dataUrl)
-        )
+        .filter((a) => (a.type === 'document' && a.dataBase64) || (a.type === 'image' && a.dataUrl))
         .map((a) => ({
           name: a.name,
           data_base64:
-            a.type === 'image' && a.dataUrl
-              ? a.dataUrl.split(',')[1] ?? a.dataUrl
-              : a.dataBase64,
+            a.type === 'image' && a.dataUrl ? (a.dataUrl.split(',')[1] ?? a.dataUrl) : a.dataBase64,
           mime_type: a.mimeType,
         }));
 
@@ -4354,6 +5586,25 @@ export function ChatConsole({
 
       await sendPromise;
       settleLifecycle();
+      // The turn's promise settled, but the terminal LISTENER may never have
+      // run: a later send unsubscribed it (cross-session listener kill), or
+      // the turn-id guard dropped the terminal event.  Without this cleanup
+      // the invocation's 60s watchdog survives as a zombie and, once the user
+      // is back on this session with the in-flight cache flushed, fires a
+      // false "后端 60s 无响应" into the message list while the backend is
+      // streaming fine.  Deliberately NOT sendCleanup(): onFinal ran before
+      // this promise resolved (the bridge dispatches the terminal event
+      // first) and already scheduled the typewriter reveal — sendCleanup()
+      // would cancel that animation frame and freeze the final answer
+      // mid-reveal.  Only THIS invocation's watchdog and listeners are
+      // cleaned up here.
+      clearWatchdogTimer();
+      for (const unsub of myUnsubs) unsub();
+      if (unsubsRef.current === myUnsubs) {
+        unsubsRef.current = [];
+        unsubsSessionRef.current = null;
+      }
+      sendInvocationRegistryRef.current.delete(thisSendId);
     } catch (e: any) {
       if (animId !== null) cancelAnimationFrame(animId);
       if (streamErrorHandled) {
@@ -4361,12 +5612,21 @@ export function ChatConsole({
         setStreaming(false);
         setSendingFor(sendSessionKey, null);
         sendCleanup();
-        cleanupListeners();
+        // Identity-scoped: only THIS invocation's listeners — the shared
+        // unsubsRef may point at a newer overlapping send.
+        cleanupListeners(myUnsubs);
+        sendInvocationRegistryRef.current.delete(thisSendId);
         return;
       }
       const errMsg = sanitizeUiMessage(e?.message ?? String(e ?? '未知错误'));
       if (isProviderConfigurationProblem(errMsg, e?.code)) {
-        setMessages((prev) => [...prev, createProviderConfigMessage(errMsg)]);
+        setMessages((prev) => [
+          ...prev,
+          createProviderConfigMessage(
+            requiresReloginRef.current ? RELOGIN_INTERCEPT_TEXT : errMsg,
+            loggedInRef.current && !requiresReloginRef.current ? 'open-provider-settings' : 'login'
+          ),
+        ]);
       } else if (e?.code) {
         setMessages((prev) => [
           ...prev,
@@ -4382,9 +5642,21 @@ export function ChatConsole({
       setStreaming(false);
       setSendingFor(sendSessionKey, null);
       sendCleanup();
-      cleanupListeners();
+      // Identity-scoped: only THIS invocation's listeners — the shared
+      // unsubsRef may point at a newer overlapping send.
+      cleanupListeners(myUnsubs);
+      sendInvocationRegistryRef.current.delete(thisSendId);
     }
-  }, [input, attachments, streaming, cleanupListeners, onChatFinished, executionPolicy, workspace, reasoningMode]);
+  }, [
+    input,
+    attachments,
+    streaming,
+    cleanupListeners,
+    onChatFinished,
+    executionPolicy,
+    workspace,
+    reasoningMode,
+  ]);
 
   // Keep handleSendRef fresh for programmatic sends (regenerate)
   useEffect(() => {
@@ -4397,8 +5669,11 @@ export function ChatConsole({
     (paper: PaperItem) => {
       const title = (paper.title || 'this paper').trim();
       const filenameBase =
-        paper.arxiv_id || paper.id || paper.doi ||
-        title.replace(/[\\/:*?"<>|]/g, '_').slice(0, 80) || 'paper';
+        paper.arxiv_id ||
+        paper.id ||
+        paper.doi ||
+        title.replace(/[\\/:*?"<>|]/g, '_').slice(0, 80) ||
+        'paper';
       // #667: 有开放 PDF 直链 → 直接下载（Electron downloadURL，零 token 零 AI）。
       // 只接受有效的 HTTP(S) URL——无效直链不阻断后续候选/fallback
       // （CodeRabbit #668 review）。
@@ -4441,7 +5716,10 @@ export function ChatConsole({
               } else {
                 setPaperDownloadStates((prev) => ({
                   ...prev,
-                  [`${sessionKey}:${paper.id || ''}`]: { status: 'failed', error: res.error ?? '直链下载失败' },
+                  [`${sessionKey}:${paper.id || ''}`]: {
+                    status: 'failed',
+                    error: res.error ?? '直链下载失败',
+                  },
                 }));
               }
             }
@@ -4473,17 +5751,18 @@ export function ChatConsole({
     setInput(instruction);
     setTimeout(() => {
       const text = instruction.trim();
-      if (!text) return;
-      // Direct send: bypasses the input-state read in handleSend since
-      // we just set it. We inline the send logic here for simplicity.
-      window.miqi.chat
-        .send(text, sessionKey)
-        .then(() => {
-          setDownloadingPaperId(null);
-        })
-        .catch(() => {
-          setDownloadingPaperId(null);
-        });
+      if (!text) {
+        programmaticTextRef.current = null;
+        setDownloadingPaperId(null);
+        return;
+      }
+      // 经 handleSend 主流程发送（而非直连 chat.send）：网关门禁、乐观气泡
+      // 与流式渲染路径一致（#922）。文本经 programmaticTextRef 显式传入。
+      programmaticTextRef.current = instruction;
+      handleSendRef.current();
+      // 发出即清理下载指示：无论网关拦截（handleSend 恢复草稿）还是发送
+      // 失败，指示都不悬挂；流式回复由 handleSend 的监听链负责渲染。
+      setDownloadingPaperId(null);
     }, 0);
   };
 
@@ -4555,19 +5834,93 @@ export function ChatConsole({
     const isDocFile = DOCUMENT_SUFFIXES_RE.test(path);
     if (isDocFile) {
       // Collect candidate paths: the tracked path, then try common subdirs
-      // (paper_search saves to workspace/papers/, office tools to workspace/ root)
-      const candidates = [path];
+      // (paper_search saves to workspace/papers/, office tools to workspace/ root).
+      // Session-isolated files (#731) live under sessions/<safe-key>/files/ —
+      // the full session-relative path is the ONLY form the bridge reliably
+      // reads for bare tracked names (bare+session_key returns null at the
+      // bridge, same finding as the HTML preview branch), so that candidate
+      // is resolved workspace-scoped without a session key.
+      const candidates: Array<{ p: string; withSession: boolean }> = [
+        { p: path, withSession: true },
+      ];
+      // path 本身已是 sessions/<safe>/files/<name> 全路径时,再带 session_key
+      // 会被 files.read 二次拼接会话目录而读不到(桥接对全路径+session_key
+      // 返回 null),补一个 workspace-scoped 候选并优先尝试(CodeRabbit #889)。
+      if (/^sessions\/[^/]+\/files\//.test(path.replace(/\\/g, '/'))) {
+        candidates.unshift({ p: path, withSession: false });
+      }
       const nameOnly = path.replace(/\\/g, '/').split('/').pop()!;
-      if (nameOnly !== path) candidates.push(nameOnly);
-      if (!path.startsWith('papers/')) candidates.push(`papers/${nameOnly}`);
+      if (nameOnly !== path) candidates.push({ p: nameOnly, withSession: true });
+      if (!path.startsWith('papers/'))
+        candidates.push({ p: `papers/${nameOnly}`, withSession: true });
+      if (nameOnly === path) {
+        const safeKey = String(currentSessionRef.current ?? '').replace(/[:\\/]/g, '_');
+        if (safeKey) {
+          candidates.push({ p: `sessions/${safeKey}/files/${nameOnly}`, withSession: false });
+        }
+      }
+
+      // #877: PDF — proper paginated rendering via the workspace iframe blob
+      // approach (Chromium's built-in PDF viewer).  Text parsing stays as the
+      // fallback for scanned PDFs / read failures.
+      if (PDF_FILE_RE.test(path)) {
+        for (const candidate of candidates) {
+          try {
+            const res = await window.miqi.files.read(
+              candidate.p,
+              candidate.withSession ? currentSessionRef.current : undefined
+            );
+            if (res?.data_base64) {
+              setPreviewFile({
+                path: candidate.p,
+                kind: 'pdf',
+                pdfUrl: base64ToBlobUrl(res.data_base64, res.mime_type || 'application/pdf'),
+              });
+              return;
+            }
+          } catch {
+            continue; // try next candidate
+          }
+        }
+        // no binary read — fall through to the text parse below
+      }
 
       for (const candidate of candidates) {
         try {
-          const result = await window.miqi.documents.parse(candidate, currentSessionRef.current, {
-            preview: true,
-          });
+          const result = await window.miqi.documents.parse(
+            candidate.p,
+            candidate.withSession ? currentSessionRef.current : undefined,
+            {
+              preview: true,
+              structured: true,
+            }
+          );
+          // #877: rich renderers — spreadsheet table for XLSX/CSV, ordered
+          // blocks for DOCX.  Fall back to plain text when the backend can't
+          // produce structure (e.g. .xls/.odt have no structured support).
+          if (
+            result?.structured?.kind === 'spreadsheet' &&
+            /\.(xlsx|xls|csv|ods)$/i.test(candidate.p)
+          ) {
+            setPreviewFile({
+              path: candidate.p,
+              kind: 'spreadsheet',
+              spreadsheet: result.structured,
+              content: result.text,
+            });
+            return;
+          }
+          if (result?.structured?.kind === 'document' && /\.(docx|doc|odt)$/i.test(candidate.p)) {
+            setPreviewFile({
+              path: candidate.p,
+              kind: 'document',
+              docBlocks: result.structured,
+              content: result.text,
+            });
+            return;
+          }
           if (result?.text) {
-            setPreviewFile({ path: candidate, content: result.text });
+            setPreviewFile({ path: candidate.p, content: result.text });
             return;
           }
         } catch {
@@ -4741,15 +6094,28 @@ export function ChatConsole({
   /** Stable no-arg reload trigger for error bubbles (#570). */
   const retryLoad = useCallback(() => setRetryTick((t) => t + 1), []);
 
+  /** #1000：登录引导气泡内一键登录成功后移除该气泡（用户即可重发消息）。 */
+  const handleLoginGuidanceDone = useCallback(
+    (msg: Message) => {
+      if (currentSessionRef.current !== sessionKey) return; // 已切走：保留给该会话
+      setMessages((prev) => prev.filter((m) => m.timestamp !== msg.timestamp));
+    },
+    [sessionKey]
+  );
+
   // Composer right-click edit menu (剪切/复制/粘贴/全选) — restored from
   // #547 after the #577 rewrite dropped it.
   const inputContextItems = useMemo<ContextMenuAction[]>(
     () => [
       {
-        label: '剪切', icon: <Scissors size={14} />, shortcut: 'Ctrl+X',
+        label: '剪切',
+        icon: <Scissors size={14} />,
+        shortcut: 'Ctrl+X',
         onSelect: () => {
-          const el = textareaRef.current; if (!el) return;
-          const s = el.selectionStart, e = el.selectionEnd;
+          const el = textareaRef.current;
+          if (!el) return;
+          const s = el.selectionStart,
+            e = el.selectionEnd;
           if (s === e) return;
           navigator.clipboard.writeText(el.value.slice(s, e)).catch(() => {});
           el.setRangeText('', s, e, 'end');
@@ -4760,33 +6126,45 @@ export function ChatConsole({
         },
       },
       {
-        label: '复制', icon: <Copy size={14} />, shortcut: 'Ctrl+C',
+        label: '复制',
+        icon: <Copy size={14} />,
+        shortcut: 'Ctrl+C',
         onSelect: () => {
-          const el = textareaRef.current; if (!el) return;
+          const el = textareaRef.current;
+          if (!el) return;
           const txt = el.value.slice(el.selectionStart, el.selectionEnd);
           if (txt) navigator.clipboard.writeText(txt).catch(() => {});
         },
       },
       {
-        label: '粘贴', icon: <ClipboardPaste size={14} />, shortcut: 'Ctrl+V',
+        label: '粘贴',
+        icon: <ClipboardPaste size={14} />,
+        shortcut: 'Ctrl+V',
         onSelect: () => {
-          const el = textareaRef.current; if (!el) return;
-          navigator.clipboard.readText().then((text) => {
-            if (!text) return;
-            // Insert at the caret like native Ctrl+V — replace the current
-            // selection range instead of always appending at the end.
-            const s = el.selectionStart ?? el.value.length;
-            const e = el.selectionEnd ?? s;
-            el.setRangeText(text, s, e, 'end');
-            // Let React's onChange pick up the new value (single source of
-            // truth for state vs DOM — avoids double-delete drift).
-            el.dispatchEvent(new Event('input', { bubbles: true }));
-            el.focus();
-          }).catch(() => {});
+          const el = textareaRef.current;
+          if (!el) return;
+          navigator.clipboard
+            .readText()
+            .then((text) => {
+              if (!text) return;
+              // Insert at the caret like native Ctrl+V — replace the current
+              // selection range instead of always appending at the end.
+              const s = el.selectionStart ?? el.value.length;
+              const e = el.selectionEnd ?? s;
+              el.setRangeText(text, s, e, 'end');
+              // Let React's onChange pick up the new value (single source of
+              // truth for state vs DOM — avoids double-delete drift).
+              el.dispatchEvent(new Event('input', { bubbles: true }));
+              el.focus();
+            })
+            .catch(() => {});
         },
       },
       {
-        label: '全选', icon: <CheckCircle size={14} />, shortcut: 'Ctrl+A', divider: true,
+        label: '全选',
+        icon: <CheckCircle size={14} />,
+        shortcut: 'Ctrl+A',
+        divider: true,
         onSelect: () => textareaRef.current?.select(),
       },
     ],
@@ -4804,7 +6182,9 @@ export function ChatConsole({
   // streaming, so their content length IS part of the signature; assistant
   // body length is NOT (extraction never depends on it).
   const sourcesSig = messages
-    .map((m) => (m.role === 'progress' ? `${m.toolCallId ?? ''}:${m.content?.length ?? 0}` : m.role))
+    .map((m) =>
+      m.role === 'progress' ? `${m.toolCallId ?? ''}:${m.content?.length ?? 0}` : m.role
+    )
     .join('|');
   const sourcesByMsg = useMemo(() => {
     if (sourcesCacheRef.current?.sig === sourcesSig) return sourcesCacheRef.current.map;
@@ -4875,7 +6255,12 @@ export function ChatConsole({
       if (streaming) return;
       cleanupListeners();
       const idx = messagesRef.current.indexOf(msg);
-      if (idx >= 0) setMessages((prev) => prev.slice(0, idx));
+      if (idx >= 0) {
+        // #886: a stopped round keeps its interrupted half-reply in the
+        // timeline — the retried attempt appends after it instead of
+        // rewinding and dropping the "已停止" context.
+        setMessages((prev) => (wasTurnStopped(prev, idx) ? prev : prev.slice(0, idx)));
+      }
       setInput(msg.content);
       setAttachments(msg.attachments ?? []);
     },
@@ -4902,7 +6287,10 @@ export function ChatConsole({
         attachments: userMsg.attachments ?? [],
         retry: true,
       };
-      setMessages((prev) => prev.slice(0, userIdx)); // handleSend re-appends the user message
+      // #886: regenerating a manually-stopped turn must not rewind and drop
+      // the interrupted round — keep it and let handleSend append the new
+      // attempt after it.  Only a completed answer is replaced in place.
+      setMessages((prev) => (wasTurnStopped(prev, userIdx) ? prev : prev.slice(0, userIdx)));
       setInput(userMsg.content);
       setAttachments(userMsg.attachments ?? []);
       requestAnimationFrame(() => handleSendRef.current());
@@ -4949,7 +6337,9 @@ export function ChatConsole({
         if (!cancelled) setCustomTitle(null);
       }
     })();
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+    };
   }, [renameVersion, sessionKey]);
 
   const titleInputRef = useRef<HTMLInputElement>(null);
@@ -4973,7 +6363,9 @@ export function ChatConsole({
           await window.miqi.sessions.rename(sessionKey, trimmed.slice(0, 100));
           setCustomTitle(trimmed.slice(0, 100));
           onRename?.();
-        } catch { /* ignore */ }
+        } catch {
+          /* ignore */
+        }
       }
       setEditingTitle(false);
     },
@@ -5089,7 +6481,13 @@ export function ChatConsole({
         onSelect: handleCopyReproContext,
       },
     ],
-    [handleCopyReproContext, handleCopyTaskSummary, handleCopyTaskSummaryAll, handleExportTaskMarkdown, messages]
+    [
+      handleCopyReproContext,
+      handleCopyTaskSummary,
+      handleCopyTaskSummaryAll,
+      handleExportTaskMarkdown,
+      messages,
+    ]
   );
 
   const shareButtonLabel =
@@ -5167,7 +6565,7 @@ export function ChatConsole({
           className="text-sm font-bold whitespace-nowrap shrink-0 text-text"
           data-testid="app-title"
         >
-          MiqroForge Desktop
+          MiQroForge Desktop
         </span>
 
         {/* Center: Search */}
@@ -5403,25 +6801,112 @@ export function ChatConsole({
             className="flex-1 overflow-y-auto"
             style={{ background: 'var(--background)' }}
           >
-            <div className="max-w-[760px] mx-auto px-6 py-5 flex flex-col gap-2">
-              {!historyLoaded ? (
+            <div
+              className={`max-w-[760px] mx-auto px-4 py-5 flex flex-col gap-2 ${
+                historyLoaded && messages.length === 0 ? 'min-h-full' : ''
+              }`}
+            >
+              {/* Only show the "connecting" spinner while loading AND no messages
+                  yet.  A user can send before the session's load() finishes
+                  (historyLoaded false), and the optimistic bubble is already in
+                  `messages` — with the old `!historyLoaded` gate it was hidden
+                  behind the spinner until load() resolved (#872). */}
+              {!historyLoaded && messages.length === 0 ? (
                 <div className="flex flex-col items-center justify-center min-h-[300px] gap-2.5">
                   <Loader2 size={16} className="animate-spin text-text-faint" />
                   <p className="text-xs text-text-faint">正在连接…</p>
                 </div>
               ) : messages.length === 0 ? (
-                <div className="flex flex-col items-center justify-center h-full min-h-[400px] text-center gap-4">
+                <div className="relative flex flex-1 flex-col items-center justify-center text-center min-h-[400px] gap-5">
+                  {/* EB-1 光晕衬底 */}
                   <div
-                    className="w-16 h-16 rounded-2xl flex items-center justify-center text-2xl font-bold text-white shadow-lg"
-                    style={{ background: 'var(--avatar-dark)' }}
+                    className="pointer-events-none absolute top-0 left-1/2 -translate-x-1/2 w-[680px] h-[360px]"
+                    style={{
+                      background:
+                        'radial-gradient(closest-side, var(--accent-soft), transparent 72%)',
+                    }}
+                  />
+                  <div
+                    className="relative w-14 h-14 rounded-2xl flex items-center justify-center shadow-sm"
+                    style={{
+                      background: 'var(--surface)',
+                      border: '1px solid var(--border-subtle)',
+                    }}
                   >
-                    A
+                    <MiQroForgeLogo size={34} />
                   </div>
-                  <div className="flex flex-col items-center gap-1">
-                    <p className="text-[15px] font-medium text-text-muted">
-                      从文件、问题或修改请求开始
+                  <div className="relative flex flex-col items-center gap-2">
+                    <p
+                      className="text-[30px] font-extrabold tracking-[-0.02em] leading-tight"
+                      style={{ color: 'var(--text)' }}
+                    >
+                      让 <span style={{ color: 'var(--accent)' }}>MiQroForge</span> 帮你干活
                     </p>
-                    <p className="text-xs text-text-faint">发起一段对话即可开始</p>
+                    <p className="text-[13px] text-text-muted">先选一种做事方式，再告诉我任务</p>
+                  </div>
+                  {/* #1000 首屏登录入口：未登录时欢迎区直接展示登录卡片，不再藏在设置页深处 */}
+                  {!loggedIn && <QraftLoginCard onGoToQraft={onOpenQraftSettings} />}
+                  <div className="relative flex gap-[10px] w-full max-w-[560px]">
+                    {[
+                      {
+                        key: 'fast' as const,
+                        icon: '⚡',
+                        tag: '极速问答',
+                        tagline: '面向快速解答',
+                        desc: '即时回答问题、改少量代码，低延迟优先。',
+                      },
+                      {
+                        key: 'think' as const,
+                        icon: '🧠',
+                        tag: '深度研究',
+                        tagline: '面向复杂任务',
+                        desc: '长链路检索、推理与方案推演，先想后答。',
+                      },
+                      {
+                        key: 'code' as const,
+                        icon: '💻',
+                        tag: '代码任务',
+                        tagline: '面向工程交付',
+                        desc: '实现 / 重构 / 测试全流程，产出可审阅变更。',
+                      },
+                    ].map((m) => {
+                      const active = welcomeMode === m.key;
+                      return (
+                        <button
+                          key={m.key}
+                          type="button"
+                          onClick={() => selectWelcomeMode(m.key)}
+                          className={`flex-1 flex flex-col items-center gap-[5px] rounded-xl px-3 py-3 cursor-pointer transition-colors duration-200 border min-h-[132px] ${
+                            active ? 'border-[var(--accent)]' : 'border-[var(--border-subtle)]'
+                          } hover:border-[var(--accent)]`}
+                          style={{
+                            background: active
+                              ? 'color-mix(in srgb, var(--surface) 92%, var(--accent-soft))'
+                              : 'var(--surface)',
+                          }}
+                        >
+                          <span
+                            className="inline-flex items-center gap-[6px] text-[13px] font-bold"
+                            style={{ color: 'var(--text)' }}
+                          >
+                            <span className="text-[15px]">{m.icon}</span>
+                            {m.tag}
+                          </span>
+                          <span className="text-[11px] text-text-faint">{m.tagline}</span>
+                          <span className="text-[11.5px] text-text-muted leading-snug">
+                            {m.desc}
+                          </span>
+                          {/* ✓ 仅 active 渲染:opacity 隐藏会让文本留在 DOM,
+                              toContainText 断言不了"取消选中"。占位 div 保持底部对齐。 */}
+                          <div
+                            className="mt-auto flex items-center justify-center"
+                            style={{ minHeight: 16, color: 'var(--accent)' }}
+                          >
+                            {active && <span className="text-[11px] font-bold">✓ 已选择</span>}
+                          </div>
+                        </button>
+                      );
+                    })}
                   </div>
                 </div>
               ) : (
@@ -5447,10 +6932,20 @@ export function ChatConsole({
                       downloadingPaperId={downloadingPaperId}
                       paperDownloadStates={paperDownloadStates}
                     />
+                  ) : group.kind === 'reply-head' ? (
+                    <div key={`head-${group.thinking.timestamp}-${i}`}>
+                      {shouldRenderThinkingGroup(reasoningMode) && (
+                        <ThinkingBlockGroup
+                          thinking={group.thinking}
+                          fallbackMode={reasoningMode}
+                        />
+                      )}
+                    </div>
                   ) : (
                     <div key={`${group.msg.timestamp}-${i}`}>
                       <MessageBubble
                         msg={group.msg}
+                        hideHeader={group.kind === 'reply-content'}
                         sessionKey={sessionKey}
                         turnIndex={i}
                         execOutputs={execOutputs}
@@ -5459,14 +6954,10 @@ export function ChatConsole({
                         toolStepIndex={toolStepByMsg.get(group.msg)}
                         isLast={i === chatGroups.length - 1}
                         onResume={
-                          group.msg.interrupted
-                            ? () => handleResumeTurn(group.msg)
-                            : undefined
+                          group.msg.interrupted ? () => handleResumeTurn(group.msg) : undefined
                         }
                         onRestart={
-                          group.msg.interrupted
-                            ? () => handleRestartTurn(group.msg)
-                            : undefined
+                          group.msg.interrupted ? () => handleRestartTurn(group.msg) : undefined
                         }
                         reasoningMode={reasoningMode}
                         searchResults={
@@ -5481,6 +6972,7 @@ export function ChatConsole({
                         onRetryLoad={retryLoad}
                         onRegenerate={handleRegenerate}
                         onOpenProviderSettings={onOpenProviderSettings}
+                        onLoginSuccess={handleLoginGuidanceDone}
                         onDownloadPaper={handleDownloadPaper}
                         downloadingPaperId={downloadingPaperId}
                         paperDownloadStates={paperDownloadStates}
@@ -5507,6 +6999,15 @@ export function ChatConsole({
               <ConfirmCardArea matchedTurnIds={matchedTurnIds} />
             </div>
           </div>
+
+          {/* 渐变晕染分界线：固定在输入框上方，消息滚到附近时柔和淡出到背景 */}
+          <div
+            className="pointer-events-none shrink-0 -mt-10 h-10"
+            style={{
+              background:
+                'linear-gradient(to bottom, color-mix(in srgb, var(--background) 0%, transparent) 0%, color-mix(in srgb, var(--background) 0%, transparent) 40%, var(--background) 100%)',
+            }}
+          />
 
           {/* Composer——确认卡弹出时隐藏（WorkBuddy 式：界面只有一个卡片） */}
           <div
@@ -5546,6 +7047,69 @@ export function ChatConsole({
                           if (previewJustClosed.current) return;
                           if (!isDoc || !att.dataBase64) return;
                           const ext = att.name.split('.').pop()?.toLowerCase() ?? '';
+
+                          // #877: PDF → proper paginated rendering (iframe blob)
+                          if (ext === 'pdf') {
+                            try {
+                              setPreviewFile({
+                                path: att.name,
+                                kind: 'pdf',
+                                pdfUrl: base64ToBlobUrl(att.dataBase64, 'application/pdf'),
+                                dataBase64: att.dataBase64,
+                              });
+                              return;
+                            } catch {
+                              /* fall through to client-side text */
+                            }
+                          }
+
+                          // #877: Office/CSV → backend structured parse of the
+                          // in-memory bytes (rich table / document render).
+                          if (/^(xlsx|xls|ods|csv|docx|doc|odt)$/i.test(ext)) {
+                            try {
+                              const result = await window.miqi.documents.parse(
+                                att.name,
+                                undefined,
+                                {
+                                  preview: true,
+                                  structured: true,
+                                  dataBase64: att.dataBase64,
+                                }
+                              );
+                              if (result?.structured) {
+                                if (result.structured.kind === 'spreadsheet') {
+                                  setPreviewFile({
+                                    path: att.name,
+                                    kind: 'spreadsheet',
+                                    spreadsheet: result.structured,
+                                    content: result.text,
+                                    dataBase64: att.dataBase64,
+                                  });
+                                  return;
+                                }
+                                setPreviewFile({
+                                  path: att.name,
+                                  kind: 'document',
+                                  docBlocks: result.structured,
+                                  content: result.text,
+                                  dataBase64: att.dataBase64,
+                                });
+                                return;
+                              }
+                              // No structure (e.g. .xls/.odt) — use the backend text
+                              if (result?.text) {
+                                setPreviewFile({
+                                  path: att.name,
+                                  content: result.text.slice(0, 50000),
+                                  dataBase64: att.dataBase64,
+                                });
+                                return;
+                              }
+                            } catch {
+                              /* fall through to client-side text */
+                            }
+                          }
+
                           let previewText = '';
 
                           // Client-side extraction only (fast, no server round-trip)
@@ -5594,7 +7158,11 @@ export function ChatConsole({
                               style={{ border: '1px solid var(--border-subtle)' }}
                             />
                           ) : (
-                            <Image size={14} className="shrink-0" style={{ color: 'var(--info)' }} />
+                            <Image
+                              size={14}
+                              className="shrink-0"
+                              style={{ color: 'var(--info)' }}
+                            />
                           )
                         ) : (
                           <FileText size={14} className="shrink-0 text-text-faint" />
@@ -5627,20 +7195,28 @@ export function ChatConsole({
                           <CheckCircle
                             size={13}
                             className="shrink-0"
-                            style={{ color: '#22c55e' }}
+                            style={{ color: 'var(--success)' }}
                           />
                         )}
                         {isDoc && isError && (
                           <AlertCircle
                             size={13}
                             className="shrink-0"
-                            style={{ color: '#ef4444' }}
+                            style={{ color: 'var(--danger)' }}
                           />
                         )}
 
                         {/* Remove */}
                         <button
-                          onClick={() => removeAttachment(i)}
+                          onClick={(e) => {
+                            // The chip container opens the preview on click —
+                            // without stopPropagation the remove click bubbles
+                            // up and pops the preview modal for the just-removed
+                            // file (and the modal then eats further input, e.g.
+                            // the attachment.spec cleanup loop in CI).
+                            e.stopPropagation();
+                            removeAttachment(i);
+                          }}
                           className="shrink-0 opacity-0 group-hover:opacity-100 transition-opacity hover:bg-[rgba(0,0,0,0.1)] rounded p-0.5"
                         >
                           <X size={11} style={{ color: 'var(--text-faint)' }} />
@@ -5696,7 +7272,7 @@ export function ChatConsole({
                   {/* 复杂问题角标（#680 跟进）：轻量气泡挂在模式按钮上，
                       3 秒自动消失，不占输入区。 */}
                   <div className="relative">
-                    <ReasoningModeSwitch mode={reasoningMode} onChange={setReasoningMode} />
+                    <ReasoningModeSwitch mode={reasoningMode} onChange={changeReasoningMode} />
                     {complexHint && reasoningMode === 'fast' && (
                       <div
                         className="absolute left-full ml-2 top-1/2 -translate-y-1/2 z-50 flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] whitespace-nowrap"
@@ -5720,7 +7296,10 @@ export function ChatConsole({
                         <span>💡 建议</span>
                         <button
                           type="button"
-                          onClick={() => { setReasoningMode('think'); setComplexHint(false); }}
+                          onClick={() => {
+                            changeReasoningMode('think');
+                            setComplexHint(false);
+                          }}
                           className="font-semibold cursor-pointer"
                           style={{ color: '#d9b8f5' }}
                         >
@@ -5761,7 +7340,11 @@ export function ChatConsole({
                       aria-label="停止生成"
                       className="shrink-0 w-8 h-8 rounded-full flex items-center justify-center transition-all duration-200 hover:bg-[var(--surface-muted)] active:scale-95"
                     >
-                      <Square size={12} style={{ color: 'var(--text-muted)' }} fill="currentColor" />
+                      <Square
+                        size={12}
+                        style={{ color: 'var(--text-muted)' }}
+                        fill="currentColor"
+                      />
                     </button>
                   ) : (
                     <button
@@ -5773,8 +7356,7 @@ export function ChatConsole({
                       style={{
                         background:
                           'linear-gradient(135deg, var(--accent), color-mix(in srgb, var(--accent) 65%, #000))',
-                        boxShadow:
-                          '0 2px 10px color-mix(in srgb, var(--accent) 35%, transparent)',
+                        boxShadow: '0 2px 10px color-mix(in srgb, var(--accent) 35%, transparent)',
                       }}
                     >
                       <Send size={14} style={{ color: '#fff' }} />
@@ -5786,7 +7368,10 @@ export function ChatConsole({
 
             {/* Inline workspace selector — only before the conversation starts */}
             {historyLoaded && messages.length === 0 && (
-              <div className="flex items-center justify-center mt-2" data-testid="inline-workspace-selector">
+              <div
+                className="flex items-center justify-center mt-2"
+                data-testid="inline-workspace-selector"
+              >
                 <div
                   className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full text-xs border shadow-sm"
                   style={{
@@ -5796,7 +7381,11 @@ export function ChatConsole({
                   }}
                 >
                   <Folder size={12} className="shrink-0" />
-                  <span className="truncate max-w-[280px]" title={workspace || undefined} data-testid="inline-workspace-path">
+                  <span
+                    className="truncate max-w-[280px]"
+                    title={workspace || undefined}
+                    data-testid="inline-workspace-path"
+                  >
                     {workspace ? `工作目录：${workspace}` : '默认工作目录'}
                   </span>
                   <button
@@ -5883,7 +7472,10 @@ export function ChatConsole({
                 </span>
               </div>
               <div className="flex items-center gap-2">
-                <span className="text-xs font-medium text-text-faint" data-testid="task-assets-stats">
+                <span
+                  className="text-xs font-medium text-text-faint"
+                  data-testid="task-assets-stats"
+                >
                   {resultFiles.length} 个结果 / {processFiles.length} 个过程
                 </span>
               </div>
@@ -5906,7 +7498,13 @@ export function ChatConsole({
               <>
                 {/* issue #607: 结果资产（默认展开、星标强调） + 过程资产（默认折叠） */}
                 {resultFiles.length > 0 && (
-                  <AssetSection label="结果文件" testKey="result" count={resultFiles.length} defaultOpen accent>
+                  <AssetSection
+                    label="结果文件"
+                    testKey="result"
+                    count={resultFiles.length}
+                    defaultOpen
+                    accent
+                  >
                     {resultFiles.map((f) => (
                       <TrackedFileCard
                         key={f.path}
@@ -5914,7 +7512,9 @@ export function ChatConsole({
                         isResult
                         onPreview={() => handlePreview(f.path)}
                         onDiff={() => handleShowDiff(f.path)}
-                        onReveal={() => window.miqi.files.openContainingFolder(normalizePath(f.path))}
+                        onReveal={() =>
+                          window.miqi.files.openContainingFolder(normalizePath(f.path))
+                        }
                       />
                     ))}
                   </AssetSection>
@@ -5973,14 +7573,19 @@ export function ChatConsole({
                             border: '1px solid var(--border-subtle)',
                           }}
                         >
-                          <FileText size={11} style={{ color: 'var(--info)' }} className="shrink-0" />
+                          <FileText
+                            size={11}
+                            style={{ color: 'var(--info)' }}
+                            className="shrink-0"
+                          />
                           <span className="text-[11px] truncate flex-1 text-text" title={f.path}>
                             {f.name}
                           </span>
                           <span
                             className="text-[9px] px-1.5 py-0.5 rounded font-medium shrink-0"
                             style={{
-                              background: f.op === 'write' ? 'var(--accent)' : 'rgba(234,179,8,0.15)',
+                              background:
+                                f.op === 'write' ? 'var(--accent)' : 'rgba(234,179,8,0.15)',
                               color: f.op === 'write' ? 'var(--accent-text)' : 'var(--warning)',
                             }}
                           >
@@ -6011,14 +7616,19 @@ export function ChatConsole({
                             border: '1px solid var(--border-subtle)',
                           }}
                         >
-                          <FileText size={11} style={{ color: 'var(--info)' }} className="shrink-0" />
+                          <FileText
+                            size={11}
+                            style={{ color: 'var(--info)' }}
+                            className="shrink-0"
+                          />
                           <span className="text-[11px] truncate flex-1 text-text" title={f.path}>
                             {f.name}
                           </span>
                           <span
                             className="text-[9px] px-1.5 py-0.5 rounded font-medium shrink-0"
                             style={{
-                              background: f.op === 'write' ? 'var(--accent)' : 'rgba(234,179,8,0.15)',
+                              background:
+                                f.op === 'write' ? 'var(--accent)' : 'rgba(234,179,8,0.15)',
                               color: f.op === 'write' ? 'var(--accent-text)' : 'var(--warning)',
                             }}
                           >
@@ -6079,12 +7689,12 @@ export function ChatConsole({
             if (!o) closePreview();
           }}
           hideClose
-          className="max-w-[820px] p-0"
+          className="max-w-[980px] p-0"
         >
           <div
             className="flex flex-col rounded-xl shadow-2xl overflow-hidden"
             style={{
-              width: 820,
+              width: previewFile.kind ? 940 : 820,
               maxHeight: '85vh',
               background: 'var(--surface-elevated)',
               border: '1px solid var(--border)',
@@ -6096,9 +7706,13 @@ export function ChatConsole({
             <div className="flex items-center justify-between px-4 py-3 border-b shrink-0 border-border-subtle">
               <div className="flex items-center gap-2 min-w-0 flex-1">
                 {PDF_FILE_RE.test(previewFile.path) ? (
-                  <FileText size={14} style={{ color: '#ef4444' }} className="shrink-0" />
+                  <FileText size={14} style={{ color: 'var(--danger)' }} className="shrink-0" />
                 ) : /\.(xlsx|xls|csv|ods)$/i.test(previewFile.path) ? (
-                  <FileSpreadsheet size={14} style={{ color: '#22c55e' }} className="shrink-0" />
+                  <FileSpreadsheet
+                    size={14}
+                    style={{ color: 'var(--success)' }}
+                    className="shrink-0"
+                  />
                 ) : /\.(pptx|ppt|odp)$/i.test(previewFile.path) ? (
                   <FileBarChart size={14} style={{ color: '#f97316' }} className="shrink-0" />
                 ) : (
@@ -6132,6 +7746,50 @@ export function ChatConsole({
                 )}
                 <button
                   onClick={async () => {
+                    // #877: 下载/另存为 — native save dialog via main process
+                    let base64 = previewFile.dataBase64;
+                    if (!base64) {
+                      const nameOnly = previewFile.path.replace(/\\/g, '/').split('/').pop()!;
+                      const safeKey = String(currentSessionRef.current ?? '').replace(
+                        /[:\\/]/g,
+                        '_'
+                      );
+                      const reads: Array<{ p: string; session?: string }> = [
+                        { p: previewFile.path, session: currentSessionRef.current },
+                        { p: previewFile.path },
+                      ];
+                      if (safeKey && nameOnly === previewFile.path) {
+                        reads.push({ p: `sessions/${safeKey}/files/${nameOnly}` });
+                      }
+                      for (const read of reads) {
+                        try {
+                          const res = await window.miqi.files.read(read.p, read.session, {
+                            asBinary: true,
+                          });
+                          if (res?.data_base64) {
+                            base64 = res.data_base64;
+                            break;
+                          }
+                        } catch {
+                          /* try next */
+                        }
+                      }
+                    }
+                    if (!base64 && previewFile.content) {
+                      base64 = bytesToBase64(new TextEncoder().encode(previewFile.content));
+                    }
+                    if (!base64) return;
+                    const name = previewFile.path.split(/[\\/]/).pop() || 'download';
+                    await window.miqi.files.saveAs(name, base64);
+                  }}
+                  className="flex items-center gap-1 px-2 py-1 rounded text-[11px] text-[var(--accent)] hover:bg-[var(--accent-soft)] transition-colors"
+                  title="保存到本地"
+                >
+                  <Download size={12} />
+                  <span>下载/另存为</span>
+                </button>
+                <button
+                  onClick={async () => {
                     if (previewFile.dataBase64) {
                       const tmp = `_open_${Date.now()}_${previewFile.path}`;
                       try {
@@ -6163,22 +7821,43 @@ export function ChatConsole({
               </div>
             </div>
             <div className="flex-1 overflow-auto">
-              {/\.html?$/i.test(previewFile.path) ? (
+              {previewFile.kind === 'pdf' && previewFile.pdfUrl ? (
+                <iframe
+                  src={previewFile.pdfUrl}
+                  title={previewFile.path}
+                  className="w-full border-0"
+                  style={{ height: '70vh', background: 'var(--surface)' }}
+                />
+              ) : previewFile.kind === 'spreadsheet' && previewFile.spreadsheet ? (
+                <SpreadsheetPreview sheets={previewFile.spreadsheet.sheets} />
+              ) : previewFile.kind === 'document' && previewFile.docBlocks ? (
+                <DocxPreview blocks={previewFile.docBlocks.blocks} />
+              ) : /\.html?$/i.test(previewFile.path) ? (
                 htmlSourceMode ? (
                   <pre className="p-4 text-xs font-mono leading-relaxed whitespace-pre-wrap break-all text-text-muted">
                     {previewFile.content}
                   </pre>
                 ) : (
                   <SandboxHtmlFrame
-                    html={previewFile.content}
+                    html={previewFile.content ?? ''}
                     className="w-full border-0"
                     maxHeight="70vh"
                   />
                 )
-              ) : (
+              ) : previewFile.content && !/^\(Could not open file/.test(previewFile.content) ? (
                 <pre className="p-4 text-xs font-mono leading-relaxed whitespace-pre-wrap break-all text-text-muted">
                   {previewFile.content}
                 </pre>
+              ) : (
+                <div className="flex flex-col items-center justify-center gap-2 p-8 text-center">
+                  <AlertCircle size={18} style={{ color: 'var(--warning)' }} />
+                  <p className="text-xs text-[var(--text-muted)]">
+                    {unsupportedPreviewReason(previewFile.path, previewFile.content)}
+                  </p>
+                  <p className="text-[11px] text-[var(--text-faint)]">
+                    请使用上方「下载/另存为」保存到本地，或用「系统应用打开」在外部程序查看
+                  </p>
+                </div>
               )}
             </div>
           </div>
@@ -6227,8 +7906,8 @@ export function ChatConsole({
                   <span
                     className="text-[10px] px-1.5 py-0.5 rounded font-medium shrink-0"
                     style={{
-                      background: 'rgba(34,197,94,0.15)',
-                      color: '#4ade80',
+                      background: 'rgba(16,185,129,0.15)',
+                      color: 'var(--success)',
                     }}
                   >
                     NEW FILE
@@ -6253,7 +7932,7 @@ export function ChatConsole({
                     disabled={reverting}
                     className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors"
                     style={{
-                      background: reverting ? 'var(--surface-muted)' : 'rgba(239,68,68,0.15)',
+                      background: reverting ? 'var(--surface-muted)' : 'rgba(255,97,97,0.15)',
                       color: reverting ? 'var(--text-faint)' : 'var(--danger)',
                       border: '1px solid var(--danger)',
                     }}
@@ -6318,7 +7997,9 @@ export function ChatConsole({
       {/* ── Workspace Picker Modal ── */}
       <Modal
         open={workspacePickerOpen}
-        onOpenChange={(o) => { if (!o) setWorkspacePickerOpen(false); }}
+        onOpenChange={(o) => {
+          if (!o) setWorkspacePickerOpen(false);
+        }}
         hideClose
       >
         <div
@@ -6351,7 +8032,10 @@ export function ChatConsole({
             {/* Recent workspaces */}
             {recentWorkspaces.length > 0 && (
               <>
-                <div className="text-[10px] font-semibold uppercase tracking-wider text-text-faint px-1 pt-1 pb-0.5" data-testid="workspace-picker-recent-label">
+                <div
+                  className="text-[10px] font-semibold uppercase tracking-wider text-text-faint px-1 pt-1 pb-0.5"
+                  data-testid="workspace-picker-recent-label"
+                >
                   最近使用
                 </div>
                 {recentWorkspaces.map((ws, idx) => (
@@ -6361,11 +8045,12 @@ export function ChatConsole({
                     className="flex items-center gap-2 px-3 py-2 rounded-lg text-left transition-colors hover:bg-[var(--surface-muted)] w-full"
                     data-testid={`workspace-picker-recent-${idx}`}
                   >
-                    <FolderCheck size={14} style={{ color: 'var(--text-muted)' }} className="shrink-0" />
-                    <span
-                      className="text-xs text-[var(--text)] truncate"
-                      title={ws}
-                    >
+                    <FolderCheck
+                      size={14}
+                      style={{ color: 'var(--text-muted)' }}
+                      className="shrink-0"
+                    />
+                    <span className="text-xs text-[var(--text)] truncate" title={ws}>
                       {ws}
                     </span>
                   </button>
@@ -6430,14 +8115,21 @@ export function ChatConsole({
               <div className="text-[14px] font-semibold" style={{ color: 'var(--text)' }}>
                 下载成功
               </div>
-              <div className="text-[12px] truncate max-w-[260px]" style={{ color: 'var(--text-muted)' }}>
+              <div
+                className="text-[12px] truncate max-w-[260px]"
+                style={{ color: 'var(--text-muted)' }}
+              >
                 {downloadToast.filename}
               </div>
             </div>
             <button
               onClick={() => window.miqi.files?.openContainingFolder(downloadToast.savePath)}
               className="text-[12.5px] font-medium px-3 py-1.5 rounded-lg cursor-pointer shrink-0 transition-all"
-              style={{ background: 'var(--success-bg)', color: 'var(--success-text)', border: 'none' }}
+              style={{
+                background: 'var(--success-bg)',
+                color: 'var(--success-text)',
+                border: 'none',
+              }}
               onMouseEnter={(e) => (e.currentTarget.style.opacity = '0.8')}
               onMouseLeave={(e) => (e.currentTarget.style.opacity = '1')}
             >
@@ -6481,7 +8173,12 @@ function AssetSection({
       >
         {open ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
         {accent && (
-          <Star size={11} fill="currentColor" className="shrink-0" style={{ color: 'var(--accent)' }} />
+          <Star
+            size={11}
+            fill="currentColor"
+            className="shrink-0"
+            style={{ color: 'var(--accent)' }}
+          />
         )}
         <span className="shrink-0">{label}</span>
         <span className="shrink-0 opacity-70">{count}</span>
@@ -6595,6 +8292,9 @@ interface MessageBubbleProps {
   /** Reasoning mode of the active conversation — fast hides thinking blocks
    *  (issue #680: 极速回答不展示思考过程). */
   reasoningMode?: ReasoningMode;
+  /** True when this bubble is the reply-content of a split turn (the
+   *  avatar/name/thinking header was already rendered by its reply-head). */
+  hideHeader?: boolean;
   /** Current session key — scopes persisted 👍/👎 feedback to this session. */
   sessionKey: string;
   /** Stable per-turn index (chatGroups 下标) — reload-stable feedback key. */
@@ -6615,10 +8315,15 @@ interface MessageBubbleProps {
   onRetryLoad?: () => void;
   onRegenerate?: (msg: Message) => void;
   onOpenProviderSettings?: () => void;
+  /** #1000：错误气泡内一键登录成功后移除该引导气泡。 */
+  onLoginSuccess?: (msg: Message) => void;
   onDownloadPaper?: (paper: PaperItem) => void;
   downloadingPaperId?: string | null;
   /** #668 补：论文下载结果反馈（paperId → done/failed） */
-  paperDownloadStates?: Record<string, { status: 'done' | 'failed'; savePath?: string; error?: string }>;
+  paperDownloadStates?: Record<
+    string,
+    { status: 'done' | 'failed'; savePath?: string; error?: string }
+  >;
   /** Reference URLs collected from the tool calls preceding this answer */
   sources?: MessageSource[];
   /** Workflow step number when this progress row is a tool call. */
@@ -6636,6 +8341,7 @@ interface MessageBubbleProps {
 
 const MessageBubble = memo(function MessageBubble({
   msg,
+  hideHeader,
   sessionKey,
   execOutputs,
   inlineExecOutput,
@@ -6646,6 +8352,7 @@ const MessageBubble = memo(function MessageBubble({
   onRetryLoad,
   onRegenerate,
   onOpenProviderSettings,
+  onLoginSuccess,
   onDownloadPaper,
   downloadingPaperId,
   paperDownloadStates,
@@ -6675,9 +8382,7 @@ const MessageBubble = memo(function MessageBubble({
   // 后端 ISO 时间戳，两者永不相等，导致切换会话/重启后点赞状态丢失 (#547 恢复 review)。
   // 工具链行（turnIndex 未传）不渲染反馈 UI，键值无所谓，沿用 timestamp 兜底。
   const feedbackKey =
-    turnIndex !== undefined
-      ? `${sessionKey}:turn:${turnIndex}`
-      : `${sessionKey}:${msg.timestamp}`;
+    turnIndex !== undefined ? `${sessionKey}:turn:${turnIndex}` : `${sessionKey}:${msg.timestamp}`;
   const [feedback, setFeedback] = useState<'up' | 'down' | null>(() => {
     try {
       const map = JSON.parse(localStorage.getItem(MSG_FEEDBACK_KEY) || '{}');
@@ -6693,13 +8398,27 @@ const MessageBubble = memo(function MessageBubble({
   const [dislikeDone, setDislikeDone] = useState(false);
   const [dislikeError, setDislikeError] = useState('');
 
+  // ── Hook-count uniformity ─────────────────────────────────────────────
+  // These three hooks must run BEFORE the role-based early returns below
+  // (progress / error / subagent).  A fiber reconciled across a role change
+  // (e.g. a window-switch restore that swaps a bubble's role at the same
+  // key) would otherwise call 9 hooks on the early-return path vs 12 on the
+  // main path — React throws "Rendered fewer hooks than expected".
+  const bubbleRef = useRef<HTMLDivElement>(null);
+  const capturedSelectionRef = useRef('');
+  const [copyHovered, setCopyHovered] = useState(false);
+  // #880: 消息渲染失败兜底——「显示原文」切换为查看原始 markdown/HTML 文本
+  const [showRawOnError, setShowRawOnError] = useState(false);
+
   const persistFeedback = (v: 'up' | 'down' | null) => {
     try {
       const map = JSON.parse(localStorage.getItem(MSG_FEEDBACK_KEY) || '{}');
       if (v === null) delete map[feedbackKey];
       else map[feedbackKey] = v;
       localStorage.setItem(MSG_FEEDBACK_KEY, JSON.stringify(map));
-    } catch { /* storage unavailable */ }
+    } catch {
+      /* storage unavailable */
+    }
   };
 
   const submitDislike = async () => {
@@ -6712,8 +8431,7 @@ const MessageBubble = memo(function MessageBubble({
         category: 'suggestion',
         title: '回答不满意',
         content:
-          (dislikeText.trim() ||
-            '（未填写具体说明）') +
+          (dislikeText.trim() || '（未填写具体说明）') +
           `\n\n— 消息摘要：${msg.content.slice(0, 200)}`,
         app_version: typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : 'dev',
       });
@@ -6738,6 +8456,8 @@ const MessageBubble = memo(function MessageBubble({
         }
         reasoning={msg.reasoning}
         content={String(msg.content ?? '')}
+        elapsedSeconds={msg.reasoningElapsedS}
+        mode={msg.reasoningMode}
         onResume={onResume}
         onRestart={onRestart}
       />
@@ -6796,44 +8516,79 @@ const MessageBubble = memo(function MessageBubble({
       // Both stack under the label row with the left rule running through
       // (用户要求：URL 往下堆叠、竖线贯穿、点击搜索行直接出结果卡片).
       const results =
-        isSearch && !isCollapsed
-          ? parseWebSearchResults(searchResults ?? msg.content)
-          : [];
+        isSearch && !isCollapsed ? parseWebSearchResults(searchResults ?? msg.content) : [];
       const canExpandSearch = isSearch && results.length > 0;
+      // Full exec command (issue #902): the label shows a 60-char summary, the
+      // expanded block shows the untruncated command + a copy button.  Rows
+      // with no command args (legacy sessions) still expand to show output.
+      const cmdText = msg.toolArgs !== undefined ? toolCommandText(msg.toolArgs) : undefined;
+      const canExpandCmd = typeof cmdText === 'string' && cmdText.length > 0;
+      const canExpand = canExpandCmd || !!msg.toolOutput;
       return (
         <div className="flex items-start gap-2 py-0.5">
           <div className="flex w-4 flex-col items-center self-stretch">
             <span className="text-[13px] leading-none">{toolIconEmoji(iconName)}</span>
             {toolStepIndex ? (
-              <span className="mt-0.5 text-[9px] leading-none tabular-nums" style={{ color: 'var(--info)' }}>
+              <span
+                className="mt-0.5 text-[9px] leading-none tabular-nums"
+                style={{ color: 'var(--info)' }}
+              >
                 {String(toolStepIndex).padStart(2, '0')}
               </span>
             ) : null}
-            <span className="mt-0.5 w-[2px] flex-1 min-h-2 rounded-full" style={{ background: 'var(--border-subtle)' }} />
+            <span
+              className="mt-0.5 w-[2px] flex-1 min-h-2 rounded-full"
+              style={{ background: 'var(--border-subtle)' }}
+            />
             {!isLastToolRow && (
-              <ArrowDown size={10} className="shrink-0" style={{ color: 'var(--info)', opacity: 0.55 }} />
+              <ArrowDown
+                size={10}
+                className="shrink-0"
+                style={{ color: 'var(--info)', opacity: 0.55 }}
+              />
             )}
           </div>
           <div className="min-w-0 flex-1">
             <button
               type="button"
-              onClick={canExpandSearch ? () => setSearchOpen((v) => !v) : undefined}
+              onClick={
+                canExpandSearch
+                  ? () => setSearchOpen((v) => !v)
+                  : canExpand
+                    ? () => setExpanded((v) => !v)
+                    : undefined
+              }
               className={cn(
                 'block min-w-0 text-left font-mono text-[11px] leading-[1.6] break-all rounded-[8px] px-2.5 py-1.5',
-                canExpandSearch && 'cursor-pointer select-none hover:opacity-85'
+                (canExpandSearch || canExpand) && 'cursor-pointer select-none hover:opacity-85'
               )}
               style={{ background: '#f5f5f5', border: '1px solid #e8e8e8', color: '#333' }}
-              aria-expanded={canExpandSearch ? searchOpen : undefined}
+              aria-expanded={canExpandSearch ? searchOpen : canExpand ? expanded : undefined}
             >
               {toolLabel}
-              {canExpandSearch && (
+              {(canExpandSearch || canExpand) && (
                 <ChevronDown
                   size={11}
                   className="ml-1 inline-block shrink-0 align-middle transition-transform opacity-60"
-                  style={{ transform: searchOpen ? 'none' : 'rotate(-90deg)' }}
+                  style={{
+                    transform: canExpandSearch
+                      ? searchOpen
+                        ? 'none'
+                        : 'rotate(-90deg)'
+                      : expanded
+                        ? 'none'
+                        : 'rotate(-90deg)',
+                  }}
                 />
               )}
             </button>
+            {expanded && cmdText !== undefined && (
+              <ToolCommandBlock
+                command={cmdText}
+                onCopy={(t) => onCopy(t, copyIdx ?? 0)}
+                copied={isCopied}
+              />
+            )}
             {searchOpen && results.length > 0 && (
               <div className="mt-1 flex flex-col gap-1.5">
                 {results.map((r) => (
@@ -6846,7 +8601,10 @@ const MessageBubble = memo(function MessageBubble({
                     className="block rounded-lg border p-2 transition-colors hover:border-[var(--info)]"
                     style={{ borderColor: 'var(--border-subtle)' }}
                   >
-                    <div className="flex items-center gap-1.5 text-[11px]" style={{ color: 'var(--info)' }}>
+                    <div
+                      className="flex items-center gap-1.5 text-[11px]"
+                      style={{ color: 'var(--info)' }}
+                    >
                       <img
                         src={`https://${hostOf(r.url)}/favicon.ico`}
                         alt=""
@@ -6860,7 +8618,10 @@ const MessageBubble = memo(function MessageBubble({
                     </div>
                     <div className="mt-0.5 truncate text-xs font-medium">{r.title}</div>
                     {r.snippet && (
-                      <div className="mt-0.5 line-clamp-2 text-[11px] leading-relaxed" style={{ color: 'var(--text-muted)' }}>
+                      <div
+                        className="mt-0.5 line-clamp-2 text-[11px] leading-relaxed"
+                        style={{ color: 'var(--text-muted)' }}
+                      >
                         {r.snippet}
                       </div>
                     )}
@@ -6899,7 +8660,13 @@ const MessageBubble = memo(function MessageBubble({
               <div className="mt-1 p-2 bg-black/80 text-green-400 text-[11px] font-mono rounded max-h-48 overflow-y-auto border border-gray-700">
                 <pre
                   className="whitespace-pre-wrap"
-                  style={{ background: 'transparent', border: 'none', borderRadius: 0, padding: 0, margin: 0 }}
+                  style={{
+                    background: 'transparent',
+                    border: 'none',
+                    borderRadius: 0,
+                    padding: 0,
+                    margin: 0,
+                  }}
                 >
                   {execOutputs[msg.toolCallId].stdout}
                   {execOutputs[msg.toolCallId].stderr ? (
@@ -6912,7 +8679,16 @@ const MessageBubble = memo(function MessageBubble({
               </div>
             )}
             {!isCollapsed && msg.toolOutput && results.length === 0 && (
-              <div className="mt-1 max-h-48 overflow-y-auto rounded border border-gray-700 bg-black/80 p-2 font-mono text-[11px] leading-relaxed whitespace-pre-wrap break-all" style={{ color: '#d1d5db' }}>
+              <div
+                className="mt-1 max-h-48 overflow-y-auto rounded border border-gray-700 bg-black/80 p-2 font-mono text-[11px] leading-relaxed whitespace-pre-wrap break-all"
+                style={{ color: '#d1d5db' }}
+              >
+                <span
+                  className="mb-1 block text-[10px] uppercase tracking-wide opacity-70"
+                  style={{ color: '#9ca3af' }}
+                >
+                  输出
+                </span>
                 {msg.content}
               </div>
             )}
@@ -6930,20 +8706,26 @@ const MessageBubble = memo(function MessageBubble({
             msg.collapsed && 'cursor-pointer select-none',
             isToolRow ? 'hover:opacity-80' : 'hover:opacity-75'
           )}
-          style={
-            isToolRow
-              ? { color: 'var(--info)' }
-              : { color: 'var(--text-muted)' }
-          }
+          style={isToolRow ? { color: 'var(--info)' } : { color: 'var(--text-muted)' }}
         >
           {isToolRow ? (
-            <span className="text-[12px] leading-none">{toolIconEmoji(activities[0]?.name ?? '')}</span>
+            <span className="text-[12px] leading-none">
+              {toolIconEmoji(activities[0]?.name ?? '')}
+            </span>
           ) : isLast ? (
             <Loader2 size={11} className="shrink-0 animate-spin opacity-70" />
           ) : (
             <CheckCircle size={11} className="shrink-0 opacity-70" />
           )}
-          <span className="truncate">{toolLabel}</span>
+          {/* Tool rows show the derived chain label; plain progress rows
+              (warnings, billing notices, …) show their full content — the
+              chain-label pipeline truncates to 28 chars and would cut off
+              the message body (#921). */}
+          {isToolRow ? (
+            <span className="truncate">{toolLabel}</span>
+          ) : (
+            <span className="whitespace-pre-wrap break-words">{msg.content}</span>
+          )}
           {msg.collapsed &&
             (isCollapsed ? (
               <ChevronRight size={11} className="shrink-0 opacity-60" />
@@ -6951,7 +8733,7 @@ const MessageBubble = memo(function MessageBubble({
               <ChevronDown size={11} className="shrink-0 opacity-60" />
             ))}
         </button>
-        {!isCollapsed && !msg.toolOutput && activities.length > 0 && (
+        {!isCollapsed && isToolRow && !msg.toolOutput && activities.length > 0 && (
           <div className="mt-0.5 flex flex-col gap-0.5 pl-0.5">
             {activities.map((act, i) => (
               <span key={i} className="text-[11px]" style={{ color: 'var(--info)' }}>
@@ -6966,7 +8748,13 @@ const MessageBubble = memo(function MessageBubble({
           <div className="ml-5 mt-1 p-2 bg-black/80 text-green-400 text-[11px] font-mono rounded max-h-48 overflow-y-auto border border-gray-700">
             <pre
               className="whitespace-pre-wrap"
-              style={{ background: 'transparent', border: 'none', borderRadius: 0, padding: 0, margin: 0 }}
+              style={{
+                background: 'transparent',
+                border: 'none',
+                borderRadius: 0,
+                padding: 0,
+                margin: 0,
+              }}
             >
               {execOutputs[msg.toolCallId].stdout}
               {execOutputs[msg.toolCallId].stderr ? (
@@ -7022,6 +8810,17 @@ const MessageBubble = memo(function MessageBubble({
               {msg.actionLabel ?? '配置 Provider'}
             </button>
           )}
+          {/* #1000 未登录拦截：错误气泡内直接一键浏览器登录（自管理忙碌/反馈态），
+              登录成功后移除本引导气泡 */}
+          {msg.action === 'login' && (
+            <QraftLoginButton
+              testId="chat-error-login-btn"
+              size="sm"
+              busyLabel="等待授权中…"
+              className="mt-3"
+              onLoggedIn={() => onLoginSuccess?.(msg)}
+            />
+          )}
         </div>
       </div>
     );
@@ -7052,7 +8851,6 @@ const MessageBubble = memo(function MessageBubble({
 
   // 复制选区（restored from pre-#577, issue #677）：选中即复制选中、
   // 否则复制全文。hover 不得清掉菜单打开时捕获的选区。
-  const bubbleRef = useRef<HTMLDivElement>(null);
   const selectMessageText = () => {
     const textEl = bubbleRef.current?.querySelector('[data-message-body]') as HTMLElement | null;
     if (!textEl) return;
@@ -7065,8 +8863,6 @@ const MessageBubble = memo(function MessageBubble({
   const deselectMessageText = () => {
     window.getSelection()?.removeAllRanges();
   };
-  const capturedSelectionRef = useRef('');
-  const [copyHovered, setCopyHovered] = useState(false);
   const copyWithSelection = () => {
     const selected = capturedSelectionRef.current;
     onCopy(selected.length > 0 ? selected : msg.content, copyIdx ?? turnIndex ?? 0);
@@ -7094,13 +8890,23 @@ const MessageBubble = memo(function MessageBubble({
 
   const contextItems: ContextMenuAction[] = isUser
     ? [
-        { label: '复制文本', onEnter: selectMessageText, onLeave: deselectMessageText, onSelect: copyWithSelection },
+        {
+          label: '复制文本',
+          onEnter: selectMessageText,
+          onLeave: deselectMessageText,
+          onSelect: copyWithSelection,
+        },
         { label: '复制原始消息', onSelect: copyRawMessage },
         { label: '复制时间戳', onSelect: copyTimestamp },
         { label: '重试', onSelect: () => onRetry?.(msg) },
       ]
     : [
-        { label: '复制文本', onEnter: selectMessageText, onLeave: deselectMessageText, onSelect: copyWithSelection },
+        {
+          label: '复制文本',
+          onEnter: selectMessageText,
+          onLeave: deselectMessageText,
+          onSelect: copyWithSelection,
+        },
         { label: '复制原始消息', onSelect: copyRawMessage },
         { label: '复制时间戳', onSelect: copyTimestamp },
         ...(hasCodeBlock
@@ -7127,7 +8933,13 @@ const MessageBubble = memo(function MessageBubble({
       {({ onContextMenu }) => (
         <div
           ref={bubbleRef}
-          className={cn('flex min-w-0', isUser ? 'items-end justify-end' : 'flex-col items-start w-full')}
+          className={cn(
+            'flex min-w-0 gap-3',
+            isUser ? 'items-start justify-end' : 'flex-col items-start',
+            // reply-content (thinking/tools already rendered the icon rail) —
+            // indent the body so it lines up with the thinking/tool labels.
+            hideHeader && !isUser && 'pl-4'
+          )}
           onContextMenu={(e) => {
             // Capture any manual selection before hover-preview can replace it
             capturedSelectionRef.current = window.getSelection()?.toString() ?? '';
@@ -7135,195 +8947,254 @@ const MessageBubble = memo(function MessageBubble({
           }}
           data-testid={isUser ? 'chat-message-user' : 'chat-message-assistant'}
         >
-          {!isUser && (
-            /* 头像 + 名字（WorkBuddy 式——用户明确）：最上面一行：A 字头像 + MiQi 名字 */
-            <div className="flex items-center gap-2 mb-1.5" data-testid="assistant-avatar-row">
+          {!isUser && !hideHeader && (
+            <div className="flex items-center gap-2 mb-3 pl-2" data-testid="assistant-avatar-row">
               <AgentAvatar />
               <span
-                className="text-[12.5px] font-medium"
-                style={{ color: 'var(--text-muted, #6b7280)' }}
+                className="text-[16px] font-semibold shrink-0 whitespace-nowrap"
+                style={{ color: 'var(--text)' }}
               >
-                MiQi
+                MiQroForge
               </span>
             </div>
           )}
 
-          {/* Pending spinner — the optimistic user bubble is shown before the
+            {/* Pending spinner — the optimistic user bubble is shown before the
               backend has accepted the send; a small spinning icon (no text)
               outside the bubble tells the user it's on its way.  It appears
               only while this exact bubble (matched by timestamp) is still
               pending (issue #364). */}
-          {isUser && sending === msg.timestamp && (
-            <Loader2 size={14} className="animate-spin shrink-0 self-center text-text-faint" />
-          )}
-
-          <div
-            className={cn(
-              'group flex min-w-0 flex-col gap-1.5',
-              isUser ? 'items-end max-w-[70%]' : 'w-full max-w-full'
+            {isUser && sending === msg.timestamp && (
+              <Loader2 size={14} className="animate-spin shrink-0 self-center text-text-faint" />
             )}
-          >
-            {/* image attachments */}
-            {msg.attachments
-              ?.filter((a) => a.type === 'image')
-              .map((att, i) =>
-                att.dataUrl ? (
-                  <img
-                    key={i}
-                    src={att.dataUrl}
-                    alt={att.name}
-                    className="rounded-xl max-w-[280px] max-h-[200px] object-cover"
-                    style={{ border: '1px solid var(--border-subtle)' }}
-                  />
-                ) : (
-                  // Restoring / read-failed image — placeholder instead of a
-                  // broken <img> (same fallback as the composer, CodeRabbit #661).
-                  <div
-                    key={i}
-                    className="flex h-24 w-24 shrink-0 items-center justify-center rounded-xl"
-                    style={{ border: '1px solid var(--border-subtle)', background: 'var(--surface-muted)' }}
-                  >
-                    <Image size={18} style={{ color: 'var(--info)' }} />
-                  </div>
-                )
+
+            <div
+              className={cn(
+                'group flex min-w-0 flex-col gap-1.5',
+                isUser ? 'items-end max-w-[calc(100%-48px)]' : 'w-full'
               )}
-            {/* text attachments */}
-            {msg.attachments
-              ?.filter((a) => a.type === 'text')
-              .map((att, i) => (
-                <div
-                  key={i}
-                  className="flex min-w-0 max-w-full items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs"
-                  style={{
-                    background: 'var(--surface-muted)',
-                    border: '1px solid var(--border-subtle)',
-                    color: 'var(--text-muted)',
-                  }}
-                >
-                  <FileText size={12} className="shrink-0 text-text-faint" />
-                  <span className="truncate min-w-0" title={att.name}>{att.name}</span>
-                </div>
-              ))}
-            {/* document attachments */}
-            {msg.attachments
-              ?.filter((a) => a.type === 'document')
-              .map((att, i) => {
-                const cat = getDocCategory(att.name);
-                const isDone = !att.status || att.status === 'done';
-                const isParsing = att.status === 'parsing';
-                return (
+            >
+              {/* image attachments */}
+              {msg.attachments
+                ?.filter((a) => a.type === 'image')
+                .map((att, i) =>
+                  att.dataUrl ? (
+                    <img
+                      key={i}
+                      src={att.dataUrl}
+                      alt={att.name}
+                      className="rounded-xl max-w-[280px] max-h-[200px] object-cover"
+                      style={{ border: '1px solid var(--border-subtle)' }}
+                    />
+                  ) : (
+                    // Restoring / read-failed image — placeholder instead of a
+                    // broken <img> (same fallback as the composer, CodeRabbit #661).
+                    <div
+                      key={i}
+                      className="flex h-24 w-24 shrink-0 items-center justify-center rounded-xl"
+                      style={{
+                        border: '1px solid var(--border-subtle)',
+                        background: 'var(--surface-muted)',
+                      }}
+                    >
+                      <Image size={18} style={{ color: 'var(--info)' }} />
+                    </div>
+                  )
+                )}
+              {/* text attachments */}
+              {msg.attachments
+                ?.filter((a) => a.type === 'text')
+                .map((att, i) => (
                   <div
                     key={i}
-                    className="flex min-w-0 max-w-full items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs transition-all duration-500"
-                    style={{
-                      background: isDone && cat ? cat.bg : 'var(--surface-muted)',
-                      border: `1px solid ${isDone && cat ? cat.color + '40' : 'var(--border-subtle)'}`,
-                      color: isDone && cat ? cat.color : 'var(--text-muted)',
-                      opacity: isDone ? 1 : 0.7,
-                    }}
-                  >
-                    <span
-                      className="shrink-0 rounded font-bold text-[10px] px-1 py-0.5 leading-none text-white"
-                      style={{ background: isDone && cat ? cat.color : 'var(--text-faint)' }}
-                    >
-                      {cat ? cat.label : 'FILE'}
-                    </span>
-                    <span className="truncate min-w-0" title={att.name}>{att.name}</span>
-                    <span className="shrink-0 whitespace-nowrap">({formatFileSize(att.size)})</span>
-                    {isParsing && (
-                      <Loader2 size={11} className="shrink-0 animate-spin text-text-muted" />
-                    )}
-                    {isDone && (
-                      <CheckCircle size={11} className="shrink-0" style={{ color: '#22c55e' }} />
-                    )}
-                  </div>
-                );
-              })}
-            {/* Always clean injected document text from content — shown as chips only when attachments are missing */}
-            {isUser &&
-              (() => {
-                const { cleanContent, chips } = extractFileChips(msg.content);
-                // Always store cleaned content so the bubble renders without injected text
-                (msg as any).__cleanContent = cleanContent;
-                // Only show historical chips when there are no real attachments (avoids duplicates)
-                if (chips.length === 0 || (msg.attachments && msg.attachments.length > 0))
-                  return null;
-                return chips.map((chip, i) => (
-                  <div
-                    key={`hist-${i}`}
                     className="flex min-w-0 max-w-full items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs"
                     style={{
-                      background: chip.category.bg,
-                      border: `1px solid ${chip.category.color}40`,
-                      color: chip.category.color,
+                      background: 'var(--surface-muted)',
+                      border: '1px solid var(--border-subtle)',
+                      color: 'var(--text-muted)',
                     }}
                   >
-                    <span
-                      className="shrink-0 rounded font-bold text-[10px] px-1 py-0.5 leading-none text-white"
-                      style={{ background: chip.category.color }}
-                    >
-                      {chip.category.label}
+                    <FileText size={12} className="shrink-0 text-text-faint" />
+                    <span className="truncate min-w-0" title={att.name}>
+                      {att.name}
                     </span>
-                    <span className="truncate min-w-0" title={chip.name}>{chip.name}</span>
-                    <CheckCircle size={11} className="shrink-0" style={{ color: '#22c55e' }} />
                   </div>
-                ));
-              })()}
+                ))}
+              {/* document attachments */}
+              {msg.attachments
+                ?.filter((a) => a.type === 'document')
+                .map((att, i) => {
+                  const cat = getDocCategory(att.name);
+                  const isDone = !att.status || att.status === 'done';
+                  const isParsing = att.status === 'parsing';
+                  return (
+                    <div
+                      key={i}
+                      className="flex min-w-0 max-w-full items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs transition-all duration-500"
+                      style={{
+                        background: isDone && cat ? cat.bg : 'var(--surface-muted)',
+                        border: `1px solid ${isDone && cat ? cat.color + '40' : 'var(--border-subtle)'}`,
+                        color: isDone && cat ? cat.color : 'var(--text-muted)',
+                        opacity: isDone ? 1 : 0.7,
+                      }}
+                    >
+                      <span
+                        className="shrink-0 rounded font-bold text-[10px] px-1 py-0.5 leading-none text-white"
+                        style={{ background: isDone && cat ? cat.color : 'var(--text-faint)' }}
+                      >
+                        {cat ? cat.label : 'FILE'}
+                      </span>
+                      <span className="truncate min-w-0" title={att.name}>
+                        {att.name}
+                      </span>
+                      <span className="shrink-0 whitespace-nowrap">
+                        ({formatFileSize(att.size)})
+                      </span>
+                      {isParsing && (
+                        <Loader2 size={11} className="shrink-0 animate-spin text-text-muted" />
+                      )}
+                      {isDone && (
+                        <CheckCircle
+                          size={11}
+                          className="shrink-0"
+                          style={{ color: 'var(--success)' }}
+                        />
+                      )}
+                    </div>
+                  );
+                })}
+              {/* Always clean injected document text from content — shown as chips only when attachments are missing */}
+              {isUser &&
+                (() => {
+                  const { cleanContent, chips } = extractFileChips(msg.content);
+                  // Always store cleaned content so the bubble renders without injected text
+                  (msg as any).__cleanContent = cleanContent;
+                  // Only show historical chips when there are no real attachments (avoids duplicates)
+                  if (chips.length === 0 || (msg.attachments && msg.attachments.length > 0))
+                    return null;
+                  return chips.map((chip, i) => (
+                    <div
+                      key={`hist-${i}`}
+                      className="flex min-w-0 max-w-full items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs"
+                      style={{
+                        background: chip.category.bg,
+                        border: `1px solid ${chip.category.color}40`,
+                        color: chip.category.color,
+                      }}
+                    >
+                      <span
+                        className="shrink-0 rounded font-bold text-[10px] px-1 py-0.5 leading-none text-white"
+                        style={{ background: chip.category.color }}
+                      >
+                        {chip.category.label}
+                      </span>
+                      <span className="truncate min-w-0" title={chip.name}>
+                        {chip.name}
+                      </span>
+                      <CheckCircle
+                        size={11}
+                        className="shrink-0"
+                        style={{ color: 'var(--success)' }}
+                      />
+                    </div>
+                  ));
+                })()}
 
-            {/* Main bubble */}
-            <div
-              data-message-body
-              className="text-sm leading-relaxed rounded-2xl px-4 py-3 transition-shadow"
-              style={{
-                ...(isUser
-                  ? { background: 'var(--bubble-user-bg)', color: 'var(--bubble-user-text)' }
-                  : {
-                      background: 'var(--bubble-ai-bg)',
-                      color: 'var(--bubble-ai-text)',
-                      border: '1px solid var(--bubble-ai-border)',
-                    }),
-                // 经典蓝色框（#547 hover 复制预览）：跟随气泡圆角的外框
-                ...(copyHovered ? { boxShadow: '0 0 0 2px var(--accent)' } : {}),
-              }}
-            >
-              <ErrorBoundary
-                fallback={(error, reset) => (
-                  <div
-                    className="text-xs p-2 rounded"
-                    style={{ color: 'var(--danger)', background: 'var(--danger-bg)' }}
-                  >
-                    ⚠ 消息渲染失败
+              {/* Main bubble — AI 侧去气泡：正文直接落在 chat 背景上撑满列宽（issue #772） */}
+              <div
+                data-message-body
+                className={cn(
+                  'text-sm transition-shadow',
+                  isUser && 'rounded-2xl rounded-br-none px-4 py-3'
+                )}
+                style={{
+                  lineHeight: 'var(--leading-relaxed)',
+                  ...(isUser
+                    ? { background: 'var(--bubble-user-bg)', color: 'var(--bubble-user-text)' }
+                    : { color: 'var(--bubble-ai-text)' }),
+                  // 经典蓝色框（#547 hover 复制预览）：跟随气泡/正文外框
+                  ...(copyHovered ? { boxShadow: '0 0 0 2px var(--accent)' } : {}),
+                }}
+              >
+                {showRawOnError ? (
+                  <div>
+                    <pre
+                      className="p-3 text-xs font-mono leading-relaxed whitespace-pre-wrap break-all overflow-auto"
+                      style={{
+                        color: 'var(--text-muted)',
+                        background: 'var(--surface-muted)',
+                        maxHeight: '60vh',
+                      }}
+                    >
+                      {msg.content}
+                    </pre>
                     <button
-                      onClick={reset}
-                      className="ml-2 underline"
+                      onClick={() => setShowRawOnError(false)}
+                      className="mt-1 text-xs underline"
                       style={{ color: 'var(--accent)' }}
                     >
-                      重试
+                      返回
                     </button>
                   </div>
-                )}
-              >
-                {msg.role === 'assistant' && msg.content === '' && !msg.reasoning ? (
-                  <span className="inline-block w-2 h-4 bg-[var(--accent)] animate-pulse rounded-sm" />
-                ) : msg.role === 'assistant' ? (
-                  <>
-                    {/* Reasoning-mode icon (issue #680): shown only when there
-                        is NO thinking block above (the block's icon already
-                        carries 🚀/🧠 by mode — avoids duplicate badges). The
-                        icon follows the message's OWN mode, not the live
-                        app-wide mode (audit P0-2). */}
-                    {(msg.reasoningMode ?? reasoningMode) === 'fast' && !msg.reasoning && (
-                      <span className="mr-1 text-[11px] leading-none select-none" style={{ color: '#d9a520' }}>
-                        🚀
-                      </span>
-                    )}
-                    <MarkdownContent content={msg.content} />
-                  </>
                 ) : (
-                  renderContent((msg as any).__cleanContent ?? msg.content)
+                  <ErrorBoundary
+                    fallback={(error, reset) => (
+                      <div
+                        className="text-xs p-2 rounded"
+                        style={{ color: 'var(--danger)', background: 'var(--danger-bg)' }}
+                      >
+                        ⚠ 消息渲染失败
+                        <button
+                          onClick={reset}
+                          className="ml-2 underline"
+                          style={{ color: 'var(--accent)' }}
+                        >
+                          重试
+                        </button>
+                        <button
+                          onClick={() => setShowRawOnError(true)}
+                          className="ml-2 underline"
+                          style={{ color: 'var(--accent)' }}
+                        >
+                          显示原文
+                        </button>
+                      </div>
+                    )}
+                  >
+                    {msg.role === 'assistant' && msg.content === '' && !msg.reasoning ? (
+                      <span className="inline-block w-2 h-4 bg-[var(--accent)] animate-pulse rounded-sm" />
+                    ) : msg.role === 'assistant' ? (
+                      <>
+                        {/* Reasoning-mode icon (issue #680): shown only when there
+                          is NO thinking block above (the block's icon already
+                          carries 🚀/🧠 by mode — avoids duplicate badges). The
+                          icon follows the message's OWN mode, not the live
+                          app-wide mode (audit P0-2).
+                          #905 follow-up: reply-content messages (hideHeader)
+                          always sit under a reply-head thinking block whose
+                          header already shows 🚀/🧠 — a second inline 🚀
+                          right above the answer (below the tool rows) is a
+                          duplicate badge. Check the ACTUAL presence of the
+                          block above, not msg.reasoning (which lives on the
+                          separate progress row and is always undefined here). */}
+                        {(msg.reasoningMode ?? reasoningMode) === 'fast' &&
+                          !msg.reasoning &&
+                          !hideHeader && (
+                            <span
+                              className="mr-1 text-[11px] leading-none select-none"
+                              style={{ color: '#d9a520' }}
+                            >
+                              🚀
+                            </span>
+                          )}
+                        <MarkdownContent content={msg.content} />
+                      </>
+                    ) : (
+                      renderContent((msg as any).__cleanContent ?? msg.content)
+                    )}
+                  </ErrorBoundary>
                 )}
-              </ErrorBoundary>
-            </div>
+              </div>
 
             {/* 2026-08-27：计划/确认是 AI 回答的一部分——卡在消息内容后、操作栏前 */}
             {cards && cards.length > 0 && (
@@ -7339,172 +9210,178 @@ const MessageBubble = memo(function MessageBubble({
               </div>
             )}
 
-            {/* Message action bar — copy / regenerate / feedback / sources.
+              {/* 常驻免责声明（#836）—— 每条 AI 回答正文底部 */}
+              {!isUser && msg.content !== '' && (
+                <div className="mt-0.5" data-testid="chat-disclaimer">
+                  <span className="text-size-2xs leading-relaxed text-[var(--text-faint)] select-none">
+                    {CHAT_DISCLAIMER_ZH}
+                  </span>
+                </div>
+              )}
+
+              {/* Message action bar — copy / regenerate / feedback / sources.
                 Restored from #547 (dropped by the #577 rewrite). */}
-            {!isUser && msg.content !== '' && (
-              <div
-                className="flex items-center gap-0.5 self-start opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 transition-opacity"
-                data-testid="message-actions"
-              >
-                <button
-                  onClick={() => onCopy(msg.content, copyIdx ?? turnIndex ?? 0)}
-                  onMouseEnter={() => {
-                    setCopyHovered(true);
-                    selectMessageText();
-                  }}
-                  onMouseLeave={() => {
-                    setCopyHovered(false);
-                    deselectMessageText();
-                  }}
-                  title="复制"
-                  aria-label="复制"
-                  className="p-1 rounded hover:bg-[var(--surface-muted)] hover:text-[var(--text)] transition-colors"
+              {!isUser && msg.content !== '' && (
+                <div
+                  className="flex items-center gap-0.5 self-start opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 transition-opacity"
+                  data-testid="message-actions"
                 >
-                  {isCopied ? (
-                    <Check size={13} style={{ color: 'var(--success)' }} />
-                  ) : (
-                    <Copy size={13} />
-                  )}
-                </button>
-                {onRegenerate && (
                   <button
-                    onClick={() => onRegenerate?.(msg)}
-                    title="重新生成"
-                    aria-label="重新生成"
+                    onClick={() => onCopy(msg.content, copyIdx ?? turnIndex ?? 0)}
+                    onMouseEnter={() => {
+                      setCopyHovered(true);
+                      selectMessageText();
+                    }}
+                    onMouseLeave={() => {
+                      setCopyHovered(false);
+                      deselectMessageText();
+                    }}
+                    title="复制"
+                    aria-label="复制"
                     className="p-1 rounded hover:bg-[var(--surface-muted)] hover:text-[var(--text)] transition-colors"
                   >
-                    <RefreshCw size={13} />
+                    {isCopied ? (
+                      <Check size={13} style={{ color: 'var(--success)' }} />
+                    ) : (
+                      <Copy size={13} />
+                    )}
                   </button>
-                )}
+                  {onRegenerate && (
+                    <button
+                      onClick={() => onRegenerate?.(msg)}
+                      title="重新生成"
+                      aria-label="重新生成"
+                      className="p-1 rounded hover:bg-[var(--surface-muted)] hover:text-[var(--text)] transition-colors"
+                    >
+                      <RefreshCw size={13} />
+                    </button>
+                  )}
+                  <button
+                    onClick={() => {
+                      const next = feedback === 'up' ? null : 'up';
+                      setFeedback(next);
+                      persistFeedback(next);
+                    }}
+                    title="喜欢"
+                    aria-label="喜欢"
+                    className={`p-1 rounded hover:bg-[var(--surface-muted)] transition-colors ${
+                      feedback === 'up' ? 'text-[var(--accent)]' : ''
+                    }`}
+                  >
+                    <ThumbsUp size={13} />
+                  </button>
+                  <button
+                    onClick={() => {
+                      const next = feedback === 'down' ? null : 'down';
+                      setFeedback(next);
+                      persistFeedback(next);
+                      if (next === 'down') {
+                        setDislikeText('');
+                        setDislikeDone(false);
+                        setShowDislike(true);
+                      }
+                    }}
+                    title="不喜欢"
+                    aria-label="不喜欢"
+                    className={`p-1 rounded hover:bg-[var(--surface-muted)] transition-colors ${
+                      feedback === 'down' ? 'text-[var(--danger)]' : ''
+                    }`}
+                  >
+                    <ThumbsDown size={13} />
+                  </button>
+                  {/* 查看来源 always visible (#547 原版行为) — 无来源时弹窗给提示 */}
+                  <button
+                    onClick={() => setShowSources(true)}
+                    title="查看来源"
+                    aria-label="查看来源"
+                    className="p-1 rounded hover:bg-[var(--surface-muted)] hover:text-[var(--text)] transition-colors"
+                  >
+                    <ExternalLink size={13} />
+                  </button>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+      </ContextMenu>
+
+      {/* Sources modal — tools used for this answer + reference URLs (#547). */}
+      <Modal
+        open={showSources}
+        onOpenChange={setShowSources}
+        title={`查看来源${(sources ?? []).length > 0 ? `（${(sources ?? []).length}）` : ''}`}
+      >
+        <div className="flex flex-col gap-1.5 max-h-[50vh] overflow-y-auto">
+          {(sources ?? []).map((s, i) => (
+            <a
+              key={`${s.url}-${i}`}
+              href={s.url}
+              target="_blank"
+              rel="noreferrer"
+              className="flex items-center gap-2 rounded-lg px-2.5 py-2 text-xs hover:bg-[var(--surface-muted)] transition-colors"
+            >
+              <ExternalLink size={12} className="shrink-0" />
+              <span className="truncate">
+                {s.tool ? `${s.tool} · ` : ''}
+                {s.url}
+              </span>
+            </a>
+          ))}
+          {(sources ?? []).length === 0 && (
+            <p className="text-xs text-[var(--text-muted)]">该回答未使用网络工具，没有参考资料。</p>
+          )}
+        </div>
+      </Modal>
+
+      {/* Dislike feedback modal — lightweight report actually submitted to
+        the backend feedback channel (not just a local toggle). */}
+      <Modal open={showDislike} onOpenChange={setShowDislike} title="反馈：回答不满意">
+        <div className="flex flex-col gap-3">
+          <p className="text-xs text-[var(--text-muted)]">
+            感谢反馈。可以补充说明哪里不满意（可选），我们会将这条反馈连同消息内容一起提交。
+          </p>
+          <textarea
+            value={dislikeText}
+            onChange={(e) => setDislikeText(e.target.value)}
+            placeholder="可选：说明不满意的地方（例如：答案不准确、缺少引用……）"
+            rows={3}
+            disabled={dislikeSending || dislikeDone}
+            className="w-full rounded-lg px-3 py-2 text-sm bg-[var(--surface-muted)] border border-[var(--border-subtle)] focus:outline-none focus:border-[var(--accent)]"
+          />
+          {dislikeDone ? (
+            <p className="text-xs" style={{ color: 'var(--success)' }}>
+              ✓ 已提交反馈
+            </p>
+          ) : (
+            <>
+              {dislikeError && (
+                <p className="text-xs" style={{ color: 'var(--danger)' }}>
+                  {dislikeError}
+                </p>
+              )}
+              <div className="flex justify-end gap-2">
                 <button
-                  onClick={() => {
-                    const next = feedback === 'up' ? null : 'up';
-                    setFeedback(next);
-                    persistFeedback(next);
-                  }}
-                  title="喜欢"
-                  aria-label="喜欢"
-                  className={`p-1 rounded hover:bg-[var(--surface-muted)] transition-colors ${
-                    feedback === 'up' ? 'text-[var(--accent)]' : ''
-                  }`}
+                  type="button"
+                  onClick={() => setShowDislike(false)}
+                  disabled={dislikeSending}
+                  className="px-3 py-1.5 rounded-lg text-xs hover:bg-[var(--surface-muted)] transition-colors"
                 >
-                  <ThumbsUp size={13} />
+                  取消
                 </button>
                 <button
-                  onClick={() => {
-                    const next = feedback === 'down' ? null : 'down';
-                    setFeedback(next);
-                    persistFeedback(next);
-                    if (next === 'down') {
-                      setDislikeText('');
-                      setDislikeDone(false);
-                      setShowDislike(true);
-                    }
-                  }}
-                  title="不喜欢"
-                  aria-label="不喜欢"
-                  className={`p-1 rounded hover:bg-[var(--surface-muted)] transition-colors ${
-                    feedback === 'down' ? 'text-[var(--danger)]' : ''
-                  }`}
+                  type="button"
+                  onClick={submitDislike}
+                  disabled={dislikeSending}
+                  className="px-3 py-1.5 rounded-lg text-xs font-medium transition-colors disabled:opacity-50"
+                  style={{ background: 'var(--danger)', color: 'var(--danger-bg)' }}
                 >
-                  <ThumbsDown size={13} />
-                </button>
-                {/* 查看来源 always visible (#547 原版行为) — 无来源时弹窗给提示 */}
-                <button
-                  onClick={() => setShowSources(true)}
-                  title="查看来源"
-                  aria-label="查看来源"
-                  className="p-1 rounded hover:bg-[var(--surface-muted)] hover:text-[var(--text)] transition-colors"
-                >
-                  <ExternalLink size={13} />
+                  {dislikeSending ? '提交中…' : '提交反馈'}
                 </button>
               </div>
-            )}
-          </div>
-
-          {isUser && <UserAvatar />}
+            </>
+          )}
         </div>
-      )}
-    </ContextMenu>
-
-    {/* Sources modal — tools used for this answer + reference URLs (#547). */}
-    <Modal
-      open={showSources}
-      onOpenChange={setShowSources}
-      title={`查看来源${(sources ?? []).length > 0 ? `（${(sources ?? []).length}）` : ''}`}
-    >
-      <div className="flex flex-col gap-1.5 max-h-[50vh] overflow-y-auto">
-        {(sources ?? []).map((s, i) => (
-          <a
-            key={`${s.url}-${i}`}
-            href={s.url}
-            target="_blank"
-            rel="noreferrer"
-            className="flex items-center gap-2 rounded-lg px-2.5 py-2 text-xs hover:bg-[var(--surface-muted)] transition-colors"
-          >
-            <ExternalLink size={12} className="shrink-0" />
-            <span className="truncate">{s.tool ? `${s.tool} · ` : ''}{s.url}</span>
-          </a>
-        ))}
-        {(sources ?? []).length === 0 && (
-          <p className="text-xs text-[var(--text-muted)]">该回答未使用网络工具，没有参考资料。</p>
-        )}
-      </div>
-    </Modal>
-
-    {/* Dislike feedback modal — lightweight report actually submitted to
-        the backend feedback channel (not just a local toggle). */}
-    <Modal
-      open={showDislike}
-      onOpenChange={setShowDislike}
-      title="反馈：回答不满意"
-    >
-      <div className="flex flex-col gap-3">
-        <p className="text-xs text-[var(--text-muted)]">
-          感谢反馈。可以补充说明哪里不满意（可选），我们会将这条反馈连同消息内容一起提交。
-        </p>
-        <textarea
-          value={dislikeText}
-          onChange={(e) => setDislikeText(e.target.value)}
-          placeholder="可选：说明不满意的地方（例如：答案不准确、缺少引用……）"
-          rows={3}
-          disabled={dislikeSending || dislikeDone}
-          className="w-full rounded-lg px-3 py-2 text-sm bg-[var(--surface-muted)] border border-[var(--border-subtle)] focus:outline-none focus:border-[var(--accent)]"
-        />
-        {dislikeDone ? (
-          <p className="text-xs" style={{ color: 'var(--success)' }}>
-            ✓ 已提交反馈
-          </p>
-        ) : (
-          <>
-            {dislikeError && (
-              <p className="text-xs" style={{ color: 'var(--danger)' }}>
-                {dislikeError}
-              </p>
-            )}
-            <div className="flex justify-end gap-2">
-            <button
-              type="button"
-              onClick={() => setShowDislike(false)}
-              disabled={dislikeSending}
-              className="px-3 py-1.5 rounded-lg text-xs hover:bg-[var(--surface-muted)] transition-colors"
-            >
-              取消
-            </button>
-            <button
-              type="button"
-              onClick={submitDislike}
-              disabled={dislikeSending}
-              className="px-3 py-1.5 rounded-lg text-xs font-medium transition-colors disabled:opacity-50"
-              style={{ background: 'var(--danger)', color: 'var(--danger-bg)' }}
-            >
-              {dislikeSending ? '提交中…' : '提交反馈'}
-            </button>
-          </div>
-          </>
-        )}
-      </div>
-    </Modal>
+      </Modal>
     </>
   );
 }, areMessageBubblePropsEqual);
@@ -7516,10 +9393,7 @@ const MessageBubble = memo(function MessageBubble({
  * tool-only signature), so untouched bubbles skip render entirely during
  * animation frames — the #538 全量重渲染 fix for long sessions.
  */
-function areMessageBubblePropsEqual(
-  a: MessageBubbleProps,
-  b: MessageBubbleProps
-): boolean {
+function areMessageBubblePropsEqual(a: MessageBubbleProps, b: MessageBubbleProps): boolean {
   return (
     a.msg === b.msg &&
     a.sessionKey === b.sessionKey &&

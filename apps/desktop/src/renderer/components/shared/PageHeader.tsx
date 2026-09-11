@@ -8,12 +8,7 @@ export interface PageHeaderProps {
   className?: string;
 }
 
-export function PageHeader({
-  title,
-  description,
-  actions,
-  className,
-}: PageHeaderProps) {
+export function PageHeader({ title, description, actions, className }: PageHeaderProps) {
   return (
     <div
       className={cn(
@@ -23,15 +18,9 @@ export function PageHeader({
     >
       <div>
         <h1 className="text-base font-semibold text-[var(--text)]">{title}</h1>
-        {description && (
-          <p className="text-xs text-[var(--text-muted)] mt-0.5">
-            {description}
-          </p>
-        )}
+        {description && <p className="text-xs text-[var(--text-muted)] mt-0.5">{description}</p>}
       </div>
-      {actions && (
-        <div className="flex items-center gap-2">{actions}</div>
-      )}
+      {actions && <div className="flex items-center gap-2">{actions}</div>}
     </div>
   );
 }

@@ -1,10 +1,9 @@
 """Verify generated PDF is valid and contains expected content."""
+import glob as _glob
 import json
 import os
 import re
 import sys
-import glob as _glob
-from pathlib import Path
 
 sys.stdout.reconfigure(encoding='utf-8')
 

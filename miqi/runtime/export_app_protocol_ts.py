@@ -9,24 +9,23 @@ import miqi.runtime.protocol_specs as specs
 from miqi.runtime.core_request_models import CORE_METHOD_PARAM_MODELS
 from miqi.runtime.core_response_models import CORE_METHOD_RESULT_MODELS
 from miqi.runtime.filesystem_request_models import FILESYSTEM_METHOD_PARAM_MODELS
-from miqi.runtime.plugin_skill_request_models import PLUGIN_SKILL_METHOD_PARAM_MODELS
-from miqi.runtime.plugin_skill_response_models import PLUGIN_SKILL_METHOD_RESULT_MODELS
-from miqi.runtime.session_request_models import SESSION_METHOD_PARAM_MODELS
-from miqi.runtime.session_response_models import SESSION_METHOD_RESULT_MODELS
-from miqi.runtime.thread_request_models import THREAD_METHOD_PARAM_MODELS
-from miqi.runtime.thread_response_models import THREAD_METHOD_RESULT_MODELS
-from miqi.runtime.process_request_models import COMMAND_PROCESS_METHOD_PARAM_MODELS
 from miqi.runtime.filesystem_response_models import (
     FILESYSTEM_EVENT_MODELS,
     FILESYSTEM_METHOD_RESULT_MODELS,
 )
+from miqi.runtime.plugin_skill_request_models import PLUGIN_SKILL_METHOD_PARAM_MODELS
+from miqi.runtime.plugin_skill_response_models import PLUGIN_SKILL_METHOD_RESULT_MODELS
+from miqi.runtime.process_request_models import COMMAND_PROCESS_METHOD_PARAM_MODELS
 from miqi.runtime.process_response_models import (
     PROCESS_EVENT_MODELS,
     PROCESS_METHOD_RESULT_MODELS,
 )
 from miqi.runtime.protocol_model_schema import params_schema_from_model, result_schema_from_model
+from miqi.runtime.session_request_models import SESSION_METHOD_PARAM_MODELS
+from miqi.runtime.session_response_models import SESSION_METHOD_RESULT_MODELS
+from miqi.runtime.thread_request_models import THREAD_METHOD_PARAM_MODELS
+from miqi.runtime.thread_response_models import THREAD_METHOD_RESULT_MODELS
 from miqi.runtime.turn_request_models import TURN_METHOD_PARAM_MODELS
-
 
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_OUTPUT = ROOT / "apps" / "desktop" / "src" / "shared" / "app-protocol.ts"

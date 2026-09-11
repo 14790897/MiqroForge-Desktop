@@ -10,7 +10,6 @@ Validates:
 
 import pytest
 
-
 # ── helpers ──────────────────────────────────────────────────────────────────
 
 
@@ -67,7 +66,7 @@ async def test_files_tree_workspace_only(fake_config, fake_provider, tmp_path):
 @pytest.mark.asyncio
 async def test_files_tree_session_scoped_requires_claim(fake_config, fake_provider, tmp_path):
     """files.tree with unowned session_key returns REQUIRES_CLAIM."""
-    from miqi.runtime.app_server import ClientSessionRegistry, AppServerError
+    from miqi.runtime.app_server import AppServerError, ClientSessionRegistry
     from miqi.runtime.file_handlers import files_tree_handler
 
     # Create an unowned session on disk (no owner_client_id)
@@ -106,7 +105,7 @@ async def test_files_read_own_file_succeeds(fake_config, fake_provider, tmp_path
 @pytest.mark.asyncio
 async def test_files_read_cross_client_rejected(fake_config, fake_provider, tmp_path):
     """files.read by client-B on client-A's session returns UNAUTHORIZED."""
-    from miqi.runtime.app_server import ClientSessionRegistry, AppServerError
+    from miqi.runtime.app_server import AppServerError, ClientSessionRegistry
     from miqi.runtime.file_handlers import files_read_handler
 
     sm, ws = _setup_session("x-read-a", "client-A")
@@ -125,7 +124,7 @@ async def test_files_read_cross_client_rejected(fake_config, fake_provider, tmp_
 @pytest.mark.asyncio
 async def test_files_read_unowned_legacy_requires_claim(fake_config, fake_provider, tmp_path):
     """files.read on unowned legacy session returns REQUIRES_CLAIM."""
-    from miqi.runtime.app_server import ClientSessionRegistry, AppServerError
+    from miqi.runtime.app_server import AppServerError, ClientSessionRegistry
     from miqi.runtime.file_handlers import files_read_handler
 
     sm, ws = _setup_session("legacy-read-unowned", None, set_owner=False)
@@ -144,7 +143,7 @@ async def test_files_read_unowned_legacy_requires_claim(fake_config, fake_provid
 @pytest.mark.asyncio
 async def test_files_read_missing_path(fake_config, fake_provider, tmp_path):
     """files.read rejects missing path parameter."""
-    from miqi.runtime.app_server import ClientSessionRegistry, AppServerError
+    from miqi.runtime.app_server import AppServerError, ClientSessionRegistry
     from miqi.runtime.file_handlers import files_read_handler
 
     registry = ClientSessionRegistry()
@@ -181,7 +180,7 @@ async def test_files_write_own_session_succeeds(fake_config, fake_provider, tmp_
 @pytest.mark.asyncio
 async def test_files_write_cross_client_rejected(fake_config, fake_provider, tmp_path):
     """files.write by client-B on client-A's session returns UNAUTHORIZED."""
-    from miqi.runtime.app_server import ClientSessionRegistry, AppServerError
+    from miqi.runtime.app_server import AppServerError, ClientSessionRegistry
     from miqi.runtime.file_handlers import files_write_handler
 
     _setup_session("write-cross", "client-A")
@@ -199,7 +198,7 @@ async def test_files_write_cross_client_rejected(fake_config, fake_provider, tmp
 @pytest.mark.asyncio
 async def test_files_write_unowned_legacy_rejected(fake_config, fake_provider, tmp_path):
     """files.write on unowned legacy session returns REQUIRES_CLAIM (no auto-claim)."""
-    from miqi.runtime.app_server import ClientSessionRegistry, AppServerError
+    from miqi.runtime.app_server import AppServerError, ClientSessionRegistry
     from miqi.runtime.file_handlers import files_write_handler
 
     _setup_session("write-legacy-unowned", None, set_owner=False)
@@ -220,7 +219,7 @@ async def test_files_write_unowned_legacy_rejected(fake_config, fake_provider, t
 @pytest.mark.asyncio
 async def test_files_delete_cross_client_rejected(fake_config, fake_provider, tmp_path):
     """files.delete by client-B on client-A's session returns UNAUTHORIZED."""
-    from miqi.runtime.app_server import ClientSessionRegistry, AppServerError
+    from miqi.runtime.app_server import AppServerError, ClientSessionRegistry
     from miqi.runtime.file_handlers import files_delete_handler
 
     sm, ws = _setup_session("delete-cross", "client-A")
@@ -242,7 +241,7 @@ async def test_files_delete_cross_client_rejected(fake_config, fake_provider, tm
 @pytest.mark.asyncio
 async def test_files_diff_cross_client_rejected(fake_config, fake_provider, tmp_path):
     """files.diff by client-B on client-A's session returns UNAUTHORIZED."""
-    from miqi.runtime.app_server import ClientSessionRegistry, AppServerError
+    from miqi.runtime.app_server import AppServerError, ClientSessionRegistry
     from miqi.runtime.file_handlers import files_diff_handler
 
     _setup_session("diff-cross", "client-A")
@@ -263,7 +262,7 @@ async def test_files_diff_cross_client_rejected(fake_config, fake_provider, tmp_
 @pytest.mark.asyncio
 async def test_files_revert_cross_client_rejected(fake_config, fake_provider, tmp_path):
     """files.revert by client-B on client-A's session returns UNAUTHORIZED."""
-    from miqi.runtime.app_server import ClientSessionRegistry, AppServerError
+    from miqi.runtime.app_server import AppServerError, ClientSessionRegistry
     from miqi.runtime.file_handlers import files_revert_handler
 
     _setup_session("revert-cross", "client-A")
@@ -285,8 +284,9 @@ async def test_files_revert_uses_session_manager_not_undefined_function():
     The handler must NOT reference the previously undefined _remove_tracked_file
     symbol. It should use SessionManager.remove_tracked_file with client_id.
     """
-    from miqi.runtime.file_handlers import files_revert_handler
     import inspect
+
+    from miqi.runtime.file_handlers import files_revert_handler
 
     source = inspect.getsource(files_revert_handler)
     # The handler must not call bare _remove_tracked_file(...)
@@ -322,7 +322,7 @@ async def test_files_accept_updates_tracked_files_with_client_id(fake_config, fa
 @pytest.mark.asyncio
 async def test_files_accept_cross_client_rejected(fake_config, fake_provider, tmp_path):
     """files.accept by client-B on client-A's session returns UNAUTHORIZED."""
-    from miqi.runtime.app_server import ClientSessionRegistry, AppServerError
+    from miqi.runtime.app_server import AppServerError, ClientSessionRegistry
     from miqi.runtime.file_handlers import files_accept_handler
 
     _setup_session("accept-cross", "client-A")
@@ -344,6 +344,7 @@ async def test_files_accept_cross_client_rejected(fake_config, fake_provider, tm
 async def test_sandbox_manager_client_scoped_keys():
     """Same session_key under different clients maps to different sandbox keys."""
     from pathlib import Path
+
     from miqi.sandbox.manager import SandboxManager
 
     manager = SandboxManager(workspace=Path("."), enabled=False)

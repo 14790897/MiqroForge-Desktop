@@ -36,7 +36,7 @@ export function useSessionStatus() {
     (sessionKey: string): SessionStatus => {
       return map[sessionKey] ?? 'PENDING';
     },
-    [map],
+    [map]
   );
 
   const getStatusDisplay = useCallback((status: SessionStatus): StatusDisplayInfo => {

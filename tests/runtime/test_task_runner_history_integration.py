@@ -243,7 +243,7 @@ async def test_task_runner_auto_compacts_before_large_turn(
     before AgentMessageEvent."""
     from unittest.mock import AsyncMock
 
-    from miqi.protocol.events import ContextCompactedEvent, TurnCompleteEvent
+    from miqi.protocol.events import TurnCompleteEvent
     from miqi.runtime.context_runtime import CompactionResult
 
     runtime = RuntimeSession.create(
@@ -303,9 +303,7 @@ async def test_compaction_failure_does_not_crash_runtime(
     from unittest.mock import AsyncMock
 
     from miqi.protocol.events import (
-        AgentMessageEvent,
         ErrorEvent,
-        EventSeverity,
         TurnCompleteEvent,
     )
 
@@ -369,7 +367,6 @@ async def test_compaction_record_persisted_and_reused(
     import asyncio as _asyncio
     from unittest.mock import AsyncMock, MagicMock
 
-    from miqi.runtime.context_runtime import CompactionResult
     from miqi.runtime.history_runtime import HistoryRuntime
     from miqi.runtime.task_runner import TaskRunner
 
@@ -534,7 +531,8 @@ async def test_real_compactor_produces_summary_and_replaces_history(tmp_path):
     assert summary_msgs[0]["role"] == "system"
 
     # Verify compaction audit record
-    import aiosqlite, json
+
+    import aiosqlite
     async with aiosqlite.connect(str(db_path)) as db:
         db.row_factory = aiosqlite.Row
         cursor = await db.execute(

@@ -7,7 +7,6 @@ Hardening: Path traversal and name validation tests for create/upload/delete.
 """
 
 import tempfile
-from pathlib import Path
 
 import pytest
 
@@ -48,8 +47,8 @@ async def test_skills_list_returns_skills(registry_with_state):
 @pytest.mark.asyncio
 async def test_skills_get_requires_name():
     """skills.get should reject empty name."""
-    from miqi.runtime.skill_handlers import skills_get_handler
     from miqi.runtime.app_server import AppServerError
+    from miqi.runtime.skill_handlers import skills_get_handler
 
     registry = ClientSessionRegistry()
     with pytest.raises(AppServerError, match="name is required"):
@@ -59,8 +58,8 @@ async def test_skills_get_requires_name():
 @pytest.mark.asyncio
 async def test_skills_get_not_found(registry_with_state):
     """skills.get should raise NOT_FOUND for nonexistent skill."""
-    from miqi.runtime.skill_handlers import skills_get_handler
     from miqi.runtime.app_server import AppServerError
+    from miqi.runtime.skill_handlers import skills_get_handler
 
     registry, mock_state = registry_with_state
     config = _make_config_with_workspace()
@@ -77,8 +76,8 @@ async def test_skills_get_not_found(registry_with_state):
 @pytest.mark.asyncio
 async def test_skills_open_folder_requires_name():
     """skills.open_folder should reject empty name."""
-    from miqi.runtime.skill_handlers import skills_open_folder_handler
     from miqi.runtime.app_server import AppServerError
+    from miqi.runtime.skill_handlers import skills_open_folder_handler
 
     registry = ClientSessionRegistry()
     with pytest.raises(AppServerError, match="name is required"):
@@ -106,8 +105,8 @@ async def test_skills_open_folder_returns_path(registry_with_state):
 @pytest.mark.asyncio
 async def test_skills_create_invalid_name():
     """skills.create should reject invalid skill names."""
-    from miqi.runtime.skill_handlers import skills_create_handler
     from miqi.runtime.app_server import AppServerError
+    from miqi.runtime.skill_handlers import skills_create_handler
 
     registry = ClientSessionRegistry()
     with pytest.raises(AppServerError, match="Invalid name"):
@@ -122,8 +121,8 @@ async def test_skills_create_invalid_name():
 @pytest.mark.asyncio
 async def test_skills_delete_builtin():
     """skills.delete should reject builtin skill deletion."""
-    from miqi.runtime.skill_handlers import skills_delete_handler
     from miqi.runtime.app_server import AppServerError
+    from miqi.runtime.skill_handlers import skills_delete_handler
 
     registry = ClientSessionRegistry()
     with pytest.raises(AppServerError, match="Builtin skills cannot be deleted"):
@@ -159,8 +158,8 @@ _PATH_TRAVERSAL_NAMES = [
 @pytest.mark.parametrize("bad_name,desc", _PATH_TRAVERSAL_NAMES)
 async def test_skills_create_rejects_path_traversal(bad_name, desc):
     """skills.create rejects path traversal and malicious names."""
-    from miqi.runtime.skill_handlers import skills_create_handler
     from miqi.runtime.app_server import AppServerError
+    from miqi.runtime.skill_handlers import skills_create_handler
 
     registry = ClientSessionRegistry()
     with pytest.raises(AppServerError, match="Invalid name"):
@@ -173,8 +172,8 @@ async def test_skills_create_rejects_path_traversal(bad_name, desc):
 @pytest.mark.parametrize("bad_name,desc", _PATH_TRAVERSAL_NAMES)
 async def test_skills_upload_rejects_path_traversal(bad_name, desc):
     """skills.upload rejects path traversal and malicious names."""
-    from miqi.runtime.skill_handlers import skills_upload_handler
     from miqi.runtime.app_server import AppServerError
+    from miqi.runtime.skill_handlers import skills_upload_handler
 
     registry = ClientSessionRegistry()
     with pytest.raises(AppServerError, match="Invalid name"):
@@ -187,8 +186,8 @@ async def test_skills_upload_rejects_path_traversal(bad_name, desc):
 @pytest.mark.parametrize("bad_name,desc", _PATH_TRAVERSAL_NAMES)
 async def test_skills_delete_rejects_path_traversal(bad_name, desc):
     """skills.delete rejects path traversal and malicious names."""
-    from miqi.runtime.skill_handlers import skills_delete_handler
     from miqi.runtime.app_server import AppServerError
+    from miqi.runtime.skill_handlers import skills_delete_handler
 
     registry = ClientSessionRegistry()
     with pytest.raises(AppServerError, match="Invalid name"):
@@ -203,7 +202,6 @@ async def test_skills_delete_rejects_path_traversal(bad_name, desc):
 def test_validate_skill_path_blocks_traversal_after_resolve(tmp_path):
     """_validate_skill_path blocks paths that resolve outside workspace/skills."""
     from miqi.runtime.skill_handlers import _validate_skill_path
-    from miqi.runtime.app_server import AppServerError
 
     workspace = tmp_path / "workspace"
     workspace.mkdir()

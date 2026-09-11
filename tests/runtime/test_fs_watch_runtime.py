@@ -17,9 +17,8 @@ from unittest.mock import MagicMock
 import pytest
 
 from miqi.runtime.app_server import AppServer, ClientCapabilities, ClientSessionRegistry
-from miqi.runtime.fs_watch_runtime import FsWatchRuntime
 from miqi.runtime.fs_watch_app_handlers import register_fs_watch_handlers
-
+from miqi.runtime.fs_watch_runtime import FsWatchRuntime
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 

@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import pytest
 
+from miqi.runtime.app_server import AppServerError
 from miqi.runtime.session_request_models import (
     SESSION_METHOD_PARAM_MODELS,
     validate_session_params,
 )
-from miqi.runtime.app_server import AppServerError
 
 
 class TestAllMethodsExist:
@@ -29,7 +29,7 @@ class TestAllMethodsExist:
 
 
 class TestSessionKeyAlias:
-    def test_accepts_sessionKey(self):
+    def test_accepts_camel_case_session_key(self):
         typed = validate_session_params("sessions.get", {"sessionKey": "abc"})
         assert typed.session_key == "abc"
 
@@ -73,7 +73,7 @@ class TestInvalidKeysRejected:
 
 
 class TestSessionRenameParams:
-    def test_accepts_title_and_sessionKey(self):
+    def test_accepts_title_and_session_key(self):
         typed = validate_session_params("sessions.rename", {"sessionKey": "abc", "title": "新标题"})
         assert typed.session_key == "abc"
         assert typed.title == "新标题"

@@ -1,6 +1,6 @@
 # 功能页面
 
-MiqroForge Desktop 前端包含 15 个功能页面，通过左侧 Sidebar 导航切换。
+MiQroForge Desktop 前端包含 15 个功能页面，通过左侧 Sidebar 导航切换。
 
 ## 页面总览
 

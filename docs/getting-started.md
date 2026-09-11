@@ -4,7 +4,7 @@
 
 | 依赖 | 版本要求 | 用途 |
 |------|----------|------|
-| Python | 3.11 或 3.12 | 运行 MiqroForge 后端 Agent 引擎 |
+| Python | 3.11 或 3.12 | 运行 MiQroForge 后端 Agent 引擎 |
 | Node.js | 20+ | 运行 Electron 前端 |
 | uv | 最新 | Python 包管理与虚拟环境 |
 | Git | 2.x | 版本控制与 MCP 子模块管理 |

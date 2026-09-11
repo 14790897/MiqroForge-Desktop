@@ -7,12 +7,19 @@
  *
  * 依据《Qraft OAuth2 接入实测文档》(issue #726)：
  * - access_token 实测有效期约 2 小时（expires_in=7199），并非官方的 24 小时；
- * - refresh_token 不轮换（刷新返回同一个值），不要依赖轮换语义；
+ * - refresh_token 轮换（刷新成功后旧值立即失效），必须持久化响应中的新值；
+ *   平台升级可能作废存量 refresh_token，此时刷新返回 REFRESH_TOKEN_INVALID；
  * - userinfo 响应无 picture 字段；
  * - 授权确认必须走 POST /oauth2/doConfirm（授权页修复前）；authorize 不传 state。
  */
 
-export type { QraftAccount, QraftErrorCode, QraftLoginResult, QraftStatus } from '../../shared/ipc';
+export type {
+  QraftAccount,
+  QraftErrorCode,
+  QraftLoginResult,
+  QraftPointsBalance,
+  QraftStatus,
+} from '../../shared/ipc';
 import type { QraftAccount } from '../../shared/ipc';
 
 export type QraftEnv = 'test' | 'prod';
@@ -84,4 +91,28 @@ export interface QraftStoredState {
   cookie: string;
   account: QraftAccount;
   tokens: QraftTokens;
+  /**
+   * 平台 AI 网关信息（userinfo 下发）。encryptedApiKey 属密钥：只存在于
+   * safeStorage 加密的 store 与 0600 的 token 文件中，绝不进渲染进程/日志。
+   * token 刷新不重拉 userinfo，故随本存储带入并在重写 token 文件时保留。
+   */
+  aiGateway?: QraftAiGateway;
+  /**
+   * 平台托管 MCP 网关凭据（userinfo 下发，作 Authorization Bearer）。
+   * 属密钥：只存在于加密 store 与 0600 token 文件，绝不进渲染进程/日志。
+   * token 刷新不重拉 userinfo，故随本存储带入并在重写 token 文件时保留。
+   */
+  mcpGatewayKey?: string;
+}
+
+/** 平台 AI 网关开通信息（腾讯云消费者密钥 + 状态 + 配置版本）。 */
+export interface QraftAiGateway {
+  /** 网关消费者密钥（X-Api-Key）。 */
+  encryptedApiKey: string;
+  /** 网关开通状态：active / provisioning / failed / disabled 等。 */
+  status: string;
+  /** 平台配置版本号（可热刷本地模型/网关清单，留后续）。 */
+  configVersion?: number;
+  consumerId?: string;
+  consumerGroupId?: string;
 }

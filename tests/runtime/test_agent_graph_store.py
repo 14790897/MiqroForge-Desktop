@@ -2,8 +2,6 @@
 
 import time
 
-import pytest
-
 from miqi.runtime.agent_graph_store import AgentGraphStore
 
 

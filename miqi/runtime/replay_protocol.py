@@ -5,7 +5,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-
 ReplaySource = Literal["live", "stored"]
 IntegritySeverity = Literal["info", "warning", "error"]
 

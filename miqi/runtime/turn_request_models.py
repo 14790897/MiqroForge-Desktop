@@ -13,7 +13,6 @@ from miqi.runtime.turn_protocol import (
     normalize_turn_input,
 )
 
-
 T = TypeVar("T", bound=BaseModel)
 
 

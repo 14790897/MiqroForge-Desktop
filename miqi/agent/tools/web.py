@@ -1,22 +1,22 @@
 """Web tools: web_search and web_fetch."""
 
+import asyncio
 import html
 import ipaddress
-import asyncio
 import json
 import logging
 import os
 import re
 import socket
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import urlparse
 
 import httpx
 
+from miqi.agent.tools.base import Tool
+
 # Suppress noisy readability tracebacks for empty/broken pages
 logging.getLogger("readability.readability").setLevel(logging.WARNING)
-
-from miqi.agent.tools.base import Tool
 
 # Shared constants
 USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_7_2) AppleWebKit/537.36"
@@ -165,7 +165,9 @@ class SearchResult:
 
 
 # Error categories that should trigger fallback in auto mode.
-_FALLBACK_ERRORS = {"RATE_LIMIT", "NETWORK", "SERVER_ERROR"}
+# BALANCE_ERROR（余额不足）也回落——DeepSeek 配置了 key 但账户没钱时，
+# 用户仍应能得到搜索结果（#979：配置了不能搜索 → 自动切换兜底）。
+_FALLBACK_ERRORS = {"RATE_LIMIT", "NETWORK", "SERVER_ERROR", "NO_RESULT", "BALANCE_ERROR"}
 # Errors that must NOT silently fall back (config problems) — log, but
 # degrade to the keyless provider once so the user still gets an answer.
 _AUTH_ERRORS = {"AUTH_ERROR", "NO_KEY"}
@@ -184,7 +186,10 @@ def _format_results(query: str, results: list[dict[str, str]]) -> str:
     """Model-facing string format (unchanged from the old tool output)."""
     lines = [f"Results for: {query}\n"]
     for i, item in enumerate(results, 1):
-        lines.append(f"{i}. {item.get('title', '')}\n   {item.get('url', '')}")
+        title = item.get("title", "")
+        url = item.get("url", "")
+        # DeepSeek 搜索结果是总结文本，无来源 URL——不伪造可抓取地址（外部审阅 #844）
+        lines.append(f"{i}. {title}\n   {url}" if url else f"{i}. {title}")
         if snippet := item.get("snippet"):
             lines.append(f"   {snippet}")
     return "\n".join(lines)
@@ -332,6 +337,125 @@ class TavilyProvider(SearchProvider):
             return SearchResult(False, error_type="NETWORK", provider="tavily")
 
 
+def _is_official_deepseek_base(api_base: str) -> bool:
+    """DeepSeek 官方 base 判断（hostname 精确 + HTTPS 强制，避免子串/明文误判）。
+
+    /responses 端点是官方专属——中转站/腾讯云只有 chat/completions。
+    http:// 明文会泄露 bearer token，拒绝（CodeRabbit #844）。
+    """
+    try:
+        p = urlparse(api_base or "")
+    except ValueError:
+        return False
+    return p.scheme == "https" and p.hostname == "api.deepseek.com"
+
+
+def _model_is_deepseek(model: str | None) -> bool:
+    """当前对话模型是否为 DeepSeek（"对应模型的联网搜索"判定）。
+
+    兼容 "deepseek/deepseek-v4-flash"（provider 前缀）与
+    "deepseek-v4-flash"（裸模型名）两种写法。
+    """
+    if not model:
+        return False
+    m = model.strip().lower()
+    return m == "deepseek" or m.startswith("deepseek/") or m.startswith("deepseek-")
+
+
+class DeepSeekSearchProvider(SearchProvider):
+    """DeepSeek 官方联网搜索（Responses API，复用 LLM key，零配置）。
+
+    仅支持官方 api_base（api.deepseek.com）——中转站/腾讯云没有 /responses
+    端点。模型自动拆多查询 + 打开原文核实，返回已总结文本（含来源）。
+    一次搜索 ≈ 7K tokens（约 0.3 分钱），medium 档实测 ~8s。
+    """
+
+    name = "deepseek"
+
+    def __init__(self, api_key: str, api_base: str = "https://api.deepseek.com",
+                 timeout: float = 30.0, model: str | None = None):
+        self.api_key = api_key
+        self.api_base = (api_base or "https://api.deepseek.com").rstrip("/")
+        self.timeout = timeout
+        # 跟随用户模型（去 provider 前缀，如 deepseek/deepseek-chat → deepseek-chat）；
+        # 非 deepseek 模型/未知时用 deepseek-v4-flash 兜底（CodeRabbit #844）
+        self.model = model or ""
+
+    def _resolve_model(self) -> str:
+        m = self.model.strip()
+        if m.startswith("deepseek/"):
+            m = m.split("/", 1)[1]
+        # v4 系列跟随用户模型；legacy（deepseek-chat/reasoner）与未知用 flash——
+        # 实测 legacy + 强制 tool_choice 只返回 web_search_call 无总结文本（NO_RESULT）
+        if m.startswith("deepseek-v4-"):
+            return m
+        return "deepseek-v4-flash"
+
+    async def search(self, query: str, count: int) -> SearchResult:
+        if not self.api_key:
+            return SearchResult(False, error_type="NO_KEY", provider="deepseek")
+        if not _is_official_deepseek_base(self.api_base):
+            return SearchResult(False, error_type="UNSUPPORTED", provider="deepseek")
+        # 实测 medium ~8s（与消费端一致）；high 35s 超过客户端超时，一律 medium
+        #（外部审阅 #844：count>=8 选 high 会 30s 必超时）
+        context = "medium"
+        # 规范化：官方 base 可能带 /v1（配置自动填充）——统一走文档化 /responses 路径
+        url = f"{self.api_base.rstrip('/').removesuffix('/v1')}/responses"
+        try:
+            async with asyncio.timeout(self.timeout):
+                async with httpx.AsyncClient(
+                    timeout=httpx.Timeout(self.timeout, connect=8.0, write=8.0, pool=8.0)
+                ) as client:
+                    r = await client.post(
+                        url,
+                        json={
+                            "model": self._resolve_model(),
+                            "input": query,
+                            "tools": [{"type": "web_search", "web_search": {"context_size": context}}],
+                            # 强制 web_search：防止"仅文本输出"被当成成功结果（CodeRabbit #844）
+                            "tool_choice": {"type": "web_search"},
+                        },
+                        headers={"Authorization": f"Bearer {self.api_key}"},
+                    )
+                    if r.status_code == 429:
+                        return SearchResult(False, error_type="RATE_LIMIT", provider="deepseek")
+                    if r.status_code in (401, 403):
+                        return SearchResult(False, error_type="AUTH_ERROR", provider="deepseek")
+                    if r.status_code == 402:
+                        # 预付账户余额不足——专属分类，不能当"服务端错误"（外部审阅 #844）
+                        return SearchResult(False, error_type="BALANCE_ERROR", provider="deepseek")
+                    if r.status_code >= 500:
+                        return SearchResult(False, error_type="SERVER_ERROR", provider="deepseek")
+                    r.raise_for_status()
+
+            data = r.json()
+            # 仅 completed 视为成功（failed/incomplete → 走 fallback 链，CodeRabbit #844）
+            if data.get("status") not in (None, "completed"):
+                return SearchResult(False, error_type="SERVER_ERROR", provider="deepseek")
+            text = ""
+            for item in data.get("output", []):
+                if item.get("type") != "message":
+                    continue
+                for c in item.get("content", []):
+                    if c.get("type") == "output_text" and c.get("text"):
+                        text = c["text"]
+            if not text:
+                # completed 但无输出（被拒/内容过滤等）——按失败回落，不能当"成功无结果"
+                # 短路整条链（外部审阅 #844）
+                return SearchResult(False, error_type="NO_RESULT", provider="deepseek")
+            return SearchResult(True, [{
+                "title": "DeepSeek 联网搜索（官方）",
+                "url": "",  # 总结文本无来源 URL——不伪造可抓取地址（外部审阅 #844）
+                "snippet": text,
+            }], provider="deepseek")
+        except (asyncio.TimeoutError, httpx.TimeoutException):
+            return SearchResult(False, error_type="NETWORK", provider="deepseek")
+        except httpx.HTTPStatusError:
+            return SearchResult(False, error_type="SERVER_ERROR", provider="deepseek")
+        except Exception:
+            return SearchResult(False, error_type="NETWORK", provider="deepseek")
+
+
 class SearchProviderManager:
     """Orchestrates providers for the configured search strategy.
 
@@ -340,22 +464,41 @@ class SearchProviderManager:
     keyless provider with a warning (never silently loops).
     """
 
-    _PROVIDERS = {"tavily": TavilyProvider, "brave": BraveProvider, "ddgs": DDGSProvider}
+    _PROVIDERS = {
+        "tavily": TavilyProvider,
+        "brave": BraveProvider,
+        "ddgs": DDGSProvider,
+        "deepseek": DeepSeekSearchProvider,
+    }
 
     def __init__(
         self,
         provider: str,
         *,
+        model: str | None = None,
+        model_provider: Callable[[], str | None] | None = None,
         tavily_api_key: str = "",
         brave_api_key: str = "",
+        deepseek_api_key: str = "",
+        deepseek_api_base: str = "https://api.deepseek.com",
     ):
+        self.model = model
+        # 动态模型解析：每次 _chain() 时重读（配置改动即时生效，外部审阅 #844）
+        self._model_provider = model_provider
         self.tavily_api_key = tavily_api_key
         self.brave_api_key = brave_api_key
+        self.deepseek_api_key = deepseek_api_key
+        self.deepseek_api_base = (deepseek_api_base or "https://api.deepseek.com").rstrip("/")
         name = (provider or "auto").lower()
         # Old "hybrid" value means the auto fallback chain now.
         self.provider = "auto" if name in {"auto", "hybrid"} else name
         if self.provider not in self._PROVIDERS:
             self.provider = "auto"
+
+    def _current_model(self) -> str | None:
+        if self._model_provider is not None:
+            return self._model_provider()
+        return self.model
 
     def _make(self, name: str) -> SearchProvider | None:
         if name == "tavily":
@@ -364,12 +507,27 @@ class SearchProviderManager:
             return BraveProvider(self.brave_api_key)
         if name == "ddgs":
             return DDGSProvider()
+        if name == "deepseek":
+            return DeepSeekSearchProvider(self.deepseek_api_key, self.deepseek_api_base,
+                                          model=self._current_model() or "")
         return None
 
     def _chain(self) -> list[SearchProvider]:
         if self.provider != "auto":
             return [self._make(self.provider)]
         chain = []
+        # ① 对话模型对应的官方联网搜索优先（如 DeepSeek /responses，零配置复用
+        #    模型 key）；② 配了 key 的第三方搜索（Tavily/Brave，快）；
+        #    ③ DDGS 兜底
+        if (
+            _model_is_deepseek(self._current_model())
+            and self.deepseek_api_key
+            and _is_official_deepseek_base(self.deepseek_api_base)
+        ):
+            chain.append(DeepSeekSearchProvider(
+                self.deepseek_api_key, self.deepseek_api_base,
+                model=self._current_model() or "",
+            ))
         if self.tavily_api_key:
             chain.append(TavilyProvider(self.tavily_api_key))
         if self.brave_api_key:
@@ -420,14 +578,17 @@ class SearchProviderManager:
 _ERROR_REASONS: dict[str, str] = {
     "NO_KEY": "未配置 {provider} API key，请在设置中填写",
     "AUTH_ERROR": "{provider} API key 无效（401/403），请在设置中检查",
+    "BALANCE_ERROR": "{provider} 账户余额不足（402），请充值后重试",
     "RATE_LIMIT": "搜索服务限流（429），请稍后重试",
     "NETWORK": "网络连接失败，请检查网络后重试",
     "SERVER_ERROR": "搜索服务暂时不可用（服务端错误）",
+    "UNSUPPORTED": "当前 {provider} 服务商不支持联网搜索（仅官方 api.deepseek.com 支持）",
 }
 _PROVIDER_LABELS: dict[str, str] = {
     "tavily": "Tavily",
     "brave": "Brave",
     "ddgs": "DuckDuckGo",
+    "deepseek": "DeepSeek",
 }
 
 
@@ -448,7 +609,7 @@ def _failure_message(result: SearchResult) -> str:
 
 
 class WebSearchTool(Tool):
-    """Search the web. provider=auto falls back Tavily → Brave → DDGS."""
+    """Search the web. provider=auto falls back 对应模型搜索 → Tavily → Brave → DDGS."""
 
     name = "web_search"
     description = "Search the web. Returns titles, URLs, and snippets."
@@ -471,14 +632,25 @@ class WebSearchTool(Tool):
         api_key: str | None = None,
         max_results: int = 5,
         provider: str = "auto",
+        model: str | None = None,
+        model_provider: Callable[[], str | None] | None = None,
         tavily_api_key: str | None = None,
         brave_api_key: str | None = None,
+        deepseek_api_key: str | None = None,
+        deepseek_api_base: str = "https://api.deepseek.com",
     ):
         self.manager = SearchProviderManager(
             provider,
+            # 当前对话模型：决定"对应模型的联网搜索"（如 DeepSeek）；model_provider
+            # 优先（每次链构建动态读取，配置换模型即时生效）
+            model=model,
+            model_provider=model_provider,
             # legacy api_key was the Brave key — never feed it to Tavily (#561)
             tavily_api_key=tavily_api_key or os.environ.get("TAVILY_API_KEY", ""),
             brave_api_key=brave_api_key or api_key or os.environ.get("BRAVE_API_KEY", ""),
+            # DeepSeek 联网搜索复用 LLM key（零配置；仅官方 base 生效）
+            deepseek_api_key=deepseek_api_key or os.environ.get("DEEPSEEK_API_KEY", ""),
+            deepseek_api_base=deepseek_api_base or "https://api.deepseek.com",
         )
         self.max_results = max_results
 
@@ -502,11 +674,13 @@ class WebSearchTool(Tool):
         return _format_results(query, result.results)
 
     async def _parallel_search(self, query: str, n_queries: int, n: int) -> list[str]:
-        """#804: fast 模式扇出搜索先走**配置的 provider 链**（Tavily→Brave→DDGS），
+        """#804: fast 模式扇出搜索先走**配置的 provider 链**（对应模型搜索 → Tavily → Brave → DDGS），
         不再被 SearchOrchestrator 直接 ddgs 绕过——用户配的 key 在 fast 模式
         同样生效（#748 的 fallback 链在默认 fast 路径下此前是死代码）。链失败
         /空结果才回退 ddgs 区域变体（原 orchestrator 内置逻辑，含 15s 超时）；
-        两者都失败时透出配置链的最后失败原因，不让模型误读为\"无结果\"。
+        两者都失败时透出配置链的最后失败原因，不让模型误读为"无结果"。
+        显式选择引擎时（provider != auto）不回退 ddgs——尊重显式语义
+        （如"仅使用 DeepSeek"），失败直接透出原因（外部审阅 #844）。
         """
         last_failure: SearchResult | None = None
         try:
@@ -519,6 +693,11 @@ class WebSearchTool(Tool):
                 "web_search parallel: manager chain failed for %r — falling back to ddgs",
                 query[:60],
             )
+        if self.manager.provider != "auto":
+            # 显式引擎：不静默回落，透出失败原因
+            if last_failure is not None and not last_failure.success:
+                return [_failure_message(last_failure)]
+            return []
         from miqi.agent.search_orchestrator import _ddgs_regional_search
 
         blocks = await _ddgs_regional_search(query, n_queries, n)

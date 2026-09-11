@@ -1,8 +1,8 @@
 {
   "name": "kwp-small-business",
   "version": "1.0.0",
-  "description": "Knowledge Work Plugins — Small Business (31 skills). Adapted from anthropics/knowledge-work-plugins for MiqroForge.",
-  "author": "Anthropic (adapted for MiqroForge)",
+  "description": "Knowledge Work Plugins — Small Business (31 skills). Adapted from anthropics/knowledge-work-plugins for MiQroForge.",
+  "author": "Anthropic (adapted for MiQroForge)",
   "skills": [
     "business-pulse",
     "call-list",

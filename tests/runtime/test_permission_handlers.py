@@ -7,11 +7,11 @@ migrated from bridge legacy to AppServer async handlers.
 Hardening: Cross-client isolation tests and global control-plane documentation.
 """
 
-import pytest
 from unittest.mock import MagicMock, patch
 
-from miqi.runtime.app_server import ClientSessionRegistry
+import pytest
 
+from miqi.runtime.app_server import ClientSessionRegistry
 
 # ── permissions.get ───────────────────────────────────────────────────────────
 

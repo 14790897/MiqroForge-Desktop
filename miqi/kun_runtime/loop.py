@@ -8,13 +8,16 @@ All dependencies are constructor-injected for testability.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 import time
 import uuid
+from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Literal
 
 from loguru import logger
 
+from miqi.agent.agent_mode import get_mode_config
+from miqi.agent.tools.user_roots import extract_user_mentioned_roots
 from miqi.kun_runtime.cancellation import CancellationToken, InflightTracker
 from miqi.kun_runtime.compactor import ContextCompactor
 from miqi.kun_runtime.event_recorder import RuntimeEventRecorder
@@ -22,7 +25,6 @@ from miqi.kun_runtime.model_client import (
     ModelRequest,
     ModelToolSpec,
 )
-from miqi.agent.agent_mode import get_mode_config
 from miqi.kun_runtime.stores import FileSessionStore, FileThreadStore
 from miqi.kun_runtime.tool_host import (
     ASK_USER_CONFIRM_TOOL,
@@ -94,6 +96,30 @@ def _remember_key(payload: dict[str, Any]) -> str:
     )
     raw = f"{title}|{message}|{steps}|{choices}"
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+
+
+def _turn_user_texts(
+    thread: dict[str, Any], items: list[dict[str, Any]], turn_id: str,
+) -> list[str]:
+    """Collect the current turn's user-message texts (prompt + steering).
+
+    Issue #821: only user-role content is scanned for directory mentions —
+    never model output or tool results, so prompt injection via documents
+    cannot grant roots.
+    """
+    texts: list[str] = []
+    for turn in thread.get("turns") or []:
+        if turn.get("id") == turn_id:
+            prompt = str(turn.get("prompt") or "")
+            if prompt:
+                texts.append(prompt)
+            break
+    for item in items:
+        if item.get("turnId") == turn_id and item.get("kind") == "user_message":
+            text = str(item.get("text") or "")
+            if text and text not in texts:
+                texts.append(text)
+    return texts
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -408,6 +434,22 @@ class AgentLoop:
         # generation, parallel search), think = current behavior.
         mode_cfg = get_mode_config((thread.get("metadata") or {}).get("mode"))
 
+        # User-mentioned output dirs (issue #821): auto-sense directories the
+        # user named in this turn's messages so file tools can read/write
+        # them (e.g. "输出到 C:\Users\x\Desktop\test_result").  Extraction is
+        # best-effort — a failure must never kill the turn.
+        _user_texts = _turn_user_texts(thread, loaded_items, turn_id)
+        _ws_raw = thread.get("workspace") or ""
+        try:
+            _user_roots = extract_user_mentioned_roots(
+                _user_texts, workspace=Path(_ws_raw) if _ws_raw else None,
+            )
+        except Exception:
+            logger.warning("user_roots extraction failed — continuing without extra roots", exc_info=True)
+            _user_roots = []
+        if _user_roots:
+            logger.debug("turn {}: user-mentioned roots: {}", turn_id, _user_roots)
+
         # List tools
         tool_context = ToolHostContext(
             thread_id=thread_id,
@@ -424,6 +466,7 @@ class AgentLoop:
             mode=mode_cfg.mode,
             search_strategy=mode_cfg.search,
             parallel_limit=mode_cfg.tool.parallel_limit,
+            user_mentioned_roots=[str(r) for r in _user_roots],
         )
         tools = await self._opts.tool_host.list_tools(tool_context)
         tool_specs = [ModelToolSpec(

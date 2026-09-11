@@ -11,10 +11,9 @@ Each skill is defined by a SKILL.md file with YAML frontmatter.
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass, field
-from pathlib import Path
 from enum import Enum
+from pathlib import Path
 
 import yaml
 from loguru import logger

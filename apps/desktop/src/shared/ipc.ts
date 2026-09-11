@@ -49,6 +49,7 @@ export const IPC = {
   PROVIDERS_TEST: 'providers:test',
   PROVIDERS_UPDATE: 'providers:update',
   PROVIDERS_ACTIVATE: 'providers:activate',
+  PROVIDERS_DEACTIVATE: 'providers:deactivate',
   // Models (model/list catalog — issue #788 常用模型预设)
   MODEL_LIST: 'models:list',
   CHANNELS_LIST: 'channels:list',
@@ -99,6 +100,7 @@ export const IPC = {
   FILES_ACCEPT: 'files:accept',
   FILES_OPEN_EXTERNAL: 'files:openExternal',
   FILES_OPEN_CONTAINING_FOLDER: 'files:openContainingFolder',
+  FILES_SAVE_AS: 'files:saveAs', // #877: 预览弹窗「下载/另存为」
   HTML_OPEN_IN_BROWSER: 'html:openInBrowser',
   DOWNLOADS_DOWNLOAD: 'downloads:download', // #667: 直接下载（论文 PDF 等）
   DOCUMENTS_PARSE: 'documents:parse',
@@ -123,6 +125,9 @@ export const IPC = {
 
   // Sandbox runtime toggle
   SANDBOX_SET_ENABLED: 'sandbox:setEnabled',
+
+  // #854: allow_system_installs runtime toggle (no restart)
+  SANDBOX_SET_ALLOW_SYSTEM_INSTALLS: 'sandbox:setAllowSystemInstalls',
 
   // Write initial config (no bridge needed �? used by Setup Wizard)
   CONFIG_WRITE_INITIAL: 'config:write_initial',
@@ -156,12 +161,18 @@ export const IPC = {
   FEEDBACK_SUBMIT: 'feedback:submit',
   FEEDBACK_LIST: 'feedback:list',
 
-  // Qraft 平台 OAuth2 登录 (issue #726, 主进程本地处理)
+  // MiQroForge 平台 OAuth2 登录 (issue #726, 主进程本地处理)
   QRAFT_LOGIN: 'qraft:login',
   QRAFT_BROWSER_LOGIN: 'qraft:browserLogin',
   QRAFT_STATUS: 'qraft:status',
   QRAFT_REFRESH: 'qraft:refresh',
   QRAFT_LOGOUT: 'qraft:logout',
+  QRAFT_POINTS_BALANCE: 'qraft:pointsBalance',
+  QRAFT_BILLING_HISTORY: 'qraft:billingHistory',
+
+  // App lifecycle
+  APP_QUIT: 'app:quit',
+  APP_FOCUS: 'app:focus',
 } as const;
 
 // ---------------------------------------------------------------------------
@@ -184,6 +195,12 @@ export const IPC_EVENTS = {
   USER_INPUT_REQUEST: 'userInput:request',
   USER_INPUT_RESOLVED: 'userInput:resolved',
 
+  // Config hot-reload broadcast (issue #789) — emitted by the bridge after
+  // config.save with tier A/B/C classification. Orphan events are mapped
+  // as CHAT_<TYPE> by the main process.
+  CONFIG_UPDATED: 'config:updated',
+  CHAT_CONFIG_UPDATED: 'config:updated',
+
   // New events (Phase 1)
   AGENT_SPAWNED: 'agent:spawned',
   AGENT_COMPLETED: 'agent:completed',
@@ -196,7 +213,7 @@ export const IPC_EVENTS = {
   WSL_INSTALL_PROGRESS: 'wsl:installProgress',
   WSL_CHECK_UPDATED: 'wsl:checkUpdated',
 
-  // Qraft 登录态变化（自动刷新/过期时由主进程推送）
+  // MiQroForge 登录态变化（自动刷新/过期时由主进程推送）
   QRAFT_STATUS_CHANGED: 'qraft:statusChanged',
 } as const;
 
@@ -249,6 +266,9 @@ export interface SessionClaimLegacyResult {
 
 export const ConfigUpdateInput = z.object({
   config: z.record(z.unknown()),
+  // 比较并设置（#991）：期望当前默认模型仍为此值，后端不一致时跳过写入。
+  // nullish：与 app-protocol.ts 契约（null | string）一致，null/缺省均放行
+  expectModel: z.string().nullish(),
 });
 
 export const ProviderTestInput = z.object({
@@ -269,6 +289,10 @@ export const ProviderUpdateInput = z.object({
 export const ProviderActivateInput = z.object({
   provider_name: z.string().min(1),
   activation_code: z.string().min(1),
+});
+
+export const ProviderDeactivateInput = z.object({
+  provider_name: z.string().min(1),
 });
 
 // New Phase 1 schemas
@@ -360,6 +384,12 @@ export interface ProvidersListResult {
   providers: ProviderInfo[];
   active_model?: string;
   active_provider?: string | null;
+  /**
+   * 当前默认模型在运行时是否真的能发起会话。登录后经平台 AI 网关路由的默认
+   * 模型不需要任何本地 provider 凭据，只看 `configured` 会误判为不可用。
+   * 旧版 bridge 不返回该字段时为 undefined（前端回退到 configured 判定）。
+   */
+  active_model_resolvable?: boolean;
 }
 
 export interface ProviderUpdateResult {
@@ -601,6 +631,26 @@ export interface CronSchedule {
   tz: string | null;
 }
 
+// Issue #789: config hot-reload broadcast payload (tier classification).
+export interface ConfigUpdatedPayload {
+  /** Tier A paths — hot-applied, no restart needed. */
+  applied: string[];
+  /** Tier B paths — take effect for new sessions/turns. */
+  newSessionsOnly: string[];
+  /** Tier C paths — require an app restart. */
+  restartRequired: string[];
+  /** Human-readable reasons for the restart-required paths. */
+  restartReasons: string[];
+  /** Number of active runtime sessions hot-applied. */
+  propagatedSessions?: number;
+  /**
+   * False when a provider rebuild failed during hot-apply (e.g. bad API
+   * key): the old provider stays in the active session, so the save is
+   * persisted but NOT live — UI must not claim "已生效".
+   */
+  providerRebuilt?: boolean;
+}
+
 export interface CronPayload {
   kind: 'system_event' | 'agent_turn';
   message: string;
@@ -763,11 +813,13 @@ export interface SkillDetail {
 // ---------------------------------------------------------------------------
 
 export interface McpServerConfig {
+  type?: string;
   command?: string;
   args?: string[];
   env?: Record<string, string>;
   url?: string;
   headers?: Record<string, string>;
+  insecure_http?: boolean;
   tool_timeout?: number;
   progress_interval_seconds?: number;
   description?: string;
@@ -780,11 +832,13 @@ export interface McpServerInfo extends McpServerConfig {
 
 export const McpUpsertInput = z.object({
   name: z.string().min(1),
+  type: z.string().optional(),
   command: z.string().optional(),
   args: z.array(z.string()).optional(),
   env: z.record(z.string()).optional(),
   url: z.string().optional(),
   headers: z.record(z.string()).optional(),
+  insecure_http: z.boolean().optional(),
   tool_timeout: z.number().optional(),
   progress_interval_seconds: z.number().optional(),
   description: z.string().optional(),
@@ -802,6 +856,13 @@ export const McpDeleteInput = z.object({
 export const FilesReadInput = z.object({
   path: z.string().min(1),
   session_key: z.string().optional(),
+  /** #877: read raw bytes (Office files etc.) for「下载/另存为」 */
+  as_binary: z.boolean().optional(),
+});
+
+export const FilesSaveAsInput = z.object({
+  default_name: z.string().min(1),
+  data_base64: z.string(),
 });
 
 export const FilesWriteInput = z.object({
@@ -872,6 +933,50 @@ export interface FilesOpenContainingFolderResult {
   error?: string;
 }
 
+/** #877: native save dialog result for the preview「下载/另存为」button. */
+export interface FilesSaveAsResult {
+  saved: boolean;
+  canceled?: boolean;
+  path?: string;
+  error?: string;
+}
+
+// ---------------------------------------------------------------------------
+// Structured document preview types (issue #877: rich in-app rendering)
+// ---------------------------------------------------------------------------
+
+export interface CellMerge {
+  /** 0-based row/col bounds of a merged range (inclusive). */
+  start_row: number;
+  start_col: number;
+  end_row: number;
+  end_col: number;
+}
+
+export interface StructuredSheet {
+  name: string;
+  rows: string[][];
+  merges?: CellMerge[];
+}
+
+export interface SpreadsheetData {
+  kind: 'spreadsheet';
+  sheets: StructuredSheet[];
+}
+
+export type DocBlock =
+  | { type: 'heading'; level: number; text: string }
+  | { type: 'paragraph'; text: string }
+  | { type: 'table'; rows: string[][] }
+  | { type: 'image'; data_url: string };
+
+export interface DocumentBlocks {
+  kind: 'document';
+  blocks: DocBlock[];
+}
+
+export type StructuredParseResult = SpreadsheetData | DocumentBlocks;
+
 export interface DocumentsParseResult {
   path: string;
   text: string;
@@ -880,6 +985,9 @@ export interface DocumentsParseResult {
   mime_type: string;
   ocr_used: boolean;
   parse_ms: number;
+  /** #877: present when structured parsing succeeded and the frontend
+   *  requested it.  Absent for formats without a rich renderer. */
+  structured?: StructuredParseResult;
 }
 
 export interface TrackedFileInfo {
@@ -898,7 +1006,7 @@ export interface ChatProgress {
   text?: string;
   /** Tool-hint flag — absent for pure-lifecycle events like stream:'turn'. */
   tool_hint?: boolean;
-  stream?: 'stdout' | 'stderr' | 'reasoning' | 'turn';
+  stream?: 'stdout' | 'stderr' | 'reasoning' | 'turn' | 'points';
   delta?: string;
   tool_call_id?: string;
   /** Original tool-call arguments (e.g. web_fetch's url) — carried on the
@@ -910,13 +1018,17 @@ export interface ChatProgress {
   /** Session key for frontend-side event filtering (fix #212). */
   session_key?: string;
   /** Document progress events from server-side parsing */
-  type?: 'doc_progress';
+  type?: 'doc_progress' | 'billed' | 'blocked';
   file?: string;
   stage?: string;
   message?: string;
   /** Backend-issued turn id — carried on turn_started progress so the
    *  frontend can drop terminal events from superseded turns (#542). */
   turn_id?: string;
+  /** Platform points billing events (stream:'points')：本次扣费数量。 */
+  points_cost?: number;
+  /** Platform points billing events (stream:'points')：扣费后的可用余额。 */
+  balance?: number;
 }
 
 export interface ChatFinal {
@@ -926,6 +1038,11 @@ export interface ChatFinal {
   /** Model reasoning / chain-of-thought from thinking models
    *  (DeepSeek-R1, Kimi). Rendered as a collapsible thinking block. */
   reasoning?: string;
+  /** Server-side thinking proxy (seconds): time from request start to the
+   *  first reasoning delta, measured by the backend (#834). Preferred over
+   *  frontend first/last-delta timing, which only measures transport time
+   *  for buffered reasoning providers (DeepSeek). */
+  reasoning_elapsed_s?: number;
   /** Session key for frontend-side event filtering (fix #212).  Optional
    *  for backward compatibility; see ChatProgress.session_key. */
   session_key?: string;
@@ -1268,10 +1385,10 @@ export interface FeedbackSubmitResult {
 }
 
 // ---------------------------------------------------------------------------
-// Qraft 平台 OAuth2 登录 (issue #726)
+// MiQroForge 平台 OAuth2 登录 (issue #726)
 // ---------------------------------------------------------------------------
 
-/** Qraft 接入配置的 URL 校验（IPC 边界拦截非法值，避免进入网络/OAuth 流程）。 */
+/** MiQroForge 接入配置的 URL 校验（IPC 边界拦截非法值，避免进入网络/OAuth 流程）。 */
 const qraftBaseUrlSchema = z
   .string()
   .max(500)
@@ -1297,7 +1414,7 @@ export const QraftLoginInput = z.object({
   redirectUri: qraftRedirectUriSchema,
 });
 
-/** 浏览器登录请求：打开 Qraft 页面由用户登录并点击"同意"，无需手机号/密码。 */
+/** 浏览器登录请求：打开 MiQroForge 页面由用户登录并点击"同意"，无需手机号/密码。 */
 export const QraftBrowserLoginInput = z.object({
   env: z.enum(['test', 'prod']).optional(),
   baseUrl: qraftBaseUrlSchema,
@@ -1324,10 +1441,13 @@ export type QraftErrorCode =
   | 'AUTHORIZE_FAILED'
   | 'TOKEN_EXCHANGE_FAILED'
   | 'REFRESH_FAILED'
+  | 'REFRESH_TOKEN_INVALID'
   | 'USERINFO_FAILED'
   | 'LOGIN_CANCELLED'
   | 'BROWSER_LOGIN_FAILED'
   | 'INVALID_CONFIG'
+  | 'POINTS_FAILED'
+  | 'INSUFFICIENT_POINTS'
   | 'INTERNAL';
 
 export interface QraftLoginResult {
@@ -1335,6 +1455,50 @@ export interface QraftLoginResult {
   account?: QraftAccount;
   code?: QraftErrorCode;
   message?: string;
+}
+
+/** 本地留存的扣费历史条目（issue #927；平台无扣费历史查询接口）。 */
+export interface QraftBillingHistoryEntry {
+  /** 计费请求唯一 ID（Python 侧生成，去重键）。 */
+  chargeId: string;
+  /** 扣费时间（ISO 8601）。 */
+  deductedAt: string;
+  /** 本次扣除积分。 */
+  cost: number;
+  /** 扣费后可用余额（成功时）。 */
+  balanceAfter?: number;
+  status: 'billed' | 'insufficient' | 'error';
+  /** SLURM 作业 ID（作业提交成功后回传补充）。 */
+  jobId?: string;
+  serverName?: string;
+  toolName?: string;
+  /** 提交命令/脚本参数摘要。 */
+  argsSummary?: string;
+  sessionKey?: string;
+  /** 扣费时的登录账号 sub（历史按账号隔离展示，换账号互不可见）。 */
+  accountSub?: string;
+}
+
+/** 平台积分余额（GET /oauth2/points/balance 的 data 字段）。 */
+export interface QraftPointsBalance {
+  /** 可用积分 */
+  availablePoints: number;
+  /** 托管（冻结）积分 */
+  heldPoints: number;
+  /** 累计获得积分 */
+  totalEarned: number;
+  /** 累计支出积分 */
+  totalSpent: number;
+}
+
+/** 平台 AI 网关开通状态（userinfo 下发；"active" 才允许模型调用走网关）。 */
+export type QraftAiGatewayStatus = string;
+
+/** 登录态中下发的网关开通信息（仅非敏感字段进渲染进程；encryptedApiKey 永不外发）。 */
+export interface QraftAiGatewayInfo {
+  status: QraftAiGatewayStatus;
+  /** 平台配置版本号（本切片仅展示/透出，热刷新留后续）。 */
+  configVersion?: number;
 }
 
 export interface QraftStatus {
@@ -1348,4 +1512,8 @@ export interface QraftStatus {
   refreshScheduledAt?: number;
   refreshError?: QraftErrorCode;
   requiresRelogin?: boolean;
+  /** 最近一次拉取的积分余额（设置页拉取后缓存，随状态事件推送）。 */
+  points?: QraftPointsBalance;
+  /** 平台 AI 网关开通状态（登录且 active 时模型调用走网关）。 */
+  aiGateway?: QraftAiGatewayInfo;
 }

@@ -70,10 +70,7 @@ describe('classifyTrackedFiles (issue #607 结果/过程资产分类 — 白名�
   });
 
   it('delete → 过程，即使三类格式', () => {
-    const files = [
-      f('old_report.pdf', 'delete', 900),
-      f('new_report.pdf', 'write', 910),
-    ];
+    const files = [f('old_report.pdf', 'delete', 900), f('new_report.pdf', 'write', 910)];
     const { results, process } = classifyTrackedFiles(files);
     expect(results.map((x) => x.name)).toEqual(['new_report.pdf']);
     expect(process.map((x) => x.name)).toEqual(['old_report.pdf']);

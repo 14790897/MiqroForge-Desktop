@@ -109,17 +109,20 @@ function FactsTab() {
     }
   }, [activeFile, editorContent]);
 
-  const createFile = useCallback(async (name: string) => {
-    const finalName = name.trim().endsWith('.md') ? name.trim() : name.trim() + '.md';
-    setShowNewFileDialog(false);
-    try {
-      await window.miqi.memory.update(finalName, '');
-      await loadFiles();
-      selectFile(finalName);
-    } catch (e: any) {
-      setError(e?.message || '创建失败');
-    }
-  }, [loadFiles, selectFile]);
+  const createFile = useCallback(
+    async (name: string) => {
+      const finalName = name.trim().endsWith('.md') ? name.trim() : name.trim() + '.md';
+      setShowNewFileDialog(false);
+      try {
+        await window.miqi.memory.update(finalName, '');
+        await loadFiles();
+        selectFile(finalName);
+      } catch (e: any) {
+        setError(e?.message || '创建失败');
+      }
+    },
+    [loadFiles, selectFile]
+  );
 
   const deleteFile = useCallback(
     async (path: string) => {
@@ -317,7 +320,9 @@ function FactsTab() {
       {showNewFileDialog && (
         <InputDialog
           open={showNewFileDialog}
-          onOpenChange={(o) => { if (!o) setShowNewFileDialog(false); }}
+          onOpenChange={(o) => {
+            if (!o) setShowNewFileDialog(false);
+          }}
           title="新建笔记"
           label="文件名（如 notes.md）"
           onConfirm={createFile}
@@ -663,7 +668,9 @@ function HistoryTab() {
                         {step.args_summary}
                       </div>
                       <div className="text-[var(--muted-foreground)] mt-0.5">
-                        <span className="text-size-2xs text-[var(--muted-foreground)]">result: </span>
+                        <span className="text-size-2xs text-[var(--muted-foreground)]">
+                          result:{' '}
+                        </span>
                         {step.result_summary}
                       </div>
                     </div>

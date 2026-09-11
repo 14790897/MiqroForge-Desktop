@@ -2,78 +2,21 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Any
 
 from miqi.agent.tools.base import Tool
 from miqi.agent.tools.filesystem import _persist_tracked_file
+from miqi.documents.path_utils import (
+    enforce_boundary,
+    ensure_suffix,
+    raw_output_path,
+    resolve_output_path,
+    resolve_read_path,
+)
 
-
-def _raw_output_path(kwargs: dict[str, Any]) -> str:
-    return str(
-        kwargs.get("filename")
-        or kwargs.get("file_path")
-        or kwargs.get("path")
-        or ""
-    )
-
-
-def _ensure_suffix(path: Path, suffix: str) -> Path:
-    if not path.name or path.name in {".", ".."}:
-        raise ValueError("必须提供输出文件名")
-    if path.suffix.lower() == suffix:
-        return path
-    return path.with_suffix(suffix)
-
-
-def _enforce_boundary(path: Path, allowed_dir: Path | None, workspace: Path | None) -> None:
-    effective_dir = allowed_dir or workspace
-    if effective_dir is None:
-        return
-    try:
-        path.resolve().relative_to(effective_dir.resolve())
-    except ValueError:
-        raise PermissionError(
-            f"Path '{path}' resolves outside allowed directory '{effective_dir}'"
-        )
-
-
-def _resolve_output_path(
-    file_path: str,
-    workspace: Path | None,
-    allowed_dir: Path | None,
-) -> Path:
-    """Resolve an output path and enforce workspace/directory bounds.
-
-    Office document write tools always write inside the workspace:
-    - Relative paths are resolved against *workspace*.
-    - If *allowed_dir* is ``None`` but *workspace* is set, *workspace*
-      is used as the effective boundary (defense-in-depth default).
-    - Absolute paths outside the effective boundary are rejected.
-
-    Raises:
-        PermissionError: if the resolved path is outside the effective boundary.
-    """
-    p = Path(file_path).expanduser()
-    if not p.is_absolute() and workspace is not None:
-        p = workspace / p
-    resolved = p.resolve()
-
-    # Defense-in-depth: when no explicit allowed_dir is given, office
-    # write tools default to workspace as the boundary.
-    effective_dir = allowed_dir
-    if effective_dir is None and workspace is not None:
-        effective_dir = workspace.resolve()
-
-    if effective_dir is not None:
-        try:
-            resolved.relative_to(effective_dir.resolve())
-        except ValueError:
-            raise PermissionError(
-                f"Path '{file_path}' resolves outside allowed directory "
-                f"'{effective_dir}'"
-            )
-    return resolved
+logger = logging.getLogger(__name__)
 
 
 class PptxReadTool(Tool):
@@ -117,15 +60,15 @@ class PptxReadTool(Tool):
 
     async def execute(self, **kwargs: Any) -> str:
         _sess_key = kwargs.pop("_session_key", None)
-        raw_path = _raw_output_path(kwargs)
+        raw_path = raw_output_path(kwargs)
         if not raw_path.strip():
             return "Error: 必须提供 filename"
         try:
-            file_path = _resolve_output_path(
+            file_path = resolve_output_path(
                 raw_path, self._workspace, self._allowed_dir,
             )
-            file_path = _ensure_suffix(file_path, ".pptx")
-            _enforce_boundary(file_path, self._allowed_dir, self._workspace)
+            file_path = ensure_suffix(file_path, ".pptx")
+            enforce_boundary(file_path, self._allowed_dir, self._workspace)
         except PermissionError as e:
             return f"Error: 权限被拒绝：{e}"
         except ValueError as e:
@@ -156,16 +99,21 @@ class CreatePptxTool(Tool):
     name = "create_pptx"
     description = (
         "Create a PowerPoint (.pptx) presentation in the workspace files directory. "
-        "Supports multiple slides with titles, bullets, body text, and images."
+        "Supports multiple slides with titles, bullets, body text, and images. "
+        "Each slide's image_path must resolve inside the session files directory "
+        "(or a user-authorized directory); an image outside those roots is "
+        "skipped, not embedded, and reported in the result."
     )
 
     def __init__(
         self,
         workspace: Path | None = None,
         allowed_dir: Path | None = None,
+        allow_user_roots: bool = False,
     ):
         self._workspace = workspace
         self._allowed_dir = allowed_dir
+        self._allow_user_roots = allow_user_roots
 
     @property
     def parameters(self) -> dict[str, Any]:
@@ -213,17 +161,18 @@ class CreatePptxTool(Tool):
         from pptx.util import Inches
 
         _sess_key = kwargs.pop("_session_key", None)
-        raw_path = _raw_output_path(kwargs)
+        user_roots = kwargs.pop("_user_roots", None)
+        raw_path = raw_output_path(kwargs)
         slides = kwargs.get("slides") or []
         if not raw_path.strip():
             return "Error: 必须提供 filename"
 
         try:
-            file_path = _resolve_output_path(
+            file_path = resolve_output_path(
                 raw_path, self._workspace, self._allowed_dir,
             )
-            file_path = _ensure_suffix(file_path, ".pptx")
-            _enforce_boundary(file_path, self._allowed_dir, self._workspace)
+            file_path = ensure_suffix(file_path, ".pptx")
+            enforce_boundary(file_path, self._allowed_dir, self._workspace)
         except PermissionError as e:
             return f"Error: 权限被拒绝：{e}"
         except ValueError as e:
@@ -231,6 +180,7 @@ class CreatePptxTool(Tool):
         if not slides:
             return "Error: 必须提供 slides"
 
+        skipped_images: list[str] = []
         try:
             prs = Presentation()
             for slide_data in slides:
@@ -265,17 +215,39 @@ class CreatePptxTool(Tool):
                         paragraph.level = 0
                 image_path = slide_data.get("image_path")
                 if image_path:
-                    slide.shapes.add_picture(
-                        str(image_path),
-                        Inches(float(slide_data.get("image_left", 5.5))),
-                        Inches(float(slide_data.get("image_top", 1.5))),
-                        width=Inches(float(slide_data.get("image_width", 3.0))),
-                    )
+                    try:
+                        resolved = resolve_read_path(
+                            str(image_path),
+                            self._workspace,
+                            self._allowed_dir,
+                            user_roots,
+                            self._allow_user_roots,
+                        )
+                        slide.shapes.add_picture(
+                            str(resolved),
+                            Inches(float(slide_data.get("image_left", 5.5))),
+                            Inches(float(slide_data.get("image_top", 1.5))),
+                            width=Inches(float(slide_data.get("image_width", 3.0))),
+                        )
+                    except Exception as e:
+                        # Out-of-bounds, missing, or not-an-image: skip this
+                        # slide's picture and keep building the deck
+                        # (issue #1005 节 2).
+                        logger.warning(
+                            "create_pptx: 跳过图片 %s：%s", image_path, e,
+                        )
+                        skipped_images.append(f"{image_path}（{e}）")
 
             file_path.parent.mkdir(parents=True, exist_ok=True)
             prs.save(str(file_path))
             _persist_tracked_file(self._workspace, file_path, op="write", session_key=_sess_key)
-            return f"Created: {file_path} ({len(slides)} slides)"
+            result = f"Created: {file_path} ({len(slides)} slides)"
+            if skipped_images:
+                result += (
+                    f"（跳过 {len(skipped_images)} 个图片："
+                    f"{'；'.join(skipped_images)}）"
+                )
+            return result
         except Exception as e:
             return f"Error writing {raw_path}: {e}"
 
@@ -284,4 +256,9 @@ class PptxWriteTool(CreatePptxTool):
     """Backward-compatible alias for create_pptx."""
 
     name = "pptx_write"
-    description = "Create a new PowerPoint (.pptx) file. Prefer create_pptx for new calls."
+    description = (
+        "Create a new PowerPoint (.pptx) file. Each slide's image_path must "
+        "resolve inside the session files directory (or a user-authorized "
+        "directory); out-of-bounds images are skipped and reported. "
+        "Prefer create_pptx for new calls."
+    )

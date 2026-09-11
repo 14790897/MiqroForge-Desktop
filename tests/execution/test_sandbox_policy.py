@@ -1,16 +1,14 @@
 """Tests for miqi.execution.sandbox_policy."""
 
 import pytest
+
 from miqi.execution.sandbox_policy import (
-    SandboxPolicyEngine,
-    SandboxSelection,
-    SandboxType,
     SandboxDeniedError,
+    SandboxPolicyEngine,
+    SandboxType,
 )
 from miqi.protocol.permissions import (
     FileSystemAccessMode,
-    FileSystemSandboxPolicy,
-    NetworkSandboxPolicy,
 )
 
 

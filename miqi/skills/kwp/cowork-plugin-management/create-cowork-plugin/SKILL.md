@@ -268,8 +268,8 @@ The `.plugin` file will appear in the chat as a rich preview where the user can 
 
 ---
 
-## Using This Skill with MiqroForge
+## Using This Skill with MiQroForge
 
-MiqroForge includes built-in tools that cover most standalone needs: `web_search`, `web_fetch`, `read_file`, `write_file`, `edit_file`, `create_docx`, `create_pptx`, `create_xlsx`, `create_pdf`, `exec`.
+MiQroForge includes built-in tools that cover most standalone needs: `web_search`, `web_fetch`, `read_file`, `write_file`, `edit_file`, `create_docx`, `create_pptx`, `create_xlsx`, `create_pdf`, `exec`.
 
-To add MCP connectors for supercharged mode, configure MCP servers in MiqroForge's MCP settings page or add them via `config.json`.
+To add MCP connectors for supercharged mode, configure MCP servers in MiQroForge's MCP settings page or add them via `config.json`.

@@ -1,5 +1,5 @@
 appId: com.miqi.desktop
-productName: MiqroForge Desktop
+productName: MiQroForge Desktop
 directories:
   output: ../../dist-new
 files:
@@ -54,6 +54,11 @@ nsis:
   oneClick: false
   createDesktopShortcut: true
   createStartMenuShortcut: true
+dmg:
+  # DMG 挂载协议页（SLA）不启用：build/ 下 license_*.txt 会被 dmg-builder
+  # 按约定拾取，中文文本无法用 mac_roman 编码导致打包失败。macOS 用户由
+  # 应用内首次启动隐私协议确认门兜底（#837）。
+  license: null
 publish:
   - provider: generic
     url: ""

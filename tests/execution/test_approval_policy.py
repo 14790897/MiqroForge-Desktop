@@ -1,6 +1,5 @@
-import pytest
 
-from miqi.execution.approval_policy import ApprovalPolicy, ApprovalMode
+from miqi.execution.approval_policy import ApprovalMode, ApprovalPolicy
 
 
 def test_never_mode_auto_allows_all():

@@ -5,9 +5,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from miqi.runtime.workspace_logging import (
+    _redact_message,
     append_workspace_log,
     append_workspace_log_json,
-    _redact_message,
 )
 
 

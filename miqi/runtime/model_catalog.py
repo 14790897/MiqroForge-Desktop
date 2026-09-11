@@ -10,7 +10,6 @@ from typing import Any
 
 from miqi.runtime.model_protocol import ModelView, ProviderCapabilitiesView
 
-
 # Built-in model entries.  Every keyed model references a provider config name.
 # The current configured model is always included (visible) even if absent here.
 _BUILTIN_MODELS: dict[str, dict[str, Any]] = {
@@ -193,22 +192,6 @@ _BUILTIN_MODELS: dict[str, dict[str, Any]] = {
         "default_service_tier": "standard",
     },
     # ── DeepSeek ───────────────────────────────────────────────────────
-    "deepseek/deepseek-reasoner": {
-        "name": "DeepSeek Reasoner",
-        "provider": "deepseek",
-        "hidden": False,
-        "supported_reasoning_efforts": ["medium", "high"],
-        "service_tiers": ["standard"],
-        "default_service_tier": "standard",
-    },
-    "deepseek/deepseek-chat": {
-        "name": "DeepSeek Chat",
-        "provider": "deepseek",
-        "hidden": False,
-        "supported_reasoning_efforts": ["low", "medium"],
-        "service_tiers": ["standard"],
-        "default_service_tier": "standard",
-    },
     "deepseek/deepseek-v4-flash": {
         "name": "DeepSeek V4 Flash",
         "provider": "deepseek",

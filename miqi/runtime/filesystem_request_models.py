@@ -8,7 +8,6 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 
 from miqi.runtime.app_server import AppServerError
 
-
 T = TypeVar("T", bound=BaseModel)
 
 

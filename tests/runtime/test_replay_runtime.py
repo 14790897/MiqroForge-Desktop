@@ -2,13 +2,11 @@
 
 import pytest
 
-
 # ── Helpers ──────────────────────────────────────────────────────────────
 
 
 async def _populate_ledger_with_complete_turn(ledger, *, thread_id="thread-1", turn_id="turn-1"):
     """Populate a ledger with a complete turn: start, user msg, deltas, tool, exec, end."""
-    import time
 
     await ledger.append_item(
         thread_id=thread_id, turn_id=turn_id,
@@ -456,7 +454,6 @@ async def test_replay_corrupt_payload_skipped_gracefully(tmp_path):
             item_type="turn_started", payload={"agent_name": "main"},
         )
         # Manually corrupt one row's payload_json in the DB
-        import json
         db = ledger._conn
         await db.execute(
             """INSERT INTO runtime_ledger_items
@@ -1264,7 +1261,6 @@ async def test_corrupt_approval_payload_does_not_break_replay(tmp_path):
         )
         # Manually insert corrupt row
         db = ledger._conn
-        import json
         await db.execute(
             """INSERT INTO runtime_ledger_items
                (item_id, session_id, thread_id, turn_id, seq, item_type,

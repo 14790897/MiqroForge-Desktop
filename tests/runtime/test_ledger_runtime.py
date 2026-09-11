@@ -115,7 +115,7 @@ async def test_ledger_concurrent_appends_sequential_no_duplicate_seqs(tmp_path):
     runtime = LedgerRuntime(tmp_path / "runtime.db", session_id="sess-1")
     await runtime.initialize()
     try:
-        N = 20
+        count = 20
 
         async def append_one(i: int):
             return await runtime.append_item(
@@ -127,23 +127,23 @@ async def test_ledger_concurrent_appends_sequential_no_duplicate_seqs(tmp_path):
                 payload={},
             )
 
-        # Launch N concurrent appends
-        items = await asyncio.gather(*(append_one(i) for i in range(N)))
+        # Launch count concurrent appends
+        items = await asyncio.gather(*(append_one(i) for i in range(count)))
 
-        # All items must have unique seq values 1..N (in any order
+        # All items must have unique seq values 1..count (in any order
         # since concurrent appends don't guarantee submission order,
         # but they MUST guarantee uniqueness).
         seqs = sorted(item.seq for item in items)
-        assert seqs == list(range(1, N + 1)), (
-            f"Expected seq 1..{N}, got {seqs}. "
+        assert seqs == list(range(1, count + 1)), (
+            f"Expected seq 1..{count}, got {seqs}. "
             f"Duplicates: {[s for s in seqs if seqs.count(s) > 1]}"
         )
-        assert len(set(seqs)) == N, f"Duplicate seq values found: {seqs}"
+        assert len(set(seqs)) == count, f"Duplicate seq values found: {seqs}"
 
         # Also verify all items are loadable and correctly ordered
         loaded = await runtime.load_items("thread-1")
-        assert len(loaded) == N
-        assert [item.seq for item in loaded] == list(range(1, N + 1))
+        assert len(loaded) == count
+        assert [item.seq for item in loaded] == list(range(1, count + 1))
     finally:
         await runtime.close()
 

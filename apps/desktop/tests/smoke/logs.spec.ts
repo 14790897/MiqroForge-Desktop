@@ -1,5 +1,5 @@
 /**
- * MiqroForge Desktop — Logs Tab Smoke Tests
+ * MiQroForge Desktop — Logs Tab Smoke Tests
  *
  * Covers the Settings → Logs tab renderer flows with a mock bridge backend.
  * Validates: navigation, table rendering, filter controls, sub-tabs,
@@ -15,10 +15,7 @@ import { buildMockBridgeScript, type MockBridgeOptions } from './mocks';
 // Helpers
 // ---------------------------------------------------------------------------
 
-async function injectMockAndGoto(
-  page: import('@playwright/test').Page,
-  opts?: MockBridgeOptions,
-) {
+async function injectMockAndGoto(page: import('@playwright/test').Page, opts?: MockBridgeOptions) {
   await page.addInitScript({ content: buildMockBridgeScript(opts) });
   await page.goto('/');
   await page.waitForSelector('#root', { state: 'visible' });
@@ -48,7 +45,6 @@ async function clickRefreshButton(page: import('@playwright/test').Page) {
 // ---------------------------------------------------------------------------
 
 test.describe('Logs Tab — Navigation', () => {
-
   test('navigates from sidebar to Settings → Logs tab', async ({ page }) => {
     await injectMockAndGoto(page);
     await navigateToLogsTab(page);
@@ -117,7 +113,6 @@ test.describe('Logs Tab — Navigation', () => {
 // ---------------------------------------------------------------------------
 
 test.describe('Logs Tab — Entry Display', () => {
-
   test('table populates with entries after clicking refresh', async ({ page }) => {
     await injectMockAndGoto(page);
     await navigateToLogsTab(page);
@@ -192,7 +187,6 @@ test.describe('Logs Tab — Entry Display', () => {
 // ---------------------------------------------------------------------------
 
 test.describe('Logs Tab — Filtering', () => {
-
   test('level filter: ERROR shows only ERROR rows', async ({ page }) => {
     await injectMockAndGoto(page);
     await navigateToLogsTab(page);
@@ -298,7 +292,6 @@ test.describe('Logs Tab — Filtering', () => {
 // ---------------------------------------------------------------------------
 
 test.describe('Logs Tab — Sub-tabs', () => {
-
   test('"前端日志" shows only renderer and main sources', async ({ page }) => {
     await injectMockAndGoto(page);
     await navigateToLogsTab(page);
@@ -352,7 +345,6 @@ test.describe('Logs Tab — Sub-tabs', () => {
 // ---------------------------------------------------------------------------
 
 test.describe('Logs Tab — Real-time Streaming', () => {
-
   test('triggerLog adds new entries to the table in real time', async ({ page }) => {
     await injectMockAndGoto(page);
     await navigateToLogsTab(page);
@@ -362,11 +354,7 @@ test.describe('Logs Tab — Real-time Streaming', () => {
 
     // Fire a real-time log event via the mock trigger API
     await page.evaluate(() => {
-      (window as any).__miqiMock.triggerLog(
-        'Real-time test message',
-        'ERROR',
-        'tool',
-      );
+      (window as any).__miqiMock.triggerLog('Real-time test message', 'ERROR', 'tool');
     });
 
     // Table should now have 6 rows (5 original + 1 streamed)
@@ -398,7 +386,6 @@ test.describe('Logs Tab — Real-time Streaming', () => {
 // ---------------------------------------------------------------------------
 
 test.describe('Logs Tab — Row Interaction', () => {
-
   test('clicking a row toggles message expansion (removes line-clamp)', async ({ page }) => {
     await injectMockAndGoto(page);
     await navigateToLogsTab(page);
@@ -457,7 +444,6 @@ test.describe('Logs Tab — Row Interaction', () => {
 // ---------------------------------------------------------------------------
 
 test.describe('Logs Tab — Edge Cases', () => {
-
   test('preload bridge error page does not show logs', async ({ page }) => {
     await injectMockAndGoto(page, { preloadOk: false });
 

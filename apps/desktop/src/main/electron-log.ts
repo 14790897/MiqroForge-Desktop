@@ -14,28 +14,28 @@
  * - Static `fs` imports only — no dynamic `require('fs')`.
  * - Basic redaction for secrets that may appear in console output.
  */
-import {
-  appendFileSync,
-  mkdirSync,
-  readdirSync,
-  statSync,
-  unlinkSync,
-} from 'fs';
+import { appendFileSync, mkdirSync, readdirSync, statSync, unlinkSync } from 'fs';
 import { join } from 'path';
 
 const RETAIN_DAYS = 7;
 const CLEANUP_INTERVAL = 100;
 const CUTOFF_MS = RETAIN_DAYS * 86_400_000;
 
-// Basic redaction patterns for secrets that may leak via console output
+// Basic redaction patterns for secrets that may leak via console output.
+// The keyword must sit at the END of the key so metric keys that merely
+// contain a keyword stay intact (first_token_latency_ms, prompt_tokens,
+// token_usage, ...) while real credential keys (access_token, client_secret,
+// api_key, Authorization, password) are still masked.
 const REDACT_RE = [
-  // Colon-separated: Authorization: Bearer sk-xxx (multi-word value, bounded to 3 words max)
-  /("?\w*(?:api[_-]?key|token|secret|authorization|password)\w*"?)\s*:\s*"?([^"}\s,;\n]+(?:\s+[^"}\s,;\n]+){0,2})"?/gi,
-  // Equals-separated: api_key=sk-xxx (single-word value only)
-  /("?\w*(?:api[_-]?key|token|secret|authorization|password)\w*"?)\s*=\s*"?([^"}\s,;]+)"?/gi,
+  // Colon-separated: Authorization: Bearer sk-xxx. Consume the FULL
+  // multi-word value up to a delimiter (quote/comma/semicolon/brace/EOL)
+  // so long passphrases cannot partially leak.
+  /("?\w*(?:api[_-]?key|token|secret|authorization|password)"?)\s*:\s*"?([^"}\s,;\n]+(?:\s+[^"}\s,;\n]+)*)"?/gi,
+  // Equals-separated: api_key=sk-xxx — same full-value consumption.
+  /("?\w*(?:api[_-]?key|token|secret|authorization|password)"?)\s*=\s*"?([^"}\s,;]+(?:\s+[^"}\s,;]+)*)"?/gi,
 ];
 
-function redactMessage(message: string): string {
+export function redactMessage(message: string): string {
   let result = message;
   for (const re of REDACT_RE) {
     result = result.replace(re, '$1=[REDACTED]');
@@ -98,19 +98,20 @@ export function writeMainProcessLog(
   level: string,
   message: string,
   projectRoot?: string,
-  source?: string,
+  source?: string
 ): void {
   try {
     const logDir = resolveLogDir(projectRoot);
     const dateStr = new Date().toISOString().slice(0, 10);
     const filePrefix = source === 'renderer' ? 'renderer' : 'electron-main';
-    const sourceLabel = source === 'renderer' ? 'renderer' : source === 'bridge' ? 'bridge' : 'main';
+    const sourceLabel =
+      source === 'renderer' ? 'renderer' : source === 'bridge' ? 'bridge' : 'main';
     const logPath = join(logDir, `${filePrefix}-${dateStr}.log`);
     const timestamp = new Date().toISOString();
     appendFileSync(
       logPath,
       `[${timestamp}] [${level}] [${sourceLabel}] ${redactMessage(message)}\n`,
-      'utf8',
+      'utf8'
     );
     // Throttled cleanup — run every N writes
     _writeCounter += 1;

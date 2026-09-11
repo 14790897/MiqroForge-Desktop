@@ -6,7 +6,6 @@ operations properly manage RuntimeSession lifecycle through AppServer.
 
 import pytest
 
-
 # ── sessions.list ──────────────────────────────────────────────────────────
 
 
@@ -98,7 +97,7 @@ async def test_sessions_get_active_session(fake_config, fake_provider, tmp_path)
 @pytest.mark.asyncio
 async def test_sessions_get_missing_session_key(fake_config, fake_provider, tmp_path):
     """sessions.get rejects missing session_key."""
-    from miqi.runtime.app_server import ClientSessionRegistry, AppServerError
+    from miqi.runtime.app_server import AppServerError, ClientSessionRegistry
     from miqi.runtime.session_handlers import sessions_get_handler
 
     registry = ClientSessionRegistry()
@@ -144,7 +143,7 @@ async def test_sessions_delete_stops_runtime_and_cleans_registry(fake_config, fa
 @pytest.mark.asyncio
 async def test_sessions_delete_missing_session_key(fake_config, fake_provider, tmp_path):
     """sessions.delete rejects missing session_key."""
-    from miqi.runtime.app_server import ClientSessionRegistry, AppServerError
+    from miqi.runtime.app_server import AppServerError, ClientSessionRegistry
     from miqi.runtime.session_handlers import sessions_delete_handler
 
     registry = ClientSessionRegistry()
@@ -187,7 +186,7 @@ async def test_sessions_archive_stops_runtime(fake_config, fake_provider, tmp_pa
 @pytest.mark.asyncio
 async def test_sessions_archive_missing_session_key(fake_config, fake_provider, tmp_path):
     """sessions.archive rejects missing session_key."""
-    from miqi.runtime.app_server import ClientSessionRegistry, AppServerError
+    from miqi.runtime.app_server import AppServerError, ClientSessionRegistry
     from miqi.runtime.session_handlers import sessions_archive_handler
 
     registry = ClientSessionRegistry()
@@ -203,7 +202,7 @@ async def test_sessions_archive_missing_session_key(fake_config, fake_provider, 
 @pytest.mark.asyncio
 async def test_sessions_unarchive_requires_session_key(fake_config, fake_provider, tmp_path):
     """sessions.unarchive rejects missing session_key."""
-    from miqi.runtime.app_server import ClientSessionRegistry, AppServerError
+    from miqi.runtime.app_server import AppServerError, ClientSessionRegistry
     from miqi.runtime.session_handlers import sessions_unarchive_handler
 
     registry = ClientSessionRegistry()

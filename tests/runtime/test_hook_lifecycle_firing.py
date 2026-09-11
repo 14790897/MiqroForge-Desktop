@@ -6,7 +6,6 @@ their assigned lifecycle hook points.
 
 from __future__ import annotations
 
-import asyncio
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
@@ -15,10 +14,10 @@ from typing import Any
 import pytest
 
 from miqi.execution.hook_runtime import (
-    HookPoint,
-    HookRuntime,
-    HookRegistration,
     HookOutcome,
+    HookPoint,
+    HookRegistration,
+    HookRuntime,
     LifecycleHookContext,
 )
 from miqi.providers.base import LLMResponse, LLMStreamEvent

@@ -60,16 +60,16 @@ function CreateSkillModal({
   };
 
   return (
-    <Modal open={open} onOpenChange={(o) => { if (!o) onClose(); }} hideClose>
-      <div
-        className="rounded-xl shadow-2xl w-full max-w-md mx-4 bg-surface"
-      >
-        <div
-          className="flex items-center justify-between px-5 py-4 border-b border-border"
-        >
-          <h2 className="text-base font-semibold text-text">
-            新建技能
-          </h2>
+    <Modal
+      open={open}
+      onOpenChange={(o) => {
+        if (!o) onClose();
+      }}
+      hideClose
+    >
+      <div className="rounded-xl shadow-2xl w-full max-w-md mx-4 bg-surface">
+        <div className="flex items-center justify-between px-5 py-4 border-b border-border">
+          <h2 className="text-base font-semibold text-text">新建技能</h2>
           <button
             onClick={onClose}
             className="p-1 rounded hover:bg-[var(--surface-muted)] text-text-muted"
@@ -79,11 +79,7 @@ function CreateSkillModal({
         </div>
         <div className="p-5 space-y-4">
           <div>
-            <label
-              className="block text-xs font-medium mb-1 text-text-muted"
-            >
-              技能名称
-            </label>
+            <label className="block text-xs font-medium mb-1 text-text-muted">技能名称</label>
             <input
               type="text"
               value={name}
@@ -98,11 +94,7 @@ function CreateSkillModal({
             />
           </div>
           <div>
-            <label
-              className="block text-xs font-medium mb-1 text-text-muted"
-            >
-              描述 (可选)
-            </label>
+            <label className="block text-xs font-medium mb-1 text-text-muted">描述 (可选)</label>
             <input
               type="text"
               value={description}
@@ -125,9 +117,7 @@ function CreateSkillModal({
             </div>
           )}
         </div>
-        <div
-          className="flex justify-end gap-2 px-5 py-4 border-t border-border"
-        >
+        <div className="flex justify-end gap-2 px-5 py-4 border-t border-border">
           <button
             onClick={onClose}
             className="px-4 py-2 rounded-lg text-xs font-medium transition-colors hover:bg-[var(--surface-muted)] text-text-muted"
@@ -200,13 +190,9 @@ export function SkillsPage() {
   // (The server normalizes to forward slashes in skills.list, but we
   // still tolerate either for safety.)
   const KWP_PATH_RE = /[/\\]kwp[/\\]/;
-  const builtin = filtered.filter(
-    (s) => s.source === 'builtin' && !KWP_PATH_RE.test(s.path),
-  );
+  const builtin = filtered.filter((s) => s.source === 'builtin' && !KWP_PATH_RE.test(s.path));
   const workspace = filtered.filter((s) => s.source === 'workspace');
-  const kwp = filtered.filter(
-    (s) => s.source === 'builtin' && KWP_PATH_RE.test(s.path),
-  );
+  const kwp = filtered.filter((s) => s.source === 'builtin' && KWP_PATH_RE.test(s.path));
 
   const handleCopyContent = () => {
     if (!detail) return;
@@ -406,8 +392,15 @@ export function SkillsPage() {
                       className="inline-flex items-center gap-1 text-size-2xs px-2 py-0.5 rounded-full font-medium"
                       style={
                         detail.source === 'builtin'
-                          ? { background: 'color-mix(in srgb, var(--surface-muted) 60%, transparent)', color: 'var(--text-muted)' }
-                          : { background: 'color-mix(in srgb, var(--accent) 12%, transparent)', color: 'var(--accent)' }
+                          ? {
+                              background:
+                                'color-mix(in srgb, var(--surface-muted) 60%, transparent)',
+                              color: 'var(--text-muted)',
+                            }
+                          : {
+                              background: 'color-mix(in srgb, var(--accent) 12%, transparent)',
+                              color: 'var(--accent)',
+                            }
                       }
                     >
                       {detail.source === 'builtin' ? <Lock size={10} /> : <FolderOpen size={10} />}

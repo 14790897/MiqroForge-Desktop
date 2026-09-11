@@ -6,7 +6,7 @@ import mimetypes
 import platform
 import re as _ctx_re
 from pathlib import Path
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from loguru import logger
 

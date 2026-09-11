@@ -6,7 +6,7 @@ import pytest
 
 
 def test_normalize_turn_input_accepts_text_items():
-    from miqi.runtime.turn_protocol import normalize_turn_input, input_text
+    from miqi.runtime.turn_protocol import input_text, normalize_turn_input
 
     items = normalize_turn_input([
         {"type": "text", "text": "Run tests"},
@@ -28,7 +28,7 @@ def test_normalize_turn_input_rejects_empty_input():
 
 
 def test_normalize_turn_input_preserves_mentions_and_skills():
-    from miqi.runtime.turn_protocol import normalize_turn_input, input_text
+    from miqi.runtime.turn_protocol import input_text, normalize_turn_input
 
     items = normalize_turn_input([
         {"type": "text", "text": "@sample summarize"},

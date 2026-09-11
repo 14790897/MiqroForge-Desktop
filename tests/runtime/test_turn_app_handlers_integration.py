@@ -94,6 +94,7 @@ async def test_turn_start_streams_codex_item_events(tmp_path, fake_config):
 @pytest.mark.asyncio
 async def test_turn_interrupt_streams_interrupted_completion(tmp_path, fake_config):
     import asyncio as _asyncio
+
     from miqi.providers.base import LLMResponse, LLMStreamEvent
     from miqi.runtime.session import RuntimeSession
 
@@ -177,6 +178,7 @@ async def test_turn_interrupt_streams_interrupted_completion(tmp_path, fake_conf
 async def test_recoverable_error_does_not_terminate_drain(tmp_path, fake_config):
     """Fix 3: recoverable ErrorEvent should not stop the drain loop."""
     import asyncio as _asyncio
+
     from miqi.protocol.events import ErrorEvent, EventSeverity
     from miqi.providers.base import LLMResponse, LLMStreamEvent
     from miqi.runtime.session import RuntimeSession
@@ -267,7 +269,8 @@ async def test_recoverable_error_does_not_terminate_drain(tmp_path, fake_config)
 async def test_turn_interrupt_calls_cancel_approvals_for_thread(tmp_path, fake_config):
     """Fix 4: turn/interrupt active turn must call cancel_approvals_for_thread."""
     import asyncio as _asyncio
-    from unittest.mock import AsyncMock, MagicMock
+    from unittest.mock import AsyncMock
+
     from miqi.providers.base import LLMResponse, LLMStreamEvent
     from miqi.runtime.session import RuntimeSession
 
@@ -356,6 +359,7 @@ async def test_turn_interrupt_calls_cancel_approvals_for_thread(tmp_path, fake_c
 async def test_concurrent_turn_start_same_thread_only_one_succeeds(tmp_path, fake_config):
     """Two concurrent turn/start for the same thread — exactly one wins."""
     import asyncio as _asyncio
+
     from miqi.providers.base import LLMResponse, LLMStreamEvent
     from miqi.runtime.session import RuntimeSession
 
@@ -428,6 +432,7 @@ async def test_concurrent_turn_start_same_thread_only_one_succeeds(tmp_path, fak
 async def test_sequential_immediate_second_turn_start_rejected(tmp_path, fake_config):
     """Second sequential turn/start (without waiting for active turn) is rejected."""
     import asyncio as _asyncio
+
     from miqi.providers.base import LLMResponse, LLMStreamEvent
     from miqi.runtime.session import RuntimeSession
 
@@ -505,6 +510,7 @@ async def test_sequential_immediate_second_turn_start_rejected(tmp_path, fake_co
 async def test_turn_start_succeeds_after_turn_completes(tmp_path, fake_config):
     """After a turn completes (drain releases reservation), a new turn succeeds."""
     import asyncio as _asyncio
+
     from miqi.providers.base import LLMResponse, LLMStreamEvent
     from miqi.runtime.session import RuntimeSession
 

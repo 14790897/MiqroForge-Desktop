@@ -2,8 +2,7 @@
 
 import pytest
 
-from miqi.runtime.app_server import AppServer, AppServerError, ClientSessionRegistry
-
+from miqi.runtime.app_server import AppServer, ClientSessionRegistry
 
 # ── ClientCapabilities dataclass ────────────────────────────────────────────
 

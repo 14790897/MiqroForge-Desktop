@@ -1,6 +1,7 @@
 """Tests for miqi.runtime.input_queue."""
 
 import pytest
+
 from miqi.runtime.input_queue import InputQueue
 
 

@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import json
 
-import pytest
-
 from miqi.runtime.protocol_snapshot import (
     DEFAULT_SNAPSHOT,
     build_protocol_snapshot,

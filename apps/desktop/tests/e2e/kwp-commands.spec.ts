@@ -31,6 +31,7 @@ import {
   waitForInputReady,
   sendMessage,
   waitForResponseComplete,
+  userMessage,
 } from './helpers/electron-setup';
 
 // Phrases that should reliably trigger the embedded KWP skills.
@@ -99,9 +100,19 @@ test.describe('KWP Commands & Skill Auto-trigger E2E', () => {
     const body = await page.locator('main').last().textContent();
     expect(body || '').toMatch(/[一-鿿]/); // any CJK char
     const cuePhrases = [
-      '产品', '路线', '战略', '需求', '用户',
-      '假设', '机会', '风险', '方案', 'idea',
-      'feature', 'requirement', 'opportunity',
+      '产品',
+      '路线',
+      '战略',
+      '需求',
+      '用户',
+      '假设',
+      '机会',
+      '风险',
+      '方案',
+      'idea',
+      'feature',
+      'requirement',
+      'opportunity',
     ];
     const hit = cuePhrases.some((p) => (body || '').includes(p));
     expect(hit).toBeTruthy();
@@ -167,8 +178,9 @@ test.describe('KWP Commands & Skill Auto-trigger E2E', () => {
     await expect(heading).toBeVisible({ timeout: 10_000 });
 
     // Account-research should be visible among the converted skills.
-    await expect(page.getByText('account-research', { exact: false }).first())
-      .toBeVisible({ timeout: 5_000 });
+    await expect(page.getByText('account-research', { exact: false }).first()).toBeVisible({
+      timeout: 5_000,
+    });
   });
 
   // ──────── Test 5: slash command is detected without LLM round-trip ───
@@ -201,10 +213,7 @@ test.describe('KWP Commands & Skill Auto-trigger E2E', () => {
     // (data-testid="chat-message-user").  Searching page-wide or
     // main-wide could match stale DOM (older turn, in-flight text,
     // placeholders) and silently break the test.
-    const userBubble = page
-      .getByTestId('chat-message-user')
-      .filter({ hasText: marker })
-      .first();
+    const userBubble = userMessage(page, marker);
 
     // The user message bubble must contain the args…
     await expect(userBubble).toBeVisible({ timeout: 10_000 });
@@ -222,10 +231,7 @@ test.describe('KWP Commands & Skill Auto-trigger E2E', () => {
     // For an unknown command the bubble must contain the full text
     // because the detector doesn't know about it.
     await expect(
-      page
-        .getByTestId('chat-message-user')
-        .filter({ hasText: '/no-such-slash-command-x' })
-        .first(),
+      page.getByTestId('chat-message-user').filter({ hasText: '/no-such-slash-command-x' }).first()
     ).toBeVisible({ timeout: 10_000 });
   });
 });

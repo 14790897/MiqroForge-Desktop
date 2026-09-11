@@ -1,6 +1,6 @@
 # 功能总览
 
-MiqroForge 是一个**本地优先的个人 AI 助手桌面应用**，将强大的 AI Agent 引擎与现代化的 Electron 桌面界面相结合。以下按功能域分类介绍 MiqroForge 能做什么。
+MiQroForge 是一个**本地优先的个人 AI 助手桌面应用**，将强大的 AI Agent 引擎与现代化的 Electron 桌面界面相结合。以下按功能域分类介绍 MiQroForge 能做什么。
 
 ---
 
@@ -93,7 +93,7 @@ MiqroForge 是一个**本地优先的个人 AI 助手桌面应用**，将强大�
 
 ## 🔌 多渠道消息集成
 
-MiqroForge 可作为多渠道消息中枢，统一接入以下平台，让 AI 助手在不同平台间无缝响应：
+MiQroForge 可作为多渠道消息中枢，统一接入以下平台，让 AI 助手在不同平台间无缝响应：
 
 | 渠道 | 协议/方式 |
 |---|---|
@@ -132,7 +132,6 @@ MiqroForge 可作为多渠道消息中枢，统一接入以下平台，让 AI �
 | `weather` | 通过 wttr.in 和 Open-Meteo 获取天气 |
 | `workspace-cleanup` | 整理工作区目录 |
 | `skill-creator` | 创建新技能的向导 |
-| `slurm` | SLURM 集群作业提交和管理 |
 
 ### SkillHub 在线市场
 

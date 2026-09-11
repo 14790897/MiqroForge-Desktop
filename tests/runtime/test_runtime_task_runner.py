@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from miqi.protocol.commands import UserMessage, AbortTurn
+from miqi.protocol.commands import AbortTurn, UserMessage
 from miqi.runtime.task_runner import TaskRunner
 
 
@@ -129,10 +129,10 @@ async def test_task_runner_abort_turn_uses_non_deprecated_coroutine_check(fake_s
 @pytest.mark.asyncio
 async def test_approval_response_resolves_orchestrator(fake_services):
     """ApprovalResponse resolves the orchestrator's pending approval (Phase 18)."""
+    from miqi.execution.orchestrator import ApprovalResolveResult
     from miqi.protocol.commands import ApprovalResponse
     from miqi.protocol.events import ApprovalResolvedEvent
     from miqi.runtime.task_runner import TaskRunner
-    from miqi.execution.orchestrator import ApprovalResolveResult
 
     events = asyncio.Queue()
     seen: dict[str, str] = {}
@@ -170,10 +170,10 @@ async def test_approval_response_resolves_orchestrator(fake_services):
 async def test_approval_response_nonexistent_approval_rejected(fake_services):
     """Phase 31.4: ApprovalResponse for nonexistent approval emits
     CommandRejectedEvent, NOT ApprovalResolvedEvent."""
+    from miqi.execution.orchestrator import ApprovalResolveResult
     from miqi.protocol.commands import ApprovalResponse
     from miqi.protocol.events import CommandRejectedEvent
     from miqi.runtime.task_runner import TaskRunner
-    from miqi.execution.orchestrator import ApprovalResolveResult
 
     events = asyncio.Queue()
 
@@ -206,10 +206,10 @@ async def test_approval_response_nonexistent_approval_rejected(fake_services):
 async def test_approval_response_invalid_decision_rejected(fake_services):
     """Phase 31.4: ApprovalResponse with invalid decision emits
     CommandRejectedEvent, NOT ApprovalResolvedEvent."""
+    from miqi.execution.orchestrator import ApprovalResolveResult
     from miqi.protocol.commands import ApprovalResponse
     from miqi.protocol.events import CommandRejectedEvent
     from miqi.runtime.task_runner import TaskRunner
-    from miqi.execution.orchestrator import ApprovalResolveResult
 
     events = asyncio.Queue()
 
@@ -242,10 +242,10 @@ async def test_approval_response_invalid_decision_rejected(fake_services):
 async def test_approval_response_resolved_event_has_correct_turn_id(fake_services):
     """Phase 31.4: successful TaskRunner ApprovalResponse emits
     ApprovalResolvedEvent with turn_id from the orchestrator result."""
+    from miqi.execution.orchestrator import ApprovalResolveResult
     from miqi.protocol.commands import ApprovalResponse
     from miqi.protocol.events import ApprovalResolvedEvent
     from miqi.runtime.task_runner import TaskRunner
-    from miqi.execution.orchestrator import ApprovalResolveResult
 
     events = asyncio.Queue()
 
@@ -297,7 +297,6 @@ async def test_task_runner_unknown_submission_command_rejected(fake_services):
 async def test_thread_command_create_emits_thread_created(fake_services):
     """ThreadCommand(action='new') must call ThreadRuntime.create_thread
     and emit ThreadCreatedEvent."""
-    from unittest.mock import AsyncMock
 
     from miqi.protocol.commands import ThreadCommand
     from miqi.protocol.events import ThreadCreatedEvent
@@ -489,7 +488,6 @@ async def test_thread_command_rename_missing_title_rejected(fake_services):
 @pytest.mark.asyncio
 async def test_thread_command_archive_unknown_thread_rejected(fake_services):
     """ThreadCommand archive on nonexistent thread emits CommandRejectedEvent."""
-    from unittest.mock import AsyncMock
 
     from miqi.protocol.commands import ThreadCommand
     from miqi.protocol.events import CommandRejectedEvent
@@ -512,7 +510,6 @@ async def test_thread_command_archive_unknown_thread_rejected(fake_services):
 @pytest.mark.asyncio
 async def test_thread_command_fork_unknown_parent_rejected(fake_services):
     """ThreadCommand fork on nonexistent parent emits CommandRejectedEvent."""
-    from unittest.mock import AsyncMock
 
     from miqi.protocol.commands import ThreadCommand
     from miqi.protocol.events import CommandRejectedEvent
@@ -539,7 +536,7 @@ async def test_thread_command_fork_unknown_parent_rejected(fake_services):
 
 def test_compact_command_is_submission():
     """CompactCommand exists, has correct type, and is part of Submission."""
-    from miqi.protocol.commands import CompactCommand, Submission
+    from miqi.protocol.commands import CompactCommand
 
     cmd = CompactCommand(thread_id="thread-1")
     assert cmd.type == "compact"
@@ -555,7 +552,6 @@ def test_compact_command_is_submission():
 async def test_compact_command_emits_context_compacted(fake_services):
     """CompactCommand must call context_runtime.compact_thread and emit
     ContextCompactedEvent (Phase 19)."""
-    from unittest.mock import AsyncMock
 
     from miqi.protocol.commands import CompactCommand
     from miqi.protocol.events import ContextCompactedEvent

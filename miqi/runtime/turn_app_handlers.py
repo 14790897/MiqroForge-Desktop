@@ -9,10 +9,17 @@ from __future__ import annotations
 import uuid
 from typing import Any
 
-from miqi.protocol.commands import UserMessage
 import miqi.runtime.protocol_specs as protocol_specs
+from miqi.protocol.commands import UserMessage
 from miqi.runtime.app_server import AppServer, AppServerError
 from miqi.runtime.turn_event_adapter import CodexTurnEventAdapter
+from miqi.runtime.turn_protocol import (
+    TurnProtocolError,
+    injected_message_to_provider_message,
+    input_attachments,
+    input_media,
+    turn_view,
+)
 from miqi.runtime.turn_request_models import (
     ThreadCompactStartParams,
     ThreadInjectItemsParams,
@@ -21,14 +28,6 @@ from miqi.runtime.turn_request_models import (
     TurnSteerParams,
     validate_turn_params,
 )
-from miqi.runtime.turn_protocol import (
-    TurnProtocolError,
-    input_attachments,
-    input_media,
-    injected_message_to_provider_message,
-    turn_view,
-)
-
 
 # ── helpers ────────────────────────────────────────────────────────────────
 
@@ -300,7 +299,8 @@ async def _run_thread_compaction(
     thread_id: str,
     turn_id: str,
 ) -> None:
-    from miqi.runtime.turn_protocol import context_compaction_item, turn_view as _turn_view
+    from miqi.runtime.turn_protocol import context_compaction_item
+    from miqi.runtime.turn_protocol import turn_view as _turn_view
 
     await server.emit_event(
         session.session_id,

@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from miqi.session.manager import SessionManager, OwnershipError
+from miqi.session.manager import OwnershipError, SessionManager
 
 
 def _make_manager(tmp_path: Path) -> SessionManager:

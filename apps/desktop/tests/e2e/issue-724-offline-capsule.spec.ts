@@ -20,10 +20,7 @@
 
 import { test, expect } from '@playwright/test';
 import type { ElectronApplication, Page } from '@playwright/test';
-import {
-  launchElectronApp,
-  closeElectronApp,
-} from './helpers/electron-setup';
+import { launchElectronApp, closeElectronApp } from './helpers/electron-setup';
 
 const CAPSULE = '[data-testid="runtime-status-capsule"]';
 
@@ -75,10 +72,7 @@ test.describe('Issue #724: 顶栏「离线」状态胶囊点击重连', () => {
     const capsule = page.locator(CAPSULE);
     await expect(capsule).toContainText('离线', { timeout: 30_000 });
     await expect(capsule).toBeEnabled();
-    await expect(capsule).toHaveAttribute(
-      'title',
-      '运行时未连接，点击重新连接',
-    );
+    await expect(capsule).toHaveAttribute('title', '运行时未连接，点击重新连接');
 
     // ── Click the capsule — this is the #724 fix under test ───────────
     await capsule.click();

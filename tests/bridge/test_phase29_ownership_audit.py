@@ -9,14 +9,12 @@ Validates:
 - AgentLoop/process_direct remain zero in production paths
 """
 
-import json
 from pathlib import Path
 
 import pytest
 
-from miqi.session.manager import SessionManager
 from miqi.runtime.app_server import AppServerError
-
+from miqi.session.manager import SessionManager
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -326,18 +324,19 @@ async def test_session_handlers_always_pass_client_id(fake_config, fake_provider
 
 def test_appserver_handlers_signature_always_has_client_id():
     """All AppServer session handler functions accept client_id parameter."""
-    from miqi.runtime.session_handlers import (
-        sessions_list_handler,
-        sessions_get_handler,
-        sessions_delete_handler,
-        sessions_archive_handler,
-        sessions_unarchive_handler,
-        sessions_list_archived_handler,
-        sessions_get_tracked_files_handler,
-        sessions_clear_tracked_files_handler,
-        sessions_claim_legacy_handler,
-    )
     import inspect
+
+    from miqi.runtime.session_handlers import (
+        sessions_archive_handler,
+        sessions_claim_legacy_handler,
+        sessions_clear_tracked_files_handler,
+        sessions_delete_handler,
+        sessions_get_handler,
+        sessions_get_tracked_files_handler,
+        sessions_list_archived_handler,
+        sessions_list_handler,
+        sessions_unarchive_handler,
+    )
 
     handlers = [
         sessions_list_handler,

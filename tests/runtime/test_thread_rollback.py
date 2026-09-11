@@ -11,10 +11,10 @@ from miqi.runtime.thread_app_handlers import register_codex_thread_handlers
 
 def _make_mock_session_with_real_runtimes(session_id: str, db_base: Path):
     """Create a mock session with real ThreadRuntime/LedgerRuntime/ReplayRuntime."""
-    from miqi.runtime.thread_runtime import ThreadRuntime
+    from miqi.runtime.history_runtime import HistoryRuntime
     from miqi.runtime.ledger_runtime import LedgerRuntime
     from miqi.runtime.replay_runtime import ReplayRuntime
-    from miqi.runtime.history_runtime import HistoryRuntime
+    from miqi.runtime.thread_runtime import ThreadRuntime
 
     db_path = db_base / "runtime.db"
     threads = ThreadRuntime(db_path, session_id=session_id)

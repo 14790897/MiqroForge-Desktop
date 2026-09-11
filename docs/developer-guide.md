@@ -160,7 +160,7 @@ apps/desktop/src/
   "tools": {
     "sandbox": {
       "enabled": true,
-      "share_net": false,
+      "share_net": true,
       "allow_system_installs": false,
       "max_sandboxes": 10,
       "auto_cleanup": true,
@@ -175,7 +175,7 @@ apps/desktop/src/
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | `enabled` | bool | true | 启用沙箱隔离 |
-| `share_net` | bool | false | 共享宿主机网络（true=容器可联网） |
+| `share_net` | bool | true | 共享宿主机网络（默认开启，沙箱内可直接联网、`pip install` 等；设为 false 则隔离网络命名空间 `--unshare-net`，沙箱内无外网） |
 | `allow_system_installs` | bool | false | 将系统包安装命令（`sudo apt-get install ...` 等）路由到 WSL 发行版以 root 执行。沙箱内无 root 且 `/usr` 等系统目录只读，apt 永远无法在沙箱内安装；开启后安装命令会改为在 WSL 发行版中执行，**安装一次、跨会话持久**，并立即通过沙箱对发行版系统目录的 ro-bind 在沙箱内可见（如 `xelatex`）。默认关闭：在 WSL 发行版中执行 root 命令属于主动让渡的权限，需用户显式开启。仅 Windows + WSL 生效（#759） |
 | `max_sandboxes` | int | 10 | 最大并发沙箱数 |
 | `auto_cleanup` | bool | true | 会话结束时自动清理沙箱 |

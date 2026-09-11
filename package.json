@@ -1,11 +1,11 @@
 {
   "name": "miqi-desktop-release",
-  "version": "0.20.0",
+  "version": "0.25.0",
   "private": true,
-  "description": "Release tooling for MiqroForge Desktop",
+  "description": "Release tooling for MiQroForge Desktop",
   "repository": {
     "type": "git",
-    "url": "https://github.com/14790897/MiQi.git"
+    "url": "https://github.com/14790897/MiqroForge-Desktop.git"
   },
   "scripts": {
     "commit": "cz",
@@ -14,8 +14,11 @@
     "prepare": "husky"
   },
   "lint-staged": {
-    "apps/desktop/src/**/*.{ts,tsx}": "prettier --config apps/desktop/.prettierrc --write",
-    "apps/desktop/*.json": "prettier --config apps/desktop/.prettierrc --write"
+    "apps/desktop/src/**/*.{ts,tsx}": "prettier --config apps/desktop/.prettierrc --ignore-path apps/desktop/.prettierignore --write",
+    "apps/desktop/tests/**/*.{ts,tsx}": "prettier --config apps/desktop/.prettierrc --ignore-path apps/desktop/.prettierignore --write",
+    "apps/desktop/*.{ts,mjs,cjs,js}": "prettier --config apps/desktop/.prettierrc --ignore-path apps/desktop/.prettierignore --write",
+    "apps/desktop/scripts/*.{js,mjs,cjs}": "prettier --config apps/desktop/.prettierrc --ignore-path apps/desktop/.prettierignore --write",
+    "apps/desktop/!(package-lock).json": "prettier --config apps/desktop/.prettierrc --ignore-path apps/desktop/.prettierignore --write"
   },
   "devDependencies": {
     "@commitlint/cli": "^19.6.0",

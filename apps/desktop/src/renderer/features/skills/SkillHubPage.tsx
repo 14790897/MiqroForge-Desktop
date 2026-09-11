@@ -204,7 +204,11 @@ export function SkillHubPage({ installedSkills, onSkillInstalled }: SkillHubPage
         {!loading && !error && skills.length === 0 && (
           <div className="flex flex-col items-center justify-center h-full gap-3 text-[var(--text-muted)]">
             <Package size={32} strokeWidth={1.5} />
-            <div className="text-sm">{query.trim() ? '未找到匹配的技能，换个关键词试试' : '技能市场暂无可安装技能，本地技能请在「我的技能」中查看'}</div>
+            <div className="text-sm">
+              {query.trim()
+                ? '未找到匹配的技能，换个关键词试试'
+                : '技能市场暂无可安装技能，本地技能请在「我的技能」中查看'}
+            </div>
           </div>
         )}
 

@@ -1,5 +1,5 @@
 /**
- * MiqroForge Desktop — Playwright Smoke QA Tests
+ * MiQroForge Desktop — Playwright Smoke QA Tests
  *
  * Covers the core renderer flows with a mock bridge backend.
  * Run: npx playwright test --config=playwright.config.ts
@@ -7,8 +7,8 @@
  * Test coverage:
  *  1. App load — preload bridge check, UI renders
  *  2. Sidebar — navigation buttons, session list
- *  3. Chat — input field, message display, sanitization
- *  4. StatusBar — runtime status visible
+ *  3. Chat — session title header, message sanitization
+ *  4. StatusBar — runtime status visible + 登录态积分余额
  */
 
 import { test, expect } from '@playwright/test';
@@ -18,23 +18,18 @@ import { buildMockBridgeScript, type MockBridgeOptions } from './mocks';
 // Helpers
 // ---------------------------------------------------------------------------
 
-async function injectMockAndGoto(
-  page: import('@playwright/test').Page,
-  opts?: MockBridgeOptions,
-) {
+async function injectMockAndGoto(page: import('@playwright/test').Page, opts?: MockBridgeOptions) {
   await page.addInitScript({ content: buildMockBridgeScript(opts) });
   await page.goto('/');
   // Wait for React to render
   await page.waitForSelector('#root', { state: 'visible' });
 }
 
-
 // ---------------------------------------------------------------------------
 // Suite 1: App Load & Bridge
 // ---------------------------------------------------------------------------
 
 test.describe('App Load & Bridge', () => {
-
   test('renders the application shell when preload is available', async ({ page }) => {
     await injectMockAndGoto(page);
 
@@ -54,13 +49,12 @@ test.describe('App Load & Bridge', () => {
     await expect(page.getByText('应用预加载脚本注入失败')).toBeVisible();
   });
 
-  test('renders MiqroForge branding', async ({ page }) => {
+  test('renders MiQroForge branding', async ({ page }) => {
     await injectMockAndGoto(page);
 
-    // "MiqroForge Desktop" is the app-title in the ChatConsole header
+    // "MiQroForge Desktop" is the app-title in the ChatConsole header
     await expect(page.getByTestId('app-title')).toBeVisible();
   });
-
 });
 
 // ---------------------------------------------------------------------------
@@ -68,7 +62,6 @@ test.describe('App Load & Bridge', () => {
 // ---------------------------------------------------------------------------
 
 test.describe('Sidebar Navigation', () => {
-
   test('sidebar renders with core session layout', async ({ page }) => {
     await injectMockAndGoto(page);
 
@@ -108,7 +101,6 @@ test.describe('Sidebar Navigation', () => {
     // The sessions section header should say "Tasks"
     await expect(page.getByText(/^(Tasks|任务)$/)).toBeVisible({ timeout: 3000 });
   });
-
 });
 
 // ---------------------------------------------------------------------------
@@ -116,29 +108,6 @@ test.describe('Sidebar Navigation', () => {
 // ---------------------------------------------------------------------------
 
 test.describe('Chat Console', () => {
-
-  test('renders chat input with correct placeholder', async ({ page }) => {
-    await injectMockAndGoto(page);
-
-    // The chat textarea should be present with the expected placeholder
-    const textarea = page.getByPlaceholder('Ask Agent to analyze or edit files...');
-    await expect(textarea).toBeVisible({ timeout: 5000 });
-  });
-
-  test('renders send button', async ({ page }) => {
-    await injectMockAndGoto(page);
-
-    // There should be a button containing the Send icon
-    const sendBtn = page.locator('button:has(svg)').filter({
-      has: page.locator('svg')
-    }).last();
-
-    // The send button should exist (disabled until input is entered)
-    // We just verify the textarea + button area exists
-    const inputArea = page.getByPlaceholder('Ask Agent to analyze or edit files...');
-    await expect(inputArea).toBeAttached();
-  });
-
   test('renders session title in header', async ({ page }) => {
     await injectMockAndGoto(page);
 
@@ -146,25 +115,6 @@ test.describe('Chat Console', () => {
     const title = page.locator('h2.font-semibold.truncate').first();
     await expect(title).toBeVisible({ timeout: 5000 });
   });
-
-  test('renders input area footer area', async ({ page }) => {
-    await injectMockAndGoto(page);
-
-    // The input textarea and its container should render
-    const textarea = page.getByPlaceholder('Ask Agent to analyze or edit files...');
-    await expect(textarea).toBeVisible({ timeout: 5000 });
-
-    // Verify the textarea is within an input area container
-    await expect(textarea).toBeEnabled({ timeout: 5000 });
-  });
-
-  test('chat input is enabled when not streaming', async ({ page }) => {
-    await injectMockAndGoto(page);
-
-    const textarea = page.getByPlaceholder('Ask Agent to analyze or edit files...');
-    await expect(textarea).toBeEnabled({ timeout: 5000 });
-  });
-
 });
 
 // ---------------------------------------------------------------------------
@@ -172,7 +122,6 @@ test.describe('Chat Console', () => {
 // ---------------------------------------------------------------------------
 
 test.describe('Status Bar', () => {
-
   test('shows runtime status indicator', async ({ page }) => {
     await injectMockAndGoto(page);
 
@@ -187,6 +136,102 @@ test.describe('Status Bar', () => {
     await expect(page.getByText('已停止')).toBeVisible({ timeout: 5000 });
   });
 
+  test('shows points balance in status bar when logged in', async ({ page }) => {
+    await injectMockAndGoto(page, {
+      qraftStatus: {
+        loggedIn: true,
+        account: { phone: '18500000000', sub: '19', nickname: 'MiQi测试' },
+      },
+    });
+
+    // 状态栏在登录后拉取余额（mock 默认 270 可用积分）并展示
+    await expect(page.getByTestId('statusbar-points')).toHaveText(/积分 270/);
+  });
+
+  test('hides points balance in status bar when logged out', async ({ page }) => {
+    await injectMockAndGoto(page);
+
+    await expect(page.getByTestId('statusbar-points')).toHaveCount(0);
+  });
+
+  test('shows billing history popover when clicking points', async ({ page }) => {
+    await injectMockAndGoto(page, {
+      qraftStatus: {
+        loggedIn: true,
+        account: { phone: '18500000000', sub: '19', nickname: 'MiQi测试' },
+      },
+      qraftBillingHistoryResult: [
+        {
+          chargeId: 'charge-001',
+          deductedAt: new Date(Date.now() - 3600_000).toISOString(),
+          cost: 10,
+          balanceAfter: 260,
+          status: 'billed',
+          jobId: 'slurm-123',
+          serverName: 'slurm',
+          toolName: 'submit_job',
+          argsSummary: 'sbatch run.sh',
+        },
+        {
+          chargeId: 'charge-002',
+          deductedAt: new Date(Date.now() - 7200_000).toISOString(),
+          cost: 10,
+          status: 'insufficient',
+          jobId: 'slurm-124',
+        },
+      ],
+    });
+
+    await expect(page.getByTestId('statusbar-points')).toHaveText(/积分 270/);
+    await page.getByTestId('statusbar-points').click();
+
+    const popover = page.getByTestId('statusbar-points-popover');
+    await expect(popover).toBeVisible();
+    // 明细：作业、扣费金额、扣后余额、失败状态
+    await expect(popover).toContainText('作业 slurm-123');
+    await expect(popover).toContainText('sbatch run.sh');
+    await expect(popover).toContainText('-10');
+    await expect(popover).toContainText('余额 260');
+    await expect(popover).toContainText('作业 slurm-124');
+    await expect(popover).toContainText('余额不足');
+
+    // 再次点击关闭弹层
+    await page.getByTestId('statusbar-points').click();
+    await expect(popover).toHaveCount(0);
+  });
+
+  test('shows empty billing history popover when no charges', async ({ page }) => {
+    await injectMockAndGoto(page, {
+      qraftStatus: {
+        loggedIn: true,
+        account: { phone: '18500000000', sub: '19', nickname: 'MiQi测试' },
+      },
+    });
+
+    await expect(page.getByTestId('statusbar-points')).toHaveText(/积分 270/);
+    await page.getByTestId('statusbar-points').click();
+    await expect(page.getByTestId('statusbar-points-popover')).toContainText('暂无扣费记录');
+
+    // 点击弹层外关闭
+    await page.mouse.click(10, 10);
+    await expect(page.getByTestId('statusbar-points-popover')).toHaveCount(0);
+  });
+
+  test('closes popover and navigates to settings via footer link', async ({ page }) => {
+    await injectMockAndGoto(page, {
+      qraftStatus: {
+        loggedIn: true,
+        account: { phone: '18500000000', sub: '19', nickname: 'MiQi测试' },
+      },
+    });
+
+    await expect(page.getByTestId('statusbar-points')).toHaveText(/积分 270/);
+    await page.getByTestId('statusbar-points').click();
+    await page.getByTestId('statusbar-points-open-settings').click();
+    await expect(page.getByTestId('statusbar-points-popover')).toHaveCount(0);
+    // 跳转到设置 → Qraft 平台账号页（含扣费历史区块）
+    await expect(page.getByText('MiQroForge 平台账号')).toBeVisible();
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -194,26 +239,22 @@ test.describe('Status Bar', () => {
 // ---------------------------------------------------------------------------
 
 test.describe('Error Sanitization', () => {
-
   test('renderer loads sanitizeUiMessage module without error', async ({ page }) => {
     await injectMockAndGoto(page);
 
     // Verify the page loaded without JavaScript errors
     const errors: string[] = [];
-    page.on('pageerror', err => errors.push(err.message));
+    page.on('pageerror', (err) => errors.push(err.message));
 
     // Reload to trigger a fresh render
     await page.reload();
     await page.waitForSelector('#root', { state: 'visible' });
 
     // Filter out expected errors (CSP, missing icons, etc.)
-    const unexpectedErrors = errors.filter(
-      e => !e.includes('Failed to load resource')
-    );
+    const unexpectedErrors = errors.filter((e) => !e.includes('Failed to load resource'));
 
     expect(unexpectedErrors).toHaveLength(0);
   });
-
 });
 
 // ---------------------------------------------------------------------------
@@ -221,22 +262,9 @@ test.describe('Error Sanitization', () => {
 // ---------------------------------------------------------------------------
 
 test.describe('Layout', () => {
-
-  test('sidebar and main content are both visible', async ({ page }) => {
-    await injectMockAndGoto(page);
-
-    // The sidebar width is 240px, so the main column should be right of that
-    // Verify both key landmarks exist
-    await expect(page.getByTestId('app-title')).toBeVisible({ timeout: 3000 });
-    await expect(
-      page.getByPlaceholder('Ask Agent to analyze or edit files...')
-    ).toBeVisible({ timeout: 3000 });
-  });
-
   test('page title is set correctly', async ({ page }) => {
     await injectMockAndGoto(page);
 
-    await expect(page).toHaveTitle(/MiqroForge/i);
+    await expect(page).toHaveTitle(/MiQroForge/i);
   });
-
 });

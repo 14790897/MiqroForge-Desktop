@@ -193,7 +193,7 @@ async def test_acceptance_landlock_never_auto_selected_on_available_alone():
 
     selection = await engine.select(ctx)
     assert selection.sandbox_type != SandboxType.LANDLOCK, (
-        f"LANDLOCK must not be selected when landlock_supported=False"
+        "LANDLOCK must not be selected when landlock_supported=False"
     )
     assert selection.sandbox_type == SandboxType.NONE
 

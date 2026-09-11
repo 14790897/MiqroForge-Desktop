@@ -1,7 +1,10 @@
 import pytest
 
 from miqi.execution.hook_runtime import (
-    HookRuntime, HookRegistration, HookPoint, HookOutcome,
+    HookOutcome,
+    HookPoint,
+    HookRegistration,
+    HookRuntime,
 )
 
 

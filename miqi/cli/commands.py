@@ -1,9 +1,7 @@
 """CLI commands for MiQi runtime."""
 
-import asyncio
 import os
 import select
-import signal
 import sys
 from pathlib import Path
 
@@ -15,19 +13,20 @@ from prompt_toolkit.history import FileHistory
 from prompt_toolkit.patch_stdout import patch_stdout
 from rich.console import Console
 from rich.markdown import Markdown
-from rich.table import Table
 from rich.text import Text
 
 from miqi import __logo__, __version__
-from miqi.config.schema import Config
 from miqi.cli.agent_cmd import register_agent_command
+from miqi.cli.config_cmd import register_config_commands
 from miqi.cli.gateway_cmd import register_gateway_command
 from miqi.cli.management import register_management_commands
 from miqi.cli.onboard import register_onboard_command
+from miqi.cli.trace_cmd import trace_app
+from miqi.config.schema import Config
 
 app = typer.Typer(
     name="miqi",
-    help=f"{__logo__} MiqroForge Runtime - Personal AI Assistant",
+    help=f"{__logo__} MiQroForge Runtime - Personal AI Assistant",
     no_args_is_help=True,
 )
 
@@ -725,10 +724,8 @@ register_management_commands(
     print_agent_response=_print_agent_response,
 )
 
-from miqi.cli.config_cmd import register_config_commands
 register_config_commands(app, console=console)
 
-from miqi.cli.trace_cmd import trace_app
 app.add_typer(trace_app, name="trace")
 
 

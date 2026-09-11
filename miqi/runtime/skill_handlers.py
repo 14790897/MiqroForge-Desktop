@@ -11,9 +11,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-from loguru import logger
-
-from miqi.runtime.app_server import AppServerError, get_bridge_state
+from miqi.runtime.app_server import AppServerError, get_bridge_context, get_bridge_state
 
 _SKILL_NAME_RE = re.compile(r'^[a-z][a-z0-9-]*$')
 
@@ -67,6 +65,28 @@ def _get_skills_loader(registry: Any) -> Any:
     config = state.load_config()
     from miqi.agent.skills import SkillsLoader
     return SkillsLoader(workspace=config.workspace_path)
+
+
+async def _invalidate_and_notify(client_id: str, registry: Any, name: str) -> None:
+    """Invalidate the shared skill index and notify clients after a mutation.
+
+    Aligns with ``_extra_roots_set`` (skills_app_handlers.py), which emits the
+    same ``skills/changed`` event. create/upload/delete previously neither
+    invalidated the process-level index (#859) nor notified the frontend.
+    """
+    from miqi.agent.skills import invalidate_skill_index
+
+    state = get_bridge_state(registry)
+    config = state.load_config()
+    invalidate_skill_index(config.workspace_path)
+
+    app_server = get_bridge_context(registry, "app_server")
+    if app_server is not None:
+        await app_server.emit_client_event(
+            client_id,
+            "skills/changed",
+            {"name": name},
+        )
 
 
 async def skills_list_handler(
@@ -192,6 +212,7 @@ async def skills_create_handler(
         f"# {name}\n\n{description or 'A new skill'}\n"
     )
     (skill_dir / "SKILL.md").write_text(template, encoding="utf-8")
+    await _invalidate_and_notify(client_id, registry, name)
     return {"result": {"ok": True, "path": str(skill_dir)}}
 
 
@@ -221,6 +242,7 @@ async def skills_upload_handler(
 
     skill_dir.mkdir(parents=True)
     (skill_dir / "SKILL.md").write_text(content, encoding="utf-8")
+    await _invalidate_and_notify(client_id, registry, name)
     return {"result": {"ok": True}}
 
 
@@ -253,4 +275,5 @@ async def skills_delete_handler(
         )
 
     _shutil.rmtree(skill_dir)
+    await _invalidate_and_notify(client_id, registry, name)
     return {"result": {"ok": True}}

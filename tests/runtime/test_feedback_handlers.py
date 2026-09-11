@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
-import shutil
 import tempfile
 from datetime import date, timedelta
 from pathlib import Path
@@ -87,8 +85,8 @@ async def test_feedback_list_returns_entries():
 @pytest.mark.asyncio
 async def test_feedback_list_respects_limit():
     """With 7 backups and limit=3, only the newest 3 are returned."""
-    from miqi.runtime.feedback_handlers import feedback_list_handler
     import miqi.runtime.feedback_handlers as handlers
+    from miqi.runtime.feedback_handlers import feedback_list_handler
 
     workspace = _make_workspace()
     state = _make_mock_state(workspace)
@@ -120,8 +118,8 @@ async def test_feedback_list_respects_limit():
 @pytest.mark.asyncio
 async def test_feedback_list_limit_zero_returns_all():
     """limit=0 (or null/None) means no limit — return everything."""
-    from miqi.runtime.feedback_handlers import feedback_list_handler
     import miqi.runtime.feedback_handlers as handlers
+    from miqi.runtime.feedback_handlers import feedback_list_handler
 
     workspace = _make_workspace()
     state = _make_mock_state(workspace)
@@ -149,8 +147,8 @@ async def test_feedback_list_limit_zero_returns_all():
 @pytest.mark.asyncio
 async def test_feedback_list_limit_clamps_to_max():
     """limit > 200 is clamped to 200 to bound work."""
-    from miqi.runtime.feedback_handlers import feedback_list_handler
     import miqi.runtime.feedback_handlers as handlers
+    from miqi.runtime.feedback_handlers import feedback_list_handler
 
     workspace = _make_workspace()
     state = _make_mock_state(workspace)
@@ -266,7 +264,7 @@ async def test_feedback_submit_rejects_when_disabled(_bridge_state_isolated):
 @pytest.mark.asyncio
 async def test_feedback_submit_rejects_when_no_feishu_credentials(_bridge_state_isolated):
     """feedback:submit raises FEISHU_NOT_CONFIGURED when app_id/app_secret are blank AND schema defaults are overridden to ''."""
-    from miqi.runtime.feedback_handlers import feedback_submit_handler, FeedbackConfig
+    from miqi.runtime.feedback_handlers import FeedbackConfig, feedback_submit_handler
 
     workspace = _make_workspace()
     state = _make_mock_state(workspace, app_id="", app_secret="")
@@ -289,7 +287,7 @@ async def test_feedback_submit_rejects_when_no_feishu_credentials(_bridge_state_
 @pytest.mark.asyncio
 async def test_feedback_submit_rejects_when_no_bitable_config(_bridge_state_isolated):
     """feedback:submit raises BITABLE_NOT_CONFIGURED when bitable target is blank AND schema defaults are overridden to ''."""
-    from miqi.runtime.feedback_handlers import feedback_submit_handler, FeedbackConfig
+    from miqi.runtime.feedback_handlers import FeedbackConfig, feedback_submit_handler
 
     workspace = _make_workspace()
     state = _make_mock_state(workspace, bitable_app_token="", bitable_table_id="")
@@ -530,6 +528,7 @@ def test_backward_compat_aliases_exist(tmp_path):
 def test_decode_data_url_extracts_mime_filename_and_bytes():
     """Round-trip: build a tiny PNG data URL, decode it."""
     import base64
+
     from miqi.runtime.feedback_handlers import _decode_data_url
 
     # 1x1 transparent PNG
@@ -564,8 +563,9 @@ async def test_feedback_submit_uploads_screenshots_and_creates_record(
     _bridge_state_isolated,
 ):
     """Submit with one screenshot: upload should be called once, record includes 附件 field."""
-    from miqi.runtime.feedback_handlers import feedback_submit_handler
     import base64
+
+    from miqi.runtime.feedback_handlers import feedback_submit_handler
 
     workspace = _make_workspace()
     state = _make_mock_state(workspace)
@@ -705,8 +705,9 @@ async def test_feedback_submit_rejects_oversized_encoded_data_url(_bridge_state_
 @pytest.mark.asyncio
 async def test_feedback_submit_caps_screenshots_at_5(_bridge_state_isolated):
     """More than 5 screenshots → only first 5 are uploaded."""
-    from miqi.runtime.feedback_handlers import feedback_submit_handler
     import base64
+
+    from miqi.runtime.feedback_handlers import feedback_submit_handler
 
     workspace = _make_workspace()
     state = _make_mock_state(workspace)

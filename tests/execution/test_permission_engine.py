@@ -1,11 +1,14 @@
 """Tests for miqi.execution.permission_engine."""
 import pytest
+
 from miqi.config.schema import ApprovalBypassConfig
+from miqi.execution.approval_policy import ApprovalMode, ApprovalPolicy
+from miqi.execution.exec_policy import CommandRule, ExecPolicy
 from miqi.execution.permission_engine import (
     PermissionEngine,
-    PermissionDecision,
     PermissionVerdict,
 )
+from miqi.runtime.permission_profile import PermissionProfile
 
 
 class FakeContext:
@@ -184,12 +187,6 @@ async def test_make_key_write_file():
     ctx = FakeContext("write_file", {"path": "/tmp/test.txt"})
     key = PermissionEngine._make_key(ctx)
     assert key == "write_file:/tmp/test.txt"
-
-
-from miqi.execution.approval_policy import ApprovalPolicy, ApprovalMode
-from miqi.execution.exec_policy import ExecPolicy, CommandRule
-from miqi.execution.permission_engine import PermissionEngine, PermissionVerdict
-from miqi.runtime.permission_profile import PermissionProfile
 
 
 class _Ctx:

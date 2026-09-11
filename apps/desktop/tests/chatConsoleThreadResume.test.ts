@@ -28,7 +28,9 @@ describe('pickThreadToResume', () => {
   });
 
   it('picks the single active thread', () => {
-    const items = [{ id: 'thread-a', turnCount: 3, updatedAt: 1000, archived: false, ephemeral: false }];
+    const items = [
+      { id: 'thread-a', turnCount: 3, updatedAt: 1000, archived: false, ephemeral: false },
+    ];
     expect(pickThreadToResume(items)).toBe('thread-a');
   });
 
@@ -36,18 +38,60 @@ describe('pickThreadToResume', () => {
     // Real fragmented-session shape: a nearly-empty recap thread touched
     // last vs. a history-rich thread touched earlier.
     const items = [
-      { id: 'rich-but-older', turnCount: 14, updatedAt: 2000, createdAt: 1000, archived: false, ephemeral: false },
-      { id: 'empty-but-recent', turnCount: 1, updatedAt: 9000, createdAt: 8000, archived: false, ephemeral: false },
-      { id: 'mid', turnCount: 6, updatedAt: 5000, createdAt: 1500, archived: false, ephemeral: false },
+      {
+        id: 'rich-but-older',
+        turnCount: 14,
+        updatedAt: 2000,
+        createdAt: 1000,
+        archived: false,
+        ephemeral: false,
+      },
+      {
+        id: 'empty-but-recent',
+        turnCount: 1,
+        updatedAt: 9000,
+        createdAt: 8000,
+        archived: false,
+        ephemeral: false,
+      },
+      {
+        id: 'mid',
+        turnCount: 6,
+        updatedAt: 5000,
+        createdAt: 1500,
+        archived: false,
+        ephemeral: false,
+      },
     ];
     expect(pickThreadToResume(items)).toBe('rich-but-older');
   });
 
   it('breaks turnCount ties by the largest updatedAt', () => {
     const items = [
-      { id: 'same-turns-old', turnCount: 5, updatedAt: 1000, createdAt: 1000, archived: false, ephemeral: false },
-      { id: 'same-turns-new', turnCount: 5, updatedAt: 5000, createdAt: 2000, archived: false, ephemeral: false },
-      { id: 'same-turns-mid', turnCount: 5, updatedAt: 3000, createdAt: 1500, archived: false, ephemeral: false },
+      {
+        id: 'same-turns-old',
+        turnCount: 5,
+        updatedAt: 1000,
+        createdAt: 1000,
+        archived: false,
+        ephemeral: false,
+      },
+      {
+        id: 'same-turns-new',
+        turnCount: 5,
+        updatedAt: 5000,
+        createdAt: 2000,
+        archived: false,
+        ephemeral: false,
+      },
+      {
+        id: 'same-turns-mid',
+        turnCount: 5,
+        updatedAt: 3000,
+        createdAt: 1500,
+        archived: false,
+        ephemeral: false,
+      },
     ];
     expect(pickThreadToResume(items)).toBe('same-turns-new');
   });
@@ -55,7 +99,14 @@ describe('pickThreadToResume', () => {
   it('treats a missing turnCount as 0 (richness still drives selection)', () => {
     const items = [
       { id: 'no-count', updatedAt: 9000, createdAt: 9000, archived: false, ephemeral: false },
-      { id: 'has-count', turnCount: 2, updatedAt: 1000, createdAt: 1000, archived: false, ephemeral: false },
+      {
+        id: 'has-count',
+        turnCount: 2,
+        updatedAt: 1000,
+        createdAt: 1000,
+        archived: false,
+        ephemeral: false,
+      },
     ];
     expect(pickThreadToResume(items)).toBe('has-count');
   });
@@ -70,7 +121,13 @@ describe('pickThreadToResume', () => {
 
   it('skips archived threads', () => {
     const items = [
-      { id: 'archived-but-richest', turnCount: 99, updatedAt: 9999, archived: true, ephemeral: false },
+      {
+        id: 'archived-but-richest',
+        turnCount: 99,
+        updatedAt: 9999,
+        archived: true,
+        ephemeral: false,
+      },
       { id: 'active-thin', turnCount: 1, updatedAt: 1000, archived: false, ephemeral: false },
     ];
     expect(pickThreadToResume(items)).toBe('active-thin');
@@ -111,8 +168,22 @@ describe('pickThreadToResume', () => {
 
   it('handles stringy/non-numeric counts and timestamps defensively', () => {
     const items = [
-      { id: 'a', turnCount: 'abc', updatedAt: 'abc', createdAt: 5, archived: false, ephemeral: false },
-      { id: 'b', turnCount: '10', updatedAt: '10', createdAt: 1, archived: false, ephemeral: false },
+      {
+        id: 'a',
+        turnCount: 'abc',
+        updatedAt: 'abc',
+        createdAt: 5,
+        archived: false,
+        ephemeral: false,
+      },
+      {
+        id: 'b',
+        turnCount: '10',
+        updatedAt: '10',
+        createdAt: 1,
+        archived: false,
+        ephemeral: false,
+      },
     ];
     // Number('abc') → NaN → 0; Number('10') → 10. b has more turns → picked.
     expect(pickThreadToResume(items)).toBe('b');
@@ -132,9 +203,36 @@ describe('resume wiring: threads.list → pickThreadToResume', () => {
     // Mirrors the real _thread_list response: { data: [ThreadView.to_dict...] }.
     const backendResponse = {
       data: [
-        { id: 'thread-empty-recap', title: 'recap', status: 'active', turnCount: 1, updatedAt: 9000, createdAt: 8500, archived: false, ephemeral: false },
-        { id: 'thread-real-convo', title: 'main', status: 'active', turnCount: 14, updatedAt: 2000, createdAt: 1000, archived: false, ephemeral: false },
-        { id: 'thread-archived-old', title: 'old', status: 'archived', turnCount: 99, updatedAt: 9999, createdAt: 1, archived: true, ephemeral: false },
+        {
+          id: 'thread-empty-recap',
+          title: 'recap',
+          status: 'active',
+          turnCount: 1,
+          updatedAt: 9000,
+          createdAt: 8500,
+          archived: false,
+          ephemeral: false,
+        },
+        {
+          id: 'thread-real-convo',
+          title: 'main',
+          status: 'active',
+          turnCount: 14,
+          updatedAt: 2000,
+          createdAt: 1000,
+          archived: false,
+          ephemeral: false,
+        },
+        {
+          id: 'thread-archived-old',
+          title: 'old',
+          status: 'archived',
+          turnCount: 99,
+          updatedAt: 9999,
+          createdAt: 1,
+          archived: true,
+          ephemeral: false,
+        },
       ],
       nextCursor: null,
     };
@@ -144,13 +242,9 @@ describe('resume wiring: threads.list → pickThreadToResume', () => {
 
   it('still resumes when the backend uses the legacy `items` envelope', () => {
     const legacyResponse = {
-      items: [
-        { id: 'only-one', turnCount: 5, updatedAt: 1000, archived: false, ephemeral: false },
-      ],
+      items: [{ id: 'only-one', turnCount: 5, updatedAt: 1000, archived: false, ephemeral: false }],
     };
-    expect(pickThreadToResume(extractThreadListRows(legacyResponse))).toBe(
-      'only-one',
-    );
+    expect(pickThreadToResume(extractThreadListRows(legacyResponse))).toBe('only-one');
   });
 
   it('returns null for an empty page (brand-new session resumes nothing)', () => {
@@ -173,12 +267,8 @@ describe('resume wiring: threads.list → pickThreadToResume', () => {
     // ids can never appear as a selection here. Pin that only the supplied
     // rows are considered — nothing is fetched or merged from elsewhere.
     const ownSessionOnly = {
-      data: [
-        { id: 'A-thread', turnCount: 10, updatedAt: 1000, archived: false, ephemeral: false },
-      ],
+      data: [{ id: 'A-thread', turnCount: 10, updatedAt: 1000, archived: false, ephemeral: false }],
     };
-    expect(pickThreadToResume(extractThreadListRows(ownSessionOnly))).toBe(
-      'A-thread',
-    );
+    expect(pickThreadToResume(extractThreadListRows(ownSessionOnly))).toBe('A-thread');
   });
 });

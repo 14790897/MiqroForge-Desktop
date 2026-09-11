@@ -6,10 +6,10 @@ from unittest.mock import AsyncMock, MagicMock
 
 def _make_orchestrator(permission_engine=None, deny_patterns=None, permanent_allowlist=None):
     """Create a minimal ToolOrchestrator for testing."""
-    from miqi.execution.permission_engine import PermissionEngine
-    from miqi.execution.sandbox_policy import SandboxPolicyEngine
     from miqi.execution.hook_runtime import HookRuntime
     from miqi.execution.orchestrator import ToolOrchestrator
+    from miqi.execution.permission_engine import PermissionEngine
+    from miqi.execution.sandbox_policy import SandboxPolicyEngine
 
     pe = permission_engine or PermissionEngine()
     if deny_patterns:

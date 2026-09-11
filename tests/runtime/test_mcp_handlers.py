@@ -41,8 +41,8 @@ async def test_mcp_list_returns_servers(registry_with_state):
 @pytest.mark.asyncio
 async def test_mcp_upsert_requires_name():
     """mcp.upsert should reject empty name."""
-    from miqi.runtime.mcp_handlers import mcp_upsert_handler
     from miqi.runtime.app_server import AppServerError
+    from miqi.runtime.mcp_handlers import mcp_upsert_handler
 
     registry = ClientSessionRegistry()
     with pytest.raises(AppServerError, match="name is required"):

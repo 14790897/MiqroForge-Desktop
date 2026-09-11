@@ -8,7 +8,6 @@ from typing import Any
 from miqi.runtime.ledger_runtime import LedgerItem
 from miqi.runtime.thread_runtime import RuntimeThread
 
-
 EXPORT_VERSION = 1
 
 
@@ -16,8 +15,8 @@ EXPORT_VERSION = 1
 class ThreadExportDocument:
     version: int
     thread: dict[str, Any]
-    ledgerItems: list[dict[str, Any]] = field(default_factory=list)
-    providerMessages: list[dict[str, Any]] = field(default_factory=list)
+    ledgerItems: list[dict[str, Any]] = field(default_factory=list)  # noqa: N815
+    providerMessages: list[dict[str, Any]] = field(default_factory=list)  # noqa: N815
 
     def to_dict(self) -> dict[str, Any]:
         return {

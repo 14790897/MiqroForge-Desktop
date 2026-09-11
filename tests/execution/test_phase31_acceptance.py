@@ -16,7 +16,6 @@ import pytest
 
 from miqi.runtime.ledger_runtime import LedgerRuntime
 
-
 # ── Helpers ────────────────────────────────────────────────────────────────
 
 
@@ -368,7 +367,8 @@ async def test_exec_tool_never_bypasses_injected_sandbox_selection():
     from miqi.agent.tools.shell import ExecTool
     from miqi.execution.sandbox_policy import SandboxSelection, SandboxType
     from miqi.protocol.permissions import (
-        FileSystemSandboxPolicy, NetworkSandboxPolicy,
+        FileSystemSandboxPolicy,
+        NetworkSandboxPolicy,
     )
 
     _none = SandboxSelection(
@@ -400,7 +400,8 @@ async def test_exec_tool_bwrap_unavailable_fails_closed():
     from miqi.agent.tools.shell import ExecTool
     from miqi.execution.sandbox_policy import SandboxSelection, SandboxType
     from miqi.protocol.permissions import (
-        FileSystemSandboxPolicy, NetworkSandboxPolicy,
+        FileSystemSandboxPolicy,
+        NetworkSandboxPolicy,
     )
 
     bwrap = SandboxSelection(

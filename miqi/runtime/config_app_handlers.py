@@ -11,9 +11,9 @@ from typing import Any
 
 from loguru import logger
 
+import miqi.runtime.protocol_specs as protocol_specs
 from miqi.runtime.app_server import AppServer, AppServerError, get_bridge_state
 from miqi.runtime.core_request_models import validate_core_params
-import miqi.runtime.protocol_specs as protocol_specs
 
 # ── Secret field names ────────────────────────────────────────────────────
 _SECRET_FIELDS = {
@@ -100,6 +100,19 @@ def _validate_dot_path(path: str) -> None:
             )
 
 
+def _reject_provider_credential_path(path: str) -> None:
+    """拒绝 batchWrite 写入 providers 子树（整个 providers 都是凭据领域）。
+
+    拦截 "providers" 及 "providers.*" 任意层级，防止整对象替换
+    （如 path="providers.deepseek"）绕过字段级拦截（CodeRabbit #912 review）。
+    """
+    if path == "providers" or path.startswith("providers."):
+        raise AppServerError(
+            f"Provider 配置（{path}）已禁用写入，请使用内置激活码",
+            code="NOT_SUPPORTED",
+        )
+
+
 def _apply_edit(target: dict, edit: dict) -> None:
     """Apply a single edit dict to *target* in-place.
 
@@ -109,6 +122,7 @@ def _apply_edit(target: dict, edit: dict) -> None:
     op = edit.get("op", "set")
     path = edit.get("path", "")
     _validate_dot_path(path)
+    _reject_provider_credential_path(path)  # 后端收口（#835）
 
     segments = path.split(".")
     if op in ("set", None):
@@ -228,8 +242,8 @@ def register_config_app_handlers(server: AppServer) -> None:
         All edits are applied to an in-memory copy, then validated once.
         If validation fails, nothing is written to disk.
         """
-        from miqi.config.schema import Config
         from miqi.config.loader import save_config
+        from miqi.config.schema import Config
 
         typed = validate_core_params("config/batchWrite", params)
         edits = [edit.model_dump(by_alias=True) for edit in typed.edits]
@@ -255,6 +269,24 @@ def register_config_app_handlers(server: AppServer) -> None:
                 code="INVALID_PARAMS",
             ) from exc
 
+        # 收口（#929）：batchWrite 与 config.update 采用同一模型策略 ——
+        # 仅当编辑改写了默认模型时校验「可解析到有凭据 provider / 经网关
+        # 路由」，且拒绝空值。此前该路径完全没有模型门控，可原样写入
+        # custom/default 等运行时无法使用的值。
+        if any(e.get("path") == "agents.defaults.model" for e in edits):
+            model_value = new_config.agents.defaults.model
+            if not model_value:
+                raise AppServerError(
+                    "默认模型不能为空，请从下拉列表选择预设模型",
+                    code="INVALID_PARAMS",
+                )
+            from miqi.runtime.provider_handlers import _model_provider_resolvable
+
+            if not _model_provider_resolvable(new_config, model_value):
+                raise AppServerError(
+                    f"Unsupported model: {model_value}", code="INVALID_PARAMS",
+                )
+
         # Save to disk (atomic from the caller's perspective — validation
         # passed, so this write is the only side effect)
         try:
@@ -269,36 +301,31 @@ def register_config_app_handlers(server: AppServer) -> None:
         # Update bridge state cache
         state.config = new_config
 
-        # Propagate to active sessions when requested
+        # Issue #789: hot-apply to active sessions + broadcast config_updated
+        # (only when the caller requested a runtime reload).
+        from miqi.runtime.config_handlers import hot_apply_and_broadcast
+
+        report = None
         propagated = 0
         if reload_user_config:
-            for sid in registry.list_sessions(client_id):
-                runtime = await registry.get_session(client_id, sid)
-                if runtime is None:
-                    continue
-                try:
-                    session_state = getattr(runtime.services, "session_state", None)
-                    if session_state is not None:
-                        session_state.config_snapshot = new_config
-                        propagated += 1
-                    from miqi.runtime.config_handlers import _apply_runtime_approval_bypass
-                    _apply_runtime_approval_bypass(runtime, new_config)
-                except Exception as exc:
-                    logger.warning(
-                        "config.batchWrite: failed to propagate to session {}: {}",
-                        sid, exc,
-                    )
+            report, propagated = await hot_apply_and_broadcast(
+                registry, client_id, config, new_config,
+            )
 
         logger.info(
-            "config.batchWrite: saved {} edit(s), propagated to {} session(s) (client={})",
+            "config.batchWrite: saved {} edit(s), hot-applied to {} session(s) (client={})",
             applied, propagated, client_id,
         )
 
-        return {"result": {
+        result: dict[str, Any] = {
             "saved": True,
             "applied": applied,
             "propagatedSessions": propagated,
-        }}
+        }
+        if report is not None:
+            result["tierReport"] = report.to_dict()
+
+        return {"result": result}
 
     server.register_method("config/read", _config_read, spec=protocol_specs.CONFIG_READ)
     server.register_method("config/batchWrite", _config_batch_write, spec=protocol_specs.CONFIG_BATCH_WRITE)

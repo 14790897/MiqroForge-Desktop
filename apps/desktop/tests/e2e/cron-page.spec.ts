@@ -103,7 +103,10 @@ test.describe.serial('Cron Page E2E (#113)', () => {
     await page.getByRole('button', { name: 'at', exact: true }).click();
     const atInput = page.getByPlaceholder(String(Date.now() + 60000));
     // placeholder 是动态的（Date.now()+60000），用 label 定位数字输入
-    await page.locator('input[type="number"]').first().fill(String(Date.now() + TEN_MINUTES_MS));
+    await page
+      .locator('input[type="number"]')
+      .first()
+      .fill(String(Date.now() + TEN_MINUTES_MS));
     await page.getByPlaceholder('任务触发时 Agent 应执行的操作…').fill('执行 at 任务');
     await submitCreate(page);
     await expectJobVisible(page, 'e2e-at-job');
@@ -174,7 +177,9 @@ test.describe.serial('Cron Page E2E (#113)', () => {
     // 最近执行记录面板出现（runs.length > 0 才渲染），且面板内含该任务名
     const runsPanel = page.locator('div.rounded-xl', { hasText: '最近执行记录' }).first();
     await expect(runsPanel).toBeVisible({ timeout: 15_000 });
-    await expect(runsPanel.getByText('e2e-at-job', { exact: true })).toBeVisible({ timeout: 10_000 });
+    await expect(runsPanel.getByText('e2e-at-job', { exact: true })).toBeVisible({
+      timeout: 10_000,
+    });
   });
 
   // ── 5. 重启恢复 ────────────────────────────────────────────────────────

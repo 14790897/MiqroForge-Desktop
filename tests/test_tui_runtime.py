@@ -8,7 +8,6 @@ import tempfile
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
-
 # ---------------------------------------------------------------------------
 # Task 10.7: TUI uses shared provider factory (not LLMProvider.from_config)
 # ---------------------------------------------------------------------------
@@ -77,7 +76,6 @@ def test_tui_load_runtime_handles_failure_gracefully():
 def test_tui_connect_runtime_creates_runtime_session():
     """Phase 14: connect_runtime() creates RuntimeSession + RuntimeClient."""
     from miqi.tui.app import MiQiTui
-    import asyncio
 
     rtc = []
 

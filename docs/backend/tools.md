@@ -84,11 +84,11 @@ class ToolResult:
 
 | 工具 | 功能 | 安全限制 |
 |------|------|----------|
-| `read_file` | 读取文件内容 | 工作区 + `memory/`/`skills/`/`.skills/`；`tools.extra_roots` 可额外授权；config.json 仅只读 |
-| `write_file` | 写入/创建文件 | 工作区 + 默认共享目录 + `tools.extra_roots`；config/session 路径不可写，自动创建快照 |
-| `edit_file` | 精确字符串替换 | 工作区 + 默认共享目录 + `tools.extra_roots`；config/session 路径不可写 |
-| `list_dir` | 列出目录 | 工作区 + 默认共享目录 + `tools.extra_roots` |
-| `apply_patch` | Unified Diff 补丁应用 | 工作区 + 默认共享目录 + `tools.extra_roots`；config/session 路径不可写，版本快照 |
+| `read_file` | 读取文件内容 | 工作区 + `memory/`/`skills/`/`.skills/`；`tools.extra_roots` 可额外授权；config.json 仅只读；用户消息中点名的输出目录本回合内自动授权（#821） |
+| `write_file` | 写入/创建文件 | 工作区 + 默认共享目录 + `tools.extra_roots`；config/session 路径不可写，自动创建快照；用户点名的输出目录自动授权 |
+| `edit_file` | 精确字符串替换 | 工作区 + 默认共享目录 + `tools.extra_roots`；config/session 路径不可写；用户点名的输出目录自动授权 |
+| `list_dir` | 列出目录 | 工作区 + 默认共享目录 + `tools.extra_roots`；用户点名的输出目录自动授权 |
+| `apply_patch` | Unified Diff 补丁应用 | 工作区 + 默认共享目录 + `tools.extra_roots`；config/session 路径不可写，版本快照；用户点名的输出目录自动授权 |
 
 ### 办公文档工具
 
@@ -230,11 +230,12 @@ get_document_category(path) → "pdf" | "word" | "ppt" | "excel" | ...
 ## 安全机制
 
 1. **工作区隔离**：文件操作受 `workspace` 目录约束（由 `restrict_to_workspace` 控制），WSL 沙箱下默认放行 `memory/`、`skills/`、`.skills/` 与配置文件；`tools.extra_roots` 可显式授权 workspace 外目录
-2. **危险命令审批**：39 种危险命令模式需用户确认（`miqi/agent/command_approval.py`）
-3. **bwrap 沙箱**：LANDLOCK 文件系统规则，FIFO 驱逐（最多 10 个）
-4. **快照保护**：文件写入前自动创建原始内容快照，支持回滚
-5. **超时终止**：工具执行超时自动中断
-6. **默认拒绝**：PermissionEngine 采用 deny-by-default 策略
+2. **用户输出目录自动授权（#821）**：KUN 运行时从用户本条消息中自动提取点名的目录（如「结果输出到 `C:\Users\x\Desktop\test_result`」），该回合内授权文件工具（read/write/edit/list/apply_patch/graph_render）读写；仅扫描用户消息、不扫描模型输出或文档内容，且配置目录、会话文件目录、用户主目录、盘符根与系统顶层目录（Windows/Program Files 等）永不授权；可用 `tools.auto_user_dirs: false` 关闭
+3. **危险命令审批**：39 种危险命令模式需用户确认（`miqi/agent/command_approval.py`）
+4. **bwrap 沙箱**：LANDLOCK 文件系统规则，FIFO 驱逐（最多 10 个）
+5. **快照保护**：文件写入前自动创建原始内容快照，支持回滚
+6. **超时终止**：工具执行超时自动中断
+7. **默认拒绝**：PermissionEngine 采用 deny-by-default 策略
 
 ## Hook 系统
 

@@ -1,6 +1,7 @@
 """Tests for diagnostic handlers — Phase 35.8."""
 
 import pytest
+
 from miqi.runtime.app_server import ClientSessionRegistry
 
 

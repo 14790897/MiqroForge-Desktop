@@ -588,7 +588,7 @@ def register_management_commands(
         config = load_config()
         workspace = config.workspace_path
 
-        console.print(f"{logo} MiqroForge Status\n")
+        console.print(f"{logo} MiQroForge Status\n")
 
         console.print(
             f"Config: {config_path} {'[green]✓[/green]' if config_path.exists() else '[red]✗[/red]'}"

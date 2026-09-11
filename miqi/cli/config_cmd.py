@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-import json
 import re
 import sys
-
 
 # Matches model names that signal "small" parameter count (≤ ~13B), e.g.
 #   Qwen/Qwen2.5-7B-Instruct, llama-3.1-8b, mistral-7B, qwen-1.8b, gemma-2b.
@@ -27,7 +25,7 @@ def register_config_commands(app, *, console) -> None:
     """Add `miqi config` sub-command group to *app*."""
     import typer
 
-    config_app = typer.Typer(help="Manage MiqroForge configuration")
+    config_app = typer.Typer(help="Manage MiQroForge configuration")
     app.add_typer(config_app, name="config")
 
     mcp_app = typer.Typer(help="Manage MCP server connections")
@@ -51,27 +49,25 @@ def register_config_commands(app, *, console) -> None:
         cfg = config.agents.defaults
         provider_name = config.get_provider_name(cfg.model)
 
-        console.print(f"\n[bold]Agent[/bold]")
+        console.print("\n[bold]Agent[/bold]")
         console.print(f"  name:  [cyan]{cfg.name}[/cyan]")
         console.print(f"  model: [cyan]{cfg.model}[/cyan]"
                       + (f"  [dim]({provider_name})[/dim]" if provider_name else ""))
 
         # Providers
-        from miqi.config.schema import ProviderConfig
-        default_p = ProviderConfig()
         configured = {
             k: v for k, v in config.providers.model_dump(by_alias=True).items()
             if v.get("apiKey") or v.get("apiBase") is not None
         }
         if configured:
-            console.print(f"\n[bold]Providers[/bold]")
+            console.print("\n[bold]Providers[/bold]")
             for name, p in configured.items():
                 key_display = ("*" * 8 + p["apiKey"][-4:]) if p.get("apiKey") else "[dim](no key)[/dim]"
                 base_display = f"  base={p['apiBase']}" if p.get("apiBase") else ""
                 console.print(f"  {name}: {key_display}{base_display}")
 
         # Channels
-        console.print(f"\n[bold]Channels[/bold]")
+        console.print("\n[bold]Channels[/bold]")
         feishu = config.channels.feishu
         if feishu.enabled:
             console.print(f"  feishu: [green]enabled[/green]  app_id={feishu.app_id}")
@@ -80,7 +76,7 @@ def register_config_commands(app, *, console) -> None:
 
         # MCP servers
         if config.tools.mcp_servers:
-            console.print(f"\n[bold]MCP Servers[/bold]")
+            console.print("\n[bold]MCP Servers[/bold]")
             for sname, srv in config.tools.mcp_servers.items():
                 if srv.command:
                     console.print(f"  [cyan]{sname}[/cyan]  stdio  {srv.command} {' '.join(srv.args)}")
@@ -367,7 +363,7 @@ def register_config_commands(app, *, console) -> None:
         config.tools.mcp_servers["pdf2zh"] = existing
 
         save_config(config, get_config_path())
-        console.print(f"[green]✓[/green] MCP server [cyan]pdf2zh[/cyan] configured")
+        console.print("[green]✓[/green] MCP server [cyan]pdf2zh[/cyan] configured")
         console.print(f"  provider:  [cyan]{norm_provider or '(none)'}[/cyan]")
         console.print(f"  model:     [cyan]{model}[/cyan]")
         console.print(f"  api_base:  [cyan]{api_base or '(default)'}[/cyan]")
@@ -403,6 +399,7 @@ def register_config_commands(app, *, console) -> None:
             miqi config sync-llm
         """
         from rich.table import Table
+
         from miqi.config.loader import get_config_path, load_config, save_config
 
         config = load_config()
@@ -474,6 +471,7 @@ def register_config_commands(app, *, console) -> None:
     def mcp_list():
         """List configured MCP servers."""
         from rich.table import Table
+
         from miqi.config.loader import load_config
 
         config = load_config()
@@ -650,7 +648,6 @@ def register_config_commands(app, *, console) -> None:
 
 def _detect_feishu_mcp_python() -> str | None:
     """Try common installation paths for feishu-mcp."""
-    import shutil
     from pathlib import Path
 
     # Bundled submodule path (set up by scripts/setup_mcps.sh)

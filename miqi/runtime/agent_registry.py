@@ -4,7 +4,45 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
+
 from loguru import logger
+
+# Structured comparison output convention (issue #878): the frontend renders a
+# ```compare JSON code block as a sortable/highlightable comparison table. This
+# is appended to the main agent's system prompt so the model emits the block
+# when presenting a multi-scheme parameter comparison.
+_STRUCTURED_COMPARE_CONVENTION = """
+
+## Structured Comparison Output (```compare)
+
+When presenting a **parameter comparison across multiple schemes / process paths /
+experimental conditions** (e.g. 工艺路径、配方、参数范围对比), output the comparison
+as a ```compare JSON code block (NOT a plain markdown table). The desktop app renders
+it as a sortable, highlightable comparison table.
+
+Schema (valid JSON):
+
+```compare
+{
+  "title": "optional title",
+  "schemes": ["scheme A", "scheme B", "..."],
+  "parameters": [
+    { "name": "压力", "unit": "MPa", "range": "2–4", "source": "ref-1",
+      "values": ["2–4", "5–8", "..."] }
+  ],
+  "citations": [{ "id": "ref-1", "title": "...", "doi": "...", "url": "..." }]
+}
+```
+
+Rules:
+
+- `schemes` = the column headers (one scheme / process per column).
+- `parameters[].values` = one value per scheme, in the same order as `schemes`.
+- `range` (optional) = the parameter's overall range, used for cell highlighting.
+- `source` (optional) = a citation id from `citations`; omit it when there is no source.
+- Emit only valid JSON inside the fence; if it cannot be parsed, the block is shown as a plain code block.
+"""
 
 
 @dataclass
@@ -147,7 +185,7 @@ class AgentRegistry:
         # Main agent — handles everything by default
         self.register(AgentMetadata(
             name="main",
-            display_name="MiqroForge",
+            display_name="MiQroForge",
             description="General-purpose AI assistant for code and document tasks",
             system_prompt=self._build_main_prompt(now),
             available_tools=[
@@ -214,12 +252,12 @@ class AgentRegistry:
 
     @staticmethod
     def _build_main_prompt(now: str) -> str:
-        return f"""# MiqroForge Desktop Agent
+        return f"""# MiQroForge Desktop Agent
 
 ## Current Time
 {now}
 
-You are MiqroForge, a desktop AI assistant. You can help with:
+You are MiQroForge, a desktop AI assistant. You can help with:
 
 - **Code tasks**: read, write, edit, and execute code
 - **Document tasks**: create and edit Word (.docx), PowerPoint (.pptx), Excel (.xlsx), and **PDF** files
@@ -236,7 +274,7 @@ You are MiqroForge, a desktop AI assistant. You can help with:
 5. Save important findings to memory
 6. Write clear, helpful responses in the user's language
 7. **Local skills: BEFORE claiming a capability is unavailable, check the "Local Skills" list in the system prompt. If the user's request matches a listed skill, load its SKILL.md via `skill_manage` (action=view, name=<name>) or read_file on its location, and follow its instructions. Never claim a skill does not exist without checking this list first.**
-"""
+""" + _STRUCTURED_COMPARE_CONVENTION
 
     @staticmethod
     def _build_code_agent_prompt() -> str:

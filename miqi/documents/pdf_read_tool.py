@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from miqi.agent.tools.base import Tool
-from miqi.documents.document_parser import parse_document, is_supported_document
+from miqi.documents.document_parser import is_supported_document, parse_document
 
 
 class PdfReadTool(Tool):

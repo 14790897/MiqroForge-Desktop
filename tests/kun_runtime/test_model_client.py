@@ -411,10 +411,10 @@ class TestKunPreSendGuard:
         e2 = est_fn(str(after2))
         e3 = est_fn(str(after3))
         assert e2 > e3
-        L = (e2 + e3) // 2
+        safe_limit = (e2 + e3) // 2
         monkeypatch.setattr(
             "miqi.kun_runtime.context_estimator.get_safe_context_limit",
-            lambda model: L,
+            lambda model: safe_limit,
         )
 
         provider = RecordingProvider(content="done")

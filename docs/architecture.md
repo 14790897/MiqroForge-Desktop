@@ -1,6 +1,6 @@
 # 系统架构
 
-MiqroForge 是一个**本地优先的个人 AI 助手框架**，采用五层架构设计，从桌面 UI 到沙箱执行层层隔离。
+MiQroForge 是一个**本地优先的个人 AI 助手框架**，采用五层架构设计，从桌面 UI 到沙箱执行层层隔离。
 
 ## 分层架构
 
@@ -48,13 +48,13 @@ graph TB
     AS --> MW
 ```
 
-AppServer（`miqi/runtime/app_server.py`）是 MiqroForge 自己的传输无关协议层：
+AppServer（`miqi/runtime/app_server.py`）是 MiQroForge 自己的传输无关协议层：
 - **类型化方法注册**：通过 `ProtocolRegistry`（`miqi/runtime/protocol_registry.py`）管理所有方法规范，含稳定性标记（stable/experimental/deprecated/legacy）和作用域（session/connection/thread 等）
 - **客户端/会话隔离**：`ClientSessionRegistry` 按 `(client_id, session_id)` 隔离，空闲会话自动 TTL 驱逐
 - **Middleware 链**：请求处理前执行认证、限流、日志等中间件
 - **协议目录**：`protocol/catalog` 端点导出 JSON Schema Draft 2020-12 格式的方法目录
 
-### 4. 运行时引擎层 (MiqroForge Runtime Engine)
+### 4. 运行时引擎层 (MiQroForge Runtime Engine)
 
 ```mermaid
 graph TB
@@ -161,7 +161,7 @@ graph TB
 
 ### 2. 类型化应用协议
 
-AppServer 是 MiqroForge 自己的应用层协议设计：
+AppServer 是 MiQroForge 自己的应用层协议设计：
 
 - **类型化信封**：Pydantic v2 模型定义请求/响应/成功/错误格式
 - **ProtocolRegistry**：所有方法按 `MethodStability`/`MethodScope` 分类注册
@@ -227,7 +227,7 @@ AppServer 是 MiqroForge 自己的应用层协议设计：
 
 ## 协议方法族
 
-MiqroForge 的 AppServer 协议覆盖以下功能域：
+MiQroForge 的 AppServer 协议覆盖以下功能域：
 
 | 族 | 说明 | 方法示例 |
 |--------|------|---------|

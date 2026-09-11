@@ -8,9 +8,9 @@ from typing import Any
 
 from loguru import logger
 
+import miqi.runtime.protocol_specs as protocol_specs
 from miqi.runtime.app_server import AppServer, AppServerError, get_bridge_context
 from miqi.runtime.plugin_skill_request_models import validate_plugin_skill_params
-import miqi.runtime.protocol_specs as protocol_specs
 
 
 def _workspace_root(registry: Any) -> Path | None:
@@ -140,6 +140,10 @@ def register_skills_app_handlers(server: AppServer) -> None:
             validated.append(_resolve_allowed_extra_root(raw, workspace))
         by_client = registry.bridge_context.setdefault("skills_extra_roots_by_client", {})
         by_client[client_id] = validated
+        # extraRoots 目前不在共享索引内（_skills_list 单独遍历），但统一失效
+        # 语义下任何技能写操作都清空缓存，防御未来将 extraRoots 纳入索引。
+        from miqi.agent.skills import invalidate_skill_index
+        invalidate_skill_index()
         roots_payload = {"roots": [str(root) for root in validated]}
         await server.emit_event(
             session_id or "process",

@@ -5,10 +5,10 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+import miqi.runtime.protocol_specs as protocol_specs
 from miqi.runtime.app_server import AppServer, AppServerError, get_bridge_context
 from miqi.runtime.core_request_models import validate_core_params
 from miqi.runtime.permission_profile_runtime import PermissionProfileRuntime
-import miqi.runtime.protocol_specs as protocol_specs
 
 
 def _workspace_root(registry: Any) -> Path | None:

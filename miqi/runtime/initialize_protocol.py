@@ -15,18 +15,15 @@ import re
 import sys
 import uuid
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any
 
 import miqi
-
 import miqi.runtime.protocol_specs as protocol_specs
 from miqi.runtime.app_server import (
     AppServer,
     AppServerError,
     ClientCapabilities,
 )
-
 
 # ── Dataclasses ─────────────────────────────────────────────────────────────
 
@@ -280,7 +277,7 @@ def build_initialize_result(
 
     server_info = {
         "name": "miqi",
-        "title": "MiqroForge",
+        "title": "MiQroForge",
         "version": version,
     }
 

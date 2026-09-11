@@ -2,12 +2,11 @@
 
 import tempfile
 from pathlib import Path
+
 from miqi.skills.skill_manager import (
-    SkillsManager,
-    SkillMetadata,
-    SkillScope,
-    SkillLoadOutcome,
     SkillInjections,
+    SkillScope,
+    SkillsManager,
 )
 
 

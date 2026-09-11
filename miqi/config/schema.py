@@ -2,10 +2,14 @@
 
 import os
 from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from pydantic.alias_generators import to_camel
 from pydantic_settings import BaseSettings
+
+if TYPE_CHECKING:
+    from miqi.providers.base import LLMProvider
 
 
 class Base(BaseModel):
@@ -347,6 +351,25 @@ class ProviderConfig(Base):
     api_base: str | None = None
     extra_headers: dict[str, str] | None = None  # Custom headers (e.g. APP-Code for AiHubMix)
 
+    @field_validator("api_key", mode="before")
+    @classmethod
+    def _clean_api_key(cls, v: Any) -> str:
+        """API keys travel in the ASCII-only Authorization header.
+
+        Users sometimes paste the key and then type a note into the same
+        field (e.g. ``"sk-xxx  用这个"``). The trailing annotation makes
+        httpx raise ``UnicodeEncodeError: 'ascii' codec can't encode`` when
+        building the ``Authorization: Bearer …`` header — before any HTTP
+        request leaves the process, so the provider error is masked by the
+        encoding crash. Strip surrounding whitespace and drop non-ASCII
+        characters (they can never be part of a valid key) so the config
+        self-heals at load time.
+        """
+        if v is None:
+            return ""
+        value = str(v)
+        return "".join(ch for ch in value if ord(ch) < 128).strip()
+
 
 class ProvidersConfig(Base):
     """Configuration for LLM providers."""
@@ -406,7 +429,7 @@ class WebSearchConfig(Base):
         # "hybrid" (旧语义: ddgs 优先 brave 兜底) 升级为 auto 回落链
         if provider == "hybrid":
             return "auto"
-        return provider if provider in {"auto", "tavily", "brave", "ddgs"} else "auto"
+        return provider if provider in {"auto", "deepseek", "tavily", "brave", "ddgs"} else "auto"
 
 
 class WebFetchConfig(Base):
@@ -428,7 +451,7 @@ class SandboxConfig(Base):
     """Sandbox isolation configuration for per-session environments."""
 
     enabled: bool = True
-    share_net: bool = False  # Allow network access inside sandbox (disabled by default for security)
+    share_net: bool = True  # Share host network with sandbox (enabled by default so pip/apt inside the sandbox can reach the network; set false for full network isolation)
     # Route system package installs (apt-get/apt/dnf/... install) to the WSL
     # distro as root instead of failing inside the unprivileged read-only
     # bwrap sandbox.  Installs persist across sessions and are immediately
@@ -446,9 +469,26 @@ class SandboxConfig(Base):
 
 
 class ExecToolConfig(Base):
-    """Shell exec tool configuration."""
+    """Shell exec tool configuration.
 
-    timeout: int = 60
+    Timeout model (#810): the *execution budget* (``timeout``) is the
+    maximum wall-clock time a command may run before the whole process
+    tree is terminated.  ``max_timeout`` is the hard cap for per-call
+    ``timeout`` values requested by the model — requests above it are
+    rejected before the command starts.  ``idle_timeout`` is a
+    staleness signal (no output for this long ⇒ likely stuck); it never
+    kills the process — the heartbeat keeps the turn alive and the
+    execution timeout is the backstop.  ``heartbeat_interval`` controls
+    how often a silent command emits a progress delta so the bridge
+    chat drain (600 s idle) and the frontend watchdog never end the
+    turn while the command is still running.
+    """
+
+    timeout: int = Field(60, ge=1)
+    max_timeout: int = Field(1800, ge=1)  # Hard cap for per-call timeout requests (30 min)
+    idle_timeout: int = Field(90, ge=1)  # No-output staleness threshold (seconds)
+    heartbeat_interval: int = Field(30, ge=1)  # Progress heartbeat cadence (seconds)
+    kill_grace_seconds: int = Field(5, ge=1)  # terminate → SIGKILL grace period
     env_passthrough: list[str] = Field(
         default_factory=list,
         description=(
@@ -461,6 +501,22 @@ class ExecToolConfig(Base):
             "parent environment via StdioServerParameters."
         ),
     )
+
+    @model_validator(mode="after")
+    def _validate_timeout_ordering(self) -> "ExecToolConfig":
+        """Default ``timeout`` must not exceed the hard cap.
+
+        Otherwise a model that omits ``timeout`` runs with the default
+        (e.g. 3600 s) while the outer backstop is only max_timeout
+        (1800 s) — the "cap" is silently bypassed by not passing the
+        argument (#845 review).
+        """
+        if self.timeout > self.max_timeout:
+            raise ValueError(
+                f"tools.exec.timeout ({self.timeout}) 不能大于 "
+                f"tools.exec.max_timeout ({self.max_timeout})"
+            )
+        return self
 
 
 class PapersToolConfig(Base):
@@ -475,17 +531,41 @@ class PapersToolConfig(Base):
 
 
 class MCPServerConfig(Base):
-    """MCP server connection configuration (stdio or HTTP)."""
+    """MCP server connection configuration (stdio, streamable HTTP, or SSE)."""
 
+    type: str = ""  # Transport override: "sse" | "http" | "stdio"; empty = auto (command→stdio, url→http)
     command: str = ""  # Stdio: command to run (e.g. "npx")
     args: list[str] = Field(default_factory=list)  # Stdio: command arguments
     env: dict[str, str] = Field(default_factory=dict)  # Stdio: extra env vars
-    url: str = ""  # HTTP: streamable HTTP endpoint URL
-    headers: dict[str, str] = Field(default_factory=dict)  # HTTP: Custom HTTP Headers
+    url: str = ""  # HTTP/SSE: endpoint URL
+    headers: dict[str, str] = Field(default_factory=dict)  # HTTP/SSE: Custom HTTP Headers
+    insecure_http: bool = False  # Explicit opt-in: allow non-loopback http:// endpoints (credentials in cleartext; platform gateway has no https yet)
     tool_timeout: int = 30  # Seconds before a tool call is cancelled
     progress_interval_seconds: int = 15  # Interval for heartbeat progress messages during long-running tool calls (0 = off)
     description: str = ""  # Description shown to LLM in the gateway entry-point tool (lazy mode)
     lazy: bool = False  # If true, register a single gateway tool instead of all tools upfront; activate on demand
+
+
+# 平台托管 slurm MCP 网关（内置默认服务器条目，2026-09-05 产品确认）：
+# 零配置预置 URL/传输/超时；凭据不入仓库（明文）——共享网关 token
+# 以 AES-256-GCM 密文存于桌面主进程（mcp-gateway-key.ts），登录时解密
+# 写入 workspace/.qraft/token.json（0600，字段 mcpGatewayKey；未来平台
+# 按用户下发时 userinfo 字段优先覆盖），Python 连接本服务器时自动注入
+# Authorization Bearer（见 _connect_one_server）。
+# insecure_http 默认 true（2026-09-10）：平台暂无 https 网关域名，上线
+# 需走明文 http；内置条目显式 opt-in（共享 token 明文传输的已知权衡，
+# 用户可改回 false 关闭）。键名含 "slurm" 使作业进入计费范围
+# （#936：RUNNING 时扣 10 分）。用户显式配置 mcp_servers（含空对象）
+# 即覆盖此默认。
+DEFAULT_MCP_SERVERS: dict = {
+    "miqroforge-slurm": {
+        "type": "sse",
+        "url": "http://124.220.57.194:9000/sse",
+        "insecure_http": True,
+        "tool_timeout": 90,
+        "description": "MiQroForge 平台托管 SLURM 集群：作业提交/状态监控/取消、分区查询、输出与文件传输",
+    },
+}
 
 
 class ObservabilityConfig(Base):
@@ -513,8 +593,15 @@ class ToolsConfig(Base):
     papers: PapersToolConfig = Field(default_factory=PapersToolConfig)
     restrict_to_workspace: bool = False  # If true, restrict all tool access to workspace directory
     extra_roots: list[str] = Field(default_factory=list)  # Additional filesystem roots allowed by file tools
+    auto_user_dirs: bool = True  # Auto-sense output directories the user mentions and authorize file tools for the session (#821)
     sandbox: SandboxConfig = Field(default_factory=SandboxConfig)
-    mcp_servers: dict[str, MCPServerConfig] = Field(default_factory=dict)
+    mcp_servers: dict[str, MCPServerConfig] = Field(
+        # validate_default 未开启：default_factory 结果不会自动校验，
+        # 这里显式构造 MCPServerConfig 实例保证类型正确。
+        default_factory=lambda: {
+            name: MCPServerConfig(**cfg) for name, cfg in DEFAULT_MCP_SERVERS.items()
+        }
+    )
 
 
 class Config(BaseSettings):
@@ -529,6 +616,12 @@ class Config(BaseSettings):
     cron: CronConfig = Field(default_factory=CronConfig)
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
     observability: ObservabilityConfig = Field(default_factory=ObservabilityConfig)
+    # Inert passthrough for configs written by the removed #915 points-billing
+    # gate.  Config is a BaseSettings (extra keys are forbidden), so the field
+    # must stay to keep old config.json files loadable — deleting it made
+    # load_config silently fall back to a default config (providers lost,
+    # "尚未配置模型服务" on send).  Nothing reads this value (#960).
+    billing: dict[str, object] = Field(default_factory=dict)
     # Opaque Desktop-owned settings (e.g. theme, layout).  Not validated —
     # the Desktop UI reads/writes this via config/batchWrite desktop.* paths.
     desktop: dict[str, object] = Field(default_factory=dict)
@@ -620,14 +713,30 @@ class Config(BaseSettings):
                 return spec.default_api_base
         return None
 
+    def is_builtin_activated(self, provider_name: str) -> bool:
+        """Whether a provider holds a built-in (enterprise) activation.
+
+        Tolerates all historical store shapes: missing key, legacy bool
+        (``{"deepseek": true}``) and the current dict (``{"builtin": True}``).
+        A present-but-null/string entry is treated as not activated instead
+        of crashing the decode (#929 review).
+        """
+        store = self.desktop.get("providerActivation")
+        if not isinstance(store, dict):
+            return False
+        entry = store.get(provider_name)
+        if isinstance(entry, bool):
+            return entry
+        if isinstance(entry, dict):
+            return entry.get("builtin") is True
+        return False
+
     def build_provider(self, model: str) -> "LLMProvider | None":
         """Build an LLMProvider instance for the given model string.
 
         Used by ProviderFallbackChain to construct fallback provider instances.
         Returns None if the model/provider cannot be resolved.
         """
-        from miqi.providers.base import LLMProvider  # noqa: F401 (type hint only)
-
         api_key = self.get_api_key(model)
         api_base = self.get_api_base(model)
         provider_name = self.get_provider_name(model)

@@ -1,5 +1,5 @@
 /**
- * 极简 cookie jar — Qraft 平台登录态依赖 cookie 传递：
+ * 极简 cookie jar — MiQroForge 平台登录态依赖 cookie 传递：
  * 服务端在登录响应下发 `Set-Cookie: Authorization=<uuid>; Path=/`，
  * 后续 OAuth 授权流程必须携带该 cookie（实测用 header 不生效）。
  *
@@ -64,7 +64,7 @@ export class CookieJar implements CookieJarLike {
     for (const header of collectSetCookieHeaders(res.headers)) {
       const parsed = parseSetCookieValue(header);
       if (!parsed) continue;
-      // 值为空或 "deleted"/过期（Max-Age<=0，含 -1）表示删除 —— Qraft 场景里直接清掉。
+      // 值为空或 "deleted"/过期（Max-Age<=0，含 -1）表示删除 —— MiQroForge 场景里直接清掉。
       if (
         parsed.value === '' ||
         /^delete/i.test(parsed.value) ||

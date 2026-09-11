@@ -26,8 +26,7 @@ import {
 
 // ─── Test Suite ───────────────────────────────────────────────────
 
-const SKIP_APPROVAL_ON_CI =
-  !!process.env.CI;
+const SKIP_APPROVAL_ON_CI = !!process.env.CI;
 
 test.describe('Approval Persistence E2E', () => {
   let electronApp: ElectronApplication;
@@ -57,10 +56,10 @@ test.describe('Approval Persistence E2E', () => {
       // Ensure bridge ready, clear existing approvals
       await waitForBridgeInitialized(page);
       try {
-        await page.evaluate(() =>
-          (window as any).miqi.approvals.clearPermanent(),
-        );
-      } catch { /* fine */ }
+        await page.evaluate(() => (window as any).miqi.approvals.clearPermanent());
+      } catch {
+        /* fine */
+      }
 
       await createNewConversation(page);
 
@@ -68,10 +67,7 @@ test.describe('Approval Persistence E2E', () => {
       const filepath = `e2e_persist_${Date.now()}.txt`;
 
       // ── First call: same file path → shows approval dialog ──
-      await sendMessage(
-        page,
-        `Use write_file to create ${filepath} with content "first write"`,
-      );
+      await sendMessage(page, `Use write_file to create ${filepath} with content "first write"`);
 
       await expect(page.getByTestId('approval-title')).toBeVisible({
         timeout: 60_000,
@@ -82,15 +78,15 @@ test.describe('Approval Persistence E2E', () => {
       console.log('[test] Clicked 永久允许');
 
       await waitForResponseComplete(page, 240_000);
-      await expect(
-        page.locator('main').getByText(filepath, { exact: false }).first(),
-      ).toBeVisible({ timeout: 15_000 });
+      await expect(page.locator('main').getByText(filepath, { exact: false }).first()).toBeVisible({
+        timeout: 15_000,
+      });
       console.log(`[test] ✅ First file created: ${filepath}`);
 
       // ── Second call: SAME file path → should auto-approve ──
       await sendMessage(
         page,
-        `Use write_file to overwrite ${filepath} with content "second write — auto-approved"`,
+        `Use write_file to overwrite ${filepath} with content "second write — auto-approved"`
       );
 
       await waitForResponseComplete(page, 240_000);
@@ -101,11 +97,11 @@ test.describe('Approval Persistence E2E', () => {
       });
       console.log('[test] ✅ Second call: no approval dialog (auto-approved)');
 
-      await expect(
-        page.locator('main').getByText(filepath, { exact: false }).first(),
-      ).toBeVisible({ timeout: 15_000 });
+      await expect(page.locator('main').getByText(filepath, { exact: false }).first()).toBeVisible({
+        timeout: 15_000,
+      });
       console.log(`[test] ✅ Second write auto-approved: ${filepath}`);
-    },
+    }
   );
 
   // ═══════════════════════════════════════════════════════════════
@@ -118,10 +114,10 @@ test.describe('Approval Persistence E2E', () => {
     async () => {
       test.skip(SKIP_APPROVAL_ON_CI, 'CI disables commandApproval — approval dialog never appears');
       try {
-        await page.evaluate(() =>
-          (window as any).miqi.approvals.clearPermanent(),
-        );
-      } catch { /* ok */ }
+        await page.evaluate(() => (window as any).miqi.approvals.clearPermanent());
+      } catch {
+        /* ok */
+      }
 
       await createNewConversation(page);
       const filepath = `e2e_cross_${Date.now()}.txt`;
@@ -129,7 +125,7 @@ test.describe('Approval Persistence E2E', () => {
       // ── Conv 1: approve permanently ──
       await sendMessage(
         page,
-        `Use write_file to create ${filepath} with content "cross-session test"`,
+        `Use write_file to create ${filepath} with content "cross-session test"`
       );
       await expect(page.getByTestId('approval-title')).toBeVisible({ timeout: 60_000 });
       await page.getByTestId('approval-allow-permanent').click();
@@ -140,13 +136,12 @@ test.describe('Approval Persistence E2E', () => {
       await createNewConversation(page);
       await sendMessage(
         page,
-        `Use write_file to overwrite ${filepath} with content "cross-session overwrite"`,
+        `Use write_file to overwrite ${filepath} with content "cross-session overwrite"`
       );
       await waitForResponseComplete(page, 240_000);
 
       await expect(page.getByTestId('approval-title')).not.toBeVisible({ timeout: 5_000 });
       console.log('[test] ✅ Conv 2: no approval dialog (cross-session permanent allowlist)');
-    },
+    }
   );
-
 });

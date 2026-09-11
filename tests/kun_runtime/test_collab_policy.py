@@ -8,8 +8,6 @@ confirm, independent of approval bypass.
 
 import asyncio
 
-import pytest
-
 from miqi.execution.collab_policy import (
     AutonomyMode,
     CollabVerdict,
@@ -118,7 +116,7 @@ class TestToolHostCollabGate:
         host = self._host()
         # manual 模式下 write_file 需要确认卡（registry 中存在该工具）
         call = ToolCallLike(call_id="c1", tool_name="write_file", arguments={"path": "/tmp/ws/a.txt", "content": "hi"})
-        result = asyncio.run(host.execute(call, self._ctx(mode="manual", await_user_input=await_user_input)))
+        asyncio.run(host.execute(call, self._ctx(mode="manual", await_user_input=await_user_input)))
         assert len(gate_calls) == 1, "写文件在 manual 模式必须先经过确认卡"
         assert gate_calls[0]["title"] == "确认执行：write_file"
         assert "cancel" in [c["id"] for c in gate_calls[0]["choices"]]
@@ -134,7 +132,7 @@ class TestToolHostCollabGate:
 
         host = self._host()
         call = ToolCallLike(call_id="c1", tool_name="read_file", arguments={"path": "/tmp/x"})
-        result = asyncio.run(host.execute(call, self._ctx(mode="autonomous", await_user_input=await_user_input)))
+        asyncio.run(host.execute(call, self._ctx(mode="autonomous", await_user_input=await_user_input)))
         assert gate_calls == [], "读类工具不应触发确认卡"
 
     def test_user_cancel_returns_cancelled(self):

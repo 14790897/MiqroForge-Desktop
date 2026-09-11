@@ -230,6 +230,26 @@ def load_permanent_allowlist(patterns: set[str]) -> None:
         _permanent_approved.update(patterns)
 
 
+def replace_permanent_allowlist(patterns: set[str]) -> None:
+    """Replace the in-memory permanent allowlist to match config exactly.
+
+    Unlike :func:`load_permanent_allowlist` (which only adds), this makes
+    the in-memory allowlist equal the persisted config.  Called on hot
+    config reload (#789) so removed patterns take effect without restart.
+
+    Timestamps of patterns that SURVIVE the replacement are preserved —
+    clearing ``_permanent_added_at`` unconditionally would reset the
+    "approved at 14:00" metadata of still-active patterns to epoch
+    (2026-08-26 review, #11).
+    """
+    with _lock:
+        _permanent_approved.clear()
+        _permanent_approved.update(patterns)
+        surviving = {p: t for p, t in _permanent_added_at.items() if p in patterns}
+        _permanent_added_at.clear()
+        _permanent_added_at.update(surviving)
+
+
 def get_permanent_allowlist() -> set[str]:
     """Return current permanent allowlist (for config persistence)."""
     with _lock:
@@ -374,11 +394,18 @@ def prompt_dangerous_approval(
         sys.stdout.flush()
 
 
-def _save_permanent_allowlist() -> None:
-    """Persist permanent allowlist to config (best-effort)."""
+def _save_permanent_allowlist() -> bool:
+    """Persist permanent allowlist to config.
+
+    Returns True when the file write succeeded, False otherwise
+    (2026-08-31 review: callers must be able to tell a failed persist from
+    a successful one instead of reporting ``cleared: true`` blindly).
+    """
     try:
-        from miqi.config.loader import load_config, save_config_allowlist
+        from miqi.config.loader import save_config_allowlist
         patterns = get_permanent_allowlist()
         save_config_allowlist(patterns)
+        return True
     except Exception as exc:
         logger.warning("Could not save permanent allowlist: %s", exc)
+        return False

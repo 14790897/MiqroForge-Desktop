@@ -1,5 +1,5 @@
 /**
- * Qraft 登录态安全存储。
+ * MiQroForge 登录态安全存储。
  *
  * token / 平台登录 cookie 用 Electron safeStorage 加密后落盘
  * （文件位于 userData/qraft-auth.json）。安全存储不可用（如 Linux 无

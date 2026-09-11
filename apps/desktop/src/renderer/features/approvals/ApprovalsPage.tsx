@@ -143,8 +143,7 @@ export function ApprovalsPage() {
   ];
 
   // Global bypass settings
-  const [bypassConfig, setBypassConfig] =
-    useState<ApprovalBypassConfig>(DEFAULT_APPROVAL_BYPASS);
+  const [bypassConfig, setBypassConfig] = useState<ApprovalBypassConfig>(DEFAULT_APPROVAL_BYPASS);
   const [bypassLoading, setBypassLoading] = useState(true);
   const [bypassSaving, setBypassSaving] = useState<ApprovalBypassKey | null>(null);
   const [bypassSaved, setBypassSaved] = useState<ApprovalBypassKey | null>(null);
@@ -292,10 +291,12 @@ export function ApprovalsPage() {
         : (() => {
             const updated = { ...bypassConfig, [key]: enabled };
             // If all 4 individual bypasses are now ON, auto-check bypassAll
-            if (updated.bypassCommandApproval &&
-                updated.bypassFileWriteApproval &&
-                updated.bypassToolConfirmation &&
-                updated.bypassNetworkApproval) {
+            if (
+              updated.bypassCommandApproval &&
+              updated.bypassFileWriteApproval &&
+              updated.bypassToolConfirmation &&
+              updated.bypassNetworkApproval
+            ) {
               updated.bypassAll = true;
             } else {
               updated.bypassAll = false;
@@ -378,9 +379,7 @@ export function ApprovalsPage() {
       <div className="flex items-center justify-between px-5 py-2.5 border-b border-[var(--border-subtle)] bg-[var(--surface)] shrink-0">
         <div>
           <h1 className="text-base font-semibold text-[var(--text)]">命令审批</h1>
-          <p className="text-xs text-[var(--text-muted)] mt-0.5">
-            智能体执行危险命令前需要授权。
-          </p>
+          <p className="text-xs text-[var(--text-muted)] mt-0.5">智能体执行危险命令前需要授权。</p>
         </div>
         <button
           onClick={load}
@@ -493,9 +492,7 @@ export function ApprovalsPage() {
                     </span>
                     <span className="block text-size-2xs text-[var(--text-muted)] mt-0.5">
                       {row.description}
-                      {bypassConfig.bypassAll
-                        ? '。当前由“全部绕过”统一控制'
-                        : ''}
+                      {bypassConfig.bypassAll ? '。当前由“全部绕过”统一控制' : ''}
                     </span>
                   </span>
                   <ToggleSwitch
@@ -517,7 +514,7 @@ export function ApprovalsPage() {
         ) : !data ? (
           <div className="flex flex-col items-center justify-center h-40 gap-2 text-sm text-[var(--text-faint)]">
             <Shield size={24} />
-            <span>MiqroForge 运行时未启动</span>
+            <span>MiQroForge 运行时未启动</span>
           </div>
         ) : (
           <>
@@ -657,7 +654,11 @@ export function ApprovalsPage() {
                                 <span className="text-[var(--text-faint)] shrink-0">
                                   添加时间：
                                 </span>
-                                <span>{entry.added_at ? formatAbsoluteTime(entry.added_at * 1000) : '未知'}</span>
+                                <span>
+                                  {entry.added_at
+                                    ? formatAbsoluteTime(entry.added_at * 1000)
+                                    : '未知'}
+                                </span>
                               </div>
                             </div>
                           )}
@@ -880,7 +881,13 @@ export function ApprovalsPage() {
 
       {/* ── Add Dialog ────────────────────────────────────────────────── */}
       {showAdd && (
-        <Modal open={showAdd} onOpenChange={(o) => { if (!o) setShowAdd(false); }} hideClose>
+        <Modal
+          open={showAdd}
+          onOpenChange={(o) => {
+            if (!o) setShowAdd(false);
+          }}
+          hideClose
+        >
           <div
             className="bg-[var(--surface-elevated)] border border-[var(--border)] rounded-xl shadow-xl w-full max-w-[420px] mx-4 overflow-hidden"
             onClick={(e) => e.stopPropagation()}

@@ -397,7 +397,9 @@ export function MemoryPage() {
       {showNewFileDialog && (
         <InputDialog
           open={showNewFileDialog}
-          onOpenChange={(o) => { if (!o) setShowNewFileDialog(false); }}
+          onOpenChange={(o) => {
+            if (!o) setShowNewFileDialog(false);
+          }}
           title="新建记忆文件"
           label="文件名（自动添加 .md）"
           onConfirm={handleCreateFile}

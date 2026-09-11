@@ -7,10 +7,10 @@ a local backup in memory/FEEDBACK.jsonl.
 from __future__ import annotations
 
 import json
-import platform
-import sys
 import os
+import platform
 import re
+import sys
 import time
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -22,6 +22,12 @@ from loguru import logger
 from miqi.config.schema import FeedbackConfig
 from miqi.runtime.app_server import AppServerError
 
+# Feishu Bitable payload limits.
+MAX_LOG_BYTES = 196_608  # Bitable text-field limit
+NOTICE_BUDGET = 300  # reserve bytes for skipped/unreadable notices and separators
+# Per-cell cap with safety margin: JSON escaping of backslashes (Windows
+# paths) and other special chars can inflate the payload by up to 2x.
+MAX_CELL_BYTES = 88_000
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -59,9 +65,6 @@ def _collect_all_logs(log_dir: Path, max_age_days: int = 7) -> str:
     """
     if not log_dir.exists():
         return "[日志目录不存在]"
-
-    MAX_LOG_BYTES = 196_608  # Feishu Bitable text-field limit
-    NOTICE_BUDGET = 300  # reserve bytes for skipped/unreadable notices and separators
 
     _date_re = re.compile(r"(\d{4}-\d{2}-\d{2})")
     parts: list[str] = []
@@ -154,8 +157,8 @@ def _collect_system_info() -> dict[str, str]:
     }
     # Try WSL check
     try:
-        import subprocess
         import os as _os
+        import subprocess
         r = subprocess.run(
             ["wsl", "--list", "--verbose"],
             capture_output=True, text=True, timeout=5,
@@ -431,9 +434,6 @@ async def feedback_submit_handler(
 
     # 4. Build Bitable fields — cap per-field text sizes to stay within
     #    Feishu per-cell limits (multiline text ≈ 196,608 bytes per cell).
-    MAX_CELL_BYTES = 88_000  # ~45% of Feishu 196,608 limit — JSON escaping of
-    # backslashes (Windows paths) and other special chars can inflate the
-    # payload by up to 2x, so a 50% safety margin avoids TooLargeCell.
 
     def _cap_text(value: str, max_bytes: int = MAX_CELL_BYTES) -> str:
         """Truncate *value* so its UTF-8 encoding fits within *max_bytes*."""

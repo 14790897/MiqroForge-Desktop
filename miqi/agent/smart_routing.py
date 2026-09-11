@@ -17,7 +17,6 @@ from __future__ import annotations
 import re
 from typing import Any, Optional
 
-
 # Keywords that indicate a complex task requiring the primary model.
 # Ported verbatim from Hermes.
 _COMPLEX_KEYWORDS: frozenset[str] = frozenset({

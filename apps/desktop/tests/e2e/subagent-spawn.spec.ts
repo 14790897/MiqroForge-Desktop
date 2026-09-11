@@ -38,11 +38,19 @@ async function ensureSession(page: Page): Promise<void> {
 
   // Wait for the thinking indicator to appear and then disappear.
   try {
-    await expect(page.locator('[data-testid="thinking-indicator"]')).toBeVisible({ timeout: 15_000 });
-  } catch { /* may appear faster than we can catch */ }
+    await expect(page.locator('[data-testid="thinking-indicator"]')).toBeVisible({
+      timeout: 15_000,
+    });
+  } catch {
+    /* may appear faster than we can catch */
+  }
   try {
-    await expect(page.locator('[data-testid="thinking-indicator"]')).toBeHidden({ timeout: 60_000 });
-  } catch { /* already hidden */ }
+    await expect(page.locator('[data-testid="thinking-indicator"]')).toBeHidden({
+      timeout: 60_000,
+    });
+  } catch {
+    /* already hidden */
+  }
 
   // Give the runtime a moment to fully settle after the turn completes.
   await page.waitForTimeout(2000);
@@ -62,7 +70,7 @@ test.describe('Subagent Spawn E2E', () => {
 
     // Verify the agents bridge API is present.
     const hasAgents = await page.evaluate(
-      () => typeof (window as any).miqi?.agents?.spawn === 'function',
+      () => typeof (window as any).miqi?.agents?.spawn === 'function'
     );
     if (!hasAgents) {
       console.log('[test] agents API not available — skipping suite');
@@ -113,13 +121,20 @@ test.describe('Subagent Spawn E2E', () => {
     //    the main agent echoing the prompt).
     const countCards = (t: string) => (t.match(/(?:✅|❌) Subagent/g) || []).length;
     const initialCards = countCards(
-      (await page.locator('main').textContent().catch(() => '')) || '',
+      (await page
+        .locator('main')
+        .textContent()
+        .catch(() => '')) || ''
     );
     const deadline = Date.now() + 180_000;
     let rendered = false;
     let lastText = '';
     while (Date.now() < deadline) {
-      const mainText = (await page.locator('main').textContent().catch(() => '')) || '';
+      const mainText =
+        (await page
+          .locator('main')
+          .textContent()
+          .catch(() => '')) || '';
       lastText = mainText;
       if (countCards(mainText) > initialCards) {
         // New card appeared — extract the newest ✅ card and check its body.
@@ -136,7 +151,11 @@ test.describe('Subagent Spawn E2E', () => {
     // Print the rendered chat area so we can verify WHO ran the command:
     // the subagent card (role=subagent, from chat:subagent_result) vs any
     // main-agent tool calls in the same conversation.
-    const mainTextFinal = (await page.locator('main').textContent().catch(() => '')) || '';
+    const mainTextFinal =
+      (await page
+        .locator('main')
+        .textContent()
+        .catch(() => '')) || '';
     console.log('[test] ai-spawn: main text tail:', mainTextFinal.slice(-800));
     expect(rendered).toBe(true);
 

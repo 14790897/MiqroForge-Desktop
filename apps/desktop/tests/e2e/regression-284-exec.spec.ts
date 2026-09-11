@@ -38,9 +38,7 @@ test.describe.serial('Exec delta flooding fix', () => {
     'exec output shows inline command output, no empty delta rows',
     { timeout: LLM_TIMEOUT },
     async () => {
-      await page.evaluate(() =>
-        (window as any).miqi.approvals.addPermanent('*:*', 'always'),
-      );
+      await page.evaluate(() => (window as any).miqi.approvals.addPermanent('*:*', 'always'));
 
       await createNewConversation(page);
       const prompt =
@@ -48,9 +46,9 @@ test.describe.serial('Exec delta flooding fix', () => {
       await sendMessage(page, prompt);
 
       try {
-        await expect(
-          page.locator('[data-testid="thinking-indicator"]'),
-        ).toBeHidden({ timeout: 240_000 });
+        await expect(page.locator('[data-testid="thinking-indicator"]')).toBeHidden({
+          timeout: 240_000,
+        });
       } catch {
         const mainText = await page.locator('main').textContent();
         console.log('[test] AI stuck — main textContent (last 1000):');
@@ -60,7 +58,7 @@ test.describe.serial('Exec delta flooding fix', () => {
 
       await page.waitForTimeout(3000);
 
-      const mainText = await page.locator('main').textContent() || '';
+      const mainText = (await page.locator('main').textContent()) || '';
 
       expect(mainText).toContain('DELTA_TEST_OK');
       expect(mainText).toContain('line2');
@@ -69,84 +67,72 @@ test.describe.serial('Exec delta flooding fix', () => {
       expect(mainText).not.toContain('ExecCommandOutputDeltaEvent');
 
       console.log('[test] ✅ Exec output clean — no delta flooding');
-    },
+    }
   );
 
-  test(
-    'exec stderr output renders inline without flooding',
-    { timeout: LLM_TIMEOUT },
-    async () => {
-      await page.evaluate(() =>
-        (window as any).miqi.approvals.addPermanent('*:*', 'always'),
-      );
+  test('exec stderr output renders inline without flooding', { timeout: LLM_TIMEOUT }, async () => {
+    await page.evaluate(() => (window as any).miqi.approvals.addPermanent('*:*', 'always'));
 
-      await createNewConversation(page);
-      const prompt =
-        '用 exec 工具执行: echo OK_STDERR >&2 && echo NORMAL_OUTPUT。只输出命令结果，不要解释。';
-      await sendMessage(page, prompt);
+    await createNewConversation(page);
+    const prompt =
+      '用 exec 工具执行: echo OK_STDERR >&2 && echo NORMAL_OUTPUT。只输出命令结果，不要解释。';
+    await sendMessage(page, prompt);
 
-      try {
-        await expect(
-          page.locator('[data-testid="thinking-indicator"]'),
-        ).toBeHidden({ timeout: 240_000 });
-      } catch {
-        const mainText = await page.locator('main').textContent();
-        console.log('[test] AI stuck — main textContent (last 1000):');
-        console.log((mainText || '').slice(-1000));
-        throw new Error('Thinking indicator did not hide');
-      }
+    try {
+      await expect(page.locator('[data-testid="thinking-indicator"]')).toBeHidden({
+        timeout: 240_000,
+      });
+    } catch {
+      const mainText = await page.locator('main').textContent();
+      console.log('[test] AI stuck — main textContent (last 1000):');
+      console.log((mainText || '').slice(-1000));
+      throw new Error('Thinking indicator did not hide');
+    }
 
-      await page.waitForTimeout(3000);
+    await page.waitForTimeout(3000);
 
-      const mainText = await page.locator('main').textContent() || '';
+    const mainText = (await page.locator('main').textContent()) || '';
 
-      expect(mainText).toContain('OK_STDERR');
-      expect(mainText).toContain('NORMAL_OUTPUT');
-      expect(mainText).not.toContain('outputDelta');
-      expect(mainText).not.toContain('item/commandExecution');
+    expect(mainText).toContain('OK_STDERR');
+    expect(mainText).toContain('NORMAL_OUTPUT');
+    expect(mainText).not.toContain('outputDelta');
+    expect(mainText).not.toContain('item/commandExecution');
 
-      console.log('[test] ✅ stderr output also clean');
-    },
-  );
+    console.log('[test] ✅ stderr output also clean');
+  });
 
-  test(
-    'multiple exec calls do not accumulate flooding',
-    { timeout: LLM_TIMEOUT },
-    async () => {
-      await page.evaluate(() =>
-        (window as any).miqi.approvals.addPermanent('*:*', 'always'),
-      );
+  test('multiple exec calls do not accumulate flooding', { timeout: LLM_TIMEOUT }, async () => {
+    await page.evaluate(() => (window as any).miqi.approvals.addPermanent('*:*', 'always'));
 
-      await createNewConversation(page);
-      const prompt =
-        '按顺序执行以下 3 条命令，每条只回复 exec 的实际输出：' +
-        '1) echo "ROUND1"' +
-        '2) echo "ROUND2"' +
-        '3) echo "ROUND3"' +
-        '不要加任何解释';
-      await sendMessage(page, prompt);
+    await createNewConversation(page);
+    const prompt =
+      '按顺序执行以下 3 条命令，每条只回复 exec 的实际输出：' +
+      '1) echo "ROUND1"' +
+      '2) echo "ROUND2"' +
+      '3) echo "ROUND3"' +
+      '不要加任何解释';
+    await sendMessage(page, prompt);
 
-      try {
-        await expect(
-          page.locator('[data-testid="thinking-indicator"]'),
-        ).toBeHidden({ timeout: 240_000 });
-      } catch {
-        const mainText = await page.locator('main').textContent();
-        console.log('[test] AI stuck — main textContent (last 1000):');
-        console.log((mainText || '').slice(-1000));
-        throw new Error('Thinking indicator did not hide');
-      }
+    try {
+      await expect(page.locator('[data-testid="thinking-indicator"]')).toBeHidden({
+        timeout: 240_000,
+      });
+    } catch {
+      const mainText = await page.locator('main').textContent();
+      console.log('[test] AI stuck — main textContent (last 1000):');
+      console.log((mainText || '').slice(-1000));
+      throw new Error('Thinking indicator did not hide');
+    }
 
-      await page.waitForTimeout(3000);
+    await page.waitForTimeout(3000);
 
-      const mainText = await page.locator('main').textContent() || '';
+    const mainText = (await page.locator('main').textContent()) || '';
 
-      expect(mainText).toContain('ROUND1');
-      expect(mainText).toContain('ROUND2');
-      expect(mainText).toContain('ROUND3');
-      expect(mainText).not.toContain('outputDelta');
+    expect(mainText).toContain('ROUND1');
+    expect(mainText).toContain('ROUND2');
+    expect(mainText).toContain('ROUND3');
+    expect(mainText).not.toContain('outputDelta');
 
-      console.log('[test] ✅ 3 exec rounds — clean output, no flooding');
-    },
-  );
+    console.log('[test] ✅ 3 exec rounds — clean output, no flooding');
+  });
 });

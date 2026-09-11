@@ -8,7 +8,6 @@ import pytest
 
 from miqi.runtime.app_server import ClientSessionRegistry
 
-
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 
@@ -58,8 +57,8 @@ async def test_plugins_list_returns_empty_when_no_manager():
 @pytest.mark.asyncio
 async def test_plugins_install_requires_url():
     """plugins.install should reject missing URL."""
-    from miqi.runtime.plugin_handlers import plugins_install_handler
     from miqi.runtime.app_server import AppServerError
+    from miqi.runtime.plugin_handlers import plugins_install_handler
 
     registry = ClientSessionRegistry()
     with pytest.raises(AppServerError, match="Plugin manager not initialized"):
@@ -74,8 +73,8 @@ async def test_plugins_install_no_url(registry_with_state):
     """plugins.install should reject request without url."""
     pm = _make_fake_plugin_manager(with_plugins=True)
 
-    from miqi.runtime.plugin_handlers import plugins_install_handler
     from miqi.runtime.app_server import AppServerError
+    from miqi.runtime.plugin_handlers import plugins_install_handler
 
     registry, mock_state = registry_with_state
     # Inject plugin manager via bridge_context (Phase 35 hardening DI)
@@ -93,8 +92,8 @@ async def test_plugins_install_no_url(registry_with_state):
 @pytest.mark.asyncio
 async def test_plugins_uninstall_no_manager():
     """plugins.uninstall should raise when PluginManager not initialized."""
-    from miqi.runtime.plugin_handlers import plugins_uninstall_handler
     from miqi.runtime.app_server import AppServerError
+    from miqi.runtime.plugin_handlers import plugins_uninstall_handler
 
     registry = ClientSessionRegistry()
     with pytest.raises(AppServerError, match="Plugin manager not initialized"):
@@ -109,8 +108,8 @@ async def test_plugins_uninstall_no_manager():
 @pytest.mark.asyncio
 async def test_plugins_toggle_no_manager():
     """plugins.toggle should raise when PluginManager not initialized."""
-    from miqi.runtime.plugin_handlers import plugins_toggle_handler
     from miqi.runtime.app_server import AppServerError
+    from miqi.runtime.plugin_handlers import plugins_toggle_handler
 
     registry = ClientSessionRegistry()
     with pytest.raises(AppServerError, match="Plugin manager not initialized"):

@@ -8,24 +8,22 @@ AppServer files.* control-plane API must not be reachable as an agent tool.
 """
 
 import asyncio
-from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from miqi.execution.orchestrator import (
-    ToolOrchestrator,
-    ToolExecutionContext,
-)
 from miqi.config.schema import ApprovalBypassConfig
+from miqi.execution.hook_runtime import HookOutcome
+from miqi.execution.orchestrator import (
+    ToolExecutionContext,
+    ToolOrchestrator,
+)
 from miqi.execution.permission_engine import (
-    PermissionEngine,
     PermissionDecision,
+    PermissionEngine,
     PermissionVerdict,
 )
-from miqi.execution.hook_runtime import HookOutcome
 from miqi.runtime.tool_registry_factory import create_runtime_tool_registry
-
 
 # ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -636,14 +634,11 @@ async def test_write_file_deny_by_policy_blocks_execution(orch, mock_orch_compon
 async def test_real_write_file_tool_goes_through_tool_orchestrator(tmp_path):
     """End-to-end: when PermissionEngine approves write_file, the real
     WriteFileTool writes to disk via the full orchestrator pipeline."""
-    from miqi.execution.sandbox_policy import (
-        SandboxPolicyEngine, SandboxSelection, SandboxType,
-    )
-    from miqi.protocol.permissions import (
-        FileSystemSandboxPolicy, NetworkSandboxPolicy,
-    )
-    from miqi.agent.tools.registry import ToolRegistry
     from miqi.agent.tools.filesystem import WriteFileTool
+    from miqi.agent.tools.registry import ToolRegistry
+    from miqi.execution.sandbox_policy import (
+        SandboxPolicyEngine,
+    )
 
     test_file = tmp_path / "test_output.txt"
     content = "Hello from Phase 31.7"
@@ -695,14 +690,11 @@ async def test_real_write_file_tool_goes_through_tool_orchestrator(tmp_path):
 async def test_real_edit_file_tool_goes_through_tool_orchestrator(tmp_path):
     """End-to-end: when PermissionEngine approves edit_file, the real
     EditFileTool edits a file via the full orchestrator pipeline."""
-    from miqi.execution.sandbox_policy import (
-        SandboxPolicyEngine, SandboxSelection, SandboxType,
-    )
-    from miqi.protocol.permissions import (
-        FileSystemSandboxPolicy, NetworkSandboxPolicy,
-    )
-    from miqi.agent.tools.registry import ToolRegistry
     from miqi.agent.tools.filesystem import EditFileTool
+    from miqi.agent.tools.registry import ToolRegistry
+    from miqi.execution.sandbox_policy import (
+        SandboxPolicyEngine,
+    )
 
     test_file = tmp_path / "config.py"
     original = "debug = False\n"
@@ -756,12 +748,9 @@ async def test_real_edit_file_tool_goes_through_tool_orchestrator(tmp_path):
 async def test_write_file_deny_by_orchestrator_does_not_mutate_disk(tmp_path):
     """When orchestrator denies write_file (via deny pattern), the file
     on disk must remain unchanged."""
-    from miqi.execution.sandbox_policy import SandboxPolicyEngine
-    from miqi.protocol.permissions import (
-        FileSystemSandboxPolicy, NetworkSandboxPolicy,
-    )
-    from miqi.agent.tools.registry import ToolRegistry
     from miqi.agent.tools.filesystem import WriteFileTool
+    from miqi.agent.tools.registry import ToolRegistry
+    from miqi.execution.sandbox_policy import SandboxPolicyEngine
 
     test_file = tmp_path / "protected.txt"
     test_file.write_text("original content")

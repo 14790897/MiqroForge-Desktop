@@ -21,7 +21,7 @@ This file documents non-obvious constraints and usage patterns.
 
 ## Feishu Channel — Runtime Behaviors
 
-These are enforced by the MiqroForge Feishu channel itself (not by the MCP tool):
+These are enforced by the MiQroForge Feishu channel itself (not by the MCP tool):
 
 - **Group chats require an @mention.** The bot only replies in a group when it is explicitly
   @-mentioned. In group replies, address the original sender with a real Feishu mention via

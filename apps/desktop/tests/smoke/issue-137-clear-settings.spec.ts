@@ -17,10 +17,9 @@ async function injectMockAndGoto(page: import('@playwright/test').Page) {
         tools: {
           web: {
             search: {
-              provider: 'hybrid',
-              apiKey: 'BSA-old',
-              ollamaApiBase: 'https://old-search.example',
-              ollamaApiKey: 'search-old',
+              provider: 'auto',
+              tavilyApiKey: 'tvly-old',
+              braveApiKey: 'BSA-old',
             },
             fetch: {
               provider: 'hybrid',
@@ -40,59 +39,58 @@ async function injectMockAndGoto(page: import('@playwright/test').Page) {
   await page.waitForSelector('#root', { state: 'visible' });
 }
 
-test('issue #137: clearing workspace and model sends explicit empty values', async ({ page }) => {
+test('issue #137: clearing workspace sends explicit empty values', async ({ page }) => {
   await injectMockAndGoto(page);
+  // #929 收口后默认模型改为预设下拉，未登录时被门控隐藏 —— 登录后
+  // 才能断言下拉；清空工作目录时模型保持原值（不再有空模型写入路径）。
+  await page.evaluate(() => (window as any).miqi.qraft.login('18500000000', 'test-password'));
 
-  await page.getByText('System Settings').click();
+  await page.getByText(/^(System Settings|系统设置)$/).click();
 
   const workspaceInput = page.getByPlaceholder('~/.miqi/workspace');
-  const modelInput = page.getByPlaceholder('provider/model-name');
+  const modelSelect = page.locator('select').first();
   await expect(workspaceInput).toHaveValue('C:/old-workspace');
-  await expect(modelInput).toHaveValue('openai/gpt-4.1');
+  await expect(modelSelect).toBeVisible();
 
   await workspaceInput.fill('');
-  await modelInput.fill('');
   const generalPanel = workspaceInput.locator('xpath=ancestor::div[contains(@class, "p-6")][1]');
   await generalPanel.locator('button').nth(1).click();
 
   const updates = await page.evaluate(() => window.__miqiMock.getConfigUpdates());
   expect(updates).toHaveLength(1);
-  expect(updates[0]).toEqual({
-    agents: {
-      defaults: {
-        name: 'miqi',
-        workspace: '',
-        model: '',
-        temperature: 0.2,
-        maxTokens: 4096,
-      },
-    },
-  });
+  const defaults = (updates[0] as any).agents.defaults;
+  expect(defaults.workspace).toBe('');
+  expect(defaults.name).toBe('miqi');
+  expect(defaults.temperature).toBe(0.2);
+  expect(defaults.maxTokens).toBe(4096);
+  // 模型未改动时保留原值，不会被清成空字符串（#929 收口：空模型被后端拒绝）
+  expect(defaults.model).toBe('openai/gpt-4.1');
 });
 
 test('issue #137: clearing web tool keys sends explicit empty values', async ({ page }) => {
   await injectMockAndGoto(page);
 
-  await page.getByText('System Settings').click();
-  await page.locator('[role="tab"]').filter({ hasText: 'Web' }).click();
+  await page.getByText(/^(System Settings|系统设置)$/).click();
+  await page.getByRole('tab').filter({ hasText: 'Web' }).click();
 
+  // 搜索 key 收在「自定义搜索引擎」折叠面板里（#844 改版后）
+  const details = page.locator('details').filter({ has: page.getByText('自定义搜索引擎') });
+  await details.locator('summary').click();
+
+  const tavilyKeyInput = page.getByPlaceholder('tvly-...');
   const braveKeyInput = page.getByPlaceholder('BSA...');
-  const searchBaseInput = page.getByPlaceholder('https://ollama.com').first();
-  const searchKeyInput = page.getByPlaceholder('ollama-key...').first();
   const fetchBaseInput = page.locator('input[value="https://old-fetch.example"]');
   const fetchKeyInput = page.locator('input[value="fetch-old"]');
   const s2KeyInput = page.locator('input[value="s2-old"]');
 
+  await expect(tavilyKeyInput).toHaveValue('tvly-old');
   await expect(braveKeyInput).toHaveValue('BSA-old');
-  await expect(searchBaseInput).toHaveValue('https://old-search.example');
-  await expect(searchKeyInput).toHaveValue('search-old');
   await expect(fetchBaseInput).toHaveValue('https://old-fetch.example');
   await expect(fetchKeyInput).toHaveValue('fetch-old');
   await expect(s2KeyInput).toHaveValue('s2-old');
 
+  await tavilyKeyInput.fill('');
   await braveKeyInput.fill('');
-  await searchBaseInput.fill('');
-  await searchKeyInput.fill('');
   await fetchBaseInput.fill('');
   await fetchKeyInput.fill('');
   await s2KeyInput.fill('');
@@ -106,10 +104,9 @@ test('issue #137: clearing web tool keys sends explicit empty values', async ({ 
     tools: {
       web: {
         search: {
-          provider: 'hybrid',
-          apiKey: '',
-          ollamaApiBase: '',
-          ollamaApiKey: '',
+          provider: 'auto',
+          tavilyApiKey: '',
+          braveApiKey: '',
         },
         fetch: {
           provider: 'hybrid',

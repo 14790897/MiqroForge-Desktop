@@ -22,6 +22,8 @@ import {
   buildAuthorizeUrl,
   createQraftClient,
   extractCodeForRedirect,
+  type FetchInitLike,
+  type FetchResponseLike,
   type QraftLogger,
   type ResolvedQraftConfig,
 } from './client';
@@ -31,6 +33,39 @@ import { QraftStore } from './store';
 const { ipcMain, app, net, safeStorage, BrowserWindow, session } = electron;
 
 let service: QraftService | null = null;
+
+/** 供主进程其他模块（slurm 计费拦截）获取共享的 QraftService 实例。 */
+export function getQraftService(): QraftService {
+  return getService();
+}
+
+/**
+ * electron.net.fetch 的 redirect:'manual' 实现：目标响应为 302 时直接
+ * reject（"Redirect was cancelled"，Chromium 行为），而 OAuth2 授权码
+ * 流程必须读取 302 的 Location（authorize → 登录页 / redirect_uri?code=）。
+ * 遇到该错误时回退 Node 内置 fetch（undici）：其 manual 语义正确返回
+ * 302 响应。其余请求仍走 net.fetch（系统代理支持）。
+ * 登录 cookie 由 QraftClient 显式经 Cookie 头携带（cookie-jar），不依赖
+ * 会话级 cookie store，回退后凭据传递不受影响。
+ */
+async function netFetchWithManualFallback(
+  url: string,
+  init?: FetchInitLike
+): Promise<FetchResponseLike> {
+  try {
+    return await net.fetch(url, init);
+  } catch (err) {
+    if (
+      init?.redirect === 'manual' &&
+      err instanceof Error &&
+      err.message.includes('Redirect was cancelled')
+    ) {
+      console.warn('[qraft] net.fetch manual 302 回退到 undici fetch（Electron 行为差异）');
+      return await globalThis.fetch(url, init);
+    }
+    throw err;
+  }
+}
 
 function getService(): QraftService {
   if (service) return service;
@@ -50,7 +85,7 @@ function getService(): QraftService {
     log
   );
   service = new QraftService({
-    client: createQraftClient({ fetch: (url, init) => net.fetch(url, init) }),
+    client: createQraftClient({ fetch: netFetchWithManualFallback }),
     store,
     log,
     onStatusChanged: (status: QraftStatus) => {
@@ -58,6 +93,10 @@ function getService(): QraftService {
         if (!win.isDestroyed()) win.webContents.send(IPC_EVENTS.QRAFT_STATUS_CHANGED, status);
       }
     },
+    // Slurm 作业扣费历史（issue #927）：与登录态同目录，随 userData 隔离。
+    billingHistoryPath: () => join(app.getPath('userData'), 'qraft-billing-history.json'),
+    // 已计费作业 ID 无上限索引（展示历史 200 条截断，去重索引完整保留）。
+    billedJobIdsPath: () => join(app.getPath('userData'), 'qraft-billed-job-ids.json'),
     // Skill/agent 读取 access_token 的通道：workspace 在沙箱中 bind-mount，
     // 文件放 workspace 下即可被沙箱内 Skill 读取（见 docs qraft-oauth2-login.md 第 6 节）。
     tokenFilePath: () => {
@@ -75,8 +114,8 @@ function getService(): QraftService {
 const BROWSER_LOGIN_TIMEOUT_MS = 5 * 60_000;
 
 /**
- * 浏览器登录：打开 Qraft 授权页，用户在页面完成登录并点击"同意"
- *（Qraft 授权页修复后按钮可用）。拦截跳转回 redirect_uri 的 code，
+ * 浏览器登录：打开 MiQroForge 授权页，用户在页面完成登录并点击"同意"
+ *（MiQroForge 授权页修复后按钮可用）。拦截跳转回 redirect_uri 的 code，
  * 拦截到即关闭窗口。窗口提前关闭 → LOGIN_CANCELLED。
  */
 function openBrowserLoginWindow(config: ResolvedQraftConfig): Promise<string> {
@@ -87,7 +126,7 @@ function openBrowserLoginWindow(config: ResolvedQraftConfig): Promise<string> {
     const win = new BrowserWindow({
       width: 960,
       height: 720,
-      title: 'Qraft 平台登录',
+      title: 'MiQroForge 平台登录',
       autoHideMenuBar: true,
       webPreferences: {
         session: loginSession,
@@ -110,7 +149,7 @@ function openBrowserLoginWindow(config: ResolvedQraftConfig): Promise<string> {
       void loginSession.clearStorageData().catch(() => {});
     };
 
-    // 安全加固：授权窗口只允许在 Qraft 平台 origin 内导航，其余目标一律
+    // 安全加固：授权窗口只允许在 MiQroForge 平台 origin 内导航，其余目标一律
     // 拦截；页面发起的 window.open 一律拒绝。服务端 302（登录跳转/授权
     // 回调）走 will-redirect，不受 will-navigate 限制，回调仍由 captureCode
     // 拦截后立即关窗。
@@ -178,7 +217,9 @@ function openBrowserLoginWindow(config: ResolvedQraftConfig): Promise<string> {
     void win.loadURL(buildAuthorizeUrl(config)).catch(() => {
       settle(() => {
         win.destroy();
-        reject(new QraftError('BROWSER_LOGIN_FAILED', '无法打开 Qraft 登录页，请检查网络后重试'));
+        reject(
+          new QraftError('BROWSER_LOGIN_FAILED', '无法打开 MiQroForge 登录页，请检查网络后重试')
+        );
       });
     });
   });
@@ -245,6 +286,14 @@ export function registerQraftIpcHandlers(): void {
 
   ipcMain.handle(IPC.QRAFT_STATUS, async (): Promise<QraftStatus> => {
     return getService().status();
+  });
+
+  ipcMain.handle(IPC.QRAFT_POINTS_BALANCE, async () => {
+    return getService().fetchPointsBalance();
+  });
+
+  ipcMain.handle(IPC.QRAFT_BILLING_HISTORY, async () => {
+    return getService().getBillingHistory();
   });
 
   ipcMain.handle(IPC.QRAFT_REFRESH, async (): Promise<QraftLoginResult> => {

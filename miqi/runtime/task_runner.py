@@ -6,10 +6,10 @@ typed protocol events onto the shared event queue.
 
 from __future__ import annotations
 
-import dataclasses
-import uuid
 import asyncio
+import dataclasses
 import inspect
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -38,6 +38,30 @@ from miqi.protocol.events import (
     TurnCompleteEvent,
     TurnStartedEvent,
 )
+
+# System-prompt prefix per agent execution mode (plan/manual/edit/auto).
+_MODE_PROMPTS = {
+    "plan": (
+        "【Agent 模式：规划 — 只读分析】你的角色是分析助手。"
+        "你可以使用只读工具（搜索、读文件、查看代码）获取信息、分析问题、提供方案和建议。\n"
+        "限制：不能修改文件，不能执行会改变环境的命令，不能创建或删除资源。\n"
+        "请在回答中充分利用搜索、阅读等只读工具来获取信息并给出分析。"
+        "如果用户请求修改，请描述修改方案和步骤，"
+        "等待用户切换到「允许编辑」或「自动」模式后再执行。\n\n"
+    ),
+    "manual": (
+        "【Agent 模式：手动】你的角色是协作者。你有全部工具，但每个操作需要用户确认。"
+        "请逐步说明你打算做什么（改哪个文件、执行什么命令），等待用户逐一批准后再动手。\n\n"
+    ),
+    "edit": (
+        "【Agent 模式：允许编辑】你的角色是工程师。直接修改文件，安全操作自动放行。"
+        "危险操作（执行命令、网络请求、删除文件）需要用户确认。高效工作。\n\n"
+    ),
+    "auto": (
+        "【Agent 模式：自动】你的角色是全权代理。完全自主执行，不中断询问。"
+        "直接完成任务，注意安全底线。用户信任你的判断。\n\n"
+    ),
+}
 
 
 def _classify_chain(exc: BaseException):
@@ -313,6 +337,7 @@ class TaskRunner:
             return
 
         from types import SimpleNamespace
+
         from miqi.runtime.agent_registry import AgentRegistry
         from miqi.runtime.permission_profile import PermissionProfile
         from miqi.runtime.turn_context import TurnContext
@@ -557,28 +582,6 @@ class TaskRunner:
             )
         # edit: both flags False → normal approval flow
 
-        _MODE_PROMPTS = {
-            "plan": (
-                "【Agent 模式：规划 — 只读分析】你的角色是分析助手。"
-                "你可以使用只读工具（搜索、读文件、查看代码）获取信息、分析问题、提供方案和建议。\n"
-                "限制：不能修改文件，不能执行会改变环境的命令，不能创建或删除资源。\n"
-                "请在回答中充分利用搜索、阅读等只读工具来获取信息并给出分析。"
-                "如果用户请求修改，请描述修改方案和步骤，"
-                "等待用户切换到「允许编辑」或「自动」模式后再执行。\n\n"
-            ),
-            "manual": (
-                "【Agent 模式：手动】你的角色是协作者。你有全部工具，但每个操作需要用户确认。"
-                "请逐步说明你打算做什么（改哪个文件、执行什么命令），等待用户逐一批准后再动手。\n\n"
-            ),
-            "edit": (
-                "【Agent 模式：允许编辑】你的角色是工程师。直接修改文件，安全操作自动放行。"
-                "危险操作（执行命令、网络请求、删除文件）需要用户确认。高效工作。\n\n"
-            ),
-            "auto": (
-                "【Agent 模式：自动】你的角色是全权代理。完全自主执行，不中断询问。"
-                "直接完成任务，注意安全底线。用户信任你的判断。\n\n"
-            ),
-        }
         mode_prompt = _MODE_PROMPTS.get(turn.execution_policy, "")
         effective_system_prompt = mode_prompt + metadata.system_prompt if mode_prompt else metadata.system_prompt
         # #680: reasoning mode (fast/think) — generation budget + prompt.
@@ -1005,6 +1008,7 @@ class TaskRunner:
                 finish_reason="stop",
                 tool_calls=tool_calls,
                 reasoning=result.reasoning,
+                reasoning_elapsed_s=result.reasoning_elapsed_s,
             ))
             await self._events.put(TurnCompleteEvent(
                 turn_id=turn_id,
@@ -1093,6 +1097,16 @@ class TaskRunner:
                 # AUTH is sensitive — surface a fixed, non-leaking message
                 # instead of the raw provider exception text (Plan 58.2).
                 user_message = "模型服务认证失败，请检查 Provider 的 API Key、API Base 或当前模型配置。"
+            elif prov_err.kind is ErrorKind.CONTENT_BLOCKED:
+                # 平台内容安全拦截（网关实测 403 sensitive_word_detected）：
+                # 与认证无关，必须给出可执行的正确指引——此前被归为 AUTH，
+                # 用户被引导去检查 API Key / 重选模型，而改密钥永远修不好。
+                # 文案刻意不含 "api key"/"模型服务认证失败" 等关键词，
+                # 避免前端 isProviderConfigurationProblem 再挂上「去选择模型」。
+                user_message = (
+                    "请求被平台内容安全策略拦截（触发敏感词检测），"
+                    "请调整提问或上传的内容后重试。"
+                )
             elif prov_err.kind is ErrorKind.PAYMENT_REQUIRED:
                 # Issue #528: 402 / balance / quota exhausted — account
                 # status, not auth. Fixed non-leaking billing hint

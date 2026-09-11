@@ -20,7 +20,6 @@ import pytest
 
 from miqi.runtime.app_server import AppServerError
 
-
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 

@@ -1,8 +1,6 @@
 """Tests for miqi.runtime.agent_registry."""
 
-import json
 import pytest
-from pathlib import Path
 
 from miqi.runtime.agent_registry import AgentMetadata, AgentRegistry
 
@@ -24,7 +22,7 @@ def test_registry_register_and_resolve():
     registry = AgentRegistry()
     meta = registry.resolve("main")
     assert meta.name == "main"
-    assert meta.display_name == "MiqroForge"
+    assert meta.display_name == "MiQroForge"
 
 
 def test_discover_plugin_agents_parses_frontmatter(tmp_path):
@@ -100,6 +98,16 @@ def test_main_agent_prompt_guides_skill_discovery():
     assert "Local Skills" in main_agent.system_prompt
     assert "skill_manage" in main_agent.system_prompt
     assert "Never claim a skill does not exist" in main_agent.system_prompt
+
+
+def test_main_agent_prompt_guides_structured_comparison_output():
+    """#878: the main agent must be instructed to emit ```compare JSON for
+    multi-scheme parameter comparisons, so the desktop renders a comparison table."""
+    registry = AgentRegistry()
+    main_agent = registry.resolve("main")
+    assert "Structured Comparison Output" in main_agent.system_prompt
+    assert "```compare" in main_agent.system_prompt
+    assert '"schemes"' in main_agent.system_prompt
 
 
 def test_registry_register_duplicate_raises():

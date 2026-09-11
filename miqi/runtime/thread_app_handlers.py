@@ -16,14 +16,15 @@ from typing import Any
 
 from loguru import logger
 
+import miqi.runtime.protocol_specs as protocol_specs
 from miqi.runtime.app_server import AppServer, AppServerError, get_bridge_state
 from miqi.runtime.stored_runtime import (
     StoredRuntimeReader,
-    StoredThreadAmbiguous,
+    StoredThreadAmbiguousError,
     StoredThreadBundle,
     StoredThreadError,
-    StoredThreadNotFound,
-    StoredThreadUnauthorized,
+    StoredThreadNotFoundError,
+    StoredThreadUnauthorizedError,
 )
 from miqi.runtime.thread_projection import (
     ThreadProjectionRuntime,
@@ -32,7 +33,6 @@ from miqi.runtime.thread_projection import (
 )
 from miqi.runtime.thread_protocol import page_items
 from miqi.runtime.thread_request_models import validate_thread_params
-import miqi.runtime.protocol_specs as protocol_specs
 
 
 def _resolve_session_id_for_stored(
@@ -337,7 +337,7 @@ def register_codex_thread_handlers(server: AppServer) -> None:
                 overwrite=typed.overwrite,
             )
             bundle = await reader.load_bundle(imported_thread_id, session_id=target_session_id)
-        except (StoredThreadError, StoredThreadUnauthorized) as exc:
+        except (StoredThreadError, StoredThreadUnauthorizedError) as exc:
             raise _stored_error(exc) from exc
         except Exception as exc:
             from loguru import logger
@@ -535,11 +535,11 @@ def _stored_reader(registry: Any, client_id: str) -> StoredRuntimeReader:
 
 
 def _stored_error(exc: Exception) -> AppServerError:
-    if isinstance(exc, StoredThreadUnauthorized):
+    if isinstance(exc, StoredThreadUnauthorizedError):
         return AppServerError("Not authorized", code="UNAUTHORIZED")
-    if isinstance(exc, StoredThreadAmbiguous):
+    if isinstance(exc, StoredThreadAmbiguousError):
         return AppServerError("Multiple stored threads match; provide sessionId", code="AMBIGUOUS_THREAD")
-    if isinstance(exc, StoredThreadNotFound):
+    if isinstance(exc, StoredThreadNotFoundError):
         return AppServerError("Thread not found", code="NOT_FOUND")
     if isinstance(exc, StoredThreadError):
         return AppServerError("Stored thread read failed", code="INTERNAL")

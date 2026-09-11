@@ -1,8 +1,9 @@
 """Tests for miqi.runtime.agent_status."""
 
 import pytest
-from miqi.runtime.agent_status import AgentStateMachine, VALID_TRANSITIONS
+
 from miqi.protocol.events import AgentStatus
+from miqi.runtime.agent_status import VALID_TRANSITIONS, AgentStateMachine
 
 
 def test_initial_state():

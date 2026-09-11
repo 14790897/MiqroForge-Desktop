@@ -43,8 +43,8 @@ async def mcp_upsert_handler(
     registry: Any,
 ) -> dict[str, Any]:
     """Create or update an MCP server entry by name."""
-    from miqi.config.schema import MCPServerConfig
     from miqi.config.loader import save_config
+    from miqi.config.schema import MCPServerConfig
 
     name = str(params.get("name", "")).strip()
     if not name:

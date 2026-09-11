@@ -12,9 +12,7 @@ import base64
 import io
 import os
 import re
-import shutil
 import subprocess
-import tempfile
 import time
 from pathlib import Path
 from typing import Any
@@ -39,12 +37,29 @@ MAX_CONTEXT_CHARS = 200_000
 
 # ── Public API ─────────────────────────────────────────────────────────────
 
+# Structured preview caps (issue #877): bound the JSON payload so a giant
+# workbook/document can't blow up the IPC bridge.
+_MAX_STRUCTURED_SHEETS = 8
+_MAX_STRUCTURED_ROWS = 200
+_MAX_STRUCTURED_COLS = 40
+_MAX_STRUCTURED_CELL_CHARS = 500
+_MAX_STRUCTURED_BLOCKS = 300
+_MAX_STRUCTURED_TABLE_ROWS = 100
+_MAX_STRUCTURED_TABLE_COLS = 30
+_MAX_STRUCTURED_IMAGES = 15
+_MAX_STRUCTURED_IMAGE_BYTES = 2 * 1024 * 1024      # per image
+_MAX_STRUCTURED_IMAGE_TOTAL = 8 * 1024 * 1024      # summed across a document
+_MAX_STRUCTURED_BLOCK_TEXT_CHARS = 2000            # per heading/paragraph block
+_MAX_STRUCTURED_TEXT_TOTAL = 100_000               # summed text budget (CWE-400)
+
+
 def parse_document(
     file_path: Path,
     *,
     max_chars: int = MAX_CONTEXT_CHARS,
     force_ocr: bool = False,
     extract_charts: bool = True,
+    structured: bool = False,
 ) -> dict[str, Any]:
     """Parse a document file and return extracted text with metadata.
 
@@ -53,10 +68,14 @@ def parse_document(
         max_chars: Maximum characters to return.
         force_ocr: If True, force OCR even for text-based PDFs.
         extract_charts: If True, also extract structured tables/charts from PDFs/PPTX.
+        structured: If True, also return a `structured` key for formats that
+            support rich in-app rendering (spreadsheets: xlsx/csv; documents:
+            docx).  Used by the frontend preview (issue #877).
 
     Returns:
         dict with keys: text, page_count, size_bytes, mime_type, ocr_used,
-                        parse_ms, charts (if extract_charts=True)
+                        parse_ms, charts (if extract_charts=True),
+                        structured (if structured=True and format supports it)
     """
     suffix = _get_suffix(file_path)
     if suffix in _PDF_SUFFIXES:
@@ -65,17 +84,17 @@ def parse_document(
     elif suffix in _IMAGE_SUFFIXES:
         return _parse_image(file_path, max_chars=max_chars)
     elif suffix in _DOCX_SUFFIXES:
-        return _parse_docx(file_path, max_chars=max_chars)
+        return _parse_docx(file_path, max_chars=max_chars, structured=structured)
     elif suffix in _PPTX_SUFFIXES:
         return _parse_pptx(file_path, max_chars=max_chars, extract_charts=extract_charts)
     elif suffix in _XLSX_SUFFIXES:
-        return _parse_xlsx(file_path, max_chars=max_chars)
+        return _parse_xlsx(file_path, max_chars=max_chars, structured=structured)
     elif suffix in _MD_SUFFIXES:
         return _parse_markdown(file_path, max_chars=max_chars)
     elif suffix in _HTML_SUFFIXES:
         return _parse_html(file_path, max_chars=max_chars)
     elif suffix in _CSV_SUFFIXES:
-        return _parse_csv(file_path, max_chars=max_chars)
+        return _parse_csv(file_path, max_chars=max_chars, structured=structured)
     elif suffix in _JSON_SUFFIXES:
         return _parse_json(file_path, max_chars=max_chars)
     elif suffix in _XML_FILE_SUFFIXES:
@@ -506,7 +525,7 @@ def _extract_chart_data_from_pdf_page(page_obj: Any) -> list[dict[str, Any]]:
     """
     tables = []
     try:
-        import pdfplumber
+        import pdfplumber  # noqa: F401 (availability probe)
         # pdfplumber works with file paths, not page objects
     except ImportError:
         return tables
@@ -564,7 +583,110 @@ def _format_charts(charts: list[dict[str, Any]]) -> str:
 
 # ── Word (DOCX) Parsing ────────────────────────────────────────────────────
 
-def _parse_docx(file_path: Path, *, max_chars: int = MAX_CONTEXT_CHARS) -> dict[str, Any]:
+_DOCX_HEADING_RE = re.compile(r"(Heading|标题)\s*(\d+)", re.IGNORECASE)
+
+
+def _docx_structured_blocks(doc: Any) -> list[dict[str, Any]]:
+    """Walk a python-docx document body in order and emit render blocks.
+
+    Block kinds (issue #877): heading / paragraph / table / image.  Images are
+    extracted from inline shapes and inlined as base64 data URLs (best-effort;
+    skipped when too large).  Text blocks are individually capped and share an
+    aggregate budget so a hostile/huge document can't blow up the IPC payload
+    (CWE-400, CodeRabbit #889).  Returns [] when the document is too large to
+    render or an unexpected element fails — the caller falls back to text.
+    """
+    from docx.oxml.ns import qn
+    from docx.table import Table
+    from docx.text.paragraph import Paragraph
+
+    blocks: list[dict[str, Any]] = []
+    image_count = 0
+    image_bytes_total = 0
+    text_total = 0
+
+    def add_image(blip: Any) -> None:
+        nonlocal image_count, image_bytes_total
+        if image_count >= _MAX_STRUCTURED_IMAGES or image_bytes_total >= _MAX_STRUCTURED_IMAGE_TOTAL:
+            return
+        rid = blip.get(
+            "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}embed"
+        )
+        if not rid:
+            return  # linked image — no embedded blob
+        part = doc.part.related_parts.get(rid)
+        if part is None:
+            return
+        try:
+            data = part.blob
+        except Exception:
+            return
+        if not data or len(data) > _MAX_STRUCTURED_IMAGE_BYTES:
+            return
+        if image_bytes_total + len(data) > _MAX_STRUCTURED_IMAGE_TOTAL:
+            return
+        mime = getattr(part, "content_type", "") or "image/png"
+        image_count += 1
+        image_bytes_total += len(data)
+        blocks.append({
+            "type": "image",
+            "data_url": f"data:{mime};base64,{base64.b64encode(data).decode('ascii')}",
+        })
+
+    def add_text(text: str) -> None:
+        nonlocal text_total
+        text_total += len(text)
+
+    try:
+        for child in doc.element.body.iterchildren():
+            if len(blocks) >= _MAX_STRUCTURED_BLOCKS:
+                break
+            if text_total >= _MAX_STRUCTURED_TEXT_TOTAL:
+                break  # aggregate payload budget reached — stop emitting
+            if child.tag == qn("w:p"):
+                para = Paragraph(child, doc)
+                for blip in child.findall(
+                    ".//{http://schemas.openxmlformats.org/drawingml/2006/main}blip"
+                ):
+                    add_image(blip)
+                text = para.text[:_MAX_STRUCTURED_BLOCK_TEXT_CHARS]
+                style_name = ""
+                try:
+                    style_name = (para.style.name if para.style else "") or ""
+                except Exception:
+                    style_name = ""
+                heading_match = _DOCX_HEADING_RE.search(style_name)
+                if heading_match and text.strip():
+                    blocks.append({
+                        "type": "heading",
+                        "level": max(1, min(4, int(heading_match.group(2)))),
+                        "text": text,
+                    })
+                    add_text(text)
+                elif text.strip():
+                    blocks.append({"type": "paragraph", "text": text})
+                    add_text(text)
+            elif child.tag == qn("w:tbl"):
+                table = Table(child, doc)
+                rows: list[list[str]] = []
+                for row in table.rows[:_MAX_STRUCTURED_TABLE_ROWS]:
+                    cells = [
+                        cell.text.strip()[:_MAX_STRUCTURED_CELL_CHARS]
+                        for cell in row.cells[:_MAX_STRUCTURED_TABLE_COLS]
+                    ]
+                    rows.append(cells)
+                if rows:
+                    blocks.append({"type": "table", "rows": rows})
+                    add_text("".join("".join(cells) for cells in rows))
+    except Exception as exc:
+        logger.warning("DOCX structured extraction failed: {}", exc)
+        return []
+
+    return blocks
+
+
+def _parse_docx(file_path: Path, *, max_chars: int = MAX_CONTEXT_CHARS,
+                structured: bool = False) -> dict[str, Any]:
     """Extract text from a Word document."""
     import time
     t0 = time.monotonic()
@@ -602,7 +724,7 @@ def _parse_docx(file_path: Path, *, max_chars: int = MAX_CONTEXT_CHARS) -> dict[
     text = text[:max_chars]
     parse_ms = (time.monotonic() - t0) * 1000
 
-    return {
+    result = {
         "text": text,
         "page_count": page_count,
         "size_bytes": file_path.stat().st_size,
@@ -610,6 +732,19 @@ def _parse_docx(file_path: Path, *, max_chars: int = MAX_CONTEXT_CHARS) -> dict[
         "ocr_used": False,
         "parse_ms": round(parse_ms, 0),
     }
+    if structured:
+        # Only .docx supports rich blocks (python-docx can't read .doc/.odt);
+        # failures leave structured unset so the frontend falls back to text.
+        if file_path.suffix.lower() == ".docx" and not text.startswith("[文档解析失败"):
+            try:
+                from docx import Document
+                doc = Document(str(file_path))
+                blocks = _docx_structured_blocks(doc)
+                if blocks:
+                    result["structured"] = {"kind": "document", "blocks": blocks}
+            except Exception as exc:
+                logger.warning("DOCX structured pass failed: {}", exc)
+    return result
 
 
 # ── PowerPoint (PPTX) Parsing ──────────────────────────────────────────────
@@ -719,7 +854,8 @@ def _parse_pptx(file_path: Path, *, max_chars: int = MAX_CONTEXT_CHARS,
 
 # ── Excel (XLSX) Parsing ───────────────────────────────────────────────────
 
-def _parse_xlsx(file_path: Path, *, max_chars: int = MAX_CONTEXT_CHARS) -> dict[str, Any]:
+def _parse_xlsx(file_path: Path, *, max_chars: int = MAX_CONTEXT_CHARS,
+                structured: bool = False) -> dict[str, Any]:
     """Extract text and data from an Excel spreadsheet."""
     import time
     t0 = time.monotonic()
@@ -762,7 +898,7 @@ def _parse_xlsx(file_path: Path, *, max_chars: int = MAX_CONTEXT_CHARS) -> dict[
     text = text[:max_chars]
     parse_ms = (time.monotonic() - t0) * 1000
 
-    return {
+    result = {
         "text": text,
         "page_count": sheet_count,
         "size_bytes": file_path.stat().st_size,
@@ -770,6 +906,43 @@ def _parse_xlsx(file_path: Path, *, max_chars: int = MAX_CONTEXT_CHARS) -> dict[
         "ocr_used": False,
         "parse_ms": round(parse_ms, 0),
     }
+    if structured:
+        # Only openpyxl-readable workbooks (.xlsx; .xls/.ods raise) get the
+        # rich table payload — failures leave structured unset for the text
+        # fallback.  Non-read-only load so merged-cell ranges are available.
+        if file_path.suffix.lower() == ".xlsx" and not text.startswith("[文档解析失败"):
+            try:
+                import openpyxl
+                wb = openpyxl.load_workbook(str(file_path), data_only=True)
+                sheets: list[dict[str, Any]] = []
+                for ws in wb.worksheets[:_MAX_STRUCTURED_SHEETS]:
+                    max_row = min(ws.max_row or 1, _MAX_STRUCTURED_ROWS)
+                    max_col = min(ws.max_column or 1, _MAX_STRUCTURED_COLS)
+                    rows: list[list[str]] = []
+                    for row in ws.iter_rows(
+                        min_row=1, max_row=max_row, max_col=max_col, values_only=True
+                    ):
+                        rows.append([
+                            "" if cell is None else str(cell)[:_MAX_STRUCTURED_CELL_CHARS]
+                            for cell in row
+                        ])
+                    merges: list[dict[str, int]] = []
+                    for rng in ws.merged_cells.ranges:
+                        if rng.min_row > _MAX_STRUCTURED_ROWS or rng.min_col > _MAX_STRUCTURED_COLS:
+                            continue
+                        merges.append({
+                            "start_row": max(0, rng.min_row - 1),
+                            "start_col": max(0, rng.min_col - 1),
+                            "end_row": min(_MAX_STRUCTURED_ROWS - 1, rng.max_row - 1),
+                            "end_col": min(_MAX_STRUCTURED_COLS - 1, rng.max_col - 1),
+                        })
+                    sheets.append({"name": ws.title, "rows": rows, "merges": merges})
+                wb.close()
+                if sheets:
+                    result["structured"] = {"kind": "spreadsheet", "sheets": sheets}
+            except Exception as exc:
+                logger.warning("XLSX structured pass failed: {}", exc)
+    return result
 
 
 # ── Markdown Parsing ────────────────────────────────────────────────────────
@@ -909,7 +1082,6 @@ def _parse_html(file_path: Path, max_chars: int = 50000) -> dict:
         doc = _lxml_html.document_fromstring(raw)
     except Exception:
         # Fallback: plain text stripping via stdlib
-        stem = Path(file_path.stem).stem if file_path.stem else "HTML"
         from html.parser import HTMLParser as _StdlibParser
         class _Stripper(_StdlibParser):
             def __init__(self):
@@ -963,7 +1135,8 @@ def _parse_html(file_path: Path, max_chars: int = 50000) -> dict:
 
 # ── CSV Parser ────────────────────────────────────────────────────────────
 
-def _parse_csv(file_path: Path, max_chars: int = MAX_CONTEXT_CHARS) -> dict[str, Any]:
+def _parse_csv(file_path: Path, max_chars: int = MAX_CONTEXT_CHARS,
+               structured: bool = False) -> dict[str, Any]:
     """Extract and format CSV data as readable text."""
     import csv as _csv_mod
     t0 = time.perf_counter()
@@ -972,7 +1145,13 @@ def _parse_csv(file_path: Path, max_chars: int = MAX_CONTEXT_CHARS) -> dict[str,
         reader = _csv_mod.reader(io.StringIO(raw, newline=""))
         rows = list(reader)
         if not rows:
-            return _make_text_result(file_path, raw, max_chars, t0, "text/csv")
+            result = _make_text_result(file_path, raw, max_chars, t0, "text/csv")
+            if structured:
+                result["structured"] = {
+                    "kind": "spreadsheet",
+                    "sheets": [{"name": file_path.stem or "CSV", "rows": []}],
+                }
+            return result
         # Format as table-like text
         lines = []
         headers = rows[0] if rows else []
@@ -988,7 +1167,19 @@ def _parse_csv(file_path: Path, max_chars: int = MAX_CONTEXT_CHARS) -> dict[str,
         logger.warning(f"CSV parsing failed: {exc}, falling back to raw text")
         raw = file_path.read_text(encoding="utf-8", errors="replace")
         text = raw
-    return _make_text_result(file_path, text, max_chars, t0, "text/csv")
+        rows = []
+    result = _make_text_result(file_path, text, max_chars, t0, "text/csv")
+    if structured:
+        sheet_rows = [
+            [str(cell)[:_MAX_STRUCTURED_CELL_CHARS]
+             for cell in row[:_MAX_STRUCTURED_COLS]]
+            for row in rows[:_MAX_STRUCTURED_ROWS]
+        ]
+        result["structured"] = {
+            "kind": "spreadsheet",
+            "sheets": [{"name": file_path.stem or "CSV", "rows": sheet_rows}],
+        }
+    return result
 
 
 # ── JSON Parser ───────────────────────────────────────────────────────────

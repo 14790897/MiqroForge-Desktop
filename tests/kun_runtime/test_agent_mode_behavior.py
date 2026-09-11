@@ -13,16 +13,16 @@ from pathlib import Path
 import pytest
 
 from miqi.agent.agent_mode import FAST_PROMPT
-from miqi.kun_runtime.compactor import ContextCompactor
-from miqi.kun_runtime.event_recorder import RuntimeEventRecorder
 from miqi.kun_runtime.cancellation import InflightTracker
+from miqi.kun_runtime.compactor import ContextCompactor
+from miqi.kun_runtime.event_bus import EventBus
+from miqi.kun_runtime.event_recorder import RuntimeEventRecorder
 from miqi.kun_runtime.loop import AgentLoop, AgentLoopOptions
 from miqi.kun_runtime.model_client import FakeModelClient, ModelRequest, ModelStreamChunk
 from miqi.kun_runtime.stores import FileSessionStore, FileThreadStore
 from miqi.kun_runtime.tool_host import FakeToolHost
 from miqi.kun_runtime.turn_service import TurnService
 from miqi.kun_runtime.usage import UsageService
-from miqi.kun_runtime.event_bus import EventBus
 
 _FIXED = "2026-08-18T00:00:00.000Z"
 

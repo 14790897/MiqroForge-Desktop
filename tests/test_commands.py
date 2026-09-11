@@ -7,7 +7,6 @@ from typer.testing import CliRunner
 
 from miqi.cli.commands import app
 from miqi.config.schema import Config
-from miqi.providers.registry import find_by_model
 
 runner = CliRunner()
 
@@ -109,7 +108,7 @@ def test_status_with_existing_config_no_crash(monkeypatch, tmp_path):
     result = runner.invoke(app, ["status"])
 
     assert result.exit_code == 0
-    assert "MiqroForge Status" in result.stdout
+    assert "MiQroForge Status" in result.stdout
     assert "OpenRouter" in result.stdout
 
 
@@ -130,8 +129,6 @@ def test_agent_command_passes_runtime_configs(monkeypatch, tmp_path):
     config.providers.openrouter.api_key = "sk-or-v1-test"
     config.agents.defaults.workspace = str(tmp_path / "workspace")
     (tmp_path / "workspace").mkdir(parents=True, exist_ok=True)
-
-    captured: dict = {}
 
     class FakeCronService:
         def __init__(self, _store_path, **kwargs):

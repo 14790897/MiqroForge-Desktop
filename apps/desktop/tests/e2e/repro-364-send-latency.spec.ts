@@ -30,10 +30,7 @@
 
 import { test, expect } from '@playwright/test';
 import type { ElectronApplication, Page } from '@playwright/test';
-import {
-  launchElectronApp,
-  closeElectronApp,
-} from './helpers/electron-setup';
+import { launchElectronApp, closeElectronApp } from './helpers/electron-setup';
 
 const PROVIDERS_LIST = 'providers:list';
 const PROVIDER_DELAY_MS = 5_000;
@@ -53,27 +50,30 @@ test.describe('#364: optimistic send shows user bubble immediately while provide
 
     // ── Slow the providers:list handler (main process) — simulate a cold
     //    bridge that queues this IPC behind its init work. ──
-    await electronApp.evaluate(async ({ ipcMain: ipc }, args: any) => {
-      ipc.removeHandler(args.channel);
-      ipc.handle(args.channel, async () => {
-        await new Promise((r) => setTimeout(r, args.delay));
-        return {
-          providers: [
-            {
-              name: 'openai',
-              display_name: 'OpenAI',
-              env_key: 'OPENAI_API_KEY',
-              provider_type: 'openai',
-              is_gateway: false,
-              is_local: false,
-              default_api_base: 'https://api.openai.com/v1',
-              configured: true,
-              api_base: null,
-            },
-          ],
-        };
-      });
-    }, { channel: PROVIDERS_LIST, delay: PROVIDER_DELAY_MS });
+    await electronApp.evaluate(
+      async ({ ipcMain: ipc }, args: any) => {
+        ipc.removeHandler(args.channel);
+        ipc.handle(args.channel, async () => {
+          await new Promise((r) => setTimeout(r, args.delay));
+          return {
+            providers: [
+              {
+                name: 'openai',
+                display_name: 'OpenAI',
+                env_key: 'OPENAI_API_KEY',
+                provider_type: 'openai',
+                is_gateway: false,
+                is_local: false,
+                default_api_base: 'https://api.openai.com/v1',
+                configured: true,
+                api_base: null,
+              },
+            ],
+          };
+        });
+      },
+      { channel: PROVIDERS_LIST, delay: PROVIDER_DELAY_MS }
+    );
 
     const textarea = page.locator('[data-testid="chat-input-container"] textarea');
     await textarea.fill('repro-364 消息');
@@ -87,7 +87,7 @@ test.describe('#364: optimistic send shows user bubble immediately while provide
     //    or per-session pending guard) instead of spawning a duplicate bubble. ──
     await page.evaluate(() => {
       const ta = document.querySelector<HTMLTextAreaElement>(
-        '[data-testid="chat-input-container"] textarea',
+        '[data-testid="chat-input-container"] textarea'
       );
       if (!ta) throw new Error('textarea not found');
       for (let i = 0; i < 2; i++) {
@@ -98,7 +98,7 @@ test.describe('#364: optimistic send shows user bubble immediately while provide
             keyCode: 13,
             bubbles: true,
             cancelable: true,
-          }),
+          })
         );
       }
     });
@@ -138,10 +138,13 @@ test.describe('#364: optimistic send shows user bubble immediately while provide
     // Wait until the (eventually-appearing) user bubble shows, or timeout.
     let tBubble = -1;
     try {
-      await page.getByTestId('chat-message-user').last().waitFor({
-        state: 'visible',
-        timeout: PROVIDER_DELAY_MS + 5_000,
-      });
+      await page
+        .getByTestId('chat-message-user')
+        .last()
+        .waitFor({
+          state: 'visible',
+          timeout: PROVIDER_DELAY_MS + 5_000,
+        });
       tBubble = Date.now() - t0;
     } catch {
       tBubble = -1;
@@ -160,21 +163,20 @@ test.describe('#364: optimistic send shows user bubble immediately while provide
           bubbleCountFinal = await page.getByTestId('chat-message-user').count();
           return bubbleCountFinal;
         },
-        { timeout: 20_000, intervals: [500, 1_000, 1_500, 2_000] },
+        { timeout: 20_000, intervals: [500, 1_000, 1_500, 2_000] }
       )
       .toBe(1);
 
     console.log(
       `\n[repro-364] 500ms after Enter: input still filled=${stillFilled}, ` +
         `user bubble visible=${bubbleVisibleEarly} (t=${tEarly}ms), ` +
-        `bubble count early=${bubbleCountEarly}, pending spinner=${pendingSpinnerVisible}`,
+        `bubble count early=${bubbleCountEarly}, pending spinner=${pendingSpinnerVisible}`
     );
     console.log(
-      `[repro-364] user bubble appeared after ${tBubble}ms (providers:list delayed ${PROVIDER_DELAY_MS}ms)`,
+      `[repro-364] user bubble appeared after ${tBubble}ms (providers:list delayed ${PROVIDER_DELAY_MS}ms)`
     );
     console.log(
-      `[repro-364] 2× send → final user bubble count = ${bubbleCountFinal} ` +
-        `(duplicate if > 1)`,
+      `[repro-364] 2× send → final user bubble count = ${bubbleCountFinal} ` + `(duplicate if > 1)`
     );
 
     // Post-fix expectations: the optimistic bubble appears immediately, the
@@ -183,24 +185,21 @@ test.describe('#364: optimistic send shows user bubble immediately while provide
     expect(
       bubbleVisibleEarly,
       'user bubble should appear immediately on Enter (optimistic UI), ' +
-        'not wait for providers:list',
+        'not wait for providers:list'
     ).toBe(true);
-    expect(
-      stillFilled,
-      'input box should clear immediately on Enter',
-    ).toBe(false);
+    expect(stillFilled, 'input box should clear immediately on Enter').toBe(false);
     expect(
       pendingSpinnerVisible,
-      'optimistic user bubble should show a pending spinner while waiting',
+      'optimistic user bubble should show a pending spinner while waiting'
     ).toBe(true);
     expect(
       bubbleCountFinal,
-      `double send must produce exactly one user bubble, got ${bubbleCountFinal}`,
+      `double send must produce exactly one user bubble, got ${bubbleCountFinal}`
     ).toBe(1);
     expect(
       tBubble,
       `user bubble appeared at ${tBubble}ms — should be ~0, not blocked by the ` +
-        `${PROVIDER_DELAY_MS}ms providers:list delay`,
+        `${PROVIDER_DELAY_MS}ms providers:list delay`
     ).toBeLessThan(PROVIDER_DELAY_MS);
   });
 });

@@ -17,6 +17,30 @@ npm run build:all
 | `npm run build` | 仅编译前端（`electron-vite build`） |
 | `npx electron-builder --win --publish never` | 仅打包安装包 |
 
+## 构建前置环境要求（Windows 必读）
+
+> ⚠️ 这一节只影响**打包机（build machine）**，不影响最终用户。
+> 最终 exe 已自带全套运行时 DLL，用户双击即用、无需安装任何东西。
+
+**onnxruntime 1.26 需要 `msvcp140.dll` >= 14.40。** PyInstaller 的分析阶段会真实
+`import onnxruntime`（以探测它要打进 exe 的 DLL），如果打包机的 VC++ 运行库太旧或
+版本错配，这一步会报 `initialization routine failed` / `DLL load failed`，构建直接失败。
+
+**新机器首次打包前，先跑环境检查：**
+
+```bash
+uv run python scripts/check-build-env.py
+```
+
+- 输出 `Result: PASS` → 可以打包
+- 输出 `Result: FAIL` → 按提示安装最新的 **Visual C++ 2015-2022 Redistributable (x64)**：
+  https://aka.ms/vs/17/release/vc_redist.x64.exe ，装完重跑检查
+
+检查脚本的判据是 `import onnxruntime` 是否成功（Python 会优先从自身 prefix 目录解析
+DLL，所以只要 import 成功即代表实际生效的 DLL 版本正确），失败时才会列出各位置
+`msvcp140.dll` / `vcruntime140.dll` 的版本帮助定位。**不要手动往 System32 里复制 DLL**，
+统一用官方 Redistributable 安装包解决。
+
 ## 打包流程详解
 
 ### 1. Python 后端打包
@@ -75,7 +99,7 @@ npx electron-builder       # 打包安装包
 
 ```yaml
 appId: com.miqi.desktop
-productName: MiqroForge Desktop
+productName: MiQroForge Desktop
 directories:
   output: ../../dist-new
 
@@ -100,8 +124,8 @@ publish:
 
 | 文件 | 描述 | 平台 |
 |------|------|------|
-| `dist-new/MiqroForge Desktop 0.1.0.exe` | 便携版 | Windows |
-| `dist-new/MiqroForge Desktop Setup 0.1.0.exe` | NSIS 安装器 | Windows |
+| `dist-new/MiQroForge Desktop 0.1.0.exe` | 便携版 | Windows |
+| `dist-new/MiQroForge Desktop Setup 0.1.0.exe` | NSIS 安装器 | Windows |
 | `dist/miqi-bridge.exe` | Python 后端（自包含） | Windows |
 | `dist/miqi-0.1.4.tar.gz` | Python 源码包 | 通用 |
 | `dist/miqi-0.1.4-py3-none-any.whl` | Python Wheel | 通用 |
@@ -211,7 +235,7 @@ electron-builder 要求主图标至少为 256x256 像素。
 ### 3. 打包后环境检查报"Python not found"
 
 问题现象：
-在干净机器上运行打包后的 MiqroForge Desktop，Setup Wizard 显示 Python 缺失和依赖缺失。
+在干净机器上运行打包后的 MiQroForge Desktop，Setup Wizard 显示 Python 缺失和依赖缺失。
 
 问题原因：
 PYTHON_CHECK handler 只查找系统 Python，没有检测打包的 `miqi-bridge.exe`。已在新版本中修复（优先检测 bundled exe）。
@@ -237,3 +261,26 @@ PyInstaller 打包的 exe 不是 Python 解释器，传给 exe 的参数会变�
 
 解决方案：
 使用 `miqi-bridge.exe --check` 替代。`--check` 在 server.py 顶部处理，输出 JSON 格式的环境检查结果。
+
+### 6. 构建报 onnxruntime DLL 初始化失败
+
+错误信息：
+```
+OSError: [WinError 1114] A dynamic link library (DLL) initialization routine failed
+ImportError: DLL load failed while importing onnxruntime
+```
+
+问题原因：
+打包机的 VC++ 运行库 `msvcp140.dll` 版本太旧（< 14.40），或与 Python 自带的
+`vcruntime140.dll` 版本错配。onnxruntime 1.26 需要 14.40+，而 PyInstaller 分析阶段
+必须真实加载 onnxruntime，于是构建失败。
+
+解决方案：
+```bash
+uv run python scripts/check-build-env.py   # 确认根因
+```
+然后安装最新版 Visual C++ 2015-2022 Redistributable (x64)：
+https://aka.ms/vs/17/release/vc_redist.x64.exe
+
+装完重跑检查脚本，`Result: PASS` 后再打包。最终 exe 不受此影响——它已内置正确的
+`msvcp140.dll`，最终用户无需安装任何东西。

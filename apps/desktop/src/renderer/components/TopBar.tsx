@@ -1,8 +1,10 @@
 import { useEffect, useState } from 'react';
 import { useRuntime } from '../contexts/RuntimeContext';
-import { AlertTriangle, RefreshCw, Loader2, Folder } from 'lucide-react';
+import { AlertTriangle, RefreshCw, Loader2, Folder, UserRound } from 'lucide-react';
 import { cn } from '../lib/utils';
-import { MiQiLogo } from './MiQiLogo';
+import { MiQroForgeLogo } from './MiQroForgeLogo';
+import { useQraftStatus } from '../hooks/useQraftStatus';
+import { QraftLoginButton } from '../features/settings/components/QraftLoginCard';
 
 interface ApprovalBypassStatus {
   bypassAll?: boolean;
@@ -25,12 +27,13 @@ function isBypassEnabled(status: ApprovalBypassStatus | null): boolean {
 
 function isAllBypassOn(status: ApprovalBypassStatus | null): boolean {
   if (!status) return false;
-  return !!(status.bypassAll || (
-    status.bypassCommandApproval &&
-    status.bypassFileWriteApproval &&
-    status.bypassToolConfirmation &&
-    status.bypassNetworkApproval
-  ));
+  return !!(
+    status.bypassAll ||
+    (status.bypassCommandApproval &&
+      status.bypassFileWriteApproval &&
+      status.bypassToolConfirmation &&
+      status.bypassNetworkApproval)
+  );
 }
 
 function getBypassLabel(status: ApprovalBypassStatus | null, autoMode: boolean): string {
@@ -47,9 +50,7 @@ function getBypassTitle(status: ApprovalBypassStatus | null, autoMode: boolean =
   if (status?.bypassFileWriteApproval) labels.push('文件写入审批');
   if (status?.bypassToolConfirmation) labels.push('工具确认');
   if (status?.bypassNetworkApproval) labels.push('网络审批');
-  return labels.length > 0
-    ? `已绕过: ${labels.join('、')}`
-    : '打开审批设置';
+  return labels.length > 0 ? `已绕过: ${labels.join('、')}` : '打开审批设置';
 }
 
 function formatWorkspace(workspace: string): string {
@@ -63,8 +64,22 @@ function formatWorkspace(workspace: string): string {
   return display;
 }
 
-export function TopBar({ onOpenApprovals, workspace }: { onOpenApprovals?: () => void; workspace?: string }) {
+export function TopBar({
+  onOpenApprovals,
+  onOpenQraft,
+  workspace,
+}: {
+  onOpenApprovals?: () => void;
+  /** #1000: 账号 chip 点击 → 设置 → MiQroForge 平台。 */
+  onOpenQraft?: () => void;
+  workspace?: string;
+}) {
   const { status, start } = useRuntime();
+  // #1000: 顶栏登录入口 —— 未登录显示一键登录 chip（错误经 title 提示，
+  // 不内联渲染避免顶栏抖动）；已登录显示账号 chip，点击进平台账号页。
+  const { status: qraftStatus, loggedIn } = useQraftStatus();
+  // 登录失效（token 刷新失败且未恢复）：账号 chip 切换为警示态，点击去重新登录。
+  const needsRelogin = qraftStatus?.requiresRelogin === true;
   const [approvalBypass, setApprovalBypass] = useState<ApprovalBypassStatus | null>(null);
   const [bypassHovered, setBypassHovered] = useState(false);
   const [autoMode, setAutoMode] = useState(() => sessionStorage.getItem('miqi:mode:auto') === '1');
@@ -153,7 +168,7 @@ export function TopBar({ onOpenApprovals, workspace }: { onOpenApprovals?: () =>
           className="text-sm font-semibold tracking-tight"
           style={{ color: 'var(--topbar-text)' }}
         >
-          MiqroForge
+          MiQroForge
         </span>
         <span className="text-xs font-light opacity-50" style={{ color: 'var(--topbar-text)' }}>
           Desktop
@@ -176,42 +191,42 @@ export function TopBar({ onOpenApprovals, workspace }: { onOpenApprovals?: () =>
           </div>
         )}
         {bypassEnabled && (
-            <button
-              type="button"
-              onClick={onOpenApprovals}
-              onMouseEnter={() => setBypassHovered(true)}
-              onMouseLeave={() => setBypassHovered(false)}
-              onFocus={() => setBypassHovered(true)}
-              onBlur={() => setBypassHovered(false)}
-              aria-label={getBypassTitle(approvalBypass, autoMode)}
-              title={getBypassTitle(approvalBypass, autoMode)}
-              className="flex items-center rounded-full text-size-2xs font-medium overflow-hidden h-6 shrink-0"
-              style={{
-                color: 'var(--approval-warning)',
-                background: bypassHovered
-                  ? 'color-mix(in srgb, var(--approval-warning-bg) 80%, transparent)'
-                  : 'color-mix(in srgb, var(--approval-warning-bg) 50%, transparent)',
-                border: '1px solid var(--approval-warning-border)',
-                transition: 'background 0.2s ease',
-              }}
-            >
-              <span className="flex items-center gap-1 px-2.5 whitespace-nowrap shrink-0">
-                <AlertTriangle size={10} className="shrink-0" />
-                <span>{getBypassLabel(approvalBypass, autoMode)}</span>
+          <button
+            type="button"
+            onClick={onOpenApprovals}
+            onMouseEnter={() => setBypassHovered(true)}
+            onMouseLeave={() => setBypassHovered(false)}
+            onFocus={() => setBypassHovered(true)}
+            onBlur={() => setBypassHovered(false)}
+            aria-label={getBypassTitle(approvalBypass, autoMode)}
+            title={getBypassTitle(approvalBypass, autoMode)}
+            className="flex items-center rounded-full text-size-2xs font-medium overflow-hidden h-6 shrink-0"
+            style={{
+              color: 'var(--approval-warning)',
+              background: bypassHovered
+                ? 'color-mix(in srgb, var(--approval-warning-bg) 80%, transparent)'
+                : 'color-mix(in srgb, var(--approval-warning-bg) 50%, transparent)',
+              border: '1px solid var(--approval-warning-border)',
+              transition: 'background 0.2s ease',
+            }}
+          >
+            <span className="flex items-center gap-1 px-2.5 whitespace-nowrap shrink-0">
+              <AlertTriangle size={10} className="shrink-0" />
+              <span>{getBypassLabel(approvalBypass, autoMode)}</span>
+            </span>
+            {bypassDetailText && (
+              <span
+                className="whitespace-nowrap overflow-hidden pr-2.5"
+                style={{
+                  maxWidth: bypassHovered ? '400px' : '0px',
+                  opacity: bypassHovered ? 1 : 0,
+                  transition: 'max-width 0.3s ease, opacity 0.25s ease',
+                }}
+              >
+                <span style={{ color: 'var(--text-muted)' }}>{bypassDetailText}</span>
               </span>
-              {bypassDetailText && (
-                <span
-                  className="whitespace-nowrap overflow-hidden pr-2.5"
-                  style={{
-                    maxWidth: bypassHovered ? '400px' : '0px',
-                    opacity: bypassHovered ? 1 : 0,
-                    transition: 'max-width 0.3s ease, opacity 0.25s ease',
-                  }}
-                >
-                  <span style={{ color: 'var(--text-muted)' }}>{bypassDetailText}</span>
-                </span>
-              )}
-            </button>
+            )}
+          </button>
         )}
         {/* Sync state */}
         <button
@@ -227,12 +242,17 @@ export function TopBar({ onOpenApprovals, workspace }: { onOpenApprovals?: () =>
                 : '运行时未连接，点击重新连接'
           }
           aria-label={
-            isRunning ? '运行时已连接' : isStarting ? '正在启动/停止运行时' : '运行时未连接，点击重新连接'
+            isRunning
+              ? '运行时已连接'
+              : isStarting
+                ? '正在启动/停止运行时'
+                : '运行时未连接，点击重新连接'
           }
           className={cn(
             'flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-medium',
-            isOffline && 'cursor-pointer hover:brightness-95 active:brightness-90 transition-[filter]',
-            !isOffline && 'cursor-default',
+            isOffline &&
+              'cursor-pointer hover:brightness-95 active:brightness-90 transition-[filter]',
+            !isOffline && 'cursor-default'
           )}
           style={{
             background: isRunning
@@ -248,12 +268,58 @@ export function TopBar({ onOpenApprovals, workspace }: { onOpenApprovals?: () =>
         </button>
       </div>
 
-      {/* Right: user avatar */}
+      {/* Right: account entry + user avatar */}
       <div className="flex items-center gap-2">
-        <span className="text-xs font-medium hidden sm:block" style={{ color: 'var(--topbar-text)' }}>
-          MiqroForge 智能体
+        {/* #1000 登录入口：未登录一键登录；已登录账号 chip 点击进平台账号页；
+            登录失效时 chip 切换为警示态（配合全局横幅的持续提示） */}
+        {loggedIn ? (
+          needsRelogin ? (
+            <button
+              type="button"
+              data-testid="topbar-relogin-chip"
+              onClick={onOpenQraft}
+              className="flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-xs font-medium transition-colors hover:brightness-95"
+              style={{
+                background: 'color-mix(in srgb, var(--approval-warning-bg) 60%, transparent)',
+                color: 'var(--approval-warning)',
+                border: '1px solid var(--approval-warning-border)',
+              }}
+              title="MiQroForge 平台登录已失效，点击去重新登录"
+            >
+              <AlertTriangle size={12} />
+              登录已失效
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={onOpenQraft}
+              className="flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-xs font-medium transition-colors hover:brightness-95"
+              style={{
+                background: 'var(--accent-soft)',
+                color: 'var(--accent)',
+              }}
+              data-testid="topbar-account-chip"
+              title="查看平台账号（设置 → MiQroForge 平台）"
+            >
+              <UserRound size={12} />
+              {qraftStatus?.account?.nickname || qraftStatus?.account?.username || '已登录'}
+            </button>
+          )
+        ) : (
+          <QraftLoginButton
+            testId="topbar-login-btn"
+            size="sm"
+            busyLabel="等待授权中…"
+            inlineFeedback={false}
+          />
+        )}
+        <span
+          className="text-xs font-medium hidden sm:block"
+          style={{ color: 'var(--topbar-text)' }}
+        >
+          MiQroForge 智能体
         </span>
-        <MiQiLogo size={28} />
+        <MiQroForgeLogo size={28} />
       </div>
     </div>
   );

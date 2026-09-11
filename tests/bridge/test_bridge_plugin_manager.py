@@ -1,8 +1,9 @@
 """Tests for bridge PluginManager initialization — ensures discover()
 is awaited properly in async contexts without RuntimeWarning."""
 
-import pytest
 import warnings
+
+import pytest
 
 
 @pytest.mark.asyncio

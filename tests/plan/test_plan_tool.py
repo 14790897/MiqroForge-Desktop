@@ -4,8 +4,8 @@ import asyncio
 
 
 def test_plan_create_and_read():
-    from miqi.plan.plan_tracker import PlanTracker
     from miqi.plan.plan_tool import PlanCreateTool
+    from miqi.plan.plan_tracker import PlanTracker
 
     tracker = PlanTracker()
     create_tool = PlanCreateTool(tracker=tracker)
@@ -30,8 +30,8 @@ def test_plan_create_and_read():
 
 
 def test_plan_update_step():
-    from miqi.plan.plan_tracker import PlanTracker
     from miqi.plan.plan_tool import PlanCreateTool, PlanUpdateTool
+    from miqi.plan.plan_tracker import PlanTracker
 
     tracker = PlanTracker()
     create_tool = PlanCreateTool(tracker=tracker)
@@ -58,8 +58,8 @@ def test_plan_update_step():
 
 
 def test_plan_update_not_found():
-    from miqi.plan.plan_tracker import PlanTracker
     from miqi.plan.plan_tool import PlanUpdateTool
+    from miqi.plan.plan_tracker import PlanTracker
 
     tracker = PlanTracker()
     update_tool = PlanUpdateTool(tracker=tracker)

@@ -76,9 +76,10 @@ async def test_debug_replay_thread_returns_document(tmp_path):
 @pytest.mark.asyncio
 async def test_debug_replay_messages_reports_history_ledger_matches_when_consistent(tmp_path):
     """debug/replay/messages reports matches=True when actual history matches ledger."""
+    import time
+
     from miqi.runtime.history_runtime import HistoryItem
     from miqi.runtime.stored_runtime import StoredRuntimeReader
-    import time
 
     db = tmp_path / ".miqi-runtime" / "runtime.db"
     await _seed(db)

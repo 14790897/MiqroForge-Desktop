@@ -14,13 +14,13 @@ the permission engine actually triggers APPROVAL_REQUIRED.
 """
 
 import asyncio
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 import pytest
 
 from miqi.execution.orchestrator import (
-    ToolOrchestrator,
     ToolExecutionContext,
+    ToolOrchestrator,
 )
 from miqi.execution.permission_engine import (
     PermissionEngine,

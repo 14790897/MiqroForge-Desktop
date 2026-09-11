@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from miqi.protocol.events import AgentStatus
 
+from miqi.protocol.events import AgentStatus
 
 VALID_TRANSITIONS: dict[AgentStatus, set[AgentStatus]] = {
     AgentStatus.IDLE: {AgentStatus.THINKING, AgentStatus.ABORTED},

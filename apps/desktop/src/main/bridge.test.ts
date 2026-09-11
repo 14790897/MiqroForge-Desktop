@@ -78,7 +78,7 @@ describe('buildInitializeParams', () => {
     expect(params.clientId).toBe('miqi-desktop');
     expect(params.clientInfo).toEqual({
       name: 'miqi_desktop',
-      title: 'MiqroForge Desktop',
+      title: 'MiQroForge Desktop',
       version: '0.1.0',
     });
     expect(params.capabilities).toEqual({
@@ -319,8 +319,7 @@ describe('BridgeManager lifecycle', () => {
 
     await startBridge(firstProc, bridge, { clientId: 'first', serverInfo: { version: '1' } });
     const oldCloseHandler = firstProc.on.mock.calls.find((call) => call[0] === 'close')?.[1] as
-      | ((code: number | null) => void)
-      | undefined;
+      ((code: number | null) => void) | undefined;
     expect(oldCloseHandler).toBeTypeOf('function');
 
     const stopPromise = bridge.stop();
@@ -350,8 +349,7 @@ describe('BridgeManager lifecycle', () => {
 
     await startBridge(proc, bridge, { clientId: 'stop-close', serverInfo: { version: '1' } });
     const persistentCloseHandler = proc.on.mock.calls.find((call) => call[0] === 'close')?.[1] as
-      | ((code: number | null) => void)
-      | undefined;
+      ((code: number | null) => void) | undefined;
     expect(persistentCloseHandler).toBeTypeOf('function');
 
     const stopPromise = bridge.stop();
@@ -628,7 +626,10 @@ describe('BridgeManager lifecycle', () => {
     const proc = createMockProcess();
     const bridge = new BridgeManager('/fake/root');
 
-    await startBridge(proc, bridge, { clientId: 'default-timeout-test', serverInfo: { version: '1' } });
+    await startBridge(proc, bridge, {
+      clientId: 'default-timeout-test',
+      serverInfo: { version: '1' },
+    });
 
     vi.useFakeTimers();
     try {
@@ -646,9 +647,7 @@ describe('BridgeManager lifecycle', () => {
       await vi.advanceTimersByTimeAsync(CHAT_BACKEND_DRAIN_TIMEOUT_MS + 1);
       expect(settled).toBe(false);
 
-      await vi.advanceTimersByTimeAsync(
-        CHAT_SEND_TIMEOUT_MS - CHAT_BACKEND_DRAIN_TIMEOUT_MS - 1
-      );
+      await vi.advanceTimersByTimeAsync(CHAT_SEND_TIMEOUT_MS - CHAT_BACKEND_DRAIN_TIMEOUT_MS - 1);
       await expect(sendPromise).rejects.toThrow(/Request chat\.send timed out/);
     } finally {
       vi.useRealTimers();
@@ -724,7 +723,11 @@ describe('BridgeManager lifecycle', () => {
 
     bridge.sandboxAvailable = true;
 
-    feedLine(proc, { request_id: 'ev-sr-2', event: 'sandbox.ready', data: { initialized: false, error: 'bwrap not found' } });
+    feedLine(proc, {
+      request_id: 'ev-sr-2',
+      event: 'sandbox.ready',
+      data: { initialized: false, error: 'bwrap not found' },
+    });
     await new Promise((r) => setTimeout(r, 50));
 
     expect(bridge.sandboxAvailable).toBe(false);

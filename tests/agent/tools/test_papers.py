@@ -9,18 +9,17 @@ from xml.etree import ElementTree as ET
 import pytest
 
 from miqi.agent.tools.papers import (
-    PaperSearchTool,
-    PaperGetTool,
     PaperDownloadTool,
-    _parse_arxiv_entry,
-    _to_record,
+    PaperGetTool,
+    PaperSearchTool,
     _detect_paywall_text,
-    _safe_file_component,
     _extract_arxiv_id,
-    _looks_like_pdf,
     _looks_like_html,
+    _looks_like_pdf,
+    _parse_arxiv_entry,
+    _safe_file_component,
+    _to_record,
 )
-
 
 # ── _extract_arxiv_id ────────────────────────────────────────────────────────
 

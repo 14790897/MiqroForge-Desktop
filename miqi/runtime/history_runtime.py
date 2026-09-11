@@ -15,6 +15,7 @@ when the event loop shuts down.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 import uuid
@@ -24,7 +25,6 @@ from typing import Any
 
 import aiosqlite
 from loguru import logger
-
 
 VALID_HISTORY_ROLES = frozenset({
     "system",
@@ -89,7 +89,12 @@ class HistoryRuntime:
     async def initialize(self) -> None:
         """Open persistent connection and create tables."""
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._db = await aiosqlite.connect(str(self.db_path), timeout=30)
+        # isolation_level=None (autocommit): see LedgerRuntime.initialize for
+        # the stranded-lock rationale — a cancelled turn task must never leave
+        # an open write transaction holding the shared DB file lock.
+        self._db = await aiosqlite.connect(
+            str(self.db_path), timeout=30, isolation_level=None
+        )
         await self._db.execute("PRAGMA journal_mode=WAL")
         self._db.row_factory = aiosqlite.Row
         await self._db.execute("""
@@ -143,9 +148,42 @@ class HistoryRuntime:
                 reasoning_content TEXT NOT NULL DEFAULT '',
                 tool_state_json TEXT NOT NULL DEFAULT '[]',
                 version INTEGER NOT NULL DEFAULT 1,
-                updated_at REAL NOT NULL
+                updated_at REAL NOT NULL,
+                reasoning_elapsed_s REAL,
+                reasoning_mode TEXT
             )
         """)
+        # #834: reasoning_elapsed_s was added after the original table schema,
+        # so older DBs need a migration (SQLite has no ADD COLUMN IF NOT
+        # EXISTS before 3.35).  Fresh DBs already have the column via the
+        # CREATE above; the ALTER only fires for pre-existing tables.
+        # Check-then-act is racy across concurrent connections, so the ALTER
+        # itself is guarded (CR #856-4).  #905 review extends the same pattern
+        # for reasoning_mode (fast/think label on restored interrupted cards).
+        async with self._db.execute("PRAGMA table_info(execution_snapshots)") as cursor:
+            cols = {row[1] for row in await cursor.fetchall()}
+        if "reasoning_elapsed_s" not in cols:
+            try:
+                await self._db.execute(
+                    "ALTER TABLE execution_snapshots ADD COLUMN reasoning_elapsed_s REAL"
+                )
+            except Exception:
+                # Concurrent initializer may have won the race — verify the
+                # column now exists before treating anything as an error.
+                async with self._db.execute("PRAGMA table_info(execution_snapshots)") as cursor:
+                    cols2 = {row[1] for row in await cursor.fetchall()}
+                if "reasoning_elapsed_s" not in cols2:
+                    raise
+        if "reasoning_mode" not in cols:
+            try:
+                await self._db.execute(
+                    "ALTER TABLE execution_snapshots ADD COLUMN reasoning_mode TEXT"
+                )
+            except Exception:
+                async with self._db.execute("PRAGMA table_info(execution_snapshots)") as cursor:
+                    cols2 = {row[1] for row in await cursor.fetchall()}
+                if "reasoning_mode" not in cols2:
+                    raise
         await self._db.commit()
 
     async def close(self) -> None:
@@ -224,7 +262,7 @@ class HistoryRuntime:
             tools_used = json.loads(row["tools_used_json"])
         except (json.JSONDecodeError, TypeError) as exc:
             logger.warning(
-                "Corrupted tools_used_json for turn %s, degrading to []: %s",
+                "Corrupted tools_used_json for turn {}, degrading to []: {}",
                 turn_id, exc,
             )
             tools_used = []
@@ -234,7 +272,7 @@ class HistoryRuntime:
             token_usage = json.loads(row["token_usage_json"])
         except (json.JSONDecodeError, TypeError) as exc:
             logger.warning(
-                "Corrupted token_usage_json for turn %s, degrading to {}: %s",
+                "Corrupted token_usage_json for turn {}, degrading to {{}}: {}",
                 turn_id, exc,
             )
             token_usage = {}
@@ -311,7 +349,7 @@ class HistoryRuntime:
                 payload = json.loads(row["payload_json"])
             except (json.JSONDecodeError, TypeError) as exc:
                 logger.warning(
-                    "Skipping corrupted payload_json for item %s in thread %s: %s",
+                    "Skipping corrupted payload_json for item {} in thread {}: {}",
                     row["item_id"], thread_id, exc,
                 )
                 payload = {}
@@ -388,6 +426,8 @@ class HistoryRuntime:
         reasoning_content: str = "",
         tool_state: list[dict] | None = None,
         version: int = 1,
+        reasoning_elapsed_s: float | None = None,
+        reasoning_mode: str | None = None,
     ) -> None:
         """Persist (or update) an in-flight turn's execution snapshot.
 
@@ -398,20 +438,23 @@ class HistoryRuntime:
         await db.execute(
             """INSERT INTO execution_snapshots
                (turn_id, thread_id, session_id, status, assistant_content,
-                reasoning_content, tool_state_json, version, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                reasoning_content, tool_state_json, version, updated_at,
+                reasoning_elapsed_s, reasoning_mode)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(turn_id) DO UPDATE SET
-                 status = excluded.status,
-                 assistant_content = excluded.assistant_content,
-                 reasoning_content = excluded.reasoning_content,
-                 tool_state_json = excluded.tool_state_json,
-                 version = excluded.version,
-                 updated_at = excluded.updated_at""",
+                status = excluded.status,
+                assistant_content = excluded.assistant_content,
+                reasoning_content = excluded.reasoning_content,
+                tool_state_json = excluded.tool_state_json,
+                version = excluded.version,
+                updated_at = excluded.updated_at,
+                reasoning_elapsed_s = excluded.reasoning_elapsed_s,
+                reasoning_mode = excluded.reasoning_mode""",
             (
                 turn_id, thread_id, self.session_id, status,
                 assistant_content, reasoning_content,
                 json.dumps(tool_state or [], ensure_ascii=False),
-                version, time.time(),
+                version, time.time(), reasoning_elapsed_s, reasoning_mode,
             ),
         )
         await db.commit()
@@ -468,12 +511,15 @@ class HistoryRuntime:
 
     @staticmethod
     def _snapshot_row_to_dict(row: Any) -> dict[str, Any]:
+        """Convert a snapshot row to the dict shape consumed by the load path."""
         return {
             "turn_id": row["turn_id"],
             "thread_id": row["thread_id"],
             "status": row["status"],
             "assistant_content": row["assistant_content"],
             "reasoning_content": row["reasoning_content"],
+            "reasoning_elapsed_s": row["reasoning_elapsed_s"],
+            "reasoning_mode": row["reasoning_mode"],
             "tool_state": json.loads(row["tool_state_json"] or "[]"),
             "version": row["version"],
             "updated_at": row["updated_at"],
@@ -555,6 +601,13 @@ class HistoryRuntime:
                 ),
             )
             await db.commit()
+        except asyncio.CancelledError:
+            # CancelledError 不是 Exception 子类，只接 except Exception 会漏掉
+            # 它：回合任务取消落在事务中途时，不回滚会把本连接的写锁一直
+            # 滞留（与 test_issue_886 database is locked 同源）。ROLLBACK 用
+            # shield——任务已处于取消态，普通 await 会被立即再次取消。
+            await asyncio.shield(db.execute("ROLLBACK"))
+            raise
         except Exception:
             await db.execute("ROLLBACK")
             raise

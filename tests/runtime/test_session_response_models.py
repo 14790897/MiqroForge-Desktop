@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from miqi.runtime.session_response_models import SESSION_METHOD_RESULT_MODELS
 from miqi.runtime.protocol_model_schema import result_schema_from_model
+from miqi.runtime.session_response_models import SESSION_METHOD_RESULT_MODELS
 
 
 class TestAllMethodsExist:

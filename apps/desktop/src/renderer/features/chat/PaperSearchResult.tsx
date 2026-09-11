@@ -121,10 +121,7 @@ function PaperCard({
             className="text-sm font-semibold leading-snug min-w-0 flex-1 break-words"
             style={{ color: 'var(--text-primary)' }}
           >
-            <FileText
-              size={14}
-              className="inline mr-1.5 shrink-0 text-text-muted"
-            />
+            <FileText size={14} className="inline mr-1.5 shrink-0 text-text-muted" />
             {paper.title || '无标题'}
           </h4>
           {paper.year && (
@@ -141,9 +138,7 @@ function PaperCard({
         </div>
 
         {/* Authors + citation count */}
-        <div
-          className="flex items-center gap-3 mt-1 flex-wrap text-xs text-text-muted"
-        >
+        <div className="flex items-center gap-3 mt-1 flex-wrap text-xs text-text-muted">
           <span className="inline-flex items-center gap-1">
             <Users size={11} />
             {fmtAuthors(paper.authors)}
@@ -219,7 +214,10 @@ function PaperCard({
           <div className="inline-flex items-center gap-2">
             <span
               className="inline-flex items-center gap-1.5 px-3 py-1 rounded-lg text-xs font-medium"
-              style={{ background: 'var(--success-bg, #d4f5e0)', color: 'var(--success-text, #1d7e3a)' }}
+              style={{
+                background: 'var(--success-bg, #d4f5e0)',
+                color: 'var(--success-text, #1d7e3a)',
+              }}
             >
               <Check size={12} /> 已下载
             </span>
@@ -227,7 +225,11 @@ function PaperCard({
               <button
                 onClick={() => window.miqi.files?.openContainingFolder(downloadState.savePath!)}
                 className="inline-flex items-center gap-1 px-2 py-1 rounded-lg text-xs font-medium cursor-pointer hover:underline"
-                style={{ background: 'none', border: '1px solid var(--border)', color: 'var(--text-muted)' }}
+                style={{
+                  background: 'none',
+                  border: '1px solid var(--border)',
+                  color: 'var(--text-muted)',
+                }}
               >
                 <FolderOpen size={12} /> 打开文件夹
               </button>
@@ -241,12 +243,17 @@ function PaperCard({
               style={{ background: 'var(--danger-bg, #f8e8e8)', color: 'var(--danger, #c04040)' }}
               title={downloadState.error}
             >
-              <AlertCircle size={12} /> 下载失败{downloadState.error ? `：${downloadState.error}` : ''}
+              <AlertCircle size={12} /> 下载失败
+              {downloadState.error ? `：${downloadState.error}` : ''}
             </span>
             <button
               onClick={() => onDownload(paper)}
               className="inline-flex items-center gap-1 px-2 py-1 rounded-lg text-xs font-medium cursor-pointer hover:underline"
-              style={{ background: 'none', border: '1px solid var(--border)', color: 'var(--text-muted)' }}
+              style={{
+                background: 'none',
+                border: '1px solid var(--border)',
+                color: 'var(--text-muted)',
+              }}
             >
               <RotateCw size={11} /> 重试
             </button>
@@ -289,7 +296,10 @@ export default function PaperSearchResult({
   onDownloadPaper: (paper: PaperItem) => void;
   downloadingId: string | null;
   /** #668 补：下载结果反馈（paperId → done/failed + savePath/error） */
-  paperDownloadStates?: Record<string, { status: 'done' | 'failed'; savePath?: string; error?: string }>;
+  paperDownloadStates?: Record<
+    string,
+    { status: 'done' | 'failed'; savePath?: string; error?: string }
+  >;
   /** #696 补：session 前缀键（防跨会话串状态，CodeRabbit） */
   downloadStateKeyPrefix?: string;
 }) {
@@ -321,10 +331,10 @@ export default function PaperSearchResult({
   return (
     <div className="my-1">
       {/* Search meta */}
-      <div
-        className="flex min-w-0 flex-wrap items-center gap-2 mb-2 text-size-2xs text-text-muted"
-      >
-        <span className="min-w-0 break-words">{data.query ? `"${data.query}"的搜索结果` : '搜索结果'}</span>
+      <div className="flex min-w-0 flex-wrap items-center gap-2 mb-2 text-size-2xs text-text-muted">
+        <span className="min-w-0 break-words">
+          {data.query ? `"${data.query}"的搜索结果` : '搜索结果'}
+        </span>
         {data.total != null && (
           <span style={{ color: 'var(--text-faint)' }}>
             · {data.total} found · showing {items.length}

@@ -77,21 +77,24 @@ export function ThinkBlock({
       ? `${mode === 'fast' ? '快速思考' : '深度思考'}… · ${liveSeconds} 秒`
       : elapsedSeconds !== undefined
         ? `${mode === 'fast' ? '快速思考' : '深度思考'} · ${elapsedSeconds} 秒`
-        : mode === 'fast' ? '快速思考' : '深度思考');
+        : mode === 'fast'
+          ? '快速思考'
+          : '深度思考');
 
   return (
-    <div className="my-0.5 flex min-w-0">
+    <div className="my-0.5 flex min-w-0 pl-2">
       <div className="flex w-4 flex-col items-center self-stretch">
         <span
-          className={
-            live ? 'text-[13px] leading-none animate-pulse' : 'text-[13px] leading-none'
-          }
+          className={live ? 'text-[13px] leading-none animate-pulse' : 'text-[13px] leading-none'}
         >
           {icon}
         </span>
-        <span className="mt-0.5 w-[2px] flex-1 min-h-2 rounded-full" style={{ background: 'var(--border-subtle)' }} />
+        <span
+          className="mt-0.5 w-[2px] flex-1 min-h-2 rounded-full"
+          style={{ background: 'var(--border-subtle)' }}
+        />
       </div>
-      <div className="min-w-0 flex-1 pl-2">
+      <div className="min-w-0 flex-1">
         <button
           type="button"
           onClick={toggle}
@@ -111,10 +114,7 @@ export function ThinkBlock({
           style={{ gridTemplateRows: open ? '1fr' : '0fr' }}
         >
           <div className="min-h-0 overflow-hidden">
-            <div
-              className="text-[13px] leading-relaxed"
-              style={{ color: 'var(--text-muted)' }}
-            >
+            <div className="text-[13px] leading-relaxed" style={{ color: 'var(--text-muted)' }}>
               {/* Render markdown so structured thinking (1./•/** lists) shows
                *  like DeepSeek's, not as raw text. The global `pre` grey box
                *  is avoided since MarkdownContent has no plain-<pre> wrapper. */}

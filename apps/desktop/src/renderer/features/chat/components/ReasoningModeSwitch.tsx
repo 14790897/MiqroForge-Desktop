@@ -18,7 +18,11 @@ const LABELS: Record<string, string> = Object.fromEntries(ITEMS.map((i) => [i.ke
 /** 极速回答 / 深度研究 菜单选择器（issue #680）。
  * 设计 1:1 复用 ExecutionPolicySelector（按钮 + 悬浮菜单 + 快捷键），
  * 只换选项内容与模式色。 */
-export const ReasoningModeSwitch: React.FC<ReasoningModeSwitchProps> = ({ mode, onChange, disabled }) => {
+export const ReasoningModeSwitch: React.FC<ReasoningModeSwitchProps> = ({
+  mode,
+  onChange,
+  disabled,
+}) => {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
   const cur = ITEMS.find((i) => i.key === mode)!;
@@ -32,10 +36,13 @@ export const ReasoningModeSwitch: React.FC<ReasoningModeSwitchProps> = ({ mode, 
     return () => document.removeEventListener('mousedown', h);
   }, [open]);
 
-  const pick = useCallback((m: ReasoningMode) => {
-    onChange(m);
-    setOpen(false);
-  }, [onChange]);
+  const pick = useCallback(
+    (m: ReasoningMode) => {
+      onChange(m);
+      setOpen(false);
+    },
+    [onChange]
+  );
 
   // keyboard: 1/2 direct
   useEffect(() => {
@@ -57,37 +64,58 @@ export const ReasoningModeSwitch: React.FC<ReasoningModeSwitchProps> = ({ mode, 
         onClick={() => setOpen(!open)}
         disabled={disabled}
         style={{
-          display: 'flex', alignItems: 'center', gap: 6,
-          padding: '4px 10px', borderRadius: 7,
-          fontSize: 11, fontWeight: 600, cursor: 'pointer',
+          display: 'flex',
+          alignItems: 'center',
+          gap: 6,
+          padding: '4px 10px',
+          borderRadius: 7,
+          fontSize: 11,
+          fontWeight: 600,
+          cursor: 'pointer',
           border: '1px solid var(--border)',
           background: 'var(--surface)',
           color: 'var(--text)',
           transition: 'all .15s',
         }}
-        onMouseEnter={(e) => { e.currentTarget.style.background = 'var(--surface-muted)'; }}
-        onMouseLeave={(e) => { e.currentTarget.style.background = 'var(--surface)'; }}
+        onMouseEnter={(e) => {
+          e.currentTarget.style.background = 'var(--surface-muted)';
+        }}
+        onMouseLeave={(e) => {
+          e.currentTarget.style.background = 'var(--surface)';
+        }}
         aria-label="回答模式"
         aria-expanded={open}
       >
         <span style={{ width: 6, height: 6, borderRadius: '50%', background: cur.color }} />
         <span>{cur.label}</span>
-        <span style={{ fontSize: 8, opacity: .3 }}>▾</span>
+        <span style={{ fontSize: 8, opacity: 0.3 }}>▾</span>
       </button>
 
       <div
         className={cn(
           'absolute left-0 bottom-full mb-1 z-50 overflow-hidden',
           'transition-all duration-150',
-          open ? 'opacity-100 scale-100 translate-y-0' : 'opacity-0 scale-95 translate-y-1 pointer-events-none',
+          open
+            ? 'opacity-100 scale-100 translate-y-0'
+            : 'opacity-0 scale-95 translate-y-1 pointer-events-none'
         )}
         style={{
-          minWidth: 220, background: 'var(--surface)',
-          border: '1px solid var(--border)', borderRadius: 12,
+          minWidth: 220,
+          background: 'var(--surface)',
+          border: '1px solid var(--border)',
+          borderRadius: 12,
           boxShadow: '0 8px 30px rgba(0,0,0,0.12)',
         }}
       >
-        <div style={{ padding: '5px 14px 2px', fontSize: 10, color: 'var(--text-faint)', letterSpacing: .5, textTransform: 'uppercase' }}>
+        <div
+          style={{
+            padding: '5px 14px 2px',
+            fontSize: 10,
+            color: 'var(--text-faint)',
+            letterSpacing: 0.5,
+            textTransform: 'uppercase',
+          }}
+        >
           回答模式
         </div>
         {ITEMS.map((p) => {
@@ -99,32 +127,75 @@ export const ReasoningModeSwitch: React.FC<ReasoningModeSwitchProps> = ({ mode, 
               onClick={() => pick(p.key)}
               disabled={active}
               style={{
-                display: 'flex', alignItems: 'center', gap: 10,
-                padding: '6px 14px', fontSize: 12, cursor: active ? 'default' : 'pointer',
-                width: '100%', textAlign: 'left', transition: 'background .12s',
+                display: 'flex',
+                alignItems: 'center',
+                gap: 10,
+                padding: '6px 14px',
+                fontSize: 12,
+                cursor: active ? 'default' : 'pointer',
+                width: '100%',
+                textAlign: 'left',
+                transition: 'background .12s',
                 color: active ? 'var(--text)' : 'var(--text-muted)',
                 fontWeight: active ? 500 : 400,
                 background: active ? `${p.color}1A` : 'transparent',
               }}
-              onMouseEnter={(e) => { if (!active) e.currentTarget.style.background = 'var(--surface-muted)'; }}
-              onMouseLeave={(e) => { if (!active) e.currentTarget.style.background = 'transparent'; }}
+              onMouseEnter={(e) => {
+                if (!active) e.currentTarget.style.background = 'var(--surface-muted)';
+              }}
+              onMouseLeave={(e) => {
+                if (!active) e.currentTarget.style.background = 'transparent';
+              }}
             >
-              <span style={{ width: 7, height: 7, borderRadius: '50%', background: p.color, opacity: active ? 1 : .6, flexShrink: 0 }} />
+              <span
+                style={{
+                  width: 7,
+                  height: 7,
+                  borderRadius: '50%',
+                  background: p.color,
+                  opacity: active ? 1 : 0.6,
+                  flexShrink: 0,
+                }}
+              />
               <span style={{ flex: 1 }}>
                 <span style={{ display: 'block' }}>{p.label}</span>
                 <span style={{ fontSize: 10, color: 'var(--text-faint)' }}>{p.desc}</span>
               </span>
-              <span style={{ fontSize: 10, color: 'var(--text-faint)', border: '1px solid var(--border)', borderRadius: 3, padding: '1px 4px' }}>
+              <span
+                style={{
+                  fontSize: 10,
+                  color: 'var(--text-faint)',
+                  border: '1px solid var(--border)',
+                  borderRadius: 3,
+                  padding: '1px 4px',
+                }}
+              >
                 {['1', '2'][ITEMS.indexOf(p)]}
               </span>
-              <span style={{ fontSize: 10, color: p.color, flexShrink: 0, visibility: active ? 'visible' : 'hidden' }}>✓</span>
+              <span
+                style={{
+                  fontSize: 10,
+                  color: p.color,
+                  flexShrink: 0,
+                  visibility: active ? 'visible' : 'hidden',
+                }}
+              >
+                ✓
+              </span>
             </button>
           );
         })}
         <div style={{ padding: '6px 14px', borderTop: '1px solid var(--border-subtle)' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             <span style={{ fontSize: 10, color: 'var(--text-muted)' }}>极速</span>
-            <div style={{ flex: 1, height: 4, borderRadius: 2, background: 'linear-gradient(to right, #f59e0b, #a855f7)' }} />
+            <div
+              style={{
+                flex: 1,
+                height: 4,
+                borderRadius: 2,
+                background: 'linear-gradient(to right, #f59e0b, #a855f7)',
+              }}
+            />
             <span style={{ fontSize: 10, color: 'var(--text-muted)' }}>深度</span>
           </div>
         </div>

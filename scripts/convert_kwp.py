@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Convert anthropics/knowledge-work-plugins skills to MiqroForge format.
+"""Convert anthropics/knowledge-work-plugins skills to MiQroForge format.
 
 Usage:
   python scripts/convert_kwp.py [--repo PATH] [--output PATH] [--filter PLUGIN]
@@ -13,15 +13,14 @@ Options:
 
 The script:
 1. Reads each plugin's skills/<name>/SKILL.md
-2. Converts frontmatter to MiqroForge format (adds metadata field)
-3. Adapts `~~placeholder` references for MiqroForge's tool landscape
+2. Converts frontmatter to MiQroForge format (adds metadata field)
+3. Adapts `~~placeholder` references for MiQroForge's tool landscape
 4. Generates a collection manifest (plugin.json)
 """
 
 from __future__ import annotations
 
 import json
-import os
 import re
 import shutil
 import sys
@@ -64,7 +63,7 @@ PLUGIN_CATEGORIES = {
     "small-business": "go-to-market",
 }
 
-# ── Placeholder → MiqroForge tool reference mapping ────────────────────────
+# ── Placeholder → MiQroForge tool reference mapping ────────────────────────
 _PLACEHOLDER_MAP = {
     "~~CRM": (
         "No CRM connected — use `web_search` and `web_fetch` for company "
@@ -151,7 +150,7 @@ _PLACEHOLDER_RE = re.compile(
 )
 
 # Additional tokens found in KWP skills that aren't in the main PLACEHOLDER_MAP.
-# These are resolved to MiqroForge-equivalent tool guidance.
+# These are resolved to MiQroForge-equivalent tool guidance.
 _EXTRA_PLACEHOLDERS = {
     "~~CI/CD": "CI/CD pipeline — use `exec` to run deployment scripts or check build status",
     "~~SEO tools": "SEO analysis tools — use `web_search` and `web_fetch` for SEO research",
@@ -174,7 +173,7 @@ _SKIP_SKILLS: dict[str, set[str]] = {
 
 
 def _resolve_body_placeholders(text: str) -> str:
-    """Replace known ``~~placeholder`` tokens in text with MiqroForge guidance.
+    """Replace known ``~~placeholder`` tokens in text with MiQroForge guidance.
 
     Uses longest-first replacement so multi-word tokens like
     ``~~data warehouse`` match before ``~~data``.
@@ -187,18 +186,18 @@ def _resolve_body_placeholders(text: str) -> str:
 
 
 def resolve_placeholder(match: re.Match) -> str:
-    """Replace a ``~~placeholder`` token with MiqroForge-appropriate guidance.
+    """Replace a ``~~placeholder`` token with MiQroForge-appropriate guidance.
 
     Falls back to returning the token as-is with a connector note.
     """
     token = match.group(0)
     if token in _PLACEHOLDER_MAP:
         return _PLACEHOLDER_MAP[token]
-    return f"[Connector: {token} — not yet configured in MiqroForge]"
+    return f"[Connector: {token} — not yet configured in MiQroForge]"
 
 
 def convert_body(body: str) -> str:
-    """Adapt KWP skill body for MiqroForge context."""
+    """Adapt KWP skill body for MiQroForge context."""
     lines = body.split("\n")
     result: list[str] = []
     in_connectors_table = False
@@ -212,18 +211,18 @@ def convert_body(body: str) -> str:
         line = _resolve_body_placeholders(line)
 
         # Trim connector table width hints (those are workspace-dependent)
-        # Skip the "Connectors (Optional)" section header — replace with MiqroForge note
+        # Skip the "Connectors (Optional)" section header — replace with MiQroForge note
         if line.strip() == "## Connectors (Optional)":
-            result.append("## MiqroForge Tools (Standalone Mode)")
+            result.append("## MiQroForge Tools (Standalone Mode)")
             result.append("")
             result.append(
-                "> 💡 This skill works **standalone** with MiqroForge's built-in tools. "
+                "> 💡 This skill works **standalone** with MiQroForge's built-in tools. "
             )
             result.append(
                 "> For the **supercharged** experience, connect MCP servers for "
             )
             result.append(
-                "> external tools via MiqroForge's MCP configuration. "
+                "> external tools via MiQroForge's MCP configuration. "
             )
             result.append(
                 "> See the plugin's `.mcp.json` and `CONNECTORS.md` for available connectors."
@@ -252,33 +251,32 @@ def convert_body(body: str) -> str:
 
         result.append(line)
 
-    # Append MiqroForge tool guidance footer
+    # Append MiQroForge tool guidance footer
     result.append("")
     result.append("---")
     result.append("")
-    result.append("## Using This Skill with MiqroForge")
+    result.append("## Using This Skill with MiQroForge")
     result.append("")
     result.append(
-        "MiqroForge includes built-in tools that cover most standalone needs: "
+        "MiQroForge includes built-in tools that cover most standalone needs: "
         "`web_search`, `web_fetch`, `read_file`, `write_file`, `edit_file`, "
         "`create_docx`, `create_pptx`, `create_xlsx`, `create_pdf`, `exec`."
     )
     result.append("")
     result.append(
         "To add MCP connectors for supercharged mode, configure MCP servers "
-        "in MiqroForge's MCP settings page or add them via `config.json`."
+        "in MiQroForge's MCP settings page or add them via `config.json`."
     )
 
     return "\n".join(result)
 
 
 def convert_frontmatter(kwp_meta: dict, plugin_name: str, skill_name: str) -> str:
-    """Convert KWP frontmatter to MiqroForge format with metadata JSON."""
+    """Convert KWP frontmatter to MiQroForge format with metadata JSON."""
     name = kwp_meta.get("name", skill_name)
     description = kwp_meta.get("description", "")
-    argument_hint = kwp_meta.get("argument-hint", "")
 
-    # Build MiqroForge metadata
+    # Build MiQroForge metadata
     miqi_meta: dict = {
         "requires": {},
     }
@@ -336,7 +334,7 @@ def convert_skill(
     output_dir: Path,
     dry_run: bool = False,
 ) -> bool:
-    """Convert a single KWP skill to MiqroForge format. Returns True if written."""
+    """Convert a single KWP skill to MiQroForge format. Returns True if written."""
     raw = source_path.read_text(encoding="utf-8")
 
     meta, body = parse_kwp_frontmatter(raw)
@@ -415,16 +413,16 @@ def generate_plugin_json(
     dry_run: bool = False,
     commands_metadata: list[dict] | None = None,
 ) -> None:
-    """Generate a MiqroForge-compatible plugin.json for one KWP plugin."""
+    """Generate a MiQroForge-compatible plugin.json for one KWP plugin."""
     manifest = {
         "name": f"kwp-{plugin_name}",
         "version": "1.0.0",
         "description": (
             f"Knowledge Work Plugins — {plugin_name.replace('-', ' ').title()} "
             f"({len(skills)} skills). "
-            f"Adapted from anthropics/knowledge-work-plugins for MiqroForge."
+            f"Adapted from anthropics/knowledge-work-plugins for MiQroForge."
         ),
-        "author": "Anthropic (adapted for MiqroForge)",
+        "author": "Anthropic (adapted for MiQroForge)",
         "skills": skills,
         "mcp_servers": [],
         "slash_commands": commands_metadata or [],
@@ -446,26 +444,26 @@ def generate_plugin_json(
 def generate_collection_readme(output_dir: Path, all_plugins: list[str]) -> None:
     """Write a README explaining the KWP collection."""
     lines = [
-        "# Knowledge Work Plugins for MiqroForge",
+        "# Knowledge Work Plugins for MiQroForge",
         "",
         "Skills adapted from [anthropics/knowledge-work-plugins]"
         "(https://github.com/anthropics/knowledge-work-plugins) "
-        "for use with MiqroForge Desktop Agent.",
+        "for use with MiQroForge Desktop Agent.",
         "",
         "## How to use",
         "",
-        "These skills appear automatically in MiqroForge when placed under "
+        "These skills appear automatically in MiQroForge when placed under "
         "`miqi/skills/kwp/`. The agent can read them via `read_file` "
         "when the skill description matches the current task.",
         "",
         "## Standalone vs Supercharged",
         "",
-        "All skills work **standalone** with MiqroForge's built-in tools "
+        "All skills work **standalone** with MiQroForge's built-in tools "
         "(`web_search`, `web_fetch`, `write_file`, `exec`, `create_docx`, "
         "`create_pptx`, `create_xlsx`, `create_pdf`).",
         "",
         "For the **supercharged** experience described in the original "
-        "plugin docs, configure MCP servers via MiqroForge's MCP settings.",
+        "plugin docs, configure MCP servers via MiQroForge's MCP settings.",
         "",
         "## Included Plugins",
         "",
@@ -482,7 +480,7 @@ def generate_collection_readme(output_dir: Path, all_plugins: list[str]) -> None
         "",
         "Original content: Apache 2.0 — [anthropics/knowledge-work-plugins]"
         "(https://github.com/anthropics/knowledge-work-plugins)",
-        "Adaptation: MIT — [MiqroForge Desktop](http://git.miqroera.com/intership/miqi-desktop.git)",
+        "Adaptation: MIT — [MiQroForge Desktop](http://git.miqroera.com/intership/miqi-desktop.git)",
     ])
 
     (output_dir / "README.md").write_text(
@@ -494,7 +492,7 @@ def main():
     import argparse
 
     parser = argparse.ArgumentParser(
-        description="Convert anthropics/knowledge-work-plugins to MiqroForge format"
+        description="Convert anthropics/knowledge-work-plugins to MiQroForge format"
     )
     parser.add_argument(
         "--repo",

@@ -9,7 +9,6 @@ This module provides the main ``MemoryStore`` class which composes:
 from __future__ import annotations
 
 import asyncio
-import os
 import re
 import threading
 import time
@@ -21,6 +20,11 @@ from miqi.agent.memory.lessons import LessonStore
 from miqi.agent.memory.nlp import TextProcessor
 from miqi.agent.memory.snapshot import SnapshotStore
 from miqi.utils.helpers import ensure_dir, timestamp, today_date
+
+# Truncation caps for memory sections merged into the system prompt.
+_LT_MAX = 8000  # long-term notes when the snapshot is empty
+_TODAY_MAX = 12000  # today's notes
+_USER_MAX = 4000  # user profile (memory/USER.md)
 
 
 class MemoryStore:
@@ -518,7 +522,6 @@ class MemoryStore:
                     parts.append("## Legacy Long-term Notes\n" + legacy)
                 else:
                     # Hard cap to avoid token explosion when snapshot is empty.
-                    _LT_MAX = 8000
                     if len(long_term) > _LT_MAX:
                         long_term = long_term[:_LT_MAX] + "\n... (truncated)"
                     parts.append("## Long-term Memory\n" + long_term)
@@ -526,7 +529,6 @@ class MemoryStore:
             today = self.read_today()
             if today:
                 # Today's notes are high-signal but can grow unbounded via heartbeat.
-                _TODAY_MAX = 12000
                 if len(today) > _TODAY_MAX:
                     today = today[:_TODAY_MAX] + "\n... (truncated)"
                 parts.append("## Today's Notes\n" + today)
@@ -536,7 +538,6 @@ class MemoryStore:
             if user_md.exists():
                 user_content = user_md.read_text(encoding="utf-8")
                 if user_content.strip():
-                    _USER_MAX = 4000
                     if len(user_content) > _USER_MAX:
                         user_content = user_content[:_USER_MAX] + "\n... (truncated)"
                     parts.append("## User Profile\n" + user_content)

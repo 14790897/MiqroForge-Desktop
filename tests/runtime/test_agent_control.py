@@ -454,8 +454,8 @@ async def test_subagent_end_hook_error_does_not_fail_successful_agent(
     fake_provider,
     fake_tool_registry,
 ):
-    from miqi.runtime.agent_registry import AgentRegistry
     from miqi.execution.hook_runtime import HookPoint
+    from miqi.runtime.agent_registry import AgentRegistry
 
     hooks = MagicMock()
 
@@ -494,8 +494,8 @@ async def test_subagent_end_hook_error_does_not_mask_agent_error(
     fake_provider,
     fake_tool_registry,
 ):
-    from miqi.runtime.agent_registry import AgentRegistry
     from miqi.execution.hook_runtime import HookPoint
+    from miqi.runtime.agent_registry import AgentRegistry
 
     hooks = MagicMock()
 

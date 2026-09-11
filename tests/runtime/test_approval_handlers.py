@@ -9,7 +9,6 @@ import time
 
 import pytest
 
-
 # ── Helpers ────────────────────────────────────────────────────────────────
 
 
@@ -109,10 +108,11 @@ async def test_approvals_list_includes_permanent_allowlist(fake_config, fake_pro
 async def test_approvals_list_includes_approval_mode_from_profile(fake_config, fake_provider, tmp_path):
     """approvals.list surfaces the active session's approval_policy mode."""
     from pathlib import Path
+
+    from miqi.execution.approval_policy import ApprovalMode, ApprovalPolicy
     from miqi.runtime.app_server import ClientSessionRegistry
     from miqi.runtime.approval_handlers import approvals_list_handler
     from miqi.runtime.permission_profile import PermissionProfile
-    from miqi.execution.approval_policy import ApprovalPolicy, ApprovalMode
 
     registry = ClientSessionRegistry()
 
@@ -189,7 +189,7 @@ async def test_approvals_resolve_own_session_approval(fake_config, fake_provider
 @pytest.mark.asyncio
 async def test_approvals_resolve_rejects_cross_client(fake_config, fake_provider, tmp_path):
     """approvals.resolve returns UNAUTHORIZED for another client's approval."""
-    from miqi.runtime.app_server import ClientSessionRegistry, AppServerError
+    from miqi.runtime.app_server import AppServerError, ClientSessionRegistry
     from miqi.runtime.approval_handlers import approvals_resolve_handler
 
     registry = ClientSessionRegistry()
@@ -212,7 +212,7 @@ async def test_approvals_resolve_rejects_cross_client(fake_config, fake_provider
 @pytest.mark.asyncio
 async def test_approvals_resolve_invalid_decision(fake_config, fake_provider, tmp_path):
     """approvals.resolve rejects invalid decision values."""
-    from miqi.runtime.app_server import ClientSessionRegistry, AppServerError
+    from miqi.runtime.app_server import AppServerError, ClientSessionRegistry
     from miqi.runtime.approval_handlers import approvals_resolve_handler
 
     registry = ClientSessionRegistry()
@@ -229,7 +229,7 @@ async def test_approvals_resolve_invalid_decision(fake_config, fake_provider, tm
 @pytest.mark.asyncio
 async def test_approvals_resolve_missing_approval_id(fake_config, fake_provider, tmp_path):
     """approvals.resolve requires approval_id."""
-    from miqi.runtime.app_server import ClientSessionRegistry, AppServerError
+    from miqi.runtime.app_server import AppServerError, ClientSessionRegistry
     from miqi.runtime.approval_handlers import approvals_resolve_handler
 
     registry = ClientSessionRegistry()
@@ -248,9 +248,9 @@ async def test_approvals_resolve_missing_approval_id(fake_config, fake_provider,
 async def test_approvals_resolve_allow_emits_resolved_event(fake_config, fake_provider, tmp_path):
     """Phase 31.4: AppServer approvals.resolve with 'once' emits
     ApprovalResolvedEvent through the runtime session's event emitter."""
+    from miqi.protocol.events import ApprovalResolvedEvent
     from miqi.runtime.app_server import ClientSessionRegistry
     from miqi.runtime.approval_handlers import approvals_resolve_handler
-    from miqi.protocol.events import ApprovalResolvedEvent
 
     registry = ClientSessionRegistry()
     session = await _create_session_with_approval(registry, "client-A", "session-a", fake_config, fake_provider, tmp_path)
@@ -281,9 +281,9 @@ async def test_approvals_resolve_allow_emits_resolved_event(fake_config, fake_pr
 async def test_approvals_resolve_deny_emits_resolved_event(fake_config, fake_provider, tmp_path):
     """Phase 31.4: AppServer approvals.resolve with 'deny' emits
     ApprovalResolvedEvent with decision='deny'."""
+    from miqi.protocol.events import ApprovalResolvedEvent
     from miqi.runtime.app_server import ClientSessionRegistry
     from miqi.runtime.approval_handlers import approvals_resolve_handler
-    from miqi.protocol.events import ApprovalResolvedEvent
 
     registry = ClientSessionRegistry()
     session = await _create_session_with_approval(registry, "client-A", "session-a", fake_config, fake_provider, tmp_path)
@@ -311,9 +311,9 @@ async def test_approvals_resolve_deny_emits_resolved_event(fake_config, fake_pro
 async def test_approvals_resolve_always_emits_resolved_event(fake_config, fake_provider, tmp_path):
     """Phase 31.4: AppServer approvals.resolve with 'always' emits
     ApprovalResolvedEvent and updates the permanent allowlist."""
+    from miqi.protocol.events import ApprovalResolvedEvent
     from miqi.runtime.app_server import ClientSessionRegistry
     from miqi.runtime.approval_handlers import approvals_resolve_handler
-    from miqi.protocol.events import ApprovalResolvedEvent
 
     registry = ClientSessionRegistry()
     session = await _create_session_with_approval(registry, "client-A", "session-a", fake_config, fake_provider, tmp_path)
@@ -349,7 +349,7 @@ async def test_approvals_resolve_always_emits_resolved_event(fake_config, fake_p
 async def test_approvals_resolve_nonexistent_no_event(fake_config, fake_provider, tmp_path):
     """Phase 31.4: AppServer approvals.resolve for a nonexistent approval
     does NOT emit ApprovalResolvedEvent."""
-    from miqi.runtime.app_server import ClientSessionRegistry, AppServerError
+    from miqi.runtime.app_server import AppServerError, ClientSessionRegistry
     from miqi.runtime.approval_handlers import approvals_resolve_handler
 
     registry = ClientSessionRegistry()
@@ -380,7 +380,7 @@ async def test_approvals_resolve_nonexistent_no_event(fake_config, fake_provider
 async def test_approvals_resolve_invalid_decision_no_event(fake_config, fake_provider, tmp_path):
     """Phase 31.4: AppServer approvals.resolve with invalid decision
     does NOT emit ApprovalResolvedEvent."""
-    from miqi.runtime.app_server import ClientSessionRegistry, AppServerError
+    from miqi.runtime.app_server import AppServerError, ClientSessionRegistry
     from miqi.runtime.approval_handlers import approvals_resolve_handler
 
     registry = ClientSessionRegistry()
@@ -400,9 +400,9 @@ async def test_approvals_resolve_invalid_decision_no_event(fake_config, fake_pro
 @pytest.mark.asyncio
 async def test_approvals_resolve_legacy_allow_mapped_to_once(fake_config, fake_provider, tmp_path):
     """Phase 31.4: legacy 'allow' decision is accepted and normalized to 'once'."""
+    from miqi.protocol.events import ApprovalResolvedEvent
     from miqi.runtime.app_server import ClientSessionRegistry
     from miqi.runtime.approval_handlers import approvals_resolve_handler
-    from miqi.protocol.events import ApprovalResolvedEvent
 
     registry = ClientSessionRegistry()
     session = await _create_session_with_approval(registry, "client-A", "session-a", fake_config, fake_provider, tmp_path)
@@ -433,9 +433,9 @@ async def test_approvals_resolve_legacy_allow_mapped_to_once(fake_config, fake_p
 async def test_approvals_resolve_legacy_allow_permanent_mapped_to_always(fake_config, fake_provider, tmp_path):
     """Phase 31.4: legacy 'allow_permanent' decision is accepted and
     normalized to 'always'."""
+    from miqi.protocol.events import ApprovalResolvedEvent
     from miqi.runtime.app_server import ClientSessionRegistry
     from miqi.runtime.approval_handlers import approvals_resolve_handler
-    from miqi.protocol.events import ApprovalResolvedEvent
 
     registry = ClientSessionRegistry()
     session = await _create_session_with_approval(registry, "client-A", "session-a", fake_config, fake_provider, tmp_path)
@@ -474,8 +474,8 @@ async def test_approvals_resolve_legacy_allow_permanent_mapped_to_always(fake_co
 async def test_approvals_clear_permanent_removes_pattern(fake_config, fake_provider, tmp_path):
     """approvals.clear_permanent removes a specific pattern."""
     from miqi.agent.command_approval import approve_permanent, get_permanent_allowlist
-    from miqi.runtime.approval_handlers import approvals_clear_permanent_handler
     from miqi.runtime.app_server import ClientSessionRegistry
+    from miqi.runtime.approval_handlers import approvals_clear_permanent_handler
 
     # Add a permanent approval
     approve_permanent("test-pattern-1")
@@ -498,8 +498,8 @@ async def test_approvals_clear_permanent_removes_pattern(fake_config, fake_provi
 async def test_approvals_clear_permanent_clears_all(fake_config, fake_provider, tmp_path):
     """approvals.clear_permanent without pattern clears all."""
     from miqi.agent.command_approval import approve_permanent, get_permanent_allowlist
-    from miqi.runtime.approval_handlers import approvals_clear_permanent_handler
     from miqi.runtime.app_server import ClientSessionRegistry
+    from miqi.runtime.approval_handlers import approvals_clear_permanent_handler
 
     approve_permanent("pattern-all-1")
     approve_permanent("pattern-all-2")
@@ -519,8 +519,8 @@ async def test_approvals_clear_permanent_clears_all(fake_config, fake_provider, 
 async def test_approvals_add_permanent_adds_pattern(fake_config, fake_provider, tmp_path):
     """approvals.add_permanent adds and persists a pattern."""
     from miqi.agent.command_approval import get_permanent_allowlist
-    from miqi.runtime.approval_handlers import approvals_add_permanent_handler
     from miqi.runtime.app_server import ClientSessionRegistry
+    from miqi.runtime.approval_handlers import approvals_add_permanent_handler
 
     registry = ClientSessionRegistry()
     result = await approvals_add_permanent_handler(
@@ -531,7 +531,7 @@ async def test_approvals_add_permanent_adds_pattern(fake_config, fake_provider, 
     assert "new-pattern-xyz" in get_permanent_allowlist()
 
     # Cleanup
-    from miqi.agent.command_approval import _lock, _permanent_approved, _permanent_added_at
+    from miqi.agent.command_approval import _lock, _permanent_added_at, _permanent_approved
     with _lock:
         _permanent_approved.discard("new-pattern-xyz")
         _permanent_added_at.pop("new-pattern-xyz", None)
@@ -540,7 +540,7 @@ async def test_approvals_add_permanent_adds_pattern(fake_config, fake_provider, 
 @pytest.mark.asyncio
 async def test_approvals_add_permanent_rejects_empty_pattern(fake_config, fake_provider, tmp_path):
     """approvals.add_permanent rejects empty pattern."""
-    from miqi.runtime.app_server import ClientSessionRegistry, AppServerError
+    from miqi.runtime.app_server import AppServerError, ClientSessionRegistry
     from miqi.runtime.approval_handlers import approvals_add_permanent_handler
 
     registry = ClientSessionRegistry()
@@ -558,9 +558,9 @@ async def test_approvals_add_permanent_rejects_empty_pattern(fake_config, fake_p
 @pytest.mark.asyncio
 async def test_approvals_history_returns_data(fake_config, fake_provider, tmp_path):
     """approvals.history returns history data."""
+    from miqi.agent.command_approval import add_approval_history
     from miqi.runtime.app_server import ClientSessionRegistry
     from miqi.runtime.approval_handlers import approvals_history_handler
-    from miqi.agent.command_approval import add_approval_history
 
     # Add a history entry
     add_approval_history(

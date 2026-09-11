@@ -25,11 +25,7 @@
 
 import { test, expect } from '@playwright/test';
 import type { ElectronApplication, Page } from '@playwright/test';
-import {
-  waitForInputReady,
-  launchElectronApp,
-  closeElectronApp,
-} from './helpers/electron-setup';
+import { waitForInputReady, launchElectronApp, closeElectronApp } from './helpers/electron-setup';
 
 // WSL 是 Windows-only 功能：Linux/macOS runner 上无 WSL，整个套件无意义
 // （bridge 会返回 "Not on Windows"）。CI 在 ubuntu/macos 也跑 e2e，必须
@@ -53,9 +49,7 @@ async function navigateToWslPage(page: Page): Promise<void> {
   await page.waitForTimeout(1000);
 
   // Verify WSL page is loaded
-  await expect(
-    page.getByText('WSL 状态监控').first(),
-  ).toBeVisible({ timeout: 10_000 });
+  await expect(page.getByText('WSL 状态监控').first()).toBeVisible({ timeout: 10_000 });
 }
 
 /** Read WSL check result via bridge API */
@@ -65,9 +59,7 @@ async function bridgeWslCheck(page: Page): Promise<Record<string, unknown>> {
 
 /** Filter out docker-desktop from distro list (not a usable user distro) */
 function getUserDistros(distros: string[]): string[] {
-  return (distros ?? []).filter(
-    (d: string) => !/^docker[-_]desktop/i.test(d),
-  );
+  return (distros ?? []).filter((d: string) => !/^docker[-_]desktop/i.test(d));
 }
 
 // ─── Test Suite ─────────────────────────────────────────────────────
@@ -92,53 +84,47 @@ test.describe('WSL One-Click Install E2E', () => {
   //  Test 1: WSL check IPC returns valid result
   // ═════════════════════════════════════════════════════════════════
 
-  test(
-    'wsl:check returns valid result with featureState field',
-    { timeout: 60_000 },
-    async () => {
-      await waitForInputReady(page);
+  test('wsl:check returns valid result with featureState field', { timeout: 60_000 }, async () => {
+    await waitForInputReady(page);
 
-      const result = await bridgeWslCheck(page);
-      console.log('[test] WSL check result:', JSON.stringify(result));
+    const result = await bridgeWslCheck(page);
+    console.log('[test] WSL check result:', JSON.stringify(result));
 
-      // PR #373 adds featureState to WslCheckResult
-      expect(result).toBeDefined();
-      expect(typeof result).toBe('object');
+    // PR #373 adds featureState to WslCheckResult
+    expect(result).toBeDefined();
+    expect(typeof result).toBe('object');
 
-      if (result && typeof result === 'object') {
-        const r = result as Record<string, unknown>;
+    if (result && typeof result === 'object') {
+      const r = result as Record<string, unknown>;
 
-        // Core fields that must exist (pre-PR and post-PR)
-        expect(r).toHaveProperty('isWindows');
-        expect(r).toHaveProperty('installed');
-        expect(r).toHaveProperty('version');
-        expect(r).toHaveProperty('distros');
-        expect(r).toHaveProperty('defaultDistro');
-        expect(r).toHaveProperty('running');
+      // Core fields that must exist (pre-PR and post-PR)
+      expect(r).toHaveProperty('isWindows');
+      expect(r).toHaveProperty('installed');
+      expect(r).toHaveProperty('version');
+      expect(r).toHaveProperty('distros');
+      expect(r).toHaveProperty('defaultDistro');
+      expect(r).toHaveProperty('running');
 
-        // PR #373 additions
-        expect(r).toHaveProperty('featureState');
-        expect(r).toHaveProperty('rebootRequired');
+      // PR #373 additions
+      expect(r).toHaveProperty('featureState');
+      expect(r).toHaveProperty('rebootRequired');
 
-        // Validate featureState is one of the 5 valid states
-        const validStates = [
-          'not-supported',
-          'not-enabled',
-          'not-installed',
-          'installed-but-not-initialized',
-          'ready',
-        ];
-        expect(validStates).toContain(r.featureState);
+      // Validate featureState is one of the 5 valid states
+      const validStates = [
+        'not-supported',
+        'not-enabled',
+        'not-installed',
+        'installed-but-not-initialized',
+        'ready',
+      ];
+      expect(validStates).toContain(r.featureState);
 
-        // rebootRequired must be boolean
-        expect(typeof r.rebootRequired).toBe('boolean');
+      // rebootRequired must be boolean
+      expect(typeof r.rebootRequired).toBe('boolean');
 
-        console.log(
-          `[test] ✅ featureState=${r.featureState}, rebootRequired=${r.rebootRequired}`,
-        );
-      }
-    },
-  );
+      console.log(`[test] ✅ featureState=${r.featureState}, rebootRequired=${r.rebootRequired}`);
+    }
+  });
 
   // ═════════════════════════════════════════════════════════════════
   //  Test 2: WSL Status Page renders + shows appropriate UI
@@ -152,23 +138,23 @@ test.describe('WSL One-Click Install E2E', () => {
       await navigateToWslPage(page);
 
       // Page title
-      await expect(
-        page.getByText('WSL 状态监控').first(),
-      ).toBeVisible({ timeout: 5_000 });
+      await expect(page.getByText('WSL 状态监控').first()).toBeVisible({ timeout: 5_000 });
 
       // Run WSL check to determine current state
       const check = await bridgeWslCheck(page);
       const rawDistros: string[] = (check as any)?.distros ?? [];
       const distros = getUserDistros(rawDistros);
       if (rawDistros.length !== distros.length) {
-        console.log(`[test] Filtered out ${rawDistros.length - distros.length} docker distro(s), effective: ${JSON.stringify(distros)}`);
+        console.log(
+          `[test] Filtered out ${rawDistros.length - distros.length} docker distro(s), effective: ${JSON.stringify(distros)}`
+        );
       } else {
         console.log(`[test] WSL check: distros=${JSON.stringify(distros)}`);
       }
 
       if (distros.length === 0) {
         // PR #373: when no distros, the install button should appear
-        // Look for install/one-click button — text matches "一键安装" 
+        // Look for install/one-click button — text matches "一键安装"
         // or the Download icon button
         const installBtn = page.getByRole('button').filter({
           has: page.locator('svg'), // lucide icon inside button
@@ -182,7 +168,7 @@ test.describe('WSL One-Click Install E2E', () => {
         const hasInstallBtn = await installPrompt.isVisible().catch(() => false);
 
         console.log(
-          `[test] No-distro state: hasNoDistroMsg=${hasNoDistroMsg}, hasInstallBtn=${hasInstallBtn}`,
+          `[test] No-distro state: hasNoDistroMsg=${hasNoDistroMsg}, hasInstallBtn=${hasInstallBtn}`
         );
 
         // At minimum, the page should show an informative empty state
@@ -201,12 +187,12 @@ test.describe('WSL One-Click Install E2E', () => {
         const distroText = page.getByText(distros[0], { exact: false });
         const hasDistroText = await distroText.isVisible().catch(() => false);
 
-        // Or look for "发行版" (distro selector text) 
+        // Or look for "发行版" (distro selector text)
         const distroLabel = page.getByText('发行版', { exact: false });
         const hasDistroLabel = await distroLabel.isVisible().catch(() => false);
 
         console.log(
-          `[test] Installed state: hasDistroText="${distros[0]}"=${hasDistroText}, hasDistroLabel=${hasDistroLabel}`,
+          `[test] Installed state: hasDistroText="${distros[0]}"=${hasDistroText}, hasDistroLabel=${hasDistroLabel}`
         );
 
         // The page should render the monitoring UI
@@ -214,7 +200,7 @@ test.describe('WSL One-Click Install E2E', () => {
         expect(pageText).toBeTruthy();
         console.log('[test] ✅ WSL page rendered for installed state');
       }
-    },
+    }
   );
 
   // ═════════════════════════════════════════════════════════════════
@@ -253,14 +239,18 @@ test.describe('WSL One-Click Install E2E', () => {
       if ((result as any)?._error) {
         // Method may fail if WSL is already properly installed
         // (no action needed ≠ error, but bridge may return error)
-        console.log(`[test] installAndProvision error (may be expected): ${(result as any)._error}`);
+        console.log(
+          `[test] installAndProvision error (may be expected): ${(result as any)._error}`
+        );
       } else {
         // Result should match WslInstallAndProvisionResult interface
         expect(result).toHaveProperty('success');
         expect(result).toHaveProperty('phase');
-        console.log(`[test] ✅ installAndProvision: success=${(result as any).success}, phase=${(result as any).phase}`);
+        console.log(
+          `[test] ✅ installAndProvision: success=${(result as any).success}, phase=${(result as any).phase}`
+        );
       }
-    },
+    }
   );
 
   // ═════════════════════════════════════════════════════════════════
@@ -283,25 +273,26 @@ test.describe('WSL One-Click Install E2E', () => {
           const done = await new Promise<void>((resolve) => {
             let timer: any = null;
 
-            unsubscribe = (window as any).miqi.wsl.onInstallProgress(
-              (data: any) => {
-                if (!collected.some((e: any) => e.phase === data.phase)) {
-                  collected.push({ ...data });
-                }
-                if (data.phase === 'complete' || data.phase === 'error') {
-                  if (timer) clearTimeout(timer);
-                  resolve();
-                }
-              },
-            );
+            unsubscribe = (window as any).miqi.wsl.onInstallProgress((data: any) => {
+              if (!collected.some((e: any) => e.phase === data.phase)) {
+                collected.push({ ...data });
+              }
+              if (data.phase === 'complete' || data.phase === 'error') {
+                if (timer) clearTimeout(timer);
+                resolve();
+              }
+            });
 
             // Fire installAndProvision after listener is registered
-            (window as any).miqi.wsl.installAndProvision().then(() => {
-              // Fallback: resolve after 10s if no complete/error event
-              timer = setTimeout(resolve, 10000);
-            }).catch(() => {
-              timer = setTimeout(resolve, 10000);
-            });
+            (window as any).miqi.wsl
+              .installAndProvision()
+              .then(() => {
+                // Fallback: resolve after 10s if no complete/error event
+                timer = setTimeout(resolve, 10000);
+              })
+              .catch(() => {
+                timer = setTimeout(resolve, 10000);
+              });
           });
         } catch (e: any) {
           collected.push({ _error: e?.message ?? String(e) });
@@ -333,9 +324,7 @@ test.describe('WSL One-Click Install E2E', () => {
       console.log(`[test] Phase sequence: ${phases.join(' → ')}`);
 
       // Verify post-install state: re-check WSL
-      const postCheck = await page.evaluate(() =>
-        (window as any).miqi.wsl.check(),
-      );
+      const postCheck = await page.evaluate(() => (window as any).miqi.wsl.check());
       console.log('[test] Post-install WSL check:', JSON.stringify(postCheck));
 
       // If we started with no distros, we should now have distros
@@ -343,75 +332,85 @@ test.describe('WSL One-Click Install E2E', () => {
       if (postCheck && typeof postCheck === 'object') {
         let pc = postCheck as Record<string, unknown>;
         expect(pc).toHaveProperty('installed');
-        const postDistros: string[] = Array.isArray(pc.distros) ? pc.distros as string[] : [];
+        const postDistros: string[] = Array.isArray(pc.distros) ? (pc.distros as string[]) : [];
         const userDistros = getUserDistros(postDistros);
         if (userDistros.length > 0) {
-          console.log(`[test] ✅ Post-install: ${userDistros.length} user distro(s) installed: ${JSON.stringify(userDistros)}`);
+          console.log(
+            `[test] ✅ Post-install: ${userDistros.length} user distro(s) installed: ${JSON.stringify(userDistros)}`
+          );
         } else {
-          console.log(`[test] ℹ️ Post-install: featureState=${pc.featureState}, distros=${JSON.stringify(pc.distros)}`);
+          console.log(
+            `[test] ℹ️ Post-install: featureState=${pc.featureState}, distros=${JSON.stringify(pc.distros)}`
+          );
         }
       }
-    },
+    }
   );
 
   // ═════════════════════════════════════════════════════════════════
   //  Test 5: Setup Wizard WSL guidance (runs after full setup)
   // ═════════════════════════════════════════════════════════════════
 
-  test(
-    'Setup Wizard shows WSL guidance based on featureState',
-    { timeout: 60_000 },
-    async () => {
-      await waitForInputReady(page);
+  test('Setup Wizard shows WSL guidance based on featureState', { timeout: 60_000 }, async () => {
+    await waitForInputReady(page);
 
-      // Navigate to Settings → General → "重新运行配置向导"
-      const settingsBtn = page.locator('[data-testid="nav-system-settings"]');
-      await expect(settingsBtn).toBeVisible({ timeout: 10_000 });
-      await settingsBtn.click();
-      await page.waitForTimeout(1500);
+    // Navigate to Settings → General → "重新运行配置向导"
+    const settingsBtn = page.locator('[data-testid="nav-system-settings"]');
+    await expect(settingsBtn).toBeVisible({ timeout: 10_000 });
+    await settingsBtn.click();
+    await page.waitForTimeout(1500);
 
-      // Ensure on General tab (may not be default after WSL tab in Test 2)
-      const generalTab = page.getByRole('tab', { name: '通用' });
-      if (await generalTab.isVisible({ timeout: 3000 }).catch(() => false)) {
-        await generalTab.click();
-        await page.waitForTimeout(500);
-      }
+    // Ensure on General tab (may not be default after WSL tab in Test 2)
+    const generalTab = page.getByRole('tab', { name: '通用' });
+    if (await generalTab.isVisible({ timeout: 3000 }).catch(() => false)) {
+      await generalTab.click();
+      await page.waitForTimeout(500);
+    }
 
-      // Scroll to Danger Zone at bottom to reveal re-setup button
-      await page.getByText('重新配置').scrollIntoViewIfNeeded().catch(() => {});
-      await page.waitForTimeout(300);
+    // Scroll to Danger Zone at bottom to reveal re-setup button
+    await page
+      .getByText('重新配置')
+      .scrollIntoViewIfNeeded()
+      .catch(() => {});
+    await page.waitForTimeout(300);
 
-      // Click "重新运行配置向导" button
-      const reSetupBtn = page.getByRole('button', {
-        name: '重新运行配置向导',
-      });
-      const hasReSetup = await reSetupBtn.isVisible({ timeout: 5_000 }).catch(() => false);
+    // Click "重新运行配置向导" button
+    const reSetupBtn = page.getByRole('button', {
+      name: '重新运行配置向导',
+    });
+    const hasReSetup = await reSetupBtn.isVisible({ timeout: 5_000 }).catch(() => false);
 
-      if (!hasReSetup) {
-        console.log('[test] Skipping setup wizard test — re-setup button not found');
-        test.skip();
-        return;
-      }
+    if (!hasReSetup) {
+      console.log('[test] Skipping setup wizard test — re-setup button not found');
+      test.skip();
+      return;
+    }
 
-      await reSetupBtn.click();
-      await page.waitForTimeout(2000);
+    await reSetupBtn.click();
+    await page.waitForTimeout(2000);
 
-      // Setup Wizard is a full-screen overlay — no <main> element.
-      // Look for WSL-related text in the entire page body instead.
-      const wslSection = page.getByText('WSL', { exact: false });
-      const hasWslSection = await wslSection.first().isVisible({ timeout: 10_000 }).catch(() => false);
+    // Setup Wizard is a full-screen overlay — no <main> element.
+    // Look for WSL-related text in the entire page body instead.
+    const wslSection = page.getByText('WSL', { exact: false });
+    const hasWslSection = await wslSection
+      .first()
+      .isVisible({ timeout: 10_000 })
+      .catch(() => false);
 
-      if (hasWslSection) {
-        // Use page-level textContent since SetupWizard doesn't use <main>
-        const bodyText = await page.locator('body').textContent({ timeout: 10_000 });
-        console.log(`[test] Setup Wizard WSL section text (first 300 chars): ${(bodyText || '').substring(0, 300)}`);
-        console.log('[test] ✅ Setup Wizard shows WSL guidance');
-      } else {
-        console.log('[test] WSL section not visible — may be in a different step, verifying page has content');
-        const bodyText = await page.locator('body').textContent({ timeout: 10_000 });
-        expect(bodyText).toBeTruthy();
-        console.log('[test] ✅ Setup Wizard rendered (WSL guidance may be conditional on platform)');
-      }
-    },
-  );
+    if (hasWslSection) {
+      // Use page-level textContent since SetupWizard doesn't use <main>
+      const bodyText = await page.locator('body').textContent({ timeout: 10_000 });
+      console.log(
+        `[test] Setup Wizard WSL section text (first 300 chars): ${(bodyText || '').substring(0, 300)}`
+      );
+      console.log('[test] ✅ Setup Wizard shows WSL guidance');
+    } else {
+      console.log(
+        '[test] WSL section not visible — may be in a different step, verifying page has content'
+      );
+      const bodyText = await page.locator('body').textContent({ timeout: 10_000 });
+      expect(bodyText).toBeTruthy();
+      console.log('[test] ✅ Setup Wizard rendered (WSL guidance may be conditional on platform)');
+    }
+  });
 });

@@ -13,7 +13,6 @@ from miqi.runtime.protocol_registry import (
     ProtocolMethodSpec,
 )
 
-
 # Python field names that exist only for runtime use (e.g. Path resolution
 # after validation) and must NOT appear in catalog params schemas.
 _INTERNAL_MODEL_FIELDS: set[str] = {

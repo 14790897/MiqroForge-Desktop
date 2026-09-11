@@ -1,5 +1,4 @@
 """Phase 2: ContextBuilder includes session work dir in the identity prompt."""
-from pathlib import Path
 from miqi.agent.context import ContextBuilder
 
 

@@ -23,7 +23,6 @@ import pytest
 from miqi.sandbox.bwrap import BwrapSandbox
 from miqi.sandbox.manager import SandboxManager
 
-
 # ── Helpers ──────────────────────────────────────────────────────────────
 
 def _make_manager(tmp_path: Path) -> SandboxManager:
@@ -407,9 +406,9 @@ async def test_handle_kill_noop_after_process_reaped(monkeypatch):
 @pytest.mark.asyncio
 async def test_handle_kill_signals_pgid_while_running(monkeypatch):
     """kill() on a running process (returncode None) still signals the pgid."""
-    from miqi.sandbox.bwrap import BwrapCommandHandle
-
     import signal as _signal
+
+    from miqi.sandbox.bwrap import BwrapCommandHandle
 
     proc = _fake_proc(None)  # still running
     handle = BwrapCommandHandle(proc, pgid=999)

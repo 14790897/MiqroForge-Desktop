@@ -1,7 +1,7 @@
-# MiqroForge 自带 Skills 精确调用量化评估报告（含优化前后对比）
+# MiQroForge 自带 Skills 精确调用量化评估报告（含优化前后对比）
 
 - 评估日期：2026-08-17
-- 评估对象：MiqroForge Desktop 真实 agent（Electron 全链路 + 真实 LLM `deepseek-v4-flash`，runtime 温度 0.1）
+- 评估对象：MiQroForge Desktop 真实 agent（Electron 全链路 + 真实 LLM `deepseek-v4-flash`，runtime 温度 0.1）
 - 评估脚本：[skill-invocation-eval.spec.ts](skill-invocation-eval.spec.ts)（Playwright E2E，可复现）
 - 原始数据：`apps/desktop/test-reports/eval-history/`（baseline 结果在首版报告中，v2 完整数据在 `v2-final-14cases.json`）
 

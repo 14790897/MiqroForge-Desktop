@@ -7,7 +7,7 @@ from miqi.runtime.thread_app_handlers import register_codex_thread_handlers
 
 
 @pytest.mark.asyncio
-async def test_thread_resume_missing_threadId_returns_invalid():
+async def test_thread_resume_missing_thread_id_returns_invalid():
     server = AppServer(ClientSessionRegistry())
     register_codex_thread_handlers(server)
     server.registry.bridge_context = {}
@@ -20,7 +20,7 @@ async def test_thread_resume_missing_threadId_returns_invalid():
 
 
 @pytest.mark.asyncio
-async def test_thread_read_non_string_threadId_returns_invalid():
+async def test_thread_read_non_string_thread_id_returns_invalid():
     server = AppServer(ClientSessionRegistry())
     register_codex_thread_handlers(server)
     server.registry.bridge_context = {}

@@ -62,6 +62,13 @@ class ProviderSpec:
     # conversations (DeepSeek official API for deepseek-reasoner requires this).
     supports_reasoning_history: bool = False
 
+    # #834: provider streams reasoning CoT incrementally (interleaved with
+    # content — Kimi/Qwen/GPT-5 style) instead of buffering the whole pass
+    # server-side (DeepSeek).  For streaming providers the request→first-delta
+    # proxy does NOT equal thinking time, so it must be suppressed regardless
+    # of delta ordering.
+    streams_reasoning: bool = False
+
     @property
     def label(self) -> str:
         return self.display_name or self.name.title()
@@ -72,16 +79,6 @@ class ProviderSpec:
 # ---------------------------------------------------------------------------
 
 PROVIDERS: tuple[ProviderSpec, ...] = (
-
-    # === Custom (direct OpenAI-compatible endpoint, uses CustomProvider) ======
-    ProviderSpec(
-        name="custom",
-        keywords=(),
-        env_key="",
-        display_name="Custom",
-        model_prefix="",
-        is_direct=True,
-    ),
 
     # === Gateways (detected by api_key / api_base, not model name) =========
     # Gateways can route any model, so they win in fallback.
@@ -281,6 +278,9 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         is_gateway=False,
         is_local=False,
         detect_by_key_prefix="",
+        # #834: Kimi streams reasoning CoT incrementally (interleaved with
+        # content) — the request→first-delta thinking proxy is invalid here.
+        streams_reasoning=True,
         detect_by_base_keyword="",
         default_api_base="https://api.moonshot.ai/v1",   # intl; use api.moonshot.cn for China
         strip_model_prefix=False,
@@ -390,6 +390,28 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
 # ---------------------------------------------------------------------------
 # Lookup helpers
 # ---------------------------------------------------------------------------
+
+# Test/fallback model per provider — used by connection tests, model-picking
+# fallbacks (loader migration / deactivation reset), and the catalog defaults.
+# Gateway/local entries are FULL model ids (routed as-is); standard-provider
+# entries are bare names to be prefixed with "spec.name/".
+PROVIDER_TEST_MODELS: dict[str, str] = {
+    "anthropic": "claude-opus-4-5",
+    "openai": "gpt-4.1",
+    "deepseek": "deepseek-v4-flash",
+    "gemini": "gemini-2.5-pro",
+    "moonshot": "kimi-k2.5",
+    "dashscope": "qwen-max",
+    "zhipu": "glm-4",
+    "minimax": "MiniMax-M2.7",
+    "aihubmix": "claude-opus-4.1",
+    "siliconflow": "deepseek-ai/DeepSeek-V3",
+    "vllm": "meta-llama/Llama-3.1-8B-Instruct",
+    "ollama_local": "llama3.2",
+    "ollama_cloud": "gpt-oss:20b-cloud",
+    "openrouter": "anthropic/claude-opus-4-5",
+    "custom": "default",
+}
 
 def find_by_model(model: str) -> ProviderSpec | None:
     """Match a standard provider by model-name keyword (case-insensitive).

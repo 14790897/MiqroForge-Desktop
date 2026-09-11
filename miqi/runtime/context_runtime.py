@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import unicodedata
 from dataclasses import dataclass
-from typing import Any, Callable, Awaitable
+from typing import Any, Awaitable, Callable
 
 from loguru import logger
 
@@ -127,13 +127,36 @@ class ContextRuntime:
     ):
         self._compressor: Any = None
         self._compression_threshold_chars = compression_threshold_chars
+        self._context_limit_chars = context_limit_chars
         self._hooks = hooks
         if llm_call_fn is not None:
-            from miqi.agent.context_compressor import ContextCompressor
-            self._compressor = ContextCompressor(
-                llm_call_fn=llm_call_fn,
-                context_limit_chars=context_limit_chars,
-            )
+            self.set_llm_call_fn(llm_call_fn)
+
+    def set_llm_call_fn(
+        self,
+        llm_call_fn: Callable[[list[dict[str, Any]], str], Awaitable[str]] | None,
+        *,
+        context_limit_chars: int | None = None,
+    ) -> None:
+        """(Re)wire the context compressor's LLM call closure.
+
+        Issue #789 hot reload: after the provider is rebuilt at runtime, the
+        compressor must use the NEW provider — the closure captures the
+        provider at build time, so it is rebuilt here instead of mutating the
+        old closure.  *context_limit_chars* may be supplied to apply a new
+        compression threshold (defaults to the construction-time value).
+        """
+        if context_limit_chars is not None:
+            self._context_limit_chars = context_limit_chars
+        if llm_call_fn is None:
+            self._compressor = None
+            return
+        from miqi.agent.context_compressor import ContextCompressor
+
+        self._compressor = ContextCompressor(
+            llm_call_fn=llm_call_fn,
+            context_limit_chars=self._context_limit_chars,
+        )
 
     # ── Phase 12: message building ──────────────────────────────────────
 

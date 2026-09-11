@@ -7,15 +7,14 @@ not the dead _state._agent_control pointer.
 
 import pytest
 
-
 # ── agent.list ─────────────────────────────────────────────────────────────
 
 
 @pytest.mark.asyncio
 async def test_agent_list_empty_when_no_agents(fake_config, fake_provider, tmp_path):
     """agent.list returns empty list when no agents have been spawned."""
-    from miqi.runtime.app_server import ClientSessionRegistry
     from miqi.runtime.agent_handlers import agent_list_handler
+    from miqi.runtime.app_server import ClientSessionRegistry
 
     registry = ClientSessionRegistry()
     try:
@@ -38,8 +37,8 @@ async def test_agent_list_empty_when_no_agents(fake_config, fake_provider, tmp_p
 @pytest.mark.asyncio
 async def test_agent_list_requires_session_id(fake_config, fake_provider, tmp_path):
     """agent.list requires session_id."""
-    from miqi.runtime.app_server import ClientSessionRegistry, AppServerError
     from miqi.runtime.agent_handlers import agent_list_handler
+    from miqi.runtime.app_server import AppServerError, ClientSessionRegistry
 
     registry = ClientSessionRegistry()
 
@@ -51,8 +50,8 @@ async def test_agent_list_requires_session_id(fake_config, fake_provider, tmp_pa
 @pytest.mark.asyncio
 async def test_agent_list_requires_authorized_session(fake_config, fake_provider, tmp_path):
     """agent.list returns UNAUTHORIZED for wrong client."""
-    from miqi.runtime.app_server import ClientSessionRegistry, AppServerError
     from miqi.runtime.agent_handlers import agent_list_handler
+    from miqi.runtime.app_server import AppServerError, ClientSessionRegistry
 
     registry = ClientSessionRegistry()
     try:
@@ -78,8 +77,8 @@ async def test_agent_list_requires_authorized_session(fake_config, fake_provider
 async def test_agent_list_missing_session_returns_empty(fake_config, fake_provider, tmp_path):
     """agent.list returns empty list when the session_id does not exist yet
     (desktop pre-session call) for any client."""
-    from miqi.runtime.app_server import ClientSessionRegistry
     from miqi.runtime.agent_handlers import agent_list_handler
+    from miqi.runtime.app_server import ClientSessionRegistry
 
     registry = ClientSessionRegistry()
 
@@ -95,8 +94,8 @@ async def test_agent_list_missing_session_returns_empty(fake_config, fake_provid
 @pytest.mark.asyncio
 async def test_agent_get_requires_session_id(fake_config, fake_provider, tmp_path):
     """agent.get requires session_id."""
-    from miqi.runtime.app_server import ClientSessionRegistry, AppServerError
     from miqi.runtime.agent_handlers import agent_get_handler
+    from miqi.runtime.app_server import AppServerError, ClientSessionRegistry
 
     registry = ClientSessionRegistry()
 
@@ -110,8 +109,8 @@ async def test_agent_get_requires_session_id(fake_config, fake_provider, tmp_pat
 @pytest.mark.asyncio
 async def test_agent_get_requires_agent_id(fake_config, fake_provider, tmp_path):
     """agent.get requires agent_id."""
-    from miqi.runtime.app_server import ClientSessionRegistry, AppServerError
     from miqi.runtime.agent_handlers import agent_get_handler
+    from miqi.runtime.app_server import AppServerError, ClientSessionRegistry
 
     registry = ClientSessionRegistry()
     try:
@@ -135,8 +134,8 @@ async def test_agent_get_requires_agent_id(fake_config, fake_provider, tmp_path)
 @pytest.mark.asyncio
 async def test_agent_get_unknown_agent(fake_config, fake_provider, tmp_path):
     """agent.get returns NOT_FOUND for unknown agent_id."""
-    from miqi.runtime.app_server import ClientSessionRegistry, AppServerError
     from miqi.runtime.agent_handlers import agent_get_handler
+    from miqi.runtime.app_server import AppServerError, ClientSessionRegistry
 
     registry = ClientSessionRegistry()
     try:

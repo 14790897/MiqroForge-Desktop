@@ -1,10 +1,10 @@
-# MiqroForge Environment Diagnostic Script (Windows PowerShell)
+# MiQroForge Environment Diagnostic Script (Windows PowerShell)
 # Run: .\diagnose.ps1  or  irm https://... | iex
 # Output: paste into GitHub Issue "环境" section
 
 $ErrorActionPreference = "SilentlyContinue"
 
-Write-Host "--- MIQROFORGE DIAGNOSTIC ---"
+Write-Host "--- MiQroForge DIAGNOSTIC ---"
 Write-Host ""
 
 # ---- OS ----
@@ -36,8 +36,8 @@ try {
 }
 Write-Host ""
 
-# ---- MiqroForge ----
-Write-Host "**MiqroForge**"
+# ---- MiQroForge ----
+Write-Host "**MiQroForge**"
 try {
     $ver = python -c "import miqi; print(miqi.__version__)" 2>$null
     if ($LASTEXITCODE -eq 0) {

@@ -450,22 +450,30 @@ describe('QraftClient.exchangeCode（浏览器登录路径直接用 code 换 tok
 });
 
 describe('QraftClient.refreshTokens', () => {
-  it('用 refresh_token 刷新；实测返回同一个 refresh_token（不轮换）', async () => {
+  it('用 refresh_token 刷新；响应携带新 refresh_token（轮换语义）时以新值为准', async () => {
+    const body = JSON.stringify({
+      code: 200,
+      msg: 'ok',
+      token_type: 'bearer',
+      access_token: 'NEW-ACCESS',
+      refresh_token: 'NEW-REFRESH',
+      expires_in: '7199',
+    });
     const fetch = createFetchMock([
       {
         method: 'POST',
         url: /\/oauth2\/refresh$/,
-        response: mockResponse(200, TOKEN_OK_JSON, jsonHeaders()),
+        response: mockResponse(200, body, jsonHeaders()),
       },
     ]);
     const client = new QraftClient(fetch, noopLog);
     const tokens = await client.refreshTokens(CONFIG, 'REFRESH-TOKEN-abcdef');
-    expect(tokens.refreshToken).toBe('REFRESH-TOKEN-abcdef');
-    expect(tokens.accessToken).toBe('ACCESS-TOKEN-abcdef');
+    expect(tokens.refreshToken).toBe('NEW-REFRESH');
+    expect(tokens.accessToken).toBe('NEW-ACCESS');
     expect(tokens.expiresAt).toBeGreaterThan(Date.now());
   });
 
-  it('响应未携带 refresh_token 时回退为入参（防御官方文档声称的轮换语义）', async () => {
+  it('成功响应缺少 refresh_token（轮换语义下无法续期）→ REFRESH_TOKEN_INVALID', async () => {
     const body = JSON.stringify({
       code: 200,
       msg: 'ok',
@@ -481,18 +489,46 @@ describe('QraftClient.refreshTokens', () => {
       },
     ]);
     const client = new QraftClient(fetch, noopLog);
-    const tokens = await client.refreshTokens(CONFIG, 'REFRESH-TOKEN-abcdef');
-    expect(tokens.refreshToken).toBe('REFRESH-TOKEN-abcdef');
+    await expect(client.refreshTokens(CONFIG, 'REFRESH-TOKEN-abcdef')).rejects.toMatchObject({
+      code: 'REFRESH_TOKEN_INVALID',
+    });
   });
 
-  it('刷新失败报 REFRESH_FAILED', async () => {
+  it('refresh_token 已失效（平台作废）分类为 REFRESH_TOKEN_INVALID，且不泄漏 token 原文', async () => {
+    // 实测平台返回：originalMessage 会回显 refresh_token 原文。
+    const body = JSON.stringify({
+      code: 500,
+      msg: '未知错误',
+      data: {
+        message: '未知错误',
+        originalMessage: 'SaOAuth2RefreshTokenException: 无效refresh_token: STALE-TOKEN-VALUE',
+      },
+    });
+    const fetch = createFetchMock([
+      {
+        method: 'POST',
+        url: /\/oauth2\/refresh$/,
+        response: mockResponse(200, body, jsonHeaders()),
+      },
+    ]);
+    const client = new QraftClient(fetch, noopLog);
+    await expect(client.refreshTokens(CONFIG, 'STALE-TOKEN-VALUE')).rejects.toMatchObject({
+      code: 'REFRESH_TOKEN_INVALID',
+    });
+    await expect(client.refreshTokens(CONFIG, 'STALE-TOKEN-VALUE')).rejects.toSatisfy(
+      (err: unknown) => err instanceof Error && !err.message.includes('STALE-TOKEN-VALUE'),
+      '错误消息不得包含 refresh_token 原文'
+    );
+  });
+
+  it('其他业务错误保持 REFRESH_FAILED（瞬时错误，服务层继续重试）', async () => {
     const fetch = createFetchMock([
       {
         method: 'POST',
         url: /\/oauth2\/refresh$/,
         response: mockResponse(
           200,
-          JSON.stringify({ code: 500, msg: 'refresh_token 无效' }),
+          JSON.stringify({ code: 500, msg: '服务繁忙，请稍后重试' }),
           jsonHeaders()
         ),
       },
@@ -523,6 +559,74 @@ describe('QraftClient.getUserInfo', () => {
     await expect(client.getUserInfo(CONFIG, 'BAD')).rejects.toMatchObject({
       code: 'SESSION_EXPIRED',
     });
+  });
+
+  it('解析顶层平铺的网关字段（encryptedApiKey/aiGatewayStatus/configVersion）', async () => {
+    const body = JSON.stringify({
+      sub: '19',
+      username: 'U-HKY4-GB4E',
+      nickname: 'MiQi测试',
+      encryptedApiKey: 'sk-test-top-level',
+      aiGatewayStatus: 'active',
+      configVersion: 1,
+      consumerId: 'C-123',
+    });
+    const fetch = createFetchMock([
+      { url: /\/oauth2\/userinfo$/, response: mockResponse(200, body, jsonHeaders()) },
+    ]);
+    const client = new QraftClient(fetch, noopLog);
+    const info = await client.getUserInfo(CONFIG, 'ACCESS-TOKEN');
+    expect(info).toEqual({
+      sub: '19',
+      username: 'U-HKY4-GB4E',
+      nickname: 'MiQi测试',
+      aiGateway: {
+        encryptedApiKey: 'sk-test-top-level',
+        status: 'active',
+        configVersion: 1,
+        consumerId: 'C-123',
+      },
+    });
+  });
+
+  it('解析嵌套在 data 内的网关字段；configVersion 数字字符串归一为 number', async () => {
+    const body = JSON.stringify({
+      sub: '19',
+      username: 'U-HKY4-GB4E',
+      nickname: 'MiQi测试',
+      data: {
+        encryptedApiKey: 'sk-test-nested',
+        aiGatewayStatus: 'active',
+        configVersion: '3',
+      },
+    });
+    const fetch = createFetchMock([
+      { url: /\/oauth2\/userinfo$/, response: mockResponse(200, body, jsonHeaders()) },
+    ]);
+    const client = new QraftClient(fetch, noopLog);
+    const info = await client.getUserInfo(CONFIG, 'ACCESS-TOKEN');
+    expect(info.aiGateway).toEqual({
+      encryptedApiKey: 'sk-test-nested',
+      status: 'active',
+      configVersion: 3,
+    });
+  });
+
+  it('encryptedApiKey 缺失（即使有 aiGatewayStatus）时整体省略 aiGateway', async () => {
+    const body = JSON.stringify({
+      sub: '19',
+      username: 'U-HKY4-GB4E',
+      nickname: 'MiQi测试',
+      aiGatewayStatus: 'disabled',
+      configVersion: 0,
+    });
+    const fetch = createFetchMock([
+      { url: /\/oauth2\/userinfo$/, response: mockResponse(200, body, jsonHeaders()) },
+    ]);
+    const client = new QraftClient(fetch, noopLog);
+    const info = await client.getUserInfo(CONFIG, 'ACCESS-TOKEN');
+    expect(info).toEqual({ sub: '19', username: 'U-HKY4-GB4E', nickname: 'MiQi测试' });
+    expect('aiGateway' in info).toBe(false);
   });
 });
 
@@ -592,8 +696,138 @@ describe('QraftClient 错误分类与重试', () => {
 
 describe('QraftError', () => {
   it('携带稳定错误码', () => {
-    const err = new QraftError('IP_NOT_WHITELISTED', '出口 IP 未加白，请联系 Qraft 管理员');
+    const err = new QraftError('IP_NOT_WHITELISTED', '出口 IP 未加白，请联系 MiQroForge 管理员');
     expect(err.code).toBe('IP_NOT_WHITELISTED');
     expect(err.message).toContain('出口 IP 未加白');
+  });
+});
+
+// ── 积分接口（OAuth2 第三方接入指南）────────────────────────────────────
+
+const POINTS_OK = JSON.stringify({
+  code: 200,
+  message: 'ok',
+  data: { availablePoints: 270, heldPoints: 0, totalEarned: 300, totalSpent: 30 },
+});
+
+describe('QraftClient.getPointsBalance', () => {
+  it('GET /oauth2/points/balance 返回余额字段', async () => {
+    const calls: Array<{ url: string; auth: string | null }> = [];
+    const fetch = createFetchMock(
+      [
+        {
+          url: /\/oauth2\/points\/balance$/,
+          response: mockResponse(200, POINTS_OK, jsonHeaders()),
+        },
+      ],
+      (url, init) =>
+        calls.push({
+          url,
+          auth: (init as { headers?: Record<string, string> })?.headers?.['Authorization'] ?? null,
+        })
+    );
+    const client = new QraftClient(fetch, noopLog);
+    const balance = await client.getPointsBalance(CONFIG, 'TOKEN');
+    expect(balance).toEqual({
+      availablePoints: 270,
+      heldPoints: 0,
+      totalEarned: 300,
+      totalSpent: 30,
+    });
+    expect(calls[0].url).toBe('https://test.forge.miqroera.com/api/oauth2/points/balance');
+    expect(calls[0].auth).toBe('Bearer TOKEN');
+  });
+
+  it('40101/40102 业务码 → SESSION_EXPIRED', async () => {
+    const fetch = createFetchMock([
+      {
+        url: /\/oauth2\/points\/balance$/,
+        response: mockResponse(
+          200,
+          JSON.stringify({ code: 40102, message: 'access_token 无效或已过期' }),
+          jsonHeaders()
+        ),
+      },
+    ]);
+    const client = new QraftClient(fetch, noopLog);
+    await expect(client.getPointsBalance(CONFIG, 'TOKEN')).rejects.toMatchObject({
+      code: 'SESSION_EXPIRED',
+    });
+  });
+
+  it('HTTP 401 → SESSION_EXPIRED', async () => {
+    const fetch = createFetchMock([
+      { url: /\/oauth2\/points\/balance$/, response: mockResponse(401, 'unauthorized') },
+    ]);
+    const client = new QraftClient(fetch, noopLog);
+    await expect(client.getPointsBalance(CONFIG, 'TOKEN')).rejects.toMatchObject({
+      code: 'SESSION_EXPIRED',
+    });
+  });
+
+  it('业务失败（无 data）→ POINTS_FAILED 透出 message', async () => {
+    const fetch = createFetchMock([
+      {
+        url: /\/oauth2\/points\/balance$/,
+        response: mockResponse(
+          200,
+          JSON.stringify({ code: 500, message: '服务端异常' }),
+          jsonHeaders()
+        ),
+      },
+    ]);
+    const client = new QraftClient(fetch, noopLog);
+    await expect(client.getPointsBalance(CONFIG, 'TOKEN')).rejects.toMatchObject({
+      code: 'POINTS_FAILED',
+      message: expect.stringContaining('服务端异常') as unknown as string,
+    });
+  });
+});
+
+describe('QraftClient.deductPoints', () => {
+  it('POST /oauth2/points/deduct 携带金额与来源，返回扣后余额', async () => {
+    const bodies: string[] = [];
+    const fetch = createFetchMock(
+      [
+        {
+          method: 'POST',
+          url: /\/oauth2\/points\/deduct$/,
+          response: mockResponse(200, POINTS_OK, jsonHeaders()),
+        },
+      ],
+      (_url, init) => bodies.push((init as { body?: string })?.body ?? '')
+    );
+    const client = new QraftClient(fetch, noopLog);
+    const balance = await client.deductPoints(CONFIG, 'TOKEN', {
+      amount: 30,
+      source: 'desktop-agent-task',
+      memo: 'thread:thread-1',
+    });
+    expect(balance.availablePoints).toBe(270);
+    const sent = JSON.parse(bodies[0]) as Record<string, unknown>;
+    expect(sent.amount).toBe(30);
+    expect(sent.source).toBe('desktop-agent-task');
+    expect(sent.memo).toBe('thread:thread-1');
+  });
+
+  it('40003 余额不足 → INSUFFICIENT_POINTS 并带可用积分', async () => {
+    const fetch = createFetchMock([
+      {
+        method: 'POST',
+        url: /\/oauth2\/points\/deduct$/,
+        response: mockResponse(
+          200,
+          JSON.stringify({ code: 40003, message: '可用积分不足', data: { availablePoints: 5 } }),
+          jsonHeaders()
+        ),
+      },
+    ]);
+    const client = new QraftClient(fetch, noopLog);
+    await expect(
+      client.deductPoints(CONFIG, 'TOKEN', { amount: 30, source: 'desktop-agent-task' })
+    ).rejects.toMatchObject({
+      code: 'INSUFFICIENT_POINTS',
+      message: expect.stringContaining('5') as unknown as string,
+    });
   });
 });

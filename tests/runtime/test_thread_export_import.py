@@ -160,8 +160,8 @@ async def test_thread_import_creates_db_and_table_on_clean_workspace(tmp_path):
 @pytest.mark.asyncio
 async def test_export_includes_provider_messages(tmp_path):
     """thread/export includes non-empty providerMessages from stored history."""
-    from miqi.runtime.stored_runtime import StoredRuntimeReader
     from miqi.runtime.history_runtime import HistoryItem
+    from miqi.runtime.stored_runtime import StoredRuntimeReader
 
     db = tmp_path / ".miqi-runtime" / "runtime.db"
     await _seed_thread(db, thread_id="export-me")
@@ -227,9 +227,10 @@ async def test_import_writes_provider_visible_history(tmp_path):
 @pytest.mark.asyncio
 async def test_import_overwrite_deletes_stale_history(tmp_path):
     """Overwrite import removes old runtime_history_items so no stale context remains."""
-    from miqi.runtime.stored_runtime import StoredRuntimeReader
-    from miqi.runtime.history_runtime import HistoryItem
     import time
+
+    from miqi.runtime.history_runtime import HistoryItem
+    from miqi.runtime.stored_runtime import StoredRuntimeReader
 
     server = _server(tmp_path)
     db = tmp_path / ".miqi-runtime" / "runtime.db"
@@ -279,10 +280,11 @@ async def test_import_overwrite_deletes_stale_history(tmp_path):
 @pytest.mark.asyncio
 async def test_import_round_trip_does_not_duplicate_provider_history(tmp_path):
     """Export→import round-trip: provider history count equals ledger message count (no dup)."""
-    from miqi.runtime.stored_runtime import StoredRuntimeReader
+    import time
+
     from miqi.runtime.history_runtime import HistoryItem
     from miqi.runtime.ledger_runtime import LedgerRuntime
-    import time
+    from miqi.runtime.stored_runtime import StoredRuntimeReader
 
     db = tmp_path / ".miqi-runtime" / "runtime.db"
     await _seed_thread(db, thread_id="src")
@@ -418,10 +420,12 @@ async def test_import_ledger_wins_over_provider_messages_when_both_present(tmp_p
 @pytest.mark.asyncio
 async def test_import_overwrite_does_not_duplicate_provider_history(tmp_path):
     """Overwrite import on a thread that already has history must not duplicate."""
-    from miqi.runtime.stored_runtime import StoredRuntimeReader
-    from miqi.runtime.history_runtime import HistoryItem
     import time
+
     import aiosqlite
+
+    from miqi.runtime.history_runtime import HistoryItem
+    from miqi.runtime.stored_runtime import StoredRuntimeReader
 
     db = tmp_path / ".miqi-runtime" / "runtime.db"
     reader = StoredRuntimeReader(db, client_id="client-a")

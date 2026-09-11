@@ -16,10 +16,10 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from miqi.execution.hook_runtime import (
+    HookOutcome,
     HookPoint,
     HookRegistration,
     HookRuntime,
-    HookOutcome,
 )
 from miqi.execution.orchestrator import (
     OrchestrationResult,

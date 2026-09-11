@@ -8,14 +8,12 @@
 """
 from __future__ import annotations
 
-import asyncio
 from types import SimpleNamespace
 
 import pytest
 
-from miqi.runtime.turn_runner import TurnRunner
 from miqi.runtime.turn_context import TurnContext
-from miqi.protocol.events import ToolCallBeginEvent, ToolCallEndEvent
+from miqi.runtime.turn_runner import TurnRunner
 
 
 class FakeClock:
@@ -26,6 +24,7 @@ class FakeClock:
     """
 
     def __init__(self, start: float = 0.0, auto_advance: float = 0.0):
+        """Test double for the reasoning-elapsed scenarios."""
         self._now = start
         self._auto = auto_advance
 
@@ -43,11 +42,13 @@ class FakeProvider:
     """返回预编排的响应序列：先 N 轮 tool_calls，最后收尾回答。"""
 
     def __init__(self, tool_rounds: int = 0, all_search: bool = False):
+        """Test double for the reasoning-elapsed scenarios."""
         self._rounds = tool_rounds
         self._all_search = all_search
         self.calls = 0
 
     async def stream_chat(self, **kwargs):
+        """Test double for the reasoning-elapsed scenarios."""
         self.calls += 1
         if self.calls <= self._rounds:
             yield SimpleNamespace(kind="content_delta", delta="")
@@ -86,6 +87,7 @@ class FakeProvider:
 
 class FakeTools:
     def __init__(self):
+        """Test double for the reasoning-elapsed scenarios."""
         self.executed: list[str] = []
 
     async def execute_many(self, turn, tool_calls):
@@ -105,6 +107,7 @@ class FakeTools:
 
 class FakeContext:
     def __init__(self):
+        """Test double for the reasoning-elapsed scenarios."""
         self.messages: list[dict] = []
 
     def build_initial_messages(self, **kwargs):
@@ -129,6 +132,7 @@ class FakeContext:
 
 class FakeEmitter:
     def __init__(self):
+        """Test double for the reasoning-elapsed scenarios."""
         self.events: list[str] = []
 
     async def emit(self, event):
@@ -171,7 +175,7 @@ async def test_fast_caps_iterations_to_3():
     （不触发 phase 预算）——纯验证轮数裁剪。"""
     clock = FakeClock()
     runner, provider, tools, emitter = _mk_runner(clock, rounds=5)
-    result = await runner.run(
+    await runner.run(
         turn=_mk_turn("fast"),
         user_content="hi",
         system_prompt="",
@@ -186,7 +190,7 @@ async def test_think_keeps_full_iterations():
     """think: 不裁剪——5 轮工具全部执行。"""
     clock = FakeClock()
     runner, provider, tools, emitter = _mk_runner(clock, rounds=5)
-    result = await runner.run(
+    await runner.run(
         turn=_mk_turn("think"),
         user_content="hi",
         system_prompt="",
@@ -224,7 +228,7 @@ async def test_fast_hard_stop_at_30s():
     → break（模型调用 ≤2 次）。"""
     clock = FakeClock(auto_advance=10)
     runner, provider, tools, emitter = _mk_runner(clock, rounds=5)
-    result = await runner.run(
+    await runner.run(
         turn=_mk_turn("fast"),
         user_content="hi",
         system_prompt="",
@@ -256,7 +260,7 @@ async def test_think_no_search_phase_limit():
     """think: web_search 无 phase 限制——两轮都执行。"""
     clock = FakeClock()
     runner, provider, tools, emitter = _mk_runner(clock, rounds=2, all_search=True)
-    result = await runner.run(
+    await runner.run(
         turn=_mk_turn("think"),
         user_content="hi",
         system_prompt="",
@@ -324,3 +328,241 @@ async def test_think_exhaustion_keeps_diagnosis():
         tools=[],
     )
     assert "已达到最大迭代次数" in result.final_content
+
+
+@pytest.mark.asyncio
+async def test_reasoning_elapsed_s_measured_from_round_start():
+    """#834: 首个 reasoning delta 到达时记录思考耗时（本轮模型调用开始→首
+    delta，粗钟兜底路径），随 TurnResult 返回——前端 final 事件优先使用
+    该服务端值。"""
+    import asyncio
+
+    class _ReasoningProvider(FakeProvider):
+        def __init__(self):
+            """Reasoning-first provider for the round-start timing test."""
+            super().__init__(tool_rounds=0)
+            self.reasoning_yielded = False
+
+        async def stream_chat(self, **kwargs):
+            """Yield reasoning deltas after a simulated thinking delay."""
+            self.calls += 1
+            # 模拟服务端先思考再下发：首 delta 前 sleep 200ms（0.2s 留足
+            # Windows 计时器精度余量，见 test_openai_streaming 同模式修复）
+            await asyncio.sleep(0.2)
+            yield SimpleNamespace(kind="reasoning_delta", delta="先思考")
+            yield SimpleNamespace(kind="reasoning_delta", delta="再思考")
+            yield SimpleNamespace(kind="content_delta", delta="最终回答")
+            yield SimpleNamespace(
+                kind="completed",
+                response=SimpleNamespace(
+                    has_tool_calls=False,
+                    tool_calls=[],
+                    content="最终回答",
+                    reasoning_content="先思考再思考",
+                    usage={},
+                    finish_reason="stop",
+                ),
+            )
+
+    clock = FakeClock()
+    provider = _ReasoningProvider()
+    tools = FakeTools()
+    emitter = FakeEmitter()
+    runner = TurnRunner(
+        provider=provider,
+        tool_runtime=tools,
+        context_runtime=FakeContext(),
+        event_emitter=emitter,
+        max_iterations=10,
+        clock=clock,
+    )
+    result = await runner.run(
+        turn=_mk_turn("think"),
+        user_content="hi",
+        system_prompt="",
+        tools=[],
+    )
+    assert result.reasoning_elapsed_s is not None
+    assert result.reasoning_elapsed_s >= 0.15
+
+
+@pytest.mark.asyncio
+async def test_reasoning_elapsed_s_prefers_provider_value():
+    """#834 / review: completed 事件携带的 provider per-attempt 值（重试排除）
+    无条件优先于粗钟——粗钟只做 provider 未上报时的兜底。"""
+    import asyncio
+
+    class _ProviderWithElapsed(FakeProvider):
+        def __init__(self):
+            """Test double for the reasoning-elapsed scenarios."""
+            super().__init__(tool_rounds=0)
+
+        async def stream_chat(self, **kwargs):
+            """Test double for the reasoning-elapsed scenarios."""
+            self.calls += 1
+            # 粗钟会测到 0.2s+（首 delta 前 sleep）；provider 上报的精确值
+            # 应覆盖它（如 0.05s 的小值、或真实服务端思考的大值）。
+            await asyncio.sleep(0.2)
+            yield SimpleNamespace(kind="reasoning_delta", delta="思考")
+            yield SimpleNamespace(kind="content_delta", delta="回答")
+            yield SimpleNamespace(
+                kind="completed",
+                response=SimpleNamespace(
+                    has_tool_calls=False,
+                    tool_calls=[],
+                    content="回答",
+                    reasoning_content="思考",
+                    reasoning_elapsed_s=0.05,  # provider 精确测量（排除失败尝试）
+                    usage={},
+                    finish_reason="stop",
+                ),
+            )
+
+    clock = FakeClock()
+    provider = _ProviderWithElapsed()
+    tools = FakeTools()
+    emitter = FakeEmitter()
+    runner = TurnRunner(
+        provider=provider,
+        tool_runtime=tools,
+        context_runtime=FakeContext(),
+        event_emitter=emitter,
+        max_iterations=10,
+        clock=clock,
+    )
+    result = await runner.run(
+        turn=_mk_turn("think"),
+        user_content="hi",
+        system_prompt="",
+        tools=[],
+    )
+    # provider 值（0.05）优先，而非粗钟测到的 ~0.2s
+    assert result.reasoning_elapsed_s == 0.05
+
+
+@pytest.mark.asyncio
+async def test_reasoning_elapsed_first_value_survives_later_suppressed_round():
+    """CodeRabbit #856: 第 1 轮 DeepSeek 建立 provider 值（60s）→ 第 2 轮
+    交错流式 suppressed → 首值保留（跨轮权威），不被后续抑制清掉。"""
+    import asyncio
+
+    class _MixedProvider(FakeProvider):
+        def __init__(self):
+            """Test double for the reasoning-elapsed scenarios."""
+            super().__init__(tool_rounds=0)
+
+        async def stream_chat(self, **kwargs):
+            """Test double for the reasoning-elapsed scenarios."""
+            self.calls += 1
+            if self.calls == 1:
+                # 第 1 轮：缓冲思考（DeepSeek），请求工具
+                yield SimpleNamespace(kind="reasoning_delta", delta="思考一")
+                yield SimpleNamespace(
+                    kind="completed",
+                    response=SimpleNamespace(
+                        has_tool_calls=True,
+                        tool_calls=[SimpleNamespace(
+                            id="tc1", name="web_search",
+                            arguments={}, arguments_json="{}",
+                        )],
+                        content="",
+                        reasoning_content="思考一",
+                        reasoning_elapsed_s=60.0,
+                        reasoning_elapsed_suppressed=False,
+                        usage={},
+                        finish_reason="tool_calls",
+                    ),
+                )
+            else:
+                # 第 2 轮：交错流式（Kimi）→ 抑制
+                await asyncio.sleep(0.05)
+                yield SimpleNamespace(kind="reasoning_delta", delta="思考二")
+                yield SimpleNamespace(kind="content_delta", delta="最终回答")
+                yield SimpleNamespace(
+                    kind="completed",
+                    response=SimpleNamespace(
+                        has_tool_calls=False,
+                        tool_calls=[],
+                        content="最终回答",
+                        reasoning_content="思考二",
+                        reasoning_elapsed_s=None,
+                        reasoning_elapsed_suppressed=True,
+                        usage={},
+                        finish_reason="stop",
+                    ),
+                )
+
+    clock = FakeClock()
+    provider = _MixedProvider()
+    tools = FakeTools()
+    emitter = FakeEmitter()
+    runner = TurnRunner(
+        provider=provider,
+        tool_runtime=tools,
+        context_runtime=FakeContext(),
+        event_emitter=emitter,
+        max_iterations=10,
+        clock=clock,
+    )
+    result = await runner.run(
+        turn=_mk_turn("think"),
+        user_content="hi",
+        system_prompt="",
+        tools=[],
+    )
+    assert len(tools.executed) == 1  # 第 1 轮工具已执行
+    # 首轮 provider 值（60s）跨轮保留，不被第 2 轮抑制清掉
+    assert result.reasoning_elapsed_s == 60.0
+
+
+@pytest.mark.asyncio
+async def test_reasoning_elapsed_suppressed_clears_coarse_placeholder():
+    """CodeRabbit #856: 首轮就是交错流式（suppressed）时，粗钟占位必须被
+    清除——TurnResult 返回 None，前端回退本地 span。"""
+    import asyncio
+
+    class _InterleavedProvider(FakeProvider):
+        def __init__(self):
+            """Test double for the reasoning-elapsed scenarios."""
+            super().__init__(tool_rounds=0)
+
+        async def stream_chat(self, **kwargs):
+            """Test double for the reasoning-elapsed scenarios."""
+            self.calls += 1
+            await asyncio.sleep(0.05)  # 粗钟会占到 ~0.05s
+            yield SimpleNamespace(kind="reasoning_delta", delta="思考")
+            yield SimpleNamespace(kind="content_delta", delta="回答")
+            yield SimpleNamespace(
+                kind="completed",
+                response=SimpleNamespace(
+                    has_tool_calls=False,
+                    tool_calls=[],
+                    content="回答",
+                    reasoning_content="思考",
+                    reasoning_elapsed_s=None,
+                    reasoning_elapsed_suppressed=True,
+                    usage={},
+                    finish_reason="stop",
+                ),
+            )
+
+    clock = FakeClock()
+    provider = _InterleavedProvider()
+    tools = FakeTools()
+    emitter = FakeEmitter()
+    runner = TurnRunner(
+        provider=provider,
+        tool_runtime=tools,
+        context_runtime=FakeContext(),
+        event_emitter=emitter,
+        max_iterations=10,
+        clock=clock,
+    )
+    result = await runner.run(
+        turn=_mk_turn("think"),
+        user_content="hi",
+        system_prompt="",
+        tools=[],
+    )
+    # 粗钟占位（~0.05s）被抑制信号清除 → None（前端本地 span 兜底）
+    assert result.reasoning_elapsed_s is None

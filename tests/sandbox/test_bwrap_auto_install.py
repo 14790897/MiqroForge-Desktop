@@ -7,14 +7,12 @@ CI prereqs on GitHub Actions windows-latest:
     wsl --install -d Ubuntu --no-launch
 """
 
-import asyncio
 import tempfile
 from pathlib import Path
 
 import pytest
 
 from miqi.sandbox.bwrap import BwrapSandbox
-
 
 pytestmark = [pytest.mark.wsl, pytest.mark.sandbox]
 
@@ -32,10 +30,10 @@ def _has_real_distro() -> str | None:
             capture_output=True, text=True, timeout=10,
         )
         lines = [
-            l.strip().replace("\x00", "")
-            for l in result.stdout.splitlines()
-            if l.strip().replace("\x00", "")
-            and "docker-desktop" not in l.lower()
+            line.strip().replace("\x00", "")
+            for line in result.stdout.splitlines()
+            if line.strip().replace("\x00", "")
+            and "docker-desktop" not in line.lower()
         ]
         for distro in lines:
             check = subprocess.run(

@@ -21,17 +21,22 @@ import asyncio
 import atexit
 import json
 import os
-import re
 import signal
+import subprocess
 import sys
 import threading
 import time
-import traceback
-import uuid
 from pathlib import Path
 from typing import Any
 
-from miqi.runtime.workspace_logging import append_workspace_log, _redact_message
+from miqi.bridge.loopback_compat import install_loopback_safe_socketpair
+from miqi.runtime.workspace_logging import _redact_message, append_workspace_log
+
+# Windows loopback can be selectively filtered by security software (WFP
+# residue), which makes asyncio's socketpair-based self-pipe hang forever and
+# the bridge never reaches "ready". Install the guarded fallback before any
+# asyncio event loop is created.
+install_loopback_safe_socketpair()
 
 # Force UTF-8 on Windows (default is GBK/cp936 which cannot encode emoji)
 if hasattr(sys.stdout, 'reconfigure'):
@@ -46,6 +51,9 @@ _stdout_buffer = sys.stdout.buffer if hasattr(sys.stdout, 'buffer') else None
 
 _stdout_lock = threading.Lock()
 _file_logging_sinks: dict[Path, int] = {}
+
+# Client prefix used to namespace session keys in sandbox metadata lookups.
+_CLIENT_PREFIX = "miqi-desktop:"
 
 
 def _log(msg: str, level: str = "INFO") -> None:
@@ -129,6 +137,10 @@ class BridgeState:
 
     def __init__(self) -> None:
         self.config = None  # lazy-loaded
+        # #789: snapshot of the config at process start — never overwritten by
+        # saves.  Used to compute PENDING restart-requiring state (tier-C
+        # fields whose current value differs from what the process runs with).
+        self.config_at_startup = None
         self._lock = threading.Lock()
         self._terminated: set[str] = set()
         self._pending_approvals: dict[str, threading.Event] = {}
@@ -146,6 +158,12 @@ class BridgeState:
         from miqi.config.loader import load_config
 
         self.config = load_config()
+        # First load in the process is the startup snapshot (#789).  Deep
+        # copy: handlers mutate self.config in place (e.g. mcp_upsert /
+        # mcp_delete), and a shared nested object would corrupt the
+        # pending-restart baseline (2026-09-01 review).
+        if self.config_at_startup is None:
+            self.config_at_startup = self.config.model_copy(deep=True)
         return self.config
 
     async def get_runtime_session(self, session_key: str, *, caller_id: str = "", approval_callback=None):
@@ -213,7 +231,6 @@ class BridgeState:
                 # may be called without client_id, so strip the known client
                 # prefix `miqi-desktop:` when present, and otherwise keep the
                 # key intact (a raw key like `desktop:xxx` must not be split).
-                _CLIENT_PREFIX = "miqi-desktop:"
                 bare_key = key
                 if key.startswith(_CLIENT_PREFIX):
                     bare_key = key[len(_CLIENT_PREFIX):]
@@ -224,7 +241,7 @@ class BridgeState:
 
         self._sandbox_manager = SandboxManager(
             workspace=config.workspace_path,
-            share_net=getattr(sb_cfg, "share_net", False),
+            share_net=getattr(sb_cfg, "share_net", True),
             # Start with enabled=False so tools run locally during
             # background install.  _init_sandbox_manager() in loop.py
             # auto-enables after initialize() succeeds and persists
@@ -359,13 +376,6 @@ class BridgeState:
 
 _state = BridgeState()
 
-from miqi.agent.tools.filesystem import (
-    _delete_snapshot,
-    _snapshots_lock,
-    _maybe_snapshot,
-    _restore_snapshot,
-    _read_snapshot,
-)
 
 # ---------------------------------------------------------------------------
 # Handlers
@@ -587,6 +597,21 @@ def _graceful_shutdown() -> None:
         _bridge_state = None
 
 
+def _clear_sandbox_state_file_fast() -> None:
+    """#959: 看门狗退出路径的状态文件快清理（不做 destroy_all —— 那正是
+    优雅关停的挂起向量）。防下一次启动读到 stale 条目。"""
+    global _bridge_state
+    if _bridge_state is None:
+        return
+    sandbox_mgr = getattr(_bridge_state, "_sandbox_manager", None)
+    if sandbox_mgr is None or sandbox_mgr == "disabled":
+        return
+    try:
+        sandbox_mgr._clear_state_file()
+    except Exception:
+        pass
+
+
 def main() -> None:
     global _bridge_state
 
@@ -650,6 +675,27 @@ def main() -> None:
     # instead of per-request asyncio.run(). Legacy handlers continue to
     # work via the _dispatch fallback path.
     from miqi.bridge.loop import BridgeRuntimeLoop
+
+    # #959: parent-death watchdog — Electron 被硬杀（E2E 15s 竞速超时/崩溃）
+    # 时 before-quit → BridgeManager.stop() 不会执行，桥若无此看门狗会成为
+    # 孤儿污染后续运行（mcps.list 挂起）。看门狗发现启动链死亡后硬退出
+    # （os._exit），故意绕过会挂起在 WSL teardown 的 _graceful_shutdown；
+    # 退出前只做状态文件快清理 + Windows 整树回收 MCP/exec 孙进程。
+    def _on_parent_death() -> None:
+        _clear_sandbox_state_file_fast()
+        if os.name == "nt":
+            try:
+                subprocess.run(
+                    ["taskkill", "/F", "/T", "/PID", str(os.getpid())],
+                    capture_output=True,
+                    timeout=10,
+                )
+            except Exception:
+                pass
+
+    from miqi.bridge.parent_watchdog import start_parent_watchdog
+
+    start_parent_watchdog(on_death=_on_parent_death)
 
     bridge = BridgeRuntimeLoop(
         send_func=_send,

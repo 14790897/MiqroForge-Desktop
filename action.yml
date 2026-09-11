@@ -52,7 +52,7 @@ inputs:
   sys-keywords:
     description: 'Comma-separated keywords to detect system info in environment section'
     required: false
-    default: 'OS,Python,CPU,Hardware,MiqroForge,Node,WSL,bwrap,Disk'
+    default: 'OS,Python,CPU,Hardware,MiQroForge,Node,WSL,bwrap,Disk'
 
   min-sys-keywords:
     description: 'Minimum number of system keywords matched in environment section'

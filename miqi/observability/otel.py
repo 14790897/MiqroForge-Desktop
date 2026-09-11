@@ -237,12 +237,16 @@ def build_telemetry_sink(
         return None
 
     try:
-        from opentelemetry import context as otel_context, trace as otel_trace
+        from opentelemetry import context as otel_context
+        from opentelemetry import trace as otel_trace
+        from opentelemetry.sdk.metrics import MeterProvider
+        from opentelemetry.sdk.metrics.export import (
+            ConsoleMetricExporter,
+            PeriodicExportingMetricReader,
+        )
+        from opentelemetry.sdk.resources import Resource
         from opentelemetry.sdk.trace import TracerProvider
         from opentelemetry.sdk.trace.export import BatchSpanProcessor, ConsoleSpanExporter
-        from opentelemetry.sdk.metrics import MeterProvider
-        from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader, ConsoleMetricExporter
-        from opentelemetry.sdk.resources import Resource
         from opentelemetry.sdk.trace.sampling import ParentBased, TraceIdRatioBased
         from opentelemetry.trace import Status, StatusCode
     except ImportError as e:
@@ -269,10 +273,10 @@ def build_telemetry_sink(
     else:
         exporter = None
 
-    _SpanProcessor = span_processor if span_processor is not None else BatchSpanProcessor
+    _span_processor = span_processor if span_processor is not None else BatchSpanProcessor
     tracer_provider = TracerProvider(resource=resource, sampler=sampler)
     if exporter is not None:
-        tracer_provider.add_span_processor(_SpanProcessor(exporter))
+        tracer_provider.add_span_processor(_span_processor(exporter))
 
     # ── meter / metric reader ──
     if meter is not None:

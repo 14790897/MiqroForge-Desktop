@@ -1,10 +1,9 @@
-import pytest
 
 from miqi.execution.exec_policy import (
     CommandRule,
-    NetworkRule,
-    FilesystemRule,
     ExecPolicy,
+    FilesystemRule,
+    NetworkRule,
     PolicyVerdict,
 )
 

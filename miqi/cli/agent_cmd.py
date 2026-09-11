@@ -86,11 +86,6 @@ def register_agent_command(
                 f"{logo} Interactive mode (type [bold]exit[/bold] or [bold]Ctrl+C[/bold] to quit)\n"
             )
 
-            if ":" in session_id:
-                cli_channel, cli_chat_id = session_id.split(":", 1)
-            else:
-                cli_channel, cli_chat_id = "cli", session_id
-
             def _exit_on_sigint(signum, frame):
                 restore_terminal()
                 console.print("\nGoodbye!")

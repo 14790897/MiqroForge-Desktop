@@ -4,11 +4,11 @@ import pytest
 
 from miqi.runtime.app_server import AppServer, AppServerError, ClientSessionRegistry
 from miqi.runtime.session_handlers import (
-    sessions_get_handler,
-    sessions_delete_handler,
     sessions_archive_handler,
-    sessions_get_tracked_files_handler,
     sessions_claim_legacy_handler,
+    sessions_delete_handler,
+    sessions_get_handler,
+    sessions_get_tracked_files_handler,
 )
 
 

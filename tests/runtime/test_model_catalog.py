@@ -91,8 +91,6 @@ def test_model_catalog_covers_common_preset_models():
     catalog = ModelCatalog(current_config_model="")
     ids = {m.id for m in catalog.list_models()}
     for expected in [
-        "deepseek/deepseek-chat",
-        "deepseek/deepseek-reasoner",
         "deepseek/deepseek-v4-flash",
         "openai/gpt-4o",
         "openai/gpt-4o-mini",

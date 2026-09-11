@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import base64
 import uuid
-
 from typing import Any
 
 import miqi.runtime.protocol_specs as protocol_specs

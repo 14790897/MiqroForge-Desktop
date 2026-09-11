@@ -42,10 +42,7 @@
 
 import { test, expect } from '@playwright/test';
 import type { ElectronApplication, Page } from '@playwright/test';
-import {
-  launchElectronApp,
-  closeElectronApp,
-} from './helpers/electron-setup';
+import { launchElectronApp, closeElectronApp } from './helpers/electron-setup';
 
 // The full retry window: 500+1000+2000+4000+8000+10000*5 ≈ 57s.
 const RETRY_WINDOW_MS = 57_000;
@@ -98,7 +95,7 @@ test.describe('Repro #570: silent UI on session open with no bridge', () => {
     }
     expect(
       samples.join('\n'),
-      'during the 10× retry the UI should show a connecting/loading explanation',
+      'during the 10× retry the UI should show a connecting/loading explanation'
     ).toMatch(/连接|加载|重试|connecting|loading/i);
 
     // ── Desired #2: after the retries are exhausted the user should get an
@@ -108,7 +105,7 @@ test.describe('Repro #570: silent UI on session open with no bridge', () => {
     const afterText = (await page.locator('main').textContent()) ?? '';
     expect(
       afterText,
-      'after 10 exhausted retries the UI should show an explicit error message',
+      'after 10 exhausted retries the UI should show an explicit error message'
     ).toMatch(/加载失败|连接失败|重试失败|会话加载失败|出错|失败|error/i);
 
     // ── Desired #3: the error bubble is not a dead end — its "重试" button
@@ -116,33 +113,33 @@ test.describe('Repro #570: silent UI on session open with no bridge', () => {
     //    so a user (or the #480 slow-start path) can recover once the bridge
     //    comes back. ──
     const attemptsBefore = consoleLines.filter((l) =>
-      /Load attempt \d+\/10 returned null/.test(l),
+      /Load attempt \d+\/10 returned null/.test(l)
     ).length;
     const retryBtn = page.getByRole('button', { name: '重试' });
     await retryBtn.click({ timeout: 5_000 });
     await page.waitForTimeout(1000);
     const attemptsAfter = consoleLines.filter((l) =>
-      /Load attempt \d+\/10 returned null/.test(l),
+      /Load attempt \d+\/10 returned null/.test(l)
     ).length;
     expect(
       attemptsAfter,
-      'clicking 重试 on the error bubble should trigger a fresh load() attempt',
+      'clicking 重试 on the error bubble should trigger a fresh load() attempt'
     ).toBeGreaterThan(attemptsBefore);
 
     // The retry loop DID run (proven via console) and, thanks to the #570
     // fix, the UI now surfaced a connecting hint during the window and an
     // explicit error after it exhausted.
     const loadAttemptLines = consoleLines.filter((l) =>
-      /Load attempt \d+\/10 returned null/.test(l),
+      /Load attempt \d+\/10 returned null/.test(l)
     );
     expect(
       loadAttemptLines.length,
-      'ChatConsole.load() retry loop ran (proven via console logs)',
+      'ChatConsole.load() retry loop ran (proven via console logs)'
     ).toBeGreaterThan(0);
     console.log(
       `[e2e] Retry loop ran ${loadAttemptLines.length} attempts before exhaustion — ` +
         `UI showed connecting hint + error after fix, 重试 button re-triggered load. ` +
-        `First: ${loadAttemptLines[0]}`,
+        `First: ${loadAttemptLines[0]}`
     );
   });
 });

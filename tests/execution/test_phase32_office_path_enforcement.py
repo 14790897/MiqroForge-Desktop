@@ -19,7 +19,6 @@ from miqi.documents.pptx_tool import PptxWriteTool
 from miqi.documents.xlsx_tool import XlsxWriteTool
 from miqi.execution.hook_runtime import HookOutcome
 
-
 # ── Path enforcement: relative path inside workspace succeeds ────────────────
 
 
@@ -276,8 +275,8 @@ def test_execute_concurrent_no_production_call_sites():
                 hits.append((str(py_file), line))
 
     assert len(hits) == 0, (
-        f"execute_concurrent() called in production paths:\n"
-        + "\n".join(f"  {f}: {l}" for f, l in hits)
+        "execute_concurrent() called in production paths:\n"
+        + "\n".join(f"  {f}: {line}" for f, line in hits)
     )
 
 
@@ -325,8 +324,8 @@ def test_registry_execute_not_called_in_production():
                 hits.append((str(py_file), line))
 
     assert len(hits) == 0, (
-        f"ToolRegistry.execute() called in production paths:\n"
-        + "\n".join(f"  {f}: {l}" for f, l in hits)
+        "ToolRegistry.execute() called in production paths:\n"
+        + "\n".join(f"  {f}: {line}" for f, line in hits)
     )
 
 
@@ -337,11 +336,11 @@ def test_registry_execute_not_called_in_production():
 async def test_tool_runtime_routes_through_orchestrator():
     """ToolRuntime.execute_one() must call ToolOrchestrator.execute(),
     not ToolRegistry.execute() directly."""
-    from miqi.runtime.tool_runtime import ToolRuntime
-    from miqi.execution.orchestrator import ToolOrchestrator, ToolExecutionContext
-    from miqi.execution.sandbox_policy import SandboxPolicyEngine
-    from miqi.agent.tools.registry import ToolRegistry
     from miqi.agent.tools.filesystem import ReadFileTool
+    from miqi.agent.tools.registry import ToolRegistry
+    from miqi.execution.orchestrator import ToolOrchestrator
+    from miqi.execution.sandbox_policy import SandboxPolicyEngine
+    from miqi.runtime.tool_runtime import ToolRuntime
 
     # Build a minimal orchestrator with a ToolRegistry
     registry = ToolRegistry()

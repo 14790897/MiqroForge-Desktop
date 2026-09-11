@@ -5,7 +5,6 @@ the SKILL.md content so the agent can run the skill's scripts without
 relying on hard-coded machine paths in the system prompt.
 """
 
-from pathlib import Path
 
 import pytest
 

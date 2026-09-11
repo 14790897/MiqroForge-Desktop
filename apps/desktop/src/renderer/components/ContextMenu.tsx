@@ -147,7 +147,11 @@ export function ContextMenu({ children, items, minWidth = 180 }: Props) {
                     }`}
                   >
                     <span className="flex items-center gap-2">
-                      {item.icon && <span className="w-4 h-4 flex items-center justify-center shrink-0">{item.icon}</span>}
+                      {item.icon && (
+                        <span className="w-4 h-4 flex items-center justify-center shrink-0">
+                          {item.icon}
+                        </span>
+                      )}
                       {item.label}
                     </span>
                     {item.shortcut && (

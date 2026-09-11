@@ -8,6 +8,6 @@ The entire feature is a no-op when disabled or when the optional
 ``otel`` extra is not installed — no runtime behavior change.
 """
 
-from miqi.observability.otel import build_telemetry_sink, TelemetrySink
+from miqi.observability.otel import TelemetrySink, build_telemetry_sink
 
 __all__ = ["build_telemetry_sink", "TelemetrySink"]

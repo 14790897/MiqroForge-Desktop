@@ -18,10 +18,7 @@
 
 import { test, expect } from '@playwright/test';
 import type { ElectronApplication, Page } from '@playwright/test';
-import {
-  launchElectronApp,
-  closeElectronApp,
-} from './helpers/electron-setup';
+import { launchElectronApp, closeElectronApp } from './helpers/electron-setup';
 
 test.describe('Inline Exec Output Toggle E2E', () => {
   let electronApp: ElectronApplication;
@@ -76,9 +73,7 @@ test.describe('Inline Exec Output Toggle E2E', () => {
   test('1-default: settings UI visible and toggle defaults to OFF', async () => {
     await openSettings(page);
 
-    const sectionTitle = page.locator(
-      '[data-testid="settings-inline-exec-output-title"]',
-    );
+    const sectionTitle = page.locator('[data-testid="settings-inline-exec-output-title"]');
     await expect(sectionTitle).toBeVisible({ timeout: 5_000 });
     await expect(sectionTitle).toContainText('内联终端输出');
 

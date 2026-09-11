@@ -1,6 +1,6 @@
 """Phase 3: ensure_sessions_gitignored writes sessions/ to .gitignore for git workspaces."""
 from pathlib import Path
-import pytest
+
 from miqi.utils.helpers import ensure_sessions_gitignored
 
 

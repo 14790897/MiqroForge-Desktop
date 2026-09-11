@@ -7,10 +7,10 @@ from unittest.mock import MagicMock
 import pytest
 
 from miqi.runtime.app_server import AppServer, ClientSessionRegistry
-from miqi.runtime.model_app_handlers import register_model_app_handlers
-from miqi.runtime.feature_app_handlers import register_feature_app_handlers
-from miqi.runtime.permission_profile_app_handlers import register_permission_profile_app_handlers
 from miqi.runtime.config_app_handlers import register_config_app_handlers
+from miqi.runtime.feature_app_handlers import register_feature_app_handlers
+from miqi.runtime.model_app_handlers import register_model_app_handlers
+from miqi.runtime.permission_profile_app_handlers import register_permission_profile_app_handlers
 
 
 def _setup_server(

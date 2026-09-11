@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import pytest
 
-
 # ── Corrected required fields per-handler audit ───────────────────────────
 # Maps method → expected required params (as exported in paramsSchema.required)
 

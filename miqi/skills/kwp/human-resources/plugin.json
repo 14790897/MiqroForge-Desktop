@@ -1,8 +1,8 @@
 {
   "name": "kwp-human-resources",
   "version": "1.0.0",
-  "description": "Knowledge Work Plugins — Human Resources (9 skills). Adapted from anthropics/knowledge-work-plugins for MiqroForge.",
-  "author": "Anthropic (adapted for MiqroForge)",
+  "description": "Knowledge Work Plugins — Human Resources (9 skills). Adapted from anthropics/knowledge-work-plugins for MiQroForge.",
+  "author": "Anthropic (adapted for MiQroForge)",
   "skills": [
     "comp-analysis",
     "draft-offer",

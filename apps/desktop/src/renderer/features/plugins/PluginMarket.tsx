@@ -48,7 +48,14 @@ export function PluginMarket() {
   };
 
   const statusLabel = (s: string) => {
-    switch (s) { case 'active': return '已启用'; case 'error': return '错误'; default: return '已禁用'; }
+    switch (s) {
+      case 'active':
+        return '已启用';
+      case 'error':
+        return '错误';
+      default:
+        return '已禁用';
+    }
   };
 
   if (loading)
@@ -88,18 +95,15 @@ export function PluginMarket() {
             >
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2">
-                  <span className="text-xs font-medium text-text">
-                    {p.name}
-                  </span>
-                  <span className="text-size-2xs text-text-faint">
-                    v{p.version}
-                  </span>
+                  <span className="text-xs font-medium text-text">{p.name}</span>
+                  <span className="text-size-2xs text-text-faint">v{p.version}</span>
                   <span
                     className={cn(
                       'text-size-2xs px-1.5 py-0.5 rounded',
                       p.status === 'active' && 'bg-[var(--success-bg)] text-[var(--success)]',
                       p.status === 'error' && 'bg-[var(--danger-bg)] text-[var(--danger)]',
-                      p.status === 'disabled' && 'bg-[var(--surface-muted)] text-[var(--text-faint)]',
+                      p.status === 'disabled' &&
+                        'bg-[var(--surface-muted)] text-[var(--text-faint)]'
                     )}
                   >
                     {statusLabel(p.status)}
@@ -108,7 +112,9 @@ export function PluginMarket() {
                 <div className="flex items-center gap-1.5">
                   <button
                     onClick={() => handleToggle(p.name, p.status)}
-                    style={{ color: p.status === 'active' ? 'var(--success)' : 'var(--text-faint)' }}
+                    style={{
+                      color: p.status === 'active' ? 'var(--success)' : 'var(--text-faint)',
+                    }}
                     className="hover:opacity-80 transition-opacity"
                   >
                     {p.status === 'active' ? <ToggleRight size={18} /> : <ToggleLeft size={18} />}
@@ -121,11 +127,7 @@ export function PluginMarket() {
                   </button>
                 </div>
               </div>
-              {p.description && (
-                <p className="text-xs mt-1 text-text-muted">
-                  {p.description}
-                </p>
-              )}
+              {p.description && <p className="text-xs mt-1 text-text-muted">{p.description}</p>}
             </div>
           ))}
         </div>

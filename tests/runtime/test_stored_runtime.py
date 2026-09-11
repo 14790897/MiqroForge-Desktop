@@ -5,9 +5,9 @@ import pytest
 from miqi.runtime.ledger_runtime import LedgerRuntime
 from miqi.runtime.stored_runtime import (
     StoredRuntimeReader,
-    StoredThreadAmbiguous,
-    StoredThreadNotFound,
-    StoredThreadUnauthorized,
+    StoredThreadAmbiguousError,
+    StoredThreadNotFoundError,
+    StoredThreadUnauthorizedError,
     session_belongs_to_client,
 )
 from miqi.runtime.thread_runtime import ThreadRuntime
@@ -57,7 +57,7 @@ async def test_stored_reader_resolves_thread_by_session_id(tmp_path):
 @pytest.mark.asyncio
 async def test_stored_reader_rejects_foreign_session_id(tmp_path):
     reader = StoredRuntimeReader(tmp_path / "nonexistent.db", client_id="client-a")
-    with pytest.raises(StoredThreadUnauthorized):
+    with pytest.raises(StoredThreadUnauthorizedError):
         await reader.resolve_thread("thread-x", session_id="client-b:default")
 
 
@@ -72,7 +72,7 @@ async def test_stored_reader_ambiguous_thread_requires_session_id(tmp_path):
         await a1.create_thread(title="One", thread_id="same")
         await a2.create_thread(title="Two", thread_id="same")
         reader = StoredRuntimeReader(db, client_id="client-a")
-        with pytest.raises(StoredThreadAmbiguous):
+        with pytest.raises(StoredThreadAmbiguousError):
             await reader.resolve_thread("same")
     finally:
         await a1.close()
@@ -86,7 +86,7 @@ async def test_stored_reader_not_found_for_missing_thread(tmp_path):
     await runtime.initialize()
     try:
         reader = StoredRuntimeReader(db, client_id="client-a")
-        with pytest.raises(StoredThreadNotFound):
+        with pytest.raises(StoredThreadNotFoundError):
             await reader.resolve_thread("nonexistent")
     finally:
         await runtime.close()

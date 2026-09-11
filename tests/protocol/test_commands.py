@@ -1,12 +1,13 @@
 """Tests for miqi.protocol.commands."""
 
 import json
+
 from miqi.protocol.commands import (
-    UserMessage,
-    ApprovalResponse,
     AbortTurn,
+    ApprovalResponse,
     ConfigUpdate,
     ThreadCommand,
+    UserMessage,
 )
 
 

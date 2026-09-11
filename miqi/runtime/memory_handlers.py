@@ -10,8 +10,6 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from loguru import logger
-
 from miqi.runtime.app_server import AppServerError
 
 
@@ -173,9 +171,8 @@ async def memory_lessons_handler(
     registry: Any,
 ) -> dict[str, Any]:
     """List learned lessons from MemoryStore."""
-    from miqi.agent.memory import MemoryStore
-
     import miqi.bridge.server as bridge_module
+    from miqi.agent.memory import MemoryStore
 
     state = getattr(bridge_module, "_state", None)
     if state is None:

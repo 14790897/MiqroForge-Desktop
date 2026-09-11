@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import time
-import aiosqlite
 from pathlib import Path
+
+import aiosqlite
 
 
 class ThreadStore:

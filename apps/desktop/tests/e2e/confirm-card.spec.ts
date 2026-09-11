@@ -68,9 +68,7 @@ async function startMockOpenAI(): Promise<{ proc: ChildProcess; mockUrl: string 
   const deadline = Date.now() + 30_000;
   while (!readyUrl && Date.now() < deadline) {
     if (proc.exitCode !== null) {
-      throw new Error(
-        `mock OpenAI server exited early (code ${proc.exitCode}): ${stderrTail}`,
-      );
+      throw new Error(`mock OpenAI server exited early (code ${proc.exitCode}): ${stderrTail}`);
     }
     await new Promise((r) => setTimeout(r, 250));
   }
@@ -89,7 +87,7 @@ test.describe('Confirm Card (ask_user_confirm_card)', () => {
   // the full suite and covers this spec — same trimming strategy as #710.
   test.skip(
     process.platform === 'darwin' && !!process.env.CI,
-    'macOS CI cannot reach the local mock server',
+    'macOS CI cannot reach the local mock server'
   );
 
   let electronApp: ElectronApplication;
@@ -199,7 +197,7 @@ test.describe('Confirm Card (ask_user_confirm_card)', () => {
       await waitForResponseComplete(page, LLM_TIMEOUT);
       await expect(page.locator('main')).toContainText(
         '项目入口：forge.miqroera.com/projects/mof-price-report',
-        { timeout: 30_000 },
+        { timeout: 30_000 }
       );
       await expect(page.locator('main')).toContainText('mof-price-report.workflow.json');
 
@@ -211,7 +209,7 @@ test.describe('Confirm Card (ask_user_confirm_card)', () => {
         path: `test-results/${test.info().title.replace(/\s+/g, '-')}-final.png`,
         fullPage: true,
       });
-    },
+    }
   );
 
   test(
@@ -281,6 +279,6 @@ test.describe('Confirm Card (ask_user_confirm_card)', () => {
         fullPage: true,
         timeout: 60_000,
       });
-    },
+    }
   );
 });

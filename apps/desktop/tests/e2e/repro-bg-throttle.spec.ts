@@ -1,5 +1,5 @@
 /**
- * REPRO: MiqroForge 窗口最小化/完全遮挡（后台）时，AI 流式回复卡住，切回前台才继续。
+ * REPRO: MiQroForge 窗口最小化/完全遮挡（后台）时，AI 流式回复卡住，切回前台才继续。
  *
  * 机制（代码层面已确认）：
  *  - 流式正文由 rAF 打字机动画驱动：revealNext 每帧 reveal 4 字符，
@@ -24,11 +24,7 @@
  */
 import { test, expect } from '@playwright/test';
 import type { ElectronApplication, Page } from '@playwright/test';
-import {
-  launchElectronApp,
-  closeElectronApp,
-  sendMessage,
-} from './helpers/electron-setup';
+import { launchElectronApp, closeElectronApp, sendMessage } from './helpers/electron-setup';
 
 test.describe('repro: background (minimized) window freezes streaming reply', () => {
   let electronApp: ElectronApplication;
@@ -99,17 +95,19 @@ test.describe('repro: background (minimized) window freezes streaming reply', ()
     let L0 = 0;
     for (let attempt = 0; attempt < 3 && L0 === 0; attempt++) {
       if (attempt > 0) {
-        console.log(`[repro] no stream on attempt ${attempt - 1} — waiting for turn to end, then resending…`);
-        await page.waitForFunction(() => {
-          const ta = document.querySelector(
-            '[data-testid="chat-input-container"] textarea'
-          ) as HTMLTextAreaElement | null;
-          return !!ta && !ta.disabled;
-        }, { timeout: 180_000 });
-        await sendMessage(
-          page,
-          '请继续：直接给出至少 800 字的中文详细回答（不要调用任何工具）。'
+        console.log(
+          `[repro] no stream on attempt ${attempt - 1} — waiting for turn to end, then resending…`
         );
+        await page.waitForFunction(
+          () => {
+            const ta = document.querySelector(
+              '[data-testid="chat-input-container"] textarea'
+            ) as HTMLTextAreaElement | null;
+            return !!ta && !ta.disabled;
+          },
+          { timeout: 180_000 }
+        );
+        await sendMessage(page, '请继续：直接给出至少 800 字的中文详细回答（不要调用任何工具）。');
       }
       const deadline = Date.now() + 180_000;
       while (Date.now() < deadline) {
@@ -161,9 +159,9 @@ test.describe('repro: background (minimized) window freezes streaming reply', ()
     // N samples" loop is NOT reliable — a provider/tool pause can exceed the
     // window and record a partial reply as Lfinal.  The enabled composer is
     // the deterministic completion signal.
-    await expect(
-      page.locator('[data-testid="chat-input-container"] textarea')
-    ).toBeEnabled({ timeout: 120_000 });
+    await expect(page.locator('[data-testid="chat-input-container"] textarea')).toBeEnabled({
+      timeout: 120_000,
+    });
     const Lfinal = ((await assistantText()) || '').length;
     const raf3 = await page.evaluate(() => (window as any).__rafCount);
     const tEnd = Date.now();
@@ -179,7 +177,13 @@ test.describe('repro: background (minimized) window freezes streaming reply', ()
     // Persist the measurements so they survive reporter truncation.
     const { writeFileSync } = require('node:fs');
     writeFileSync(
-      require('node:path').join(__dirname, '..', '..', 'test-results', 'repro-bg-throttle-summary.txt'),
+      require('node:path').join(
+        __dirname,
+        '..',
+        '..',
+        'test-results',
+        'repro-bg-throttle-summary.txt'
+      ),
       `L0=${L0} L1=${L1} L2=${L2} Lfinal=${Lfinal} raf0=${raf0} raf1=${raf1} raf2=${raf2} raf3=${raf3} hidden_ms=${tBack - tMin} catchup_ms=${tEnd - tBack}\n`
     );
 
@@ -201,7 +205,10 @@ test.describe('repro: background (minimized) window freezes streaming reply', ()
     //    should reveal far more than the pre-fix ~76 chars (19 frames × 4).
     //    FullContent grows at stream speed (~55 chars/s → ~880 in 16s), so
     //    L2-L0 should approach the streamed amount — assert > 300.
-    expect(L2 - L0, 'assistant text should KEEP GROWING while hidden (time-driven typewriter)').toBeGreaterThan(300);
+    expect(
+      L2 - L0,
+      'assistant text should KEEP GROWING while hidden (time-driven typewriter)'
+    ).toBeGreaterThan(300);
     // 2. The reply eventually completes to a full-length answer.
     expect(Lfinal, 'reply must complete to a full-length answer').toBeGreaterThan(800);
     expect(Lfinal).toBeGreaterThanOrEqual(L2);

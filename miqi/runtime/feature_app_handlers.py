@@ -4,10 +4,10 @@ from __future__ import annotations
 
 from typing import Any
 
+import miqi.runtime.protocol_specs as protocol_specs
 from miqi.runtime.app_server import AppServer, get_bridge_context
 from miqi.runtime.core_request_models import validate_core_params
 from miqi.runtime.feature_runtime import FeatureRuntime
-import miqi.runtime.protocol_specs as protocol_specs
 
 
 def _get_feature_runtime(registry: Any) -> FeatureRuntime:

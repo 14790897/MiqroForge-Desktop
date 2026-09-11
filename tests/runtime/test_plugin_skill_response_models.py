@@ -26,28 +26,28 @@ class TestAllMethodsExist:
 
 
 class TestWireFields:
-    def test_plugin_uninstall_uses_pluginId(self):
+    def test_plugin_uninstall_uses_plugin_id(self):
         schema = result_schema_from_model(PLUGIN_SKILL_METHOD_RESULT_MODELS["plugin/uninstall"])
         props = schema["properties"]
         assert "pluginId" in props
         assert "removed" in props
 
-    def test_marketplace_remove_uses_marketplaceName(self):
+    def test_marketplace_remove_uses_marketplace_name(self):
         schema = result_schema_from_model(PLUGIN_SKILL_METHOD_RESULT_MODELS["marketplace/remove"])
         props = schema["properties"]
         assert "marketplaceName" in props
 
-    def test_marketplace_add_uses_alreadyPresent(self):
+    def test_marketplace_add_uses_already_present(self):
         schema = result_schema_from_model(PLUGIN_SKILL_METHOD_RESULT_MODELS["marketplace/add"])
         props = schema["properties"]
         assert "alreadyPresent" in props
 
-    def test_marketplace_upgrade_uses_selectedMarketplaces(self):
+    def test_marketplace_upgrade_uses_selected_marketplaces(self):
         schema = result_schema_from_model(PLUGIN_SKILL_METHOD_RESULT_MODELS["marketplace/upgrade"])
         props = schema["properties"]
         assert "selectedMarketplaces" in props
 
-    def test_plugin_list_uses_featuredPluginIds(self):
+    def test_plugin_list_uses_featured_plugin_ids(self):
         schema = result_schema_from_model(PLUGIN_SKILL_METHOD_RESULT_MODELS["plugin/list"])
         props = schema["properties"]
         assert "featuredPluginIds" in props

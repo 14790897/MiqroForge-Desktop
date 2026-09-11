@@ -40,8 +40,21 @@ export function extractProgressMessage(
   }
 
   // Exec delta events are streamed inline — skip rendering as standalone rows.
-  if (eventName.toLowerCase().includes('outputdelta') || eventName.toLowerCase().includes('commandexecution')) {
+  if (
+    eventName.toLowerCase().includes('outputdelta') ||
+    eventName.toLowerCase().includes('commandexecution')
+  ) {
     return null;
+  }
+
+  // ToolErrorEvent is a recoverable tool-level failure the agent is expected
+  // to adapt to (e.g. a path rejected by session isolation) — not a system
+  // error. Rendering it with the red error bubble makes a routine
+  // self-correction look like a crash; demote to a quiet warning row.
+  // Turn-level errors arrive via the terminal error channel and keep red.
+  if (eventName === 'ToolErrorEvent') {
+    const msg = data.message ?? data.reason ?? '工具执行失败';
+    if (msg) return { message: String(msg), role: 'warning' };
   }
 
   if (eventName.toLowerCase().includes('error') || data.error_kind) {

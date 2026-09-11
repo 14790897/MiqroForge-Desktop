@@ -70,7 +70,7 @@ sequenceDiagram
 
 ### 消息格式
 
-MiqroForge 使用 **JSON-line 协议** 通过 stdin/stdout 通信，每条消息为一行完整 JSON：
+MiQroForge 使用 **JSON-line 协议** 通过 stdin/stdout 通信，每条消息为一行完整 JSON：
 
 ```
 Request (前端 → 后端):

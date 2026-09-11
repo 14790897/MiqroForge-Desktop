@@ -1,6 +1,6 @@
 # SkillHub 技能市场
 
-SkillHub 是 MiqroForge 的公开技能注册中心，提供可搜索、可安装的 Agent 技能市场。注册中心地址：`https://skills.sixiangjia.de`。
+SkillHub 是 MiQroForge 的公开技能注册中心，提供可搜索、可安装的 Agent 技能市场。注册中心地址：`https://skills.sixiangjia.de`。
 
 ## 架构
 

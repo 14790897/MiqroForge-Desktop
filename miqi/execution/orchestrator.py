@@ -24,18 +24,18 @@ from typing import Any
 
 from loguru import logger
 
+from miqi.execution.hook_runtime import HookPoint, HookRuntime
+from miqi.execution.permission_engine import (
+    PermissionDecision,
+    PermissionEngine,
+    PermissionVerdict,
+)
 from miqi.execution.sandbox_policy import (
+    SandboxDeniedError,
     SandboxPolicyEngine,
     SandboxSelection,
     SandboxType,
-    SandboxDeniedError,
 )
-from miqi.execution.permission_engine import (
-    PermissionEngine,
-    PermissionDecision,
-    PermissionVerdict,
-)
-from miqi.execution.hook_runtime import HookRuntime, HookPoint, HookOutcome
 from miqi.protocol.events import (
     ApprovalRequestedEvent,
     ApprovalResolvedEvent,
@@ -49,6 +49,21 @@ VALID_APPROVAL_DECISIONS = frozenset({
     "once", "session", "always", "deny", "allow", "allow_permanent",
 })
 _LEGACY_DECISION_MAP = {"allow": "once", "allow_permanent": "always"}
+
+# Tools that mutate the filesystem: always receive the sandbox selection and
+# session key so tool bodies can enforce sandboxing and asset tracking.
+_FILE_MUTATION_TOOLS = frozenset({
+    "write_file", "edit_file", "delete_file", "apply_patch",
+    "read_file", "list_dir",
+    "docx_write", "pptx_write", "xlsx_write",
+    "create_docx", "create_pptx", "create_xlsx",
+    "create_pdf", "pdf_write", "pdf_read",
+    "edit_docx", "append_xlsx",
+    "paper_download",
+    # graph_render 写 svg/html 产物 + 读源 JSON——需 _session_key
+    # 注入否则资产栏追踪永不生效（CodeRabbit #761）
+    "graph_render",
+})
 
 # Phase 31.4: max lengths for sanitized approval metadata fields
 _MAX_DESCRIPTION_LENGTH = 500
@@ -71,27 +86,67 @@ _SENSITIVE_ARG_PATTERNS = frozenset({
 })
 
 
-def _normalize_tool_args(tool_name: str, kwargs: dict[str, Any]) -> dict[str, Any]:
+def _normalize_tool_args(
+    tool_name: str,
+    kwargs: dict[str, Any],
+    tool: Any = None,
+) -> dict[str, Any]:
     """Normalise common arg-name mismatches from different providers.
 
     E.g. ``file_path`` → ``path``, ``cmd`` → ``command``.
     When the canonical name already exists, the alias is dropped (safety:
     don't let two competing values exist).
+
+    Schema-aware (issue #805): the ``file_path``/``filename`` → ``path``
+    aliases exist for tools whose canonical param is ``path`` (e.g.
+    read_file / write_file).  Tools whose schema declares ``file_path`` as
+    the canonical param (pdf_read, docx/xlsx/pptx, create_pdf …) must NOT
+    have their ``file_path`` rewritten — otherwise they receive ``path``
+    and their ``execute()`` can't find it.  When the target tool's schema
+    is available and declares no ``path`` property, those aliases are
+    skipped; without a tool (e.g. direct unit-test calls) legacy behaviour
+    is preserved.
     """
+    props: dict[str, Any] = {}
+    schema_known = False
+    if tool is not None:
+        params = getattr(tool, "parameters", None) or {}
+        props = params.get("properties") or {}
+        schema_known = True
     for alias, canonical in _ARG_ALIASES.items():
-        if alias in kwargs:
-            if canonical not in kwargs:
-                kwargs[canonical] = kwargs.pop(alias)
-                logger.debug(
-                    "Tool %s: normalised arg %r → %r", tool_name, alias, canonical,
-                )
-            else:
-                # Canonical already present — drop the alias to avoid ambiguity
-                dropped = kwargs.pop(alias)
-                logger.debug(
-                    "Tool %s: dropped alias arg %r=%r (canonical %r already set)",
-                    tool_name, alias, dropped, canonical,
-                )
+        if alias not in kwargs:
+            continue
+        # issue #805: don't rewrite file_path/filename for tools whose
+        # canonical param is file_path (schema declares no ``path``).
+        if canonical == "path" and schema_known and "path" not in props:
+            # But a ``filename`` alias for a file_path-canonical tool still
+            # needs normalization — PdfReadTool.execute() reads only
+            # ``file_path`` (CodeRabbit #840): map it to the schema name.
+            if alias == "filename" and "file_path" in props:
+                if "file_path" not in kwargs:
+                    kwargs["file_path"] = kwargs.pop(alias)
+                    logger.debug(
+                        "Tool {}: normalised arg {!r} → {!r}", tool_name, alias, "file_path",
+                    )
+                else:
+                    kwargs.pop(alias)
+                    logger.debug(
+                        "Tool {}: dropped alias arg {!r} (canonical {!r} already set)",
+                        tool_name, alias, "file_path",
+                    )
+            continue
+        if canonical not in kwargs:
+            kwargs[canonical] = kwargs.pop(alias)
+            logger.debug(
+                "Tool {}: normalised arg {!r} → {!r}", tool_name, alias, canonical,
+            )
+        else:
+            # Canonical already present — drop the alias to avoid ambiguity
+            kwargs.pop(alias)
+            logger.debug(
+                "Tool {}: dropped alias arg {!r} (canonical {!r} already set)",
+                tool_name, alias, canonical,
+            )
     return kwargs
 
 
@@ -123,10 +178,17 @@ def _sanitize_exc_for_ui(exc: BaseException) -> str:
     # Truncate to a reasonable length
     if len(raw) > 300:
         raw = raw[:300] + "…"
-    # Strip common sensitive patterns (absolute paths, URLs with credentials)
+    # Strip common sensitive patterns (absolute paths, URLs with credentials).
+    # URL 必须先行替换成整体（前端 sanitizeUiMessage 同序）：先跑路径正则
+    # 会把 https://user:secret@host/path 里的路径段先打码，URL 正则随后
+    # 无法整体匹配，凭据 `secret` 泄漏（#991 review）。
+    # 大小写不敏感 + 不设长度上限：HTTPS:// 大写 scheme 与超长凭据 URL 也
+    # 必须整体替换。raw 已在上方截断到 300 字符，匹配长度天然有界。
     import re as _re
-    raw = _re.sub(r'(?:/[^\s"\'<>|:]{1,200})+', '[path]', raw)
-    raw = _re.sub(r'https?://[^\s"\'<>]{1,200}', '[url]', raw)
+    raw = _re.sub(r'https?://[^\s"\'<>]+', '[url]', raw, flags=_re.IGNORECASE)
+    # 负向后顾：斜杠段前面不能紧跟单词字符，避免把 deepseek/deepseek-v4-flash
+    # 这类 provider/model id 误当 Unix 路径打码（前端 sanitizeUiMessage 同款修复）。
+    raw = _re.sub(r'(?<![A-Za-z0-9_.-])(?:/[^\s"\'<>|:]{1,200})+', '[path]', raw)
     raw = _re.sub(r'\b[A-Za-z0-9+/=]{40,}\b', '[token]', raw)
     return f"{type(exc).__name__}: {raw}" if raw else type(exc).__name__
 
@@ -171,6 +233,9 @@ class ToolExecutionContext:
     # Execution policy flags
     bypass_approval: bool = False
     force_approval: bool = False
+    # #821: directories the user mentioned this turn (auto-sensed by the
+    # turn runner); injected into file tools as ``_user_roots``.
+    user_mentioned_roots: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -265,6 +330,15 @@ class ToolOrchestrator:
                     ctx.duration_ms = int((time.monotonic() - start) * 1000)
                     return ctx
 
+                # Normalize alias arg-names BEFORE schema validation (#805,
+                # CodeRabbit #840): providers may send filename/file_path for
+                # path-canonical tools (and vice versa); validation must see
+                # the canonical names. _execute_in_sandbox() re-runs the same
+                # normalization on the kwargs it builds — it is idempotent.
+                ctx.arguments = _normalize_tool_args(
+                    ctx.tool_name, dict(ctx.arguments), tool,
+                )
+
                 schema_errors = tool.validate_params(ctx.arguments)
                 if isinstance(schema_errors, list) and schema_errors:
                     ctx.result = (
@@ -346,7 +420,7 @@ class ToolOrchestrator:
         except asyncio.CancelledError:
             ctx.result = "工具执行已取消"
             ctx.status = OrchestrationResult.CANCELLED
-        except Exception as e:
+        except Exception:
             logger.exception("Tool orchestrator error for {}", ctx.tool_name)
             ctx.result = f"工具执行失败 {ctx.tool_name}：工具执行异常"
             ctx.status = OrchestrationResult.TOOL_ERROR
@@ -679,13 +753,14 @@ class ToolOrchestrator:
         # so that new sessions / restarts pick up this approval.
         try:
             from miqi.agent.command_approval import (
-                approve_permanent, _save_permanent_allowlist,
+                _save_permanent_allowlist,
+                approve_permanent,
             )
             approve_permanent(pattern)
             _save_permanent_allowlist()
         except Exception as exc:
             logger.warning(
-                "Failed to sync permanent approval to global allowlist: %s", exc,
+                "Failed to sync permanent approval to global allowlist: {}", exc,
             )
 
     def _record_session_approval(self, meta: dict[str, Any]) -> None:
@@ -824,23 +899,22 @@ class ToolOrchestrator:
         # the policy engine never returns NONE for them, so this is
         # normally RESTRICTED.  Injecting even NONE is future-proofing
         # for tool-body sandbox enforcement and auditing.
-        _FILE_MUTATION_TOOLS = frozenset({
-            "write_file", "edit_file", "delete_file", "apply_patch",
-            "read_file", "list_dir",
-            "docx_write", "pptx_write", "xlsx_write",
-            "create_docx", "create_pptx", "create_xlsx",
-            "create_pdf", "pdf_write", "pdf_read",
-            "edit_docx", "append_xlsx",
-            "paper_download",
-            # graph_render 写 svg/html 产物 + 读源 JSON——需 _session_key
-            # 注入否则资产栏追踪永不生效（CodeRabbit #761）
-            "graph_render",
-        })
         kwargs = {**ctx.arguments}
         if ctx.tool_name == "exec" or ctx.tool_name in _FILE_MUTATION_TOOLS:
             kwargs["_sandbox"] = sandbox
             # _session_key already includes client_id prefix (e.g. "miqi-desktop:desktop:xxx")
             kwargs["_session_key"] = ctx.session_id
+            # #821: auto-sensed user-mentioned output dirs — mirrors the KUN
+            # tool host injection so file tools accept the user's explicitly
+            # requested output location (e.g. Desktop/test_result).
+            if ctx.user_mentioned_roots:
+                kwargs["_user_roots"] = list(ctx.user_mentioned_roots)
+        elif ctx.tool_name.startswith("mcp_"):
+            # MCP 工具（issue #927）：注入会话上下文供 slurm 计费握手使用
+            #（MCPToolWrapper 会 pop 掉，不传给 MCP 服务端）。
+            kwargs["_session_key"] = ctx.session_id
+            kwargs["_turn_id"] = ctx.turn_id
+            kwargs["_tool_call_id"] = ctx.tool_call_id
         elif sandbox.sandbox_type != SandboxType.NONE:
             kwargs["_sandbox"] = sandbox
 
@@ -859,7 +933,9 @@ class ToolOrchestrator:
                 kwargs["_thread_id"] = ctx.thread_id
 
         # Phase 56: normalize common arg-name incompatibilities from providers
-        kwargs = _normalize_tool_args(ctx.tool_name, kwargs)
+        # (schema-aware since #805: file_path aliases only rewrite tools that
+        # declare ``path`` as their canonical param)
+        kwargs = _normalize_tool_args(ctx.tool_name, kwargs, tool)
 
         logger.debug(
             "Tool execute: name={} args={} sandbox={}",
@@ -887,7 +963,7 @@ class ToolOrchestrator:
             ))
             result = f"工具执行失败 {ctx.tool_name}：{safe_msg}"
             if ctx.turn_id:
-                result += f"\n[Hint: Use 'exec' to inspect the environment or try a different approach.]"
+                result += "\n[Hint: Use 'exec' to inspect the environment or try a different approach.]"
             ctx.status = OrchestrationResult.TOOL_ERROR
         else:
             dt_ms = int((time.monotonic() - t0) * 1000)

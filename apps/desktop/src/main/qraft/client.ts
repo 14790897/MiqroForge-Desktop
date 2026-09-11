@@ -10,7 +10,7 @@
  *   ③ 确认授权  POST /oauth2/doConfirm（必须走该接口）
  *   ④ 取授权码  再次 GET authorize → 302 Location 里的一次性 code
  *   ⑤ 换 token  POST /oauth2/token（grant_type=authorization_code）
- *   ⑥ 刷新      POST /oauth2/refresh（实测 refresh_token 不轮换）
+ *   ⑥ 刷新      POST /oauth2/refresh（新平台轮换 refresh_token：旧值刷新后立即失效）
  *
  * 所有凭据（密码、token、cookie）均不进入日志 —— 只记录步骤与脱敏摘要。
  */
@@ -22,7 +22,13 @@ import {
   findEraBundleUrls,
   maskSecret,
 } from './rsa';
-import type { QraftAccount, QraftErrorCode, QraftTokens } from './types';
+import type {
+  QraftAccount,
+  QraftAiGateway,
+  QraftErrorCode,
+  QraftPointsBalance,
+  QraftTokens,
+} from './types';
 
 // ── 可注入依赖（生产用 electron.net.fetch，测试用 mock） ──────────────
 
@@ -159,7 +165,7 @@ export class QraftClient {
         const res = await this.fetchImpl(url, { ...init, signal: controller.signal });
         if (res.status === 403) {
           // 实测：未加白 IP 访问任何路径统一返回 nginx 默认 403 页（HTML）。
-          throw new QraftError('IP_NOT_WHITELISTED', '出口 IP 未加白，请联系 Qraft 管理员');
+          throw new QraftError('IP_NOT_WHITELISTED', '出口 IP 未加白，请联系 MiQroForge 管理员');
         }
         const bodyText = await res.text();
         return { res, bodyText };
@@ -385,7 +391,11 @@ export class QraftClient {
 
   // ── ⑥ 刷新 token ─────────────────────────────────────────────────────
 
-  /** POST /oauth2/refresh：实测 refresh_token 不轮换（返回同一个）。 */
+  /** POST /oauth2/refresh：新平台轮换 refresh_token（旧值刷新后立即失效），
+   *  必须持久化响应中的新值；成功响应缺失 refresh_token 时拒绝（沿用旧值
+   *  必然导致下一次刷新失败）。refresh_token 已失效（平台侧作废）属于永久
+   *  错误，分类为 REFRESH_TOKEN_INVALID —— 重试必然失败，应由服务层停止
+   *  自动重试并引导用户重新登录。 */
   async refreshTokens(config: ResolvedQraftConfig, refreshToken: string): Promise<QraftTokens> {
     const body = new URLSearchParams({
       grant_type: 'refresh_token',
@@ -403,9 +413,24 @@ export class QraftClient {
     }
     const data = parseBusinessJson(bodyText);
     if (data.code !== 200 || !data.access_token) {
+      const detail = refreshServerDetail(data, refreshToken);
+      if (isInvalidRefreshToken(detail)) {
+        throw new QraftError(
+          'REFRESH_TOKEN_INVALID',
+          `refresh_token 已失效，请重新登录（平台返回：${detail || '无详情'}）`
+        );
+      }
       throw new QraftError(
         'REFRESH_FAILED',
-        `刷新 token 失败：${data.message || data.msg || '响应缺少 access_token'}`
+        `刷新 token 失败：${detail || data.message || data.msg || '响应缺少 access_token'}`
+      );
+    }
+    if (!data.refresh_token) {
+      // 轮换语义下旧值已立即失效：成功响应不携带新 refresh_token 即无法
+      // 续期，沿用旧值下一次刷新必然失败 —— 直接按永久错误引导重登。
+      throw new QraftError(
+        'REFRESH_TOKEN_INVALID',
+        '刷新响应缺少新的 refresh_token（轮换语义下旧值已失效），请重新登录'
       );
     }
     this.log('INFO', 'qraft: token 刷新成功');
@@ -414,11 +439,15 @@ export class QraftClient {
 
   // ── 业务接口 ─────────────────────────────────────────────────────────
 
-  /** GET /oauth2/userinfo：实测响应无 picture 字段。 */
+  /** GET /oauth2/userinfo：实测响应无 picture 字段。
+   *  网关字段（encryptedApiKey/aiGatewayStatus/configVersion/consumerId 等）可能
+   *  平铺在顶层或嵌套在 data 内（实测两层都出现过），两层都取。
+   *  encryptedApiKey 为空（未开通/未下发）时省略 aiGateway —— 调用方据此区分
+   *  "平台未开通网关" 与 "已开通"，同时不把空串当密钥处理。 */
   async getUserInfo(
     config: ResolvedQraftConfig,
     accessToken: string
-  ): Promise<Omit<QraftAccount, 'phone'>> {
+  ): Promise<Omit<QraftAccount, 'phone'> & { aiGateway?: QraftAiGateway; mcpGatewayKey?: string }> {
     const { res, bodyText } = await this.request(`${config.baseUrl}/oauth2/userinfo`, {
       headers: { Authorization: `Bearer ${accessToken}` },
     });
@@ -434,23 +463,124 @@ export class QraftClient {
     if (typeof data.sub !== 'string' && typeof data.username !== 'string') {
       throw new QraftError('USERINFO_FAILED', 'userinfo 响应缺少 sub/username 字段');
     }
+    const nested = (data.data ?? {}) as Record<string, unknown>;
+    const field = (name: string): unknown =>
+      name in data ? data[name] : (nested[name] ?? undefined);
+    const encryptedApiKey = String(field('encryptedApiKey') ?? '');
+    const status = String(field('aiGatewayStatus') ?? '');
+    const aiGateway: QraftAiGateway | undefined = encryptedApiKey
+      ? {
+          encryptedApiKey,
+          status,
+          configVersion: coerceConfigVersion(field('configVersion')),
+          consumerId: field('consumerId') != null ? String(field('consumerId')) : undefined,
+          consumerGroupId:
+            field('consumerGroupId') != null ? String(field('consumerGroupId')) : undefined,
+        }
+      : undefined;
+    // 平台托管 MCP 网关凭据（作 Authorization Bearer 使用）：平台下发后
+    // 由主进程写入 0600 token 文件，Python 连接默认网关时注入；缺失时
+    // 省略（未开通/未下发），调用方据此区分。
+    const mcpGatewayKey = String(field('mcpGatewayKey') ?? '');
     this.log('INFO', 'qraft: userinfo 获取成功');
     return {
       sub: String(data.sub ?? ''),
       username: String(data.username ?? ''),
       nickname: String(data.nickname ?? ''),
+      ...(aiGateway ? { aiGateway } : {}),
+      ...(mcpGatewayKey ? { mcpGatewayKey } : {}),
     };
   }
 
   /**
+   * GET /oauth2/points/balance：查询当前用户积分余额。
+   * 业务码 40101/40102（token 缺失/失效）→ SESSION_EXPIRED。
+   */
+  async getPointsBalance(
+    config: ResolvedQraftConfig,
+    accessToken: string
+  ): Promise<QraftPointsBalance> {
+    const { res, bodyText } = await this.request(`${config.baseUrl}/oauth2/points/balance`, {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    });
+    if (res.status === 401) {
+      throw new QraftError('SESSION_EXPIRED', 'access_token 已失效');
+    }
+    if (!this.isJson(res)) {
+      throw new QraftError('POINTS_FAILED', `查询积分余额失败：HTTP ${res.status}`);
+    }
+    const data = parseBusinessJson(bodyText);
+    if (data.code === 40101 || data.code === 40102) {
+      throw new QraftError('SESSION_EXPIRED', 'access_token 已失效，请重新登录');
+    }
+    if (data.code !== 200 || !data.data) {
+      throw new QraftError(
+        'POINTS_FAILED',
+        `查询积分余额失败：${data.message || data.msg || '未知错误'}`
+      );
+    }
+    this.log('INFO', 'qraft: 积分余额查询成功');
+    return parsePointsBalance(data.data);
+  }
+
+  /**
+   * POST /oauth2/points/deduct：扣除当前用户可用积分（算力计费）。
+   * 业务码 40003（可用积分不足）→ INSUFFICIENT_POINTS；40101/40102 → SESSION_EXPIRED。
+   * 成功返回扣费后的最新余额（响应 data 为 PointBalanceVO）。
+   */
+  async deductPoints(
+    config: ResolvedQraftConfig,
+    accessToken: string,
+    req: { amount: number; source: string; resourceType?: string; project?: string; memo?: string }
+  ): Promise<QraftPointsBalance> {
+    const { res, bodyText } = await this.request(`${config.baseUrl}/oauth2/points/deduct`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${accessToken}`,
+      },
+      body: JSON.stringify(req),
+    });
+    if (res.status === 401) {
+      throw new QraftError('SESSION_EXPIRED', 'access_token 已失效');
+    }
+    if (!this.isJson(res)) {
+      throw new QraftError('POINTS_FAILED', `扣除积分失败：HTTP ${res.status}`);
+    }
+    const data = parseBusinessJson(bodyText);
+    if (data.code === 40101 || data.code === 40102) {
+      throw new QraftError('SESSION_EXPIRED', 'access_token 已失效，请重新登录');
+    }
+    if (data.code === 40003) {
+      const inner = (data.data ?? {}) as Record<string, unknown>;
+      const available = Number.parseInt(String(inner.availablePoints ?? ''), 10);
+      const suffix = Number.isFinite(available) ? `（当前可用 ${available}）` : '';
+      throw new QraftError(
+        'INSUFFICIENT_POINTS',
+        `可用积分不足${suffix}：${data.message || data.msg || '本次扣除失败'}`
+      );
+    }
+    if (data.code !== 200 || !data.data) {
+      throw new QraftError(
+        'POINTS_FAILED',
+        `扣除积分失败：${data.message || data.msg || '未知错误'}`
+      );
+    }
+    this.log('INFO', 'qraft: 积分扣除成功');
+    return parsePointsBalance(data.data);
+  }
+
+  /**
    * 从 token 响应构造统一结构；实测 expires_in=7199（约 2 小时，非官方 24 小时）。
-   * refresh_token 实测不轮换；响应未携带时保留入参（防御官方文档声称的轮换语义）。
+   * 新平台轮换 refresh_token：刷新路径（refreshTokens）强制响应携带新值，
+   * 缺失直接报 REFRESH_TOKEN_INVALID；此处的回退只服务于 exchangeCode
+   *（登录换取 token，响应缺失属防御性兜底）。
    */
   private buildTokens(data: Record<string, unknown>, fallbackRefreshToken = ''): QraftTokens {
     const expiresIn = Number.parseInt(String(data.expires_in ?? '7199'), 10) || 7199;
     return {
       accessToken: String(data.access_token),
-      // 实测不轮换，但仍以响应为准存一份（同一个值，无副作用）。
+      // 轮换语义：以响应中的新值为准；未携带时沿用入参（旧值）。
       refreshToken: String(data.refresh_token ?? fallbackRefreshToken),
       openid: String(data.openid ?? ''),
       idToken: data.id_token ? String(data.id_token) : undefined,
@@ -474,7 +604,7 @@ interface BusinessEnvelope {
   [key: string]: unknown;
 }
 
-/** 解析 Qraft 业务 JSON 信封（HTTP 200 + {code: 200, ...} 表示成功）。 */
+/** 解析 MiQroForge 业务 JSON 信封（HTTP 200 + {code: 200, ...} 表示成功）。 */
 export function parseBusinessJson(bodyText: string): BusinessEnvelope {
   try {
     const parsed = JSON.parse(bodyText) as Record<string, unknown>;
@@ -482,6 +612,62 @@ export function parseBusinessJson(bodyText: string): BusinessEnvelope {
   } catch {
     return { code: -1, message: '响应不是合法 JSON' };
   }
+}
+
+/** 服务端错误消息可能回显 refresh_token 原文（实测 originalMessage 形如
+ *  "无效refresh_token: <token>")：替换为掩码并截断，防止凭据进入日志/界面。 */
+function sanitizeServerMessage(message: string, secrets: string[]): string {
+  let out = message;
+  for (const secret of secrets) {
+    if (secret) out = out.split(secret).join('***');
+  }
+  return out.slice(0, 200);
+}
+
+/** 提取刷新失败的服务端明细：优先 data.data.originalMessage（Sa-Token 异常
+ *  详情），退化为顶层 message/msg；含脱敏。 */
+function refreshServerDetail(data: BusinessEnvelope, refreshToken: string): string {
+  const nested = data.data;
+  const original =
+    typeof nested === 'object' && nested !== null
+      ? String((nested as Record<string, unknown>).originalMessage ?? '')
+      : '';
+  const raw = [original, data.message, data.msg]
+    .filter((s): s is string => typeof s === 'string' && s.length > 0)
+    .join('；');
+  return sanitizeServerMessage(raw, [refreshToken]);
+}
+
+/** refresh_token 已失效（平台侧作废/过期）：重试必然失败，属永久错误。 */
+function isInvalidRefreshToken(detail: string): boolean {
+  return /RefreshTokenException|无效\s*refresh_token|refresh_token\s*(无效|已失效|已过期|过期)|invalid\s+refresh/i.test(
+    detail
+  );
+}
+
+/** configVersion 防御性归一为 number：平台可能下发数字或数字字符串。 */
+function coerceConfigVersion(raw: unknown): number | undefined {
+  if (typeof raw === 'number' && Number.isFinite(raw)) return raw;
+  if (typeof raw === 'string') {
+    const n = Number.parseInt(raw, 10);
+    if (Number.isFinite(n)) return n;
+  }
+  return undefined;
+}
+
+/** 解析 PointBalanceVO（balance/deduct 响应的 data 字段）。 */
+function parsePointsBalance(raw: unknown): QraftPointsBalance {
+  const inner = (raw ?? {}) as Record<string, unknown>;
+  const num = (v: unknown): number => {
+    const n = Number.parseInt(String(v ?? ''), 10);
+    return Number.isFinite(n) ? n : 0;
+  };
+  return {
+    availablePoints: num(inner.availablePoints),
+    heldPoints: num(inner.heldPoints),
+    totalEarned: num(inner.totalEarned),
+    totalSpent: num(inner.totalSpent),
+  };
 }
 
 /** 新建一个带默认依赖的客户端（生产：electron.net.fetch + 主进程日志）。 */

@@ -107,7 +107,7 @@ test.describe('No-Sandbox Host Exec E2E', () => {
               .some(
                 (l) =>
                   !/^C:\\Windows\\System32\\bash\.exe$/i.test(l) &&
-                  !/\\(?:cygwin|cygwin64)\\/i.test(l),
+                  !/\\(?:cygwin|cygwin64)\\/i.test(l)
               );
           } catch {
             return false;
@@ -179,10 +179,7 @@ test.describe('No-Sandbox Host Exec E2E', () => {
           }
         }
         text = (await page.locator('main').textContent()) ?? '';
-        if (
-          /NO_SANDBOX_EXEC_OK_\d+/.test(text) &&
-          /NO_SANDBOX_NETWORK_OK_\d+/.test(text)
-        ) {
+        if (/NO_SANDBOX_EXEC_OK_\d+/.test(text) && /NO_SANDBOX_NETWORK_OK_\d+/.test(text)) {
           break;
         }
         if (text !== lastText) {
@@ -209,8 +206,8 @@ test.describe('No-Sandbox Host Exec E2E', () => {
 
       await postScreenshotToPr(
         `test-results/${test.info().title.replace(/\s+/g, '-')}.png`,
-        '✅ E2E 通过：无沙箱 exec 链路（Git Bash/cmd 回退）',
+        '✅ E2E 通过：无沙箱 exec 链路（Git Bash/cmd 回退）'
       );
-    },
+    }
   );
 });

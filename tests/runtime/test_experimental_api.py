@@ -12,9 +12,13 @@ from __future__ import annotations
 
 import pytest
 
-from miqi.runtime.app_server import AppServer, AppServerError, ClientCapabilities, ClientSessionRegistry
+from miqi.runtime.app_server import (
+    AppServer,
+    AppServerError,
+    ClientCapabilities,
+    ClientSessionRegistry,
+)
 from miqi.runtime.experimental_api import require_experimental_api
-
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 

@@ -1,4 +1,4 @@
-"""MiqroForge TUI — Textual-based terminal interface."""
+"""MiQroForge TUI — Textual-based terminal interface."""
 
 from __future__ import annotations
 
@@ -6,13 +6,13 @@ from pathlib import Path
 from typing import Any
 
 from textual.app import App, ComposeResult
-from textual.widgets import Header, Footer, Input, Static
-from textual.containers import Horizontal, Vertical
 from textual.binding import Binding
+from textual.containers import Horizontal, Vertical
+from textual.widgets import Footer, Header, Input, Static
 
 
 class MiQiTui(App):
-    """MiqroForge Terminal User Interface.
+    """MiQroForge Terminal User Interface.
 
     Launch with:
         uv run python -m miqi.tui.app
@@ -54,7 +54,7 @@ class MiQiTui(App):
         workspace: Path,
         model: str = "default",
     ) -> None:
-        """Connect to MiqroForge runtime via RuntimeSession (Phase 14).
+        """Connect to MiQroForge runtime via RuntimeSession (Phase 14).
 
         Historical: Does NOT construct AgentLoop directly. Uses RuntimeSession
         which owns the full service graph internally.
@@ -75,7 +75,7 @@ class MiQiTui(App):
 
         self._append_message(
             "System",
-            f"Connected to MiqroForge runtime (model: {model}, workspace: {workspace})",
+            f"Connected to MiQroForge runtime (model: {model}, workspace: {workspace})",
         )
 
     def compose(self) -> ComposeResult:
@@ -89,7 +89,7 @@ class MiQiTui(App):
     def on_mount(self) -> None:
         """Called when the app is mounted."""
         self.query_one("#chat", Static).update(
-            "Welcome to MiqroForge TUI!\n"
+            "Welcome to MiQroForge TUI!\n"
             "Type a message below and press Enter to send.\n"
             "Ctrl+C: abort | Ctrl+N: new thread | Ctrl+P: toggle plan",
         )
@@ -107,7 +107,7 @@ class MiQiTui(App):
             self._process_message(content)
         else:
             self._append_message(
-                "MiqroForge",
+                "MiQroForge",
                 "(No runtime connected. Use `miqi tui --connect` to connect, "
                 "or call app.connect_runtime(provider, workspace) in code.)",
             )
@@ -117,6 +117,7 @@ class MiQiTui(App):
         if self._runtime is not None:
             try:
                 import asyncio as _asyncio
+
                 from miqi.protocol.commands import AbortTurn
                 _asyncio.run(self._runtime.submit(AbortTurn(thread_id="tui:default")))
                 self._append_message("System", "Turn aborted.")
@@ -170,6 +171,7 @@ class MiQiTui(App):
     def show_diff(self, filepath: str, old: str, new: str) -> None:
         """Show an inline diff in the chat area."""
         import difflib
+
         from rich.markup import escape
 
         chat = self.query_one("#chat", Static)
@@ -217,9 +219,9 @@ class MiQiTui(App):
                     thread_id="tui:default",
                     on_event=self._handle_runtime_event,
                 )
-                self._append_message("MiqroForge", response or "(no response)")
+                self._append_message("MiQroForge", response or "(no response)")
             except Exception as e:
-                self._append_message("MiqroForge", f"Error: {e}")
+                self._append_message("MiQroForge", f"Error: {e}")
 
         asyncio.create_task(_run())
 
@@ -242,6 +244,7 @@ def _load_runtime_from_config() -> tuple[Any, Path, str] | None:
     Returns (provider, workspace, model) or None on failure.
     """
     from pathlib import Path
+
     from miqi.config.loader import load_config
     from miqi.providers.factory import make_provider
 

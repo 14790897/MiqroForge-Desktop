@@ -61,6 +61,13 @@ class ToolHostContext:
     search_strategy: Any = None
     parallel_limit: int | None = None
 
+    # Directories the user mentioned in their message this turn (issue #821).
+    # The agent loop extracts them from user_message items; the tool host
+    # injects them as ``_user_roots`` so file tools can read/write the
+    # user-requested output dirs (e.g. Desktop/test_result) without static
+    # tools.extra_roots config.
+    user_mentioned_roots: list[str] = field(default_factory=list)
+
 
 @dataclass
 class ToolHostResult:
@@ -84,6 +91,8 @@ ASK_USER_CONFIRM_TOOL = "ask_user_confirm_card"
 # (sessions/<key>/files) can only engage when the tool knows which session
 # is executing — the KUN tool host is the single execution point here, so it
 # must do the same injection or file writes land in the shared root.
+# graph_render is included for parity with the legacy orchestrator
+# (CodeRabbit #761) — it writes svg/html artifacts and reads source JSON.
 _SESSION_KEY_TOOLS = frozenset({
     "exec",
     "write_file", "edit_file", "delete_file", "apply_patch",
@@ -93,6 +102,16 @@ _SESSION_KEY_TOOLS = frozenset({
     "create_pdf", "pdf_write", "pdf_read",
     "edit_docx", "append_xlsx",
     "paper_download",
+    "graph_render",
+})
+
+# File tools that accept the injected ``_user_roots`` — directories the
+# user mentioned in their message (issue #821), auto-sensed by the agent
+# loop.  Only file-ish tools consume them; injecting into every tool would
+# be harmless but pointless.
+_USER_ROOTS_TOOLS = frozenset({
+    "write_file", "edit_file", "read_file", "list_dir",
+    "apply_patch", "graph_render",
 })
 
 
@@ -224,6 +243,8 @@ class MiQiToolHost:
         from miqi.execution.collab_policy import (
             AutonomyMode,
             CollabVerdict,
+        )
+        from miqi.execution.collab_policy import (
             evaluate as collab_evaluate,
         )
 
@@ -317,6 +338,25 @@ class MiQiToolHost:
                 session_key = thread_id_to_session_key(context.thread_id) or context.thread_id
                 if session_key:
                     extra["_session_key"] = session_key
+            if tool_name.startswith("mcp_"):
+                # MCP 工具（issue #927）：注入会话上下文供 slurm 计费事件
+                # 使用（MCPToolWrapper 会 pop 掉，不传给 MCP 服务端）。
+                from miqi.kun_runtime.migration_adapter import (
+                    thread_id_to_session_key,
+                )
+
+                extra["_session_key"] = (
+                    thread_id_to_session_key(context.thread_id)
+                    or context.thread_id
+                )
+                extra["_turn_id"] = context.turn_id
+                extra["_tool_call_id"] = call.call_id
+            # User-mentioned output dirs (issue #821): pass the turn's
+            # auto-sensed roots to file tools so the user's explicitly
+            # requested output location (e.g. Desktop/test_result) works
+            # without static tools.extra_roots config.
+            if tool_name in _USER_ROOTS_TOOLS and context.user_mentioned_roots:
+                extra["_user_roots"] = list(context.user_mentioned_roots)
             # Reasoning mode (issue #680): hand the fast-mode search strategy
             # to web_search so it can fan out (parallel queries + fetches).
             if tool_name == "web_search" and context.search_strategy is not None:

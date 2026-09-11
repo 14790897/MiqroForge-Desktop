@@ -9,8 +9,8 @@ export function renderContent(text: string) {
       return (
         <pre
           key={i}
-          className="my-2 text-xs rounded-lg px-3 py-2 overflow-x-auto max-w-full"
-          style={{ background: 'rgba(0,0,0,0.06)' }}
+          className="my-2 text-[13px] leading-[1.6] rounded-lg px-3 py-2.5 overflow-x-auto max-w-full"
+          style={{ background: 'var(--code-bg)' }}
         >
           <code>{code}</code>
         </pre>
@@ -26,7 +26,7 @@ export function renderContent(text: string) {
             return (
               <code
                 key={j}
-                className="text-xs font-mono px-1 rounded"
+                className="font-mono text-[0.9em] leading-none px-1.5 py-[2px] rounded"
                 style={{ background: 'rgba(0,0,0,0.08)' }}
               >
                 {seg.slice(1, -1)}

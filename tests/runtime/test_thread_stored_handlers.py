@@ -466,9 +466,10 @@ async def test_thread_list_pagination_cursor_stable_with_desc(tmp_path):
 @pytest.mark.asyncio
 async def test_stored_fork_copies_history_rows(tmp_path):
     """Stored fork copies runtime_history_items so destination has provider messages."""
-    from miqi.runtime.stored_runtime import StoredRuntimeReader
-    from miqi.runtime.history_runtime import HistoryItem
     import time
+
+    from miqi.runtime.history_runtime import HistoryItem
+    from miqi.runtime.stored_runtime import StoredRuntimeReader
 
     db = tmp_path / ".miqi-runtime" / "runtime.db"
     await _seed_thread(db, thread_id="src-fork")
@@ -497,9 +498,10 @@ async def test_stored_fork_copies_history_rows(tmp_path):
 @pytest.mark.asyncio
 async def test_stored_rollback_deletes_history_for_removed_turns(tmp_path):
     """Stored rollback removes history items belonging to dropped turns."""
-    from miqi.runtime.stored_runtime import StoredRuntimeReader
-    from miqi.runtime.history_runtime import HistoryItem
     import time
+
+    from miqi.runtime.history_runtime import HistoryItem
+    from miqi.runtime.stored_runtime import StoredRuntimeReader
 
     db = tmp_path / ".miqi-runtime" / "runtime.db"
     await _seed_thread(db, thread_id="rollback-hist")

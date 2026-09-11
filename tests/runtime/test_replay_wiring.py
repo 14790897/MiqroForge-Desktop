@@ -5,7 +5,6 @@ import pytest
 from miqi.protocol.commands import UserMessage
 from miqi.protocol.events import TurnCompleteEvent
 
-
 # ── RuntimeServices has replay_runtime ────────────────────────────────────
 
 

@@ -10,7 +10,6 @@ from typing import Any
 from miqi.runtime.ledger_runtime import LedgerItem
 from miqi.runtime.replay_protocol import ReplayDiffView
 
-
 DOCUMENT_VERSION = 1
 
 

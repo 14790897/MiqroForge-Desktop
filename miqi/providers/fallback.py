@@ -20,14 +20,13 @@ Usage::
 """
 from __future__ import annotations
 
-import asyncio
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from loguru import logger
 
 if TYPE_CHECKING:
-    from miqi.providers.base import LLMProvider, LLMResponse
     from miqi.config.schema import Config
+    from miqi.providers.base import LLMProvider, LLMResponse
 
 
 # HTTP error codes that indicate provider-level failure (trigger fallback)

@@ -63,6 +63,39 @@ def sandbox_is_active(sandbox_manager: Any) -> bool:
 _git_bash_checked = False
 _git_bash_path: str | None = None
 
+_host_python_checked = False
+_host_python_path: str | None = None
+
+
+def _find_host_python() -> str | None:
+    """Find a real Python interpreter on the host, skipping store stubs.
+
+    Packaged (frozen) builds only — there sys.executable is the bridge
+    binary itself, not an interpreter. On Windows the PATH scan must skip
+    %LOCALAPPDATA%\\Microsoft\\WindowsApps\\python.exe: that is a store
+    stub which opens the Microsoft Store and hangs instead of running.
+    Result is cached because the per-turn environment description calls
+    this on every turn.
+    """
+    global _host_python_checked, _host_python_path
+    if _host_python_checked:
+        return _host_python_path
+    _host_python_checked = True
+    if os.name == "nt":
+        for entry in os.environ.get("PATH", "").split(os.pathsep):
+            if not entry:
+                continue
+            cand = os.path.join(entry, "python.exe")
+            if not os.path.isfile(cand):
+                continue
+            if "windowsapps" in cand.lower():
+                continue
+            _host_python_path = cand
+            break
+    else:
+        _host_python_path = shutil.which("python3") or shutil.which("python")
+    return _host_python_path
+
 
 def _is_cygwin_bash(path: str) -> bool:
     r"""True when *path* is a Cygwin bash.exe (e.g. C:\cygwin64\bin\bash.exe).
@@ -186,25 +219,76 @@ def _skills_dirs_note(workspace: str | Path | None, style: str) -> str:
     return "技能定位：" + "、".join(parts) + "。"
 
 
-def _python_note(style: str) -> str:
-    """One sentence disclosing the bridge's REAL python interpreter.
-
-    The AI otherwise resolves `python` via PATH and can hit the
-    WindowsApps store stub (hangs ~forever) or a stale interpreter —
-    give it the full path in the exec environment's path style
-    (msys = /c/..., mnt = /mnt/c/..., native = as-is).
-    """
-    exe = str(getattr(sys, "executable", ""))
-    if not exe:
-        return ""
+def _host_python_note(exe: str, style: str) -> str:
     if style == "msys":
         exe = windows_path_to_msys(exe)
-    elif style == "mnt":
-        exe = windows_path_to_mnt(exe)
     return (
         f"推荐 Python 解释器：{exe}。"
         "运行 python 脚本请直接用这个完整路径，避免 PATH 上其他 "
         "python 启动卡顿（如商店占位程序）。"
+    )
+
+
+def _python_note(style: str) -> str:
+    """One sentence disclosing the bridge's REAL python interpreter.
+
+    Host-exec paths only — inside the sandbox the host interpreter cannot
+    run (no WSL interop), see _sandbox_python_note instead.  The AI
+    otherwise resolves `python` via PATH and can hit the WindowsApps
+    store stub (hangs ~forever) or a stale interpreter — give it the full
+    path in the exec environment's path style
+    (msys = /c/..., native = as-is).
+    """
+    if getattr(sys, "frozen", False):
+        # Packaged (PyInstaller) build: sys.executable is miqi-bridge.exe
+        # itself, NOT a python interpreter — recommending it would make
+        # the AI launch a second bridge instead of running the script.
+        # The embedded runtime is private to the bridge, so fall back to a
+        # real host interpreter when one exists.
+        host_py = _find_host_python()
+        if host_py:
+            return _host_python_note(host_py, style)
+        return (
+            "本机未检测到可用的独立 Python（打包版自带的运行时仅供 bridge "
+            "内部使用，不能用来执行脚本）。运行 Python 脚本请让用户安装 "
+            "Python 3.11+，或启用沙箱后在沙箱内使用 python3。"
+        )
+    exe = str(getattr(sys, "executable", ""))
+    if not exe:
+        return ""
+    return _host_python_note(exe, style)
+
+
+def _sandbox_python_note(sandbox_manager: Any) -> str:
+    """Tell the AI how to run Python INSIDE the bwrap sandbox.
+
+    The sandbox ro-binds the distro's /usr, so python3 is always present
+    (the WSL readiness probe only passes with python3 + pip available).
+    The host interpreter disclosure (_python_note) is wrong here: bwrap's
+    namespace isolation removes the WSL interop bridge, so Windows .exe
+    files under /mnt/c — including the bridge's own venv python — can
+    never start, and recommending one makes the AI retry a dead path
+    (#822).
+    """
+    if _is_windows():
+        interop = (
+            "沙箱内无 WSL interop：/mnt/c/... 下的 Windows 程序（含 Windows 侧 "
+            "python.exe）无法启动，不要尝试运行。"
+        )
+    else:
+        interop = ""
+    install = (
+        "Python 依赖用 python3 -m pip install --user <包名> 安装（写入沙箱 HOME，"
+        "沙箱销毁后不保留）；pip 报 externally-managed 时改用 "
+        "python3 -m venv ~/.venv && ~/.venv/bin/pip install <包名>。"
+    )
+    if getattr(sandbox_manager, "allow_system_installs", False):
+        install += (
+            "需要长期可用的依赖可直接 sudo apt-get install python3-<包名>"
+            "（随发行版持久化，装完沙箱内立即可用）。"
+        )
+    return (
+        f"沙箱内请使用 python3（发行版自带，只读挂载始终可用）。{interop}{install}"
     )
 
 
@@ -250,7 +334,7 @@ def describe_exec_environment(
         return (
             " ".join(parts)
             + _skills_dirs_note(workspace, "mnt")
-            + _python_note("mnt")
+            + _sandbox_python_note(sandbox_manager)
         )
     if os.name == "nt":
         if find_git_bash() is not None:
@@ -274,6 +358,10 @@ def describe_exec_environment(
             "cmd 语法注意：用 && 连接多条命令（不支持 ; 分隔），"
             "ls/find/grep/sed 不可用（用 dir / where / findstr），"
             "或使用 powershell -Command \"...\"。"
+            "本机未检测到 Git Bash，请只用 cmd 或 powershell 语法；"
+            "不要直接运行 bash/wsl 命令：PATH 上的 bash 可能是 "
+            "System32\\bash.exe（子系统的入口桩），若子系统未启用会报 "
+            "「EXECUTABLE NOT FOUND / 子系统未安装」。"
             + _skills_dirs_note(workspace, "native") + _python_note("native")
         )
     return (
@@ -297,7 +385,7 @@ class SandboxManager:
         self,
         workspace: Path,
         sandbox_base_dir: Path | None = None,
-        share_net: bool = False,
+        share_net: bool = True,
         enabled: bool = True,
         max_sandboxes: int = 10,
         auto_cleanup: bool = True,

@@ -1,4 +1,4 @@
-# MiqroForge Desktop
+# MiQroForge Desktop
 
 <p align="center">
   <em>🐈‍⬛🪶 A lightweight, extensible personal AI agent framework with a modern desktop interface</em>
@@ -15,7 +15,7 @@
 
 ## Overview
 
-MiqroForge Desktop is an Electron-based desktop application that provides a modern graphical interface for the MiqroForge AI agent. It combines powerful AI agent capabilities with an intuitive user interface, supporting chat interaction, memory management, task scheduling, and more.
+MiQroForge Desktop is an Electron-based desktop application that provides a modern graphical interface for the MiQroForge AI agent. It combines powerful AI agent capabilities with an intuitive user interface, supporting chat interaction, memory management, task scheduling, and more.
 ![interface](interface.png)
 
 ### Core Positioning
@@ -65,9 +65,22 @@ MiqroForge Desktop is an Electron-based desktop application that provides a mode
 
 ### Prerequisites
 
-- **Python 3.11+** — to run the MiqroForge backend
+- **Python 3.11+** — to run the MiQroForge backend
 - **Node.js 20+** — to run Electron frontend
 - **uv** — Python package manager (recommended)
+
+> **Windows users** can install `uv` and Node.js with winget (included in Windows 10 1709+ / Windows 11; if missing, install "App Installer" from the Microsoft Store first):
+>
+> ```bash
+> # Install uv
+> winget install --id astral-sh.uv -e
+>
+> # Install nvm-windows, then Node.js 22
+> winget install --id CoreyButler.NVMforWindows -e
+> nvm install 22
+> ```
+>
+> After installing nvm-windows, open a new terminal before running `nvm`.
 
 ### Installation
 
@@ -129,7 +142,7 @@ miqi-bridge.exe --check
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                    MiqroForge Desktop App                   │
+│                    MiQroForge Desktop App                   │
 ├─────────────────────────────────────────────────────────────┤
 │  Electron Frontend                                          │
 │  ├── React 19 + TypeScript                                 │
@@ -147,7 +160,7 @@ miqi-bridge.exe --check
 │  ├── JSON Schema Draft 2020-12 Catalog                      │
 │  └── Handler Typed Validation                               │
 ├─────────────────────────────────────────────────────────────┤
-│  MiqroForge Runtime Engine                                  │
+│  MiQroForge Runtime Engine                                  │
 │  ├── RuntimeSession / TaskRunner / TurnRunner               │
 │  ├── HistoryRuntime + LedgerRuntime (SQLite persistence)    │
 │  ├── ContextRuntime (compaction, token budgeting)           │

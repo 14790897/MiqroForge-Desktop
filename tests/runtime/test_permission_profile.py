@@ -30,8 +30,8 @@ def test_permission_profile_custom_values():
 
 
 def test_permission_profile_attaches_to_turn_context():
-    from miqi.runtime.permission_profile import PermissionProfile
     from miqi.runtime.agent_registry import AgentMetadata
+    from miqi.runtime.permission_profile import PermissionProfile
     from miqi.runtime.turn_context import TurnContext
 
     profile = PermissionProfile(

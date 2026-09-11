@@ -20,7 +20,6 @@ from typing import Any
 
 from loguru import logger
 
-
 CHAT_DRAIN_IDLE_TIMEOUT_SECONDS = 600
 
 # #798: the frontend watchdog reports "后端 60s 无响应" after 60s without
@@ -72,6 +71,12 @@ class BridgeRuntimeLoop:
         self._terminal_sent: set[str] = set()  # prevent duplicate terminal events
         self._active_chat_tasks: dict[str, asyncio.Task] = {}  # req_id → drain task
         self._session_drain_tasks: dict[str, asyncio.Task] = {}  # session_id → drain
+        # #797: drain tasks released by chat.abort (popped from
+        # _session_drain_tasks but NOT cancelled) — they keep draining in the
+        # background until the aborted turn's terminal event arrives, and the
+        # next chat.send's drain awaits them so a stale terminal event can
+        # never be misread as the new request's terminal.
+        self._released_drain_tasks: dict[str, asyncio.Task] = {}
         # Phase 45: Codex-style connection state (initialize handshake)
         self._connection_state: Any = None  # Created in _init_app_server
 
@@ -296,6 +301,9 @@ class BridgeRuntimeLoop:
         # Phase 45: expose AppServer in bridge_context so handlers can
         # check client capabilities (e.g., experimentalApi).
         registry.bridge_context["app_server"] = self._app_server
+        # #797: expose the turn-lock release so chat.abort (app_server
+        # command handler) can free the bridge-side lock immediately.
+        registry.bridge_context["release_turn_lock"] = self.release_turn_lock
         await self._app_server.start()
 
         import miqi.runtime.protocol_specs as protocol_specs
@@ -306,6 +314,12 @@ class BridgeRuntimeLoop:
         # Register sandbox runtime toggle
         self._app_server.register_method(
             "sandbox.setEnabled", self._sandbox_set_enabled_handler,
+        )
+
+        # Register #854: allow_system_installs runtime toggle (no restart)
+        self._app_server.register_method(
+            "sandbox.setAllowSystemInstalls",
+            self._sandbox_set_allow_system_installs_handler,
         )
 
         # Register Phase 27.3: chat.send through AppServer
@@ -487,15 +501,17 @@ class BridgeRuntimeLoop:
 
         # Register Phase 35.2: providers.* handlers
         from miqi.runtime.provider_handlers import (
+            providers_activate_handler,
+            providers_deactivate_handler,
             providers_list_handler,
             providers_test_handler,
             providers_update_handler,
-            providers_activate_handler,
         )
         self._app_server.register_method("providers.list", providers_list_handler)
         self._app_server.register_method("providers.test", providers_test_handler)
         self._app_server.register_method("providers.update", providers_update_handler)
         self._app_server.register_method("providers.activate", providers_activate_handler)
+        self._app_server.register_method("providers.deactivate", providers_deactivate_handler)
 
         # Register Phase 35.2: channels.* handlers
         from miqi.runtime.channel_handlers import (
@@ -702,6 +718,70 @@ class BridgeRuntimeLoop:
             },
         }
 
+    # ── turn-lock release (issue #797) ───────────────────────────────────
+
+    def release_turn_lock(self, session_id: str) -> bool:
+        """Release the bridge-side turn lock for *session_id* without
+        killing the underlying drain task (#797).
+
+        chat.abort only submits AbortTurn to the runtime; the drain task
+        ends (and the lock frees) only when it reads a terminal event from
+        the session queue.  If the runtime is stuck on a blocking tool call
+        (WSL subprocesses don't respond to asyncio cancellation) no
+        terminal event arrives and the session stays locked until the
+        STALE_TURN_TIMEOUT guard — rejecting every new message with
+        TURN_IN_PROGRESS.
+
+        This pops the drain task from _session_drain_tasks (freeing the
+        lock immediately) but leaves it running in the background: it keeps
+        consuming the aborted turn's events and emits the terminal event
+        for the ORIGINAL request, so nothing stale leaks into a later
+        drain.  Bounded: the drain's own 600s idle timeout terminates it.
+        """
+        if not session_id:
+            return False
+        task = self._session_drain_tasks.pop(session_id, None)
+        if task is None or task.done():
+            return False
+        self._released_drain_tasks[session_id] = task
+        # Drop the _active_chat_tasks entry so shutdown/gc accounting no
+        # longer treats the released drain as an in-flight chat request.
+        for req_id, t in list(self._active_chat_tasks.items()):
+            if t is task:
+                self._active_chat_tasks.pop(req_id, None)
+                break
+        task.add_done_callback(
+            lambda t: self._released_drain_tasks.pop(session_id, None)
+            if self._released_drain_tasks.get(session_id) is t else None
+        )
+        logger.warning(
+            "chat.abort: released turn lock for session {} "
+            "(drain keeps draining in background until terminal event)",
+            session_id,
+        )
+        return True
+
+    async def _await_released_predecessor(self, session_id: str) -> None:
+        """#797: wait for a released (aborted) predecessor drain to finish.
+
+        A chat.send that lands while the aborted turn is still draining
+        must not consume that turn's terminal event as its own.  The
+        predecessor (if any) is the older queue waiter, but waiting on it
+        explicitly removes the race entirely: when it ends it has consumed
+        every event of the aborted turn, so this drain only ever sees its
+        own turn's events.
+        """
+        predecessor = self._released_drain_tasks.get(session_id)
+        if predecessor is not None and not predecessor.done():
+            try:
+                await asyncio.wait([predecessor])
+            except Exception as exc:
+                # A predecessor failure must not block this drain; it is
+                # bounded by its own idle timeout and will be cleaned up.
+                logger.debug(
+                    "chat.send: released predecessor drain errored while awaited: {}", exc
+                )
+
     # ── chat.send handler ──────────────────────────────────────────────────
 
     async def _chat_send_handler(
@@ -874,7 +954,7 @@ class BridgeRuntimeLoop:
                 try:
                     raw = _b64.b64decode(data_b64)
                 except Exception as exc:
-                    logger.warning("chat.send: base64 decode failed for %s: %s", name, exc)
+                    logger.warning("chat.send: base64 decode failed for {}: {}", name, exc)
                     return None
 
                 safe_name = _re.sub(r'[<>:"/\\\\|?*]', '_', name)
@@ -890,7 +970,7 @@ class BridgeRuntimeLoop:
                 # Parse document and extract text (offload to thread to avoid
                 # blocking the persistent bridge event-loop).
                 try:
-                    from miqi.documents.document_parser import parse_document, is_supported_document
+                    from miqi.documents.document_parser import is_supported_document, parse_document
                     if is_supported_document(dest):
                         await _emit_doc_progress(name, "extracting", "Extracting text...")
                         result = await _asyncio.to_thread(parse_document, dest, max_chars=100_000)
@@ -905,7 +985,7 @@ class BridgeRuntimeLoop:
                         )
                         return (name, text)
                 except Exception as exc:
-                    logger.warning("chat.send: parse failed for %s: %s", name, exc)
+                    logger.warning("chat.send: parse failed for {}: {}", name, exc)
                 return (name, "")
 
             tasks = [_decode_and_parse(att) for att in attachments_raw]
@@ -1006,7 +1086,6 @@ class BridgeRuntimeLoop:
         self._app_server.subscribe(client_id, runtime_id)
 
         # Spawn background drain task
-        app_server = self._app_server
         task = asyncio.create_task(
             self._drain_chat_events(
                 request_id=request_id,
@@ -1104,13 +1183,27 @@ class BridgeRuntimeLoop:
         """
         app_server = self._app_server
 
+        # #797: a chat.send that lands while the aborted turn is still
+        # draining (lock released by chat.abort, drain kept alive in the
+        # background) must wait for that predecessor to finish — otherwise a
+        # stale TurnAbortedEvent from the old turn could be emitted as THIS
+        # request's terminal.  The new turn cannot start until the old one
+        # has fully cleaned up anyway (RuntimeSession is single-turn), so
+        # this never delays a live turn.
+        await self._await_released_predecessor(session_id)
+
         async def _emit(
             event_type: str,
             data: Any,
             *,
             refresh_activity: bool = True,
-        ) -> None:
-            """Emit a non-terminal event through AppServer fanout."""
+        ) -> int:
+            """Emit a non-terminal event through AppServer fanout.
+
+            Returns the number of clients the event was handed off to
+            (0 = silently skipped) — delivery-sensitive callers (billing)
+            treat a zero as a failed handoff.
+            """
             # Inject session_key so the frontend can filter events
             # by session, preventing cross-session message leaks (#212).
             if isinstance(data, dict):
@@ -1124,7 +1217,7 @@ class BridgeRuntimeLoop:
                 active = self._session_drain_tasks.get(session_id)
                 if active is not None and not active.done():
                     active._miqi_last_activity = time.monotonic()
-            await app_server.emit_event(
+            return await app_server.emit_event(
                 session_id, event_type, data,
                 request_id=request_id,
             )
@@ -1151,6 +1244,8 @@ class BridgeRuntimeLoop:
             return True
 
         heartbeat_task: asyncio.Task | None = None
+        reasoning_chunks = 0
+        reasoning_chars = 0
 
         try:
             from dataclasses import asdict, is_dataclass
@@ -1165,6 +1260,22 @@ class BridgeRuntimeLoop:
                 await _emit("user_input_requested", payload)
 
             set_user_input_emitter(session_key, _user_input_emitter)
+
+            # Slurm MCP 计费握手（issue #927）：MCP 工具执行前经此通道向
+            # Desktop 发起扣费请求；作业提交成功后回传作业 ID 补进历史。
+            from miqi.agent.billing_resolver import set_billing_charge_emitter
+
+            async def _billing_charge_emitter(payload: dict) -> int:
+                # 返回送达的客户端数：MCP 工具侧据此决定是否标记作业已
+                # 报告（0 送达不标记，下一次 RUNNING 轮询重试）。
+                return await _emit("slurm_job_running", payload)
+
+            # 双键注册：MCP 工具侧拿到的 _session_key 是 client 前缀的
+            # session_id（f"{client_id}:{session_key}"），与 drain 的
+            # session_key 不是同一个键——两个键都注册才能命中。
+            set_billing_charge_emitter(session_key, _billing_charge_emitter)
+            set_billing_charge_emitter(session_id, _billing_charge_emitter)
+
             from miqi.agent.user_input_resolver import set_thread_session
 
             set_thread_session(thread_id, session_key)
@@ -1235,6 +1346,8 @@ class BridgeRuntimeLoop:
                     }
                     if event.reasoning:
                         final_payload["reasoning"] = event.reasoning
+                    if event.reasoning_elapsed_s is not None:
+                        final_payload["reasoning_elapsed_s"] = event.reasoning_elapsed_s
                     await _emit_terminal("final", final_payload)
                     # Do NOT break — consume the TurnCompleteEvent that
                     # follows so the next drain task starts with a clean queue.
@@ -1293,10 +1406,13 @@ class BridgeRuntimeLoop:
                 # streaming thinking block (DeepSeek-R1 / Kimi thinking
                 # models). Issue #539.
                 if isinstance(event, AgentReasoningEvent):
-                    logger.info(
-                        "forwarding reasoning_delta (len={}) for turn={}",
-                        len(event.content), event.turn_id,
-                    )
+                    reasoning_chunks += 1
+                    reasoning_chars += len(event.content)
+                    if reasoning_chunks % 10 == 0:
+                        logger.info(
+                            "forwarding reasoning_delta #{} (len={}) for turn={}",
+                            reasoning_chunks, len(event.content), event.turn_id,
+                        )
                     await _emit("progress", {
                         "stream": "reasoning",
                         "delta": event.content,
@@ -1369,6 +1485,12 @@ class BridgeRuntimeLoop:
             })
         finally:
             # Stop the heartbeat — the turn is done (or the drain died).
+            if reasoning_chunks:
+                logger.info(
+                    "chat.send drain done: forwarded {} reasoning chunks "
+                    "({} chars) for session={}",
+                    reasoning_chunks, reasoning_chars, session_id,
+                )
             if heartbeat_task is not None:
                 heartbeat_task.cancel()
             # Unwire THIS session's user-input emitter and thread mapping so
@@ -1505,11 +1627,7 @@ class BridgeRuntimeLoop:
         AppServer.dispatch() on the persistent loop.
         For legacy methods, call the sync dispatch function directly.
         """
-        dispatch_legacy = self._dispatch_legacy
-        app_server = self._app_server
-        send = self._send
         queue = self._stdin_queue
-        conn_state = self._connection_state
         if queue is None:
             logger.error("BridgeRuntimeLoop: stdin queue not initialized")
             return
@@ -1792,7 +1910,7 @@ class BridgeRuntimeLoop:
             sb_cfg = getattr(config.tools, "sandbox", None)
             new_mgr = SandboxManager(
                 workspace=config.workspace_path,
-                share_net=getattr(sb_cfg, "share_net", False),
+                share_net=getattr(sb_cfg, "share_net", True),
                 enabled=True,
                 max_sandboxes=getattr(sb_cfg, "max_sandboxes", 10),
                 auto_cleanup=getattr(sb_cfg, "auto_cleanup", True),
@@ -1832,6 +1950,77 @@ class BridgeRuntimeLoop:
             )
             return {"result": {"enabled": False, "destroyed": destroyed}}
 
+    async def _sandbox_set_allow_system_installs_handler(
+        self, request_id: str, params: dict, client_id: str,
+        session_id: str | None, registry: Any,
+    ) -> dict:
+        """#854: sandbox.setAllowSystemInstalls — runtime toggle, no restart.
+
+        统一入口（外部审阅 #854；#875 review 09-02 P2 修订）：runtime 属性
+        与 config 持久化原子成对——与确认卡「允许并记住」共享
+        ``apply_system_installs_toggle``（同一实现防止行为漂移）；本 handler
+        额外刷新 bridge 内存态，失败按 fail-closed 抛 AppServerError（设置页
+        UI 语义：开关不得停留在"已开启"而实际未生效）。
+        """
+        if not isinstance(params, dict):
+            from miqi.runtime.app_server import AppServerError
+
+            raise AppServerError(
+                "sandbox.setAllowSystemInstalls: params must be an object",
+                code="INVALID_PARAMS",
+            )
+        enabled = params.get("enabled")
+        if not isinstance(enabled, bool):
+            from miqi.runtime.app_server import AppServerError
+
+            raise AppServerError(
+                "sandbox.setAllowSystemInstalls: 'enabled' must be a boolean",
+                code="INVALID_PARAMS",
+            )
+        if self._bridge_state is None:
+            from miqi.runtime.app_server import AppServerError
+
+            raise AppServerError(
+                "Bridge state not available", code="INTERNAL",
+            )
+
+        # 统一入口（外部审阅 #854；#875 review 09-02 P2）：与确认卡
+        # 「允许并记住」共享 apply_system_installs_toggle——config 持久化
+        # （共享锁 fresh-read，与卡 approver、extra-root persister 同一把锁）
+        # 在前、runtime 切换在后（fail-closed），两条路径同一实现。
+        from miqi.runtime.tool_registry_factory import apply_system_installs_toggle
+
+        mgr = getattr(self._bridge_state, "_sandbox_manager", None)
+        persist_failed, runtime_failed = apply_system_installs_toggle(
+            enabled, None if mgr == "disabled" else mgr,
+        )
+        if persist_failed:
+            logger.error("sandbox.setAllowSystemInstalls: config save failed")
+            from miqi.runtime.app_server import AppServerError
+
+            raise AppServerError(
+                "Failed to save config", code="INTERNAL",
+            )
+        if runtime_failed:
+            # #875 review: config is already persisted, but the runtime
+            # toggle did NOT apply.  Returning success here would show
+            # "已开启" in the UI while the sandbox still denies installs
+            # (UI=true / config=true / runtime=false).  Surface the
+            # failure so the toggle stays off; a restart picks up the
+            # persisted config.
+            from miqi.runtime.app_server import AppServerError
+
+            raise AppServerError(
+                "Runtime update failed (config saved; restart to apply)",
+                code="INTERNAL",
+            )
+        # 刷新 bridge 内存态（save_config 已失效 loader 缓存，重新加载）
+        self._bridge_state.config = self._bridge_state.load_config()
+        logger.info(
+            "sandbox.setAllowSystemInstalls: {} (client={})", enabled, client_id,
+        )
+        return {"result": {"allowSystemInstalls": enabled}}
+
     async def _shutdown(self) -> None:
         """Graceful shutdown sequence.
 
@@ -1861,6 +2050,18 @@ class BridgeRuntimeLoop:
             )
         self._active_chat_tasks.clear()
         self._session_drain_tasks.clear()
+        # #797: released drains (aborted turns still draining in the
+        # background) are bounded by their own 600s idle timeout, but at
+        # shutdown cancel them so the loop can close cleanly.
+        for task in list(self._released_drain_tasks.values()):
+            if not task.done():
+                task.cancel()
+        if self._released_drain_tasks:
+            await asyncio.gather(
+                *list(self._released_drain_tasks.values()),
+                return_exceptions=True,
+            )
+        self._released_drain_tasks.clear()
 
         # 2. Stop AppServer (stops RuntimeSessions, cancels TTL, etc.)
         if self._app_server is not None:

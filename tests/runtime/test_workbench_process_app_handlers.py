@@ -1,10 +1,8 @@
 """Tests for workbench process/* AppServer handlers (Phase 43.5)."""
 
-import asyncio
 from pathlib import Path
 
 import pytest
-
 
 # ── Helpers ──────────────────────────────────────────────────────────────
 

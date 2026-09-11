@@ -54,11 +54,17 @@ function findFileInSessionDirs(miqiHome: string, filename: string): string | nul
 
 async function waitForFileInPanel(page: Page, filename: string, timeout = 30_000) {
   const assetsPanel = page.getByTestId('task-assets-panel');
-  const card = assetsPanel.locator('[class*="rounded"][class*="p-"]').filter({ hasText: filename.slice(0, 20) }).first();
+  const card = assetsPanel
+    .locator('[class*="rounded"][class*="p-"]')
+    .filter({ hasText: filename.slice(0, 20) })
+    .first();
   try {
     await expect(card).toBeVisible({ timeout });
   } catch {
-    const fallback = assetsPanel.locator('.rounded-lg.p-2\\.5').filter({ hasText: filename.slice(0, 20) }).first();
+    const fallback = assetsPanel
+      .locator('.rounded-lg.p-2\\.5')
+      .filter({ hasText: filename.slice(0, 20) })
+      .first();
     await expect(fallback).toBeVisible({ timeout });
     return fallback;
   }
@@ -137,7 +143,8 @@ test.describe('Session Workspace Isolation E2E', () => {
     // absolute root path.  The write must be redirected into the session's
     // isolated files dir.  Retry the send once — deepseek no-op turns (the
     // model replies without calling write_file) are a known flake class.
-    const message = `必须调用 write_file 工具创建文件，path 参数必须是绝对路径 "${absoluteTarget}"，content="${content}"。` +
+    const message =
+      `必须调用 write_file 工具创建文件，path 参数必须是绝对路径 "${absoluteTarget}"，content="${content}"。` +
       `创建完成后只回复"完成"。`;
     let created = false;
     for (let attempt = 0; attempt < 2 && !created; attempt++) {
@@ -157,7 +164,10 @@ test.describe('Session Workspace Isolation E2E', () => {
     console.log(`[test] ✅ File "${filename}" found under sessions/*/files/`);
 
     // …and NOT at the shared workspace root.
-    expect(existsSync(absoluteTarget), `file must not exist at workspace root: ${absoluteTarget}`).toBe(false);
+    expect(
+      existsSync(absoluteTarget),
+      `file must not exist at workspace root: ${absoluteTarget}`
+    ).toBe(false);
     console.log('[test] ✅ Workspace root is clean');
 
     // The Task Assets panel still shows the file (tracked_files bookkeeping
@@ -168,32 +178,13 @@ test.describe('Session Workspace Isolation E2E', () => {
 
   test('a new session does not see the previous session files', async () => {
     test.setTimeout(LLM_TIMEOUT);
-    const marker = `E2E_WSISO_B_${Date.now()}`;
-    const filename = `e2e_wsiso_b_${Date.now()}.md`;
-    const workspaceRoot = resolve(join(miqiHome, 'workspace'));
-    const content = `# ${marker}\n\nIsolation check.`;
 
+    // 直接切到新会话：其资产面板必须为空——不能泄漏上一条用例会话的
+    // 追踪文件。隔离断言的对象就是会话 A 的文件，无需再走一轮 LLM 创建。
     await createNewConversation(page);
-    const createMessage = `必须调用 write_file 工具创建文件，path 参数必须是绝对路径 "${join(workspaceRoot, filename)}"，content="${content}"。` +
-      `创建完成后只回复"完成"。`;
-    // Same no-op retry loop as the first test (CodeRabbit #731 review).
-    let created = false;
-    for (let attempt = 0; attempt < 2 && !created; attempt++) {
-      await sendMessageWithRetry(page, createMessage);
-      await waitForResponseComplete(page, 240_000);
-      created = findFileInSessionDirs(miqiHome, filename) !== null;
-      if (!created) {
-        console.log(`[test] ⚠️ write_file not executed (attempt ${attempt + 1}) — retrying send`);
-      }
-    }
-    await expect
-      .poll(() => findFileInSessionDirs(miqiHome, filename), { timeout: 30_000 })
-      .not.toBeNull();
-
-    // Switch to a fresh session — its Task Assets panel must start empty
-    // (no cross-session leakage).
-    await createNewConversation(page);
-    await expect(page.locator('[data-testid="task-assets-empty"]')).toBeVisible({ timeout: 15_000 });
+    await expect(page.locator('[data-testid="task-assets-empty"]')).toBeVisible({
+      timeout: 15_000,
+    });
     console.log('[test] ✅ New session shows empty Task Assets');
   });
 });

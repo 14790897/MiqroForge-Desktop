@@ -76,7 +76,7 @@ test.describe('MOF-5 Qraft Upload E2E', () => {
     test.skip(
       !qraftTokenValid(),
       'Opt-in: requires a valid Qraft login in ' +
-        `${join(REAL_WORKSPACE, '.qraft', 'token.json')} (set MIQI_E2E_WORKSPACE)`,
+        `${join(REAL_WORKSPACE, '.qraft', 'token.json')} (set MIQI_E2E_WORKSPACE)`
     );
 
     const fixture = await launchElectronApp((config) => {
@@ -207,8 +207,8 @@ test.describe('MOF-5 Qraft Upload E2E', () => {
 
       await postScreenshotToPr(
         `test-results/${test.info().title.replace(/\s+/g, '-')}.png`,
-        '✅ E2E 验收通过：MOF-5 报告生成 + qraft-workflowspec-export 上传',
+        '✅ E2E 验收通过：MOF-5 报告生成 + qraft-workflowspec-export 上传'
       );
-    },
+    }
   );
 });

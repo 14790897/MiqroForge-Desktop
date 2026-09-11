@@ -17,7 +17,6 @@ from typing import Any
 
 from loguru import logger
 
-
 # ── Constants ────────────────────────────────────────────────────────────────
 
 MAX_RESULTS = 50

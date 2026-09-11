@@ -8,7 +8,6 @@ import asyncio
 
 import pytest
 
-
 # ── Fixtures ─────────────────────────────────────────────────────────────
 
 
@@ -432,7 +431,7 @@ async def test_kill_returncode_zero_preserved(process_runtime):
         # Block until the test is done inspecting
         await ok_to_cleanup.wait()
 
-    handle = await process_runtime.spawn_background(
+    await process_runtime.spawn_background(
         client_id="test-client",
         handle_id="kill-returncode-zero",
         kind="process",
@@ -476,7 +475,7 @@ async def test_kill_returncode_nonzero_preserved(process_runtime):
         exit_seen.set()
         await ok_to_cleanup.wait()
 
-    handle = await process_runtime.spawn_background(
+    await process_runtime.spawn_background(
         client_id="test-client",
         handle_id="kill-returncode-one",
         kind="process",

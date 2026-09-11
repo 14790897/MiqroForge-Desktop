@@ -19,6 +19,8 @@ Run:  PYTHONPATH=. .venv/Scripts/python.exe scripts/mock_openai.py
 from __future__ import annotations
 
 import json
+import os
+import re
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 EXEC_TITLE = "确认执行方案？"
@@ -48,7 +50,6 @@ UPLOAD_CHOICES = [
 
 def _build_steps(text: str) -> list[dict]:
     """动态生成步骤：解析用户调整要求（步数/市场/复杂度），模拟 LLM 理解。"""
-    import re
 
     n = 3
     # Bounded digit run — avoids CodeQL py/polynomial-redos on long inputs.
@@ -281,14 +282,37 @@ class Handler(BaseHTTPRequestHandler):
                 "usage": {"prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20},
             }
 
-        # ── issue #714 dual-card branch（同一回合两张确认卡） ──
-        # Triggered by the LATEST user message containing "双卡" so it never
-        # collides with the main flow; counts only dual-titled cards already
-        # emitted so the branch is deterministic even with shared history.
+        # ── issue #864 write-authorization card branch ──
+        # Triggered by the LATEST user message containing "写授权" so it never
+        # collides with the main flow. The model emits ONE response carrying a
+        # single write_file tool_call whose target is a workspace-EXTERNAL
+        # absolute path (a temp dir on the host) and declares it via
+        # authorize_paths — the desktop must pop the write-authorization card
+        # (允许本次 / 本目录不再询问 / 拒绝) instead of silently writing.
         last_user = next(
             (str(m.get("content", "")) for m in reversed(messages) if m.get("role") == "user"),
             "",
         )
+        if "写授权" in last_user:
+            if n_write > 0:
+                self._respond(text("写授权流程结束。"))
+                return
+            out_dir = os.environ.get("MIQI_AUTH_OUT_DIR", "")
+            target = os.path.join(out_dir, "auth_probe.txt") if out_dir else ""
+            if not target:
+                self._respond(text("写授权：缺少 MIQI_AUTH_OUT_DIR 环境变量。"))
+                return
+            self._respond(tc("write_file", {
+                "path": target,
+                "content": "authorization-card-e2e-probe",
+                "authorize_paths": [target],
+            }, "call_auth_write"))
+            return
+
+        # ── issue #714 dual-card branch（同一回合两张确认卡） ──
+        # Triggered by the LATEST user message containing "双卡" so it never
+        # collides with the main flow; counts only dual-titled cards already
+        # emitted so the branch is deterministic even with shared history.
         n_dual_calls = 0
         for m in messages:
             if m.get("role") != "assistant" or not m.get("tool_calls"):

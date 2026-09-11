@@ -50,10 +50,7 @@ async function mainText(page: Page): Promise<string> {
 
 /** Text of the LAST assistant bubble — the model's newest reply. */
 async function lastAssistantReply(page: Page): Promise<string> {
-  return (await page
-    .locator('[data-testid="chat-message-assistant"]')
-    .last()
-    .textContent()) || '';
+  return (await page.locator('[data-testid="chat-message-assistant"]').last().textContent()) || '';
 }
 
 test.describe('Workspace Switch E2E', () => {
@@ -74,9 +71,7 @@ test.describe('Workspace Switch E2E', () => {
     'create custom dir → switch workspace → verify pill + session workspace',
     { timeout: LLM_TIMEOUT },
     async () => {
-      await page.evaluate(() =>
-        (window as any).miqi.approvals.addPermanent('*:*', 'always'),
-      );
+      await page.evaluate(() => (window as any).miqi.approvals.addPermanent('*:*', 'always'));
 
       await dismissOverlays(page);
 
@@ -98,16 +93,21 @@ test.describe('Workspace Switch E2E', () => {
       //    Patch via electronApp.evaluate instead — this captures the same
       //    pattern used by feedback.spec.ts for mocking IPC handlers.
       const DIALOG_OPEN_DIRECTORY = 'dialog:openDirectory';
-      await electronApp.evaluate(async ({ ipcMain: ipc }, { channel, ws }: { channel: string; ws: string }) => {
-        ipc.removeHandler(channel);
-        ipc.handle(channel, async () => ws);
-      }, { channel: DIALOG_OPEN_DIRECTORY, ws: customWs });
+      await electronApp.evaluate(
+        async ({ ipcMain: ipc }, { channel, ws }: { channel: string; ws: string }) => {
+          ipc.removeHandler(channel);
+          ipc.handle(channel, async () => ws);
+        },
+        { channel: DIALOG_OPEN_DIRECTORY, ws: customWs }
+      );
 
       // ── 4. Click "更换" → picker → browse → workspace switches ──
       const changeBtn = page.locator('[data-testid="inline-workspace-change-btn"]');
       await expect(changeBtn).toBeEnabled({ timeout: 5000 });
       await changeBtn.click();
-      await expect(page.locator('[data-testid="workspace-picker-modal"]')).toBeVisible({ timeout: 5000 });
+      await expect(page.locator('[data-testid="workspace-picker-modal"]')).toBeVisible({
+        timeout: 5000,
+      });
       await page.locator('[data-testid="workspace-picker-browse"]').click();
 
       await waitForInputReady(page, 15000);
@@ -123,14 +123,13 @@ test.describe('Workspace Switch E2E', () => {
       // Windows may resolve short 8.3 names (INTERS~1 → Intership003), so
       // compare using realpath.  On non-Windows this is a no-op.
       const resolvedCustomWs = realpathSync(customWs);
-      const pillPathMatch =
-        pillText!.includes(customWs) || pillText!.includes(resolvedCustomWs);
+      const pillPathMatch = pillText!.includes(customWs) || pillText!.includes(resolvedCustomWs);
       // Also check the last segment (basename) in case the path display
       // normalises differently.
       const basename = customWs.split(/[/\\]/).pop()!;
       expect(
         pillPathMatch || pillText!.includes(basename),
-        `expected pill "${pillText}" to contain "${customWs}" or "${resolvedCustomWs}" or "${basename}"`,
+        `expected pill "${pillText}" to contain "${customWs}" or "${resolvedCustomWs}" or "${basename}"`
       ).toBe(true);
       console.log(`[test] ✅ Pill reflects custom workspace`);
 
@@ -141,7 +140,9 @@ test.describe('Workspace Switch E2E', () => {
         try {
           const s = await (window as any).miqi.runtime.status();
           return s?.sandbox_available === true;
-        } catch { return false; }
+        } catch {
+          return false;
+        }
       });
       console.log(`[test] Sandbox available: ${sandboxAvail}`);
       if (sandboxAvail) {
@@ -163,7 +164,9 @@ test.describe('Workspace Switch E2E', () => {
             try {
               // re-read live status each iteration
               return (window as any).miqi.runtime.status()?.sandbox_available;
-            } catch { return true; }
+            } catch {
+              return true;
+            }
           });
           if (!stillOn) break;
           await page.waitForTimeout(2000);
@@ -172,7 +175,9 @@ test.describe('Workspace Switch E2E', () => {
           try {
             const s = await (window as any).miqi.runtime.status();
             return s?.sandbox_available === true;
-          } catch { return false; }
+          } catch {
+            return false;
+          }
         });
         console.log(`[test] Sandbox after disable: ${after}`);
         // Proceed even if sandbox didn't disable — WSL sandbox disable
@@ -185,7 +190,10 @@ test.describe('Workspace Switch E2E', () => {
       //    system-prompt context or a real `pwd`. The hard proof that the
       //    workspace switched correctly is in steps 8-10 (metadata,
       //    write_file, read_file). Don't fail the suite on LLM wording.
-      await sendMessage(page, '请回复你当前会话的工作目录的绝对路径。如果你的环境上下文中有该路径，直接引用；否则用 exec 工具执行 pwd。只回复路径，不要解释。');
+      await sendMessage(
+        page,
+        '请回复你当前会话的工作目录的绝对路径。如果你的环境上下文中有该路径，直接引用；否则用 exec 工具执行 pwd。只回复路径，不要解释。'
+      );
       await waitForResponseComplete(page);
       const reply = await lastAssistantReply(page);
       console.log(`[test] AI reply about workspace: ${reply?.slice(0, 500)}`);
@@ -199,7 +207,9 @@ test.describe('Workspace Switch E2E', () => {
       if (replyPathMatch) {
         console.log(`[test] ✅ AI correctly identified the custom workspace`);
       } else {
-        console.log(`[test] ⚠️ AI reply did not mention the custom workspace path (soft check — continuing)`);
+        console.log(
+          `[test] ⚠️ AI reply did not mention the custom workspace path (soft check — continuing)`
+        );
       }
 
       // ── 8. Verify session metadata has the workspace ──
@@ -214,7 +224,9 @@ test.describe('Workspace Switch E2E', () => {
               return mw;
             }
           }
-        } catch { return null; }
+        } catch {
+          return null;
+        }
         return null;
       }, customWs);
       console.log(`[test] Session metadata workspace: ${metaWs}`);
@@ -226,44 +238,63 @@ test.describe('Workspace Switch E2E', () => {
       //    workspace should already be customWs.
       const marker = `WS_FILE_${Date.now().toString(36)}`;
       const markerFile = `_e2e_ws_file.txt`;
-      await sendMessage(page,
+      await sendMessage(
+        page,
         `用 write_file 工具在当前工作目录创建文件 ${markerFile}，内容为 "${marker}"。只回复是否成功。`
       );
       await waitForResponseComplete(page);
       const { existsSync: existsCheck } = await import('node:fs');
       const fileAtCustomWs = existsCheck(join(customWs, markerFile));
-      console.log(`[test] write_file at customWs: ${fileAtCustomWs} (${join(customWs, markerFile)})`);
+      console.log(
+        `[test] write_file at customWs: ${fileAtCustomWs} (${join(customWs, markerFile)})`
+      );
       if (fileAtCustomWs) {
         console.log(`[test] ✅ AI wrote file to custom workspace`);
-        try { unlinkSync(join(customWs, markerFile)); } catch { /* ignore */ }
+        try {
+          unlinkSync(join(customWs, markerFile));
+        } catch {
+          /* ignore */
+        }
       }
       expect(
         fileAtCustomWs,
-        `write_file should create "${markerFile}" inside customWs "${customWs}"`,
+        `write_file should create "${markerFile}" inside customWs "${customWs}"`
       ).toBe(true);
 
       // ── 10. Ask AI to READ the pre-existing file from customWs —
       //    hello.txt was created at the start of the test in customWs.
       //    If read_file resolves against the custom workspace, the AI
       //    must be able to see its contents.
-      await sendMessage(page,
+      await sendMessage(
+        page,
         `用 read_file 工具读取文件 ${preExistingFile}，只回复文件内容原文，不要任何解释。`
       );
       await waitForResponseComplete(page);
       const readReply = await lastAssistantReply(page);
       console.log(`[test] AI read reply (last 300): ${readReply?.slice(-300)}`);
-      const readMatch =
-        readReply.includes(preExistingContent);
+      const readMatch = readReply.includes(preExistingContent);
       expect(
         readMatch,
-        `expected AI read reply to contain "${preExistingContent}", got: "${readReply?.slice(0, 200)}"`,
+        `expected AI read reply to contain "${preExistingContent}", got: "${readReply?.slice(0, 200)}"`
       ).toBe(true);
       console.log(`[test] ✅ AI read pre-existing file from custom workspace`);
 
       // ── Cleanup ──
-      try { unlinkSync(join(customWs, preExistingFile)); } catch { /* ignore */ }
-      try { unlinkSync(join(customWs, 'notes.md')); } catch { /* ignore */ }
-      try { rmdirSync(customWs); } catch { /* ignore */ }
-    },
+      try {
+        unlinkSync(join(customWs, preExistingFile));
+      } catch {
+        /* ignore */
+      }
+      try {
+        unlinkSync(join(customWs, 'notes.md'));
+      } catch {
+        /* ignore */
+      }
+      try {
+        rmdirSync(customWs);
+      } catch {
+        /* ignore */
+      }
+    }
   );
 });

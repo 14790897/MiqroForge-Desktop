@@ -383,7 +383,7 @@ class AppServer:
                 "code": exc.code,
                 "recoverable": exc.recoverable,
             }
-        except Exception as exc:
+        except Exception:
             logger.exception(
                 "AppServer: internal error dispatching {} {} (client={})",
                 method, request_id, client_id,
@@ -605,15 +605,19 @@ class AppServer:
         data: Any,
         *,
         request_id: str | None = None,
-    ) -> None:
+    ) -> int:
         """Emit an event to all clients subscribed to a session.
 
         Clients without a registered sink are silently skipped.
         Respects per-client notification opt-out (Phase 45).
+
+        Returns the number of clients whose sink accepted the envelope —
+        callers with delivery-sensitive semantics (billing handoff) can use
+        it to distinguish a silently-skipped emit from a handed-off one.
         """
         subs = self._subscriptions.get(session_id, set())
         if not subs:
-            return
+            return 0
 
         envelope = {
             "request_id": request_id,
@@ -621,8 +625,11 @@ class AppServer:
             "data": data,
         }
 
+        delivered = 0
         for client_id in list(subs):
-            await self._deliver_to_client(client_id, event_type, envelope)
+            if await self._deliver_to_client(client_id, event_type, envelope):
+                delivered += 1
+        return delivered
 
     async def emit_client_event(
         self,
@@ -685,13 +692,18 @@ class AppServer:
         client_id: str,
         event_type: str,
         envelope: dict[str, Any],
-    ) -> None:
-        """Deliver event envelope to *client_id* if not opted out."""
+    ) -> bool:
+        """Deliver event envelope to *client_id* if not opted out.
+
+        Returns True only when the client's sink accepted the envelope;
+        opt-out / missing sink / sink exception all count as not delivered
+        (the sink exception is logged, mirroring the previous behavior).
+        """
         if not self.should_deliver_notification(client_id, event_type):
-            return
+            return False
         sink = self._event_sinks.get(client_id)
         if sink is None:
-            return
+            return False
         try:
             await sink(envelope)
         except Exception as exc:
@@ -699,6 +711,8 @@ class AppServer:
                 "AppServer: failed to deliver event {} to client {}: {}",
                 event_type, client_id, exc,
             )
+            return False
+        return True
 
 
 # ── Bridge context helpers (Phase 35 hardening) ──────────────────────────
@@ -837,6 +851,15 @@ def register_command_handlers(server: "AppServer") -> None:
 
     # ── chat.abort ───────────────────────────────────────────────────────
     async def _chat_abort(request_id, params, client_id, session_id, registry):
+        """Submit AbortTurn, then release the bridge-side turn lock (#797).
+
+        The release is best-effort and runs even when the AbortTurn
+        submission fails (a submit failure must not leave the session
+        locked).  But a failed submission must NOT be reported as a
+        successful abort — the turn keeps running, and reporting success
+        would let the client show a false "stopped" state while the work
+        continues.  Surface it as a recoverable ABORT_FAILED instead.
+        """
         from miqi.protocol.commands import AbortTurn
 
         typed = validate_thread_params("chat.abort", params)
@@ -848,7 +871,34 @@ def register_command_handlers(server: "AppServer") -> None:
         # explicit thread registers its cancel event under session_key, so an
         # abort that resolved to "default" could never signal it (#542).
         thread_id = typed.thread_id or params.get("session_key") or "default"
-        await session.submit(AbortTurn(thread_id=thread_id))
+        abort_submitted = False
+        try:
+            await session.submit(AbortTurn(thread_id=thread_id))
+            abort_submitted = True
+        except Exception as exc:
+            # The abort must still release the turn lock below — a submit
+            # failure (e.g. runtime teardown race) must not leave the session
+            # locked.  Log and continue with the release.
+            logger.warning("chat.abort: AbortTurn submit failed: {}", exc)
+        # #797: interrupt must free the bridge-side turn lock immediately.
+        # AbortTurn alone only ends the drain task when the runtime emits a
+        # terminal event; a runtime stuck on a blocking tool call (WSL
+        # subprocess ignores asyncio cancellation) never does, leaving the
+        # session rejecting every new message with TURN_IN_PROGRESS for up
+        # to STALE_TURN_TIMEOUT.  Release pops the drain from
+        # _session_drain_tasks (it keeps draining in the background).
+        release = get_bridge_context(registry, "release_turn_lock")
+        if callable(release):
+            try:
+                release(session_id)
+            except Exception as exc:
+                logger.warning("chat.abort: turn-lock release failed: {}", exc)
+        if not abort_submitted:
+            raise AppServerError(
+                "Failed to abort turn; the turn may still be running",
+                code="ABORT_FAILED",
+                recoverable=True,
+            )
         return {"result": {"aborted": True}}
 
     import miqi.runtime.protocol_specs as protocol_specs

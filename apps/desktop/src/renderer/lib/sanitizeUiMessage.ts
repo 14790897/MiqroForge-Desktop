@@ -14,8 +14,10 @@ const MAX_LEN = 300;
  * Matches http(s) URLs.
  * Applied BEFORE the path regex so URLs are replaced as a whole unit,
  * rather than having their path segments fragmented into [path] markers.
+ * Case-insensitive (HTTPS:// … 同样整体替换)且不设长度上限 —— 截断在
+ * 上方先行执行,匹配长度天然有界（#991 review）。
  */
-const RE_URL = /https?:\/\/[^\s"'<>]{1,200}/g;
+const RE_URL = /https?:\/\/[^\s"'<>]+/gi;
 
 /**
  * Matches Unix / Windows absolute paths.
@@ -26,10 +28,12 @@ const RE_URL = /https?:\/\/[^\s"'<>]{1,200}/g;
  * Three alternatives (longest-first so UNC wins over drive-letter):
  *   1) UNC:  \\?\X:\dir\...\file
  *   2) Windows drive:  X:\dir\...\file
- *   3) Unix absolute:  /dir/.../file
+ *   3) Unix absolute:  /dir/.../file — 负向后顾要求斜杠前不是单词字符，
+ *      避免把 deepseek/deepseek-v4-flash 这类 provider/model id 误当路径
+ *      打码成 [path]（实测：保存网关模型报错被显示成 deepseek[path]）。
  */
 const RE_PATH =
-  /(?:\\\\\?\\[A-Za-z]:[\\/](?:[^\s"'<>|:]+[\\/])*[^\s"'<>|:]+)|(?:[A-Za-z]:[\\/](?:[^\s"'<>|:]+[\\/])*[^\s"'<>|:]+)|(?:\/(?:[^\s"'<>|:]+[\/])*[^\s"'<>|:]+)/g;
+  /(?:\\\\\?\\[A-Za-z]:[\\/](?:[^\s"'<>|:]+[\\/])*[^\s"'<>|:]+)|(?:[A-Za-z]:[\\/](?:[^\s"'<>|:]+[\\/])*[^\s"'<>|:]+)|(?:(?<![A-Za-z0-9_.-])\/(?:[^\s"'<>|:]+[\/])*[^\s"'<>|:]+)/g;
 
 /** Matches long Base64-like tokens (40+ contiguous base64 chars). */
 const RE_TOKEN = /\b[A-Za-z0-9+/=]{40,}\b/g;

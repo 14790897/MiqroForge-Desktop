@@ -48,7 +48,7 @@ async function sendStart(page: Page, text: string) {
   await inputX.type(text);
   await inputX.press('Enter');
   await expect(
-    page.locator('main [class*="max-w-[760px]"]').getByText(text, { exact: false }).first(),
+    page.locator('main [class*="max-w-[760px]"]').getByText(text, { exact: false }).first()
   ).toBeVisible({ timeout: 15_000 });
 }
 
@@ -106,9 +106,9 @@ async function switchAwayAndBack(page: Page, aKey: string, markerA: string) {
   await aButton!.click();
 
   // Marker text visible again — the core restoration check (no refresh).
-  await expect(
-    msgList.getByText(markerA, { exact: false }).first(),
-  ).toBeVisible({ timeout: 10_000 });
+  await expect(msgList.getByText(markerA, { exact: false }).first()).toBeVisible({
+    timeout: 10_000,
+  });
 
   return msgList;
 }
@@ -159,7 +159,7 @@ test.describe('Session Streaming Isolation E2E', () => {
       expect(contentB, 'Session B should contain its own marker').toContain(markerB);
 
       console.log(`[test] ✅ Session B isolated — no cross-session message leak`);
-    },
+    }
   );
 
   test(
@@ -179,22 +179,25 @@ test.describe('Session Streaming Isolation E2E', () => {
       expect((await page.locator('main').textContent()) || '').toContain(markerB);
 
       // Verify via IPC: A's history must not contain B's marker and vice versa.
-      const isolation = await page.evaluate(async (markers) => {
-        const all = await (window as any).miqi.sessions.list();
-        const sessions: any[] = all.sessions || all || [];
-        const results: any[] = [];
-        for (const s of sessions) {
-          try {
-            const detail = await (window as any).miqi.sessions.get(s.key);
-            const msgs = Array.isArray(detail?.messages) ? detail.messages : [];
-            const text = msgs.map((m: any) => m.content || '').join('\n');
-            results.push({ key: s.key, title: s.title, text });
-          } catch (e) {
-            results.push({ key: s.key, title: s.title, text: '', error: String(e) });
+      const isolation = await page.evaluate(
+        async (markers) => {
+          const all = await (window as any).miqi.sessions.list();
+          const sessions: any[] = all.sessions || all || [];
+          const results: any[] = [];
+          for (const s of sessions) {
+            try {
+              const detail = await (window as any).miqi.sessions.get(s.key);
+              const msgs = Array.isArray(detail?.messages) ? detail.messages : [];
+              const text = msgs.map((m: any) => m.content || '').join('\n');
+              results.push({ key: s.key, title: s.title, text });
+            } catch (e) {
+              results.push({ key: s.key, title: s.title, text: '', error: String(e) });
+            }
           }
-        }
-        return results;
-      }, [markerA, markerB]);
+          return results;
+        },
+        [markerA, markerB]
+      );
 
       const sessionA = isolation.find((s: any) => s.text.includes(markerA));
       const sessionB = isolation.find((s: any) => s.text.includes(markerB));
@@ -207,19 +210,27 @@ test.describe('Session Streaming Isolation E2E', () => {
       let aText = sessionA?.text ?? '';
       let bText = sessionB?.text ?? '';
       if (aText.includes(markerB) || bText.includes(markerA)) {
-        const retry = await page.evaluate(async (markers) => {
-          const all = await (window as any).miqi.sessions.list();
-          const sessions: any[] = all.sessions || all || [];
-          const results: any[] = [];
-          for (const s of sessions) {
-            try {
-              const detail = await (window as any).miqi.sessions.get(s.key);
-              const msgs = Array.isArray(detail?.messages) ? detail.messages : [];
-              results.push({ key: s.key, text: msgs.map((m: any) => m.content || '').join('\n') });
-            } catch { /* ignore */ }
-          }
-          return results;
-        }, [markerA, markerB]);
+        const retry = await page.evaluate(
+          async (markers) => {
+            const all = await (window as any).miqi.sessions.list();
+            const sessions: any[] = all.sessions || all || [];
+            const results: any[] = [];
+            for (const s of sessions) {
+              try {
+                const detail = await (window as any).miqi.sessions.get(s.key);
+                const msgs = Array.isArray(detail?.messages) ? detail.messages : [];
+                results.push({
+                  key: s.key,
+                  text: msgs.map((m: any) => m.content || '').join('\n'),
+                });
+              } catch {
+                /* ignore */
+              }
+            }
+            return results;
+          },
+          [markerA, markerB]
+        );
         const a2 = retry.find((s: any) => s.key === sessionA?.key);
         const b2 = retry.find((s: any) => s.key === sessionB?.key);
         aText = a2?.text ?? aText;
@@ -229,7 +240,7 @@ test.describe('Session Streaming Isolation E2E', () => {
       expect(bText, 'Session B should not contain Session A marker').not.toContain(markerA);
 
       console.log(`[test] ✅ Session history isolation verified`);
-    },
+    }
   );
 
   test(
@@ -258,7 +269,7 @@ test.describe('Session Streaming Isolation E2E', () => {
           return text.trim().length > 20;
         },
         markerA,
-        { timeout: 60_000 },
+        { timeout: 60_000 }
       );
 
       // Resolve A's session key, then switch away and back while the reply is
@@ -277,10 +288,10 @@ test.describe('Session Streaming Isolation E2E', () => {
           return text.trim().length > 40;
         },
         markerA,
-        { timeout: 120_000 },
+        { timeout: 120_000 }
       );
 
       console.log(`[test] ✅ Reply continued after switch-back — no refresh`);
-    },
+    }
   );
 });

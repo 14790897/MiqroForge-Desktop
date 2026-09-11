@@ -5,7 +5,6 @@ import pytest
 from miqi.protocol.commands import UserMessage
 from miqi.protocol.events import TurnCompleteEvent
 
-
 # ── Replay turns ─────────────────────────────────────────────────────────
 
 
@@ -13,7 +12,6 @@ from miqi.protocol.events import TurnCompleteEvent
 async def test_replay_turns_through_app_server(fake_config, fake_provider, tmp_path):
     """replay.turns returns turn_ids from ledger for an authorized client."""
     from miqi.runtime.app_server import AppServer, ClientSessionRegistry
-    from miqi.runtime.session import RuntimeSession
 
     # Create a real RuntimeSession for the registry
     registry = ClientSessionRegistry()

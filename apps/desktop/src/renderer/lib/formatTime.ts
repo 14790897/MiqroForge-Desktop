@@ -1,5 +1,5 @@
 /**
- * Unified time formatting utilities for the MiqroForge renderer.
+ * Unified time formatting utilities for the MiQroForge renderer.
  *
  * Replaces ~9 scattered implementations of formatTime / relativeTime / relativeTimeLabel
  * across 7 files (Sidebar, FeedbackPage, ChatConsole, MemoryPage, ApprovalsPage,

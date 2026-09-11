@@ -1,12 +1,8 @@
 """Tests for bridge transport adapter over AppServer (Phase 26.2)."""
 
 import json
-import sys
-from pathlib import Path
-from unittest.mock import patch
 
 import pytest
-
 
 # ── Helpers ──────────────────────────────────────────────────────────────
 
@@ -50,8 +46,6 @@ def _make_app_server():
 @pytest.mark.asyncio
 async def test_transport_dispatches_request_to_app_server():
     """Simulate a full dispatch cycle: request JSON → AppServer → response JSON."""
-    from miqi.runtime.app_server import ClientSessionRegistry
-
     server = _make_app_server()
     capturer = _CaptureStdout()
 
@@ -68,7 +62,6 @@ async def test_transport_dispatches_request_to_app_server():
     params = req.get("params", {})
 
     # Resolve client_id (Phase 27.5: required)
-    registry: ClientSessionRegistry = server.registry
     client_id = params.get("client_id") or "desktop-test"
 
     # Dispatch through AppServer
@@ -185,7 +178,6 @@ async def test_bridge_app_server_created_in_main(monkeypatch, tmp_path):
     not by _ensure_app_server() (which is now a simple getter).
     """
     import miqi.bridge.server as bridge_module
-
     from miqi.bridge.loop import BridgeRuntimeLoop
     from miqi.runtime.app_server import AppServer
 
@@ -213,7 +205,7 @@ async def test_bridge_app_server_created_in_main(monkeypatch, tmp_path):
 def test_bridge_existing_dispatch_still_works(monkeypatch):
     """The existing _METHODS dispatch table must still work after
     AppServer is added — backward compatibility."""
-    from miqi.bridge.server import _METHODS, _dispatch
+    from miqi.bridge.server import _METHODS
 
     # _METHODS should contain the remaining legacy handlers
     assert "status" in _METHODS

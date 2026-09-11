@@ -15,10 +15,22 @@ interface ModalProps {
 }
 
 /** General-purpose modal powered by Radix Dialog — use for custom-body modals. */
-export function Modal({ open, onOpenChange, title, children, className, hideClose, onBeforeClose }: ModalProps) {
+export function Modal({
+  open,
+  onOpenChange,
+  title,
+  children,
+  className,
+  hideClose,
+  onBeforeClose,
+}: ModalProps) {
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className={cn('max-w-md', className)} hideClose={hideClose} onBeforeClose={onBeforeClose}>
+      <DialogContent
+        className={cn('max-w-md', className)}
+        hideClose={hideClose}
+        onBeforeClose={onBeforeClose}
+      >
         {title && (
           <DialogHeader>
             <DialogTitle>{title}</DialogTitle>

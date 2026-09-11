@@ -9,7 +9,7 @@
     → turn 完成
 
 运行：
-  cd D:\\Desktop\\811\\MiqroForge
+  cd D:\\Desktop\\811\\MiQroForge
   PYTHONPATH=. .venv/Scripts/python.exe scripts/e2e_ask_user_confirm.py
 """
 from __future__ import annotations
@@ -111,10 +111,6 @@ async def main() -> int:
         ))
 
         # 注册真实工具集（含 ask_user_confirm_card）
-        from miqi.runtime.tool_registry_factory import create_runtime_tool_registry
-        from miqi.config.loader import load_config
-
-        config = load_config() if hasattr(load_config, "__call__") else None
         # 轻量 registry：只挂确认卡工具
         registry = ToolRegistry()
         from miqi.agent.tools.ask_user_confirm import AskUserConfirmCardTool

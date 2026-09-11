@@ -3,9 +3,9 @@ from __future__ import annotations
 import pytest
 
 from miqi.bridge.loop import BridgeRuntimeLoop
+from miqi.runtime.protocol_model_schema import params_schema_from_model, result_schema_from_model
 from miqi.runtime.session_request_models import SESSION_METHOD_PARAM_MODELS
 from miqi.runtime.session_response_models import SESSION_METHOD_RESULT_MODELS
-from miqi.runtime.protocol_model_schema import params_schema_from_model, result_schema_from_model
 
 
 class _CaptureSend:

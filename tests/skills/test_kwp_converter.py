@@ -2,14 +2,11 @@
 
 from __future__ import annotations
 
-import json
+# Import converter functions
+import importlib.util as _util
 import re
 from pathlib import Path
 
-import pytest
-
-# Import converter functions
-import importlib.util as _util
 _converter = _util.spec_from_file_location(
     "convert_kwp", str(Path(__file__).parent.parent.parent / "scripts" / "convert_kwp.py")
 )
@@ -113,7 +110,7 @@ class TestBodyConversion:
             "More text."
         )
         result = convert_body(body)
-        assert "## MiqroForge Tools (Standalone Mode)" in result
+        assert "## MiQroForge Tools (Standalone Mode)" in result
         assert "- **CRM**" in result or "**CRM**" in result
         assert "- **Email**" in result or "**Email**" in result
 
@@ -126,8 +123,8 @@ class TestBodyConversion:
     def test_miqi_footer_added(self):
         body = "# Test Skill\n\nDo something."
         result = convert_body(body)
-        assert "## Using This Skill with MiqroForge" in result
-        assert "MiqroForge includes built-in tools" in result
+        assert "## Using This Skill with MiQroForge" in result
+        assert "MiQroForge includes built-in tools" in result
 
 
 class TestPlaceholderResolution:
@@ -163,7 +160,7 @@ class TestPlaceholderResolution:
 
 
 class TestOutputFormat:
-    """Verify the MiqroForge skill format is compatible with SkillsLoader."""
+    """Verify the MiQroForge skill format is compatible with SkillsLoader."""
 
     def test_frontmatter_parsable_by_skillsloader(self):
         """SkillsLoader uses simple key: value line parsing."""
@@ -217,4 +214,4 @@ class TestOutputFormat:
         assert "~~CRM" not in output
         assert "~~enrichment" not in output
         # Connectors replaced
-        assert "MiqroForge Tools (Standalone Mode)" in output
+        assert "MiQroForge Tools (Standalone Mode)" in output

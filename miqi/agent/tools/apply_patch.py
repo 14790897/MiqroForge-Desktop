@@ -13,8 +13,10 @@ from typing import Any, Iterable
 
 from miqi.agent.tools.base import Tool
 from miqi.agent.tools.filesystem import (
+    _effective_shared_roots,
     _get_active_sandbox,
     _get_session_workspace,
+    _is_absolute_host_path,
     _is_default_workspace,
     _make_exists_check,
     _maybe_snapshot,
@@ -23,8 +25,10 @@ from miqi.agent.tools.filesystem import (
     _resolve_path,
     _resolve_sandbox_path,
     _resolve_session_dir,
+    _resolve_write_shared_roots,
     _sandbox_file_exists,
     _sandbox_read_file,
+    _sandbox_to_host_path,
     _sandbox_write_file,
 )
 
@@ -283,6 +287,10 @@ class ApplyPatchTool(Tool):
         shared_roots: Iterable[Path] | None = None,
         session_files_dir: Path | None = None,
         base_workspace: Path | None = None,
+        allow_user_roots: bool = True,
+        write_resolver=None,
+        persist_extra_root=None,
+        bypass_approval: bool = False,
     ):
         self._workspace = workspace
         self._allowed_dir = allowed_dir
@@ -291,6 +299,17 @@ class ApplyPatchTool(Tool):
         self._shared_roots = list(shared_roots or [])
         self._session_files_dir = session_files_dir
         self._base_workspace = base_workspace
+        self._allow_user_roots = allow_user_roots
+        # Write authorization card (issue #864).
+        self._write_resolver = write_resolver
+        self._persist_extra_root = persist_extra_root
+        self._bypass_approval = bypass_approval
+        # Session-scoped grants (CodeRabbit #866).
+        self._granted: dict[str, set[str]] = {}
+
+    def _session_granted(self, session_key: str | None) -> set[str]:
+        """Return the session-scoped grant set for *session_key*."""
+        return self._granted.setdefault(session_key or "", set())
 
     @property
     def name(self) -> str:
@@ -311,7 +330,15 @@ class ApplyPatchTool(Tool):
                 "patch": {
                     "type": "string",
                     "description": "The unified diff body to apply",
-                }
+                },
+                "authorize_paths": {
+                    "type": "array",
+                    "description": (
+                        "（可选）提前声明需要写入的、位于已授权写根之外的绝对路径。"
+                        "提供后会在写入前先向用户发起授权，避免写入时才被拒绝。"
+                    ),
+                    "items": {"type": "string"},
+                },
             },
             "required": ["patch"],
         }
@@ -321,6 +348,35 @@ class ApplyPatchTool(Tool):
         if not isinstance(patch, str) or not patch:
             return "Error: 缺少必要参数 'patch'"
         _sess_key = kwargs.pop("_session_key", None)
+        shared = _effective_shared_roots(
+            self._shared_roots, kwargs.pop("_user_roots", None), self._allow_user_roots,
+        )
+        # Agent-declared write paths (issue #864): authorize upfront.
+        _authorize = kwargs.pop("authorize_paths", None)
+        _sandbox0 = _get_active_sandbox(self._sandbox_manager)
+        boundary_enforced = (
+            (_sandbox0 is not None and getattr(_sandbox0, "_use_wsl", False))
+            or self._allowed_dir is not None
+        )
+        if isinstance(_authorize, list) and _authorize:
+            _base = self._base_workspace or self._workspace
+            _granted = self._session_granted(_sess_key)
+            _once: set[str] = set()
+            for _p in _authorize:
+                _auth = await _resolve_write_shared_roots(
+                    str(_p),
+                    base_dir=_base,
+                    workspace_root=self._base_workspace or self._workspace,
+                    shared=shared,
+                    granted=_granted,
+                    once_granted=_once,
+                    write_resolver=self._write_resolver,
+                    persist_extra_root=self._persist_extra_root,
+                    boundary_enforced=boundary_enforced,
+                    bypass=self._bypass_approval,
+                )
+                if _auth is None:
+                    return f"Error: 权限被拒绝：用户未授权写入 {_p}"
         try:
             file_patches = parse_patch(patch)
         except PatchParseError as e:
@@ -331,7 +387,7 @@ class ApplyPatchTool(Tool):
 
         for fp in file_patches:
             try:
-                result = await self._apply_one_file(fp, sandbox, _sess_key)
+                result = await self._apply_one_file(fp, sandbox, _sess_key, shared)
             except PatchApplyError as e:
                 return f"Error applying patch to {fp.path}: {e}"
             except PermissionError as e:
@@ -339,13 +395,19 @@ class ApplyPatchTool(Tool):
             except Exception as e:
                 return f"Error applying patch to {fp.path}: {type(e).__name__}: {e}"
             if result is not None:
-                changed.append(fp.path)
+                changed.append(result)
 
         if not changed:
             return "No files changed"
         return f"Applied patch to: {', '.join(changed)}"
 
-    async def _apply_one_file(self, file_patch: FilePatch, sandbox, _sess_key: str | None = None):
+    async def _apply_one_file(
+        self,
+        file_patch: FilePatch,
+        sandbox,
+        _sess_key: str | None = None,
+        shared: list[Path] | None = None,
+    ):
         path = file_patch.path
 
         # Session isolation (#221 / #613 follow-up): patch targets written
@@ -359,10 +421,32 @@ class ApplyPatchTool(Tool):
         session_dir = _resolve_session_dir(
             self._session_files_dir, session_ws, self._workspace, _sess_key, base_ws,
         )
+        shared = shared if shared is not None else self._shared_roots
+        requested = path
         path = await _redirect_new_file_write(
             path, base_ws, session_dir,
-            _make_exists_check(self._shared_roots, sandbox, session_ws, native_base_dir=self._workspace),
+            _make_exists_check(shared, sandbox, session_ws, native_base_dir=self._workspace),
         )
+        # Delivery truthfulness (miqibug 路径归一化): when an absolute patch
+        # target is normalized into the session files dir, report BOTH paths.
+        redirected = path != requested and _is_absolute_host_path(requested)
+        # Write authorization card (issue #864).
+        authorized = await _resolve_write_shared_roots(
+            path,
+            base_dir=base_ws or self._workspace,
+            workspace_root=self._base_workspace or self._workspace,
+            shared=shared,
+            granted=self._session_granted(_sess_key),
+            write_resolver=self._write_resolver,
+            persist_extra_root=self._persist_extra_root,
+            boundary_enforced=(
+                (sandbox is not None and getattr(sandbox, "_use_wsl", False))
+                or self._allowed_dir is not None
+            ),
+            bypass=self._bypass_approval,
+        )
+        if authorized is not None:
+            shared = authorized
 
         if sandbox is not None and getattr(sandbox, "_use_wsl", False):
             # session_files_dir enforces per-session isolation (#689): the
@@ -370,7 +454,7 @@ class ApplyPatchTool(Tool):
             # patch could target another session's files dir.
             sandbox_path = _resolve_sandbox_path(
                 path, self._workspace, sandbox,
-                extra_roots=self._shared_roots,
+                extra_roots=shared,
                 session_files_dir=session_dir or session_ws,
             )
             _log.info("apply_patch [sandbox]: %s → %s", path, sandbox_path)
@@ -396,7 +480,14 @@ class ApplyPatchTool(Tool):
             except Exception as e:
                 raise IOError(f"Cannot write file in sandbox: {e}") from e
 
-            return sandbox_path
+            if path != requested:
+                host = _sandbox_to_host_path(sandbox_path, self._workspace, sandbox)
+                if redirected:
+                    return (
+                        f"{host}（请求路径 {requested} 已按会话隔离归一化到会话 files 目录）"
+                    )
+                return host
+            return file_patch.path
 
         # Native / no sandbox
         file_path = _resolve_path(
@@ -404,7 +495,7 @@ class ApplyPatchTool(Tool):
             session_dir or self._workspace,
             self._allowed_dir,
             self._sandbox_manager,
-            shared_roots=self._shared_roots,
+            shared_roots=shared,
         )
         _reject_foreign_session_path(file_path, base_ws, session_dir)
         snap_ok = _maybe_snapshot(file_path, snapshot_dir=self._snapshot_dir)
@@ -423,7 +514,16 @@ class ApplyPatchTool(Tool):
             _log.warning(
                 "Snapshot failed for %s — revert will not be available", file_path
             )
-        return str(file_path)
+        if path != requested:
+            # The redirect re-anchored the target (absolute or relative) —
+            # report the resolved destination; the note is reserved for the
+            # surprising case of an absolute path moved into the session dir.
+            if redirected:
+                return (
+                    f"{file_path}（请求路径 {requested} 已按会话隔离归一化到会话 files 目录）"
+                )
+            return str(file_path)
+        return file_patch.path
 
 
 # Deferred logger to avoid circular import concerns

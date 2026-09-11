@@ -67,7 +67,7 @@ export function HtmlPreviewCard({ html }: { html: string }) {
           </button>
           <button
             type="button"
-            onClick={() => window.miqi.files.openExternal(html)}
+            onClick={() => window.miqi.html.openInBrowser(html)}
             className="px-2 py-0.5 text-xs rounded text-[var(--text-muted)] hover:bg-[var(--surface-muted)]"
             title="用系统默认浏览器打开完整页面（脚本可运行）"
           >

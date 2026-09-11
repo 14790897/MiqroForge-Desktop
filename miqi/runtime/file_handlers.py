@@ -42,7 +42,6 @@ from miqi.runtime.fs_protocol import decode_data_base64, encode_data_base64
 from miqi.session.manager import OwnershipError
 from miqi.utils.helpers import safe_filename
 
-
 # ── workspace / SessionManager access ──────────────────────────────────────
 
 
@@ -230,6 +229,16 @@ _BINARY_VIEWABLE_SUFFIXES: set[str] = {
     ".svg",
 }
 
+# Office 后缀只在显式 as_binary=true 时可读（issue #877「下载/另存为」需
+# 要原始字节）；不加入 _BINARY_VIEWABLE_SUFFIXES，避免工作区编辑器对它们
+# 也走 iframe blob 路径（Chromium 无法渲染 xlsx/docx）。
+_BINARY_READABLE_SUFFIXES: set[str] = _BINARY_VIEWABLE_SUFFIXES | {
+    ".xlsx", ".xls", ".ods",
+    ".docx", ".doc", ".odt",
+    ".pptx", ".ppt", ".odp",
+    ".csv",
+}
+
 _SUFFIX_TO_MIME: dict[str, str] = {
     ".pdf": "application/pdf",
     ".jpg": "image/jpeg",
@@ -242,6 +251,16 @@ _SUFFIX_TO_MIME: dict[str, str] = {
     ".tif": "image/tiff",
     ".ico": "image/x-icon",
     ".svg": "image/svg+xml",
+    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ".xls": "application/vnd.ms-excel",
+    ".ods": "application/vnd.oasis.opendocument.spreadsheet",
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".doc": "application/msword",
+    ".odt": "application/vnd.oasis.opendocument.text",
+    ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    ".ppt": "application/vnd.ms-powerpoint",
+    ".odp": "application/vnd.oasis.opendocument.presentation",
+    ".csv": "text/csv",
 }
 
 _TREE_SKIP_SUFFIXES: set[str] = {
@@ -437,12 +456,18 @@ def _find_in_sandbox_workspaces(
             logger.info("[files:read] sandbox fallback: sandbox manager disabled/absent")
             return None
 
-        # Build session-scoped suffix (same logic as _get_session_workspace)
+        # Build the session-scoped suffix with the canonical key derivation
+        # (``_session_files_dir_key``, #1003) — the same one
+        # ``_get_session_workspace`` uses.  Deriving it locally produced a
+        # divergent directory for two-segment channel keys
+        # (``desktop:<ts>`` → ``sessions/<ts>/files`` instead of
+        # ``sessions/desktop_<ts>/files``), so this fallback searched a
+        # directory no writer ever creates (issue #1005).
         session_suffix = ""
         if session_key:
-            from miqi.utils.helpers import safe_filename
-            key = session_key.split(":", 1)[-1] if ":" in session_key else session_key
-            safe_key = safe_filename(key.replace(":", "_"))
+            from miqi.agent.tools.filesystem import _session_files_dir_key
+
+            safe_key = _session_files_dir_key(session_key)
             session_suffix = f"sessions/{safe_key}/files"
 
         sandboxes = sm.list_sandboxes()
@@ -521,6 +546,8 @@ async def files_read_handler(
     # 分支（前端内联展示需 data_base64/mime_type）；调用方想读纯文本
     # 时显式传 as_text=true 强制走文本分支。
     as_text = bool(params.get("as_text"))
+    # #877：显式请求原始字节（「下载/另存为」需要 Office 文件字节）。
+    as_binary = bool(params.get("as_binary"))
 
     logger.info(
         "[files:read] req={} path={} session_key={} client={}",
@@ -576,8 +603,10 @@ async def files_read_handler(
     # _ALLOWED_SUFFIXES）与二进制可读集——文本分支先命中会返回纯文本
     # content，前端内联展示需要 data_base64/mime_type（CodeRabbit #761）。
     # as_text=true（#776）显式请求纯文本时例外，svg 走文本分支。
+    # as_binary=true（#877）时对 Office 后缀等也走二进制分支。
     in_text_safe = suffix in _TEXT_SAFE_SUFFIXES or resolved.name in _TEXT_SAFE_NAMES
-    if in_text_safe and (suffix not in _BINARY_VIEWABLE_SUFFIXES or as_text):
+    want_binary = as_binary and suffix in _BINARY_READABLE_SUFFIXES
+    if in_text_safe and (suffix not in _BINARY_VIEWABLE_SUFFIXES or as_text) and not want_binary:
         # ── text file ──────────────────────────────────────────────────
         try:
             if wsl_distro:
@@ -603,7 +632,7 @@ async def files_read_handler(
             },
         }
 
-    if suffix in _BINARY_VIEWABLE_SUFFIXES:
+    if suffix in _BINARY_VIEWABLE_SUFFIXES or want_binary:
         # ── binary file — return base64 ───────────────────────────────
         try:
             if wsl_distro:

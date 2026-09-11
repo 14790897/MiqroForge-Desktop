@@ -2,7 +2,7 @@
 
 ## 欢迎贡献
 
-MiqroForge Desktop 是一个开源项目，采用 MIT 许可证。我们欢迎各种形式的贡献。
+MiQroForge Desktop 是一个开源项目，采用 MIT 许可证。我们欢迎各种形式的贡献。
 
 ## 贡献方式
 
@@ -12,7 +12,7 @@ MiqroForge Desktop 是一个开源项目，采用 MIT 许可证。我们欢迎�
 2. 使用 Bug Report 模板提交 Issue
 3. 尽可能提供：
    - 操作系统和版本
-   - MiqroForge Desktop 版本
+   - MiQroForge Desktop 版本
    - 复现步骤
    - 预期行为 vs 实际行为
    - 相关日志或截图

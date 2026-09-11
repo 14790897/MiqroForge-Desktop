@@ -1,9 +1,9 @@
 """Phase 4: ExperienceStore aggregates facts, rules, and traces."""
-import time
 from pathlib import Path
+
+from miqi.agent.memory.experience_store import ExperienceStore
 from miqi.agent.memory.store import MemoryStore
 from miqi.agent.trace.store import TraceStore
-from miqi.agent.memory.experience_store import ExperienceStore
 
 
 def make_stores(tmp_path: Path):

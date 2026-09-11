@@ -8,11 +8,10 @@ The protocol uses a Submission-Queue / Event-Queue pattern:
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
-import time
-
 
 # ── Event Severity ──────────────────────────────────────────
 
@@ -99,6 +98,7 @@ class AgentMessageEvent:
     finish_reason: str = "stop"
     tool_calls: list[dict[str, Any]] = field(default_factory=list)
     reasoning: str | None = None
+    reasoning_elapsed_s: float | None = None  # #834: server-side thinking proxy
 
 
 # ── Tool Call Events ────────────────────────────────────────

@@ -9,12 +9,9 @@ These tests cover two layers:
 from __future__ import annotations
 
 import json
-import tempfile
 import shutil
+import tempfile
 from pathlib import Path
-
-import pytest
-
 
 # ──────────────────────── PluginManager ────────────────────────────
 
@@ -177,7 +174,6 @@ class TestSlashCommandDiscovery:
                 plugin / ".claude-plugin" / "plugin.json",
             ]:
                 if cand.exists():
-                    manifest_path = cand
                     break
             else:
                 continue
@@ -243,7 +239,6 @@ class TestSlashCommandInterceptor:
         patch introduces. Returning ``(effective_system_prompt, rewritten_msg_content)``
         lets us assert without instantiating the full runtime.
         """
-        import dataclasses
 
         slash_content = None
         msg = type("M", (), {"content": msg_content})  # immutable shim

@@ -162,23 +162,96 @@ async def test_config_batch_write_delete_removes_optional_value():
     registry = ClientSessionRegistry()
     server = _setup_server(registry, model="anthropic/claude-opus-4-5")
 
-    # Set an optional provider field so we can delete it
+    # 使用非凭据字段（providers.* 凭据字段已收口禁用，见 #835）
     await server.dispatch(
         "1", "config/batchWrite",
-        {"edits": [{"path": "providers.anthropic.apiBase", "value": "https://api.example.com/v1"}]},
+        {"edits": [{"path": "agents.defaults.workspace", "value": "/tmp/foo"}]},
         "client-1", None,
     )
     state = registry.bridge_context["state"]
-    assert state.config.providers.anthropic.api_base == "https://api.example.com/v1"
+    assert state.config.agents.defaults.workspace == "/tmp/foo"
 
-    # Now delete that optional field
+    # Now delete that field
     response = await server.dispatch(
         "2", "config/batchWrite",
-        {"edits": [{"op": "delete", "path": "providers.anthropic.apiBase"}]},
+        {"edits": [{"op": "delete", "path": "agents.defaults.workspace"}]},
         "client-1", None,
     )
     assert response["result"]["saved"] is True
-    assert state.config.providers.anthropic.api_base is None
+    assert state.config.agents.defaults.workspace == "~/.miqi/workspace"
+
+
+@pytest.mark.asyncio
+async def test_config_batch_write_rejects_provider_credentials():
+    """后端收口（#835）：batchWrite 拒绝写入 providers 凭据字段。"""
+    registry = ClientSessionRegistry()
+    server = _setup_server(registry, model="anthropic/claude-opus-4-5")
+
+    response = await server.dispatch(
+        "1", "config/batchWrite",
+        {"edits": [{"path": "providers.deepseek.apiKey", "value": "sk-custom"}]},
+        "client-1", None,
+    )
+    assert response.get("code") == "NOT_SUPPORTED"
+
+
+@pytest.mark.asyncio
+async def test_config_batch_write_rejects_whole_provider_object():
+    """后端收口（#835）：batchWrite 拒绝整对象替换 provider（绕过字段级拦截）。"""
+    registry = ClientSessionRegistry()
+    server = _setup_server(registry, model="anthropic/claude-opus-4-5")
+
+    response = await server.dispatch(
+        "1", "config/batchWrite",
+        {"edits": [{"path": "providers.deepseek", "value": {"apiKey": "sk-custom"}}]},
+        "client-1", None,
+    )
+    assert response.get("code") == "NOT_SUPPORTED"
+
+
+@pytest.mark.asyncio
+async def test_config_batch_write_rejects_unresolvable_model():
+    """#929：batchWrite 与 config.update 同一模型门控 —— 此前该路径可
+    原样写入 custom/default 等运行时无法使用的模型。"""
+    registry = ClientSessionRegistry()
+    server = _setup_server(registry, model="anthropic/claude-opus-4-5")
+
+    response = await server.dispatch(
+        "1", "config/batchWrite",
+        {"edits": [{"path": "agents.defaults.model", "value": "custom/default"}]},
+        "client-1", None,
+    )
+    assert response.get("code") == "INVALID_PARAMS"
+
+
+@pytest.mark.asyncio
+async def test_config_batch_write_rejects_empty_model():
+    """#929：空模型同样拒绝 —— 之前空值可落盘并让运行时把空模型名发给
+    兜底 provider。"""
+    registry = ClientSessionRegistry()
+    server = _setup_server(registry)
+
+    response = await server.dispatch(
+        "1", "config/batchWrite",
+        {"edits": [{"path": "agents.defaults.model", "value": ""}]},
+        "client-1", None,
+    )
+    assert response.get("code") == "INVALID_PARAMS"
+
+
+@pytest.mark.asyncio
+async def test_config_batch_write_unrelated_edit_ignores_legacy_model():
+    """#929 review：模型门控只对模型编辑生效 —— 历史遗留模型不阻塞
+    无关字段的 batchWrite 编辑。"""
+    registry = ClientSessionRegistry()
+    server = _setup_server(registry, model="custom/default")
+
+    response = await server.dispatch(
+        "1", "config/batchWrite",
+        {"edits": [{"path": "agents.defaults.workspace", "value": "/tmp/bar"}]},
+        "client-1", None,
+    )
+    assert response["result"]["saved"] is True
 
 
 @pytest.mark.asyncio
@@ -317,7 +390,8 @@ def test_config_batch_write_does_not_touch_real_config_path(monkeypatch):
     async def _run():
         return await server.dispatch(
             "1", "config/batchWrite",
-            {"edits": [{"path": "agents.defaults.model", "value": "deepseek/deepseek-chat"}]},
+            # #929 收口后模型必须解析到有凭据的 provider —— fixture 配置了 openai key
+            {"edits": [{"path": "agents.defaults.model", "value": "openai/gpt-4.1"}]},
             "client-1", None,
         )
     result = asyncio.run(_run())
@@ -347,7 +421,8 @@ async def test_config_batch_write_propagates_to_client_sessions():
     # test that the propagation path runs without error when no sessions exist.
     response = await server.dispatch(
         "1", "config/batchWrite",
-        {"edits": [{"path": "agents.defaults.model", "value": "deepseek/deepseek-chat"}],
+        # #929 收口后模型必须解析到有凭据的 provider —— fixture 配置了 openai key
+        {"edits": [{"path": "agents.defaults.model", "value": "openai/gpt-4.1"}],
          "reloadUserConfig": True},
         "client-1", None,
     )

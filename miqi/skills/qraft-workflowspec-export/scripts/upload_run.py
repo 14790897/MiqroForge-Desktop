@@ -88,9 +88,9 @@ def classify_response(resp: httpx.Response, body_text: str) -> tuple[str, str]:
     """按实测常见问题分类。返回 (code, 用户可读提示)。"""
     status = resp.status_code
     if status == 403:
-        return "IP_NOT_WHITELISTED", "上传失败（HTTP 403）：出口 IP 未加白，请联系 Qraft 管理员"
+        return "IP_NOT_WHITELISTED", "上传失败（HTTP 403）：出口 IP 未加白，请联系 MiQroForge 管理员"
     if status == 401:
-        return "TOKEN_EXPIRED", "上传失败（HTTP 401）：access_token 已失效，请到 设置 → Qraft 平台 重新登录"
+        return "TOKEN_EXPIRED", "上传失败（HTTP 401）：access_token 已失效，请到 设置 → MiQroForge 平台 重新登录"
     if 400 <= status < 500:
         message = ""
         try:
@@ -100,7 +100,7 @@ def classify_response(resp: httpx.Response, body_text: str) -> tuple[str, str]:
             message = body_text[:200]
         return "BAD_REQUEST", f"上传失败（HTTP {status}）：{message or '请求参数错误'}"
     if status >= 500:
-        return "SERVER_ERROR", f"上传失败（HTTP {status}）：Qraft 服务端异常，请稍后重试"
+        return "SERVER_ERROR", f"上传失败（HTTP {status}）：MiQroForge 服务端异常，请稍后重试"
     if 200 <= status < 300:
         # 实测成功时 body 为纯文本 ok；若返回 JSON 业务信封且 code != 200，
         # 是平台侧业务错误（如服务端数据库缺表），不能误报为成功。
@@ -110,7 +110,7 @@ def classify_response(resp: httpx.Response, body_text: str) -> tuple[str, str]:
                 inner = data.get("data")
                 inner = inner if isinstance(inner, dict) else {}
                 detail = inner.get("originalMessage") or inner.get("message") or data.get("msg") or ""
-                return "SERVER_ERROR", f"上传失败：Qraft 返回业务错误（{detail or '未知错误'}），请联系 Qraft 管理员"
+                return "SERVER_ERROR", f"上传失败：MiQroForge 返回业务错误（{detail or '未知错误'}），请联系 MiQroForge 管理员"
         except ValueError:
             pass
         return "OK", body_text.strip() or "ok"
@@ -215,7 +215,7 @@ def main() -> int:
     else:
         print(message)
     if code == "OK":
-        log("上传成功，可在 Qraft 平台查看方案")
+        log("上传成功，可在 MiQroForge 平台查看方案")
         return 0
     print(f"[{code}] {message}", file=sys.stderr)
     return 1

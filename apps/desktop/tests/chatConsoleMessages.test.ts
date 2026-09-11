@@ -6,8 +6,13 @@ import {
   getTaskShareDownloadName,
   appendReasoningDelta,
   insertStandaloneReasoning,
+  insertInterruptedTurns,
+  wasTurnStopped,
   sessionMsgsToUi,
+  toolCommandText,
   formatToolCallHint,
+  applyReloginIntercept,
+  RELOGIN_INTERCEPT_TEXT,
 } from '../src/renderer/features/chat/ChatConsole';
 
 describe('sessionMsgsToUi', () => {
@@ -93,6 +98,36 @@ describe('sessionMsgsToUi', () => {
     expect(rows[0].summary).toBe('下载论文');
     expect(rows[0].summary).not.toContain('An Image is Worth 16x16 Words');
     expect(rows[0].toolOutput).toBe(true);
+  });
+
+  it('restored exec rows keep the full command in toolArgs for expansion (#902)', () => {
+    // 命令长度 > 60：折叠摘要被截断，但 toolArgs 保留原文供展开使用。
+    const command =
+      "python -c \"import os; print([f for f in os.listdir('.') if f.endswith('.report')])\" --verbose --debug --color=never";
+    const messages = sessionMsgsToUi([
+      { role: 'user', content: '运行一下', timestamp: '2026-07-08T01:00:00.000Z' },
+      {
+        role: 'assistant',
+        content: '',
+        tool_calls: [{ function: { name: 'exec', arguments: JSON.stringify({ command }) } }],
+        timestamp: '2026-07-08T01:00:01.000Z',
+      },
+      {
+        role: 'tool',
+        name: 'exec',
+        arguments: { command },
+        content: '3',
+        timestamp: '2026-07-08T01:00:02.000Z',
+      },
+    ]);
+
+    const rows = messages.filter((m) => m.role === 'progress' && m.toolHint);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].toolArgs).toEqual({ command });
+    // 折叠摘要仍被截断（60 字符），完整命令只在展开区出现。
+    expect(rows[0].summary).toContain('执行命令');
+    expect(rows[0].summary).not.toContain(command);
+    expect(rows[0].summary).toMatch(/…$/);
   });
 
   it('keeps reasoning as a standalone timeline block before tool calls', () => {
@@ -252,7 +287,7 @@ describe('buildTaskShareText', () => {
     expect(text).toContain('# 测试任务');
     expect(text).toContain('刚刚更新 · 1 个文件');
     expect(text).toContain('- 用户: 请修改 README');
-    expect(text).toContain('- MiqroForge: 已完成修改');
+    expect(text).toContain('- MiQroForge: 已完成修改');
     expect(text).toContain('- README.md (edit)');
     expect(text).not.toContain('Write: README.md');
   });
@@ -287,5 +322,180 @@ describe('task share helpers', () => {
     const name = getTaskShareDownloadName('修复: 顶部/侧边 文件?', 1783993200000);
 
     expect(name).toBe('修复-顶部-侧边-文件-2026-07-14T01-40-00-000Z.md');
+  });
+});
+
+// ── #886: interrupted-turn preservation ────────────────────────────────────
+
+const user = (content: string, ts: number) => ({ role: 'user', content, timestamp: ts });
+const assistant = (content: string, ts: number) => ({ role: 'assistant', content, timestamp: ts });
+const stopped = (ts: number) => ({ role: 'progress', content: '已停止。', timestamp: ts });
+
+describe('wasTurnStopped', () => {
+  it('returns true when the round carries the 已停止 marker', () => {
+    const msgs = [user('长任务', 1), assistant('半截', 2), stopped(3)];
+    expect(wasTurnStopped(msgs, 0)).toBe(true);
+  });
+
+  it('returns false for a completed round without the marker', () => {
+    const msgs = [user('问题', 1), assistant('完整回答', 2)];
+    expect(wasTurnStopped(msgs, 0)).toBe(false);
+  });
+
+  it('scopes to the current round only (not a later stopped round)', () => {
+    const msgs = [
+      user('问题A', 1),
+      assistant('回答A', 2),
+      user('问题B', 3),
+      assistant('半截B', 4),
+      stopped(5),
+    ];
+    expect(wasTurnStopped(msgs, 0)).toBe(false);
+    expect(wasTurnStopped(msgs, 2)).toBe(true);
+  });
+
+  it('ignores a 已停止 marker that appears before the user message', () => {
+    const msgs = [stopped(0), user('问题A', 1), assistant('回答A', 2)];
+    expect(wasTurnStopped(msgs, 1)).toBe(false);
+  });
+});
+
+describe('insertInterruptedTurns', () => {
+  // timestamps are epoch-ms for messages; snapshot `updated_at` is epoch
+  // seconds (the helper converts ×1000), so both land in the same domain.
+  it('inserts the interrupted card after its own user message, before the retry', () => {
+    const merged = [
+      user('长任务', 100_000),
+      user('长任务', 300_000),
+      assistant('重试成功', 400_000),
+    ];
+    const snap = [
+      {
+        turn_id: 't1',
+        status: 'interrupted',
+        assistant_content: '半截回答',
+        updated_at: 200, // → 200_000 ms, between user#1 (100k) and retry user#2 (300k)
+      },
+    ];
+    const out = insertInterruptedTurns(merged, snap);
+    expect(out.map((m) => (m.interrupted ? 'CARD' : m.role))).toEqual([
+      'user',
+      'CARD',
+      'user',
+      'assistant',
+    ]);
+    const card = out.find((m) => m.interrupted);
+    expect(card?.content).toBe('半截回答');
+    expect(card?.interruptedMeta?.turnId).toBe('t1');
+  });
+
+  it('appends at the end when the interrupted round is the latest', () => {
+    const merged = [user('长任务', 100_000)];
+    const snap = [
+      { turn_id: 't1', status: 'interrupted', assistant_content: '半截', updated_at: 200 },
+    ];
+    const out = insertInterruptedTurns(merged, snap);
+    expect(out.map((m) => (m.interrupted ? 'CARD' : m.role))).toEqual(['user', 'CARD']);
+  });
+
+  it('returns merged unchanged when there are no interrupted turns', () => {
+    const merged = [user('a', 1), assistant('b', 2)];
+    expect(insertInterruptedTurns(merged, [])).toBe(merged);
+  });
+
+  it('keeps multiple interrupted cards in chronological order', () => {
+    const merged = [user('一', 100_000), user('二', 400_000), assistant('答', 500_000)];
+    const snaps = [
+      { turn_id: 't2', status: 'interrupted', assistant_content: '半截B', updated_at: 450 },
+      { turn_id: 't1', status: 'interrupted', assistant_content: '半截A', updated_at: 200 },
+    ];
+    const out = insertInterruptedTurns(merged, snaps);
+    const cards = out.filter((m) => m.interrupted);
+    expect(cards.map((c) => c.interruptedMeta?.turnId)).toEqual(['t1', 't2']);
+    expect(out.map((m) => (m.interrupted ? 'CARD' : m.role))).toEqual([
+      'user',
+      'CARD',
+      'user',
+      'CARD',
+      'assistant',
+    ]);
+  });
+});
+
+describe('toolCommandText (issue #902)', () => {
+  it('returns the command from a single args object', () => {
+    expect(toolCommandText({ command: 'cp a b', timeout: 30 })).toBe('cp a b');
+  });
+
+  it('returns the first command from a merged args array', () => {
+    expect(toolCommandText([{ path: 'a.md' }, { command: 'python run.py' }])).toBe('python run.py');
+  });
+
+  it('returns undefined when command is missing or not a string', () => {
+    expect(toolCommandText({ path: 'a.md' })).toBeUndefined();
+    expect(toolCommandText({ command: 42 })).toBeUndefined();
+    expect(toolCommandText({ command: '   ' })).toBeUndefined();
+    expect(toolCommandText([{ path: 'a.md' }])).toBeUndefined();
+  });
+
+  it('returns undefined for undefined/empty args', () => {
+    expect(toolCommandText(undefined)).toBeUndefined();
+    expect(toolCommandText(null)).toBeUndefined();
+    expect(toolCommandText([])).toBeUndefined();
+  });
+});
+
+describe('applyReloginIntercept (平台登录失效拦截)', () => {
+  const userMsg = { role: 'user' as const, content: '继续之前的工作', timestamp: 42 };
+  const interruptedCard = {
+    role: 'assistant' as const,
+    content: '（中断回合）',
+    interrupted: true,
+    timestamp: 41,
+  };
+  const prevMsg = { role: 'assistant' as const, content: '历史回复', timestamp: 1 };
+
+  it('普通发送：乐观 user 气泡按时间戳匹配替换为重登引导', () => {
+    const next = applyReloginIntercept([prevMsg, userMsg], userMsg, null);
+    expect(next).toHaveLength(2);
+    expect(next[0]).toBe(prevMsg);
+    expect(next[1].role).toBe('error');
+    expect(next[1].action).toBe('login');
+    expect(next[1].content).toBe(RELOGIN_INTERCEPT_TEXT);
+  });
+
+  it('恢复中断回合：无乐观气泡时恢复被移除的中断卡并追加重登引导', () => {
+    // handleResumeTurn 已把中断卡从列表移除，resume 路径不再推 user 气泡
+    const next = applyReloginIntercept([prevMsg], userMsg, interruptedCard);
+    expect(next).toHaveLength(3);
+    expect(next[0]).toBe(prevMsg);
+    expect(next[1]).toBe(interruptedCard);
+    expect(next[2].role).toBe('error');
+    expect(next[2].action).toBe('login');
+    expect(next[2].content).toBe(RELOGIN_INTERCEPT_TEXT);
+  });
+
+  it('时间戳不匹配且无恢复卡片（会话已切换等）：原样返回', () => {
+    const next = applyReloginIntercept([prevMsg], userMsg, null);
+    expect(next).toBe(next);
+    expect(next).toEqual([prevMsg]);
+  });
+
+  it('user 气泡匹配优先于恢复卡片（异常共存时按普通发送处理）', () => {
+    const next = applyReloginIntercept([prevMsg, userMsg], userMsg, interruptedCard);
+    expect(next).toHaveLength(2);
+    expect(next[1].role).toBe('error');
+  });
+
+  it('等待预检期间其他监听器追加消息：就地替换 user 气泡并保留后续消息', () => {
+    // qraft.status() 等待期间子代理等监听器可能把消息追加到 user 气泡之后，
+    // 尾部不再匹配——必须按 role+时间戳定位原气泡就地替换（CodeRabbit #1016）。
+    const laterMsg = { role: 'assistant' as const, content: '子代理持久事件', timestamp: 43 };
+    const next = applyReloginIntercept([prevMsg, userMsg, laterMsg], userMsg, null);
+    expect(next).toHaveLength(3);
+    expect(next[0]).toBe(prevMsg);
+    expect(next[1].role).toBe('error');
+    expect(next[1].content).toBe(RELOGIN_INTERCEPT_TEXT);
+    expect(next[2]).toBe(laterMsg);
   });
 });

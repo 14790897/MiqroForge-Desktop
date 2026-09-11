@@ -1,11 +1,11 @@
 """Tests for execution policy integration in TaskRunner / ToolRuntime."""
 import asyncio
-
-import pytest
-from unittest.mock import MagicMock
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from unittest.mock import MagicMock
+
+import pytest
 
 from miqi.runtime.tool_policy import PLAN_BLOCKED_TOOLS
 
@@ -16,7 +16,7 @@ class FakeAgentMetadata:
     system_prompt: str = "You are a helpful assistant."
 
 
-@dataclass  
+@dataclass
 class FakeTurnContext:
     turn_id: str = "test-turn"
     thread_id: str = "test-thread"
@@ -208,7 +208,7 @@ class TestTurnContextDefaults:
 
     def test_default_execution_policy(self):
         from miqi.runtime.turn_context import TurnContext
-        
+
         tc = TurnContext(
             turn_id="test",
             thread_id="t1",
@@ -217,7 +217,7 @@ class TestTurnContextDefaults:
             agent_metadata=FakeAgentMetadata(),
             provider=None,
         )
-        
+
         assert tc.execution_policy == "edit"
         assert tc.bypass_approval is False
         assert tc.force_approval is False
@@ -225,7 +225,7 @@ class TestTurnContextDefaults:
     def test_fields_have_no_mode_legacy(self):
         """Ensure old 'mode' field is gone; replaced by execution_policy."""
         from miqi.runtime.turn_context import TurnContext
-        
+
         tc = TurnContext(
             turn_id="test",
             thread_id="t1",
@@ -234,7 +234,7 @@ class TestTurnContextDefaults:
             agent_metadata=FakeAgentMetadata(),
             provider=None,
         )
-        
+
         # execution_policy exists, mode does not
         assert hasattr(tc, "execution_policy")
         assert not hasattr(tc, "mode"), "Old 'mode' field should not exist"
@@ -329,7 +329,6 @@ class TestPlanModeCapabilityConstraints:
         """Plan mode sets bypass_approval=True — safety depends on tool filtering."""
         turn = FakeTurnContext(execution_policy="plan")
 
-        from miqi.runtime.tool_policy import PLAN_BLOCKED_TOOLS
 
         if turn.execution_policy == "plan":
             turn.bypass_approval = True
@@ -342,9 +341,10 @@ class TestPlanModeCapabilityConstraints:
 
     def test_plan_system_prompt_references_readonly_analysis(self):
         """Plan mode system prompt uses read-only analysis language."""
-        from miqi.runtime.turn_context import TurnContext
-        from pathlib import Path
         import tempfile
+        from pathlib import Path
+
+        from miqi.runtime.turn_context import TurnContext
 
         tc = TurnContext(
             turn_id="test",

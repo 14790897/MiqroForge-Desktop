@@ -1,11 +1,8 @@
 import { useCallback, useEffect, useState } from 'react';
 import {
   AlertTriangle,
-  ArrowLeft,
-  ArrowRight,
   Check,
   Folder,
-  Key,
   Loader2,
   Monitor,
   RefreshCw,
@@ -16,10 +13,9 @@ import {
 import { Button } from '../../components/ui/Button';
 import { Input } from '../../components/ui/Input';
 import { cn } from '../../lib/utils';
-import { sanitizeUiMessage } from '../../lib/sanitizeUiMessage';
 import type { WslCheckResult, WslInstallProgress } from '../../../shared/ipc';
 
-type Step = 'welcome' | 'provider';
+type Step = 'welcome';
 type CheckState<T> = {
   status: 'idle' | 'checking' | 'ok' | 'warning' | 'error';
   result?: T;
@@ -33,137 +29,7 @@ interface PythonStatus {
   config_exists: boolean;
 }
 
-interface StaticProvider {
-  name: string;
-  displayName: string;
-  defaultModel: string;
-  isLocal: boolean;
-  isOllamaCloud: boolean;
-  defaultApiBase?: string;
-  keyRequired: boolean;
-}
-
 const DEFAULT_WORKSPACE = '~/.miqi/workspace';
-
-import { PROVIDER_SUGGESTED_MODELS } from '../../lib/providers';
-
-const STATIC_PROVIDERS: StaticProvider[] = [
-  {
-    name: 'openrouter',
-    displayName: 'OpenRouter（推荐网关）',
-    defaultModel: 'anthropic/claude-opus-4-5',
-    isLocal: false,
-    isOllamaCloud: false,
-    keyRequired: true,
-  },
-  {
-    name: 'anthropic',
-    displayName: 'Anthropic',
-    defaultModel: 'claude-opus-4-5',
-    isLocal: false,
-    isOllamaCloud: false,
-    keyRequired: true,
-  },
-  {
-    name: 'openai',
-    displayName: 'OpenAI',
-    defaultModel: 'gpt-4.1',
-    isLocal: false,
-    isOllamaCloud: false,
-    keyRequired: true,
-  },
-  {
-    name: 'deepseek',
-    displayName: 'DeepSeek',
-    defaultModel: 'deepseek-v4-flash',
-    isLocal: false,
-    isOllamaCloud: false,
-    keyRequired: true,
-  },
-  {
-    name: 'gemini',
-    displayName: 'Google Gemini',
-    defaultModel: 'gemini-2.5-pro',
-    isLocal: false,
-    isOllamaCloud: false,
-    keyRequired: true,
-  },
-  {
-    name: 'moonshot',
-    displayName: 'Moonshot (Kimi)',
-    defaultModel: 'kimi-k2.5',
-    isLocal: false,
-    isOllamaCloud: false,
-    keyRequired: true,
-  },
-  {
-    name: 'dashscope',
-    displayName: 'DashScope（通义千问）',
-    defaultModel: 'qwen-max',
-    isLocal: false,
-    isOllamaCloud: false,
-    keyRequired: true,
-  },
-  {
-    name: 'zhipu',
-    displayName: 'Zhipu AI（智谱）',
-    defaultModel: 'glm-4',
-    isLocal: false,
-    isOllamaCloud: false,
-    keyRequired: true,
-  },
-  {
-    name: 'minimax',
-    displayName: 'MiniMax',
-    defaultModel: 'MiniMax-M2.7',
-    isLocal: false,
-    isOllamaCloud: false,
-    keyRequired: true,
-  },
-  {
-    name: 'aihubmix',
-    displayName: 'AiHubMix',
-    defaultModel: 'claude-opus-4.1',
-    isLocal: false,
-    isOllamaCloud: false,
-    keyRequired: true,
-  },
-  {
-    name: 'siliconflow',
-    displayName: 'SiliconFlow（硅基流动）',
-    defaultModel: 'deepseek-ai/DeepSeek-V3',
-    isLocal: false,
-    isOllamaCloud: false,
-    keyRequired: true,
-  },
-  {
-    name: 'vllm',
-    displayName: 'vLLM / 本地 OpenAI 兼容',
-    defaultModel: 'meta-llama/Llama-3.1-8B-Instruct',
-    isLocal: true,
-    isOllamaCloud: false,
-    defaultApiBase: 'http://localhost:8000/v1',
-    keyRequired: false,
-  },
-  {
-    name: 'ollama_local',
-    displayName: 'Ollama（本地）',
-    defaultModel: 'llama3.2',
-    isLocal: true,
-    isOllamaCloud: false,
-    defaultApiBase: 'http://localhost:11434',
-    keyRequired: false,
-  },
-  {
-    name: 'ollama_cloud',
-    displayName: 'Ollama Cloud',
-    defaultModel: 'gpt-oss:20b-cloud',
-    isLocal: false,
-    isOllamaCloud: true,
-    defaultApiBase: 'https://ollama.com',
-    keyRequired: true,
-  },
-];
 
 export function SetupWizard({
   onComplete,
@@ -174,12 +40,6 @@ export function SetupWizard({
 }) {
   const [step, setStep] = useState<Step>('welcome');
   const [workspace, setWorkspace] = useState(DEFAULT_WORKSPACE);
-  const [selectedProvider, setSelectedProvider] = useState('');
-  const [apiKey, setApiKey] = useState('');
-  const [apiBase, setApiBase] = useState('');
-  const [modelName, setModelName] = useState('');
-  const [testResult, setTestResult] = useState<'idle' | 'testing' | 'ok' | 'error'>('idle');
-  const [testError, setTestError] = useState('');
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState('');
   const [pythonCheck, setPythonCheck] = useState<CheckState<PythonStatus>>({ status: 'idle' });
@@ -228,51 +88,14 @@ export function SetupWizard({
   }, []);
 
   useEffect(() => {
-    Promise.all([
-      window.miqi.config.get().catch(() => null),
-      window.miqi.providers.list().catch(() => null),
-    ])
-      .then(([cfg, providersResult]) => {
+    window.miqi.config
+      .get()
+      .then((cfg) => {
         if (!cfg) return;
         const agents = (cfg as Record<string, unknown>)['agents'] as
           Record<string, unknown> | undefined;
         const defaults = agents?.['defaults'] as Record<string, unknown> | undefined;
-        const activeModel =
-          typeof providersResult?.active_model === 'string' && providersResult.active_model
-            ? providersResult.active_model
-            : defaults?.['model']
-              ? String(defaults['model'])
-              : '';
         if (defaults?.['workspace']) setWorkspace(String(defaults['workspace']));
-        if (activeModel) setModelName(activeModel);
-
-        const providers = (cfg as Record<string, unknown>)['providers'] as
-          Record<string, unknown> | undefined;
-        if (!providers) return;
-
-        const activeProvider =
-          typeof providersResult?.active_provider === 'string'
-            ? providersResult.active_provider
-            : providersResult?.providers?.find((p) => p.configured_model)?.name;
-        const selected =
-          activeProvider && STATIC_PROVIDERS.some((p) => p.name === activeProvider)
-            ? activeProvider
-            : STATIC_PROVIDERS.find((provider) => {
-                const entry = providers[provider.name] as Record<string, unknown> | undefined;
-                return !!entry?.['apiKey'] || !!entry?.['apiBase'];
-              })?.name;
-        if (!selected) return;
-
-        const selectedMeta = STATIC_PROVIDERS.find((p) => p.name === selected);
-        const entry = providers[selected] as Record<string, unknown> | undefined;
-        setSelectedProvider(selected);
-        if (entry?.['apiKey']) setApiKey(String(entry['apiKey']));
-        if (entry?.['apiBase']) {
-          setApiBase(String(entry['apiBase']));
-        } else {
-          setApiBase(selectedMeta?.defaultApiBase ?? '');
-        }
-        if (!activeModel && selectedMeta) setModelName(selectedMeta.defaultModel);
       })
       .catch(() => {
         /* no existing config yet */
@@ -314,35 +137,12 @@ export function SetupWizard({
     void runEnvironmentChecks();
   }, []);
 
-  const providerMeta = STATIC_PROVIDERS.find((p) => p.name === selectedProvider);
-
-  const canContinueProvider = () => {
-    if (!selectedProvider || !providerMeta) return false;
-    if (providerMeta.isLocal) return !!apiBase;
-    if (providerMeta.isOllamaCloud) return !!apiBase && !!apiKey;
-    return !!apiKey;
-  };
-
-  const resetConnectionTest = () => {
-    setTestResult('idle');
-    setTestError('');
-  };
-
   const saveInitialConfig = async (config: Record<string, unknown>) => {
     if (saving) return;
     setSaving(true);
     setSaveError('');
     try {
       await window.miqi.setup.writeInitialConfig(config);
-      const savedProvider = typeof config.provider_name === 'string' ? config.provider_name : '';
-      const savedModel = typeof config.model === 'string' ? config.model : undefined;
-      if (savedProvider && testResult === 'ok') {
-        try {
-          await window.miqi.providers.test(savedProvider, undefined, undefined, savedModel);
-        } catch (e) {
-          console.warn('[SetupWizard] 保存配置后二次验证 Provider 失败，已继续完成初始化', e);
-        }
-      }
       try {
         await window.miqi.runtime.start();
       } catch {
@@ -360,46 +160,6 @@ export function SetupWizard({
     void saveInitialConfig({
       workspace: workspace || DEFAULT_WORKSPACE,
     });
-  };
-
-  const handleFinish = async () => {
-    if (!providerMeta) return;
-    await saveInitialConfig({
-      provider_name: providerMeta.name,
-      api_key: apiKey || null,
-      api_base: apiBase || null,
-      model: modelName || providerMeta.defaultModel,
-      workspace: workspace || DEFAULT_WORKSPACE,
-    });
-  };
-
-  const testProvider = async () => {
-    if (!selectedProvider) return;
-    setTestResult('testing');
-    setTestError('');
-    try {
-      const result = await window.miqi.providers.test(
-        selectedProvider,
-        apiKey,
-        apiBase || undefined,
-        modelName || providerMeta?.defaultModel
-      );
-      if (result.ok) {
-        setTestResult('ok');
-      } else {
-        setTestResult('error');
-        setTestError('Provider 测试失败，请检查 API Key、API Base 或网络连接。');
-      }
-    } catch (e: any) {
-      const msg: string = e?.message ?? String(e);
-      if (msg.includes('Bridge not running') || msg.includes('not running')) {
-        setTestResult('idle');
-        setTestError('运行时未启动或正在重启，请稍后再试。');
-      } else {
-        setTestResult('error');
-        setTestError(sanitizeUiMessage(msg));
-      }
-    }
   };
 
   const pythonBlocksStart = pythonCheck.status === 'checking' || pythonCheck.status === 'error';
@@ -421,13 +181,15 @@ export function SetupWizard({
     };
 
     const pythonSummary = (() => {
-      if (pythonCheck.status === 'checking') return '正在检查 Python 和 MiqroForge 依赖...';
+      if (pythonCheck.status === 'checking') return '正在检查 Python 和 MiQroForge 依赖...';
       if (pythonCheck.status === 'ok') {
         const version = pythonCheck.result?.python_version;
         return version ? `已就绪 · Python ${version}` : '已就绪';
       }
       if (pythonCheck.status === 'error') {
-        return pythonCheck.result?.issues?.[0] ?? pythonCheck.error ?? 'Python 或 MiqroForge 依赖不可用';
+        return (
+          pythonCheck.result?.issues?.[0] ?? pythonCheck.error ?? 'Python 或 MiQroForge 依赖不可用'
+        );
       }
       return '等待检查';
     })();
@@ -471,11 +233,13 @@ export function SetupWizard({
 
       return (
         <div className="mt-2 rounded-md border border-[var(--danger)]/25 bg-[var(--danger)]/5 p-3">
-          <p className="text-xs font-medium text-[var(--danger)]">需要先修复 Python / MiqroForge 环境</p>
+          <p className="text-xs font-medium text-[var(--danger)]">
+            需要先修复 Python / MiQroForge 环境
+          </p>
           <ul className="mt-1.5 list-disc pl-4 text-xs text-[var(--danger)] space-y-1">
             {(pythonCheck.result?.issues?.length
               ? pythonCheck.result.issues
-              : [pythonCheck.error ?? 'Python 或 MiqroForge 依赖不可用']
+              : [pythonCheck.error ?? 'Python 或 MiQroForge 依赖不可用']
             ).map((issue) => (
               <li key={issue}>{issue}</li>
             ))}
@@ -483,7 +247,7 @@ export function SetupWizard({
           <div className="mt-2 space-y-1.5 text-xs text-[var(--text-muted)]">
             <p>处理方式：</p>
             <p>1. 安装 Python 3.11 或更高版本，或设置 MIQI_PYTHON_PATH 指向可用 Python。</p>
-            <p>2. 在 MiqroForge 仓库根目录安装依赖后重新检查：</p>
+            <p>2. 在 MiQroForge 仓库根目录安装依赖后重新检查：</p>
             {renderCommand('uv sync')}
           </div>
         </div>
@@ -519,7 +283,7 @@ export function SetupWizard({
                   <div
                     className={cn(
                       'w-6 h-6 rounded-full flex items-center justify-center text-size-2xs font-bold',
-                      isComplete && 'bg-[var(--accent)] text-[#1a1a1a]',
+                      isComplete && 'bg-[var(--accent)] text-[var(--accent-text)]',
                       isCurrent &&
                         !isError &&
                         'bg-[var(--accent)]/15 text-[var(--accent)] ring-2 ring-[var(--accent)]/30',
@@ -652,7 +416,7 @@ export function SetupWizard({
           <div className="mt-2 rounded-md border border-[var(--warning)]/25 bg-[var(--warning)]/5 p-3">
             <p className="text-xs font-medium text-[var(--text)]">发行版已安装</p>
             <p className="mt-1 text-xs text-[var(--text-muted)]">
-              发行版 {result?.defaultDistro || result?.distros?.[0]} 已安装。MiqroForge
+              发行版 {result?.defaultDistro || result?.distros?.[0]} 已安装。MiQroForge
               将自动从中导出沙箱环境，无需额外操作。
             </p>
             <div className="mt-2">
@@ -713,7 +477,7 @@ export function SetupWizard({
               <div className="min-w-0 flex-1">
                 <div className="flex items-center gap-1.5 text-xs font-medium text-[var(--text)]">
                   {renderStatusIcon(pythonCheck.status)}
-                  Python / MiqroForge
+                  Python / MiQroForge
                 </div>
                 <p className="text-xs text-[var(--text-muted)] mt-1 break-words">{pythonSummary}</p>
                 {renderPythonGuidance()}
@@ -738,7 +502,7 @@ export function SetupWizard({
 
         {pythonCheck.status === 'error' && (
           <p className="text-xs text-[var(--danger)]">
-            Python / MiqroForge 运行环境未就绪，修复后重新检查即可继续进入应用。
+            Python / MiQroForge 运行环境未就绪，修复后重新检查即可继续进入应用。
           </p>
         )}
       </section>
@@ -753,7 +517,7 @@ export function SetupWizard({
           <span className="icon-color text-3xl leading-none">⚡</span>
         </div>
         <div>
-          <h1 className="text-2xl font-semibold text-[var(--text)]">欢迎使用 MiqroForge Desktop</h1>
+          <h1 className="text-2xl font-semibold text-[var(--text)]">欢迎使用 MiQroForge Desktop</h1>
           <p className="text-sm text-[var(--text-muted)] max-w-sm leading-relaxed mt-2">
             默认配置会先初始化工作目录。Provider、API Key、模型和工具可稍后在设置中配置。
           </p>
@@ -775,193 +539,11 @@ export function SetupWizard({
           {saving ? <Loader2 size={16} className="animate-spin" /> : <Zap size={16} />}
           使用默认配置，进入应用
         </Button>
-        <Button
-          variant="ghost"
-          onClick={() => setStep('provider')}
-          disabled={saving || pythonBlocksStart}
-        >
-          高级配置 <ArrowRight size={16} />
-        </Button>
       </div>
     </div>
   );
 
-  const renderProvider = () => {
-    const needsApiBase = providerMeta?.isLocal || providerMeta?.isOllamaCloud;
-    const keyOptional = providerMeta?.isLocal && !providerMeta?.isOllamaCloud;
-    const modelSuggestions = providerMeta
-      ? (PROVIDER_SUGGESTED_MODELS[providerMeta.name] ?? [providerMeta.defaultModel])
-      : [];
-
-    return (
-      <div className="flex flex-col gap-4">
-        <h2 className="text-lg font-semibold text-[var(--text)]">Provider 配置</h2>
-        <p className="text-sm text-[var(--text-muted)]">
-          需要立即配置模型服务时填写；也可以返回默认流程，进入应用后再到设置中配置。
-        </p>
-
-        <WorkspacePicker workspace={workspace} setWorkspace={setWorkspace} />
-
-        <div className="flex flex-col gap-1.5">
-          <label className="text-xs font-medium text-[var(--text-muted)]">Provider</label>
-          <select
-            value={selectedProvider}
-            onChange={(e) => {
-              const providerName = e.target.value;
-              const nextProvider = STATIC_PROVIDERS.find((p) => p.name === providerName);
-              setSelectedProvider(providerName);
-              setApiKey('');
-              setApiBase(nextProvider?.defaultApiBase ?? '');
-              setModelName(nextProvider?.defaultModel ?? '');
-              resetConnectionTest();
-            }}
-            className="h-9 rounded-lg border border-[var(--border)] bg-[var(--surface)] px-3 text-sm text-[var(--text)] focus:outline-none focus:border-[var(--border-strong)]"
-          >
-            <option value="">请选择 Provider...</option>
-            <optgroup label="云端 API">
-              {STATIC_PROVIDERS.filter((p) => !p.isLocal && !p.isOllamaCloud).map((p) => (
-                <option key={p.name} value={p.name}>
-                  {p.displayName}
-                </option>
-              ))}
-            </optgroup>
-            <optgroup label="本地 / 自托管">
-              {STATIC_PROVIDERS.filter((p) => p.isLocal || p.isOllamaCloud).map((p) => (
-                <option key={p.name} value={p.name}>
-                  {p.displayName}
-                </option>
-              ))}
-            </optgroup>
-          </select>
-        </div>
-
-        {providerMeta && (
-          <>
-            {needsApiBase && (
-              <div className="flex flex-col gap-1.5">
-                <label className="text-xs font-medium text-[var(--text-muted)]">API Base URL</label>
-                <Input
-                  value={apiBase}
-                  onChange={(e) => {
-                    setApiBase(e.target.value);
-                    resetConnectionTest();
-                  }}
-                  placeholder={providerMeta.defaultApiBase ?? 'https://api.example.com/v1'}
-                />
-              </div>
-            )}
-
-            {!keyOptional && (
-              <div className="flex flex-col gap-1.5">
-                <label className="text-xs font-medium text-[var(--text-muted)]">API Key</label>
-                <Input
-                  type="password"
-                  value={apiKey}
-                  onChange={(e) => {
-                    setApiKey(e.target.value);
-                    resetConnectionTest();
-                  }}
-                  placeholder="sk-..."
-                />
-              </div>
-            )}
-
-            {!needsApiBase && (
-              <div className="flex flex-col gap-1.5">
-                <label className="text-xs font-medium text-[var(--text-muted)]">
-                  API Base URL（可选）
-                </label>
-                <Input
-                  value={apiBase}
-                  onChange={(e) => {
-                    setApiBase(e.target.value);
-                    resetConnectionTest();
-                  }}
-                  placeholder="https://api.openai.com/v1"
-                />
-              </div>
-            )}
-
-            <div className="flex flex-col gap-1.5">
-              <label className="text-xs font-medium text-[var(--text-muted)]">默认模型</label>
-              <Input
-                value={modelName}
-                onChange={(e) => {
-                  setModelName(e.target.value);
-                  resetConnectionTest();
-                }}
-                placeholder={providerMeta.defaultModel}
-              />
-              {modelSuggestions.length > 0 && (
-                <div className="flex flex-wrap gap-1.5 mt-0.5">
-                  {modelSuggestions.map((model) => (
-                    <button
-                      key={model}
-                      type="button"
-                      onClick={() => {
-                        setModelName(model);
-                        resetConnectionTest();
-                      }}
-                      className="px-2 py-0.5 rounded text-xs bg-[var(--surface-muted)] text-[var(--text-faint)] hover:text-[var(--accent)] hover:bg-[var(--accent-soft)] transition-colors font-mono"
-                    >
-                      {model}
-                    </button>
-                  ))}
-                </div>
-              )}
-              <p className="text-xs text-[var(--text-faint)]">
-                当前连接测试会使用 {providerMeta.displayName} /{' '}
-                {modelName || providerMeta.defaultModel}
-              </p>
-            </div>
-
-            {(keyOptional || apiKey) && (
-              <div className="flex items-center gap-3">
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={testProvider}
-                  disabled={testResult === 'testing'}
-                >
-                  {testResult === 'testing' && <Loader2 size={14} className="animate-spin" />}
-                  测试连接
-                </Button>
-                {testResult === 'ok' && (
-                  <span className="text-xs text-[var(--success)] flex items-center gap-1">
-                    <Check size={12} /> 连接成功
-                  </span>
-                )}
-                {testResult === 'error' && (
-                  <span className="text-xs text-[var(--danger)]">{testError}</span>
-                )}
-                {testResult === 'idle' && testError && (
-                  <span className="text-xs text-[var(--text-muted)]">{testError}</span>
-                )}
-              </div>
-            )}
-          </>
-        )}
-
-        {saveError && (
-          <div className="rounded-lg border border-[var(--danger)]/30 bg-[var(--danger)]/10 px-3 py-2 text-xs text-[var(--danger)]">
-            {saveError}
-          </div>
-        )}
-
-        <div className="flex gap-2 mt-2">
-          <Button variant="ghost" onClick={() => setStep('welcome')}>
-            <ArrowLeft size={16} /> 返回
-          </Button>
-          <Button onClick={handleFinish} disabled={!canContinueProvider() || saving}>
-            {saving ? <Loader2 size={16} className="animate-spin" /> : <Key size={16} />}
-            保存并进入应用
-          </Button>
-        </div>
-      </div>
-    );
-  };
-
-  const allSteps: Step[] = ['welcome', 'provider'];
+  const allSteps: Step[] = ['welcome'];
   const stepIdx = allSteps.indexOf(step);
 
   return (
@@ -998,7 +580,6 @@ export function SetupWizard({
         </div>
 
         {step === 'welcome' && renderWelcome()}
-        {step === 'provider' && renderProvider()}
       </div>
     </div>
   );
