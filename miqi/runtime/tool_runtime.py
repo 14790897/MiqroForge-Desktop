@@ -152,6 +152,9 @@ class ToolRuntime:
         confirmation_contexts: list[ToolExecutionContext] = []
         all_confirmed = True
         for call in confirmation_calls:
+            # Interactive confirmations form an explicit FIFO queue. A user
+            # decision for one card must not suppress later confirmation cards
+            # from the same provider response; they are still shown one by one.
             ctx = await self.execute_one(turn, call)
             confirmation_contexts.append(ctx)
             approved = self._confirmation_approved(ctx)
@@ -161,9 +164,9 @@ class ToolRuntime:
                     setattr(turn, "_plan_adjustment_pending", "")
                 else:
                     setattr(turn, "_plan_gate_blocked", True)
+                    setattr(turn, "_plan_confirm_done", False)
             if not approved:
                 all_confirmed = False
-                break
 
         if all_confirmed:
             sibling_contexts = await asyncio.gather(
