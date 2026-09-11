@@ -2518,6 +2518,14 @@ export function ChatConsole({
     const msgTurnIds = new Set(
       messages.filter((m) => m.role === 'assistant' && m.turnId).map((m) => m.turnId as string)
     );
+    // #646-v2（CI strict violation）：工具链在 turn 进行中也会渲染确认卡——
+    // 该 turn 的 progress 工具行出现（或仍在流式的 active turn）后，兜底区
+    // 必须同步排除，否则同一张卡在工具链与兜底区形成双 DOM 实例。
+    for (const m of messages) {
+      if (m.role === 'progress' && m.turnId) msgTurnIds.add(m.turnId);
+    }
+    const active = activeTurnIdRef.current;
+    if (active) msgTurnIds.add(active);
     return new Set([...cardsByTurn.keys()].filter((t) => msgTurnIds.has(t)));
   }, [cardsByTurn, messages]);
   // sourcesByMsg cache: keyed by a tool-only signature so the map object is

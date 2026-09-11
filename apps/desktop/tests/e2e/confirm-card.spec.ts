@@ -183,13 +183,13 @@ test.describe('Confirm Card (ask_user_confirm_card)', () => {
 
       // ── 第二张卡：上传确认（web_search 走真实网络，CI 无外网时工具报错
       //    不影响状态机推进，但给足超时）──
-      await expect(cardArea.getByText('方案已完成，是否上传到 MiQroForge？')).toBeVisible({
-        timeout: 180_000,
-      });
-      // 按文本 filter 定位上传卡（first() 会命中第一张卡的回执——回执无按钮）
+      // 按文本 filter 定位上传卡（CI strict 防御：first() 会命中第一张卡的回执——回执无按钮）
       const uploadCard = page
         .getByTestId('confirm-card')
         .filter({ hasText: '是否上传到 MiQroForge' });
+      await expect(uploadCard.first()).toBeVisible({
+        timeout: 180_000,
+      });
       await expect(uploadCard.first().getByTestId('confirm-run')).toBeVisible();
 
       await page.screenshot({
