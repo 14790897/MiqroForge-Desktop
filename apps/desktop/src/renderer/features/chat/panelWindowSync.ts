@@ -263,6 +263,14 @@ export function createPanelWindowSync(options: PanelWindowSyncOptions): PanelWin
       // 否则新生命周期第一次请求会被「有在途」卡住。
       inFlight = false;
       anchor = null;
+      // 去重位与实际宽度也必须回到新生命周期的基线，不能跨 dispose 残留：
+      //   · requested 残留 → 新生命周期里同一个目标会被当成「已请求过」直接吞掉；
+      //   · applied 残留 → 新拖拽的 anchor.applied 取到脏值，窗口加宽量按错的
+      //     基线算（实测会多扩整整一个面板宽）。
+      // 卸载时 ChatConsole 会自行把主进程 extra 归零，模块这边必须同步归零。
+      requested = NaN;
+      applied = 0;
+      lastAppliedWidth = NaN;
     },
   };
 }

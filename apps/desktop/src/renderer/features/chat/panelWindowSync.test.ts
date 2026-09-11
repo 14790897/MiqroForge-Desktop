@@ -253,6 +253,43 @@ describe('panelWindowSync 拖拽队列', () => {
     expect(h.sync.applied).toBe(80);
   });
 
+  it('dispose 清掉去重位：新生命周期里同一个目标必须重新发', async () => {
+    // 卸载时 ChatConsole 会自行 setPanelWindowExtra(0) 把主进程 extra 归零，
+    // 模块里的 requested 若跨 dispose 残留，新生命周期里同一个目标会被
+    // 「已请求过」直接吞掉 —— React 以为窗口还有 extra，主进程其实已经归零。
+    const h = makeHarness();
+    h.sync.request(280);
+    h.flush();
+    await h.respond(0, { applied: 280 });
+    expect(h.sync.applied).toBe(280);
+    expect(h.sent).toEqual([280]);
+
+    h.sync.dispose();
+    expect(h.sync.applied).toBe(0); // 基线跟着回到新生命周期
+
+    h.sync.request(280); // 同一目标
+    h.flush();
+    expect(h.sent).toEqual([280, 280]); // 必须重发
+    await h.respond(1, { applied: 280 });
+    expect(h.sync.applied).toBe(280);
+  });
+
+  it('dispose 清掉 applied：新生命周期的拖拽按正确基线算窗口增量', async () => {
+    // 这是 applied 残留真正的杀伤面：拖拽的窗口加宽量是「锚点 applied + 面板增量」
+    // 的相对量，锚点取到脏的 280 会让主进程多扩整整一个面板宽。
+    const h = makeHarness();
+    h.sync.request(280);
+    h.flush();
+    await h.respond(0, { applied: 280 });
+
+    h.sync.dispose();
+    h.sync.beginDrag({ clientX: 500, width: 280 });
+    h.sync.dragTo(360); // 面板只加了 80
+    h.flush();
+
+    expect(h.sent).toEqual([280, 80]); // 不是 280 + 80 = 360
+  });
+
   it('request 落地后回调 onRequestSettled（应用 / 跳过 / 去重命中都算）', async () => {
     const h = makeHarness();
     // 正常应用

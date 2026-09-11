@@ -6821,9 +6821,13 @@ export function ChatConsole({
               {streaming && <span className="tag-inprogress shrink-0">{'\u8fdb\u884c\u4e2d'}</span>}
               {/* \u66f4\u65b0\u65f6\u95f4\uff1a\u653e\u5728\u5de5\u4f5c\u76ee\u5f55\u80f6\u56ca\u524d\u9762\u3001\u968f\u4f1a\u8bdd\u8eab\u4efd\u5c55\u793a\uff08\u53f3\u4fa7\u53ea\u7559\u7ed9\u64cd\u4f5c\uff09\u3002
                   \u53ea\u9732\u65f6\u95f4\uff0c\u5b8c\u6574 \u6587\u4ef6/\u63d2\u4ef6 \u7edf\u8ba1\u6536\u8fdb tooltip\u3002 */}
-              {messages.length > 0 && (
+              {/* \u66f4\u65b0\u65f6\u95f4 / \u6587\u4ef6\u6570\uff1a\u5e38\u9a7b\u5143\u4fe1\u606f\u3002\u538b\u7f29\u6001**\u6574\u6761\u9690\u85cf**\uff08\u5b8c\u6574\u5185\u5bb9\u4ecd\u5728
+                  title / aria-label \u91cc\uff09\u2014\u2014\u5b83\u5b9e\u6d4b\u5360 110px\uff0c\u800c\u804a\u5929\u5217\u7a84\u5230\u8fd9\u4e2a\u6863\u4f4d\u65f6
+                  \u6807\u9898\u53ea\u5269 82px\uff0c\u7b49\u4e8e\u8ba9\u4f4e\u4ef7\u503c\u7684\u8f85\u52a9\u4fe1\u606f\u6324\u6389\u4e3b\u4fe1\u606f\u3002\u8fd9\u4e5f\u987a\u5e26\u53bb\u6389\u4e86
+                  \u539f\u6765\u7684 `hidden md:` \u2014\u2014 \u90a3\u662f\u89c6\u53e3\u65ad\u70b9\uff0c\u800c\u7a97\u53e3\u6709 minWidth\uff0c\u5b83\u6c38\u4e0d\u89e6\u53d1\u3002 */}
+              {messages.length > 0 && !subHeaderCompact && (
                 <span
-                  className="hidden md:inline-flex shrink-0 items-center gap-1 text-[11px] leading-none whitespace-nowrap"
+                  className="inline-flex shrink-0 items-center gap-1 text-[11px] leading-none whitespace-nowrap"
                   aria-label={taskHeaderInfo.meta}
                   title={taskHeaderInfo.meta}
                   data-testid="chat-header-updated-at"
