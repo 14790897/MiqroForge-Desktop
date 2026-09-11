@@ -66,7 +66,6 @@ class SeqProvider:
         self.calls += 1
         n = self.calls
         print(f"\n=== provider round R{n} === (messages={len(messages or [])})")
-        # 打印最近消息角色，便于观察回合是否推进
         roles = [m.get("role") for m in (messages or [])]
         print(f"  roles: {roles[-6:]}")
         if n == 1:
@@ -96,12 +95,10 @@ async def main():
     (workspace / "out").mkdir(exist_ok=True)
     print(f"workspace: {workspace}")
 
-    # 真实工具
     registry = ToolRegistry()
     registry.register(ReadFileTool(workspace=workspace, allowed_dir=workspace))
     registry.register(WriteFileTool(workspace=workspace))
     registry.register(ListDirTool(workspace=workspace, allowed_dir=workspace))
-    # 确认工具注入自动 confirm resolver
     registry.register(AskUserConfirmCardTool(resolver=auto_confirm))
     registry.register(AskUserPlanConfirmTool(resolver=auto_confirm))
 
@@ -123,8 +120,6 @@ async def main():
         event_emitter=emitter,
         max_iterations=10,
     )
-
-    from types import SimpleNamespace
 
     turn = TurnContext(
         turn_id="turn-127-repro",
@@ -149,10 +144,11 @@ async def main():
         )
         elapsed = time.perf_counter() - t0
         print(f"\n=== RESULT ({(elapsed):.1f}s) ===")
-        print("final_content:", (result.final_content or "")[:120])
+        final_content = result.final_content or ""
+        print("final_content:", final_content[:120])
         print("tools_used:", result.tools_used)
         print("provider rounds:", provider.calls)
-        ok = provider.calls == 4 and (result.final_content or "").startswith("✅")
+        ok = provider.calls == 4 and final_content.startswith("✅")
         print("\n>>> 127 复现：", "PASS（回合完整推进）" if ok else "FAIL（回合未推进到 R4）")
     except asyncio.TimeoutError:
         print(f"\n=== TIMEOUT 60s（provider rounds={provider.calls}）——回合卡住 ===")
