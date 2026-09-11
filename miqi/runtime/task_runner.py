@@ -1077,6 +1077,16 @@ class TaskRunner:
                 # AUTH is sensitive — surface a fixed, non-leaking message
                 # instead of the raw provider exception text (Plan 58.2).
                 user_message = "模型服务认证失败，请检查 Provider 的 API Key、API Base 或当前模型配置。"
+            elif prov_err.kind is ErrorKind.CONTENT_BLOCKED:
+                # 平台内容安全拦截（网关实测 403 sensitive_word_detected）：
+                # 与认证无关，必须给出可执行的正确指引——此前被归为 AUTH，
+                # 用户被引导去检查 API Key / 重选模型，而改密钥永远修不好。
+                # 文案刻意不含 "api key"/"模型服务认证失败" 等关键词，
+                # 避免前端 isProviderConfigurationProblem 再挂上「去选择模型」。
+                user_message = (
+                    "请求被平台内容安全策略拦截（触发敏感词检测），"
+                    "请调整提问或上传的内容后重试。"
+                )
             elif prov_err.kind is ErrorKind.PAYMENT_REQUIRED:
                 # Issue #528: 402 / balance / quota exhausted — account
                 # status, not auth. Fixed non-leaking billing hint

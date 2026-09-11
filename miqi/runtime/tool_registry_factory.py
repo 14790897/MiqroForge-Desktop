@@ -501,6 +501,17 @@ def create_runtime_tool_registry(
             env_passthrough=list(getattr(exec_cfg, "env_passthrough", [])) if exec_cfg is not None else [],
             approval_callback=approval_callback,
             sandbox_manager=_sbm,
+            # #984: workspace + static extra roots the sandbox must keep
+            # writable after /mnt went read-only; ``allow_user_dirs`` gates
+            # the per-call _user_roots component (tools.auto_user_dirs).
+            shared_roots=_shared_roots,
+            allow_user_dirs=_auto_user_dirs,
+            # #1007 review: the workspace root is in that bind set, which
+            # would re-open <ws>/sessions/** (other sessions' files) too.
+            # These two host paths let bwrap re-mount <ws>/sessions read-only
+            # and keep only this session's files dir writable.
+            workspace_root=str(workspace.resolve()),
+            session_files_dir=str(_work_dir) if _work_dir is not None else None,
             # #854: 系统包安装授权确认卡——关闭状态下拦截点弹卡（once/always/deny）。
             # "允许并记住"走统一入口：runtime 属性 + config 持久化（外部审阅 #854）。
             system_install_approver=_make_system_install_approver(
@@ -599,12 +610,24 @@ def create_runtime_tool_registry(
     # Office write tools always write inside the workspace, independently
     # of the `restrict_to_workspace` config (which only controls
     # WriteFileTool / EditFileTool).
-    registry.register(CreateDocxTool(workspace=_write_workspace, allowed_dir=_write_workspace))
-    registry.register(DocxWriteTool(workspace=_write_workspace, allowed_dir=_write_workspace))
+    registry.register(CreateDocxTool(
+        workspace=_write_workspace, allowed_dir=_write_workspace,
+        allow_user_roots=_auto_user_dirs,
+    ))
+    registry.register(DocxWriteTool(
+        workspace=_write_workspace, allowed_dir=_write_workspace,
+        allow_user_roots=_auto_user_dirs,
+    ))
     registry.register(EditDocxTool(workspace=_write_workspace, allowed_dir=_write_workspace))
     registry.register(PptxReadTool(workspace=_write_workspace, allowed_dir=_write_workspace))
-    registry.register(CreatePptxTool(workspace=_write_workspace, allowed_dir=_write_workspace))
-    registry.register(PptxWriteTool(workspace=_write_workspace, allowed_dir=_write_workspace))
+    registry.register(CreatePptxTool(
+        workspace=_write_workspace, allowed_dir=_write_workspace,
+        allow_user_roots=_auto_user_dirs,
+    ))
+    registry.register(PptxWriteTool(
+        workspace=_write_workspace, allowed_dir=_write_workspace,
+        allow_user_roots=_auto_user_dirs,
+    ))
     registry.register(XlsxReadTool(workspace=_write_workspace, allowed_dir=_write_workspace))
     registry.register(CreateXlsxTool(workspace=_write_workspace, allowed_dir=_write_workspace))
     registry.register(XlsxWriteTool(workspace=_write_workspace, allowed_dir=_write_workspace))

@@ -245,6 +245,92 @@ async def test_config_update_rejects_custom_model_even_with_gateway(fake_config,
     assert exc_info.value.code == "INVALID_PARAMS"
 
 
+# ── 平台 AI 网关路由与保存门控（#922 收尾） ─────────────────────────────
+
+
+def _write_qraft_gateway_token(config, *, status: str = "active") -> None:
+    """在 config 的 workspace 下写入带 aiGateway 块的 token 文件。"""
+    import json
+    from pathlib import Path
+
+    token_file = Path(config.agents.defaults.workspace) / ".qraft" / "token.json"
+    token_file.parent.mkdir(parents=True, exist_ok=True)
+    token_file.write_text(json.dumps({
+        "accessToken": "tok-123",
+        "aiGateway": {
+            "encryptedApiKey": "sk-test-gateway-secret",
+            "status": status,
+            "configVersion": 1,
+        },
+    }), encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_config_update_accepts_gateway_model_with_active_qraft_creds(
+    fake_config, fake_provider, tmp_path, monkeypatch,
+):
+    """平台网关凭据 active 时，网关实测模型可保存 —— 门控须与
+    factory.make_provider 的网关路由一致（#922）；登录用户无任何本地
+    provider 凭据时，这是唯一可用的模型。"""
+    from unittest import mock
+
+    from miqi.runtime.config_handlers import config_update_handler
+
+    monkeypatch.delenv("QRAFT_GATEWAY_BASE", raising=False)
+    _write_qraft_gateway_token(fake_config)
+    registry = _setup_registry(fake_config, tmp_path)
+
+    with mock.patch("miqi.config.loader.save_config"):
+        result = await config_update_handler(
+            "req-1",
+            {"config": {"agents": {"defaults": {"model": "deepseek/deepseek-v4-flash"}}}},
+            "client-1", None, registry,
+        )
+    assert result["result"]["saved"] is True
+
+
+@pytest.mark.asyncio
+async def test_config_update_rejects_gateway_model_without_qraft_creds(
+    fake_config, fake_provider, tmp_path, monkeypatch,
+):
+    """无网关凭据时，网关模型与其他模型一样必须由本地 provider 凭据背书。"""
+    from miqi.runtime.app_server import AppServerError
+    from miqi.runtime.config_handlers import config_update_handler
+
+    monkeypatch.delenv("QRAFT_GATEWAY_BASE", raising=False)
+    registry = _setup_registry(fake_config, tmp_path)
+
+    with pytest.raises(AppServerError) as exc_info:
+        await config_update_handler(
+            "req-1",
+            {"config": {"agents": {"defaults": {"model": "deepseek/deepseek-v4-flash"}}}},
+            "client-1", None, registry,
+        )
+    assert exc_info.value.code == "INVALID_PARAMS"
+
+
+@pytest.mark.asyncio
+async def test_config_update_rejects_non_gateway_model_even_with_qraft_creds(
+    fake_config, fake_provider, tmp_path, monkeypatch,
+):
+    """网关凭据 active 只放行网关实测模型 —— 其余 deepseek 模型运行时仍走
+    直连（factory.make_provider），不能借网关凭据保存。"""
+    from miqi.runtime.app_server import AppServerError
+    from miqi.runtime.config_handlers import config_update_handler
+
+    monkeypatch.delenv("QRAFT_GATEWAY_BASE", raising=False)
+    _write_qraft_gateway_token(fake_config)
+    registry = _setup_registry(fake_config, tmp_path)
+
+    with pytest.raises(AppServerError) as exc_info:
+        await config_update_handler(
+            "req-1",
+            {"config": {"agents": {"defaults": {"model": "deepseek/deepseek-v4-pro"}}}},
+            "client-1", None, registry,
+        )
+    assert exc_info.value.code == "INVALID_PARAMS"
+
+
 @pytest.mark.asyncio
 async def test_config_update_accepts_model_of_configured_provider(fake_config, fake_provider, tmp_path):
     """#929 review：模型归属的 provider 持有凭据（或经网关路由）时放行。"""
@@ -263,3 +349,79 @@ async def test_config_update_accepts_model_of_configured_provider(fake_config, f
         )
     assert result["result"]["saved"] is True
     assert registry.bridge_context["state"].config.agents.defaults.model == "deepseek/deepseek-v4-flash"
+
+
+# ── 比较并设置 expect_model（#991 review）────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_config_update_expect_model_match_saves(fake_config, fake_provider, tmp_path):
+    """期望值与磁盘当前模型一致时正常保存。"""
+    from unittest import mock
+
+    from miqi.runtime.config_handlers import config_update_handler
+
+    fake_config.providers.deepseek.api_key = "sk-ds-1234567890"
+    fake_config.agents.defaults.model = ""
+    registry = _setup_registry(fake_config, tmp_path)
+
+    with mock.patch("miqi.config.loader.save_config") as save:
+        result = await config_update_handler(
+            "req-1",
+            {
+                "config": {"agents": {"defaults": {"model": "deepseek/deepseek-v4-flash"}}},
+                "expect_model": "",
+            },
+            "client-1", None, registry,
+        )
+    assert result["result"]["saved"] is True
+    save.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_config_update_expect_model_mismatch_skips(fake_config, fake_provider, tmp_path):
+    """快照读取后用户已选了别的模型 → 跳过写入，保留更新的选择。"""
+    from unittest import mock
+
+    from miqi.runtime.config_handlers import config_update_handler
+
+    fake_config.providers.deepseek.api_key = "sk-ds-1234567890"
+    fake_config.agents.defaults.model = "deepseek/deepseek-v4-pro"  # 间隙中被用户改写
+    registry = _setup_registry(fake_config, tmp_path)
+
+    with mock.patch("miqi.config.loader.save_config") as save:
+        result = await config_update_handler(
+            "req-1",
+            {
+                "config": {"agents": {"defaults": {"model": "deepseek/deepseek-v4-flash"}}},
+                "expect_model": "",
+            },
+            "client-1", None, registry,
+        )
+    assert result["result"] == {"saved": False, "skipped": "expect_model_mismatch"}
+    save.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_config_update_expect_model_ignored_for_unrelated_fields(
+    fake_config, fake_provider, tmp_path,
+):
+    """不改写默认模型的更新不受期望值影响（只改名等字段时照常保存）。"""
+    from unittest import mock
+
+    from miqi.runtime.config_handlers import config_update_handler
+
+    fake_config.agents.defaults.model = "deepseek/deepseek-v4-pro"  # 与期望不一致
+    registry = _setup_registry(fake_config, tmp_path)
+
+    with mock.patch("miqi.config.loader.save_config") as save:
+        result = await config_update_handler(
+            "req-1",
+            {
+                "config": {"agents": {"defaults": {"name": "renamed"}}},
+                "expect_model": "",
+            },
+            "client-1", None, registry,
+        )
+    assert result["result"]["saved"] is True
+    save.assert_called_once()

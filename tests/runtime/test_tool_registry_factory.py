@@ -321,6 +321,47 @@ def test_file_tools_receive_dot_skills_and_configured_extra_roots(fake_config, t
         assert expected.issubset(roots), f"{tool_name} missing shared roots: {expected - roots}"
 
 
+def test_exec_tool_receives_cross_session_guard_paths(fake_config, tmp_path, monkeypatch):
+    """#1007 review: exec is handed the workspace root + its own files dir.
+
+    The workspace root is in the rw bind set, which re-opens
+    ``<ws>/sessions/**`` (every other session) writable inside the sandbox.
+    ``bwrap._cross_session_guard_args`` can only close that again if it is
+    told which path is the workspace root and which is THIS session's files
+    dir — both default to ``None`` in bwrap, so a factory that stops passing
+    them turns the guard into dead code with no test failing elsewhere.
+    """
+    from miqi.agent.tools import filesystem as fs
+    from miqi.runtime.tool_registry_factory import create_runtime_tool_registry
+
+    # The per-session files layout exists for the DEFAULT workspace only
+    # (``_session_files_dir_for_key``); this tmp dir stands in for it.
+    monkeypatch.setattr(fs, "_is_default_workspace", lambda path: True)
+
+    registry = create_runtime_tool_registry(
+        config=fake_config, workspace=tmp_path, session_id="desktop:1",
+    )
+    exec_tool = registry.get("exec")
+    assert exec_tool is not None
+    assert exec_tool._workspace_root == str(tmp_path.resolve())
+    own = tmp_path / "sessions" / fs._session_files_dir_key("desktop:1") / "files"
+    assert exec_tool._session_files_dir == str(own)
+    # The guard re-opens this very dir after the read-only re-mount; it must
+    # be the dir the factory actually created (not a re-derived spelling).
+    assert own.is_dir()
+
+
+def test_exec_tool_guard_paths_absent_without_session(fake_config, tmp_path):
+    """No session key → no per-session dir → no guard (old args, exactly)."""
+    from miqi.runtime.tool_registry_factory import create_runtime_tool_registry
+
+    registry = create_runtime_tool_registry(config=fake_config, workspace=tmp_path)
+    exec_tool = registry.get("exec")
+    assert exec_tool is not None
+    assert exec_tool._workspace_root == str(tmp_path.resolve())
+    assert exec_tool._session_files_dir is None
+
+
 @pytest.mark.asyncio
 async def test_factory_native_file_tools_respect_extra_roots_when_restricted(fake_config, tmp_path):
     """tools.extra_roots must also work for native paths under workspace restriction."""

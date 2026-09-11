@@ -15,7 +15,11 @@ pattern-stacking with a path-aware capability check:
     forms (``python -c``/``perl -e``/``node -e``/``php -r``/``bash -c``
     payloads containing ``shutil.rmtree``, ``os.remove``, ``fs.rmSync``,
     nested ``rm -rf``, ...) — so re-spelling the operation does not
-    bypass the check (capability parity).
+    bypass the check (capability parity).  Python WRITE spellings
+    (``open(..., 'w')``, ``write_text``/``write_bytes``, ``os.mkdir``/
+    ``makedirs``, ``shutil.copy*``, ``os.rename`` — #984 layer 3) are
+    treated the same way: the vocabulary is a best-effort EXPERIENCE
+    layer (earlier, clearer refusals), not the enforcement layer.
   * Every affected path is resolved (canonical ``.``/``..`` handling,
     symlink resolution on the host) and classified against the session
     scope.  Permission levels:
@@ -28,6 +32,13 @@ pattern-stacking with a path-aware capability check:
       other sessions / outside workspace / statically
       unresolvable targets ($VAR, globs, command
       substitution) — UNCERTAIN → DENY (fail closed)
+
+    Per-call AUTHORIZED ROOTS (``RuntimePaths.extra_write_roots``: the
+    ``_user_roots`` dirs the user named, issue #821) are a mutation scope
+    too — layer 1 binds them rw inside the sandbox (#984), so refusing a
+    write there would contradict a grant the user just made (and break
+    every delivery to the directory they asked for).  System paths still
+    win over an authorized root (defense in depth).
 
     Sandbox semantics: when the exec runs inside the bwrap sandbox,
     ``/home/miqi/**`` and ``/tmp`` are sandbox-internal overlays
@@ -66,33 +77,45 @@ _REASON_TEXTS: dict[str, str] = {
         "（全局工作区只读）。"
     ),
     "workspace_root": "目标是工作区或 session 根目录本身。",
+    "authorized_root": "目标是用户授权目录本身。",
     "uncertain_path": "目标含变量/通配符/命令替换等无法静态解析的成分。",
     "script_uncertain": "内联脚本中的破坏性操作无法静态确定目标路径。",
     "find_exec": "find 的 -exec/-execdir 会执行任意程序，无法静态验证删除范围。",
 }
 
 _POLICY_TEXTS: dict[str, str] = {
-    "delete": "只允许删除当前 session 工作区内的文件。",
-    "write": "只允许写入当前 session 工作区内的文件。",
-    "move": "只允许在当前 session 工作区内移动/重命名文件。",
+    "delete": "只允许删除当前 session 工作区或用户授权目录内的文件。",
+    "write": "只允许写入当前 session 工作区或用户授权目录内的文件。",
+    "move": "只允许在当前 session 工作区或用户授权目录内移动/重命名文件。",
     "uncertain": "无法确认作用范围的破坏性操作一律拒绝（宁可误拒）。",
     "workspace_root": "禁止删除工作区或 session 根目录。",
+    "authorized_root": (
+        "授权目录内的文件可写可删，但目录本身不可删除。"
+    ),
     "find_exec": "无法确认删除范围的 find 操作一律拒绝。",
     "privilege": "沙箱为无特权环境，系统目录只读，提权命令不可用。",
 }
 
 _SAFE_TEXTS: dict[str, str] = {
     "delete": (
-        "请将目标限定在当前 session 目录内，例如：rm -rf ./run-output"
+        "请将目标限定在当前 session 目录内，例如：rm -rf ./run-output；"
+        "会话外目录请让用户在消息中点名该目录（本轮即授权）。"
     ),
-    "write": "请将写入目标限定在当前 session 目录内。",
-    "move": "请将源与目标都限定在当前 session 目录内。",
+    "write": (
+        "请将写入目标限定在当前 session 目录内；写入会话外目录请用文件工具"
+        "（write_file），或让用户在消息中点名该目录（本轮即授权 exec 写入）。"
+    ),
+    "move": "请将源与目标都限定在当前 session 目录或用户授权目录内。",
     "uncertain": (
         "请使用明确的目录名（如 rm -rf ./run-output），"
         "不要使用 $变量、通配符或命令替换。"
     ),
     "workspace_root": (
         "请指定根目录下的具体子目录，例如：rm -rf ./run-output"
+    ),
+    "authorized_root": (
+        "请删除授权目录内的具体文件（例如 rm -rf <授权目录>/sub），"
+        "目录本身请让用户处理。"
     ),
     "find_exec": (
         "请用 rm 加明确路径逐个删除，或对 session 目录内的明确子目录"
@@ -133,13 +156,21 @@ _INSTALL_EXCLUDE_PREV = frozenset({
     "scoop", "flatpak", "snap", "emerge",
 })
 
-#: Destructive call names inside inline-script payloads (issue #811:
-#: ``shutil.rmtree`` must be caught the same way ``rm -rf`` is).
+#: Destructive / write call names inside inline-script payloads.
+#: Issue #811: ``shutil.rmtree`` must be caught the same way ``rm -rf`` is.
+#: Issue #984 layer 3: python WRITE spellings must be caught the same way
+#: ``tee``/``mkdir`` are — ``write_text``/``open(..., 'w')`` used to sail
+#: through while the shell equivalent was refused.  Deliberately fail-open:
+#: an unrecognised spelling is simply not flagged.  The kernel layer (``/mnt``
+#: ro-bind + per-call rw binds) is the enforcement layer; this is the
+#: experience layer (earlier, clearer refusal).
 _DESTRUCTIVE_CALL_RE = re.compile(
     r"\bshutil\.rmtree\b"
     r"|\bshutil\.move\b"
+    r"|\bshutil\.copy\w*\b"
     r"|\bos\.(remove|unlink|rmdir|removedirs)\b"
     r"|\bos\.system\b"
+    r"|\bos\.(rename|replace)\b"
     r"|\bpathlib\.[^;)]*\.unlink\("
     r"|\.unlink\(\s*\)"
     r"|\bfs\.(rmSync|rmdirSync|unlinkSync|rm|rmdir|unlink)\s*\("
@@ -147,8 +178,192 @@ _DESTRUCTIVE_CALL_RE = re.compile(
     r"|\bFileUtils\.(rm|rm_r|rm_rf|rmdir|remove_dir)\b"
     r"|\bunlink\b"
     r"|\brmtree\b"
+    r"|\bwrite_text\b"
+    r"|\bwrite_bytes\b"
+    r"|\bmkdir\s*\("
+    r"|\bmakedirs\s*\("
     r"|\brm\s+-[a-zA-Z]*r"
 )
+
+#: ``open(...)`` with a WRITE mode (#984 layer 3) cannot be one pattern: the
+#: mode lives in the call's own argument list, and a READ ``open(f)`` /
+#: ``open(f, 'r')`` / ``open(f, 'rb')`` must stay unflagged (fail-open).  The
+#: call is scanned linearly with a bounded window — no backtracking regex
+#: (CodeQL ReDoS; see the note on _extract_string_literals below).
+_OPEN_CALL_RE = re.compile(r"\bopen\s*\(")
+_MODE_LITERAL_RE = re.compile(r"['\"]([rwxabt+]{1,8})['\"]")
+_WRITE_MODE_CHARS = frozenset("wax+")
+_OPEN_ARGS_LIMIT = 400
+
+
+def _top_level_call_arg_spans(text: str, start: int) -> list[tuple[int, int]]:
+    """``(start, end)`` spans of the depth-0 arguments of a call's arg list.
+
+    *start* is the index just after the opening paren.  Quote- and
+    paren-aware: ``open(os.path.join(d, 'a'), 'r')`` yields the spans of
+    ``os.path.join(d, 'a')`` and ``'r'``, so the nested ``'a'`` is never
+    mistaken for a mode.  Linear scan with a bounded window; unbalanced
+    input simply ends the scan (never raises).
+    """
+    spans: list[tuple[int, int]] = []
+    arg_start = start
+    depth = 1
+    i = start
+    stop = min(len(text), start + _OPEN_ARGS_LIMIT)
+    while i < stop:
+        ch = text[i]
+        if ch in ("'", '"'):
+            i += 1
+            while i < stop:
+                c = text[i]
+                if c == "\\" and i + 1 < stop:
+                    i += 2
+                    continue
+                i += 1
+                if c == ch:
+                    break
+            continue
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+            if depth == 0:
+                spans.append((arg_start, i))
+                return spans
+        elif ch == "," and depth == 1:
+            spans.append((arg_start, i))
+            arg_start = i + 1
+        i += 1
+    spans.append((arg_start, stop))
+    return spans
+
+
+def _top_level_call_args(text: str, start: int) -> list[str]:
+    """Arguments at depth 0 of the call whose ``(`` ends at *start*."""
+    return [text[a:b] for a, b in _top_level_call_arg_spans(text, start)]
+
+
+def _open_call_writes(payload: str) -> bool:
+    """True when *payload* calls ``open`` with a WRITE mode (#984 layer 3).
+
+    Reads stay unflagged: ``open(f)``, ``open(f, 'r')``, ``open(f, 'rb')``.
+    Writes are flagged: ``open(f, 'w'|'a'|'x'|'wb'|'ab'|'r+')``, the
+    ``X.open('w')`` method form, and ``open(f, mode='w')``.  Only the mode
+    POSITION is examined (2nd positional of a bare ``open``, 1st of a
+    method call, or a ``mode=`` keyword), so
+    ``open(os.path.join(d, 'a'), 'r')`` stays a read.
+    """
+    for m in _OPEN_CALL_RE.finditer(payload):
+        is_method = m.start() > 0 and payload[m.start() - 1] == "."
+        for idx, raw in enumerate(_top_level_call_args(payload, m.end())):
+            arg = raw.strip()
+            if arg.startswith("mode="):
+                arg = arg[len("mode="):].strip()
+            elif idx != (0 if is_method else 1):
+                continue
+            lit = _MODE_LITERAL_RE.fullmatch(arg)
+            if lit and set(lit.group(1).lower()) & _WRITE_MODE_CHARS:
+                return True
+    return False
+
+
+def _payload_is_destructive(payload: str) -> bool:
+    """True when an inline payload contains a destructive/write call.
+
+    The regex vocabulary is the fast path; ``open(..., <write mode>)``
+    needs the call's own argument list and goes through
+    :func:`_open_call_writes`.  Fail-open: unrecognised spellings fall
+    through and are left to the kernel layer.
+    """
+    return bool(_DESTRUCTIVE_CALL_RE.search(payload)) or _open_call_writes(payload)
+
+
+#: Delete-family subset of the vocabulary — used ONLY to pick the refusal
+#: wording (delete vs write guidance) for an inline payload.
+_DELETE_CALL_RE = re.compile(
+    r"\bshutil\.rmtree\b"
+    r"|\bos\.(remove|unlink|rmdir|removedirs)\b"
+    r"|\bunlink\b"
+    r"|\brmtree\b"
+    r"|\brm\s+-[a-zA-Z]*r"
+)
+
+#: Delete / move family — the paths these touch can be REMOVED, so an
+#: authorized root itself must not be their operand (see
+#: :func:`_is_authorized_root_itself`).
+_REMOVAL_CALL_RE = re.compile(
+    r"\bshutil\.(rmtree|move)\b"
+    r"|\bos\.(remove|unlink|rmdir|removedirs|rename|replace)\b"
+    r"|\bunlink\b"
+    r"|\brmtree\b"
+    r"|\brm\s+-[a-zA-Z]*r"
+)
+
+#: Copy-family calls whose FIRST argument is only READ (shell ``cp`` parity).
+#: ``shutil.move`` / ``os.rename`` are deliberately absent: they REMOVE the
+#: source, so both sides are mutations.
+_COPY_CALL_RE = re.compile(r"\bshutil\.copy\w*\s*\(")
+
+
+#: ``src=`` keyword of the copy family, anchored at the start of a depth-0
+#: argument.  Every call this regex (:data:`_COPY_CALL_RE`) matches names its
+#: first parameter ``src`` — ``copy``, ``copy2``, ``copyfile`` and
+#: ``copytree`` alike (``shutil.move`` is deliberately not matched there).
+_COPY_SRC_KEYWORD_RE = re.compile(r"\s*src\s*=\s*")
+
+
+def _copy_source_spans(payload: str) -> list[tuple[int, int]]:
+    """Spans of the SOURCE argument of every ``shutil.copy*`` call.
+
+    Positional form: the first argument is the source
+    (``shutil.copy('/etc/x', out)``).  Keyword form: the argument values
+    are looked at by NAME, because the first argument is then NOT
+    necessarily the source — ``shutil.copy(dst=out, src=p)`` writes the
+    argument that ``args[0]`` would have labelled a read, letting an
+    out-of-scope target through as "just a cp source".
+
+    Only when no ``src=`` argument is present does the first argument
+    count as the source, so every positional payload keeps its previous
+    classification verbatim.  A malformed ``src=`` (no value) yields an
+    empty span, which matches no literal — i.e. it degrades to "this
+    literal is a mutation", never to a read.
+    """
+    spans: list[tuple[int, int]] = []
+    for m in _COPY_CALL_RE.finditer(payload):
+        args = _top_level_call_arg_spans(payload, m.end())
+        if not args:
+            continue
+        for a, b in args:
+            keyword = _COPY_SRC_KEYWORD_RE.match(payload[a:b])
+            if keyword:
+                spans.append((a + keyword.end(), b))
+                break
+        else:
+            spans.append(args[0])
+    return spans
+
+
+def _only_as_copy_source(
+    payload: str, literal: str, spans: list[tuple[int, int]],
+) -> bool:
+    """True when EVERY occurrence of *literal* is a copy SOURCE argument.
+
+    Inline payloads classify every literal as a mutation by default, which
+    would refuse ``shutil.copy('/etc/x', out)`` although the shell
+    ``cp /etc/x out`` is allowed.  A literal that also appears anywhere
+    else (``shutil.copy(p, q); os.remove(p)``) keeps its mutation role.
+    """
+    if not literal or not spans:
+        return False
+    pos = payload.find(literal)
+    if pos == -1:
+        return False
+    while pos != -1:
+        if not any(a <= pos and pos + len(literal) <= b for a, b in spans):
+            return False
+        pos = payload.find(literal, pos + 1)
+    return True
+
 
 #: String literals inside a script payload are extracted with a LINEAR
 #: scanner (_extract_string_literals) — a backreference regex here would
@@ -494,6 +709,37 @@ def _under(path: str, parent: str) -> bool:
     return p.startswith(q + "/") or p == q
 
 
+def _authorized_write(pstr: str, rt: "RuntimePaths") -> bool:
+    """True when *pstr* sits in a per-call AUTHORIZED root (#821/#984).
+
+    ``extra_write_roots`` carries the dirs the USER named for this call.
+    Layer 1 re-opens them writable inside the sandbox, so a refusal here
+    would contradict a grant the user just made (and break every delivery
+    to the directory they asked for).  Equality counts: the file tools
+    accept the root itself (``Path.relative_to``), and so does the bind.
+    """
+    for root in rt.extra_write_roots:
+        if _under(pstr, root):
+            return True
+    return False
+
+
+def _is_authorized_root_itself(pstr: str, rt: "RuntimePaths") -> bool:
+    """True when *pstr* IS an authorized root (not merely inside one).
+
+    Equality is a mutation scope for WRITE-kind targets (``cp a <root>``,
+    ``mv x <root>``, ``mkdir <root>`` — the operand is the directory being
+    written into), but a delete/move-SOURCE must not remove the granted
+    directory itself: the grant is "deliver here", not "delete my folder".
+    Mirrors the existing workspace/session-root protection.
+    """
+    p = _norm_str(pstr).rstrip("/")
+    for root in rt.extra_write_roots:
+        if p and p == _norm_str(root).rstrip("/"):
+            return True
+    return False
+
+
 def _is_system_path(pstr: str, rt: "RuntimePaths") -> bool:
     """True when *pstr* (normalized host path) is a protected system path."""
     n = _norm_str(pstr).rstrip("/")
@@ -544,6 +790,12 @@ class RuntimePaths:
     sandbox_cwd: str = "/home/miqi/workspace"
     miqi_home: str | None = None
     host_home: str | None = None
+    #: Host roots the user authorized for THIS call (issue #821
+    #: ``_user_roots`` — the output dirs they named).  Layer 1 binds them
+    #: rw inside the sandbox (#984), so the guard must not refuse a
+    #: mutation inside them.  Populated only when ``tools.auto_user_dirs``
+    #: is on, i.e. exactly when the bind happens.
+    extra_write_roots: tuple[str, ...] = ()
 
     @property
     def current_session_key(self) -> str | None:
@@ -597,7 +849,31 @@ def _is_flag(tok: _Token, windows_flags: bool = False) -> bool:
     return False
 
 
-def _extract_heredoc_payload(tokens: list[_Token]) -> str:
+def _raw_heredoc_body(command: str, delim: str) -> str | None:
+    """Body of the heredoc opened with *delim*, read from the RAW text.
+
+    ``_tokenize`` strips quotes, so a payload rebuilt from tokens loses
+    every string literal — ``Path('/x').write_text('y')`` becomes
+    ``Path(/x).write_text(y)`` — and the capability engine can only answer
+    "uncertain", refusing writes the user explicitly authorized (#984
+    layer 3).  The raw body keeps quotes, so literal extraction works.
+    Returns None when the opener/body cannot be located.
+    """
+    m = re.search(r"<<-?\s*['\"]?" + re.escape(delim) + r"['\"]?", command)
+    if m is None:
+        return None
+    nl = command.find("\n", m.end())
+    if nl == -1:
+        return None
+    end = command.find("\n" + delim, nl)
+    if end == -1:
+        end = command.find(delim, nl)
+    return command[nl + 1:end if end != -1 else len(command)]
+
+
+def _extract_heredoc_payload(
+    tokens: list[_Token], raw: str | None = None,
+) -> str:
     """Extract a heredoc body after a stdin launcher flag.
 
     ``python3 - <<PY\\nimport shutil; shutil.rmtree('/etc/x')\\nPY`` →
@@ -605,6 +881,10 @@ def _extract_heredoc_payload(tokens: list[_Token]) -> str:
     payload string for the inline-script scanner (#875 B7 实测：stdin
     heredoc 是唯一穿透 launcher 扫描的入口).  Handles both ``<< PY``
     and ``<<PY`` token forms.  Returns "" when no heredoc is present.
+
+    When *raw* (the subcommand's original text) is given, the body is read
+    from it instead — the token join loses quotes, which would degrade
+    every authorized write to "uncertain" (#984 layer 3).
     """
     for idx, tok in enumerate(tokens):
         if tok.text == "<<" or tok.text.startswith("<<"):
@@ -616,6 +896,10 @@ def _extract_heredoc_payload(tokens: list[_Token]) -> str:
             delim = prefix.strip("'\"")
             if not delim:
                 return ""
+            if raw is not None:
+                body_raw = _raw_heredoc_body(raw, delim)
+                if body_raw is not None:
+                    return body_raw
             body_start = idx + 1 if not tok.text[2:] else idx + 1
             body: list[str] = []
             for body_tok in tokens[body_start:]:
@@ -626,7 +910,9 @@ def _extract_heredoc_payload(tokens: list[_Token]) -> str:
     return ""
 
 
-def _detect_ops(tokens: list[_Token]) -> list[_FileOp]:
+def _detect_ops(
+    tokens: list[_Token], raw: str | None = None,
+) -> list[_FileOp]:
     """Find destructive file operations in one subcommand's token list.
 
     Operator classification is position-aware (issue #811 review,
@@ -635,6 +921,9 @@ def _detect_ops(tokens: list[_Token]) -> list[_FileOp]:
     does (``echo "rm -rf x"`` is not a delete) while an UNQUOTED word
     still does — so ``xargs rm -rf /x`` keeps its rm detection.
     Quoted tokens also act as operands (paths with spaces).
+
+    *raw* is the subcommand's original text, used only to read heredoc
+    bodies with their quotes intact (see :func:`_raw_heredoc_body`).
     """
     ops: list[_FileOp] = []
     n = len(tokens)
@@ -701,7 +990,9 @@ def _detect_ops(tokens: list[_Token]) -> list[_FileOp]:
                     # stdin 启动器（- / -s）：payload 是 <<EOF heredoc 正文
                     # （#875 B7 实测：python3 - <<EOF 可携带 shutil.rmtree 穿透）
                     if ftok.text in _STDIN_LAUNCHER_FLAGS:
-                        payload = _extract_heredoc_payload(tokens[j + 1:])
+                        payload = _extract_heredoc_payload(
+                            tokens[j + 1:], raw=raw,
+                        )
                         if payload:
                             ops.append(_FileOp(
                                 kind="inline_script", display=text,
@@ -869,9 +1160,17 @@ def _classify_sandbox_abs(
     if _norm_str(norm) == "/" or any(
         _norm_str(norm) == r or _norm_str(norm).startswith(r + "/")
         for r in _SYSTEM_POSIX_ROOTS
-    ):
+    ) or _is_system_path(norm, rt):
+        # ``_is_system_path`` adds the host home/.ssh and the MiQroForge
+        # config home — a POSIX-native path reaches those directly in the
+        # sandbox (no /mnt/<drive> mapping), and a per-call grant must
+        # never open them (defense in depth).
         if for_write:
             return False, "system_path", norm
+        return True, "", norm
+    # POSIX-native authorized roots keep their host path in the sandbox
+    # (``--bind src src``) — same grant as the /mnt/<drive> form above.
+    if for_write and _authorized_write(norm, rt):
         return True, "", norm
     if for_write:
         return False, "outside_workspace", norm
@@ -925,6 +1224,12 @@ def _classify_host(
     # 6. System paths → deny.
     if _is_system_path(pstr, rt):
         return False, "system_path", pstr
+
+    # 6b. Per-call authorized roots (#821 ``_user_roots``) — a mutation
+    #     scope, because layer 1 binds them rw inside the sandbox.  System
+    #     paths above still win (defense in depth).
+    if _authorized_write(pstr, rt):
+        return True, "", pstr
 
     # 7. Global workspace but outside the session tree → Level 1 read-only.
     if ws and _under(pstr, ws):
@@ -1037,12 +1342,15 @@ def _check_ops_operands(
             )
             if not ok:
                 return False, code, display, _refusal(desc, code, display, policy)
-        # mv removes the source: source must be in-scope too.
+        # mv removes the source: source must be in-scope too, and never the
+        # granted directory itself.
         if op.kind == "move":
             for src in sources:
                 ok, code, display = _classify_operand(
                     src.text, rt, for_write=True,
                 )
+                if ok and _is_authorized_root_itself(display, rt):
+                    ok, code = False, "authorized_root"
                 if not ok:
                     return False, code, display, _refusal(desc, code, display, policy)
         ok, code, display = _classify_operand(target.text, rt, for_write=True)
@@ -1052,8 +1360,58 @@ def _check_ops_operands(
     # delete / write (rm, tee, mkdir, touch, ln targets)
     for t in operands:
         ok, code, display = _classify_operand(t.text, rt, for_write=True)
+        if ok and op.kind == "delete" and _is_authorized_root_itself(display, rt):
+            # The grant is "deliver into this dir", not "delete the dir".
+            return False, "authorized_root", display, _refusal(
+                desc, "authorized_root", display, "authorized_root",
+            )
         if not ok:
             return False, code, display, _refusal(desc, code, display, policy)
+    return True, "", "", ""
+
+
+def _check_script_payload(
+    payload: str, rt: RuntimePaths, *, desc: str,
+) -> tuple[bool, str, str, str]:
+    """Check a python/perl/node/php payload for out-of-scope writes.
+
+    Returns ``(ok, reason_code, display, refusal_message)``.  Used for the
+    top-level inline script AND for a nested one (``bash -c "python3 -c
+    ..."`` — the launcher scan already recursed once; this closes the
+    write-spelling hole at that depth).  Fail-closed when a destructive
+    call's path literals cannot be extracted at all.
+    """
+    if not _payload_is_destructive(payload):
+        return True, "", "", ""
+    literals = _extract_string_literals(payload)
+    path_literals = [
+        lit for lit in literals
+        if "/" in lit or "\\" in lit
+        or lit.startswith(".") or lit.startswith("~")
+    ]
+    if not path_literals:
+        return False, "script_uncertain", payload[:200], _refusal(
+            desc, "script_uncertain", payload[:200], "uncertain",
+        )
+    src_spans = _copy_source_spans(payload)
+    policy = "delete" if _DELETE_CALL_RE.search(payload) else "write"
+    removal = bool(_REMOVAL_CALL_RE.search(payload))
+    for lit in path_literals:
+        # A literal used ONLY as a ``shutil.copy*`` source is a READ (cp
+        # parity); everything else is a mutation.
+        for_write = not _only_as_copy_source(payload, lit, src_spans)
+        ok, code, display = _classify_operand(lit, rt, for_write=for_write)
+        if (
+            ok and for_write and removal
+            and _is_authorized_root_itself(display, rt)
+        ):
+            ok, code = False, "authorized_root"
+        if not ok:
+            return False, code, display, _refusal(
+                desc, code, display,
+                "authorized_root" if code == "authorized_root"
+                else (policy if for_write else "uncertain"),
+            )
     return True, "", "", ""
 
 
@@ -1084,7 +1442,7 @@ def evaluate_command(command: str, rt: RuntimePaths) -> GuardVerdict:
             return verdict
 
         # 2. Destructive file operations — path-aware capability check.
-        ops = _detect_ops(tokens)
+        ops = _detect_ops(tokens, raw=sub)
 
         # 3. Redirect targets — every subcommand's write targets must be
         #    in scope.  Process substitution is UNCERTAIN only next to a
@@ -1135,10 +1493,18 @@ def evaluate_command(command: str, rt: RuntimePaths) -> GuardVerdict:
                         )
                         return verdict
                     for inner in inner_ops:
-                        if inner.kind == "inline_script":
-                            continue  # deeper nesting — not parsed
                         inner.display = f"{op.display} -c"
-                        if inner.kind == "find_delete":
+                        if inner.kind == "inline_script":
+                            # Nested launcher (bash -c "python3 -c ..."):
+                            # check its payload too — a write spelling must
+                            # not evade the vocabulary one level down.
+                            ok, code, display, msg = _check_script_payload(
+                                inner.extra, rt,
+                                desc=desc_map["inline_script"].format(
+                                    verb=inner.display,
+                                ),
+                            )
+                        elif inner.kind == "find_delete":
                             ok, code, display, msg = _check_find_op(
                                 inner, rt, payload[:200],
                             )
@@ -1152,30 +1518,14 @@ def evaluate_command(command: str, rt: RuntimePaths) -> GuardVerdict:
                             verdict.message = msg
                             return verdict
                     continue
-                if not _DESTRUCTIVE_CALL_RE.search(payload):
-                    continue  # plain python -c "print(1)" etc.
-                literals = _extract_string_literals(payload)
-                path_literals = [
-                    lit for lit in literals
-                    if "/" in lit or "\\" in lit
-                    or lit.startswith(".") or lit.startswith("~")
-                ]
-                if not path_literals:
+                ok, code, display, msg = _check_script_payload(
+                    payload, rt, desc=op_desc,
+                )
+                if not ok:
                     verdict.allowed = False
-                    verdict.reason_code = "script_uncertain"
-                    verdict.message = _refusal(
-                        op_desc, "script_uncertain", payload[:200], "uncertain",
-                    )
+                    verdict.reason_code = code
+                    verdict.message = msg
                     return verdict
-                for lit in path_literals:
-                    ok, code, display = _classify_operand(
-                        lit, rt, for_write=True,
-                    )
-                    if not ok:
-                        verdict.allowed = False
-                        verdict.reason_code = code
-                        verdict.message = _refusal(op_desc, code, display, "delete")
-                        return verdict
                 continue
 
             # delete / copy / move / write

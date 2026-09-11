@@ -627,3 +627,69 @@ async def test_snapshot_table_migrates_old_db_without_column(tmp_path):
         assert snapshots[0]["reasoning_elapsed_s"] == 42.0
     finally:
         await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_compaction_cancellation_rolls_back_and_releases_lock(tmp_path):
+    """#992: 回合任务在 replace_messages_with_compaction 事务中途被取消时，
+    CancelledError（不是 Exception 子类）必须触发 ROLLBACK——否则写锁滞留、
+    其它连接写入等待 30s 后 database is locked（与 test_issue_886 同源），
+    且部分 DELETE 会泄漏成半压缩状态。"""
+    import asyncio
+    import time
+
+    import aiosqlite
+
+    db_path = tmp_path / "runtime.db"
+    runtime = HistoryRuntime(db_path, session_id="test-session")
+    await runtime.initialize()
+    await runtime.append_message(thread_id="t1", turn_id="a", role="user", content="old-1")
+    await runtime.append_message(thread_id="t1", turn_id="a", role="assistant", content="old-2")
+
+    # 确定性注入：第 3 次 execute（BEGIN → DELETE 之后、第一条 INSERT 之前）
+    # 抛 CancelledError，等价于「首个写入已应用、回合任务被取消」。
+    real_execute = runtime._db.execute
+    state = {"calls": 0}
+
+    def sabotaged_execute(sql, *args, **kwargs):
+        state["calls"] += 1
+        if state["calls"] == 3:
+            raise asyncio.CancelledError("simulated turn cancellation")
+        return real_execute(sql, *args, **kwargs)
+
+    runtime._db.execute = sabotaged_execute  # type: ignore[method-assign]
+    try:
+        with pytest.raises(asyncio.CancelledError):
+            await runtime.replace_messages_with_compaction(
+                "t1",
+                "compact-cancelled",
+                [{"role": "system", "content": "[summary]"}] * 5,
+            )
+    finally:
+        runtime._db.execute = real_execute  # type: ignore[method-assign]
+
+    # 1) 锁已释放：另一连接用 timeout=1 立即写入（滞留锁会让它 1s 后抛
+    #    OperationalError: database is locked）。
+    async with aiosqlite.connect(str(db_path), timeout=1) as probe:
+        await probe.execute(
+            "INSERT INTO runtime_history_items"
+            " (item_id, thread_id, session_id, turn_id, role, content,"
+            "  payload_json, created_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            ("probe-1", "t1", "test-session", "a", "user", "probe", "{}", time.time()),
+        )
+        await probe.commit()
+
+    # 2) 无半压缩状态：原消息完整保留，无 compaction 记录。
+    items = await runtime.load_items("t1")
+    contents = sorted(i.content for i in items)
+    assert "old-1" in contents and "old-2" in contents, contents
+    assert all(not c.startswith("[summary]") for c in contents), contents
+    async with aiosqlite.connect(str(db_path)) as db:
+        cursor = await db.execute(
+            "SELECT COUNT(*) FROM runtime_compactions WHERE thread_id = ?", ("t1",)
+        )
+        row = await cursor.fetchone()
+    assert row[0] == 0
+
+    await runtime.close()

@@ -5,6 +5,8 @@ import remarkGfm from 'remark-gfm';
 import rehypeHighlight from 'rehype-highlight';
 import { cn } from '../../../lib/utils';
 import { HtmlPreviewCard, detectHtmlDocument } from './HtmlPreviewCard';
+import { CompareTable } from './CompareTable';
+import { isCompareLang, parseCompareJson } from './compareData';
 
 /** Strip <think>...</think> reasoning blocks before rendering. */
 function stripThinkBlocks(text: string): string {
@@ -158,6 +160,14 @@ export function MarkdownContent({ content }: { content: string }) {
         ).toLowerCase();
         const langLabel = LANG_LABELS[lang] ?? lang;
         const codeText = extractText(codeProps.children).replace(/\n$/, '');
+
+        // ```compare 结构化对比数据（issue #878）：解析成功渲染对比表，
+        // 失败则回落到下方普通代码块展示。
+        if (isCompareLang(lang)) {
+          const data = parseCompareJson(codeText);
+          if (data) return <CompareTable data={data} rawText={codeText} />;
+        }
+
         return (
           <div
             className="group my-2 overflow-hidden rounded-lg"
@@ -230,7 +240,7 @@ export function MarkdownContent({ content }: { content: string }) {
     <div className="min-w-0 break-words" style={{ overflowWrap: 'anywhere' }}>
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
-        rehypePlugins={[rehypeHighlight]}
+        rehypePlugins={[[rehypeHighlight, { plainText: ['compare', 'compare-json'] }]]}
         components={components}
       >
         {displayContent}

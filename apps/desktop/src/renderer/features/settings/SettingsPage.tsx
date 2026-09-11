@@ -6,6 +6,7 @@ import { Input } from '../../components/ui/Input';
 import { cn } from '../../lib/utils';
 import { getCachedConfig, invalidateConfigCache } from '../../lib/configCache';
 import { sanitizeUiMessage } from '../../lib/sanitizeUiMessage';
+import { QraftLoginButton } from './components/QraftLoginCard';
 import {
   RefreshCw,
   Download,
@@ -38,7 +39,6 @@ import {
   Bot,
   Palette,
   Wrench,
-  Plug,
   Database,
   BookOpen,
   ShieldCheck,
@@ -88,7 +88,6 @@ import { ChannelsPage } from '../channels/ChannelsPage';
 import { ApprovalsPage } from '../approvals/ApprovalsPage';
 import { WorkspacePage } from '../workspace/WorkspacePage';
 import { CronPage } from '../cron/CronPage';
-import { MCPsPage } from '../mcps/MCPsPage';
 import { ExperiencePage } from '../experience/ExperiencePage';
 import { SkillsPage } from '../skills/SkillsPage';
 import { MemoryPage } from '../memory/MemoryPage';
@@ -110,7 +109,6 @@ export type SettingsTab =
   | 'appearance'
   | 'agents'
   | 'skills'
-  | 'mcps'
   | 'memory'
   | 'experience'
   | 'permissions'
@@ -191,13 +189,6 @@ const SETTINGS_CATEGORIES: SettingsCategory[] = [
     id: 'integrations',
     label: '集成',
     items: [
-      {
-        value: 'mcps',
-        label: 'MCP 服务',
-        description: '外部工具协议服务',
-        keywords: ['mcp', 'tool', '协议'],
-        icon: Plug,
-      },
       {
         value: 'plugins',
         label: '插件',
@@ -590,15 +581,8 @@ function GeneralTab({
         ) : (
           <div className="flex items-center justify-between gap-3 rounded-lg border border-[var(--border-subtle)] bg-[var(--surface-muted)] px-3 py-2.5">
             <span className="text-sm text-[var(--text-muted)]">登录后使用平台内置模型</span>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={onGoToQraft}
-              data-testid="general-go-login"
-            >
-              <LogIn size={14} />
-              去登录
-            </Button>
+            {/* #1000 未登录拦截：一键浏览器登录（原「去登录」仅跳设置页） */}
+            <QraftLoginButton testId="general-login-btn" size="sm" busyLabel="等待授权中…" />
           </div>
         )}
       </div>
@@ -2738,24 +2722,6 @@ export function SettingsPage({
             )}
           >
             <SkillsPage />
-          </ErrorBoundary>
-        </Tabs.Content>
-        <Tabs.Content value="mcps" className="flex-1 overflow-y-auto">
-          <ErrorBoundary
-            fallback={(error, reset) => (
-              <div className="p-6 text-sm" style={{ color: 'var(--danger)' }}>
-                ⚠️ MCP服务设置加载失败: {error.message}
-                <button
-                  onClick={reset}
-                  className="ml-2 underline"
-                  style={{ color: 'var(--accent)' }}
-                >
-                  重试
-                </button>
-              </div>
-            )}
-          >
-            <MCPsPage />
           </ErrorBoundary>
         </Tabs.Content>
         <Tabs.Content value="memory" className="flex-1 overflow-y-auto">

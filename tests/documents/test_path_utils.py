@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import pytest
 
-from miqi.documents.path_utils import resolve_output_path
+from miqi.documents.path_utils import resolve_output_path, resolve_read_path
 
 
 def _session_files_dir(tmp_path, key: str = "desktop_test123"):
@@ -246,3 +246,89 @@ async def test_create_xlsx_normalizes_workspace_base_prefix(tmp_path):
     assert "Created:" in result
     assert expected.exists()
     assert not (files_dir / "sessions").exists()
+
+
+# ── resolve_read_path: 输入路径与输出路径同边界（issue #1005 节 2）─────
+
+
+def test_read_path_in_bounds_matches_output_path(tmp_path):
+    """界内相对路径：与 resolve_output_path 解析出同一结果。"""
+    files_dir = _session_files_dir(tmp_path)
+
+    read = resolve_read_path("assets/chart.png", files_dir, files_dir)
+    out = resolve_output_path("assets/chart.png", files_dir, files_dir)
+
+    assert read == out == (files_dir / "assets" / "chart.png").resolve()
+
+
+def test_read_path_out_of_bounds_rejected_without_user_roots(tmp_path):
+    files_dir = _session_files_dir(tmp_path)
+    secret = tmp_path / "outside" / "secret.png"
+    secret.parent.mkdir(parents=True, exist_ok=True)
+    secret.write_bytes(b"x")
+
+    with pytest.raises(PermissionError, match="不在"):
+        resolve_read_path(str(secret), files_dir, files_dir)
+
+
+def test_read_path_requires_injected_user_roots(tmp_path):
+    """allow_user_roots=True 但没有注入 _user_roots → 仍然拒绝（fail-closed）。"""
+    files_dir = _session_files_dir(tmp_path)
+    secret = tmp_path / "outside" / "secret.png"
+    secret.parent.mkdir(parents=True, exist_ok=True)
+    secret.write_bytes(b"x")
+
+    with pytest.raises(PermissionError, match="不在"):
+        resolve_read_path(
+            str(secret), files_dir, files_dir, None, True,
+        )
+
+
+def test_read_path_allows_authorized_user_root(tmp_path):
+    files_dir = _session_files_dir(tmp_path)
+    authorized = tmp_path / "user_pics"
+    image = authorized / "photo.png"
+    authorized.mkdir(parents=True, exist_ok=True)
+    image.write_bytes(b"x")
+
+    resolved = resolve_read_path(
+        str(image), files_dir, files_dir, [str(authorized)], True,
+    )
+
+    assert resolved == image.resolve()
+
+
+def test_read_path_rejects_path_outside_authorized_roots(tmp_path):
+    files_dir = _session_files_dir(tmp_path)
+    authorized = tmp_path / "user_pics"
+    authorized.mkdir(parents=True, exist_ok=True)
+    secret = tmp_path / "outside" / "secret.png"
+    secret.parent.mkdir(parents=True, exist_ok=True)
+    secret.write_bytes(b"x")
+
+    with pytest.raises(PermissionError, match="不在用户授权目录内"):
+        resolve_read_path(
+            str(secret), files_dir, files_dir, [str(authorized)], True,
+        )
+
+
+def test_read_path_never_joins_relative_path_onto_user_root(tmp_path):
+    """越界的相对路径不落到用户授权目录（否则 ../../.. 可逃逸）。"""
+    files_dir = _session_files_dir(tmp_path)
+    authorized = tmp_path / "user_pics"
+    authorized.mkdir(parents=True, exist_ok=True)
+
+    with pytest.raises(PermissionError, match="非绝对路径"):
+        resolve_read_path(
+            "../../outside/secret.png", files_dir, files_dir,
+            [str(authorized)], True,
+        )
+
+
+def test_read_path_rejects_cross_session(tmp_path):
+    files_dir = _session_files_dir(tmp_path, key="desktop_A")
+    other = _session_files_dir(tmp_path, key="desktop_B") / "secret.png"
+    other.write_bytes(b"x")
+
+    with pytest.raises(PermissionError, match="不在"):
+        resolve_read_path(str(other), files_dir, files_dir)

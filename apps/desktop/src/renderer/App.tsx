@@ -7,14 +7,16 @@ import { TopBar } from './components/TopBar';
 import { ApprovalBypassBanner } from './components/ApprovalBypassBanner';
 import { SetupWizard } from './features/setup/SetupWizard';
 import { PrivacyConsentGate } from './features/setup/PrivacyConsentGate';
+import { QraftLoginStep } from './features/setup/QraftLoginStep';
 import { ChatConsole } from './features/chat/ChatConsole';
 import { SettingsPage, type SettingsTab } from './features/settings/SettingsPage';
-import { MCPsPage } from './features/mcps/MCPsPage';
 import { ApprovalProvider } from './contexts/ApprovalContext';
 import { UserInputProvider } from './contexts/UserInputContext';
 import { RestartRequiredProvider } from './contexts/RestartRequiredContext';
 import { ConfigHotReloadListener } from './components/ConfigHotReloadListener';
+import { GatewayModelAutoSync } from './components/GatewayModelAutoSync';
 import { InstallWarningToaster } from './components/InstallWarningToaster';
+import { QraftReloginNotifier } from './components/QraftReloginNotifier';
 import { ApprovalModal } from './features/approvals/ApprovalModal';
 import { CronPage } from './features/cron/CronPage';
 import { MemoryPage } from './features/memory/MemoryPage';
@@ -35,7 +37,6 @@ type NavId =
   | 'workspace'
   | 'agents'
   | 'plan'
-  | 'mcps'
   | 'cron'
   | 'memory'
   | 'experience'
@@ -82,6 +83,9 @@ function AppShell() {
   const [consentVersion, setConsentVersion] = useState<string | null>(() => readStoredConsent());
   const consentBypassed = PRELOAD_OK && window.miqi.env?.isE2E === true;
   const consentOk = consentBypassed || isConsentCurrent(consentVersion);
+  // #1000: 同意隐私协议后衔接登录页（协议 → 登录一气呵成）。仅本次挂载内
+  // 生效：跳过或完成登录后不再出现，后续启动由首屏登录卡片承接入口。
+  const [showLoginStep, setShowLoginStep] = useState(false);
   const [workspace, setWorkspace] = useState<string | null>(null);
   const [newSessionTrigger, setNewSessionTrigger] = useState(0);
   const pendingWorkspace = useRef<{ sessionKey: string; workspace: string } | null>(null);
@@ -94,7 +98,18 @@ function AppShell() {
     hasActivityRef.current = false; // 切会话后重置活动信号
   }, [sessionKey]);
   const handleSessionActivityChange = useCallback((hasActivity: boolean) => {
+    const flipped = hasActivity && !hasActivityRef.current;
     hasActivityRef.current = hasActivity;
+    // 首条消息乐观挂载后立即刷新侧栏：会话此刻已向 bridge 落盘，但
+    // onChatFinished 要到回合结束才触发——慢模型（思考 1 分钟+）期间侧栏
+    // 会一直显示「暂无任务」，新会话卡片要等回合收尾才出现（macos-e2e
+    // session-rename 播种 60s 超时的根因）。落盘可能晚于乐观挂载一拍，
+    // 补 1.5s / 5s 两个延迟刷新兜底；都是纯读 sessions.list，无副作用。
+    if (flipped) {
+      setSessionRefreshKey((k) => k + 1);
+      window.setTimeout(() => setSessionRefreshKey((k) => k + 1), 1500);
+      window.setTimeout(() => setSessionRefreshKey((k) => k + 1), 5000);
+    }
   }, []);
   const sessionKeyRef = useRef(sessionKey);
 
@@ -278,8 +293,19 @@ function AppShell() {
           onAgree={() => {
             recordConsent();
             setConsentVersion(PRIVACY_VERSION);
+            // #1000: 同意后直接衔接登录页，登录入口不再藏在设置页深处。
+            setShowLoginStep(true);
           }}
         />
+      </TooltipProvider>
+    );
+  }
+
+  // #1000: 协议 → 登录衔接页（可「暂不登录」跳过；已登录时展示成功态进入应用）。
+  if (showLoginStep) {
+    return (
+      <TooltipProvider>
+        <QraftLoginStep onDone={() => setShowLoginStep(false)} />
       </TooltipProvider>
     );
   }
@@ -354,9 +380,17 @@ function AppShell() {
     <TooltipProvider>
       <RestartRequiredProvider>
         <ConfigHotReloadListener />
+        <GatewayModelAutoSync />
         <InstallWarningToaster
           onOpenSandboxSettings={() => {
             setSettingsTab('general');
+            setActiveNav('settings');
+          }}
+        />
+        {/* 平台登录失效的全局告知：横幅常驻可关闭，顶栏 chip 持续提示 */}
+        <QraftReloginNotifier
+          onOpenQraft={() => {
+            setSettingsTab('qraft');
             setActiveNav('settings');
           }}
         />
@@ -364,7 +398,14 @@ function AppShell() {
           <UserInputProvider>
             {/* Full-height flex column */}
             <div className="flex flex-col h-screen" style={{ background: 'var(--background)' }}>
-              <TopBar onOpenApprovals={openApprovalSettings} workspace={workspace ?? undefined} />
+              <TopBar
+                onOpenApprovals={openApprovalSettings}
+                onOpenQraft={() => {
+                  setSettingsTab('qraft');
+                  setActiveNav('settings');
+                }}
+                workspace={workspace ?? undefined}
+              />
               <ApprovalBypassBanner onOpenApprovals={openApprovalSettings} />
               {/* Body row */}
               <div className="flex flex-1 overflow-hidden">
@@ -413,6 +454,10 @@ function AppShell() {
                         setSettingsTab('providers');
                         setActiveNav('settings');
                       }}
+                      onOpenQraftSettings={() => {
+                        setSettingsTab('qraft');
+                        setActiveNav('settings');
+                      }}
                       onOpenApprovals={() => {
                         setSettingsTab('approvals');
                         setActiveNav('settings');
@@ -423,7 +468,6 @@ function AppShell() {
                     />
                   </div>
                   {activeNav === 'workspace' && <WorkspacePage />}
-                  {activeNav === 'mcps' && <SettingsPage tab="mcps" />}
                   {activeNav === 'cron' && <CronPage />}
                   {activeNav === 'memory' && <SettingsPage tab="memory" />}
                   {activeNav === 'experience' && <SettingsPage tab="experience" />}

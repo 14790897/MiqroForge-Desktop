@@ -71,7 +71,9 @@ describe('ModelQuickPanel（#835/#922 门控）', () => {
     expect(html).toContain('模型设置');
     expect(html).toContain('默认模型');
     expect(html).toContain('登录后使用平台内置模型');
-    expect(html).toContain('去登录');
+    // #1000：一键浏览器登录按钮（原「去登录」跳设置页改为直接发起 OAuth）
+    expect(html).toContain('登录 MiQroForge 账号');
+    expect(html).toContain('model-quickpanel-login-btn');
     expect(html).not.toContain('保存');
     expect(html).not.toContain('API Key');
     expect(html).not.toContain('API Base URL');
