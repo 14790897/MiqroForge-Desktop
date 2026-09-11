@@ -1,3 +1,19 @@
+## [0.29.1](https://github.com/14790897/MiqroForge-Desktop/compare/v0.29.0...v0.29.1) (2026-09-11)
+
+
+### Bug Fixes
+
+* **agent:** slurm 计费补扣快作业——COMPLETED 也触发扣费 ([#1037](https://github.com/14790897/MiqroForge-Desktop/issues/1037)) ([5a401e8](https://github.com/14790897/MiqroForge-Desktop/commit/5a401e8cd5edaccae64c3c7fffebaf8a3a0e9295))
+* **sandbox:** 沙箱写边界（层 1+2+3）—— /mnt 只读 + 授权路径 per-call rw bind + python 写系护栏（[#984](https://github.com/14790897/MiqroForge-Desktop/issues/984)） ([#1007](https://github.com/14790897/MiqroForge-Desktop/issues/1007)) ([842e001](https://github.com/14790897/MiqroForge-Desktop/commit/842e00149669a6d09e04932846cf967ee671ef4f)), closes [#821](https://github.com/14790897/MiqroForge-Desktop/issues/821)
+
+---
+## 下载说明
+
+macOS 用户请按芯片架构选择安装包：
+
+- **Apple Silicon (M1/M2/M3/M4)**：下载 `0.29.1-arm64.dmg`（ARM 架构）
+- **Intel**：下载 `0.29.1.dmg`（x86 无后缀）
+
 # [0.29.0](https://github.com/14790897/MiqroForge-Desktop/compare/v0.28.0...v0.29.0) (2026-09-10)
 
 
