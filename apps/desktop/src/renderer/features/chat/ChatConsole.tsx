@@ -1724,6 +1724,8 @@ export function sessionMsgsToUi(rawMsgs: any[]): Message[] {
             toolName: 'paper_search',
             toolData: paperData,
             collapsed: false,
+            // CodeRabbit（9-11）：链卡按 turn 归属需要行级 turnId（恢复路径）
+            turnId: String((m as { turn_id?: unknown }).turn_id ?? '') || undefined,
             timestamp: ts,
           });
         } else {
@@ -1735,6 +1737,7 @@ export function sessionMsgsToUi(rawMsgs: any[]): Message[] {
             summary: 'paper_search',
             toolHint: true,
             collapsed: true,
+            turnId: String((m as { turn_id?: unknown }).turn_id ?? '') || undefined,
             timestamp: ts,
           });
         }
@@ -1752,6 +1755,7 @@ export function sessionMsgsToUi(rawMsgs: any[]): Message[] {
           toolName,
           toolOutput: true,
           collapsed: true,
+          turnId: String((m as { turn_id?: unknown }).turn_id ?? '') || undefined,
           timestamp: ts,
         });
       }
@@ -5120,6 +5124,8 @@ export function ChatConsole({
             : data.tool_call_id
               ? toolArgsByCallId.current.get(data.tool_call_id)
               : undefined,
+          // CodeRabbit（9-11）：链卡按 turn 归属需要行级 turnId（实时路径）
+          turnId: activeTurnIdRef.current ?? undefined,
           timestamp: Date.now(),
         };
         setMessages((prev) => {
@@ -8043,10 +8049,16 @@ function ToolChainGroup({
       r.toolName === 'ask_user_confirm_card' || (r.content ?? '').includes('ask_user_confirm_card')
   );
   const chainCards = useMemo(() => {
-    return [...Object.values(chainResolved), ...Object.values(chainPending)].sort(
-      (a, b) => (a.createdAt ?? 0) - (b.createdAt ?? 0)
-    );
-  }, [chainPending, chainResolved]);
+    // CodeRabbit（9-11）：① 只保留确认卡——plan/action 卡由 MessageBubble 渲染，
+    // 混入会让 confirmRowIdx 与 confirm 行错位；② 按本链 turn 过滤——多链同屏
+    // 时防止把别条链的卡挂进来（行级 turnId：实时走 activeTurnIdRef，恢复走
+    // raw.turn_id）。
+    const chainTurnId = rows.find((r) => r.turnId)?.turnId;
+    return [...Object.values(chainResolved), ...Object.values(chainPending)]
+      .filter((c) => isConfirmCard(c as never))
+      .filter((c) => !chainTurnId || c.request.turn_id === chainTurnId)
+      .sort((a, b) => (a.createdAt ?? 0) - (b.createdAt ?? 0));
+  }, [chainPending, chainResolved, rows]);
   // 工具链内 ask_user_confirm_card 行（按顺序）→ 卡队列索引
   const confirmRowIdxRef = useRef(0);
   confirmRowIdxRef.current = 0;

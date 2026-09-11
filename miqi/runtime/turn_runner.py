@@ -1235,11 +1235,11 @@ class TurnRunner:
 
     async def _harness_plan_confirm(
         self, turn: Any, tool_names: list[str]
-    ) -> bool:
+    ) -> str:
         """#646-v2: harness 强制计划卡——经 user_input_gate 弹卡等用户确认。
 
         载荷由 TaskPolicy 生成（用户语言步骤 + 权限推断），不依赖模型写计划。
-        返回 True=用户确认开始执行；False=取消/超时。
+        返回 choice_id："confirm"=用户确认开始执行；"modify"=要求调整；""=取消/超时。
         """
         # 无 UI 通道（headless/测试/CLI）→ 降级放行——阻塞会让所有写/执行静默失败。
         # 注意：必须走 thread→session 映射（与 resolver 一致）——直查 thread_id
