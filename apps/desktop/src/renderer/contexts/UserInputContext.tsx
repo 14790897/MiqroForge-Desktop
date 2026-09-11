@@ -7,10 +7,7 @@ import {
   useRef,
   type ReactNode,
 } from 'react';
-import type {
-  UserInputCardRequest,
-  UserInputResolvedData,
-} from '../../shared/ipc';
+import type { UserInputCardRequest, UserInputResolvedData } from '../../shared/ipc';
 import type { TimelineEntry } from '../features/chat/components/Timeline';
 
 export type UserInputCardState = 'pending' | 'confirmed' | 'cancelled' | 'modify';
@@ -196,7 +193,10 @@ export function UserInputProvider({ children }: { children: ReactNode }) {
               title: String(raw.title ?? 'AI 正在执行任务'),
               goal: String(raw.goal ?? ''),
               steps: Array.isArray(raw.steps)
-                ? raw.steps.map((s: any) => ({ name: String(s?.name ?? s?.title ?? ''), tools: Array.isArray(s?.tools) ? s.tools : [] }))
+                ? raw.steps.map((s: any) => ({
+                    name: String(s?.name ?? s?.title ?? ''),
+                    tools: Array.isArray(s?.tools) ? s.tools : [],
+                  }))
                 : [],
               permissions: Array.isArray(raw.permissions) ? raw.permissions : [],
               phase: 'running',
@@ -229,7 +229,13 @@ export function UserInputProvider({ children }: { children: ReactNode }) {
   }, [upsertPending, moveToResolved, activeSession]);
 
   const resolve = useCallback(
-    async (inputId: string, choiceId: string, choiceLabel: string, remember = false, rememberMode = 'session') => {
+    async (
+      inputId: string,
+      choiceId: string,
+      choiceLabel: string,
+      remember = false,
+      rememberMode = 'session'
+    ) => {
       const miqi = (window as any).miqi;
       const entry = pendingRef.current[inputId];
       const role = entry?.request.choices?.find((c) => c.id === choiceId)?.role;
@@ -246,7 +252,13 @@ export function UserInputProvider({ children }: { children: ReactNode }) {
         role
       );
       try {
-        const res = await miqi?.userInput?.resolve(inputId, choiceId, choiceLabel, remember, rememberMode);
+        const res = await miqi?.userInput?.resolve(
+          inputId,
+          choiceId,
+          choiceLabel,
+          remember,
+          rememberMode
+        );
         if (res && res.resolved === false && entry) {
           markBackendReleased(inputId);
         }

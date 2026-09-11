@@ -34,7 +34,7 @@ function render(entry_: UserInputCardEntry, opts?: { initialExpanded?: boolean }
       entry: entry_,
       onResolve: () => {},
       initialExpanded: opts?.initialExpanded,
-    }),
+    })
   );
 }
 

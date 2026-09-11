@@ -133,7 +133,12 @@ export function HermesConfirmBar({
           disabled={busyNow}
           data-testid="confirm-run"
           className="h-full gap-1 rounded-none px-3 text-xs font-medium cursor-pointer hover:opacity-85 disabled:opacity-50"
-          style={{ background: 'none', border: 'none', color: btnStyle.color, fontFamily: 'inherit' }}
+          style={{
+            background: 'none',
+            border: 'none',
+            color: btnStyle.color,
+            fontFamily: 'inherit',
+          }}
         >
           {submitting === 'confirm' ? (
             <Loader2 className="inline size-3 animate-spin" />
@@ -146,62 +151,68 @@ export function HermesConfirmBar({
             </>
           )}
         </button>
-        {hasMoreOptions && <span aria-hidden className="w-px self-stretch" style={{ background: 'rgba(0,0,0,.08)' }} />}
         {hasMoreOptions && (
-        <DropdownMenu.Root>
-          <DropdownMenu.Trigger asChild>
-            <button
-              aria-label="更多选项"
-              className="h-full w-5 cursor-pointer rounded-none px-0 hover:opacity-85 disabled:opacity-50"
-              style={{ background: 'none', border: 'none', color: btnStyle.color }}
-              disabled={busyNow}
-            >
-              {submitting === 'session' || submitting === 'always' ? (
-                <Loader2 className="mx-auto size-3 animate-spin" />
-              ) : (
-                <ChevronDown className="mx-auto size-3" />
-              )}
-            </button>
-          </DropdownMenu.Trigger>
-          <DropdownMenu.Portal>
-            <DropdownMenu.Content
-              align="start"
-              sideOffset={4}
-              className="z-50 min-w-40 rounded-lg border bg-white p-1 shadow-lg"
-              style={{ borderColor: 'rgba(0,0,0,.08)', fontFamily: 'inherit' }}
-            >
-              {allowSession && (
+          <span
+            aria-hidden
+            className="w-px self-stretch"
+            style={{ background: 'rgba(0,0,0,.08)' }}
+          />
+        )}
+        {hasMoreOptions && (
+          <DropdownMenu.Root>
+            <DropdownMenu.Trigger asChild>
+              <button
+                aria-label="更多选项"
+                className="h-full w-5 cursor-pointer rounded-none px-0 hover:opacity-85 disabled:opacity-50"
+                style={{ background: 'none', border: 'none', color: btnStyle.color }}
+                disabled={busyNow}
+              >
+                {submitting === 'session' || submitting === 'always' ? (
+                  <Loader2 className="mx-auto size-3 animate-spin" />
+                ) : (
+                  <ChevronDown className="mx-auto size-3" />
+                )}
+              </button>
+            </DropdownMenu.Trigger>
+            <DropdownMenu.Portal>
+              <DropdownMenu.Content
+                align="start"
+                sideOffset={4}
+                className="z-50 min-w-40 rounded-lg border bg-white p-1 shadow-lg"
+                style={{ borderColor: 'rgba(0,0,0,.08)', fontFamily: 'inherit' }}
+              >
+                {allowSession && (
+                  <DropdownMenu.Item
+                    onSelect={() => {
+                      setSubmitting('session');
+                      onResolve('session');
+                    }}
+                    className="cursor-pointer rounded-md px-2.5 py-1.5 text-xs outline-none hover:bg-[#f0f2f5]"
+                  >
+                    本会话允许
+                  </DropdownMenu.Item>
+                )}
+                {allowAlways && (
+                  <DropdownMenu.Item
+                    onSelect={() => respond('always')}
+                    className="cursor-pointer rounded-md px-2.5 py-1.5 text-xs outline-none hover:bg-[#f0f2f5]"
+                  >
+                    总是允许
+                  </DropdownMenu.Item>
+                )}
                 <DropdownMenu.Item
                   onSelect={() => {
-                    setSubmitting('session');
-                    onResolve('session');
+                    setSubmitting('deny');
+                    onResolve('deny');
                   }}
-                  className="cursor-pointer rounded-md px-2.5 py-1.5 text-xs outline-none hover:bg-[#f0f2f5]"
+                  className="cursor-pointer rounded-md px-2.5 py-1.5 text-xs outline-none hover:bg-[#fdf0ef]"
+                  style={{ color: '#d64545' }}
                 >
-                  本会话允许
+                  拒绝
                 </DropdownMenu.Item>
-              )}
-              {allowAlways && (
-                <DropdownMenu.Item
-                  onSelect={() => respond('always')}
-                  className="cursor-pointer rounded-md px-2.5 py-1.5 text-xs outline-none hover:bg-[#f0f2f5]"
-                >
-                  总是允许
-                </DropdownMenu.Item>
-              )}
-              <DropdownMenu.Item
-                onSelect={() => {
-                  setSubmitting('deny');
-                  onResolve('deny');
-                }}
-                className="cursor-pointer rounded-md px-2.5 py-1.5 text-xs outline-none hover:bg-[#fdf0ef]"
-                style={{ color: '#d64545' }}
-              >
-                拒绝
-              </DropdownMenu.Item>
-            </DropdownMenu.Content>
-          </DropdownMenu.Portal>
-        </DropdownMenu.Root>
+              </DropdownMenu.Content>
+            </DropdownMenu.Portal>
+          </DropdownMenu.Root>
         )}
       </div>
 
@@ -286,19 +297,32 @@ export function HermesConfirmBar({
       <Dialog.Root open={confirmAlways} onOpenChange={setConfirmAlways}>
         <Dialog.Portal>
           <Dialog.Overlay className="fixed inset-0 z-50 bg-black/30" />
-          <Dialog.Content className="fixed left-1/2 top-1/2 z-50 w-[calc(100%-2rem)] max-w-md -translate-x-1/2 -translate-y-1/2 rounded-xl border bg-white p-4 shadow-xl"
-            style={{ borderColor: 'rgba(0,0,0,.08)', fontFamily: 'inherit' }}>
-            <Dialog.Title className="text-sm font-semibold" style={{ color: 'var(--text, #1d2129)' }}>
+          <Dialog.Content
+            className="fixed left-1/2 top-1/2 z-50 w-[calc(100%-2rem)] max-w-md -translate-x-1/2 -translate-y-1/2 rounded-xl border bg-white p-4 shadow-xl"
+            style={{ borderColor: 'rgba(0,0,0,.08)', fontFamily: 'inherit' }}
+          >
+            <Dialog.Title
+              className="text-sm font-semibold"
+              style={{ color: 'var(--text, #1d2129)' }}
+            >
               总是允许？
             </Dialog.Title>
-            <Dialog.Description className="mt-1.5 text-xs leading-relaxed" style={{ color: 'var(--text-muted, #6b7280)' }}>
+            <Dialog.Description
+              className="mt-1.5 text-xs leading-relaxed"
+              style={{ color: 'var(--text-muted, #6b7280)' }}
+            >
               {description || '将此操作加入永久允许列表，下次不再询问。'}
             </Dialog.Description>
             <div className="mt-4 flex justify-end gap-2">
               <button
                 onClick={() => setConfirmAlways(false)}
                 className="rounded-md px-3 py-1.5 text-xs cursor-pointer hover:bg-[#f2f2f2]"
-                style={{ background: 'none', border: 'none', color: 'var(--text-muted, #6b7280)', fontFamily: 'inherit' }}
+                style={{
+                  background: 'none',
+                  border: 'none',
+                  color: 'var(--text-muted, #6b7280)',
+                  fontFamily: 'inherit',
+                }}
               >
                 取消
               </button>

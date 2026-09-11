@@ -37,7 +37,7 @@ describe('PlanCard (#646-v2)', () => {
   });
 
   it('running: shows step progress without decision controls', () => {
-    const e = entry({ phase: 'running', stepStatus: { '论文检索': 'done', '生成报告': 'running' } });
+    const e = entry({ phase: 'running', stepStatus: { 论文检索: 'done', 生成报告: 'running' } });
     const html = render(e);
     expect(html).toContain('执行中');
     expect(html).toContain('论文检索');

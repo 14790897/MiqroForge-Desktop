@@ -87,10 +87,16 @@ export function PlanCard({
       <div className="flex items-start gap-3">
         <div
           className="mt-0.5 grid size-7 shrink-0 place-items-center rounded-lg"
-          style={{ background: waiting ? 'var(--accent-soft, #eef5ff)' : 'var(--surface-muted, #f5f6f8)' }}
+          style={{
+            background: waiting ? 'var(--accent-soft, #eef5ff)' : 'var(--surface-muted, #f5f6f8)',
+          }}
         >
           {running ? (
-            <Loader2 size={15} className="animate-spin" style={{ color: 'var(--accent, #2a7de1)' }} />
+            <Loader2
+              size={15}
+              className="animate-spin"
+              style={{ color: 'var(--accent, #2a7de1)' }}
+            />
           ) : done ? (
             <Check size={15} style={{ color: '#2ea45f' }} />
           ) : modified ? (
@@ -104,16 +110,25 @@ export function PlanCard({
 
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
-            <h3 className="min-w-0 flex-1 text-[13px] font-semibold leading-5" style={{ color: 'var(--text, #1f2328)' }}>
+            <h3
+              className="min-w-0 flex-1 text-[13px] font-semibold leading-5"
+              style={{ color: 'var(--text, #1f2328)' }}
+            >
               {entry.title || '任务计划'}
             </h3>
-            <span className="shrink-0 text-[11px]" style={{ color: done ? '#2ea45f' : 'var(--text-faint, #9aa0a8)' }}>
+            <span
+              className="shrink-0 text-[11px]"
+              style={{ color: done ? '#2ea45f' : 'var(--text-faint, #9aa0a8)' }}
+            >
               {statusLabel}
             </span>
           </div>
 
           {goal && (
-            <p className="mt-1 text-[12px] leading-5" style={{ color: 'var(--text-muted, #6b7280)' }}>
+            <p
+              className="mt-1 text-[12px] leading-5"
+              style={{ color: 'var(--text-muted, #6b7280)' }}
+            >
               {goal}
             </p>
           )}
@@ -121,19 +136,35 @@ export function PlanCard({
           {shouldShowDetails && (
             <div className="mt-2.5 space-y-1.5">
               {entry.steps.map((step, index) => {
-                const stepState = running || done ? entry.stepStatus?.[step.name] ?? 'pending' : 'pending';
+                const stepState =
+                  running || done ? (entry.stepStatus?.[step.name] ?? 'pending') : 'pending';
                 return (
-                  <div key={`${step.name}-${index}`} className="flex items-start gap-2.5 text-[12px] leading-5">
+                  <div
+                    key={`${step.name}-${index}`}
+                    className="flex items-start gap-2.5 text-[12px] leading-5"
+                  >
                     <span className="mt-0.5 grid size-4 shrink-0 place-items-center">
                       {stepState === 'done' ? (
                         <Check size={13} style={{ color: '#2ea45f' }} />
                       ) : stepState === 'running' ? (
-                        <Loader2 size={13} className="animate-spin" style={{ color: 'var(--accent, #2a7de1)' }} />
+                        <Loader2
+                          size={13}
+                          className="animate-spin"
+                          style={{ color: 'var(--accent, #2a7de1)' }}
+                        />
                       ) : (
                         <Circle size={10} style={{ color: 'var(--text-faint, #b4bac3)' }} />
                       )}
                     </span>
-                    <span className="min-w-0 flex-1 break-words" style={{ color: stepState === 'done' ? 'var(--text-muted, #6b7280)' : 'var(--text, #30343b)' }}>
+                    <span
+                      className="min-w-0 flex-1 break-words"
+                      style={{
+                        color:
+                          stepState === 'done'
+                            ? 'var(--text-muted, #6b7280)'
+                            : 'var(--text, #30343b)',
+                      }}
+                    >
                       {step.name}
                     </span>
                   </div>
@@ -143,7 +174,10 @@ export function PlanCard({
           )}
 
           {waiting && permissions.length > 0 && (
-            <div className="mt-2 flex flex-wrap items-center gap-x-2.5 gap-y-1 text-[11px]" style={{ color: 'var(--text-faint, #8d949d)' }}>
+            <div
+              className="mt-2 flex flex-wrap items-center gap-x-2.5 gap-y-1 text-[11px]"
+              style={{ color: 'var(--text-faint, #8d949d)' }}
+            >
               <span>涉及</span>
               {permissions.map((permission) => (
                 <span key={permission}>{permission}</span>
@@ -193,8 +227,18 @@ export function PlanCard({
           )}
 
           {waiting && editing && (
-            <div className="mt-3 rounded-lg border p-2.5" style={{ borderColor: 'var(--border, #e1e5ea)', background: 'var(--surface-muted, #f8f9fb)' }}>
-              <label htmlFor="plan-adjustment" className="flex items-center gap-1.5 text-[11.5px] font-medium" style={{ color: 'var(--text, #30343b)' }}>
+            <div
+              className="mt-3 rounded-lg border p-2.5"
+              style={{
+                borderColor: 'var(--border, #e1e5ea)',
+                background: 'var(--surface-muted, #f8f9fb)',
+              }}
+            >
+              <label
+                htmlFor="plan-adjustment"
+                className="flex items-center gap-1.5 text-[11.5px] font-medium"
+                style={{ color: 'var(--text, #30343b)' }}
+              >
                 <PencilLine size={13} />
                 你希望怎么调整？
               </label>

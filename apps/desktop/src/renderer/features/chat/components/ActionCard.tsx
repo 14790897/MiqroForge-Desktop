@@ -36,9 +36,16 @@ const ACTION_META: Record<string, { icon: string; title: string; tone: 'normal' 
 
 export function ActionCard({ entry, onResolve }: ActionCardProps) {
   const [submitting, setSubmitting] = useState<string | null>(null);
-  const meta = ACTION_META[entry.action] ?? { icon: '⚠', title: '高风险操作', tone: 'danger' as const };
+  const meta = ACTION_META[entry.action] ?? {
+    icon: '⚠',
+    title: '高风险操作',
+    tone: 'danger' as const,
+  };
 
-  const handleResolve = (choice: HermesConfirmChoice, rememberMode?: 'session' | 'always' | null) => {
+  const handleResolve = (
+    choice: HermesConfirmChoice,
+    rememberMode?: 'session' | 'always' | null
+  ) => {
     if (submitting) return;
     setSubmitting(choice);
     if (choice === 'deny') onResolve('cancel');
@@ -69,7 +76,9 @@ export function ActionCard({ entry, onResolve }: ActionCardProps) {
         status="pending"
         meta={
           <span className="shrink-0 break-all">
-            {entry.fileName ? `${entry.fileName}${formatSize(entry.sizeBytes) ? ` · ${formatSize(entry.sizeBytes)}` : ''}` : formatSize(entry.sizeBytes) || ''}
+            {entry.fileName
+              ? `${entry.fileName}${formatSize(entry.sizeBytes) ? ` · ${formatSize(entry.sizeBytes)}` : ''}`
+              : formatSize(entry.sizeBytes) || ''}
             {entry.sha256 ? ` · ${entry.sha256.slice(0, 12)}…` : ''}
           </span>
         }
@@ -82,7 +91,9 @@ export function ActionCard({ entry, onResolve }: ActionCardProps) {
                   ? '确认上传'
                   : entry.action === 'payment'
                     ? '确认支付'
-                    : entry.action === 'delete' || entry.action === 'external_send' || entry.action === 'external'
+                    : entry.action === 'delete' ||
+                        entry.action === 'external_send' ||
+                        entry.action === 'external'
                       ? `确认${meta.title}`
                       : '确认执行'
               }
@@ -100,11 +111,7 @@ export function ActionCard({ entry, onResolve }: ActionCardProps) {
           </div>
         }
       >
-        {entry.sha256 && (
-          <pre className={TOOL_PRE_CLASS}>
-            指纹：{entry.sha256}
-          </pre>
-        )}
+        {entry.sha256 && <pre className={TOOL_PRE_CLASS}>指纹：{entry.sha256}</pre>}
       </HermesToolRow>
     </div>
   );

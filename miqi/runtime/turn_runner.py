@@ -921,12 +921,17 @@ class TurnRunner:
                 run_ctx = getattr(turn, "_run_ctx", None)
                 for tc in todo_calls:
                     tool = TodoWriteTool(run_ctx.todo_state if run_ctx is not None else None)
+                    # CodeRabbit（8-24）：解析失败时 args 未定义会 UnboundLocalError；
+                    # 解析/执行失败时 status 应为 TOOL_ERROR（不是 SUCCESS）
+                    args: dict[str, Any] = {}
+                    status = OrchestrationResult.SUCCESS
                     try:
                         raw_args = getattr(tc, "arguments", None)
                         args = _json.loads(raw_args) if isinstance(raw_args, str) and raw_args else (raw_args or {})
                         result_text = await tool.execute(**args)
                     except Exception as exc:  # pragma: no cover - defensive
                         result_text = _json.dumps({"status": "error", "reason": str(exc)[:120]}, ensure_ascii=False)
+                        status = OrchestrationResult.TOOL_ERROR
                     # CodeRabbit Critical ①：构造 ToolExecutionContext（非 OrchestrationResult——
                     # 后者是枚举，关键字构造直接抛错）
                     from miqi.execution.orchestrator import ToolExecutionContext
@@ -938,7 +943,7 @@ class TurnRunner:
                         thread_id=turn.thread_id,
                         agent_type=getattr(turn, "agent_type", "main"),
                         result=result_text,
-                        status=OrchestrationResult.SUCCESS,
+                        status=status,
                         duration_ms=0,
                     ))
             if other_calls:
@@ -1225,19 +1230,18 @@ class TurnRunner:
         载荷由 TaskPolicy 生成（用户语言步骤 + 权限推断），不依赖模型写计划。
         返回 True=用户确认开始执行；False=取消/超时。
         """
+        # 无 UI 通道（headless/测试/CLI）→ 降级放行——阻塞会让所有写/执行静默失败。
+        # 注意：必须走 thread→session 映射（与 resolver 一致）——直查 thread_id
+        # 在 thread≠session 的环境（测试/多会话）会误判无通道而静默放行。
         from miqi.agent.user_input_resolver import (
             make_resolver,
+            session_for_thread,
             user_input_emitter_for,
         )
         from miqi.execution.task_policy import (
             permissions_for_tools,
             plan_card_steps,
         )
-
-        # 无 UI 通道（headless/测试/CLI）→ 降级放行——阻塞会让所有写/执行静默失败。
-        # 注意：必须走 thread→session 映射（与 resolver 一致）——直查 thread_id
-        # 在 thread≠session 的环境（测试/多会话）会误判无通道而静默放行。
-        from miqi.agent.user_input_resolver import session_for_thread
 
         thread_id = str(getattr(turn, "thread_id", "") or "")
         session_key = session_for_thread(thread_id) or thread_id

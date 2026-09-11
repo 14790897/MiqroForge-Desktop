@@ -186,7 +186,10 @@ test.describe('Confirm Card (ask_user_confirm_card)', () => {
       });
 
       // 卡片 msgIn 动画（.35s）期间 click 会因元素移动超时——force 点击
-      await page.getByTestId('confirm-card').getByTestId('confirm-run').click({ force: true, timeout: 15_000 });
+      await page
+        .getByTestId('confirm-card')
+        .getByTestId('confirm-run')
+        .click({ force: true, timeout: 15_000 });
       // 两张卡均留在消息流原位：第一张"已确认执行方案"，第二张转"已确认"态
       await expect(cardArea.getByText('已确认执行方案')).toBeVisible({ timeout: 30_000 });
       await expect(cardArea.getByText('方案已完成，是否上传到 MiQroForge')).toBeVisible({

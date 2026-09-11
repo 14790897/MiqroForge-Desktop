@@ -22,11 +22,18 @@ const PERM_META: Record<string, { icon: string; label: string }> = {
 };
 
 function StepList({ entry }: { entry: TimelineEntry }) {
-  const items = entry.todoItems ?? entry.steps.map((s, i) => ({
-    id: `${i}`,
-    title: s.name,
-    status: entry.stepStatus?.[s.name] === 'done' ? 'completed' : entry.stepStatus?.[s.name] === 'running' ? 'in_progress' : 'queued',
-  }));
+  const items =
+    entry.todoItems ??
+    entry.steps.map((s, i) => ({
+      id: `${i}`,
+      title: s.name,
+      status:
+        entry.stepStatus?.[s.name] === 'done'
+          ? 'completed'
+          : entry.stepStatus?.[s.name] === 'running'
+            ? 'in_progress'
+            : 'queued',
+    }));
 
   return (
     <div className="flex min-w-0 flex-col gap-0.5 py-1">
@@ -36,11 +43,42 @@ function StepList({ entry }: { entry: TimelineEntry }) {
         const blocked = item.status === 'blocked';
         const cancelled = item.status === 'cancelled';
         return (
-          <div key={item.id || index} className="flex min-w-0 items-center gap-2 py-0.5 text-[12px]">
-            <span className="grid size-4 shrink-0 place-items-center text-[10px]" style={{ color: done ? '#2ea45f' : active ? 'var(--accent, #2a7de1)' : blocked ? '#b7791f' : '#a0a6b0' }}>
-              {done ? '✓' : cancelled ? '×' : blocked ? '!' : active ? <Loader2 size={11} className="animate-spin" /> : String(index + 1)}
+          <div
+            key={item.id || index}
+            className="flex min-w-0 items-center gap-2 py-0.5 text-[12px]"
+          >
+            <span
+              className="grid size-4 shrink-0 place-items-center text-[10px]"
+              style={{
+                color: done
+                  ? '#2ea45f'
+                  : active
+                    ? 'var(--accent, #2a7de1)'
+                    : blocked
+                      ? '#b7791f'
+                      : '#a0a6b0',
+              }}
+            >
+              {done ? (
+                '✓'
+              ) : cancelled ? (
+                '×'
+              ) : blocked ? (
+                '!'
+              ) : active ? (
+                <Loader2 size={11} className="animate-spin" />
+              ) : (
+                String(index + 1)
+              )}
             </span>
-            <span className="min-w-0 flex-1 truncate" title={item.title} style={{ color: done || cancelled ? 'var(--text-faint, #9aa0a8)' : 'var(--text, #1d2129)', fontWeight: active ? 600 : 400 }}>
+            <span
+              className="min-w-0 flex-1 truncate"
+              title={item.title}
+              style={{
+                color: done || cancelled ? 'var(--text-faint, #9aa0a8)' : 'var(--text, #1d2129)',
+                fontWeight: active ? 600 : 400,
+              }}
+            >
               {item.title}
             </span>
           </div>
@@ -55,7 +93,11 @@ export function Timeline({ entry }: { entry: TimelineEntry }) {
   const permissionNodes = entry.permissions.map((p) => {
     const meta = PERM_META[p] ?? { icon: '🔐', label: p };
     return (
-      <span key={p} className="inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[10px]" style={{ background: 'var(--surface-3, #f1f2f4)', color: 'var(--text-muted, #6b7280)' }}>
+      <span
+        key={p}
+        className="inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[10px]"
+        style={{ background: 'var(--surface-3, #f1f2f4)', color: 'var(--text-muted, #6b7280)' }}
+      >
         {meta.icon} {meta.label}
       </span>
     );
@@ -70,15 +112,26 @@ export function Timeline({ entry }: { entry: TimelineEntry }) {
         defaultOpen={running}
       >
         <div className="w-full min-w-0 pl-5">
-          {entry.goal && <div className="mb-1 truncate text-[11.5px] text-(--conversation-scaffold-text, #6b7280)" title={entry.goal}>{entry.goal}</div>}
+          {entry.goal && (
+            <div
+              className="mb-1 truncate text-[11.5px] text-(--conversation-scaffold-text, #6b7280)"
+              title={entry.goal}
+            >
+              {entry.goal}
+            </div>
+          )}
           <StepList entry={entry} />
-          {permissionNodes.length > 0 && <div className="mt-1.5 flex flex-wrap gap-1">{permissionNodes}</div>}
+          {permissionNodes.length > 0 && (
+            <div className="mt-1.5 flex flex-wrap gap-1">{permissionNodes}</div>
+          )}
         </div>
       </HermesToolRow>
     </div>
   );
 }
 
-export function isTimelineRequest(data: UserInputCardRequest | undefined): data is UserInputCardRequest {
+export function isTimelineRequest(
+  data: UserInputCardRequest | undefined
+): data is UserInputCardRequest {
   return data?.display === 'timeline';
 }

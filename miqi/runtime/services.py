@@ -205,9 +205,9 @@ class RuntimeServices:
             spawn_tool._agent_control = agent_control
             spawn_tool._event_emitter = emitter
 
+        from miqi.runtime.collaborative_turn_runner import CollaborativeTurnRunner
         from miqi.runtime.context_runtime import ContextRuntime
         from miqi.runtime.tool_runtime import ToolRuntime
-        from miqi.runtime.collaborative_turn_runner import CollaborativeTurnRunner
 
         tool_runtime = ToolRuntime(orchestrator=orchestrator)
 

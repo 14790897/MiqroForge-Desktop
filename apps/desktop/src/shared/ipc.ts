@@ -531,7 +531,13 @@ export interface UserInputCardRequest {
   /** #684 契约扩展：触发工具名 + 校验警告（B 级必上卡）+ 产物元数据 */
   toolName?: string;
   warnings?: { code?: string; message: string; severity?: string }[];
-  metadata?: { run_id?: string; artifact_name?: string; artifact_path?: string; artifact_size?: number; artifact_sha256?: string };
+  metadata?: {
+    run_id?: string;
+    artifact_name?: string;
+    artifact_path?: string;
+    artifact_size?: number;
+    artifact_sha256?: string;
+  };
   /** #646-v2 Action Card（request_action_confirmation）：危险动作确认字段 */
   action?: string;
   target?: string;

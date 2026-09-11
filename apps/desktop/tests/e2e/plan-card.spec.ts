@@ -41,8 +41,14 @@ async function waitForTcpListener(port: number): Promise<void> {
     // Re-probe until the server is actually accepting connections.
     const probe = await new Promise<boolean>((resolve) => {
       const socket = createConnection({ host: '127.0.0.1', port });
-      const ok = () => { socket.destroy(); resolve(true); };
-      const fail = () => { socket.destroy(); resolve(false); };
+      const ok = () => {
+        socket.destroy();
+        resolve(true);
+      };
+      const fail = () => {
+        socket.destroy();
+        resolve(false);
+      };
       socket.once('connect', ok);
       socket.once('error', fail);
       socket.setTimeout(1000, fail);
@@ -50,7 +56,9 @@ async function waitForTcpListener(port: number): Promise<void> {
     if (probe) return;
     await new Promise((r) => setTimeout(r, 250));
   }
-  throw new Error(`mock OpenAI server did not accept TCP connections on 127.0.0.1:${port} within 30s`);
+  throw new Error(
+    `mock OpenAI server did not accept TCP connections on 127.0.0.1:${port} within 30s`
+  );
 }
 
 async function startMockOpenAI(): Promise<{ proc: ChildProcess; mockUrl: string }> {
@@ -104,66 +112,62 @@ async function launchWithMock() {
 }
 
 test.describe('Plan Card (#646-v2)', () => {
-  test(
-    '计划工作流：当前方案执行 → ActionCard → 完成',
-    { timeout: LLM_TIMEOUT },
-    async () => {
-      const fixture = await launchWithMock();
-      const electronApp: ElectronApplication = fixture.electronApp;
-      const page: Page = fixture.page;
+  test('计划工作流：当前方案执行 → ActionCard → 完成', { timeout: LLM_TIMEOUT }, async () => {
+    const fixture = await launchWithMock();
+    const electronApp: ElectronApplication = fixture.electronApp;
+    const page: Page = fixture.page;
 
-      try {
-        await createNewConversation(page);
-        await sendMessage(page, '计划：生成 MOF-5 实验报告并上传');
+    try {
+      await createNewConversation(page);
+      await sendMessage(page, '计划：生成 MOF-5 实验报告并上传');
 
-        const planCard = page.getByTestId('plan-card').first();
-        await expect(planCard).toBeVisible({ timeout: 60_000 });
-        await expect(planCard.getByText('生成 MOF-5 实验报告')).toBeVisible();
-        await expect(planCard.getByText('搜集论文资料')).toBeVisible();
-        await expect(planCard.getByText('上传到 Qraft')).toBeVisible();
-        await expect(planCard.getByText('网络')).toBeVisible();
-        await expect(planCard.getByText('外部')).toBeVisible();
-        await expect(planCard.getByTestId('plan-confirm')).toBeVisible();
-        await expect(planCard.getByTestId('confirm-modify')).toBeVisible();
+      const planCard = page.getByTestId('plan-card').first();
+      await expect(planCard).toBeVisible({ timeout: 60_000 });
+      await expect(planCard.getByText('生成 MOF-5 实验报告')).toBeVisible();
+      await expect(planCard.getByText('搜集论文资料')).toBeVisible();
+      await expect(planCard.getByText('上传到 Qraft')).toBeVisible();
+      await expect(planCard.getByText('网络')).toBeVisible();
+      await expect(planCard.getByText('外部')).toBeVisible();
+      await expect(planCard.getByTestId('plan-confirm')).toBeVisible();
+      await expect(planCard.getByTestId('confirm-modify')).toBeVisible();
 
-        await page.screenshot({ path: 'test-results/plan-card-waiting.png' });
-        await planCard.getByTestId('plan-confirm').click();
+      await page.screenshot({ path: 'test-results/plan-card-waiting.png' });
+      await planCard.getByTestId('plan-confirm').click();
 
-        const autoApprove = async () => {
-          try {
-            for (let i = 0; i < 60; i++) {
-              const dialog = page.getByRole('alertdialog').first();
-              if (await dialog.isVisible().catch(() => false)) {
-                const allow = dialog.getByRole('button', { name: /允许一次|允许/ }).first();
-                if (await allow.isVisible().catch(() => false)) await allow.click();
-              }
-              await page.waitForTimeout(500);
+      const autoApprove = async () => {
+        try {
+          for (let i = 0; i < 60; i++) {
+            const dialog = page.getByRole('alertdialog').first();
+            if (await dialog.isVisible().catch(() => false)) {
+              const allow = dialog.getByRole('button', { name: /允许一次|允许/ }).first();
+              if (await allow.isVisible().catch(() => false)) await allow.click();
             }
-          } catch {
-            // App closed: nothing left to approve.
+            await page.waitForTimeout(500);
           }
-        };
-        const approveTask = autoApprove();
+        } catch {
+          // App closed: nothing left to approve.
+        }
+      };
+      const approveTask = autoApprove();
 
-        const actionCard = page.getByTestId('action-card').first();
-        await expect(actionCard).toBeVisible({ timeout: 60_000 });
-        await expect(actionCard.getByText('☁ 上传').first()).toBeVisible();
-        await expect(actionCard.getByText('Qraft').first()).toBeVisible();
-        await expect(actionCard.getByText('mof-report.json').first()).toBeVisible();
-        await expect(actionCard.getByText(/23\.0 KB/)).toBeVisible();
+      const actionCard = page.getByTestId('action-card').first();
+      await expect(actionCard).toBeVisible({ timeout: 60_000 });
+      await expect(actionCard.getByText('☁ 上传').first()).toBeVisible();
+      await expect(actionCard.getByText('Qraft').first()).toBeVisible();
+      await expect(actionCard.getByText('mof-report.json').first()).toBeVisible();
+      await expect(actionCard.getByText(/23\.0 KB/)).toBeVisible();
 
-        await page.screenshot({ path: 'test-results/action-card-upload.png' });
-        await actionCard.getByRole('button', { name: '确认上传' }).click();
-        await waitForResponseComplete(page, LLM_TIMEOUT);
-        await expect(page.getByText(/已完成：MOF-5 实验报告/)).toBeVisible({ timeout: 30_000 });
+      await page.screenshot({ path: 'test-results/action-card-upload.png' });
+      await actionCard.getByRole('button', { name: '确认上传' }).click();
+      await waitForResponseComplete(page, LLM_TIMEOUT);
+      await expect(page.getByText(/已完成：MOF-5 实验报告/)).toBeVisible({ timeout: 30_000 });
 
-        await approveTask;
-      } finally {
-        await closeElectronApp(electronApp, fixture.miqiHome);
-        fixture.mockServer.kill();
-      }
-    },
-  );
+      await approveTask;
+    } finally {
+      await closeElectronApp(electronApp, fixture.miqiHome);
+      fixture.mockServer.kill();
+    }
+  });
 
   test(
     '调整方案：内联输入意见 → Agent 重新规划 → 不执行旧方案',
@@ -197,6 +201,6 @@ test.describe('Plan Card (#646-v2)', () => {
         await closeElectronApp(electronApp, fixture.miqiHome);
         fixture.mockServer.kill();
       }
-    },
+    }
   );
 });

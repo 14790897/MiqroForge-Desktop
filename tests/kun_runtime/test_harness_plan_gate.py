@@ -7,12 +7,11 @@
 """
 
 import asyncio
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 import pytest
 
 from miqi.agent.user_input_resolver import set_user_input_emitter
-
 
 
 class _FakeModelResponse:
@@ -24,10 +23,16 @@ class _FakeModelResponse:
         self.usage = {}
 
 
+_tc_counter = 0
+
+
 def _tc(name: str, args: dict | None = None):
+    # CodeRabbit（8-24）：id(tc) % 1000 可能碰撞——用单调递增计数器
+    global _tc_counter
+    _tc_counter += 1
     tc = MagicMock()
     tc.name = name
-    tc.id = f"call_{name}_{id(tc) % 1000}"
+    tc.id = f"call_{name}_{_tc_counter}"
     tc.arguments = args or {}
     return tc
 
@@ -146,15 +151,27 @@ class TestHarnessPlanGate:
         from miqi.agent.user_input_resolver import (
             clear_thread_session,
             set_thread_session,
+            set_user_input_emitter,
         )
 
         set_thread_session("thread-t3", "sess-t3")
         set_thread_session("thread-t5", "sess-t5")
         set_thread_session("thread-t8", "sess-t8")
         yield
-        clear_thread_session("thread-t3")
-        clear_thread_session("thread-t5")
-        clear_thread_session("thread-t8")
+        # CodeRabbit（8-24）：清理全部测试 session（不只 t3/t5/t8）+
+        # 清除 set_user_input_emitter 注册的回调（防后续测试复用过期映射）
+        for thread, sess in [
+            ("thread-t3", "sess-t3"),
+            ("thread-t5", "sess-t5"),
+            ("thread-t8", "sess-t8"),
+            ("thread-a1", "sess-a1"),
+            ("thread-m1", "sess-m1"),
+            ("thread-s3", "sess-s3"),
+            ("thread-s5", "sess-s5"),
+            ("thread-s6", "sess-s6"),
+        ]:
+            clear_thread_session(thread)
+            set_user_input_emitter(sess, None)
 
     async def test_t5_auto_mode_no_plan_card(self):
         """T5：auto 模式不弹计划卡（非阻塞展示）。"""
@@ -169,8 +186,11 @@ class TestHarnessPlanGate:
             _FakeModelResponse([], has_tool_calls=False),
         ]
         runner, events = _make_runner(responses)
-        await runner._handle_user_message(
-            MagicMock(content="测试", thread_id="thread-t5", mode="auto", media=[])
+        await asyncio.wait_for(
+            runner._handle_user_message(
+                MagicMock(content="测试", thread_id="thread-t5", mode="auto", media=[])
+            ),
+            timeout=15,
         )
         assert emitted_events == [], "auto 模式不应弹计划卡"
 
@@ -194,8 +214,11 @@ class TestHarnessPlanGate:
             _FakeModelResponse([], has_tool_calls=False),
         ]
         runner, events = _make_runner(responses)
-        await runner._handle_user_message(
-            MagicMock(content="搜索并生成报告", thread_id="thread-a1", mode="auto", media=[])
+        await asyncio.wait_for(
+            runner._handle_user_message(
+                MagicMock(content="搜索并生成报告", thread_id="thread-a1", mode="auto", media=[])
+            ),
+            timeout=15,
         )
         # Timeline 事件出现（display=timeline，无确认卡语义）
         timelines = [e for e in emitted if e.get("display") == "timeline"]
@@ -247,8 +270,11 @@ class TestHarnessPlanGate:
 
         runner, events = _make_runner(responses, tools=RecordingTools())
         flow = asyncio.create_task(cancel_flow())
-        await runner._handle_user_message(
-            MagicMock(content="搜索并写文件", thread_id="thread-m1", mode="edit", media=[])
+        await asyncio.wait_for(
+            runner._handle_user_message(
+                MagicMock(content="搜索并写文件", thread_id="thread-m1", mode="edit", media=[])
+            ),
+            timeout=15,
         )
         await flow
         assert len(emitted) >= 1, "弹卡"
@@ -299,8 +325,11 @@ class TestHarnessPlanGate:
 
         runner, events = _make_runner(responses, tools=RecordingTools())
         flow = asyncio.create_task(confirm_flow())
-        await runner._handle_user_message(
-            MagicMock(content="搜索并写文件", thread_id="thread-s3", mode="edit", media=[])
+        await asyncio.wait_for(
+            runner._handle_user_message(
+                MagicMock(content="搜索并写文件", thread_id="thread-s3", mode="edit", media=[])
+            ),
+            timeout=15,
         )
         await flow
 
@@ -360,8 +389,11 @@ class TestHarnessPlanGate:
 
         runner, events = _make_runner(responses, tools=RecordingTools())
         flow = asyncio.create_task(confirm_flow())
-        await runner._handle_user_message(
-            MagicMock(content="搜索并写文件", thread_id="thread-s5", mode="edit", media=[])
+        await asyncio.wait_for(
+            runner._handle_user_message(
+                MagicMock(content="搜索并写文件", thread_id="thread-s5", mode="edit", media=[])
+            ),
+            timeout=15,
         )
         await flow
 
@@ -414,8 +446,11 @@ class TestHarnessPlanGate:
 
         runner, events = _make_runner(responses, tools=RecordingTools())
         flow = asyncio.create_task(confirm_flow())
-        await runner._handle_user_message(
-            MagicMock(content="搜索并写文件", thread_id="thread-s6", mode="edit", media=[])
+        await asyncio.wait_for(
+            runner._handle_user_message(
+                MagicMock(content="搜索并写文件", thread_id="thread-s6", mode="edit", media=[])
+            ),
+            timeout=15,
         )
         await flow
 

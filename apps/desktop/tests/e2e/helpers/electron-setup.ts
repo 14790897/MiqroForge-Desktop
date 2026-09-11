@@ -248,7 +248,9 @@ export async function approvePlanCardIfAny(page: Page, timeoutMs = 90_000) {
       }
       checked += 1;
       if (checked % 20 === 1) {
-        console.log(`[test] approvePlanCardIfAny: 检查 ${checked} 次，计划卡未出现（${Date.now() < deadline ? '继续等' : '超时'}）`);
+        console.log(
+          `[test] approvePlanCardIfAny: 检查 ${checked} 次，计划卡未出现（${Date.now() < deadline ? '继续等' : '超时'}）`
+        );
       }
     } catch {
       // 页面已关闭（测试结束）——静默退出
@@ -287,7 +289,10 @@ export async function approveLoop(page: Page, timeout = 180_000) {
         console.log('[test] Auto-approved plan card (开始执行)');
       }
     }
-    const text = await page.locator('main').textContent().catch(() => '');
+    const text = await page
+      .locator('main')
+      .textContent()
+      .catch(() => '');
     const len = text ? text.length : 0;
     if (len > 0) started = true;
     // Allow small growth (a live timer adds a few chars per second); a large

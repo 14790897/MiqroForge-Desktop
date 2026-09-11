@@ -9,7 +9,8 @@ import { Loader2, ChevronRight, AlertCircle } from 'lucide-react';
  * 时间）+ 行下审批条（PendingToolApproval）+ 展开等宽区（pre）。成功静默
  * （success is silent——无字形），失败/警告才有字形与颜色。
  */
-export type ToolRowStatus = 'pending' | 'running' | 'success' | 'error' | 'warning' | 'cancelled' | 'modified';
+export type ToolRowStatus =
+  'pending' | 'running' | 'success' | 'error' | 'warning' | 'cancelled' | 'modified';
 
 export interface HermesToolRowProps {
   /** 行标题（工具名/任务名——SCAFFOLD_LABEL 小字） */
@@ -32,13 +33,20 @@ export interface HermesToolRowProps {
 
 // Hermes SCAFFOLD_LABEL_CLASS 等价（--conversation-tool-font-size 灰）
 const LABEL_CLASS = 'text-[12.5px] leading-[1.5] text-(--conversation-scaffold-text, #6b7280)';
-const META_CLASS = 'shrink-0 text-[0.625rem] tabular-nums text-(--conversation-scaffold-meta, #a0a6b0)';
+const META_CLASS =
+  'shrink-0 text-[0.625rem] tabular-nums text-(--conversation-scaffold-meta, #a0a6b0)';
 const GLYPH_WRAP_CLASS = 'grid size-3.5 shrink-0 place-items-center self-center';
 
 function StatusGlyph({ status }: { status: NonNullable<HermesToolRowProps['status']> }) {
   // Hermes：success is silent（成功无字形）；只有 pending/running/error/warning 有字形
   if (status === 'pending' || status === 'running') {
-    return <Loader2 size={13} className="animate-spin" style={{ color: 'var(--conversation-scaffold-meta, #a0a6b0)' }} />;
+    return (
+      <Loader2
+        size={13}
+        className="animate-spin"
+        style={{ color: 'var(--conversation-scaffold-meta, #a0a6b0)' }}
+      />
+    );
   }
   if (status === 'error') {
     return <AlertCircle size={13} style={{ color: '#d64545' }} />;
@@ -65,13 +73,14 @@ export function HermesToolRow({
   const [open, setOpen] = useState(defaultOpen);
 
   const hasContent = children != null;
-  const chevron = hasContent || approval ? (
-    <ChevronRight
-      size={12}
-      className="shrink-0 transition-transform duration-150 opacity-60"
-      style={{ transform: open ? 'rotate(90deg)' : 'none' }}
-    />
-  ) : null;
+  const chevron =
+    hasContent || approval ? (
+      <ChevronRight
+        size={12}
+        className="shrink-0 transition-transform duration-150 opacity-60"
+        style={{ transform: open ? 'rotate(90deg)' : 'none' }}
+      />
+    ) : null;
 
   return (
     <div className="w-full min-w-0 max-w-full" data-testid={testid}>

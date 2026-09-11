@@ -17,9 +17,12 @@ class CollaborativeTurnRunner(TurnRunner):
     """TurnRunner variant with an editable, model-driven plan boundary."""
 
     async def _harness_plan_confirm(self, turn: Any, tool_names: list[str]) -> str:
-        from miqi.agent.user_input_resolver import make_resolver, user_input_emitter_for
+        from miqi.agent.user_input_resolver import (
+            make_resolver,
+            session_for_thread,
+            user_input_emitter_for,
+        )
         from miqi.execution.task_policy import permissions_for_tools, plan_card_steps
-        from miqi.agent.user_input_resolver import session_for_thread
 
         thread_id = str(getattr(turn, "thread_id", "") or "")
         session_key = session_for_thread(thread_id) or thread_id

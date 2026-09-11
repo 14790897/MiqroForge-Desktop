@@ -17,10 +17,7 @@ export function TurnStatusBar() {
       className="inline-flex items-center gap-2 text-[12px] font-medium"
       data-testid="turn-status-waiting"
     >
-      <span
-        className="w-[7px] h-[7px] rounded-full"
-        style={{ background: '#9db8d8' }}
-      />
+      <span className="w-[7px] h-[7px] rounded-full" style={{ background: '#9db8d8' }} />
       <span style={{ color: '#6a8fb8' }}>等待你的确认</span>
     </div>
   );

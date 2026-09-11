@@ -5,7 +5,6 @@ from miqi.runtime.task_objects import (
     ApprovedScope,
     ExternalAction,
     PlanSnapshot,
-    TodoItem,
     TodoState,
     validate_transition,
 )

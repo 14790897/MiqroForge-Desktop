@@ -107,7 +107,13 @@ export function ConfirmCard({
       </span>
       <div className="flex min-w-0 flex-col">
         <span className="text-[13px] font-medium leading-tight" style={{ color: '#333' }}>
-          {effectiveState === 'confirmed' ? '已确认' : effectiveState === 'modify' ? '已修改' : timedOut ? '已超时' : '已取消'}
+          {effectiveState === 'confirmed'
+            ? '已确认'
+            : effectiveState === 'modify'
+              ? '已修改'
+              : timedOut
+                ? '已超时'
+                : '已取消'}
         </span>
         <span className="text-[12px] break-words" style={{ color: '#6b7280' }}>
           {resolvedTitle}
@@ -126,22 +132,28 @@ export function ConfirmCard({
   // ConfirmChoice.role 类型只有 'cancel' | 'adjust'（confirm 是默认/未标注）；
   // 生产/测试数据可能只传 id（如 adjust/cancel）——id 兜底
   const roleOf = (r: string | undefined) => r as 'adjust' | 'cancel' | undefined;
-  const isAdjust = (c: { id: string; role?: string }) => roleOf(c.role) === 'adjust' || c.id === 'adjust';
-  const isCancel = (c: { id: string; role?: string }) => roleOf(c.role) === 'cancel' || c.id === 'cancel';
+  const isAdjust = (c: { id: string; role?: string }) =>
+    roleOf(c.role) === 'adjust' || c.id === 'adjust';
+  const isCancel = (c: { id: string; role?: string }) =>
+    roleOf(c.role) === 'cancel' || c.id === 'cancel';
   const adjustChoice = choices.find(isAdjust);
   const cancelChoice = choices.find(isCancel);
   const confirmChoice = choices.find((c) => !isAdjust(c) && !isCancel(c));
   // 未映射到 确认/修改/取消 三键的选项 → 展开区按钮行
   const customChoices = choices.filter(
-    (c) => c.id !== confirmChoice?.id && c.id !== adjustChoice?.id && c.id !== cancelChoice?.id,
+    (c) => c.id !== confirmChoice?.id && c.id !== adjustChoice?.id && c.id !== cancelChoice?.id
   );
 
-  const handleBarResolve = (choice: HermesConfirmChoice, rememberMode?: 'session' | 'always' | null) => {
+  const handleBarResolve = (
+    choice: HermesConfirmChoice,
+    rememberMode?: 'session' | 'always' | null
+  ) => {
     if (choice === 'confirm' && confirmChoice) onResolve(confirmChoice.id, rememberMode);
     else if (choice === 'modify' && adjustChoice) onResolve(adjustChoice.id, rememberMode);
     else if (choice === 'deny' && cancelChoice) onResolve(cancelChoice.id, rememberMode);
     // session/always 档：确认按钮 + remember（HermesConfirmBar 内部处理 rememberMode）
-    else if (choice === 'confirm') onResolve(confirmChoice?.id ?? choices[0]?.id ?? '', rememberMode);
+    else if (choice === 'confirm')
+      onResolve(confirmChoice?.id ?? choices[0]?.id ?? '', rememberMode);
     else if (choice === 'deny') onResolve(cancelChoice?.id ?? '', rememberMode);
   };
 
@@ -185,7 +197,11 @@ export function ConfirmCard({
     >
       {/* 展开区：说明 + 步骤 + 自定义选项（Hermes 等宽 pre 风格） */}
       <div className="flex flex-col gap-1.5 w-full min-w-0">
-        {req.message && <div className="text-[11.5px] leading-[1.6] break-words" style={{ color: '#6b7280' }}>{req.message}</div>}
+        {req.message && (
+          <div className="text-[11.5px] leading-[1.6] break-words" style={{ color: '#6b7280' }}>
+            {req.message}
+          </div>
+        )}
         {steps.length > 0 && (
           <div className="flex flex-col gap-0.5">
             {steps.map((s, i) => (

@@ -2487,10 +2487,15 @@ export function ChatConsole({
   }, [messages]);
   // 2026-08-26 用户裁决：有确认/计划卡时输入框隐藏（WorkBuddy 式）
   // 2026-08-27：计划/确认是 AI 回答的一部分——卡片内联在产生它的消息后
-  const { pending: pendingCards, resolved: resolvedCards, resolve: resolveCard, timeoutCard } = useUserInput();
+  const {
+    pending: pendingCards,
+    resolved: resolvedCards,
+    resolve: resolveCard,
+    timeoutCard,
+  } = useUserInput();
   const allCards = useMemo(
     () => [...Object.values(resolvedCards), ...Object.values(pendingCards)],
-    [pendingCards, resolvedCards],
+    [pendingCards, resolvedCards]
   );
   // 2026-08-27：卡属于 AI 回答——按 turn_id 关联到消息，在消息内部渲染
   const cardsByTurn = useMemo(() => {
@@ -2509,9 +2514,7 @@ export function ChatConsole({
     // 只算"消息流里已存在该 turn 的消息"的卡——turn 进行中（AI 消息未生成）
     // 卡留在兜底区显示，消息生成后才内联进消息
     const msgTurnIds = new Set(
-      messages
-        .filter((m) => m.role === 'assistant' && m.turnId)
-        .map((m) => m.turnId as string),
+      messages.filter((m) => m.role === 'assistant' && m.turnId).map((m) => m.turnId as string)
     );
     return new Set([...cardsByTurn.keys()].filter((t) => msgTurnIds.has(t)));
   }, [cardsByTurn, messages]);
@@ -4772,13 +4775,27 @@ export function ChatConsole({
               last.timestamp === ts &&
               last.content !== fullContent
             ) {
-              return [...prev.slice(0, -1), { ...last, content: fullContent, turnId: activeTurnIdRef.current ?? last.turnId }];
+              return [
+                ...prev.slice(0, -1),
+                { ...last, content: fullContent, turnId: activeTurnIdRef.current ?? last.turnId },
+              ];
             }
             if (last?.role === 'assistant' && last.content !== fullContent) {
-              return [...prev.slice(0, -1), { ...last, content: fullContent, turnId: activeTurnIdRef.current ?? last.turnId }];
+              return [
+                ...prev.slice(0, -1),
+                { ...last, content: fullContent, turnId: activeTurnIdRef.current ?? last.turnId },
+              ];
             }
             if (!last || last.role !== 'assistant') {
-              return [...prev, { role: 'assistant', content: fullContent, timestamp: ts, turnId: activeTurnIdRef.current ?? undefined }];
+              return [
+                ...prev,
+                {
+                  role: 'assistant',
+                  content: fullContent,
+                  timestamp: ts,
+                  turnId: activeTurnIdRef.current ?? undefined,
+                },
+              ];
             }
             return prev;
           });
@@ -6982,7 +6999,7 @@ export function ChatConsole({
                             ? (cardsByTurn.get(group.msg.turnId) ?? []).filter(
                                 // 2026-08-27：确认卡由工具链行渲染（Hermes 式）——
                                 // inline 只留 plan/action 卡防重复
-                                (c) => !isConfirmCard(c as never),
+                                (c) => !isConfirmCard(c as never)
                               )
                             : undefined
                         }
@@ -7014,15 +7031,20 @@ export function ChatConsole({
             className="shrink-0 px-5 pb-4 pt-3"
             style={{
               background: 'var(--background)',
-
             }}
           >
-          {Object.keys(pendingCards).length > 0 && (
-            <div className="max-w-[760px] mx-auto text-center text-[11px] py-3" style={{ color: '#a0a6b0' }}>
-              等待你的确认…
-            </div>
-          )}
-<div className="max-w-[760px] mx-auto" style={Object.keys(pendingCards).length > 0 ? { display: 'none' } : undefined}>
+            {Object.keys(pendingCards).length > 0 && (
+              <div
+                className="max-w-[760px] mx-auto text-center text-[11px] py-3"
+                style={{ color: '#a0a6b0' }}
+              >
+                等待你的确认…
+              </div>
+            )}
+            <div
+              className="max-w-[760px] mx-auto"
+              style={Object.keys(pendingCards).length > 0 ? { display: 'none' } : undefined}
+            >
               {attachments.length > 0 && (
                 <div className="flex flex-wrap gap-2 mb-2">
                   {attachments.map((att, i) => {
@@ -8210,14 +8232,20 @@ function ToolChainGroup({
   const autoCollapsedRef = useRef(false);
   // 2026-08-27：确认/计划是工具的一部分（Hermes 式）——审批条在工具行下。
   // 卡按 createdAt 顺序与 ask_user_confirm_card 工具行一一对应（单 turn 主场景）。
-  const { pending: chainPending, resolved: chainResolved, resolve: chainResolve, timeoutCard: chainTimeout } = useUserInput();
+  const {
+    pending: chainPending,
+    resolved: chainResolved,
+    resolve: chainResolve,
+    timeoutCard: chainTimeout,
+  } = useUserInput();
   // 2026-08-27 Hermes 式：含确认卡的工具链不自动收起——审批条消失后行保留
   const hasConfirmRow = rows.some(
-    (r) => r.toolName === 'ask_user_confirm_card' || (r.content ?? '').includes('ask_user_confirm_card'),
+    (r) =>
+      r.toolName === 'ask_user_confirm_card' || (r.content ?? '').includes('ask_user_confirm_card')
   );
   const chainCards = useMemo(() => {
     return [...Object.values(chainResolved), ...Object.values(chainPending)].sort(
-      (a, b) => (a.createdAt ?? 0) - (b.createdAt ?? 0),
+      (a, b) => (a.createdAt ?? 0) - (b.createdAt ?? 0)
     );
   }, [chainPending, chainResolved]);
   // 工具链内 ask_user_confirm_card 行（按顺序）→ 卡队列索引
@@ -8253,7 +8281,9 @@ function ToolChainGroup({
         {open && (
           <div className="mt-0.5 flex flex-col">
             {rows.map((row, i) => {
-              const isConfirmRow = row.toolName === 'ask_user_confirm_card' || (row.content ?? '').includes('ask_user_confirm_card');
+              const isConfirmRow =
+                row.toolName === 'ask_user_confirm_card' ||
+                (row.content ?? '').includes('ask_user_confirm_card');
               const card = isConfirmRow ? chainCards[confirmRowIdxRef.current++] : undefined;
               return (
                 <div key={`${row.timestamp}-${i}`}>
@@ -8930,34 +8960,34 @@ const MessageBubble = memo(function MessageBubble({
   return (
     <>
       <ContextMenu items={contextItems}>
-      {({ onContextMenu }) => (
-        <div
-          ref={bubbleRef}
-          className={cn(
-            'flex min-w-0 gap-3',
-            isUser ? 'items-start justify-end' : 'flex-col items-start',
-            // reply-content (thinking/tools already rendered the icon rail) —
-            // indent the body so it lines up with the thinking/tool labels.
-            hideHeader && !isUser && 'pl-4'
-          )}
-          onContextMenu={(e) => {
-            // Capture any manual selection before hover-preview can replace it
-            capturedSelectionRef.current = window.getSelection()?.toString() ?? '';
-            onContextMenu(e);
-          }}
-          data-testid={isUser ? 'chat-message-user' : 'chat-message-assistant'}
-        >
-          {!isUser && !hideHeader && (
-            <div className="flex items-center gap-2 mb-3 pl-2" data-testid="assistant-avatar-row">
-              <AgentAvatar />
-              <span
-                className="text-[16px] font-semibold shrink-0 whitespace-nowrap"
-                style={{ color: 'var(--text)' }}
-              >
-                MiQroForge
-              </span>
-            </div>
-          )}
+        {({ onContextMenu }) => (
+          <div
+            ref={bubbleRef}
+            className={cn(
+              'flex min-w-0 gap-3',
+              isUser ? 'items-start justify-end' : 'flex-col items-start',
+              // reply-content (thinking/tools already rendered the icon rail) —
+              // indent the body so it lines up with the thinking/tool labels.
+              hideHeader && !isUser && 'pl-4'
+            )}
+            onContextMenu={(e) => {
+              // Capture any manual selection before hover-preview can replace it
+              capturedSelectionRef.current = window.getSelection()?.toString() ?? '';
+              onContextMenu(e);
+            }}
+            data-testid={isUser ? 'chat-message-user' : 'chat-message-assistant'}
+          >
+            {!isUser && !hideHeader && (
+              <div className="flex items-center gap-2 mb-3 pl-2" data-testid="assistant-avatar-row">
+                <AgentAvatar />
+                <span
+                  className="text-[16px] font-semibold shrink-0 whitespace-nowrap"
+                  style={{ color: 'var(--text)' }}
+                >
+                  MiQroForge
+                </span>
+              </div>
+            )}
 
             {/* Pending spinner — the optimistic user bubble is shown before the
               backend has accepted the send; a small spinning icon (no text)
@@ -9196,19 +9226,19 @@ const MessageBubble = memo(function MessageBubble({
                 )}
               </div>
 
-            {/* 2026-08-27：计划/确认是 AI 回答的一部分——卡在消息内容后、操作栏前 */}
-            {cards && cards.length > 0 && (
-              <div className="flex flex-col gap-1 w-full mt-1" data-testid="inline-cards">
-                {cards.map((c) => (
-                  <ConfirmCardItem
-                    key={c.request.input_id}
-                    entry={c as never}
-                    resolve={resolveCard}
-                    timeoutCard={timeoutCard}
-                  />
-                ))}
-              </div>
-            )}
+              {/* 2026-08-27：计划/确认是 AI 回答的一部分——卡在消息内容后、操作栏前 */}
+              {cards && cards.length > 0 && (
+                <div className="flex flex-col gap-1 w-full mt-1" data-testid="inline-cards">
+                  {cards.map((c) => (
+                    <ConfirmCardItem
+                      key={c.request.input_id}
+                      entry={c as never}
+                      resolve={resolveCard}
+                      timeoutCard={timeoutCard}
+                    />
+                  ))}
+                </div>
+              )}
 
               {/* 常驻免责声明（#836）—— 每条 AI 回答正文底部 */}
               {!isUser && msg.content !== '' && (

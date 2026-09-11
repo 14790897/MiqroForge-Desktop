@@ -51,7 +51,9 @@ async function waitForTcpListener(port: number): Promise<void> {
     if (connected) return;
     await new Promise((r) => setTimeout(r, 250));
   }
-  throw new Error(`mock OpenAI server did not accept TCP connections on 127.0.0.1:${port} within 30s`);
+  throw new Error(
+    `mock OpenAI server did not accept TCP connections on 127.0.0.1:${port} within 30s`
+  );
 }
 
 async function startMockOpenAI(): Promise<{ proc: ChildProcess; mockUrl: string }> {
@@ -144,7 +146,9 @@ test.describe('Auto Timeline (#646-v2)', () => {
             const dialog = page.getByRole('alertdialog').first();
             if (await dialog.isVisible().catch(() => false)) {
               const allow = dialog.getByRole('button', { name: /允许一次|允许/ }).first();
-              if (await allow.isVisible().catch(() => false)) { await allow.click(); }
+              if (await allow.isVisible().catch(() => false)) {
+                await allow.click();
+              }
             }
             await page.waitForTimeout(500);
           }
@@ -169,6 +173,6 @@ test.describe('Auto Timeline (#646-v2)', () => {
       await expect(page.getByTestId('timeline')).toBeVisible();
 
       await approveTask;
-    },
+    }
   );
 });
