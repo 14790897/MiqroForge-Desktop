@@ -132,7 +132,10 @@ test.describe('Confirm Card (ask_user_confirm_card)', () => {
       // 而非 mock，导致回合挂起）；中性词同样命中 mock 的 R1 单卡分支
       await sendMessage(page, '帮我整理季度销售数据报告并确认执行');
 
-      await expect(cardArea.getByText('确认执行方案？')).toBeVisible({ timeout: 60_000 });
+      // 卡内定位（真实模型输出可能也含同名文本——CI strict mode 撞车）
+      await expect(
+        cardArea.getByTestId('confirm-card').first().getByText('确认执行方案？')
+      ).toBeVisible({ timeout: 60_000 });
       // 步骤在展开区（Hermes 工具行默认收起——点击行展开）
       await expect(page.getByTestId('confirm-card').getByTestId('confirm-run')).toBeVisible();
       await expect(page.getByTestId('confirm-card').getByTestId('confirm-modify')).toBeVisible();
@@ -166,7 +169,7 @@ test.describe('Confirm Card (ask_user_confirm_card)', () => {
       const approveTask = autoApprove();
       // Hermes 式：确认后卡留在消息流原位变状态（"已确认执行方案"）——
       // 无"已处理 N 张"折叠入口（用户 2026-08-26：收起历史那块要正常）
-      await expect(cardArea.getByText('已确认执行方案')).toBeVisible({
+      await expect(cardArea.getByText('已确认执行方案').first()).toBeVisible({
         timeout: 30_000,
       });
 
@@ -187,7 +190,7 @@ test.describe('Confirm Card (ask_user_confirm_card)', () => {
         .getByTestId('confirm-run')
         .click({ force: true, timeout: 15_000 });
       // 两张卡均留在消息流原位：第一张"已确认执行方案"，第二张转"已确认"态
-      await expect(cardArea.getByText('已确认执行方案')).toBeVisible({ timeout: 30_000 });
+      await expect(cardArea.getByText('已确认执行方案').first()).toBeVisible({ timeout: 30_000 });
       await expect(cardArea.getByText('方案已完成，是否上传到 MiQroForge')).toBeVisible({
         timeout: 30_000,
       });
@@ -201,7 +204,7 @@ test.describe('Confirm Card (ask_user_confirm_card)', () => {
       await expect(page.locator('main')).toContainText('mof-price-report.workflow.json');
 
       // ── 两张卡均留在消息流原位（决议痕迹 = 卡的状态更新，无折叠入口）──
-      await expect(cardArea.getByText('已确认执行方案')).toBeVisible();
+      await expect(cardArea.getByText('已确认执行方案').first()).toBeVisible();
       await expect(cardArea.getByText('方案已完成，是否上传到 MiQroForge')).toBeVisible();
 
       await page.screenshot({

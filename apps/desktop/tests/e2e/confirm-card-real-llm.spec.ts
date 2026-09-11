@@ -74,7 +74,10 @@ test.describe('Confirm Card (real LLM)', () => {
 
       // 点击确认 → tool result 回传模型 → 模型继续完成回合
       await confirmCard.getByTestId('confirm-run').click();
-      await expect(page.getByText('已确认执行方案', { exact: true })).toBeVisible({
+      // 回执内定位（页面级会撞上真实模型输出里的同名文本——CI strict mode）
+      await expect(
+        page.locator('[data-receipt="true"]').getByText('已确认执行方案', { exact: true }).first()
+      ).toBeVisible({
         timeout: 30_000,
       });
 
