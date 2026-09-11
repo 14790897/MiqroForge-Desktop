@@ -144,11 +144,16 @@ export function ConfirmCardArea({ matchedTurnIds }: { matchedTurnIds?: Set<strin
     let merged = [...Object.values(resolved), ...Object.values(pending)];
     merged.sort((a, b) => (a.createdAt ?? 0) - (b.createdAt ?? 0));
     if (matchedTurnIds && matchedTurnIds.size > 0) {
-      merged = merged.filter(
-        (entry) => !(entry.request.turn_id && matchedTurnIds.has(entry.request.turn_id))
-      );
+      merged = merged.filter((entry) => {
+        const turnId = entry.request.turn_id;
+        if (!turnId || !matchedTurnIds.has(turnId)) return true;
+        // A pending confirmation still needs a fallback render until its
+        // originating ToolChainGroup is actually visible. Resolved confirmations
+        // can be omitted because the originating row owns their history card.
+        return entry.state === 'pending';
+      });
     }
-    return merged.filter((entry) => !isConfirmCard(entry as never));
+    return merged;
   }, [pending, resolved, matchedTurnIds]);
 
   if (allEntries.length === 0 && Object.keys(timelines).length === 0) return null;

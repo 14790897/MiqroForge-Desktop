@@ -7,7 +7,10 @@ import {
   useRef,
   type ReactNode,
 } from 'react';
-import type { UserInputCardRequest, UserInputResolvedData } from '../../shared/ipc';
+import type {
+  UserInputCardRequest,
+  UserInputResolvedData,
+} from '../../shared/ipc';
 import type { TimelineEntry } from '../features/chat/components/Timeline';
 
 export type UserInputCardState = 'pending' | 'confirmed' | 'cancelled' | 'modify';
@@ -36,15 +39,7 @@ interface UserInputContextValue {
   pending: Record<string, UserInputCardEntry>;
   resolved: Record<string, UserInputCardEntry>;
   timelines: Record<string, TimelineEntry>;
-  /** Send the user's choice back to the backend (blocking tool resolves). */
-  resolve: (
-    inputId: string,
-    choiceId: string,
-    choiceLabel: string,
-    remember?: boolean,
-    rememberMode?: 'session' | 'always'
-  ) => Promise<void>;
-  /** Local timeout: flip the card to a timed-out resolved state. */
+  resolve: (inputId: string, choiceId: string, choiceLabel: string, remember?: boolean, rememberMode?: 'session' | 'always') => Promise<void>;
   timeoutCard: (inputId: string) => void;
   lastAdjustAt?: number;
   activeSession?: string;
@@ -88,14 +83,7 @@ export function UserInputProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const moveToResolved = useCallback(
-    (
-      inputId: string,
-      state: UserInputCardState,
-      choiceId?: string,
-      choiceLabel?: string,
-      timedOut = false,
-      role?: string
-    ) => {
+    (inputId: string, state: UserInputCardState, choiceId?: string, choiceLabel?: string, timedOut = false, role?: string) => {
       const entry = pendingRef.current[inputId];
       if (!entry) return;
       const done: UserInputCardEntry = {
@@ -113,14 +101,14 @@ export function UserInputProvider({ children }: { children: ReactNode }) {
       const isAdjust = role === 'adjust' || (role === undefined && choiceId === 'adjust');
       if (isAdjust) setLastAdjustAt(Date.now());
     },
-    []
+    [],
   );
 
   const timeoutCard = useCallback(
     (inputId: string) => {
       moveToResolved(inputId, 'cancelled', undefined, undefined, true);
     },
-    [moveToResolved]
+    [moveToResolved],
   );
 
   const markBackendReleased = useCallback((inputId: string) => {
@@ -163,8 +151,6 @@ export function UserInputProvider({ children }: { children: ReactNode }) {
           return {
             ...prev,
             [turnId]: {
-              // CodeRabbit（9-11）：todo_state 事件晚于 timeline 时不得清空
-              // steps/permissions/phase——合并保留，仅刷新 todoItems
               title: (raw.title as string) ?? current?.title ?? 'AI 正在执行任务',
               goal: (raw.goal as string) ?? current?.goal ?? '',
               steps: current?.steps ?? [],
@@ -176,7 +162,7 @@ export function UserInputProvider({ children }: { children: ReactNode }) {
                     status: String(it?.status ?? 'queued'),
                   }))
                 : [],
-              phase: current?.phase ?? 'running',
+              phase: (raw.phase as TimelineEntry['phase'] | undefined) ?? current?.phase ?? 'running',
               todoRevision: revision,
             },
           };
@@ -193,16 +179,16 @@ export function UserInputProvider({ children }: { children: ReactNode }) {
           return {
             ...prev,
             [turnId]: {
-              title: String(raw.title ?? 'AI 正在执行任务'),
-              goal: String(raw.goal ?? ''),
+              title: String(raw.title ?? current?.title ?? 'AI 正在执行任务'),
+              goal: String(raw.goal ?? current?.goal ?? ''),
               steps: Array.isArray(raw.steps)
                 ? raw.steps.map((s: any) => ({
                     name: String(s?.name ?? s?.title ?? ''),
                     tools: Array.isArray(s?.tools) ? s.tools : [],
                   }))
-                : [],
-              permissions: Array.isArray(raw.permissions) ? raw.permissions : [],
-              phase: 'running',
+                : current?.steps ?? [],
+              permissions: Array.isArray(raw.permissions) ? raw.permissions : current?.permissions ?? [],
+              phase: (raw.phase as TimelineEntry['phase'] | undefined) ?? current?.phase ?? 'running',
               todoRevision: revision,
             },
           };
@@ -221,7 +207,7 @@ export function UserInputProvider({ children }: { children: ReactNode }) {
           data.input_id,
           'confirmed',
           typeof res.choice_id === 'string' ? res.choice_id : undefined,
-          typeof res.choice_label === 'string' ? res.choice_label : undefined
+          typeof res.choice_label === 'string' ? res.choice_label : undefined,
         );
       }
     });
@@ -232,36 +218,15 @@ export function UserInputProvider({ children }: { children: ReactNode }) {
   }, [upsertPending, moveToResolved, activeSession]);
 
   const resolve = useCallback(
-    async (
-      inputId: string,
-      choiceId: string,
-      choiceLabel: string,
-      remember = false,
-      rememberMode = 'session'
-    ) => {
+    async (inputId: string, choiceId: string, choiceLabel: string, remember = false, rememberMode = 'session') => {
       const miqi = (window as any).miqi;
       const entry = pendingRef.current[inputId];
       const role = entry?.request.choices?.find((c) => c.id === choiceId)?.role;
       const isCancel = role === 'cancel' || (role === undefined && choiceId === 'cancel');
       const isModify = role === 'adjust' || choiceId === 'modify' || choiceId === 'adjust';
-      // Optimistic update: the card flips to confirmed/cancelled/modify immediately;
-      // backend user_input_resolved will reconcile (idempotent).
-      moveToResolved(
-        inputId,
-        isCancel ? 'cancelled' : isModify ? 'modify' : 'confirmed',
-        choiceId,
-        choiceLabel,
-        false,
-        role
-      );
+      moveToResolved(inputId, isCancel ? 'cancelled' : isModify ? 'modify' : 'confirmed', choiceId, choiceLabel, false, role);
       try {
-        const res = await miqi?.userInput?.resolve(
-          inputId,
-          choiceId,
-          choiceLabel,
-          remember,
-          rememberMode
-        );
+        const res = await miqi?.userInput?.resolve(inputId, choiceId, choiceLabel, remember, rememberMode);
         if (res && res.resolved === false && entry) {
           markBackendReleased(inputId);
         }
@@ -277,22 +242,11 @@ export function UserInputProvider({ children }: { children: ReactNode }) {
         }
       }
     },
-    [moveToResolved, upsertPending, markBackendReleased]
+    [moveToResolved, upsertPending, markBackendReleased],
   );
 
   return (
-    <UserInputContext.Provider
-      value={{
-        pending,
-        resolved,
-        timelines,
-        resolve,
-        timeoutCard,
-        lastAdjustAt,
-        activeSession,
-        setActiveSession,
-      }}
-    >
+    <UserInputContext.Provider value={{ pending, resolved, timelines, resolve, timeoutCard, lastAdjustAt, activeSession, setActiveSession }}>
       {children}
     </UserInputContext.Provider>
   );

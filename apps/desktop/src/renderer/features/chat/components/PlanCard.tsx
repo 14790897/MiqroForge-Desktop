@@ -203,7 +203,7 @@ export function PlanCard({
               </button>
               <button
                 type="button"
-                data-testid="confirm-modify"
+                data-testid="plan-modify"
                 onClick={() => setEditing(true)}
                 className="inline-flex h-7 items-center gap-1.5 rounded-md px-2.5 text-[11.5px] font-medium"
                 style={{

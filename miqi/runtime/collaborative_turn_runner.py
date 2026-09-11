@@ -1,9 +1,8 @@
 """Collaborative plan boundary for the desktop runtime.
 
-The base TurnRunner owns the large execution loop. This small adapter changes
-only the plan interaction: when the user asks to adjust a harness-generated
-plan, preserve that feedback on the turn so ToolRuntime can stop the old tool
-batch and feed the user instruction back to the model for a fresh plan.
+The base TurnRunner owns the execution loop. This adapter adds the editable
+plan loop: when a user adjusts a harness-generated plan, the old plan is not
+executed and the model gets a fresh planning round with the user's constraint.
 """
 
 from __future__ import annotations
@@ -12,9 +11,57 @@ from typing import Any
 
 from miqi.runtime.turn_runner import TurnRunner
 
+_MAX_REPLANS_PER_TURN = 5
+
 
 class CollaborativeTurnRunner(TurnRunner):
     """TurnRunner variant with an editable, model-driven plan boundary."""
+
+    async def run(self, *, turn: Any, user_content: str, **kwargs: Any) -> Any:
+        """Run the turn, restarting planning when the user adjusts the plan."""
+        base_content = user_content
+        current_content = base_content
+        last_result: Any = None
+
+        for _ in range(_MAX_REPLANS_PER_TURN):
+            # TurnContext deliberately has no user_content field. The plan
+            # boundary uses this transient value only for the plan-card goal.
+            setattr(turn, "user_content", current_content)
+            result = await super().run(
+                turn=turn,
+                user_content=current_content,
+                **kwargs,
+            )
+            last_result = result
+
+            adjustment = str(
+                getattr(turn, "_plan_adjustment_pending", "") or ""
+            ).strip()
+            if not adjustment:
+                return result
+
+            # Base TurnRunner returns before PlanSnapshot/TodoState creation
+            # when the decision is "modify". Reset all per-plan state so the
+            # next provider round cannot reuse the rejected plan.
+            current_content = (
+                f"{base_content}\n\n"
+                "【用户调整后的任务约束】\n"
+                f"{adjustment}\n"
+                "请严格基于这条约束重新规划，不要执行之前被否决的方案。"
+            )
+            setattr(turn, "_plan_adjustment_pending", "")
+            setattr(turn, "_plan_gate_blocked", False)
+            setattr(turn, "_plan_confirm_done", False)
+            setattr(turn, "_plan_phases", [])
+            setattr(turn, "_plan_seen_tools", [])
+            setattr(turn, "_plan_calls", [])
+            setattr(turn, "_plan_timeline_shown", False)
+            setattr(turn, "_run_ctx", None)
+
+        # A bounded replan loop must never silently discard the final base
+        # result. Returning the last result keeps the existing exhaustion
+        # semantics intact if the model repeatedly asks for adjustments.
+        return last_result
 
     async def _harness_plan_confirm(self, turn: Any, tool_names: list[str]) -> str:
         from miqi.agent.user_input_resolver import (
@@ -40,16 +87,19 @@ class CollaborativeTurnRunner(TurnRunner):
             "timeout_seconds": 300,
         })
         answers = result.get("answers") or {}
-        choice = str(answers.get("choice_id", "")) if result.get("status") == "submitted" else ""
+        choice = (
+            str(answers.get("choice_id", ""))
+            if result.get("status") == "submitted"
+            else ""
+        )
         if choice in {"modify", "adjust"}:
+            # choice_label is the actual free-text user instruction collected
+            # by PlanCard, not the button caption. Carry it to Collaborative
+            # TurnRunner.run so the next provider round sees the new constraint.
             adjustment = str(answers.get("choice_label") or "").strip()
-            # The base loop still owns the next iteration. ToolRuntime sees this
-            # marker while executing the current batch and blocks old mutations;
-            # the blocked result carries the feedback into the model context.
+            if not adjustment:
+                return "modify"
             turn._plan_adjustment_pending = adjustment
             turn._plan_gate_blocked = True
-            # CodeRabbit（9-11）：不得回报 "confirm"——基础循环会据此冻结旧
-            # PlanSnapshot/初始化旧 TodoState 并注入「已批准」系统消息（与用户
-            # 决定矛盾）。返回真实决定 "modify"，走 TurnRunner 既有的 modify 分支。
             return "modify"
         return choice

@@ -32,9 +32,9 @@ export interface HermesToolRowProps {
 }
 
 // Hermes SCAFFOLD_LABEL_CLASS 等价（--conversation-tool-font-size 灰）
-const LABEL_CLASS = 'text-[12.5px] leading-[1.5] text-(--conversation-scaffold-text, #6b7280)';
+const LABEL_CLASS = 'text-[12.5px] leading-[1.5] text-[var(--conversation-scaffold-text, #6b7280)]';
 const META_CLASS =
-  'shrink-0 text-[0.625rem] tabular-nums text-(--conversation-scaffold-meta, #a0a6b0)';
+  'shrink-0 text-[0.625rem] tabular-nums text-[var(--conversation-scaffold-meta, #a0a6b0)]';
 const GLYPH_WRAP_CLASS = 'grid size-3.5 shrink-0 place-items-center self-center';
 
 function StatusGlyph({ status }: { status: NonNullable<HermesToolRowProps['status']> }) {
@@ -118,4 +118,4 @@ export function HermesToolRow({
 
 /** Hermes TOOL_SECTION_PRE_CLASS 等价：等宽小字 + 换行 */
 export const TOOL_PRE_CLASS =
-  'whitespace-pre-wrap break-all font-mono text-[0.7rem] leading-[1.55] text-(--conversation-scaffold-text, #6b7280)';
+  'whitespace-pre-wrap break-all font-mono text-[0.7rem] leading-[1.55] text-[var(--conversation-scaffold-text,#6b7280)]';

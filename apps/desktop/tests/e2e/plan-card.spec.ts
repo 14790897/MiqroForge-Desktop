@@ -7,9 +7,6 @@
  */
 import { _electron as electron, test, expect } from '@playwright/test';
 import type { ElectronApplication, Page } from '@playwright/test';
-import { spawn, type ChildProcess } from 'node:child_process';
-import { createConnection } from 'node:net';
-import { join } from 'node:path';
 import {
   LLM_TIMEOUT,
   sendMessage,
@@ -17,7 +14,6 @@ import {
   launchElectronApp,
   closeElectronApp,
   createNewConversation,
-  APPS_DESKTOP,
 } from './helpers/electron-setup';
 import { startMockOpenAI, patchConfigForMock } from './helpers/mock-openai';
 
@@ -47,7 +43,7 @@ test.describe('Plan Card (#646-v2)', () => {
       await expect(planCard.getByText('网络')).toBeVisible();
       await expect(planCard.getByText('外部')).toBeVisible();
       await expect(planCard.getByTestId('plan-confirm')).toBeVisible();
-      await expect(planCard.getByTestId('confirm-modify')).toBeVisible();
+      await expect(planCard.getByTestId('plan-modify')).toBeVisible();
 
       await page.screenshot({ path: 'test-results/plan-card-waiting.png' });
       await planCard.getByTestId('plan-confirm').click();
@@ -101,7 +97,7 @@ test.describe('Plan Card (#646-v2)', () => {
 
         const planCard = page.getByTestId('plan-card').first();
         await expect(planCard).toBeVisible({ timeout: 60_000 });
-        await planCard.getByTestId('confirm-modify').click();
+        await planCard.getByTestId('plan-modify').click();
 
         const adjustment = planCard.getByTestId('plan-adjustment-input');
         await expect(adjustment).toBeVisible();
