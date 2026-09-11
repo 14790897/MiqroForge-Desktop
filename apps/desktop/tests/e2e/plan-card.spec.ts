@@ -8,6 +8,7 @@
 import { _electron as electron, test, expect } from '@playwright/test';
 import type { ElectronApplication, Page } from '@playwright/test';
 import { spawn, type ChildProcess } from 'node:child_process';
+import { createConnection } from 'node:net';
 import { join } from 'node:path';
 import {
   LLM_TIMEOUT,
@@ -21,6 +22,37 @@ import {
 
 const REPO_ROOT = join(APPS_DESKTOP, '..', '..');
 
+async function waitForTcpListener(port: number): Promise<void> {
+  const deadline = Date.now() + 30_000;
+  while (Date.now() < deadline) {
+    await new Promise<void>((resolve) => {
+      const socket = createConnection({ host: '127.0.0.1', port });
+      const finish = () => {
+        socket.removeAllListeners();
+        socket.destroy();
+        resolve();
+      };
+      socket.once('connect', finish);
+      socket.once('error', finish);
+      socket.setTimeout(1000, finish);
+    });
+    // A successful TCP connect is a direct readiness signal; unlike a
+    // child-process stdout pipe it does not depend on Python stdout delivery.
+    // Re-probe until the server is actually accepting connections.
+    const probe = await new Promise<boolean>((resolve) => {
+      const socket = createConnection({ host: '127.0.0.1', port });
+      const ok = () => { socket.destroy(); resolve(true); };
+      const fail = () => { socket.destroy(); resolve(false); };
+      socket.once('connect', ok);
+      socket.once('error', fail);
+      socket.setTimeout(1000, fail);
+    });
+    if (probe) return;
+    await new Promise((r) => setTimeout(r, 250));
+  }
+  throw new Error(`mock OpenAI server did not accept TCP connections on 127.0.0.1:${port} within 30s`);
+}
+
 async function startMockOpenAI(): Promise<{ proc: ChildProcess; mockUrl: string }> {
   const python = process.env.MIQI_PYTHON_PATH || 'python';
   const port = 20000 + Math.floor(Math.random() * 20000);
@@ -30,31 +62,30 @@ async function startMockOpenAI(): Promise<{ proc: ChildProcess; mockUrl: string 
     env: { ...process.env, PYTHONUNBUFFERED: '1' },
     windowsHide: true,
   });
-  let readyUrl = '';
   let stderrTail = '';
-  proc.stdout?.on('data', (d) => {
-    const t = String(d);
-    console.log(`[mock] ${t.trim()}`);
-    const m = t.match(/http:\/\/127\.0\.0\.1:(\d+)\/v1/);
-    if (m) readyUrl = `http://127.0.0.1:${m[1]}/v1`;
-  });
+  proc.stdout?.on('data', (d) => console.log(`[mock] ${String(d).trim()}`));
   proc.stderr?.on('data', (d) => {
     stderrTail = (stderrTail + String(d)).slice(-2000);
     console.log(`[mock-err] ${String(d).trim()}`);
   });
   proc.on('exit', (code) => console.log(`[test] mock server exited: ${code}`));
-  const deadline = Date.now() + 30_000;
-  while (!readyUrl && Date.now() < deadline) {
-    if (proc.exitCode !== null) {
-      throw new Error(`mock OpenAI server exited early (code ${proc.exitCode}): ${stderrTail}`);
+
+  const startupDeadline = Date.now() + 30_000;
+  while (proc.exitCode === null && Date.now() < startupDeadline) {
+    try {
+      await waitForTcpListener(port);
+      const mockUrl = `http://127.0.0.1:${port}/v1`;
+      console.log(`[test] mock OpenAI server ready at ${mockUrl}`);
+      return { proc, mockUrl };
+    } catch {
+      await new Promise((r) => setTimeout(r, 250));
     }
-    await new Promise((r) => setTimeout(r, 250));
   }
-  if (!readyUrl) {
-    proc.kill();
-    throw new Error(`mock OpenAI server startup line not seen in 30s: ${stderrTail}`);
+  if (proc.exitCode !== null) {
+    throw new Error(`mock OpenAI server exited early (code ${proc.exitCode}): ${stderrTail}`);
   }
-  return { proc, mockUrl: readyUrl };
+  proc.kill();
+  throw new Error(`mock OpenAI server did not become ready in 30s: ${stderrTail}`);
 }
 
 async function launchWithMock() {
@@ -98,7 +129,6 @@ test.describe('Plan Card (#646-v2)', () => {
         await page.screenshot({ path: 'test-results/plan-card-waiting.png' });
         await planCard.getByTestId('plan-confirm').click();
 
-        // E2E 环境自动处理工具审批，避免把环境差异混进计划工作流断言。
         const autoApprove = async () => {
           try {
             for (let i = 0; i < 60; i++) {
@@ -162,7 +192,6 @@ test.describe('Plan Card (#646-v2)', () => {
         await expect(revised.getByText('对比合成成本')).toBeVisible();
         await expect(page.getByTestId('action-card')).toHaveCount(0);
 
-        // 用户可以继续调整；这里取消收尾，验证不会无意执行旧计划。
         await revised.getByTestId('plan-cancel').click();
       } finally {
         await closeElectronApp(electronApp, fixture.miqiHome);
