@@ -280,4 +280,39 @@ describe('panelWindowSync 拖拽队列', () => {
     await tick();
     expect(h.settled()).toBe(4);
   });
+
+  it('拖拽在途时排队的 request：必须等它真的发出去才通知（否则面板又先出现）', async () => {
+    const h = makeHarness();
+    h.sync.beginDrag({ clientX: 500, width: 280 });
+    h.sync.dragTo(360);
+    h.flush();
+    expect(h.sent).toEqual([80]); // 拖拽的请求在途
+
+    h.sync.request(280); // 在途期间排进一个独立目标
+    expect(h.settled()).toBe(0);
+
+    await h.respond(0, { applied: 80 }); // 在途请求回来；finally 里只是排了 rAF
+    expect(h.sent).toEqual([80]); // 排队的目标还没发出去
+    expect(h.settled()).toBe(0); // 所以此刻不能通知 —— 否则窗口还没扩面板就显示了
+
+    h.flush(); // 现在才真的发出
+    expect(h.sent).toEqual([80, 280]);
+    await h.respond(1, { applied: 280 });
+    expect(h.settled()).toBe(1); // 落地后才通知
+  });
+
+  it('请求失败不占去重位：同一目标之后还能重发', async () => {
+    const h = makeHarness();
+    h.sync.request(280);
+    h.flush();
+    expect(h.sent).toEqual([280]);
+    h.inFlight[0].fail(new Error('ipc down'));
+    await tick();
+
+    h.sync.request(280); // 同一目标重试
+    h.flush();
+    expect(h.sent).toEqual([280, 280]); // 不能被去重吞掉，否则窗口永远补不回来
+    await h.respond(1, { applied: 280 });
+    expect(h.sync.applied).toBe(280);
+  });
 });

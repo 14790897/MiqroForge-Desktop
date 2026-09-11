@@ -128,9 +128,13 @@ export function createPanelWindowSync(options: PanelWindowSyncOptions): PanelWin
     applyWidth(width);
   };
 
-  /** request() 的目标已落地 → 通知一次（幂等，避免重复触发面板显示）。 */
+  /** request() 的目标已落地 → 通知一次（幂等，避免重复触发面板显示）。
+   *  必须等队列真的静默才回调：`request()` 可能是排在一次在途请求后面进来的，
+   *  此时目标还没发出去，提前回调会让面板先出现、窗口后扩——正是要消掉的那个
+   *  挤压。判据与 settle() 的静默判据一致。 */
   const notifyRequestSettled = () => {
     if (!notifyOnSettle) return;
+    if (inFlight || raf || Number.isFinite(pending)) return; // 目标还没发出去
     notifyOnSettle = false;
     onRequestSettled?.();
   };
@@ -150,7 +154,9 @@ export function createPanelWindowSync(options: PanelWindowSyncOptions): PanelWin
   };
 
   const maybeQueue = () => {
-    if (raf || inFlight) return;
+    // 没活干就别排 rAF：排了会让「队列静默」的判据（raf 非零）永远不成立，
+    // settle() / notifyRequestSettled() 就再也不会被触发。
+    if (raf || inFlight || !Number.isFinite(pending)) return;
     raf = schedule(() => {
       raf = 0;
       const target = pending;
@@ -163,13 +169,17 @@ export function createPanelWindowSync(options: PanelWindowSyncOptions): PanelWin
         notifyRequestSettled();
         return;
       }
-      requested = target;
       inFlight = true;
       const gen = generation;
       send(target)
         .then((r) => {
           // 上一个生命周期的响应：整条丢弃，不写 applied、不碰面板宽度。
           if (gen !== generation) return;
+          // 去重位只在**请求真的落地后**才占：若写在 send 之前，一次失败的请求
+          // 也会把目标记成「已请求过」，之后同一个目标会被去重直接吞掉、永远补不
+          // 回来，面板与窗口的宽度就此错开。失败走 catch，requested 保持原值，
+          // 于是同一目标下次还能重发。
+          requested = target;
           // skipped：最大化/满屏/不可缩放/屏幕已无空间，窗口根本没动。此时
           // r.applied 是 0（不是「应用到了 0」），回写它会让拖拽中的面板按 0
           // 反推宽度而跳变。面板本身仍要跟手——按用户拖到的宽度走。
