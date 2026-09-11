@@ -63,6 +63,10 @@ export interface PanelWindowSyncOptions {
   applyWidth: (width: number) => void;
   /** 收尾时提交宽度（setState），供开关面板等复用。 */
   commitWidth: (width: number) => void;
+  /** `request()` 的目标落地后回调（已应用 / 被跳过 / 去重命中都算）。
+   *  开面板用它把「窗口先让出宽度」和「面板再出现」串成一个过渡，
+   *  避免面板先渲染、聊天列被压窄一瞬再弹回。拖拽路径不触发。 */
+  onRequestSettled?: () => void;
   /** 调度下一批（默认 requestAnimationFrame）。 */
   schedule?: (cb: () => void) => number;
   cancel?: (handle: number) => void;
@@ -81,7 +85,8 @@ export interface PanelWindowSync {
   endDrag(): void;
   /** 与拖拽无关的窗口加宽请求（开/关面板）。 */
   request(extra: number): void;
-  /** 停掉排队的请求并清掉拖拽锚点（组件卸载）。 */
+  /** 停掉排队的请求、作废在途响应的写回权，并清掉拖拽锚点（组件卸载）。
+   *  实例之后仍可继续使用——见 dispose 实现里的 StrictMode 说明。 */
   dispose(): void;
 }
 
@@ -90,6 +95,7 @@ export function createPanelWindowSync(options: PanelWindowSyncOptions): PanelWin
     send,
     applyWidth,
     commitWidth,
+    onRequestSettled,
     schedule = (cb) => requestAnimationFrame(cb),
     cancel = (handle) => cancelAnimationFrame(handle),
   } = options;
@@ -101,6 +107,13 @@ export function createPanelWindowSync(options: PanelWindowSyncOptions): PanelWin
   let pendingWidth = NaN as number;
   let inFlight = false;
   let applied = 0;
+  /** 生命周期代次：dispose 时 +1。在途 IPC 发出时记下当时的代次，回来时代次
+   *  对不上就整条丢弃——否则「旧实例的请求 → dispose → 新操作 → 旧响应才回来」
+   *  会把上一个生命周期的 applied 写进当前状态，污染新拖拽。（StrictMode 的
+   *  模拟卸载/重挂载会复用同一个实例，这条路径是真会走到的。） */
+  let generation = 0;
+  /** 本次 request() 是否还需要回调 onRequestSettled。 */
+  let notifyOnSettle = false;
   /** 上一次发出的目标（含被主进程跳过的），仅用于去重。不能拿 applied 去重，
    *  否则被跳过的目标会每帧重发。 */
   let requested = NaN as number;
@@ -113,6 +126,13 @@ export function createPanelWindowSync(options: PanelWindowSyncOptions): PanelWin
     if (width === lastAppliedWidth) return;
     lastAppliedWidth = width;
     applyWidth(width);
+  };
+
+  /** request() 的目标已落地 → 通知一次（幂等，避免重复触发面板显示）。 */
+  const notifyRequestSettled = () => {
+    if (!notifyOnSettle) return;
+    notifyOnSettle = false;
+    onRequestSettled?.();
   };
 
   /** 队列静默且已松手 → 按主进程最终实际应用到的宽度收尾。 */
@@ -140,12 +160,16 @@ export function createPanelWindowSync(options: PanelWindowSyncOptions): PanelWin
       pendingWidth = NaN;
       if (target === requested) {
         settle(); // 目标没变：窗口已停在那里，直接收尾
+        notifyRequestSettled();
         return;
       }
       requested = target;
       inFlight = true;
+      const gen = generation;
       send(target)
         .then((r) => {
+          // 上一个生命周期的响应：整条丢弃，不写 applied、不碰面板宽度。
+          if (gen !== generation) return;
           // skipped：最大化/满屏/不可缩放/屏幕已无空间，窗口根本没动。此时
           // r.applied 是 0（不是「应用到了 0」），回写它会让拖拽中的面板按 0
           // 反推宽度而跳变。面板本身仍要跟手——按用户拖到的宽度走。
@@ -160,11 +184,15 @@ export function createPanelWindowSync(options: PanelWindowSyncOptions): PanelWin
             apply(panelWidthForApplied(anchor, r.applied));
           }
         })
-        .catch(() => {})
+        .catch(() => {
+          /* 请求失败也让队列继续（finally 里补发 / 收尾） */
+        })
         .finally(() => {
+          if (gen !== generation) return; // 已 dispose：既别补发也别收尾
           inFlight = false;
           maybeQueue(); // 在途期间又收到更新宽度 → 补发到最新
           settle(); // 在途期间松了手 → 现在才轮到收尾
+          notifyRequestSettled();
         });
     });
   };
@@ -206,17 +234,24 @@ export function createPanelWindowSync(options: PanelWindowSyncOptions): PanelWin
     request(extra) {
       pending = Math.round(extra);
       pendingWidth = NaN;
+      notifyOnSettle = true;
       maybeQueue();
     },
     dispose() {
-      // 只停掉**当前排队**的请求 + 撤掉锚点，不置永久停用标志：React StrictMode
-      // （dev 下 main.tsx 常开）会把 effect 跑成 mount → 卸载 → 再 mount，永久
-      // 停用会让第二次挂载之后面板再也不跟随窗口。真正的卸载之后也不会再有人
-      // 调 request/dragTo（事件监听随组件一起拆掉），因此无需额外熔断。
+      // 不置永久停用标志：React StrictMode（dev 下 main.tsx 常开）会把 effect 跑成
+      // mount → 卸载 → 再 mount，永久停用会让第二次挂载之后面板再也不跟随窗口。
+      // 所以这里只做两件事：停掉排队中的工作，以及 **作废在途响应的写回权**
+      // （generation +1）——同一实例被 StrictMode 复用后，旧生命周期那个还在飞的
+      // 响应回来时会命中代次检查被整条丢弃，不会把旧 applied 写进新拖拽。
+      generation += 1;
       if (raf) cancel(raf);
       raf = 0;
       pending = NaN;
       pendingWidth = NaN;
+      notifyOnSettle = false;
+      // 旧请求的 finally 已被代次挡掉，不会再来清 inFlight；这里主动放开，
+      // 否则新生命周期第一次请求会被「有在途」卡住。
+      inFlight = false;
       anchor = null;
     },
   };

@@ -2390,15 +2390,16 @@ function splitCachedMessages(events: InFlightEvent[]): {
 
 /* ─── Main component ─────────────────────────────────────────────── */
 
-/** #989 标题区右侧三件操作（工作目录 / 分享 / 文件面板）共用的一套 ghost 规格：
- *  28px 高、7px 圆角、11px 中黑、无边框无底色，只有 hover 才浮出浅底。此前三者
- *  是三种视觉（橙描边胶囊 / 灰描边分体按钮 / 裸图标），同规格后标题重新成为这一行
- *  的视觉第一，压缩态也天然一致。 */
+/** #989 标题区右侧三件共用一套 ghost 底规格：28px 高、7px 圆角、11px、无边框，
+ *  图标 12–13px。此前三者是三种视觉（橙描边胶囊 / 灰描边分体按钮 / 裸图标）。
+ *  「统一」之后还要留住层级——三件并不是同等重要的东西，所以底规格之上再分三档：
+ *    标题（第一视觉层） > 工作目录＝当前上下文（常驻浅底） > 分享/面板＝操作（纯 ghost）
+ */
 const HDR_CTL =
   'shrink-0 inline-flex items-center justify-center h-7 rounded-[7px] text-[11px] font-medium ' +
   'text-[var(--text-muted)] transition-colors hover:bg-[var(--surface-muted)] ' +
   'disabled:opacity-45 disabled:hover:bg-transparent';
-/** 带文字的形态（宽版）。 */
+/** 纯文本 + 图标形态（分享）。 */
 const HDR_CTL_LABEL = `${HDR_CTL} gap-1 px-[9px]`;
 /** 纯图标形态（压缩态，以及文件面板按钮）。 */
 const HDR_CTL_ICON = `${HDR_CTL} w-7 px-0`;
@@ -2406,6 +2407,14 @@ const HDR_CTL_ICON = `${HDR_CTL} w-7 px-0`;
 const HDR_CTL_CARET =
   'shrink-0 inline-flex items-center justify-center h-7 w-5 rounded-[7px] ' +
   'text-[var(--text-muted)] transition-colors hover:bg-[var(--surface-muted)]';
+/** 工作目录＝「当前上下文」，不是操作：常驻一层浅底，比纯 ghost 多一档存在感，
+ *  但仍压不过标题。压缩态同一个底，只是收成图标。 */
+const HDR_CTL_CONTEXT = `${HDR_CTL_LABEL} bg-[var(--surface-muted)] hover:bg-[var(--surface-hover)]`;
+const HDR_CTL_CONTEXT_ICON = `${HDR_CTL_ICON} bg-[var(--surface-muted)] hover:bg-[var(--surface-hover)]`;
+/** 文件面板开关是操作，但同时是「面板开着吗」的状态位：开着时常驻浅底，
+ *  关着时纯 ghost，hover 才浮底。 */
+const HDR_CTL_TOGGLE = `${HDR_CTL_ICON} hover:bg-[var(--surface-hover)]`;
+const HDR_CTL_TOGGLE_ON = `${HDR_CTL_ICON} bg-[var(--surface-muted)] hover:bg-[var(--surface-hover)]`;
 
 /** Upper bound for waiting on a superseded turn's chat.send to settle after
  *  abort(). Normal aborts resolve in well under a second (the send promise
@@ -2637,6 +2646,9 @@ export function ChatConsole({
    *  (含长回复消息树)重建 VDOM——内容多的对话会因此卡。 */
   const assetsPanelRef = useRef<HTMLDivElement | null>(null);
   const panelWidthRef = useRef(panelWidth);
+  /** 点「文件面板」打开时置位：等主进程真的把窗口加宽了，才让面板出现。
+   *  见下面 onRequestSettled。 */
+  const pendingPanelReveal = useRef(false);
   /** 资产面板拖宽的「窗口跟随」串行队列（#989，实现与竞态回归见
    *  panelWindowSync.ts / panelWindowSync.test.ts）：面板变宽就请求主进程把原生
    *  窗口同量加宽，聊天列 flex-1 分到新增宽度而保持原宽。拖拽锚点、latest-wins
@@ -2650,6 +2662,16 @@ export function ChatConsole({
       },
       commitWidth: (width) => {
         if (width !== panelWidthRef.current) setPanelWidth(width);
+      },
+      // 窗口加宽落地（或被跳过/请求失败）后再显示面板。打开按钮先只发加宽请求，
+      // 面板此刻还不渲染——否则面板先出现、聊天列被压窄一瞬，等 IPC 回来窗口才
+      // 跟上，正是本 PR 要消掉的那个挤压。最大化/满屏时主进程回 skipped，这里
+      // 同样会走到（notifyRequestSettled 覆盖了 skipped 与失败分支），面板照常
+      // 显示，不会点不开。
+      onRequestSettled: () => {
+        if (!pendingPanelReveal.current) return;
+        pendingPanelReveal.current = false;
+        setPanelOpen(true);
       },
     })
   );
@@ -6834,7 +6856,9 @@ export function ChatConsole({
                 title={workspace ? `工作目录：${workspace}` : '默认工作目录'}
                 aria-label="工作目录"
                 data-testid="chat-header-workspace-capsule"
-                className={cn(subHeaderCompact ? HDR_CTL_ICON : `${HDR_CTL_LABEL} min-w-0`)}
+                className={cn(
+                  subHeaderCompact ? HDR_CTL_CONTEXT_ICON : `${HDR_CTL_CONTEXT} min-w-0`
+                )}
                 style={{
                   // 压缩态只剩一个文件夹图标：已选目录用正文色、默认目录用更浅的 faint，
                   // 两种状态仍能分辨（不再靠橙色描边 + 橙点这一套）。
@@ -6903,12 +6927,19 @@ export function ChatConsole({
             <Tooltip content="显示或隐藏文件面板">
               <button
                 onClick={() => {
-                  const opening = !panelOpen;
-                  // 打开:窗口加宽到与面板等宽 → 聊天列原宽不变;关闭:还原。
-                  panelSync.request(opening ? panelWidth : 0);
-                  setPanelOpen(opening);
+                  if (panelOpen) {
+                    // 关闭：面板先撤、聊天列立刻拿回宽度，窗口随后收回。这个顺序
+                    // 只会让聊天空出一瞬；反过来先收窗会把面板压在聊天列上多撑一拍。
+                    setPanelOpen(false);
+                    panelSync.request(0);
+                    return;
+                  }
+                  // 打开：先只发窗口加宽请求，面板由 onRequestSettled 在窗口真的
+                  // 让出宽度之后再显示 —— 聊天列全程不变，没有那一瞬的挤压。
+                  pendingPanelReveal.current = true;
+                  panelSync.request(panelWidth);
                 }}
-                className={cn(HDR_CTL_ICON, 'ml-1')}
+                className={cn(panelOpen ? HDR_CTL_TOGGLE_ON : HDR_CTL_TOGGLE, 'ml-1')}
                 title="显示或隐藏文件面板"
                 aria-label="显示或隐藏文件面板"
                 data-testid="toggle-assets-panel-btn"
@@ -7350,10 +7381,7 @@ export function ChatConsole({
                     }}
                     disabled={streaming}
                     data-testid="inline-workspace-change-btn"
-                    className={cn(
-                      HDR_CTL_LABEL,
-                      'min-w-0 bg-[var(--surface-muted)] hover:bg-[var(--surface-hover)]'
-                    )}
+                    className={cn(HDR_CTL_CONTEXT, 'min-w-0')}
                     style={{
                       color: workspace ? 'var(--text-muted)' : 'var(--text-faint)',
                     }}
@@ -9460,12 +9488,16 @@ function WorkspacePickerMenu({
         role="menu"
         aria-label="选择工作目录"
         data-testid="workspace-picker-modal"
-        className="fixed z-[60] overflow-hidden rounded-xl border bg-[var(--surface-elevated)] p-1.5 shadow-[0_12px_30px_rgba(0,0,0,0.16)]"
+        className="fixed z-[60] overflow-y-auto overflow-x-hidden rounded-xl border bg-[var(--surface-elevated)] p-1.5 shadow-[0_12px_30px_rgba(0,0,0,0.16)]"
         style={{
           left: pos.left,
           top: pos.top,
           minWidth: 288,
           maxWidth: 'min(360px, calc(100vw - 16px))',
+          // 菜单只封顶宽度是不够的：「最近使用」可以很长，没有高度上限 + 内部滚动
+          // 时会一路长出视口底部，底下几行点不到（原来的居中 Modal 有 70vh +
+          // overflow:auto，换成 anchored menu 时把这个保护丢了）。
+          maxHeight: 'min(420px, calc(100vh - 16px))',
           borderColor: 'var(--border)',
         }}
       >
@@ -9484,6 +9516,7 @@ function WorkspacePickerMenu({
                   key={ws}
                   type="button"
                   role="menuitem"
+                  aria-current={isCur ? 'true' : undefined}
                   onClick={() => onPick(ws)}
                   data-testid={`workspace-picker-recent-${idx}`}
                   className={cn(
@@ -9500,13 +9533,24 @@ function WorkspacePickerMenu({
                   ) : (
                     <Folder size={13} style={{ color: 'var(--text-muted)' }} className="shrink-0" />
                   )}
-                  <span className="min-w-0 flex-1 truncate text-[var(--text)]" title={ws}>
+                  <span
+                    className={cn(
+                      'min-w-0 flex-1 truncate text-[var(--text)]',
+                      isCur && 'font-medium'
+                    )}
+                    title={ws}
+                  >
                     {ws}
                   </span>
+                  {/* 当前项靠「行底色 + FolderCheck + 右侧勾」三重表达，不再单写
+                      一个「当前」字样——那是第四个信号，读起来反而吵。 */}
                   {isCur && (
-                    <span className="shrink-0 text-[10px] font-bold text-[var(--accent)]">
-                      当前
-                    </span>
+                    <Check
+                      size={13}
+                      aria-hidden
+                      className="shrink-0"
+                      style={{ color: 'var(--accent)' }}
+                    />
                   )}
                 </button>
               );
@@ -9519,7 +9563,7 @@ function WorkspacePickerMenu({
           role="menuitem"
           onClick={onBrowse}
           data-testid="workspace-picker-browse"
-          className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[11px] font-medium text-[var(--accent)] transition-colors hover:bg-[var(--surface-muted)]"
+          className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[11px] font-semibold text-[var(--accent)] transition-colors hover:bg-[var(--surface-muted)]"
         >
           <FolderOpen size={13} className="shrink-0" />
           浏览…

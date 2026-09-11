@@ -22,10 +22,12 @@ import {
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>((res) => {
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
     resolve = res;
+    reject = rej;
   });
-  return { promise, resolve };
+  return { promise, resolve, reject };
 }
 
 const tick = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
@@ -35,19 +37,24 @@ function makeHarness() {
   const inFlight: Array<{
     extra: number;
     settle: (result: PanelWindowExtraResult) => void;
+    fail: (reason?: unknown) => void;
   }> = [];
   const widths: number[] = [];
   const committed: number[] = [];
   const scheduled: Array<() => void> = [];
+  let settledCount = 0;
   const sync = createPanelWindowSync({
     send: (extra) => {
       sent.push(extra);
       const d = deferred<PanelWindowExtraResult>();
-      inFlight.push({ extra, settle: d.resolve });
+      inFlight.push({ extra, settle: d.resolve, fail: d.reject });
       return d.promise;
     },
     applyWidth: (width) => widths.push(width),
     commitWidth: (width) => committed.push(width),
+    onRequestSettled: () => {
+      settledCount += 1;
+    },
     schedule: (cb) => {
       scheduled.push(cb);
       return scheduled.length; // 句柄 = 下标 + 1
@@ -63,7 +70,16 @@ function makeHarness() {
     inFlight[index].settle(result);
     await tick();
   };
-  return { sync, sent, inFlight, widths, committed, flush, respond };
+  return {
+    sync,
+    sent,
+    inFlight,
+    widths,
+    committed,
+    flush,
+    respond,
+    settled: () => settledCount,
+  };
 }
 
 describe('panelWindowSync 宽度换算', () => {
@@ -211,5 +227,57 @@ describe('panelWindowSync 拖拽队列', () => {
     expect(h.sent).toEqual([80]);
     await h.respond(0, { applied: 80 });
     expect(h.widths).toEqual([360]);
+  });
+
+  it('旧生命周期的在途响应不会污染新操作（dispose → 新拖拽 → 旧响应才回来）', async () => {
+    // 这条正是「dispose 可复用」打开的窗口：StrictMode 复用同一实例，
+    // 旧生命周期发出去的 IPC 之后才 resolve，若不按代次作废，它会：
+    //   ① 把旧的 applied 写进新状态；② 命中 anchor 后按旧值改面板宽度。
+    const h = makeHarness();
+    h.sync.request(100);
+    h.flush();
+    expect(h.sent).toEqual([100]); // 旧生命周期的请求还在飞
+
+    h.sync.dispose(); // 模拟 StrictMode 卸载
+    h.sync.beginDrag({ clientX: 500, width: 280 }); // 重挂载后用户开始拖拽
+    h.sync.dragTo(360);
+    h.flush();
+    expect(h.sent).toEqual([100, 80]); // 新请求已发出
+
+    await h.respond(0, { applied: 999 }); // 旧响应现在才回来，带着一个离谱的 applied
+    expect(h.sync.applied).toBe(0); // 未被写成 999
+    expect(h.widths).toEqual([]); // 也没按它改面板宽度
+
+    await h.respond(1, { applied: 80 }); // 新响应才生效
+    expect(h.widths).toEqual([360]);
+    expect(h.sync.applied).toBe(80);
+  });
+
+  it('request 落地后回调 onRequestSettled（应用 / 跳过 / 去重命中都算）', async () => {
+    const h = makeHarness();
+    // 正常应用
+    h.sync.request(280);
+    h.flush();
+    expect(h.settled()).toBe(0); // 未落地前不回调
+    await h.respond(0, { applied: 280 });
+    expect(h.settled()).toBe(1);
+
+    // 被主进程跳过（最大化）—— 也必须回调，否则面板永远不显示
+    h.sync.request(0);
+    h.flush();
+    await h.respond(1, { applied: 0, skipped: true });
+    expect(h.settled()).toBe(2);
+
+    // 目标与上次相同 → 走去重分支，同样要回调
+    h.sync.request(0);
+    h.flush();
+    expect(h.settled()).toBe(3);
+
+    // 请求失败（IPC 抛错）也不能把面板卡住不显示
+    h.sync.request(300);
+    h.flush();
+    h.inFlight[2].fail(new Error('ipc down'));
+    await tick();
+    expect(h.settled()).toBe(4);
   });
 });
