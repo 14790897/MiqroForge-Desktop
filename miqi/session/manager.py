@@ -1055,29 +1055,20 @@ class SessionManager:
                 compacted += 1
         return compacted
 
-    def list_recent_workspaces(
-        self,
-        limit: int = 5,
-        *,
-        client_id: str | None = None,
-        include_archived: bool = False,
-    ) -> list[str]:
+    def list_recent_workspaces(self, limit: int = 5, *, client_id: str | None = None) -> list[str]:
         """Return distinct workspace paths from recent sessions, newest first.
 
         Filters out the default workspace path. Used by the frontend workspace picker.
         Scoped to client_id when provided.
 
-        include_archived: If True, archived sessions still contribute their
-            workspace.  Callers that ask "which root might hold a given
-            session's real data" need this — archive state says nothing about
-            where the folder copy lives (#956).
+        Capped by ``limit`` on purpose — this is a "recently used" list.  Use
+        ``list_bound_workspaces`` to discover folder roots, where a cap would
+        lose data.
         """
         if limit <= 0:
             return []
         default_ws = str(self.workspace.expanduser().resolve())
-        sessions = self.list_sessions(
-            include_archived=include_archived, client_id=client_id
-        )
+        sessions = self.list_sessions(client_id=client_id)
         seen: set[str] = set()
         recent: list[str] = []
         for s in sessions:
@@ -1088,3 +1079,33 @@ class SessionManager:
                 if len(recent) >= limit:
                     break
         return recent
+
+    def list_bound_workspaces(
+        self,
+        *,
+        client_id: str | None = None,
+        include_archived: bool = False,
+    ) -> list[str]:
+        """Return every distinct workspace a session is bound to — uncapped.
+
+        The discovery counterpart to ``list_recent_workspaces``: callers ask
+        "which folder roots might hold a session's authoritative copy", and
+        any cap here silently makes an older folder session unreachable —
+        its conversation stays intact on disk but it vanishes from the
+        sidebar after a restart, and a bare ``get`` finds nothing (#956).
+
+        include_archived: an archived stub is still a valid pointer to its
+            folder copy, and sessions.archive marks the stub archived before
+            it resolves that copy, so archive state must not gate discovery.
+        """
+        default_ws = str(self.workspace.expanduser().resolve())
+        seen: set[str] = set()
+        roots: list[str] = []
+        for s in self.list_sessions(
+            include_archived=include_archived, client_id=client_id
+        ):
+            ws = s.get("workspace")
+            if ws and ws != default_ws and ws not in seen:
+                seen.add(ws)
+                roots.append(ws)
+        return roots

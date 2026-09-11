@@ -47,6 +47,24 @@ def _write_app_home_stub(app_home, key, client_id, workspace=None):
     return sm
 
 
+def _write_app_home_stub_at(app_home, key, client_id, workspace, updated_at):
+    """Write an app-home binding stub stamped with an explicit updated_at.
+
+    list_sessions orders by updated_at, so a test that needs a particular
+    recency ordering has to pin it on the metadata line directly.
+    """
+    import json
+
+    sm = _write_app_home_stub(app_home, key, client_id, workspace)
+    path = sm.get_session_dir(key) / "conversation.jsonl"
+    lines = path.read_text(encoding="utf-8").splitlines()
+    meta = json.loads(lines[0])
+    meta["updated_at"] = updated_at
+    lines[0] = json.dumps(meta, ensure_ascii=False)
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return sm
+
+
 def test_load_existing_does_not_migrate_legacy_flat_file(tmp_path):
     """load_existing must not migrate a legacy flat session file (#956 review).
 
@@ -331,3 +349,88 @@ async def test_sessions_archive_reaches_folder_copy(monkeypatch, tmp_path):
     assert [
         s for s in archived["result"]["sessions"] if s.get("key") == "folder-session"
     ]
+
+
+# ── candidate root discovery is uncapped ───────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_sessions_list_finds_folder_session_beyond_recent_window(
+    monkeypatch, tmp_path
+):
+    """A folder session older than any recent-workspace window still surfaces.
+
+    Candidate roots used to come from a capped recent-workspace list.  Once a
+    user had more workspaces than the cap, an older folder session kept its
+    conversation on disk but stopped being scanned: it disappeared from the
+    sidebar after a restart, and a bare sessions.get found nothing.
+    """
+    from miqi.runtime.app_server import ClientSessionRegistry
+    from miqi.runtime.session_handlers import sessions_list_handler
+
+    app_home = tmp_path / "app-home"
+    app_home.mkdir(parents=True)
+    _install_app_home(monkeypatch, app_home)
+
+    # Newer sessions bound to distinct workspaces — enough to overflow any
+    # recent-N window.
+    for i in range(30):
+        ws = tmp_path / f"ws-{i:02d}"
+        ws.mkdir()
+        _write_app_home_stub_at(
+            app_home, f"recent-{i:02d}", "client-1", ws,
+            f"2026-02-01T00:00:{i:02d}+00:00",
+        )
+
+    # The session under test holds the oldest binding in the store.
+    target_root = tmp_path / "target-folder"
+    target_root.mkdir()
+    _write_folder_session(target_root, "target-session", "client-1")
+    _write_app_home_stub_at(
+        app_home, "target-session", "client-1", target_root,
+        "2026-01-01T00:00:00+00:00",
+    )
+
+    registry = ClientSessionRegistry()
+    listed = await sessions_list_handler("req-1", {}, "client-1", None, registry)
+    keys = [s.get("key") for s in listed["result"]["sessions"]]
+    assert "target-session" in keys
+
+
+@pytest.mark.asyncio
+async def test_sessions_get_unowned_folder_copy_reports_unowned(monkeypatch, tmp_path):
+    """An unowned folder copy follows the legacy REQUIRES_CLAIM contract.
+
+    The app-home legacy path reads the history but reports ownership
+    "unowned" and never auto-claims it.  The folder fallback used to adopt
+    the copy as an ordinary owned session, so the same session answered
+    "unowned" from the app-home root and "owned" from the folder root.
+    """
+    from miqi.runtime.app_server import ClientSessionRegistry
+    from miqi.runtime.session_handlers import sessions_get_handler
+    from miqi.session.manager import SessionManager
+
+    app_home = tmp_path / "app-home"
+    folder_root = tmp_path / "task-folder"
+    app_home.mkdir(parents=True)
+    folder_root.mkdir(parents=True)
+    _install_app_home(monkeypatch, app_home)
+
+    # Legacy folder copy: written without a client_id, so no owner_client_id.
+    legacy_sm = SessionManager(folder_root)
+    legacy = legacy_sm.get_or_create("legacy-folder-session")
+    legacy.add_message("user", "legacy folder question")
+    legacy.add_message("assistant", "legacy folder answer")
+    legacy_sm.save(legacy)
+
+    registry = ClientSessionRegistry()
+    result = await sessions_get_handler(
+        "req-1",
+        {"session_key": "legacy-folder-session", "workspace": str(folder_root)},
+        "client-1",
+        None,
+        registry,
+    )
+    r = result["result"]
+    assert r["ownership"] == "unowned"
+    assert any(m.get("content") == "legacy folder question" for m in r["messages"])

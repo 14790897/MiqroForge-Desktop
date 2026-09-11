@@ -56,23 +56,27 @@ def _candidate_workspace_roots(
 
     A folder-bound session writes its conversation under the bound workspace
     root while the app-home root keeps only a stub.  Collect every known
-    folder root: the explicitly requested workspace plus workspaces recorded
-    in other sessions' metadata (the recent-workspace list).  The default
-    workspace is always excluded.
+    folder root: the explicitly requested workspace plus every workspace any
+    session is bound to.  The default workspace is always excluded.
 
-    Archived sessions contribute their workspace too.  Archive state says
-    nothing about where a folder copy lives, and callers routinely discover
-    the root *after* the app-home stub changed state (#956): sessions.archive
-    marks the stub archived before resolving the folder copy, so an
-    active-only listing would drop the very root being searched for.
+    Two properties matter here, and both are load-bearing:
+
+    * Uncapped.  A "recent N workspaces" window would drop the root of any
+      folder session older than the window, so its history would vanish from
+      the sidebar after a restart and a bare sessions.get would find nothing
+      even though the conversation is intact on disk.  Discovery walks every
+      persisted binding instead.
+    * Archived sessions included.  Archive state says nothing about where a
+      folder copy lives, and callers routinely discover the root *after* the
+      app-home stub changed state: sessions.archive marks the stub archived
+      before resolving the folder copy, so an active-only listing would drop
+      the very root being searched for.
     """
     from miqi.session.manager import SessionManager
 
     raw_roots: list[str] = list(extra or [])
     raw_roots.extend(
-        sm.list_recent_workspaces(
-            limit=25, client_id=client_id, include_archived=True,
-        )
+        sm.list_bound_workspaces(client_id=client_id, include_archived=True)
     )
 
     default_ws = str(Path(sm.workspace).expanduser().resolve())
@@ -365,15 +369,24 @@ async def sessions_get_handler(
             if found is not None:
                 folder_session, authoritative_ws = found
                 disk_session = folder_session
-                try:
-                    stub = sm.get_or_create(
-                        session_key, client_id=client_id, workspace=authoritative_ws,
-                    )
-                    # Binding-only stub: never copy the folder's messages into
-                    # the app-home root — the folder stays authoritative.
-                    sm.save(stub)
-                except Exception as exc:
-                    logger.debug("sessions.get: binding backfill failed: {}", exc)
+                # A legacy folder copy carries no owner_client_id.  Mirror the
+                # app-home REQUIRES_CLAIM path exactly: the history stays
+                # readable and is reported as unowned, and no owned binding is
+                # stamped for a session this client never claimed — otherwise
+                # the same session would answer "owned" from the folder root
+                # and "unowned" from app-home.
+                if folder_session.metadata.get("owner_client_id") is None:
+                    ownership = "unowned"
+                else:
+                    try:
+                        stub = sm.get_or_create(
+                            session_key, client_id=client_id, workspace=authoritative_ws,
+                        )
+                        # Binding-only stub: never copy the folder's messages into
+                        # the app-home root — the folder stays authoritative.
+                        sm.save(stub)
+                    except Exception as exc:
+                        logger.debug("sessions.get: binding backfill failed: {}", exc)
 
         if authoritative_ws is None:
             # 空会话是临时的：首条消息写入前不进 sessions.list（左端不残留默认会话）。
