@@ -92,6 +92,10 @@ class ToolRuntime:
 
         confirmation_calls = [c for c in tool_calls if c.name in _INTERACTIVE_CONFIRM_TOOLS]
         sibling_calls = [c for c in tool_calls if c.name not in _INTERACTIVE_CONFIRM_TOOLS]
+        # CodeRabbit（9-11）：plan gate 的放行判定必须只看 ask_user_plan_confirm
+        # ——用 confirmation_calls（含 action 确认等）会把「批次里有别的确认工具」
+        # 误当成「用户已给出新计划确认」，绕过调整/拒绝后的变更门。
+        plan_confirm_calls = [c for c in tool_calls if c.name == "ask_user_plan_confirm"]
 
         plan_gate_blocked = bool(getattr(turn, "_plan_gate_blocked", False))
         adjustment = str(getattr(turn, "_plan_adjustment_pending", "") or "").strip()
@@ -100,7 +104,7 @@ class ToolRuntime:
         # to produce a new plan. The current model batch belongs to the old
         # plan, so reads may inspect state but mutations must not run. Returning
         # the feedback as a tool result makes the next model round aware of why.
-        if adjustment and plan_gate_blocked and not confirmation_calls:
+        if adjustment and plan_gate_blocked and not plan_confirm_calls:
             reason = (
                 "未执行：用户刚刚要求调整任务方案。"
                 f"用户意见：{adjustment}\n"
@@ -129,7 +133,7 @@ class ToolRuntime:
 
         # A rejected or modified plan closes the mutation gate for subsequent
         # rounds. Read-only inspection can continue so the model can revise it.
-        if plan_gate_blocked and not confirmation_calls:
+        if plan_gate_blocked and not plan_confirm_calls:
             contexts: list[ToolExecutionContext | None] = [
                 self._blocked_context(
                     turn,
