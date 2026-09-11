@@ -55,12 +55,14 @@ import type {
 } from '../../shared/ipc';
 import { registerQraftIpcHandlers } from '../qraft/ipc';
 import {
+  classifyKernelInstall,
   classifyWslFeatureState,
   hasNonRootUser,
   isBashCapableDistro,
   readFeatureStates,
-  wslPackageInstalled,
-  wslStatusWorks,
+  runElevated,
+  summarizeElevated,
+  wslKernelPresent,
 } from './wsl-state';
 import {
   getConfigDir,
@@ -974,22 +976,34 @@ for m in ("pydantic", "httpx", "loguru"):
           message: '正在启用 Windows 可选功能 (WSL + 虚拟机平台)...',
         } satisfies WslInstallProgress);
 
-        // Exit codes of UAC-elevated processes cannot be read reliably
-        // (Select-Object ExitCode throws after RunAs elevation), so run
-        // without -PassThru and verify the result by re-reading the feature
-        // states afterwards.
-        const r = spawnSync(
-          'powershell.exe',
-          [
-            '-NoProfile',
-            '-Command',
-            'Start-Process powershell -ArgumentList "-NoProfile -Command ' +
-              'Enable-WindowsOptionalFeature -Online -FeatureName Microsoft-Windows-Subsystem-Linux -NoRestart; ' +
-              'Enable-WindowsOptionalFeature -Online -FeatureName VirtualMachinePlatform -NoRestart" ' +
-              '-Verb RunAs -Wait',
-          ],
-          { timeout: 120000, encoding: 'utf8', windowsHide: true }
+        // The elevated process runs Enable-WindowsOptionalFeature and reports
+        // its own output/exit code through the trampoline files: a declined
+        // UAC prompt used to be indistinguishable from a DISM failure here.
+        const r = runElevated(
+          {
+            powershell: [
+              '$ErrorActionPreference = "Continue"',
+              'Enable-WindowsOptionalFeature -Online -FeatureName Microsoft-Windows-Subsystem-Linux -NoRestart',
+              'Enable-WindowsOptionalFeature -Online -FeatureName VirtualMachinePlatform -NoRestart',
+            ].join('\r\n'),
+          },
+          120000
         );
+
+        if (r.kind === 'cancelled') {
+          safeSend(IPC_EVENTS.WSL_INSTALL_PROGRESS, {
+            phase: 'error',
+            message: '启用 Windows 功能被取消：管理员权限请求被拒绝',
+            error: 'ELEVATION_CANCELLED',
+          } satisfies WslInstallProgress);
+          return {
+            success: false,
+            phase: 'error',
+            errorCode: 'ELEVATION_CANCELLED',
+            error: '启用 Windows 功能被取消',
+            nextStep: '重新点击「一键安装 WSL2」，并在弹出的 UAC 窗口中点击「是」',
+          } satisfies WslInstallAndProvisionResult;
+        }
 
         // Verification requires a successful read with the WSL feature on.
         // VirtualMachinePlatform is intentionally not required: on machines
@@ -997,11 +1011,12 @@ for m in ("pydantic", "httpx", "loguru"):
         // it is functional (observed in live testing) — gating on it would
         // recreate the false-failure bug this step was fixed for.
         const featuresAfter = readFeatureStates();
-        if (r.error || r.status !== 0 || !featuresAfter.ok || !featuresAfter.featureWsl) {
+        if (!featuresAfter.ok || !featuresAfter.featureWsl) {
+          const detail = r.kind === 'ok' ? '功能状态未变化' : summarizeElevated(r);
           safeSend(IPC_EVENTS.WSL_INSTALL_PROGRESS, {
             phase: 'error',
-            message: `启用 Windows 功能失败: ${r.error?.message ?? '功能状态未变化'}`,
-            error: r.error?.message ?? 'feature state unchanged after enable',
+            message: `启用 Windows 功能失败: ${detail}`,
+            error: detail,
           } satisfies WslInstallProgress);
           return {
             success: false,
@@ -1035,30 +1050,44 @@ for m in ("pydantic", "httpx", "loguru"):
           message: '正在安装 WSL2 内核...',
         } satisfies WslInstallProgress);
 
-        const r = spawnSync(
-          'powershell.exe',
-          [
-            '-NoProfile',
-            '-Command',
-            'Start-Process wsl -ArgumentList "--install --no-distribution --no-launch" -Verb RunAs -Wait',
-          ],
-          { timeout: 300000, encoding: 'utf8', windowsHide: true }
+        const r = runElevated(
+          { command: 'wsl.exe --install --no-distribution --no-launch' },
+          300000
         );
 
-        // Verify by system state: the WSL app package must exist after the
-        // install (wsl --status may keep failing until the next reboot).
-        const kernelOk = wslStatusWorks() || wslPackageInstalled();
-        if (r.error || r.status !== 0 || !kernelOk) {
+        // Only ask the system when the elevated run itself was inconclusive:
+        // exit code 0 already proves the install, and a declined UAC prompt
+        // proves nothing was attempted, so probing would just add latency.
+        const kernelPresent =
+          r.kind === 'failed' || r.kind === 'unknown' ? wslKernelPresent() : false;
+        const outcome = classifyKernelInstall(r, kernelPresent);
+
+        if (outcome.status === 'cancelled') {
           safeSend(IPC_EVENTS.WSL_INSTALL_PROGRESS, {
             phase: 'error',
-            message: `WSL2 内核安装失败: ${r.error?.message ?? '未检测到 WSL 包'}`,
-            error: r.error?.message ?? 'WSL package not found after install',
+            message: 'WSL2 内核安装被取消：管理员权限请求被拒绝',
+            error: 'ELEVATION_CANCELLED',
+          } satisfies WslInstallProgress);
+          return {
+            success: false,
+            phase: 'error',
+            errorCode: 'ELEVATION_CANCELLED',
+            error: 'WSL2 内核安装被取消',
+            nextStep: '重新点击「一键安装 WSL2」，并在弹出的 UAC 窗口中点击「是」',
+          } satisfies WslInstallAndProvisionResult;
+        }
+
+        if (outcome.status === 'failed') {
+          safeSend(IPC_EVENTS.WSL_INSTALL_PROGRESS, {
+            phase: 'error',
+            message: `WSL2 内核安装失败: ${outcome.detail}`,
+            error: outcome.detail,
           } satisfies WslInstallProgress);
           return {
             success: false,
             phase: 'error',
             errorCode: 'KERNEL_INSTALL_FAILED',
-            error: 'WSL2 内核安装失败',
+            error: `WSL2 内核安装失败: ${outcome.detail}`,
             nextStep: '以管理员身份打开 PowerShell 并运行: wsl --install --no-distribution',
           } satisfies WslInstallAndProvisionResult;
         }
@@ -1086,28 +1115,39 @@ for m in ("pydantic", "httpx", "loguru"):
           message: '正在安装 Ubuntu 发行版（可能需要几分钟）...',
         } satisfies WslInstallProgress);
 
-        const r = spawnSync(
-          'powershell.exe',
-          [
-            '-NoProfile',
-            '-Command',
-            'Start-Process wsl -ArgumentList "--install -d Ubuntu --no-launch" -Verb RunAs -Wait',
-          ],
-          { timeout: 300000, encoding: 'utf8', windowsHide: true }
-        );
+        const r = runElevated({ command: 'wsl.exe --install -d Ubuntu --no-launch' }, 300000);
 
-        const postCheck = runWslCheckInternal();
-        if (r.error || r.status !== 0 || postCheck.distros.length === 0) {
+        if (r.kind === 'cancelled') {
           safeSend(IPC_EVENTS.WSL_INSTALL_PROGRESS, {
             phase: 'error',
-            message: 'Ubuntu 安装失败',
-            error: r.error?.message ?? 'DISTRO_INSTALL_FAILED',
+            message: 'Ubuntu 安装被取消：管理员权限请求被拒绝',
+            error: 'ELEVATION_CANCELLED',
+          } satisfies WslInstallProgress);
+          return {
+            success: false,
+            phase: 'error',
+            errorCode: 'ELEVATION_CANCELLED',
+            error: 'Ubuntu 发行版安装被取消',
+            nextStep: '重新点击「一键安装 WSL2」，并在弹出的 UAC 窗口中点击「是」',
+          } satisfies WslInstallAndProvisionResult;
+        }
+
+        const postCheck = runWslCheckInternal();
+        if (postCheck.distros.length === 0) {
+          // Exit code 0 with no registered distro means the install asked for a
+          // reboot — reporting the raw "退出码 0" here would read as success.
+          const detail =
+            r.kind === 'ok' ? '发行版未注册，可能需要重启后重试' : summarizeElevated(r);
+          safeSend(IPC_EVENTS.WSL_INSTALL_PROGRESS, {
+            phase: 'error',
+            message: `Ubuntu 安装失败: ${detail}`,
+            error: detail,
           } satisfies WslInstallProgress);
           return {
             success: false,
             phase: 'error',
             errorCode: 'DISTRO_INSTALL_FAILED',
-            error: 'Ubuntu 发行版安装失败',
+            error: `Ubuntu 发行版安装失败: ${detail}`,
             nextStep: '以管理员身份打开 PowerShell 并运行: wsl --install -d Ubuntu',
           } satisfies WslInstallAndProvisionResult;
         }
