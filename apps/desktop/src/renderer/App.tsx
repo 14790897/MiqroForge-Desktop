@@ -398,13 +398,13 @@ function AppShell() {
           <UserInputProvider>
             {/* Full-height flex column */}
             <div className="flex flex-col h-screen" style={{ background: 'var(--background)' }}>
+              {/* #989: 工作目录胶囊已下沉到聊天标题区（ChatConsole），顶栏不再重复展示 */}
               <TopBar
                 onOpenApprovals={openApprovalSettings}
                 onOpenQraft={() => {
                   setSettingsTab('qraft');
                   setActiveNav('settings');
                 }}
-                workspace={workspace ?? undefined}
               />
               <ApprovalBypassBanner onOpenApprovals={openApprovalSettings} />
               {/* Body row */}

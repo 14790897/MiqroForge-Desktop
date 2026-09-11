@@ -2372,4 +2372,145 @@ for m in ("pydantic", "httpx", "loguru"):
     }
     return { ok: true, focused: !win.isDestroyed() && win.isFocused() };
   });
+
+  // 资产面板推开聊天区时把窗口加宽(extra≈面板宽):聊天列是 flex-1,新增宽度全归它,
+  // 聊天区因此不挤压;关闭(extra=0)还原到开面板前宽度。逐次记录左右实际扩展量用于
+  // 精确还原,最大化/全屏/不可调大小或屏幕已无剩余空间时跳过。记录以窗口为键,
+  // 窗口销毁后自然归零(下次开面板以当时宽度为基线)。
+  const panelExtraByWin = new WeakMap<
+    BrowserWindow,
+    {
+      extra: number;
+      left: number;
+      right: number;
+      /** 渲染进程最后要求的**逻辑目标**。skipped（最大化/满屏/不可缩放）时 setBounds
+       *  做不了，但目标必须留下来 —— 否则「最大化期间关掉面板」会被整个丢掉，恢复
+       *  窗口后那 280px 就永远撑在窗口上（面板已关、窗口仍宽一截）。 */
+      wanted: number;
+    }
+  >();
+  /** 我们自己 setBounds 产生的、**尚未被 resize 事件消费**的宽度集合。
+   *  用集合而不是单个值：连续两次 setBounds 时后一次会覆盖前一次的目标，而
+   *  Electron 不保证 resize 事件的合并与顺序 —— 第一个事件可能在后一个目标写进来
+   *  之后才到，单值就会把它判成「用户拖的」并污染 W_user。集合让每个事件各自
+   *  认领一次。也不用时间窗：setBounds 到 resize 派发的延迟取决于 OS。 */
+  const pendingSelfWidths = new WeakMap<BrowserWindow, Set<number>>();
+  const markSelfResize = (win: BrowserWindow, width: number) => {
+    let s = pendingSelfWidths.get(win);
+    if (!s) {
+      s = new Set();
+      pendingSelfWidths.set(win, s);
+    }
+    // 对应不上的陈旧条目没有价值，别让它无限增长
+    if (s.size > 8) s.clear();
+    s.add(width);
+  };
+  /** 该宽度是否由我们自己引起；是则消费掉这一次（返回 true）。 */
+  const consumeSelfResize = (win: BrowserWindow, width: number): boolean => {
+    const s = pendingSelfWidths.get(win);
+    if (!s || !s.has(width)) return false;
+    s.delete(width);
+    return true;
+  };
+  /** 用户期望的窗口宽度 W_user，满足 W_actual = W_user + rec.extra。
+   *  记的不是「用户设的总宽」而是**扣掉面板那部分之后**的基线 —— 否则用户在面板
+   *  开着时拖窗，会把面板的 280 一起吸收进基线，之后关面板一像素都收不回来。 */
+  const userWidth = new WeakMap<BrowserWindow, number>();
+  const windowHooked = new WeakSet<BrowserWindow>();
+  /** 从最大化/最小化恢复后补应用一次逻辑目标：那些状态下 setBounds 是 skipped 的，
+   *  但期间用户可能开/关了面板 —— 恢复时必须把窗口拉回与逻辑目标一致，否则就留下
+   *  「面板已关、窗口仍被它撑宽」的幽灵宽度。 */
+  const reconcileOnRestore = (win: BrowserWindow) => {
+    if (win.isDestroyed() || win.isMaximized() || win.isFullScreen()) return;
+    const rec = panelExtraByWin.get(win);
+    if (!rec || rec.wanted === rec.extra) return;
+    applyPanelExtra(win, rec.wanted);
+  };
+  /** 每窗口挂一次监听：识别「用户自己改了窗口宽度」，以及在恢复时补应用逻辑目标。 */
+  const hookWindow = (win: BrowserWindow) => {
+    if (windowHooked.has(win)) return;
+    windowHooked.add(win);
+    win.on('resize', () => {
+      if (win.isDestroyed()) return;
+      const w = win.getBounds().width;
+      if (consumeSelfResize(win, w)) return; // 我们自己设的那次，消费掉
+      // 用户拖的：把增量记到 W_user 上（扣掉面板当前占用的 extra）
+      const rec = panelExtraByWin.get(win);
+      userWidth.set(win, Math.max(0, w - (rec?.extra ?? 0)));
+    });
+    win.on('unmaximize', () => reconcileOnRestore(win));
+    win.on('restore', () => reconcileOnRestore(win));
+  };
+  /** 把窗口加宽/收窄到 target 对应的状态，返回实际应用到的 extra。 */
+  const applyPanelExtra = (win: BrowserWindow, target: number): number => {
+    const rec = panelExtraByWin.get(win) ?? { extra: 0, left: 0, right: 0, wanted: target };
+    rec.wanted = target;
+    const delta = target - rec.extra;
+    if (delta !== 0) {
+      const b = win.getBounds();
+      const wa = electron.screen.getDisplayMatching(b).workArea;
+      if (delta > 0) {
+        // 优先向右扩(左缘不动),右缘到工作区边界后向左借位把窗口整体放中间可多补
+        const growRight = Math.min(delta, Math.max(0, wa.x + wa.width - (b.x + b.width)));
+        const growLeft = Math.min(delta - growRight, Math.max(0, b.x - wa.x));
+        const grown = growRight + growLeft;
+        if (grown > 0) {
+          const nextWidth = b.width + grown;
+          markSelfResize(win, nextWidth);
+          win.setBounds({ x: b.x - growLeft, y: b.y, width: nextWidth, height: b.height });
+          rec.right += growRight;
+          rec.left += growLeft;
+          rec.extra += grown;
+        }
+      } else {
+        // 收窄:先还左借位再收右侧,总量不越过最小宽(minWidth)。绝不主动抹掉
+        // 用户自己拉宽的窗口——仅收回本面板实际加宽的 px。
+        //
+        // 用户在面板开着时拖窗，那个增量已经记进 W_user（见 watchUserResize），
+        // 所以这里以 W_user 为下界收窄：面板那 280px 收得回来，用户自己加的
+        // 那部分不会被一起吃掉。W_actual = W_user + rec.extra 是这一段的模型。
+        const userW = userWidth.get(win);
+        const userRoom =
+          userW === undefined ? Number.POSITIVE_INFINITY : Math.max(0, b.width - userW);
+        const maxRemove = Math.min(Math.max(0, b.width - win.getMinimumSize()[0]), userRoom);
+        let remove = Math.min(-delta, rec.extra);
+        const remLeft = Math.min(remove, rec.left, maxRemove);
+        remove -= remLeft;
+        const remRight = Math.min(remove, rec.right, maxRemove - remLeft);
+        const removed = remLeft + remRight;
+        if (removed > 0) {
+          const nextWidth = b.width - removed;
+          markSelfResize(win, nextWidth);
+          win.setBounds({ x: b.x + remLeft, y: b.y, width: nextWidth, height: b.height });
+          rec.left = Math.max(0, rec.left - remLeft);
+          rec.right = Math.max(0, rec.right - remRight);
+          rec.extra = Math.max(0, rec.extra - removed);
+        }
+      }
+      panelExtraByWin.set(win, rec);
+    }
+    return rec.extra;
+  };
+
+  ipcMain.handle(IPC.APP_PANEL_EXTRA, (event, raw: unknown) => {
+    const win = electron.BrowserWindow.fromWebContents(event.sender);
+    const target = Math.max(
+      0,
+      Math.round(typeof raw === 'number' && Number.isFinite(raw) ? raw : 0)
+    );
+    if (!win || win.isDestroyed()) {
+      return { ok: false, applied: 0, skipped: true };
+    }
+    hookWindow(win);
+    if (win.isMaximized() || win.isFullScreen() || !win.isResizable()) {
+      // 现在动不了，但逻辑目标要留下（见 rec.wanted）—— 恢复窗口时由
+      // reconcileOnRestore 补应用。不能像以前那样直接返回、什么都不记：那样
+      // 「最大化期间关面板」会被整个丢掉，恢复后窗口仍被面板撑宽 280px。
+      const rec = panelExtraByWin.get(win) ?? { extra: 0, left: 0, right: 0, wanted: target };
+      rec.wanted = target;
+      panelExtraByWin.set(win, rec);
+      return { ok: false, applied: rec.extra, skipped: true };
+    }
+    return { ok: true, applied: applyPanelExtra(win, target), skipped: false };
+  });
 }
