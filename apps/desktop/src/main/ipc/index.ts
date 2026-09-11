@@ -2379,7 +2379,15 @@ for m in ("pydantic", "httpx", "loguru"):
   // 窗口销毁后自然归零(下次开面板以当时宽度为基线)。
   const panelExtraByWin = new WeakMap<
     BrowserWindow,
-    { extra: number; left: number; right: number }
+    {
+      extra: number;
+      left: number;
+      right: number;
+      /** 渲染进程最后要求的**逻辑目标**。skipped（最大化/满屏/不可缩放）时 setBounds
+       *  做不了，但目标必须留下来 —— 否则「最大化期间关掉面板」会被整个丢掉，恢复
+       *  窗口后那 280px 就永远撑在窗口上（面板已关、窗口仍宽一截）。 */
+      wanted: number;
+    }
   >();
   /** 我们自己 setBounds 的**目标宽度**。resize 事件到达时实际宽度与它一致 → 认定是
    *  我们引起的。不用时间窗：setBounds 到 resize 派发的延迟取决于 OS，固定 150ms
@@ -2389,11 +2397,20 @@ for m in ("pydantic", "httpx", "loguru"):
    *  记的不是「用户设的总宽」而是**扣掉面板那部分之后**的基线 —— 否则用户在面板
    *  开着时拖窗，会把面板的 280 一起吸收进基线，之后关面板一像素都收不回来。 */
   const userWidth = new WeakMap<BrowserWindow, number>();
-  const userResizeWatched = new WeakSet<BrowserWindow>();
-  /** 每窗口挂一次 resize 监听，用来识别「用户自己改了窗口宽度」。 */
-  const watchUserResize = (win: BrowserWindow) => {
-    if (userResizeWatched.has(win)) return;
-    userResizeWatched.add(win);
+  const windowHooked = new WeakSet<BrowserWindow>();
+  /** 从最大化/最小化恢复后补应用一次逻辑目标：那些状态下 setBounds 是 skipped 的，
+   *  但期间用户可能开/关了面板 —— 恢复时必须把窗口拉回与逻辑目标一致，否则就留下
+   *  「面板已关、窗口仍被它撑宽」的幽灵宽度。 */
+  const reconcileOnRestore = (win: BrowserWindow) => {
+    if (win.isDestroyed() || win.isMaximized() || win.isFullScreen()) return;
+    const rec = panelExtraByWin.get(win);
+    if (!rec || rec.wanted === rec.extra) return;
+    applyPanelExtra(win, rec.wanted);
+  };
+  /** 每窗口挂一次监听：识别「用户自己改了窗口宽度」，以及在恢复时补应用逻辑目标。 */
+  const hookWindow = (win: BrowserWindow) => {
+    if (windowHooked.has(win)) return;
+    windowHooked.add(win);
     win.on('resize', () => {
       if (win.isDestroyed()) return;
       const w = win.getBounds().width;
@@ -2406,25 +2423,14 @@ for m in ("pydantic", "httpx", "loguru"):
       const rec = panelExtraByWin.get(win);
       userWidth.set(win, Math.max(0, w - (rec?.extra ?? 0)));
     });
+    win.on('unmaximize', () => reconcileOnRestore(win));
+    win.on('restore', () => reconcileOnRestore(win));
   };
-  ipcMain.handle(IPC.APP_PANEL_EXTRA, (event, raw: unknown) => {
-    const win = electron.BrowserWindow.fromWebContents(event.sender);
-    if (
-      !win ||
-      win.isDestroyed() ||
-      win.isMaximized() ||
-      win.isFullScreen() ||
-      !win.isResizable()
-    ) {
-      return { ok: false, applied: 0, skipped: true };
-    }
-    watchUserResize(win);
-    const target = Math.max(
-      0,
-      Math.round(typeof raw === 'number' && Number.isFinite(raw) ? raw : 0)
-    );
-    const rec = panelExtraByWin.get(win) ?? { extra: 0, left: 0, right: 0 };
-    let delta = target - rec.extra;
+  /** 把窗口加宽/收窄到 target 对应的状态，返回实际应用到的 extra。 */
+  const applyPanelExtra = (win: BrowserWindow, target: number): number => {
+    const rec = panelExtraByWin.get(win) ?? { extra: 0, left: 0, right: 0, wanted: target };
+    rec.wanted = target;
+    const delta = target - rec.extra;
     if (delta !== 0) {
       const b = win.getBounds();
       const wa = electron.screen.getDisplayMatching(b).workArea;
@@ -2468,6 +2474,28 @@ for m in ("pydantic", "httpx", "loguru"):
       }
       panelExtraByWin.set(win, rec);
     }
-    return { ok: true, applied: rec.extra, skipped: false };
+    return rec.extra;
+  };
+
+  ipcMain.handle(IPC.APP_PANEL_EXTRA, (event, raw: unknown) => {
+    const win = electron.BrowserWindow.fromWebContents(event.sender);
+    const target = Math.max(
+      0,
+      Math.round(typeof raw === 'number' && Number.isFinite(raw) ? raw : 0)
+    );
+    if (!win || win.isDestroyed()) {
+      return { ok: false, applied: 0, skipped: true };
+    }
+    hookWindow(win);
+    if (win.isMaximized() || win.isFullScreen() || !win.isResizable()) {
+      // 现在动不了，但逻辑目标要留下（见 rec.wanted）—— 恢复窗口时由
+      // reconcileOnRestore 补应用。不能像以前那样直接返回、什么都不记：那样
+      // 「最大化期间关面板」会被整个丢掉，恢复后窗口仍被面板撑宽 280px。
+      const rec = panelExtraByWin.get(win) ?? { extra: 0, left: 0, right: 0, wanted: target };
+      rec.wanted = target;
+      panelExtraByWin.set(win, rec);
+      return { ok: false, applied: rec.extra, skipped: true };
+    }
+    return { ok: true, applied: applyPanelExtra(win, target), skipped: false };
   });
 }

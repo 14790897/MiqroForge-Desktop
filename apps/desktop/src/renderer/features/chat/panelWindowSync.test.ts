@@ -176,7 +176,31 @@ describe('panelWindowSync 拖拽队列', () => {
     h.flush();
     expect(h.sent).toEqual([40, 80]); // 补发到最新
     await h.respond(1, { applied: 80 });
-    expect(h.widths).toEqual([320, 360]);
+    // 只落最新目标那一档：409→40 那次响应回来时 pending=80 已存在，按 latest-wins
+    // 的 UI 侧不投影，所以不经过中间的 320，直接到 360。
+    expect(h.widths).toEqual([360]);
+  });
+
+  it('反向拖动：陈旧的 in-flight 响应不投影到面板（latest-wins 的 UI 侧）', async () => {
+    // latest-wins 原先只保证「下一个请求覆盖 pending」，没挡住旧的 in-flight 结果
+    // 先作用到 UI：用户已经往回拖了，面板却先跳回旧宽度、等下一个响应才回来。
+    const h = makeHarness();
+    h.sync.beginDrag({ clientX: 500, width: 280 });
+    h.sync.dragTo(360); // 先往外拖 → extra 80，在途
+    h.flush();
+    expect(h.sent).toEqual([80]);
+
+    h.sync.dragTo(300); // 还没回来就反向拖回来 → pending 20
+    await h.respond(0, { applied: 80 }); // 旧的 80 现在才回来
+
+    // 关键断言：不该出现 360（那是用户已经放弃的位置）
+    expect(h.widths).toEqual([]);
+    expect(h.widths).not.toContain(360);
+
+    h.flush(); // 最新目标才发出去
+    expect(h.sent).toEqual([80, 20]);
+    await h.respond(1, { applied: 20 });
+    expect(h.widths).toEqual([300]); // 只按最新目标更新一次，终点是 300 不是 360
   });
 
   it('只点一下分隔条不拖动：窗口请求与当前一致，面板不跳变', async () => {

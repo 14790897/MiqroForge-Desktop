@@ -184,14 +184,21 @@ export function createPanelWindowSync(options: PanelWindowSyncOptions): PanelWin
           // r.applied 是 0（不是「应用到了 0」），回写它会让拖拽中的面板按 0
           // 反推宽度而跳变。面板本身仍要跟手——按用户拖到的宽度走。
           if (r.skipped) {
-            if (anchor && Number.isFinite(desired)) apply(clampPanelWidth(desired));
+            // 同理：已有更新目标在排队时，这次陈旧的目标宽不该再写 DOM。
+            if (anchor && Number.isFinite(desired) && !Number.isFinite(pending)) {
+              apply(clampPanelWidth(desired));
+            }
             return;
           }
           applied = r.applied;
           if (anchor) {
             anchor.windowFollowed = true;
-            // 拖拽中面板只按实际增量走，不超前于窗口扩出。
-            apply(panelWidthForApplied(anchor, r.applied));
+            // 若已有更新的目标在排队，别把这次**陈旧**的宽度投影到面板：用户在
+            // 反向拖动（先拖宽再往回拖）时，会看到面板先跳回旧宽度、等下一个响应
+            // 才回来 —— latest-wins 只保证了「下一个请求覆盖 pending」，没挡住
+            // 旧的 in-flight 结果先作用到 UI。applied 仍照常更新为真实值（收尾与
+            // 下一次锚定用的就是它），只是不投影；面板等最新目标的响应再动。
+            if (!Number.isFinite(pending)) apply(panelWidthForApplied(anchor, r.applied));
           }
         })
         .catch(() => {
