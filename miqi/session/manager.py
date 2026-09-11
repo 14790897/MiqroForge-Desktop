@@ -162,10 +162,15 @@ class SessionManager:
                 self._session_locks[key] = lock
             return lock
 
+    def _get_flat_session_path(self, key: str) -> Path:
+        """Flat ``sessions/<key>.jsonl`` layout — still a supported store."""
+        safe_key = safe_filename(key.replace(":", "_"))
+        return self.sessions_dir / f"{safe_key}.jsonl"
+
     def _migrate_flat_to_dir(self, key: str) -> None:
         """If old flat .jsonl exists and new dir does not, migrate."""
         safe_key = safe_filename(key.replace(":", "_"))
-        old_flat = self.sessions_dir / f"{safe_key}.jsonl"
+        old_flat = self._get_flat_session_path(key)
         new_dir  = self.sessions_dir / safe_key
         if old_flat.exists() and not new_dir.exists():
             new_dir.mkdir(parents=True, exist_ok=True)
@@ -248,22 +253,37 @@ class SessionManager:
         self._cache[key] = session
         return session
 
-    def _load(self, key: str) -> Session | None:
-        """Load a session from disk."""
-        self._migrate_flat_to_dir(key)
+    def _load(self, key: str, *, migrate: bool = True) -> Session | None:
+        """Load a session from disk.
+
+        When ``migrate`` is False, neither the flat-file nor the legacy-path
+        migration runs — used by read-only probing (``load_existing``) so a
+        scan across candidate workspace roots never mutates the filesystem.
+        """
+        if migrate:
+            self._migrate_flat_to_dir(key)
         path = self._get_session_path(key)
         if not path.exists():
-            legacy_path = self._get_legacy_session_path(key)
-            if legacy_path.exists():
-                try:
-                    path.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.move(str(legacy_path), str(path))
-                    logger.info("Migrated session {} from legacy path", key)
-                except Exception:
-                    logger.exception("Failed to migrate session {}", key)
-
-        if not path.exists():
-            return None
+            if migrate:
+                legacy_path = self._get_legacy_session_path(key)
+                if legacy_path.exists():
+                    try:
+                        path.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.move(str(legacy_path), str(path))
+                        logger.info("Migrated session {} from legacy path", key)
+                    except Exception:
+                        logger.exception("Failed to migrate session {}", key)
+            if not path.exists():
+                # Read-only fallback: the flat sessions/<key>.jsonl layout is
+                # still a supported store — list_sessions and delete() both
+                # fall back to it.  Probing must therefore be able to READ it
+                # without moving it, or a legacy folder-bound session reads as
+                # absent and stays undiscoverable, which is the very bug this
+                # probing exists to fix (#956 review).
+                flat_path = self._get_flat_session_path(key)
+                if not flat_path.exists():
+                    return None
+                path = flat_path
 
         try:
             messages: list[dict[str, Any]] = []
@@ -314,6 +334,18 @@ class SessionManager:
         except Exception as exc:
             logger.warning("Failed to load session {}: {}", key, exc)
             return None
+
+    def load_existing(self, key: str) -> Session | None:
+        """Load a session from disk without creating it or touching the cache.
+
+        Unlike get_or_create, a missing/corrupt session returns None with no
+        side effects — used by read-side probing of other workspace roots
+        (#956 folder-bound session resolution).  Legacy/flat-file migration is
+        disabled so probing never mutates the filesystem; the flat
+        ``sessions/<key>.jsonl`` layout is still READ (it remains a supported
+        store), just never moved.
+        """
+        return self._load(key, migrate=False)
 
     def save(self, session: Session) -> None:
         """Persist session changes with append-only writes when possible."""
@@ -1044,6 +1076,10 @@ class SessionManager:
 
         Filters out the default workspace path. Used by the frontend workspace picker.
         Scoped to client_id when provided.
+
+        Capped by ``limit`` on purpose — this is a "recently used" list.  Use
+        ``list_bound_workspaces`` to discover folder roots, where a cap would
+        lose data.
         """
         if limit <= 0:
             return []
@@ -1059,3 +1095,33 @@ class SessionManager:
                 if len(recent) >= limit:
                     break
         return recent
+
+    def list_bound_workspaces(
+        self,
+        *,
+        client_id: str | None = None,
+        include_archived: bool = False,
+    ) -> list[str]:
+        """Return every distinct workspace a session is bound to — uncapped.
+
+        The discovery counterpart to ``list_recent_workspaces``: callers ask
+        "which folder roots might hold a session's authoritative copy", and
+        any cap here silently makes an older folder session unreachable —
+        its conversation stays intact on disk but it vanishes from the
+        sidebar after a restart, and a bare ``get`` finds nothing (#956).
+
+        include_archived: an archived stub is still a valid pointer to its
+            folder copy, and sessions.archive marks the stub archived before
+            it resolves that copy, so archive state must not gate discovery.
+        """
+        default_ws = str(self.workspace.expanduser().resolve())
+        seen: set[str] = set()
+        roots: list[str] = []
+        for s in self.list_sessions(
+            include_archived=include_archived, client_id=client_id
+        ):
+            ws = s.get("workspace")
+            if ws and ws != default_ws and ws not in seen:
+                seen.add(ws)
+                roots.append(ws)
+        return roots

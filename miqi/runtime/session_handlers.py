@@ -46,6 +46,99 @@ def _client_session_id(client_id: str, session_key: str) -> str:
     return f"{client_id}:{session_key}"
 
 
+def _candidate_workspace_roots(
+    sm: Any,
+    client_id: str,
+    *,
+    extra: list[str] | None = None,
+) -> list[Path]:
+    """Candidate folder roots that may hold real session data (#956).
+
+    A folder-bound session writes its conversation under the bound workspace
+    root while the app-home root keeps only a stub.  Collect every known
+    folder root: the explicitly requested workspace plus every workspace any
+    session is bound to.  The default workspace is always excluded.
+
+    Two properties matter here, and both are load-bearing:
+
+    * Uncapped.  A "recent N workspaces" window would drop the root of any
+      folder session older than the window, so its history would vanish from
+      the sidebar after a restart and a bare sessions.get would find nothing
+      even though the conversation is intact on disk.  Discovery walks every
+      persisted binding instead.
+    * Archived sessions included.  Archive state says nothing about where a
+      folder copy lives, and callers routinely discover the root *after* the
+      app-home stub changed state: sessions.archive marks the stub archived
+      before resolving the folder copy, so an active-only listing would drop
+      the very root being searched for.
+    """
+    from miqi.session.manager import SessionManager
+
+    raw_roots: list[str] = list(extra or [])
+    raw_roots.extend(
+        sm.list_bound_workspaces(client_id=client_id, include_archived=True)
+    )
+
+    default_ws = str(Path(sm.workspace).expanduser().resolve())
+    roots: list[Path] = []
+    seen: set[str] = set()
+    for raw in raw_roots:
+        if not raw:
+            continue
+        try:
+            resolved = SessionManager._validate_workspace(Path(raw))
+        except Exception:
+            continue
+        key = str(resolved)
+        if key == default_ws or key in seen:
+            continue
+        seen.add(key)
+        roots.append(resolved)
+    return roots
+
+
+def _find_folder_session(
+    sm: Any,
+    session_key: str,
+    client_id: str,
+    *,
+    extra_workspace: str | None = None,
+) -> tuple[Any, Path] | None:
+    """Locate the authoritative folder-root copy of a session.
+
+    Returns (folder_session, folder_root) for the first known root that holds
+    real messages for ``session_key``, or None.  Sessions owned by a different
+    client are skipped — never leak another client's data.
+    """
+    from miqi.session.manager import SessionManager
+
+    for root in _candidate_workspace_roots(
+        sm, client_id, extra=[extra_workspace] if extra_workspace else None,
+    ):
+        try:
+            folder_sm = SessionManager(root)
+            folder_session = folder_sm.load_existing(session_key)
+        except Exception:
+            continue
+        if folder_session is None or not folder_session.messages:
+            continue
+        owner = folder_session.metadata.get("owner_client_id")
+        if owner is not None and owner != client_id:
+            continue
+        return folder_session, root
+    return None
+
+
+def _folder_session_manager(sm: Any, session_key: str, client_id: str) -> Any | None:
+    """SessionManager for the authoritative folder-root copy, if one exists."""
+    from miqi.session.manager import SessionManager
+
+    found = _find_folder_session(sm, session_key, client_id)
+    if found is None:
+        return None
+    return SessionManager(found[1])
+
+
 # ── sessions.list ──────────────────────────────────────────────────────────
 
 
@@ -121,6 +214,61 @@ async def sessions_list_handler(
                 "updated_at": None,
                 "agent_count": len(getattr(getattr(runtime.services, "agent_control", None), "_agents", {})) if runtime else 0,
             })
+
+    # #956: folder-bound sessions write their real conversation under the
+    # bound workspace root — their app-home stub is empty, so exclude_empty
+    # above hides them and they would vanish from the sidebar after a restart.
+    # Surface them from the known folder roots, title/updated_at taken from
+    # the authoritative folder copy.
+    try:
+        from miqi.session.manager import SessionManager
+
+        folder_copies: dict[str, dict[str, Any]] = {}
+        for root in _candidate_workspace_roots(sm, client_id):
+            try:
+                folder_sm = SessionManager(root)
+                for entry in folder_sm.list_sessions(
+                    client_id=client_id, exclude_empty=True,
+                ):
+                    fkey = entry.get("key", "")
+                    if fkey:
+                        entry["workspace"] = str(root)
+                        folder_copies.setdefault(fkey, entry)
+            except Exception as exc:
+                logger.debug(
+                    "sessions.list: folder scan failed for {}: {}", root, exc,
+                )
+
+        # Enrich active "not on disk" entries (the active loop above used a
+        # generic title=key and created_at=None) with the folder copy's real
+        # title/updated_at, then consume them so they are not added twice.
+        for entry in result_sessions:
+            fcopy = folder_copies.get(entry.get("key", ""))
+            if fcopy is None:
+                continue
+            if entry.get("created_at") is None:
+                entry["title"] = fcopy["title"]
+                entry["created_at"] = fcopy["created_at"]
+                entry["updated_at"] = fcopy["updated_at"]
+                entry["workspace"] = fcopy["workspace"]
+            folder_copies.pop(entry.get("key", ""), None)
+
+        # Remaining folder copies are folder-only sessions — their app-home
+        # stub was hidden by exclude_empty and they are not active.  Surface
+        # them with the folder copy's title/updated_at.
+        for fkey, fcopy in folder_copies.items():
+            if fkey in seen_keys:
+                continue
+            fsid = _client_session_id(client_id, fkey)
+            if fsid in active_sids:
+                continue  # safety net — already represented by the active loop
+            fstatus = (
+                "unowned" if fcopy.get("ownership") == "unowned" else "inactive"
+            )
+            result_sessions.append({**fcopy, "status": fstatus})
+            seen_keys.add(fkey)
+    except Exception as exc:
+        logger.warning("sessions.list: folder-session resolution failed: {}", exc)
 
     return {"result": {"sessions": result_sessions}}
 
@@ -201,29 +349,65 @@ async def sessions_get_handler(
     updated_at: str | None = None
     metadata: dict[str, Any] = {}
     ownership: str = "owned"
+    # #956: folder root holding the authoritative copy (set when adopted).
+    authoritative_ws: Path | None = None
 
     try:
         sm = _get_session_manager()
         ws = Path(typed.workspace) if typed.workspace else None
         disk_session = sm.get_or_create(session_key, client_id=client_id, workspace=ws)
-        # 空会话是临时的：首条消息写入前不进 sessions.list（左端不残留默认会话）。
-        # 但显式带 workspace 的空会话仍要落盘——用户先切工作目录、后发首条消息时，
-        # workspace 元数据需跨 get/重启存活（workspace E2E 依赖该契约）。
-        # 保留条件要覆盖"已落盘的 workspace 绑定"：切目录后的一次裸 get（无 workspace
-        # 参数，如历史重载/列表刷新）不能把空会话当残留 GC 掉，否则首条消息会落在
-        # 丢失 workspace 的会话上。仅当空会话既无显式 workspace、磁盘上也没有任何
-        # workspace 元数据时，才把它当作旧版本无条件 save 留下的空白残留删除。
+
+        # #956: folder-bound sessions write their real conversation under the
+        # bound workspace root while the app-home copy is an empty stub.  When
+        # the stub is empty, resolve the authoritative copy (explicit workspace
+        # → recent-workspace scan) and backfill the binding so later reads and
+        # sessions.list resolve without another scan.
         if not disk_session.messages:
-            existing_ws = disk_session.metadata.get("workspace")
-            if ws is not None or existing_ws is not None:
+            found = _find_folder_session(
+                sm, session_key, client_id, extra_workspace=str(ws) if ws else None,
+            )
+            if found is not None:
+                folder_session, authoritative_ws = found
+                disk_session = folder_session
+                # A legacy folder copy carries no owner_client_id.  Mirror the
+                # app-home REQUIRES_CLAIM path exactly: the history stays
+                # readable and is reported as unowned, and no owned binding is
+                # stamped for a session this client never claimed — otherwise
+                # the same session would answer "owned" from the folder root
+                # and "unowned" from app-home.
+                if folder_session.metadata.get("owner_client_id") is None:
+                    ownership = "unowned"
+                else:
+                    try:
+                        stub = sm.get_or_create(
+                            session_key, client_id=client_id, workspace=authoritative_ws,
+                        )
+                        # Binding-only stub: never copy the folder's messages into
+                        # the app-home root — the folder stays authoritative.
+                        sm.save(stub)
+                    except Exception as exc:
+                        logger.debug("sessions.get: binding backfill failed: {}", exc)
+
+        if authoritative_ws is None:
+            # 空会话是临时的：首条消息写入前不进 sessions.list（左端不残留默认会话）。
+            # 但显式带 workspace 的空会话仍要落盘——用户先切工作目录、后发首条消息时，
+            # workspace 元数据需跨 get/重启存活（workspace E2E 依赖该契约）。
+            # 保留条件要覆盖"已落盘的 workspace 绑定"：切目录后的一次裸 get（无 workspace
+            # 参数，如历史重载/列表刷新）不能把空会话当残留 GC 掉，否则首条消息会落在
+            # 丢失 workspace 的会话上。仅当空会话既无显式 workspace、磁盘上也没有任何
+            # workspace 元数据时，才把它当作旧版本无条件 save 留下的空白残留删除。
+            if not disk_session.messages:
+                existing_ws = disk_session.metadata.get("workspace")
+                if ws is not None or existing_ws is not None:
+                    sm.save(disk_session)
+                elif sm.get_session_dir(session_key).exists():
+                    sm.delete(session_key, client_id=client_id)
+                    disk_session = sm.get_or_create(
+                        session_key, client_id=client_id, workspace=ws
+                    )
+            else:
                 sm.save(disk_session)
-            elif sm.get_session_dir(session_key).exists():
-                sm.delete(session_key, client_id=client_id)
-                disk_session = sm.get_or_create(
-                    session_key, client_id=client_id, workspace=ws
-                )
-        else:
-            sm.save(disk_session)
+
         messages = disk_session.messages
         created_at = disk_session.created_at.isoformat()
         updated_at = disk_session.updated_at.isoformat()
@@ -245,7 +429,11 @@ async def sessions_get_handler(
         logger.warning("Failed to load session {}: {}", session_key, exc)
         raise AppServerError("Failed to get session", code="INTERNAL") from exc
 
-    ws_result = metadata.get("workspace")
+    ws_result = (
+        str(authoritative_ws)
+        if authoritative_ws is not None
+        else metadata.get("workspace")
+    )
 
     if runtime is not None:
         return {
@@ -335,15 +523,29 @@ async def sessions_delete_handler(
                 session_key, client_id, exc,
             )
 
-    # 3. Remove disk files (client-scoped)
+    # 3. Remove disk files (client-scoped).  A folder-bound session's real
+    # conversation lives under its bound workspace root — locate it BEFORE
+    # deleting the app-home entry (which carries the binding), then delete both.
     sm = _get_session_manager()
     try:
+        folder_sm = _folder_session_manager(sm, session_key, client_id)
         disk_deleted = sm.delete(session_key, client_id=client_id)
+        folder_deleted = False
+        if folder_sm is not None:
+            try:
+                folder_deleted = folder_sm.delete(session_key, client_id=client_id)
+            except OwnershipError as exc:
+                # An unowned legacy folder copy is not deletable by this client —
+                # keep it and let the app-home deletion stand.
+                logger.debug(
+                    "sessions.delete: folder copy {} not deleted: {}",
+                    session_key, exc,
+                )
     except OwnershipError as exc:
         raise AppServerError(exc.args[0], code=exc.code) from exc
 
     # Success if runtime was stopped (session may not have been on disk)
-    deleted = runtime_was_active or disk_deleted
+    deleted = runtime_was_active or disk_deleted or folder_deleted
 
     # Clean up AppServer event subscriptions for the deleted session.
     # stop_session() cleans _sessions/_client_sessions/_session_clients but
@@ -405,10 +607,21 @@ async def sessions_archive_handler(
                 session_key, client_id, exc,
             )
 
-    # 3. Mark archived on disk (client-scoped)
+    # 3. Mark archived on disk (client-scoped).  A folder-bound session must be
+    # archived under its workspace root too, or the folder scan would keep
+    # surfacing it in the active list (#956).
     sm = _get_session_manager()
     try:
         sm.archive(session_key, client_id=client_id)
+        folder_sm = _folder_session_manager(sm, session_key, client_id)
+        if folder_sm is not None:
+            try:
+                folder_sm.archive(session_key, client_id=client_id)
+            except OwnershipError as exc:
+                logger.debug(
+                    "sessions.archive: folder copy {} not archived: {}",
+                    session_key, exc,
+                )
     except OwnershipError as exc:
         raise AppServerError(exc.args[0], code=exc.code) from exc
 
@@ -432,6 +645,15 @@ async def sessions_unarchive_handler(
     sm = _get_session_manager()
     try:
         sm.unarchive(session_key, client_id=client_id)
+        folder_sm = _folder_session_manager(sm, session_key, client_id)
+        if folder_sm is not None:
+            try:
+                folder_sm.unarchive(session_key, client_id=client_id)
+            except OwnershipError as exc:
+                logger.debug(
+                    "sessions.unarchive: folder copy {} not unarchived: {}",
+                    session_key, exc,
+                )
     except OwnershipError as exc:
         raise AppServerError(exc.args[0], code=exc.code) from exc
 
@@ -465,6 +687,32 @@ async def sessions_list_archived_handler(
         marker = sm.sessions_dir / safe_key / ".archived"
         if marker.exists():
             archived.append(s)
+
+    # #956: folder-bound sessions archived under their workspace root must
+    # stay reachable here or unarchive would have no way to find them.
+    try:
+        from miqi.session.manager import SessionManager
+
+        for root in _candidate_workspace_roots(sm, client_id):
+            try:
+                folder_sm = SessionManager(root)
+                for s in folder_sm.list_sessions(
+                    include_archived=True, client_id=client_id,
+                ):
+                    fkey = s.get("key", "")
+                    if any(a.get("key") == fkey for a in archived):
+                        continue
+                    safe_key = safe_filename(fkey.replace(":", "_"))
+                    marker = folder_sm.sessions_dir / safe_key / ".archived"
+                    if marker.exists():
+                        archived.append({**s, "workspace": str(root)})
+            except Exception as exc:
+                logger.debug(
+                    "sessions.list_archived: folder scan failed for {}: {}",
+                    root, exc,
+                )
+    except Exception as exc:
+        logger.warning("sessions.list_archived: folder resolution failed: {}", exc)
 
     return {"result": {"sessions": archived}}
 
@@ -537,6 +785,17 @@ async def sessions_rename_handler(
     sm = _get_session_manager()
     try:
         effective_title = sm.rename(session_key, title, client_id=client_id)
+        folder_sm = _folder_session_manager(sm, session_key, client_id)
+        if folder_sm is not None:
+            try:
+                effective_title = folder_sm.rename(
+                    session_key, title, client_id=client_id,
+                )
+            except OwnershipError as exc:
+                logger.debug(
+                    "sessions.rename: folder copy {} not renamed: {}",
+                    session_key, exc,
+                )
     except OwnershipError as exc:
         raise AppServerError(exc.args[0], code=exc.code) from exc
 
