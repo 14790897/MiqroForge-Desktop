@@ -385,6 +385,12 @@ class Handler(BaseHTTPRequestHandler):
             self._respond(text("✅ 已完成：MOF-5 实验报告已生成并上传 Qraft。"))
             return
         if "计划" in last_user:
+            # CodeRabbit（9-11）：计划被取消后不得继续推进状态机
+            # （cancelled 也满足 n_plan>=1 会误发 web_search）
+            if last.get("status") == "cancelled":
+                print("  [mock] PlanCard 取消 → 结束", flush=True)
+                self._respond(text("好的，已取消该计划。"))
+                return
             if n_plan == 0:
                 print("  [mock] PlanCard 分支 → ask_user_plan_confirm", flush=True)
                 self._respond(tc("ask_user_plan_confirm", {

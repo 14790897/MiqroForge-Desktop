@@ -47,9 +47,9 @@ export function sanitizeUiMessage(raw: string): string {
     return '上一个任务还在进行中，请稍候片刻或新开一个会话。';
   }
   // #646-v2 实测（2026-08-17）：Turn 内部错误——统一中文提示（此前英文直出）
-  if (lower.includes('turn task failed') || lower.includes('internal error')) {
-    return '任务执行失败（内部错误）。请查看运行时日志后重试。';
-  }
+  // CodeRabbit（9-11）：裸 'internal error' 太宽（'500 internal error' /
+  // 'Internal error: no api key configured' 都会被吞成内部错误）——收窄为
+  // 后端特定标记，且凭据检查优先（no api key 的引导不能被它吞掉）。
   // Missing/invalid provider credential — must be checked BEFORE the bridge
   // checks: Electron wraps every chat:send failure as "Error invoking remote
   // method 'chat:send': …", so the real cause would otherwise be swallowed and
@@ -60,6 +60,9 @@ export function sanitizeUiMessage(raw: string): string {
     lower.includes('api key not configured')
   ) {
     return '未配置 API Key，请前往 设置 > 模型 配置后再试。';
+  }
+  if (lower.includes('turn task failed') || lower.includes('internal_error')) {
+    return '任务执行失败（内部错误）。请查看运行时日志后重试。';
   }
   // Only treat genuine bridge-down signals as "runtime not started". The
   // generic "error invoking remote method 'chat:send'" prefix appears on ANY

@@ -152,7 +152,7 @@ async def main():
         print("final_content:", (result.final_content or "")[:120])
         print("tools_used:", result.tools_used)
         print("provider rounds:", provider.calls)
-        ok = provider.calls == 4 and result.final_content.startswith("✅")
+        ok = provider.calls == 4 and (result.final_content or "").startswith("✅")
         print("\n>>> 127 复现：", "PASS（回合完整推进）" if ok else "FAIL（回合未推进到 R4）")
     except asyncio.TimeoutError:
         print(f"\n=== TIMEOUT 60s（provider rounds={provider.calls}）——回合卡住 ===")

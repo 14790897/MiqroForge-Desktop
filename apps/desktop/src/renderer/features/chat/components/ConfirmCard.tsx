@@ -148,13 +148,15 @@ export function ConfirmCard({
     choice: HermesConfirmChoice,
     rememberMode?: 'session' | 'always' | null
   ) => {
-    if (choice === 'confirm' && confirmChoice) onResolve(confirmChoice.id, rememberMode);
-    else if (choice === 'modify' && adjustChoice) onResolve(adjustChoice.id, rememberMode);
-    else if (choice === 'deny' && cancelChoice) onResolve(cancelChoice.id, rememberMode);
-    // session/always 档：确认按钮 + remember（HermesConfirmBar 内部处理 rememberMode）
-    else if (choice === 'confirm')
+    // CodeRabbit（9-11）：'session'/'always' 档此前无分支——卡挂死到超时；
+    // 语义等同确认（rememberMode 作为记忆档传下去）。
+    if (choice === 'confirm' || choice === 'session' || choice === 'always') {
       onResolve(confirmChoice?.id ?? choices[0]?.id ?? '', rememberMode);
-    else if (choice === 'deny') onResolve(cancelChoice?.id ?? '', rememberMode);
+    } else if (choice === 'modify') {
+      onResolve(adjustChoice?.id ?? 'modify', rememberMode);
+    } else if (choice === 'deny') {
+      onResolve(cancelChoice?.id ?? 'cancel', rememberMode);
+    }
   };
 
   const runLabel = confirmChoice?.label ?? '确认';

@@ -92,23 +92,32 @@ export function HermesConfirmBar({
   // MiQi 差异：输入框永远正常（用户定稿）——输入框/输入控件聚焦时快捷键让位，
   // 否则用户发新消息（Ctrl+Enter）会误触发确认卡（Hermes 原版 composer 被审批条
   // 替换、无此冲突）。
+  // CodeRabbit（9-11）：busyNow 闭包可能过期——用 ref 读最新值，避免二次
+  // resolve 同一张卡（submitting 变化不会重建 effect）。
+  const busyRef = useRef(busyNow);
+  busyRef.current = busyNow;
   useEffect(() => {
     if (confirmAlways) return;
-    const onKeyDown = (event: KeyboardEvent) => {
+    const onKeyDown = (event: KeyboardEvent & { __miqiResolved?: boolean }) => {
+      // CodeRabbit（9-11）：多张卡同时挂载时每个 bar 都监听 window——同一事件
+      // 只允许第一个 bar 处理（标记法），避免一次 Esc 拒绝所有卡。
+      if (event.__miqiResolved) return;
       const target = event.target as HTMLElement | null;
       const tag = target?.tagName ?? '';
       const editing = tag === 'TEXTAREA' || tag === 'INPUT' || target?.isContentEditable === true;
       if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
         if (editing) return; // 输入框快捷键（发送）优先
         event.preventDefault();
-        if (!busyNow) {
+        event.__miqiResolved = true;
+        if (!busyRef.current) {
           setSubmitting('confirm');
           onResolve('confirm');
         }
       } else if (event.key === 'Escape') {
         if (editing) return; // 输入框 Esc 不拒绝
         event.preventDefault();
-        if (!busyNow) {
+        event.__miqiResolved = true;
+        if (!busyRef.current) {
           setSubmitting('deny');
           onResolve('deny');
         }

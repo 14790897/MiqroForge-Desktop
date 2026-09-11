@@ -163,10 +163,12 @@ export function UserInputProvider({ children }: { children: ReactNode }) {
           return {
             ...prev,
             [turnId]: {
-              title: (raw.title as string) ?? 'AI 正在执行任务',
-              goal: (raw.goal as string) ?? '',
-              steps: [],
-              permissions: [],
+              // CodeRabbit（9-11）：todo_state 事件晚于 timeline 时不得清空
+              // steps/permissions/phase——合并保留，仅刷新 todoItems
+              title: (raw.title as string) ?? current?.title ?? 'AI 正在执行任务',
+              goal: (raw.goal as string) ?? current?.goal ?? '',
+              steps: current?.steps ?? [],
+              permissions: current?.permissions ?? [],
               todoItems: Array.isArray(raw.items)
                 ? raw.items.map((it: any) => ({
                     id: String(it?.id ?? ''),
@@ -174,6 +176,7 @@ export function UserInputProvider({ children }: { children: ReactNode }) {
                     status: String(it?.status ?? 'queued'),
                   }))
                 : [],
+              phase: current?.phase ?? 'running',
               todoRevision: revision,
             },
           };
