@@ -169,6 +169,9 @@ export function ConfirmCard({
             runLabel={runLabel}
             onResolve={handleBarResolve}
             allowModify={!!adjustChoice}
+            // 权限契约（外部复核 9-11）：后端 allow_remember_choice=false 时
+            // 不得暴露「本会话允许」——否则前端可越权写入 session remember。
+            allowSession={req.allow_remember_choice === true}
             denyLabel={cancelChoice?.label ?? '取消'}
             description={req.message || undefined}
           />

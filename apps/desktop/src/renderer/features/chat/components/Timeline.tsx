@@ -19,6 +19,12 @@ const PERM_META: Record<string, { icon: string; label: string }> = {
   workspace_write: { icon: '📄', label: '创建/修改文件' },
   exec: { icon: '⚙️', label: '执行命令' },
   external_upload: { icon: '⬆️', label: '外部上传' },
+  // 权限语义细分（外部复核 9-11）：删除/支付/外发/进程不再统一标"外部上传"
+  external_delete: { icon: '🗑️', label: '删除文件' },
+  external_message: { icon: '✉️', label: '外发消息' },
+  payment: { icon: '💳', label: '支付' },
+  process_spawn: { icon: '🚀', label: '启动进程' },
+  external_other: { icon: '🌐', label: '外部操作' },
 };
 
 function StepList({ entry }: { entry: TimelineEntry }) {

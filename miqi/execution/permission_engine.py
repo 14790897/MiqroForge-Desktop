@@ -120,11 +120,75 @@ class PermissionEngine:
         deny_patterns: set[str] | None = None,
         session_allowlist: set[str] | None = None,
         approval_bypass: Any | None = None,
+        action_guard_resolver: Any | None = None,
     ):
         self.permanent_allowlist = permanent_allowlist or set()
         self.deny_patterns = deny_patterns or set()
         self.session_allowlist = session_allowlist or set()
         self.approval_bypass = approval_bypass
+        # Action Guard（外部复核 9-11）：高危外部副作用（risk>=10：上传/支付/
+        # 破坏性删除/外发消息/spawn）在真实派发前强制确认——resolver 即
+        # user_input_gate 弹卡通道（无则为 headless，走 APPROVAL_REQUIRED）。
+        self.action_guard_resolver = action_guard_resolver
+        # 会话级去重：同一 thread 内已确认过的同类动作不再重复弹卡。
+        self._action_guard_confirmed: set[str] = set()
+
+    async def _action_guard(self, ctx: Any) -> "PermissionDecision | None":
+        """fail-closed：should_confirm_action 命中的动作未经用户确认不得执行。
+
+        不依赖模型自觉先调 request_action_confirmation——在真实执行边界兜底。
+        """
+        try:
+            from miqi.execution.task_policy import should_confirm_action
+            if not should_confirm_action(ctx.tool_name, getattr(ctx, "arguments", None) or {}):
+                return None
+        except Exception:
+            return None
+        key = f"{getattr(ctx, 'thread_id', '')}:{ctx.tool_name}"
+        if key in self._action_guard_confirmed:
+            return None
+        if self.action_guard_resolver is None:
+            # headless/CLI：无弹卡通道——不静默放行，交给常规审批流显式要求。
+            return PermissionDecision(
+                verdict=PermissionVerdict.APPROVAL_REQUIRED,
+                category="run",
+                reason="危险动作需要确认（Action Guard）",
+                description=f"危险动作确认 · {ctx.tool_name}",
+                allow_permanent=False,
+            )
+        try:
+            result = await self.action_guard_resolver(
+                {
+                    "title": "危险动作确认",
+                    "message": f"模型请求执行高危动作：{ctx.tool_name}。确认后才真正执行。",
+                    "choices": [
+                        {"id": "confirm", "label": "允许执行", "role": "confirm"},
+                        {"id": "cancel", "label": "拒绝", "role": "cancel"},
+                    ],
+                    "allow_remember_choice": False,
+                    "thread_id": getattr(ctx, "thread_id", ""),
+                    "turn_id": getattr(ctx, "turn_id", ""),
+                    "tool_name": ctx.tool_name,
+                }
+            )
+        except Exception as exc:  # noqa: BLE001
+            return PermissionDecision(
+                verdict=PermissionVerdict.DENY,
+                reason=f"行动确认通道失败（fail-closed）：{exc}",
+            )
+        answers = result.get("answers") if isinstance(result, dict) else None
+        if (
+            isinstance(result, dict)
+            and result.get("status") == "submitted"
+            and isinstance(answers, dict)
+            and answers.get("choice_id") == "confirm"
+        ):
+            self._action_guard_confirmed.add(key)
+            return None
+        return PermissionDecision(
+            verdict=PermissionVerdict.DENY,
+            reason="用户未确认危险动作（Action Guard）",
+        )
 
     async def check(self, ctx: Any) -> PermissionDecision:
         tool_name = ctx.tool_name
@@ -161,6 +225,12 @@ class PermissionEngine:
                 allow_permanent=False,
                 description=f"手动模式 · {detail}",
             )
+
+        # Action Guard（外部复核 9-11，fail-closed）：高危外部副作用在真实派发前
+        # 强制确认——模型不先调 request_action_confirmation 也无法绕过。
+        guard_decision = await self._action_guard(ctx)
+        if guard_decision is not None:
+            return guard_decision
 
         cmd_key = self._make_key(ctx)
         if cmd_key in self.session_allowlist:

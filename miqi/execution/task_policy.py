@@ -312,13 +312,31 @@ def plan_card_steps(tool_calls: list[tuple[str, str]]) -> list[dict[str, str]]:
     return steps
 
 
+# 权限类别细分（外部复核 9-11）：EXTERNAL phase 不全是"上传"——删除/支付/
+# 外发消息/进程 spawn 需要各自语义，避免 PlanCard 权限摘要与实际副作用不符。
+_EXTERNAL_PERMISSION_BY_TOOL: dict[str, str] = {
+    "upload": "external_upload",
+    "upload_run": "external_upload",
+    "qraft_upload": "external_upload",
+    "delete_file": "external_delete",
+    "delete_dir": "external_delete",
+    "remove_file": "external_delete",
+    "rm": "external_delete",
+    "payment": "payment",
+    "send_message": "external_message",
+    "spawn": "process_spawn",
+}
+
+
 def permissions_for_tools(tool_calls: list[str]) -> list[str]:
     """Convert tool capabilities into user-facing permission categories."""
     perms: list[str] = []
     for tool_name in tool_calls:
         phase = phase_for_tool(tool_name)
-        if phase == PHASE_EXTERNAL and "external_upload" not in perms:
-            perms.append("external_upload")
+        if phase == PHASE_EXTERNAL:
+            perm = _EXTERNAL_PERMISSION_BY_TOOL.get(tool_name, "external_other")
+            if perm not in perms:
+                perms.append(perm)
         elif phase == PHASE_EXEC and "exec" not in perms:
             perms.append("exec")
         elif phase == PHASE_WRITE and "workspace_write" not in perms:

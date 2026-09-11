@@ -18,7 +18,12 @@ const PERM_LABELS: Record<string, string> = {
   shell: '命令',
   exec: '命令',
   external_upload: '外部',
+  external_delete: '删除',
+  external_message: '外发',
   external_send: '外发',
+  payment: '支付',
+  process_spawn: '启动进程',
+  external_other: '外部',
 };
 
 function compactPermissions(permissions: string[]): string[] {
