@@ -21,6 +21,8 @@
 
 import { test, expect } from '@playwright/test';
 import type { ElectronApplication, Page } from '@playwright/test';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import {
   sendMessage,
   createNewConversation,
@@ -34,6 +36,17 @@ const HAS_CREDS =
   !!process.env.QRAFT_PHONE && !!process.env.QRAFT_PASSWORD && !!process.env.DEEPSEEK_API_KEY;
 
 const describeFn = HAS_CREDS ? test.describe : test.describe.skip;
+
+/** 读桥日志（<MIQI_HOME>/workspace/logs/bridge-*.log）拼接文本。 */
+function readBridgeLog(miqiHome: string): string {
+  const dir = join(miqiHome, 'workspace', 'logs');
+  if (!existsSync(dir)) return '';
+  return readdirSync(dir)
+    .filter((f) => /^bridge-\d{4}-\d{2}-\d{2}\.log$/.test(f))
+    .sort()
+    .map((f) => readFileSync(join(dir, f), 'utf8'))
+    .join('\n');
+}
 
 /** 轮询处理审批弹窗与确认卡，直到 ready() 为真或超时。 */
 async function driveUntilReady(page: Page, ready: () => Promise<boolean>, timeout = 300_000) {
@@ -142,6 +155,15 @@ describeFn('托管 slurm MCP 网关 live E2E（opt-in）', () => {
           .catch(() => '')) ?? '';
       expect(text).toContain('mcp_miqroforge-slurm_submit_slurm_job');
       expect(text).not.toContain('内容安全策略拦截');
+
+      // 6. 提交确实**成功**（不止工具名出现）：桥日志里 submit 工具返回
+      //    success:true + 非空 job_id。失败/被拒的提交不会带这两项，也不会
+      //    产生作业 → 上一步的扣费断言同样不会成立（双重兜底）。
+      const log = readBridgeLog(fixture.miqiHome);
+      expect(log, 'submit_slurm_job 应返回成功结果（success:true）').toMatch(
+        /submit_slurm_job done \([^)]*\): result prefix='[^']*"success":\s*true/
+      );
+      expect(log, '提交结果应含非空 job_id').toMatch(/"job_id":\s*"\d+"/);
 
       await page.screenshot({
         path: 'test-results/slurm-billing-hosted-charge.png',
