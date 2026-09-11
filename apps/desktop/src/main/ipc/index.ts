@@ -2389,10 +2389,29 @@ for m in ("pydantic", "httpx", "loguru"):
       wanted: number;
     }
   >();
-  /** 我们自己 setBounds 的**目标宽度**。resize 事件到达时实际宽度与它一致 → 认定是
-   *  我们引起的。不用时间窗：setBounds 到 resize 派发的延迟取决于 OS，固定 150ms
-   *  的因果判断会在派发延迟时把我们自己的改动误判成用户调整，进而污染下面的基线。 */
-  const expectedSelfWidth = new WeakMap<BrowserWindow, number>();
+  /** 我们自己 setBounds 产生的、**尚未被 resize 事件消费**的宽度集合。
+   *  用集合而不是单个值：连续两次 setBounds 时后一次会覆盖前一次的目标，而
+   *  Electron 不保证 resize 事件的合并与顺序 —— 第一个事件可能在后一个目标写进来
+   *  之后才到，单值就会把它判成「用户拖的」并污染 W_user。集合让每个事件各自
+   *  认领一次。也不用时间窗：setBounds 到 resize 派发的延迟取决于 OS。 */
+  const pendingSelfWidths = new WeakMap<BrowserWindow, Set<number>>();
+  const markSelfResize = (win: BrowserWindow, width: number) => {
+    let s = pendingSelfWidths.get(win);
+    if (!s) {
+      s = new Set();
+      pendingSelfWidths.set(win, s);
+    }
+    // 对应不上的陈旧条目没有价值，别让它无限增长
+    if (s.size > 8) s.clear();
+    s.add(width);
+  };
+  /** 该宽度是否由我们自己引起；是则消费掉这一次（返回 true）。 */
+  const consumeSelfResize = (win: BrowserWindow, width: number): boolean => {
+    const s = pendingSelfWidths.get(win);
+    if (!s || !s.has(width)) return false;
+    s.delete(width);
+    return true;
+  };
   /** 用户期望的窗口宽度 W_user，满足 W_actual = W_user + rec.extra。
    *  记的不是「用户设的总宽」而是**扣掉面板那部分之后**的基线 —— 否则用户在面板
    *  开着时拖窗，会把面板的 280 一起吸收进基线，之后关面板一像素都收不回来。 */
@@ -2414,11 +2433,7 @@ for m in ("pydantic", "httpx", "loguru"):
     win.on('resize', () => {
       if (win.isDestroyed()) return;
       const w = win.getBounds().width;
-      const expected = expectedSelfWidth.get(win);
-      if (expected !== undefined && w === expected) {
-        expectedSelfWidth.delete(win); // 我们自己设的那次，用掉一次
-        return;
-      }
+      if (consumeSelfResize(win, w)) return; // 我们自己设的那次，消费掉
       // 用户拖的：把增量记到 W_user 上（扣掉面板当前占用的 extra）
       const rec = panelExtraByWin.get(win);
       userWidth.set(win, Math.max(0, w - (rec?.extra ?? 0)));
@@ -2441,7 +2456,7 @@ for m in ("pydantic", "httpx", "loguru"):
         const grown = growRight + growLeft;
         if (grown > 0) {
           const nextWidth = b.width + grown;
-          expectedSelfWidth.set(win, nextWidth);
+          markSelfResize(win, nextWidth);
           win.setBounds({ x: b.x - growLeft, y: b.y, width: nextWidth, height: b.height });
           rec.right += growRight;
           rec.left += growLeft;
@@ -2465,7 +2480,7 @@ for m in ("pydantic", "httpx", "loguru"):
         const removed = remLeft + remRight;
         if (removed > 0) {
           const nextWidth = b.width - removed;
-          expectedSelfWidth.set(win, nextWidth);
+          markSelfResize(win, nextWidth);
           win.setBounds({ x: b.x + remLeft, y: b.y, width: nextWidth, height: b.height });
           rec.left = Math.max(0, rec.left - remLeft);
           rec.right = Math.max(0, rec.right - remRight);
