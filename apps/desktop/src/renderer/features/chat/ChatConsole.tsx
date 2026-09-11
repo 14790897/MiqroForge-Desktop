@@ -4455,6 +4455,13 @@ export function ChatConsole({
       // #922/#1000：网关状态先取一次，供「未登录 → 登录引导」与
       // 「已登录但网关未就绪 → 网关提示」两个分支共用。旧 preload/
       // smoke mock 无 qraft 命名空间时为 null（视为未登录）。
+      //
+      // ⚠️ 这三个卡口（重登 / 网关门禁 / 无可用模型）都是 **await 之后** 才判定的，
+      // 而 handleAbort 会把本会话的 pending id 覆盖成 tombstone 0。若期间用户
+      // 中断了本次发送，陈旧结果再回来就会：删掉 pending 记录、清掉
+      // streamingBySession、并把**已取消**的乐观气泡换成拦截卡。所以三个分支
+      // 都必须先过 isCurrentPendingSend —— 失守时一律落到下面那条守卫，
+      // 由它按「本次发送已作废」删气泡、还输入框。
       const gatewayStatus =
         typeof window.miqi.qraft?.status === 'function'
           ? await window.miqi.qraft.status().catch(() => null)
@@ -4466,7 +4473,11 @@ export function ChatConsole({
       // 快照读取失败（qraft.status() 抛错）时回退到订阅状态 refs，拦截不失效。
       const gatewayLoggedIn = gatewayStatus?.loggedIn ?? loggedInRef.current;
       const gatewayRequiresRelogin = gatewayStatus?.requiresRelogin ?? requiresReloginRef.current;
-      if (gatewayLoggedIn && gatewayRequiresRelogin) {
+      if (
+        gatewayLoggedIn &&
+        gatewayRequiresRelogin &&
+        isCurrentPendingSend(sendSessionKey, thisSendId)
+      ) {
         pendingSendIdsRef.current.delete(sendSessionKey);
         streamingBySession.delete(sendSessionKey);
         setSendingFor(sendSessionKey, null);
@@ -4491,7 +4502,8 @@ export function ChatConsole({
       if (
         gatewayStatus?.loggedIn === true &&
         gatewayStatus.aiGateway &&
-        gatewayStatus.aiGateway.status !== 'active'
+        gatewayStatus.aiGateway.status !== 'active' &&
+        isCurrentPendingSend(sendSessionKey, thisSendId)
       ) {
         pendingSendIdsRef.current.delete(sendSessionKey);
         streamingBySession.delete(sendSessionKey);
@@ -4519,7 +4531,11 @@ export function ChatConsole({
       // 时回退到 configured（保持原行为）。
       const modelServable =
         result.active_model_resolvable ?? result.providers.some((provider) => provider.configured);
-      if (!modelServable) {
+      // 与上面两个网关卡口同一个道理：providers.list() 也是 await 出来的，
+      // 期间用户可能已中断或又发了新消息 —— 陈旧结果不能去动 pending/streaming，
+      // 更不能把已取消的乐观气泡替换成引导卡。失守时落到下面那条
+      // isCurrentPendingSend 守卫，由它按「本次发送已作废」收尾。
+      if (!modelServable && isCurrentPendingSend(sendSessionKey, thisSendId)) {
         // No servable model — replace the optimistic bubble with the
         // provider-config guidance.  The send is refused: the user should
         // configure a provider before sending.  The draft is restored to the

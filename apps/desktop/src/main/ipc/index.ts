@@ -2381,6 +2381,24 @@ for m in ("pydantic", "httpx", "loguru"):
     BrowserWindow,
     { extra: number; left: number; right: number }
   >();
+  /** 我们自己 setBounds 的「静默窗口」：这段时间内到达的 resize 事件算我们引起的。
+   *  用时间窗而不是比对宽度——OS 可能对我们的宽度做钳制，比对会把我们自己的改动
+   *  误判成用户调整。 */
+  const selfResizeUntil = new WeakMap<BrowserWindow, number>();
+  /** 用户最后一次**自己**拖动窗口边缘时的宽度，作为收窄时的下界。 */
+  const userFloorWidth = new WeakMap<BrowserWindow, number>();
+  const userResizeWatched = new WeakSet<BrowserWindow>();
+  /** 每窗口挂一次 resize 监听，用来识别「用户自己改了窗口宽度」。 */
+  const watchUserResize = (win: BrowserWindow) => {
+    if (userResizeWatched.has(win)) return;
+    userResizeWatched.add(win);
+    selfResizeUntil.set(win, 0);
+    win.on('resize', () => {
+      if (win.isDestroyed()) return;
+      if (Date.now() < (selfResizeUntil.get(win) ?? 0)) return; // 我们自己设的
+      userFloorWidth.set(win, win.getBounds().width);
+    });
+  };
   ipcMain.handle(IPC.APP_PANEL_EXTRA, (event, raw: unknown) => {
     const win = electron.BrowserWindow.fromWebContents(event.sender);
     if (
@@ -2392,6 +2410,7 @@ for m in ("pydantic", "httpx", "loguru"):
     ) {
       return { ok: false, applied: 0, skipped: true };
     }
+    watchUserResize(win);
     const target = Math.max(
       0,
       Math.round(typeof raw === 'number' && Number.isFinite(raw) ? raw : 0)
@@ -2407,6 +2426,7 @@ for m in ("pydantic", "httpx", "loguru"):
         const growLeft = Math.min(delta - growRight, Math.max(0, b.x - wa.x));
         const grown = growRight + growLeft;
         if (grown > 0) {
+          selfResizeUntil.set(win, Date.now() + 150);
           win.setBounds({ x: b.x - growLeft, y: b.y, width: b.width + grown, height: b.height });
           rec.right += growRight;
           rec.left += growLeft;
@@ -2414,14 +2434,23 @@ for m in ("pydantic", "httpx", "loguru"):
         }
       } else {
         // 收窄:先还左借位再收右侧,总量不越过最小宽(minWidth)。绝不主动抹掉
-        // 用户自己拉宽的窗口(仅收回本面板实际加宽的 px)。
-        const maxRemove = Math.max(0, b.width - win.getMinimumSize()[0]);
+        // 用户自己拉宽的窗口——仅收回本面板实际加宽的 px。
+        //
+        // 但「哪 280px 是面板加的」在用户手动拖过窗口之后就分不出来了：窗口从
+        // 1560 被用户拉到 1780 时，那 280px 已经混进用户设定的宽度里。所以再以
+        // 用户最后一次自己调出的宽度为下界，收窄不得越过它——否则用户刚拉到的
+        // 1780 会被「关闭面板」减成 1500，与上面这句承诺直接冲突。
+        const floor = userFloorWidth.get(win);
+        const userRoom =
+          floor === undefined ? Number.POSITIVE_INFINITY : Math.max(0, b.width - floor);
+        const maxRemove = Math.min(Math.max(0, b.width - win.getMinimumSize()[0]), userRoom);
         let remove = Math.min(-delta, rec.extra);
         const remLeft = Math.min(remove, rec.left, maxRemove);
         remove -= remLeft;
         const remRight = Math.min(remove, rec.right, maxRemove - remLeft);
         const removed = remLeft + remRight;
         if (removed > 0) {
+          selfResizeUntil.set(win, Date.now() + 150);
           win.setBounds({ x: b.x + remLeft, y: b.y, width: b.width - removed, height: b.height });
           rec.left = Math.max(0, rec.left - remLeft);
           rec.right = Math.max(0, rec.right - remRight);
