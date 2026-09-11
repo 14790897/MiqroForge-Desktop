@@ -2381,22 +2381,30 @@ for m in ("pydantic", "httpx", "loguru"):
     BrowserWindow,
     { extra: number; left: number; right: number }
   >();
-  /** 我们自己 setBounds 的「静默窗口」：这段时间内到达的 resize 事件算我们引起的。
-   *  用时间窗而不是比对宽度——OS 可能对我们的宽度做钳制，比对会把我们自己的改动
-   *  误判成用户调整。 */
-  const selfResizeUntil = new WeakMap<BrowserWindow, number>();
-  /** 用户最后一次**自己**拖动窗口边缘时的宽度，作为收窄时的下界。 */
-  const userFloorWidth = new WeakMap<BrowserWindow, number>();
+  /** 我们自己 setBounds 的**目标宽度**。resize 事件到达时实际宽度与它一致 → 认定是
+   *  我们引起的。不用时间窗：setBounds 到 resize 派发的延迟取决于 OS，固定 150ms
+   *  的因果判断会在派发延迟时把我们自己的改动误判成用户调整，进而污染下面的基线。 */
+  const expectedSelfWidth = new WeakMap<BrowserWindow, number>();
+  /** 用户期望的窗口宽度 W_user，满足 W_actual = W_user + rec.extra。
+   *  记的不是「用户设的总宽」而是**扣掉面板那部分之后**的基线 —— 否则用户在面板
+   *  开着时拖窗，会把面板的 280 一起吸收进基线，之后关面板一像素都收不回来。 */
+  const userWidth = new WeakMap<BrowserWindow, number>();
   const userResizeWatched = new WeakSet<BrowserWindow>();
   /** 每窗口挂一次 resize 监听，用来识别「用户自己改了窗口宽度」。 */
   const watchUserResize = (win: BrowserWindow) => {
     if (userResizeWatched.has(win)) return;
     userResizeWatched.add(win);
-    selfResizeUntil.set(win, 0);
     win.on('resize', () => {
       if (win.isDestroyed()) return;
-      if (Date.now() < (selfResizeUntil.get(win) ?? 0)) return; // 我们自己设的
-      userFloorWidth.set(win, win.getBounds().width);
+      const w = win.getBounds().width;
+      const expected = expectedSelfWidth.get(win);
+      if (expected !== undefined && w === expected) {
+        expectedSelfWidth.delete(win); // 我们自己设的那次，用掉一次
+        return;
+      }
+      // 用户拖的：把增量记到 W_user 上（扣掉面板当前占用的 extra）
+      const rec = panelExtraByWin.get(win);
+      userWidth.set(win, Math.max(0, w - (rec?.extra ?? 0)));
     });
   };
   ipcMain.handle(IPC.APP_PANEL_EXTRA, (event, raw: unknown) => {
@@ -2426,8 +2434,9 @@ for m in ("pydantic", "httpx", "loguru"):
         const growLeft = Math.min(delta - growRight, Math.max(0, b.x - wa.x));
         const grown = growRight + growLeft;
         if (grown > 0) {
-          selfResizeUntil.set(win, Date.now() + 150);
-          win.setBounds({ x: b.x - growLeft, y: b.y, width: b.width + grown, height: b.height });
+          const nextWidth = b.width + grown;
+          expectedSelfWidth.set(win, nextWidth);
+          win.setBounds({ x: b.x - growLeft, y: b.y, width: nextWidth, height: b.height });
           rec.right += growRight;
           rec.left += growLeft;
           rec.extra += grown;
@@ -2436,13 +2445,12 @@ for m in ("pydantic", "httpx", "loguru"):
         // 收窄:先还左借位再收右侧,总量不越过最小宽(minWidth)。绝不主动抹掉
         // 用户自己拉宽的窗口——仅收回本面板实际加宽的 px。
         //
-        // 但「哪 280px 是面板加的」在用户手动拖过窗口之后就分不出来了：窗口从
-        // 1560 被用户拉到 1780 时，那 280px 已经混进用户设定的宽度里。所以再以
-        // 用户最后一次自己调出的宽度为下界，收窄不得越过它——否则用户刚拉到的
-        // 1780 会被「关闭面板」减成 1500，与上面这句承诺直接冲突。
-        const floor = userFloorWidth.get(win);
+        // 用户在面板开着时拖窗，那个增量已经记进 W_user（见 watchUserResize），
+        // 所以这里以 W_user 为下界收窄：面板那 280px 收得回来，用户自己加的
+        // 那部分不会被一起吃掉。W_actual = W_user + rec.extra 是这一段的模型。
+        const userW = userWidth.get(win);
         const userRoom =
-          floor === undefined ? Number.POSITIVE_INFINITY : Math.max(0, b.width - floor);
+          userW === undefined ? Number.POSITIVE_INFINITY : Math.max(0, b.width - userW);
         const maxRemove = Math.min(Math.max(0, b.width - win.getMinimumSize()[0]), userRoom);
         let remove = Math.min(-delta, rec.extra);
         const remLeft = Math.min(remove, rec.left, maxRemove);
@@ -2450,8 +2458,9 @@ for m in ("pydantic", "httpx", "loguru"):
         const remRight = Math.min(remove, rec.right, maxRemove - remLeft);
         const removed = remLeft + remRight;
         if (removed > 0) {
-          selfResizeUntil.set(win, Date.now() + 150);
-          win.setBounds({ x: b.x + remLeft, y: b.y, width: b.width - removed, height: b.height });
+          const nextWidth = b.width - removed;
+          expectedSelfWidth.set(win, nextWidth);
+          win.setBounds({ x: b.x + remLeft, y: b.y, width: nextWidth, height: b.height });
           rec.left = Math.max(0, rec.left - remLeft);
           rec.right = Math.max(0, rec.right - remRight);
           rec.extra = Math.max(0, rec.extra - removed);
