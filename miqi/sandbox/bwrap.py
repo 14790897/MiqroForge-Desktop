@@ -58,6 +58,113 @@ class BwrapSandboxError(Exception):
     """Error raised when bwrap operations fail."""
 
 
+def _host_path_to_sandbox(path: str) -> str:
+    """Map a host path to the path bwrap must bind it at (#984).
+
+    ``C:\\x`` → ``/mnt/c/x``; a WSL-native path is already usable and is
+    returned unchanged.  Anything else (UNC, relative) cannot be mapped and
+    raises — a per-call writable bind must never be silently dropped, or the
+    command would run without the write access it was granted.
+
+    A drive path must be drive-ABSOLUTE (``C:/…``).  The drive-relative
+    spellings Windows accepts (``C:``, ``C:relative``) mean "relative to
+    that drive's current directory" and have no fixed sandbox target; the
+    old ``p[1] == ":"`` test mapped them to ``/mnt/c`` / ``/mnt/crelative``
+    — a bind of a path nobody named (review #1007).
+
+    Deliberately local: importing ``miqi.sandbox.manager.windows_path_to_mnt``
+    at module scope is circular (``manager`` imports this module at line 45).
+    """
+    p = str(path).replace("\\", "/")
+    if len(p) >= 3 and p[1] == ":" and p[2] in "/\\":
+        return "/mnt/" + p[0].lower() + p[2:]
+    if p.startswith("//"):
+        raise BwrapSandboxError(
+            f"Cannot bind UNC path into the sandbox: {path}"
+        )
+    if not p.startswith("/"):
+        raise BwrapSandboxError(
+            f"Cannot bind relative path into the sandbox: {path}"
+        )
+    return p
+
+
+def _bind_key(path: str) -> str:
+    """Comparison key for a bind path (``/``-joined, case-folded on Windows).
+
+    ``os.path.normcase`` is identity on POSIX (paths stay case-sensitive) and
+    lower-cases + flips separators on Windows — the same normalisation
+    ``ExecTool._exec_rw_binds`` uses to de-duplicate its bind set, so a
+    comparison here matches what actually reached the mount list.
+    """
+    return os.path.normcase(str(path)).replace("\\", "/").rstrip("/")
+
+
+def _is_same_or_ancestor(parent: str, child: str) -> bool:
+    """True when *child* is *parent* itself or lives under it.
+
+    Path-boundary aware: ``…/workspace`` is NOT an ancestor of
+    ``…/workspace-other`` (a plain ``startswith`` would say it is).
+    """
+    p = _bind_key(parent)
+    c = _bind_key(child)
+    return c == p or c.startswith(p.rstrip("/") + "/")
+
+
+def _cross_session_guard_args(
+    workspace_root: str | None,
+    session_files_dir: str | None,
+    rw_sources: list[str],
+) -> list[str]:
+    """Mount args that keep OTHER sessions' directories read-only (#1007).
+
+    Layer 1 re-opens the workspace root writable with a hard ``--bind``, and
+    ``<workspace>/sessions/**`` lives underneath it — so session A's exec
+    could write session B's files, undoing both the per-session containment
+    checks and layer 2's read-only ``/mnt``.  bwrap applies mounts in order,
+    so a later ``--ro-bind`` of ``<workspace>/sessions`` wins over the earlier
+    rw bind; the current session's own files dir is then re-opened with a
+    later ``--bind`` so normal work keeps working.
+
+    Deliberately conditional:
+
+    * only when the workspace root (or one of its ancestors) is actually in
+      the rw bind set — otherwise there is nothing to protect and the old arg
+      list is emitted unchanged;
+    * only when ``session_files_dir`` is given AND sits under
+      ``<workspace>/sessions``.  That is the per-session files layout, which
+      ``filesystem._session_files_dir_for_key`` establishes for the DEFAULT
+      workspace only; a custom workspace has no per-session files area, and
+      its ``<project>/sessions`` may be the project's own directory — turning
+      that read-only inside exec would break legitimate work.
+
+    The guard mount is ``--ro-bind-try``: it only ever NARROWS, and a missing
+    ``sessions`` dir means there are no session dirs to protect, so a hard
+    bind would fail every command for nothing.  The re-open is a hard
+    ``--bind`` and only for a path already in the rw set (an existing,
+    authorized source).
+    """
+    if not workspace_root or not session_files_dir:
+        return []
+    try:
+        ws = _host_path_to_sandbox(workspace_root)
+        own = _host_path_to_sandbox(session_files_dir)
+    except BwrapSandboxError:
+        # UNC / drive-relative / relative — not bindable, same rule the bind
+        # sources themselves follow.
+        return []
+    if not any(_is_same_or_ancestor(src, ws) for src in rw_sources):
+        return []
+    sessions = ws.rstrip("/") + "/sessions"
+    if not _is_same_or_ancestor(sessions, own):
+        return []
+    args = ["--ro-bind-try", sessions, sessions]
+    if any(_bind_key(src) == _bind_key(own) for src in rw_sources):
+        # After the ro-bind → the current session's area stays writable.
+        args.extend(["--bind", own, own])
+    return args
+
+
 _auto_install_cache: dict[str, bool] = {}
 """Cache auto-install results per distro to avoid repeated apt-get calls."""
 
@@ -1391,8 +1498,21 @@ class BwrapSandbox:
         timeout: float = 60.0,
         env: dict[str, str] | None = None,
         cwd: str | None = None,
+        extra_rw_binds: list[str] | None = None,
+        workspace_root: str | None = None,
+        session_files_dir: str | None = None,
     ) -> tuple[int, str, str]:
         """Run a command inside the bwrap sandbox.
+
+        Args:
+            extra_rw_binds: PER-CALL host paths to bind writable for this
+                command only (#984) — the session's authorized output dirs.
+                They do not modify the sandbox; see :meth:`_build_bwrap_args`.
+            workspace_root: Host path of the workspace root, when the caller
+                knows it — enables the cross-session read-only guard (#1007).
+            session_files_dir: Host path of THIS session's files dir; it is
+                re-opened writable after that guard.  Neither kwarg alone
+                disables anything else: ``None`` reproduces the old args.
 
         Returns:
             (exit_code, stdout, stderr)
@@ -1422,7 +1542,10 @@ class BwrapSandbox:
                 )
             logger.info("Sandbox directories recreated for {}", self.session_key)
 
-        bwrap_args = self._build_bwrap_args(command, env=env, cwd=cwd)
+        bwrap_args = self._build_bwrap_args(
+            command, env=env, cwd=cwd, extra_rw_binds=extra_rw_binds,
+            workspace_root=workspace_root, session_files_dir=session_files_dir,
+        )
 
         exit_code = -1
         stdout = ""
@@ -1519,6 +1642,9 @@ class BwrapSandbox:
         command: str,
         env: dict[str, str] | None = None,
         cwd: str | None = None,
+        extra_rw_binds: list[str] | None = None,
+        workspace_root: str | None = None,
+        session_files_dir: str | None = None,
     ) -> BwrapCommandHandle:
         """Run a command inside the bwrap sandbox with streaming I/O.
 
@@ -1534,6 +1660,11 @@ class BwrapSandbox:
         The caller also owns timeout and cancellation — use
         :meth:`BwrapCommandHandle.kill` to stop a running command.
 
+        ``extra_rw_binds`` are per-call writable host paths (#984), same
+        semantics as :meth:`run_command`; ``workspace_root`` /
+        ``session_files_dir`` feed the cross-session read-only guard
+        (#1007 review), same semantics as :meth:`run_command` too.
+
         Returns:
             BwrapCommandHandle with .stdout, .stderr, .wait(), .kill(),
             and .cleanup().
@@ -1544,7 +1675,10 @@ class BwrapSandbox:
         if not self._running or not self._bwrap_path:
             raise BwrapSandboxError("Sandbox not started")
 
-        bwrap_args = self._build_bwrap_args(command, env=env, cwd=cwd)
+        bwrap_args = self._build_bwrap_args(
+            command, env=env, cwd=cwd, extra_rw_binds=extra_rw_binds,
+            workspace_root=workspace_root, session_files_dir=session_files_dir,
+        )
 
         if not hasattr(self, '_streaming_handles'):
             self._streaming_handles: list[BwrapCommandHandle] = []
@@ -1734,6 +1868,9 @@ class BwrapSandbox:
         command: str,
         env: dict[str, str] | None = None,
         cwd: str | None = None,
+        extra_rw_binds: list[str] | None = None,
+        workspace_root: str | None = None,
+        session_files_dir: str | None = None,
     ) -> list[str]:
         """Build the full bwrap argument list.
 
@@ -1741,6 +1878,20 @@ class BwrapSandbox:
         shell quoting needed because each argument is passed separately.
 
         On WSL, this list is directly appended after ``wsl.exe -d distro --``.
+
+        ``extra_rw_binds`` are PER-CALL host paths (issue #984) that must be
+        writable for this one command — the workspace, static extra roots and
+        the turn's authorized output dirs.  They are converted to their
+        sandbox paths and hard ``--bind``-ed after the read-only ``/mnt``
+        mount, so a missing or unmappable source fails loudly instead of
+        silently running without the granted write access.
+
+        ``workspace_root`` / ``session_files_dir`` (host paths, #1007 review)
+        feed the cross-session guard: when the workspace root is in the rw
+        set, ``<workspace>/sessions`` is re-mounted READ-ONLY after it (other
+        sessions live there) and this session's own files dir is re-opened
+        writable after THAT — see :func:`_cross_session_guard_args`.  Both
+        default to ``None``, which keeps the previous argument list exactly.
 
         The sandbox layout:
         /usr, /bin, /lib, etc — read-only bind mounts from host
@@ -1785,8 +1936,13 @@ class BwrapSandbox:
         # Windows files are accessible via /mnt/c, /mnt/d, etc. in WSL.
         # We need to bind-mount /mnt so the sandbox can access the
         # workspace files that live on the Windows filesystem.
+        # READ-ONLY since #984: the whole Windows user data area used to be
+        # writable through this one mount, so a python `open(..., "w")`
+        # bypassed the shell write guard.  Writable paths are re-opened
+        # below with an explicit hard --bind (workspace, extra roots,
+        # per-call authorized dirs).
         if self._use_wsl:
-            args.extend(["--bind-try", "/mnt", "/mnt"])
+            args.extend(["--ro-bind-try", "/mnt", "/mnt"])
 
         # ── Writable overlays ───────────────────────────────────────
         args.extend(["--tmpfs", "/tmp"])
@@ -1814,6 +1970,26 @@ class BwrapSandbox:
             args.extend(["--ro-bind", src, src])
         for src in self.extra_rw_binds:
             args.extend(["--bind", src, src])
+
+        # ── Per-call writable binds (#984) ──────────────────────────
+        # These land AFTER the read-only ``/mnt`` mount above, so a later
+        # bind re-opens exactly the authorized subtrees.  Hard ``--bind``,
+        # never ``--bind-try``: a missing/unmappable source must fail the
+        # command loudly instead of silently running without the write
+        # access the caller granted (and without falling back to the host).
+        rw_sources: list[str] = list(self.extra_rw_binds)
+        for raw in extra_rw_binds or []:
+            src = _host_path_to_sandbox(raw)
+            rw_sources.append(src)
+            args.extend(["--bind", src, src])
+
+        # ── Cross-session guard (#1007 review) ──────────────────────
+        # ``<workspace>/sessions`` was re-opened writable by the bind above;
+        # close it again (later mount wins) and keep only THIS session's own
+        # files dir writable.
+        args.extend(_cross_session_guard_args(
+            workspace_root, session_files_dir, rw_sources,
+        ))
 
         # ── Die with parent ─────────────────────────────────────────
         args.append("--die-with-parent")

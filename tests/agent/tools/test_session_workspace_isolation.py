@@ -519,7 +519,8 @@ async def test_write_file_wsl_sandbox_redirects_absolute_root_path(tmp_path):
         def __init__(self):
             self.calls = []
 
-        async def run_command(self, cmd, timeout=30):
+        async def run_command(self, cmd, timeout=30, **kwargs):
+            # **kwargs mirrors BwrapSandbox.run_command (extra_rw_binds, #984)
             self.calls.append(cmd)
             if cmd.startswith("test "):
                 return (1, "", "")  # target does not exist yet

@@ -139,6 +139,7 @@ class AgentControl:
         label: str | None = None,
         fork_history: bool = False,
         model_override: str | None = None,
+        user_roots: list[str] | None = None,
     ) -> LiveAgent:
         """Spawn a new agent to handle a task.
 
@@ -149,6 +150,9 @@ class AgentControl:
             label: Human-readable task label
             fork_history: Whether to copy parent's conversation history
             model_override: Override the default model for this agent
+            user_roots: #984 — the parent turn's authorized output roots,
+                inherited by the sub-agent (job path only; the legacy
+                ``_run_agent`` path has no root source).
 
         Returns:
             LiveAgent handle for the spawned agent
@@ -181,6 +185,7 @@ class AgentControl:
                 agent_type=agent_type,
                 task=task,
                 parent_thread_id=parent_agent_id or self.session_id,
+                user_roots=user_roots,
             )
             agent_id = job.job_id
             thread_id = job.thread_id
@@ -608,19 +613,14 @@ class AgentControl:
                             client_id=turn_ctx.client_id,
                             session_id=turn_ctx.session_id,
                         )
-                        # #821: sub-agents inherit the parent task's
-                        # user-mentioned output dirs (the spawn prompt usually
-                        # echoes them).
-                        try:
-                            from miqi.agent.tools.user_roots import extract_user_mentioned_roots
-
-                            ctx.user_mentioned_roots = [
-                                str(r) for r in extract_user_mentioned_roots(
-                                    [task], workspace=self.workspace,
-                                )
-                            ]
-                        except Exception:
-                            ctx.user_mentioned_roots = []
+                        # #984: the legacy path no longer re-extracts roots
+                        # from the spawn task text.  The task is model-authored
+                        # (the model can echo any path it likes into it), so
+                        # extraction here re-opened the injection channel #821
+                        # closed.  Roots now travel explicitly through
+                        # AgentJob.user_roots on the job path; a legacy
+                        # sub-agent gets no roots (documented behaviour
+                        # change, plan v5 §3).
                         ctx = await self._orchestrator.execute(ctx)
                         result = ctx.result or ""
                         success = ctx.status == OrchestrationResult.SUCCESS
