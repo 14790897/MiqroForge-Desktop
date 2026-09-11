@@ -96,7 +96,9 @@ def test_summary_structure():
     assert s["total"] == 3
     assert s["completed"] == 1
     assert s["in_progress"] == ["分析"]
-    assert s["pending"] == 2
+    # CodeRabbit（9-11）：实现语义 pending=queued（8b51ae25）——a/b 已 in_progress、
+    # a 已 completed，queued 只剩 c → pending == 1
+    assert s["pending"] == 1
 
 
 def test_observed_source_item():
@@ -116,4 +118,6 @@ def test_approved_scope_structured():
     )
     plan = PlanSnapshot(plan_id="p1", goal="g", steps=[("a", "s")], approved_scope=scope)
     assert plan.approved_scope.external_actions[0].provider == "qraft"
-    assert plan.approved_scope.artifacts[0]["name"] == "report.docx"
+    # CodeRabbit（9-11）：normalize 后 artifacts 是 ArtifactRef 值对象（97a1bf20）——
+    # 属性访问，非 dict 下标
+    assert plan.approved_scope.artifacts[0].name == "report.docx"
