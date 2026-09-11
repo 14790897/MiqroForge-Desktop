@@ -80,10 +80,20 @@ class SpawnTool(Tool):
                 "Legacy SubagentManager fallback is disabled."
             )
 
+        # #984: the parent turn's authorized roots travel with the job so the
+        # sub-agent's exec/file tools can write where the user asked.  The
+        # task text is NOT scanned for paths — it is model-authored, and
+        # re-extracting from it would re-open the injection channel #821
+        # deliberately closed (see TurnContext.is_subagent).
+        user_roots = [
+            str(r) for r in (kwargs.pop("_user_roots", None) or [])
+        ]
+
         agent = await self._agent_control.spawn(
             agent_type="code-agent",
             task=task,
             label=display_label,
+            user_roots=user_roots,
         )
         logger.info(
             "Subagent spawned via AgentControl: {} ({})",
