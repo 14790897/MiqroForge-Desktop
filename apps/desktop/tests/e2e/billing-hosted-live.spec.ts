@@ -1,25 +1,30 @@
 /**
- * 托管 slurm MCP 网关计费 live E2E（opt-in，需真实登录 + 可用 LLM 凭据；
+ * 托管 slurm MCP 网关 live E2E（opt-in，需真实登录 + 可用 LLM 凭据；
  * CI 无凭据自动跳过）：
  *   真实登录 → 内置 miqroforge-slurm（http + insecure_http 默认放行）→
- *   真实 LLM 调用 mcp_miqroforge-slurm_submit_slurm_job 提交作业 →
- *   check_job_status 轮询到 RUNNING → Desktop 扣 10 积分 → 聊天区提示。
+ *   真实 LLM 在**自然提示词**下自主发现并调用 slurm MCP 提交作业 → 确认卡
+ *   确认 → 作业提交并执行。
+ *
+ * 断言「模型能自主发现 mcp_miqroforge-slurm_* 工具并提交作业」+「出现扣费提示」。
+ * 计费在作业进入可扣费状态（RUNNING 或 COMPLETED）时触发——快作业从 PENDING
+ * 直接到 COMPLETED 也能扣分（2026-09-11 修复：原先只认 RUNNING，快作业漏扣；
+ * FAILED/TIMEOUT/CANCELLED 不计费）。
  *
  * 与 billing-live.spec.ts 的区别：后者走自部署本地回环服务器（127.0.0.1）
  * + 显式 Bearer header；本 spec 走 #1029 开启的内置托管网关（登录态注入
- * 共享 mcpGatewayKey，零配置）。覆盖「登录后调托管 slurm MCP + 计费」全链。
+ * 共享 mcpGatewayKey，零配置）。
  *
- * Run（真实消耗：测试账号 10 积分 + 一个集群作业）：
+ * Run（真实消耗：一个集群作业）：
  *   QRAFT_PHONE=… QRAFT_PASSWORD=… DEEPSEEK_API_KEY=… npx playwright test \
  *     --config=playwright.config.ts --project=electron tests/e2e/billing-hosted-live.spec.ts
  */
 
 import { test, expect } from '@playwright/test';
 import type { ElectronApplication, Page } from '@playwright/test';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import {
-  LLM_TIMEOUT,
   sendMessage,
-  waitForResponseComplete,
   createNewConversation,
   launchElectronApp,
   closeElectronApp,
@@ -32,25 +37,46 @@ const HAS_CREDS =
 
 const describeFn = HAS_CREDS ? test.describe : test.describe.skip;
 
-async function approveLoop(page: Page, timeout = 180_000) {
-  const deadline = Date.now() + timeout;
-  while (Date.now() < deadline) {
-    const btn = page
-      .getByRole('button', { name: '持久允许' })
-      .or(page.getByRole('button', { name: '永久允许' }));
-    if (await btn.isVisible({ timeout: 1000 }).catch(() => false)) {
-      await btn.click();
-    }
-    const thinking = await page
-      .getByText('Thinking…')
-      .isVisible()
-      .catch(() => false);
-    if (!thinking) break;
-    await page.waitForTimeout(1000);
-  }
+/** 读桥日志（<MIQI_HOME>/workspace/logs/bridge-*.log）拼接文本。 */
+function readBridgeLog(miqiHome: string): string {
+  const dir = join(miqiHome, 'workspace', 'logs');
+  if (!existsSync(dir)) return '';
+  return readdirSync(dir)
+    .filter((f) => /^bridge-\d{4}-\d{2}-\d{2}\.log$/.test(f))
+    .sort()
+    .map((f) => readFileSync(join(dir, f), 'utf8'))
+    .join('\n');
 }
 
-describeFn('托管 slurm MCP 网关计费 live E2E（opt-in）', () => {
+/** 轮询处理审批弹窗与确认卡，直到 ready() 为真或超时。 */
+async function driveUntilReady(page: Page, ready: () => Promise<boolean>, timeout = 300_000) {
+  const deadline = Date.now() + timeout;
+  while (Date.now() < deadline) {
+    if (await ready()) return true;
+    // 审批弹窗（工具执行授权）
+    const allow = page
+      .getByRole('button', { name: '持久允许' })
+      .or(page.getByRole('button', { name: '永久允许' }));
+    if (await allow.isVisible({ timeout: 300 }).catch(() => false)) {
+      await allow
+        .first()
+        .click()
+        .catch(() => {});
+    }
+    // 确认卡（ask_user_confirm_card）：点主按钮「确认提交」
+    const primary = page.getByTestId('confirm-card-primary');
+    if (await primary.isVisible({ timeout: 300 }).catch(() => false)) {
+      await primary
+        .first()
+        .click()
+        .catch(() => {});
+    }
+    await page.waitForTimeout(1500);
+  }
+  return ready();
+}
+
+describeFn('托管 slurm MCP 网关 live E2E（opt-in）', () => {
   let fixture: ElectronFixture;
   let electronApp: ElectronApplication;
   let page: Page;
@@ -86,7 +112,7 @@ describeFn('托管 slurm MCP 网关计费 live E2E（opt-in）', () => {
   });
 
   test(
-    '真实登录 → 托管 slurm MCP 提交作业 → RUNNING 扣 10 积分 → 聊天区提示',
+    '真实登录 → 自然提示词 → 模型自主发现并调用 slurm MCP 提交作业',
     { timeout: 360_000 },
     async () => {
       // 1. 设置页真实登录（幂等：dev userData 可能残留上次登录态）
@@ -101,19 +127,25 @@ describeFn('托管 slurm MCP 网关计费 live E2E（opt-in）', () => {
       }
       await expect(loggedInBadge).toBeVisible({ timeout: 90_000 });
 
-      // 2. 新会话 + 预授权（避免审批卡住工具执行）
+      // 2. 新会话 + 预授权
       await createNewConversation(page);
       await page.evaluate(() => (window as any).miqi.approvals.addPermanent('*:*', 'always'));
 
-      // 3. 指示模型用托管网关工具提交作业并轮询到 RUNNING
-      //（工具注册名为 mcp_miqroforge-slurm_<tool>；只提交一次避免多作业噪音）
-      await sendMessage(
+      // 3. 自然提示词——不点名工具名，模型需自行发现 slurm MCP 并提交
+      await sendMessage(page, '使用slurm提交任意一个任务');
+
+      // 4. 驱动确认卡/审批，直到扣费提示出现（作业进入可扣费状态：
+      //    RUNNING 或已执行终态 COMPLETED/FAILED/TIMEOUT）
+      const charged = await driveUntilReady(
         page,
-        '使用 mcp_miqroforge-slurm_submit_slurm_job 工具提交作业（script 参数用 ' +
-          '"#!/bin/bash\\nsleep 30\\nhostname"，保证轮询时作业仍在运行），只提交一次，不要重复提交。' +
-          '然后用 mcp_miqroforge-slurm_check_job_status 轮询该作业，直到状态为 RUNNING 后，最后只回复 DONE_SLURM'
+        async () =>
+          await page
+            .getByText(/已扣 10 积分/)
+            .first()
+            .isVisible()
+            .catch(() => false)
       );
-      await approveLoop(page);
+      expect(charged, '应出现「已扣 10 积分」扣费提示').toBe(true);
 
       // 4. RUNNING 扣费提示（10 积分）——出现即截图，作为证据
       await expect(page.getByText(/已扣 10 积分/).first()).toBeVisible({ timeout: 300_000 });
@@ -122,15 +154,29 @@ describeFn('托管 slurm MCP 网关计费 live E2E（opt-in）', () => {
         fullPage: true,
       });
 
-      // 5. 回合正常收尾
-      await waitForResponseComplete(page, 300_000);
-      await expect(
-        page
-          .getByTestId('chat-message-assistant')
-          .getByText(/DONE_SLURM/)
-          .first()
-      ).toBeVisible({ timeout: 30_000 });
+      // 5. 模型自主发现并调用了 slurm MCP 提交作业
+      const text =
+        (await page
+          .locator('main')
+          .textContent()
+          .catch(() => '')) ?? '';
+      expect(text).toContain('mcp_miqroforge-slurm_submit_slurm_job');
+      expect(text).not.toContain('内容安全策略拦截');
 
+      // 6. 提交确实**成功**（不止工具名出现）：桥日志里 submit 工具返回
+      //    success:true + 非空 job_id。失败/被拒的提交不会带这两项，也不会
+      //    产生作业 → 上一步的扣费断言同样不会成立（双重兜底）。
+      const log = readBridgeLog(fixture.miqiHome);
+      expect(log, 'submit_slurm_job 应返回成功结果（success:true）').toMatch(
+        /submit_slurm_job done \([^)]*\): result prefix='[^']*"success":\s*true/
+      );
+      expect(log, '提交结果应含非空 job_id').toMatch(/"job_id":\s*"\d+"/);
+
+      await page.screenshot({
+        path: 'test-results/slurm-billing-hosted-charge.png',
+        fullPage: true,
+      });
+      await expect(page.getByText(/已扣 10 积分/).first()).toBeVisible({ timeout: 30_000 });
       await page.screenshot({ path: 'test-results/slurm-billing-hosted-live.png', fullPage: true });
     }
   );
