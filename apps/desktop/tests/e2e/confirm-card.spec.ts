@@ -29,6 +29,7 @@ import {
   createNewConversation,
   APPS_DESKTOP,
 } from './helpers/electron-setup';
+import { patchConfigForMock } from './helpers/mock-openai';
 
 const REPO_ROOT = join(APPS_DESKTOP, '..', '..');
 
@@ -102,16 +103,11 @@ test.describe('Confirm Card (ask_user_confirm_card)', () => {
     // depends on the model in agents.defaults (CI uses siliconflow), so
     // patching a single provider would leak real API calls in CI. The mock
     // ignores model names and API keys.
-    const fixture = await launchElectronApp((config: any) => {
-      const providers = config.providers ?? {};
-      for (const [name, p] of Object.entries(providers)) {
-        if (p && typeof p === 'object') {
-          (p as any).apiBase = mock.mockUrl;
-          if (!(p as any).apiKey) (p as any).apiKey = 'mock-key';
-        }
-      }
-      config.providers = providers;
-    });
+    // 门禁（#1000/#1025）：显式注入 deepseek mock provider + 默认模型，
+    // 否则 active_model_resolvable=false 会被发送拦截（详见 patchConfigForMock）。
+    const fixture = await launchElectronApp((config: any) =>
+      patchConfigForMock(config, mock.mockUrl)
+    );
     electronApp = fixture.electronApp;
     page = fixture.page;
     miqiHome = fixture.miqiHome;

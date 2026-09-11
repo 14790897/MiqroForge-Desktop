@@ -19,95 +19,13 @@ import {
   createNewConversation,
   APPS_DESKTOP,
 } from './helpers/electron-setup';
-
-const REPO_ROOT = join(APPS_DESKTOP, '..', '..');
-
-async function waitForTcpListener(port: number): Promise<void> {
-  const deadline = Date.now() + 30_000;
-  while (Date.now() < deadline) {
-    await new Promise<void>((resolve) => {
-      const socket = createConnection({ host: '127.0.0.1', port });
-      const finish = () => {
-        socket.removeAllListeners();
-        socket.destroy();
-        resolve();
-      };
-      socket.once('connect', finish);
-      socket.once('error', finish);
-      socket.setTimeout(1000, finish);
-    });
-    // A successful TCP connect is a direct readiness signal; unlike a
-    // child-process stdout pipe it does not depend on Python stdout delivery.
-    // Re-probe until the server is actually accepting connections.
-    const probe = await new Promise<boolean>((resolve) => {
-      const socket = createConnection({ host: '127.0.0.1', port });
-      const ok = () => {
-        socket.destroy();
-        resolve(true);
-      };
-      const fail = () => {
-        socket.destroy();
-        resolve(false);
-      };
-      socket.once('connect', ok);
-      socket.once('error', fail);
-      socket.setTimeout(1000, fail);
-    });
-    if (probe) return;
-    await new Promise((r) => setTimeout(r, 250));
-  }
-  throw new Error(
-    `mock OpenAI server did not accept TCP connections on 127.0.0.1:${port} within 30s`
-  );
-}
-
-async function startMockOpenAI(): Promise<{ proc: ChildProcess; mockUrl: string }> {
-  const python = process.env.MIQI_PYTHON_PATH || 'python';
-  const port = 20000 + Math.floor(Math.random() * 20000);
-  const proc = spawn(python, [join(REPO_ROOT, 'scripts', 'mock_openai.py'), String(port)], {
-    cwd: REPO_ROOT,
-    stdio: ['ignore', 'pipe', 'pipe'],
-    env: { ...process.env, PYTHONUNBUFFERED: '1' },
-    windowsHide: true,
-  });
-  let stderrTail = '';
-  proc.stdout?.on('data', (d) => console.log(`[mock] ${String(d).trim()}`));
-  proc.stderr?.on('data', (d) => {
-    stderrTail = (stderrTail + String(d)).slice(-2000);
-    console.log(`[mock-err] ${String(d).trim()}`);
-  });
-  proc.on('exit', (code) => console.log(`[test] mock server exited: ${code}`));
-
-  const startupDeadline = Date.now() + 30_000;
-  while (proc.exitCode === null && Date.now() < startupDeadline) {
-    try {
-      await waitForTcpListener(port);
-      const mockUrl = `http://127.0.0.1:${port}/v1`;
-      console.log(`[test] mock OpenAI server ready at ${mockUrl}`);
-      return { proc, mockUrl };
-    } catch {
-      await new Promise((r) => setTimeout(r, 250));
-    }
-  }
-  if (proc.exitCode !== null) {
-    throw new Error(`mock OpenAI server exited early (code ${proc.exitCode}): ${stderrTail}`);
-  }
-  proc.kill();
-  throw new Error(`mock OpenAI server did not become ready in 30s: ${stderrTail}`);
-}
+import { startMockOpenAI, patchConfigForMock } from './helpers/mock-openai';
 
 async function launchWithMock() {
   const mock = await startMockOpenAI();
-  const fixture = await launchElectronApp((config: any) => {
-    const providers = config.providers ?? {};
-    for (const [name, provider] of Object.entries(providers)) {
-      if (provider && typeof provider === 'object') {
-        (provider as any).apiBase = mock.mockUrl;
-        if (!(provider as any).apiKey) (provider as any).apiKey = 'mock-key';
-      }
-    }
-    config.providers = providers;
-  });
+  const fixture = await launchElectronApp((config: any) =>
+    patchConfigForMock(config, mock.mockUrl)
+  );
   return { ...fixture, mockServer: mock.proc };
 }
 
@@ -125,7 +43,7 @@ test.describe('Plan Card (#646-v2)', () => {
       await expect(planCard).toBeVisible({ timeout: 60_000 });
       await expect(planCard.getByText('生成 MOF-5 实验报告')).toBeVisible();
       await expect(planCard.getByText('搜集论文资料')).toBeVisible();
-      await expect(planCard.getByText('上传到 Qraft')).toBeVisible();
+      await expect(planCard.getByText('上传到 Qraft').first()).toBeVisible();
       await expect(planCard.getByText('网络')).toBeVisible();
       await expect(planCard.getByText('外部')).toBeVisible();
       await expect(planCard.getByTestId('plan-confirm')).toBeVisible();

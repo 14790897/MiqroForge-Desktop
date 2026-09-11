@@ -27,66 +27,7 @@ import {
   createNewConversation,
   APPS_DESKTOP,
 } from './helpers/electron-setup';
-
-const REPO_ROOT = join(APPS_DESKTOP, '..', '..');
-
-async function waitForTcpListener(port: number): Promise<void> {
-  const deadline = Date.now() + 30_000;
-  while (Date.now() < deadline) {
-    const connected = await new Promise<boolean>((resolve) => {
-      const socket = createConnection({ host: '127.0.0.1', port });
-      socket.once('connect', () => {
-        socket.destroy();
-        resolve(true);
-      });
-      socket.once('error', () => {
-        socket.destroy();
-        resolve(false);
-      });
-      socket.setTimeout(1000, () => {
-        socket.destroy();
-        resolve(false);
-      });
-    });
-    if (connected) return;
-    await new Promise((r) => setTimeout(r, 250));
-  }
-  throw new Error(
-    `mock OpenAI server did not accept TCP connections on 127.0.0.1:${port} within 30s`
-  );
-}
-
-async function startMockOpenAI(): Promise<{ proc: ChildProcess; mockUrl: string }> {
-  const python = process.env.MIQI_PYTHON_PATH || 'python';
-  const port = 20000 + Math.floor(Math.random() * 20000);
-  const proc = spawn(python, [join(REPO_ROOT, 'scripts', 'mock_openai.py'), String(port)], {
-    cwd: REPO_ROOT,
-    stdio: ['ignore', 'pipe', 'pipe'],
-    env: { ...process.env, PYTHONUNBUFFERED: '1' },
-    windowsHide: true,
-  });
-  let stderrTail = '';
-  proc.stdout?.on('data', (d) => console.log(`[mock] ${String(d).trim()}`));
-  proc.stderr?.on('data', (d) => {
-    stderrTail = (stderrTail + String(d)).slice(-2000);
-    console.log(`[mock-err] ${String(d).trim()}`);
-  });
-  proc.on('exit', (code) => console.log(`[test] mock server exited: ${code}`));
-
-  try {
-    await waitForTcpListener(port);
-  } catch (error) {
-    if (proc.exitCode !== null) {
-      throw new Error(`mock OpenAI server exited early (code ${proc.exitCode}): ${stderrTail}`);
-    }
-    proc.kill();
-    throw error;
-  }
-
-  const mockUrl = `http://127.0.0.1:${port}/v1`;
-  console.log(`[test] mock OpenAI server ready at ${mockUrl}`);
-  return { proc, mockUrl };
-}
+import { startMockOpenAI, patchConfigForMock } from './helpers/mock-openai';
 
 test.describe('Auto Timeline (#646-v2)', () => {
   let electronApp: ElectronApplication;
@@ -97,16 +38,9 @@ test.describe('Auto Timeline (#646-v2)', () => {
   test.beforeAll(async () => {
     const mock = await startMockOpenAI();
     mockServer = mock.proc;
-    const fixture = await launchElectronApp((config: any) => {
-      const providers = config.providers ?? {};
-      for (const [name, p] of Object.entries(providers)) {
-        if (p && typeof p === 'object') {
-          (p as any).apiBase = mock.mockUrl;
-          if (!(p as any).apiKey) (p as any).apiKey = 'mock-key';
-        }
-      }
-      config.providers = providers;
-    });
+    const fixture = await launchElectronApp((config: any) =>
+      patchConfigForMock(config, mock.mockUrl)
+    );
     electronApp = fixture.electronApp;
     page = fixture.page;
     miqiHome = fixture.miqiHome;

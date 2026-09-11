@@ -111,18 +111,31 @@ export async function sendUntilDoneOrProviderDown(
 ): Promise<boolean> {
   const { maxAttempts = 2, perAttemptWaitMs = 150_000, silenceExtendMs = 150_000 } = opts;
   const errLocator = page.getByText(PROVIDER_UNAVAILABLE_TEXT);
+  // 门禁（#1000/#1025）：未登录/无可用模型时发送被 fail-fast 拦下，
+  // 消息被替换成登录引导气泡——这不是 provider 错误，也不是回归。
+  const gateLocator = page.getByText('尚未登录平台账号');
+  if ((await gateLocator.count()) > 0) return false;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     // Snapshot BEFORE the send: an error that surfaces during sendMessage
     // itself must count as this attempt's error. Error bubbles from earlier
     // attempts stay in the message list, so match by count delta — only an
     // error that appeared after this snapshot counts.
     const errCountBefore = await errLocator.count();
-    await sendMessage(page, text);
+    // 发送被拦（未配置/不可用的 provider → 门禁 fail-fast，user 气泡根本
+    // 不会挂载）时，sendMessage 内部的计数断言会抛错——按「provider 不可用」
+    // 处理，返回 false 让调用方 skip，而不是把环境问题当成回归 fail。
+    try {
+      await sendMessage(page, text);
+    } catch {
+      return false;
+    }
     let sawError = false;
 
     let deadline = Date.now() + perAttemptWaitMs;
     while (Date.now() < deadline) {
       if (await isDone()) return true;
+      // 门禁引导气泡（发送后出现）——立即判定为不可用
+      if ((await gateLocator.count()) > 0) return false;
       if ((await errLocator.count()) > errCountBefore) {
         sawError = true;
         break;
@@ -137,6 +150,7 @@ export async function sendUntilDoneOrProviderDown(
       deadline = Date.now() + silenceExtendMs;
       while (Date.now() < deadline) {
         if (await isDone()) return true;
+        if ((await gateLocator.count()) > 0) return false;
         if ((await errLocator.count()) > errCountBefore) {
           sawError = true;
           break;

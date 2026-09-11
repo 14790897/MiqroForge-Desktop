@@ -45,7 +45,7 @@ test.describe('Confirm Card (real LLM)', () => {
     { timeout: LLM_TIMEOUT * 2 },
     async () => {
       // 2026-08-28：卡并进工具链（Hermes 式）——断言页面级 + 回执
-      const cardArea = page;
+      const cardCount = () => page.getByTestId('confirm-card').count();
 
       // 显式指令模型调用工具（真实 HTTP 请求到 provider）。macos-e2e 上共享
       // CI key 限流会让回合报「模型服务暂时不可用」——重发一次；全失败则跳过
@@ -55,7 +55,7 @@ test.describe('Confirm Card (real LLM)', () => {
         '请立即调用 ask_user_confirm_card 工具弹出确认卡片：' +
           'title 用「确认执行方案？」，message 用「开始前需要你确认以下计划」。' +
           '调用后收到结果时直接回复 OK。',
-        async () => (await cardArea.count()) > 0
+        async () => (await cardCount()) > 0
       );
       test.skip(
         !cardAppeared,
