@@ -3,9 +3,11 @@ import {
   useRef,
   useCallback,
   useMemo,
+  memo,
   forwardRef,
   useImperativeHandle,
   type KeyboardEvent,
+  type Ref,
 } from 'react';
 import { Textarea } from '../../components/ui/Textarea';
 import { ContextMenu, type ContextMenuAction } from '../../components/ContextMenu';
@@ -46,7 +48,7 @@ interface ComposerProps {
   onAbort: () => void;
 }
 
-export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Composer(
+function ComposerImpl(
   {
     streaming,
     hasAttachments,
@@ -61,8 +63,8 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     onAttachClick,
     onSubmit,
     onAbort,
-  },
-  ref
+  }: ComposerProps,
+  ref: Ref<ComposerHandle>
 ) {
   const [input, setInput] = useState('');
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -294,4 +296,13 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       </div>
     </div>
   );
-});
+}
+
+/**
+ * Memoized (#1042): a parent re-render — streaming frames, session switch, or
+ * any unrelated ChatConsole state — no longer re-renders the composer, as long
+ * as ChatConsole passes stable props (its handlers are useCallback-wrapped and
+ * onSubmit is memoized there too). Keystrokes already only touch the composer's
+ * own state; this closes the other direction.
+ */
+export const Composer = memo(forwardRef<ComposerHandle, ComposerProps>(ComposerImpl));
