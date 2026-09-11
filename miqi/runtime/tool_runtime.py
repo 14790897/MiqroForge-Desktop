@@ -160,8 +160,13 @@ class ToolRuntime:
             approved = self._confirmation_approved(ctx)
             if call.name == "ask_user_plan_confirm":
                 if approved:
+                    # A model-issued plan confirmation is a real approval
+                    # boundary too. Record the resolved decision so turn_runner
+                    # can freeze the approved PlanSnapshot/TodoState exactly
+                    # once, just like the harness-generated plan gate.
                     setattr(turn, "_plan_gate_blocked", False)
                     setattr(turn, "_plan_adjustment_pending", "")
+                    setattr(turn, "_plan_confirm_done", True)
                 else:
                     setattr(turn, "_plan_gate_blocked", True)
                     setattr(turn, "_plan_confirm_done", False)
