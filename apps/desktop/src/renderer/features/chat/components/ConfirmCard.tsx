@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef } from 'react';
+import React, { useEffect, useRef } from 'react';
 import { Check, X } from 'lucide-react';
 import type { ConfirmChoice, ConfirmStep, UserInputCardRequest } from '../../../../shared/ipc';
 import type { StepExecStatus, UserInputCardEntry } from '../../../contexts/UserInputContext';
