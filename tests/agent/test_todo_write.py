@@ -79,4 +79,5 @@ async def test_summary_prompt_shape():
     s = r["summary"]
     # 结构化短摘要：total/completed/in_progress/pending/blocked——无 source/kind
     assert set(s) == {"total", "completed", "in_progress", "pending", "blocked"}
-    assert s["total"] == 3 and s["pending"] == 3
+    # pending=queued 语义（8b51ae25）：a=in_progress、b/c=queued → pending == 2
+    assert s["total"] == 3 and s["pending"] == 2
