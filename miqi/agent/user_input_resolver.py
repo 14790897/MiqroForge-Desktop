@@ -95,12 +95,18 @@ def resolve_user_input(
     remember_mode: str = "session",
 ) -> bool:
     """Resolve a pending user-input request (called by the app handler)."""
-    # 审计（#646 原始需求 + PR Agent compliance）：记录确认卡调用时间/标题/用户选择。
+    # 审计只记录稳定元数据，避免把卡片正文或用户自由文本写入日志。
     req = _gate.pending_request(input_id)
     if req is not None:
+        choice_id = str((answers or {}).get("choice_id", ""))
+        choice_role = str((answers or {}).get("choice_role", ""))
         _logger.info(
-            "audit confirm-card resolved: input_id=%s title=%s choices=%s remember=%s",
-            input_id, (req.prompt or "")[:60], answers or {}, remember,
+            "audit confirm-card resolved: input_id=%s request_type=%s choice_id=%s choice_role=%s remember=%s",
+            input_id,
+            type(req).__name__,
+            choice_id,
+            choice_role,
+            remember,
         )
     return _gate.resolve(input_id, answers or {}, remember=remember, remember_mode=remember_mode)
 
