@@ -1055,16 +1055,29 @@ class SessionManager:
                 compacted += 1
         return compacted
 
-    def list_recent_workspaces(self, limit: int = 5, *, client_id: str | None = None) -> list[str]:
+    def list_recent_workspaces(
+        self,
+        limit: int = 5,
+        *,
+        client_id: str | None = None,
+        include_archived: bool = False,
+    ) -> list[str]:
         """Return distinct workspace paths from recent sessions, newest first.
 
         Filters out the default workspace path. Used by the frontend workspace picker.
         Scoped to client_id when provided.
+
+        include_archived: If True, archived sessions still contribute their
+            workspace.  Callers that ask "which root might hold a given
+            session's real data" need this — archive state says nothing about
+            where the folder copy lives (#956).
         """
         if limit <= 0:
             return []
         default_ws = str(self.workspace.expanduser().resolve())
-        sessions = self.list_sessions(client_id=client_id)
+        sessions = self.list_sessions(
+            include_archived=include_archived, client_id=client_id
+        )
         seen: set[str] = set()
         recent: list[str] = []
         for s in sessions:

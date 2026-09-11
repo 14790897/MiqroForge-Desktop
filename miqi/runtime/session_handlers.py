@@ -59,11 +59,21 @@ def _candidate_workspace_roots(
     folder root: the explicitly requested workspace plus workspaces recorded
     in other sessions' metadata (the recent-workspace list).  The default
     workspace is always excluded.
+
+    Archived sessions contribute their workspace too.  Archive state says
+    nothing about where a folder copy lives, and callers routinely discover
+    the root *after* the app-home stub changed state (#956): sessions.archive
+    marks the stub archived before resolving the folder copy, so an
+    active-only listing would drop the very root being searched for.
     """
     from miqi.session.manager import SessionManager
 
     raw_roots: list[str] = list(extra or [])
-    raw_roots.extend(sm.list_recent_workspaces(limit=25, client_id=client_id))
+    raw_roots.extend(
+        sm.list_recent_workspaces(
+            limit=25, client_id=client_id, include_archived=True,
+        )
+    )
 
     default_ws = str(Path(sm.workspace).expanduser().resolve())
     roots: list[Path] = []

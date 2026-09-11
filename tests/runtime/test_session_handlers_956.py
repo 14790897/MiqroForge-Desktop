@@ -279,3 +279,55 @@ async def test_sessions_delete_removes_folder_copy(monkeypatch, tmp_path):
     assert not [
         s for s in list_result["result"]["sessions"] if s.get("key") == "folder-session"
     ]
+
+
+# ── sessions.archive / sessions.list_archived ──────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_sessions_archive_reaches_folder_copy(monkeypatch, tmp_path):
+    """sessions.archive archives the folder-root copy and keeps it unarchivable.
+
+    sessions.archive marks the app-home stub archived *before* it locates the
+    folder copy, so root discovery must not be gated on archive state: an
+    active-only recent-workspace scan drops the stub, the folder copy is never
+    found, and it stays invisible to sessions.list_archived — leaving
+    sessions.unarchive no way to reach it (#956).
+    """
+    from miqi.runtime.app_server import ClientSessionRegistry
+    from miqi.runtime.session_handlers import (
+        sessions_archive_handler,
+        sessions_list_archived_handler,
+        sessions_list_handler,
+    )
+
+    app_home = tmp_path / "app-home"
+    folder_root = tmp_path / "task-folder"
+    app_home.mkdir(parents=True)
+    folder_root.mkdir(parents=True)
+    _install_app_home(monkeypatch, app_home)
+
+    _write_folder_session(folder_root, "folder-session", "client-1")
+    _write_app_home_stub(app_home, "folder-session", "client-1", folder_root)
+
+    registry = ClientSessionRegistry()
+    result = await sessions_archive_handler(
+        "req-1", {"session_key": "folder-session"}, "client-1", None, registry,
+    )
+    assert result["result"]["archived"] is True
+
+    # Archived under both roots: the folder scan must not surface it in the
+    # active list...
+    listed = await sessions_list_handler("req-1", {}, "client-1", None, registry)
+    assert not [
+        s for s in listed["result"]["sessions"] if s.get("key") == "folder-session"
+    ]
+
+    # ...and the archive must still find it, or unarchive has no way to reach
+    # the copy.  This is the assertion the ordering bug breaks.
+    archived = await sessions_list_archived_handler(
+        "req-1", {}, "client-1", None, registry,
+    )
+    assert [
+        s for s in archived["result"]["sessions"] if s.get("key") == "folder-session"
+    ]
