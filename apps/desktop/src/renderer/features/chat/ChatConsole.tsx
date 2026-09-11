@@ -31,7 +31,7 @@ import { Tooltip } from '../../components/ui/Tooltip';
 import { ContextMenu, type ContextMenuAction } from '../../components/ContextMenu';
 import { cn } from '../../lib/utils';
 import { Modal } from '../../components/shared';
-import { formatRelativeTime } from '../../lib/formatTime';
+import { formatRelativeTime, formatChatTime } from '../../lib/formatTime';
 import {
   ExecutionPolicySelector,
   type ExecutionPolicy,
@@ -620,6 +620,23 @@ function getDocIcon(name: string) {
       return FileType;
   }
 }
+
+/** 用户消息时间标签——自身维护分钟级 tick,避免 clockTick 传遍整棵
+ *  MessageBubble 树导致全局 memo 失效(外部审查 P2)。 */
+const TimestampLabel = memo(function TimestampLabel({ timestamp }: { timestamp: number }) {
+  const [, forceTick] = useState(0);
+  useEffect(() => {
+    const timer = window.setInterval(() => forceTick((n) => n + 1), 60_000);
+    return () => window.clearInterval(timer);
+  }, []);
+  const label = formatChatTime(timestamp);
+  if (!label) return null;
+  return (
+    <div className="w-full text-center pt-1 pb-0.5">
+      <span className="text-[11px] leading-none text-[var(--text-faint)] select-none">{label}</span>
+    </div>
+  );
+});
 
 function relativeTimeLabel(timestamp?: number | string | null, now = Date.now()): string {
   if (timestamp === undefined || timestamp === null) return '尚未更新';
@@ -4131,6 +4148,12 @@ export function ChatConsole({
    *  session's pending send.  Comparing the stored id against this closure's
    *  own id lets a superseded / re-sent / cancelled send know it lost the turn. */
   const pendingSendIdsRef = useRef<Map<string, number>>(new Map());
+  /** 编辑重答原子化(#828):handleSend 同步段的接受结果——
+   *  被 pending guard 等预检拒绝时标 'rejected',handleEdit 据此回滚截断。 */
+  const editSendOutcomeRef = useRef<'accepted' | 'rejected' | null>(null);
+  /** 编辑重答回滚点:异步预派发失败(无 provider / 网关非 active)时,
+   *  恢复截断前的完整消息列表并给出错误提示(CodeRabbit #1011)。 */
+  const editRollbackRef = useRef<{ snapshot: Message[]; sessionKey: string } | null>(null);
   /** Monotonic id for pendingSendIdsRef — distinguishes "this send" from any
    *  newer send that started for the same session. */
   const sendSeqRef = useRef(0);
@@ -4187,10 +4210,13 @@ export function ChatConsole({
     // setInput 后的渲染 flush（旧闭包读到的 input state 是旧值）。
     const programmaticText = programmaticTextRef.current;
     programmaticTextRef.current = null;
-    const text = (payload?.text ?? programmaticText ?? input).trim();
+    // payload(编辑重答/重试)文本原样发送,不经 trim —— 保留用户刻意的
+    // 首尾空格/换行(CodeRabbit #1011);trim 仅用于空输入校验。
+    const text = payload?.text ?? (programmaticText ?? input).trim();
     const atts = payload?.attachments ?? attachments;
-    if (!text && atts.length === 0 && !_resumeId) {
+    if (!text.trim() && atts.length === 0 && !_resumeId) {
       retryPayloadRef.current = null;
+      editSendOutcomeRef.current = 'rejected';
       return;
     }
     // 复杂问题 + 极速模式 → 提示建议切 🧠 深度研究（不阻断，可忽略）
@@ -4208,6 +4234,7 @@ export function ChatConsole({
       // A blocked regenerate must not leak its payload into the next manual
       // send — clear it before bailing (CodeRabbit #681).
       retryPayloadRef.current = null;
+      editSendOutcomeRef.current = 'rejected';
       return;
     }
     // Retry/regenerate: nudge the model to answer differently — the stored
@@ -4257,6 +4284,7 @@ export function ChatConsole({
 
     const wasStreaming = streaming;
     retryPayloadRef.current = null;
+    editSendOutcomeRef.current = 'accepted';
     // Unique id for THIS send, stored in the pending map.  A later send for
     // the same session overwrites it, so this closure can tell it lost the
     // turn (its provider check must not proceed).
@@ -4371,14 +4399,21 @@ export function ChatConsole({
         streamingBySession.delete(sendSessionKey);
         setSendingFor(sendSessionKey, null);
         if (currentSessionRef.current === sendSessionKey) {
+          const rollback = editRollbackRef.current;
+          editRollbackRef.current = null;
           setStreaming(false);
-          setMessages((prev) => {
-            const last = prev[prev.length - 1];
-            if (last?.timestamp === userMsg.timestamp) {
-              return [...prev.slice(0, -1), createGatewayBlockedMessage()];
-            }
-            return prev;
-          });
+          if (rollback && rollback.sessionKey === sendSessionKey) {
+            // 编辑重答:恢复截断前的完整列表,错误提示追加在末尾(#1011)
+            setMessages([...rollback.snapshot, createGatewayBlockedMessage()]);
+          } else {
+            setMessages((prev) => {
+              const last = prev[prev.length - 1];
+              if (last?.timestamp === userMsg.timestamp) {
+                return [...prev.slice(0, -1), createGatewayBlockedMessage()];
+              }
+              return prev;
+            });
+          }
           setInput(text);
           setAttachments(atts);
         }
@@ -4419,14 +4454,21 @@ export function ChatConsole({
         streamingBySession.delete(sendSessionKey);
         setSendingFor(sendSessionKey, null);
         if (currentSessionRef.current === sendSessionKey) {
+          const rollback = editRollbackRef.current;
+          editRollbackRef.current = null;
           setStreaming(false);
-          setMessages((prev) => {
-            const last = prev[prev.length - 1];
-            if (last?.timestamp === userMsg.timestamp) {
-              return [...prev.slice(0, -1), guidance];
-            }
-            return prev;
-          });
+          if (rollback && rollback.sessionKey === sendSessionKey) {
+            // 编辑重答:恢复截断前的完整列表,错误提示追加在末尾(#1011)
+            setMessages([...rollback.snapshot, guidance]);
+          } else {
+            setMessages((prev) => {
+              const last = prev[prev.length - 1];
+              if (last?.timestamp === userMsg.timestamp) {
+                return [...prev.slice(0, -1), guidance];
+              }
+              return prev;
+            });
+          }
           setInput(text);
           setAttachments(atts);
         }
@@ -4447,16 +4489,26 @@ export function ChatConsole({
       streamingBySession.delete(sendSessionKey);
       setSendingFor(sendSessionKey, null);
       if (currentSessionRef.current === sendSessionKey) {
-        setMessages((prev) => {
-          const last = prev[prev.length - 1];
-          if (last?.timestamp === userMsg.timestamp) return prev.slice(0, -1);
-          return prev;
-        });
+        const rollback = editRollbackRef.current;
+        editRollbackRef.current = null;
+        if (rollback && rollback.sessionKey === sendSessionKey) {
+          // 编辑重答被 stop/superseded:恢复截断前的完整列表(#1011)
+          setMessages(rollback.snapshot);
+        } else {
+          setMessages((prev) => {
+            const last = prev[prev.length - 1];
+            if (last?.timestamp === userMsg.timestamp) return prev.slice(0, -1);
+            return prev;
+          });
+        }
         setInput(text);
         setAttachments(atts);
       }
       return;
     }
+
+    // 所有预派发检查通过 —— 发送真正开始,清掉编辑回滚点(防陈旧)
+    editRollbackRef.current = null;
 
     // If a reveal animation is still running from the previous response,
     // cancel it and abort the in-flight request so we can start fresh.  A
@@ -6259,6 +6311,45 @@ export function ChatConsole({
     [streaming]
   );
 
+  /* 编辑用户消息并重新回答(#828 学 Hermes edit → rewind → resubmit):
+     截断到该消息之前,用编辑后的文本重新发送 —— 复用 regenerate 机制。
+     原子化(外部审查 P1):发送前预检 pending guard;handleSend 若在同步段
+     被拒(editSendOutcomeRef='rejected'),回滚截断恢复原消息列表。 */
+  const handleEdit = useCallback(
+    async (original: Message, newText: string) => {
+      if (streaming) return;
+      // 预检:同 session 有 pending 发送时不得截断(截断后必然被 handleSend 拒绝)
+      if (pendingSendIdsRef.current.has(currentSessionRef.current)) return;
+      const text = newText;
+      // 仅用 trim 判空,不改变实际 payload(保留用户刻意换行/空格)
+      if (!text.trim()) return;
+      const msgs = messagesRef.current;
+      const idx = msgs.indexOf(original);
+      if (idx < 0) return;
+      const snapshot = msgs;
+      retryPayloadRef.current = {
+        text,
+        attachments: original.attachments ?? [],
+        // 编辑是"修改后重新提问",不是重试 — 不带"换角度重新回答"提示词
+        retry: false,
+      };
+      setMessages((prev) => prev.slice(0, idx));
+      // 记录回滚点:异步预派发失败时恢复(见 handleSend 的 provider/网关检查)
+      editRollbackRef.current = { snapshot, sessionKey: currentSessionRef.current };
+      // 同步原子调用:handleSend 经 retryPayload 读文本,不依赖 setInput 渲染
+      // flush —— 不排 RAF(窗口不可见时 RAF 可能不触发,导致"截断但不发送")。
+      editSendOutcomeRef.current = null;
+      handleSendRef.current();
+      // handleSend 的同步段此时已执行完:被拒 → 回滚,避免"截断成功、重发失败"
+      if (editSendOutcomeRef.current === 'rejected') {
+        retryPayloadRef.current = null;
+        setMessages(snapshot);
+        editRollbackRef.current = null;
+      }
+    },
+    [streaming]
+  );
+
   /* session display name — persisted custom title wins, else first user
      message, else timestamp fallback */
   const sessionTitle = useMemo(() => {
@@ -6763,9 +6854,10 @@ export function ChatConsole({
             style={{ background: 'var(--background)' }}
           >
             <div
-              className={`max-w-[760px] mx-auto px-4 py-5 flex flex-col gap-2 ${
+              className={`max-w-[760px] mx-auto px-4 pt-5 flex flex-col gap-4 ${
                 historyLoaded && messages.length === 0 ? 'min-h-full' : ''
               }`}
+              style={{ paddingBottom: '20vh' }}
             >
               {/* Only show the "connecting" spinner while loading AND no messages
                   yet.  A user can send before the session's load() finishes
@@ -6909,6 +7001,7 @@ export function ChatConsole({
                         hideHeader={group.kind === 'reply-content'}
                         sessionKey={sessionKey}
                         turnIndex={i}
+                        onEdit={handleEdit}
                         execOutputs={execOutputs}
                         inlineExecOutput={inlineExecOutput}
                         sources={sourcesByMsg.get(group.msg) ?? []}
@@ -8254,6 +8347,8 @@ interface MessageBubbleProps {
   isLastToolRow?: boolean;
   /** web_search result text for this row (click-to-expand cards). */
   searchResults?: string;
+  /** 编辑用户消息并重新回答(#828)。 */
+  onEdit?: (msg: Message, newText: string) => void;
   /** #740: resume/restart an interrupted turn (half-generated reply). */
   onResume?: () => void;
   onRestart?: () => void;
@@ -8283,12 +8378,16 @@ const MessageBubble = memo(function MessageBubble({
   turnIndex,
   copyIdx,
   sending,
+  onEdit,
   onResume,
   onRestart,
   reasoningMode,
 }: MessageBubbleProps) {
   const [expanded, setExpanded] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
+  // 编辑态(#828):用户消息原地变输入框,提交后截断重发
+  const [editing, setEditing] = useState(false);
+  const [editText, setEditText] = useState('');
   // Message action bar (copy/regenerate/feedback/sources) — restored from
   // #547 after #577 dropped the whole bar, leaving only a hover-only copy
   // button (#577 功能回归修复).  Feedback is persisted to localStorage
@@ -8323,7 +8422,6 @@ const MessageBubble = memo(function MessageBubble({
   // main path — React throws "Rendered fewer hooks than expected".
   const bubbleRef = useRef<HTMLDivElement>(null);
   const capturedSelectionRef = useRef('');
-  const [copyHovered, setCopyHovered] = useState(false);
   // #880: 消息渲染失败兜底——「显示原文」切换为查看原始 markdown/HTML 文本
   const [showRawOnError, setShowRawOnError] = useState(false);
 
@@ -8846,6 +8944,9 @@ const MessageBubble = memo(function MessageBubble({
 
   return (
     <>
+      {/* 用户消息时间戳——居中显示在上一回答与本提问之间(ChatGPT 式),
+          组件自维护分钟 tick,不牵动整棵 memo 气泡树 */}
+      {isUser && <TimestampLabel timestamp={msg.timestamp} />}
       <ContextMenu items={contextItems}>
         {({ onContextMenu }) => (
           <div
@@ -9029,11 +9130,61 @@ const MessageBubble = memo(function MessageBubble({
                   ...(isUser
                     ? { background: 'var(--bubble-user-bg)', color: 'var(--bubble-user-text)' }
                     : { color: 'var(--bubble-ai-text)' }),
-                  // 经典蓝色框（#547 hover 复制预览）：跟随气泡/正文外框
-                  ...(copyHovered ? { boxShadow: '0 0 0 2px var(--accent)' } : {}),
                 }}
               >
-                {showRawOnError ? (
+                {isUser && editing ? (
+                  /* 编辑态(#828):原地变输入框,提交 = 截断到此处并用新文本重新回答 */
+                  <div className="flex flex-col gap-2 min-w-[320px] max-w-full">
+                    <textarea
+                      value={editText}
+                      onChange={(e) => setEditText(e.target.value)}
+                      autoFocus
+                      rows={3}
+                      data-testid="edit-message-input"
+                      className="w-full resize-none rounded-lg px-3 py-2 text-sm bg-[var(--surface)] text-[var(--text)] border border-[var(--border)] focus:outline-none focus:border-[var(--accent)]"
+                      style={{ lineHeight: 'var(--leading-relaxed)' }}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Escape') setEditing(false);
+                        if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+                          if (
+                            editText.trim() &&
+                            editText.trim() !== extractFileChips(msg.content).cleanContent.trim()
+                          ) {
+                            onEdit?.(msg, editText);
+                          }
+                          setEditing(false);
+                        }
+                      }}
+                    />
+                    <div className="flex items-center justify-end gap-2">
+                      <button
+                        onClick={() => setEditing(false)}
+                        className="px-3 py-1.5 text-xs rounded-lg bg-[var(--surface)] text-[var(--text-muted)] hover:text-[var(--text)] transition-colors"
+                      >
+                        取消
+                      </button>
+                      <button
+                        onClick={() => {
+                          if (
+                            editText.trim() &&
+                            editText.trim() !== extractFileChips(msg.content).cleanContent.trim()
+                          ) {
+                            onEdit?.(msg, editText);
+                          }
+                          setEditing(false);
+                        }}
+                        disabled={
+                          !editText.trim() ||
+                          editText.trim() === extractFileChips(msg.content).cleanContent.trim()
+                        }
+                        data-testid="edit-message-submit"
+                        className="px-3 py-1.5 text-xs rounded-lg bg-[var(--accent)] text-white disabled:opacity-40 transition-opacity"
+                      >
+                        重新回答
+                      </button>
+                    </div>
+                  </div>
+                ) : showRawOnError ? (
                   <div>
                     <pre
                       className="p-3 text-xs font-mono leading-relaxed whitespace-pre-wrap break-all overflow-auto"
@@ -9113,6 +9264,41 @@ const MessageBubble = memo(function MessageBubble({
                 )}
               </div>
 
+              {/* 用户消息操作 — 复制 / 编辑(仅鼠标靠近/hover 消息时显示,#828;
+                  编辑态下隐藏,避免与编辑框叠在一起) */}
+              {isUser && msg.content !== '' && !editing && (
+                <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 transition-opacity mt-1">
+                  <button
+                    onClick={() => onCopy(msg.content, copyIdx ?? turnIndex ?? 0)}
+                    title="复制"
+                    aria-label="复制"
+                    className="flex items-center justify-center w-8 h-8 rounded-lg bg-[var(--surface-muted)]/70 text-[var(--text-muted)] hover:bg-[var(--surface-muted)] hover:text-[var(--text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)] transition-colors"
+                  >
+                    {isCopied ? (
+                      <Check size={14} style={{ color: 'var(--success)' }} />
+                    ) : (
+                      <Copy size={14} />
+                    )}
+                  </button>
+                  {onEdit && (
+                    <button
+                      onClick={() => {
+                        setEditing(true);
+                        // 附件消息的 content 含序列化文件块 — 编辑器只带可见文本,
+                        // 附件原样保留在 original.attachments(CodeRabbit #1011)
+                        setEditText(extractFileChips(msg.content).cleanContent);
+                      }}
+                      title="编辑并重新回答"
+                      aria-label="编辑并重新回答"
+                      data-testid="edit-message-btn"
+                      className="flex items-center justify-center w-8 h-8 rounded-lg bg-[var(--surface-muted)]/70 text-[var(--text-muted)] hover:bg-[var(--surface-muted)] hover:text-[var(--text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)] transition-colors"
+                    >
+                      <Pencil size={14} />
+                    </button>
+                  )}
+                </div>
+              )}
+
               {/* 常驻免责声明（#836）—— 每条 AI 回答正文底部 */}
               {!isUser && msg.content !== '' && (
                 <div className="mt-0.5" data-testid="chat-disclaimer">
@@ -9123,30 +9309,23 @@ const MessageBubble = memo(function MessageBubble({
               )}
 
               {/* Message action bar — copy / regenerate / feedback / sources.
-                Restored from #547 (dropped by the #577 rewrite). */}
+                #828: 按钮放大(浅灰底大点击区)、复制不再 hover 选中/高亮框、
+                常驻显示(不随 hover 出现消失) */}
               {!isUser && msg.content !== '' && (
                 <div
-                  className="flex items-center gap-0.5 self-start opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 transition-opacity"
+                  className="flex items-center gap-1.5 self-start mt-3 mb-3"
                   data-testid="message-actions"
                 >
                   <button
                     onClick={() => onCopy(msg.content, copyIdx ?? turnIndex ?? 0)}
-                    onMouseEnter={() => {
-                      setCopyHovered(true);
-                      selectMessageText();
-                    }}
-                    onMouseLeave={() => {
-                      setCopyHovered(false);
-                      deselectMessageText();
-                    }}
                     title="复制"
                     aria-label="复制"
-                    className="p-1 rounded hover:bg-[var(--surface-muted)] hover:text-[var(--text)] transition-colors"
+                    className="flex items-center justify-center w-9 h-9 rounded-lg bg-[var(--surface-muted)]/70 text-[var(--text-muted)] hover:bg-[var(--surface-muted)] hover:text-[var(--text)] transition-colors"
                   >
                     {isCopied ? (
-                      <Check size={13} style={{ color: 'var(--success)' }} />
+                      <Check size={16} style={{ color: 'var(--success)' }} />
                     ) : (
-                      <Copy size={13} />
+                      <Copy size={16} />
                     )}
                   </button>
                   {onRegenerate && (
@@ -9154,9 +9333,9 @@ const MessageBubble = memo(function MessageBubble({
                       onClick={() => onRegenerate?.(msg)}
                       title="重新生成"
                       aria-label="重新生成"
-                      className="p-1 rounded hover:bg-[var(--surface-muted)] hover:text-[var(--text)] transition-colors"
+                      className="flex items-center justify-center w-9 h-9 rounded-lg bg-[var(--surface-muted)]/70 text-[var(--text-muted)] hover:bg-[var(--surface-muted)] hover:text-[var(--text)] transition-colors"
                     >
-                      <RefreshCw size={13} />
+                      <RefreshCw size={16} />
                     </button>
                   )}
                   <button
@@ -9167,11 +9346,13 @@ const MessageBubble = memo(function MessageBubble({
                     }}
                     title="喜欢"
                     aria-label="喜欢"
-                    className={`p-1 rounded hover:bg-[var(--surface-muted)] transition-colors ${
-                      feedback === 'up' ? 'text-[var(--accent)]' : ''
+                    className={`flex items-center justify-center w-9 h-9 rounded-lg border border-[var(--border-subtle)] bg-[var(--surface-muted)]/50 transition-colors ${
+                      feedback === 'up'
+                        ? 'text-[var(--accent)] bg-[var(--accent-soft)]'
+                        : 'text-[var(--text-muted)] hover:bg-[var(--surface-muted)] hover:text-[var(--text)]'
                     }`}
                   >
-                    <ThumbsUp size={13} />
+                    <ThumbsUp size={16} />
                   </button>
                   <button
                     onClick={() => {
@@ -9186,20 +9367,22 @@ const MessageBubble = memo(function MessageBubble({
                     }}
                     title="不喜欢"
                     aria-label="不喜欢"
-                    className={`p-1 rounded hover:bg-[var(--surface-muted)] transition-colors ${
-                      feedback === 'down' ? 'text-[var(--danger)]' : ''
+                    className={`flex items-center justify-center w-9 h-9 rounded-lg border border-[var(--border-subtle)] bg-[var(--surface-muted)]/50 transition-colors ${
+                      feedback === 'down'
+                        ? 'text-[var(--danger)] bg-[var(--danger-bg)]'
+                        : 'text-[var(--text-muted)] hover:bg-[var(--surface-muted)] hover:text-[var(--text)]'
                     }`}
                   >
-                    <ThumbsDown size={13} />
+                    <ThumbsDown size={16} />
                   </button>
                   {/* 查看来源 always visible (#547 原版行为) — 无来源时弹窗给提示 */}
                   <button
                     onClick={() => setShowSources(true)}
                     title="查看来源"
                     aria-label="查看来源"
-                    className="p-1 rounded hover:bg-[var(--surface-muted)] hover:text-[var(--text)] transition-colors"
+                    className="flex items-center justify-center w-9 h-9 rounded-lg bg-[var(--surface-muted)]/70 text-[var(--text-muted)] hover:bg-[var(--surface-muted)] hover:text-[var(--text)] transition-colors"
                   >
-                    <ExternalLink size={13} />
+                    <ExternalLink size={16} />
                   </button>
                 </div>
               )}
@@ -9318,7 +9501,8 @@ function areMessageBubblePropsEqual(a: MessageBubbleProps, b: MessageBubbleProps
     a.onRetryLoad === b.onRetryLoad &&
     a.onRegenerate === b.onRegenerate &&
     a.onOpenProviderSettings === b.onOpenProviderSettings &&
-    a.onDownloadPaper === b.onDownloadPaper
+    a.onDownloadPaper === b.onDownloadPaper &&
+    a.onEdit === b.onEdit
   );
 }
 
