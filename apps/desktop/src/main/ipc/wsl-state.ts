@@ -141,8 +141,12 @@ function sleepSync(ms: number): void {
 // ---------------------------------------------------------------------------
 // Elevation trampoline — recovers the exit code / output of a UAC-elevated
 // process.  Start-Process cannot return them (`ExitCode` throws after RunAs),
-// so the elevated child is launched through a generated batch file that
-// redirects its combined output and exit code to files next to it.
+// so the elevated child writes its exit code to a file instead.
+//
+// The elevated payload travels as an *encoded command line*, never as a script
+// file: %TEMP% is user-writable, so a same-user process could replace a script
+// between writing it and the UAC-elevated launch, turning the elevation prompt
+// into an admin code-execution primitive.  Only result files live in %TEMP%.
 // ---------------------------------------------------------------------------
 
 /** Exit code the trampoline reports when the user declines the UAC prompt. */
@@ -163,13 +167,13 @@ export interface ElevatedRunResult {
 }
 
 export interface ElevatedPayload {
-  /** Command line executed inside the elevated cmd.exe. */
-  command?: string;
-  /** PowerShell script executed elevated via a generated payload.ps1. */
+  /** Executable run elevated; its stdout/stderr and exit code are captured. */
+  command?: { file: string; args?: string[] };
+  /** PowerShell script run elevated; its output and exit code are captured. */
   powershell?: string;
 }
 
-/** Decode wsl.exe output, which is UTF-16LE even when redirected to a file. */
+/** Decode command output, which may be UTF-16LE even when redirected to a file. */
 export function decodeWslOutput(buf: Buffer | string | null | undefined): string {
   if (!buf || buf.length === 0) return '';
   if (typeof buf === 'string') return buf.replace(/\0/g, '').trim();
@@ -178,8 +182,8 @@ export function decodeWslOutput(buf: Buffer | string | null | undefined): string
   }
   // ASCII text in UTF-16LE is NUL-interleaved, but CJK text is not: its code
   // units have no zero high byte, so the NUL heuristic alone silently turns
-  // localized (e.g. Chinese) wsl.exe messages into mojibake.  Fall back to
-  // "UTF-8 decoding produced replacement characters" as a second signal.
+  // localized (e.g. Chinese) output into mojibake.  Fall back to "UTF-8
+  // decoding produced replacement characters" as a second signal.
   const nullRatio =
     buf.reduce((acc, b, i) => (i % 2 === 1 && b === 0 ? acc + 1 : acc), 0) /
     Math.max(1, Math.floor(buf.length / 2));
@@ -189,11 +193,15 @@ export function decodeWslOutput(buf: Buffer | string | null | undefined): string
   return asUtf8.replace(/\0/g, '').trim();
 }
 
-/** One-line description of a failed elevated run, for the error card. */
+/**
+ * One-line description of a failed elevated run, for the error card.  Exit
+ * code 0 is omitted: in a failure path it says "the process did not fail",
+ * and the captured output is the part that explains what went wrong.
+ */
 export function summarizeElevated(r: ElevatedRunResult, maxLen = 300): string {
   if (r.kind === 'unknown' && r.error) return r.error;
   const parts: string[] = [];
-  if (r.exitCode !== null) parts.push(`退出码 ${r.exitCode}`);
+  if (r.exitCode !== null && r.exitCode !== 0) parts.push(`退出码 ${r.exitCode}`);
   const out = r.output.replace(/\s+/g, ' ').trim();
   if (out) parts.push(out.length > maxLen ? out.slice(-maxLen) : out);
   return parts.join('——') || '无输出';
@@ -207,52 +215,43 @@ export function runElevated(payload: ElevatedPayload, timeoutMs = 300000): Eleva
   let dir: string | null = null;
   try {
     dir = mkdtempSync(join(tmpdir(), 'miqi-elev-'));
-    const runPath = join(dir, 'run.cmd');
-    const errPath = join(dir, 'trampoline.txt');
+    const outPath = join(dir, 'out.txt');
+    const errPath = join(dir, 'err.txt');
+    const codePath = join(dir, 'exit.txt');
+    const trampolinePath = join(dir, 'trampoline.txt');
 
-    // The elevated process starts with CWD=System32, so every path is
-    // anchored to %~dp0 (the directory of run.cmd).
-    const lines = ['@echo off'];
-    if (payload.powershell) {
-      // PowerShell 5.1 reads BOM-less .ps1 as ANSI — always write the BOM.
-      writeFileSync(join(dir, 'payload.ps1'), '﻿' + payload.powershell, 'utf8');
-      lines.push(
-        'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0payload.ps1" > "%~dp0out.txt" 2>&1'
-      );
-    } else {
-      lines.push(`${payload.command ?? ''} > "%~dp0out.txt" 2>&1`);
-    }
-    lines.push('set EC=%errorlevel%');
-    // Leading redirection: `echo %EC%> file` would be parsed as a handle.
-    lines.push('> "%~dp0exit.txt" echo %EC%');
-    writeFileSync(runPath, `${lines.join('\r\n')}\r\n`, 'utf8');
+    const elevated = payload.powershell
+      ? powershellCapture(payload.powershell, outPath, errPath, codePath)
+      : commandCapture(payload.command ?? { file: '' }, outPath, errPath, codePath);
 
-    const outer =
+    const trampoline =
       "$ErrorActionPreference='Stop'; " +
-      `try { Start-Process -FilePath 'cmd.exe' -ArgumentList '/c', '"${psEscape(runPath)}"' ` +
+      `try { Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-EncodedCommand','${encodeCommand(elevated)}') ` +
       '-Verb RunAs -Wait -ErrorAction Stop } ' +
       'catch { ' +
       `if ($_.Exception.NativeErrorCode -eq ${ELEVATION_CANCELLED}) { exit ${ELEVATION_CANCELLED} } ` +
-      `Set-Content -LiteralPath '${psEscape(errPath)}' -Value $_.Exception.Message -Encoding UTF8; ` +
+      `Set-Content -LiteralPath '${psEscape(trampolinePath)}' -Value $_.Exception.Message -Encoding UTF8; ` +
       'exit 99 }';
 
-    const r = spawnSync('powershell.exe', ['-NoProfile', '-Command', outer], {
-      timeout: timeoutMs,
-      encoding: 'utf8',
-      windowsHide: true,
-    });
+    const r = spawnSync(
+      'powershell.exe',
+      ['-NoProfile', '-EncodedCommand', encodeCommand(trampoline)],
+      { timeout: timeoutMs, encoding: 'buffer', windowsHide: true }
+    );
 
     if (r.error) return { kind: 'unknown', exitCode: null, output: '', error: r.error.message };
     if (r.status === ELEVATION_CANCELLED) return { kind: 'cancelled', exitCode: null, output: '' };
 
-    const output = decodeWslOutput(readFileOrNull(join(dir, 'out.txt')));
-    const exitCode = readExitCode(join(dir, 'exit.txt'));
+    const stdout = decodeWslOutput(readFileOrNull(outPath));
+    const stderr = decodeWslOutput(readFileOrNull(errPath));
+    const output = [stdout, stderr].filter((s) => s.length > 0).join('\n');
+    const exitCode = readExitCode(codePath);
     if (exitCode === null) {
       // The elevated process never wrote its exit code: the trampoline failed
-      // (no UAC prompt was shown, or the batch file could not be launched).
+      // (no UAC prompt was shown, or the elevated process was killed early).
       const detail =
-        readTextOrNull(errPath) ||
-        (typeof r.stderr === 'string' ? r.stderr.trim() : '') ||
+        readTextOrNull(trampolinePath) ||
+        decodeWslOutput(r.stderr as Buffer | null) ||
         `提权进程未返回结果（powershell 退出码 ${r.status}）`;
       return { kind: 'unknown', exitCode: null, output, error: detail };
     }
@@ -268,6 +267,67 @@ export function runElevated(payload: ElevatedPayload, timeoutMs = 300000): Eleva
       }
     }
   }
+}
+
+/** Base64 UTF-16LE, the encoding PowerShell's -EncodedCommand expects. */
+function encodeCommand(script: string): string {
+  return Buffer.from(script, 'utf16le').toString('base64');
+}
+
+/** Elevated script: run an executable, capture both streams and the exit code. */
+function commandCapture(
+  cmd: { file: string; args?: string[] },
+  outPath: string,
+  errPath: string,
+  codePath: string
+): string {
+  const args = (cmd.args ?? []).map((a) => `'${psEscape(a)}'`).join(',');
+  // An empty @() is rejected by Start-Process ("argument collection contains a
+  // null value"), so the parameter is omitted entirely when there are no args.
+  const argList = args ? ` -ArgumentList @(${args})` : '';
+  return [
+    "$ErrorActionPreference = 'Stop'",
+    'try {',
+    `  $p = Start-Process -FilePath '${psEscape(cmd.file)}'${argList} ` +
+      `-RedirectStandardOutput '${psEscape(outPath)}' ` +
+      `-RedirectStandardError '${psEscape(errPath)}' -NoNewWindow -Wait -PassThru -ErrorAction Stop`,
+    `  Set-Content -LiteralPath '${psEscape(codePath)}' -Value $p.ExitCode -Encoding ASCII`,
+    '  exit $p.ExitCode',
+    '} catch {',
+    `  $_ | Out-String | Set-Content -LiteralPath '${psEscape(errPath)}' -Encoding UTF8`,
+    `  Set-Content -LiteralPath '${psEscape(codePath)}' -Value 99 -Encoding ASCII`,
+    '  exit 99',
+    '}',
+  ].join('\r\n');
+}
+
+/**
+ * Elevated script: run a PowerShell body and capture everything it writes.
+ * `*>&1` merges the error stream into the captured text, so a cmdlet failure
+ * that PowerShell does not turn into a non-zero exit code still reaches the
+ * user instead of collapsing into a generic message.
+ */
+function powershellCapture(
+  body: string,
+  outPath: string,
+  errPath: string,
+  codePath: string
+): string {
+  return [
+    "$ErrorActionPreference = 'Continue'",
+    `$log = '${psEscape(outPath)}'`,
+    `$err = '${psEscape(errPath)}'`,
+    '$ec = 0',
+    'try {',
+    `  & {\n${body}\n  } *>&1 | Out-String | Set-Content -LiteralPath $log -Encoding UTF8`,
+    '} catch {',
+    '  $_ | Out-String | Set-Content -LiteralPath $err -Encoding UTF8',
+    '  $ec = 1',
+    '}',
+    'if ($LASTEXITCODE -is [int]) { $ec = $LASTEXITCODE }',
+    `Set-Content -LiteralPath '${psEscape(codePath)}' -Value $ec -Encoding ASCII`,
+    'exit $ec',
+  ].join('\r\n');
 }
 
 function psEscape(value: string): string {

@@ -350,6 +350,12 @@ describe('summarizeElevated', () => {
     expect(summary).toContain('WSL 内核更新失败');
   });
 
+  it('omits a zero exit code — in a failure path it explains nothing', () => {
+    expect(summarizeElevated({ kind: 'ok', exitCode: 0, output: '拒绝访问: 需要管理员权限' })).toBe(
+      '拒绝访问: 需要管理员权限'
+    );
+  });
+
   it('returns 无输出 when nothing at all was captured', () => {
     expect(summarizeElevated({ kind: 'failed', exitCode: null, output: '' })).toBe('无输出');
   });
@@ -387,13 +393,19 @@ describe('classifyKernelInstall', () => {
 });
 
 describe('runElevated', () => {
-  function mockFiles(files: { out?: string | Buffer; exit?: string; trampoline?: string }) {
+  function mockFiles(files: {
+    out?: string | Buffer;
+    err?: string;
+    exit?: string;
+    trampoline?: string;
+  }) {
     mockedReadFileSync.mockImplementation(((p: string) => {
       const name = String(p);
       const out = files.out;
       if (name.endsWith('out.txt') && out !== undefined) {
         return Buffer.isBuffer(out) ? out : Buffer.from(out);
       }
+      if (name.endsWith('err.txt') && files.err !== undefined) return Buffer.from(files.err);
       if (name.endsWith('exit.txt') && files.exit !== undefined) return Buffer.from(files.exit);
       if (name.endsWith('trampoline.txt') && files.trampoline !== undefined) {
         return Buffer.from(files.trampoline);
@@ -402,10 +414,21 @@ describe('runElevated', () => {
     }) as any);
   }
 
+  /** The PowerShell script runElevated asked Windows to run elevated. */
+  function elevatedScript(): string {
+    const args = (mockedSpawnSync.mock.calls.at(-1) as any[])[1] as string[];
+    const outer = Buffer.from(args[args.indexOf('-EncodedCommand') + 1], 'base64').toString(
+      'utf16le'
+    );
+    const inner = outer.match(/-EncodedCommand','([A-Za-z0-9+/=]+)'/);
+    expect(inner).not.toBeNull();
+    return Buffer.from(inner![1], 'base64').toString('utf16le');
+  }
+
   it('reports ok when the elevated process exited 0', () => {
     mockFiles({ out: 'installed', exit: '0' });
     mockSpawn({ status: 0 });
-    expect(runElevated({ command: 'wsl.exe --install' })).toEqual({
+    expect(runElevated({ command: { file: 'wsl.exe', args: ['--install'] } })).toEqual({
       kind: 'ok',
       exitCode: 0,
       output: 'installed',
@@ -415,17 +438,23 @@ describe('runElevated', () => {
   it('reports failed with the recovered exit code and output', () => {
     mockFiles({ out: Buffer.from('内核更新失败', 'utf16le'), exit: '1' });
     mockSpawn({ status: 0 });
-    const r = runElevated({ command: 'wsl.exe --install' });
+    const r = runElevated({ command: { file: 'wsl.exe' } });
     expect(r.kind).toBe('failed');
     expect(r.exitCode).toBe(1);
     expect(r.output).toBe('内核更新失败');
     expect(summarizeElevated(r)).toContain('退出码 1');
   });
 
+  it('merges stderr into the captured output', () => {
+    mockFiles({ err: '拒绝访问', exit: '1' });
+    mockSpawn({ status: 0 });
+    expect(runElevated({ command: { file: 'wsl.exe' } }).output).toBe('拒绝访问');
+  });
+
   it('reports cancelled when the trampoline exits with ERROR_CANCELLED', () => {
     mockFiles({});
     mockSpawn({ status: ELEVATION_CANCELLED });
-    expect(runElevated({ command: 'wsl.exe --install' })).toEqual({
+    expect(runElevated({ command: { file: 'wsl.exe' } })).toEqual({
       kind: 'cancelled',
       exitCode: null,
       output: '',
@@ -435,7 +464,7 @@ describe('runElevated', () => {
   it('reports unknown with the trampoline message when no exit code was written', () => {
     mockFiles({ trampoline: 'This operation has been cancelled' });
     mockSpawn({ status: 99 });
-    expect(runElevated({ command: 'wsl.exe --install' })).toEqual({
+    expect(runElevated({ command: { file: 'wsl.exe' } })).toEqual({
       kind: 'unknown',
       exitCode: null,
       output: '',
@@ -446,32 +475,45 @@ describe('runElevated', () => {
   it('reports unknown when powershell itself cannot be spawned', () => {
     mockFiles({});
     mockSpawn({ error: new Error('spawn powershell.exe ENOENT') as any, status: null });
-    expect(runElevated({ command: 'wsl.exe --install' })).toMatchObject({
+    expect(runElevated({ command: { file: 'wsl.exe' } })).toMatchObject({
       kind: 'unknown',
       error: 'spawn powershell.exe ENOENT',
     });
   });
 
-  it('writes the elevated command and its exit-code echo into run.cmd', () => {
+  it('delivers the payload as an encoded command line, never as a %TEMP% script', () => {
     mockFiles({ exit: '0' });
     mockSpawn({ status: 0 });
-    runElevated({ command: 'wsl.exe --install --no-distribution' });
-    const [, content] = mockedWriteFileSync.mock.calls.find(([p]) =>
-      String(p).endsWith('run.cmd')
-    )!;
-    expect(String(content)).toContain('wsl.exe --install --no-distribution');
-    expect(String(content)).toContain('%~dp0out.txt');
-    expect(String(content)).toContain('> "%~dp0exit.txt" echo %EC%');
+    runElevated({ command: { file: 'wsl.exe', args: ['--install', '--no-distribution'] } });
+
+    // Nothing executable may be written to the user-writable temp dir: a
+    // same-user process could replace it before the UAC-elevated launch.
+    expect(mockedWriteFileSync).not.toHaveBeenCalled();
+
+    const script = elevatedScript();
+    expect(script).toContain("Start-Process -FilePath 'wsl.exe'");
+    expect(script).toContain("-ArgumentList @('--install','--no-distribution')");
+    expect(script).toContain('-RedirectStandardOutput');
   });
 
-  it('writes a BOM-prefixed payload.ps1 in powershell mode', () => {
+  it('omits -ArgumentList when the command has no arguments', () => {
+    // Start-Process rejects an empty @() with a parameter binding error.
+    mockFiles({ exit: '0' });
+    mockSpawn({ status: 0 });
+    runElevated({ command: { file: 'wsl.exe' } });
+    expect(elevatedScript()).not.toContain('-ArgumentList @()');
+  });
+
+  it('runs a powershell payload through the same encoded channel', () => {
     mockFiles({ exit: '0' });
     mockSpawn({ status: 0 });
     runElevated({ powershell: 'Enable-WindowsOptionalFeature -Online' });
-    const [, content] = mockedWriteFileSync.mock.calls.find(([p]) =>
-      String(p).endsWith('payload.ps1')
-    )!;
-    expect(String(content).startsWith('﻿')).toBe(true);
-    expect(String(content)).toContain('Enable-WindowsOptionalFeature');
+
+    expect(mockedWriteFileSync).not.toHaveBeenCalled();
+
+    const script = elevatedScript();
+    expect(script).toContain('Enable-WindowsOptionalFeature -Online');
+    // Merging the error stream is what keeps a failed cmdlet's message visible.
+    expect(script).toContain('*>&1');
   });
 });

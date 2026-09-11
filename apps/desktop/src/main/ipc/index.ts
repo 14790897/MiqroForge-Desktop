@@ -1012,7 +1012,11 @@ for m in ("pydantic", "httpx", "loguru"):
         // recreate the false-failure bug this step was fixed for.
         const featuresAfter = readFeatureStates();
         if (!featuresAfter.ok || !featuresAfter.featureWsl) {
-          const detail = r.kind === 'ok' ? '功能状态未变化' : summarizeElevated(r);
+          // A failed DISM cmdlet leaves the exit code at 0, so the captured
+          // output is the only place the real reason appears — fall back to the
+          // generic text only when the elevated run produced nothing at all.
+          const produced = r.kind === 'unknown' || r.exitCode !== 0 || r.output.trim().length > 0;
+          const detail = produced ? summarizeElevated(r) : '功能状态未变化';
           safeSend(IPC_EVENTS.WSL_INSTALL_PROGRESS, {
             phase: 'error',
             message: `启用 Windows 功能失败: ${detail}`,
@@ -1051,7 +1055,12 @@ for m in ("pydantic", "httpx", "loguru"):
         } satisfies WslInstallProgress);
 
         const r = runElevated(
-          { command: 'wsl.exe --install --no-distribution --no-launch' },
+          {
+            command: {
+              file: 'wsl.exe',
+              args: ['--install', '--no-distribution', '--no-launch'],
+            },
+          },
           300000
         );
 
@@ -1115,7 +1124,10 @@ for m in ("pydantic", "httpx", "loguru"):
           message: '正在安装 Ubuntu 发行版（可能需要几分钟）...',
         } satisfies WslInstallProgress);
 
-        const r = runElevated({ command: 'wsl.exe --install -d Ubuntu --no-launch' }, 300000);
+        const r = runElevated(
+          { command: { file: 'wsl.exe', args: ['--install', '-d', 'Ubuntu', '--no-launch'] } },
+          300000
+        );
 
         if (r.kind === 'cancelled') {
           safeSend(IPC_EVENTS.WSL_INSTALL_PROGRESS, {
@@ -1134,10 +1146,24 @@ for m in ("pydantic", "httpx", "loguru"):
 
         const postCheck = runWslCheckInternal();
         if (postCheck.distros.length === 0) {
-          // Exit code 0 with no registered distro means the install asked for a
-          // reboot — reporting the raw "退出码 0" here would read as success.
-          const detail =
-            r.kind === 'ok' ? '发行版未注册，可能需要重启后重试' : summarizeElevated(r);
+          // The command succeeded but no distro is registered yet: as with the
+          // kernel step that means "installed, reboot pending", not a failure.
+          // Only a non-zero exit code is an install failure.
+          if (r.kind === 'ok') {
+            safeSend(IPC_EVENTS.WSL_INSTALL_PROGRESS, {
+              phase: 'installing_distro',
+              rebootRequired: true,
+              message: 'Ubuntu 已安装，需要重启系统以继续。',
+            } satisfies WslInstallProgress);
+            return {
+              success: true,
+              phase: 'installing_distro',
+              rebootRequired: true,
+              nextStep: '请重启系统，重新打开 MiQroForge 后向导将自动继续',
+            } satisfies WslInstallAndProvisionResult;
+          }
+
+          const detail = summarizeElevated(r);
           safeSend(IPC_EVENTS.WSL_INSTALL_PROGRESS, {
             phase: 'error',
             message: `Ubuntu 安装失败: ${detail}`,
