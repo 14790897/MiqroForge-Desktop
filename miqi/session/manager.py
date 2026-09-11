@@ -162,10 +162,15 @@ class SessionManager:
                 self._session_locks[key] = lock
             return lock
 
+    def _get_flat_session_path(self, key: str) -> Path:
+        """Flat ``sessions/<key>.jsonl`` layout — still a supported store."""
+        safe_key = safe_filename(key.replace(":", "_"))
+        return self.sessions_dir / f"{safe_key}.jsonl"
+
     def _migrate_flat_to_dir(self, key: str) -> None:
         """If old flat .jsonl exists and new dir does not, migrate."""
         safe_key = safe_filename(key.replace(":", "_"))
-        old_flat = self.sessions_dir / f"{safe_key}.jsonl"
+        old_flat = self._get_flat_session_path(key)
         new_dir  = self.sessions_dir / safe_key
         if old_flat.exists() and not new_dir.exists():
             new_dir.mkdir(parents=True, exist_ok=True)
@@ -258,18 +263,27 @@ class SessionManager:
         if migrate:
             self._migrate_flat_to_dir(key)
         path = self._get_session_path(key)
-        if migrate and not path.exists():
-            legacy_path = self._get_legacy_session_path(key)
-            if legacy_path.exists():
-                try:
-                    path.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.move(str(legacy_path), str(path))
-                    logger.info("Migrated session {} from legacy path", key)
-                except Exception:
-                    logger.exception("Failed to migrate session {}", key)
-
         if not path.exists():
-            return None
+            if migrate:
+                legacy_path = self._get_legacy_session_path(key)
+                if legacy_path.exists():
+                    try:
+                        path.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.move(str(legacy_path), str(path))
+                        logger.info("Migrated session {} from legacy path", key)
+                    except Exception:
+                        logger.exception("Failed to migrate session {}", key)
+            if not path.exists():
+                # Read-only fallback: the flat sessions/<key>.jsonl layout is
+                # still a supported store — list_sessions and delete() both
+                # fall back to it.  Probing must therefore be able to READ it
+                # without moving it, or a legacy folder-bound session reads as
+                # absent and stays undiscoverable, which is the very bug this
+                # probing exists to fix (#956 review).
+                flat_path = self._get_flat_session_path(key)
+                if not flat_path.exists():
+                    return None
+                path = flat_path
 
         try:
             messages: list[dict[str, Any]] = []
@@ -326,8 +340,10 @@ class SessionManager:
 
         Unlike get_or_create, a missing/corrupt session returns None with no
         side effects — used by read-side probing of other workspace roots
-        (#956 folder-bound session resolution).  Disables legacy/flat-file
-        migration so probing never mutates the filesystem.
+        (#956 folder-bound session resolution).  Legacy/flat-file migration is
+        disabled so probing never mutates the filesystem; the flat
+        ``sessions/<key>.jsonl`` layout is still READ (it remains a supported
+        store), just never moved.
         """
         return self._load(key, migrate=False)
 

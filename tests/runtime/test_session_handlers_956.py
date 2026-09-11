@@ -66,11 +66,13 @@ def _write_app_home_stub_at(app_home, key, client_id, workspace, updated_at):
 
 
 def test_load_existing_does_not_migrate_legacy_flat_file(tmp_path):
-    """load_existing must not migrate a legacy flat session file (#956 review).
+    """load_existing must READ a legacy flat session without migrating it.
 
     _find_folder_session probes candidate workspace roots via load_existing;
     if that mutated legacy files, a scan could silently move a session into
-    the wrong root.  load_existing must leave flat .jsonl files untouched.
+    the wrong root.  So the flat file has to stay exactly where it is — but
+    the flat layout is still a supported store, so probing also has to read
+    it instead of reporting the session as absent (#956 review).
     """
     from miqi.session.manager import SessionManager
 
@@ -84,9 +86,12 @@ def test_load_existing_does_not_migrate_legacy_flat_file(tmp_path):
         encoding="utf-8",
     )
 
-    # Probing must not migrate: the directory-based path does not exist yet,
-    # so load_existing returns None and leaves the flat file alone.
-    assert sm.load_existing(key) is None
+    loaded = sm.load_existing(key)
+    assert loaded is not None
+    assert any(m.get("content") == "hi" for m in loaded.messages)
+
+    # ...and the probe left no trace: the flat file is untouched and the
+    # directory form was not created in its place.
     assert flat.exists()
     assert not (sm.sessions_dir / safe_key).exists()
 
@@ -434,3 +439,49 @@ async def test_sessions_get_unowned_folder_copy_reports_unowned(monkeypatch, tmp
     r = result["result"]
     assert r["ownership"] == "unowned"
     assert any(m.get("content") == "legacy folder question" for m in r["messages"])
+
+
+@pytest.mark.asyncio
+async def test_sessions_get_resolves_legacy_flat_folder_copy(monkeypatch, tmp_path):
+    """A folder copy still in the flat sessions/<key>.jsonl layout resolves.
+
+    Folder discovery probes each candidate root with load_existing(), and the
+    flat layout is still a supported store (list_sessions and delete() both
+    fall back to it).  If probing skipped it, a legacy folder-bound session
+    would keep failing #956 exactly as before the fix: history empty on
+    switch-back and gone after a restart.
+    """
+    from miqi.runtime.app_server import ClientSessionRegistry
+    from miqi.runtime.session_handlers import sessions_get_handler
+    from miqi.session.manager import SessionManager
+
+    app_home = tmp_path / "app-home"
+    folder_root = tmp_path / "task-folder"
+    app_home.mkdir(parents=True)
+    folder_root.mkdir(parents=True)
+    _install_app_home(monkeypatch, app_home)
+
+    # The authoritative copy sits in the older flat layout.
+    folder_sm = SessionManager(folder_root)
+    flat = folder_sm.sessions_dir / "legacy-folder.jsonl"
+    flat.parent.mkdir(parents=True, exist_ok=True)
+    flat.write_text(
+        '{"_type": "metadata", "metadata": {}, "owner_client_id": "client-1"}\n'
+        '{"role": "user", "content": "flat folder question",'
+        ' "timestamp": "2026-01-01T00:00:00"}\n'
+        '{"role": "assistant", "content": "flat folder answer",'
+        ' "timestamp": "2026-01-01T00:00:01"}\n',
+        encoding="utf-8",
+    )
+
+    _write_app_home_stub(app_home, "legacy-folder", "client-1", folder_root)
+
+    registry = ClientSessionRegistry()
+    result = await sessions_get_handler(
+        "req-1", {"session_key": "legacy-folder"}, "client-1", None, registry,
+    )
+    r = result["result"]
+    assert any(m.get("content") == "flat folder question" for m in r["messages"])
+    # Probing must not have relocated the flat file into the directory form.
+    assert flat.exists()
+    assert not (folder_sm.sessions_dir / "legacy-folder").exists()
