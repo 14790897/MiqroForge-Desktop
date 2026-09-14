@@ -7018,7 +7018,7 @@ export function ChatConsole({
             style={{ background: 'var(--background)' }}
           >
             <div
-              className={`max-w-[760px] mx-auto px-4 pt-5 flex flex-col gap-4 ${
+              className={`max-w-[760px] mx-auto px-4 pt-5 flex flex-col gap-3 ${
                 historyLoaded && messages.length === 0 ? 'min-h-full' : ''
               }`}
               style={{ paddingBottom: '20vh' }}
