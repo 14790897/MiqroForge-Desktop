@@ -2707,6 +2707,12 @@ export function ChatConsole({
     panelWidthRef.current = panelWidth;
   }, [panelWidth]);
 
+  // 上报「面板当前是否占宽」给主进程用于抬高窗口最小宽度(不改窗口宽):冷启动面板默认
+  // 展开且没有加宽请求,不报的话缩窗会把聊天列/输入框压到最小宽度以下;关闭时上报 0 还原。
+  useEffect(() => {
+    void window.miqi.app.setPanelWindowExtra(panelOpen ? panelWidth : 0, true).catch(() => {});
+  }, [panelOpen, panelWidth]);
+
   useEffect(() => {
     const timer = window.setInterval(() => setClockTick(Date.now()), 60_000);
     return () => window.clearInterval(timer);
@@ -7410,7 +7416,7 @@ export function ChatConsole({
           <div
             data-testid="task-assets-panel"
             ref={assetsPanelRef}
-            className="flex flex-col shrink-0 border-l overflow-y-auto relative"
+            className="flex flex-col shrink min-w-[200px] border-l overflow-y-auto relative"
             style={{
               width: panelWidth,
               background: 'var(--panel-bg)',

@@ -2387,6 +2387,9 @@ for m in ("pydantic", "httpx", "loguru"):
        *  做不了，但目标必须留下来 —— 否则「最大化期间关掉面板」会被整个丢掉，恢复
        *  窗口后那 280px 就永远撑在窗口上（面板已关、窗口仍宽一截）。 */
       wanted: number;
+      /** 面板当前是否占用窗口宽度(渲染层上报,含冷启动默认展开)。用于把窗口最小宽度
+       *  抬到「基准 + PANEL_MIN_FLOOR」;不同于 extra —— 冷启动面板展开但 extra 为 0。 */
+      occupied: boolean;
     }
   >();
   /** 我们自己 setBounds 产生的、**尚未被 resize 事件消费**的宽度集合。
@@ -2416,6 +2419,11 @@ for m in ("pydantic", "httpx", "loguru"):
    *  记的不是「用户设的总宽」而是**扣掉面板那部分之后**的基线 —— 否则用户在面板
    *  开着时拖窗，会把面板的 280 一起吸收进基线，之后关面板一像素都收不回来。 */
   const userWidth = new WeakMap<BrowserWindow, number>();
+  /** 面板展开时窗口最小宽度额外预留的 px(= 面板可被压到的下限 PANEL_MIN_WIDTH)。
+   *  缩窗时面板先从 280 被压到这个下限让位,聊天列因此保住基准最小宽度、输入框不被挤扁。 */
+  const PANEL_MIN_FLOOR = 200;
+  /** 面板未展开时的窗口最小宽度(基准)。 */
+  const baseMinByWin = new WeakMap<BrowserWindow, { width: number; height: number }>();
   const windowHooked = new WeakSet<BrowserWindow>();
   /** 从最大化/最小化恢复后补应用一次逻辑目标：那些状态下 setBounds 是 skipped 的，
    *  但期间用户可能开/关了面板 —— 恢复时必须把窗口拉回与逻辑目标一致，否则就留下
@@ -2430,6 +2438,11 @@ for m in ("pydantic", "httpx", "loguru"):
   const hookWindow = (win: BrowserWindow) => {
     if (windowHooked.has(win)) return;
     windowHooked.add(win);
+    // 基准最小宽度必须在任何面板加宽之前记下(此时仍是 createWindow 的 minWidth)。
+    if (!baseMinByWin.has(win)) {
+      const [minW, minH] = win.getMinimumSize();
+      baseMinByWin.set(win, { width: minW, height: minH });
+    }
     win.on('resize', () => {
       if (win.isDestroyed()) return;
       const w = win.getBounds().width;
@@ -2441,10 +2454,27 @@ for m in ("pydantic", "httpx", "loguru"):
     win.on('unmaximize', () => reconcileOnRestore(win));
     win.on('restore', () => reconcileOnRestore(win));
   };
+  /** 面板展开时把窗口最小宽度抬到「基准 + PANEL_MIN_FLOOR」,关闭还原。
+   *  绝不把 min 设到大于当前窗口宽 —— 否则 Windows 会把窗口钉死、完全无法调整
+   *  (上一版按面板实际宽抬高时就是这样把窗口锁住的)。 */
+  const syncWindowMin = (win: BrowserWindow, panelOpen: boolean) => {
+    const base = baseMinByWin.get(win);
+    if (!base) return;
+    const want = base.width + (panelOpen ? PANEL_MIN_FLOOR : 0);
+    const safe = Math.min(want, win.getBounds().width);
+    if (win.getMinimumSize()[0] !== safe) win.setMinimumSize(safe, base.height);
+  };
   /** 把窗口加宽/收窄到 target 对应的状态，返回实际应用到的 extra。 */
   const applyPanelExtra = (win: BrowserWindow, target: number): number => {
-    const rec = panelExtraByWin.get(win) ?? { extra: 0, left: 0, right: 0, wanted: target };
+    const rec = panelExtraByWin.get(win) ?? {
+      extra: 0,
+      left: 0,
+      right: 0,
+      wanted: target,
+      occupied: false,
+    };
     rec.wanted = target;
+    rec.occupied = target > 0;
     const delta = target - rec.extra;
     if (delta !== 0) {
       const b = win.getBounds();
@@ -2489,10 +2519,11 @@ for m in ("pydantic", "httpx", "loguru"):
       }
       panelExtraByWin.set(win, rec);
     }
+    syncWindowMin(win, rec.occupied);
     return rec.extra;
   };
 
-  ipcMain.handle(IPC.APP_PANEL_EXTRA, (event, raw: unknown) => {
+  ipcMain.handle(IPC.APP_PANEL_EXTRA, (event, raw: unknown, minOnly?: boolean) => {
     const win = electron.BrowserWindow.fromWebContents(event.sender);
     const target = Math.max(
       0,
@@ -2502,12 +2533,34 @@ for m in ("pydantic", "httpx", "loguru"):
       return { ok: false, applied: 0, skipped: true };
     }
     hookWindow(win);
+    if (minOnly) {
+      // 只上报「面板当前是否占宽」以抬高窗口最小宽度,不动窗口:冷启动面板默认展开、
+      // 没有任何加宽请求(extra=0),但不报的话缩窗会把聊天列/输入框压扁。
+      const rec = panelExtraByWin.get(win) ?? {
+        extra: 0,
+        left: 0,
+        right: 0,
+        wanted: 0,
+        occupied: false,
+      };
+      rec.occupied = target > 0;
+      panelExtraByWin.set(win, rec);
+      syncWindowMin(win, rec.occupied);
+      return { ok: true, applied: rec.extra, skipped: false };
+    }
     if (win.isMaximized() || win.isFullScreen() || !win.isResizable()) {
       // 现在动不了，但逻辑目标要留下（见 rec.wanted）—— 恢复窗口时由
       // reconcileOnRestore 补应用。不能像以前那样直接返回、什么都不记：那样
       // 「最大化期间关面板」会被整个丢掉，恢复后窗口仍被面板撑宽 280px。
-      const rec = panelExtraByWin.get(win) ?? { extra: 0, left: 0, right: 0, wanted: target };
+      const rec = panelExtraByWin.get(win) ?? {
+        extra: 0,
+        left: 0,
+        right: 0,
+        wanted: target,
+        occupied: false,
+      };
       rec.wanted = target;
+      rec.occupied = target > 0;
       panelExtraByWin.set(win, rec);
       return { ok: false, applied: rec.extra, skipped: true };
     }
