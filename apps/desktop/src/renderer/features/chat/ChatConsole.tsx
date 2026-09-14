@@ -2837,8 +2837,10 @@ export function ChatConsole({
     content?: string;
     dataBase64?: string;
     /** #877: rich render kind — pdf iframe / spreadsheet table / docx blocks. */
-    kind?: 'pdf' | 'spreadsheet' | 'document';
+    kind?: 'pdf' | 'spreadsheet' | 'document' | 'image';
     pdfUrl?: string;
+    /** kind==='image' 时的图片源（data URL）。 */
+    imageUrl?: string;
     spreadsheet?: SpreadsheetData;
     docBlocks?: DocumentBlocks;
   } | null>(null);
@@ -7132,6 +7134,29 @@ export function ChatConsole({
                               // Ignore clicks that arrive right after closing preview
                               // (the close button click can fall through to the chip behind)
                               if (previewJustClosed.current) return;
+                              // 图片：点击打开预览（芯片内不再显示缩略图，保证所有文件芯片等高）
+                              if (att.type === 'image') {
+                                const imgExt = (att.name.split('.').pop() || '').toLowerCase();
+                                const mime =
+                                  imgExt === 'jpg' || imgExt === 'jpeg'
+                                    ? 'image/jpeg'
+                                    : imgExt === 'gif'
+                                      ? 'image/gif'
+                                      : imgExt === 'webp'
+                                        ? 'image/webp'
+                                        : imgExt === 'bmp'
+                                          ? 'image/bmp'
+                                          : 'image/png';
+                                const imageUrl =
+                                  att.dataUrl ||
+                                  (att.dataBase64
+                                    ? `data:${mime};base64,${att.dataBase64}`
+                                    : undefined);
+                                if (imageUrl) {
+                                  setPreviewFile({ path: att.name, kind: 'image', imageUrl });
+                                  return;
+                                }
+                              }
                               if (!isDoc || !att.dataBase64) return;
                               const ext = att.name.split('.').pop()?.toLowerCase() ?? '';
 
@@ -7237,20 +7262,11 @@ export function ChatConsole({
                                 {cat.label}
                               </span>
                             ) : att.type === 'image' ? (
-                              att.dataUrl ? (
-                                <img
-                                  src={att.dataUrl}
-                                  alt={att.name}
-                                  className="h-8 w-8 shrink-0 rounded object-cover"
-                                  style={{ border: '1px solid var(--border-subtle)' }}
-                                />
-                              ) : (
-                                <Image
-                                  size={12}
-                                  className="shrink-0"
-                                  style={{ color: 'var(--info)' }}
-                                />
-                              )
+                              <Image
+                                size={12}
+                                className="shrink-0"
+                                style={{ color: 'var(--info)' }}
+                              />
                             ) : (
                               <FileText size={12} className="shrink-0 text-text-faint" />
                             )}
@@ -7800,7 +7816,22 @@ export function ChatConsole({
               </div>
             </div>
             <div className="flex-1 overflow-auto">
-              {previewFile.kind === 'pdf' && previewFile.pdfUrl ? (
+              {previewFile.kind === 'image' && previewFile.imageUrl ? (
+                <div
+                  className="flex items-center justify-center p-4"
+                  style={{
+                    background: 'var(--surface-muted)',
+                    maxHeight: '75vh',
+                    overflow: 'auto',
+                  }}
+                >
+                  <img
+                    src={previewFile.imageUrl}
+                    alt={previewFile.path}
+                    style={{ maxWidth: '100%', maxHeight: '72vh', borderRadius: 8 }}
+                  />
+                </div>
+              ) : previewFile.kind === 'pdf' && previewFile.pdfUrl ? (
                 <iframe
                   src={previewFile.pdfUrl}
                   title={previewFile.path}
