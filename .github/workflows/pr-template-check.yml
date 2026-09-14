@@ -53,9 +53,11 @@ jobs:
               {
                 label: '日志/验证证据',
                 check: () => {
-                  const m = withoutComments.match(/## 日志\/验证证据\s*\n+```\s*\n([\s\S]*?)```/);
-                  if (!m) return false;
-                  const content = m[1].trim();
+                  // 节内出现非空代码块即算填写（允许标题与代码块之间有说明文字），或全 PR 含图片
+                  const section = withoutComments.match(/## 日志\/验证证据\s*\n([\s\S]*?)(?=\n## |\n##$|$)/);
+                  if (!section) return false;
+                  const code = section[1].match(/```[^\n]*\n([\s\S]*?)```/);
+                  const content = code ? code[1].trim() : '';
                   const hasLog = content.length > 0 && content !== '（粘贴日志/截图）';
                   return hasLog || hasImage;
                 },
