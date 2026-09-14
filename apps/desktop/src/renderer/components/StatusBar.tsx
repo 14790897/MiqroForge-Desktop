@@ -237,41 +237,41 @@ export function StatusBar({ onOpenPoints }: { onOpenPoints?: () => void }) {
                     data-testid="statusbar-billing-history"
                   >
                     {billingHistory.map((entry) => (
-                      <li
-                        key={entry.chargeId}
-                        className="flex items-center justify-between gap-2 text-size-2xs"
-                      >
-                        <div className="min-w-0">
-                          <p className="flex items-center text-[var(--text)]">
-                            <span className="min-w-0 truncate">
-                              {entry.jobId
-                                ? `作业 ${entry.jobId}`
-                                : `${entry.serverName ?? ''}.${entry.toolName ?? ''}`}
-                            </span>
-                            <span className="ml-2 shrink-0 text-[var(--text-faint)]">
-                              {fmtDateTime(Date.parse(entry.deductedAt))}
-                            </span>
-                          </p>
+                      <li key={entry.chargeId} className="flex flex-col gap-0.5 text-size-2xs">
+                        {/* 主信息行：作业 ID + 金额。日期不与标题同行——窄弹层
+                            下（CI Linux 字体更宽）「日期+金额」会吃满整行，把
+                            作业 ID 挤成 0 宽整条不可见。 */}
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="min-w-0 truncate text-[var(--text)]">
+                            {entry.jobId
+                              ? `作业 ${entry.jobId}`
+                              : `${entry.serverName ?? ''}.${entry.toolName ?? ''}`}
+                          </span>
+                          <span className="shrink-0 text-right">
+                            {entry.status === 'billed' ? (
+                              <>
+                                <span className="text-[var(--danger)]">-{entry.cost}</span>
+                                {entry.balanceAfter !== undefined && (
+                                  <span className="ml-1 text-[var(--text-faint)]">
+                                    余额 {entry.balanceAfter}
+                                  </span>
+                                )}
+                              </>
+                            ) : (
+                              <span className="text-[var(--warning)]">
+                                {entry.status === 'insufficient' ? '余额不足' : '扣费失败'}
+                              </span>
+                            )}
+                          </span>
+                        </div>
+                        <p className="flex items-center gap-2 text-[var(--text-faint)]">
+                          <span className="shrink-0">
+                            {fmtDateTime(Date.parse(entry.deductedAt))}
+                          </span>
                           {entry.argsSummary && (
-                            <p className="truncate text-[var(--text-faint)]">{entry.argsSummary}</p>
+                            <span className="min-w-0 truncate">{entry.argsSummary}</span>
                           )}
-                        </div>
-                        <div className="shrink-0 text-right">
-                          {entry.status === 'billed' ? (
-                            <>
-                              <span className="text-[var(--danger)]">-{entry.cost}</span>
-                              {entry.balanceAfter !== undefined && (
-                                <span className="ml-1 text-[var(--text-faint)]">
-                                  余额 {entry.balanceAfter}
-                                </span>
-                              )}
-                            </>
-                          ) : (
-                            <span className="text-[var(--warning)]">
-                              {entry.status === 'insufficient' ? '余额不足' : '扣费失败'}
-                            </span>
-                          )}
-                        </div>
+                        </p>
                       </li>
                     ))}
                   </ul>
