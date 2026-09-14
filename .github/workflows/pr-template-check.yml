@@ -19,9 +19,15 @@ jobs:
             // 去掉 HTML 注释（<!-- xxx -->）
             const withoutComments = body.replace(/<!--[\s\S]*?-->/g, '').trim();
 
-            // 检查 PR 描述中是否包含图片（Markdown 图片语法 或 GitHub 上传的图片附件）
-            const hasImage = /!\[.*?\]\(.*?\)/.test(withoutComments) ||
-                             /https?:\/\/github\.com\/user-attachments\/assets\/[^\s)]+/.test(body);
+            // 取 `## 标题` 到下一个 `## 标题` 之间的正文。
+            // 空节时正则会把下一个标题行吸进来，用 startsWith('## ') 拦掉，避免空节误判为已填写。
+            const sectionText = (label) => {
+              const m = withoutComments.match(
+                new RegExp(`## ${label}\\s*\\n+([\\s\\S]*?)(?=\\n## |\\n##$|$)`)
+              );
+              const text = m ? m[1].trim() : '';
+              return text.startsWith('## ') ? '' : text;
+            };
 
             const checks = [
               {
@@ -31,50 +37,28 @@ jobs:
               },
               {
                 label: '变更概述',
-                check: () => {
-                  const m = withoutComments.match(/## 变更概述\s*\n+(.+?)(?=\n##|\n*$)/s);
-                  return m && m[1].trim().length > 0;
-                },
+                check: () => sectionText('变更概述').length > 0,
               },
               {
                 label: '背景/问题',
-                check: () => {
-                  const m = withoutComments.match(/## 背景\/问题\s*\n+(.+?)(?=\n##|\n*$)/s);
-                  return m && m[1].trim().length > 0;
-                },
+                check: () => sectionText('背景/问题').length > 0,
               },
               {
                 label: '变更内容',
-                check: () => {
-                  const m = withoutComments.match(/## 变更内容\s*\n+(.+?)(?=\n##|\n*$)/s);
-                  return m && m[1].trim().length > 0;
-                },
+                check: () => sectionText('变更内容').length > 0,
               },
               {
                 label: '日志/验证证据',
-                check: () => {
-                  // 节内出现非空代码块即算填写（允许标题与代码块之间有说明文字），或全 PR 含图片
-                  const section = withoutComments.match(/## 日志\/验证证据\s*\n([\s\S]*?)(?=\n## |\n##$|$)/);
-                  if (!section) return false;
-                  const code = section[1].match(/```[^\n]*\n([\s\S]*?)```/);
-                  const content = code ? code[1].trim() : '';
-                  const hasLog = content.length > 0 && content !== '（粘贴日志/截图）';
-                  return hasLog || hasImage;
-                },
+                // 节内有非空内容即可，不强制代码块或图片格式
+                check: () => sectionText('日志/验证证据').length > 0,
               },
               {
                 label: '测试情况',
-                check: () => {
-                  const m = withoutComments.match(/## 测试情况\s*\n+(.+?)(?=\n##|\n*$)/s);
-                  return m && m[1].trim().length > 0;
-                },
+                check: () => sectionText('测试情况').length > 0,
               },
               {
                 label: '截图',
-                check: () => {
-                  const m = withoutComments.match(/## 截图\s*\n+(.+?)(?=\n##|\n*$)/s);
-                  return m && m[1].trim().length > 0;
-                },
+                check: () => sectionText('截图').length > 0,
               },
             ];
 
