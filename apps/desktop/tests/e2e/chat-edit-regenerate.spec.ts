@@ -43,6 +43,14 @@ async function startMockOpenAI(): Promise<{ proc: ChildProcess; mockUrl: string 
 }
 
 test.describe.serial('编辑消息重答(#1011)', () => {
+  // macOS CI 无法运行本 spec:runner 的 undici fetch 到本地 127.0.0.1 会失败,
+  // 且 spawn 的 mock stdout 管道不投递(macos-e2e 实测)。Linux electron-e2e
+  // 跑全量覆盖本 spec —— 与 confirm-card.spec.ts 相同的裁剪策略。
+  test.skip(
+    process.platform === 'darwin' && !!process.env.CI,
+    'macOS CI cannot reach the local mock server'
+  );
+
   let electronApp: any;
   let page: any;
   let miqiHome: string;
