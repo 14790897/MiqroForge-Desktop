@@ -1,6 +1,7 @@
 import {
   useState,
   useEffect,
+  useSyncExternalStore,
   useRef,
   useCallback,
   useMemo,
@@ -622,14 +623,31 @@ function getDocIcon(name: string) {
   }
 }
 
-/** 用户消息时间标签——自身维护分钟级 tick,避免 clockTick 传遍整棵
- *  MessageBubble 树导致全局 memo 失效(外部审查 P2)。 */
+/** 全局分钟 ticker(#1011,review):所有 TimestampLabel 共享同一个 60s
+ *  interval,label 通过 useSyncExternalStore 订阅 —— 避免每条用户消息
+ *  各自建立长期 setInterval(长会话数百 timer)。 */
+let minuteTickValue = 0;
+const minuteTickListeners = new Set<() => void>();
+if (typeof window !== 'undefined') {
+  window.setInterval(() => {
+    minuteTickValue += 1;
+    minuteTickListeners.forEach((notify) => notify());
+  }, 60_000);
+}
+function subscribeMinuteTick(notify: () => void): () => void {
+  minuteTickListeners.add(notify);
+  return () => {
+    minuteTickListeners.delete(notify);
+  };
+}
+function getMinuteTickSnapshot(): number {
+  return minuteTickValue;
+}
+
+/** 用户消息时间标签——订阅全局分钟 tick,跨午夜自动刷新;隔离于 memo
+ *  气泡树(不牵动整棵 MessageBubble 重渲染)。 */
 const TimestampLabel = memo(function TimestampLabel({ timestamp }: { timestamp: number }) {
-  const [, forceTick] = useState(0);
-  useEffect(() => {
-    const timer = window.setInterval(() => forceTick((n) => n + 1), 60_000);
-    return () => window.clearInterval(timer);
-  }, []);
+  useSyncExternalStore(subscribeMinuteTick, getMinuteTickSnapshot, getMinuteTickSnapshot);
   const label = formatChatTime(timestamp);
   if (!label) return null;
   return (
@@ -9245,7 +9263,11 @@ const MessageBubble = memo(function MessageBubble({
               {isUser && msg.content !== '' && !editing && (
                 <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 transition-opacity mt-1">
                   <button
-                    onClick={() => onCopy(msg.content, copyIdx ?? turnIndex ?? 0)}
+                    onClick={() =>
+                      // 复制与编辑同一套 cleanContent 语义(review):
+                      // 附件消息的 content 含内部序列化块,不能把内部标记复制出去
+                      onCopy(extractFileChips(msg.content).cleanContent, copyIdx ?? turnIndex ?? 0)
+                    }
                     title="复制"
                     aria-label="复制"
                     className="flex items-center justify-center w-8 h-8 rounded-lg bg-[var(--surface-muted)]/70 text-[var(--text-muted)] hover:bg-[var(--surface-muted)] hover:text-[var(--text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)] transition-colors"
