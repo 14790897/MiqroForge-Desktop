@@ -7799,11 +7799,10 @@ export function ChatConsole({
                     // 有字节流 → 写临时文件后用系统默认应用打开（保留扩展名）；
                     // 失败或只有路径 → 回退直接 openExternal(路径)。
                     if (previewFile.dataBase64) {
-                      const tmp = `_open_${Date.now()}_${previewFile.path}`;
+                      const name = previewFile.path.split(/[\\/]/).pop() || 'file';
                       try {
-                        await window.miqi.files.write(tmp, '', undefined, previewFile.dataBase64);
-                        await window.miqi.files.openExternal(tmp);
-                        return;
+                        const res = await window.miqi.files.openBytes(name, previewFile.dataBase64);
+                        if (res?.opened) return;
                       } catch {
                         /* fall through to path */
                       }

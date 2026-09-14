@@ -466,6 +466,9 @@ const api = {
       ipcRenderer.invoke(IPC.FILES_ACCEPT, { path, session_key: sessionKey }),
     openExternal: (path: string): Promise<FilesOpenExternalResult> =>
       ipcRenderer.invoke(IPC.FILES_OPEN_EXTERNAL, { path }),
+    /** 预览「系统应用打开」：把字节写成系统临时文件后用默认应用打开（保留扩展名）。 */
+    openBytes: (name: string, dataBase64: string): Promise<FilesOpenExternalResult> =>
+      ipcRenderer.invoke(IPC.FILES_OPEN_BYTES, { name, base64: dataBase64 }),
     openContainingFolder: (path: string): Promise<FilesOpenContainingFolderResult> =>
       ipcRenderer.invoke(IPC.FILES_OPEN_CONTAINING_FOLDER, { path }),
     /** #877: native save dialog for the preview「下载/另存为」button. */

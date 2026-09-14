@@ -1985,6 +1985,39 @@ for m in ("pydantic", "httpx", "loguru"):
     return { opened: true, path: raw };
   });
 
+  // -- Open raw bytes with the system default application ----------------
+  // 预览弹窗「系统应用打开」：把字节写成系统临时文件（保留扩展名，命中默认应用或弹出
+  // Windows「打开方式」），再交给 OS。临时目录在 workspace 之外，故不走 canonical 校验。
+  ipcMain.handle(IPC.FILES_OPEN_BYTES, async (_event, payload: unknown) => {
+    const p = payload as { name?: string; base64?: string };
+    const rawName = typeof p?.name === 'string' && p.name ? p.name : 'file';
+    const base64 = typeof p?.base64 === 'string' ? p.base64 : '';
+    if (!base64) return { opened: false, path: rawName, error: 'Empty payload' };
+
+    const dot = rawName.lastIndexOf('.');
+    const stem = dot > 0 ? rawName.slice(0, dot) : rawName;
+    const ext = dot > 0 ? rawName.slice(dot) : '';
+    const safeStem = stem.replace(/[^\w一-龥.-]/g, '_').slice(-60) || 'file';
+    const safeExt = ext.replace(/[^\w.]/g, '').slice(0, 10);
+    const tmpPath = join(tmpdir(), `miqi-open-${randomUUID()}-${safeStem}${safeExt}`);
+
+    try {
+      writeFileSync(tmpPath, Buffer.from(base64, 'base64'), { mode: 0o600 });
+    } catch (e: any) {
+      return { opened: false, path: tmpPath, error: e?.message ?? String(e) };
+    }
+    const error = await shell.openPath(tmpPath);
+    // 外部应用可能稍后异步读取，延迟清理而不是立刻删除
+    setTimeout(() => {
+      try {
+        unlinkSync(tmpPath);
+      } catch {
+        /* already gone */
+      }
+    }, 10 * 60_000);
+    return error ? { opened: false, path: tmpPath, error } : { opened: true, path: tmpPath };
+  });
+
   // -- Open an HTML string in the system default browser -------------------
   // Write the content to a temp .html file (so relative CSS/scripts resolve
   // normally) and hand it to the OS default handler — the browser for .html.

@@ -99,6 +99,7 @@ export const IPC = {
   FILES_REVERT: 'files:revert',
   FILES_ACCEPT: 'files:accept',
   FILES_OPEN_EXTERNAL: 'files:openExternal',
+  FILES_OPEN_BYTES: 'files:openBytes', // 预览：字节 → 系统临时文件 → 默认应用打开
   FILES_OPEN_CONTAINING_FOLDER: 'files:openContainingFolder',
   FILES_SAVE_AS: 'files:saveAs', // #877: 预览弹窗「下载/另存为」
   HTML_OPEN_IN_BROWSER: 'html:openInBrowser',
