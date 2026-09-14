@@ -13,6 +13,7 @@ from typing import Any
 from loguru import logger
 
 from miqi.paths import get_legacy_data_dir
+from miqi.session.session_keys import session_files_dir_key
 from miqi.utils.helpers import ensure_dir, safe_filename
 
 # Per-session-key locks shared by ALL SessionManager instances in the process.
@@ -156,8 +157,11 @@ class SessionManager:
         self._cache: dict[str, Session] = {}
 
     def get_session_dir(self, key: str) -> Path:
-        safe_key = safe_filename(key.replace(":", "_"))
-        return self.sessions_dir / safe_key
+        # Canonical derivation (single source of truth, #1014) — shared with
+        # files.read / files.write / attachment saving so every side of the
+        # session directory agrees on the name.  Idempotent, so callers may
+        # pass either the raw key or an already-derived one.
+        return self.sessions_dir / session_files_dir_key(key)
 
     def _get_session_path(self, key: str) -> Path:
         """Get the file path for a session key."""
@@ -178,15 +182,24 @@ class SessionManager:
 
     def _migrate_flat_to_dir(self, key: str) -> None:
         """If old flat .jsonl exists and new dir does not, migrate."""
-        safe_key = safe_filename(key.replace(":", "_"))
-        old_flat = self.sessions_dir / f"{safe_key}.jsonl"
-        new_dir  = self.sessions_dir / safe_key
+        # 两个名字刻意不同源（#1014）：旧扁平文件的文件名写死于 raw 约定
+        # （`safe_filename(key.replace(":", "_"))`），照 canonical 去找会漏掉
+        # 三段 namespaced key 的存量文件；迁移后的新目录则用 canonical，
+        # 与 get_session_dir 一致。
+        old_flat = self.sessions_dir / f"{safe_filename(key.replace(':', '_'))}.jsonl"
+        new_dir  = self.sessions_dir / session_files_dir_key(key)
         if old_flat.exists() and not new_dir.exists():
             new_dir.mkdir(parents=True, exist_ok=True)
             shutil.move(str(old_flat), str(new_dir / "conversation.jsonl"))
 
     def _get_legacy_session_path(self, key: str) -> Path:
-        """Legacy global session path for migration only."""
+        """Legacy global session path for migration only.
+
+        Deliberately NOT canonical (#1014): this reads files written by the
+        old global layout in ``~/.assistant/sessions/``, whose names were
+        frozen at write time.  Canonicalising the lookup would make those
+        already-written files unfindable instead of migrating them.
+        """
         safe_key = safe_filename(key.replace(":", "_"))
         return self.legacy_sessions_dir / f"{safe_key}.jsonl"
 
@@ -743,9 +756,10 @@ class SessionManager:
             if session_dir.exists():
                 shutil.rmtree(session_dir)
                 return True
-            # Fallback: old flat file that was never migrated
-            safe_key = safe_filename(key.replace(":", "_"))
-            old_flat = self.sessions_dir / f"{safe_key}.jsonl"
+            # Fallback: old flat file that was never migrated.  Same raw
+            # name convention as ``_migrate_flat_to_dir`` (#1014) — the file
+            # was written under the legacy rule, not the canonical one.
+            old_flat = self.sessions_dir / f"{safe_filename(key.replace(':', '_'))}.jsonl"
             if old_flat.exists():
                 old_flat.unlink()
                 return True
