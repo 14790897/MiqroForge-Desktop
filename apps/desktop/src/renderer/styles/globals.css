@@ -899,14 +899,15 @@ tbody tr:nth-child(even) td {
   transform: translateX(2px);
 }
 
+/* 水平居中归元素的 -translate-x-1/2（v4 落在独立 translate 属性上，会与 transform 叠加），keyframes 只管纵向位移与缩放 */
 @keyframes approval-bypass-island-in {
   from {
     opacity: 0;
-    transform: translate(-50%, -8px) scale(0.96);
+    transform: translateY(-8px) scale(0.96);
   }
   to {
     opacity: 1;
-    transform: translate(-50%, 0) scale(1);
+    transform: translateY(0) scale(1);
   }
 }
 
@@ -919,8 +920,8 @@ tbody tr:nth-child(even) td {
 
 /* Banner auto-dismiss animations */
 @keyframes banner-in {
-  from { opacity: 0; transform: translate(-50%, -8px) scale(0.96); }
-  to   { opacity: 1; transform: translate(-50%, 0) scale(1); }
+  from { opacity: 0; transform: translateY(-8px) scale(0.96); }
+  to   { opacity: 1; transform: translateY(0) scale(1); }
 }
 
 /* Turn status pulse (issue #646: 等待你的确认) */
@@ -935,8 +936,8 @@ tbody tr:nth-child(even) td {
   50% { opacity: 0.45; }
 }
 @keyframes banner-out {
-  from { opacity: 1; transform: translate(-50%, 0) scale(1); }
-  to   { opacity: 0; transform: translate(-50%, -6px) scale(0.97); }
+  from { opacity: 1; transform: translateY(0) scale(1); }
+  to   { opacity: 0; transform: translateY(-6px) scale(0.97); }
 }
 .animate-banner-in {
   animation: banner-in 0.4s cubic-bezier(0.2, 0.9, 0.2, 1) both;

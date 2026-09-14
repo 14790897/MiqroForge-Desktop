@@ -252,10 +252,25 @@ test.describe('MiQroForge 平台登录 E2E (issue #726)', () => {
       await expect(page.getByTestId('qraft-relogin-notify-action')).toContainText('去重新登录');
       await expect(page.getByTestId('topbar-relogin-chip')).toBeVisible();
       await expect(page.getByTestId('topbar-relogin-chip')).toContainText('登录已失效');
+
       await page.screenshot({
         path: 'test-results/qraft-e2e-relogin-notify.png',
         fullPage: true,
       });
+
+      // 横幅水平居中于窗口：Tailwind v4 的 -translate-x-1/2 落在独立 translate
+      // 属性上，若 keyframes 的 transform 里再写一次 translate(-50%) 会叠加，
+      // 横幅整体左移半个身位。
+      const { bannerCenter, viewportCenter } = await page
+        .getByTestId('qraft-relogin-notify')
+        .evaluate((el) => {
+          const rect = el.getBoundingClientRect();
+          return {
+            bannerCenter: rect.left + rect.width / 2,
+            viewportCenter: document.documentElement.clientWidth / 2,
+          };
+        });
+      expect(Math.abs(bannerCenter - viewportCenter)).toBeLessThanOrEqual(1);
 
       // 关闭横幅后不再出现；顶栏 chip 持续提示
       await page.getByTestId('qraft-relogin-notify-close').click();
