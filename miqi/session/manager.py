@@ -207,60 +207,70 @@ class SessionManager:
         When workspace is provided for a NEW session, it is stored in metadata.
         The path is validated for safety (no traversal, must be absolute).
         """
-        if key in self._cache:
-            session = self._cache[key]
-            if client_id is not None:
-                owner = session.metadata.get("owner_client_id")
-                if owner is None:
-                    raise OwnershipError(
-                        f"Session '{key}' is a legacy session with no owner. "
-                        "It must be explicitly claimed before access.",
-                        code="REQUIRES_CLAIM",
-                    )
-                if owner != client_id:
-                    raise OwnershipError(
-                        f"Session '{key}' is owned by client '{owner}', not '{client_id}'",
-                        code="UNAUTHORIZED",
-                    )
-            # Explicit workspace wins even for an existing (cached) session —
-            # the frontend persists the user's pick via sessions.get(workspace=...)
-            # which may arrive after a bridge-not-ready retry already created
-            # the session without a workspace.
-            if workspace is not None:
-                session.metadata["workspace"] = str(self._validate_workspace(workspace))
+        with self._get_session_lock(key):
+            if key in self._cache:
+                session = self._cache[key]
+                if client_id is not None:
+                    # Re-read the owner from disk rather than trusting the cached
+                    # metadata: a different SessionManager instance may have
+                    # deleted + re-created this session under a new owner since
+                    # this entry was cached (#1050 TOCTOU). Fall back to the
+                    # cached owner only when there is no disk session at all —
+                    # an existing-but-unowned disk session must stay unowned
+                    # (REQUIRES_CLAIM), never be authorized by a stale cache.
+                    owner = self._read_owner(key)
+                    if owner is None and not self._get_session_path(key).exists():
+                        owner = session.metadata.get("owner_client_id")
+                    if owner is None:
+                        raise OwnershipError(
+                            f"Session '{key}' is a legacy session with no owner. "
+                            "It must be explicitly claimed before access.",
+                            code="REQUIRES_CLAIM",
+                        )
+                    if owner != client_id:
+                        raise OwnershipError(
+                            f"Session '{key}' is owned by client '{owner}', not '{client_id}'",
+                            code="UNAUTHORIZED",
+                        )
+                # Explicit workspace wins even for an existing (cached) session —
+                # the frontend persists the user's pick via sessions.get(workspace=...)
+                # which may arrive after a bridge-not-ready retry already created
+                # the session without a workspace.
+                if workspace is not None:
+                    session.metadata["workspace"] = str(self._validate_workspace(workspace))
+                return session
+
+            session = self._load(key)
+            if session is None:
+                # New session
+                session = Session(key=key)
+                if client_id is not None:
+                    session.metadata["owner_client_id"] = client_id
+                if workspace is not None:
+                    ws = self._validate_workspace(workspace)
+                    session.metadata["workspace"] = str(ws)
+            else:
+                # Existing session on disk
+                if client_id is not None:
+                    owner = session.metadata.get("owner_client_id")
+                    if owner is None:
+                        # Unowned legacy session — DO NOT auto-claim
+                        raise OwnershipError(
+                            f"Session '{key}' is a legacy session with no owner. "
+                            "It must be explicitly claimed before access.",
+                            code="REQUIRES_CLAIM",
+                        )
+                    if owner != client_id:
+                        raise OwnershipError(
+                            f"Session '{key}' is owned by client '{owner}', not '{client_id}'",
+                            code="UNAUTHORIZED",
+                        )
+                # Same as cache path: explicit workspace overrides on disk session.
+                if workspace is not None:
+                    session.metadata["workspace"] = str(self._validate_workspace(workspace))
+
+            self._cache[key] = session
             return session
-
-        session = self._load(key)
-        if session is None:
-            # New session
-            session = Session(key=key)
-            if client_id is not None:
-                session.metadata["owner_client_id"] = client_id
-            if workspace is not None:
-                ws = self._validate_workspace(workspace)
-                session.metadata["workspace"] = str(ws)
-        else:
-            # Existing session on disk
-            if client_id is not None:
-                owner = session.metadata.get("owner_client_id")
-                if owner is None:
-                    # Unowned legacy session — DO NOT auto-claim
-                    raise OwnershipError(
-                        f"Session '{key}' is a legacy session with no owner. "
-                        "It must be explicitly claimed before access.",
-                        code="REQUIRES_CLAIM",
-                    )
-                if owner != client_id:
-                    raise OwnershipError(
-                        f"Session '{key}' is owned by client '{owner}', not '{client_id}'",
-                        code="UNAUTHORIZED",
-                    )
-            # Same as cache path: explicit workspace overrides on disk session.
-            if workspace is not None:
-                session.metadata["workspace"] = str(self._validate_workspace(workspace))
-
-        self._cache[key] = session
-        return session
 
     def _load(self, key: str) -> Session | None:
         """Load a session from disk."""
@@ -760,18 +770,18 @@ class SessionManager:
 
         When client_id is provided, ownership is verified first.
         """
-        if client_id is not None:
-            self._verify_ownership_for_mutation(key, client_id)
-        session = self.get_or_create(key, client_id=client_id)
-        cleaned = (title or "").strip()
-        if not cleaned:
-            return session.metadata.get("title") or (
-                self._extract_title(self._get_session_path(key)) or key
-            )
-        session.metadata["title"] = cleaned[:100]
-        # save() skips the write when there are no new messages, so persist the
-        # metadata-only change by rewriting the metadata line directly.
         with self._get_session_lock(key):
+            if client_id is not None:
+                self._verify_ownership_for_mutation(key, client_id)
+            session = self.get_or_create(key, client_id=client_id)
+            cleaned = (title or "").strip()
+            if not cleaned:
+                return session.metadata.get("title") or (
+                    self._extract_title(self._get_session_path(key)) or key
+                )
+            session.metadata["title"] = cleaned[:100]
+            # save() skips the write when there are no new messages, so persist the
+            # metadata-only change by rewriting the metadata line directly.
             self._migrate_flat_to_dir(key)
             path = self._get_session_path(key)
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -784,8 +794,8 @@ class SessionManager:
                         + "\n"
                     )
                 path.chmod(0o600)
-        self._cache[key] = session
-        return session.metadata["title"]
+            self._cache[key] = session
+            return session.metadata["title"]
 
     @staticmethod
     def _extract_title(path: Path) -> str:
@@ -937,15 +947,31 @@ class SessionManager:
     def _read_owner(self, key: str) -> str | None:
         """Read owner_client_id from the metadata line of a session file.
 
+        Stops at the metadata line (normally the first line — ``save`` emits it
+        before any message and ``_rewrite_metadata_line`` keeps it at index 0),
+        so a well-formed file costs one line read; this sits on the hot path of
+        ``get_or_create``'s cache-hit ownership re-check (#1050). Unlike the old
+        ``_read_metadata`` path it does not parse trailing message timestamps,
+        but it still scans past non-metadata lines so legacy/hand-edited files
+        that place metadata later are not misread as unowned.
+
         Returns None if the session doesn't exist or has no owner_client_id.
         """
         path = self._get_session_path(key)
         if not path.exists():
             return None
-        data = self._read_metadata(path)
-        if data is None:
+        try:
+            with open(path, encoding="utf-8") as f:
+                for raw in f:
+                    line = raw.strip()
+                    if not line:
+                        continue
+                    data = json.loads(line)
+                    if data.get("_type") == "metadata":
+                        return data.get("owner_client_id")
+        except Exception:
             return None
-        return data.get("owner_client_id")
+        return None
 
     def _read_workspace(self, key: str) -> str | None:
         """Read the workspace from the metadata line of a session file.
