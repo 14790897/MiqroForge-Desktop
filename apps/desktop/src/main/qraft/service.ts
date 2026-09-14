@@ -602,14 +602,12 @@ export class QraftService {
     // 并发去重：同一 charge_id / 复合作业键（账号+服务器+作业 ID）的
     // 在途请求共享同一次扣费，后到者等待首个结果（状态轮询会并发报告 RUNNING）。
     const inFlightKey = `c:${chargeId}`;
-    const jobKey = jobId
-      ? this.slurmJobKey(
-          this.options.store.current?.account.sub ?? '',
-          String(payload.server_name ?? '').slice(0, 64),
-          jobId
-        )
-      : '';
-    const inFlightJobKey = jobKey ? `j:${jobKey}` : null;
+    // 空 subject（浏览器登录 userinfo 失败）不作复合作业键：索引跨登出保留后
+    // `::server::jobId` 会在账号之间串用，既可能误挡他人作业也可能被人误挡。
+    const inFlightSub = this.options.store.current?.account.sub ?? '';
+    const inFlightJobKey = inFlightSub
+      ? `j:${this.slurmJobKey(inFlightSub, String(payload.server_name ?? '').slice(0, 64), jobId)}`
+      : null;
     const inFlight =
       this.inFlightCharges.get(inFlightKey) ??
       (inFlightJobKey ? this.inFlightCharges.get(inFlightJobKey) : undefined);
@@ -648,7 +646,10 @@ export class QraftService {
     // 重复扣费），历史文件覆盖跨重启。
     const accountSub = state.account.sub;
     const serverName = String(payload.server_name ?? '').slice(0, 64);
-    const jobKey = jobId ? this.slurmJobKey(accountSub, serverName, jobId) : '';
+    // 空 subject 不构键：userinfo 失败留下的空 sub 会让 `::server::jobId`
+    // 在账号之间串用（索引现在跨登出保留），退化为仅按 charge_id（每次
+    // 工具调用新生成的 uuid4）去重，不会牵连其他账号的记录。
+    const jobKey = accountSub ? this.slurmJobKey(accountSub, serverName, jobId) : '';
     const history = this.loadBillingHistory();
     const existing =
       history.find((e) => e.chargeId === chargeId) ||
@@ -788,12 +789,17 @@ export class QraftService {
   /** 读取扣费历史（新→旧；只返回当前登录账号的记录）。 */
   getBillingHistory(): QraftBillingHistoryEntry[] {
     const state = this.options.store.current;
-    // 未登录时不外发任何记录：历史文件保留其他账号的条目，没有当前
-    // 账号作过滤依据时不展示（UI 也只在登录后渲染入口）。
+    // 未登录不外发任何记录：历史文件保留其他账号的条目。
     if (!state) return [];
     const sub = state.account.sub;
+    // 账号身份未知（浏览器登录 userinfo 失败会留下空 sub）时同样不外发：
+    // 空 sub 无法作过滤依据，返回全量等于把其他账号的作业与计费数据
+    // 展示给当前用户（CodeRabbit #1067）。
+    if (!sub) return [];
     const history = this.loadBillingHistory();
-    return sub ? history.filter((e) => !e.accountSub || e.accountSub === sub) : history;
+    // 无 accountSub 的是加字段前的老记录（归属不可知，按历史行为展示）；
+    // 空字符串来自身份未知的一次会话，无法归属到任何账号，不外发。
+    return history.filter((e) => e.accountSub === undefined || e.accountSub === sub);
   }
 
   // ── 扣费历史持久化（userData/qraft-billing-history.json）──────────────
