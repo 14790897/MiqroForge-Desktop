@@ -2454,6 +2454,15 @@ const WELCOME_MODE_REASONING: Record<WelcomeMode, ReasoningMode> = {
 };
 const reasoningModeToWelcome = (m: ReasoningMode): WelcomeMode =>
   m === 'think' ? 'daily' : 'fast';
+/**
+ * 从 reasoningMode 反推选中卡时要防一个歧义：日常任务与代码任务都映射 think，光看
+ * reasoningMode 分不出用户想要哪张卡。已经停在「代码任务」时就别把它顶掉——否则在
+ * 输入条切一次「深度研究」或换个会话，代码卡会悄悄变成日常任务，代码模式独有的
+ * 「内置技能」入口也跟着消失（#962 CodeRabbit）。
+ * 原来那条「切到 fast 却还高亮代码卡」的问题不受影响：m === 'fast' 时照样落到 fast。
+ */
+const resolveWelcomeMode = (prev: WelcomeMode, m: ReasoningMode): WelcomeMode =>
+  m === 'think' && prev === 'code' ? 'code' : reasoningModeToWelcome(m);
 
 export function ChatConsole({
   sessionKey = DEFAULT_SESSION,
@@ -2588,7 +2597,9 @@ export function ChatConsole({
         if (cancelled) return;
         const byName = new Map(
           (res?.skills ?? [])
-            .filter((s) => s.source === 'builtin' && !s.path.includes('/kwp/'))
+            // 这里是纯字符串匹配，而 Windows 上 skills.list() 回的是反斜杠路径
+            // （Python 侧 str(Path)），只写 '/kwp/' 在 Windows 上一条都匹配不上。
+            .filter((s) => s.source === 'builtin' && !s.path.replace(/\\/g, '/').includes('/kwp/'))
             .map((s) => [s.name, s] as const)
         );
         // 顺序与上架范围都以 SKILL_ORDER 为准：技能清单本身来自文件系统，顺序不稳定，
@@ -2634,6 +2645,13 @@ export function ChatConsole({
   useEffect(() => {
     setPickedTaskIdx(null);
   }, [pickedSceneIdx]);
+  // 「内置技能」是 skills.list() 回来之后才插到最前面的，整个 welcomeScenes 因此右移
+  // 一位。用户如果在这之前就选了子项目，那个下标会指到隔壁场景上，而输入框里还留着
+  // 上一个任务的提示词——列表一变就把选择清掉，宁可让用户重选（#962 CodeRabbit）。
+  useEffect(() => {
+    setPickedSceneIdx(null);
+    setPickedTaskIdx(null);
+  }, [builtinSkillTasks]);
   // Composer 侧的推理模式切换(ReasoningModeSwitch / 建议提示)同样要同步 welcome
   // 卡高亮——否则空态下先选了「代码任务」再从输入条切 fast,welcomeMode 停在 code、
   // 发送却用 fast,高亮与真实模式不一致(CodeRabbit)。会话已有消息后 welcome 卡不
@@ -2645,7 +2663,7 @@ export function ChatConsole({
   const changeReasoningMode = useCallback(
     (m: ReasoningMode) => {
       setReasoningMode(m);
-      if (messages.length === 0) setWelcomeMode(reasoningModeToWelcome(m));
+      if (messages.length === 0) setWelcomeMode((prev) => resolveWelcomeMode(prev, m));
     },
     [messages.length]
   );
@@ -2653,7 +2671,7 @@ export function ChatConsole({
   // 却因中途切到 fast 而高亮与发送模式不一致（CodeRabbit）。仅随 sessionKey 触发，
   // 不在同一会话内用 reasoningMode 变化覆盖用户手动选卡。
   useEffect(() => {
-    setWelcomeMode(reasoningModeToWelcome(reasoningMode));
+    setWelcomeMode((prev) => resolveWelcomeMode(prev, reasoningMode));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionKey]);
   const [streaming, setStreaming] = useState(false);
