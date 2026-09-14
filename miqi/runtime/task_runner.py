@@ -606,6 +606,12 @@ class TaskRunner:
 
             effective_system_prompt += "\n\n" + ASK_USER_CONFIRM_INSTRUCTION
 
+        # 回答可视化与引用标注（issue #671）— 技术方案/流程/对比类回答
+        # 追加 Mermaid 流程图与参考文献（前端 MarkdownContent 渲染 mermaid）
+        from miqi.agent.answer_style import VISUAL_ANSWER_INSTRUCTION
+
+        effective_system_prompt += "\n\n" + VISUAL_ANSWER_INSTRUCTION
+
         # ── Inject session workspace into the prompt ─────────────────────
         # The AI must know its working directory without needing `pwd`.
         # Inside a bwrap/WSL sandbox `pwd` returns the fixed sandbox path

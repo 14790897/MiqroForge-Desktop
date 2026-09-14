@@ -519,6 +519,11 @@ class AgentLoop:
             request.context_instructions = request.context_instructions or []
             request.context_instructions.append(ASK_USER_CONFIRM_INSTRUCTION)
 
+        # 回答可视化与引用标注（issue #671）
+        from miqi.agent.answer_style import VISUAL_ANSWER_INSTRUCTION
+        request.context_instructions = request.context_instructions or []
+        request.context_instructions.append(VISUAL_ANSWER_INSTRUCTION)
+
         await self._record_pipeline(thread_id, turn_id, "pre_send", {
             "model": model, "historyItems": len(history), "toolCount": len(tools),
         })
