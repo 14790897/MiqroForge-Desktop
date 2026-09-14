@@ -2718,9 +2718,12 @@ export function ChatConsole({
 
   // 上报「面板当前是否占宽」给主进程用于抬高窗口最小宽度(不改窗口宽):冷启动面板默认
   // 展开且没有加宽请求,不报的话缩窗会把聊天列/输入框压到最小宽度以下;关闭时上报 0 还原。
+  //
+  // 只依赖 panelOpen,且传占用标志(1/0):主进程只用 target > 0,不关心具体宽度,
+  // 所以依赖 panelWidth 只会让每次宽度提交多打一次无意义的 IPC(baiye-banned #1047)。
   useEffect(() => {
-    void window.miqi.app.setPanelWindowExtra(panelOpen ? panelWidth : 0, true).catch(() => {});
-  }, [panelOpen, panelWidth]);
+    void window.miqi.app.setPanelWindowExtra(panelOpen ? 1 : 0, true).catch(() => {});
+  }, [panelOpen]);
 
   useEffect(() => {
     const timer = window.setInterval(() => setClockTick(Date.now()), 60_000);
