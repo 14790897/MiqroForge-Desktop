@@ -20,7 +20,7 @@ develop 合并到 main 的 PR 必须使用标准格式，而不是"定期同步"
 **反向同步（main→develop）正确做法：** 建临时分支 `chore/sync-main-into-develop` 指向 main，用该临时分支作为 head 创建 PR 到 develop，避免 main 被自动删除。
 
 **自动化流水线（2026-09-14 起，用户选择「建 PR 后立即合并」策略）：**
-- `.github/workflows/weekly-release.yml`：每周五 09:00 Asia/Shanghai（cron `0 1 * * 5`）自动创建 develop→main 发布 PR 并立即合并（用 `RELEASE_TOKEN`，否则 GITHUB_TOKEN 触发的 push 不会启动 release.yml）；支持 `workflow_dispatch -f dry_run=true` 只建 PR 不合并
+- `.github/workflows/weekly-release.yml`：每周五 00:00 Asia/Shanghai（cron `0 16 * * 4`，即周四 16:00 UTC）自动创建 develop→main 发布 PR 并立即合并（用 `RELEASE_TOKEN`，否则 GITHUB_TOKEN 触发的 push 不会启动 release.yml）；支持 `workflow_dispatch -f dry_run=true` 只建 PR 不合并
 - `.github/workflows/sync-main-into-develop.yml`：正式 release published 时自动反向同步（临时分支 + 立即合并）
 - **develop 版本号约定：** 反向同步时追加 `chore(version): develop 版本号标记为 X-dev` 提交，develop 版本 = 最新已发布版本 + `-dev`（如 `0.30.0-dev`），手动反向同步也需遵守
 - 若自动合并失败（如冲突）工作流会重试 5 次后报错，PR 保留给人处理；加急/临时发布仍走手动流程

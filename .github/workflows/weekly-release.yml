@@ -1,11 +1,11 @@
 name: Weekly Release (develop into main)
 
-# 每周五 09:00 (Asia/Shanghai = 01:00 UTC) 自动创建并立即合并 develop → main 的发布 PR，
+# 每周五 00:00 (Asia/Shanghai = 前一天周四 16:00 UTC) 自动创建并立即合并 develop → main 的发布 PR，
 # 合并产生的 main push 由 release.yml 触发 semantic-release 发版与打包。
 # 也可在 Actions 页手动触发（dry_run 只建 PR 不合并）。
 on:
   schedule:
-    - cron: '0 1 * * 5'
+    - cron: '0 16 * * 4'
   workflow_dispatch:
     inputs:
       dry_run:
