@@ -4680,8 +4680,9 @@ export function ChatConsole({
       return;
     }
 
-    // 所有预派发检查通过 —— 发送真正开始,清掉本次 send 的编辑回滚点(防陈旧)
-    editRollbacksRef.current.delete(thisSendId);
+    // 编辑回滚点保留至真正派发(#1011 P1,review):预派发检查通过≠已发出,
+    // 附件/内容构造/thread start/send 仍可能失败,过早清除会导致无法恢复。
+    // (本处不再删除,改在 chat.send 发出成功后清除)
 
     // If a reveal animation is still running from the previous response,
     // cancel it and abort the in-flight request so we can start fresh.  A
@@ -4768,12 +4769,19 @@ export function ChatConsole({
       // awaited, and the composer / setAttachments / setMessages act on the
       // currently displayed session.
       if (currentSessionRef.current === sendSessionKey) {
+        const rollback = editRollbacksRef.current.get(thisSendId);
+        editRollbacksRef.current.delete(thisSendId);
         setStreaming(false);
-        setMessages((prev) => {
-          const last = prev[prev.length - 1];
-          if (last?.timestamp === userMsg.timestamp) return prev.slice(0, -1);
-          return prev;
-        });
+        if (rollback && rollback.sessionKey === sendSessionKey) {
+          // 编辑重答被取消(#1011):恢复截断前的完整列表
+          setMessages(rollback.snapshot);
+        } else {
+          setMessages((prev) => {
+            const last = prev[prev.length - 1];
+            if (last?.timestamp === userMsg.timestamp) return prev.slice(0, -1);
+            return prev;
+          });
+        }
         composerRef.current?.setText(text);
         setAttachments(atts);
       }
@@ -5751,6 +5759,10 @@ export function ChatConsole({
         reasoningModeRef.current,
         _resumeId ?? undefined
       );
+      // chat.send 已发出(turn 已派发)——此刻清除本次 send 的编辑回滚点
+      // (#1011 P1):此前的失败路径(附件/内容构造/thread start/send 调用)
+      // 都保留了回滚点可供恢复。
+      editRollbacksRef.current.delete(thisSendId);
 
       // Mark as done after a tick — server parsing is synchronous, already complete
       if (sentAttachments.some((a) => a.type === 'document')) {
@@ -5797,6 +5809,8 @@ export function ChatConsole({
         settleLifecycle();
         setStreaming(false);
         setSendingFor(sendSessionKey, null);
+        // 流错误已在流处理器内渲染(turn 已派发)——仅清理本次回滚点防泄漏
+        editRollbacksRef.current.delete(thisSendId);
         sendCleanup();
         // Identity-scoped: only THIS invocation's listeners — the shared
         // unsubsRef may point at a newer overlapping send.
@@ -5805,13 +5819,26 @@ export function ChatConsole({
         return;
       }
       const errMsg = sanitizeUiMessage(e?.message ?? String(e ?? '未知错误'));
+      // 编辑重答(#1011 P1):chat.send 未成功发出前的失败 —— 恢复截断前
+      // 的完整列表(错误提示追加末尾),避免「原消息被截掉且无法恢复」。
+      const sendFailRollback = editRollbacksRef.current.get(thisSendId);
+      editRollbacksRef.current.delete(thisSendId);
+      const sendFailRollbackApplies =
+        !!sendFailRollback &&
+        sendFailRollback.sessionKey === sendSessionKey &&
+        currentSessionRef.current === sendSessionKey;
       if (isProviderConfigurationProblem(errMsg, e?.code)) {
-        setMessages((prev) => [
-          ...prev,
-          createProviderConfigMessage(
-            requiresReloginRef.current ? RELOGIN_INTERCEPT_TEXT : errMsg,
-            loggedInRef.current && !requiresReloginRef.current ? 'open-provider-settings' : 'login'
-          ),
+        const failMsg = createProviderConfigMessage(
+          requiresReloginRef.current ? RELOGIN_INTERCEPT_TEXT : errMsg,
+          loggedInRef.current && !requiresReloginRef.current ? 'open-provider-settings' : 'login'
+        );
+        setMessages((prev) =>
+          sendFailRollbackApplies ? [...sendFailRollback!.snapshot, failMsg] : [...prev, failMsg]
+        );
+      } else if (sendFailRollbackApplies) {
+        setMessages([
+          ...sendFailRollback!.snapshot,
+          { role: 'error' as const, content: errMsg, timestamp: Date.now() },
         ]);
       } else if (e?.code) {
         setMessages((prev) => [
@@ -9136,8 +9163,8 @@ const MessageBubble = memo(function MessageBubble({
                         if (e.key === 'Escape') setEditing(false);
                         if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
                           if (
-                            editText.trim() &&
-                            editText.trim() !== extractFileChips(msg.content).cleanContent.trim()
+                            editText.trim() !== '' &&
+                            editText !== extractFileChips(msg.content).cleanContent
                           ) {
                             onEdit?.(msg, editText);
                           }
@@ -9155,16 +9182,16 @@ const MessageBubble = memo(function MessageBubble({
                       <button
                         onClick={() => {
                           if (
-                            editText.trim() &&
-                            editText.trim() !== extractFileChips(msg.content).cleanContent.trim()
+                            editText.trim() !== '' &&
+                            editText !== extractFileChips(msg.content).cleanContent
                           ) {
                             onEdit?.(msg, editText);
                           }
                           setEditing(false);
                         }}
                         disabled={
-                          !editText.trim() ||
-                          editText.trim() === extractFileChips(msg.content).cleanContent.trim()
+                          editText.trim() === '' ||
+                          editText === extractFileChips(msg.content).cleanContent
                         }
                         data-testid="edit-message-submit"
                         className="px-3 py-1.5 text-xs rounded-lg bg-[var(--accent)] text-white disabled:opacity-40 transition-opacity"
