@@ -8,7 +8,7 @@ import {
   type ComponentProps,
 } from 'react';
 import { createPortal } from 'react-dom';
-import { ASSET_PANEL_MIN_WIDTH } from '../../../shared/layout';
+import { ASSET_PANEL_MIN_WIDTH, canOpenPanelWithoutSqueeze } from '../../../shared/layout';
 import { AgentAvatar } from './components/Avatars';
 import { MiQroForgeLogo } from '../../components/MiQroForgeLogo';
 import { MarkdownContent } from './components/MarkdownContent';
@@ -2645,7 +2645,13 @@ export function ChatConsole({
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [historyLoaded, sessionKey]);
-  const [panelOpen, setPanelOpen] = useState(true);
+  // 冷启动默认展开的前提是「窗口放得下面板且聊天列不被挤压」;放不下就默认收起 ——
+  // 既不静默撑宽窗口(minOnly 不改窗口宽),也不把挤压直接呈现给用户(baiye-banned #1047)。
+  const [panelOpen, setPanelOpen] = useState(() =>
+    canOpenPanelWithoutSqueeze(
+      typeof window === 'undefined' ? Number.POSITIVE_INFINITY : window.innerWidth
+    )
+  );
   const [panelWidth, setPanelWidth] = useState(280);
   const panelResizing = useRef(false);
   /** 面板 DOM 节点:拖拽中直改其宽度,避免每帧 setPanelWidth 让整个 ChatConsole
