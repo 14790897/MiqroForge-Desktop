@@ -7667,12 +7667,13 @@ export function ChatConsole({
             if (!o) closePreview();
           }}
           hideClose
-          className="max-w-[980px] p-0"
+          className="max-w-[980px] p-0 bg-transparent border-0 shadow-none"
         >
           <div
             className="flex flex-col rounded-xl shadow-2xl overflow-hidden"
             style={{
-              width: previewFile.kind ? 940 : 820,
+              width: '100%',
+              maxWidth: previewFile.kind ? 940 : 820,
               maxHeight: '85vh',
               background: 'var(--surface-elevated)',
               border: '1px solid var(--border)',
