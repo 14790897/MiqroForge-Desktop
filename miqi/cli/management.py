@@ -556,6 +556,7 @@ def register_management_commands(
                 provider=provider,
                 session_id=session_id,
                 workspace=config.workspace_path,
+                approval_channel_available=False,
             )
             await runtime.start()
             try:

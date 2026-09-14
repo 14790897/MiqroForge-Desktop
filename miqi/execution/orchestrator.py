@@ -271,6 +271,7 @@ class ToolOrchestrator:
         approval_timeout_ms: int = 60_000,
         session_id: str = "",
         ledger_runtime: Any | None = None,
+        approval_channel_available: bool = True,
     ):
         self.permissions = permission_engine
         self.sandbox = sandbox_engine
@@ -278,6 +279,10 @@ class ToolOrchestrator:
         self.tools = tool_registry
         self.events = event_emitter
         self.approval_timeout_ms = approval_timeout_ms
+        # Frontends without a way to resolve an approval must fail closed
+        # immediately instead of creating an orphan request that waits for
+        # the timeout and is later misreported as a user denial.
+        self.approval_channel_available = approval_channel_available
         self._session_id = session_id
         # Phase 31.8: ledger runtime for replay-persistent event recording
         self._ledger = ledger_runtime
@@ -367,6 +372,25 @@ class ToolOrchestrator:
                 return ctx
 
             if decision.verdict == PermissionVerdict.APPROVAL_REQUIRED:
+                if not self.approval_channel_available:
+                    decision = PermissionDecision(
+                        verdict=PermissionVerdict.DENY,
+                        category=decision.category,
+                        description=decision.description,
+                        details=decision.details,
+                        reason=(
+                            "Approval is required, but this client has no approval "
+                            "channel; the action was denied by default. Use the "
+                            "desktop approval flow or configure an explicit approval "
+                            "bypass."
+                        ),
+                        allow_permanent=decision.allow_permanent,
+                    )
+                    ctx.permission_decision = decision
+                    ctx.result = f"权限被拒绝：{decision.reason}"
+                    ctx.status = OrchestrationResult.DENIED_BY_POLICY
+                    return ctx
+
                 pr_outcome = await self.hooks.run_with_outcome(
                     HookPoint.PERMISSION_REQUEST, ctx
                 )

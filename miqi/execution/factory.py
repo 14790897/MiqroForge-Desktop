@@ -26,6 +26,7 @@ def create_default_orchestrator(
     approval_bypass: Any | None = None,
     ledger_runtime: Any | None = None,
     exec_timeout_ms: int | None = None,
+    approval_channel_available: bool = True,
 ) -> Any:
     """Create a ToolOrchestrator with sensible defaults.
 
@@ -44,6 +45,9 @@ def create_default_orchestrator(
             Defaults to 30s; pass the configured ``tools.exec.timeout``
             (in ms) so the selection does not silently cap commands below
             the user's setting.
+        approval_channel_available: Whether the caller can resolve emitted
+            approval requests. Callers without an approval UI must set this
+            to False so approval-required actions fail closed immediately.
     Returns:
         Configured ToolOrchestrator instance.
     """
@@ -79,4 +83,5 @@ def create_default_orchestrator(
         tool_registry=tool_registry,
         event_emitter=emitter,
         ledger_runtime=ledger_runtime,
+        approval_channel_available=approval_channel_available,
     )

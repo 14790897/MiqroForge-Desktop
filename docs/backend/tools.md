@@ -62,6 +62,11 @@ class ToolResult:
 - `ASK` — 每次询问用户
 - `DENY` — 拒绝执行
 
+如果客户端没有可用的审批响应通道，审批要求必须默认拒绝，并立即返回结构化的
+`DENIED_BY_POLICY` 结果；不得创建无人处理的审批请求并等待超时。CLI、TUI、Gateway
+等无审批界面的入口会显式关闭该通道，桌面端通过 `approvals.resolve` 保持事件驱动的
+审批流程。显式配置的 approval bypass 仍按原策略生效。
+
 ### 阶段 2: 沙箱选择
 
 `SandboxPolicyEngine` 根据工具类型和参数选择沙箱：

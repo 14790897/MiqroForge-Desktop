@@ -69,6 +69,7 @@ class MiQiTui(App):
             provider=provider,
             session_id="tui:default",
             workspace=workspace,
+            approval_channel_available=False,
         )
         await self._runtime.start()
         self._client = RuntimeClient(self._runtime)

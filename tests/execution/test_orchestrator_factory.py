@@ -43,3 +43,15 @@ def test_create_default_orchestrator_permanent_allowlist():
     )
 
     assert "echo hello" in orchestrator.permissions.permanent_allowlist
+
+
+def test_create_default_orchestrator_propagates_approval_channel_capability():
+    """Frontends can opt into immediate fail-closed approval handling."""
+    from miqi.execution.factory import create_default_orchestrator
+
+    orchestrator = create_default_orchestrator(
+        tool_registry=None,
+        approval_channel_available=False,
+    )
+
+    assert orchestrator.approval_channel_available is False

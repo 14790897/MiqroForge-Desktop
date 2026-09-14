@@ -149,6 +149,7 @@ class ClientSessionRegistry:
                 workspace=workspace,
                 sandbox_manager=sandbox_manager,
                 agent_completion_callback=_on_agent_completed,
+                approval_channel_available=True,
             )
             await runtime.start()
 

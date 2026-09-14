@@ -100,6 +100,7 @@ def register_agent_command(
                     provider=provider,
                     session_id=session_id,
                     workspace=config.workspace_path,
+                    approval_channel_available=False,
                 )
                 await runtime.start()
                 await cron.start()
@@ -177,6 +178,7 @@ async def _run_agent_once_via_runtime(
         provider=provider,
         session_id=session_id,
         workspace=config.workspace_path,
+        approval_channel_available=False,
     )
     await runtime.start()
     try:

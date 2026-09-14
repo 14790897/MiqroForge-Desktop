@@ -5,6 +5,7 @@ block, modify, or short-circuit the tool execution pipeline.
 """
 
 import json
+import time
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -16,6 +17,7 @@ from miqi.execution.hook_runtime import (
     HookRuntime,
 )
 from miqi.execution.orchestrator import (
+    OrchestrationResult,
     ToolExecutionContext,
     ToolOrchestrator,
 )
@@ -161,6 +163,51 @@ async def test_permission_request_block_short_circuits_approval(orch, mock_orch_
     assert "auto-denied by hook" in result_ctx.result
     mock_orch_components["event_emitter"].emit.assert_not_called()
     tool_mock.execute.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_missing_approval_channel_fails_closed_without_waiting(
+    mock_orch_components,
+):
+    """A client without an approval resolver must refuse immediately."""
+    mock_orch_components["permission_engine"].check.return_value = PermissionDecision(
+        verdict=PermissionVerdict.APPROVAL_REQUIRED,
+        category="network",
+        description="web_search: sensitive query",
+        details={"query": "sensitive query"},
+    )
+
+    tool_mock = MagicMock()
+    tool_mock.execute = AsyncMock(return_value="must-not-run")
+    mock_orch_components["tool_registry"].get.return_value = tool_mock
+
+    orch = ToolOrchestrator(
+        permission_engine=mock_orch_components["permission_engine"],
+        sandbox_engine=mock_orch_components["sandbox_engine"],
+        hook_runtime=mock_orch_components["hook_runtime"],
+        tool_registry=mock_orch_components["tool_registry"],
+        event_emitter=mock_orch_components["event_emitter"],
+        approval_channel_available=False,
+    )
+    ctx = make_ctx(
+        tool_name="web_search",
+        arguments={"query": "sensitive query"},
+    )
+
+    started = time.perf_counter()
+    result_ctx = await orch.execute(ctx)
+    elapsed = time.perf_counter() - started
+
+    assert elapsed < 0.5
+    assert result_ctx.status is OrchestrationResult.DENIED_BY_POLICY
+    assert result_ctx.permission_decision is not None
+    assert result_ctx.permission_decision.verdict is PermissionVerdict.DENY
+    assert "approval channel" in result_ctx.permission_decision.reason
+    assert "用户已拒绝" not in (result_ctx.result or "")
+    mock_orch_components["event_emitter"].emit.assert_not_called()
+    mock_orch_components["sandbox_engine"].select.assert_not_called()
+    tool_mock.execute.assert_not_called()
+    assert not orch._pending_approvals
 
 
 @pytest.mark.asyncio

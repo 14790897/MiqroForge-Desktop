@@ -205,6 +205,7 @@ class BridgeState:
             provider=provider,
             session_id=ns_key,
             workspace=config.workspace_path,
+            approval_channel_available=False,
         )
         await runtime.start()
         self._runtime_sessions[ns_key] = runtime

@@ -78,6 +78,7 @@ def register_gateway_command(
             provider=provider,
             session_id="gateway:default",
             workspace=config.workspace_path,
+            approval_channel_available=False,
         )
         gateway_client = RuntimeClient(gateway_runtime)
 
