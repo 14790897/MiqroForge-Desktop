@@ -46,6 +46,8 @@ interface ComposerProps {
   onAttachClick: () => void;
   onSubmit: (text: string) => void;
   onAbort: () => void;
+  /** 右键「粘贴」：先尝试把剪贴板里的文件/图片挂成附件（返回 true=已处理），否则走文本粘贴。 */
+  onPasteClipboard?: () => Promise<boolean>;
   /** 附件预览等「框内顶部」内容的挂载点:ChatConsole 用 portal 把预览投到这里,
    *  让附件预览显示在输入框内部(而不是框外上方)。 */
   attachmentSlotRef?: (el: HTMLDivElement | null) => void;
@@ -66,6 +68,7 @@ function ComposerImpl(
     onAttachClick,
     onSubmit,
     onAbort,
+    onPasteClipboard,
     attachmentSlotRef,
   }: ComposerProps,
   ref: Ref<ComposerHandle>
@@ -137,11 +140,13 @@ function ComposerImpl(
         icon: <ClipboardPaste size={14} />,
         shortcut: 'Ctrl+V',
         onSelect: () => {
-          const el = textareaRef.current;
-          if (!el) return;
-          navigator.clipboard
-            .readText()
-            .then((text) => {
+          void (async () => {
+            // 剪贴板里是文件/图片 → 挂附件；否则按文本粘贴
+            if (onPasteClipboard && (await onPasteClipboard())) return;
+            const el = textareaRef.current;
+            if (!el) return;
+            try {
+              const text = await navigator.clipboard.readText();
               if (!text) return;
               // Insert at the caret like native Ctrl+V — replace the current
               // selection range instead of always appending at the end.
@@ -152,8 +157,10 @@ function ComposerImpl(
               // truth for state vs DOM — avoids double-delete drift).
               el.dispatchEvent(new Event('input', { bubbles: true }));
               el.focus();
-            })
-            .catch(() => {});
+            } catch {
+              /* clipboard unavailable */
+            }
+          })();
         },
       },
       {

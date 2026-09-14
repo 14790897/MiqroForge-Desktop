@@ -4202,22 +4202,27 @@ export function ChatConsole({
     ]);
   }, []);
 
+  // 剪贴板 → 附件（主进程读）：Ctrl+V 与右键「粘贴」共用；返回是否挂了文件
+  const pasteClipboardFiles = useCallback(async (): Promise<boolean> => {
+    try {
+      const res = await window.miqi.clipboard.readFiles();
+      const items = [...(res?.files ?? []), ...(res?.image ? [res.image] : [])];
+      if (items.length === 0) return false;
+      items.forEach((f) => attachBase64(f.name, f.base64, f.mime, f.size));
+      return true;
+    } catch {
+      return false;
+    }
+  }, [attachBase64]);
+
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       if (!(e.ctrlKey || e.metaKey) || e.key.toLowerCase() !== 'v') return;
-      void (async () => {
-        try {
-          const res = await window.miqi.clipboard.readFiles();
-          const items = [...(res?.files ?? []), ...(res?.image ? [res.image] : [])];
-          for (const f of items) attachBase64(f.name, f.base64, f.mime, f.size);
-        } catch {
-          /* clipboard unavailable */
-        }
-      })();
+      void pasteClipboardFiles();
     };
     window.addEventListener('keydown', onKeyDown, true);
     return () => window.removeEventListener('keydown', onKeyDown, true);
-  }, [attachBase64]);
+  }, [pasteClipboardFiles]);
 
   const removeAttachment = (idx: number) =>
     setAttachments((prev) => prev.filter((_, i) => i !== idx));
@@ -7460,6 +7465,7 @@ export function ChatConsole({
                 onAttachClick={handleAttachClick}
                 onSubmit={handleComposerSubmit}
                 onAbort={handleAbort}
+                onPasteClipboard={pasteClipboardFiles}
                 attachmentSlotRef={setAttachmentSlot}
               />
             </div>
