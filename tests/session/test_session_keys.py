@@ -139,6 +139,51 @@ def test_delete_flat_fallback_looks_up_the_raw_name(tmp_path, monkeypatch):
     assert not old_flat.exists()
 
 
+def test_migrate_flat_to_dir_not_blocked_by_files_only_dir(tmp_path):
+    """canonical 目录仅含 ``files/`` 时不得跳过迁移（#1014 CodeRabbit 评审）。
+
+    附件落盘 / archive 标记会先建出目录，所以「目录存在」≠「会话已迁移」。
+    判据是 ``conversation.jsonl``；把判据改回 ``not new_dir.exists()`` 时本用例
+    必须变红（否则表示没锁住这个回归）。
+    """
+    sm = SessionManager(tmp_path / "ws")
+    canonical_dir = sm.sessions_dir / _NAMESPACED_DIR
+    (canonical_dir / "files").mkdir(parents=True)
+
+    old_flat = sm.sessions_dir / _NAMESPACED_RAW_NAME
+    old_flat.write_text(
+        f'{{"_type": "metadata", "key": "{_NAMESPACED_KEY}",'
+        ' "created_at": "2026-09-14T00:00:00", "updated_at": "2026-09-14T00:00:00",'
+        ' "metadata": {}, "last_consolidated": 0}\n'
+        '{"role": "user", "content": "hi", "timestamp": "2026-09-14T00:00:01"}\n',
+        encoding="utf-8",
+    )
+
+    session = sm._load(_NAMESPACED_KEY)
+
+    assert session is not None
+    assert [m["content"] for m in session.messages] == ["hi"]
+    assert (canonical_dir / "conversation.jsonl").exists()
+    assert not old_flat.exists()
+
+
+def test_migrate_flat_to_dir_keeps_existing_conversation(tmp_path):
+    """对照：已含 ``conversation.jsonl`` 时跳过迁移，既有对话不被覆盖。"""
+    sm = SessionManager(tmp_path / "ws")
+    canonical_dir = sm.sessions_dir / _NAMESPACED_DIR
+    canonical_dir.mkdir(parents=True)
+    existing = canonical_dir / "conversation.jsonl"
+    existing.write_text('{"role": "user", "content": "canonical"}\n', encoding="utf-8")
+
+    old_flat = sm.sessions_dir / _NAMESPACED_RAW_NAME
+    old_flat.write_text('{"role": "user", "content": "stale flat"}\n', encoding="utf-8")
+
+    sm._migrate_flat_to_dir(_NAMESPACED_KEY)
+
+    assert existing.read_text(encoding="utf-8") == '{"role": "user", "content": "canonical"}\n'
+    assert old_flat.read_text(encoding="utf-8") == '{"role": "user", "content": "stale flat"}\n'
+
+
 def test_legacy_global_path_keeps_the_raw_name(tmp_path):
     """``_get_legacy_session_path`` 保持 raw：它读的是历史写死的文件名。
 

@@ -14,6 +14,14 @@ would need a reverse import of ``safe_filename`` and create a cycle.
 
 It depends only on ``miqi.utils.helpers`` and imports nothing from the
 agent/runtime/bridge layers, so every layer may import it freely.
+
+Naming invariant: callers may hold either the bare session key
+(``desktop:<ts>``) or the client-namespaced form
+(``miqi-desktop:desktop:<ts>``); both MUST derive the same directory.
+That shared directory is deliberate (one logical session, one folder)
+and is NOT a cross-client isolation boundary — cross-client isolation
+relies on session ownership checks, and this derivation must not be
+scoped by client_id (the bare form carries no client information).
 """
 
 from __future__ import annotations

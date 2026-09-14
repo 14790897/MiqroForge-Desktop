@@ -186,16 +186,26 @@ class SessionManager:
             return lock
 
     def _migrate_flat_to_dir(self, key: str) -> None:
-        """If old flat .jsonl exists and new dir does not, migrate."""
+        """Move the old flat ``<raw>.jsonl`` into the canonical session dir.
+
+        The migration is skipped only when the canonical dir already holds a
+        ``conversation.jsonl`` — a directory that merely *exists* (holding
+        only ``files/`` or ``.archived``) must not count as migrated, or the
+        flat file stays behind as the single copy of the history.
+        """
         # 两个名字刻意不同源（#1014）：旧扁平文件的文件名写死于 raw 约定
         # （`safe_filename(key.replace(":", "_"))`），照 canonical 去找会漏掉
         # 三段 namespaced key 的存量文件；迁移后的新目录则用 canonical，
         # 与 get_session_dir 一致。
         old_flat = self.sessions_dir / f"{safe_filename(key.replace(':', '_'))}.jsonl"
-        new_dir  = self.sessions_dir / session_files_dir_key(key)
-        if old_flat.exists() and not new_dir.exists():
+        new_dir = self.sessions_dir / session_files_dir_key(key)
+        new_path = new_dir / "conversation.jsonl"
+        # 「已迁移」的判据是 conversation.jsonl 而不是 new_dir.exists()：目录可能
+        # 先由附件落盘 / archive 标记建出来（只有 files/ 或 .archived），此时旧
+        # 扁平文件仍是唯一的历史来源，按「目录存在」跳过等于把历史会话判死。
+        if old_flat.exists() and not new_path.exists():
             new_dir.mkdir(parents=True, exist_ok=True)
-            shutil.move(str(old_flat), str(new_dir / "conversation.jsonl"))
+            shutil.move(str(old_flat), str(new_path))
 
     def _get_legacy_session_path(self, key: str) -> Path:
         """Legacy global session path for migration only.
