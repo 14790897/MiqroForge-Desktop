@@ -46,6 +46,9 @@ interface ComposerProps {
   onAttachClick: () => void;
   onSubmit: (text: string) => void;
   onAbort: () => void;
+  /** 附件预览等「框内顶部」内容的挂载点:ChatConsole 用 portal 把预览投到这里,
+   *  让附件预览显示在输入框内部(而不是框外上方)。 */
+  attachmentSlotRef?: (el: HTMLDivElement | null) => void;
 }
 
 function ComposerImpl(
@@ -63,6 +66,7 @@ function ComposerImpl(
     onAttachClick,
     onSubmit,
     onAbort,
+    attachmentSlotRef,
   }: ComposerProps,
   ref: Ref<ComposerHandle>
 ) {
@@ -174,6 +178,8 @@ function ComposerImpl(
         boxShadow: '0 -4px 20px rgba(0,0,0,0.06), 0 2px 8px rgba(0,0,0,0.04)',
       }}
     >
+      {/* 框内顶部插槽：附件预览由 ChatConsole portal 投到这里(显示在输入框内部) */}
+      <div ref={attachmentSlotRef} />
       {/* Textarea on top — grows up to 1/3 of viewport (DeepSeek style) */}
       <ContextMenu items={inputContextItems} minWidth={160}>
         {({ onContextMenu }) => (

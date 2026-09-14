@@ -2650,6 +2650,8 @@ export function ChatConsole({
    *  (含长回复消息树)重建 VDOM——内容多的对话会因此卡。 */
   const assetsPanelRef = useRef<HTMLDivElement | null>(null);
   const panelWidthRef = useRef(panelWidth);
+  /** 附件预览的投送目标:Composer 框内插槽节点(见下方 portal)。 */
+  const [attachmentSlot, setAttachmentSlot] = useState<HTMLDivElement | null>(null);
   /** 点「文件面板」打开时置位：等主进程真的把窗口加宽了，才让面板出现。
    *  见下面 onRequestSettled。 */
   const pendingPanelReveal = useRef(false);
@@ -7102,209 +7104,215 @@ export function ChatConsole({
             }}
           >
             <div className="max-w-[760px] min-w-[min(360px,100%)] mx-auto">
-              {attachments.length > 0 && (
-                <div className="flex flex-wrap gap-2 mb-2">
-                  {attachments.map((att, i) => {
-                    const isDoc = att.type === 'document';
-                    const cat = isDoc ? getDocCategory(att.name) : null;
-                    const isPending = isDoc && (!att.status || att.status === 'pending');
-                    const isParsing = isDoc && att.status === 'parsing';
-                    const isDone = isDoc && att.status === 'done';
-                    const isError = isDoc && att.status === 'error';
+              {attachments.length > 0 &&
+                (() => {
+                  // 附件预览渲染到输入框「内部」:portal 投到 Composer 的框内插槽,
+                  // 插槽尚未挂载时先原地渲染一帧兜底。
+                  const preview = (
+                    <div className="flex flex-wrap gap-2 mb-2">
+                      {attachments.map((att, i) => {
+                        const isDoc = att.type === 'document';
+                        const cat = isDoc ? getDocCategory(att.name) : null;
+                        const isPending = isDoc && (!att.status || att.status === 'pending');
+                        const isParsing = isDoc && att.status === 'parsing';
+                        const isDone = isDoc && att.status === 'done';
+                        const isError = isDoc && att.status === 'error';
 
-                    return (
-                      <div
-                        key={i}
-                        className="flex items-center gap-2 rounded-lg pl-2 pr-1.5 py-1.5 text-xs group max-w-[240px] cursor-pointer hover:brightness-95 transition-all"
-                        style={{
-                          background: isDoc && cat ? cat.bg : 'var(--surface-muted)',
-                          border: `1px solid ${isDoc && cat ? cat.color + '40' : 'var(--border-subtle)'}`,
-                        }}
-                        onClick={async (e) => {
-                          // Ignore clicks that arrive right after closing preview
-                          // (the close button click can fall through to the chip behind)
-                          if (previewJustClosed.current) return;
-                          if (!isDoc || !att.dataBase64) return;
-                          const ext = att.name.split('.').pop()?.toLowerCase() ?? '';
+                        return (
+                          <div
+                            key={i}
+                            className="flex items-center gap-2 rounded-lg pl-2 pr-1.5 py-1.5 text-xs group max-w-[240px] cursor-pointer hover:brightness-95 transition-all"
+                            style={{
+                              background: isDoc && cat ? cat.bg : 'var(--surface-muted)',
+                              border: `1px solid ${isDoc && cat ? cat.color + '40' : 'var(--border-subtle)'}`,
+                            }}
+                            onClick={async (e) => {
+                              // Ignore clicks that arrive right after closing preview
+                              // (the close button click can fall through to the chip behind)
+                              if (previewJustClosed.current) return;
+                              if (!isDoc || !att.dataBase64) return;
+                              const ext = att.name.split('.').pop()?.toLowerCase() ?? '';
 
-                          // #877: PDF → proper paginated rendering (iframe blob)
-                          if (ext === 'pdf') {
-                            try {
-                              setPreviewFile({
-                                path: att.name,
-                                kind: 'pdf',
-                                pdfUrl: base64ToBlobUrl(att.dataBase64, 'application/pdf'),
-                                dataBase64: att.dataBase64,
-                              });
-                              return;
-                            } catch {
-                              /* fall through to client-side text */
-                            }
-                          }
-
-                          // #877: Office/CSV → backend structured parse of the
-                          // in-memory bytes (rich table / document render).
-                          if (/^(xlsx|xls|ods|csv|docx|doc|odt)$/i.test(ext)) {
-                            try {
-                              const result = await window.miqi.documents.parse(
-                                att.name,
-                                undefined,
-                                {
-                                  preview: true,
-                                  structured: true,
-                                  dataBase64: att.dataBase64,
-                                }
-                              );
-                              if (result?.structured) {
-                                if (result.structured.kind === 'spreadsheet') {
+                              // #877: PDF → proper paginated rendering (iframe blob)
+                              if (ext === 'pdf') {
+                                try {
                                   setPreviewFile({
                                     path: att.name,
-                                    kind: 'spreadsheet',
-                                    spreadsheet: result.structured,
-                                    content: result.text,
+                                    kind: 'pdf',
+                                    pdfUrl: base64ToBlobUrl(att.dataBase64, 'application/pdf'),
                                     dataBase64: att.dataBase64,
                                   });
                                   return;
+                                } catch {
+                                  /* fall through to client-side text */
                                 }
-                                setPreviewFile({
-                                  path: att.name,
-                                  kind: 'document',
-                                  docBlocks: result.structured,
-                                  content: result.text,
-                                  dataBase64: att.dataBase64,
-                                });
-                                return;
                               }
-                              // No structure (e.g. .xls/.odt) — use the backend text
-                              if (result?.text) {
-                                setPreviewFile({
-                                  path: att.name,
-                                  content: result.text.slice(0, 50000),
-                                  dataBase64: att.dataBase64,
-                                });
-                                return;
+
+                              // #877: Office/CSV → backend structured parse of the
+                              // in-memory bytes (rich table / document render).
+                              if (/^(xlsx|xls|ods|csv|docx|doc|odt)$/i.test(ext)) {
+                                try {
+                                  const result = await window.miqi.documents.parse(
+                                    att.name,
+                                    undefined,
+                                    {
+                                      preview: true,
+                                      structured: true,
+                                      dataBase64: att.dataBase64,
+                                    }
+                                  );
+                                  if (result?.structured) {
+                                    if (result.structured.kind === 'spreadsheet') {
+                                      setPreviewFile({
+                                        path: att.name,
+                                        kind: 'spreadsheet',
+                                        spreadsheet: result.structured,
+                                        content: result.text,
+                                        dataBase64: att.dataBase64,
+                                      });
+                                      return;
+                                    }
+                                    setPreviewFile({
+                                      path: att.name,
+                                      kind: 'document',
+                                      docBlocks: result.structured,
+                                      content: result.text,
+                                      dataBase64: att.dataBase64,
+                                    });
+                                    return;
+                                  }
+                                  // No structure (e.g. .xls/.odt) — use the backend text
+                                  if (result?.text) {
+                                    setPreviewFile({
+                                      path: att.name,
+                                      content: result.text.slice(0, 50000),
+                                      dataBase64: att.dataBase64,
+                                    });
+                                    return;
+                                  }
+                                } catch {
+                                  /* fall through to client-side text */
+                                }
                               }
-                            } catch {
-                              /* fall through to client-side text */
-                            }
-                          }
 
-                          let previewText = '';
+                              let previewText = '';
 
-                          // Client-side extraction only (fast, no server round-trip)
-                          try {
-                            const raw = Uint8Array.from(atob(att.dataBase64), (c) =>
-                              c.charCodeAt(0)
-                            );
-                            if (ext === 'pdf') {
-                              previewText = extractPdfText(raw.buffer);
-                            } else if (
-                              /^(md|markdown|mdown|txt|text|csv|json|ya?ml|xml|py|ts|js|log|html|htm|env|sql|ini|toml|htaccess|sh|bash)$/i.test(
-                                ext
-                              )
-                            ) {
-                              previewText = new TextDecoder().decode(raw);
-                            } else {
-                              previewText = '(Office 文件 —— 发送后服务端解析)';
-                            }
-                          } catch {
-                            previewText = '(无法预览)';
-                          }
-                          if (!previewText || !previewText.trim()) {
-                            previewText = '(扫描件或二进制文件，无文本内容)';
-                          }
-                          setPreviewFile({
-                            path: att.name,
-                            content: previewText.slice(0, 50000),
-                            dataBase64: att.dataBase64,
-                          });
-                        }}
-                      >
-                        {/* File type badge */}
-                        {isDoc && cat ? (
-                          <span
-                            className="shrink-0 rounded font-bold text-[10px] px-1.5 py-0.5 leading-none"
-                            style={{ background: cat.color, color: '#fff' }}
+                              // Client-side extraction only (fast, no server round-trip)
+                              try {
+                                const raw = Uint8Array.from(atob(att.dataBase64), (c) =>
+                                  c.charCodeAt(0)
+                                );
+                                if (ext === 'pdf') {
+                                  previewText = extractPdfText(raw.buffer);
+                                } else if (
+                                  /^(md|markdown|mdown|txt|text|csv|json|ya?ml|xml|py|ts|js|log|html|htm|env|sql|ini|toml|htaccess|sh|bash)$/i.test(
+                                    ext
+                                  )
+                                ) {
+                                  previewText = new TextDecoder().decode(raw);
+                                } else {
+                                  previewText = '(Office 文件 —— 发送后服务端解析)';
+                                }
+                              } catch {
+                                previewText = '(无法预览)';
+                              }
+                              if (!previewText || !previewText.trim()) {
+                                previewText = '(扫描件或二进制文件，无文本内容)';
+                              }
+                              setPreviewFile({
+                                path: att.name,
+                                content: previewText.slice(0, 50000),
+                                dataBase64: att.dataBase64,
+                              });
+                            }}
                           >
-                            {cat.label}
-                          </span>
-                        ) : att.type === 'image' ? (
-                          att.dataUrl ? (
-                            <img
-                              src={att.dataUrl}
-                              alt={att.name}
-                              className="h-12 w-12 shrink-0 rounded object-cover"
-                              style={{ border: '1px solid var(--border-subtle)' }}
-                            />
-                          ) : (
-                            <Image
-                              size={14}
-                              className="shrink-0"
-                              style={{ color: 'var(--info)' }}
-                            />
-                          )
-                        ) : (
-                          <FileText size={14} className="shrink-0 text-text-faint" />
-                        )}
+                            {/* File type badge */}
+                            {isDoc && cat ? (
+                              <span
+                                className="shrink-0 rounded font-bold text-[10px] px-1.5 py-0.5 leading-none"
+                                style={{ background: cat.color, color: '#fff' }}
+                              >
+                                {cat.label}
+                              </span>
+                            ) : att.type === 'image' ? (
+                              att.dataUrl ? (
+                                <img
+                                  src={att.dataUrl}
+                                  alt={att.name}
+                                  className="h-12 w-12 shrink-0 rounded object-cover"
+                                  style={{ border: '1px solid var(--border-subtle)' }}
+                                />
+                              ) : (
+                                <Image
+                                  size={14}
+                                  className="shrink-0"
+                                  style={{ color: 'var(--info)' }}
+                                />
+                              )
+                            ) : (
+                              <FileText size={14} className="shrink-0 text-text-faint" />
+                            )}
 
-                        {/* Name + size */}
-                        <div className="flex flex-col min-w-0 leading-tight">
-                          <span className="truncate font-medium text-text">
-                            {att.name.length > 28
-                              ? att.name.slice(0, 25) + '…' + att.name.slice(-4)
-                              : att.name}
-                          </span>
-                          <span className="text-[10px] text-text-muted">
-                            {formatFileSize(att.size)}
-                            {isDoc && isParsing && ' · 解析中…'}
-                            {isDoc && isDone && ' · 已就绪'}
-                            {isDoc && isError && ' · 解析失败'}
-                          </span>
-                        </div>
+                            {/* Name + size */}
+                            <div className="flex flex-col min-w-0 leading-tight">
+                              <span className="truncate font-medium text-text">
+                                {att.name.length > 28
+                                  ? att.name.slice(0, 25) + '…' + att.name.slice(-4)
+                                  : att.name}
+                              </span>
+                              <span className="text-[10px] text-text-muted">
+                                {formatFileSize(att.size)}
+                                {isDoc && isParsing && ' · 解析中…'}
+                                {isDoc && isDone && ' · 已就绪'}
+                                {isDoc && isError && ' · 解析失败'}
+                              </span>
+                            </div>
 
-                        {/* Status icon — only after send */}
-                        {isDoc && isParsing && (
-                          <Loader2
-                            size={13}
-                            className="shrink-0 animate-spin"
-                            style={{ color: cat?.color ?? 'var(--text-faint)' }}
-                          />
-                        )}
-                        {isDoc && isDone && (
-                          <CheckCircle
-                            size={13}
-                            className="shrink-0"
-                            style={{ color: 'var(--success)' }}
-                          />
-                        )}
-                        {isDoc && isError && (
-                          <AlertCircle
-                            size={13}
-                            className="shrink-0"
-                            style={{ color: 'var(--danger)' }}
-                          />
-                        )}
+                            {/* Status icon — only after send */}
+                            {isDoc && isParsing && (
+                              <Loader2
+                                size={13}
+                                className="shrink-0 animate-spin"
+                                style={{ color: cat?.color ?? 'var(--text-faint)' }}
+                              />
+                            )}
+                            {isDoc && isDone && (
+                              <CheckCircle
+                                size={13}
+                                className="shrink-0"
+                                style={{ color: 'var(--success)' }}
+                              />
+                            )}
+                            {isDoc && isError && (
+                              <AlertCircle
+                                size={13}
+                                className="shrink-0"
+                                style={{ color: 'var(--danger)' }}
+                              />
+                            )}
 
-                        {/* Remove */}
-                        <button
-                          onClick={(e) => {
-                            // The chip container opens the preview on click —
-                            // without stopPropagation the remove click bubbles
-                            // up and pops the preview modal for the just-removed
-                            // file (and the modal then eats further input, e.g.
-                            // the attachment.spec cleanup loop in CI).
-                            e.stopPropagation();
-                            removeAttachment(i);
-                          }}
-                          className="shrink-0 opacity-0 group-hover:opacity-100 transition-opacity hover:bg-[rgba(0,0,0,0.1)] rounded p-0.5"
-                        >
-                          <X size={11} style={{ color: 'var(--text-faint)' }} />
-                        </button>
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
+                            {/* Remove */}
+                            <button
+                              onClick={(e) => {
+                                // The chip container opens the preview on click —
+                                // without stopPropagation the remove click bubbles
+                                // up and pops the preview modal for the just-removed
+                                // file (and the modal then eats further input, e.g.
+                                // the attachment.spec cleanup loop in CI).
+                                e.stopPropagation();
+                                removeAttachment(i);
+                              }}
+                              className="shrink-0 opacity-0 group-hover:opacity-100 transition-opacity hover:bg-[rgba(0,0,0,0.1)] rounded p-0.5"
+                            >
+                              <X size={11} style={{ color: 'var(--text-faint)' }} />
+                            </button>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  );
+                  return attachmentSlot ? createPortal(preview, attachmentSlot) : preview;
+                })()}
 
               {/* Turn status (issue #646: 等待你的确认) */}
               <TurnStatusBar />
@@ -7360,6 +7368,7 @@ export function ChatConsole({
                 onAttachClick={handleAttachClick}
                 onSubmit={handleComposerSubmit}
                 onAbort={handleAbort}
+                attachmentSlotRef={setAttachmentSlot}
               />
             </div>
           </div>
