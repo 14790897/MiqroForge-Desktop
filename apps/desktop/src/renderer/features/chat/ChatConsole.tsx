@@ -4284,9 +4284,14 @@ export function ChatConsole({
   /** 编辑重答原子化(#828):handleSend 同步段的接受结果——
    *  被 pending guard 等预检拒绝时标 'rejected',handleEdit 据此回滚截断。 */
   const editSendOutcomeRef = useRef<'accepted' | 'rejected' | null>(null);
-  /** 编辑重答回滚点:异步预派发失败(无 provider / 网关非 active)时,
-   *  恢复截断前的完整消息列表并给出错误提示(CodeRabbit #1011)。 */
-  const editRollbackRef = useRef<{ snapshot: Message[]; sessionKey: string } | null>(null);
+  /** 编辑重答回滚点(待绑定,#1011)。handleEdit 设置,handleSend 在生成
+   *  thisSendId 后转入 editRollbacksRef 按 sendId 绑定。 */
+  const editPendingRollbackRef = useRef<{ snapshot: Message[]; sessionKey: string } | null>(null);
+  /** 编辑重答回滚点(按 sendId 绑定,#1011;CodeRabbit:发送可跨 session
+   *  重叠,单槽会被别的 send 误消费——每个 send 只取自己绑定的回滚点)。 */
+  const editRollbacksRef = useRef<Map<number, { snapshot: Message[]; sessionKey: string }>>(
+    new Map()
+  );
   /** Monotonic id for pendingSendIdsRef — distinguishes "this send" from any
    *  newer send that started for the same session. */
   const sendSeqRef = useRef(0);
@@ -4422,6 +4427,13 @@ export function ChatConsole({
     // the same session overwrites it, so this closure can tell it lost the
     // turn (its provider check must not proceed).
     const thisSendId = ++sendSeqRef.current;
+    // 编辑重答(#1011):把待绑定回滚点绑到本次 send —— 按 sendId 绑定,
+    // 避免跨 session 的其它 send 消费/清除它(CodeRabbit)。
+    const pendingEditRollback = editPendingRollbackRef.current;
+    if (pendingEditRollback && pendingEditRollback.sessionKey === sendSessionKey) {
+      editRollbacksRef.current.set(thisSendId, pendingEditRollback);
+    }
+    editPendingRollbackRef.current = null;
     pendingSendIdsRef.current.set(sendSessionKey, thisSendId);
     setSendingFor(sendSessionKey, userMsg.timestamp);
     setStreaming(true);
@@ -4538,8 +4550,8 @@ export function ChatConsole({
         streamingBySession.delete(sendSessionKey);
         setSendingFor(sendSessionKey, null);
         if (currentSessionRef.current === sendSessionKey) {
-          const rollback = editRollbackRef.current;
-          editRollbackRef.current = null;
+          const rollback = editRollbacksRef.current.get(thisSendId);
+          editRollbacksRef.current.delete(thisSendId);
           setStreaming(false);
           if (rollback && rollback.sessionKey === sendSessionKey) {
             // 编辑重答:恢复截断前的完整列表,错误提示追加在末尾(#1011)
@@ -4597,8 +4609,8 @@ export function ChatConsole({
         streamingBySession.delete(sendSessionKey);
         setSendingFor(sendSessionKey, null);
         if (currentSessionRef.current === sendSessionKey) {
-          const rollback = editRollbackRef.current;
-          editRollbackRef.current = null;
+          const rollback = editRollbacksRef.current.get(thisSendId);
+          editRollbacksRef.current.delete(thisSendId);
           setStreaming(false);
           if (rollback && rollback.sessionKey === sendSessionKey) {
             // 编辑重答:恢复截断前的完整列表,错误提示追加在末尾(#1011)
@@ -4632,8 +4644,8 @@ export function ChatConsole({
       streamingBySession.delete(sendSessionKey);
       setSendingFor(sendSessionKey, null);
       if (currentSessionRef.current === sendSessionKey) {
-        const rollback = editRollbackRef.current;
-        editRollbackRef.current = null;
+        const rollback = editRollbacksRef.current.get(thisSendId);
+        editRollbacksRef.current.delete(thisSendId);
         if (rollback && rollback.sessionKey === sendSessionKey) {
           // 编辑重答被 stop/superseded:恢复截断前的完整列表(#1011)
           setMessages(rollback.snapshot);
@@ -4650,8 +4662,8 @@ export function ChatConsole({
       return;
     }
 
-    // 所有预派发检查通过 —— 发送真正开始,清掉编辑回滚点(防陈旧)
-    editRollbackRef.current = null;
+    // 所有预派发检查通过 —— 发送真正开始,清掉本次 send 的编辑回滚点(防陈旧)
+    editRollbacksRef.current.delete(thisSendId);
 
     // If a reveal animation is still running from the previous response,
     // cancel it and abort the in-flight request so we can start fresh.  A
@@ -6417,7 +6429,7 @@ export function ChatConsole({
       };
       setMessages((prev) => prev.slice(0, idx));
       // 记录回滚点:异步预派发失败时恢复(见 handleSend 的 provider/网关检查)
-      editRollbackRef.current = { snapshot, sessionKey: currentSessionRef.current };
+      editPendingRollbackRef.current = { snapshot, sessionKey: currentSessionRef.current };
       // 同步原子调用:handleSend 经 retryPayload 读文本,不依赖 setInput 渲染
       // flush —— 不排 RAF(窗口不可见时 RAF 可能不触发,导致"截断但不发送")。
       editSendOutcomeRef.current = null;
@@ -6426,7 +6438,7 @@ export function ChatConsole({
       if (editSendOutcomeRef.current === 'rejected') {
         retryPayloadRef.current = null;
         setMessages(snapshot);
-        editRollbackRef.current = null;
+        editPendingRollbackRef.current = null;
       }
     },
     [streaming]
