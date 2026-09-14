@@ -59,7 +59,12 @@ jobs:
           else
             echo "::notice::版本号已是 ${DEV_VERSION}，跳过提交"
           fi
-          git push --force origin chore/sync-main-into-develop
+          if git fetch origin chore/sync-main-into-develop 2>/dev/null; then
+            git push --force-with-lease origin chore/sync-main-into-develop
+          else
+            echo "::notice::远端还没有临时分支，直接创建"
+            git push origin chore/sync-main-into-develop
+          fi
 
           git log --oneline origin/develop..HEAD --no-merges > sync_commits.txt
           echo "version=${DEV_VERSION}" >> "$GITHUB_OUTPUT"
@@ -109,7 +114,7 @@ jobs:
             sleep 10
           done
           if [ "$merged" != true ]; then
-            echo "::error::自动合并 PR #$NUMBER 失败，请手动查看（可能是冲突）"
+            echo "::error::自动合并 PR #$NUMBER 失败，请手动查看（冲突、权限或分支规则集限制）"
             exit 1
           fi
           echo "::notice::已合并反向同步 PR #$NUMBER，develop 版本号为 ${{ steps.prep.outputs.version }}"
