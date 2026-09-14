@@ -210,12 +210,26 @@ test.describe('MiQroForge 扣费历史跨登出/重启留存 E2E', () => {
     await expect(
       page.getByTestId('qraft-billing-history').getByText('作业 12137708')
     ).toBeVisible();
+  });
 
-    // 状态栏积分弹层（明细入口）同样展示记录。先把弹层压到 240px：行宽受
-    // 平台字体度量影响（CI Linux 字体更宽时曾把作业 ID 挤成 0 宽、整条不可见），
-    // 固定窄宽 + 宽度下限让该断言与平台无关。
+  // 状态栏积分按钮只在余额缓存存在时渲染，余额查询走本地 mock ——
+  // macOS CI 的 undici 连不上本地监听（同 qraft-login.spec.ts 的裁剪），
+  // 该平台无法覆盖此链路，其余断言保留。
+  test('状态栏积分弹层展示记录，窄行不挤掉作业 ID', async () => {
+    test.skip(
+      process.platform === 'darwin' && !!process.env.CI,
+      'macOS CI cannot reach the local mock server'
+    );
+
+    await gotoQraftTab(page);
+    await expect(page.getByTestId('qraft-billing-history')).toBeVisible({ timeout: 15_000 });
+
+    // 弹层（积分明细入口）同样展示记录
     await page.getByTestId('statusbar-points').click();
     await expect(page.getByTestId('statusbar-points-popover')).toBeVisible({ timeout: 15_000 });
+
+    // 行宽受平台字体度量影响（CI Linux 字体更宽时曾把作业 ID 挤成 0 宽、整条
+    // 不可见）：压到 220px 并断言宽度下限，让该回归与平台字体无关。
     await page.evaluate(() => {
       const el = document.querySelector<HTMLElement>('[data-testid="statusbar-points-popover"]');
       if (el) el.style.width = '220px';
@@ -225,7 +239,7 @@ test.describe('MiQroForge 扣费历史跨登出/重启留存 E2E', () => {
     const jobBox = await jobLabel.boundingBox();
     expect(jobBox?.width ?? 0).toBeGreaterThan(40);
 
-    // 截图用正常宽度（断言用的窄宽已生效过，这里还原后再截图）
+    // 截图用正常宽度（窄宽断言已生效过，还原后再截图）
     await page.evaluate(() => {
       const el = document.querySelector<HTMLElement>('[data-testid="statusbar-points-popover"]');
       if (el) el.style.width = '';
