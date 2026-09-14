@@ -72,6 +72,7 @@ import {
   readLocalConfig,
   resolveWorkspacePath,
 } from './workspace-path';
+import { panelWindowMinWidth } from '../../shared/layout';
 
 const { ipcMain, dialog, shell, app } = electron;
 
@@ -2419,9 +2420,6 @@ for m in ("pydantic", "httpx", "loguru"):
    *  记的不是「用户设的总宽」而是**扣掉面板那部分之后**的基线 —— 否则用户在面板
    *  开着时拖窗，会把面板的 280 一起吸收进基线，之后关面板一像素都收不回来。 */
   const userWidth = new WeakMap<BrowserWindow, number>();
-  /** 面板展开时窗口最小宽度额外预留的 px(= 面板可被压到的下限 PANEL_MIN_WIDTH)。
-   *  缩窗时面板先从 280 被压到这个下限让位,聊天列因此保住基准最小宽度、输入框不被挤扁。 */
-  const PANEL_MIN_FLOOR = 200;
   /** 面板未展开时的窗口最小宽度(基准)。 */
   const baseMinByWin = new WeakMap<BrowserWindow, { width: number; height: number }>();
   const windowHooked = new WeakSet<BrowserWindow>();
@@ -2454,14 +2452,12 @@ for m in ("pydantic", "httpx", "loguru"):
     win.on('unmaximize', () => reconcileOnRestore(win));
     win.on('restore', () => reconcileOnRestore(win));
   };
-  /** 面板展开时把窗口最小宽度抬到「基准 + PANEL_MIN_FLOOR」,关闭还原。
-   *  绝不把 min 设到大于当前窗口宽 —— 否则 Windows 会把窗口钉死、完全无法调整
-   *  (上一版按面板实际宽抬高时就是这样把窗口锁住的)。 */
+  /** 面板展开时把窗口最小宽度抬到「基准 + 面板下限」,关闭还原;计算见
+   *  shared/layout.panelWindowMinWidth(clamp 到不超过当前窗口宽,避免钉死窗口)。 */
   const syncWindowMin = (win: BrowserWindow, panelOpen: boolean) => {
     const base = baseMinByWin.get(win);
     if (!base) return;
-    const want = base.width + (panelOpen ? PANEL_MIN_FLOOR : 0);
-    const safe = Math.min(want, win.getBounds().width);
+    const safe = panelWindowMinWidth(base.width, panelOpen, win.getBounds().width);
     if (win.getMinimumSize()[0] !== safe) win.setMinimumSize(safe, base.height);
   };
   /** 把窗口加宽/收窄到 target 对应的状态，返回实际应用到的 extra。 */

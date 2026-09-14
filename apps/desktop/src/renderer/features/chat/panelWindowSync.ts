@@ -18,9 +18,12 @@
  * 纯状态机 + 注入的 send/调度器，便于在 node 环境下直接测竞态。
  */
 
+import { ASSET_PANEL_MIN_WIDTH } from '../../../shared/layout';
+
 /** 资产面板宽度边界：拖拽与收尾共用同一组钳制，避免两处用了不同上下限、
- *  松手瞬间面板跳一下。 */
-export const PANEL_MIN_WIDTH = 200;
+ *  松手瞬间面板跳一下。最小宽度取自 shared/layout —— 主进程抬高窗口最小宽度也用它，
+ *  两处必须同源(#1047 Review)。 */
+export const PANEL_MIN_WIDTH = ASSET_PANEL_MIN_WIDTH;
 export const PANEL_MAX_WIDTH = 500;
 
 export function clampPanelWidth(width: number): number {

@@ -8,6 +8,7 @@ import {
   type ComponentProps,
 } from 'react';
 import { createPortal } from 'react-dom';
+import { ASSET_PANEL_MIN_WIDTH } from '../../../shared/layout';
 import { AgentAvatar } from './components/Avatars';
 import { MiQroForgeLogo } from '../../components/MiQroForgeLogo';
 import { MarkdownContent } from './components/MarkdownContent';
@@ -7416,9 +7417,10 @@ export function ChatConsole({
           <div
             data-testid="task-assets-panel"
             ref={assetsPanelRef}
-            className="flex flex-col shrink min-w-[200px] border-l overflow-y-auto relative"
+            className="flex flex-col shrink border-l overflow-y-auto relative"
             style={{
               width: panelWidth,
+              minWidth: ASSET_PANEL_MIN_WIDTH,
               background: 'var(--panel-bg)',
               borderColor: 'var(--panel-border)',
             }}
