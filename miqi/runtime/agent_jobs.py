@@ -32,6 +32,11 @@ class AgentJob:
     error: str | None = None
     created_at: float = field(default_factory=time.time)
     completed_at: float | None = None
+    # #984: authorized output roots inherited from the parent turn, so the
+    # sub-agent's exec/file tools can write where the user asked.  In-memory
+    # only — AgentGraphStore.save_job takes explicit keyword args and the
+    # SQLite schema is fixed, so a restart loses them (documented in the PR).
+    user_roots: list[str] = field(default_factory=list)
 
 
 class AgentJobRuntime:
@@ -79,8 +84,14 @@ class AgentJobRuntime:
         agent_type: str,
         task: str,
         parent_thread_id: str,
+        user_roots: list[str] | None = None,
     ) -> AgentJob:
-        """Start a new agent job and return its handle."""
+        """Start a new agent job and return its handle.
+
+        ``user_roots`` (#984) are the parent turn's authorized output dirs;
+        they are inherited by the sub-agent turn.  They are intentionally
+        NOT persisted — see :class:`AgentJob`.
+        """
         job_id = str(uuid.uuid4())[:12]
         thread_id = f"{self.services.session_id}:{job_id}"
 
@@ -90,6 +101,7 @@ class AgentJobRuntime:
             task=task,
             thread_id=thread_id,
             parent_thread_id=parent_thread_id,
+            user_roots=list(user_roots or []),
         )
         self._jobs[job_id] = job
 

@@ -92,6 +92,23 @@ class TestInjectionGuards:
         assert _url_matches_trusted_gateway("http://evil.example.com/sse") is False
         assert _url_matches_trusted_gateway("") is False
 
+    def test_gateway_key_injection_allowed_over_url(self):
+        from miqi.agent.tools.mcp import _inject_gateway_key_over_url
+
+        # https 一律允许（无论是否 opt-in）
+        assert _inject_gateway_key_over_url(_cfg(url="https://mcp.example.com/sse")) is True
+        # 明文 http 未 opt-in：不允许（fail-closed）
+        assert _inject_gateway_key_over_url(_cfg(url="http://124.220.57.194:9000/sse")) is False
+        # 明文 http 显式 opt-in：允许（平台暂无 https 的过渡）
+        assert (
+            _inject_gateway_key_over_url(
+                _cfg(url="http://124.220.57.194:9000/sse", insecure_http=True)
+            )
+            is True
+        )
+        # 空 url：不允许
+        assert _inject_gateway_key_over_url(_cfg()) is False
+
 
 # ── #975 Artifact Boundary：wrapper 接线（C2）───────────────────────────────
 

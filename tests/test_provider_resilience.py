@@ -99,6 +99,39 @@ def test_classify_error_auth_message() -> None:
     assert classify_error(Exception("invalid api key")) == ErrorKind.AUTH
 
 
+# ── 平台内容安全拦截：403 但不是认证失败 ──────────────────────────────────
+
+
+def test_classify_error_content_blocked_from_gateway_403() -> None:
+    """平台 AI 网关实测返回 403 sensitive_word_detected —— 认证失败是误报，
+    真因是内容被审核拦截（用户改 API Key / 换模型永远修不好）。"""
+    exc = _StatusError(
+        "Error code: 403 - {'error': {'code': 'sensitive_word_detected', "
+        "'message': '我们换一个话题吧', 'type': 'security_violation'}}",
+        status_code=403,
+    )
+    assert classify_error(exc) == ErrorKind.CONTENT_BLOCKED
+
+
+def test_classify_error_content_blocked_from_message_only() -> None:
+    """无 status_code 时也要按审核信号分流（SDK 包装层可能丢掉状态码）。"""
+    assert classify_error(
+        Exception("content_policy_violation: your request was rejected")
+    ) == ErrorKind.CONTENT_BLOCKED
+
+
+def test_classify_error_content_blocked_not_retryable() -> None:
+    """同一份内容重试必然再次被拦，不得进入重试链。"""
+    assert is_retryable(ErrorKind.CONTENT_BLOCKED) is False
+    assert ProviderError(kind=ErrorKind.CONTENT_BLOCKED, message="blocked").recoverable is False
+
+
+def test_plain_403_still_auth() -> None:
+    """回归护栏：真正的 403 权限拒绝仍归 AUTH，不被审核判定抢走。"""
+    assert classify_error(_StatusError("forbidden", status_code=403)) == ErrorKind.AUTH
+    assert classify_error(Exception("Forbidden: billing access denied")) == ErrorKind.AUTH
+
+
 # ── Issue #528: 402 / balance / quota → PAYMENT_REQUIRED ───────────────────
 
 

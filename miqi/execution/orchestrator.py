@@ -63,6 +63,9 @@ _FILE_MUTATION_TOOLS = frozenset({
     # graph_render 写 svg/html 产物 + 读源 JSON——需 _session_key
     # 注入否则资产栏追踪永不生效（CodeRabbit #761）
     "graph_render",
+    # #984: spawn 是子 agent 的授权根继承入口——父 turn 的 _user_roots 经此
+    # 传到 AgentControl.spawn，否则子 agent 的 exec/文件工具拿不到任何根。
+    "spawn",
 })
 
 # Phase 31.4: max lengths for sanitized approval metadata fields
@@ -900,6 +903,14 @@ class ToolOrchestrator:
         # normally RESTRICTED.  Injecting even NONE is future-proofing
         # for tool-body sandbox enforcement and auditing.
         kwargs = {**ctx.arguments}
+        # #984 (R2): ``_user_roots`` is a harness-owned channel — it appears in
+        # no tool schema, and object validation only walks declared keys
+        # (base.py:112-114), so a model-supplied value would ride through
+        # ``ctx.arguments`` and re-open the write boundary this turn's sensed
+        # roots are meant to gate.  Drop it first, then inject the harness
+        # value below — empty list included, so "no roots this turn" is an
+        # explicit harness answer instead of a fall-through to the model's list.
+        kwargs.pop("_user_roots", None)
         if ctx.tool_name == "exec" or ctx.tool_name in _FILE_MUTATION_TOOLS:
             kwargs["_sandbox"] = sandbox
             # _session_key already includes client_id prefix (e.g. "miqi-desktop:desktop:xxx")
@@ -907,8 +918,7 @@ class ToolOrchestrator:
             # #821: auto-sensed user-mentioned output dirs — mirrors the KUN
             # tool host injection so file tools accept the user's explicitly
             # requested output location (e.g. Desktop/test_result).
-            if ctx.user_mentioned_roots:
-                kwargs["_user_roots"] = list(ctx.user_mentioned_roots)
+            kwargs["_user_roots"] = list(ctx.user_mentioned_roots or [])
         elif ctx.tool_name.startswith("mcp_"):
             # MCP 工具（issue #927）：注入会话上下文供 slurm 计费握手使用
             #（MCPToolWrapper 会 pop 掉，不传给 MCP 服务端）。

@@ -276,8 +276,14 @@ async def test_orchestrator_injects_user_roots_kwargs(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_orchestrator_skips_user_roots_when_empty(tmp_path: Path) -> None:
-    """No user roots on ctx → no `_user_roots` kwarg injected."""
+async def test_orchestrator_injects_empty_user_roots_when_none(tmp_path: Path) -> None:
+    """No user roots on ctx → an explicit empty list (#984 R2).
+
+    The kwarg is injected unconditionally so a model-authored ``_user_roots``
+    riding in ``ctx.arguments`` can never be the value the tool ends up with;
+    ``[]`` and "absent" are equivalent downstream (``_effective_shared_roots``
+    early-returns on falsy ``user_roots``).
+    """
     components: dict[str, Any] = {
         "permission_engine": MagicMock(),
         "sandbox_engine": MagicMock(),
@@ -330,4 +336,4 @@ async def test_orchestrator_skips_user_roots_when_empty(tmp_path: Path) -> None:
     await orch.execute(ctx)
 
     kwargs = tool_mock.execute.call_args.kwargs
-    assert "_user_roots" not in kwargs
+    assert kwargs["_user_roots"] == []

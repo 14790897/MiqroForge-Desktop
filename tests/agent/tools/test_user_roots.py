@@ -18,8 +18,10 @@ from miqi.agent.tools.filesystem import _effective_shared_roots
 from miqi.agent.tools.user_roots import (
     DEFAULT_MAX_USER_ROOTS,
     _is_protected_extra_root,
+    _is_protected_prefix,
     _raw_mentions,
     extract_user_mentioned_roots,
+    sanitize_user_roots,
 )
 from miqi.paths import get_config_path
 
@@ -154,6 +156,73 @@ class TestExtractUserMentionedRoots:
         assert extract_user_mentioned_roots([str(out)], workspace=None) == [out.resolve()]
 
 
+# ── protected prefix table (#984) ────────────────────────────────────────
+
+
+class TestProtectedPrefix:
+    """Subtree filtering: depth-1 system dirs were handled, deeper ones not.
+
+    ``_is_protected_prefix`` walks ``Path.parts``, so drive-letter paths only
+    split into components on Windows; on POSIX they are one relative component
+    and the Windows-only cases below are skipped rather than asserted.
+    """
+
+    @pytest.mark.skipif(not _IS_WINDOWS, reason="drive-letter paths split only on Windows")
+    def test_windows_system_subtree(self) -> None:
+        assert _is_protected_prefix(Path(r"C:\Windows\Temp\x")) is True
+
+    @pytest.mark.skipif(not _IS_WINDOWS, reason="drive-letter paths split only on Windows")
+    def test_programdata_subtree(self) -> None:
+        assert _is_protected_prefix(Path(r"C:\ProgramData\pkg\out")) is True
+
+    @pytest.mark.skipif(not _IS_WINDOWS, reason="drive-letter paths split only on Windows")
+    def test_appdata_anywhere(self) -> None:
+        assert _is_protected_prefix(
+            Path(r"C:\Users\x\AppData\Local\Temp\o")
+        ) is True
+
+    def test_posix_system_subtree(self) -> None:
+        assert _is_protected_prefix(Path("/etc/cron.d/x")) is True
+
+    def test_posix_tmp_subtree(self) -> None:
+        assert _is_protected_prefix(Path("/tmp/out")) is True
+
+    def test_user_desktop_not_protected(self) -> None:
+        # The primary #821 scenario must keep working.
+        assert _is_protected_prefix(Path(r"C:\Users\x\Desktop\test_result")) is False
+
+    def test_posix_home_not_protected(self) -> None:
+        assert _is_protected_prefix(Path("/home/alice/out")) is False
+
+    def test_config_home_subtree(self) -> None:
+        assert _is_protected_prefix(Path(get_config_path()).parent / "sub") is True
+
+    @pytest.mark.skipif(not _IS_WINDOWS, reason="drive-letter mentions Windows-only")
+    def test_windows_temp_mention_rejected(self) -> None:
+        roots = extract_user_mentioned_roots([r"结果放 C:\Windows\Temp\x 里"])
+        assert roots == []
+
+    @pytest.mark.skipif(not _IS_WINDOWS, reason="drive-letter mentions Windows-only")
+    def test_windows_programdata_mention_rejected(self) -> None:
+        roots = extract_user_mentioned_roots([r"输出到 C:\ProgramData\pkg\out"])
+        assert roots == []
+
+    def test_posix_system_subtree_mention_rejected(self) -> None:
+        assert extract_user_mentioned_roots(["看下 /etc/cron.d/backdoor"]) == []
+
+    @pytest.mark.skipif(_IS_WINDOWS, reason="POSIX host paths only")
+    def test_posix_home_mention_allowed(self, tmp_path: Path) -> None:
+        out = tmp_path / "out"
+        out.mkdir()
+        assert extract_user_mentioned_roots([f"输出到 {out}"]) == [out.resolve()]
+
+    def test_config_subtree_mention_rejected(self) -> None:
+        roots = extract_user_mentioned_roots(
+            [f"写到 {Path(get_config_path()).parent / 'evil'}"]
+        )
+        assert roots == []
+
+
 # ── _is_protected_extra_root ─────────────────────────────────────────────
 
 
@@ -205,3 +274,92 @@ class TestEffectiveSharedRoots:
         base = [tmp_path / "ws"]
         merged = _effective_shared_roots(base, [None, 123, b"bytes"], True)
         assert merged == base
+
+
+# ── sanitize_user_roots (#1007 review) ───────────────────────────────────
+
+
+class TestSanitizeUserRoots:
+    """Untrusted root strings (an IPC ``user_roots`` param) get the same
+    filtering the mention extractor applies.
+
+    They travel the job path straight into ``ToolExecutionContext
+    .user_mentioned_roots`` — no ``extract_user_mentioned_roots`` call sits
+    on that hop — so they reach both the bwrap rw binds and the command
+    guard's write scope unfiltered.
+    """
+
+    def test_protected_system_subtrees_dropped(self, tmp_path: Path) -> None:
+        assert sanitize_user_roots(
+            [r"C:\Windows\Temp\x", r"C:\ProgramData\pkg\out"],
+            workspace=tmp_path / "ws",
+        ) == []
+
+    def test_relative_and_bare_drive_forms_dropped(self) -> None:
+        assert sanitize_user_roots(
+            ["relative/dir", "C:", "C:relative", r"\\wsl$\Ubuntu\home\out", ""],
+            workspace=None,
+        ) == []
+
+    def test_invalid_entries_dropped(self) -> None:
+        assert sanitize_user_roots(
+            [None, 123, b"bytes", {"a": 1}], workspace=None,
+        ) == []
+
+    def test_malformed_payload_dropped_not_raised(self) -> None:
+        """A non-list payload must not crash the IPC handler — nor have its
+        characters / keys read as roots."""
+        out = str(Path.home() / "Desktop" / "out")
+        assert sanitize_user_roots(out, workspace=None) == []
+        assert sanitize_user_roots(5, workspace=None) == []
+        assert sanitize_user_roots({out: 1}, workspace=None) == []
+        assert sanitize_user_roots(None, workspace=None) == []
+
+    def test_config_home_dropped(self) -> None:
+        config_dir = Path(get_config_path()).parent
+        assert sanitize_user_roots([str(config_dir)], workspace=None) == []
+
+    def test_workspace_root_dropped(self, tmp_path: Path) -> None:
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        assert sanitize_user_roots([str(ws)], workspace=ws) == []
+
+    def test_workspace_child_outside_sessions_dropped(self, tmp_path: Path) -> None:
+        """Anything already inside the workspace needs no extra root."""
+        ws = tmp_path / "ws"
+        (ws / "sub").mkdir(parents=True)
+        assert sanitize_user_roots([str(ws / "sub")], workspace=ws) == []
+
+    def test_sessions_subtree_dropped(self, tmp_path: Path) -> None:
+        ws = tmp_path / "ws"
+        (ws / "sessions" / "k").mkdir(parents=True)
+        assert sanitize_user_roots([str(ws / "sessions" / "k")], workspace=ws) == []
+
+    def test_ordinary_output_dir_kept(self, tmp_path: Path) -> None:
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        out = tmp_path / "out"
+        out.mkdir()
+        assert sanitize_user_roots([str(out)], workspace=ws) == [str(out.resolve())]
+
+    def test_not_yet_created_output_dir_kept(self, tmp_path: Path) -> None:
+        """The #821 scenario: the user's output dir may not exist yet."""
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        out = tmp_path / "not_yet"
+        assert sanitize_user_roots([str(out)], workspace=ws) == [str(out.resolve())]
+
+    def test_duplicates_and_cap(self, tmp_path: Path) -> None:
+        dirs = [tmp_path / f"d{i}" for i in range(DEFAULT_MAX_USER_ROOTS + 3)]
+        for d in dirs:
+            d.mkdir()
+        paths = [str(d) for d in dirs] + [str(dirs[0])]
+        roots = sanitize_user_roots(paths, workspace=tmp_path / "ws", max_roots=4)
+        assert len(roots) == 4
+        assert len(set(roots)) == 4
+
+    def test_posix_system_subtree_dropped(self) -> None:
+        assert sanitize_user_roots(["/etc/cron.d/x"], workspace=None) == []
+
+    def test_home_root_dropped(self) -> None:
+        assert sanitize_user_roots([str(Path.home())], workspace=None) == []

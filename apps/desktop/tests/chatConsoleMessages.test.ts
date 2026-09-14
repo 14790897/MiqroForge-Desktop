@@ -11,6 +11,8 @@ import {
   sessionMsgsToUi,
   toolCommandText,
   formatToolCallHint,
+  applyReloginIntercept,
+  RELOGIN_INTERCEPT_TEXT,
 } from '../src/renderer/features/chat/ChatConsole';
 
 describe('sessionMsgsToUi', () => {
@@ -440,5 +442,60 @@ describe('toolCommandText (issue #902)', () => {
     expect(toolCommandText(undefined)).toBeUndefined();
     expect(toolCommandText(null)).toBeUndefined();
     expect(toolCommandText([])).toBeUndefined();
+  });
+});
+
+describe('applyReloginIntercept (平台登录失效拦截)', () => {
+  const userMsg = { role: 'user' as const, content: '继续之前的工作', timestamp: 42 };
+  const interruptedCard = {
+    role: 'assistant' as const,
+    content: '（中断回合）',
+    interrupted: true,
+    timestamp: 41,
+  };
+  const prevMsg = { role: 'assistant' as const, content: '历史回复', timestamp: 1 };
+
+  it('普通发送：乐观 user 气泡按时间戳匹配替换为重登引导', () => {
+    const next = applyReloginIntercept([prevMsg, userMsg], userMsg, null);
+    expect(next).toHaveLength(2);
+    expect(next[0]).toBe(prevMsg);
+    expect(next[1].role).toBe('error');
+    expect(next[1].action).toBe('login');
+    expect(next[1].content).toBe(RELOGIN_INTERCEPT_TEXT);
+  });
+
+  it('恢复中断回合：无乐观气泡时恢复被移除的中断卡并追加重登引导', () => {
+    // handleResumeTurn 已把中断卡从列表移除，resume 路径不再推 user 气泡
+    const next = applyReloginIntercept([prevMsg], userMsg, interruptedCard);
+    expect(next).toHaveLength(3);
+    expect(next[0]).toBe(prevMsg);
+    expect(next[1]).toBe(interruptedCard);
+    expect(next[2].role).toBe('error');
+    expect(next[2].action).toBe('login');
+    expect(next[2].content).toBe(RELOGIN_INTERCEPT_TEXT);
+  });
+
+  it('时间戳不匹配且无恢复卡片（会话已切换等）：原样返回', () => {
+    const next = applyReloginIntercept([prevMsg], userMsg, null);
+    expect(next).toBe(next);
+    expect(next).toEqual([prevMsg]);
+  });
+
+  it('user 气泡匹配优先于恢复卡片（异常共存时按普通发送处理）', () => {
+    const next = applyReloginIntercept([prevMsg, userMsg], userMsg, interruptedCard);
+    expect(next).toHaveLength(2);
+    expect(next[1].role).toBe('error');
+  });
+
+  it('等待预检期间其他监听器追加消息：就地替换 user 气泡并保留后续消息', () => {
+    // qraft.status() 等待期间子代理等监听器可能把消息追加到 user 气泡之后，
+    // 尾部不再匹配——必须按 role+时间戳定位原气泡就地替换（CodeRabbit #1016）。
+    const laterMsg = { role: 'assistant' as const, content: '子代理持久事件', timestamp: 43 };
+    const next = applyReloginIntercept([prevMsg, userMsg, laterMsg], userMsg, null);
+    expect(next).toHaveLength(3);
+    expect(next[0]).toBe(prevMsg);
+    expect(next[1].role).toBe('error');
+    expect(next[1].content).toBe(RELOGIN_INTERCEPT_TEXT);
+    expect(next[2]).toBe(laterMsg);
   });
 });

@@ -30,6 +30,7 @@ from miqi.agent.tools.filesystem import (
     _sandbox_read_file,
     _sandbox_to_host_path,
     _sandbox_write_file,
+    bootstrap_sandbox_roots,
 )
 
 
@@ -448,6 +449,9 @@ class ApplyPatchTool(Tool):
         if authorized is not None:
             shared = authorized
 
+        # #984: create authorized roots before the sandbox binds them.
+        bootstrap_sandbox_roots(shared)
+
         if sandbox is not None and getattr(sandbox, "_use_wsl", False):
             # session_files_dir enforces per-session isolation (#689): the
             # shared roots now include the workspace root, so without it a
@@ -476,7 +480,9 @@ class ApplyPatchTool(Tool):
             new_content = apply_file_patch(original, file_patch)
 
             try:
-                await _sandbox_write_file(sandbox, sandbox_path, new_content)
+                await _sandbox_write_file(
+                    sandbox, sandbox_path, new_content, extra_rw_binds=shared,
+                )
             except Exception as e:
                 raise IOError(f"Cannot write file in sandbox: {e}") from e
 

@@ -265,6 +265,12 @@ async def providers_list_handler(
             "providers": providers_out,
             "active_model": model,
             "active_provider": model_provider,
+            # 发送门禁的判定依据（#1010 后续）：前端只看得见「本地 provider 是否
+            # 有凭据」，登录后经平台网关路由的默认模型却不需要任何本地凭据
+            # （make_provider 的网关分支），只看 configured 会把可用模型误判成
+            # 「未配置模型服务」。这里用与运行时同一套判定（含网关路由）告诉
+            # 前端当前默认模型是否可以真正发起会话。
+            "active_model_resolvable": _model_provider_resolvable(config, model),
         }
     }
 

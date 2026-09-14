@@ -1522,10 +1522,26 @@ class BridgeRuntimeLoop:
                 "Agent control not initialized", code="INTERNAL",
             )
 
+        # #984 review: the roots a sub-agent runs with feed two authorization
+        # channels — the sandbox rw binds and the command guard's write scope
+        # — so they must come from state the SERVER holds, never from the
+        # request.  ``params`` is caller-supplied and therefore forgeable: a
+        # request field is a request, not a grant.  Filtering it (rather than
+        # dropping it) would still leave the caller choosing the scope.
+        #
+        # This channel currently has no server-side root store (the parent
+        # turn's authorized roots are not recorded per session/turn), so the
+        # sub-agent gets none: fail closed.  Wiring the parent turn's roots in
+        # is a new capability — it needs that store first — and is tracked
+        # separately from this fix.  The model-side ``spawn`` tool is not
+        # affected: it carries ``_user_roots`` through the harness-only
+        # ``extra`` channel, which ToolRegistry strips from model-authored
+        # params.
         agent = await ac.spawn(
             agent_type=params.get("agent_type", "code-agent"),
             task=params.get("task", ""),
             label=params.get("label"),
+            user_roots=None,
         )
         return {"result": {"agent_id": agent.agent_id, "thread_id": agent.thread_id}}
 

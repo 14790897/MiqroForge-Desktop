@@ -468,7 +468,57 @@ class TestUserRootsInjection:
         call = ToolCallLike(call_id="c1", tool_name="write_file", arguments={"path": "a.txt"})
         await host.execute(call, ctx)
         assert tool.last_kwargs is not None
-        assert "_user_roots" not in tool.last_kwargs
+        # #984 R2: injected unconditionally — an empty list is the harness
+        # saying "no roots this turn", never a fall-through to the model's.
+        assert tool.last_kwargs["_user_roots"] == []
+
+    @pytest.mark.asyncio
+    async def test_model_supplied_user_roots_not_adopted(self) -> None:
+        """``_user_roots`` is harness-owned: the model's copy must not reach
+        the tool.  It is in no schema and unknown keys pass validation, so
+        without the strip it would arrive verbatim (and, when the harness also
+        injects, collide as a duplicate keyword in ``execute(**args, **extra)``).
+        """
+        tool = _RecordingWriteTool()
+        reg = ToolRegistry()
+        reg.register(tool)
+        host = MiQiToolHost(reg)
+
+        ctx = ToolHostContext(thread_id="th1", turn_id="t1", workspace="/tmp")
+        call = ToolCallLike(
+            call_id="c1", tool_name="write_file",
+            arguments={
+                "path": "C:/Users/me/Documents/report.md",
+                "_user_roots": ["C:/Users/me/Documents"],
+            },
+        )
+        result = await host.execute(call, ctx)
+        assert result.item["isError"] is False, result.item
+        assert tool.last_kwargs is not None
+        assert tool.last_kwargs["_user_roots"] == []
+
+    @pytest.mark.asyncio
+    async def test_harness_roots_win_over_model_supplied(self) -> None:
+        tool = _RecordingWriteTool()
+        reg = ToolRegistry()
+        reg.register(tool)
+        host = MiQiToolHost(reg)
+
+        ctx = ToolHostContext(
+            thread_id="th1", turn_id="t1", workspace="/tmp",
+            user_mentioned_roots=["C:/Users/x/Desktop/test_result"],
+        )
+        call = ToolCallLike(
+            call_id="c1", tool_name="write_file",
+            arguments={
+                "path": "C:/Users/x/Desktop/test_result/report.md",
+                "_user_roots": ["C:/Users/me/Documents"],
+            },
+        )
+        result = await host.execute(call, ctx)
+        assert result.item["isError"] is False, result.item
+        assert tool.last_kwargs is not None
+        assert tool.last_kwargs["_user_roots"] == ["C:/Users/x/Desktop/test_result"]
 
     def test_graph_render_receives_session_key(self) -> None:
         # Parity with the legacy orchestrator (CodeRabbit #761): graph_render

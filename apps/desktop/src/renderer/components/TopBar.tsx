@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useRuntime } from '../contexts/RuntimeContext';
-import { AlertTriangle, RefreshCw, Loader2, Folder, UserRound } from 'lucide-react';
+import { AlertTriangle, RefreshCw, Loader2, UserRound } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { MiQroForgeLogo } from './MiQroForgeLogo';
 import { useQraftStatus } from '../hooks/useQraftStatus';
@@ -53,31 +53,20 @@ function getBypassTitle(status: ApprovalBypassStatus | null, autoMode: boolean =
   return labels.length > 0 ? `已绕过: ${labels.join('、')}` : '打开审批设置';
 }
 
-function formatWorkspace(workspace: string): string {
-  let display = workspace;
-  if (display.length > 30) {
-    const segs = display.split(/[\\/]/);
-    if (segs.length > 2) {
-      display = segs[0] + '/.../' + segs[segs.length - 1];
-    }
-  }
-  return display;
-}
-
 export function TopBar({
   onOpenApprovals,
   onOpenQraft,
-  workspace,
 }: {
   onOpenApprovals?: () => void;
   /** #1000: 账号 chip 点击 → 设置 → MiQroForge 平台。 */
   onOpenQraft?: () => void;
-  workspace?: string;
 }) {
   const { status, start } = useRuntime();
   // #1000: 顶栏登录入口 —— 未登录显示一键登录 chip（错误经 title 提示，
   // 不内联渲染避免顶栏抖动）；已登录显示账号 chip，点击进平台账号页。
   const { status: qraftStatus, loggedIn } = useQraftStatus();
+  // 登录失效（token 刷新失败且未恢复）：账号 chip 切换为警示态，点击去重新登录。
+  const needsRelogin = qraftStatus?.requiresRelogin === true;
   const [approvalBypass, setApprovalBypass] = useState<ApprovalBypassStatus | null>(null);
   const [bypassHovered, setBypassHovered] = useState(false);
   const [autoMode, setAutoMode] = useState(() => sessionStorage.getItem('miqi:mode:auto') === '1');
@@ -175,19 +164,6 @@ export function TopBar({
 
       {/* Center: status pills */}
       <div className="flex items-center gap-2">
-        {workspace && (
-          <div
-            className="flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[11px]"
-            title={workspace}
-            style={{
-              background: 'var(--surface-muted)',
-              color: 'var(--text-muted)',
-            }}
-          >
-            <Folder size={10} className="shrink-0" />
-            <span className="truncate max-w-[200px]">{formatWorkspace(workspace)}</span>
-          </div>
-        )}
         {bypassEnabled && (
           <button
             type="button"
@@ -268,22 +244,41 @@ export function TopBar({
 
       {/* Right: account entry + user avatar */}
       <div className="flex items-center gap-2">
-        {/* #1000 登录入口：未登录一键登录；已登录账号 chip 点击进平台账号页 */}
+        {/* #1000 登录入口：未登录一键登录；已登录账号 chip 点击进平台账号页；
+            登录失效时 chip 切换为警示态（配合全局横幅的持续提示） */}
         {loggedIn ? (
-          <button
-            type="button"
-            onClick={onOpenQraft}
-            className="flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-xs font-medium transition-colors hover:brightness-95"
-            style={{
-              background: 'var(--accent-soft)',
-              color: 'var(--accent)',
-            }}
-            data-testid="topbar-account-chip"
-            title="查看平台账号（设置 → MiQroForge 平台）"
-          >
-            <UserRound size={12} />
-            {qraftStatus?.account?.nickname || qraftStatus?.account?.username || '已登录'}
-          </button>
+          needsRelogin ? (
+            <button
+              type="button"
+              data-testid="topbar-relogin-chip"
+              onClick={onOpenQraft}
+              className="flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-xs font-medium transition-colors hover:brightness-95"
+              style={{
+                background: 'color-mix(in srgb, var(--approval-warning-bg) 60%, transparent)',
+                color: 'var(--approval-warning)',
+                border: '1px solid var(--approval-warning-border)',
+              }}
+              title="MiQroForge 平台登录已失效，点击去重新登录"
+            >
+              <AlertTriangle size={12} />
+              登录已失效
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={onOpenQraft}
+              className="flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-xs font-medium transition-colors hover:brightness-95"
+              style={{
+                background: 'var(--accent-soft)',
+                color: 'var(--accent)',
+              }}
+              data-testid="topbar-account-chip"
+              title="查看平台账号（设置 → MiQroForge 平台）"
+            >
+              <UserRound size={12} />
+              {qraftStatus?.account?.nickname || qraftStatus?.account?.username || '已登录'}
+            </button>
+          )
         ) : (
           <QraftLoginButton
             testId="topbar-login-btn"

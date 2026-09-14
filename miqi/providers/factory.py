@@ -41,8 +41,13 @@ def make_provider(config: Any) -> Any:
     # 模型时,把该模型调用经 AnthropicProvider(Anthropic Messages 兼容)指向平台
     # 网关 —— 走用户 encryptedApiKey,计入平台消费组配额。前提不满足则落回直连。
     # 必须位于下方 API-key 守卫之前:登录用户即使未激活内置密钥也能经网关调用。
+    # 注意不能用 provider_name == "deepseek" 作前置条件:零本地凭据时
+    # _match_provider 返回 (None, None),provider_name 为 None,网关分支会被
+    # 跳过而落到 API-key 守卫报 NO_API_KEY —— 与 providers.list 的
+    # active_model_resolvable 判定(不依赖 _match_provider)不一致(实测复现:
+    # 登录+网关 active+无本地 key 发送即失败)。直接用模型前缀判定。
     workspace = getattr(config, "workspace_path", None)
-    if provider_name == "deepseek" and workspace:
+    if workspace and model.startswith("deepseek/"):
         from miqi.providers.gateway import (
             GATEWAY_MODEL,
             GATEWAY_PREFIX,
@@ -51,7 +56,7 @@ def make_provider(config: Any) -> Any:
             read_gateway_creds,
         )
 
-        bare = model[len("deepseek/") :] if model.startswith("deepseek/") else model
+        bare = model[len("deepseek/"):]
         if bare == GATEWAY_MODEL:
             creds = read_gateway_creds(gateway_token_file(config))
             # 网关 origin 必须可用（显式配置强制 https，非法则回退直连）

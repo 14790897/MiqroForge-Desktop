@@ -41,6 +41,13 @@ def _extract_job_state(text: str) -> str | None:
     return match.group(1) if match else None
 
 
+# 可扣费状态（作业**成功**占用集群资源）：RUNNING=运行中；COMPLETED=正常跑完。
+# 快作业常在两次轮询间隔内从 PENDING 直接到 COMPLETED，永远观测不到 RUNNING——
+# 只认 RUNNING 会漏扣（2026-09-11 实测：自然提示词提交的 sleep 秒级作业跑完不扣分）。
+# FAILED / TIMEOUT / CANCELLED 不计费（作业未成功完成/未运行，产品确认 2026-09-11）。
+_CHARGEABLE_JOB_STATES = frozenset({"RUNNING", "COMPLETED"})
+
+
 def _extract_job_id(text: str) -> str | None:
     """从 MCP 工具输出中尽力提取 SLURM 作业 ID（无则 None）。"""
     for pattern in _JOB_ID_PATTERNS:
@@ -272,11 +279,12 @@ class MCPToolWrapper(Tool):
     ) -> None:
         """Slurm 作业计费触发（issue #927，2026-09-04 产品确认）——**纯副作用**。
 
-        作业状态变为 RUNNING 时由 Desktop 发起扣费（10 分/次）：
-        submit_slurm_job / check_job_status 的返回里 state=RUNNING 即
-        触发一次 fire-and-forget 扣费事件（Desktop 按作业 ID 去重）。
-        作业已在运行，扣费失败（如余额不足）不阻止作业，由 Desktop
-        记录到扣费历史并提示。
+        作业进入可扣费状态时由 Desktop 发起扣费（10 分/次）：submit_slurm_job /
+        check_job_status 的返回里 state ∈ {RUNNING, COMPLETED}（作业已成功占用
+        集群资源——快作业常在两次轮询间从 PENDING 直接到 COMPLETED，永远观测不到
+        RUNNING）即触发一次 fire-and-forget 扣费事件（Desktop 按作业 ID 去重）。
+        作业已运行，扣费失败（如余额不足）不阻止作业，由 Desktop 记录到扣费历史
+        并提示。FAILED / TIMEOUT / CANCELLED 不计费（未成功完成/未运行）。
 
         只负责 inspect/dedupe/emit/mark，**不决定调用方最终返回什么**
         （v6.2 R4：与 download materialization 解耦，早退不会旁路计费）。
@@ -301,7 +309,7 @@ class MCPToolWrapper(Tool):
         ]
         for text in texts:
             job_state = _extract_job_state(text)
-            if not job_state or job_state.upper() != "RUNNING":
+            if not job_state or job_state.upper() not in _CHARGEABLE_JOB_STATES:
                 continue
             # 响应里的 job_id 优先；check_job_status 的响应可能只有
             # state（作业 ID 在请求参数里），回退用请求参数保证去重键。
@@ -343,11 +351,11 @@ class MCPToolWrapper(Tool):
                 delivered = bool(result)
             except Exception:
                 logger.exception(
-                    "billing: RUNNING 扣费事件发送失败（不标记，下次轮询重试）"
+                    "billing: 扣费事件发送失败（不标记，下次轮询重试）"
                 )
             if delivered:
                 mark_job_reported(session_key, self._server_name, job_id)
-            return  # 一个 RUNNING 事件处理完即可（语义同旧 join 后单次处理）
+            return  # 一个可扣费状态处理完即可（语义同旧 join 后单次处理）
 
     async def _materialize_download(
         self,
@@ -551,10 +559,22 @@ def _gateway_key_from_token_file(token_file) -> str | None:
 
 
 def _is_https_url(url: str) -> bool:
-    """URL 是否为 https（网关凭据只注入 https 端点，CWE-319）。"""
+    """URL 是否为 https。"""
     from urllib.parse import urlsplit
 
     return urlsplit(url or "").scheme.lower() == "https"
+
+
+def _inject_gateway_key_over_url(cfg) -> bool:
+    """登录态网关凭据是否允许随该端点发送。
+
+    https 一律允许；明文 http 仅在该服务器显式 opt-in ``insecure_http``
+    时允许（平台暂无 https 网关域名，内置网关默认 opt-in——共享 token
+    明文传输的已知权衡，见 schema.DEFAULT_MCP_SERVERS）。
+    """
+    return _is_https_url(getattr(cfg, "url", "")) or bool(
+        getattr(cfg, "insecure_http", False)
+    )
 
 
 def _url_matches_trusted_gateway(url: str) -> bool:
@@ -608,18 +628,18 @@ async def _connect_one_server(
                 if _url_error:
                     logger.error("MCP server '{}': {}", name, _url_error)
                     return
-            # 登录态注入（CodeRabbit #951 三重收口）：仅当 ① 默认网关
-            # 服务器未显式配置 headers；② 名称与 URL 都匹配内置可信
-            # 端点（防止同名服务器把 workspace 凭据导向其他地址）；
-            # ③ URL 为 https（网关 token 绝不随明文 http 发送，含
-            # opt-in 端点）。平台 https 上线前默认不注入、fail-closed。
+            # 登录态注入：仅当 ① 默认网关服务器未显式配置 headers；
+            # ② 名称与 URL 都匹配内置可信端点（防止同名服务器把
+            # workspace 凭据导向其他地址）；③ 端点允许携带凭据——https，
+            # 或该服务器已显式 opt-in insecure_http（平台暂无 https，内置
+            # 网关默认 opt-in 明文 http）。三者缺一即不注入、fail-closed。
             effective_headers = dict(getattr(cfg, "headers", None) or {})
             if (
                 not effective_headers
                 and name == _DEFAULT_GATEWAY_NAME
                 and workspace is not None
                 and _url_matches_trusted_gateway(getattr(cfg, "url", ""))
-                and _is_https_url(getattr(cfg, "url", ""))
+                and _inject_gateway_key_over_url(cfg)
             ):
                 _gw_key = _gateway_key_from_token_file(workspace / ".qraft" / "token.json")
                 if _gw_key:

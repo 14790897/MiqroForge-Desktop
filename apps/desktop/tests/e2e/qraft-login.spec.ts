@@ -55,6 +55,65 @@ function buildSeededStoreContent(overrides: { baseUrl?: string; expiresAt?: numb
   });
 }
 
+/**
+ * 本地 mock 刷新端点：与真实平台一致，返回 Sa-Token 失效响应并
+ * 回显请求中实际收到的 refresh_token（HTTP 200 + code 500）。
+ * 其他 qraft 请求（设置页会自动拉取积分余额）不参与失效断言，
+ * 返回正常空余额信封即可。
+ */
+async function startInvalidRefreshMock(onRefresh?: () => void): Promise<{
+  port: number;
+  close: () => Promise<void>;
+}> {
+  const mock = createServer((req, res) => {
+    if (!(req.url ?? '').includes('/oauth2/refresh')) {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(
+        JSON.stringify({
+          code: 200,
+          msg: 'ok',
+          data: { availablePoints: 0, heldPoints: 0, totalEarned: 0, totalSpent: 0 },
+        })
+      );
+      return;
+    }
+    onRefresh?.();
+    let body = '';
+    req.on('data', (d) => (body += d));
+    req.on('end', () => {
+      const echoed = new URLSearchParams(body).get('refresh_token') ?? '';
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(
+        JSON.stringify({
+          code: 500,
+          msg: '未知错误',
+          data: {
+            message: '未知错误',
+            originalMessage: `SaOAuth2RefreshTokenException: 无效refresh_token: ${echoed}`,
+          },
+        })
+      );
+    });
+  });
+  await new Promise<void>((resolve) => mock.listen(0, '127.0.0.1', resolve));
+  return {
+    port: (mock.address() as AddressInfo).port,
+    close: () => new Promise<void>((resolve) => mock.close(() => resolve())),
+  };
+}
+
+/** 预置「已过期 token + baseUrl 指向本地 mock」的登录态（重启后应用立即自动刷新失败）。 */
+function seedExpiredStore(mockPort: number): void {
+  writeFileSync(
+    storePath,
+    buildSeededStoreContent({
+      baseUrl: `http://127.0.0.1:${mockPort}/api`,
+      expiresAt: Date.now() - 1000,
+    }),
+    'utf8'
+  );
+}
+
 async function gotoQraftTab(page: Page): Promise<void> {
   await page.getByText(/^(System Settings|系统设置)$/).click();
   await page
@@ -167,43 +226,11 @@ test.describe('MiQroForge 平台登录 E2E (issue #726)', () => {
   );
 
   test('refresh_token 已失效（平台作废）→ 停止自动重试并引导重新登录', async () => {
-    // 本地 mock 刷新端点：与真实平台一致，返回 Sa-Token 失效响应并
-    // 回显请求中实际收到的 refresh_token（HTTP 200 + code 500）。
-    // 其他 qraft 请求（设置页会自动拉取积分余额）不参与本用例断言，
-    // 返回正常空余额信封即可。
     let refreshCalls = 0;
-    const mock = createServer((req, res) => {
-      if (!(req.url ?? '').includes('/oauth2/refresh')) {
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(
-          JSON.stringify({
-            code: 200,
-            msg: 'ok',
-            data: { availablePoints: 0, heldPoints: 0, totalEarned: 0, totalSpent: 0 },
-          })
-        );
-        return;
-      }
+    const mockServer = await startInvalidRefreshMock(() => {
       refreshCalls += 1;
-      let body = '';
-      req.on('data', (d) => (body += d));
-      req.on('end', () => {
-        const echoed = new URLSearchParams(body).get('refresh_token') ?? '';
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(
-          JSON.stringify({
-            code: 500,
-            msg: '未知错误',
-            data: {
-              message: '未知错误',
-              originalMessage: `SaOAuth2RefreshTokenException: 无效refresh_token: ${echoed}`,
-            },
-          })
-        );
-      });
     });
-    await new Promise<void>((resolve) => mock.listen(0, '127.0.0.1', resolve));
-    const mockPort = (mock.address() as AddressInfo).port;
+    const mockPort = mockServer.port;
 
     // 无论启动、UI 等待或断言是否失败都关掉 mock：Playwright 不管理该
     // 服务器，close() 是异步的，必须 await 完成避免残留句柄。
@@ -211,19 +238,29 @@ test.describe('MiQroForge 平台登录 E2E (issue #726)', () => {
       // 预置登录态：token 已过期 + baseUrl 指向本地 mock。
       // 应用启动时（service 构造）发现已过期 → 立即自动刷新一次 → 平台判定失效。
       await closeElectronApp(electronApp, fixture.miqiHome);
-      writeFileSync(
-        storePath,
-        buildSeededStoreContent({
-          baseUrl: `http://127.0.0.1:${mockPort}/api`,
-          expiresAt: Date.now() - 1000,
-        }),
-        'utf8'
-      );
+      seedExpiredStore(mockPort);
 
       const f2 = await launchElectronApp();
       electronApp = f2.electronApp;
       page = f2.page;
       fixture = f2;
+
+      // 平台登录失效的全局告知：无需进入设置页，chat 页即弹横幅，
+      // 顶栏账号 chip 同步切换为失效警示态。
+      await expect(page.getByTestId('qraft-relogin-notify')).toBeVisible({ timeout: 15_000 });
+      await expect(page.getByTestId('qraft-relogin-notify')).toContainText('登录已失效');
+      await expect(page.getByTestId('qraft-relogin-notify-action')).toContainText('去重新登录');
+      await expect(page.getByTestId('topbar-relogin-chip')).toBeVisible();
+      await expect(page.getByTestId('topbar-relogin-chip')).toContainText('登录已失效');
+      await page.screenshot({
+        path: 'test-results/qraft-e2e-relogin-notify.png',
+        fullPage: true,
+      });
+
+      // 关闭横幅后不再出现；顶栏 chip 持续提示
+      await page.getByTestId('qraft-relogin-notify-close').click();
+      await expect(page.getByTestId('qraft-relogin-notify')).toHaveCount(0);
+      await expect(page.getByTestId('topbar-relogin-chip')).toBeVisible();
 
       await gotoQraftTab(page);
 
@@ -249,7 +286,57 @@ test.describe('MiQroForge 平台登录 E2E (issue #726)', () => {
         fullPage: true,
       });
     } finally {
-      await new Promise<void>((resolve) => mock.close(() => resolve()));
+      await mockServer.close();
+    }
+  });
+
+  test('登录已失效：发送消息被拦截，给出重登引导气泡（一键登录按钮）', async () => {
+    const mockServer = await startInvalidRefreshMock();
+    const mockPort = mockServer.port;
+
+    try {
+      await closeElectronApp(electronApp, fixture.miqiHome);
+      seedExpiredStore(mockPort);
+
+      const f2 = await launchElectronApp();
+      electronApp = f2.electronApp;
+      page = f2.page;
+      fixture = f2;
+
+      // 全局告知横幅出现后关闭，专注验证发送拦截分支
+      await expect(page.getByTestId('qraft-relogin-notify')).toBeVisible({ timeout: 15_000 });
+      await page.getByTestId('qraft-relogin-notify-close').click();
+
+      // 发送消息：登录失效拦截先于无 provider 判定，乐观气泡被换成
+      // 重登引导（chat-error-login-btn 一键登录），输入草稿被恢复。
+      const textarea = page.locator('[data-testid="chat-input-container"] textarea');
+      await textarea.fill('继续之前的工作');
+      await page.evaluate(() => {
+        const ta = document.querySelector<HTMLTextAreaElement>(
+          '[data-testid="chat-input-container"] textarea'
+        );
+        if (!ta) throw new Error('textarea not found');
+        ta.dispatchEvent(
+          new KeyboardEvent('keydown', {
+            key: 'Enter',
+            code: 'Enter',
+            keyCode: 13,
+            bubbles: true,
+            cancelable: true,
+          })
+        );
+      });
+
+      await expect(page.getByTestId('chat-error-login-btn')).toBeVisible({ timeout: 30_000 });
+      await expect(page.getByTestId('chat-error-login-btn')).toContainText('登录 MiQroForge 账号');
+      await expect(textarea).toHaveValue('继续之前的工作');
+
+      await page.screenshot({
+        path: 'test-results/qraft-e2e-relogin-send-intercept.png',
+        fullPage: true,
+      });
+    } finally {
+      await mockServer.close();
     }
   });
 });

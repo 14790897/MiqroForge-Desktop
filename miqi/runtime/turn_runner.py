@@ -295,10 +295,14 @@ class TurnRunner:
         # (e.g. "输出到 C:\Users\x\Desktop\test_result") so file tools can
         # read/write them.  Extracted once per turn from user-role text only;
         # mid-turn steering messages refresh the roots below.
+        # #984: sub-agent turns keep the roots inherited from their parent
+        # job — the text here is model-authored, so extracting from it would
+        # re-open the injection channel this feature closed.
         _user_texts = [user_content]
-        turn.user_mentioned_roots = extract_user_mentioned_roots(
-            _user_texts, workspace=getattr(turn, "workspace", None),
-        )
+        if not getattr(turn, "is_subagent", False):
+            turn.user_mentioned_roots = extract_user_mentioned_roots(
+                _user_texts, workspace=getattr(turn, "workspace", None),
+            )
 
         messages = self._context.build_initial_messages(
             turn=turn,
@@ -614,11 +618,13 @@ class TurnRunner:
                         messages_delta.append(delta)
                     # #821: refresh auto-sensed roots with the steering text
                     # (the user may name a new output dir mid-turn).
+                    # #984: never for sub-agent turns — see above.
                     for steer in steers:
                         _user_texts.append(steer["content"])
-                    turn.user_mentioned_roots = extract_user_mentioned_roots(
-                        _user_texts, workspace=getattr(turn, "workspace", None),
-                    )
+                    if not getattr(turn, "is_subagent", False):
+                        turn.user_mentioned_roots = extract_user_mentioned_roots(
+                            _user_texts, workspace=getattr(turn, "workspace", None),
+                        )
                     continue
 
                 content = response.content or ""
@@ -934,6 +940,11 @@ class TurnRunner:
             execution_policy="edit",  # sub-agents default to normal approval flow
             temperature=0.1,
             max_tokens=8192,
+            # #984: sub-agents inherit the parent turn's authorized roots
+            # instead of re-extracting them from their own (model-authored)
+            # task text — see TurnContext.is_subagent.
+            is_subagent=True,
+            user_mentioned_roots=[Path(r) for r in (job.user_roots or [])],
         )
 
         # Resolve capabilities if available (Phase 13)

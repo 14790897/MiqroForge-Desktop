@@ -7,6 +7,7 @@ import {
   memo,
   type ComponentProps,
 } from 'react';
+import { createPortal } from 'react-dom';
 import { AgentAvatar } from './components/Avatars';
 import { MiQroForgeLogo } from '../../components/MiQroForgeLogo';
 import { MarkdownContent } from './components/MarkdownContent';
@@ -27,25 +28,20 @@ import { ErrorBoundary } from '../../components/ErrorBoundary';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { Button } from '../../components/ui/Button';
-import { Textarea } from '../../components/ui/Textarea';
 import { Tooltip } from '../../components/ui/Tooltip';
 import { ContextMenu, type ContextMenuAction } from '../../components/ContextMenu';
 import { cn } from '../../lib/utils';
 import { Modal } from '../../components/shared';
 import { formatRelativeTime } from '../../lib/formatTime';
-import {
-  ExecutionPolicySelector,
-  type ExecutionPolicy,
-} from '../../components/ExecutionPolicySelector';
-import { ReasoningModeSwitch, type ReasoningMode } from './components/ReasoningModeSwitch';
+import { type ExecutionPolicy } from '../../components/ExecutionPolicySelector';
+import { type ReasoningMode } from './components/ReasoningModeSwitch';
+import { clampPanelWidth, createPanelWindowSync } from './panelWindowSync';
 import {
   Send,
-  Square,
   Loader2,
   Copy,
   Check,
   CheckCircle,
-  Paperclip,
   X,
   FileText,
   Image,
@@ -75,8 +71,6 @@ import {
   ThumbsUp,
   ThumbsDown,
   RefreshCw,
-  Scissors,
-  ClipboardPaste,
   Star,
   Download,
 } from 'lucide-react';
@@ -99,6 +93,7 @@ import PaperSearchResult, {
   type PaperSearchPayload,
   type PaperItem,
 } from './PaperSearchResult';
+import { Composer, type ComposerHandle } from './Composer';
 
 interface Attachment {
   name: string;
@@ -289,6 +284,11 @@ interface MessageSource {
   url: string;
 }
 
+// Stable empty array for messages without sources — keeps the `sources` prop
+// referentially equal so MessageBubble's memo isn't defeated by a fresh `[]`
+// on every keystroke (#1021).
+const EMPTY_SOURCES: MessageSource[] = [];
+
 const TOOL_LABELS: Record<string, string> = {
   web_fetch: '网页抓取',
   web_search: '网页搜索',
@@ -453,13 +453,14 @@ function isProviderConfigurationProblem(message: string, code?: string) {
 
 function createProviderConfigMessage(
   content?: string,
-  action: 'open-provider-settings' | 'login' = 'open-provider-settings'
+  action: 'open-provider-settings' | 'login' = 'open-provider-settings',
+  actionLabel?: string
 ): Message {
   return {
     role: 'error',
     content: content || '尚未配置模型服务。请先配置 Provider/API Key 后再发送消息。',
     action,
-    actionLabel: action === 'login' ? '登录 MiQroForge 账号' : '去配置模型',
+    actionLabel: actionLabel ?? (action === 'login' ? '登录 MiQroForge 账号' : '去配置模型'),
     timestamp: Date.now(),
   };
 }
@@ -472,6 +473,43 @@ function createGatewayBlockedMessage(): Message {
       'AI 网关未就绪（平台开通中或不可用），暂时无法发起会话。请到 设置 → MiQroForge 平台 查看网关状态或重新登录后重试。',
     timestamp: Date.now(),
   };
+}
+
+/** 登录失效时的统一拦截文案（发送拦截与流错误路径共用，避免气泡正文与登录按钮语义冲突）。 */
+export const RELOGIN_INTERCEPT_TEXT = 'MiQroForge 平台登录已失效，请重新登录后继续会话。';
+
+/**
+ * 登录失效拦截的消息列表变换（纯函数，便于单测）：
+ *  - 普通发送：乐观 user 气泡按（role + 时间戳）就地替换为重登引导。
+ *    从尾部向前查找——等待 qraft.status() 期间其他监听器（如子代理
+ *    持久事件）可能追加消息，尾部未必是 user 气泡；
+ *  - 恢复中断回合（#740）：无乐观 user 气泡，且 handleResumeTurn 已移除
+ *    中断卡——恢复卡片（resumeMsg）并追加重登引导，避免上下文丢失；
+ *  - 找不到匹配且无恢复卡片（会话已切换等）：原样返回。
+ */
+export function applyReloginIntercept(
+  prev: Message[],
+  userMsg: Message,
+  resumeMsg: Message | null
+): Message[] {
+  let userIndex = -1;
+  for (let i = prev.length - 1; i >= 0; i -= 1) {
+    if (prev[i].role === 'user' && prev[i].timestamp === userMsg.timestamp) {
+      userIndex = i;
+      break;
+    }
+  }
+  if (userIndex >= 0) {
+    return [
+      ...prev.slice(0, userIndex),
+      createProviderConfigMessage(RELOGIN_INTERCEPT_TEXT, 'login'),
+      ...prev.slice(userIndex + 1),
+    ];
+  }
+  if (resumeMsg) {
+    return [...prev, resumeMsg, createProviderConfigMessage(RELOGIN_INTERCEPT_TEXT, 'login')];
+  }
+  return prev;
 }
 
 /* ─── Tracked file from tool hints ───────────────────────────────── */
@@ -2351,6 +2389,32 @@ function splitCachedMessages(events: InFlightEvent[]): {
 
 /* ─── Main component ─────────────────────────────────────────────── */
 
+/** #989 标题区右侧三件共用一套 ghost 底规格：28px 高、7px 圆角、11px、无边框，
+ *  图标 12–13px。此前三者是三种视觉（橙描边胶囊 / 灰描边分体按钮 / 裸图标）。
+ *  「统一」之后还要留住层级——三件并不是同等重要的东西，所以底规格之上再分三档：
+ *    标题（第一视觉层） > 工作目录＝当前上下文（常驻浅底） > 分享/面板＝操作（纯 ghost）
+ */
+const HDR_CTL =
+  'shrink-0 inline-flex items-center justify-center h-7 rounded-[7px] text-[11px] font-medium ' +
+  'text-[var(--text-muted)] transition-colors hover:bg-[var(--surface-muted)] ' +
+  'disabled:opacity-45 disabled:hover:bg-transparent';
+/** 纯文本 + 图标形态（分享）。 */
+const HDR_CTL_LABEL = `${HDR_CTL} gap-1 px-[9px]`;
+/** 纯图标形态（压缩态，以及文件面板按钮）。 */
+const HDR_CTL_ICON = `${HDR_CTL} w-7 px-0`;
+/** 分享右侧的折叠箭头：贴住分享按钮，所以只有 20px 宽。 */
+const HDR_CTL_CARET =
+  'shrink-0 inline-flex items-center justify-center h-7 w-5 rounded-[7px] ' +
+  'text-[var(--text-muted)] transition-colors hover:bg-[var(--surface-muted)]';
+/** 工作目录＝「当前上下文」，不是操作：常驻一层浅底，比纯 ghost 多一档存在感，
+ *  但仍压不过标题。压缩态同一个底，只是收成图标。 */
+const HDR_CTL_CONTEXT = `${HDR_CTL_LABEL} bg-[var(--surface-muted)] hover:bg-[var(--surface-hover)]`;
+const HDR_CTL_CONTEXT_ICON = `${HDR_CTL_ICON} bg-[var(--surface-muted)] hover:bg-[var(--surface-hover)]`;
+/** 文件面板开关是操作，但同时是「面板开着吗」的状态位：开着时常驻浅底，
+ *  关着时纯 ghost，hover 才浮底。 */
+const HDR_CTL_TOGGLE = `${HDR_CTL_ICON} hover:bg-[var(--surface-hover)]`;
+const HDR_CTL_TOGGLE_ON = `${HDR_CTL_ICON} bg-[var(--surface-muted)] hover:bg-[var(--surface-hover)]`;
+
 /** Upper bound for waiting on a superseded turn's chat.send to settle after
  *  abort(). Normal aborts resolve in well under a second (the send promise
  *  settles at the abort terminal event); the bound only guards against a
@@ -2416,10 +2480,13 @@ export function ChatConsole({
   const [messages, setMessages] = useState<Message[]>([]);
   // #1000: 首屏登录卡片与发送拦截共用登录态；旧 preload 无 qraft 命名空间时
   // useQraftStatus 内部兜底为空态（视为未登录）。
-  const { loggedIn } = useQraftStatus();
+  const { loggedIn, status: qraftStatus } = useQraftStatus();
   // 流错误路径同步读取最新登录态：handleSend 闭包可能捕获旧值（CodeRabbit #1010）。
   const loggedInRef = useRef(loggedIn);
   loggedInRef.current = loggedIn;
+  // 登录已失效（token 刷新失败且未恢复）：流错误路径据此给重登引导而非模型配置指引。
+  const requiresReloginRef = useRef(qraftStatus?.requiresRelogin === true);
+  requiresReloginRef.current = qraftStatus?.requiresRelogin === true;
   // #875 D1（外部评估 P0/A1）：系统包安装的 persist/runtime 失败标记只写在
   // 工具输出里，模型可能摘要掉——用户会误以为「允许并记住」已永久生效。
   // 扫描消息中的失败标记并发 window 事件，由 App 级 toast 呈现（不依赖模型）。
@@ -2452,7 +2519,6 @@ export function ChatConsole({
   // #570: bump to force a manual reload of the current session's history
   // (used by the "重试" button on the load-failure error bubble).
   const [retryTick, setRetryTick] = useState(0);
-  const [input, setInput] = useState('');
   const [executionPolicy, setExecutionPolicy] = useState<ExecutionPolicy>('edit');
 
   // Reasoning mode (issue #680): ⚡极速回答 / 🧠深度研究. Default fast
@@ -2574,8 +2640,66 @@ export function ChatConsole({
   const [panelOpen, setPanelOpen] = useState(true);
   const [panelWidth, setPanelWidth] = useState(280);
   const panelResizing = useRef(false);
+  /** 面板 DOM 节点:拖拽中直改其宽度,避免每帧 setPanelWidth 让整个 ChatConsole
+   *  (含长回复消息树)重建 VDOM——内容多的对话会因此卡。 */
+  const assetsPanelRef = useRef<HTMLDivElement | null>(null);
+  const panelWidthRef = useRef(panelWidth);
+  /** 点「文件面板」打开时置位：等主进程真的把窗口加宽了，才让面板出现。
+   *  见下面 onRequestSettled。 */
+  const pendingPanelReveal = useRef(false);
+  /** 资产面板拖宽的「窗口跟随」串行队列（#989，实现与竞态回归见
+   *  panelWindowSync.ts / panelWindowSync.test.ts）：面板变宽就请求主进程把原生
+   *  窗口同量加宽，聊天列 flex-1 分到新增宽度而保持原宽。拖拽锚点、latest-wins
+   *  合并、松手收尾都在队列里，这里只负责喂鼠标位移与把它接到 DOM/state 上。 */
+  const [panelSync] = useState(() =>
+    createPanelWindowSync({
+      send: (extra) => window.miqi.app.setPanelWindowExtra(extra),
+      applyWidth: (width) => {
+        const el = assetsPanelRef.current;
+        if (el) el.style.width = `${width}px`;
+      },
+      commitWidth: (width) => {
+        if (width !== panelWidthRef.current) setPanelWidth(width);
+      },
+      // 窗口加宽落地（或被跳过/请求失败）后再显示面板。打开按钮先只发加宽请求，
+      // 面板此刻还不渲染——否则面板先出现、聊天列被压窄一瞬，等 IPC 回来窗口才
+      // 跟上，正是本 PR 要消掉的那个挤压。最大化/满屏时主进程回 skipped，这里
+      // 同样会走到（notifyRequestSettled 覆盖了 skipped 与失败分支），面板照常
+      // 显示，不会点不开。
+      onRequestSettled: () => {
+        if (!pendingPanelReveal.current) return;
+        pendingPanelReveal.current = false;
+        setPanelOpen(true);
+      },
+    })
+  );
+  /** 顶部工作目录胶囊:窄的不是视口而是「聊天列」(被资产面板挤窄、窗口又有 minWidth),
+   *  原 md: 视口断点永不触发。量聊天列宽,过窄时把目录路径收成一个小图标。 */
+  const chatColRef = useRef<HTMLDivElement | null>(null);
+  const capsuleRoRef = useRef<ResizeObserver | null>(null);
+  const [subHeaderCompact, setSubHeaderCompact] = useState(false);
+  const setChatColRef = useCallback((el: HTMLDivElement | null) => {
+    chatColRef.current = el;
+    capsuleRoRef.current?.disconnect();
+    capsuleRoRef.current = null;
+    if (!el) return;
+    const ro = new ResizeObserver(() => setSubHeaderCompact(el.clientWidth < 520));
+    ro.observe(el);
+    capsuleRoRef.current = ro;
+    setSubHeaderCompact(el.clientWidth < 520);
+  }, []);
   const [workspacePickerOpen, setWorkspacePickerOpen] = useState(false);
+  const [workspacePickerAnchor, setWorkspacePickerAnchor] = useState<DOMRect | null>(null);
   const [recentWorkspaces, setRecentWorkspaces] = useState<string[]>([]);
+  const workspacePickerOpenRef = useRef(false);
+
+  useEffect(() => {
+    workspacePickerOpenRef.current = workspacePickerOpen;
+  }, [workspacePickerOpen]);
+
+  useEffect(() => {
+    panelWidthRef.current = panelWidth;
+  }, [panelWidth]);
 
   useEffect(() => {
     const timer = window.setInterval(() => setClockTick(Date.now()), 60_000);
@@ -2611,27 +2735,57 @@ export function ChatConsole({
     };
   }, []);
 
+  useEffect(
+    () => () => {
+      capsuleRoRef.current?.disconnect();
+      capsuleRoRef.current = null;
+    },
+    []
+  );
+  // 卸载(nav 离开聊天页)时停掉窗口跟随队列,并把窗口还原到未加宽状态,
+  // 避免残宽影响其它页面;冷启动默认面板开启,基线即当前宽度,此还原为 no-op。
+  useEffect(
+    () => () => {
+      panelSync.dispose();
+      void window.miqi.app.setPanelWindowExtra(0).catch(() => {});
+    },
+    [panelSync]
+  );
+
   // Task Assets panel resize
-  const handlePanelResizeStart = useCallback((e: React.MouseEvent) => {
-    e.preventDefault();
-    panelResizing.current = true;
-    document.body.style.cursor = 'col-resize';
-    document.body.style.userSelect = 'none';
-  }, []);
+  const handlePanelResizeStart = useCallback(
+    (e: React.MouseEvent) => {
+      e.preventDefault();
+      const el = assetsPanelRef.current;
+      // 按下点即当前分隔条:队列届时记下实际面板宽 + 主进程此刻已应用的窗口加宽,
+      // 拖动时两者作为相对基准,不用绝对宽(冷启动默认面板已占空间,绝对宽会让窗口多扩整块)。
+      panelResizing.current = true;
+      panelSync.beginDrag({
+        clientX: e.clientX,
+        width: el ? el.getBoundingClientRect().width : window.innerWidth - e.clientX,
+      });
+      document.body.style.cursor = 'col-resize';
+      document.body.style.userSelect = 'none';
+    },
+    [panelSync]
+  );
 
   useEffect(() => {
     const handleMouseMove = (e: MouseEvent) => {
-      if (!panelResizing.current) return;
-      // panel is on the right, so new width = window width - mouse x
-      const newWidth = window.innerWidth - e.clientX;
-      setPanelWidth(Math.max(200, Math.min(500, newWidth)));
+      const anchor = panelSync.anchor;
+      if (!panelResizing.current || !anchor) return;
+      // 以按下点为锚按鼠标位移增减面板宽(向右移收窄、向左移加宽)。窗口加宽请求与
+      // 面板 DOM 宽度都由队列按主进程实际应用到的增量推进,本处不直改 DOM。
+      panelSync.dragTo(clampPanelWidth(anchor.width + (anchor.clientX - e.clientX)));
     };
     const handleMouseUp = () => {
-      if (panelResizing.current) {
-        panelResizing.current = false;
-        document.body.style.cursor = '';
-        document.body.style.userSelect = '';
-      }
+      if (!panelResizing.current) return;
+      panelResizing.current = false;
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+      // 松手不在此刻定格面板:可能还有一次 IPC 在途、applied 还是旧值,按旧值写
+      // DOM 会把面板钉住,等窗口真的动完就错位。交给队列在静默后统一收尾。
+      panelSync.endDrag();
     };
     document.addEventListener('mousemove', handleMouseMove);
     document.addEventListener('mouseup', handleMouseUp);
@@ -2643,7 +2797,7 @@ export function ChatConsole({
       document.body.style.cursor = '';
       document.body.style.userSelect = '';
     };
-  }, []);
+  }, [panelSync]);
   /** Current in-flight request ID (for abort) */
   const [currentReqId, setCurrentReqId] = useState<string | null>(null);
   /** Per-session timestamp of the pending optimistic user bubble (issue #364)
@@ -2777,7 +2931,7 @@ export function ChatConsole({
   const userScrolledUp = useRef(false);
   const justOpened = useRef(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const composerRef = useRef<ComposerHandle>(null);
   // 会话活动感知（restored from pre-#577, issue #677）：流式/消息变化时
   // 上报 App，让"+"能感知未落盘的活动
   useEffect(() => {
@@ -2804,7 +2958,7 @@ export function ChatConsole({
   }, [lastAdjustAt]);
   useEffect(() => {
     if (!adjustHint || streaming) return;
-    textareaRef.current?.focus();
+    composerRef.current?.focus();
   }, [adjustHint, streaming]);
   // 原生 window.confirm 模态框关闭后，Chromium 可能不把“真实的 OS 激活”交还
   // renderer：键盘事件被吞、点输入条无光标，刷新重建页面才恢复（手动复现）。
@@ -2822,7 +2976,7 @@ export function ChatConsole({
     if (messages.length === 0 && welcomeFocusedFor.current !== sessionKey) {
       welcomeFocusedFor.current = sessionKey ?? null;
       const prevHadMessages = (lastMsgCountRef.current ?? 0) > 0;
-      const focusInput = () => textareaRef.current?.focus();
+      const focusInput = () => composerRef.current?.focus();
       focusInput();
       void window.miqi.app?.focus?.();
       const t1 = window.setTimeout(focusInput, 120);
@@ -2858,10 +3012,10 @@ export function ChatConsole({
   const pendingRegrantRef = useRef(false);
   useEffect(() => {
     const runRegrant = () => {
-      textareaRef.current?.focus();
+      composerRef.current?.focus();
       window.setTimeout(() => {
         void window.miqi.app?.focus?.({ hard: true }).then(() => {
-          window.setTimeout(() => textareaRef.current?.focus(), 80);
+          window.setTimeout(() => composerRef.current?.focus(), 80);
         });
       }, 60);
     };
@@ -2884,10 +3038,10 @@ export function ChatConsole({
   useEffect(() => {
     if (historyLoaded && messages.length === 0 && pendingRegrantRef.current) {
       pendingRegrantRef.current = false;
-      textareaRef.current?.focus();
+      composerRef.current?.focus();
       window.setTimeout(() => {
         void window.miqi.app?.focus?.({ hard: true }).then(() => {
-          window.setTimeout(() => textareaRef.current?.focus(), 80);
+          window.setTimeout(() => composerRef.current?.focus(), 80);
         });
       }, 60);
     }
@@ -3233,7 +3387,7 @@ export function ChatConsole({
         setStreaming(false);
       }
       setCurrentReqId(null);
-      setInput('');
+      composerRef.current?.clear();
       setThreads([{ threadId: 'main', agentType: 'main', label: '主线程' }]);
       setActiveThreadId('main');
       setPlan(null);
@@ -4029,14 +4183,24 @@ export function ChatConsole({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [newSessionTrigger]);
 
-  // Opens the workspace picker modal — called by the inline "更换" button
-  const handleOpenWorkspacePicker = useCallback(async () => {
-    const workspaces = await window.miqi.sessions
-      .listRecentWorkspaces()
-      .then((r) => r?.workspaces ?? [])
-      .catch(() => [] as string[]);
-    setRecentWorkspaces(workspaces);
+  // 打开工作目录下拉（锚定在点中的胶囊下方，替代原居中 Modal）。再次点击
+  // 同一胶囊即收起；每次展开前刷新“最近使用”。
+  const handleOpenWorkspacePicker = useCallback(async (el?: HTMLElement | null) => {
+    if (workspacePickerOpenRef.current) {
+      setWorkspacePickerOpen(false);
+      return;
+    }
+    setWorkspacePickerAnchor(el ? el.getBoundingClientRect() : null);
     setWorkspacePickerOpen(true);
+    try {
+      const workspaces = await window.miqi.sessions
+        .listRecentWorkspaces()
+        .then((r) => r?.workspaces ?? [])
+        .catch(() => [] as string[]);
+      setRecentWorkspaces(workspaces);
+    } catch {
+      setRecentWorkspaces([]);
+    }
   }, []);
 
   const createSession = useCallback(
@@ -4073,13 +4237,17 @@ export function ChatConsole({
     retry?: boolean;
   } | null>(null);
   const handleSendRef = useRef<() => void>(() => {});
-  /** 程序化发送（论文下载 fallback 等）经此 ref 显式传文本，handleSend
-   *  一次性消费。不依赖 setInput 后的渲染 flush（旧闭包读 input 是旧值）。 */
+  /** 发送文本经此 ref 显式传入 handleSend 并一次性消费：既承载程序化发送
+   *  （论文下载 fallback 等），也承载 Composer 的用户输入（#1021 下沉后
+   *  input 状态不再住在 ChatConsole）。不依赖 state 更新后的渲染 flush。 */
   const programmaticTextRef = useRef<string | null>(null);
   /** #740: pending resume-turn id — set by 继续执行, consumed by handleSend
    *  so the resume request flows through the full send pipeline (listeners,
    *  streaming render) instead of a bare chat.send call. */
   const resumeTurnIdRef = useRef<string | null>(null);
+  // 恢复中断回合时被移除的中断卡：登录失效拦截需恢复它并追加重登引导
+  //（resume 无乐观 user 气泡，否则上下文丢失、登录按钮无处可点）。
+  const resumeRemovedMsgRef = useRef<Message | null>(null);
   /** Per-session send id of the send currently in its pre-stream pending phase
    *  (issue #364).  A session is "pending" while its optimistic bubble waits on
    *  the non-blocking provider check / thread init.  The double-Enter guard
@@ -4103,7 +4271,9 @@ export function ChatConsole({
     const meta = msg.interruptedMeta;
     if (!meta?.turnId) return;
     resumeTurnIdRef.current = meta.turnId;
-    // 移除中断卡——resume 的新回复由流式事件接管渲染
+    // 移除中断卡——resume 的新回复由流式事件接管渲染。卡片暂存 ref：
+    // 若预检被登录失效拦截，需恢复卡片并追加重登引导（applyReloginIntercept）。
+    resumeRemovedMsgRef.current = msg;
     setMessages((prev) => prev.filter((m) => m !== msg));
     handleSendRef.current();
   }, []);
@@ -4138,11 +4308,11 @@ export function ChatConsole({
     const _resumeId = resumeTurnIdRef.current;
     resumeTurnIdRef.current = null;
     const payload = retryPayloadRef.current;
-    // 程序化发送（论文下载 fallback 等）经 ref 显式传文本：不依赖
-    // setInput 后的渲染 flush（旧闭包读到的 input state 是旧值）。
+    // 发送文本经 ref 显式传入（程序化发送 + Composer 用户输入）：不依赖
+    // state 更新后的渲染 flush（旧闭包读到的 input state 是旧值）。
     const programmaticText = programmaticTextRef.current;
     programmaticTextRef.current = null;
-    const text = (payload?.text ?? programmaticText ?? input).trim();
+    const text = (payload?.text ?? programmaticText ?? '').trim();
     const atts = payload?.attachments ?? attachments;
     if (!text && atts.length === 0 && !_resumeId) {
       retryPayloadRef.current = null;
@@ -4223,13 +4393,7 @@ export function ChatConsole({
     // the streamed reply takes over rendering) — skip the optimistic push.
     if (!_resumeId) setMessages((prev) => [...prev, userMsg]);
     userScrolledUp.current = false;
-    setInput('');
-    // Reset textarea height after sending
-    setTimeout(() => {
-      if (textareaRef.current) {
-        textareaRef.current.style.height = 'auto';
-      }
-    }, 0);
+    composerRef.current?.clear();
     setAttachments([]);
     // Save a snapshot before clearing — chat.send needs it later.  Use the
     // resolved `atts` (which handles the retry-payload path), not the state,
@@ -4284,10 +4448,44 @@ export function ChatConsole({
       // #922/#1000：网关状态先取一次，供「未登录 → 登录引导」与
       // 「已登录但网关未就绪 → 网关提示」两个分支共用。旧 preload/
       // smoke mock 无 qraft 命名空间时为 null（视为未登录）。
+      //
+      // ⚠️ 这三个卡口（重登 / 网关门禁 / 无可用模型）都是 **await 之后** 才判定的，
+      // 而 handleAbort 会把本会话的 pending id 覆盖成 tombstone 0。若期间用户
+      // 中断了本次发送，陈旧结果再回来就会：删掉 pending 记录、清掉
+      // streamingBySession、并把**已取消**的乐观气泡换成拦截卡。所以三个分支
+      // 都必须先过 isCurrentPendingSend —— 失守时一律落到下面那条守卫，
+      // 由它按「本次发送已作废」删气泡、还输入框。
       const gatewayStatus =
         typeof window.miqi.qraft?.status === 'function'
           ? await window.miqi.qraft.status().catch(() => null)
           : null;
+      // ── 登录已失效拦截 ──
+      // token 刷新失败且未恢复（requiresRelogin）时拦截发送：把乐观气泡换成
+      // 重登引导（一键登录成功后气泡自动移除）。先于网关门禁/无 provider 判定
+      // —— 失效后网关状态仍是旧快照里的 active，必须优先给出重登指引。
+      // 快照读取失败（qraft.status() 抛错）时回退到订阅状态 refs，拦截不失效。
+      const gatewayLoggedIn = gatewayStatus?.loggedIn ?? loggedInRef.current;
+      const gatewayRequiresRelogin = gatewayStatus?.requiresRelogin ?? requiresReloginRef.current;
+      if (
+        gatewayLoggedIn &&
+        gatewayRequiresRelogin &&
+        isCurrentPendingSend(sendSessionKey, thisSendId)
+      ) {
+        pendingSendIdsRef.current.delete(sendSessionKey);
+        streamingBySession.delete(sendSessionKey);
+        setSendingFor(sendSessionKey, null);
+        if (currentSessionRef.current === sendSessionKey) {
+          setStreaming(false);
+          // 恢复中断回合（#740）：无乐观 user 气泡，取回被 handleResumeTurn
+          // 移除的中断卡并追加重登引导；随后复位 ref 防陈旧引用。
+          const resumeRemovedMsg = _resumeId ? resumeRemovedMsgRef.current : null;
+          resumeRemovedMsgRef.current = null;
+          setMessages((prev) => applyReloginIntercept(prev, userMsg, resumeRemovedMsg));
+          composerRef.current?.setText(text);
+          setAttachments(atts);
+        }
+        return;
+      }
       // ── #922 AI 网关门禁 ──
       // 登录后网关状态明确非 active（provisioning/failed/disabled）时拒绝发起
       // 会话：把乐观气泡换成网关提示并恢复输入框。未登录 / 平台未下发网关状态
@@ -4297,7 +4495,8 @@ export function ChatConsole({
       if (
         gatewayStatus?.loggedIn === true &&
         gatewayStatus.aiGateway &&
-        gatewayStatus.aiGateway.status !== 'active'
+        gatewayStatus.aiGateway.status !== 'active' &&
+        isCurrentPendingSend(sendSessionKey, thisSendId)
       ) {
         pendingSendIdsRef.current.delete(sendSessionKey);
         streamingBySession.delete(sendSessionKey);
@@ -4311,26 +4510,42 @@ export function ChatConsole({
             }
             return prev;
           });
-          setInput(text);
+          composerRef.current?.setText(text);
           setAttachments(atts);
         }
         return;
       }
       const result = await window.miqi.providers.list();
-      const hasConfiguredProvider = result.providers.some((provider) => provider.configured);
-      if (!hasConfiguredProvider) {
-        // No configured provider — replace the optimistic bubble with the
+      // 判定「当前默认模型能否发起会话」而不是「有没有已配置的本地 provider」：
+      // 登录后经平台 AI 网关路由的默认模型不需要任何本地凭据（make_provider
+      // 的网关分支），只看 configured 会把「登录即可用」误拦成「未配置模型
+      // 服务」——用户登录后仍被要求配置模型即由此而来。后端用与运行时同一套
+      // 判定（含网关路由）给出 active_model_resolvable；旧版 bridge 无该字段
+      // 时回退到 configured（保持原行为）。
+      const modelServable =
+        result.active_model_resolvable ?? result.providers.some((provider) => provider.configured);
+      // 与上面两个网关卡口同一个道理：providers.list() 也是 await 出来的，
+      // 期间用户可能已中断或又发了新消息 —— 陈旧结果不能去动 pending/streaming，
+      // 更不能把已取消的乐观气泡替换成引导卡。失守时落到下面那条
+      // isCurrentPendingSend 守卫，由它按「本次发送已作废」收尾。
+      if (!modelServable && isCurrentPendingSend(sendSessionKey, thisSendId)) {
+        // No servable model — replace the optimistic bubble with the
         // provider-config guidance.  The send is refused: the user should
         // configure a provider before sending.  The draft is restored to the
         // input so they can re-send once configured.  Only touch the composer /
         // message list if THIS session is still displayed — the user may have
-        // switched away while providers.list was pending, and setInput /
+        // switched away while providers.list was pending, and the composer /
         // setAttachments / setMessages act on the currently displayed session.
         // #1000：未登录时没有 Provider 可配置（#835 合规收口后凭据配置已移除），
         // 拦截气泡直接给出一键登录按钮，登录后经网关自动获得平台内置模型。
+        // 已登录时凭据配置同样不存在，引导落点是「设置 → 模型」选平台内置模型。
         const guidance =
           gatewayStatus?.loggedIn === true
-            ? createProviderConfigMessage()
+            ? createProviderConfigMessage(
+                '当前默认模型没有可用的模型服务。请到 设置 → 模型 选择平台内置模型后重试。',
+                'open-provider-settings',
+                '去选择模型'
+              )
             : createProviderConfigMessage(
                 '尚未登录平台账号。登录 MiQroForge 账号后即可使用平台内置模型发起会话，模型调用将经平台 AI 网关转发。',
                 'login'
@@ -4347,7 +4562,7 @@ export function ChatConsole({
             }
             return prev;
           });
-          setInput(text);
+          composerRef.current?.setText(text);
           setAttachments(atts);
         }
         return;
@@ -4361,7 +4576,7 @@ export function ChatConsole({
     // optimistic bubble and restore the composer (the send never started).
     // Only touch the composer / message list if THIS session is still
     // displayed — the user may have switched away while the check was pending,
-    // and setInput / setAttachments / setMessages act on the current session.
+    // and the composer / setAttachments / setMessages act on the current session.
     if (!isCurrentPendingSend(sendSessionKey, thisSendId)) {
       pendingSendIdsRef.current.delete(sendSessionKey);
       streamingBySession.delete(sendSessionKey);
@@ -4372,7 +4587,7 @@ export function ChatConsole({
           if (last?.timestamp === userMsg.timestamp) return prev.slice(0, -1);
           return prev;
         });
-        setInput(text);
+        composerRef.current?.setText(text);
         setAttachments(atts);
       }
       return;
@@ -4460,7 +4675,7 @@ export function ChatConsole({
       setSendingFor(sendSessionKey, null);
       // Only restore the composer / message list if THIS session is still
       // displayed — the user may have switched away while the aborts were
-      // awaited, and setInput / setAttachments / setMessages act on the
+      // awaited, and the composer / setAttachments / setMessages act on the
       // currently displayed session.
       if (currentSessionRef.current === sendSessionKey) {
         setStreaming(false);
@@ -4469,7 +4684,7 @@ export function ChatConsole({
           if (last?.timestamp === userMsg.timestamp) return prev.slice(0, -1);
           return prev;
         });
-        setInput(text);
+        composerRef.current?.setText(text);
         setAttachments(atts);
       }
       settleLifecycle();
@@ -5295,8 +5510,14 @@ export function ChatConsole({
         ...prev.filter((m) => !m.isLiveReasoning),
         isProviderConfigurationProblem(message, data.code)
           ? createProviderConfigMessage(
-              message,
-              loggedInRef.current ? 'open-provider-settings' : 'login'
+              requiresReloginRef.current ? RELOGIN_INTERCEPT_TEXT : message,
+              loggedInRef.current && !requiresReloginRef.current
+                ? 'open-provider-settings'
+                : 'login',
+              // 已登录且凭据未失效时：凭据配置入口已不存在（#835 收口），
+              // NO_API_KEY 只可能是当前模型不走平台网关，落点是重选模型
+              // 而非「配置模型」。登录失效时走重登引导，不覆盖其标签。
+              loggedInRef.current && !requiresReloginRef.current ? '去选择模型' : undefined
             )
           : { role: 'error', content: message, timestamp: Date.now() },
       ]);
@@ -5498,8 +5719,8 @@ export function ChatConsole({
         setMessages((prev) => [
           ...prev,
           createProviderConfigMessage(
-            errMsg,
-            loggedInRef.current ? 'open-provider-settings' : 'login'
+            requiresReloginRef.current ? RELOGIN_INTERCEPT_TEXT : errMsg,
+            loggedInRef.current && !requiresReloginRef.current ? 'open-provider-settings' : 'login'
           ),
         ]);
       } else if (e?.code) {
@@ -5523,7 +5744,6 @@ export function ChatConsole({
       sendInvocationRegistryRef.current.delete(thisSendId);
     }
   }, [
-    input,
     attachments,
     streaming,
     cleanupListeners,
@@ -5623,7 +5843,7 @@ export function ChatConsole({
     const instruction = `请下载论文《${title}》的 PDF 文件。paperId: ${pid}`;
     setDownloadingPaperId(paper.id || null);
     // Set input and trigger send on next tick so React state propagates
-    setInput(instruction);
+    composerRef.current?.setText(instruction);
     setTimeout(() => {
       const text = instruction.trim();
       if (!text) {
@@ -5639,21 +5859,6 @@ export function ChatConsole({
       // 失败，指示都不悬挂；流式回复由 handleSend 的监听链负责渲染。
       setDownloadingPaperId(null);
     }, 0);
-  };
-
-  /** Auto-resize textarea to fit content */
-  const adjustTextareaHeight = useCallback(() => {
-    const el = textareaRef.current;
-    if (!el) return;
-    el.style.height = 'auto';
-    el.style.height = `${el.scrollHeight}px`;
-  }, []);
-
-  const handleKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
-      handleSend();
-    }
   };
 
   /** Normalise a sandbox-internal path to a host path that can be opened.
@@ -5978,75 +6183,6 @@ export function ChatConsole({
     [sessionKey]
   );
 
-  // Composer right-click edit menu (剪切/复制/粘贴/全选) — restored from
-  // #547 after the #577 rewrite dropped it.
-  const inputContextItems = useMemo<ContextMenuAction[]>(
-    () => [
-      {
-        label: '剪切',
-        icon: <Scissors size={14} />,
-        shortcut: 'Ctrl+X',
-        onSelect: () => {
-          const el = textareaRef.current;
-          if (!el) return;
-          const s = el.selectionStart,
-            e = el.selectionEnd;
-          if (s === e) return;
-          navigator.clipboard.writeText(el.value.slice(s, e)).catch(() => {});
-          el.setRangeText('', s, e, 'end');
-          // Let React's onChange pick up the new value — manual setInput can
-          // drift from the DOM (deleting then requires two passes).
-          el.dispatchEvent(new Event('input', { bubbles: true }));
-          el.focus();
-        },
-      },
-      {
-        label: '复制',
-        icon: <Copy size={14} />,
-        shortcut: 'Ctrl+C',
-        onSelect: () => {
-          const el = textareaRef.current;
-          if (!el) return;
-          const txt = el.value.slice(el.selectionStart, el.selectionEnd);
-          if (txt) navigator.clipboard.writeText(txt).catch(() => {});
-        },
-      },
-      {
-        label: '粘贴',
-        icon: <ClipboardPaste size={14} />,
-        shortcut: 'Ctrl+V',
-        onSelect: () => {
-          const el = textareaRef.current;
-          if (!el) return;
-          navigator.clipboard
-            .readText()
-            .then((text) => {
-              if (!text) return;
-              // Insert at the caret like native Ctrl+V — replace the current
-              // selection range instead of always appending at the end.
-              const s = el.selectionStart ?? el.value.length;
-              const e = el.selectionEnd ?? s;
-              el.setRangeText(text, s, e, 'end');
-              // Let React's onChange pick up the new value (single source of
-              // truth for state vs DOM — avoids double-delete drift).
-              el.dispatchEvent(new Event('input', { bubbles: true }));
-              el.focus();
-            })
-            .catch(() => {});
-        },
-      },
-      {
-        label: '全选',
-        icon: <CheckCircle size={14} />,
-        shortcut: 'Ctrl+A',
-        divider: true,
-        onSelect: () => textareaRef.current?.select(),
-      },
-    ],
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    []
-  );
-
   // Associate each assistant answer with the tool URLs that preceded it in
   // the same turn. Memoized — extractMessageSources scans full tool outputs,
   // which would otherwise re-run on every animation frame while streaming.
@@ -6056,11 +6192,15 @@ export function ChatConsole({
   // React.memo on MessageBubble below.  Tool rows update their content while
   // streaming, so their content length IS part of the signature; assistant
   // body length is NOT (extraction never depends on it).
-  const sourcesSig = messages
-    .map((m) =>
-      m.role === 'progress' ? `${m.toolCallId ?? ''}:${m.content?.length ?? 0}` : m.role
-    )
-    .join('|');
+  const sourcesSig = useMemo(
+    () =>
+      messages
+        .map((m) =>
+          m.role === 'progress' ? `${m.toolCallId ?? ''}:${m.content?.length ?? 0}` : m.role
+        )
+        .join('|'),
+    [messages]
+  );
   const sourcesByMsg = useMemo(() => {
     if (sourcesCacheRef.current?.sig === sourcesSig) return sourcesCacheRef.current.map;
     const map = new Map<Message, MessageSource[]>();
@@ -6144,7 +6284,7 @@ export function ChatConsole({
         // rewinding and dropping the "已停止" context.
         setMessages((prev) => (wasTurnStopped(prev, idx) ? prev : prev.slice(0, idx)));
       }
-      setInput(msg.content);
+      composerRef.current?.setText(msg.content);
       setAttachments(msg.attachments ?? []);
     },
     [streaming, cleanupListeners]
@@ -6174,7 +6314,7 @@ export function ChatConsole({
       // the interrupted round — keep it and let handleSend append the new
       // attempt after it.  Only a completed answer is replaced in place.
       setMessages((prev) => (wasTurnStopped(prev, userIdx) ? prev : prev.slice(0, userIdx)));
-      setInput(userMsg.content);
+      composerRef.current?.setText(userMsg.content);
       setAttachments(userMsg.attachments ?? []);
       requestAnimationFrame(() => handleSendRef.current());
     },
@@ -6382,9 +6522,7 @@ export function ChatConsole({
           ? '已复制上下文'
           : '分享任务';
 
-  const shareButtonTone = shareStatus === 'idle' ? 'var(--text)' : 'var(--success)';
-  const shareButtonBackground = 'var(--surface-muted)';
-  const shareButtonBorder = 'var(--border-subtle)';
+  const shareButtonTone = shareStatus === 'idle' ? 'var(--text-muted)' : 'var(--success)';
 
   return (
     <div
@@ -6567,7 +6705,7 @@ export function ChatConsole({
       {/* ── Main area: chat + right panel ── */}
       <div className="flex flex-1 overflow-hidden">
         {/* Chat area */}
-        <div className="flex flex-col flex-1 overflow-hidden">
+        <div ref={setChatColRef} className="flex flex-col flex-1 overflow-hidden">
           {/* ── Sub header: task title + status (inside chat area) ── */}
           <div
             className="flex items-center gap-3 px-5 min-h-12 border-b shrink-0"
@@ -6613,68 +6751,140 @@ export function ChatConsole({
                   {sessionTitle}
                 </h2>
               )}
-              <span className="tag-inprogress shrink-0">{'\u8fdb\u884c\u4e2d'}</span>
-              <div
-                className="flex min-w-0 items-center gap-1.5 shrink-0 text-[12px] leading-none whitespace-nowrap"
-                aria-label={taskHeaderInfo.meta}
-                style={{ color: 'var(--text-faint)' }}
-              >
-                <span>{taskHeaderInfo.updatedLabel}</span>
-                <span aria-hidden="true">·</span>
-                <span>{taskHeaderInfo.fileLabel}</span>
-                <span aria-hidden="true">·</span>
-                <span>{taskHeaderInfo.pluginLabel}</span>
-              </div>
+              {/* \u300c\u8fdb\u884c\u4e2d\u300d\u53ea\u5728\u56de\u5408\u771f\u7684\u5728\u8dd1\u65f6\u51fa\u73b0\u2014\u2014\u4e4b\u524d\u662f\u786c\u7f16\u7801\u5e38\u663e\uff0c\u4f1a\u8bdd\u7a7a\u95f2
+                  \u4e5f\u6302\u7740\u72b6\u6001\u6807\u7b7e\uff08E2E \u7684 waitForResponseComplete \u4e00\u76f4\u6309\u300c\u56de\u5408\u7ed3\u675f
+                  \u540e\u5e94\u9690\u85cf\u300d\u5199\u7684\uff0c\u53ea\u662f\u88ab try/catch \u541e\u4e86\uff09\u3002 */}
+              {streaming && <span className="tag-inprogress shrink-0">{'\u8fdb\u884c\u4e2d'}</span>}
+              {/* \u66f4\u65b0\u65f6\u95f4\uff1a\u653e\u5728\u5de5\u4f5c\u76ee\u5f55\u80f6\u56ca\u524d\u9762\u3001\u968f\u4f1a\u8bdd\u8eab\u4efd\u5c55\u793a\uff08\u53f3\u4fa7\u53ea\u7559\u7ed9\u64cd\u4f5c\uff09\u3002
+                  \u53ea\u9732\u65f6\u95f4\uff0c\u5b8c\u6574 \u6587\u4ef6/\u63d2\u4ef6 \u7edf\u8ba1\u6536\u8fdb tooltip\u3002 */}
+              {/* \u66f4\u65b0\u65f6\u95f4 / \u6587\u4ef6\u6570\uff1a\u5e38\u9a7b\u5143\u4fe1\u606f\u3002\u538b\u7f29\u6001**\u6574\u6761\u9690\u85cf**\uff08\u5b8c\u6574\u5185\u5bb9\u4ecd\u5728
+                  title / aria-label \u91cc\uff09\u2014\u2014\u5b83\u5b9e\u6d4b\u5360 110px\uff0c\u800c\u804a\u5929\u5217\u7a84\u5230\u8fd9\u4e2a\u6863\u4f4d\u65f6
+                  \u6807\u9898\u53ea\u5269 82px\uff0c\u7b49\u4e8e\u8ba9\u4f4e\u4ef7\u503c\u7684\u8f85\u52a9\u4fe1\u606f\u6324\u6389\u4e3b\u4fe1\u606f\u3002\u8fd9\u4e5f\u987a\u5e26\u53bb\u6389\u4e86
+                  \u539f\u6765\u7684 `hidden md:` \u2014\u2014 \u90a3\u662f\u89c6\u53e3\u65ad\u70b9\uff0c\u800c\u7a97\u53e3\u6709 minWidth\uff0c\u5b83\u6c38\u4e0d\u89e6\u53d1\u3002 */}
+              {messages.length > 0 && !subHeaderCompact && (
+                <span
+                  className="inline-flex shrink-0 items-center gap-1 text-[11px] leading-none whitespace-nowrap"
+                  aria-label={taskHeaderInfo.meta}
+                  title={taskHeaderInfo.meta}
+                  data-testid="chat-header-updated-at"
+                  style={{ color: 'var(--text-faint)' }}
+                >
+                  <span aria-hidden className="opacity-50">
+                    {'\u00b7'}
+                  </span>
+                  {taskHeaderInfo.updatedLabel}
+                  <span aria-hidden className="opacity-50">
+                    {'\u00b7'}
+                  </span>
+                  <span className="shrink-0">{taskHeaderInfo.fileLabel}</span>
+                </span>
+              )}
             </div>
-            <div
-              className="flex shrink-0 items-stretch overflow-hidden rounded-md shadow-[0_1px_0_rgba(18,18,18,0.05)]"
-              style={{
-                background: shareButtonBackground,
-                border: `1px solid ${shareButtonBorder}`,
-              }}
-            >
+            {/* \u5bf9\u8bdd\u6001\u5de5\u4f5c\u76ee\u5f55\u80f6\u56ca\uff08B \u65b9\u6848\uff09\uff1a\u4f1a\u8bdd\u5df2\u4ea7\u751f\u6d88\u606f\u540e\u5728\u5b50\u6807\u9898\u680f\u5c55\u793a\u5f53\u524d\u76ee\u5f55\uff0c
+                  \u7a7a\u6001\u4e0d\u6e32\u67d3\uff08\u6b22\u8fce\u9875\u80f6\u56ca\u72ec\u7acb\u5728\u8f93\u5165\u6846\u4e0a\u65b9\uff09\u3002\u70b9\u51fb\u6362\u76ee\u5f55 \u2192 \u73b0\u6709 picker\uff0c
+                  \u9009\u62e9\u5373\u5efa\u7ed1\u5230\u65b0\u76ee\u5f55\u7684\u4f1a\u8bdd\u3002 */}
+            {/* 对话态工作目录胶囊（#989 A 方案「安静工具条」）：会话已产生消息后在子标题栏
+                展示当前目录，空态不渲染（欢迎页胶囊独立在输入框上方）。点击换目录 → 现有
+                picker，选择即建绑到新目录的会话。 */}
+            {messages.length > 0 && (
               <button
-                onClick={handleCopyTaskSummary}
-                className="flex h-7 min-w-[96px] items-center justify-center gap-1.5 px-3 text-xs font-semibold transition-colors whitespace-nowrap hover:brightness-95"
-                style={{
-                  color: shareButtonTone,
-                  cursor: 'pointer',
+                type="button"
+                onClick={(e) => {
+                  if (!streaming) void handleOpenWorkspacePicker(e.currentTarget);
                 }}
-                title="复制任务摘要"
-                aria-label="复制任务摘要"
+                disabled={streaming}
+                title={workspace ? `工作目录：${workspace}` : '默认工作目录'}
+                aria-label="工作目录"
+                data-testid="chat-header-workspace-capsule"
+                className={cn(
+                  subHeaderCompact ? HDR_CTL_CONTEXT_ICON : `${HDR_CTL_CONTEXT} min-w-0`
+                )}
+                style={{
+                  // 压缩态只剩一个文件夹图标：已选目录用正文色、默认目录用更浅的 faint，
+                  // 两种状态仍能分辨（不再靠橙色描边 + 橙点这一套）。
+                  color: subHeaderCompact
+                    ? workspace
+                      ? 'var(--text)'
+                      : 'var(--text-faint)'
+                    : workspace
+                      ? 'var(--text-muted)'
+                      : 'var(--text-faint)',
+                }}
               >
-                {shareStatus === 'idle' ? <Send size={12} /> : <Check size={12} />}
-                {shareButtonLabel}
+                <Folder size={12} className="shrink-0" />
+                {!subHeaderCompact && (
+                  <span className="truncate max-w-[170px]" data-testid="chat-header-workspace-path">
+                    {workspace ?? '默认工作目录'}
+                  </span>
+                )}
+                {!subHeaderCompact && <ChevronDown size={12} className="shrink-0 opacity-50" />}
               </button>
+            )}
+            {/* 分享：宽版是「图标 + 文字 + 折叠箭头」，压缩态只剩一个图标——右键仍可打开
+                分享菜单，不会因为收起而丢功能。 */}
+            <ContextMenu items={shareMenuItems} minWidth={180}>
+              {({ onContextMenu }) => (
+                <Tooltip content={shareButtonLabel}>
+                  <button
+                    onClick={handleCopyTaskSummary}
+                    onContextMenu={subHeaderCompact ? onContextMenu : undefined}
+                    className={subHeaderCompact ? HDR_CTL_ICON : HDR_CTL_LABEL}
+                    style={{
+                      color: shareButtonTone,
+                      cursor: 'pointer',
+                    }}
+                    title={shareButtonLabel}
+                    aria-label={shareButtonLabel}
+                  >
+                    {shareStatus === 'idle' ? <Send size={12} /> : <Check size={12} />}
+                    {!subHeaderCompact && (
+                      <span className="whitespace-nowrap">{shareButtonLabel}</span>
+                    )}
+                  </button>
+                </Tooltip>
+              )}
+            </ContextMenu>
+            {!subHeaderCompact && (
               <ContextMenu items={shareMenuItems} minWidth={180}>
                 {({ onContextMenu }) => (
                   <Tooltip content="复制摘要、导出 Markdown 或复制上下文">
                     <button
                       onClick={onContextMenu}
-                      className="flex h-7 w-7 items-center justify-center transition-colors hover:brightness-95"
+                      className={HDR_CTL_CARET}
                       style={{
-                        borderLeft: `1px solid ${shareButtonBorder}`,
-                        color: shareStatus === 'idle' ? 'var(--text-muted)' : 'var(--success)',
+                        color: shareStatus === 'idle' ? 'var(--text-faint)' : 'var(--success)',
                       }}
                       title="更多分享方式"
                       aria-label="更多分享方式"
                       aria-haspopup="menu"
                     >
-                      <ChevronDown size={12} />
+                      <ChevronDown size={11} />
                     </button>
                   </Tooltip>
                 )}
               </ContextMenu>
-            </div>
+            )}
             <Tooltip content="显示或隐藏文件面板">
               <button
-                onClick={() => setPanelOpen((v) => !v)}
-                className="p-1.5 rounded hover:bg-[var(--surface-muted)] transition-colors shrink-0 ml-1"
+                onClick={() => {
+                  if (panelOpen) {
+                    // 关闭：面板先撤、聊天列立刻拿回宽度，窗口随后收回。这个顺序
+                    // 只会让聊天空出一瞬；反过来先收窗会把面板压在聊天列上多撑一拍。
+                    setPanelOpen(false);
+                    panelSync.request(0);
+                    return;
+                  }
+                  // 打开：先只发窗口加宽请求，面板由 onRequestSettled 在窗口真的
+                  // 让出宽度之后再显示 —— 聊天列全程不变，没有那一瞬的挤压。
+                  pendingPanelReveal.current = true;
+                  panelSync.request(panelWidth);
+                }}
+                className={cn(panelOpen ? HDR_CTL_TOGGLE_ON : HDR_CTL_TOGGLE, 'ml-1')}
                 title="显示或隐藏文件面板"
                 aria-label="显示或隐藏文件面板"
                 data-testid="toggle-assets-panel-btn"
               >
-                <LayoutGrid size={14} style={{ color: 'var(--text-faint)' }} />
+                <LayoutGrid size={13} />
               </button>
             </Tooltip>
           </div>
@@ -6833,7 +7043,7 @@ export function ChatConsole({
                         turnIndex={i}
                         execOutputs={execOutputs}
                         inlineExecOutput={inlineExecOutput}
-                        sources={sourcesByMsg.get(group.msg) ?? []}
+                        sources={sourcesByMsg.get(group.msg) ?? EMPTY_SOURCES}
                         toolStepIndex={toolStepByMsg.get(group.msg)}
                         isLast={i === chatGroups.length - 1}
                         streaming={streaming && i === lastAssistantIdx && assistantTailActive}
@@ -6885,7 +7095,7 @@ export function ChatConsole({
               background: 'var(--background)',
             }}
           >
-            <div className="max-w-[760px] mx-auto">
+            <div className="max-w-[760px] min-w-[min(360px,100%)] mx-auto">
               {attachments.length > 0 && (
                 <div className="flex flex-wrap gap-2 mb-2">
                   {attachments.map((att, i) => {
@@ -7096,180 +7306,59 @@ export function ChatConsole({
               {/* AI-initiated user confirmation cards (issue #646) */}
               <ConfirmCardArea />
 
-              <div
-                className="flex flex-col rounded-3xl px-7 py-3.5 transition-all"
-                data-testid="chat-input-container"
-                style={{
-                  background: 'color-mix(in srgb, var(--surface) 85%, transparent)',
-                  backdropFilter: 'blur(16px)',
-                  WebkitBackdropFilter: 'blur(16px)',
-                  border: '1px solid color-mix(in srgb, var(--border) 60%, transparent)',
-                  outline: 'none',
-                  boxShadow: '0 -4px 20px rgba(0,0,0,0.06), 0 2px 8px rgba(0,0,0,0.04)',
-                }}
-              >
-                {/* Textarea on top — grows up to 1/3 of viewport (DeepSeek style) */}
-                <ContextMenu items={inputContextItems} minWidth={160}>
-                  {({ onContextMenu }) => (
-                    <Textarea
-                      ref={textareaRef}
-                      value={input}
-                      onChange={(e) => {
-                        setInput(e.target.value);
-                      }}
-                      onKeyDown={handleKeyDown}
-                      onContextMenu={onContextMenu}
-                      placeholder={
-                        adjustHint
-                          ? '请输入调整要求（例如：市场改为海外、步骤精简到 3 步…）'
-                          : '请输入消息或拖入文件...'
-                      }
-                      rows={1}
-                      allowResize={true}
-                      className="w-full border-0 bg-transparent p-0! leading-7! focus:ring-0 focus:border-0 min-h-[52px] max-h-[25vh] text-[15px]"
-                      style={{ color: 'var(--text)', fieldSizing: 'content' }}
-                    />
-                  )}
-                </ContextMenu>
-                {/* Icon row at the bottom — no text, like DeepSeek */}
-                <div className="flex items-center gap-3 pt-1.5 mt-0.5 border-t border-[var(--border-subtle)]">
-                  <ExecutionPolicySelector
-                    policy={executionPolicy}
-                    onChange={setExecutionPolicy}
-                    onOpenApprovals={onOpenApprovals}
-                  />
-                  {/* 复杂问题角标（#680 跟进）：轻量气泡挂在模式按钮上，
-                      3 秒自动消失，不占输入区。 */}
-                  <div className="relative">
-                    <ReasoningModeSwitch mode={reasoningMode} onChange={changeReasoningMode} />
-                    {complexHint && reasoningMode === 'fast' && (
-                      <div
-                        className="absolute left-full ml-2 top-1/2 -translate-y-1/2 z-50 flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] whitespace-nowrap"
-                        style={{
-                          background: '#2f2f3a',
-                          border: '1px solid rgba(157,106,223,.45)',
-                          color: '#c9a5ef',
-                          boxShadow: '0 4px 14px rgba(0,0,0,.35)',
-                        }}
-                      >
-                        {/* 指向按钮的小箭头（左侧） */}
-                        <span
-                          className="absolute -left-[5px] top-1/2 -translate-y-1/2 w-2 h-2"
-                          style={{
-                            background: '#2f2f3a',
-                            borderLeft: '1px solid rgba(157,106,223,.45)',
-                            borderBottom: '1px solid rgba(157,106,223,.45)',
-                            transform: 'translateY(-50%) rotate(45deg)',
-                          }}
-                        />
-                        <span>💡 建议</span>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            changeReasoningMode('think');
-                            setComplexHint(false);
-                          }}
-                          className="font-semibold cursor-pointer"
-                          style={{ color: '#d9b8f5' }}
-                        >
-                          🧠 深度研究
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => setComplexHint(false)}
-                          className="opacity-60 hover:opacity-100 cursor-pointer"
-                          aria-label="关闭提示"
-                        >
-                          ✕
-                        </button>
-                      </div>
-                    )}
-                  </div>
-                  {/* AI disclaimer — centered in the mode row, fades when typing */}
-                  <div className="flex-1 flex items-center justify-center">
-                    <span
-                      className="text-size-2xs leading-relaxed tracking-wide text-[var(--text-faint)] italic select-none transition-opacity duration-300"
-                      style={{ opacity: !input.trim() && attachments.length === 0 ? 1 : 0 }}
-                    >
-                      AI 也会犯错误，对于重要答案请谨慎验证
-                    </span>
-                  </div>
-                  <button
-                    onClick={handleAttachClick}
-                    className="shrink-0 p-1.5 rounded hover:bg-[var(--surface-muted)] transition-colors"
-                    title="附件或图片"
-                    aria-label="附件或图片"
-                  >
-                    <Paperclip size={15} style={{ color: 'var(--text-faint)' }} />
-                  </button>
-                  {streaming && !input.trim() && attachments.length === 0 ? (
-                    <button
-                      onClick={handleAbort}
-                      title="停止生成"
-                      aria-label="停止生成"
-                      className="shrink-0 w-8 h-8 rounded-full flex items-center justify-center transition-all duration-200 hover:bg-[var(--surface-muted)] active:scale-95"
-                    >
-                      <Square
-                        size={12}
-                        style={{ color: 'var(--text-muted)' }}
-                        fill="currentColor"
-                      />
-                    </button>
-                  ) : (
-                    <button
-                      onClick={handleSend}
-                      disabled={!input.trim() && attachments.length === 0}
-                      title={streaming ? '中断当前生成并发送' : '发送'}
-                      aria-label={streaming ? '中断当前生成并发送' : '发送'}
-                      className="shrink-0 w-8 h-8 rounded-full flex items-center justify-center transition-all duration-200 hover:brightness-110 hover:-translate-y-px active:scale-95 disabled:opacity-30 disabled:hover:brightness-100 disabled:hover:translate-y-0 disabled:shadow-none"
-                      style={{
-                        background:
-                          'linear-gradient(135deg, var(--accent), color-mix(in srgb, var(--accent) 65%, #000))',
-                        boxShadow: '0 2px 10px color-mix(in srgb, var(--accent) 35%, transparent)',
-                      }}
-                    >
-                      <Send size={14} style={{ color: '#fff' }} />
-                    </button>
-                  )}
-                </div>
-              </div>
-            </div>
-
-            {/* Inline workspace selector — only before the conversation starts */}
-            {historyLoaded && messages.length === 0 && (
-              <div
-                className="flex items-center justify-center mt-2"
-                data-testid="inline-workspace-selector"
-              >
-                <div
-                  className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full text-xs border shadow-sm"
-                  style={{
-                    background: 'var(--surface)',
-                    borderColor: 'var(--border-subtle)',
-                    color: 'var(--text-muted)',
-                  }}
-                >
-                  <Folder size={12} className="shrink-0" />
-                  <span
-                    className="truncate max-w-[280px]"
-                    title={workspace || undefined}
-                    data-testid="inline-workspace-path"
-                  >
-                    {workspace ? `工作目录：${workspace}` : '默认工作目录'}
-                  </span>
+              {/* 欢迎态工作目录胶囊：独立于输入框、在它正上方（同宽左对齐，不嵌进卡内）。
+                  首条消息后隐藏——会话进行中改由子标题栏胶囊承接。与子标题栏用同一套
+                  ghost 规格（28px / 圆角 7 / 11px），只是这里常驻一层浅底色——空态下它
+                  是这一屏唯一的目录入口，全透明会看不见。整体是一个按钮：原先「外层
+                  div role=button 里再嵌一个 button」是嵌套交互元素，读屏会念成两个控件。 */}
+              {historyLoaded && messages.length === 0 && (
+                <div className="flex items-center pb-2.5" data-testid="inline-workspace-selector">
                   <button
                     type="button"
-                    onClick={handleOpenWorkspacePicker}
+                    aria-label="工作目录"
+                    title={workspace ? `工作目录：${workspace}` : '默认工作目录'}
+                    onClick={(e) => {
+                      if (!streaming) void handleOpenWorkspacePicker(e.currentTarget);
+                    }}
                     disabled={streaming}
-                    className="ml-0.5 text-[var(--accent)] hover:underline disabled:opacity-40 disabled:hover:no-underline"
-                    title="更换工作目录"
                     data-testid="inline-workspace-change-btn"
+                    className={cn(HDR_CTL_CONTEXT, 'min-w-0')}
+                    style={{
+                      color: workspace ? 'var(--text-muted)' : 'var(--text-faint)',
+                    }}
                   >
-                    更换
+                    <Folder size={12} className="shrink-0" />
+                    <span
+                      className="truncate max-w-[220px]"
+                      title={workspace ?? undefined}
+                      data-testid="inline-workspace-path"
+                    >
+                      {workspace ?? '默认工作目录'}
+                    </span>
+                    <ChevronDown size={12} className="shrink-0 opacity-50" />
                   </button>
                 </div>
-              </div>
-            )}
+              )}
+              <Composer
+                ref={composerRef}
+                streaming={streaming}
+                hasAttachments={attachments.length > 0}
+                adjustHint={adjustHint}
+                executionPolicy={executionPolicy}
+                onExecutionPolicyChange={setExecutionPolicy}
+                onOpenApprovals={onOpenApprovals}
+                reasoningMode={reasoningMode}
+                onReasoningModeChange={changeReasoningMode}
+                complexHint={complexHint}
+                onComplexHintDismiss={() => setComplexHint(false)}
+                onAttachClick={handleAttachClick}
+                onSubmit={(text) => {
+                  programmaticTextRef.current = text;
+                  handleSend();
+                }}
+                onAbort={handleAbort}
+              />
+            </div>
           </div>
         </div>
 
@@ -7317,6 +7406,7 @@ export function ChatConsole({
         {panelOpen && (
           <div
             data-testid="task-assets-panel"
+            ref={assetsPanelRef}
             className="flex flex-col shrink-0 border-l overflow-y-auto relative"
             style={{
               width: panelWidth,
@@ -7863,101 +7953,26 @@ export function ChatConsole({
         </Modal>
       )}
 
-      {/* ── Workspace Picker Modal ── */}
-      <Modal
-        open={workspacePickerOpen}
-        onOpenChange={(o) => {
-          if (!o) setWorkspacePickerOpen(false);
-        }}
-        hideClose
-      >
-        <div
-          className="flex flex-col rounded-xl shadow-2xl"
-          style={{
-            width: 420,
-            maxHeight: '70vh',
-            background: 'var(--surface-elevated)',
-            border: '1px solid var(--border)',
-            pointerEvents: 'auto',
+      {/* ── 工作目录下拉（参考 #940 收敛：点胶囊就近弹出小面板，替代居中 Modal） ── */}
+      {workspacePickerOpen && (
+        <WorkspacePickerMenu
+          anchor={workspacePickerAnchor}
+          recent={recentWorkspaces}
+          current={workspace ?? null}
+          onClose={() => setWorkspacePickerOpen(false)}
+          onPick={(ws) => createSession(ws)}
+          onDefault={() => createSession(null)}
+          onBrowse={async () => {
+            setWorkspacePickerOpen(false);
+            try {
+              const dir = await window.miqi.dialog.openDirectory();
+              createSession(dir ?? null);
+            } catch {
+              createSession(null);
+            }
           }}
-          onClick={(e) => e.stopPropagation()}
-          onMouseDown={(e) => e.stopPropagation()}
-          data-testid="workspace-picker-modal"
-        >
-          <div className="flex items-center justify-between px-4 py-3 border-b shrink-0 border-border-subtle">
-            <div className="flex items-center gap-2">
-              <Folder size={16} style={{ color: 'var(--accent)' }} />
-              <span className="text-sm font-medium text-[var(--text)]">选择工作目录</span>
-            </div>
-            <button
-              onClick={() => setWorkspacePickerOpen(false)}
-              className="p-1 rounded hover:bg-[var(--surface-muted)] transition-colors"
-            >
-              <X size={14} style={{ color: 'var(--text-faint)' }} />
-            </button>
-          </div>
-
-          <div className="flex-1 overflow-auto p-3 flex flex-col gap-2">
-            {/* Recent workspaces */}
-            {recentWorkspaces.length > 0 && (
-              <>
-                <div
-                  className="text-[10px] font-semibold uppercase tracking-wider text-text-faint px-1 pt-1 pb-0.5"
-                  data-testid="workspace-picker-recent-label"
-                >
-                  最近使用
-                </div>
-                {recentWorkspaces.map((ws, idx) => (
-                  <button
-                    key={ws}
-                    onClick={() => createSession(ws)}
-                    className="flex items-center gap-2 px-3 py-2 rounded-lg text-left transition-colors hover:bg-[var(--surface-muted)] w-full"
-                    data-testid={`workspace-picker-recent-${idx}`}
-                  >
-                    <FolderCheck
-                      size={14}
-                      style={{ color: 'var(--text-muted)' }}
-                      className="shrink-0"
-                    />
-                    <span className="text-xs text-[var(--text)] truncate" title={ws}>
-                      {ws}
-                    </span>
-                  </button>
-                ))}
-                <div className="border-t border-border-subtle my-1" />
-              </>
-            )}
-
-            {/* Browse button */}
-            <button
-              onClick={async () => {
-                setWorkspacePickerOpen(false);
-                try {
-                  const dir = await window.miqi.dialog.openDirectory();
-                  createSession(dir ?? null);
-                } catch {
-                  createSession(null);
-                }
-              }}
-              className="flex items-center gap-2 px-3 py-2.5 rounded-lg text-left transition-colors hover:bg-[var(--surface-muted)] w-full"
-              data-testid="workspace-picker-browse"
-            >
-              <FolderOpen size={14} style={{ color: 'var(--accent)' }} className="shrink-0" />
-              <span className="text-xs text-[var(--accent)]">浏览...</span>
-            </button>
-
-            {/* Default workspace */}
-            <button
-              onClick={() => createSession(null)}
-              className="flex items-center gap-2 px-3 py-2.5 rounded-lg text-left transition-colors hover:bg-[var(--surface-muted)] w-full"
-              data-testid="workspace-picker-default"
-            >
-              <Folder size={14} style={{ color: 'var(--text-muted)' }} className="shrink-0" />
-              <span className="text-xs text-[var(--text-muted)]">使用默认工作目录</span>
-            </button>
-          </div>
-        </div>
-      </Modal>
+        />
+      )}
       {/* #696 补：下载完成 toast（屏幕居中 + 淡入淡出 + 2s 停留） */}
       {downloadToast && (
         <div
@@ -8117,7 +8132,7 @@ function ToolChainGroup({
               <MessageBubble
                 key={`${row.timestamp}-${i}`}
                 msg={row}
-                sources={sourcesByMsg.get(row) ?? []}
+                sources={sourcesByMsg.get(row) ?? EMPTY_SOURCES}
                 toolStepIndex={i + 1}
                 isLastToolRow={i === rows.length - 1}
                 isLast={false}
@@ -9221,6 +9236,185 @@ const MessageBubble = memo(function MessageBubble({
     </>
   );
 }, areMessageBubblePropsEqual);
+
+/* 工作目录选择下拉：点胶囊就近弹出的紧凑面板（对齐 #940 收敛稿——不再用居中的
+ * 420px Modal）。锚定在胶囊下方，收录「最近使用 + 浏览… + 使用默认工作目录」。
+ * 用全屏透明遮罩挡掉下层点击：点遮罩（含胶囊）收起、点面板内行执行动作。 */
+interface WorkspacePickerMenuProps {
+  anchor: DOMRect | null;
+  recent: string[];
+  current: string | null;
+  onClose: () => void;
+  onPick: (ws: string) => void;
+  onDefault: () => void;
+  onBrowse: () => void;
+}
+
+function WorkspacePickerMenu({
+  anchor,
+  recent,
+  current,
+  onClose,
+  onPick,
+  onDefault,
+  onBrowse,
+}: WorkspacePickerMenuProps) {
+  const panelRef = useRef<HTMLDivElement>(null);
+  // 先在胶囊下方摆放，渲染后按视口尺寸收边（面板宽度为 max-content，需实测）。
+  const [pos, setPos] = useState<{ left: number; top: number }>(() => {
+    if (!anchor) return { left: 8, top: 8 };
+    return { left: anchor.left, top: anchor.bottom + 6 };
+  });
+
+  // 摆放：先在胶囊下方就位，渲染后按视口收边。用 ResizeObserver 而不是把尺寸塞进
+  // deps——「最近使用」是异步拉回来的，面板高度在打开后还会长一次；只在挂载时量
+  // 一次会漏掉那次增长，面板会从胶囊下方一路长到视口外，底下几行点不到。
+  useEffect(() => {
+    const node = panelRef.current;
+    if (!node || !anchor) return;
+    const place = () => {
+      const rect = node.getBoundingClientRect();
+      const vw = document.documentElement.clientWidth;
+      const vh = document.documentElement.clientHeight;
+      const left = Math.max(8, Math.min(anchor.left, vw - rect.width - 8));
+      const below = anchor.bottom + 6;
+      const above = anchor.top - rect.height - 6;
+      // 下方放不下再整体翻到胶囊上方
+      const top = below + rect.height <= vh - 8 || above < 8 ? below : Math.max(8, above);
+      setPos((p) => (p.left === left && p.top === top ? p : { left, top }));
+    };
+    place();
+    const ro = new ResizeObserver(place);
+    ro.observe(node);
+    return () => ro.disconnect();
+  }, [anchor]);
+
+  // Esc / 滚动 / 窗口尺寸变化时收起
+  useEffect(() => {
+    if (!anchor) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose();
+    };
+    window.addEventListener('keydown', onKey);
+    const onReposition = () => onClose();
+    window.addEventListener('resize', onReposition);
+    window.addEventListener('scroll', onReposition, true);
+    return () => {
+      window.removeEventListener('keydown', onKey);
+      window.removeEventListener('resize', onReposition);
+      window.removeEventListener('scroll', onReposition, true);
+    };
+  }, [anchor, onClose]);
+
+  if (!anchor) return null;
+
+  const normCurrent = current?.toLowerCase();
+
+  return createPortal(
+    <>
+      {/* 全屏遮罩：点遮罩即关闭，且拦下点击不让它落到胶囊上（避免点同一个
+          胶囊时“先关后开”又弹回来）。 */}
+      <div className="fixed inset-0 z-[59]" onMouseDown={onClose} />
+      <div
+        ref={panelRef}
+        role="menu"
+        aria-label="选择工作目录"
+        data-testid="workspace-picker-modal"
+        className="fixed z-[60] overflow-y-auto overflow-x-hidden rounded-xl border bg-[var(--surface-elevated)] p-1.5 shadow-[0_12px_30px_rgba(0,0,0,0.16)]"
+        style={{
+          left: pos.left,
+          top: pos.top,
+          minWidth: 288,
+          maxWidth: 'min(360px, calc(100vw - 16px))',
+          // 菜单只封顶宽度是不够的：「最近使用」可以很长，没有高度上限 + 内部滚动
+          // 时会一路长出视口底部，底下几行点不到（原来的居中 Modal 有 70vh +
+          // overflow:auto，换成 anchored menu 时把这个保护丢了）。
+          maxHeight: 'min(420px, calc(100vh - 16px))',
+          borderColor: 'var(--border)',
+        }}
+      >
+        {recent.length > 0 && (
+          <>
+            <div
+              className="px-2 pt-0.5 pb-1 text-[9.5px] font-bold uppercase tracking-[0.06em] text-text-faint select-none"
+              data-testid="workspace-picker-recent-label"
+            >
+              最近使用
+            </div>
+            {recent.map((ws, idx) => {
+              const isCur = !!current && ws.toLowerCase() === normCurrent;
+              return (
+                <button
+                  key={ws}
+                  type="button"
+                  role="menuitem"
+                  aria-current={isCur ? 'true' : undefined}
+                  onClick={() => onPick(ws)}
+                  data-testid={`workspace-picker-recent-${idx}`}
+                  className={cn(
+                    'flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[11px] transition-colors',
+                    isCur ? 'bg-[var(--accent-soft)]' : 'hover:bg-[var(--surface-muted)]'
+                  )}
+                >
+                  {isCur ? (
+                    <FolderCheck
+                      size={13}
+                      style={{ color: 'var(--accent)' }}
+                      className="shrink-0"
+                    />
+                  ) : (
+                    <Folder size={13} style={{ color: 'var(--text-muted)' }} className="shrink-0" />
+                  )}
+                  <span
+                    className={cn(
+                      'min-w-0 flex-1 truncate text-[var(--text)]',
+                      isCur && 'font-medium'
+                    )}
+                    title={ws}
+                  >
+                    {ws}
+                  </span>
+                  {/* 当前项靠「行底色 + FolderCheck + 右侧勾」三重表达，不再单写
+                      一个「当前」字样——那是第四个信号，读起来反而吵。 */}
+                  {isCur && (
+                    <Check
+                      size={13}
+                      aria-hidden
+                      className="shrink-0"
+                      style={{ color: 'var(--accent)' }}
+                    />
+                  )}
+                </button>
+              );
+            })}
+            <div className="my-1 border-t border-border-subtle" />
+          </>
+        )}
+        <button
+          type="button"
+          role="menuitem"
+          onClick={onBrowse}
+          data-testid="workspace-picker-browse"
+          className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[11px] font-semibold text-[var(--accent)] transition-colors hover:bg-[var(--surface-muted)]"
+        >
+          <FolderOpen size={13} className="shrink-0" />
+          浏览…
+        </button>
+        <button
+          type="button"
+          role="menuitem"
+          onClick={onDefault}
+          data-testid="workspace-picker-default"
+          className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[11px] text-[var(--text-muted)] transition-colors hover:bg-[var(--surface-muted)]"
+        >
+          <Folder size={13} style={{ color: 'var(--text-muted)' }} className="shrink-0" />
+          使用默认工作目录
+        </button>
+      </div>
+    </>,
+    document.body
+  );
+}
 
 /**
  * Memo comparator: skip re-render unless a rendering-relevant prop changed.

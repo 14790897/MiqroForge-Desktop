@@ -132,7 +132,6 @@ MiQroForge 可作为多渠道消息中枢，统一接入以下平台，让 AI �
 | `weather` | 通过 wttr.in 和 Open-Meteo 获取天气 |
 | `workspace-cleanup` | 整理工作区目录 |
 | `skill-creator` | 创建新技能的向导 |
-| `slurm` | SLURM 集群作业提交和管理 |
 
 ### SkillHub 在线市场
 

@@ -164,6 +164,15 @@ class ToolRegistry:
         """
         hint = "\n\n[Analyze the error above and try a different approach.]"
 
+        # #984 layer 3 (R4): ``_user_roots`` is a harness-owned channel
+        # (ToolOrchestrator strips the model's copy before injecting its
+        # own).  ``params`` on this path IS model-authored — on any caller
+        # that skips the orchestrator (e.g. the legacy SubagentManager) a
+        # model-supplied ``_user_roots`` would become both a sandbox bind
+        # source and the guard's write scope.  Only ``**extra`` may carry
+        # it.
+        params = {k: v for k, v in params.items() if k != "_user_roots"}
+
         tool = self._tools.get(name)
         if not tool:
             return f"Error: 未找到工具 '{name}'。可用工具：{', '.join(self.tool_names)}"

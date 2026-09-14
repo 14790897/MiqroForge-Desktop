@@ -153,6 +153,40 @@ class TestMakeProviderGatewayRoute:
         assert provider.api_base == f"{gateway_origin()}{GATEWAY_PREFIX}"
         assert provider._resolve_model("deepseek/deepseek-v4-flash") == "deepseek-v4-flash"
 
+    def test_zero_local_credentials_routes_via_gateway(self, tmp_path: Path):
+        """回归（#1010 后续）：真实 Config 无任何本地凭据时 _match_provider
+        返回 (None, None)——get_provider_name() 为 None。网关分支此前把
+        provider_name == "deepseek" 当前置条件，零凭据登录用户（登录后经网关
+        用平台内置模型）会落到 API-key 守卫报 NO_API_KEY，与前端发送门禁的
+        active_model_resolvable 判定不一致（实测复现：登录+网关 active+无本地
+        key 发送即失败）。网关路由必须只看模型前缀 + 网关凭据。"""
+        from miqi.config.schema import Config
+
+        _token_for(tmp_path, _active_gateway())
+        config = Config()
+        config.agents.defaults.model = "deepseek/deepseek-v4-flash"
+        config.agents.defaults.workspace = str(tmp_path)
+        # 真实零凭据形态：_match_provider 解析不到任何已配置 provider
+        assert config.get_provider_name(config.agents.defaults.model) is None
+
+        provider = make_provider(config)
+
+        assert isinstance(provider, AnthropicProvider)
+        assert provider.api_key == SK
+        assert provider.api_base == f"{gateway_origin()}{GATEWAY_PREFIX}"
+
+    def test_zero_local_credentials_no_gateway_still_raises(self, tmp_path: Path):
+        """零凭据 + 无网关凭据：仍按「未配置 API Key」报错（守卫语义不变）。"""
+        from miqi.config.schema import Config
+
+        _token_for(tmp_path, None)
+        config = Config()
+        config.agents.defaults.model = "deepseek/deepseek-v4-flash"
+        config.agents.defaults.workspace = str(tmp_path)
+
+        with pytest.raises(ValueError, match="No API key configured"):
+            make_provider(config)
+
     def test_https_gateway_base_accepted_with_trailing_slash_normalized(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
