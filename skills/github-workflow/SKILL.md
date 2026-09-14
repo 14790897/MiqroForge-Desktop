@@ -203,6 +203,7 @@ add auto-install support                   ❌ 缺少语义前缀
 - 手动触发：`gh workflow run weekly-release.yml -f dry_run=true`（只建 PR 不合并，用于测试）
 - 发布 PR 的 body 由流水线生成，含全部必填节（`[x] 其他` + `## 截图` 等），能通过 pr-template-check
 - **develop 版本号约定**：反向同步后 develop 的版本号 = 最新已发布版本 + `-dev` 后缀（如 `0.30.0-dev`），用于区分开发中分支与正式发布版
+- **凭证处理（安全）**：两个工作流 checkout 一律 `persist-credentials: false`（仓库 public，后续 fetch 匿名即可）；`RELEASE_TOKEN` 只在需要写权限的步骤显式注入——反向同步的推送用 `https://x-access-token:…` URL 形式 + 显式租约 `--force-with-lease=<ref>:<sha>`，gh 步骤用 env。这样仓库内脚本（`scripts/update-version.sh`）执行时环境里没有凭证可偷
 - **依赖与约束（2026-09-14 核实）**：自动合并依赖 `RELEASE_TOKEN` 是仓库 owner 账号——`develop-quality-gate`（squash-only + required_linear_history + 2 审批 + electron-e2e/check-title）与 `main`（merge-only + code-owner review）两个 ruleset 的 bypass actor 都是该账号（`bypass_mode: always`）。若 token 换成非 bypass 账号，两个 PR 都会合并失败（报错会提示"规则集限制"）。反向同步**刻意**用 merge commit（bypass develop 的 linear_history）：squash 会丢失 main 提交的祖先关系，下一轮同步时版本号/CHANGELOG 行必然冲突
 - 下方手动流程仍适用于加急/临时发布
 

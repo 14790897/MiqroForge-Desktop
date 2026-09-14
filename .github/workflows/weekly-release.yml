@@ -30,7 +30,8 @@ jobs:
         with:
           ref: develop
           fetch-depth: 0
-          token: ${{ secrets.RELEASE_TOKEN }}
+          # 本工作流只读仓库、不执行仓库内脚本；不持久化任何凭证（public 仓库匿名 fetch 即可）
+          persist-credentials: false
 
       - name: Check for commits to release
         id: check

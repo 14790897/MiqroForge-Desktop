@@ -33,10 +33,14 @@ jobs:
         with:
           ref: main
           fetch-depth: 0
-          token: ${{ secrets.RELEASE_TOKEN }}
+          # 仓库为 public，后续 fetch 无需凭证；绝不把 owner token 持久化进 .git/config，
+          # 否则下面执行的仓库内脚本（update-version.sh）能读到它
+          persist-credentials: false
 
       - name: Prepare sync branch with -dev version suffix
         id: prep
+        env:
+          RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN }}
         run: |
           git fetch origin main develop --tags
           git log --oneline origin/develop..origin/main --no-merges > main_commits.txt
@@ -60,11 +64,13 @@ jobs:
           else
             echo "::notice::版本号已是 ${DEV_VERSION}，跳过提交"
           fi
+          AUTH_URL="https://x-access-token:${RELEASE_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
           if git fetch origin chore/sync-main-into-develop 2>/dev/null; then
-            git push --force-with-lease origin chore/sync-main-into-develop
+            LEASE=$(git rev-parse refs/remotes/origin/chore/sync-main-into-develop)
+            git push "--force-with-lease=refs/heads/chore/sync-main-into-develop:${LEASE}" "$AUTH_URL" chore/sync-main-into-develop
           else
             echo "::notice::远端还没有临时分支，直接创建"
-            git push origin chore/sync-main-into-develop
+            git push "$AUTH_URL" chore/sync-main-into-develop
           fi
 
           git log --oneline origin/develop..HEAD --no-merges > sync_commits.txt
