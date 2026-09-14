@@ -40,15 +40,16 @@ jobs:
         run: |
           git fetch origin main develop --tags
           git log --oneline origin/develop..origin/main --no-merges > main_commits.txt
-          if [ ! -s main_commits.txt ]; then
-            echo "has_commits=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::develop 已包含 main 的全部提交，无需反向同步"
-            exit 0
-          fi
-          echo "has_commits=true" >> "$GITHUB_OUTPUT"
-
           VERSION=$(node -p "require('./package.json').version")
           DEV_VERSION="${VERSION%-dev}-dev"
+          DEV_CURRENT=$(git show origin/develop:package.json | node -p "JSON.parse(require('fs').readFileSync(0,'utf8')).version")
+          # 无缺失提交且版本号已标记时才是真 no-op；仅缺版本标记（如 merge-only 的 release delta）也要继续
+          if [ ! -s main_commits.txt ] && [ "$DEV_CURRENT" = "$DEV_VERSION" ]; then
+            echo "needs_sync=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::develop 已包含 main 的全部提交且版本号已是 ${DEV_VERSION}，无需反向同步"
+            exit 0
+          fi
+          echo "needs_sync=true" >> "$GITHUB_OUTPUT"
 
           git checkout -B chore/sync-main-into-develop origin/main
           bash scripts/update-version.sh "${DEV_VERSION}"
@@ -67,10 +68,16 @@ jobs:
           fi
 
           git log --oneline origin/develop..HEAD --no-merges > sync_commits.txt
+          if [ -s sync_commits.txt ]; then
+            sed 's/^\([0-9a-f]\{7,\}\) /- `\1` /' sync_commits.txt > commit_list.txt
+          else
+            printf '%s\n' "- （main 没有 develop 缺失的提交，本次仅同步版本号 ${DEV_VERSION}）" > commit_list.txt
+            printf '%s\n' "(main 没有 develop 缺失的提交，本次仅同步版本号)" > sync_commits.txt
+          fi
           echo "version=${DEV_VERSION}" >> "$GITHUB_OUTPUT"
 
       - name: Create or reuse PR
-        if: steps.prep.outputs.has_commits == 'true'
+        if: steps.prep.outputs.needs_sync == 'true'
         id: pr
         env:
           GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
@@ -87,7 +94,7 @@ jobs:
             printf '## 变更概述\n\n将 main 上的 release 提交反向同步回 develop，并把 develop 版本号标记为 `%s`。\n\n' "${{ steps.prep.outputs.version }}"
             printf '## 背景/问题\n\nmain 包含 develop 尚缺的 release 提交（CHANGELOG 与版本号更新），需同步回 develop 避免后续发版时版本回退；develop 为开发中分支，版本号追加 `-dev` 后缀以便与本机安装的正式版区分。\n\n'
             printf '## 变更内容\n\n本次 main → develop 同步包含以下提交：\n\n'
-            sed 's/^\([0-9a-f]\{7,\}\) /- `\1` /' sync_commits.txt
+            cat commit_list.txt
             printf '\n## 日志/验证证据\n\n```\n$ git log --oneline origin/develop..chore/sync-main-into-develop --no-merges\n'
             cat sync_commits.txt
             printf '```\n\n'
@@ -102,7 +109,7 @@ jobs:
           echo "::notice::已创建反向同步 PR #${PR##*/}"
 
       - name: Merge PR
-        if: steps.prep.outputs.has_commits == 'true' && github.event.inputs.dry_run != 'true'
+        if: steps.prep.outputs.needs_sync == 'true' && github.event.inputs.dry_run != 'true'
         env:
           GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
         run: |
@@ -120,6 +127,6 @@ jobs:
           echo "::notice::已合并反向同步 PR #$NUMBER，develop 版本号为 ${{ steps.prep.outputs.version }}"
 
       - name: Dry run notice
-        if: steps.prep.outputs.has_commits == 'true' && github.event.inputs.dry_run == 'true'
+        if: steps.prep.outputs.needs_sync == 'true' && github.event.inputs.dry_run == 'true'
         run: |
           echo "::notice::dry_run 模式：仅创建 PR #${{ steps.pr.outputs.number }}，未合并"
