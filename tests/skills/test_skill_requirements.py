@@ -1,7 +1,5 @@
 """Tests for reading a skill's requirements.txt and gating on Python deps."""
 
-from pathlib import Path
-
 from miqi.agent.skills import SkillsLoader, _parse_requirements_text
 
 # A distribution name guaranteed not to be installed in any test env.
