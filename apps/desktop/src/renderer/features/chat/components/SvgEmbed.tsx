@@ -8,51 +8,48 @@ const DOMPurify =
 
 const LOCAL_FRAGMENT_RE = /^#[A-Za-z_][\w:.-]*$/;
 const LOCAL_URL_RE = /^url\(\s*#[A-Za-z_][\w:.-]*\s*\)$/i;
+const URL_REF_RE = /url\s*\(/i;
 
-/**
- * 拒绝 SVG 属性中的外部资源引用，同时保留 Mermaid/SVG 常见的内部 fragment 引用。
- *
- * DOMPurify 的 URI 配置主要覆盖 URI 属性；SVG 的 paint-server / marker / filter 等
- * 属性可以通过 `url(...)` 触发资源解析，因此这里在 DOMPurify 前先做一次属性级边界
- * 收紧。策略故意采用 allowlist：href/xlink:href 只允许 `#id`；任何包含 `url(...)`
- * 的属性只允许完整值为 `url(#id)`。这样不会依赖 CSS sanitizer，也不会把外链重新
- * 带进 renderer 的 SVG 资源图。
- */
-function stripExternalSvgReferences(code: string): string {
-  if (typeof window === 'undefined') return code;
+// 外部资源引用边界（审查 P3 + CodeRabbit）：DOMPurify 默认只防 XSS——https/
+// mailto 等 scheme 在其 ALLOWED_URI_REGEXP 白名单内，外链不会被剥。这里在
+// 消毒后逐属性收紧：href/xlink:href 只允许 #fragment；任何含 url(...) 的属性
+// 只允许完整值 url(#id)；含 CSS 转义特征（反斜杠+括号，如 u\72l(...)）的值
+// 一并拒绝——CSS 转义可伪装 url( 绕过上面的正则。
+//
+// 两个反例约束（均有实证）：
+// - 不能用原始字符串的 XML 预解析代替本 hook：畸形输入（如属性值内嵌引号）
+//   会让 DOMParser 整体失败并原样放行；DOMPurify 的解析器总能产出 DOM。
+// - 不能收紧全局 ALLOWED_URI_REGEXP：DOMPurify 对除 URI_SAFE 名单（id/xmlns
+//   等）外所有属性的值都跑该正则，`^#...$` 会把 x/y/fill/viewBox/d 等普通值
+//   整批删掉（CI 实证：rect 被剥成空壳）。
+//
+// node 环境（无 window）下 dompurify 导出的是未启用实例，无 addHook；与组件
+// 内 SSR 守卫同理跳过。渲染器/测试（jsdom）中正常注册。
+if (typeof window !== 'undefined') {
+  DOMPurify.addHook('afterSanitizeAttributes', (node) => {
+    for (const attr of Array.from(node.attributes)) {
+      const name = attr.name.toLowerCase();
+      const value = attr.value.trim();
 
-  try {
-    const doc = new DOMParser().parseFromString(code, 'image/svg+xml');
-    const root = doc.documentElement;
-    if (!root || root.tagName.toLowerCase() !== 'svg') return code;
-
-    for (const element of Array.from(root.querySelectorAll('*'))) {
-      for (const attr of Array.from(element.attributes)) {
-        const name = attr.name.toLowerCase();
-        const value = attr.value.trim();
-
-        if (name === 'href' || name === 'xlink:href') {
-          if (value && !LOCAL_FRAGMENT_RE.test(value)) {
-            if (element.tagName.toLowerCase() === 'use') {
-              element.remove();
-              break;
-            }
-            element.removeAttribute(attr.name);
+      if (name === 'href' || name === 'xlink:href') {
+        if (value && !LOCAL_FRAGMENT_RE.test(value)) {
+          if (node.tagName.toLowerCase() === 'use') {
+            node.remove();
+            break;
           }
-          continue;
+          node.removeAttribute(attr.name);
         }
+        continue;
+      }
 
-        if (/url\s*\(/i.test(value) && !LOCAL_URL_RE.test(value)) {
-          element.removeAttribute(attr.name);
-        }
+      if (
+        (URL_REF_RE.test(value) && !LOCAL_URL_RE.test(value)) ||
+        (value.includes('\\') && value.includes('('))
+      ) {
+        node.removeAttribute(attr.name);
       }
     }
-
-    return root.outerHTML;
-  } catch {
-    // 解析失败交回 DOMPurify 处理，避免 sanitizer 的额外预解析改变既有降级行为。
-    return code;
-  }
+  });
 }
 
 /**
@@ -65,24 +62,29 @@ export function SvgEmbed({ code }: { code: string }) {
   const clean = useMemo(() => {
     // SSR/node 环境无 window，dompurify 无法工作 —— 渲染器在浏览器执行
     if (typeof window === 'undefined') return '';
-    const referenceSafeCode = stripExternalSvgReferences(code);
-    return DOMPurify.sanitize(referenceSafeCode, {
+    return DOMPurify.sanitize(code, {
       USE_PROFILES: { svg: true, svgFilters: true },
-      // 禁外部资源元素：feImage/image 可携带 href 引用外部 URL；<use> 则在
-      // 预清洗阶段仅允许 fragment-only 引用，合法内部 symbol/marker 引用仍保留。
-      // 渲染时触发对外请求（IP/网络探测）——外部引用已在属性边界拦截。
+      // 禁外部资源元素：feImage/image 可携带 href 引用外部 URL，渲染时触发
+      // 对外请求（IP/网络探测）；href/url() 的边界另由属性级 hook 收紧。
       // style 也必须禁（审查 P3 实证）：DOMPurify 的 CSS 过滤只剥
       // @import/javascript:/expression() 等，任意选择器和 url() 探测放行
       // ——内联 style 的 CSS 作用于整个文档（非 SVG 局部），模型输出可
       // 隐藏/伪造 UI（body{display:none}）或经属性选择器外带输入值。
       // 流程图不需要内嵌 CSS，直接禁掉整个 style 元素。
       FORBID_TAGS: ['feImage', 'image', 'style'],
+      // DOMPurify 的 svg profile 默认整体禁 <use>（内部 svgDisallowed 名单，仅移出
+      // FORBID_TAGS 无效）——这里显式放回：本地 fragment 引用（symbol/marker 复用）
+      // 是流程图刚需，外链/`data:` href 由 afterSanitizeAttributes hook 拦死
+      // （非 fragment 的 use 整个元素移除）。
+      ADD_TAGS: ['use'],
       // style 属性同样封死（审查 R5 P1）：DOMPurify 非 CSS sanitizer，
       // style="fill:url(https://evil.example/x)" 会触发外部资源请求/数据
       // 外带，不在其默认防护内——流程图不需要任意 CSS，整属性剥掉。
       FORBID_ATTR: ['style'],
-      // href/xlink:href 等 URI 属性进一步只允许 fragment-only 引用。
-      ALLOWED_URI_REGEXP: /^#[A-Za-z_][\w:.-]*$/,
+      // 不要收紧 ALLOWED_URI_REGEXP：DOMPurify 对除 URI_SAFE 名单（id/xmlns 等）
+      // 外所有属性的值都跑这个正则，`^#...$` 会把 x/y/fill/viewBox/d 等普通值
+      // 整批删掉（CI 实证：rect 被剥成空壳）。fragment-only 引用边界在
+      // afterSanitizeAttributes hook 里保证。
     });
   }, [code]);
 
