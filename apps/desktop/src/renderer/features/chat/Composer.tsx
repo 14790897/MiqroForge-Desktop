@@ -198,7 +198,7 @@ function ComposerImpl(
             }
             rows={1}
             allowResize={true}
-            className="w-full border-0 bg-transparent p-0! leading-7! focus:ring-0 focus:border-0 min-h-[52px] max-h-[25vh] text-[15px]"
+            className="-mx-7 w-[calc(100%+3.5rem)] rounded-none border-0 bg-transparent px-7 py-0 leading-7! focus:ring-0 focus:border-0 min-h-[52px] max-h-[25vh] text-[15px]"
             style={{ color: 'var(--text)', fieldSizing: 'content' }}
           />
         )}
