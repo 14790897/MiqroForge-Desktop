@@ -161,6 +161,11 @@ class SessionManager:
         # files.read / files.write / attachment saving so every side of the
         # session directory agrees on the name.  Idempotent, so callers may
         # pass either the raw key or an already-derived one.
+        #
+        # 方向性提示：本方法只定义「当前会话目录名」。查找历史**文件名**的两条
+        # 路径（_migrate_flat_to_dir 的旧扁平 .jsonl、_get_legacy_session_path 的
+        # ~/.assistant 旧文件）只接受 raw key——那些名字在写入时就冻结了，且从
+        # canonical 名反推不回 raw 名，改走本方法会静默 no-op / 永远找不到。
         return self.sessions_dir / session_files_dir_key(key)
 
     def _get_session_path(self, key: str) -> Path:

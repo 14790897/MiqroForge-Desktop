@@ -2,7 +2,7 @@
 
 锁两条性质：
 1. 两段键 / 无冒号键与旧的 raw 约定（``safe_filename(key.replace(":", "_"))``）
-   **逐字相同** —— 现有磁盘数据（实测 335 个会话目录全是两段形态）零迁移；
+   **逐字相同** —— 现有磁盘数据（2026-09-14 实测 341 个会话目录全是两段形态）零迁移；
 2. 三段 namespaced 键剥掉 client_id 首段，且派生幂等。
 
 ``SessionManager.get_session_dir`` 必须与它同源，否则写侧与面板读侧又会分叉。
@@ -65,10 +65,16 @@ def test_get_session_dir_matches_shared_helper(tmp_path, session_key, expected_d
 
 
 @pytest.mark.parametrize("session_key,expected_dir", SESSION_KEY_EXPECTATIONS)
-def test_archive_marker_lives_in_the_same_dir_the_panel_lists(
+def test_archive_marker_is_written_to_the_canonical_dir(
     tmp_path, session_key, expected_dir,
 ):
-    """``sessions.list_archived`` 的读侧与 ``SessionManager.archive`` 写侧同目录。"""
+    """**写侧**：``SessionManager.archive`` 把 ``.archived`` 写进 canonical 目录。
+
+    本用例不调用任何 handler —— 它只断言标记落盘位置（``get_session_dir`` 派生）。
+    读侧（``sessions.list_archived`` 必须到同一个目录里找标记）由
+    ``tests/bridge/test_list_archived_namespaced_key.py`` 用真实 handler + 三段 key
+    覆盖（#1014 评审 B-3 缺口 1：旧名字暗示覆盖面板读侧，实际只锁了写侧）。
+    """
     sm = SessionManager(tmp_path / "ws")
     sm.archive(session_key)
     marker = sm.sessions_dir / session_files_dir_key(session_key) / ".archived"

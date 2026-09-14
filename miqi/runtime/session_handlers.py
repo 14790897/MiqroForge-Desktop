@@ -55,9 +55,10 @@ def _tracked_files_store_key(session_key: str) -> str:
     会读到 ``sessions/miqi-desktop_desktop_983/``，而条目实际落在
     ``sessions/desktop_983/``。
 
-    两段 key（现网唯一形态，如 ``desktop:1786...``）派生结果与
-    ``key.replace(":", "_")``（``get_session_dir`` 的目录名规则）逐字相同，
-    故本次归一不改变既有行为；只有三段 key 才会分叉。
+    两段 key（现网唯一形态，如 ``desktop:1786...``）派生结果与历史 raw 约定
+    ``key.replace(":", "_")`` 逐字相同——raw 是 canonical 之前的目录名规则，
+    #1014 起 ``get_session_dir`` 的规则是 canonical；两段键下两者等价，故本次
+    归一不改变既有行为，只有三段 key 才会分叉。
 
     归一发生在 ownership 校验之前：读路径由 ``load_tracked_files(key,
     client_id=...)`` 内部、清理路径由 ``clear_tracked_files(key,
