@@ -188,6 +188,45 @@ def _effective_shared_roots(
     return merged
 
 
+def _tracked_store_root(workspace: Path | None, session_key: str | None) -> Path | None:
+    """把「默认工作区下的会话 files 目录」剥回默认工作区根（tracked 存储根）。
+
+    ``create_pdf/docx/pptx/xlsx`` 等文档工具注册时的 workspace 是
+    ``<ws>/sessions/<key>/files``。tracked 条目的存储根必须是 ``<ws>``
+    （``SessionManager(<ws>)`` → ``<ws>/sessions/<key>/tracked_files.json``），
+    否则条目会落到 ``<files>/sessions/<key>/tracked_files.json`` 这条孤儿路径，
+    资产面板永远读不到。
+
+    只有形状（``.../sessions/<key>/files``）与默认根都匹配时才剥离：
+    - 拿不到默认根（异常）→ 不剥（fail-closed）；
+    - 自定义工作区（``base != get_miqi_home()/workspace``）→ 不剥；
+    - 目录名不是本会话的派生名 → 不剥（一致性校验）；
+    - ``session_key`` 为空 → 不剥。
+    """
+    if workspace is None:
+        return None
+    ws = Path(workspace).expanduser()          # 归一（防 str 入参）
+    try:
+        ws = ws.resolve()
+    except Exception:
+        return ws                              # 解析失败 → 不剥
+    if not session_key:
+        return ws
+    if ws.name != "files" or ws.parent.parent.name != "sessions":
+        return ws                              # 形状不符 → 不剥
+    base = ws.parent.parent.parent
+    try:
+        from miqi.paths import get_miqi_home
+        default_base = (get_miqi_home() / "workspace").resolve()
+    except Exception:
+        return ws                              # fail-closed：拿不到默认根绝不剥
+    if base != default_base:
+        return ws                              # 自定义工作区 → 不剥
+    if ws.parent.name != _session_files_dir_key(session_key):
+        return ws                              # 目录名非本会话派生名 → 不剥
+    return base
+
+
 def _persist_tracked_file(
     workspace: Path | None,
     file_path: str | Path,
@@ -205,15 +244,9 @@ def _persist_tracked_file(
         return
     try:
         from miqi.session.manager import SessionManager
-        sm = SessionManager(workspace)
-        # Strip the client_id prefix.  The orchestrator passes
-        # ctx.session_id which has the form "<client_id>:<session_key>"
-        # (e.g. "miqi-desktop:desktop:1784099553254"), but the frontend
-        # and SessionManager use just "<session_key>" as the lookup key.
-        if ":" in session_key:
-            parts = session_key.split(":", 1)
-            if len(parts) == 2 and parts[0] != "desktop":
-                session_key = parts[1]
+        # 修复 B：store key 与目录名派生同源（替换原 :213-216 的 client_id 剥离规则）
+        session_key = _session_files_dir_key(session_key)
+        sm = SessionManager(_tracked_store_root(workspace, session_key) or workspace)
         # Use workspace-relative paths for consistent reads across sessions
         rel_path = str(file_path)
         ws_str = str(workspace.resolve()).replace("\\", "/")
@@ -513,6 +546,10 @@ def _session_files_dir_key(session_key: str) -> str:
     ``desktop_1786...``) and keeps the whole key for two-segment channel
     keys (``desktop:1786...`` → ``desktop_1786...``) — matching the disk
     convention used by ``files.read`` and attachment saving.
+
+    Idempotent: feeding an already-derived key back in returns it
+    unchanged, so callers may pass either the raw key or a derived key
+    (``_tracked_store_root`` relies on this for its dir-name check).
     """
     from miqi.utils.helpers import safe_filename
 
