@@ -140,18 +140,32 @@ async function uploadImage(imagePath: string): Promise<string> {
   return asset.browser_download_url;
 }
 
-/** Upload an image and post it into the PR comments. No-op without a PR. */
+/** Upload an image and post it into the PR comments. No-op without a PR.
+ *
+ * Best-effort by contract — see
+ * `skills/github-workflow/references/e2e-pr-image-posting.md`: publishing
+ * evidence must never turn a passing test red, nor stack a second failure
+ * onto an already-failing one (the afterEach hook).  Upload and API errors
+ * are therefore logged and swallowed here instead of escaping to callers,
+ * who all `await` this directly.
+ */
 export async function postScreenshotToPr(imagePath: string, caption: string): Promise<void> {
   if (!imagePostingEnabled()) return;
-  const n = prNumber();
-  if (n === null) return;
-  if (!existsSync(imagePath)) return;
+  try {
+    const n = prNumber();
+    if (n === null) return;
+    if (!existsSync(imagePath)) return;
 
-  const url = await uploadImage(imagePath);
-  const body = `${caption}\n\n![](${url})`;
-  await api(`repos/${REPO}/issues/${n}/comments`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ body }),
-  });
+    const url = await uploadImage(imagePath);
+    const body = `${caption}\n\n![](${url})`;
+    await api(`repos/${REPO}/issues/${n}/comments`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ body }),
+    });
+  } catch (err) {
+    // Missing token, no release permission, rate limit, network blip: the
+    // test result is the signal, the evidence upload is not.
+    console.warn(`[pr-image-post] screenshot not published: ${(err as Error).message}`);
+  }
 }
