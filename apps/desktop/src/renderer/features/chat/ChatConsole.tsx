@@ -7152,8 +7152,19 @@ export function ChatConsole({
                                   (att.dataBase64
                                     ? `data:${mime};base64,${att.dataBase64}`
                                     : undefined);
+                                // 同时带上 base64：预览里的「下载/另存为」「系统应用打开」
+                                // 需要它写临时文件再交给系统打开（仅有 imageUrl 时
+                                // openExternal 只会拿到文件名而失败）。
+                                const imageBase64 =
+                                  att.dataBase64 ||
+                                  (att.dataUrl ? att.dataUrl.split(',')[1] : undefined);
                                 if (imageUrl) {
-                                  setPreviewFile({ path: att.name, kind: 'image', imageUrl });
+                                  setPreviewFile({
+                                    path: att.name,
+                                    kind: 'image',
+                                    imageUrl,
+                                    dataBase64: imageBase64,
+                                  });
                                   return;
                                 }
                               }
@@ -7785,16 +7796,22 @@ export function ChatConsole({
                 </button>
                 <button
                   onClick={async () => {
+                    // 有字节流 → 写临时文件后用系统默认应用打开（保留扩展名）；
+                    // 失败或只有路径 → 回退直接 openExternal(路径)。
                     if (previewFile.dataBase64) {
                       const tmp = `_open_${Date.now()}_${previewFile.path}`;
                       try {
                         await window.miqi.files.write(tmp, '', undefined, previewFile.dataBase64);
                         await window.miqi.files.openExternal(tmp);
+                        return;
                       } catch {
-                        /* fallback */
+                        /* fall through to path */
                       }
-                    } else {
-                      window.miqi.files.openExternal(previewFile.path);
+                    }
+                    try {
+                      await window.miqi.files.openExternal(previewFile.path);
+                    } catch {
+                      /* ignore */
                     }
                   }}
                   className="flex items-center gap-1 px-2 py-1 rounded text-[11px] text-[var(--accent)] hover:bg-[var(--accent-soft)] transition-colors"
