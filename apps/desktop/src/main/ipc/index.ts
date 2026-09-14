@@ -2475,6 +2475,9 @@ for m in ("pydantic", "httpx", "loguru"):
     };
     rec.wanted = target;
     rec.occupied = target > 0;
+    // 先按最新 occupied 还原/抬高最小宽度,再算收缩量:否则关面板时 maxRemove 会拿
+    // 「展开态的旧最小宽度」当上限,收不干净残留 rec.extra(CodeRabbit #1047)。
+    syncWindowMin(win, rec.occupied);
     const delta = target - rec.extra;
     if (delta !== 0) {
       const b = win.getBounds();
@@ -2561,6 +2564,9 @@ for m in ("pydantic", "httpx", "loguru"):
       };
       rec.wanted = target;
       rec.occupied = target > 0;
+      // 最大化/满屏也要同步最小宽度:否则恢复窗口时 applyPanelExtra 会按展开态的旧
+      // 最小宽度算收缩上限,关面板收不干净(CodeRabbit #1047)。
+      syncWindowMin(win, rec.occupied);
       panelExtraByWin.set(win, rec);
       return { ok: false, applied: rec.extra, skipped: true };
     }
