@@ -494,6 +494,15 @@ test.describe('File Attachment Chips', () => {
     expect(String(res.error)).toContain('allowlist');
   });
 
+  test('openBytes rejects executable ext even with trailing space', async () => {
+    const res = await page.evaluate(async () => {
+      const b64 = btoa('MZ');
+      return (window as any).miqi.files.openBytes('evil.exe ', b64);
+    });
+    expect(res.opened).toBe(false);
+    expect(String(res.error)).toContain('allowlist');
+  });
+
   test('Same file can be attached twice (no false dedupe)', async () => {
     await attachFile(page, FILES.pdf);
     await expect(composerChips(page).getByText('board_report.pdf')).toHaveCount(1, {
