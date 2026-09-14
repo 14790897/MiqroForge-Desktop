@@ -613,6 +613,11 @@ export class QraftClient {
     if (!this.isJson(res)) {
       throw new QraftError('FEEDBACK_FAILED', `提交反馈失败：HTTP ${res.status}`);
     }
+    // parseBusinessJson 缺 code 时默认 200：网关 502 等 JSON 错误页
+    // （{"message":"bad gateway"}）会被误判成功，先按 HTTP 状态拒绝。
+    if (res.status < 200 || res.status >= 300) {
+      throw new QraftError('FEEDBACK_FAILED', `提交反馈失败：HTTP ${res.status}`);
+    }
     const data = parseBusinessJson(bodyText);
     if (data.code === 40101 || data.code === 40102) {
       throw new QraftError('SESSION_EXPIRED', 'access_token 已失效，请重新登录');

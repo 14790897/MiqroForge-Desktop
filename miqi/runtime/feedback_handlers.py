@@ -473,11 +473,14 @@ async def feedback_submit_handler(
 
     # 5. Send to Feishu — get token first, then upload screenshots, then add record
     record_id = ""
-    if fb_cfg.skip_feishu:
-        # 测试专用开关（issue #1054 E2E）：不触达真实飞书，仅保留本地备份，
-        # 让平台通道成为被测对象。
-        logger.info("feedback:submit — skip_feishu 开启，跳过飞书写入")
+    # 测试专用旁路（issue #1054 E2E）：仅当进程确实运行在 E2E 环境
+    # （harness 注入 MIQI_E2E=1）时才生效 —— 真实用户配置里误填该键不会
+    # 静默丢掉飞书投递（CodeRabbit #1063 评审）。
+    if fb_cfg.skip_feishu and os.environ.get("MIQI_E2E", "").strip() == "1":
+        logger.info("feedback:submit — skip_feishu 开启（E2E），跳过飞书写入")
     else:
+        if fb_cfg.skip_feishu:
+            logger.warning("feedback:submit — skip_feishu 仅在 E2E 环境生效，已忽略并正常投递飞书")
         try:
             token = _get_tenant_access_token(app_id, app_secret)
 

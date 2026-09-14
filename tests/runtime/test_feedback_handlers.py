@@ -750,10 +750,13 @@ async def test_feedback_submit_caps_screenshots_at_5(_bridge_state_isolated):
 
 
 @pytest.mark.asyncio
-async def test_feedback_submit_skip_feishu_writes_local_backup_only(_bridge_state_isolated):
-    """skip_feishu（测试专用，issue #1054 E2E）：不触达飞书，仍落本地备份。"""
+async def test_feedback_submit_skip_feishu_writes_local_backup_only(
+    _bridge_state_isolated, monkeypatch
+):
+    """skip_feishu（测试专用，issue #1054 E2E）：E2E 环境下不触达飞书，仍落本地备份。"""
     from miqi.runtime.feedback_handlers import feedback_submit_handler
 
+    monkeypatch.setenv("MIQI_E2E", "1")
     workspace = _make_workspace()
     state = _make_mock_state(workspace)
     state.load_config.return_value.channels.feedback.skip_feishu = True
@@ -774,3 +777,29 @@ async def test_feedback_submit_skip_feishu_writes_local_backup_only(_bridge_stat
     add_mock.assert_not_called()
     backup = (workspace / "memory" / "FEEDBACK.jsonl").read_text(encoding="utf-8")
     assert "skip feishu content" in backup
+
+
+@pytest.mark.asyncio
+async def test_feedback_submit_skip_feishu_ignored_outside_e2e(
+    _bridge_state_isolated, monkeypatch
+):
+    """生产环境（无 MIQI_E2E）忽略 skip_feishu：照常投递飞书（CodeRabbit #1063）。"""
+    from miqi.runtime.feedback_handlers import feedback_submit_handler
+
+    monkeypatch.delenv("MIQI_E2E", raising=False)
+    workspace = _make_workspace()
+    state = _make_mock_state(workspace)
+    state.load_config.return_value.channels.feedback.skip_feishu = True
+    _bridge_state_isolated._state = state
+    registry = ClientSessionRegistry()
+    registry.bridge_context["state"] = state
+
+    with patch("miqi.runtime.feedback_handlers._get_workspace_path", return_value=workspace), \
+         patch("miqi.runtime.feedback_handlers._get_tenant_access_token", return_value="tok"), \
+         patch("miqi.runtime.feedback_handlers._add_bitable_record", return_value="rec_x") as add_mock:
+        result = await feedback_submit_handler(
+            "req-1", {"content": "prod content"}, "client-1", None, registry,
+        )
+
+    assert result["result"]["record_id"] == "rec_x"
+    add_mock.assert_called_once()

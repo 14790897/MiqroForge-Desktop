@@ -1000,3 +1000,20 @@ describe('QraftClient.submitFeedback 重试策略（非幂等，CodeRabbit #1063
     expect(calls).toBe(4); // 1 次 + 3 次重试
   });
 });
+
+describe('QraftClient.submitFeedback 非 2xx 兜底（CodeRabbit #1063）', () => {
+  it('HTTP 502 的 JSON 错误页不再被当成成功（缺 code 默认 200 的坑）', async () => {
+    const fetch = createFetchMock([
+      {
+        method: 'POST',
+        url: /\/oauth2\/feedback$/,
+        response: mockResponse(502, JSON.stringify({ message: 'bad gateway' }), jsonHeaders()),
+      },
+    ]);
+    const client = new QraftClient(fetch, noopLog);
+    await expect(client.submitFeedback(CONFIG, 'TOKEN', { content: 'x' })).rejects.toMatchObject({
+      code: 'FEEDBACK_FAILED',
+      message: expect.stringContaining('502') as unknown as string,
+    });
+  });
+});
