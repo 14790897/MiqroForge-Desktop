@@ -4510,6 +4510,12 @@ export function ChatConsole({
     // the optimistic UI has already shown the message, and this resolves in
     // the background.  If it rejects, the send proceeds anyway — the bridge
     // surfaces the underlying runtime error through the stream/error path.
+    //
+    // #1011 P1(review):记录 chat.send 是否真正送出 —— 只有确定「未派发」
+    // 的失败(此前的附件/内容构造/thread start 等)才允许恢复编辑快照;
+    // chat.send 调用之后的 reject(bridge/IPC/timeout)可能请求已送达后端,
+    // 此时恢复旧列表会与后端状态分叉,一律不做。
+    let turnDispatched = false;
     try {
       // #922/#1000：网关状态先取一次，供「未登录 → 登录引导」与
       // 「已登录但网关未就绪 → 网关提示」两个分支共用。旧 preload/
@@ -5762,6 +5768,7 @@ export function ChatConsole({
       // chat.send 已发出(turn 已派发)——此刻清除本次 send 的编辑回滚点
       // (#1011 P1):此前的失败路径(附件/内容构造/thread start/send 调用)
       // 都保留了回滚点可供恢复。
+      turnDispatched = true;
       editRollbacksRef.current.delete(thisSendId);
 
       // Mark as done after a tick — server parsing is synchronous, already complete
@@ -5819,11 +5826,13 @@ export function ChatConsole({
         return;
       }
       const errMsg = sanitizeUiMessage(e?.message ?? String(e ?? '未知错误'));
-      // 编辑重答(#1011 P1):chat.send 未成功发出前的失败 —— 恢复截断前
-      // 的完整列表(错误提示追加末尾),避免「原消息被截掉且无法恢复」。
+      // 编辑重答(#1011 P1):仅当「确定未派发」(chat.send 尚未送出)时才恢复
+      // 截断前的完整列表;已送出后的 reject 可能请求已达后端,恢复会造成
+      // 前后端状态分叉 —— 此时保留截断后的列表 + 错误提示。
       const sendFailRollback = editRollbacksRef.current.get(thisSendId);
       editRollbacksRef.current.delete(thisSendId);
       const sendFailRollbackApplies =
+        !turnDispatched &&
         !!sendFailRollback &&
         sendFailRollback.sessionKey === sendSessionKey &&
         currentSessionRef.current === sendSessionKey;
