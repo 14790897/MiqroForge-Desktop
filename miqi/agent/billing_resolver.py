@@ -1,10 +1,13 @@
 """Slurm MCP 作业计费桥（issue #927）。
 
-计费触发点（2026-09-04 产品确认）：**slurm 作业状态变为 RUNNING 时**由
-Desktop 发起扣费（10 分/次，memo 携带作业信息）。Python 侧在
-submit_slurm_job / check_job_status 的返回中发现 state=RUNNING 时，
-经会话发射器向 Desktop 发一次 fire-and-forget 扣费事件；作业已在运行，
-不阻止调用——余额不足等扣费失败由 Desktop 记录并提示。
+计费触发点（2026-09-04 产品确认；2026-09-11 放宽终态）：**slurm 作业进入
+可扣费状态（RUNNING / COMPLETED，即作业已成功占用集群资源）时**由 Desktop
+发起扣费（10 分/次，memo 携带作业信息）。Python 侧在 submit_slurm_job /
+check_job_status 的返回中发现该状态时，经会话发射器向 Desktop 发一次
+fire-and-forget 扣费事件；作业已运行，不阻止调用——余额不足等扣费失败由
+Desktop 记录并提示。放宽 COMPLETED 是因为快作业常在两次轮询间从 PENDING
+直接到 COMPLETED、永不被观测到 RUNNING，只认 RUNNING 会漏扣。FAILED /
+TIMEOUT / CANCELLED 不计费（作业未成功完成/未运行）。
 
 接线（与 user_input_resolver 同模式）：
   bridge/loop.py（chat.send drain）：

@@ -19,9 +19,19 @@ jobs:
             // 去掉 HTML 注释（<!-- xxx -->）
             const withoutComments = body.replace(/<!--[\s\S]*?-->/g, '').trim();
 
-            // 检查 PR 描述中是否包含图片（Markdown 图片语法 或 GitHub 上传的图片附件）
-            const hasImage = /!\[.*?\]\(.*?\)/.test(withoutComments) ||
-                             /https?:\/\/github\.com\/user-attachments\/assets\/[^\s)]+/.test(body);
+            // 「截图」节必须是真实图片：Markdown 图片语法、图片直链，或 GitHub 上传的附件链接
+            const IMAGE_RE =
+              /!\[[^\]]*\]\([^)]+\)|https?:\/\/\S+\.(?:png|jpe?g|gif|webp)\b|https?:\/\/github\.com\/user-attachments\/assets\/\S+/;
+
+            // 取 `## 标题` 到下一个 `## 标题` 之间的正文。
+            // 空节时正则会把下一个标题行吸进来，用 startsWith('## ') 拦掉，避免空节误判为已填写。
+            const sectionText = (label) => {
+              const m = withoutComments.match(
+                new RegExp(`## ${label}\\s*\\n+([\\s\\S]*?)(?=\\n## |\\n##$|$)`)
+              );
+              const text = m ? m[1].trim() : '';
+              return text.startsWith('## ') ? '' : text;
+            };
 
             const checks = [
               {
@@ -31,58 +41,45 @@ jobs:
               },
               {
                 label: '变更概述',
-                check: () => {
-                  const m = withoutComments.match(/## 变更概述\s*\n+(.+?)(?=\n##|\n*$)/s);
-                  return m && m[1].trim().length > 0;
-                },
+                check: () => sectionText('变更概述').length > 0,
               },
               {
                 label: '背景/问题',
-                check: () => {
-                  const m = withoutComments.match(/## 背景\/问题\s*\n+(.+?)(?=\n##|\n*$)/s);
-                  return m && m[1].trim().length > 0;
-                },
+                check: () => sectionText('背景/问题').length > 0,
               },
               {
                 label: '变更内容',
-                check: () => {
-                  const m = withoutComments.match(/## 变更内容\s*\n+(.+?)(?=\n##|\n*$)/s);
-                  return m && m[1].trim().length > 0;
-                },
+                check: () => sectionText('变更内容').length > 0,
               },
               {
                 label: '日志/验证证据',
-                check: () => {
-                  const m = withoutComments.match(/## 日志\/验证证据\s*\n+```\s*\n([\s\S]*?)```/);
-                  if (!m) return false;
-                  const content = m[1].trim();
-                  const hasLog = content.length > 0 && content !== '（粘贴日志/截图）';
-                  return hasLog || hasImage;
-                },
+                // 节内有非空内容即可，不强制代码块或图片格式
+                check: () => sectionText('日志/验证证据').length > 0,
               },
               {
                 label: '测试情况',
-                check: () => {
-                  const m = withoutComments.match(/## 测试情况\s*\n+(.+?)(?=\n##|\n*$)/s);
-                  return m && m[1].trim().length > 0;
-                },
+                check: () => sectionText('测试情况').length > 0,
               },
               {
                 label: '截图',
-                check: () => {
-                  const m = withoutComments.match(/## 截图\s*\n+(.+?)(?=\n##|\n*$)/s);
-                  return m && m[1].trim().length > 0;
-                },
+                // 必须有真实截图，文字占位（如「无需截图」）不算
+                check: () => IMAGE_RE.test(sectionText('截图')),
               },
             ];
 
             const failures = checks.filter(c => !c.check()).map(c => c.label);
 
             if (failures.length > 0) {
-              core.setFailed(
-                `PR 模板以下必填节为空，请补充：\n${failures.map(f => `  - ${f}`).join('\n')}` +
-                '\n\n不允许空白节，必须有日志/证据。'
-              );
+              let message =
+                `PR 模板校验未通过，以下节需要补充：\n${failures.map((f) => `  - ${f}`).join('\n')}` +
+                '\n\n不允许空白节，必须有日志/证据。';
+              if (failures.includes('截图')) {
+                message +=
+                  '\n\n「截图」节需要真实截图（Markdown 图片、图片直链或 GitHub 附件链接），文字占位不算。\n' +
+                  '可先用仓库 skills 目录里的 GitHub 技能上传本地截图，再把返回的链接贴进该节：\n' +
+                  'https://github.com/14790897/MiqroForge-Desktop/tree/develop/skills';
+              }
+              core.setFailed(message);
             } else {
               console.log('✅ PR 模板填写完整');
             }

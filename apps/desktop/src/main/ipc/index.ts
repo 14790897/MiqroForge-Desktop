@@ -55,12 +55,14 @@ import type {
 } from '../../shared/ipc';
 import { registerQraftIpcHandlers } from '../qraft/ipc';
 import {
+  classifyKernelInstall,
   classifyWslFeatureState,
   hasNonRootUser,
   isBashCapableDistro,
   readFeatureStates,
-  wslPackageInstalled,
-  wslStatusWorks,
+  runElevated,
+  summarizeElevated,
+  wslKernelPresent,
 } from './wsl-state';
 import {
   getConfigDir,
@@ -974,22 +976,34 @@ for m in ("pydantic", "httpx", "loguru"):
           message: '正在启用 Windows 可选功能 (WSL + 虚拟机平台)...',
         } satisfies WslInstallProgress);
 
-        // Exit codes of UAC-elevated processes cannot be read reliably
-        // (Select-Object ExitCode throws after RunAs elevation), so run
-        // without -PassThru and verify the result by re-reading the feature
-        // states afterwards.
-        const r = spawnSync(
-          'powershell.exe',
-          [
-            '-NoProfile',
-            '-Command',
-            'Start-Process powershell -ArgumentList "-NoProfile -Command ' +
-              'Enable-WindowsOptionalFeature -Online -FeatureName Microsoft-Windows-Subsystem-Linux -NoRestart; ' +
-              'Enable-WindowsOptionalFeature -Online -FeatureName VirtualMachinePlatform -NoRestart" ' +
-              '-Verb RunAs -Wait',
-          ],
-          { timeout: 120000, encoding: 'utf8', windowsHide: true }
+        // The elevated process runs Enable-WindowsOptionalFeature and reports
+        // its own output/exit code through the trampoline files: a declined
+        // UAC prompt used to be indistinguishable from a DISM failure here.
+        const r = runElevated(
+          {
+            powershell: [
+              '$ErrorActionPreference = "Continue"',
+              'Enable-WindowsOptionalFeature -Online -FeatureName Microsoft-Windows-Subsystem-Linux -NoRestart',
+              'Enable-WindowsOptionalFeature -Online -FeatureName VirtualMachinePlatform -NoRestart',
+            ].join('\r\n'),
+          },
+          120000
         );
+
+        if (r.kind === 'cancelled') {
+          safeSend(IPC_EVENTS.WSL_INSTALL_PROGRESS, {
+            phase: 'error',
+            message: '启用 Windows 功能被取消：管理员权限请求被拒绝',
+            error: 'ELEVATION_CANCELLED',
+          } satisfies WslInstallProgress);
+          return {
+            success: false,
+            phase: 'error',
+            errorCode: 'ELEVATION_CANCELLED',
+            error: '启用 Windows 功能被取消',
+            nextStep: '重新点击「一键安装 WSL2」，并在弹出的 UAC 窗口中点击「是」',
+          } satisfies WslInstallAndProvisionResult;
+        }
 
         // Verification requires a successful read with the WSL feature on.
         // VirtualMachinePlatform is intentionally not required: on machines
@@ -997,11 +1011,16 @@ for m in ("pydantic", "httpx", "loguru"):
         // it is functional (observed in live testing) — gating on it would
         // recreate the false-failure bug this step was fixed for.
         const featuresAfter = readFeatureStates();
-        if (r.error || r.status !== 0 || !featuresAfter.ok || !featuresAfter.featureWsl) {
+        if (!featuresAfter.ok || !featuresAfter.featureWsl) {
+          // A failed DISM cmdlet leaves the exit code at 0, so the captured
+          // output is the only place the real reason appears — fall back to the
+          // generic text only when the elevated run produced nothing at all.
+          const produced = r.kind === 'unknown' || r.exitCode !== 0 || r.output.trim().length > 0;
+          const detail = produced ? summarizeElevated(r) : '功能状态未变化';
           safeSend(IPC_EVENTS.WSL_INSTALL_PROGRESS, {
             phase: 'error',
-            message: `启用 Windows 功能失败: ${r.error?.message ?? '功能状态未变化'}`,
-            error: r.error?.message ?? 'feature state unchanged after enable',
+            message: `启用 Windows 功能失败: ${detail}`,
+            error: detail,
           } satisfies WslInstallProgress);
           return {
             success: false,
@@ -1035,30 +1054,49 @@ for m in ("pydantic", "httpx", "loguru"):
           message: '正在安装 WSL2 内核...',
         } satisfies WslInstallProgress);
 
-        const r = spawnSync(
-          'powershell.exe',
-          [
-            '-NoProfile',
-            '-Command',
-            'Start-Process wsl -ArgumentList "--install --no-distribution --no-launch" -Verb RunAs -Wait',
-          ],
-          { timeout: 300000, encoding: 'utf8', windowsHide: true }
+        const r = runElevated(
+          {
+            command: {
+              file: 'wsl.exe',
+              args: ['--install', '--no-distribution', '--no-launch'],
+            },
+          },
+          300000
         );
 
-        // Verify by system state: the WSL app package must exist after the
-        // install (wsl --status may keep failing until the next reboot).
-        const kernelOk = wslStatusWorks() || wslPackageInstalled();
-        if (r.error || r.status !== 0 || !kernelOk) {
+        // Only ask the system when the elevated run itself was inconclusive:
+        // exit code 0 already proves the install, and a declined UAC prompt
+        // proves nothing was attempted, so probing would just add latency.
+        const kernelPresent =
+          r.kind === 'failed' || r.kind === 'unknown' ? wslKernelPresent() : false;
+        const outcome = classifyKernelInstall(r, kernelPresent);
+
+        if (outcome.status === 'cancelled') {
           safeSend(IPC_EVENTS.WSL_INSTALL_PROGRESS, {
             phase: 'error',
-            message: `WSL2 内核安装失败: ${r.error?.message ?? '未检测到 WSL 包'}`,
-            error: r.error?.message ?? 'WSL package not found after install',
+            message: 'WSL2 内核安装被取消：管理员权限请求被拒绝',
+            error: 'ELEVATION_CANCELLED',
+          } satisfies WslInstallProgress);
+          return {
+            success: false,
+            phase: 'error',
+            errorCode: 'ELEVATION_CANCELLED',
+            error: 'WSL2 内核安装被取消',
+            nextStep: '重新点击「一键安装 WSL2」，并在弹出的 UAC 窗口中点击「是」',
+          } satisfies WslInstallAndProvisionResult;
+        }
+
+        if (outcome.status === 'failed') {
+          safeSend(IPC_EVENTS.WSL_INSTALL_PROGRESS, {
+            phase: 'error',
+            message: `WSL2 内核安装失败: ${outcome.detail}`,
+            error: outcome.detail,
           } satisfies WslInstallProgress);
           return {
             success: false,
             phase: 'error',
             errorCode: 'KERNEL_INSTALL_FAILED',
-            error: 'WSL2 内核安装失败',
+            error: `WSL2 内核安装失败: ${outcome.detail}`,
             nextStep: '以管理员身份打开 PowerShell 并运行: wsl --install --no-distribution',
           } satisfies WslInstallAndProvisionResult;
         }
@@ -1086,28 +1124,56 @@ for m in ("pydantic", "httpx", "loguru"):
           message: '正在安装 Ubuntu 发行版（可能需要几分钟）...',
         } satisfies WslInstallProgress);
 
-        const r = spawnSync(
-          'powershell.exe',
-          [
-            '-NoProfile',
-            '-Command',
-            'Start-Process wsl -ArgumentList "--install -d Ubuntu --no-launch" -Verb RunAs -Wait',
-          ],
-          { timeout: 300000, encoding: 'utf8', windowsHide: true }
+        const r = runElevated(
+          { command: { file: 'wsl.exe', args: ['--install', '-d', 'Ubuntu', '--no-launch'] } },
+          300000
         );
 
-        const postCheck = runWslCheckInternal();
-        if (r.error || r.status !== 0 || postCheck.distros.length === 0) {
+        if (r.kind === 'cancelled') {
           safeSend(IPC_EVENTS.WSL_INSTALL_PROGRESS, {
             phase: 'error',
-            message: 'Ubuntu 安装失败',
-            error: r.error?.message ?? 'DISTRO_INSTALL_FAILED',
+            message: 'Ubuntu 安装被取消：管理员权限请求被拒绝',
+            error: 'ELEVATION_CANCELLED',
+          } satisfies WslInstallProgress);
+          return {
+            success: false,
+            phase: 'error',
+            errorCode: 'ELEVATION_CANCELLED',
+            error: 'Ubuntu 发行版安装被取消',
+            nextStep: '重新点击「一键安装 WSL2」，并在弹出的 UAC 窗口中点击「是」',
+          } satisfies WslInstallAndProvisionResult;
+        }
+
+        const postCheck = runWslCheckInternal();
+        if (postCheck.distros.length === 0) {
+          // The command succeeded but no distro is registered yet: as with the
+          // kernel step that means "installed, reboot pending", not a failure.
+          // Only a non-zero exit code is an install failure.
+          if (r.kind === 'ok') {
+            safeSend(IPC_EVENTS.WSL_INSTALL_PROGRESS, {
+              phase: 'installing_distro',
+              rebootRequired: true,
+              message: 'Ubuntu 已安装，需要重启系统以继续。',
+            } satisfies WslInstallProgress);
+            return {
+              success: true,
+              phase: 'installing_distro',
+              rebootRequired: true,
+              nextStep: '请重启系统，重新打开 MiQroForge 后向导将自动继续',
+            } satisfies WslInstallAndProvisionResult;
+          }
+
+          const detail = summarizeElevated(r);
+          safeSend(IPC_EVENTS.WSL_INSTALL_PROGRESS, {
+            phase: 'error',
+            message: `Ubuntu 安装失败: ${detail}`,
+            error: detail,
           } satisfies WslInstallProgress);
           return {
             success: false,
             phase: 'error',
             errorCode: 'DISTRO_INSTALL_FAILED',
-            error: 'Ubuntu 发行版安装失败',
+            error: `Ubuntu 发行版安装失败: ${detail}`,
             nextStep: '以管理员身份打开 PowerShell 并运行: wsl --install -d Ubuntu',
           } satisfies WslInstallAndProvisionResult;
         }
@@ -2305,5 +2371,146 @@ for m in ("pydantic", "httpx", "loguru"):
       win.focus();
     }
     return { ok: true, focused: !win.isDestroyed() && win.isFocused() };
+  });
+
+  // 资产面板推开聊天区时把窗口加宽(extra≈面板宽):聊天列是 flex-1,新增宽度全归它,
+  // 聊天区因此不挤压;关闭(extra=0)还原到开面板前宽度。逐次记录左右实际扩展量用于
+  // 精确还原,最大化/全屏/不可调大小或屏幕已无剩余空间时跳过。记录以窗口为键,
+  // 窗口销毁后自然归零(下次开面板以当时宽度为基线)。
+  const panelExtraByWin = new WeakMap<
+    BrowserWindow,
+    {
+      extra: number;
+      left: number;
+      right: number;
+      /** 渲染进程最后要求的**逻辑目标**。skipped（最大化/满屏/不可缩放）时 setBounds
+       *  做不了，但目标必须留下来 —— 否则「最大化期间关掉面板」会被整个丢掉，恢复
+       *  窗口后那 280px 就永远撑在窗口上（面板已关、窗口仍宽一截）。 */
+      wanted: number;
+    }
+  >();
+  /** 我们自己 setBounds 产生的、**尚未被 resize 事件消费**的宽度集合。
+   *  用集合而不是单个值：连续两次 setBounds 时后一次会覆盖前一次的目标，而
+   *  Electron 不保证 resize 事件的合并与顺序 —— 第一个事件可能在后一个目标写进来
+   *  之后才到，单值就会把它判成「用户拖的」并污染 W_user。集合让每个事件各自
+   *  认领一次。也不用时间窗：setBounds 到 resize 派发的延迟取决于 OS。 */
+  const pendingSelfWidths = new WeakMap<BrowserWindow, Set<number>>();
+  const markSelfResize = (win: BrowserWindow, width: number) => {
+    let s = pendingSelfWidths.get(win);
+    if (!s) {
+      s = new Set();
+      pendingSelfWidths.set(win, s);
+    }
+    // 对应不上的陈旧条目没有价值，别让它无限增长
+    if (s.size > 8) s.clear();
+    s.add(width);
+  };
+  /** 该宽度是否由我们自己引起；是则消费掉这一次（返回 true）。 */
+  const consumeSelfResize = (win: BrowserWindow, width: number): boolean => {
+    const s = pendingSelfWidths.get(win);
+    if (!s || !s.has(width)) return false;
+    s.delete(width);
+    return true;
+  };
+  /** 用户期望的窗口宽度 W_user，满足 W_actual = W_user + rec.extra。
+   *  记的不是「用户设的总宽」而是**扣掉面板那部分之后**的基线 —— 否则用户在面板
+   *  开着时拖窗，会把面板的 280 一起吸收进基线，之后关面板一像素都收不回来。 */
+  const userWidth = new WeakMap<BrowserWindow, number>();
+  const windowHooked = new WeakSet<BrowserWindow>();
+  /** 从最大化/最小化恢复后补应用一次逻辑目标：那些状态下 setBounds 是 skipped 的，
+   *  但期间用户可能开/关了面板 —— 恢复时必须把窗口拉回与逻辑目标一致，否则就留下
+   *  「面板已关、窗口仍被它撑宽」的幽灵宽度。 */
+  const reconcileOnRestore = (win: BrowserWindow) => {
+    if (win.isDestroyed() || win.isMaximized() || win.isFullScreen()) return;
+    const rec = panelExtraByWin.get(win);
+    if (!rec || rec.wanted === rec.extra) return;
+    applyPanelExtra(win, rec.wanted);
+  };
+  /** 每窗口挂一次监听：识别「用户自己改了窗口宽度」，以及在恢复时补应用逻辑目标。 */
+  const hookWindow = (win: BrowserWindow) => {
+    if (windowHooked.has(win)) return;
+    windowHooked.add(win);
+    win.on('resize', () => {
+      if (win.isDestroyed()) return;
+      const w = win.getBounds().width;
+      if (consumeSelfResize(win, w)) return; // 我们自己设的那次，消费掉
+      // 用户拖的：把增量记到 W_user 上（扣掉面板当前占用的 extra）
+      const rec = panelExtraByWin.get(win);
+      userWidth.set(win, Math.max(0, w - (rec?.extra ?? 0)));
+    });
+    win.on('unmaximize', () => reconcileOnRestore(win));
+    win.on('restore', () => reconcileOnRestore(win));
+  };
+  /** 把窗口加宽/收窄到 target 对应的状态，返回实际应用到的 extra。 */
+  const applyPanelExtra = (win: BrowserWindow, target: number): number => {
+    const rec = panelExtraByWin.get(win) ?? { extra: 0, left: 0, right: 0, wanted: target };
+    rec.wanted = target;
+    const delta = target - rec.extra;
+    if (delta !== 0) {
+      const b = win.getBounds();
+      const wa = electron.screen.getDisplayMatching(b).workArea;
+      if (delta > 0) {
+        // 优先向右扩(左缘不动),右缘到工作区边界后向左借位把窗口整体放中间可多补
+        const growRight = Math.min(delta, Math.max(0, wa.x + wa.width - (b.x + b.width)));
+        const growLeft = Math.min(delta - growRight, Math.max(0, b.x - wa.x));
+        const grown = growRight + growLeft;
+        if (grown > 0) {
+          const nextWidth = b.width + grown;
+          markSelfResize(win, nextWidth);
+          win.setBounds({ x: b.x - growLeft, y: b.y, width: nextWidth, height: b.height });
+          rec.right += growRight;
+          rec.left += growLeft;
+          rec.extra += grown;
+        }
+      } else {
+        // 收窄:先还左借位再收右侧,总量不越过最小宽(minWidth)。绝不主动抹掉
+        // 用户自己拉宽的窗口——仅收回本面板实际加宽的 px。
+        //
+        // 用户在面板开着时拖窗，那个增量已经记进 W_user（见 watchUserResize），
+        // 所以这里以 W_user 为下界收窄：面板那 280px 收得回来，用户自己加的
+        // 那部分不会被一起吃掉。W_actual = W_user + rec.extra 是这一段的模型。
+        const userW = userWidth.get(win);
+        const userRoom =
+          userW === undefined ? Number.POSITIVE_INFINITY : Math.max(0, b.width - userW);
+        const maxRemove = Math.min(Math.max(0, b.width - win.getMinimumSize()[0]), userRoom);
+        let remove = Math.min(-delta, rec.extra);
+        const remLeft = Math.min(remove, rec.left, maxRemove);
+        remove -= remLeft;
+        const remRight = Math.min(remove, rec.right, maxRemove - remLeft);
+        const removed = remLeft + remRight;
+        if (removed > 0) {
+          const nextWidth = b.width - removed;
+          markSelfResize(win, nextWidth);
+          win.setBounds({ x: b.x + remLeft, y: b.y, width: nextWidth, height: b.height });
+          rec.left = Math.max(0, rec.left - remLeft);
+          rec.right = Math.max(0, rec.right - remRight);
+          rec.extra = Math.max(0, rec.extra - removed);
+        }
+      }
+      panelExtraByWin.set(win, rec);
+    }
+    return rec.extra;
+  };
+
+  ipcMain.handle(IPC.APP_PANEL_EXTRA, (event, raw: unknown) => {
+    const win = electron.BrowserWindow.fromWebContents(event.sender);
+    const target = Math.max(
+      0,
+      Math.round(typeof raw === 'number' && Number.isFinite(raw) ? raw : 0)
+    );
+    if (!win || win.isDestroyed()) {
+      return { ok: false, applied: 0, skipped: true };
+    }
+    hookWindow(win);
+    if (win.isMaximized() || win.isFullScreen() || !win.isResizable()) {
+      // 现在动不了，但逻辑目标要留下（见 rec.wanted）—— 恢复窗口时由
+      // reconcileOnRestore 补应用。不能像以前那样直接返回、什么都不记：那样
+      // 「最大化期间关面板」会被整个丢掉，恢复后窗口仍被面板撑宽 280px。
+      const rec = panelExtraByWin.get(win) ?? { extra: 0, left: 0, right: 0, wanted: target };
+      rec.wanted = target;
+      panelExtraByWin.set(win, rec);
+      return { ok: false, applied: rec.extra, skipped: true };
+    }
+    return { ok: true, applied: applyPanelExtra(win, target), skipped: false };
   });
 }

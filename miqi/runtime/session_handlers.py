@@ -46,6 +46,31 @@ def _client_session_id(client_id: str, session_key: str) -> str:
     return f"{client_id}:{session_key}"
 
 
+def _tracked_files_store_key(session_key: str) -> str:
+    """Derive the on-disk key for ``tracked_files.json`` (write/read 同源).
+
+    #1003 finding ①：写端 ``_persist_tracked_file`` 用
+    ``_session_files_dir_key`` 派生目录名（``sessions/<derived>/tracked_files.json``），
+    读端必须用同一派生，否则三段 namespaced key（``miqi-desktop:desktop:983``）
+    会读到 ``sessions/miqi-desktop_desktop_983/``，而条目实际落在
+    ``sessions/desktop_983/``。
+
+    两段 key（现网唯一形态，如 ``desktop:1786...``）派生结果与历史 raw 约定
+    ``key.replace(":", "_")`` 逐字相同——raw 是 canonical 之前的目录名规则，
+    #1014 起 ``get_session_dir`` 的规则是 canonical；两段键下两者等价，故本次
+    归一不改变既有行为，只有三段 key 才会分叉。
+
+    归一发生在 ownership 校验之前：读路径由 ``load_tracked_files(key,
+    client_id=...)`` 内部、清理路径由 ``clear_tracked_files(key,
+    client_id=...)`` 内部的 ``_verify_ownership_for_mutation`` 完成，且落在
+    「条目所在的那条会话记录」上（``get_session_dir(key)`` 同一条派生链），
+    因此不削弱归属校验。
+    """
+    from miqi.agent.tools.filesystem import _session_files_dir_key
+
+    return _session_files_dir_key(session_key)
+
+
 # ── sessions.list ──────────────────────────────────────────────────────────
 
 
@@ -205,25 +230,29 @@ async def sessions_get_handler(
     try:
         sm = _get_session_manager()
         ws = Path(typed.workspace) if typed.workspace else None
-        disk_session = sm.get_or_create(session_key, client_id=client_id, workspace=ws)
-        # 空会话是临时的：首条消息写入前不进 sessions.list（左端不残留默认会话）。
-        # 但显式带 workspace 的空会话仍要落盘——用户先切工作目录、后发首条消息时，
-        # workspace 元数据需跨 get/重启存活（workspace E2E 依赖该契约）。
-        # 保留条件要覆盖"已落盘的 workspace 绑定"：切目录后的一次裸 get（无 workspace
-        # 参数，如历史重载/列表刷新）不能把空会话当残留 GC 掉，否则首条消息会落在
-        # 丢失 workspace 的会话上。仅当空会话既无显式 workspace、磁盘上也没有任何
-        # workspace 元数据时，才把它当作旧版本无条件 save 留下的空白残留删除。
-        if not disk_session.messages:
-            existing_ws = disk_session.metadata.get("workspace")
-            if ws is not None or existing_ws is not None:
+        # Hold the per-key lock across the get_or_create → save/delete sequence
+        # for the same reason as _save_to_session_manager: close the #1050
+        # TOCTOU window between the ownership check and the disk write.
+        with sm._get_session_lock(session_key):
+            disk_session = sm.get_or_create(session_key, client_id=client_id, workspace=ws)
+            # 空会话是临时的：首条消息写入前不进 sessions.list（左端不残留默认会话）。
+            # 但显式带 workspace 的空会话仍要落盘——用户先切工作目录、后发首条消息时，
+            # workspace 元数据需跨 get/重启存活（workspace E2E 依赖该契约）。
+            # 保留条件要覆盖"已落盘的 workspace 绑定"：切目录后的一次裸 get（无 workspace
+            # 参数，如历史重载/列表刷新）不能把空会话当残留 GC 掉，否则首条消息会落在
+            # 丢失 workspace 的会话上。仅当空会话既无显式 workspace、磁盘上也没有任何
+            # workspace 元数据时，才把它当作旧版本无条件 save 留下的空白残留删除。
+            if not disk_session.messages:
+                existing_ws = disk_session.metadata.get("workspace")
+                if ws is not None or existing_ws is not None:
+                    sm.save(disk_session)
+                elif sm.get_session_dir(session_key).exists():
+                    sm.delete(session_key, client_id=client_id)
+                    disk_session = sm.get_or_create(
+                        session_key, client_id=client_id, workspace=ws
+                    )
+            else:
                 sm.save(disk_session)
-            elif sm.get_session_dir(session_key).exists():
-                sm.delete(session_key, client_id=client_id)
-                disk_session = sm.get_or_create(
-                    session_key, client_id=client_id, workspace=ws
-                )
-        else:
-            sm.save(disk_session)
         messages = disk_session.messages
         created_at = disk_session.created_at.isoformat()
         updated_at = disk_session.updated_at.isoformat()
@@ -451,7 +480,7 @@ async def sessions_list_archived_handler(
     """List only archived sessions (client-scoped)."""
     validate_session_params("sessions.list_archived", params)
 
-    from miqi.session.manager import safe_filename
+    from miqi.session.session_keys import session_files_dir_key
 
     sm = _get_session_manager()
     sessions = sm.list_sessions(
@@ -461,7 +490,9 @@ async def sessions_list_archived_handler(
     # Filter to only archived ones (already client-scoped by list_sessions)
     archived = []
     for s in sessions:
-        safe_key = safe_filename(s["key"].replace(":", "_"))
+        # Must match where ``SessionManager.archive`` writes the marker —
+        # ``get_session_dir`` uses this same canonical derivation (#1005).
+        safe_key = session_files_dir_key(s["key"])
         marker = sm.sessions_dir / safe_key / ".archived"
         if marker.exists():
             archived.append(s)
@@ -481,7 +512,7 @@ async def sessions_get_tracked_files_handler(
 ) -> dict[str, Any]:
     """Return tracked files for a session from tracked_files.json (client-scoped)."""
     typed = validate_session_params("sessions.get_tracked_files", params)
-    session_key = typed.session_key
+    session_key = _tracked_files_store_key(typed.session_key)
 
     sm = _get_session_manager()
     try:
@@ -508,7 +539,7 @@ async def sessions_clear_tracked_files_handler(
 ) -> dict[str, Any]:
     """Remove all tracked file entries for a session (client-scoped)."""
     typed = validate_session_params("sessions.clear_tracked_files", params)
-    session_key = typed.session_key
+    session_key = _tracked_files_store_key(typed.session_key)
 
     sm = _get_session_manager()
     try:

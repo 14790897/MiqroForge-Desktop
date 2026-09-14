@@ -173,6 +173,8 @@ export const IPC = {
   // App lifecycle
   APP_QUIT: 'app:quit',
   APP_FOCUS: 'app:focus',
+  // #assets window auto-widen: 资产面板推开聊天区时,主进程把窗口加宽,聊天列不变
+  APP_PANEL_EXTRA: 'app:panel-extra',
 } as const;
 
 // ---------------------------------------------------------------------------
