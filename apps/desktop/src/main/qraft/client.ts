@@ -571,6 +571,50 @@ export class QraftClient {
   }
 
   /**
+   * POST /oauth2/feedback：以当前登录用户身份提交反馈（issue #1054）。
+   * 平台无 title / 日志字段，content 必填；images 需图片 URL（桌面端截图是
+   * data URL，无换取通道时省略）。业务码 400 参数校验失败 → FEEDBACK_FAILED
+   * （透出服务端 message 与具体字段）；40101/40102 → SESSION_EXPIRED。
+   */
+  async submitFeedback(
+    config: ResolvedQraftConfig,
+    accessToken: string,
+    req: { type?: string; content: string; contact?: string; images?: string[] }
+  ): Promise<void> {
+    const body: Record<string, unknown> = { content: req.content };
+    if (req.type) body.type = req.type;
+    if (req.contact) body.contact = req.contact;
+    // 平台 image 字段为逗号分隔的图片 URL 串；无 URL 来源时整体省略。
+    if (req.images && req.images.length > 0) body.images = req.images.join(',');
+
+    const { res, bodyText } = await this.request(`${config.baseUrl}/oauth2/feedback`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${accessToken}`,
+      },
+      body: JSON.stringify(body),
+    });
+    if (res.status === 401) {
+      throw new QraftError('SESSION_EXPIRED', 'access_token 已失效');
+    }
+    if (!this.isJson(res)) {
+      throw new QraftError('FEEDBACK_FAILED', `提交反馈失败：HTTP ${res.status}`);
+    }
+    const data = parseBusinessJson(bodyText);
+    if (data.code === 40101 || data.code === 40102) {
+      throw new QraftError('SESSION_EXPIRED', 'access_token 已失效，请重新登录');
+    }
+    if (data.code !== 200) {
+      throw new QraftError(
+        'FEEDBACK_FAILED',
+        `提交反馈失败：${data.message || data.msg || '未知错误'}`
+      );
+    }
+    this.log('INFO', 'qraft: 反馈已提交到平台');
+  }
+
+  /**
    * 从 token 响应构造统一结构；实测 expires_in=7199（约 2 小时，非官方 24 小时）。
    * 新平台轮换 refresh_token：刷新路径（refreshTokens）强制响应携带新值，
    * 缺失直接报 REFRESH_TOKEN_INVALID；此处的回退只服务于 exchangeCode

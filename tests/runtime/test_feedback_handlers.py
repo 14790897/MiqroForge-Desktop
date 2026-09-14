@@ -211,7 +211,8 @@ async def test_feedback_list_handles_null_limit():
 
 
 @pytest.mark.asyncio
-async def test_feedback_submit_requires_title(_bridge_state_isolated):
+async def test_feedback_submit_derives_title_from_first_content_line(_bridge_state_isolated):
+    """提交不再携带 title（#1054）：Bitable 标题列由正文首个非空行派生。"""
     from miqi.runtime.feedback_handlers import feedback_submit_handler
 
     workspace = _make_workspace()
@@ -220,11 +221,16 @@ async def test_feedback_submit_requires_title(_bridge_state_isolated):
     registry = ClientSessionRegistry()
     registry.bridge_context["state"] = state
 
-    with patch("miqi.runtime.feedback_handlers._get_workspace_path", return_value=workspace):
-        with pytest.raises(AppServerError, match="标题不能为空"):
-            await feedback_submit_handler(
-                "req-1", {"content": "some content"}, "client-1", None, registry,
-            )
+    with patch("miqi.runtime.feedback_handlers._get_workspace_path", return_value=workspace), \
+         patch("miqi.runtime.feedback_handlers._get_tenant_access_token", return_value="mock_token"), \
+         patch("miqi.runtime.feedback_handlers._add_bitable_record", return_value="rec_123") as mock_add:
+        await feedback_submit_handler(
+            "req-1",
+            {"content": "\n  提交时闪退\n\n复现步骤：打开设置页"},
+            "client-1", None, registry,
+        )
+        fields = mock_add.call_args[0][3]
+        assert fields["标题"] == "提交时闪退"
 
 
 @pytest.mark.asyncio
@@ -240,7 +246,7 @@ async def test_feedback_submit_requires_content(_bridge_state_isolated):
     with patch("miqi.runtime.feedback_handlers._get_workspace_path", return_value=workspace):
         with pytest.raises(AppServerError, match="内容不能为空"):
             await feedback_submit_handler(
-                "req-1", {"title": "some title"}, "client-1", None, registry,
+                "req-1", {"content": "   "}, "client-1", None, registry,
             )
 
 
@@ -257,7 +263,7 @@ async def test_feedback_submit_rejects_when_disabled(_bridge_state_isolated):
     with patch("miqi.runtime.feedback_handlers._get_workspace_path", return_value=workspace):
         with pytest.raises(AppServerError, match="未启用"):
             await feedback_submit_handler(
-                "req-1", {"title": "test", "content": "test content"}, "client-1", None, registry,
+                "req-1", {"content": "test content"}, "client-1", None, registry,
             )
 
 
@@ -280,7 +286,7 @@ async def test_feedback_submit_rejects_when_no_feishu_credentials(_bridge_state_
          patch.object(FeedbackConfig.model_fields["feishu_app_secret"], "default", ""):
         with pytest.raises(AppServerError, match="未配置"):
             await feedback_submit_handler(
-                "req-1", {"title": "test", "content": "test content"}, "client-1", None, registry,
+                "req-1", {"content": "test content"}, "client-1", None, registry,
             )
 
 
@@ -303,7 +309,7 @@ async def test_feedback_submit_rejects_when_no_bitable_config(_bridge_state_isol
          patch.object(FeedbackConfig.model_fields["bitable_table_id"], "default", ""):
         with pytest.raises(AppServerError, match="未配置"):
             await feedback_submit_handler(
-                "req-1", {"title": "test", "content": "test content"}, "client-1", None, registry,
+                "req-1", {"content": "test content"}, "client-1", None, registry,
             )
 
 
@@ -323,7 +329,7 @@ async def test_feedback_submit_invalid_category_falls_back_to_other(_bridge_stat
          patch("miqi.runtime.feedback_handlers._add_bitable_record", return_value="rec_123") as mock_add:
         await feedback_submit_handler(
             "req-1",
-            {"title": "test", "content": "test content", "category": "INVALID"},
+            {"content": "test content", "category": "INVALID"},
             "client-1", None, registry,
         )
         fields = mock_add.call_args[0][3]
@@ -741,3 +747,30 @@ async def test_feedback_submit_caps_screenshots_at_5(_bridge_state_isolated):
     assert upload.call_count == 5
     fields = add_record.call_args.args[3]
     assert len(fields["附件"]) == 5
+
+
+@pytest.mark.asyncio
+async def test_feedback_submit_skip_feishu_writes_local_backup_only(_bridge_state_isolated):
+    """skip_feishu（测试专用，issue #1054 E2E）：不触达飞书，仍落本地备份。"""
+    from miqi.runtime.feedback_handlers import feedback_submit_handler
+
+    workspace = _make_workspace()
+    state = _make_mock_state(workspace)
+    state.load_config.return_value.channels.feedback.skip_feishu = True
+    _bridge_state_isolated._state = state
+    registry = ClientSessionRegistry()
+    registry.bridge_context["state"] = state
+
+    with patch("miqi.runtime.feedback_handlers._get_workspace_path", return_value=workspace), \
+         patch("miqi.runtime.feedback_handlers._get_tenant_access_token") as token_mock, \
+         patch("miqi.runtime.feedback_handlers._add_bitable_record") as add_mock:
+        result = await feedback_submit_handler(
+            "req-1", {"content": "skip feishu content"}, "client-1", None, registry,
+        )
+
+    assert result["result"]["ok"] is True
+    assert result["result"]["record_id"] == ""
+    token_mock.assert_not_called()
+    add_mock.assert_not_called()
+    backup = (workspace / "memory" / "FEEDBACK.jsonl").read_text(encoding="utf-8")
+    assert "skip feishu content" in backup

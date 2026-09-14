@@ -15,7 +15,12 @@ import {
   ImagePlus,
 } from 'lucide-react';
 import { cn } from '../../lib/utils';
-import type { FeedbackEntry, FeedbackSubmitResult } from '../../../shared/ipc';
+import { useQraftStatus } from '../../hooks/useQraftStatus';
+import type {
+  FeedbackEntry,
+  FeedbackPlatformOutcome,
+  FeedbackSubmitResult,
+} from '../../../shared/ipc';
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 
@@ -60,23 +65,20 @@ import { Modal } from '../../components/shared';
 
 function SubmitModal({ onClose, onSubmitted }: { onClose: () => void; onSubmitted: () => void }) {
   const [category, setCategory] = useState<'bug' | 'question' | 'suggestion' | 'other'>('bug');
-  const [title, setTitle] = useState('');
   const [content, setContent] = useState('');
   const [contact, setContact] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState(false);
+  const [platform, setPlatform] = useState<FeedbackPlatformOutcome | undefined>(undefined);
   const [screenshots, setScreenshots] = useState<ScreenshotFile[]>([]);
   const [dragOver, setDragOver] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
-  const canSubmit = title.trim().length > 0 && content.trim().length > 0 && !submitting;
+  const canSubmit = content.trim().length > 0 && !submitting;
 
   const hasUnsavedContent =
-    title.trim().length > 0 ||
-    content.trim().length > 0 ||
-    contact.trim().length > 0 ||
-    screenshots.length > 0;
+    content.trim().length > 0 || contact.trim().length > 0 || screenshots.length > 0;
 
   const onBeforeClose = useCallback(() => {
     if (submitting) return true;
@@ -169,9 +171,8 @@ function SubmitModal({ onClose, onSubmitted }: { onClose: () => void; onSubmitte
     setSubmitting(true);
     setError(null);
     try {
-      const result = await window.miqi.feedback.submit({
+      const result: FeedbackSubmitResult = await window.miqi.feedback.submit({
         category,
-        title: title.trim(),
         content: content.trim(),
         contact: contact.trim() || undefined,
         app_version: typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : 'dev',
@@ -183,6 +184,8 @@ function SubmitModal({ onClose, onSubmitted }: { onClose: () => void; onSubmitte
       if (!result || result.ok !== true) {
         throw new Error('提交未确认（后端返回 ok=false）');
       }
+      // 平台通道失败不影响提交成功：飞书通道已兜底记录，这里只提示归属未同步。
+      setPlatform(result.platform);
       setSuccess(true);
       setTimeout(() => {
         onSubmitted();
@@ -225,14 +228,23 @@ function SubmitModal({ onClose, onSubmitted }: { onClose: () => void; onSubmitte
           <div className="flex flex-col items-center gap-3 py-8">
             <CheckCircle size={40} className="text-green-400" />
             <p className="text-sm font-medium">提交成功！</p>
-            <p className="text-xs text-[var(--muted-foreground)]">日志已自动附加并发送到飞书</p>
+            <p className="text-xs text-[var(--muted-foreground)]">日志已自动附加并发送给开发团队</p>
+            {platform && !platform.ok && (
+              <p
+                data-testid="feedback-platform-unsynced"
+                className="flex items-center gap-1.5 text-xs text-[var(--warning)]"
+              >
+                <AlertTriangle size={13} />
+                反馈已收到，但平台归属暂未同步
+              </p>
+            )}
           </div>
         ) : (
           <>
             {/* Hints */}
             <div className="flex flex-col gap-1.5 mb-4 p-2.5 rounded-md bg-[var(--accent)]/5 border border-[var(--accent)]/15">
               <p className="text-size-2xs text-[var(--muted-foreground)]">
-                日志将在提交时自动附加并发送到飞书
+                日志将在提交时自动附加并发送给开发团队
               </p>
               <p className="text-size-2xs text-[var(--warning)]">
                 提示：建议先复制已填写的提示词，避免因意外关闭而丢失
@@ -263,21 +275,6 @@ function SubmitModal({ onClose, onSubmitted }: { onClose: () => void; onSubmitte
               </div>
             </div>
 
-            {/* Title */}
-            <div className="mb-4">
-              <label className="block text-xs font-medium text-[var(--muted-foreground)] mb-1.5">
-                标题
-              </label>
-              <input
-                value={title}
-                onChange={(e) => setTitle(e.target.value)}
-                placeholder="简要描述你的问题或建议"
-                maxLength={200}
-                className="w-full px-3 py-2 text-sm bg-[var(--muted)]/10 rounded-md border border-[var(--border)]
-                           outline-none focus:border-[var(--border-strong)]"
-              />
-            </div>
-
             {/* Content */}
             <div className="mb-4">
               <label className="block text-xs font-medium text-[var(--muted-foreground)] mb-1.5">
@@ -286,8 +283,8 @@ function SubmitModal({ onClose, onSubmitted }: { onClose: () => void; onSubmitte
               <textarea
                 value={content}
                 onChange={(e) => setContent(e.target.value)}
-                placeholder="请详细描述你的问题或建议..."
-                rows={5}
+                placeholder="简要描述你的问题或建议，再补充细节（复现步骤、期望行为、实际行为等）"
+                rows={6}
                 maxLength={10000}
                 className="w-full px-3 py-2 text-sm bg-[var(--muted)]/10 rounded-md border border-[var(--border)]
                            outline-none focus:border-[var(--border-strong)] resize-none"
@@ -437,6 +434,9 @@ export function FeedbackPage() {
   const [loading, setLoading] = useState(true);
   const [showSubmitModal, setShowSubmitModal] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // 登录态决定反馈去向（issue #1054）：已登录归属平台账号 + 飞书留存，
+  // 未登录仅走飞书通道 —— 空状态文案如实说明，避免误导。
+  const { loggedIn } = useQraftStatus();
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -497,7 +497,9 @@ export function FeedbackPage() {
             <MessageSquare size={28} className="text-[var(--muted-foreground)] opacity-30" />
             <p className="text-sm text-[var(--muted-foreground)]">暂无反馈记录</p>
             <p className="text-xs text-[var(--muted-foreground)] opacity-60">
-              提交反馈将自动附加日志并发送到飞书
+              {loggedIn
+                ? '提交反馈将自动附加日志，并归属到你的 MiQroForge 平台账号'
+                : '提交反馈将自动附加日志并发送给开发团队'}
             </p>
             <button
               onClick={() => setShowSubmitModal(true)}
@@ -520,13 +522,10 @@ export function FeedbackPage() {
                   <div className="flex items-start gap-3">
                     <Icon size={16} className="mt-0.5 text-[var(--muted-foreground)] shrink-0" />
                     <div className="flex-1 min-w-0">
-                      <div className="flex items-center gap-2 mb-1">
-                        <span className="text-xs px-1.5 py-0.5 rounded bg-[var(--muted)]/10 text-[var(--muted-foreground)]">
-                          {CATEGORY_LABELS[entry.category] || entry.category}
-                        </span>
-                        <span className="text-sm font-medium truncate">{entry.title}</span>
-                      </div>
-                      <p className="text-xs text-[var(--muted-foreground)] line-clamp-2 mb-1.5">
+                      <span className="inline-block text-xs px-1.5 py-0.5 mb-1 rounded bg-[var(--muted)]/10 text-[var(--muted-foreground)]">
+                        {CATEGORY_LABELS[entry.category] || entry.category}
+                      </span>
+                      <p className="text-xs text-[var(--muted-foreground)] whitespace-pre-line line-clamp-3 mb-1.5">
                         {entry.content}
                       </p>
                       <div className="flex items-center gap-2 text-size-2xs text-[var(--muted-foreground)]">

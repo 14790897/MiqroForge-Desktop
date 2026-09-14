@@ -359,6 +359,21 @@ def _read_local_feedbacks() -> list[dict[str, Any]]:
 # Handlers
 # ---------------------------------------------------------------------------
 
+def _derive_title(content: str, max_chars: int = 60) -> str:
+    """Derive the Bitable title column from the feedback body.
+
+    The submit UI no longer collects a title (issue #1054) — the platform
+    feedback API has no title field, and a separate one would only exist in
+    the Feishu copy.  Bitable still renders a title column, so derive it from
+    the first non-empty line of the content.
+    """
+    for line in content.splitlines():
+        stripped = line.strip()
+        if stripped:
+            return stripped[:max_chars]
+    return content.strip()[:max_chars]
+
+
 async def feedback_submit_handler(
     request_id: str,
     params: dict[str, Any],
@@ -370,7 +385,6 @@ async def feedback_submit_handler(
     raw_category = str(params.get("category", "other"))
     allowed_categories = {"bug", "question", "suggestion", "other"}
     category = raw_category if raw_category in allowed_categories else "other"
-    title = str(params.get("title", "")).strip()
     content = str(params.get("content", "")).strip()
     contact = str(params.get("contact", "")).strip()
     app_version = str(params.get("app_version", "unknown"))
@@ -381,10 +395,9 @@ async def feedback_submit_handler(
         screenshots_raw = []
     screenshots = [str(s) for s in screenshots_raw if s][:5]  # cap at 5
 
-    if not title:
-        raise AppServerError("反馈标题不能为空", code="INVALID_PARAMS")
     if not content:
         raise AppServerError("反馈内容不能为空", code="INVALID_PARAMS")
+    title = _derive_title(content)
 
     workspace = _get_workspace_path()
     log_dir = workspace / "logs"
@@ -459,56 +472,61 @@ async def feedback_submit_handler(
     }
 
     # 5. Send to Feishu — get token first, then upload screenshots, then add record
-    try:
-        token = _get_tenant_access_token(app_id, app_secret)
+    record_id = ""
+    if fb_cfg.skip_feishu:
+        # 测试专用开关（issue #1054 E2E）：不触达真实飞书，仅保留本地备份，
+        # 让平台通道成为被测对象。
+        logger.info("feedback:submit — skip_feishu 开启，跳过飞书写入")
+    else:
+        try:
+            token = _get_tenant_access_token(app_id, app_secret)
 
-        # 5a. Upload each screenshot to get file_token references
-        if screenshots:
-            file_tokens: list[dict[str, str]] = []
-            for idx, data_url in enumerate(screenshots):
-                try:
-                    mime, filename, raw = _decode_data_url(data_url)
-                except AppServerError:
-                    raise
-                except Exception as exc:
-                    raise AppServerError(
-                        f"截图 {idx + 1} 处理失败: {exc}",
-                        code="INVALID_PARAMS",
-                    ) from exc
-                # 10 MB cap per image
-                if len(raw) > 10 * 1024 * 1024:
-                    raise AppServerError(
-                        f"截图 {idx + 1} 超过 10MB 限制",
-                        code="FILE_TOO_LARGE",
+            # 5a. Upload each screenshot to get file_token references
+            if screenshots:
+                file_tokens: list[dict[str, str]] = []
+                for idx, data_url in enumerate(screenshots):
+                    try:
+                        mime, filename, raw = _decode_data_url(data_url)
+                    except AppServerError:
+                        raise
+                    except Exception as exc:
+                        raise AppServerError(
+                            f"截图 {idx + 1} 处理失败: {exc}",
+                            code="INVALID_PARAMS",
+                        ) from exc
+                    # 10 MB cap per image
+                    if len(raw) > 10 * 1024 * 1024:
+                        raise AppServerError(
+                            f"截图 {idx + 1} 超过 10MB 限制",
+                            code="FILE_TOO_LARGE",
+                        )
+                    logger.info("Uploading screenshot {} ({} bytes)", idx + 1, len(raw))
+                    file_token = _upload_attachment(
+                        token,
+                        filename=filename,
+                        content_type=mime,
+                        data=raw,
+                        parent_node=bitable_app_token,
                     )
-                logger.info("Uploading screenshot {} ({} bytes)", idx + 1, len(raw))
-                file_token = _upload_attachment(
-                    token,
-                    filename=filename,
-                    content_type=mime,
-                    data=raw,
-                    parent_node=bitable_app_token,
-                )
-                file_tokens.append({"file_token": file_token})
-            fields["附件"] = file_tokens
+                    file_tokens.append({"file_token": file_token})
+                fields["附件"] = file_tokens
 
-        # 5b. Add the Bitable record (with attachment references)
-        record_id = _add_bitable_record(
-            token, bitable_app_token, bitable_table_id, fields,
-        )
-    except AppServerError:
-        raise
-    except Exception as exc:
-        logger.exception("feedback:submit — Feishu API error")
-        raise AppServerError(
-            f"提交到飞书失败: {exc}", code="FEISHU_API_ERROR",
-        ) from exc
+            # 5b. Add the Bitable record (with attachment references)
+            record_id = _add_bitable_record(
+                token, bitable_app_token, bitable_table_id, fields,
+            )
+        except AppServerError:
+            raise
+        except Exception as exc:
+            logger.exception("feedback:submit — Feishu API error")
+            raise AppServerError(
+                f"提交到飞书失败: {exc}", code="FEISHU_API_ERROR",
+            ) from exc
 
     # 6. Local backup (strip log content to avoid huge local file)
     local_entry = {
         "id": f"fbk_{int(datetime.now(timezone.utc).timestamp() * 1000)}",
         "category": category,
-        "title": title,
         "content": content,
         "contact": contact,
         "app_version": app_version,

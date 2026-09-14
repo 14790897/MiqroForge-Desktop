@@ -969,3 +969,107 @@ describe('QraftService Slurm 作业扣费（issue #927）', () => {
     expect(client.deductPoints).not.toHaveBeenCalled();
   });
 });
+
+describe('QraftService 反馈平台通道（issue #1054）', () => {
+  function makeFeedbackClient() {
+    return { submitFeedback: vi.fn(), refreshTokens: vi.fn() };
+  }
+
+  it('登录态：以当前 access_token 提交，返回 ok', async () => {
+    const client = makeFeedbackClient();
+    client.submitFeedback.mockResolvedValue(undefined);
+    store.save(makeStoredState());
+    const svc = makeService(client as any);
+
+    const result = await svc.submitPlatformFeedback({
+      type: 'bug',
+      content: '提交时闪退',
+      contact: 'user@example.com',
+    });
+
+    expect(result).toEqual({ ok: true });
+    const [, tokenArg, reqArg] = client.submitFeedback.mock.calls[0] as any[];
+    expect(tokenArg).toBe('ACCESS-TOKEN');
+    expect(reqArg).toEqual({ type: 'bug', content: '提交时闪退', contact: 'user@example.com' });
+  });
+
+  it('未登录：跳过平台通道（INVALID_CONFIG，不发起请求）', async () => {
+    const client = makeFeedbackClient();
+    const svc = makeService(client as any);
+
+    const result = await svc.submitPlatformFeedback({ content: 'x' });
+
+    expect(result.ok).toBe(false);
+    expect(result.code).toBe('INVALID_CONFIG');
+    expect(client.submitFeedback).not.toHaveBeenCalled();
+  });
+
+  it('token 失效：刷新后带新 token 重试一次，返回 ok', async () => {
+    const client = makeFeedbackClient();
+    client.submitFeedback
+      .mockRejectedValueOnce(new QraftError('SESSION_EXPIRED', 'access_token 已失效'))
+      .mockResolvedValueOnce(undefined);
+    client.refreshTokens.mockResolvedValue(
+      makeTokens({ accessToken: 'NEW-ACCESS', refreshToken: 'NEW-REFRESH' })
+    );
+    store.save(makeStoredState());
+    const svc = makeService(client as any);
+
+    const result = await svc.submitPlatformFeedback({ content: 'x' });
+
+    expect(result).toEqual({ ok: true });
+    expect(client.submitFeedback).toHaveBeenCalledTimes(2);
+    expect((client.submitFeedback.mock.calls[1] as any[])[1]).toBe('NEW-ACCESS');
+  });
+
+  it('refresh_token 已作废：置 requiresRelogin 并推状态（登录失效三件套）', async () => {
+    const client = makeFeedbackClient();
+    client.submitFeedback.mockRejectedValue(
+      new QraftError('SESSION_EXPIRED', 'access_token 已失效')
+    );
+    client.refreshTokens.mockRejectedValue(
+      new QraftError('REFRESH_TOKEN_INVALID', 'refresh_token 已失效')
+    );
+    store.save(makeStoredState());
+    const svc = makeService(client as any);
+
+    const result = await svc.submitPlatformFeedback({ content: 'x' });
+
+    expect(result).toMatchObject({ ok: false, code: 'REFRESH_TOKEN_INVALID' });
+    expect(svc.status().requiresRelogin).toBe(true);
+    expect(svc.status().refreshError).toBe('REFRESH_TOKEN_INVALID');
+    expect(statusEvents.some((s: any) => s?.requiresRelogin === true)).toBe(true);
+  });
+
+  it('刷新失败（瞬时）：不重试提交，返回刷新错误码', async () => {
+    const client = makeFeedbackClient();
+    client.submitFeedback.mockRejectedValue(
+      new QraftError('SESSION_EXPIRED', 'access_token 已失效')
+    );
+    client.refreshTokens.mockRejectedValue(new QraftError('REFRESH_FAILED', '刷新 token 失败'));
+    store.save(makeStoredState());
+    const svc = makeService(client as any);
+
+    const result = await svc.submitPlatformFeedback({ content: 'x' });
+
+    expect(result).toMatchObject({ ok: false, code: 'REFRESH_FAILED' });
+    expect(client.submitFeedback).toHaveBeenCalledTimes(1);
+    expect(svc.status().requiresRelogin).toBe(true);
+  });
+
+  it('平台 400 参数校验失败：透出服务端 message（不触发重登）', async () => {
+    const client = makeFeedbackClient();
+    client.submitFeedback.mockRejectedValue(
+      new QraftError('FEEDBACK_FAILED', '提交反馈失败：content 不能为空')
+    );
+    store.save(makeStoredState());
+    const svc = makeService(client as any);
+
+    const result = await svc.submitPlatformFeedback({ content: 'x' });
+
+    expect(result).toMatchObject({ ok: false, code: 'FEEDBACK_FAILED' });
+    expect(result.message).toContain('content 不能为空');
+    expect(client.refreshTokens).not.toHaveBeenCalled();
+    expect(svc.status().requiresRelogin).toBe(false);
+  });
+});

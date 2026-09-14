@@ -8305,8 +8305,8 @@ const MessageBubble = memo(function MessageBubble({
       // Bitable via feedback.submit).  Lightweight — no required text.
       await window.miqi.feedback.submit({
         category: 'suggestion',
-        title: '回答不满意',
         content:
+          '回答不满意\n' +
           (dislikeText.trim() || '（未填写具体说明）') +
           `\n\n— 消息摘要：${msg.content.slice(0, 200)}`,
         app_version: typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : 'dev',
