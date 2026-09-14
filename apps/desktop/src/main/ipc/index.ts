@@ -11,6 +11,7 @@ import {
   writeFileSync,
   unlinkSync,
 } from 'fs';
+import { readFile as readFileAsync } from 'fs/promises';
 import { homedir, tmpdir } from 'os';
 import { randomUUID } from 'crypto';
 import { basename, join } from 'path';
@@ -2002,48 +2003,51 @@ for m in ("pydantic", "httpx", "loguru"):
     const base64 = typeof p?.base64 === 'string' ? p.base64 : '';
     if (!base64) return { opened: false, path: rawName, error: 'Empty payload' };
 
-    // 安全（CodeRabbit #1048 / CWE-434）：拒绝可执行/脚本宿主类扩展名，避免把
-    // 渲染层字节写成文件后被 shell.openPath 直接启动。调用方在被拒时不得回退。
-    const BLOCKED_EXEC_EXTS = new Set([
-      'exe',
-      'bat',
-      'cmd',
-      'com',
-      'cpl',
-      'scr',
-      'msi',
-      'msp',
-      'msc',
-      'js',
-      'jse',
-      'vbs',
-      'vbe',
-      'wsf',
-      'wsh',
-      'ps1',
-      'psm1',
-      'lnk',
-      'reg',
-      'jar',
-      'hta',
-      'gadget',
-      'scf',
-      'inf',
-      'url',
-      'chm',
-      'app',
-      'sh',
-      'bash',
-      'desktop',
-      'dll',
-      'sys',
+    // 安全（CodeRabbit #1048 / CWE-434）：白名单——仅「安全可打开」的类型交给系统
+    // 默认应用，其余（可执行/脚本宿主/宏文档等）一律拒绝，调用方在被拒时不得回退。
+    const ALLOWED_OPEN_EXTS = new Set([
+      'pdf',
+      'doc',
+      'docx',
+      'odt',
+      'rtf',
+      'xls',
+      'xlsx',
+      'ods',
+      'csv',
+      'ppt',
+      'pptx',
+      'odp',
+      'txt',
+      'text',
+      'md',
+      'markdown',
+      'mdown',
+      'json',
+      'xml',
+      'yml',
+      'yaml',
+      'log',
+      'ini',
+      'toml',
+      'env',
+      'png',
+      'jpg',
+      'jpeg',
+      'gif',
+      'webp',
+      'bmp',
+      'tif',
+      'tiff',
+      'ico',
+      'avif',
     ]);
     const extForBlock = (rawName.split('.').pop() || '').toLowerCase();
-    if (BLOCKED_EXEC_EXTS.has(extForBlock)) {
+    if (!ALLOWED_OPEN_EXTS.has(extForBlock)) {
       return {
         opened: false,
         path: rawName,
-        error: `Blocked dangerous file type: .${extForBlock}`,
+        error: `Blocked file type (not in safe allowlist): .${extForBlock}`,
       };
     }
 
@@ -2075,11 +2079,14 @@ for m in ("pydantic", "httpx", "loguru"):
   // Windows「复制文件」只提供 CF_HDROP，Chromium 的 paste 事件拿不到；改在主进程读：
   // FileNameW/FileName → 路径列表；否则 readImage()（截图）。本 handler 不接收渲染层
   // 参数（路径来自系统剪贴板），因此渲染层无法借它任意读盘。
-  ipcMain.handle(IPC.CLIPBOARD_READ_FILES, () => {
-    const MAX = 25 * 1024 * 1024;
+  ipcMain.handle(IPC.CLIPBOARD_READ_FILES, async () => {
+    const MAX_ONE = 25 * 1024 * 1024;
+    const MAX_TOTAL = 40 * 1024 * 1024;
+    const MAX_FILES = 8;
     type ClipFile = { name: string; base64: string; mime: string; size: number };
     const files: ClipFile[] = [];
     let image: ClipFile | undefined;
+    let total = 0;
 
     const mimeOf = (p: string): string => {
       const e = (p.split('.').pop() || '').toLowerCase();
@@ -2117,16 +2124,21 @@ for m in ("pydantic", "httpx", "loguru"):
         const paths = text
           .split('\0')
           .map((s) => s.trim())
-          .filter(Boolean);
+          .filter(Boolean)
+          .slice(0, MAX_FILES);
         for (const p of paths) {
+          if (files.length >= MAX_FILES || total >= MAX_TOTAL) break;
           try {
             const st = statSync(p);
-            if (!st.isFile() || st.size > MAX) continue;
+            if (!st.isFile() || st.size > MAX_ONE || total + st.size > MAX_TOTAL) continue;
+            // 异步读，避免阻塞主进程（批量粘贴时尤其重要）
+            const data = await readFileAsync(p);
+            total += data.length;
             files.push({
               name: basename(p),
-              base64: readFileSync(p).toString('base64'),
+              base64: data.toString('base64'),
               mime: mimeOf(p),
-              size: st.size,
+              size: data.length,
             });
           } catch {
             /* skip unreadable */
@@ -2139,7 +2151,7 @@ for m in ("pydantic", "httpx", "loguru"):
         const img = clipboard.readImage();
         if (img && !img.isEmpty()) {
           const png = img.toPNG();
-          if (png.length > 0 && png.length <= MAX) {
+          if (png.length > 0 && png.length <= MAX_ONE) {
             image = {
               name: `pasted-image-${Date.now()}.png`,
               base64: png.toString('base64'),

@@ -2576,12 +2576,31 @@ export function ChatConsole({
   const [streaming, setStreaming] = useState(false);
   const [copiedIdx, setCopiedIdx] = useState<number | null>(null);
   const [attachments, setAttachments] = useState<Attachment[]>([]);
-  /** 去重：同一文件（名+大小）1s 内只挂一次——浏览器 paste 与主进程剪贴板读取可能都触发。 */
-  const lastAttachRef = useRef<{ key: string; ts: number }>({ key: '', ts: 0 });
-  const shouldAcceptAttach = (key: string) => {
-    const now = Date.now();
-    if (lastAttachRef.current.key === key && now - lastAttachRef.current.ts < 1000) return false;
-    lastAttachRef.current = { key, ts: now };
+  /** 事件级去重：一次「动作」(选择/粘贴) 内同名同大小只挂一次；
+   *  跨通道（浏览器 paste 与主进程剪贴板）在 500ms 内算同一动作，避免重复挂载。
+   *  不再用“1s 内全局 name:size”去重——那会误杀合法的同名同大小附件。 */
+  const attachActionRef = useRef<{ id: string; ts: number; seen: Set<string> }>({
+    id: '',
+    ts: 0,
+    seen: new Set<string>(),
+  });
+  const newAttachAction = () => {
+    const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    attachActionRef.current = { id, ts: Date.now(), seen: new Set<string>() };
+    return id;
+  };
+  const crossChannelAttachAction = () => {
+    const cur = attachActionRef.current;
+    return cur.id && Date.now() - cur.ts < 500 ? cur.id : newAttachAction();
+  };
+  const acceptInAttachAction = (actionId: string, key: string) => {
+    if (attachActionRef.current.id !== actionId) {
+      attachActionRef.current = { id: actionId, ts: Date.now(), seen: new Set<string>() };
+    }
+    const act = attachActionRef.current;
+    act.ts = Date.now();
+    if (act.seen.has(key)) return false;
+    act.seen.add(key);
     return true;
   };
   const [historyLoaded, setHistoryLoaded] = useState(false);
@@ -4048,8 +4067,8 @@ export function ChatConsole({
   const handleAttachClick = useCallback(() => fileInputRef.current?.click(), []);
 
   // 统一把 File 转成 Attachment：input change / 剪贴板 / 拖拽共用。
-  const attachFromFile = useCallback((file: File) => {
-    if (!shouldAcceptAttach(`${file.name}:${file.size}`)) return;
+  const attachFromFile = useCallback((file: File, actionId: string): boolean => {
+    if (!acceptInAttachAction(actionId, `${file.name}:${file.size}`)) return false;
     {
       const isImage = file.type.startsWith('image/');
       const isDocument = DOCUMENT_SUFFIXES_RE.test(file.name);
@@ -4140,10 +4159,12 @@ export function ChatConsole({
         reader.readAsDataURL(file);
       }
     }
+    return true;
   }, []);
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    Array.from(e.target.files ?? []).forEach(attachFromFile);
+    const actionId = newAttachAction();
+    Array.from(e.target.files ?? []).forEach((f) => attachFromFile(f, actionId));
     e.target.value = '';
   };
 
@@ -4162,14 +4183,15 @@ export function ChatConsole({
         }
       }
       if (files.length === 0 && dt.files?.length) files.push(...Array.from(dt.files));
-      if (files.length === 0) {
-        // Windows 复制文件时剪贴板同时带路径文本；避免把它当文字粘进输入框
-        const text = dt.getData('text/plain') ?? '';
-        if (/^\s*(?:[A-Za-z]:[\\/]|\\\\|file:\/\/)/m.test(text)) e.preventDefault();
-        return;
+      // 没有文件 → 交给浏览器默认行为（纯文本/路径文本都照常粘贴，绝不吞）
+      if (files.length === 0) return;
+      const actionId = crossChannelAttachAction();
+      let any = false;
+      for (const f of files) {
+        if (attachFromFile(f, actionId)) any = true;
       }
-      e.preventDefault();
-      files.forEach(attachFromFile);
+      // 仅当确实挂上附件时才阻止默认（避免把文件路径文本也插进输入框）
+      if (any) e.preventDefault();
     };
     window.addEventListener('paste', onPaste);
     return () => window.removeEventListener('paste', onPaste);
@@ -4177,30 +4199,34 @@ export function ChatConsole({
 
   // 主进程读系统剪贴板（Ctrl+V）：Windows「复制文件」/截图在 Chromium 的 paste 事件里
   // 拿不到，改由主进程读 CF_HDROP/剪贴板图片，再作为附件挂上。
-  const attachBase64 = useCallback((name: string, base64: string, mime: string, size: number) => {
-    if (!shouldAcceptAttach(`${name}:${size}`)) return;
-    if (mime.startsWith('image/')) {
+  const attachBase64 = useCallback(
+    (name: string, base64: string, mime: string, size: number, actionId: string): boolean => {
+      if (!acceptInAttachAction(actionId, `${name}:${size}`)) return false;
+      if (mime.startsWith('image/')) {
+        setAttachments((prev) => [
+          ...prev,
+          { name, type: 'image', dataUrl: `data:${mime};base64,${base64}`, size },
+        ]);
+        return true;
+      }
+      const ext = name.split('.').pop()?.toLowerCase() ?? '';
+      const isServerParsed = /^(docx|doc|pptx|ppt|xlsx|xls|odt|odp|ods|rtf)$/i.test(ext);
       setAttachments((prev) => [
         ...prev,
-        { name, type: 'image', dataUrl: `data:${mime};base64,${base64}`, size },
+        {
+          name,
+          type: 'document',
+          dataBase64: base64,
+          dataUrl: `data:${mime};base64,${base64}`,
+          size,
+          mimeType: mime,
+          status: isServerParsed ? 'pending' : 'done',
+        },
       ]);
-      return;
-    }
-    const ext = name.split('.').pop()?.toLowerCase() ?? '';
-    const isServerParsed = /^(docx|doc|pptx|ppt|xlsx|xls|odt|odp|ods|rtf)$/i.test(ext);
-    setAttachments((prev) => [
-      ...prev,
-      {
-        name,
-        type: 'document',
-        dataBase64: base64,
-        dataUrl: `data:${mime};base64,${base64}`,
-        size,
-        mimeType: mime,
-        status: isServerParsed ? 'pending' : 'done',
-      },
-    ]);
-  }, []);
+      return true;
+    },
+    []
+  );
 
   // 剪贴板 → 附件（主进程读）：Ctrl+V 与右键「粘贴」共用；返回是否挂了文件
   const pasteClipboardFiles = useCallback(async (): Promise<boolean> => {
@@ -4208,8 +4234,12 @@ export function ChatConsole({
       const res = await window.miqi.clipboard.readFiles();
       const items = [...(res?.files ?? []), ...(res?.image ? [res.image] : [])];
       if (items.length === 0) return false;
-      items.forEach((f) => attachBase64(f.name, f.base64, f.mime, f.size));
-      return true;
+      const actionId = newAttachAction();
+      let any = false;
+      for (const f of items) {
+        if (attachBase64(f.name, f.base64, f.mime, f.size, actionId)) any = true;
+      }
+      return any;
     } catch {
       return false;
     }

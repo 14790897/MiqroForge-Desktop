@@ -471,6 +471,40 @@ test.describe('File Attachment Chips', () => {
     await expect(composerChips(page).getByText('pasted_note.txt')).toBeVisible({ timeout: 10_000 });
   });
 
+  test('Plain path text paste is not swallowed', async () => {
+    const prevented = await page.evaluate(() => {
+      const dt = new DataTransfer();
+      dt.setData('text/plain', 'C:\\Users\\Alice\\Desktop\\report.pdf');
+      const ev = new ClipboardEvent('paste', {
+        clipboardData: dt,
+        bubbles: true,
+      } as ClipboardEventInit);
+      window.dispatchEvent(ev);
+      return ev.defaultPrevented;
+    });
+    expect(prevented).toBe(false);
+  });
+
+  test('openBytes rejects non-allowlisted extension', async () => {
+    const res = await page.evaluate(async () => {
+      const b64 = btoa('MZ');
+      return (window as any).miqi.files.openBytes('evil.exe', b64);
+    });
+    expect(res.opened).toBe(false);
+    expect(String(res.error)).toContain('allowlist');
+  });
+
+  test('Same file can be attached twice (no false dedupe)', async () => {
+    await attachFile(page, FILES.pdf);
+    await expect(composerChips(page).getByText('board_report.pdf')).toHaveCount(1, {
+      timeout: 10_000,
+    });
+    await attachFile(page, FILES.pdf);
+    await expect(composerChips(page).getByText('board_report.pdf')).toHaveCount(2, {
+      timeout: 10_000,
+    });
+  });
+
   test('Send button disabled while extracting', async () => {
     await attachFile(page, FILES.largePdf);
     const sendBtn = page
