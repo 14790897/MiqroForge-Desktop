@@ -50,6 +50,7 @@ import type {
   FilesOpenExternalResult,
   FilesOpenContainingFolderResult,
   FilesSaveAsResult,
+  ClipboardReadFilesResult,
   HtmlOpenInBrowserResult,
   DocumentsParseResult,
   TrackedFileInfo,
@@ -511,6 +512,9 @@ const api = {
   clipboard: {
     writeText: (text: string): Promise<{ ok: boolean }> =>
       ipcRenderer.invoke(IPC.CLIPBOARD_WRITE_TEXT, { text }),
+    /** Ctrl+V：主进程读系统剪贴板里的文件/图片（Windows 复制文件在 Chromium paste 事件里拿不到）。 */
+    readFiles: (): Promise<ClipboardReadFilesResult> =>
+      ipcRenderer.invoke(IPC.CLIPBOARD_READ_FILES),
   },
 
   // -- Document parsing ----------------------------------------------------

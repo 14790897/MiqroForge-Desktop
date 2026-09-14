@@ -2576,6 +2576,14 @@ export function ChatConsole({
   const [streaming, setStreaming] = useState(false);
   const [copiedIdx, setCopiedIdx] = useState<number | null>(null);
   const [attachments, setAttachments] = useState<Attachment[]>([]);
+  /** 去重：同一文件（名+大小）1s 内只挂一次——浏览器 paste 与主进程剪贴板读取可能都触发。 */
+  const lastAttachRef = useRef<{ key: string; ts: number }>({ key: '', ts: 0 });
+  const shouldAcceptAttach = (key: string) => {
+    const now = Date.now();
+    if (lastAttachRef.current.key === key && now - lastAttachRef.current.ts < 1000) return false;
+    lastAttachRef.current = { key, ts: now };
+    return true;
+  };
   const [historyLoaded, setHistoryLoaded] = useState(false);
   const [downloadingPaperId, setDownloadingPaperId] = useState<string | null>(null);
   /** #668 补：论文下载结果反馈（paperId → done+savePath / failed+error） */
@@ -4041,6 +4049,7 @@ export function ChatConsole({
 
   // 统一把 File 转成 Attachment：input change / 剪贴板 / 拖拽共用。
   const attachFromFile = useCallback((file: File) => {
+    if (!shouldAcceptAttach(`${file.name}:${file.size}`)) return;
     {
       const isImage = file.type.startsWith('image/');
       const isDocument = DOCUMENT_SUFFIXES_RE.test(file.name);
@@ -4153,13 +4162,62 @@ export function ChatConsole({
         }
       }
       if (files.length === 0 && dt.files?.length) files.push(...Array.from(dt.files));
-      if (files.length === 0) return;
+      if (files.length === 0) {
+        // Windows 复制文件时剪贴板同时带路径文本；避免把它当文字粘进输入框
+        const text = dt.getData('text/plain') ?? '';
+        if (/^\s*(?:[A-Za-z]:[\\/]|\\\\|file:\/\/)/m.test(text)) e.preventDefault();
+        return;
+      }
       e.preventDefault();
       files.forEach(attachFromFile);
     };
     window.addEventListener('paste', onPaste);
     return () => window.removeEventListener('paste', onPaste);
   }, [attachFromFile]);
+
+  // 主进程读系统剪贴板（Ctrl+V）：Windows「复制文件」/截图在 Chromium 的 paste 事件里
+  // 拿不到，改由主进程读 CF_HDROP/剪贴板图片，再作为附件挂上。
+  const attachBase64 = useCallback((name: string, base64: string, mime: string, size: number) => {
+    if (!shouldAcceptAttach(`${name}:${size}`)) return;
+    if (mime.startsWith('image/')) {
+      setAttachments((prev) => [
+        ...prev,
+        { name, type: 'image', dataUrl: `data:${mime};base64,${base64}`, size },
+      ]);
+      return;
+    }
+    const ext = name.split('.').pop()?.toLowerCase() ?? '';
+    const isServerParsed = /^(docx|doc|pptx|ppt|xlsx|xls|odt|odp|ods|rtf)$/i.test(ext);
+    setAttachments((prev) => [
+      ...prev,
+      {
+        name,
+        type: 'document',
+        dataBase64: base64,
+        dataUrl: `data:${mime};base64,${base64}`,
+        size,
+        mimeType: mime,
+        status: isServerParsed ? 'pending' : 'done',
+      },
+    ]);
+  }, []);
+
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (!(e.ctrlKey || e.metaKey) || e.key.toLowerCase() !== 'v') return;
+      void (async () => {
+        try {
+          const res = await window.miqi.clipboard.readFiles();
+          const items = [...(res?.files ?? []), ...(res?.image ? [res.image] : [])];
+          for (const f of items) attachBase64(f.name, f.base64, f.mime, f.size);
+        } catch {
+          /* clipboard unavailable */
+        }
+      })();
+    };
+    window.addEventListener('keydown', onKeyDown, true);
+    return () => window.removeEventListener('keydown', onKeyDown, true);
+  }, [attachBase64]);
 
   const removeAttachment = (idx: number) =>
     setAttachments((prev) => prev.filter((_, i) => i !== idx));

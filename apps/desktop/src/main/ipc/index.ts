@@ -2,10 +2,18 @@ import { electron } from '../../shared/electron';
 import { spawn, spawnSync } from 'child_process';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync, unlinkSync } from 'fs';
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  statSync,
+  writeFileSync,
+  unlinkSync,
+} from 'fs';
 import { homedir, tmpdir } from 'os';
 import { randomUUID } from 'crypto';
-import { join } from 'path';
+import { basename, join } from 'path';
 import type { BrowserWindow } from 'electron';
 import type { BridgeManager } from '../bridge';
 import {
@@ -73,7 +81,7 @@ import {
   resolveWorkspacePath,
 } from './workspace-path';
 
-const { ipcMain, dialog, shell, app } = electron;
+const { ipcMain, dialog, shell, app, clipboard } = electron;
 
 function readWorkspaceLogLines(
   projectRoot: string,
@@ -2061,6 +2069,90 @@ for m in ("pydantic", "httpx", "loguru"):
       }
     }, 10 * 60_000);
     return error ? { opened: false, path: tmpPath, error } : { opened: true, path: tmpPath };
+  });
+
+  // -- Read files/images from the SYSTEM clipboard (Ctrl+V) ---------------
+  // Windows「复制文件」只提供 CF_HDROP，Chromium 的 paste 事件拿不到；改在主进程读：
+  // FileNameW/FileName → 路径列表；否则 readImage()（截图）。本 handler 不接收渲染层
+  // 参数（路径来自系统剪贴板），因此渲染层无法借它任意读盘。
+  ipcMain.handle(IPC.CLIPBOARD_READ_FILES, () => {
+    const MAX = 25 * 1024 * 1024;
+    type ClipFile = { name: string; base64: string; mime: string; size: number };
+    const files: ClipFile[] = [];
+    let image: ClipFile | undefined;
+
+    const mimeOf = (p: string): string => {
+      const e = (p.split('.').pop() || '').toLowerCase();
+      const m: Record<string, string> = {
+        png: 'image/png',
+        jpg: 'image/jpeg',
+        jpeg: 'image/jpeg',
+        gif: 'image/gif',
+        webp: 'image/webp',
+        bmp: 'image/bmp',
+        pdf: 'application/pdf',
+        txt: 'text/plain',
+        md: 'text/markdown',
+        csv: 'text/csv',
+        json: 'application/json',
+        xml: 'application/xml',
+        zip: 'application/zip',
+        docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+      };
+      return m[e] || 'application/octet-stream';
+    };
+
+    try {
+      for (const fmt of ['FileNameW', 'FileName']) {
+        let buf: Buffer;
+        try {
+          buf = clipboard.readBuffer(fmt);
+        } catch {
+          continue;
+        }
+        if (!buf || buf.length === 0) continue;
+        const text = fmt.endsWith('W') ? buf.toString('utf16le') : buf.toString('latin1');
+        const paths = text
+          .split('\0')
+          .map((s) => s.trim())
+          .filter(Boolean);
+        for (const p of paths) {
+          try {
+            const st = statSync(p);
+            if (!st.isFile() || st.size > MAX) continue;
+            files.push({
+              name: basename(p),
+              base64: readFileSync(p).toString('base64'),
+              mime: mimeOf(p),
+              size: st.size,
+            });
+          } catch {
+            /* skip unreadable */
+          }
+        }
+        if (files.length > 0) break;
+      }
+
+      if (files.length === 0) {
+        const img = clipboard.readImage();
+        if (img && !img.isEmpty()) {
+          const png = img.toPNG();
+          if (png.length > 0 && png.length <= MAX) {
+            image = {
+              name: `pasted-image-${Date.now()}.png`,
+              base64: png.toString('base64'),
+              mime: 'image/png',
+              size: png.length,
+            };
+          }
+        }
+      }
+    } catch {
+      /* clipboard unavailable */
+    }
+    return { files, image };
   });
 
   // -- Open an HTML string in the system default browser -------------------
