@@ -2603,6 +2603,10 @@ export function ChatConsole({
     act.seen.add(key);
     return true;
   };
+  /** Ctrl+V 有两条通道：原生 paste 与主进程读剪贴板。优先让原生 paste 处理，
+   *  150ms 内没拿到文件才回退主进程读——否则截图会被两条通道各挂一次。 */
+  const pendingPasteTimerRef = useRef<number | null>(null);
+  const nativePasteHandledRef = useRef(false);
   const [historyLoaded, setHistoryLoaded] = useState(false);
   const [downloadingPaperId, setDownloadingPaperId] = useState<string | null>(null);
   /** #668 补：论文下载结果反馈（paperId → done+savePath / failed+error） */
@@ -4068,6 +4072,10 @@ export function ChatConsole({
 
   // 统一把 File 转成 Attachment：input change / 剪贴板 / 拖拽共用。
   const attachFromFile = useCallback((file: File, actionId: string): boolean => {
+    // 与主进程剪贴板一致的单文件上限：浏览器 File（选择/拖拽/paste）此前没有限额，
+    // 超大文件会直接读进渲染层内存。
+    const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
+    if (file.size > MAX_ATTACHMENT_BYTES) return false;
     if (!acceptInAttachAction(actionId, `${file.name}:${file.size}`)) return false;
     {
       const isImage = file.type.startsWith('image/');
@@ -4190,8 +4198,16 @@ export function ChatConsole({
       for (const f of files) {
         if (attachFromFile(f, actionId)) any = true;
       }
-      // 仅当确实挂上附件时才阻止默认（避免把文件路径文本也插进输入框）
-      if (any) e.preventDefault();
+      // 仅当确实挂上附件时才阻止默认（避免把文件路径文本也插进输入框）；
+      // 同时标记「原生 paste 已处理」并取消主进程读取的延迟回退，避免重复挂载。
+      if (any) {
+        nativePasteHandledRef.current = true;
+        if (pendingPasteTimerRef.current !== null) {
+          window.clearTimeout(pendingPasteTimerRef.current);
+          pendingPasteTimerRef.current = null;
+        }
+        e.preventDefault();
+      }
     };
     window.addEventListener('paste', onPaste);
     return () => window.removeEventListener('paste', onPaste);
@@ -4248,10 +4264,18 @@ export function ChatConsole({
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       if (!(e.ctrlKey || e.metaKey) || e.key.toLowerCase() !== 'v') return;
-      void pasteClipboardFiles();
+      nativePasteHandledRef.current = false;
+      if (pendingPasteTimerRef.current !== null) window.clearTimeout(pendingPasteTimerRef.current);
+      pendingPasteTimerRef.current = window.setTimeout(() => {
+        pendingPasteTimerRef.current = null;
+        if (!nativePasteHandledRef.current) void pasteClipboardFiles();
+      }, 150);
     };
     window.addEventListener('keydown', onKeyDown, true);
-    return () => window.removeEventListener('keydown', onKeyDown, true);
+    return () => {
+      window.removeEventListener('keydown', onKeyDown, true);
+      if (pendingPasteTimerRef.current !== null) window.clearTimeout(pendingPasteTimerRef.current);
+    };
   }, [pasteClipboardFiles]);
 
   const removeAttachment = (idx: number) =>

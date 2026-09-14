@@ -505,6 +505,14 @@ test.describe('File Attachment Chips', () => {
     });
   });
 
+  test('Oversized file is rejected over the 25MB cap', async () => {
+    const big = path.join(FIXTURE_DIR, 'big_26mb.bin');
+    fs.writeFileSync(big, Buffer.alloc(26 * 1024 * 1024));
+    await attachFile(page, big);
+    await page.waitForTimeout(600);
+    await expect(composerChips(page).getByText('big_26mb.bin')).toHaveCount(0);
+  });
+
   test('Send button disabled while extracting', async () => {
     await attachFile(page, FILES.largePdf);
     const sendBtn = page
