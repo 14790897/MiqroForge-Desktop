@@ -269,6 +269,27 @@ class TestFailClosedUnchanged:
         assert "C:/Users/me/Documents" not in roots
         assert granted in roots
 
+    async def test_grant_still_gated_by_auto_user_dirs(self, tmp_path: Path):
+        """会话授权走的是 #821 的 ``_user_roots`` 通道，因此仍受
+        ``tools.auto_user_dirs`` 总闸约束：关闭时 exec 的写作用域保持不变
+        （fail-closed 只增不减；文件工具侧的卡片授权不受影响）。
+
+        这是刻意的边界而不是漏接：给卡片授权开一条独立于该配置的 exec 通道，
+        需要在 ``ExecTool`` 里新增消费面（本 issue 明确不动 shell.py 行为）。
+        """
+        outside = await _grant_via_file_tool(tmp_path, choice="always_dir")
+        granted = str(outside.resolve())
+        roots = await _injected_roots("sess-A")
+        assert granted in roots  # 注入值里仍然带着
+
+        exec_tool = ExecTool(
+            working_dir=str(tmp_path / "ws"),
+            shared_roots=[tmp_path / "ws"],
+            allow_user_dirs=False,
+        )
+        assert granted not in exec_tool._exec_rw_binds(roots)
+        assert granted not in exec_tool._guard_write_roots(roots)
+
     async def test_injection_not_mutated_by_exec_consumers(self, tmp_path: Path):
         """护栏/绑定消费注入值不会改动 store 内容（只读语义）。"""
         outside = await _grant_via_file_tool(tmp_path, choice="always_dir")
