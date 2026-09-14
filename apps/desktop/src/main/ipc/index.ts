@@ -2002,20 +2002,21 @@ for m in ("pydantic", "httpx", "loguru"):
     const rawName = typeof p?.name === 'string' && p.name ? p.name : 'file';
     const base64 = typeof p?.base64 === 'string' ? p.base64 : '';
     if (!base64) return { opened: false, path: rawName, error: 'Empty payload' };
+    // 本 IPC 自带硬上限（25MB 原始字节 ≈ 34MB base64），安全策略不依赖调用方
+    if (base64.length > 36 * 1024 * 1024) {
+      return { opened: false, path: rawName, error: 'Payload too large' };
+    }
 
     // 安全（CodeRabbit #1048 / CWE-434）：白名单——仅「安全可打开」的类型交给系统
     // 默认应用，其余（可执行/脚本宿主/宏文档等）一律拒绝，调用方在被拒时不得回退。
     const ALLOWED_OPEN_EXTS = new Set([
       'pdf',
-      'doc',
       'docx',
       'odt',
       'rtf',
-      'xls',
       'xlsx',
       'ods',
       'csv',
-      'ppt',
       'pptx',
       'odp',
       'txt',

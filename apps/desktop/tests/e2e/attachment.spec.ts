@@ -513,6 +513,19 @@ test.describe('File Attachment Chips', () => {
     await expect(composerChips(page).getByText('big_26mb.bin')).toHaveCount(0);
   });
 
+  test('Total attachment size cap blocks the overflow file', async () => {
+    const a = path.join(FIXTURE_DIR, 'big_a.bin');
+    const b = path.join(FIXTURE_DIR, 'big_b.bin');
+    fs.writeFileSync(a, Buffer.alloc(22 * 1024 * 1024));
+    fs.writeFileSync(b, Buffer.alloc(22 * 1024 * 1024));
+    await attachFile(page, a);
+    await page.waitForTimeout(500);
+    await attachFile(page, b);
+    await page.waitForTimeout(700);
+    await expect(composerChips(page).getByText('big_a.bin')).toHaveCount(1);
+    await expect(composerChips(page).getByText('big_b.bin')).toHaveCount(0);
+  });
+
   test('Send button disabled while extracting', async () => {
     await attachFile(page, FILES.largePdf);
     const sendBtn = page

@@ -2590,10 +2590,6 @@ export function ChatConsole({
     attachActionRef.current = { id, ts: Date.now(), seen: new Set<string>() };
     return id;
   };
-  const crossChannelAttachAction = () => {
-    const cur = attachActionRef.current;
-    return cur.id && Date.now() - cur.ts < 500 ? cur.id : newAttachAction();
-  };
   const acceptInAttachAction = (actionId: string, key: string) => {
     if (attachActionRef.current.id !== actionId) {
       attachActionRef.current = { id: actionId, ts: Date.now(), seen: new Set<string>() };
@@ -2604,10 +2600,35 @@ export function ChatConsole({
     act.seen.add(key);
     return true;
   };
-  /** Ctrl+V 有两条通道：原生 paste 与主进程读剪贴板。优先让原生 paste 处理，
-   *  150ms 内没拿到文件才回退主进程读——否则截图会被两条通道各挂一次。 */
-  const pendingPasteTimerRef = useRef<number | null>(null);
-  const nativePasteHandledRef = useRef(false);
+  /** Ctrl+V 有两条通道：原生 paste 与主进程读剪贴板。keydown 只登记一个 token，
+   *  真正的 paste 事件决定是否取消 fallback；若浏览器始终没给 paste，再由 timeout
+   *  走主进程读取。两条通道共用同一 token，并按「内容特征」(size:mime) 去重，
+   *  避免同名不同源（image.png vs pasted-image-*.png）绕过 name:size 去重。 */
+  const pendingPasteRef = useRef<{ token: string | null; timer: number | null }>({
+    token: null,
+    timer: null,
+  });
+  const recentContentRef = useRef<{ key: string; ts: number }[]>([]);
+  const seenContentRecently = (key: string) => {
+    const now = Date.now();
+    const arr = recentContentRef.current.filter((e) => now - e.ts < 1500);
+    if (arr.some((e) => e.key === key)) {
+      recentContentRef.current = arr;
+      return true;
+    }
+    arr.push({ key, ts: now });
+    recentContentRef.current = arr.slice(-12);
+    return false;
+  };
+
+  /** 附件总量上限（与主进程剪贴板一致）：renderer 侧 input/drag/paste 三入口统一。 */
+  const MAX_TOTAL_ATTACHMENT_BYTES = 40 * 1024 * 1024;
+  const attachmentsRef = useRef<Attachment[]>([]);
+  useEffect(() => {
+    attachmentsRef.current = attachments;
+  }, [attachments]);
+  const currentAttachmentsBytes = () =>
+    attachmentsRef.current.reduce((sum, a) => sum + (a.size || 0), 0);
   const [historyLoaded, setHistoryLoaded] = useState(false);
   const [downloadingPaperId, setDownloadingPaperId] = useState<string | null>(null);
   /** #668 补：论文下载结果反馈（paperId → done+savePath / failed+error） */
@@ -4072,104 +4093,111 @@ export function ChatConsole({
   const handleAttachClick = useCallback(() => fileInputRef.current?.click(), []);
 
   // 统一把 File 转成 Attachment：input change / 剪贴板 / 拖拽共用。
-  const attachFromFile = useCallback((file: File, actionId: string): boolean => {
-    // 与主进程剪贴板一致的单文件上限：浏览器 File（选择/拖拽/paste）此前没有限额，
-    // 超大文件会直接读进渲染层内存。
-    const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
-    if (file.size > MAX_ATTACHMENT_BYTES) return false;
-    if (!acceptInAttachAction(actionId, `${file.name}:${file.size}`)) return false;
-    {
-      const isImage = file.type.startsWith('image/');
-      const isDocument = DOCUMENT_SUFFIXES_RE.test(file.name);
-      const isTextLike = TEXT_SUFFIXES_RE.test(file.name) || file.type.startsWith('text/');
-
-      if (isTextLike && !isDocument) {
-        // Plain text files — read directly as text
-        const reader = new FileReader();
-        reader.onload = () =>
-          setAttachments((prev) => [
-            ...prev,
-            { name: file.name, type: 'text', content: reader.result as string, size: file.size },
-          ]);
-        reader.readAsText(file);
-      } else if (isTextLike && isDocument) {
-        // Markdown/text files detected as documents — read as text AND as base64 for server fallback
-        const reader = new FileReader();
-        reader.onload = () => {
-          const base64 = (reader.result as string).split(',')[1];
-          const textContent = new TextDecoder().decode(
-            Uint8Array.from(atob(base64), (c) => c.charCodeAt(0))
-          );
-          setAttachments((prev) => [
-            ...prev,
-            {
-              name: file.name,
-              type: 'document',
-              dataBase64: base64,
-              content: textContent,
-              dataUrl: reader.result as string,
-              size: file.size,
-              mimeType: file.type || getMimeTypeFromName(file.name),
-              status: 'pending' as const,
-            },
-          ]);
-        };
-        reader.readAsDataURL(file);
-      } else if (isDocument) {
-        const reader = new FileReader();
-        reader.onload = () => {
-          const base64 = (reader.result as string).split(',')[1];
-          const ext = file.name.split('.').pop()?.toLowerCase() ?? '';
-          // PDF/MD/text parse instantly client-side → done; Office/RTF needs server → pending
-          const isServerParsed = /^(docx|doc|pptx|ppt|xlsx|xls|odt|odp|ods|rtf)$/i.test(ext);
-          const parseStatus: Attachment['status'] = isServerParsed ? 'pending' : 'done';
-
-          setAttachments((prev) => [
-            ...prev,
-            {
-              name: file.name,
-              type: 'document',
-              dataUrl: reader.result as string,
-              dataBase64: base64,
-              size: file.size,
-              mimeType: file.type || getMimeTypeFromName(file.name),
-              status: parseStatus,
-            },
-          ]);
-        };
-        reader.readAsDataURL(file);
-      } else if (isImage) {
-        const reader = new FileReader();
-        reader.onload = () =>
-          setAttachments((prev) => [
-            ...prev,
-            { name: file.name, type: 'image', dataUrl: reader.result as string, size: file.size },
-          ]);
-        reader.readAsDataURL(file);
-      } else {
-        // 未知类型：保留字节按文档收下（避免“粘贴/拖入后毫无反应”）
-        const reader = new FileReader();
-        reader.onload = () => {
-          const base64 = (reader.result as string).split(',')[1];
-          const name = file.name || `pasted-file-${Date.now()}`;
-          setAttachments((prev) => [
-            ...prev,
-            {
-              name,
-              type: 'document',
-              dataBase64: base64,
-              dataUrl: reader.result as string,
-              size: file.size,
-              mimeType: file.type || getMimeTypeFromName(name),
-              status: 'done' as const,
-            },
-          ]);
-        };
-        reader.readAsDataURL(file);
+  const attachFromFile = useCallback(
+    (file: File, actionId: string, dedupeContent = false): boolean => {
+      const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
+      if (file.size > MAX_ATTACHMENT_BYTES) return false;
+      if (currentAttachmentsBytes() + file.size > MAX_TOTAL_ATTACHMENT_BYTES) return false;
+      // 内容级去重仅用于「剪贴板/粘贴」双通道；用户显式选择/拖拽同一文件应允许重复添加
+      if (dedupeContent) {
+        const mimeKey = file.type || (file.name.split('.').pop() || '').toLowerCase();
+        if (seenContentRecently(`${file.size}:${mimeKey}`)) return false;
       }
-    }
-    return true;
-  }, []);
+      if (!acceptInAttachAction(actionId, `${file.name}:${file.size}`)) return false;
+      {
+        const isImage = file.type.startsWith('image/');
+        const isDocument = DOCUMENT_SUFFIXES_RE.test(file.name);
+        const isTextLike = TEXT_SUFFIXES_RE.test(file.name) || file.type.startsWith('text/');
+
+        if (isTextLike && !isDocument) {
+          // Plain text files — read directly as text
+          const reader = new FileReader();
+          reader.onload = () =>
+            setAttachments((prev) => [
+              ...prev,
+              { name: file.name, type: 'text', content: reader.result as string, size: file.size },
+            ]);
+          reader.readAsText(file);
+        } else if (isTextLike && isDocument) {
+          // Markdown/text files detected as documents — read as text AND as base64 for server fallback
+          const reader = new FileReader();
+          reader.onload = () => {
+            const base64 = (reader.result as string).split(',')[1];
+            const textContent = new TextDecoder().decode(
+              Uint8Array.from(atob(base64), (c) => c.charCodeAt(0))
+            );
+            setAttachments((prev) => [
+              ...prev,
+              {
+                name: file.name,
+                type: 'document',
+                dataBase64: base64,
+                content: textContent,
+                dataUrl: reader.result as string,
+                size: file.size,
+                mimeType: file.type || getMimeTypeFromName(file.name),
+                status: 'pending' as const,
+              },
+            ]);
+          };
+          reader.readAsDataURL(file);
+        } else if (isDocument) {
+          const reader = new FileReader();
+          reader.onload = () => {
+            const base64 = (reader.result as string).split(',')[1];
+            const ext = file.name.split('.').pop()?.toLowerCase() ?? '';
+            // PDF/MD/text parse instantly client-side → done; Office/RTF needs server → pending
+            const isServerParsed = /^(docx|doc|pptx|ppt|xlsx|xls|odt|odp|ods|rtf)$/i.test(ext);
+            const parseStatus: Attachment['status'] = isServerParsed ? 'pending' : 'done';
+
+            setAttachments((prev) => [
+              ...prev,
+              {
+                name: file.name,
+                type: 'document',
+                dataUrl: reader.result as string,
+                dataBase64: base64,
+                size: file.size,
+                mimeType: file.type || getMimeTypeFromName(file.name),
+                status: parseStatus,
+              },
+            ]);
+          };
+          reader.readAsDataURL(file);
+        } else if (isImage) {
+          const reader = new FileReader();
+          reader.onload = () =>
+            setAttachments((prev) => [
+              ...prev,
+              { name: file.name, type: 'image', dataUrl: reader.result as string, size: file.size },
+            ]);
+          reader.readAsDataURL(file);
+        } else {
+          // 未知类型：保留字节按文档收下（避免“粘贴/拖入后毫无反应”）
+          const reader = new FileReader();
+          reader.onload = () => {
+            const base64 = (reader.result as string).split(',')[1];
+            const name = file.name || `pasted-file-${Date.now()}`;
+            setAttachments((prev) => [
+              ...prev,
+              {
+                name,
+                type: 'document',
+                dataBase64: base64,
+                dataUrl: reader.result as string,
+                size: file.size,
+                mimeType: file.type || getMimeTypeFromName(name),
+                status: 'done' as const,
+              },
+            ]);
+          };
+          reader.readAsDataURL(file);
+        }
+      }
+      return true;
+    },
+    []
+  );
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const actionId = newAttachAction();
@@ -4194,21 +4222,17 @@ export function ChatConsole({
       if (files.length === 0 && dt.files?.length) files.push(...Array.from(dt.files));
       // 没有文件 → 交给浏览器默认行为（纯文本/路径文本都照常粘贴，绝不吞）
       if (files.length === 0) return;
-      const actionId = crossChannelAttachAction();
+      // 复用 keydown 登记的 token（若有），并取消主进程读取的 fallback
+      const pending = pendingPasteRef.current;
+      const actionId = pending.token ?? newAttachAction();
+      if (pending.timer !== null) window.clearTimeout(pending.timer);
+      pendingPasteRef.current = { token: null, timer: null };
       let any = false;
       for (const f of files) {
-        if (attachFromFile(f, actionId)) any = true;
+        if (attachFromFile(f, actionId, true)) any = true;
       }
-      // 仅当确实挂上附件时才阻止默认（避免把文件路径文本也插进输入框）；
-      // 同时标记「原生 paste 已处理」并取消主进程读取的延迟回退，避免重复挂载。
-      if (any) {
-        nativePasteHandledRef.current = true;
-        if (pendingPasteTimerRef.current !== null) {
-          window.clearTimeout(pendingPasteTimerRef.current);
-          pendingPasteTimerRef.current = null;
-        }
-        e.preventDefault();
-      }
+      // 仅当确实挂上附件时才阻止默认（避免把文件路径文本也插进输入框）
+      if (any) e.preventDefault();
     };
     window.addEventListener('paste', onPaste);
     return () => window.removeEventListener('paste', onPaste);
@@ -4218,6 +4242,9 @@ export function ChatConsole({
   // 拿不到，改由主进程读 CF_HDROP/剪贴板图片，再作为附件挂上。
   const attachBase64 = useCallback(
     (name: string, base64: string, mime: string, size: number, actionId: string): boolean => {
+      if (size > 25 * 1024 * 1024) return false;
+      if (currentAttachmentsBytes() + size > MAX_TOTAL_ATTACHMENT_BYTES) return false;
+      if (seenContentRecently(`${size}:${mime}`)) return false;
       if (!acceptInAttachAction(actionId, `${name}:${size}`)) return false;
       if (mime.startsWith('image/')) {
         setAttachments((prev) => [
@@ -4246,36 +4273,45 @@ export function ChatConsole({
   );
 
   // 剪贴板 → 附件（主进程读）：Ctrl+V 与右键「粘贴」共用；返回是否挂了文件
-  const pasteClipboardFiles = useCallback(async (): Promise<boolean> => {
-    try {
-      const res = await window.miqi.clipboard.readFiles();
-      const items = [...(res?.files ?? []), ...(res?.image ? [res.image] : [])];
-      if (items.length === 0) return false;
-      const actionId = newAttachAction();
-      let any = false;
-      for (const f of items) {
-        if (attachBase64(f.name, f.base64, f.mime, f.size, actionId)) any = true;
+  const pasteClipboardFiles = useCallback(
+    async (token?: string): Promise<boolean> => {
+      try {
+        const res = await window.miqi.clipboard.readFiles();
+        const items = [...(res?.files ?? []), ...(res?.image ? [res.image] : [])];
+        if (items.length === 0) return false;
+        const actionId = token ?? newAttachAction();
+        let any = false;
+        for (const f of items) {
+          if (attachBase64(f.name, f.base64, f.mime, f.size, actionId)) any = true;
+        }
+        return any;
+      } catch {
+        return false;
       }
-      return any;
-    } catch {
-      return false;
-    }
-  }, [attachBase64]);
+    },
+    [attachBase64]
+  );
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       if (!(e.ctrlKey || e.metaKey) || e.key.toLowerCase() !== 'v') return;
-      nativePasteHandledRef.current = false;
-      if (pendingPasteTimerRef.current !== null) window.clearTimeout(pendingPasteTimerRef.current);
-      pendingPasteTimerRef.current = window.setTimeout(() => {
-        pendingPasteTimerRef.current = null;
-        if (!nativePasteHandledRef.current) void pasteClipboardFiles();
-      }, 150);
+      // 只登记一个 token；真正的 paste 事件会消费它并取消 fallback。
+      const token = newAttachAction();
+      const p = pendingPasteRef.current;
+      if (p.timer !== null) window.clearTimeout(p.timer);
+      p.token = token;
+      p.timer = window.setTimeout(() => {
+        if (pendingPasteRef.current.token === token) {
+          pendingPasteRef.current = { token: null, timer: null };
+          void pasteClipboardFiles(token);
+        }
+      }, 400);
     };
     window.addEventListener('keydown', onKeyDown, true);
     return () => {
       window.removeEventListener('keydown', onKeyDown, true);
-      if (pendingPasteTimerRef.current !== null) window.clearTimeout(pendingPasteTimerRef.current);
+      const p = pendingPasteRef.current;
+      if (p.timer !== null) window.clearTimeout(p.timer);
     };
   }, [pasteClipboardFiles]);
 
