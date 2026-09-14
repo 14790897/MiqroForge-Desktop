@@ -475,7 +475,7 @@ async def sessions_list_archived_handler(
     """List only archived sessions (client-scoped)."""
     validate_session_params("sessions.list_archived", params)
 
-    from miqi.session.manager import safe_filename
+    from miqi.session.session_keys import session_files_dir_key
 
     sm = _get_session_manager()
     sessions = sm.list_sessions(
@@ -485,7 +485,9 @@ async def sessions_list_archived_handler(
     # Filter to only archived ones (already client-scoped by list_sessions)
     archived = []
     for s in sessions:
-        safe_key = safe_filename(s["key"].replace(":", "_"))
+        # Must match where ``SessionManager.archive`` writes the marker —
+        # ``get_session_dir`` uses this same canonical derivation (#1005).
+        safe_key = session_files_dir_key(s["key"])
         marker = sm.sessions_dir / safe_key / ".archived"
         if marker.exists():
             archived.append(s)

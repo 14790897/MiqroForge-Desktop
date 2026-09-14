@@ -15,6 +15,14 @@ from typing import Any, Iterable
 
 from miqi.agent.tools.base import Tool
 
+# The canonical session-dir derivation moved to the session layer (#1014) so
+# that every writer and reader shares one implementation.  This alias keeps
+# the historical private name importable for the call sites that already use
+# it (``_session_files_dir_for_key`` below, runtime file handlers, session
+# handlers, the tool registry factory) and is asserted to be the very same
+# function object — never re-implement the derivation here.
+from miqi.session.session_keys import session_files_dir_key as _session_files_dir_key
+
 _log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -538,25 +546,11 @@ def _resolve_session_dir(
     return None
 
 
-def _session_files_dir_key(session_key: str) -> str:
-    """Derive the on-disk per-session directory key from a session key.
-
-    Strips the client_id prefix only for fully namespaced keys (three or
-    more colon segments, e.g. ``miqi-desktop:desktop:1786...`` →
-    ``desktop_1786...``) and keeps the whole key for two-segment channel
-    keys (``desktop:1786...`` → ``desktop_1786...``) — matching the disk
-    convention used by ``files.read`` and attachment saving.
-
-    Idempotent: feeding an already-derived key back in returns it
-    unchanged, so callers may pass either the raw key or a derived key
-    (``_tracked_store_root`` relies on this for its dir-name check).
-    """
-    from miqi.utils.helpers import safe_filename
-
-    parts = session_key.split(":")
-    if len(parts) >= 3:
-        parts = parts[1:]
-    return safe_filename("_".join(parts))
+# ``_session_files_dir_key`` is re-exported above from
+# ``miqi.session.session_keys`` (single implementation, #1014).  Its
+# derivation is idempotent — feeding an already-derived key back in returns
+# it unchanged — which ``_tracked_store_root`` relies on for its dir-name
+# check.
 
 
 def _session_files_dir_for_key(
