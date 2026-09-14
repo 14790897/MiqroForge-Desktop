@@ -141,7 +141,7 @@ export function buildMockBridgeScript(opts: MockBridgeOptions = {}): string {
   // 执行，localStorage 可用）。隐私门自身的交互由 e2e/privacy-consent.spec.ts
   // 覆盖。
   try {
-    localStorage.setItem('miqi:privacyConsentVersion', '1.0');
+    localStorage.setItem('miqi:privacyConsentVersion', '2.0');
   } catch (e) {}
 
   // Polyfill requestAnimationFrame with setTimeout so the ChatConsole

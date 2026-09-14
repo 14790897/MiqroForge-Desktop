@@ -10,7 +10,7 @@ async function injectMockAndGoto(
   // Privacy gate (#837) reads localStorage before the app mounts — pre-consent
   // so the chat screen is reachable without scrolling the agreement.
   await page.addInitScript({
-    content: `localStorage.setItem('miqi:privacyConsentVersion', '1.0');`,
+    content: `localStorage.setItem('miqi:privacyConsentVersion', '2.0');`,
   });
   await page.addInitScript({
     content: buildMockBridgeScript({

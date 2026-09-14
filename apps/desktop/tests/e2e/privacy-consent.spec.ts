@@ -1,14 +1,15 @@
 /**
- * Privacy consent gate E2E (issue #837) — 首次启动隐私协议确认门。
+ * 法律文件确认门 E2E (issue #837 / #1068) — 首次启动法律文件确认与设置页查阅。
  *
  * 覆盖四条路径（全部禁用 MIQI_E2E 绕过，走真实确认门）：
- *  1. 拒绝并退出：首次启动展示协议 → 点「拒绝并退出」→ 应用退出；
+ *  1. 拒绝并退出：首次启动展示《温馨提示》→ 点「不同意，退出」→ 应用退出；
  *  2. 同意进入：重启（同一 MIQI_HOME，同意未持久化）→ 门再次出现 →
- *     滚到底部并停留 → 「同意并继续」启用 → 点击 → 主界面加载；
+ *     文内《隐私政策》链接可查看全文 → 倒计时结束后「同意」启用 → 点击 →
+ *     主界面加载；
  *  3. 同意持久化：page.reload() 重挂载 AppShell → 门不再出现（同
  *     readStoredConsent/门判定路径；不重启进程——CI 上 close 后
  *     relaunch 存在桥接端口残留，主界面长期不加载）；
- *  4. 应用内入口：设置 → 隐私协议 页可随时查阅协议文本。
+ *  4. 应用内入口：设置 → 法律文件 页可查阅五份文件全文。
  *
  * serial 模式：测试共享同一个 MIQI_HOME 的同意状态，必须按序执行
  * （playwright.config.ts 全局 fullyParallel）。
@@ -63,8 +64,12 @@ test.describe.serial('Privacy consent gate (#837)', () => {
     }
 
     await expect(page.getByTestId('privacy-consent-gate')).toBeVisible({ timeout: 60_000 });
-    // 协议文本含版本号（中英文均显示 1.0）
-    await expect(page.getByTestId('privacy-consent-text')).toContainText('1.0');
+    // 弹窗内容为律师定稿的《温馨提示》（#1068），版本号随确认门展示
+    await expect(page.getByTestId('privacy-consent-text')).toContainText(
+      '欢迎您使用MiQroForge DeskTop！'
+    );
+    await expect(page.getByTestId('privacy-consent-gate')).toContainText('温馨提示');
+    await expect(page.getByTestId('privacy-consent-gate')).toContainText('2.0');
 
     const closed = electronApp.waitForEvent('close', { timeout: 20_000 }).catch(() => null);
     await page.getByTestId('privacy-consent-decline').click();
@@ -91,49 +96,34 @@ test.describe.serial('Privacy consent gate (#837)', () => {
 
     await expect(page.getByTestId('privacy-consent-gate')).toBeVisible({ timeout: 60_000 });
 
-    // 下拉到底并停留确认：滚动到底部前「同意并继续」必须禁用
+    // 计时设计沿用 #837：倒计时走完前「同意」保持禁用并显示剩余时间
     const agreeBtn = page.getByTestId('privacy-consent-agree');
-    const scrollBox = page.getByTestId('privacy-consent-scroll');
     await expect(agreeBtn).toBeDisabled();
-
-    // 回归：停留计时中滚动容器尺寸变化（窗口缩放/内容重排经 ResizeObserver
-    // 触发 checkOverflow）应重置到底状态，不能靠旧计时放行同意
-    // （CodeRabbit 评审场景）。直接缩小容器模拟——窗口级 resize 在 macOS CI
-    // 上受屏幕分辨率钳制不可靠，而容器是 ResizeObserver 的直接观察对象。
-    await scrollBox.evaluate((el) => {
-      el.scrollTop = el.scrollHeight;
-    });
-    // 倒计时：滚到底后按钮显示剩余时间倒计时（如 "…(3.0s)"）并保持禁用
     await expect(agreeBtn).toContainText(/\(\d+\.\ds\)/);
-    await expect(agreeBtn).toBeDisabled();
-    // 倒计时显示中的截图（PR 证据）
+
+    // 确认门截图（倒计时进行中）
     await page.screenshot({
       path: `test-results/${test.info().title.replace(/\s+/g, '-')}-consent-countdown.png`,
       fullPage: true,
     });
-    await scrollBox.evaluate((el) => {
-      el.style.maxHeight = '40vh'; // 缩小容器 → 溢出增多，此前「到底」失效
-    });
-    // 计时与倒计时一同被 resize 清除，按钮回到无倒计时的禁用态
-    await expect(agreeBtn).not.toContainText('(');
-    // 等过停留时长（3s）——计时已被 resize 清除，按钮保持禁用
-    await page.waitForTimeout(3300);
-    await expect(agreeBtn).toBeDisabled();
 
-    // 恢复容器尺寸：scrollTop 被浏览器钳制回底部（不产生 scroll 事件），
-    // 组件在尺寸变化回调里重新评估并重启停留计时 → 倒计时走完自动启用
-    await scrollBox.evaluate((el) => {
-      el.style.maxHeight = '';
-    });
-    await expect(agreeBtn).toBeEnabled({ timeout: 10_000 });
-    // 倒计时归零后按钮恢复原文案
-    await expect(agreeBtn).not.toContainText('(');
-
-    // 确认门本身的截图（滚动到底、按钮已启用）
+    // 文内《隐私政策》链接打开全文弹窗（律师设计稿的【请插入超链接】落地）
+    await page.getByTestId('privacy-consent-doc-privacy').click();
+    await expect(page.getByTestId('privacy-consent-doc-content')).toBeVisible({ timeout: 10_000 });
+    await expect(page.getByTestId('privacy-consent-doc-content')).toContainText(
+      'MiQroForge DeskTop隐私政策'
+    );
+    await expect(page.getByTestId('privacy-consent-doc-content')).toContainText('2026年9月28日');
     await page.screenshot({
-      path: `test-results/${test.info().title.replace(/\s+/g, '-')}-consent-gate.png`,
+      path: `test-results/${test.info().title.replace(/\s+/g, '-')}-consent-doc-dialog.png`,
       fullPage: true,
     });
+    await page.keyboard.press('Escape');
+    await expect(page.getByTestId('privacy-consent-doc-content')).toHaveCount(0);
+
+    // 倒计时结束（3s）后按钮启用，剩余时间文案消失
+    await expect(agreeBtn).toBeEnabled({ timeout: 10_000 });
+    await expect(agreeBtn).not.toContainText('(');
 
     await agreeBtn.click();
 
@@ -153,9 +143,9 @@ test.describe.serial('Privacy consent gate (#837)', () => {
     await expect(page.getByTestId('privacy-consent-gate')).toHaveCount(0);
     // #1000：进入应用后首屏（空会话欢迎区）有登录卡片入口
     await expect(page.getByTestId('chat-hero-login-card')).toBeVisible({ timeout: 60_000 });
-    // 同意版本已写入 localStorage
+    // 同意版本已写入 localStorage（#1068 起为律师版 2.0）
     const stored = await page.evaluate(() => localStorage.getItem('miqi:privacyConsentVersion'));
-    expect(stored).toBe('1.0');
+    expect(stored).toBe('2.0');
 
     // 实例保持运行，供测试 3/4 复用（避免 close 后 relaunch 的桥接端口残留）
   });
@@ -171,22 +161,35 @@ test.describe.serial('Privacy consent gate (#837)', () => {
     await expect(page.getByTestId('login-step')).toHaveCount(0);
   });
 
-  test('设置页可随时查阅隐私协议', { timeout: 90_000 }, async () => {
+  test('设置页可查阅五份法律文件', { timeout: 90_000 }, async () => {
     // 沿用测试 3 的主界面实例
     await page.getByTestId('nav-system-settings').click();
     await expect(page.getByText('设置', { exact: true }).first()).toBeVisible({
       timeout: 30_000,
     });
 
-    await page.getByRole('tab', { name: /隐私协议/ }).click();
-    await expect(page.getByTestId('settings-privacy-page')).toBeVisible({ timeout: 30_000 });
-    await expect(page.getByTestId('settings-privacy-text')).toContainText('1.0');
-    // CI 的 navigator.language 为 en-US（默认英文）——切到中文验证切换与中文文本
-    await page.getByRole('button', { name: '中文' }).click();
-    await expect(page.getByTestId('settings-privacy-text')).toContainText('隐私协议');
+    // 律师设计稿：侧边栏「隐私协议」更名为「法律文件」
+    await page.getByRole('tab', { name: /法律文件/ }).click();
+    await expect(page.getByTestId('settings-legal-page')).toBeVisible({ timeout: 30_000 });
+    await expect(page.getByTestId('legal-version-badge')).toContainText('2.0');
+    // 默认展示《用户协议》（律师版，生效 2026-09-28）
+    await expect(page.getByTestId('legal-doc-content')).toContainText('用户服务协议');
+    await expect(page.getByTestId('legal-doc-content')).toContainText('2026年9月28日');
+
+    // 逐份切换：目录五项均可见且可打开对应全文
+    const cases: Array<[string, string]> = [
+      ['privacy', 'MiQroForge DeskTop隐私政策'],
+      ['privacy-summary', '隐私政策摘要'],
+      ['data-collection', '个人信息收集清单'],
+      ['data-sharing', '第三方服务清单'],
+    ];
+    for (const [id, marker] of cases) {
+      await page.getByTestId(`legal-nav-${id}`).click();
+      await expect(page.getByTestId('legal-doc-content')).toContainText(marker);
+    }
 
     await page.screenshot({
-      path: `test-results/${test.info().title.replace(/\s+/g, '-')}-settings-privacy.png`,
+      path: `test-results/${test.info().title.replace(/\s+/g, '-')}-settings-legal.png`,
       fullPage: true,
     });
   });
