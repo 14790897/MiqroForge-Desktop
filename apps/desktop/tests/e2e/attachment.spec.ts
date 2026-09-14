@@ -458,6 +458,19 @@ test.describe('File Attachment Chips', () => {
     await expect(chip.getByRole('button', { name: /移除 board_report\.pdf/ })).toBeVisible();
   });
 
+  test('Pasting a file attaches it (window paste)', async () => {
+    await page.evaluate(() => {
+      const dt = new DataTransfer();
+      dt.items.add(
+        new File([new Uint8Array([1, 2, 3])], 'pasted_note.txt', { type: 'text/plain' })
+      );
+      window.dispatchEvent(
+        new ClipboardEvent('paste', { clipboardData: dt, bubbles: true } as ClipboardEventInit)
+      );
+    });
+    await expect(composerChips(page).getByText('pasted_note.txt')).toBeVisible({ timeout: 10_000 });
+  });
+
   test('Send button disabled while extracting', async () => {
     await attachFile(page, FILES.largePdf);
     const sendBtn = page

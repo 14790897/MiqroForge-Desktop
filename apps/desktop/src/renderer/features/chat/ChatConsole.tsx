@@ -4039,8 +4039,9 @@ export function ChatConsole({
   // useCallback (#1042): stable prop for the memoized Composer.
   const handleAttachClick = useCallback(() => fileInputRef.current?.click(), []);
 
-  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    Array.from(e.target.files ?? []).forEach((file) => {
+  // 统一把 File 转成 Attachment：input change / 剪贴板 / 拖拽共用。
+  const attachFromFile = useCallback((file: File) => {
+    {
       const isImage = file.type.startsWith('image/');
       const isDocument = DOCUMENT_SUFFIXES_RE.test(file.name);
       const isTextLike = TEXT_SUFFIXES_RE.test(file.name) || file.type.startsWith('text/');
@@ -4109,17 +4110,56 @@ export function ChatConsole({
           ]);
         reader.readAsDataURL(file);
       } else {
+        // 未知类型：保留字节按文档收下（避免“粘贴/拖入后毫无反应”）
         const reader = new FileReader();
-        reader.onload = () =>
+        reader.onload = () => {
+          const base64 = (reader.result as string).split(',')[1];
+          const name = file.name || `pasted-file-${Date.now()}`;
           setAttachments((prev) => [
             ...prev,
-            { name: file.name, type: 'text', content: reader.result as string, size: file.size },
+            {
+              name,
+              type: 'document',
+              dataBase64: base64,
+              dataUrl: reader.result as string,
+              size: file.size,
+              mimeType: file.type || getMimeTypeFromName(name),
+              status: 'done' as const,
+            },
           ]);
-        reader.readAsText(file);
+        };
+        reader.readAsDataURL(file);
       }
-    });
+    }
+  }, []);
+
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    Array.from(e.target.files ?? []).forEach(attachFromFile);
     e.target.value = '';
   };
+
+  // 全局剪贴板粘贴（Ctrl+V）：文件/图片。用 window 监听以覆盖“焦点不在输入框”的情况；
+  // 仅当剪贴板含文件时拦截，纯文本粘贴不受影响。
+  useEffect(() => {
+    const onPaste = (e: ClipboardEvent) => {
+      const dt = e.clipboardData;
+      if (!dt) return;
+      const files: File[] = [];
+      for (let i = 0; i < (dt.items?.length ?? 0); i++) {
+        const it = dt.items[i];
+        if (it.kind === 'file') {
+          const f = it.getAsFile();
+          if (f) files.push(f);
+        }
+      }
+      if (files.length === 0 && dt.files?.length) files.push(...Array.from(dt.files));
+      if (files.length === 0) return;
+      e.preventDefault();
+      files.forEach(attachFromFile);
+    };
+    window.addEventListener('paste', onPaste);
+    return () => window.removeEventListener('paste', onPaste);
+  }, [attachFromFile]);
 
   const removeAttachment = (idx: number) =>
     setAttachments((prev) => prev.filter((_, i) => i !== idx));
@@ -6133,53 +6173,6 @@ export function ChatConsole({
     fileInputRef.current.dispatchEvent(new Event('change', { bubbles: true }));
   };
 
-  // Handle clipboard paste for files and images (Ctrl+V)
-  const handlePaste = useCallback((e: React.ClipboardEvent) => {
-    const items = e.clipboardData?.items;
-    if (!items) return;
-    for (let i = 0; i < items.length; i++) {
-      const item = items[i];
-      if (item.kind !== 'file') continue;
-      const file = item.getAsFile();
-      if (!file) continue;
-      const isDocument = DOCUMENT_SUFFIXES_RE.test(file.name);
-      if (isDocument) {
-        const reader = new FileReader();
-        reader.onload = () => {
-          const base64 = (reader.result as string).split(',')[1];
-          const ext = file.name.split('.').pop()?.toLowerCase() ?? '';
-          const isServerParsed = /^(docx|doc|pptx|ppt|xlsx|xls|odt|odp|ods|rtf)$/i.test(ext);
-          const parseStatus: Attachment['status'] = isServerParsed ? 'pending' : 'done';
-          setAttachments((prev) => [
-            ...prev,
-            {
-              name: file.name,
-              type: 'document',
-              dataBase64: base64,
-              size: file.size,
-              mimeType: file.type || getMimeTypeFromName(file.name),
-              status: parseStatus,
-            },
-          ]);
-        };
-        reader.readAsDataURL(file);
-      } else if (file.type.startsWith('image/')) {
-        const reader = new FileReader();
-        reader.onload = () =>
-          setAttachments((prev) => [
-            ...prev,
-            {
-              name: file.name || 'pasted-image.png',
-              type: 'image',
-              dataUrl: reader.result as string,
-              size: file.size,
-            },
-          ]);
-        reader.readAsDataURL(file);
-      }
-    }
-  }, []);
-
   const handleCopy = useCallback(async (text: string, idx: number) => {
     // Electron clipboard bridge via main process — navigator.clipboard fails
     // under file:// (non-secure context) in packaged builds; only show
@@ -6545,7 +6538,6 @@ export function ChatConsole({
       style={previewFile ? { pointerEvents: 'none' } : undefined}
       onDrop={handleDrop}
       onDragOver={(e) => e.preventDefault()}
-      onPaste={handlePaste}
     >
       <input
         ref={fileInputRef}
