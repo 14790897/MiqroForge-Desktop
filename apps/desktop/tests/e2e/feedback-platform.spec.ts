@@ -34,11 +34,11 @@ interface RecordedCall {
   body: Record<string, unknown>;
 }
 
-/** 本地 mock 平台服务：记录请求，按 path 返回注入的业务信封。 */
+/** 本地 mock 平台服务：记录请求，按 path 返回注入的业务信封。
+ *  监听 0 号端口（系统分配），避免并行 CI 上固定端口被占用。 */
 function startMockPlatform(
-  baseUrl: string,
   responses: Map<string, { status?: number; body: string; contentType?: string }>
-): Promise<{ server: Server; calls: RecordedCall[] }> {
+): Promise<{ baseUrl: string; server: Server; calls: RecordedCall[] }> {
   const calls: RecordedCall[] = [];
   const server = createServer((req, res) => {
     let raw = '';
@@ -71,9 +71,11 @@ function startMockPlatform(
     });
   });
   return new Promise((resolve) => {
-    // 端口由 baseUrl 决定（spec 先固定端口再指向 mock）。
-    const port = Number(new URL(baseUrl).port);
-    server.listen(port, '127.0.0.1', () => resolve({ server, calls }));
+    server.listen(0, '127.0.0.1', () => {
+      const address = server.address();
+      const port = typeof address === 'object' && address ? address.port : 0;
+      resolve({ baseUrl: `http://127.0.0.1:${port}/api`, server, calls });
+    });
   });
 }
 
@@ -192,10 +194,7 @@ test.describe('Feedback platform channel E2E（issue #1054）', () => {
   });
 
   test('登录态提交成功：平台收到 Bearer + 字段，UI 不提示未同步', async () => {
-    const port = 38931;
-    const baseUrl = `http://127.0.0.1:${port}/api`;
     const started = await startMockPlatform(
-      baseUrl,
       new Map([
         [
           '/api/oauth2/feedback',
@@ -206,7 +205,7 @@ test.describe('Feedback platform channel E2E（issue #1054）', () => {
     server = started.server;
 
     const storePath = join(process.env.TEMP ?? '/tmp', 'qraft-e2e-feedback-ok.json');
-    seedQraftStore(storePath, baseUrl);
+    seedQraftStore(storePath, started.baseUrl);
     process.env[STORE_ENV] = storePath;
 
     fixture = await launchElectronApp();
@@ -230,10 +229,7 @@ test.describe('Feedback platform channel E2E（issue #1054）', () => {
   });
 
   test('access_token 失效且 refresh 作废：提交仍成功 + 未同步提示 + 重登横幅', async () => {
-    const port = 38932;
-    const baseUrl = `http://127.0.0.1:${port}/api`;
     const started = await startMockPlatform(
-      baseUrl,
       new Map([
         [
           '/api/oauth2/feedback',
@@ -254,7 +250,7 @@ test.describe('Feedback platform channel E2E（issue #1054）', () => {
     server = started.server;
 
     const storePath = join(process.env.TEMP ?? '/tmp', 'qraft-e2e-feedback-expired.json');
-    seedQraftStore(storePath, baseUrl);
+    seedQraftStore(storePath, started.baseUrl);
     process.env[STORE_ENV] = storePath;
 
     fixture = await launchElectronApp();
