@@ -125,8 +125,9 @@ test.describe('Write Authorization Card (#864)', () => {
     'write_file 写 workspace 外目录 → 弹写授权卡 → 允许本次 → 写入成功',
     { timeout: LLM_TIMEOUT },
     async () => {
-      const cardArea = page.getByTestId('confirm-card-area');
-      const resolvedArea = page.getByTestId('confirm-card-resolved');
+      // #646-v2：确认卡并进工具链（Hermes 式）——断言页面级；回执用 data-receipt
+      const cardArea = page;
+      const resolvedArea = page.locator('[data-receipt="true"]');
 
       // 跳过 PermissionEngine 的通用「文件操作审批」dialog（legacy 路径会在
       // write_file 进入 tool.execute 之前先弹它），这样本测试能精确断言到
@@ -218,7 +219,7 @@ test.describe('Write Authorization Bypass (#864)', () => {
     'approvals.bypass_all=true 时写 workspace 外目录不弹授权卡直接写入',
     { timeout: LLM_TIMEOUT },
     async () => {
-      const cardArea = page.getByTestId('confirm-card-area');
+      const cardArea = page; // #646-v2：卡并进工具链——页面级断言
       await sendMessage(page, '写授权测试');
 
       const target = join(outDir, 'auth_probe.txt');

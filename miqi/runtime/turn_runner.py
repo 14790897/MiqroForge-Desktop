@@ -713,6 +713,149 @@ class TurnRunner:
                     reasoning_elapsed_s=reasoning_elapsed_s,
                 )
 
+            # #646-v2 (GPT 拍板): harness 任务边界——模型规划输出后、第一个工具
+            # 执行前强制计划确认（Agent execution planning boundary）。
+            # 模型主动弹过 ask_user_plan_confirm 则不重复；自动模式非阻塞不等待。
+            # 实测修正：模型分批调工具（每轮 1-2 个）——按 turn 累计工具名判定
+            # 复杂度，避免每轮单独判定永不达阈值（只有审批弹）。
+            if not getattr(turn, "_plan_confirm_done", False):
+                # GPT 第二轮：累计 phase_history（跨轮阶段检测——任务升级 READ→WRITE）
+                phases = list(getattr(turn, "_plan_phases", []))
+                seen_names = list(getattr(turn, "_plan_seen_tools", []))
+                # CodeRabbit Major ③：累计调用计数（含重复——complexity_score 按调用次数计，
+                # 去重会低估重复 write）；steps/权限仍用唯一 seen_names
+                plan_calls = list(getattr(turn, "_plan_calls", []))
+                for tc in response.tool_calls:
+                    from miqi.execution.task_policy import phase_for_tool
+                    ph = phase_for_tool(tc.name)
+                    if ph:
+                        phases.append(ph)
+                    if tc.name not in seen_names:
+                        seen_names.append(tc.name)
+                    plan_calls.append(tc.name)
+                turn._plan_phases = phases
+                turn._plan_seen_tools = seen_names
+                turn._plan_calls = plan_calls
+                from miqi.execution.task_policy import (
+                    should_plan_confirm,
+                    should_show_timeline,
+                    tool_risk,
+                )
+                policy = getattr(turn, "execution_policy", "edit")
+                if "ask_user_plan_confirm" not in seen_names:
+                    if policy == "auto":
+                        # GPT P0-3：Auto 模式非阻塞 Timeline（复杂任务展示——
+                        # always visible 分级；不等待用户）
+                        if (
+                            should_show_timeline(
+                                seen_names,
+                                produces_artifact=any(
+                                    tool_risk(t) >= 2 for t in seen_names
+                                ),
+                                phase_history=phases,
+                            )
+                            and not getattr(turn, "_plan_timeline_shown", False)
+                        ):
+                            await self._emit_timeline(turn, seen_names)
+                            turn._plan_timeline_shown = True
+                    elif should_plan_confirm(
+                        plan_calls,  # CodeRabbit Major ③：含重复调用计数
+                        mode=policy,
+                        produces_artifact=any(
+                            tool_risk(t) >= 2 for t in seen_names
+                        ),
+                        phase_history=phases,
+                    ):
+                        choice = await self._harness_plan_confirm(turn, seen_names)
+                        if choice == "confirm":
+                            # CodeRabbit Critical ③：仅用户确认（choice_id=confirm）才置位——
+                            # 取消/超时不得跳过后续确认门（否则 write 可绕过安全边界）
+                            turn._plan_confirm_done = True
+                        elif choice == "modify":
+                            # 用户要求修改计划 → 界面保持干净（Hermes 式：审批后
+                            # 无多余消息框）——不 emit AI 消息；前端计划卡置"已修改"
+                            # 态 + 输入框聚焦（lastAdjustAt），用户直接输入调整意见，
+                            # 模型重新规划后弹新计划卡
+                            return TurnResult(
+                                final_content="",
+                                messages=messages,
+                                tools_used=[],
+                                token_usage={},
+                                messages_delta=[],
+                                reasoning=None,
+                            )
+                        else:
+                            # 用户取消/超时 → 终止本轮，不执行任何工具
+                            from miqi.protocol.events import AgentMessageEvent
+                            await self._events.emit(AgentMessageEvent(
+                                turn_id=turn.turn_id,
+                                content="已取消任务：用户未确认执行计划。",
+                            ))
+                            return TurnResult(
+                                final_content="已取消任务：用户未确认执行计划。",
+                                messages=messages,
+                                tools_used=[],
+                                token_usage={},
+                                messages_delta=[{"role": "assistant", "content": "已取消任务：用户未确认执行计划。"}],
+                                reasoning=None,
+                            )
+
+            # ── v3.3 Step 3：确认后冻结 PlanSnapshot + 初始化 TodoState ──
+            # （Plan 步骤 → plan-kind Todo（QUEUED）——模型后续用 todo_write 增量更新）
+            # 条件：本 turn 弹卡且用户确认（_plan_confirm_done=True）——纯读任务不创建
+            if getattr(turn, "_plan_confirm_done", False) and not getattr(turn, "_run_ctx", None):
+                import re
+
+                from miqi.execution.task_policy import plan_card_steps
+                from miqi.runtime.task_objects import (
+                    AgentRunContext,
+                    ApprovedScope,
+                    PlanSnapshot,
+                )
+
+                steps_raw = plan_card_steps([(n, "") for n in seen_names])
+                steps: list[tuple[str, str]] = []
+                used_ids: set[str] = set()
+                for st in steps_raw:
+                    text = str(st.get("name") or st.get("title") or "步骤")
+                    base = re.sub(r"[^a-z0-9\u4e00-\u9fff]+", "-", text.lower()).strip("-") or "step"
+                    sid = base
+                    i = 2
+                    while sid in used_ids:
+                        sid = f"{base}-{i}"
+                        i += 1
+                    used_ids.add(sid)
+                    steps.append((sid, text))
+                ctx = AgentRunContext(session_key=str(getattr(turn, "session_key", "") or ""))
+                ctx.plan_snapshot = PlanSnapshot(
+                    plan_id=f"plan-{turn.turn_id[:8]}",
+                    goal=str(getattr(turn, "user_content", "") or "")[:60],
+                    steps=steps,
+                    approved_scope=ApprovedScope(
+                        sources=[],
+                        artifacts=[],
+                        external_actions=[{"provider": "qraft", "operation": "upload"}]
+                        if any("upload" in n for n in seen_names)
+                        else [],
+                    ),
+                )
+                ctx.todo_state.initialize_from_plan(steps)
+                turn._run_ctx = ctx
+
+                # v3.3 Step 6：确认后注入 todo_write 引导（SHOULD——不强制；
+                # 带步骤 id 清单——模型才能用 todo_write 更新正确条目）
+                todo_ids = "\n".join(f"- {sid}: {text}" for sid, text in steps)
+                messages.append({
+                    "role": "system",
+                    "content": (
+                        "你的任务计划已被用户批准并初始化。\n"
+                        f"已批准步骤（id: 内容）：\n{todo_ids}\n"
+                        "用 todo_write 维护执行进度：开始执行某步前先把它标记为 "
+                        "in_progress，完成后标记 completed；等待用户输入/权限/外部资源时"
+                        "标记 blocked（附 blocked_reason）。每次只发送变化的步骤。"
+                    ),
+                })
+
             # Phase 24: record tool call starts in ledger
             if self._ledger is not None:
                 for tc in response.tool_calls:
@@ -757,9 +900,81 @@ class TurnRunner:
                     tool_display=self._format_tool_hint(tc.name, tc.arguments),
                     arguments=tc.arguments,
                 ))
+                # v3.3 Step 5：ToolEvent → TodoState（observed 单源——模型没调
+                # todo_write 时 harness 写兜底进度；Timeline 只读 TodoState）
+                _run_ctx = getattr(turn, "_run_ctx", None)
+                if _run_ctx is not None and tc.name != "todo_write":
+                    _obs_id = f"obs-{tc.id}"
+                    _display = self._format_tool_hint(tc.name, tc.arguments) or tc.name
+                    _run_ctx.todo_state.merge([{
+                        "id": _obs_id,
+                        "content": _display,
+                        "kind": "observed",
+                        "status": "in_progress",
+                    }])
 
             # Execute tool calls concurrently through ToolRuntime
-            contexts = await self._tools.execute_many(turn, response.tool_calls)
+            # v3.3 Step 5：todo_write 特殊处理——进度协议（不注册表执行，
+            # 用 turn._run_ctx.todo_state；无上下文 → 提示计划未确认）
+            todo_calls = [tc for tc in response.tool_calls if tc.name == "todo_write"]
+            other_calls = [tc for tc in response.tool_calls if tc.name != "todo_write"]
+            contexts = []
+            if todo_calls:
+                import json as _json
+
+                from miqi.agent.tools.todo_write import TodoWriteTool
+
+                run_ctx = getattr(turn, "_run_ctx", None)
+                for tc in todo_calls:
+                    tool = TodoWriteTool(run_ctx.todo_state if run_ctx is not None else None)
+                    # CodeRabbit（8-24）：解析失败时 args 未定义会 UnboundLocalError；
+                    # 解析/执行失败时 status 应为 TOOL_ERROR（不是 SUCCESS）
+                    args: dict[str, Any] = {}
+                    status = OrchestrationResult.SUCCESS
+                    try:
+                        raw_args = getattr(tc, "arguments", None)
+                        args = _json.loads(raw_args) if isinstance(raw_args, str) and raw_args else (raw_args or {})
+                        result_text = await tool.execute(**args)
+                    except Exception as exc:  # pragma: no cover - defensive
+                        result_text = _json.dumps({"status": "error", "reason": str(exc)[:120]}, ensure_ascii=False)
+                        status = OrchestrationResult.TOOL_ERROR
+                    # CodeRabbit Critical ①：构造 ToolExecutionContext（非 OrchestrationResult——
+                    # 后者是枚举，关键字构造直接抛错）
+                    from miqi.execution.orchestrator import ToolExecutionContext
+                    contexts.append(ToolExecutionContext(
+                        tool_name="todo_write",
+                        tool_call_id=tc.id,
+                        arguments=args,
+                        turn_id=turn.turn_id,
+                        thread_id=turn.thread_id,
+                        agent_type=getattr(turn, "agent_type", "main"),
+                        result=result_text,
+                        status=status,
+                        duration_ms=0,
+                    ))
+            if other_calls:
+                contexts.extend(await self._tools.execute_many(turn, other_calls))
+
+            # CodeRabbit Critical ②：恢复原始工具调用顺序（todo_calls 先处理过——
+            # 按 response.tool_calls 的 tool_call_id 重排，避免 zip 错位）
+            by_id = {c.tool_call_id: c for c in contexts}
+            contexts = [by_id[tc.id] for tc in response.tool_calls if tc.id in by_id]
+
+            # ask_user_confirm_card 确认执行 = 用户批准计划——置位 _plan_confirm_done，
+            # 后续轮不得重复弹计划卡（否则确认后多轮工具（127：R1→R2→R3）会在
+            # should_plan_confirm 判定处死锁等待——60s 无响应）
+            for tc, ctx in zip(response.tool_calls, contexts):
+                if tc.name in ("ask_user_confirm_card", "ask_user_plan_confirm"):
+                    try:
+                        _res = json.loads(ctx.result or "{}") if isinstance(ctx.result, str) else {}
+                        if str(_res.get("choice_id", "")) == "confirm":
+                            turn._plan_confirm_done = True
+                    except Exception:  # pragma: no cover - defensive
+                        pass
+
+            # v3.3 Step 4（后端）：Todo 变更推前端（display=todo_state——DTO 隔离：
+            # 只有 id/title/status；source/kind 不进 UI）
+            await self._emit_todo_state(turn)
 
             for tc, ctx in zip(response.tool_calls, contexts):
                 result_text = ctx.result or ""
@@ -779,6 +994,19 @@ class TurnRunner:
                     output_size=len(result_text),
                     duration_ms=getattr(ctx, "duration_ms", 0),
                 ))
+                # v3.3 Step 5（续）：observed 条目完成/失败状态
+                _run_ctx = getattr(turn, "_run_ctx", None)
+                if _run_ctx is not None and tc.name != "todo_write":
+                    _obs_id = f"obs-{tc.id}"
+                    _ok = (
+                        getattr(getattr(ctx, "status", None), "value", None) == "success"
+                        or ctx.status == OrchestrationResult.SUCCESS
+                    )
+                    _run_ctx.todo_state.merge([{
+                        "id": _obs_id,
+                        "status": "completed" if _ok else "blocked",
+                        "blocked_reason": None if _ok else "execution_failed",
+                    }])
 
             # Phase 24: record tool call completions in ledger
             if self._ledger is not None:
@@ -978,6 +1206,22 @@ class TurnRunner:
         elif turn.execution_policy == "manual":
             turn.bypass_approval = False
             turn.force_approval = True
+        elif turn.execution_policy == "edit":
+            # #646-v2（GPT 评审）: 协作（允许编辑）模式默认——文件修改自动放行，
+            # exec/危险操作仍确认。用户显式设置过权限（permission_profile 非 None）
+            # 时尊重用户设置。
+            turn.bypass_approval = False
+            if getattr(turn, "permission_profile", None) is None:
+                from miqi.execution.approval_policy import ApprovalMode, ApprovalPolicy
+                from miqi.runtime.permission_profile import PermissionProfile
+
+                turn.permission_profile = PermissionProfile(
+                    workspace=getattr(turn, "workspace", Path(".")),
+                    approval_policy=ApprovalPolicy(
+                        mode=ApprovalMode.GRANULAR,
+                        granular={"file_write": "never"},
+                    )
+                )
         # edit: both flags False → normal approval flow
         # plan: bypass_approval already set above
 
@@ -988,6 +1232,128 @@ class TurnRunner:
             tools=tools,
             max_iterations=SUBAGENT_MAX_ITERATIONS,
         )
+
+    async def _harness_plan_confirm(
+        self, turn: Any, tool_names: list[str]
+    ) -> str:
+        """#646-v2: harness 强制计划卡——经 user_input_gate 弹卡等用户确认。
+
+        载荷由 TaskPolicy 生成（用户语言步骤 + 权限推断），不依赖模型写计划。
+        返回 choice_id："confirm"=用户确认开始执行；"modify"=要求调整；""=取消/超时。
+        """
+        # 无 UI 通道（headless/测试/CLI）→ 降级放行——阻塞会让所有写/执行静默失败。
+        # 注意：必须走 thread→session 映射（与 resolver 一致）——直查 thread_id
+        # 在 thread≠session 的环境（测试/多会话）会误判无通道而静默放行。
+        from miqi.agent.user_input_resolver import (
+            make_resolver,
+            session_for_thread,
+            user_input_emitter_for,
+        )
+        from miqi.execution.task_policy import (
+            permissions_for_tools,
+            plan_card_steps,
+        )
+
+        thread_id = str(getattr(turn, "thread_id", "") or "")
+        session_key = session_for_thread(thread_id) or thread_id
+        if user_input_emitter_for(session_key) is None:
+            return "confirm"  # 降级放行（无 UI 通道）
+
+        tool_calls_with_hint = [
+            (name, "") for name in tool_names
+        ]
+        resolver = make_resolver()
+        goal = str(getattr(turn, "user_content", "") or "")[:60]
+        result = await resolver({
+            "threadId": turn.thread_id,
+            "turnId": turn.turn_id,
+            "title": "AI 准备执行任务",
+            "goal": goal or "多步骤任务",
+            "steps": plan_card_steps(tool_calls_with_hint),
+            "permissions": permissions_for_tools(tool_names),
+            "timeout_seconds": 300,
+        })
+        answers = result.get("answers") or {}
+        choice = str(answers.get("choice_id", "")) if result.get("status") == "submitted" else ""
+        return choice
+
+
+    async def _emit_todo_state(self, turn: Any) -> None:
+        """v3.3 Step 4（后端）：TodoState 变更推前端（display=todo_state）。
+
+        DTO 隔离：payload 只含 {id, title, status}（无 source/kind/blocked_reason）
+        ——v3.3 决策记录 7：source/kind 是内部协议，不是 UI 概念。
+        """
+        from miqi.agent.user_input_resolver import (
+            session_for_thread,
+            user_input_emitter_for,
+        )
+
+        run_ctx = getattr(turn, "_run_ctx", None)
+        if run_ctx is None or run_ctx.todo_state is None:
+            return
+        thread_id = str(getattr(turn, "thread_id", "") or "")
+        session_key = session_for_thread(thread_id) or thread_id
+        emitter = user_input_emitter_for(session_key)
+        if emitter is None:
+            return
+        ts = run_ctx.todo_state
+        try:
+            await emitter({
+                "display": "todo_state",
+                "turn_id": turn.turn_id,
+                "run_id": ts.run_id,
+                "revision": ts.revision,
+                "title": "AI 正在执行任务",
+                "goal": str(getattr(turn, "user_content", "") or "")[:60],
+                "summary": ts.summary(),
+                "items": [
+                    {"id": it.id, "title": it.content, "status": it.status}
+                    for it in ts.items
+                ],
+            })
+        except Exception:  # pragma: no cover - 事件推送失败不阻断执行
+            pass
+
+    async def _emit_timeline(self, turn: Any, tool_names: list[str]) -> None:
+        """#646-v2 GPT P0-3：Auto 模式非阻塞 Timeline 展示事件。
+
+        与 _harness_plan_confirm 的区别：**不经过 gate、不等待用户**——
+        直接发 user_input_requested（display=timeline），前端渲染无按钮的
+        步骤列表（✓⟳○）。payload 与 PlanCard 同构（前端复用渲染）。
+        """
+        from miqi.agent.user_input_resolver import (
+            session_for_thread,
+            user_input_emitter_for,
+        )
+        from miqi.execution.task_policy import (
+            permissions_for_tools,
+            plan_card_steps,
+        )
+
+        thread_id = str(getattr(turn, "thread_id", "") or "")
+        session_key = session_for_thread(thread_id) or thread_id
+        emitter = user_input_emitter_for(session_key)
+        if emitter is None:
+            return  # 无 UI 通道（headless/测试）——不展示
+
+        tool_calls_with_hint = [(name, "") for name in tool_names]
+        payload = {
+            "threadId": thread_id,
+            "turnId": getattr(turn, "turn_id", ""),
+            "title": "AI 正在执行任务",
+            "goal": str(getattr(turn, "user_content", "") or "")[:60] or "多步骤任务",
+            "steps": plan_card_steps(tool_calls_with_hint),
+            "permissions": permissions_for_tools(tool_names),
+            "display": "timeline",  # 前端据此渲染 Timeline（无按钮、不阻塞）
+        }
+        try:
+            if asyncio.iscoroutinefunction(emitter):
+                await emitter(payload)
+            else:
+                emitter(payload)
+        except Exception:
+            pass  # Timeline 是展示型，失败不影响执行
 
     @staticmethod
     def _format_tool_hint(name: str, args: dict) -> str:
