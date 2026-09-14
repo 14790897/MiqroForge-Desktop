@@ -1,0 +1,138 @@
+name: Sync main into develop
+
+# 发版完成后（release published）把 main 的 release 提交反向同步回 develop，
+# 并把 develop 的版本号标记为 <已发布版本>-dev（开发中标记）。
+# 反向同步沿用临时分支做法：head 用 chore/sync-main-into-develop，绝不用 main 作 head
+# （仓库开启了合并后自动删除 head 分支，曾两次误删 main）。
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: '只创建 PR，不自动合并'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: sync-main-into-develop
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    # 仅响应正式版本 tag（跳过 _gh-imgup 等预发布）
+    if: ${{ github.event_name == 'workflow_dispatch' || (github.event.release.prerelease == false && startsWith(github.event.release.tag_name, 'v')) }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          # 仓库为 public，后续 fetch 无需凭证；绝不把 owner token 持久化进 .git/config，
+          # 否则下面执行的仓库内脚本（update-version.sh）能读到它
+          persist-credentials: false
+
+      - name: Prepare sync branch with -dev version suffix
+        id: prep
+        env:
+          RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+        run: |
+          git fetch origin main develop --tags
+          git log --oneline origin/develop..origin/main --no-merges > main_commits.txt
+          VERSION=$(node -p "require('./package.json').version")
+          DEV_VERSION="${VERSION%-dev}-dev"
+          DEV_CURRENT=$(git show origin/develop:package.json | node -p "JSON.parse(require('fs').readFileSync(0,'utf8')).version")
+          # 无缺失提交且版本号已标记时才是真 no-op；仅缺版本标记（如 merge-only 的 release delta）也要继续
+          if [ ! -s main_commits.txt ] && [ "$DEV_CURRENT" = "$DEV_VERSION" ]; then
+            echo "needs_sync=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::develop 已包含 main 的全部提交且版本号已是 ${DEV_VERSION}，无需反向同步"
+            exit 0
+          fi
+          echo "needs_sync=true" >> "$GITHUB_OUTPUT"
+
+          git checkout -B chore/sync-main-into-develop origin/main
+          bash scripts/update-version.sh "${DEV_VERSION}"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          if ! git diff --quiet; then
+            git commit -am "chore(version): develop 版本号标记为 ${DEV_VERSION} [skip ci]"
+          else
+            echo "::notice::版本号已是 ${DEV_VERSION}，跳过提交"
+          fi
+          AUTH_URL="https://x-access-token:${RELEASE_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          if git fetch origin chore/sync-main-into-develop 2>/dev/null; then
+            LEASE=$(git rev-parse refs/remotes/origin/chore/sync-main-into-develop)
+            git push "--force-with-lease=refs/heads/chore/sync-main-into-develop:${LEASE}" "$AUTH_URL" chore/sync-main-into-develop
+          else
+            echo "::notice::远端还没有临时分支，直接创建"
+            git push "$AUTH_URL" chore/sync-main-into-develop
+          fi
+
+          git log --oneline origin/develop..HEAD --no-merges > sync_commits.txt
+          if [ -s sync_commits.txt ]; then
+            sed 's/^\([0-9a-f]\{7,\}\) /- `\1` /' sync_commits.txt > commit_list.txt
+          else
+            printf '%s\n' "- （main 没有 develop 缺失的提交，本次仅同步版本号 ${DEV_VERSION}）" > commit_list.txt
+            printf '%s\n' "(main 没有 develop 缺失的提交，本次仅同步版本号)" > sync_commits.txt
+          fi
+          echo "version=${DEV_VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Create or reuse PR
+        if: steps.prep.outputs.needs_sync == 'true'
+        id: pr
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+        run: |
+          PR=$(gh pr list --head chore/sync-main-into-develop --base develop --state open --json number --jq '.[0].number // empty')
+          if [ -n "$PR" ]; then
+            echo "::notice::已存在反向同步 PR #$PR，分支已更新，直接复用"
+            echo "number=$PR" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          {
+            printf '## 类型\n\n- [x] 🔧 其他\n\n'
+            printf '## 变更概述\n\n将 main 上的 release 提交反向同步回 develop，并把 develop 版本号标记为 `%s`。\n\n' "${{ steps.prep.outputs.version }}"
+            printf '## 背景/问题\n\nmain 包含 develop 尚缺的 release 提交（CHANGELOG 与版本号更新），需同步回 develop 避免后续发版时版本回退；develop 为开发中分支，版本号追加 `-dev` 后缀以便与本机安装的正式版区分。\n\n'
+            printf '## 变更内容\n\n本次 main → develop 同步包含以下提交：\n\n'
+            cat commit_list.txt
+            printf '\n## 日志/验证证据\n\n```\n$ git log --oneline origin/develop..chore/sync-main-into-develop --no-merges\n'
+            cat sync_commits.txt
+            printf '```\n\n'
+            printf '## 测试情况\n\n- 仅包含 semantic-release 生成的版本标记（CHANGELOG + package.json + pyproject.toml + apps/desktop/package.json）与 `-dev` 版本号提交\n- 无代码逻辑变更，不影响功能\n\n'
+            printf '## 截图\n\n无界面变更（反向同步 PR）。\n'
+          } > body.md
+
+          PR=$(gh pr create --base develop --head chore/sync-main-into-develop \
+            --title "chore(release): merge main into develop" \
+            --body-file body.md)
+          echo "number=${PR##*/}" >> "$GITHUB_OUTPUT"
+          echo "::notice::已创建反向同步 PR #${PR##*/}"
+
+      - name: Merge PR
+        if: steps.prep.outputs.needs_sync == 'true' && github.event.inputs.dry_run != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+        run: |
+          NUMBER="${{ steps.pr.outputs.number }}"
+          merged=false
+          for i in 1 2 3 4 5; do
+            if gh pr merge "$NUMBER" --merge; then merged=true; break; fi
+            echo "合并暂不可用（第 $i 次），10s 后重试..."
+            sleep 10
+          done
+          if [ "$merged" != true ]; then
+            echo "::error::自动合并 PR #$NUMBER 失败，请手动查看（冲突、权限或分支规则集限制）"
+            exit 1
+          fi
+          echo "::notice::已合并反向同步 PR #$NUMBER，develop 版本号为 ${{ steps.prep.outputs.version }}"
+
+      - name: Dry run notice
+        if: steps.prep.outputs.needs_sync == 'true' && github.event.inputs.dry_run == 'true'
+        run: |
+          echo "::notice::dry_run 模式：仅创建 PR #${{ steps.pr.outputs.number }}，未合并"

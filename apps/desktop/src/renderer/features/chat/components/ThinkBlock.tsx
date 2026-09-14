@@ -118,7 +118,7 @@ export function ThinkBlock({
               {/* Render markdown so structured thinking (1./•/** lists) shows
                *  like DeepSeek's, not as raw text. The global `pre` grey box
                *  is avoided since MarkdownContent has no plain-<pre> wrapper. */}
-              {children ?? <MarkdownContent content={reasoning} />}
+              {children ?? <MarkdownContent content={reasoning} disableDiagrams />}
             </div>
           </div>
         </div>
