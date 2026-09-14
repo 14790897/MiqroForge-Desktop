@@ -79,7 +79,7 @@ export function ApprovalBypassBanner({ onOpenApprovals }: { onOpenApprovals?: ()
   return (
     <div
       className={[
-        'approval-bypass-island fixed left-1/2 top-12 z-50 flex max-w-[min(720px,calc(100vw-24px))] items-center gap-2 rounded-full border px-3 py-2 text-xs backdrop-blur pointer-events-auto',
+        'approval-bypass-island fixed left-1/2 top-12 z-50 flex max-w-[min(720px,calc(100vw-24px))] -translate-x-1/2 items-center gap-2 rounded-full border px-3 py-2 text-xs backdrop-blur pointer-events-auto',
         phase === 'show' ? 'animate-banner-in' : 'animate-banner-out',
       ].join(' ')}
       style={{

@@ -3238,13 +3238,12 @@ class ExecTool(Tool):
         except Exception:
             return
         try:
+            from miqi.agent.tools.filesystem import _session_files_dir_key
             from miqi.session.manager import SessionManager
             sm = SessionManager(workspace)
-            # Strip the client_id prefix (same rule as _persist_tracked_file).
-            if ":" in session_key:
-                parts = session_key.split(":", 1)
-                if len(parts) == 2 and parts[0] != "desktop":
-                    session_key = parts[1]
+            # Store key 与目录名派生同源（与 _persist_tracked_file 一致）：
+            # ``cli:direct`` → ``cli_direct``，exec 产物与文档产物落同一会话目录。
+            session_key = _session_files_dir_key(session_key)
             sm.save_tracked_files_batch(
                 session_key, [(p, "write") for p in changed],
             )

@@ -16,6 +16,7 @@ import threading
 import time
 import traceback
 import uuid
+from pathlib import Path
 from typing import Any
 
 from loguru import logger
@@ -34,6 +35,19 @@ CHAT_HEARTBEAT_INTERVAL_SECONDS = 10
 # creation, which ignores asyncio cancellation) — the turn lock is force-
 # released so the session recovers instead of waiting for TTL eviction (#563).
 STALE_TURN_TIMEOUT = 300.0  # seconds (5 min)
+
+
+def attachment_dest_dir(ws_root: Path, session_key: str) -> Path:
+    """Directory an uploaded attachment is written to for *session_key*.
+
+    Uses the canonical session-key derivation (#1005) — the sandbox,
+    ``files.read`` and the documents parser all look the file up under
+    ``sessions/<canonical_key>/files``, so a locally invented name strands
+    the attachment somewhere no reader visits.
+    """
+    from miqi.session.session_keys import session_files_dir_key
+
+    return ws_root / "sessions" / session_files_dir_key(session_key) / "files"
 
 
 class BridgeRuntimeLoop:
@@ -928,10 +942,12 @@ class BridgeRuntimeLoop:
             import re as _re
             from pathlib import Path as _Path
 
-            ws_root = config.workspace_path
-            # Save to session files directory so tools + documents.parse find it
-            safe_key = session_key.replace(":", "_")
-            dest_dir = ws_root / "sessions" / safe_key / "files"
+            # Save to session files directory so tools + documents.parse find
+            # it.  Canonical derivation (#1005) — a bare ``replace(":", "_")``
+            # here used to drop attachments for namespaced keys
+            # (``miqi-desktop:desktop:<ts>``) into a directory the sandbox and
+            # files.read never look at.
+            dest_dir = attachment_dest_dir(config.workspace_path, session_key)
             dest_dir.mkdir(parents=True, exist_ok=True)
 
             async def _emit_doc_progress(name: str, stage: str, message: str) -> None:

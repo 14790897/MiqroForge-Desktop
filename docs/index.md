@@ -41,6 +41,7 @@ MiQroForge Desktop 是一款基于 **Electron** 构建的桌面应用，为 MiQr
 ### 快速链接
 
 - [功能总览](features.md) — 了解 MiQroForge 能做什么
+- [产品形态与技术边界 (V1)](product-form-and-technical-boundaries.md) — V1 做什么、不做什么、做到什么程度
 - [快速开始](getting-started.md) — 安装和运行
 - [系统架构](architecture.md) — 整体设计
 - [配置参考](configuration.md) — 完整配置项说明

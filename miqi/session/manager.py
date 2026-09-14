@@ -13,7 +13,19 @@ from typing import Any
 from loguru import logger
 
 from miqi.paths import get_legacy_data_dir
+from miqi.session.session_keys import session_files_dir_key
 from miqi.utils.helpers import ensure_dir, safe_filename
+
+# Per-session-key locks shared by ALL SessionManager instances in the process.
+#
+# #1003: tracked_files.json 的写入是「整读整写」，而调用方（
+# ``_persist_tracked_file``、AppServer handler）每次各自新建 SessionManager —
+# 实例级锁锁不住同一 key 的并发写：两个实例读到同一份旧快照，后写者覆盖
+# 先写者 → 丢条目。锁提升为模块级后，同进程内不同实例对同一 key 串行化。
+#
+# 跨进程（多个 bridge 进程 / 外部编辑）协调仍缺失，见 PR #1003 说明。
+_session_locks: dict[str, threading.RLock] = {}
+_session_locks_guard = threading.Lock()
 
 
 def _normalize_datetime(value: datetime) -> datetime:
@@ -143,36 +155,66 @@ class SessionManager:
         self.compact_threshold_bytes = max(1, compact_threshold_bytes)
         self.compact_keep_messages = max(1, compact_keep_messages)
         self._cache: dict[str, Session] = {}
-        self._session_locks: dict[str, threading.RLock] = {}
-        self._session_locks_guard = threading.Lock()
 
     def get_session_dir(self, key: str) -> Path:
-        safe_key = safe_filename(key.replace(":", "_"))
-        return self.sessions_dir / safe_key
+        # Canonical derivation (single source of truth, #1014) — shared with
+        # files.read / files.write / attachment saving so every side of the
+        # session directory agrees on the name.  Idempotent, so callers may
+        # pass either the raw key or an already-derived one.
+        #
+        # 方向性提示：本方法只定义「当前会话目录名」。查找历史**文件名**的两条
+        # 路径（_migrate_flat_to_dir 的旧扁平 .jsonl、_get_legacy_session_path 的
+        # ~/.assistant 旧文件）只接受 raw key——那些名字在写入时就冻结了，且从
+        # canonical 名反推不回 raw 名，改走本方法会静默 no-op / 永远找不到。
+        return self.sessions_dir / session_files_dir_key(key)
 
     def _get_session_path(self, key: str) -> Path:
         """Get the file path for a session key."""
         return self.get_session_dir(key) / "conversation.jsonl"
 
     def _get_session_lock(self, key: str) -> threading.RLock:
-        with self._session_locks_guard:
-            lock = self._session_locks.get(key)
+        # 锁标识 = 磁盘上真实的会话目录（``get_session_dir``），而不是调用方传入
+        # 的 key 字符串：``desktop:983``（file_handlers 传客户端原始 key）与
+        # ``desktop_983``（_persist_tracked_file 传派生名）派生同一目录，按原始
+        # 字符串取锁会让两者写同一个 tracked_files.json 却各持一把锁。
+        lock_key = str(self.get_session_dir(key))
+        with _session_locks_guard:
+            lock = _session_locks.get(lock_key)
             if lock is None:
                 lock = threading.RLock()
-                self._session_locks[key] = lock
+                _session_locks[lock_key] = lock
             return lock
 
     def _migrate_flat_to_dir(self, key: str) -> None:
-        """If old flat .jsonl exists and new dir does not, migrate."""
-        safe_key = safe_filename(key.replace(":", "_"))
-        old_flat = self.sessions_dir / f"{safe_key}.jsonl"
-        new_dir  = self.sessions_dir / safe_key
-        if old_flat.exists() and not new_dir.exists():
+        """Move the old flat ``<raw>.jsonl`` into the canonical session dir.
+
+        The migration is skipped only when the canonical dir already holds a
+        ``conversation.jsonl`` — a directory that merely *exists* (holding
+        only ``files/`` or ``.archived``) must not count as migrated, or the
+        flat file stays behind as the single copy of the history.
+        """
+        # 两个名字刻意不同源（#1014）：旧扁平文件的文件名写死于 raw 约定
+        # （`safe_filename(key.replace(":", "_"))`），照 canonical 去找会漏掉
+        # 三段 namespaced key 的存量文件；迁移后的新目录则用 canonical，
+        # 与 get_session_dir 一致。
+        old_flat = self.sessions_dir / f"{safe_filename(key.replace(':', '_'))}.jsonl"
+        new_dir = self.sessions_dir / session_files_dir_key(key)
+        new_path = new_dir / "conversation.jsonl"
+        # 「已迁移」的判据是 conversation.jsonl 而不是 new_dir.exists()：目录可能
+        # 先由附件落盘 / archive 标记建出来（只有 files/ 或 .archived），此时旧
+        # 扁平文件仍是唯一的历史来源，按「目录存在」跳过等于把历史会话判死。
+        if old_flat.exists() and not new_path.exists():
             new_dir.mkdir(parents=True, exist_ok=True)
-            shutil.move(str(old_flat), str(new_dir / "conversation.jsonl"))
+            shutil.move(str(old_flat), str(new_path))
 
     def _get_legacy_session_path(self, key: str) -> Path:
-        """Legacy global session path for migration only."""
+        """Legacy global session path for migration only.
+
+        Deliberately NOT canonical (#1014): this reads files written by the
+        old global layout in ``~/.assistant/sessions/``, whose names were
+        frozen at write time.  Canonicalising the lookup would make those
+        already-written files unfindable instead of migrating them.
+        """
         safe_key = safe_filename(key.replace(":", "_"))
         return self.legacy_sessions_dir / f"{safe_key}.jsonl"
 
@@ -193,60 +235,70 @@ class SessionManager:
         When workspace is provided for a NEW session, it is stored in metadata.
         The path is validated for safety (no traversal, must be absolute).
         """
-        if key in self._cache:
-            session = self._cache[key]
-            if client_id is not None:
-                owner = session.metadata.get("owner_client_id")
-                if owner is None:
-                    raise OwnershipError(
-                        f"Session '{key}' is a legacy session with no owner. "
-                        "It must be explicitly claimed before access.",
-                        code="REQUIRES_CLAIM",
-                    )
-                if owner != client_id:
-                    raise OwnershipError(
-                        f"Session '{key}' is owned by client '{owner}', not '{client_id}'",
-                        code="UNAUTHORIZED",
-                    )
-            # Explicit workspace wins even for an existing (cached) session —
-            # the frontend persists the user's pick via sessions.get(workspace=...)
-            # which may arrive after a bridge-not-ready retry already created
-            # the session without a workspace.
-            if workspace is not None:
-                session.metadata["workspace"] = str(self._validate_workspace(workspace))
+        with self._get_session_lock(key):
+            if key in self._cache:
+                session = self._cache[key]
+                if client_id is not None:
+                    # Re-read the owner from disk rather than trusting the cached
+                    # metadata: a different SessionManager instance may have
+                    # deleted + re-created this session under a new owner since
+                    # this entry was cached (#1050 TOCTOU). Fall back to the
+                    # cached owner only when there is no disk session at all —
+                    # an existing-but-unowned disk session must stay unowned
+                    # (REQUIRES_CLAIM), never be authorized by a stale cache.
+                    owner = self._read_owner(key)
+                    if owner is None and not self._get_session_path(key).exists():
+                        owner = session.metadata.get("owner_client_id")
+                    if owner is None:
+                        raise OwnershipError(
+                            f"Session '{key}' is a legacy session with no owner. "
+                            "It must be explicitly claimed before access.",
+                            code="REQUIRES_CLAIM",
+                        )
+                    if owner != client_id:
+                        raise OwnershipError(
+                            f"Session '{key}' is owned by client '{owner}', not '{client_id}'",
+                            code="UNAUTHORIZED",
+                        )
+                # Explicit workspace wins even for an existing (cached) session —
+                # the frontend persists the user's pick via sessions.get(workspace=...)
+                # which may arrive after a bridge-not-ready retry already created
+                # the session without a workspace.
+                if workspace is not None:
+                    session.metadata["workspace"] = str(self._validate_workspace(workspace))
+                return session
+
+            session = self._load(key)
+            if session is None:
+                # New session
+                session = Session(key=key)
+                if client_id is not None:
+                    session.metadata["owner_client_id"] = client_id
+                if workspace is not None:
+                    ws = self._validate_workspace(workspace)
+                    session.metadata["workspace"] = str(ws)
+            else:
+                # Existing session on disk
+                if client_id is not None:
+                    owner = session.metadata.get("owner_client_id")
+                    if owner is None:
+                        # Unowned legacy session — DO NOT auto-claim
+                        raise OwnershipError(
+                            f"Session '{key}' is a legacy session with no owner. "
+                            "It must be explicitly claimed before access.",
+                            code="REQUIRES_CLAIM",
+                        )
+                    if owner != client_id:
+                        raise OwnershipError(
+                            f"Session '{key}' is owned by client '{owner}', not '{client_id}'",
+                            code="UNAUTHORIZED",
+                        )
+                # Same as cache path: explicit workspace overrides on disk session.
+                if workspace is not None:
+                    session.metadata["workspace"] = str(self._validate_workspace(workspace))
+
+            self._cache[key] = session
             return session
-
-        session = self._load(key)
-        if session is None:
-            # New session
-            session = Session(key=key)
-            if client_id is not None:
-                session.metadata["owner_client_id"] = client_id
-            if workspace is not None:
-                ws = self._validate_workspace(workspace)
-                session.metadata["workspace"] = str(ws)
-        else:
-            # Existing session on disk
-            if client_id is not None:
-                owner = session.metadata.get("owner_client_id")
-                if owner is None:
-                    # Unowned legacy session — DO NOT auto-claim
-                    raise OwnershipError(
-                        f"Session '{key}' is a legacy session with no owner. "
-                        "It must be explicitly claimed before access.",
-                        code="REQUIRES_CLAIM",
-                    )
-                if owner != client_id:
-                    raise OwnershipError(
-                        f"Session '{key}' is owned by client '{owner}', not '{client_id}'",
-                        code="UNAUTHORIZED",
-                    )
-            # Same as cache path: explicit workspace overrides on disk session.
-            if workspace is not None:
-                session.metadata["workspace"] = str(self._validate_workspace(workspace))
-
-        self._cache[key] = session
-        return session
 
     def _load(self, key: str) -> Session | None:
         """Load a session from disk."""
@@ -406,32 +458,37 @@ class SessionManager:
         ``file_path`` is normalised to forward-slash internally.
         ``op`` is one of: read, write, edit, delete.
 
-        When client_id is provided, ownership is verified first.
+        When client_id is provided, ownership is verified while holding the
+        session lock so authorization cannot go stale before the write.
+
+        #1003 finding ③：读-改-写全程持 key 锁（模块级，跨实例共享），否则两个
+        SessionManager 实例各自读到旧快照，后写者覆盖先写者 → 丢条目。
         """
-        if client_id is not None:
-            self._verify_ownership_for_mutation(key, client_id)
-        files = self.load_tracked_files(key)
-        norm = file_path.replace("\\", "/")
-        existing = files.get(norm, {})
-        # Upgrade: read < edit < write < delete
-        rank = {"read": 0, "edit": 1, "write": 2, "delete": 3}
-        cur_rank = rank.get(existing.get("op", "read"), 0)
-        new_rank = rank.get(op, 0)
-        if new_rank >= cur_rank:
-            from pathlib import PurePosixPath
-            files[norm] = {
-                "op": op,
-                "name": name or PurePosixPath(norm).name,
-                "lastSeen": int(datetime.now().timestamp() * 1000),
-            }
-        path = self._get_tracked_files_path(key)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(".tmp")
-        tmp.write_text(
-            json.dumps({"version": 1, "files": files}, ensure_ascii=False),
-            encoding="utf-8",
-        )
-        tmp.replace(path)
+        with self._get_session_lock(key):
+            if client_id is not None:
+                self._verify_ownership_for_mutation(key, client_id)
+            files = self.load_tracked_files(key)
+            norm = file_path.replace("\\", "/")
+            existing = files.get(norm, {})
+            # Upgrade: read < edit < write < delete
+            rank = {"read": 0, "edit": 1, "write": 2, "delete": 3}
+            cur_rank = rank.get(existing.get("op", "read"), 0)
+            new_rank = rank.get(op, 0)
+            if new_rank >= cur_rank:
+                from pathlib import PurePosixPath
+                files[norm] = {
+                    "op": op,
+                    "name": name or PurePosixPath(norm).name,
+                    "lastSeen": int(datetime.now().timestamp() * 1000),
+                }
+            path = self._get_tracked_files_path(key)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(".tmp")
+            tmp.write_text(
+                json.dumps({"version": 1, "files": files}, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            tmp.replace(path)
 
     def save_tracked_files_batch(
         self, key: str, entries: list[tuple[str, str]],
@@ -444,33 +501,37 @@ class SessionManager:
         exec artifact tracker (Phase 59 / #607): N files created by one
         command no longer cost N full read+rewrite cycles on the caller's
         thread (CodeRabbit #682 review).
-        """
-        if client_id is not None:
-            self._verify_ownership_for_mutation(key, client_id)
-        if not entries:
-            return
-        files = self.load_tracked_files(key)
-        rank = {"read": 0, "edit": 1, "write": 2, "delete": 3}
-        now = int(datetime.now().timestamp() * 1000)
-        from pathlib import PurePosixPath
 
-        for file_path, op in entries:
-            norm = file_path.replace("\\", "/")
-            existing = files.get(norm, {})
-            if rank.get(op, 0) >= rank.get(existing.get("op", "read"), 0):
-                files[norm] = {
-                    "op": op,
-                    "name": PurePosixPath(norm).name,
-                    "lastSeen": now,
-                }
-        path = self._get_tracked_files_path(key)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(".tmp")
-        tmp.write_text(
-            json.dumps({"version": 1, "files": files}, ensure_ascii=False),
-            encoding="utf-8",
-        )
-        tmp.replace(path)
+        #1003 finding ③：与 ``save_tracked_file`` 共用同一把模块级 key 锁，
+        跨实例的「批量写 vs 单条写」不再互相覆盖。
+        """
+        with self._get_session_lock(key):
+            if client_id is not None:
+                self._verify_ownership_for_mutation(key, client_id)
+            if not entries:
+                return
+            files = self.load_tracked_files(key)
+            rank = {"read": 0, "edit": 1, "write": 2, "delete": 3}
+            now = int(datetime.now().timestamp() * 1000)
+            from pathlib import PurePosixPath
+
+            for file_path, op in entries:
+                norm = file_path.replace("\\", "/")
+                existing = files.get(norm, {})
+                if rank.get(op, 0) >= rank.get(existing.get("op", "read"), 0):
+                    files[norm] = {
+                        "op": op,
+                        "name": PurePosixPath(norm).name,
+                        "lastSeen": now,
+                    }
+            path = self._get_tracked_files_path(key)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(".tmp")
+            tmp.write_text(
+                json.dumps({"version": 1, "files": files}, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            tmp.replace(path)
 
     def reset_tracked_file_op(
         self, key: str, file_path: str, op: str = "read",
@@ -481,59 +542,69 @@ class SessionManager:
         Unlike ``save_tracked_file`` this bypasses the rank guard so a
         ``write`` entry can be downgraded back to ``read`` after accept.
 
-        When client_id is provided, ownership is verified first.
+        When client_id is provided, ownership is verified while holding the
+        session lock so authorization cannot go stale before the write.
         """
-        if client_id is not None:
-            self._verify_ownership_for_mutation(key, client_id)
-        files = self.load_tracked_files(key)
-        norm = file_path.replace("\\", "/")
-        if norm not in files:
-            return
-        files[norm]["op"] = op
-        files[norm]["lastSeen"] = int(datetime.now().timestamp() * 1000)
-        path = self._get_tracked_files_path(key)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(".tmp")
-        tmp.write_text(
-            json.dumps({"version": 1, "files": files}, ensure_ascii=False),
-            encoding="utf-8",
-        )
-        tmp.replace(path)
+        with self._get_session_lock(key):
+            if client_id is not None:
+                self._verify_ownership_for_mutation(key, client_id)
+            files = self.load_tracked_files(key)
+            norm = file_path.replace("\\", "/")
+            if norm not in files:
+                return
+            files[norm]["op"] = op
+            files[norm]["lastSeen"] = int(datetime.now().timestamp() * 1000)
+            path = self._get_tracked_files_path(key)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(".tmp")
+            tmp.write_text(
+                json.dumps({"version": 1, "files": files}, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            tmp.replace(path)
 
     def remove_tracked_file(
         self, key: str, file_path: str, *, client_id: str | None = None,
     ) -> None:
         """Remove a single tracked file entry.
 
-        When client_id is provided, ownership is verified first.
+        When client_id is provided, ownership is verified while holding the
+        session lock so authorization cannot go stale before the write.
         """
-        if client_id is not None:
-            self._verify_ownership_for_mutation(key, client_id)
-        files = self.load_tracked_files(key)
-        norm = file_path.replace("\\", "/")
-        files.pop(norm, None)
-        path = self._get_tracked_files_path(key)
-        if not files:
-            path.unlink(missing_ok=True)
-            return
-        tmp = path.with_suffix(".tmp")
-        tmp.write_text(
-            json.dumps({"version": 1, "files": files}, ensure_ascii=False),
-            encoding="utf-8",
-        )
-        tmp.replace(path)
+        with self._get_session_lock(key):
+            if client_id is not None:
+                self._verify_ownership_for_mutation(key, client_id)
+            files = self.load_tracked_files(key)
+            norm = file_path.replace("\\", "/")
+            files.pop(norm, None)
+            path = self._get_tracked_files_path(key)
+            if not files:
+                path.unlink(missing_ok=True)
+                return
+            tmp = path.with_suffix(".tmp")
+            tmp.write_text(
+                json.dumps({"version": 1, "files": files}, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            tmp.replace(path)
 
     def clear_tracked_files(
         self, key: str, *, client_id: str | None = None,
     ) -> None:
         """Remove the entire tracked_files.json for a session.
 
-        When client_id is provided, ownership is verified first.
+        When client_id is provided, ownership is verified while holding the
+        session lock so authorization cannot go stale before the deletion.
+
+        #1003 finding ③（复核）：clear 是整文件删除，必须在同一把 key 锁内，
+        否则会与在途的读-改-写交错（删除被随后的 ``tmp.replace`` 悄悄撤销，
+        或删掉刚写入的批次）。
         """
-        if client_id is not None:
-            self._verify_ownership_for_mutation(key, client_id)
-        path = self._get_tracked_files_path(key)
-        path.unlink(missing_ok=True)
+        with self._get_session_lock(key):
+            if client_id is not None:
+                self._verify_ownership_for_mutation(key, client_id)
+            path = self._get_tracked_files_path(key)
+            path.unlink(missing_ok=True)
 
     # ── Archive ───────────────────────────────────────────────────────
 
@@ -693,22 +764,31 @@ class SessionManager:
         When client_id is provided, ownership is verified first.
         Unowned sessions raise REQUIRES_CLAIM.
         Sessions owned by other clients raise UNAUTHORIZED.
+
+        #1003 finding ④（CodeRabbit 复审）：落盘删除与 tracked 读-改-写共用同一把
+        key 锁。否则 ``save_tracked_file`` 在 ``rmtree`` 之后才跑到
+        ``path.parent.mkdir(...)`` + ``tmp.replace``，会把刚删掉的会话目录连同
+        ``tracked_files.json`` 一起重建（已删会话复活）；反向交错则让写端抛
+        ``FileNotFoundError``。锁是 ``threading.RLock``（可重入），本路径内不再
+        获取其它锁，无锁序问题。
         """
-        if client_id is not None:
-            self._verify_ownership_for_mutation(key, client_id)
-        self._cache.pop(key, None)
-        self._migrate_flat_to_dir(key)
-        session_dir = self.get_session_dir(key)
-        if session_dir.exists():
-            shutil.rmtree(session_dir)
-            return True
-        # Fallback: old flat file that was never migrated
-        safe_key = safe_filename(key.replace(":", "_"))
-        old_flat = self.sessions_dir / f"{safe_key}.jsonl"
-        if old_flat.exists():
-            old_flat.unlink()
-            return True
-        return False
+        with self._get_session_lock(key):
+            if client_id is not None:
+                self._verify_ownership_for_mutation(key, client_id)
+            self._cache.pop(key, None)
+            self._migrate_flat_to_dir(key)
+            session_dir = self.get_session_dir(key)
+            if session_dir.exists():
+                shutil.rmtree(session_dir)
+                return True
+            # Fallback: old flat file that was never migrated.  Same raw
+            # name convention as ``_migrate_flat_to_dir`` (#1014) — the file
+            # was written under the legacy rule, not the canonical one.
+            old_flat = self.sessions_dir / f"{safe_filename(key.replace(':', '_'))}.jsonl"
+            if old_flat.exists():
+                old_flat.unlink()
+                return True
+            return False
 
     def rename(self, key: str, title: str, *, client_id: str | None = None) -> str:
         """Set a custom display title for a session, persisted in metadata.title.
@@ -719,18 +799,18 @@ class SessionManager:
 
         When client_id is provided, ownership is verified first.
         """
-        if client_id is not None:
-            self._verify_ownership_for_mutation(key, client_id)
-        session = self.get_or_create(key, client_id=client_id)
-        cleaned = (title or "").strip()
-        if not cleaned:
-            return session.metadata.get("title") or (
-                self._extract_title(self._get_session_path(key)) or key
-            )
-        session.metadata["title"] = cleaned[:100]
-        # save() skips the write when there are no new messages, so persist the
-        # metadata-only change by rewriting the metadata line directly.
         with self._get_session_lock(key):
+            if client_id is not None:
+                self._verify_ownership_for_mutation(key, client_id)
+            session = self.get_or_create(key, client_id=client_id)
+            cleaned = (title or "").strip()
+            if not cleaned:
+                return session.metadata.get("title") or (
+                    self._extract_title(self._get_session_path(key)) or key
+                )
+            session.metadata["title"] = cleaned[:100]
+            # save() skips the write when there are no new messages, so persist the
+            # metadata-only change by rewriting the metadata line directly.
             self._migrate_flat_to_dir(key)
             path = self._get_session_path(key)
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -743,8 +823,8 @@ class SessionManager:
                         + "\n"
                     )
                 path.chmod(0o600)
-        self._cache[key] = session
-        return session.metadata["title"]
+            self._cache[key] = session
+            return session.metadata["title"]
 
     @staticmethod
     def _extract_title(path: Path) -> str:
@@ -896,15 +976,31 @@ class SessionManager:
     def _read_owner(self, key: str) -> str | None:
         """Read owner_client_id from the metadata line of a session file.
 
+        Stops at the metadata line (normally the first line — ``save`` emits it
+        before any message and ``_rewrite_metadata_line`` keeps it at index 0),
+        so a well-formed file costs one line read; this sits on the hot path of
+        ``get_or_create``'s cache-hit ownership re-check (#1050). Unlike the old
+        ``_read_metadata`` path it does not parse trailing message timestamps,
+        but it still scans past non-metadata lines so legacy/hand-edited files
+        that place metadata later are not misread as unowned.
+
         Returns None if the session doesn't exist or has no owner_client_id.
         """
         path = self._get_session_path(key)
         if not path.exists():
             return None
-        data = self._read_metadata(path)
-        if data is None:
+        try:
+            with open(path, encoding="utf-8") as f:
+                for raw in f:
+                    line = raw.strip()
+                    if not line:
+                        continue
+                    data = json.loads(line)
+                    if data.get("_type") == "metadata":
+                        return data.get("owner_client_id")
+        except Exception:
             return None
-        return data.get("owner_client_id")
+        return None
 
     def _read_workspace(self, key: str) -> str | None:
         """Read the workspace from the metadata line of a session file.
