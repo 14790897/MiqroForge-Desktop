@@ -21,7 +21,7 @@ import { join } from 'node:path';
 import {
   LLM_TIMEOUT,
   sendMessage,
-  waitForResponseComplete,
+  approveLoop,
   launchElectronApp,
   closeElectronApp,
   createNewConversation,
@@ -157,18 +157,35 @@ test.describe('Issue #879 web_sources 结构化来源', () => {
     { timeout: LLM_TIMEOUT },
     async () => {
       await createNewConversation(page);
+
+      // 切到「深度研究」(think)：fast（默认）模式走 SearchOrchestrator 扇出
+      // 路径，不 emit web_sources（#879 ① defer 的 fanout 路径），think 才走
+      // 单查询并 emit 结构化来源。
+      await page.getByLabel('回答模式').click();
+      await page.getByRole('button', { name: '深度研究 AI 自由发挥' }).click();
+
       await sendMessage(page, '请用网页搜索查一下今天北京的天气');
 
-      // 1. 工具行出现「网页搜索」——web_search 被真实执行（emit web_sources）
+      // 1. 自动审批（web_search 网络访问可能触发审批弹窗）+ 等回复完成
+      await approveLoop(page);
+
+      // 2. 最终回复出现（mock 第 2 轮把真实结果 URL 嵌进回复 SEARCH_OK|url），
+      //    此时 web_search 已执行完、结构化 sources 已累积到最终回复消息。
+      await expect(
+        page
+          .getByTestId('chat-message-assistant')
+          .getByText(/SEARCH_OK\|https?:\/\//)
+          .first()
+      ).toBeVisible({ timeout: 60_000 });
+
+      // 工具行出现「网页搜索」——web_search 被真实执行（emit web_sources）
       await expect(page.locator('main').getByText('网页搜索').first()).toBeVisible({
-        timeout: 60_000,
+        timeout: 30_000,
       });
 
-      // 2. 等回复完成（web_sources 事件已随工具行到达前端）
-      await waitForResponseComplete(page, 60_000);
-
-      // 3. 点击「查看来源」按钮（每个 assistant 消息气泡都有，always visible）
-      await page.getByLabel('查看来源').first().click();
+      // 3. 点击「查看来源」按钮 —— 取最后一条 assistant 消息（最终回复），
+      //    此时 web_search 已执行、结构化 sources 已累积到该消息（#879 ②）。
+      await page.getByLabel('查看来源').last().click();
 
       // 4. 弹窗打开，标题带来源计数且 > 0
       await expect(page.getByText(/查看来源（\d+）/).first()).toBeVisible({ timeout: 15_000 });

@@ -5180,6 +5180,43 @@ export function ChatConsole({
         return;
       }
 
+      // #879: web_sources structured sources from WebSearchTool/WebFetchTool.
+      // Arrives as a progress delta ({delta, tool_call_id, tool_hint}) which
+      // extractProgressMessage() returns null for — handle it before that gate.
+      if (data.delta && typeof data.delta === 'string' && data.tool_call_id) {
+        try {
+          const inner = JSON.parse(data.delta);
+          if (
+            inner?.type === 'web_sources' &&
+            Array.isArray(inner.payload?.sources) &&
+            inner.payload.sources.length
+          ) {
+            const structured: MessageSource[] = inner.payload.sources.map(
+              (s: { title?: string; url?: string; snippet?: string; tool?: string }) => ({
+                tool: s.tool || 'web_search',
+                url: s.url || '',
+                title: s.title,
+                snippet: s.snippet,
+              })
+            );
+            const webToolName = structured[0]?.tool || 'web_search';
+            setMessages((prev) => {
+              for (let i = prev.length - 1; i >= 0; i -= 1) {
+                const m = prev[i];
+                if (m.role === 'progress' && m.toolHint && m.toolCallId === data.tool_call_id) {
+                  const next = [...prev];
+                  next[i] = { ...m, webSources: structured, toolName: webToolName };
+                  return next;
+                }
+              }
+              return prev;
+            });
+          }
+        } catch {
+          /* not JSON, ignore */
+        }
+      }
+
       // Try structured extraction first, then fall back to raw text
       const extracted = extractProgressMessage(data as ProgressPayload);
 
@@ -5193,7 +5230,6 @@ export function ChatConsole({
         // Detect paper_search result from backend events
         let toolName: string | undefined;
         let toolData: unknown;
-        let webSources: MessageSource[] | undefined;
         // Path A: item/toolResult notification (from turn_event_adapter)
         if (!toolData && data.tool_hint && data.text && !data.stream) {
           const parsed = tryParsePaperSearchResult(data.text);
@@ -5209,31 +5245,6 @@ export function ChatConsole({
             if (inner?.type === 'paper_search_result' && inner.payload) {
               toolName = 'paper_search';
               toolData = inner.payload;
-            }
-          } catch {
-            /* not JSON, ignore */
-          }
-        }
-        // Path C: web_sources from WebSearchTool/WebFetchTool (#879) — carries
-        // structured title/url/snippet so the source card doesn't re-parse text.
-        if (data.delta && typeof data.delta === 'string') {
-          try {
-            const inner = JSON.parse(data.delta);
-            if (
-              inner?.type === 'web_sources' &&
-              Array.isArray(inner.payload?.sources) &&
-              inner.payload.sources.length
-            ) {
-              const structured: MessageSource[] = inner.payload.sources.map(
-                (s: { title?: string; url?: string; snippet?: string; tool?: string }) => ({
-                  tool: s.tool || 'web_search',
-                  url: s.url || '',
-                  title: s.title,
-                  snippet: s.snippet,
-                })
-              );
-              webSources = structured;
-              if (!toolName) toolName = structured[0]?.tool;
             }
           } catch {
             /* not JSON, ignore */
