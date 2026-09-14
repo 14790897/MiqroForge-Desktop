@@ -7111,7 +7111,7 @@ export function ChatConsole({
                   // 附件预览渲染到输入框「内部」:portal 投到 Composer 的框内插槽,
                   // 插槽尚未挂载时先原地渲染一帧兜底。
                   const preview = (
-                    <div className="flex flex-wrap gap-1.5 mb-1.5">
+                    <div className="flex flex-wrap gap-1.5 mb-1.5 max-h-[104px] overflow-y-auto">
                       {attachments.map((att, i) => {
                         const isDoc = att.type === 'document';
                         const cat = isDoc ? getDocCategory(att.name) : null;

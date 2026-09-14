@@ -92,6 +92,8 @@ function ComposerImpl(
   const handleKeyDown = useCallback(
     (e: KeyboardEvent) => {
       if (e.key === 'Enter' && !e.shiftKey) {
+        // IME 组字中（中文/日文）Enter 是「选字确认」，不能当发送
+        if (e.nativeEvent.isComposing) return;
         e.preventDefault();
         onSubmit(input);
       }
