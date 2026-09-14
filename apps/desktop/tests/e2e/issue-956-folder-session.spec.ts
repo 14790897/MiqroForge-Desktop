@@ -38,6 +38,7 @@ import {
   switchToSessionWithMarker,
   waitForBridgeInitialized,
 } from './helpers/electron-setup';
+import { postScreenshotToPr } from './helpers/pr-image-post';
 
 const SIDEBAR = 'div.flex.flex-col.shrink-0.border-r';
 
@@ -97,6 +98,17 @@ test.describe('#956 folder-bound session', () => {
   let page: Page;
   let miqiHome: string;
 
+  // Surface the evidence in the PR automatically: Playwright's failure shot
+  // here, and the switch-back screenshot each passing test already captures.
+  // Inert outside CI unless MIQI_E2E_POST_IMG=1 (see helpers/pr-image-post).
+  test.afterEach(async () => {
+    if (test.info().status === 'passed') return;
+    const fail = join(test.info().outputDir, 'test-failed-1.png');
+    if (existsSync(fail)) {
+      await postScreenshotToPr(fail, `❌ E2E 失败：${test.info().title}`);
+    }
+  });
+
   test('switch-back keeps folder-session history and the input is sendable', async () => {
     test.setTimeout(LLM_TIMEOUT + 240_000);
     const fixture = await launchElectronApp();
@@ -150,6 +162,10 @@ test.describe('#956 folder-bound session', () => {
         path: 'test-results/issue-956-switch-back.png',
         fullPage: true,
       });
+      await postScreenshotToPr(
+        'test-results/issue-956-switch-back.png',
+        '✅ E2E 通过：切走再切回后，文件夹会话历史完整、发送按钮可发送'
+      );
     } finally {
       await closeElectronApp(electronApp, miqiHome);
       // Clean up the temp folder root (mkdtempSync'd outside miqiHome).
@@ -201,6 +217,10 @@ test.describe('#956 folder-bound session', () => {
         path: 'test-results/issue-956-restart.png',
         fullPage: true,
       });
+      await postScreenshotToPr(
+        'test-results/issue-956-restart.png',
+        '✅ E2E 通过：完整重启应用后，文件夹会话仍在侧栏且历史完整'
+      );
     } finally {
       await closeElectronApp(electronApp, miqiHome);
       // Clean up the temp folder root (mkdtempSync'd outside miqiHome).
