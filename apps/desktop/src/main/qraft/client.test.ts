@@ -971,3 +971,32 @@ describe('QraftClient.submitFeedback（issue #1054）', () => {
     });
   });
 });
+
+describe('QraftClient.submitFeedback 重试策略（非幂等，CodeRabbit #1063）', () => {
+  it('网络瞬时失败不重试（重试会产生重复反馈记录）', async () => {
+    let calls = 0;
+    const fetch: FetchLike = async () => {
+      calls += 1;
+      throw new TypeError('fetch failed');
+    };
+    // 默认重试 3 次；提交反馈必须一次失败即返回，否则平台可能收到重复记录。
+    const client = new QraftClient(fetch, noopLog, 5_000, 3);
+    await expect(client.submitFeedback(CONFIG, 'TOKEN', { content: 'x' })).rejects.toMatchObject({
+      code: 'NETWORK_UNREACHABLE',
+    });
+    expect(calls).toBe(1);
+  });
+
+  it('其他接口仍保留默认重试（回归保护）', async () => {
+    let calls = 0;
+    const fetch: FetchLike = async () => {
+      calls += 1;
+      throw new TypeError('fetch failed');
+    };
+    const client = new QraftClient(fetch, noopLog, 5_000, 3);
+    await expect(client.getPointsBalance(CONFIG, 'TOKEN')).rejects.toMatchObject({
+      code: 'NETWORK_UNREACHABLE',
+    });
+    expect(calls).toBe(4); // 1 次 + 3 次重试
+  });
+});

@@ -150,9 +150,16 @@ export class QraftClient {
   /**
    * 带重试的请求。仅网络类瞬时错误（超时/建连失败）重试；
    * HTTP 403（IP 白名单拦截）与业务错误不重试，直接分类抛出。
+   *
+   * `retries` 可覆盖默认重试次数：非幂等 POST（如 feedback 提交）传 0 ——
+   * 服务端已落库但读响应失败时，重试会产生重复记录。
    */
-  private async request(url: string, init: FetchInitLike = {}): Promise<RequestResult> {
-    for (let attempt = 0; attempt <= this.retries; attempt += 1) {
+  private async request(
+    url: string,
+    init: FetchInitLike = {},
+    retries: number = this.retries
+  ): Promise<RequestResult> {
+    for (let attempt = 0; attempt <= retries; attempt += 1) {
       if (attempt > 0) {
         const backoff =
           RETRY_BACKOFF_MS[attempt - 1] ?? RETRY_BACKOFF_MS[RETRY_BACKOFF_MS.length - 1];
@@ -171,7 +178,7 @@ export class QraftClient {
         return { res, bodyText };
       } catch (err) {
         if (err instanceof QraftError) throw err;
-        if (isTransientNetworkError(err) && attempt < this.retries) {
+        if (isTransientNetworkError(err) && attempt < retries) {
           continue;
         }
         // 重试耗尽或非瞬时错误：循环内直接抛出（后面无不可达代码）。
@@ -587,14 +594,19 @@ export class QraftClient {
     // 平台 image 字段为逗号分隔的图片 URL 串；无 URL 来源时整体省略。
     if (req.images && req.images.length > 0) body.images = req.images.join(',');
 
-    const { res, bodyText } = await this.request(`${config.baseUrl}/oauth2/feedback`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${accessToken}`,
+    const { res, bodyText } = await this.request(
+      `${config.baseUrl}/oauth2/feedback`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${accessToken}`,
+        },
+        body: JSON.stringify(body),
       },
-      body: JSON.stringify(body),
-    });
+      // 非幂等：平台已落库但读响应失败时重试会产生重复反馈记录。
+      0
+    );
     if (res.status === 401) {
       throw new QraftError('SESSION_EXPIRED', 'access_token 已失效');
     }
