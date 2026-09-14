@@ -2608,27 +2608,31 @@ export function ChatConsole({
     token: null,
     timer: null,
   });
-  const recentContentRef = useRef<{ key: string; ts: number }[]>([]);
-  const seenContentRecently = (key: string) => {
+  const recentContentRef = useRef<{ size: number; mime: string; name: string; ts: number }[]>([]);
+  /** 跨通道去重：同 size+mime，且（同名 或 有一方是合成名 pasted-image-*）才算同一份。
+   *  两个不同图片（a.png / b.png）即使同大小同类型也不会被误删。 */
+  const seenContentRecently = (size: number, mime: string, name: string) => {
     const now = Date.now();
     const arr = recentContentRef.current.filter((e) => now - e.ts < 1500);
-    if (arr.some((e) => e.key === key)) {
-      recentContentRef.current = arr;
-      return true;
-    }
-    arr.push({ key, ts: now });
-    recentContentRef.current = arr.slice(-12);
-    return false;
+    const isSynthetic = (n: string) => n.startsWith('pasted-image-');
+    const dup = arr.some(
+      (e) =>
+        e.size === size &&
+        e.mime === mime &&
+        (e.name === name || isSynthetic(e.name) || isSynthetic(name))
+    );
+    recentContentRef.current = [...arr, { size, mime, name, ts: now }].slice(-12);
+    return dup;
   };
 
-  /** 附件总量上限（与主进程剪贴板一致）：renderer 侧 input/drag/paste 三入口统一。 */
+  const MAX_ONE_ATTACHMENT_BYTES = 25 * 1024 * 1024;
+  /** 附件总量上限（与主进程剪贴板一致）：renderer 侧 input/拖拽/paste 三入口统一。 */
   const MAX_TOTAL_ATTACHMENT_BYTES = 40 * 1024 * 1024;
   const attachmentsRef = useRef<Attachment[]>([]);
   useEffect(() => {
     attachmentsRef.current = attachments;
   }, [attachments]);
-  const currentAttachmentsBytes = () =>
-    attachmentsRef.current.reduce((sum, a) => sum + (a.size || 0), 0);
+  const attachmentsBytes = () => attachmentsRef.current.reduce((sum, a) => sum + (a.size || 0), 0);
   const [historyLoaded, setHistoryLoaded] = useState(false);
   const [downloadingPaperId, setDownloadingPaperId] = useState<string | null>(null);
   /** #668 补：论文下载结果反馈（paperId → done+savePath / failed+error） */
@@ -4095,13 +4099,17 @@ export function ChatConsole({
   // 统一把 File 转成 Attachment：input change / 剪贴板 / 拖拽共用。
   const attachFromFile = useCallback(
     (file: File, actionId: string, dedupeContent = false): boolean => {
-      const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
-      if (file.size > MAX_ATTACHMENT_BYTES) return false;
-      if (currentAttachmentsBytes() + file.size > MAX_TOTAL_ATTACHMENT_BYTES) return false;
+      if (file.size > MAX_ONE_ATTACHMENT_BYTES) return false;
       // 内容级去重仅用于「剪贴板/粘贴」双通道；用户显式选择/拖拽同一文件应允许重复添加
-      if (dedupeContent) {
-        const mimeKey = file.type || (file.name.split('.').pop() || '').toLowerCase();
-        if (seenContentRecently(`${file.size}:${mimeKey}`)) return false;
+      if (
+        dedupeContent &&
+        seenContentRecently(
+          file.size,
+          file.type || (file.name.split('.').pop() || '').toLowerCase(),
+          file.name
+        )
+      ) {
+        return false;
       }
       if (!acceptInAttachAction(actionId, `${file.name}:${file.size}`)) return false;
       {
@@ -4199,9 +4207,25 @@ export function ChatConsole({
     []
   );
 
+  /** 批内同步累计总量：一次多选/多文件粘贴时 React state 尚未提交，必须用本地 running 值
+   *  判断，否则同一批里每个文件都看到旧的 attachmentsRef 而逐个放行（review 09:49 P1）。 */
+  const attachBatch = (files: File[], actionId: string, dedupeContent = false): number => {
+    let used = attachmentsBytes();
+    let accepted = 0;
+    for (const f of files) {
+      if (f.size > MAX_ONE_ATTACHMENT_BYTES) continue;
+      if (used + f.size > MAX_TOTAL_ATTACHMENT_BYTES) break;
+      if (attachFromFile(f, actionId, dedupeContent)) {
+        used += f.size;
+        accepted += 1;
+      }
+    }
+    return accepted;
+  };
+
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const actionId = newAttachAction();
-    Array.from(e.target.files ?? []).forEach((f) => attachFromFile(f, actionId));
+    attachBatch(Array.from(e.target.files ?? []), actionId);
     e.target.value = '';
   };
 
@@ -4227,12 +4251,9 @@ export function ChatConsole({
       const actionId = pending.token ?? newAttachAction();
       if (pending.timer !== null) window.clearTimeout(pending.timer);
       pendingPasteRef.current = { token: null, timer: null };
-      let any = false;
-      for (const f of files) {
-        if (attachFromFile(f, actionId, true)) any = true;
-      }
+      const accepted = attachBatch(files, actionId, true);
       // 仅当确实挂上附件时才阻止默认（避免把文件路径文本也插进输入框）
-      if (any) e.preventDefault();
+      if (accepted > 0) e.preventDefault();
     };
     window.addEventListener('paste', onPaste);
     return () => window.removeEventListener('paste', onPaste);
@@ -4242,9 +4263,8 @@ export function ChatConsole({
   // 拿不到，改由主进程读 CF_HDROP/剪贴板图片，再作为附件挂上。
   const attachBase64 = useCallback(
     (name: string, base64: string, mime: string, size: number, actionId: string): boolean => {
-      if (size > 25 * 1024 * 1024) return false;
-      if (currentAttachmentsBytes() + size > MAX_TOTAL_ATTACHMENT_BYTES) return false;
-      if (seenContentRecently(`${size}:${mime}`)) return false;
+      if (size > MAX_ONE_ATTACHMENT_BYTES) return false;
+      if (seenContentRecently(size, mime, name)) return false;
       if (!acceptInAttachAction(actionId, `${name}:${size}`)) return false;
       if (mime.startsWith('image/')) {
         setAttachments((prev) => [
@@ -4280,9 +4300,15 @@ export function ChatConsole({
         const items = [...(res?.files ?? []), ...(res?.image ? [res.image] : [])];
         if (items.length === 0) return false;
         const actionId = token ?? newAttachAction();
+        let used = attachmentsBytes();
         let any = false;
         for (const f of items) {
-          if (attachBase64(f.name, f.base64, f.mime, f.size, actionId)) any = true;
+          if (f.size > MAX_ONE_ATTACHMENT_BYTES) continue;
+          if (used + f.size > MAX_TOTAL_ATTACHMENT_BYTES) break;
+          if (attachBase64(f.name, f.base64, f.mime, f.size, actionId)) {
+            used += f.size;
+            any = true;
+          }
         }
         return any;
       } catch {

@@ -540,6 +540,18 @@ test.describe('File Attachment Chips', () => {
     await expect(composerChips(page).getByText('big_b.bin')).toHaveCount(0);
   });
 
+  test('Batch selection cannot bypass the total cap', async () => {
+    const a = path.join(FIXTURE_DIR, 'batch_a.bin');
+    const b = path.join(FIXTURE_DIR, 'batch_b.bin');
+    fs.writeFileSync(a, Buffer.alloc(22 * 1024 * 1024));
+    fs.writeFileSync(b, Buffer.alloc(22 * 1024 * 1024));
+    // 一次选择两个文件：批内必须用本地累计值判断，第二个应被拒
+    await page.locator('input[type="file"]').setInputFiles([a, b]);
+    await page.waitForTimeout(900);
+    await expect(composerChips(page).getByText('batch_a.bin')).toHaveCount(1);
+    await expect(composerChips(page).getByText('batch_b.bin')).toHaveCount(0);
+  });
+
   test('Send button disabled while extracting', async () => {
     await attachFile(page, FILES.largePdf);
     const sendBtn = page
