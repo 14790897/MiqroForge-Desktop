@@ -6,23 +6,28 @@
 /** 资产面板可被压缩到的最小宽度(px)。 */
 export const ASSET_PANEL_MIN_WIDTH = 200;
 
-/** 面板开/关时,窗口应保持的最小宽度。
+/** 面板开/关时,窗口**应保持**的最小宽度(不变量):
+ *  面板展开时在基准最小宽度上再加一个面板下限 —— 缩窗时面板先被压到这个下限让位,
+ *  聊天列(输入框)因此保住与「面板关闭」时相同的最小宽度。
  *
- *  面板展开时在基准最小宽度上再加一个「面板下限」,这样缩窗时面板先被压到这个下限
- *  让位,聊天列(输入框)保住与「面板关闭」时相同的最小宽度。
- *
- *  **必须 clamp 到不超过当前窗口宽**:若算出的 min ≥ 当前窗口宽,Windows 会把窗口钉死,
- *  用户完全无法再调整大小(#1047 实现过程中踩到过)。
+ *  注意:这里**不做 clamp**。真实窗口可能因为屏幕边缘/最大化而撑不到这个目标,那种
+ *  情况下由调用方(主进程)先尝试把窗口撑到目标,撑不动再用 [[clampMinToWindow]] 降级。
+ *  若在这里就 clamp,「窗口本来就窄」时返回的值会悄悄放弃不变量(sijie-Z #1047 指出的
+ *  900~1099 区间问题),并把降级当成正常结果固化进测试。
  *
  *  @param baseMinWidth 面板未展开时的窗口基准最小宽度
  *  @param panelOpen    面板当前是否展开(含冷启动默认展开)
- *  @param currentWidth 当前窗口宽度
  */
-export function panelWindowMinWidth(
-  baseMinWidth: number,
-  panelOpen: boolean,
-  currentWidth: number
-): number {
-  const want = baseMinWidth + (panelOpen ? ASSET_PANEL_MIN_WIDTH : 0);
-  return Math.min(want, currentWidth);
+export function panelWindowMinWidth(baseMinWidth: number, panelOpen: boolean): number {
+  return baseMinWidth + (panelOpen ? ASSET_PANEL_MIN_WIDTH : 0);
+}
+
+/** 把「目标最小宽度」落到当前实际能达到的宽度上。
+ *
+ *  只有当窗口确实撑不到目标时(屏幕工作区不够 / 最大化中)才退化:此时 min 取实际宽,
+ *  否则 min > 当前窗口宽会让 Windows 把窗口钉死、完全无法再调整大小。#1047 实现过程中
+ *  踩过这个坑,所以降级路径必须保留,但要显式、可测、且只作为最后手段。
+ */
+export function clampMinToWindow(target: number, achievedWidth: number): number {
+  return Math.min(target, achievedWidth);
 }

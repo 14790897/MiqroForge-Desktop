@@ -72,7 +72,7 @@ import {
   readLocalConfig,
   resolveWorkspacePath,
 } from './workspace-path';
-import { panelWindowMinWidth } from '../../shared/layout';
+import { clampMinToWindow, panelWindowMinWidth } from '../../shared/layout';
 
 const { ipcMain, dialog, shell, app } = electron;
 
@@ -2452,12 +2452,49 @@ for m in ("pydantic", "httpx", "loguru"):
     win.on('unmaximize', () => reconcileOnRestore(win));
     win.on('restore', () => reconcileOnRestore(win));
   };
-  /** 面板展开时把窗口最小宽度抬到「基准 + 面板下限」,关闭还原;计算见
-   *  shared/layout.panelWindowMinWidth(clamp 到不超过当前窗口宽,避免钉死窗口)。 */
+  /** 把窗口加宽 delta 像素(优先向右扩、右缘到工作区边界后向左借位),并把实际扩出量
+   *  记进 rec(关面板时按此收回)。返回实际扩出的宽度。 */
+  const growWindow = (
+    win: BrowserWindow,
+    rec: { extra: number; left: number; right: number },
+    delta: number
+  ): number => {
+    if (delta <= 0) return 0;
+    const b = win.getBounds();
+    const wa = electron.screen.getDisplayMatching(b).workArea;
+    const growRight = Math.min(delta, Math.max(0, wa.x + wa.width - (b.x + b.width)));
+    const growLeft = Math.min(delta - growRight, Math.max(0, b.x - wa.x));
+    const grown = growRight + growLeft;
+    if (grown > 0) {
+      const nextWidth = b.width + grown;
+      markSelfResize(win, nextWidth);
+      win.setBounds({ x: b.x - growLeft, y: b.y, width: nextWidth, height: b.height });
+      rec.right += growRight;
+      rec.left += growLeft;
+      rec.extra += grown;
+    }
+    return grown;
+  };
+  /** 同步窗口最小宽度到「面板开/关」对应的目标(不变量见 shared/layout.panelWindowMinWidth)。
+   *  窗口比目标还窄时**先把窗口撑到目标**(记账进 extra,关面板会收回),撑不动
+   *  (屏幕边缘/最大化)才退化为当前宽 —— 否则 min 取不到目标,窗口本来就偏窄时聊天列
+   *  仍会被挤压(sijie-Z #1047);而早退到 clamp 则会把降级当成正常结果。 */
   const syncWindowMin = (win: BrowserWindow, panelOpen: boolean) => {
     const base = baseMinByWin.get(win);
     if (!base) return;
-    const safe = panelWindowMinWidth(base.width, panelOpen, win.getBounds().width);
+    const want = panelWindowMinWidth(base.width, panelOpen);
+    const rec = panelExtraByWin.get(win);
+    if (
+      rec &&
+      want > win.getBounds().width &&
+      !win.isMaximized() &&
+      !win.isFullScreen() &&
+      win.isResizable()
+    ) {
+      growWindow(win, rec, want - win.getBounds().width);
+      panelExtraByWin.set(win, rec);
+    }
+    const safe = clampMinToWindow(want, win.getBounds().width);
     if (win.getMinimumSize()[0] !== safe) win.setMinimumSize(safe, base.height);
   };
   /** 把窗口加宽/收窄到 target 对应的状态，返回实际应用到的 extra。 */
@@ -2477,20 +2514,9 @@ for m in ("pydantic", "httpx", "loguru"):
     const delta = target - rec.extra;
     if (delta !== 0) {
       const b = win.getBounds();
-      const wa = electron.screen.getDisplayMatching(b).workArea;
       if (delta > 0) {
         // 优先向右扩(左缘不动),右缘到工作区边界后向左借位把窗口整体放中间可多补
-        const growRight = Math.min(delta, Math.max(0, wa.x + wa.width - (b.x + b.width)));
-        const growLeft = Math.min(delta - growRight, Math.max(0, b.x - wa.x));
-        const grown = growRight + growLeft;
-        if (grown > 0) {
-          const nextWidth = b.width + grown;
-          markSelfResize(win, nextWidth);
-          win.setBounds({ x: b.x - growLeft, y: b.y, width: nextWidth, height: b.height });
-          rec.right += growRight;
-          rec.left += growLeft;
-          rec.extra += grown;
-        }
+        growWindow(win, rec, delta);
       } else {
         // 收窄:先还左借位再收右侧,总量不越过最小宽(minWidth)。绝不主动抹掉
         // 用户自己拉宽的窗口——仅收回本面板实际加宽的 px。
