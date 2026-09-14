@@ -15,10 +15,13 @@ CodeRabbit 复审补充：``SessionManager.delete`` 也纳入同一把 key 锁 �
 文件）协调仍缺失，见 PR #1003 说明。
 """
 
+import json
 import threading
 import time
 
-from miqi.session.manager import SessionManager
+import pytest
+
+from miqi.session.manager import OwnershipError, SessionManager
 
 
 def _slow_read(monkeypatch, delay: float = 0.02) -> None:
@@ -256,3 +259,113 @@ def test_clear_tracked_files_waits_for_key_lock(tmp_path):
 
     assert done.is_set(), "clear 未退出"
     assert not store.exists()
+
+
+def _change_owner_on_disk(sm: SessionManager, key: str, owner: str) -> None:
+    path = sm._get_session_path(key)
+    lines = path.read_text(encoding="utf-8").splitlines()
+    metadata = json.loads(lines[0])
+    metadata["owner_client_id"] = owner
+    metadata.setdefault("metadata", {})["owner_client_id"] = owner
+    lines[0] = json.dumps(metadata, ensure_ascii=False)
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda sm, key: sm.save_tracked_file(
+            key, "new.md", op="write", client_id="client-A",
+        ),
+        lambda sm, key: sm.save_tracked_files_batch(
+            key, [("new.md", "write")], client_id="client-A",
+        ),
+        lambda sm, key: sm.reset_tracked_file_op(
+            key, "existing.md", op="read", client_id="client-A",
+        ),
+        lambda sm, key: sm.remove_tracked_file(
+            key, "existing.md", client_id="client-A",
+        ),
+        lambda sm, key: sm.clear_tracked_files(key, client_id="client-A"),
+    ],
+)
+def test_tracked_mutation_rechecks_ownership_after_lock(
+    tmp_path, monkeypatch, mutation,
+):
+    """A client authorized before waiting must not mutate a newly foreign session."""
+    key = "desktop:ownership-race"
+    sm = SessionManager(tmp_path)
+    session = sm.get_or_create(key, client_id="client-A")
+    sm.save(session)
+    sm.save_tracked_file(key, "existing.md", op="write")
+    tracked_path = sm._get_tracked_files_path(key)
+    tracked_before = tracked_path.read_bytes()
+
+    lock = sm._get_session_lock(key)
+    reached_lock = threading.Event()
+    monkeypatch.setattr(
+        sm,
+        "_get_session_lock",
+        lambda _key: (reached_lock.set(), lock)[1],
+    )
+    errors: list[BaseException] = []
+    worker = threading.Thread(
+        target=lambda: _capture_error(errors, lambda: mutation(sm, key)),
+        name="tracked-ownership-race",
+    )
+
+    with lock:
+        worker.start()
+        assert reached_lock.wait(timeout=10), "mutation did not reach the session lock"
+        _change_owner_on_disk(sm, key, "client-B")
+    worker.join(timeout=10)
+
+    assert not worker.is_alive(), "mutation thread did not exit"
+    assert len(errors) == 1
+    assert isinstance(errors[0], OwnershipError)
+    assert errors[0].code == "UNAUTHORIZED"
+    assert tracked_path.read_bytes() == tracked_before
+
+
+def _capture_error(errors: list[BaseException], operation) -> None:
+    try:
+        operation()
+    except BaseException as exc:  # noqa: BLE001 — thread errors must reach the test
+        errors.append(exc)
+
+
+def test_delete_rechecks_ownership_before_cache_eviction(tmp_path, monkeypatch):
+    """Delete must retain cache and disk state when ownership changes while waiting."""
+    key = "desktop:delete-ownership-race"
+    sm = SessionManager(tmp_path)
+    session = sm.get_or_create(key, client_id="client-A")
+    sm.save(session)
+    session_dir = sm.get_session_dir(key)
+
+    lock = sm._get_session_lock(key)
+    reached_lock = threading.Event()
+    monkeypatch.setattr(
+        sm,
+        "_get_session_lock",
+        lambda _key: (reached_lock.set(), lock)[1],
+    )
+    errors: list[BaseException] = []
+    worker = threading.Thread(
+        target=lambda: _capture_error(
+            errors, lambda: sm.delete(key, client_id="client-A"),
+        ),
+        name="delete-ownership-race",
+    )
+
+    with lock:
+        worker.start()
+        assert reached_lock.wait(timeout=10), "delete did not reach the session lock"
+        _change_owner_on_disk(sm, key, "client-B")
+    worker.join(timeout=10)
+
+    assert not worker.is_alive(), "delete thread did not exit"
+    assert len(errors) == 1
+    assert isinstance(errors[0], OwnershipError)
+    assert errors[0].code == "UNAUTHORIZED"
+    assert key in sm._cache
+    assert session_dir.exists()

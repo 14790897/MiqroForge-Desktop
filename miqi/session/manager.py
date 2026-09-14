@@ -420,14 +420,15 @@ class SessionManager:
         ``file_path`` is normalised to forward-slash internally.
         ``op`` is one of: read, write, edit, delete.
 
-        When client_id is provided, ownership is verified first.
+        When client_id is provided, ownership is verified while holding the
+        session lock so authorization cannot go stale before the write.
 
         #1003 finding ③：读-改-写全程持 key 锁（模块级，跨实例共享），否则两个
         SessionManager 实例各自读到旧快照，后写者覆盖先写者 → 丢条目。
         """
-        if client_id is not None:
-            self._verify_ownership_for_mutation(key, client_id)
         with self._get_session_lock(key):
+            if client_id is not None:
+                self._verify_ownership_for_mutation(key, client_id)
             files = self.load_tracked_files(key)
             norm = file_path.replace("\\", "/")
             existing = files.get(norm, {})
@@ -466,11 +467,11 @@ class SessionManager:
         #1003 finding ③：与 ``save_tracked_file`` 共用同一把模块级 key 锁，
         跨实例的「批量写 vs 单条写」不再互相覆盖。
         """
-        if client_id is not None:
-            self._verify_ownership_for_mutation(key, client_id)
-        if not entries:
-            return
         with self._get_session_lock(key):
+            if client_id is not None:
+                self._verify_ownership_for_mutation(key, client_id)
+            if not entries:
+                return
             files = self.load_tracked_files(key)
             rank = {"read": 0, "edit": 1, "write": 2, "delete": 3}
             now = int(datetime.now().timestamp() * 1000)
@@ -503,11 +504,12 @@ class SessionManager:
         Unlike ``save_tracked_file`` this bypasses the rank guard so a
         ``write`` entry can be downgraded back to ``read`` after accept.
 
-        When client_id is provided, ownership is verified first.
+        When client_id is provided, ownership is verified while holding the
+        session lock so authorization cannot go stale before the write.
         """
-        if client_id is not None:
-            self._verify_ownership_for_mutation(key, client_id)
         with self._get_session_lock(key):
+            if client_id is not None:
+                self._verify_ownership_for_mutation(key, client_id)
             files = self.load_tracked_files(key)
             norm = file_path.replace("\\", "/")
             if norm not in files:
@@ -528,11 +530,12 @@ class SessionManager:
     ) -> None:
         """Remove a single tracked file entry.
 
-        When client_id is provided, ownership is verified first.
+        When client_id is provided, ownership is verified while holding the
+        session lock so authorization cannot go stale before the write.
         """
-        if client_id is not None:
-            self._verify_ownership_for_mutation(key, client_id)
         with self._get_session_lock(key):
+            if client_id is not None:
+                self._verify_ownership_for_mutation(key, client_id)
             files = self.load_tracked_files(key)
             norm = file_path.replace("\\", "/")
             files.pop(norm, None)
@@ -552,15 +555,16 @@ class SessionManager:
     ) -> None:
         """Remove the entire tracked_files.json for a session.
 
-        When client_id is provided, ownership is verified first.
+        When client_id is provided, ownership is verified while holding the
+        session lock so authorization cannot go stale before the deletion.
 
         #1003 finding ③（复核）：clear 是整文件删除，必须在同一把 key 锁内，
         否则会与在途的读-改-写交错（删除被随后的 ``tmp.replace`` 悄悄撤销，
         或删掉刚写入的批次）。
         """
-        if client_id is not None:
-            self._verify_ownership_for_mutation(key, client_id)
         with self._get_session_lock(key):
+            if client_id is not None:
+                self._verify_ownership_for_mutation(key, client_id)
             path = self._get_tracked_files_path(key)
             path.unlink(missing_ok=True)
 
@@ -730,10 +734,10 @@ class SessionManager:
         ``FileNotFoundError``。锁是 ``threading.RLock``（可重入），本路径内不再
         获取其它锁，无锁序问题。
         """
-        if client_id is not None:
-            self._verify_ownership_for_mutation(key, client_id)
-        self._cache.pop(key, None)
         with self._get_session_lock(key):
+            if client_id is not None:
+                self._verify_ownership_for_mutation(key, client_id)
+            self._cache.pop(key, None)
             self._migrate_flat_to_dir(key)
             session_dir = self.get_session_dir(key)
             if session_dir.exists():
