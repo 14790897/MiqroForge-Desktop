@@ -7,8 +7,10 @@
 ``ExecTool`` holds no reference to those sets: its write boundary only honours
 the harness-injected ``_user_roots`` (#821/#984, layers 1 and 3 —
 ``_exec_rw_binds`` and ``_guard_write_roots``), so the very same session's
-``exec`` still refused to write a directory the user had just authorized.
-``ExecTool._exec_rw_binds``'s docstring names that gap explicitly.
+``exec`` refused to write a directory the user had just authorized — the
+residual gap ``ExecTool._exec_rw_binds``'s docstring recorded as "the #864
+approval-card grants are deliberately NOT part of the exec set" until #1013
+closed it through the store below.
 
 This module is the process-level bridge.  The file tools publish every
 session-scoped grant here (both grant points live in
