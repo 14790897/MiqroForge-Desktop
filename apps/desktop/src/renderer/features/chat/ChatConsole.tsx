@@ -38,6 +38,15 @@ import {
 } from '../../components/ExecutionPolicySelector';
 import { ReasoningModeSwitch, type ReasoningMode } from './components/ReasoningModeSwitch';
 import {
+  MODE_SCENES,
+  SKILL_ORDER,
+  SKILL_SCENE_ICON,
+  SKILL_SCENE_TITLE,
+  SKILL_STARTERS,
+  type StarterTask,
+  type WelcomeMode,
+} from './welcomeScenes';
+import {
   Send,
   Square,
   Loader2,
@@ -54,7 +63,9 @@ import {
   Eye,
   GitMerge,
   ChevronDown,
+  ChevronLeft,
   ChevronRight,
+  ChevronUp,
   ArrowDown,
   Pencil,
   BookOpen,
@@ -2407,6 +2418,16 @@ const TURN_TERMINAL_GRACE_MS = 500;
 // 常驻免责声明文案（#836）—— 法务/产品最终确认后替换；后续接入 i18n 时可迁移
 const CHAT_DISCLAIMER_ZH = 'AI 生成内容仅供参考，可能存在错误，请自行核实关键信息';
 
+// issue #962：三张模式卡映射到两档推理模式（日常任务与代码任务都走 think）。反向回写时
+// think 一律落到中间那张卡，与旧行为一致（原来中间那张是「深度研究」）。
+const WELCOME_MODE_REASONING: Record<WelcomeMode, ReasoningMode> = {
+  fast: 'fast',
+  daily: 'think',
+  code: 'think',
+};
+const reasoningModeToWelcome = (m: ReasoningMode): WelcomeMode =>
+  m === 'think' ? 'daily' : 'fast';
+
 export function ChatConsole({
   sessionKey = DEFAULT_SESSION,
   loadTrigger,
@@ -2516,29 +2537,86 @@ export function ChatConsole({
       // ignore
     }
   }, [reasoningMode]);
-  // EB-1 欢迎页模式卡选中态：独立于 reasoningMode（深度研究与代码任务都映射 think，
+  // EB-1 欢迎页模式卡选中态：独立于 reasoningMode（日常任务与代码任务都映射 think，
   // 若用 reasoningMode 推导会同时高亮两张卡）。welcomeMode 是组件级 state，跨会话
   // 不随欢迎页重挂而重置（ChatConsole 常驻），见下方 sessionKey effect。
-  const [welcomeMode, setWelcomeMode] = useState<'fast' | 'think' | 'code'>(
-    reasoningMode === 'think' ? 'think' : 'fast'
+  const [welcomeMode, setWelcomeMode] = useState<WelcomeMode>(
+    reasoningMode === 'think' ? 'daily' : 'fast'
   );
-  const selectWelcomeMode = (k: 'fast' | 'think' | 'code') => {
+  const selectWelcomeMode = (k: WelcomeMode) => {
     setWelcomeMode(k);
-    setReasoningMode(k === 'code' ? 'think' : k);
+    setReasoningMode(WELCOME_MODE_REASONING[k]);
   };
+  // issue #962 起点任务：三层渐进选择（模式 → 子项目 → 子子项目）。未选时是 null，
+  // 这样"点了子项目才冒出子子项目行、点了子子项目才显示详细内容"的渐进流程才成立。
+  const [pickedSceneIdx, setPickedSceneIdx] = useState<number | null>(null);
+  const [pickedTaskIdx, setPickedTaskIdx] = useState<number | null>(null);
+  // issue #962：代码任务的子项目里额外挂一项「内置技能」，内容来自 skills.list()，
+  // 但只上架 SKILL_ORDER 白名单里的几个（首屏不铺开全部内置技能），拿不到就整项不显示。
+  const [builtinSkillTasks, setBuiltinSkillTasks] = useState<readonly StarterTask[]>([]);
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const res = await window.miqi.skills.list();
+        if (cancelled) return;
+        const byName = new Map(
+          (res?.skills ?? [])
+            .filter((s) => s.source === 'builtin' && !s.path.includes('/kwp/'))
+            .map((s) => [s.name, s] as const)
+        );
+        // 顺序与上架范围都以 SKILL_ORDER 为准：技能清单本身来自文件系统，顺序不稳定，
+        // 而且没装的技能不该在首屏留空位。
+        setBuiltinSkillTasks(
+          SKILL_ORDER.map((name) =>
+            byName.has(name) ? (SKILL_STARTERS[name] ?? null) : null
+          ).filter((t): t is StarterTask => t !== null)
+        );
+      } catch {
+        // 技能清单不可用时这一项直接不出现——它不是必需入口
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+  const welcomeScenes = useMemo(() => {
+    const base = MODE_SCENES[welcomeMode];
+    if (welcomeMode !== 'code' || builtinSkillTasks.length === 0) return base;
+    return [
+      // 内置技能排在最前（产品要求）：它是"开箱即用"的入口，优先级高于场景模板
+      { title: SKILL_SCENE_TITLE, icon: SKILL_SCENE_ICON, tasks: builtinSkillTasks },
+      ...base,
+    ];
+  }, [welcomeMode, builtinSkillTasks]);
+  // 空态欢迎页（起点任务只在这里出现，有消息后胶囊与详细内容都应消失）
+  const isWelcomeEmpty = messages.length === 0;
+  // 子项目 chips 行的横向翻页（两侧箭头）
+  const sceneChipsRef = useRef<HTMLDivElement>(null);
+  const pickedScene = pickedSceneIdx === null ? null : (welcomeScenes[pickedSceneIdx] ?? null);
+  const pickedTask =
+    pickedScene && pickedTaskIdx !== null ? (pickedScene.tasks[pickedTaskIdx] ?? null) : null;
+  // 换模式 → 两层都清空；换子项目 → 只清子子项目。
+  useEffect(() => {
+    setPickedSceneIdx(null);
+    setPickedTaskIdx(null);
+  }, [welcomeMode]);
+  useEffect(() => {
+    setPickedTaskIdx(null);
+  }, [pickedSceneIdx]);
   // Composer 侧的推理模式切换(ReasoningModeSwitch / 建议提示)同样要同步 welcome
   // 卡高亮——否则空态下先选了「代码任务」再从输入条切 fast,welcomeMode 停在 code、
   // 发送却用 fast,高亮与真实模式不一致(CodeRabbit)。会话已有消息后 welcome 卡不
   // 再渲染,只在 messages.length===0 时回写 welcomeMode。
   const changeReasoningMode = (m: ReasoningMode) => {
     setReasoningMode(m);
-    if (messages.length === 0) setWelcomeMode(m);
+    if (messages.length === 0) setWelcomeMode(reasoningModeToWelcome(m));
   };
   // 切到新会话时按当前 reasoningMode 重新派生选中卡：避免沿用上个会话的 code 选择，
   // 却因中途切到 fast 而高亮与发送模式不一致（CodeRabbit）。仅随 sessionKey 触发，
   // 不在同一会话内用 reasoningMode 变化覆盖用户手动选卡。
   useEffect(() => {
-    setWelcomeMode(reasoningMode === 'think' ? 'think' : 'fast');
+    setWelcomeMode(reasoningModeToWelcome(reasoningMode));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionKey]);
   const [streaming, setStreaming] = useState(false);
@@ -3825,10 +3903,28 @@ export function ChatConsole({
 
   // Scroll to bottom: (a) unconditionally after opening a session,
   // (b) during streaming only if the user hasn't manually scrolled up.
+  // 空态（欢迎页）例外：它比可视区高，粘底会把品牌区顶出屏幕（issue #962 实测
+  // scrollTop 落在最大值，logo 与标题看不见）。进入空态时会有一整块 DOM 替换
+  // （「正在连接…」→ 欢迎页），浏览器的滚动锚定会把位置挪走且时机不定，所以这里
+  // 在随后两帧再钉一次顶部；之后不再干预，用户自己滚下去读「场景方案」不受影响。
+  // justOpened 不消费，留给第一条消息再触发一次粘底。
   useEffect(() => {
     if (!historyLoaded) return;
     const el = scrollRef.current;
     if (!el) return;
+    if (messages.length === 0) {
+      el.scrollTop = 0;
+      userScrolledUp.current = false;
+      const pin = () => {
+        if (scrollRef.current) scrollRef.current.scrollTop = 0;
+      };
+      const raf = requestAnimationFrame(pin);
+      const timer = window.setTimeout(pin, 250);
+      return () => {
+        cancelAnimationFrame(raf);
+        window.clearTimeout(timer);
+      };
+    }
     if (justOpened.current) {
       justOpened.current = false;
       el.scrollTop = el.scrollHeight + el.clientHeight; // clamped to max
@@ -6787,6 +6883,8 @@ export function ChatConsole({
                         'radial-gradient(closest-side, var(--accent-soft), transparent 72%)',
                     }}
                   />
+                  {/* 品牌区维持原来的两层竖排（56px 方块 + 30px 标题）。此前为压缩空态高度
+                      改成过一行 lockup，按产品意见改回——代价是空态内容高约 +86px。 */}
                   <div
                     className="relative w-14 h-14 rounded-2xl flex items-center justify-center shadow-sm"
                     style={{
@@ -6817,11 +6915,11 @@ export function ChatConsole({
                         desc: '即时回答问题、改少量代码，低延迟优先。',
                       },
                       {
-                        key: 'think' as const,
-                        icon: '🧠',
-                        tag: '深度研究',
-                        tagline: '面向复杂任务',
-                        desc: '长链路检索、推理与方案推演，先想后答。',
+                        key: 'daily' as const,
+                        icon: '📋',
+                        tag: '日常任务',
+                        tagline: '面向日常办公',
+                        desc: '文档、表格、邮件、幻灯片等日常事务，说清需求就交付。',
                       },
                       {
                         key: 'code' as const,
@@ -6837,13 +6935,18 @@ export function ChatConsole({
                           key={m.key}
                           type="button"
                           onClick={() => selectWelcomeMode(m.key)}
-                          className={`flex-1 flex flex-col items-center gap-[5px] rounded-xl px-3 py-3 cursor-pointer transition-colors duration-200 border min-h-[132px] ${
+                          className={`flex-1 flex flex-col items-center gap-[5px] rounded-xl px-3 py-3 cursor-pointer transition-colors duration-200 border min-h-[108px] ${
                             active ? 'border-[var(--accent)]' : 'border-[var(--border-subtle)]'
                           } hover:border-[var(--accent)]`}
                           style={{
+                            // 选中卡：底色自上而下由浅入深（底部更浓），配合描边与淡投影
+                            // 让"已选中"在余光里也能看出来。
                             background: active
-                              ? 'color-mix(in srgb, var(--surface) 92%, var(--accent-soft))'
+                              ? 'linear-gradient(to bottom, color-mix(in srgb, var(--surface) 84%, var(--accent-soft)), color-mix(in srgb, var(--surface) 60%, var(--accent-soft)))'
                               : 'var(--surface)',
+                            boxShadow: active
+                              ? '0 2px 10px color-mix(in srgb, var(--accent) 16%, transparent)'
+                              : undefined,
                           }}
                         >
                           <span
@@ -6853,22 +6956,183 @@ export function ChatConsole({
                             <span className="text-[15px]">{m.icon}</span>
                             {m.tag}
                           </span>
-                          <span className="text-[11px] text-text-faint">{m.tagline}</span>
+                          {/* ✓ 仅 active 渲染:opacity 隐藏会让文本留在 DOM,
+                              toContainText 断言不了"取消选中"。并进 tagline 这一行而不是
+                              单独占一行（未选中的卡原本也要为它预留 18px 占位高度，
+                              实测卡片 132 → 108px）；选中态另靠更重的底纹 + 描边 + 淡投影。 */}
+                          <span className="flex items-center gap-1.5 text-[11px] text-text-faint">
+                            <span>{m.tagline}</span>
+                            {active && (
+                              <span className="font-bold" style={{ color: 'var(--accent)' }}>
+                                ✓ 已选择
+                              </span>
+                            )}
+                          </span>
                           <span className="text-[11.5px] text-text-muted leading-snug">
                             {m.desc}
                           </span>
-                          {/* ✓ 仅 active 渲染:opacity 隐藏会让文本留在 DOM,
-                              toContainText 断言不了"取消选中"。占位 div 保持底部对齐。 */}
-                          <div
-                            className="mt-auto flex items-center justify-center"
-                            style={{ minHeight: 16, color: 'var(--accent)' }}
-                          >
-                            {active && <span className="text-[11px] font-bold">✓ 已选择</span>}
-                          </div>
                         </button>
                       );
                     })}
                   </div>
+                  {/* issue #962 起点任务：两级子选项——左栏场景（L2，上下滚动），右栏
+                      该场景下的任务（L3，每条带一句详情）。点任务填入输入框并聚焦。 */}
+                  {/* 起点任务（对齐 WorkBuddy）：子选项从 148px 左栏压成一行横向 chips，
+                      贴在输入框上方；任务列表与「场景方案」移到它上面。原来的双栏面板
+                      固定 268~320px，是空态首屏溢出的最大来源。 */}
+                  {/* issue #962 起点任务（三层渐进，按产品描述）：
+                      ① 点三大项 → 子项目横排一行，右侧箭头翻页；
+                      ② 点子项目 → 它变成输入框里的可移除胶囊，同时冒出它的子子项目行；
+                      ③ 点子子项目 → 详细内容显示在输入框里。
+                      原来的 268px 双栏面板被这两行 chips 取代——它正是空态溢出的最大来源。 */}
+                  <div
+                    data-testid="welcome-starters"
+                    aria-label="起点任务"
+                    className="relative w-full max-w-[560px] flex items-center gap-1.5"
+                  >
+                    <button
+                      type="button"
+                      aria-label="上一组子项目"
+                      onClick={() =>
+                        sceneChipsRef.current?.scrollBy({ left: -170, behavior: 'smooth' })
+                      }
+                      className="starter-chip shrink-0 w-7 h-7 flex items-center justify-center rounded-full cursor-pointer text-text-faint hover:text-[var(--text)]"
+                      style={{ border: '1px solid transparent' }}
+                    >
+                      <ChevronLeft size={13} />
+                    </button>
+                    <div
+                      key={welcomeMode}
+                      ref={sceneChipsRef}
+                      // 藏掉横向滚动条（两侧箭头就是它的替代物）：webkit 伪元素 + 标准属性各写一份。
+                      // py-3/-my-3 是给阴影留的余地：overflow-x 一旦不是 visible，overflow-y 会被
+                      // 算成 auto，chips 的 ring 与投影上下都会被这个滚动容器直接裁掉（#962 反馈
+                      // 「上下框子看不见」）；拿负 margin 把多出来的 24px 抵回去，布局高度不变。
+                      className="flex-1 min-w-0 flex items-center gap-1.5 overflow-x-auto scroll-smooth py-3 -my-3 [&::-webkit-scrollbar]:hidden"
+                      style={{
+                        animation: 'welcomeChipsIn 220ms ease-out',
+                        scrollbarWidth: 'none',
+                      }}
+                    >
+                      {welcomeScenes.map((s, i) => {
+                        const on = i === pickedSceneIdx;
+                        return (
+                          <button
+                            key={s.title}
+                            type="button"
+                            onClick={() => setPickedSceneIdx(on ? null : i)}
+                            aria-pressed={on}
+                            className={cn(
+                              'starter-chip flex items-center gap-2 shrink-0 rounded-full px-4 py-2 text-[13px] cursor-pointer',
+                              on ? 'font-semibold' : 'text-text-muted hover:text-[var(--text)]'
+                            )}
+                            style={{
+                              // 底色与描边都交给 .starter-chip（表面色 + ring + 投影），
+                              // 这里只留 1px 透明边占住原来 border 的布局宽度，选中时不跳尺寸。
+                              border: '1px solid transparent',
+                              color: on ? 'var(--text)' : undefined,
+                            }}
+                          >
+                            <span
+                              className="shrink-0 text-[12px] leading-none"
+                              style={on ? undefined : { opacity: 0.55, filter: 'saturate(0.45)' }}
+                            >
+                              {s.icon}
+                            </span>
+                            {s.title}
+                          </button>
+                        );
+                      })}
+                    </div>
+                    <button
+                      type="button"
+                      aria-label="下一组子项目"
+                      onClick={() =>
+                        sceneChipsRef.current?.scrollBy({ left: 170, behavior: 'smooth' })
+                      }
+                      className="starter-chip shrink-0 w-7 h-7 flex items-center justify-center rounded-full cursor-pointer text-text-faint hover:text-[var(--text)]"
+                      style={{ border: '1px solid transparent' }}
+                    >
+                      <ChevronRight size={13} />
+                    </button>
+                  </div>
+
+                  {/* 子子项目：换成**可展开的卡片**（#962 反馈：只靠大小区分不够）。
+                      层级感来自"控件类型变了"——L2 是横排 chips，L3 是纵列的带 ⌄ 卡片，
+                      对齐 WorkBuddy 第三层的做法；展开后直接看到提示词与任务详情。 */}
+                  {pickedScene && (
+                    <div
+                      key={`${welcomeMode}-${pickedSceneIdx}`}
+                      className="relative w-full max-w-[560px] flex flex-col gap-1.5 pl-4"
+                      style={{
+                        animation: 'welcomeChipsIn 220ms ease-out',
+                        // 这条竖线只是把 L3 归到选中的 L2 名下，跟卡片一样走中性灰（#962：所有都灰）
+                        borderLeft: '2px solid color-mix(in srgb, var(--text) 14%, transparent)',
+                      }}
+                    >
+                      {pickedScene.tasks.map((t, i) => {
+                        const open = i === pickedTaskIdx;
+                        return (
+                          <div
+                            key={t.title}
+                            data-open={open ? '' : undefined}
+                            className="starter-card rounded-lg overflow-hidden text-left"
+                            style={{ border: '1px solid transparent' }}
+                          >
+                            <button
+                              type="button"
+                              onClick={() => {
+                                if (open) {
+                                  setPickedTaskIdx(null);
+                                  return;
+                                }
+                                setPickedTaskIdx(i);
+                                // 展开的同时把提示词放进输入框（#962 反馈：详细的提示信息
+                                // 得在对话框里）。用替换而不是追加，连点不会堆成一长串。
+                                setInput(t.ask);
+                                textareaRef.current?.focus();
+                              }}
+                              aria-expanded={open}
+                              className="w-full flex items-center gap-2 px-3 py-2 text-left text-[12.5px] leading-snug cursor-pointer transition-colors duration-150"
+                              style={{
+                                color: open ? 'var(--text)' : 'var(--text-muted)',
+                                fontWeight: open ? 600 : 400,
+                              }}
+                            >
+                              <span className="shrink-0 text-[12px] leading-none">{t.icon}</span>
+                              <span className="flex-1 truncate">{t.title}</span>
+                              <span className="shrink-0" style={{ color: 'var(--text-faint)' }}>
+                                {open ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
+                              </span>
+                            </button>
+                            {open && (
+                              <div
+                                className="px-3 pb-3 flex flex-col gap-2.5"
+                                style={{ borderTop: '1px solid var(--border-subtle)' }}
+                              >
+                                {(
+                                  [
+                                    ['适用场景', t.scenario],
+                                    ['你会得到', t.deliverable],
+                                    ['需要你提供', t.needs],
+                                  ] as const
+                                ).map(([label, value]) => (
+                                  <div key={label} className="flex flex-col gap-0.5">
+                                    <span className="text-[10.5px] font-semibold tracking-wide text-text-faint">
+                                      {label}
+                                    </span>
+                                    <span className="text-[12px] leading-[1.7] text-text-muted">
+                                      {value}
+                                    </span>
+                                  </div>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
                 </div>
               ) : (
                 chatGroups.map((group, i) =>
@@ -7174,7 +7438,7 @@ export function ChatConsole({
               <ConfirmCardArea />
 
               <div
-                className="flex flex-col rounded-3xl px-7 py-3.5 transition-all"
+                className="flex flex-col rounded-xl px-7 py-3.5 transition-all"
                 data-testid="chat-input-container"
                 style={{
                   background: 'color-mix(in srgb, var(--surface) 85%, transparent)',
@@ -7185,6 +7449,49 @@ export function ChatConsole({
                   boxShadow: '0 -4px 20px rgba(0,0,0,0.06), 0 2px 8px rgba(0,0,0,0.04)',
                 }}
               >
+                {/* issue #962 起点任务：选过的子项目 / 子子项目以可移除胶囊显示在输入框里
+                    （形态对齐 WorkBuddy 的「文档处理 ×」），点子子项目后其详细内容也一并
+                    显示在这里——把最占高度的方案区搬出滚动区，空态溢出因此归零。 */}
+                {isWelcomeEmpty && (pickedScene || pickedTask) && (
+                  <div className="flex flex-wrap items-center gap-1.5 pb-2">
+                    {pickedScene && (
+                      <button
+                        type="button"
+                        onClick={() => setPickedSceneIdx(null)}
+                        title="移除这个子项目"
+                        className="group flex items-center gap-1.5 rounded-full pl-2.5 pr-1.5 py-1 text-[11.5px] cursor-pointer transition-colors duration-150"
+                        style={{
+                          // 跟上面 L2/L3 的选中态用同一套灰（#962 反馈：对话框里的也要一致）
+                          background: 'var(--starter-fill-active)',
+                          border: '1px solid color-mix(in srgb, var(--text) 12%, transparent)',
+                          color: 'var(--text)',
+                        }}
+                      >
+                        <span className="text-[11px] leading-none">{pickedScene.icon}</span>
+                        {pickedScene.title}
+                        <X size={11} className="opacity-50 group-hover:opacity-100" />
+                      </button>
+                    )}
+                    {pickedTask && (
+                      <button
+                        type="button"
+                        onClick={() => setPickedTaskIdx(null)}
+                        title="移除这个任务"
+                        className="group flex items-center gap-1.5 rounded-full pl-2.5 pr-1.5 py-1 text-[11.5px] cursor-pointer transition-colors duration-150"
+                        style={{
+                          // 跟上面 L2/L3 的选中态用同一套灰（#962 反馈：对话框里的也要一致）
+                          background: 'var(--starter-fill-active)',
+                          border: '1px solid color-mix(in srgb, var(--text) 12%, transparent)',
+                          color: 'var(--text)',
+                        }}
+                      >
+                        <span className="text-[11px] leading-none">{pickedTask.icon}</span>
+                        {pickedTask.title}
+                        <X size={11} className="opacity-50 group-hover:opacity-100" />
+                      </button>
+                    )}
+                  </div>
+                )}
                 {/* Textarea on top — grows up to 1/3 of viewport (DeepSeek style) */}
                 <ContextMenu items={inputContextItems} minWidth={160}>
                   {({ onContextMenu }) => (

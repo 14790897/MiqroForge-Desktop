@@ -2,9 +2,9 @@
  * E2E: Reasoning Mode (Fast/Think) — issue #680
  *
  * Validates (welcome-page EB-1 redesign 之后):
- * 1. 空状态（未开始对话）渲染 EB-1 模式卡：⚡极速问答 / 🧠深度研究 / 💻代码任务，
+ * 1. 空状态（未开始对话）渲染 EB-1 模式卡：⚡极速问答 / 📋日常任务 / 💻代码任务，
  *    默认选中极速问答（fast）；点击卡切换模式并持久化到 sessionStorage；
- *    代码任务卡映射 think（与深度研究同一档）。
+ *    代码任务卡映射 think（与日常任务同一档）。
  * 2. 发送消息后进入对话窗口，输入条里的 ReasoningModeSwitch 接管模式显示。
  * 3. Sending a message stamps the user bubble with the mode tag.
  * 4. Default mode is fast (user decision: 默认极速版).
@@ -42,7 +42,7 @@ test.describe('Reasoning Mode E2E', () => {
     await expect(fastCard).toBeVisible({ timeout: 15_000 });
     await expect(fastCard).toContainText('✓ 已选择');
 
-    await expect(page.getByRole('button', { name: /深度研究/ }).first()).toBeVisible();
+    await expect(page.getByRole('button', { name: /日常任务/ }).first()).toBeVisible();
     await expect(page.getByRole('button', { name: /代码任务/ }).first()).toBeVisible();
 
     // Default fast persisted (fresh app → sessionStorage empty → fast)
@@ -51,15 +51,15 @@ test.describe('Reasoning Mode E2E', () => {
       .toBe('fast');
   });
 
-  test('clicking 深度研究 / 代码任务 cards switches to think and persists', async () => {
-    const thinkCard = page.getByRole('button', { name: /深度研究/ }).first();
+  test('clicking 日常任务 / 代码任务 cards switches to think and persists', async () => {
+    const thinkCard = page.getByRole('button', { name: /日常任务/ }).first();
     await thinkCard.click();
     await expect(thinkCard).toContainText('✓ 已选择');
     await expect
       .poll(async () => page.evaluate(() => sessionStorage.getItem('miqi-reasoning-mode')))
       .toBe('think');
 
-    // 代码任务卡映射 think：仅它高亮，深度研究卡取消选中，持久化仍为 think
+    // 代码任务卡映射 think：仅它高亮，日常任务卡取消选中，持久化仍为 think
     const codeCard = page.getByRole('button', { name: /代码任务/ }).first();
     await codeCard.click();
     await expect(codeCard).toContainText('✓ 已选择');
