@@ -2647,11 +2647,12 @@ export function ChatConsole({
   }, [historyLoaded, sessionKey]);
   // 冷启动默认展开的前提是「窗口放得下面板且聊天列不被挤压」;放不下就默认收起 ——
   // 既不静默撑宽窗口(minOnly 不改窗口宽),也不把挤压直接呈现给用户(baiye-banned #1047)。
-  const [panelOpen, setPanelOpen] = useState(() =>
-    canOpenPanelWithoutSqueeze(
-      typeof window === 'undefined' ? Number.POSITIVE_INFINITY : window.innerWidth
-    )
-  );
+  // 判定用 **window.outerWidth**(原生外宽,含边框),与主进程 BrowserWindow bounds 同口径;
+  // 用 innerWidth(内容区)会因非客户区边框偏小而误判(CodeRabbit #1047)。
+  const [panelOpen, setPanelOpen] = useState(() => {
+    if (typeof window === 'undefined') return true;
+    return canOpenPanelWithoutSqueeze(window.outerWidth || window.innerWidth);
+  });
   const [panelWidth, setPanelWidth] = useState(280);
   const panelResizing = useRef(false);
   /** 面板 DOM 节点:拖拽中直改其宽度,避免每帧 setPanelWidth 让整个 ChatConsole
