@@ -16,7 +16,12 @@ import fs from 'fs';
 import os from 'os';
 
 // ── Test fixture directory ─────────────────────────────────────────────
-const FIXTURE_DIR = path.join(os.tmpdir(), 'miqi-e2e-attachment-fixtures');
+// 按 worker 隔离：CI 并行（fullyParallel/workers=4）时若共用目录，
+// 各 worker 的 beforeEach「先删再建」会互相踩（EPERM/ENOENT）。
+const FIXTURE_DIR = path.join(
+  os.tmpdir(),
+  `miqi-e2e-attachment-fixtures-w${process.env.TEST_PARALLEL_INDEX ?? '0'}`
+);
 
 // 107-char filename that overflows the user-bubble chip without truncation
 // (regression of #591 fix — issue #698).
