@@ -7109,7 +7109,7 @@ export function ChatConsole({
                   // 附件预览渲染到输入框「内部」:portal 投到 Composer 的框内插槽,
                   // 插槽尚未挂载时先原地渲染一帧兜底。
                   const preview = (
-                    <div className="flex flex-wrap gap-2 mb-2">
+                    <div className="flex flex-wrap gap-1.5 mb-1.5">
                       {attachments.map((att, i) => {
                         const isDoc = att.type === 'document';
                         const cat = isDoc ? getDocCategory(att.name) : null;
@@ -7117,11 +7117,13 @@ export function ChatConsole({
                         const isParsing = isDoc && att.status === 'parsing';
                         const isDone = isDoc && att.status === 'done';
                         const isError = isDoc && att.status === 'error';
+                        // 格式标签（WorkBuddy 风：只显示名字 + 格式，不显示大小）
+                        const extTag = (att.name.split('.').pop() || '').toUpperCase().slice(0, 4);
 
                         return (
                           <div
                             key={i}
-                            className="flex items-center gap-2 rounded-lg pl-2 pr-1.5 py-1.5 text-xs group max-w-[240px] cursor-pointer hover:brightness-95 transition-all"
+                            className="flex items-center gap-1.5 rounded-md pl-1.5 pr-1 py-1 text-[11px] group max-w-[196px] cursor-pointer hover:brightness-95 transition-all"
                             style={{
                               background: isDoc && cat ? cat.bg : 'var(--surface-muted)',
                               border: `1px solid ${isDoc && cat ? cat.color + '40' : 'var(--border-subtle)'}`,
@@ -7229,7 +7231,7 @@ export function ChatConsole({
                             {/* File type badge */}
                             {isDoc && cat ? (
                               <span
-                                className="shrink-0 rounded font-bold text-[10px] px-1.5 py-0.5 leading-none"
+                                className="shrink-0 rounded font-bold text-[9px] px-1 py-[1px] leading-none"
                                 style={{ background: cat.color, color: '#fff' }}
                               >
                                 {cat.label}
@@ -7239,53 +7241,58 @@ export function ChatConsole({
                                 <img
                                   src={att.dataUrl}
                                   alt={att.name}
-                                  className="h-12 w-12 shrink-0 rounded object-cover"
+                                  className="h-8 w-8 shrink-0 rounded object-cover"
                                   style={{ border: '1px solid var(--border-subtle)' }}
                                 />
                               ) : (
                                 <Image
-                                  size={14}
+                                  size={12}
                                   className="shrink-0"
                                   style={{ color: 'var(--info)' }}
                                 />
                               )
                             ) : (
-                              <FileText size={14} className="shrink-0 text-text-faint" />
+                              <FileText size={12} className="shrink-0 text-text-faint" />
                             )}
 
-                            {/* Name + size */}
-                            <div className="flex flex-col min-w-0 leading-tight">
+                            {/* Name + format（不显示大小，参考 WorkBuddy） */}
+                            <div className="flex items-center gap-1.5 min-w-0 leading-tight">
                               <span className="truncate font-medium text-text">
-                                {att.name.length > 28
-                                  ? att.name.slice(0, 25) + '…' + att.name.slice(-4)
+                                {att.name.length > 22
+                                  ? att.name.slice(0, 18) + '…' + att.name.slice(-3)
                                   : att.name}
                               </span>
-                              <span className="text-[10px] text-text-muted">
-                                {formatFileSize(att.size)}
-                                {isDoc && isParsing && ' · 解析中…'}
-                                {isDoc && isDone && ' · 已就绪'}
-                                {isDoc && isError && ' · 解析失败'}
-                              </span>
+                              {!isDoc && extTag && (
+                                <span
+                                  className="shrink-0 rounded font-bold text-[9px] px-1 py-[1px] leading-none"
+                                  style={{
+                                    background: 'var(--surface-3)',
+                                    color: 'var(--text-muted)',
+                                  }}
+                                >
+                                  {extTag}
+                                </span>
+                              )}
                             </div>
 
                             {/* Status icon — only after send */}
                             {isDoc && isParsing && (
                               <Loader2
-                                size={13}
+                                size={11}
                                 className="shrink-0 animate-spin"
                                 style={{ color: cat?.color ?? 'var(--text-faint)' }}
                               />
                             )}
                             {isDoc && isDone && (
                               <CheckCircle
-                                size={13}
+                                size={11}
                                 className="shrink-0"
                                 style={{ color: 'var(--success)' }}
                               />
                             )}
                             {isDoc && isError && (
                               <AlertCircle
-                                size={13}
+                                size={11}
                                 className="shrink-0"
                                 style={{ color: 'var(--danger)' }}
                               />
@@ -7304,7 +7311,7 @@ export function ChatConsole({
                               }}
                               className="shrink-0 opacity-0 group-hover:opacity-100 transition-opacity hover:bg-[rgba(0,0,0,0.1)] rounded p-0.5"
                             >
-                              <X size={11} style={{ color: 'var(--text-faint)' }} />
+                              <X size={10} style={{ color: 'var(--text-faint)' }} />
                             </button>
                           </div>
                         );
