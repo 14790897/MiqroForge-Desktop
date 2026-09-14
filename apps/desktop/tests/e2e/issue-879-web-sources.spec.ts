@@ -122,6 +122,18 @@ test.describe('Issue #879 web_sources 结构化来源', () => {
       config.providers = config.providers ?? {};
       delete config.providers.deepseek;
       config.providers.openai = { apiKey: 'mock-key', apiBase: mock.mockUrl };
+      // 显式旁路所有审批（camelCase）：launchElectronApp 只写 snake_case
+      // bypass_all，若用户真实 config 残留 camelCase bypassAll=false 会覆盖
+      // 解析结果，导致 web_search 网络审批超时。这里两种 key 都写死。
+      config.approvals = {
+        ...(config.approvals ?? {}),
+        bypassAll: true,
+        bypass_all: true,
+        bypassNetworkApproval: true,
+        bypassToolConfirmation: true,
+        bypassCommandApproval: true,
+        bypassFileWriteApproval: true,
+      };
       config.agents = {
         ...(config.agents ?? {}),
         defaults: {
@@ -166,8 +178,24 @@ test.describe('Issue #879 web_sources 结构化来源', () => {
 
       await sendMessage(page, '请用网页搜索查一下今天北京的天气');
 
-      // 1. 自动审批（web_search 网络访问可能触发审批弹窗）+ 等回复完成
-      await approveLoop(page);
+      // 1. 循环点「允许一次」直到最终回复 SEARCH_OK 出现（审批 + 回复完成）。
+      //    网络审批不支持「永久允许」，且审批弹窗打开时 main 文本稳定，
+      //    不能用文本长度判断退出——改为轮询 SEARCH_OK。
+      {
+        const ok = page
+          .getByTestId('chat-message-assistant')
+          .getByText(/SEARCH_OK\|https?:\/\//)
+          .first();
+        const deadline = Date.now() + 180_000;
+        while (Date.now() < deadline) {
+          const once = page.getByRole('button', { name: '允许一次', exact: true });
+          if (await once.isVisible({ timeout: 500 }).catch(() => false)) {
+            await once.click();
+          }
+          if (await ok.isVisible({ timeout: 500 }).catch(() => false)) break;
+          await page.waitForTimeout(500);
+        }
+      }
 
       // 2. 最终回复出现（mock 第 2 轮把真实结果 URL 嵌进回复 SEARCH_OK|url），
       //    此时 web_search 已执行完、结构化 sources 已累积到最终回复消息。

@@ -6264,7 +6264,9 @@ export function ChatConsole({
     () =>
       messages
         .map((m) =>
-          m.role === 'progress' ? `${m.toolCallId ?? ''}:${m.content?.length ?? 0}` : m.role
+          m.role === 'progress'
+            ? `${m.toolCallId ?? ''}:${m.content?.length ?? 0}:${m.webSources?.length ?? 0}`
+            : m.role
         )
         .join('|'),
     [messages]
