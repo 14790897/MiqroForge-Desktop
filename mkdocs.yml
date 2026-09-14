@@ -1,8 +1,8 @@
 site_name: MiQroForge Desktop
 site_description: 基于 Electron 的轻量级个人 AI 助手桌面应用 — 完整技术文档
-# site_url: https://14790897.github.io/miqi/
-repo_url: https://github.com/14790897/miqi
-repo_name: 14790897/miqi
+site_url: https://mygithub.sixiangjia.de/MiqroForge-Desktop/
+repo_url: https://github.com/14790897/MiqroForge-Desktop
+repo_name: 14790897/MiqroForge-Desktop
 edit_uri: edit/main/docs/
 
 theme:
@@ -66,6 +66,7 @@ markdown_extensions:
 nav:
   - 首页: index.md
   - 功能总览: features.md
+  - 产品形态与技术边界 (V1): product-form-and-technical-boundaries.md
   - 快速开始: getting-started.md
   - 系统架构:
       - 整体架构: architecture.md
