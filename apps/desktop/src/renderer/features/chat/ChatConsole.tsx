@@ -2717,9 +2717,16 @@ export function ChatConsole({
   //
   // 只依赖 panelOpen,且传占用标志(1/0):主进程只用 target > 0,不关心具体宽度,
   // 所以依赖 panelWidth 只会让每次宽度提交多打一次无意义的 IPC(baiye-banned #1047)。
+  //
+  // 该上报可能会为满足最小布局把窗口撑到目标宽度 —— 这次变化不经拖拽队列的 send(),
+  // 因此要把返回的 applied 同步进队列基线,否则首次拖拽会拿旧基线把撑窗量重复计入
+  // (CodeRabbit #1047)。
   useEffect(() => {
-    void window.miqi.app.setPanelWindowExtra(panelOpen ? 1 : 0, true).catch(() => {});
-  }, [panelOpen]);
+    void window.miqi.app
+      .setPanelWindowExtra(panelOpen ? 1 : 0, true)
+      .then((r) => panelSync.syncApplied(r.applied))
+      .catch(() => {});
+  }, [panelOpen, panelSync]);
 
   useEffect(() => {
     const timer = window.setInterval(() => setClockTick(Date.now()), 60_000);

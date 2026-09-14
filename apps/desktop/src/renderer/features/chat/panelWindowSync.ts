@@ -88,6 +88,13 @@ export interface PanelWindowSync {
   endDrag(): void;
   /** 与拖拽无关的窗口加宽请求（开/关面板）。 */
   request(extra: number): void;
+  /** 把主进程**当前实际应用到的**加宽量同步进队列基线。
+   *
+   *  队列之外的窗口变化不会经过 `send()`（例如冷启动的 minOnly 上报为满足最小布局
+   *  把窗口撑到目标宽度），此时主进程的 extra 已非 0，而队列内部的 `applied` 仍是旧值；
+   *  不同步的话首次拖拽会拿错误基线算相对增量，把那部分撑窗重复计入（CodeRabbit #1047）。
+   *  拖拽中/有在途请求时忽略，避免覆盖正在使用的基线。 */
+  syncApplied(value: number): void;
   /** 停掉排队的请求、作废在途响应的写回权，并清掉拖拽锚点（组件卸载）。
    *  实例之后仍可继续使用——见 dispose 实现里的 StrictMode 说明。 */
   dispose(): void;
@@ -256,6 +263,11 @@ export function createPanelWindowSync(options: PanelWindowSyncOptions): PanelWin
       pendingWidth = NaN;
       notifyOnSettle = true;
       maybeQueue();
+    },
+    syncApplied(value) {
+      // 拖拽中或有在途请求：基线正被使用，别覆盖。
+      if (anchor || inFlight) return;
+      if (Number.isFinite(value) && value !== applied) applied = value;
     },
     dispose() {
       // 不置永久停用标志：React StrictMode（dev 下 main.tsx 常开）会把 effect 跑成
