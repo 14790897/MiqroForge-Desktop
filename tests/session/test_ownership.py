@@ -23,9 +23,14 @@ def _make_session_manager(tmp_path: Path, **kwargs):
 
 
 def _write_legacy_session(sessions_dir: Path, key: str, messages: list | None = None):
-    """Write a legacy session file WITHOUT owner_client_id."""
-    safe_key = key.replace(":", "_")
-    session_dir = sessions_dir / safe_key
+    """Write a legacy session file WITHOUT owner_client_id.
+
+    「legacy」指归属元数据（没有 owner_client_id），磁盘布局仍是当前目录形态，
+    故目录名走公共派生（#1014）；raw 公式在三段 key 下会建到 manager 找不到的目录。
+    """
+    from miqi.session.session_keys import session_files_dir_key
+
+    session_dir = sessions_dir / session_files_dir_key(key)
     session_dir.mkdir(parents=True, exist_ok=True)
     path = session_dir / "conversation.jsonl"
     metadata = {
@@ -44,9 +49,10 @@ def _write_legacy_session(sessions_dir: Path, key: str, messages: list | None = 
 
 
 def _read_metadata_from_disk(sessions_dir: Path, key: str) -> dict | None:
-    """Read the metadata line from a session file."""
-    safe_key = key.replace(":", "_")
-    path = sessions_dir / safe_key / "conversation.jsonl"
+    """Read the metadata line from a session file (当前目录形态，同写侧派生)."""
+    from miqi.session.session_keys import session_files_dir_key
+
+    path = sessions_dir / session_files_dir_key(key) / "conversation.jsonl"
     if not path.exists():
         return None
     with open(path, encoding="utf-8") as f:
