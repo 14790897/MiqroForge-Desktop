@@ -2477,20 +2477,18 @@ for m in ("pydantic", "httpx", "loguru"):
   };
   /** 同步窗口最小宽度到「面板开/关」对应的目标(不变量见 shared/layout.panelWindowMinWidth)。
    *
-   *  `allowGrow=true`(交互式开/合面板):窗口比目标还窄时**先把窗口撑到目标**(记账进
-   *  extra,关面板会收回),撑不动(屏幕边缘/最大化)才退化为当前宽 —— 否则窗口本来就偏窄
-   *  时聊天列仍会被挤压(sijie-Z #1047)。
+   *  窗口比目标还窄时**先把窗口撑到目标**(记账进 extra,关面板会收回),撑不动
+   *  (屏幕边缘/最大化)才退化为当前宽 —— 否则窗口本来就偏窄时聊天列仍会被挤压
+   *  (sijie-Z #1047)。
    *
-   *  `allowGrow=false`(仅同步占宽的同步调用,如冷启动 minOnly):**不改窗口宽度**,只把
-   *  min 落到当前宽 —— minOnly 的语义就是「只上报占宽、不动窗口」,在这里偷偷放大窗口
-   *  既违背 API 语义,也会让冷启动时窗口被静默撑宽(baiye-banned #1047)。 */
-  const syncWindowMin = (win: BrowserWindow, panelOpen: boolean, allowGrow: boolean) => {
+   *  对冷启动的「minOnly」上报同样适用:minOnly 只表示**不应用 panel extra**,并不禁止
+   *  为满足最小布局而扩窗 —— 否则面板默认展开却挤着聊天列(baiye-banned #1047 P1)。 */
+  const syncWindowMin = (win: BrowserWindow, panelOpen: boolean) => {
     const base = baseMinByWin.get(win);
     if (!base) return;
     const want = panelWindowMinWidth(base.width, panelOpen);
     const rec = panelExtraByWin.get(win);
     if (
-      allowGrow &&
       rec &&
       want > win.getBounds().width &&
       !win.isMaximized() &&
@@ -2516,7 +2514,7 @@ for m in ("pydantic", "httpx", "loguru"):
     rec.occupied = target > 0;
     // 先按最新 occupied 还原/抬高最小宽度,再算收缩量:否则关面板时 maxRemove 会拿
     // 「展开态的旧最小宽度」当上限,收不干净残留 rec.extra(CodeRabbit #1047)。
-    syncWindowMin(win, rec.occupied, true);
+    syncWindowMin(win, rec.occupied);
     const delta = target - rec.extra;
     if (delta !== 0) {
       const b = win.getBounds();
@@ -2550,7 +2548,7 @@ for m in ("pydantic", "httpx", "loguru"):
       }
       panelExtraByWin.set(win, rec);
     }
-    syncWindowMin(win, rec.occupied, true);
+    syncWindowMin(win, rec.occupied);
     return rec.extra;
   };
 
@@ -2576,8 +2574,9 @@ for m in ("pydantic", "httpx", "loguru"):
       };
       rec.occupied = target > 0;
       panelExtraByWin.set(win, rec);
-      // minOnly:只同步占宽,不改窗口宽度(allowGrow=false)。
-      syncWindowMin(win, rec.occupied, false);
+      // minOnly 只表示「不应用 panel extra」,不禁止为满足最小布局而扩窗:冷启动默认
+      // 展开时窗口若不足目标最小宽度,这里把它撑到目标(baiye-banned #1047 P1)。
+      syncWindowMin(win, rec.occupied);
       return { ok: true, applied: rec.extra, skipped: false };
     }
     if (win.isMaximized() || win.isFullScreen() || !win.isResizable()) {
@@ -2595,7 +2594,7 @@ for m in ("pydantic", "httpx", "loguru"):
       rec.occupied = target > 0;
       // 最大化/满屏也要同步最小宽度:否则恢复窗口时 applyPanelExtra 会按展开态的旧
       // 最小宽度算收缩上限,关面板收不干净(CodeRabbit #1047)。maximized 下不会真的加宽。
-      syncWindowMin(win, rec.occupied, true);
+      syncWindowMin(win, rec.occupied);
       panelExtraByWin.set(win, rec);
       return { ok: false, applied: rec.extra, skipped: true };
     }

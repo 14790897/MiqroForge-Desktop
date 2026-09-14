@@ -8,7 +8,7 @@ import {
   type ComponentProps,
 } from 'react';
 import { createPortal } from 'react-dom';
-import { ASSET_PANEL_MIN_WIDTH, canOpenPanelWithoutSqueeze } from '../../../shared/layout';
+import { ASSET_PANEL_MIN_WIDTH } from '../../../shared/layout';
 import { AgentAvatar } from './components/Avatars';
 import { MiQroForgeLogo } from '../../components/MiQroForgeLogo';
 import { MarkdownContent } from './components/MarkdownContent';
@@ -2645,14 +2645,10 @@ export function ChatConsole({
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [historyLoaded, sessionKey]);
-  // 冷启动默认展开的前提是「窗口放得下面板且聊天列不被挤压」;放不下就默认收起 ——
-  // 既不静默撑宽窗口(minOnly 不改窗口宽),也不把挤压直接呈现给用户(baiye-banned #1047)。
-  // 判定用 **window.outerWidth**(原生外宽,含边框),与主进程 BrowserWindow bounds 同口径;
-  // 用 innerWidth(内容区)会因非客户区边框偏小而误判(CodeRabbit #1047)。
-  const [panelOpen, setPanelOpen] = useState(() => {
-    if (typeof window === 'undefined') return true;
-    return canOpenPanelWithoutSqueeze(window.outerWidth || window.innerWidth);
-  });
+  // 面板默认展开;窗口不够宽时由主进程的 syncWindowMin 负责**撑到目标最小宽度**
+  // (minOnly 只表示「不应用 panel extra」,并不禁止为满足最小布局扩窗)—— 不藏面板,
+  // 否则依赖面板的 e2e/用户路径会直接看不到面板(macOS CI 窗口 < 1100 时曾因此挂 10 条)。
+  const [panelOpen, setPanelOpen] = useState(true);
   const [panelWidth, setPanelWidth] = useState(280);
   const panelResizing = useRef(false);
   /** 面板 DOM 节点:拖拽中直改其宽度,避免每帧 setPanelWidth 让整个 ChatConsole

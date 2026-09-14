@@ -9,20 +9,6 @@ export const ASSET_PANEL_MIN_WIDTH = 200;
 /** 窗口在「面板关闭」状态下的基准最小宽度(与主进程 createWindow 的 minWidth 同源)。 */
 export const WINDOW_MIN_WIDTH = 900;
 
-/** 当前窗口宽度是否放得下「面板 + 聊天基准宽度」。
- *
- *  放得下才可以默认展开面板:否则面板一出现就会挤压聊天列(输入框),而冷启动既不该
- *  静默把窗口撑宽(违背 minOnly 的「不改窗口宽」语义),也不该把这个挤压直接呈现给
- *  用户 —— 所以放不下时默认**收起面板**(用户手动展开走交互路径,那条允许撑窗)。
- *
- *  **坐标空间**:参数必须是**原生窗口外宽**(BrowserWindow bounds 宽,renderer 侧取
- *  `window.outerWidth`),与主进程的最小宽度/加宽逻辑同口径。用内容区宽度
- *  (`window.innerWidth`)会因非客户区边框偏小,在边界上误判(CodeRabbit #1047)。
- */
-export function canOpenPanelWithoutSqueeze(nativeWindowWidth: number): boolean {
-  return nativeWindowWidth >= WINDOW_MIN_WIDTH + ASSET_PANEL_MIN_WIDTH;
-}
-
 /** 面板开/关时,窗口**应保持**的最小宽度(不变量):
  *  面板展开时在基准最小宽度上再加一个面板下限 —— 缩窗时面板先被压到这个下限让位,
  *  聊天列(输入框)因此保住与「面板关闭」时相同的最小宽度。
