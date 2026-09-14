@@ -142,7 +142,9 @@ async function enableFeedbackChannel(page: Page): Promise<void> {
     if ((lastSeen as { enabled?: boolean } | null)?.enabled === true) return;
     await page.waitForTimeout(1_000);
   }
-  throw new Error(`enableFeedbackChannel: 桥未读到 enabled=true，最后一次读到 ${JSON.stringify(lastSeen)}`);
+  throw new Error(
+    `enableFeedbackChannel: 桥未读到 enabled=true，最后一次读到 ${JSON.stringify(lastSeen)}`
+  );
 }
 
 async function openFeedbackTab(page: Page): Promise<void> {
