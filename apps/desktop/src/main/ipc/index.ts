@@ -1994,6 +1994,51 @@ for m in ("pydantic", "httpx", "loguru"):
     const base64 = typeof p?.base64 === 'string' ? p.base64 : '';
     if (!base64) return { opened: false, path: rawName, error: 'Empty payload' };
 
+    // 安全（CodeRabbit #1048 / CWE-434）：拒绝可执行/脚本宿主类扩展名，避免把
+    // 渲染层字节写成文件后被 shell.openPath 直接启动。调用方在被拒时不得回退。
+    const BLOCKED_EXEC_EXTS = new Set([
+      'exe',
+      'bat',
+      'cmd',
+      'com',
+      'cpl',
+      'scr',
+      'msi',
+      'msp',
+      'msc',
+      'js',
+      'jse',
+      'vbs',
+      'vbe',
+      'wsf',
+      'wsh',
+      'ps1',
+      'psm1',
+      'lnk',
+      'reg',
+      'jar',
+      'hta',
+      'gadget',
+      'scf',
+      'inf',
+      'url',
+      'chm',
+      'app',
+      'sh',
+      'bash',
+      'desktop',
+      'dll',
+      'sys',
+    ]);
+    const extForBlock = (rawName.split('.').pop() || '').toLowerCase();
+    if (BLOCKED_EXEC_EXTS.has(extForBlock)) {
+      return {
+        opened: false,
+        path: rawName,
+        error: `Blocked dangerous file type: .${extForBlock}`,
+      };
+    }
+
     const dot = rawName.lastIndexOf('.');
     const stem = dot > 0 ? rawName.slice(0, dot) : rawName;
     const ext = dot > 0 ? rawName.slice(dot) : '';

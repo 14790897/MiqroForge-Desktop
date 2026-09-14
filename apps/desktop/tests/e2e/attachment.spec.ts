@@ -449,6 +449,15 @@ test.describe('File Attachment Chips', () => {
     });
   });
 
+  test('Attachment chip exposes preview + remove buttons (a11y)', async () => {
+    await attachFile(page, FILES.pdf);
+    const chip = composerChips(page);
+    await expect(chip.getByRole('button', { name: /预览 board_report\.pdf/ })).toBeVisible({
+      timeout: 10_000,
+    });
+    await expect(chip.getByRole('button', { name: /移除 board_report\.pdf/ })).toBeVisible();
+  });
+
   test('Send button disabled while extracting', async () => {
     await attachFile(page, FILES.largePdf);
     const sendBtn = page

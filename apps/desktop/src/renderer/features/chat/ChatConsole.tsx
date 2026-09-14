@@ -7125,208 +7125,216 @@ export function ChatConsole({
                         return (
                           <div
                             key={i}
-                            className="flex items-center gap-1.5 rounded-md pl-1.5 pr-1 py-1 text-[11px] group max-w-[196px] cursor-pointer hover:brightness-95 transition-all"
+                            className="flex items-center gap-1.5 rounded-md pl-1.5 pr-1 py-1 text-[11px] group max-w-[196px]"
                             style={{
                               background: isDoc && cat ? cat.bg : 'var(--surface-muted)',
                               border: `1px solid ${isDoc && cat ? cat.color + '40' : 'var(--border-subtle)'}`,
                             }}
-                            onClick={async (e) => {
-                              // Ignore clicks that arrive right after closing preview
-                              // (the close button click can fall through to the chip behind)
-                              if (previewJustClosed.current) return;
-                              // 图片：点击打开预览（芯片内不再显示缩略图，保证所有文件芯片等高）
-                              if (att.type === 'image') {
-                                const imgExt = (att.name.split('.').pop() || '').toLowerCase();
-                                const mime =
-                                  imgExt === 'jpg' || imgExt === 'jpeg'
-                                    ? 'image/jpeg'
-                                    : imgExt === 'gif'
-                                      ? 'image/gif'
-                                      : imgExt === 'webp'
-                                        ? 'image/webp'
-                                        : imgExt === 'bmp'
-                                          ? 'image/bmp'
-                                          : 'image/png';
-                                const imageUrl =
-                                  att.dataUrl ||
-                                  (att.dataBase64
-                                    ? `data:${mime};base64,${att.dataBase64}`
-                                    : undefined);
-                                // 同时带上 base64：预览里的「下载/另存为」「系统应用打开」
-                                // 需要它写临时文件再交给系统打开（仅有 imageUrl 时
-                                // openExternal 只会拿到文件名而失败）。
-                                const imageBase64 =
-                                  att.dataBase64 ||
-                                  (att.dataUrl ? att.dataUrl.split(',')[1] : undefined);
-                                if (imageUrl) {
-                                  setPreviewFile({
-                                    path: att.name,
-                                    kind: 'image',
-                                    imageUrl,
-                                    dataBase64: imageBase64,
-                                  });
-                                  return;
+                          >
+                            <button
+                              type="button"
+                              aria-label={`预览 ${att.name}`}
+                              className="flex items-center gap-1.5 min-w-0 flex-1 cursor-pointer bg-transparent border-0 p-0 text-left hover:brightness-95 transition-all"
+                              onClick={async (e) => {
+                                // Ignore clicks that arrive right after closing preview
+                                // (the close button click can fall through to the chip behind)
+                                if (previewJustClosed.current) return;
+                                // 图片：点击打开预览（芯片内不再显示缩略图，保证所有文件芯片等高）
+                                if (att.type === 'image') {
+                                  const imgExt = (att.name.split('.').pop() || '').toLowerCase();
+                                  const mime =
+                                    imgExt === 'jpg' || imgExt === 'jpeg'
+                                      ? 'image/jpeg'
+                                      : imgExt === 'gif'
+                                        ? 'image/gif'
+                                        : imgExt === 'webp'
+                                          ? 'image/webp'
+                                          : imgExt === 'bmp'
+                                            ? 'image/bmp'
+                                            : 'image/png';
+                                  const imageUrl =
+                                    att.dataUrl ||
+                                    (att.dataBase64
+                                      ? `data:${mime};base64,${att.dataBase64}`
+                                      : undefined);
+                                  // 同时带上 base64：预览里的「下载/另存为」「系统应用打开」
+                                  // 需要它写临时文件再交给系统打开（仅有 imageUrl 时
+                                  // openExternal 只会拿到文件名而失败）。
+                                  const imageBase64 =
+                                    att.dataBase64 ||
+                                    (att.dataUrl ? att.dataUrl.split(',')[1] : undefined);
+                                  if (imageUrl) {
+                                    setPreviewFile({
+                                      path: att.name,
+                                      kind: 'image',
+                                      imageUrl,
+                                      dataBase64: imageBase64,
+                                    });
+                                    return;
+                                  }
                                 }
-                              }
-                              if (!isDoc || !att.dataBase64) return;
-                              const ext = att.name.split('.').pop()?.toLowerCase() ?? '';
+                                if (!isDoc || !att.dataBase64) return;
+                                const ext = att.name.split('.').pop()?.toLowerCase() ?? '';
 
-                              // #877: PDF → proper paginated rendering (iframe blob)
-                              if (ext === 'pdf') {
-                                try {
-                                  setPreviewFile({
-                                    path: att.name,
-                                    kind: 'pdf',
-                                    pdfUrl: base64ToBlobUrl(att.dataBase64, 'application/pdf'),
-                                    dataBase64: att.dataBase64,
-                                  });
-                                  return;
-                                } catch {
-                                  /* fall through to client-side text */
-                                }
-                              }
-
-                              // #877: Office/CSV → backend structured parse of the
-                              // in-memory bytes (rich table / document render).
-                              if (/^(xlsx|xls|ods|csv|docx|doc|odt)$/i.test(ext)) {
-                                try {
-                                  const result = await window.miqi.documents.parse(
-                                    att.name,
-                                    undefined,
-                                    {
-                                      preview: true,
-                                      structured: true,
+                                // #877: PDF → proper paginated rendering (iframe blob)
+                                if (ext === 'pdf') {
+                                  try {
+                                    setPreviewFile({
+                                      path: att.name,
+                                      kind: 'pdf',
+                                      pdfUrl: base64ToBlobUrl(att.dataBase64, 'application/pdf'),
                                       dataBase64: att.dataBase64,
-                                    }
-                                  );
-                                  if (result?.structured) {
-                                    if (result.structured.kind === 'spreadsheet') {
+                                    });
+                                    return;
+                                  } catch {
+                                    /* fall through to client-side text */
+                                  }
+                                }
+
+                                // #877: Office/CSV → backend structured parse of the
+                                // in-memory bytes (rich table / document render).
+                                if (/^(xlsx|xls|ods|csv|docx|doc|odt)$/i.test(ext)) {
+                                  try {
+                                    const result = await window.miqi.documents.parse(
+                                      att.name,
+                                      undefined,
+                                      {
+                                        preview: true,
+                                        structured: true,
+                                        dataBase64: att.dataBase64,
+                                      }
+                                    );
+                                    if (result?.structured) {
+                                      if (result.structured.kind === 'spreadsheet') {
+                                        setPreviewFile({
+                                          path: att.name,
+                                          kind: 'spreadsheet',
+                                          spreadsheet: result.structured,
+                                          content: result.text,
+                                          dataBase64: att.dataBase64,
+                                        });
+                                        return;
+                                      }
                                       setPreviewFile({
                                         path: att.name,
-                                        kind: 'spreadsheet',
-                                        spreadsheet: result.structured,
+                                        kind: 'document',
+                                        docBlocks: result.structured,
                                         content: result.text,
                                         dataBase64: att.dataBase64,
                                       });
                                       return;
                                     }
-                                    setPreviewFile({
-                                      path: att.name,
-                                      kind: 'document',
-                                      docBlocks: result.structured,
-                                      content: result.text,
-                                      dataBase64: att.dataBase64,
-                                    });
-                                    return;
+                                    // No structure (e.g. .xls/.odt) — use the backend text
+                                    if (result?.text) {
+                                      setPreviewFile({
+                                        path: att.name,
+                                        content: result.text.slice(0, 50000),
+                                        dataBase64: att.dataBase64,
+                                      });
+                                      return;
+                                    }
+                                  } catch {
+                                    /* fall through to client-side text */
                                   }
-                                  // No structure (e.g. .xls/.odt) — use the backend text
-                                  if (result?.text) {
-                                    setPreviewFile({
-                                      path: att.name,
-                                      content: result.text.slice(0, 50000),
-                                      dataBase64: att.dataBase64,
-                                    });
-                                    return;
+                                }
+
+                                let previewText = '';
+
+                                // Client-side extraction only (fast, no server round-trip)
+                                try {
+                                  const raw = Uint8Array.from(atob(att.dataBase64), (c) =>
+                                    c.charCodeAt(0)
+                                  );
+                                  if (ext === 'pdf') {
+                                    previewText = extractPdfText(raw.buffer);
+                                  } else if (
+                                    /^(md|markdown|mdown|txt|text|csv|json|ya?ml|xml|py|ts|js|log|html|htm|env|sql|ini|toml|htaccess|sh|bash)$/i.test(
+                                      ext
+                                    )
+                                  ) {
+                                    previewText = new TextDecoder().decode(raw);
+                                  } else {
+                                    previewText = '(Office 文件 —— 发送后服务端解析)';
                                   }
                                 } catch {
-                                  /* fall through to client-side text */
+                                  previewText = '(无法预览)';
                                 }
-                              }
-
-                              let previewText = '';
-
-                              // Client-side extraction only (fast, no server round-trip)
-                              try {
-                                const raw = Uint8Array.from(atob(att.dataBase64), (c) =>
-                                  c.charCodeAt(0)
-                                );
-                                if (ext === 'pdf') {
-                                  previewText = extractPdfText(raw.buffer);
-                                } else if (
-                                  /^(md|markdown|mdown|txt|text|csv|json|ya?ml|xml|py|ts|js|log|html|htm|env|sql|ini|toml|htaccess|sh|bash)$/i.test(
-                                    ext
-                                  )
-                                ) {
-                                  previewText = new TextDecoder().decode(raw);
-                                } else {
-                                  previewText = '(Office 文件 —— 发送后服务端解析)';
+                                if (!previewText || !previewText.trim()) {
+                                  previewText = '(扫描件或二进制文件，无文本内容)';
                                 }
-                              } catch {
-                                previewText = '(无法预览)';
-                              }
-                              if (!previewText || !previewText.trim()) {
-                                previewText = '(扫描件或二进制文件，无文本内容)';
-                              }
-                              setPreviewFile({
-                                path: att.name,
-                                content: previewText.slice(0, 50000),
-                                dataBase64: att.dataBase64,
-                              });
-                            }}
-                          >
-                            {/* File type badge */}
-                            {isDoc && cat ? (
-                              <span
-                                className="shrink-0 rounded font-bold text-[9px] px-1 py-[1px] leading-none"
-                                style={{ background: cat.color, color: '#fff' }}
-                              >
-                                {cat.label}
-                              </span>
-                            ) : att.type === 'image' ? (
-                              <Image
-                                size={12}
-                                className="shrink-0"
-                                style={{ color: 'var(--info)' }}
-                              />
-                            ) : (
-                              <FileText size={12} className="shrink-0 text-text-faint" />
-                            )}
-
-                            {/* Name + format（不显示大小，参考 WorkBuddy） */}
-                            <div className="flex items-center gap-1.5 min-w-0 leading-tight">
-                              <span className="truncate font-medium text-text">
-                                {att.name.length > 22
-                                  ? att.name.slice(0, 18) + '…' + att.name.slice(-3)
-                                  : att.name}
-                              </span>
-                              {!isDoc && extTag && (
+                                setPreviewFile({
+                                  path: att.name,
+                                  content: previewText.slice(0, 50000),
+                                  dataBase64: att.dataBase64,
+                                });
+                              }}
+                            >
+                              {/* File type badge */}
+                              {isDoc && cat ? (
                                 <span
                                   className="shrink-0 rounded font-bold text-[9px] px-1 py-[1px] leading-none"
-                                  style={{
-                                    background: 'var(--surface-3)',
-                                    color: 'var(--text-muted)',
-                                  }}
+                                  style={{ background: cat.color, color: '#fff' }}
                                 >
-                                  {extTag}
+                                  {cat.label}
                                 </span>
+                              ) : att.type === 'image' ? (
+                                <Image
+                                  size={12}
+                                  className="shrink-0"
+                                  style={{ color: 'var(--info)' }}
+                                />
+                              ) : (
+                                <FileText size={12} className="shrink-0 text-text-faint" />
                               )}
-                            </div>
 
-                            {/* Status icon — only after send */}
-                            {isDoc && isParsing && (
-                              <Loader2
-                                size={11}
-                                className="shrink-0 animate-spin"
-                                style={{ color: cat?.color ?? 'var(--text-faint)' }}
-                              />
-                            )}
-                            {isDoc && isDone && (
-                              <CheckCircle
-                                size={11}
-                                className="shrink-0"
-                                style={{ color: 'var(--success)' }}
-                              />
-                            )}
-                            {isDoc && isError && (
-                              <AlertCircle
-                                size={11}
-                                className="shrink-0"
-                                style={{ color: 'var(--danger)' }}
-                              />
-                            )}
+                              {/* Name + format（不显示大小，参考 WorkBuddy） */}
+                              <div className="flex items-center gap-1.5 min-w-0 leading-tight">
+                                <span className="truncate font-medium text-text">
+                                  {att.name.length > 22
+                                    ? att.name.slice(0, 18) + '…' + att.name.slice(-3)
+                                    : att.name}
+                                </span>
+                                {!isDoc && extTag && (
+                                  <span
+                                    className="shrink-0 rounded font-bold text-[9px] px-1 py-[1px] leading-none"
+                                    style={{
+                                      background: 'var(--surface-3)',
+                                      color: 'var(--text-muted)',
+                                    }}
+                                  >
+                                    {extTag}
+                                  </span>
+                                )}
+                              </div>
+
+                              {/* Status icon — only after send */}
+                              {isDoc && isParsing && (
+                                <Loader2
+                                  size={11}
+                                  className="shrink-0 animate-spin"
+                                  style={{ color: cat?.color ?? 'var(--text-faint)' }}
+                                />
+                              )}
+                              {isDoc && isDone && (
+                                <CheckCircle
+                                  size={11}
+                                  className="shrink-0"
+                                  style={{ color: 'var(--success)' }}
+                                />
+                              )}
+                              {isDoc && isError && (
+                                <AlertCircle
+                                  size={11}
+                                  className="shrink-0"
+                                  style={{ color: 'var(--danger)' }}
+                                />
+                              )}
+                            </button>
 
                             {/* Remove */}
                             <button
+                              type="button"
+                              aria-label={`移除 ${att.name}`}
                               onClick={(e) => {
                                 // The chip container opens the preview on click —
                                 // without stopPropagation the remove click bubbles
@@ -7796,13 +7804,14 @@ export function ChatConsole({
                 </button>
                 <button
                   onClick={async () => {
-                    // 有字节流 → 写临时文件后用系统默认应用打开（保留扩展名）；
-                    // 失败或只有路径 → 回退直接 openExternal(路径)。
+                    // 有字节流 → openBytes（主进程写临时文件并交系统打开）；
+                    // 被拒（含危险扩展名拦截）时不回退，避免绕过安全校验。
                     if (previewFile.dataBase64) {
                       const name = previewFile.path.split(/[\\/]/).pop() || 'file';
                       try {
                         const res = await window.miqi.files.openBytes(name, previewFile.dataBase64);
                         if (res?.opened) return;
+                        if (res?.error) return;
                       } catch {
                         /* fall through to path */
                       }
