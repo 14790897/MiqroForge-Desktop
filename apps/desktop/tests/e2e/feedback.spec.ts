@@ -316,7 +316,7 @@ test.describe('Feedback Page E2E', () => {
 
     // Fill form
     await page.getByPlaceholder(/简要描述你的问题或建议/).fill('E2E mock submission');
-    await page.getByPlaceholder('邮箱或飞书账号，方便我们联系你').fill('e2e@test.com');
+    await page.getByPlaceholder('邮箱或手机号，方便我们联系你').fill('e2e@test.com');
 
     // Submit
     const submitButton = page

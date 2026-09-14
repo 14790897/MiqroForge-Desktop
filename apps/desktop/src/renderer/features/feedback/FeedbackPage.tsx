@@ -299,7 +299,7 @@ function SubmitModal({ onClose, onSubmitted }: { onClose: () => void; onSubmitte
               <input
                 value={contact}
                 onChange={(e) => setContact(e.target.value)}
-                placeholder="邮箱或飞书账号，方便我们联系你"
+                placeholder="邮箱或手机号，方便我们联系你"
                 maxLength={200}
                 className="w-full px-3 py-2 text-sm bg-[var(--muted)]/10 rounded-md border border-[var(--border)]
                            outline-none focus:border-[var(--border-strong)]"
