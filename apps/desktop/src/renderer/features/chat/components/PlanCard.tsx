@@ -79,37 +79,23 @@ export function PlanCard({
   const goal = entry.goal ? displayGoal(entry.goal) : '';
 
   return (
-    <section
-      data-testid="plan-card"
-      className="w-full max-w-[720px] rounded-xl border px-4 py-3"
-      style={{
-        background: 'var(--surface, #fff)',
-        borderColor: 'var(--border, #e5e7eb)',
-        boxShadow: '0 1px 2px rgba(0,0,0,.03)',
-      }}
-      aria-label="任务计划"
-    >
+    <section data-testid="plan-card" className="w-full max-w-[720px]" aria-label="任务计划">
       <div className="flex items-start gap-3">
-        <div
-          className="mt-0.5 grid size-7 shrink-0 place-items-center rounded-lg"
-          style={{
-            background: waiting ? 'var(--accent-soft, #eef5ff)' : 'var(--surface-muted, #f5f6f8)',
-          }}
-        >
+        <div className="mt-0.5 grid size-4 shrink-0 place-items-center" aria-hidden="true">
           {running ? (
             <Loader2
-              size={15}
+              size={14}
               className="animate-spin"
               style={{ color: 'var(--accent, #2a7de1)' }}
             />
           ) : done ? (
-            <Check size={15} style={{ color: '#2ea45f' }} />
+            <Check size={14} style={{ color: '#2ea45f' }} />
           ) : modified ? (
-            <PencilLine size={15} style={{ color: 'var(--accent, #2a7de1)' }} />
+            <PencilLine size={14} style={{ color: 'var(--accent, #2a7de1)' }} />
           ) : cancelled ? (
-            <X size={15} style={{ color: 'var(--text-faint, #9aa0a8)' }} />
+            <X size={14} style={{ color: 'var(--text-faint, #9aa0a8)' }} />
           ) : (
-            <MessageSquareText size={15} style={{ color: 'var(--accent, #2a7de1)' }} />
+            <MessageSquareText size={14} style={{ color: 'var(--accent, #2a7de1)' }} />
           )}
         </div>
 
@@ -138,43 +124,49 @@ export function PlanCard({
             </p>
           )}
 
+          {/* WorkBuddy 风格：一个大块（浅灰底），里面是子项行——不是每步一个卡 */}
           {shouldShowDetails && (
-            <div className="mt-2.5 space-y-1.5">
-              {entry.steps.map((step, index) => {
-                const stepState =
-                  running || done ? (entry.stepStatus?.[step.name] ?? 'pending') : 'pending';
-                return (
-                  <div
-                    key={`${step.name}-${index}`}
-                    className="flex items-start gap-2.5 text-[12px] leading-5"
-                  >
-                    <span className="mt-0.5 grid size-4 shrink-0 place-items-center">
-                      {stepState === 'done' ? (
-                        <Check size={13} style={{ color: '#2ea45f' }} />
-                      ) : stepState === 'running' ? (
-                        <Loader2
-                          size={13}
-                          className="animate-spin"
-                          style={{ color: 'var(--accent, #2a7de1)' }}
-                        />
-                      ) : (
-                        <Circle size={10} style={{ color: 'var(--text-faint, #b4bac3)' }} />
-                      )}
-                    </span>
-                    <span
-                      className="min-w-0 flex-1 break-words"
-                      style={{
-                        color:
-                          stepState === 'done'
-                            ? 'var(--text-muted, #6b7280)'
-                            : 'var(--text, #30343b)',
-                      }}
+            <div
+              className="mt-2.5 rounded-lg px-3 py-2"
+              style={{ background: 'var(--surface-muted, #f6f7f8)' }}
+            >
+              <div className="space-y-1">
+                {entry.steps.map((step, index) => {
+                  const stepState =
+                    running || done ? (entry.stepStatus?.[step.name] ?? 'pending') : 'pending';
+                  return (
+                    <div
+                      key={`${step.name}-${index}`}
+                      className="flex items-start gap-2.5 text-[12px] leading-5"
                     >
-                      {step.name}
-                    </span>
-                  </div>
-                );
-              })}
+                      <span className="mt-0.5 grid size-4 shrink-0 place-items-center">
+                        {stepState === 'done' ? (
+                          <Check size={13} style={{ color: '#2ea45f' }} />
+                        ) : stepState === 'running' ? (
+                          <Loader2
+                            size={13}
+                            className="animate-spin"
+                            style={{ color: 'var(--accent, #2a7de1)' }}
+                          />
+                        ) : (
+                          <Circle size={9} style={{ color: 'var(--text-faint, #b4bac3)' }} />
+                        )}
+                      </span>
+                      <span
+                        className="min-w-0 flex-1 break-words"
+                        style={{
+                          color:
+                            stepState === 'done'
+                              ? 'var(--text-muted, #6b7280)'
+                              : 'var(--text, #30343b)',
+                        }}
+                      >
+                        {step.name}
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
             </div>
           )}
 

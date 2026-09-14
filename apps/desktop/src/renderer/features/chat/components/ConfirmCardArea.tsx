@@ -144,11 +144,13 @@ export function ConfirmCardArea({ matchedTurnIds }: { matchedTurnIds?: Set<strin
     let merged = [...Object.values(resolved), ...Object.values(pending)];
     merged.sort((a, b) => (a.createdAt ?? 0) - (b.createdAt ?? 0));
     if (matchedTurnIds && matchedTurnIds.size > 0) {
-      // #646-v2（CI strict violation 修复）：确认/计划卡由消息内联与工具链
-      // 负责渲染（含确认卡的工具链默认不收起，卡始终可见）——兜底区必须排除
-      // 所有已匹配 turn 的卡。此前「pending 保留」的实现会让同一张卡在工具链
-      // 与兜底区各出一个 DOM 实例（strict mode: resolved to 2 elements）。
+      // #646-v2（CI strict 修复 + plan 卡回归修复）：
+      // ① 确认卡（ask_user_confirm_card）由工具链内联渲染——已匹配 turn 的
+      //    确认卡必须从兜底排除，否则同卡双 DOM 实例（strict violation）；
+      // ② plan/action 卡没有工具链渲染路径，唯一渲染点就在这里——绝不能
+      //    因 turn 匹配被排除（否则计划卡整体消失/E2E 超时）。
       merged = merged.filter((entry) => {
+        if (!isConfirmCard(entry as never)) return true;
         const turnId = entry.request.turn_id;
         return !turnId || !matchedTurnIds.has(turnId);
       });
