@@ -244,6 +244,8 @@ interface Message {
   toolName?: string;
   /** Parsed tool data for card rendering */
   toolData?: unknown;
+  /** Structured web sources (title/url/snippet) from web_search/web_fetch (#879) */
+  webSources?: MessageSource[];
   /** Original tool-call arguments (e.g. web_fetch's url) — real references */
   toolArgs?: unknown;
   action?: 'open-provider-settings' | 'retry-load' | 'login';
@@ -282,6 +284,10 @@ interface Message {
 interface MessageSource {
   tool: string;
   url: string;
+  /** Structured title from web_search/web_fetch sources (#879) */
+  title?: string;
+  /** Structured snippet from web_search/web_fetch sources (#879) */
+  snippet?: string;
 }
 
 // Stable empty array for messages without sources — keeps the `sources` prop
@@ -326,7 +332,12 @@ function hostOf(url: string): string {
 /** Extract reference URLs from a tool/progress message.
  *  Priority: the URL the tool actually touched (toolArgs) > structured
  *  paper_search cards > links found in result text (fallback). */
-function extractMessageSources(msg: Message): MessageSource[] {
+export function extractMessageSources(msg: Message): MessageSource[] {
+  // Structured web sources (#879): web_search/web_fetch emit title/url/snippet
+  // directly — use them verbatim instead of heuristically re-parsing text.
+  if (msg.webSources && msg.webSources.length > 0) {
+    return msg.webSources;
+  }
   const sources: MessageSource[] = [];
   const skip = [
     'api.semanticscholar.org',
@@ -5182,6 +5193,7 @@ export function ChatConsole({
         // Detect paper_search result from backend events
         let toolName: string | undefined;
         let toolData: unknown;
+        let webSources: MessageSource[] | undefined;
         // Path A: item/toolResult notification (from turn_event_adapter)
         if (!toolData && data.tool_hint && data.text && !data.stream) {
           const parsed = tryParsePaperSearchResult(data.text);
@@ -5197,6 +5209,31 @@ export function ChatConsole({
             if (inner?.type === 'paper_search_result' && inner.payload) {
               toolName = 'paper_search';
               toolData = inner.payload;
+            }
+          } catch {
+            /* not JSON, ignore */
+          }
+        }
+        // Path C: web_sources from WebSearchTool/WebFetchTool (#879) — carries
+        // structured title/url/snippet so the source card doesn't re-parse text.
+        if (data.delta && typeof data.delta === 'string') {
+          try {
+            const inner = JSON.parse(data.delta);
+            if (
+              inner?.type === 'web_sources' &&
+              Array.isArray(inner.payload?.sources) &&
+              inner.payload.sources.length
+            ) {
+              const structured: MessageSource[] = inner.payload.sources.map(
+                (s: { title?: string; url?: string; snippet?: string; tool?: string }) => ({
+                  tool: s.tool || 'web_search',
+                  url: s.url || '',
+                  title: s.title,
+                  snippet: s.snippet,
+                })
+              );
+              webSources = structured;
+              if (!toolName) toolName = structured[0]?.tool;
             }
           } catch {
             /* not JSON, ignore */
@@ -9185,12 +9222,20 @@ const MessageBubble = memo(function MessageBubble({
               href={s.url}
               target="_blank"
               rel="noreferrer"
-              className="flex items-center gap-2 rounded-lg px-2.5 py-2 text-xs hover:bg-[var(--surface-muted)] transition-colors"
+              className="flex items-start gap-2 rounded-lg px-2.5 py-2 text-xs hover:bg-[var(--surface-muted)] transition-colors"
             >
-              <ExternalLink size={12} className="shrink-0" />
-              <span className="truncate">
-                {s.tool ? `${s.tool} · ` : ''}
-                {s.url}
+              <ExternalLink size={12} className="shrink-0 mt-0.5" />
+              <span className="min-w-0 flex-1">
+                <span className="block truncate">
+                  {s.tool ? `${s.tool} · ` : ''}
+                  {s.title || s.url}
+                </span>
+                {s.title && s.title !== s.url && (
+                  <span className="block truncate text-[var(--text-muted)]">{s.url}</span>
+                )}
+                {s.snippet && (
+                  <span className="block truncate text-[var(--text-muted)]">{s.snippet}</span>
+                )}
               </span>
             </a>
           ))}

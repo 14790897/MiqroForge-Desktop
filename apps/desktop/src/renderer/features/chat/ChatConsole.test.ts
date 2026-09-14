@@ -22,6 +22,7 @@ import {
   insertInterruptedTurns,
   _markUserTwinMatches,
   _sha256HexOfBase64,
+  extractMessageSources,
 } from './ChatConsole';
 
 describe('ChatConsole thinking block regression (#858 → #905)', () => {
@@ -553,5 +554,36 @@ describe('_markUserTwinMatches 一对一去重匹配（#891 复核 + #968）', (
     // as never 绕过闭合联合，模拟扩展后的运行时形态。
     const frontend = u('听这段', T, [{ name: 'clip.wav', type: 'audio' } as never]);
     expect(_markUserTwinMatches([frontend], [u('听这段', T)])).toEqual([false]);
+  });
+});
+
+describe('extractMessageSources 结构化来源 (#879)', () => {
+  it('有 webSources 时优先返回结构化来源（含 title/snippet）', () => {
+    const msg = {
+      role: 'progress',
+      content: 'Results for: x\n1. title\n   https://example.com/raw',
+      toolName: 'web_search',
+      webSources: [
+        { tool: 'web_search', url: 'https://example.com/a', title: '标题A', snippet: '摘要A' },
+        { tool: 'web_search', url: 'https://example.com/b', title: '标题B', snippet: '摘要B' },
+      ],
+      timestamp: 0,
+    };
+    expect(extractMessageSources(msg as never)).toEqual([
+      { tool: 'web_search', url: 'https://example.com/a', title: '标题A', snippet: '摘要A' },
+      { tool: 'web_search', url: 'https://example.com/b', title: '标题B', snippet: '摘要B' },
+    ]);
+  });
+
+  it('无 webSources 时回退到启发式 URL 提取（旧行为不变）', () => {
+    const msg = {
+      role: 'progress',
+      content: 'Results for: x\n1. title\n   https://example.com/a',
+      toolName: 'web_search',
+      timestamp: 0,
+    };
+    expect(extractMessageSources(msg as never)).toEqual([
+      { tool: 'web_search', url: 'https://example.com/a' },
+    ]);
   });
 });
