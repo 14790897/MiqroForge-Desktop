@@ -1013,7 +1013,10 @@ async def _resolve_write_shared_roots(
     actual write whitelist (WSL sandbox containment, or native
     ``restrict_to_workspace``).  When False — the native unrestricted path —
     there is no whitelist to widen, so the card must not fire and deny an
-    otherwise-legal write.
+    otherwise-legal write.  This is a declared design boundary, not a missing
+    authorization channel; the user-visible rules (when the card appears, what
+    each choice grants) are documented in ``docs/configuration.md``
+    («写授权卡何时出现»).
 
     ``bypass`` reflects the approval-bypass switches (``approvals.bypass_all`` /
     ``approvals.bypass_file_write_approval``).  When True the card is skipped
