@@ -9264,10 +9264,11 @@ const MessageBubble = memo(function MessageBubble({
                         // 附件原样保留在 original.attachments(CodeRabbit #1011)
                         setEditText(extractFileChips(msg.content).cleanContent);
                       }}
-                      title="编辑并重新回答"
+                      disabled={streaming}
+                      title={streaming ? '生成中,暂不可编辑' : '编辑并重新回答'}
                       aria-label="编辑并重新回答"
                       data-testid="edit-message-btn"
-                      className="flex items-center justify-center w-8 h-8 rounded-lg bg-[var(--surface-muted)]/70 text-[var(--text-muted)] hover:bg-[var(--surface-muted)] hover:text-[var(--text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)] transition-colors"
+                      className="flex items-center justify-center w-8 h-8 rounded-lg bg-[var(--surface-muted)]/70 text-[var(--text-muted)] hover:bg-[var(--surface-muted)] hover:text-[var(--text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)] transition-colors disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-[var(--surface-muted)]/70"
                     >
                       <Pencil size={14} />
                     </button>

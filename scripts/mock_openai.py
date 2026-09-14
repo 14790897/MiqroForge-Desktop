@@ -293,7 +293,9 @@ class Handler(BaseHTTPRequestHandler):
             "",
         )
         # ── 截图/UI e2e 分支:直接文本回复(前缀 MOCK_REPLY:,不影响其他流程) ──
-        if "MOCK_REPLY:" in last_user:
+        # 默认关闭(review:不污染默认 mock 行为)——截图 e2e 以环境变量
+        # MIQI_MOCK_TEXT_REPLY=1 启动本服务时启用。
+        if os.environ.get("MIQI_MOCK_TEXT_REPLY") == "1" and "MOCK_REPLY:" in last_user:
             reply = last_user.split("MOCK_REPLY:", 1)[1].strip() or "收到,这是模拟回复。"
             self._respond(text(reply))
             return
