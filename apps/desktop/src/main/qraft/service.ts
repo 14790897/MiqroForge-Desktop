@@ -518,32 +518,11 @@ export class QraftService {
     this.refreshError = null;
     this.requiresRelogin = false;
     this.pointsBalance = null;
-    // Slurm 扣费历史随登出清除（换账号后不展示前任账号的计费记录）。
-    this.billedChargeIds.clear();
-    this.billedJobIds.clear();
+    // 扣费历史与已计费作业索引不随登出删除：读取时按 account.sub 过滤，
+    // 换账号自然看不到前任账号的记录；删除会让同一账号重新登录后历史
+    // 全丢（平台轮换 refresh_token 迫使重新登录是常态），并把跨重启
+    // 去重一并放开导致同一作业被重复扣费。
     this.inFlightCharges.clear();
-    const jobIdsPath = this.options.billedJobIdsPath?.();
-    if (jobIdsPath) {
-      try {
-        rmSync(jobIdsPath, { force: true });
-      } catch (err) {
-        this.options.log(
-          'WARN',
-          `qraft: 计费索引删除失败（${err instanceof Error ? err.message : err}）`
-        );
-      }
-    }
-    const historyPath = this.options.billingHistoryPath?.();
-    if (historyPath) {
-      try {
-        rmSync(historyPath, { force: true });
-      } catch (err) {
-        this.options.log(
-          'WARN',
-          `qraft: 扣费历史删除失败（${err instanceof Error ? err.message : err}）`
-        );
-      }
-    }
     this.options.log('INFO', 'qraft: 已退出登录（cookie 与 token 均已清除）');
     this.emitStatus();
   }
@@ -808,7 +787,11 @@ export class QraftService {
 
   /** 读取扣费历史（新→旧；只返回当前登录账号的记录）。 */
   getBillingHistory(): QraftBillingHistoryEntry[] {
-    const sub = this.options.store.current?.account.sub;
+    const state = this.options.store.current;
+    // 未登录时不外发任何记录：历史文件保留其他账号的条目，没有当前
+    // 账号作过滤依据时不展示（UI 也只在登录后渲染入口）。
+    if (!state) return [];
+    const sub = state.account.sub;
     const history = this.loadBillingHistory();
     return sub ? history.filter((e) => !e.accountSub || e.accountSub === sub) : history;
   }

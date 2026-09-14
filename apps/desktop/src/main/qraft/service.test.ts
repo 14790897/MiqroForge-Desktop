@@ -822,6 +822,63 @@ describe('QraftService Slurm 作业扣费（issue #927）', () => {
     expect(client.deductPoints).toHaveBeenCalledTimes(1);
   });
 
+  it('登出保留扣费历史与去重索引：重新登录同一账号记录仍在、同作业不重复扣费', async () => {
+    const client = makeChargeClient();
+    client.deductPoints.mockResolvedValue({
+      availablePoints: 840,
+      heldPoints: 0,
+      totalEarned: 0,
+      totalSpent: 10,
+    });
+    store.save(makeStoredState());
+    const svc = makeChargeService(client);
+    await svc.chargeSlurmJob(SLURM_PAYLOAD);
+    expect(svc.getBillingHistory()).toHaveLength(1);
+
+    svc.logout();
+    // 未登录不展示任何记录（文件保留，但没有账号作过滤依据）
+    expect(svc.getBillingHistory()).toEqual([]);
+    expect(store.current).toBeNull();
+
+    // 重新登录同一账号（模拟平台轮换 refresh_token 后重新登录 + 重启应用）
+    store.save(makeStoredState());
+    const svc2 = makeChargeService(client);
+    expect(svc2.getBillingHistory()).toHaveLength(1);
+    expect(svc2.getBillingHistory()[0].chargeId).toBe('charge-abc');
+    const again = await svc2.chargeSlurmJob(SLURM_PAYLOAD);
+    expect(again.ok).toBe(true);
+    expect(client.deductPoints).toHaveBeenCalledTimes(1);
+  });
+
+  it('换账号登录看不到前任账号的扣费记录（读取时按 account.sub 过滤）', async () => {
+    const client = makeChargeClient();
+    client.deductPoints.mockResolvedValue({
+      availablePoints: 840,
+      heldPoints: 0,
+      totalEarned: 0,
+      totalSpent: 10,
+    });
+    store.save(makeStoredState());
+    const svc = makeChargeService(client);
+    await svc.chargeSlurmJob(SLURM_PAYLOAD);
+
+    svc.logout();
+    store.save(
+      makeStoredState({
+        account: { phone: '18600000000', sub: '77', username: 'U-OTHER', nickname: '其他账号' },
+      })
+    );
+    const svc2 = makeChargeService(client);
+    expect(svc2.getBillingHistory()).toEqual([]);
+    // 另一位账号的同一作业照常独立计费（去重键含 account.sub）
+    const other = await svc2.chargeSlurmJob({
+      ...SLURM_PAYLOAD,
+      charge_id: 'charge-other',
+    });
+    expect(other.ok).toBe(true);
+    expect(client.deductPoints).toHaveBeenCalledTimes(2);
+  });
+
   it('余额不足（40003）fail-closed：返回阻止并记 insufficient 历史', async () => {
     const client = makeChargeClient();
     client.deductPoints.mockRejectedValue(
