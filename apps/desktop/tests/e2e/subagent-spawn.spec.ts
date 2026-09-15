@@ -116,12 +116,35 @@ test.describe('Subagent Spawn E2E', () => {
     void (async () => {
       try {
         for (let i = 0; i < 360; i++) {
+          // #646-v2：Action Guard 的 spawn 确认已从弹窗改成内联确认卡
+          // （permission_engine：title「危险动作确认」、按钮「允许执行」）。
+          // CI 实测：只找 alertdialog 会导致无人点「允许执行」→ 卡片超时
+          // 自动取消 → subagent 永不派发、结果卡不存在。三层兜底：
+          //  1) 内联确认卡（confirm-card）内的允许按钮
+          //  2) 页面上任意可见的允许按钮（卡片可能被包在折叠容器里）
+          //  3) 旧的弹窗路径（ApprovalModal）
+          const allowName = /允许执行|允许本次|允许一次/;
+          const inCard = page
+            .locator('[data-testid="confirm-card"]')
+            .getByRole('button', { name: allowName })
+            .first();
+          if (await inCard.isVisible().catch(() => false)) {
+            await inCard.click();
+            console.log('[test] 自动批准 spawn 审批（内联确认卡·允许执行）');
+            return;
+          }
+          const anywhere = page.getByRole('button', { name: allowName }).first();
+          if (await anywhere.isVisible().catch(() => false)) {
+            await anywhere.click();
+            console.log('[test] 自动批准 spawn 审批（页面可见允许按钮）');
+            return;
+          }
           const dialog = page.getByRole('alertdialog').first();
           if (await dialog.isVisible().catch(() => false)) {
             const allow = dialog.getByRole('button', { name: '允许一次' }).first();
             if (await allow.isVisible().catch(() => false)) {
               await allow.click();
-              console.log('[test] 自动批准 spawn 审批（允许一次）');
+              console.log('[test] 自动批准 spawn 审批（弹窗·允许一次）');
               return;
             }
           }
