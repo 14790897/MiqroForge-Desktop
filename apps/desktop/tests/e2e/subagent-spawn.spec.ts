@@ -110,6 +110,27 @@ test.describe('Subagent Spawn E2E', () => {
     await textarea.fill(prompt);
     await textarea.press('Enter');
     void approvePlanCardIfAny(page);
+    // #646-v2 Action Guard：spawn 属高危外部副作用（risk>=10，外部复核 9-11 定的
+    // 规则）——模型调用后弹 ApprovalModal（role=alertdialog），必须点「允许一次」
+    // 才派发；否则回合卡在"等待你的确认"，subagent 结果永不渲染（CI 实测失败根因）。
+    void (async () => {
+      try {
+        for (let i = 0; i < 360; i++) {
+          const dialog = page.getByRole('alertdialog').first();
+          if (await dialog.isVisible().catch(() => false)) {
+            const allow = dialog.getByRole('button', { name: '允许一次' }).first();
+            if (await allow.isVisible().catch(() => false)) {
+              await allow.click();
+              console.log('[test] 自动批准 spawn 审批（允许一次）');
+              return;
+            }
+          }
+          await page.waitForTimeout(500);
+        }
+      } catch {
+        // 页面已关闭（测试结束）——静默退出
+      }
+    })();
     await expect(page.getByText(/请使用 spawn 工具/).first()).toBeVisible({ timeout: 10_000 });
 
     // 3. Wait for the subagent result card (rendered from chat:subagent_result).

@@ -26,6 +26,14 @@ async function launchWithMock() {
 }
 
 test.describe('Plan Card (#646-v2)', () => {
+  // macOS CI cannot run mock-based specs: the runner cannot reach a local
+  // 127.0.0.1 listener (see confirm-card.spec.ts / #710 trimming strategy).
+  // The Linux electron-e2e job covers this spec in full.
+  test.skip(
+    process.platform === 'darwin' && !!process.env.CI,
+    'macOS CI cannot reach the local mock server'
+  );
+
   test('计划工作流：当前方案执行 → ActionCard → 完成', { timeout: LLM_TIMEOUT }, async () => {
     const fixture = await launchWithMock();
     const electronApp: ElectronApplication = fixture.electronApp;

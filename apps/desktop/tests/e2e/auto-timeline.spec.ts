@@ -30,6 +30,14 @@ import {
 import { startMockOpenAI, patchConfigForMock } from './helpers/mock-openai';
 
 test.describe('Auto Timeline (#646-v2)', () => {
+  // macOS CI cannot run mock-based specs: the runner cannot reach a local
+  // 127.0.0.1 listener (see confirm-card.spec.ts / #710 trimming strategy).
+  // The Linux electron-e2e job covers this spec in full.
+  test.skip(
+    process.platform === 'darwin' && !!process.env.CI,
+    'macOS CI cannot reach the local mock server'
+  );
+
   let electronApp: ElectronApplication;
   let page: Page;
   let mockServer: ChildProcess;
