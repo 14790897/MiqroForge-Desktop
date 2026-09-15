@@ -227,6 +227,14 @@ test.describe('System Install Card (real LLM, #854/#875)', () => {
       }
       await expect(cardArea.getByText('系统包安装授权').first()).toBeVisible();
       await expect(cardArea.getByText(/apt-get install -y figlet/).first()).toBeVisible();
+      // #646-v2 CI 修复：上面两条断言会被**用户消息文本**蒙过——消息里本来就
+      // 含「系统包安装授权」与「apt-get install -y figlet」两个词组，于是断言
+      // 秒过，而卡片其实还没渲染；紧跟着的按钮断言用默认 5s 超时 → 真模型还没
+      // 回完 → element not found（CI 实测）。先真正等卡（data-testid=confirm-card，
+      // 120s），再做按钮断言。
+      await expect(cardArea.locator('[data-testid="confirm-card"]').first()).toBeVisible({
+        timeout: 120_000,
+      });
       // 三选项齐全（允许本次 / 允许并记住 / 拒绝）
       await expect(cardArea.getByRole('button', { name: '允许本次安装' }).first()).toBeVisible();
       await expect(cardArea.getByRole('button', { name: '拒绝' }).first()).toBeVisible();

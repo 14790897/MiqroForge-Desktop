@@ -97,7 +97,7 @@ test.describe('Subagent Spawn E2E', () => {
   // If the tool-call path is broken, this test fails — which is exactly
   // what the issue is asking to verify.
 
-  test('AI can call the spawn tool and the result renders', async () => {
+  test('AI can call the spawn tool and the result renders', { timeout: 900_000 }, async () => {
     // 1. Prime the session.
     await ensureSession(page);
 
@@ -115,40 +115,36 @@ test.describe('Subagent Spawn E2E', () => {
     // 才派发；否则回合卡在"等待你的确认"，subagent 结果永不渲染（CI 实测失败根因）。
     void (async () => {
       try {
-        for (let i = 0; i < 360; i++) {
-          // #646-v2：Action Guard 的 spawn 确认已从弹窗改成内联确认卡
-          // （permission_engine：title「危险动作确认」、按钮「允许执行」）。
-          // CI 实测：只找 alertdialog 会导致无人点「允许执行」→ 卡片超时
-          // 自动取消 → subagent 永不派发、结果卡不存在。三层兜底：
-          //  1) 内联确认卡（confirm-card）内的允许按钮
-          //  2) 页面上任意可见的允许按钮（卡片可能被包在折叠容器里）
-          //  3) 旧的弹窗路径（ApprovalModal）
+        for (let i = 0; i < 1400; i++) {
+          // #646-v2 起 spawn 要过**两层**审批，且顺序是：内联确认卡 → 操作审批弹窗。
+          //  1) Action Guard 内联确认卡（confirm-card，按钮「允许执行」）
+          //  2) 操作审批弹窗（ApprovalModal, role=alertdialog，按钮「允许一次」）
+          // CI 实测（demo-646-v8 本地复现）：只点第一层 → 弹窗无人点 → 超时 →
+          // 系统按「用户已拒绝: Approval timeout」处理 → subagent 永不派发 →
+          // 结果卡不存在（183 行断言失败）。因此**每轮都要重新探测**、连续点，
+          // 点完一次不能 return（旧实现 return 是这次失败的根因）。
           const allowName = /允许执行|允许本次|允许一次/;
+          let clicked = false;
           const inCard = page
             .locator('[data-testid="confirm-card"]')
             .getByRole('button', { name: allowName })
             .first();
           if (await inCard.isVisible().catch(() => false)) {
-            await inCard.click();
-            console.log('[test] 自动批准 spawn 审批（内联确认卡·允许执行）');
-            return;
-          }
-          const anywhere = page.getByRole('button', { name: allowName }).first();
-          if (await anywhere.isVisible().catch(() => false)) {
-            await anywhere.click();
-            console.log('[test] 自动批准 spawn 审批（页面可见允许按钮）');
-            return;
-          }
-          const dialog = page.getByRole('alertdialog').first();
-          if (await dialog.isVisible().catch(() => false)) {
-            const allow = dialog.getByRole('button', { name: '允许一次' }).first();
-            if (await allow.isVisible().catch(() => false)) {
-              await allow.click();
-              console.log('[test] 自动批准 spawn 审批（弹窗·允许一次）');
-              return;
+            await inCard.click().catch(() => {});
+            clicked = true;
+            console.log(`[test] 自动批准 #${i}：内联确认卡（允许执行）`);
+          } else {
+            const dialog = page.getByRole('alertdialog').first();
+            if (await dialog.isVisible().catch(() => false)) {
+              const allow = dialog.getByRole('button', { name: allowName }).first();
+              if (await allow.isVisible().catch(() => false)) {
+                await allow.click().catch(() => {});
+                clicked = true;
+                console.log(`[test] 自动批准 #${i}：操作审批弹窗（允许一次）`);
+              }
             }
           }
-          await page.waitForTimeout(500);
+          await page.waitForTimeout(clicked ? 300 : 500);
         }
       } catch {
         // 页面已关闭（测试结束）——静默退出
@@ -168,7 +164,7 @@ test.describe('Subagent Spawn E2E', () => {
     // 断言不依赖文案与折叠状态）。
     const cardsLocator = page.locator('[data-testid="subagent-result"]');
     const initialCards = await cardsLocator.count().catch(() => 0);
-    const deadline = Date.now() + 180_000;
+    const deadline = Date.now() + 300_000;
     let rendered = false;
     let lastText = '';
     while (Date.now() < deadline) {
