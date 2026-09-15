@@ -5762,17 +5762,27 @@ export function ChatConsole({
       //   · chat.send 调用之前的失败(附件/内容构造/thread start)= 确定未派发 → 允许恢复
       //   · 调用之后的一切失败(resolve 或 reject 皆然)= 可能已派发 → 不恢复
       //     (与普通发送失败语义一致:保留列表 + 错误提示)
-      turnDispatched = true;
-      const sendPromise = window.miqi.chat.send(
-        content,
-        key,
-        threadId ?? undefined,
-        executionPolicy,
-        chatAttachments.length > 0 ? chatAttachments : undefined,
-        workspace ?? undefined,
-        reasoningModeRef.current,
-        _resumeId ?? undefined
-      );
+      // #1011 P3(baiye-banned 终审):区分「同步 throw」——preload 的 chat.send
+      // 是普通函数,参数序列化失败 / API 缺失会在调用时同步抛出,此时请求
+      // 从未进入 IPC;仅在调用成功返回 Promise 后才标记 dispatched,
+      // 同步 throw 交由外层 catch 走「确定未派发」的恢复路径。
+      let sendPromise: Promise<unknown>;
+      try {
+        sendPromise = window.miqi.chat.send(
+          content,
+          key,
+          threadId ?? undefined,
+          executionPolicy,
+          chatAttachments.length > 0 ? chatAttachments : undefined,
+          workspace ?? undefined,
+          reasoningModeRef.current,
+          _resumeId ?? undefined
+        );
+        turnDispatched = true;
+      } catch (syncSendError) {
+        // 同步 throw:未进入 IPC —— 保持 turnDispatched=false,允许恢复
+        throw syncSendError;
+      }
       // 请求已发出 —— 清除本次 send 的编辑回滚点(此后失败一律不恢复,
       // 见上方 turnDispatched 注释;此处删除防 Map 泄漏)
       editRollbacksRef.current.delete(thisSendId);
