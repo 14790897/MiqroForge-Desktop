@@ -81,7 +81,7 @@ async def test_provision_runs_apt_and_venv():
 
     calls = [c.args[0] for c in sandbox.run_in_distro_root.call_args_list]
     assert any("apt-get install -y python3-matplotlib" in c for c in calls)
-    assert any(f"python3 -m venv '{VENV_ROOT}/skill-a'" in c for c in calls)
+    assert any(f"python3 -m venv {VENV_ROOT}/skill-a" in c for c in calls)
     assert any("pip install some-unique-pkg" in c for c in calls)
 
     assert result["ok"] is True
@@ -107,4 +107,30 @@ async def test_provision_reports_apt_failure():
     result = await provisioner.provision("skill-a")
     assert result["ok"] is False
     assert result["installed_apt"] == []
+    assert result["errors"]
+
+
+def test_plan_routes_specifier_mapped_name_to_venv():
+    """A version-pinned dep that maps to apt must still go to venv (honour the specifier)."""
+    provisioner, _ = _provisioner(["numpy==1.26"])
+    plan = provisioner.plan("skill-a")
+    assert plan["apt"] == []
+    assert plan["venv"] == ["numpy==1.26"]
+
+
+async def test_provision_fails_without_active_sandbox():
+    """No active sandbox → provisioning reports failure, not fake success."""
+    loader = _FakeLoader(["matplotlib"])
+    manager = _FakeSandboxManager(sandbox=None, allow_system_installs=True)
+    provisioner = SkillProvisioner(loader, manager)
+    result = await provisioner.provision("skill-a")
+    assert result["ok"] is False
+    assert result["errors"]
+
+
+async def test_provision_rejects_invalid_name():
+    """A skill name with shell metacharacters is rejected outright."""
+    provisioner, _ = _provisioner(["matplotlib"])
+    result = await provisioner.provision("bad'name;rm -rf /")
+    assert result["ok"] is False
     assert result["errors"]

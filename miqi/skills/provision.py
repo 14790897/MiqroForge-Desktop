@@ -19,6 +19,7 @@ only; native-Linux persistence is a follow-up.
 from __future__ import annotations
 
 import re
+import shlex
 from typing import Any
 
 # pip distribution name (PEP 503 normalised) → Debian/Ubuntu apt package name.
@@ -36,6 +37,10 @@ APT_NAME_MAP: dict[str, str] = {
 }
 
 VENV_ROOT = "/opt/miqi/venvs"
+
+# Skill names are lowercase letters/digits/hyphens (same shape as the
+# create/upload validation); anything else is rejected to avoid shell injection.
+_NAME_RE = re.compile(r"^[a-z][a-z0-9-]*$")
 
 
 def _dist_name(dist: str) -> str:
@@ -70,8 +75,10 @@ class SkillProvisioner:
     def plan(self, name: str) -> dict[str, list[str]]:
         """Split a skill's missing deps into apt-installable vs venv-required.
 
-        ``apt`` holds apt package names; ``venv`` holds the original
-        requirement strings (version specifiers preserved) for pip.
+        ``apt`` holds apt package names — only plain, unversioned deps are
+        eligible (a specifier like ``numpy==1.26`` must go through venv/pip so
+        the version is honoured). ``venv`` holds the original requirement
+        strings for pip.
         """
         missing = self._loader._missing_python_deps(name)
         apt: list[str] = []
@@ -79,7 +86,7 @@ class SkillProvisioner:
         if self._system_installs_available():
             for dist in missing:
                 base = _dist_name(dist)
-                if base in APT_NAME_MAP:
+                if dist == base and base in APT_NAME_MAP:
                     apt.append(APT_NAME_MAP[base])
                 else:
                     venv.append(dist)
@@ -87,29 +94,50 @@ class SkillProvisioner:
             venv = list(missing)
         return {"apt": apt, "venv": venv}
 
+    @staticmethod
+    def _fail(name: str, message: str) -> dict[str, Any]:
+        return {
+            "ok": False,
+            "skill": name,
+            "installed_apt": [],
+            "installed_venv": [],
+            "venv_python": None,
+            "errors": [message],
+        }
+
     async def provision(self, name: str) -> dict[str, Any]:
         """Install a skill's missing deps persistently; return a summary dict."""
+        if not _NAME_RE.match(name):
+            return self._fail(name, "非法技能名称（仅小写字母/数字/连字符）")
+
         plan = self.plan(name)
         sandbox = self._active_sandbox()
+        if (plan["apt"] or plan["venv"]) and sandbox is None:
+            return self._fail(name, "没有可用的活动沙箱，无法供给依赖")
+
         installed_apt: list[str] = []
         installed_venv: list[str] = []
         errors: list[str] = []
         vpy = venv_python(name)
 
         if plan["apt"] and sandbox is not None:
-            cmd = "apt-get install -y " + " ".join(plan["apt"])
-            rc, _out, err = await sandbox.run_in_distro_root(cmd, timeout=1200.0)
+            pkgs = " ".join(shlex.quote(p) for p in plan["apt"])
+            rc, _out, err = await sandbox.run_in_distro_root(
+                f"apt-get install -y {pkgs}", timeout=1200.0,
+            )
             if rc == 0:
                 installed_apt = plan["apt"]
             else:
                 errors.append(f"apt install 失败: {err.strip()[-300:]}")
 
         if plan["venv"] and sandbox is not None:
-            vdir = f"{VENV_ROOT}/{name}"
+            vpy_q = shlex.quote(vpy)
+            vdir_q = shlex.quote(f"{VENV_ROOT}/{name}")
+            reqs = " ".join(shlex.quote(r) for r in plan["venv"])
             cmd = (
-                f"mkdir -p {VENV_ROOT} && "
-                f"(test -x '{vpy}' || python3 -m venv '{vdir}') && "
-                f"'{vpy}' -m pip install {' '.join(plan['venv'])}"
+                f"mkdir -p {shlex.quote(VENV_ROOT)} && "
+                f"(test -x {vpy_q} || python3 -m venv {vdir_q}) && "
+                f"{vpy_q} -m pip install {reqs}"
             )
             rc, _out, err = await sandbox.run_in_distro_root(cmd, timeout=1200.0)
             if rc == 0:
