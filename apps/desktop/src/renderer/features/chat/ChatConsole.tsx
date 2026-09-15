@@ -4354,8 +4354,8 @@ export function ChatConsole({
   }, [complexHint]);
 
   const handleSend = useCallback(async () => {
-    // 发送即清除调整提示——占位词只属于"点了调整方案之后"的输入场景
-    setAdjustHint(false);
+    // #646-v2（2026-09-15 定稿）：调整意见已在计划卡内提交、由后端同轮重规划，
+    // 发送路径不再需要清理任何"调整提示"状态。
     // #740: resume consumes the pending resume-turn id (set by 继续执行).
     const _resumeId = resumeTurnIdRef.current;
     resumeTurnIdRef.current = null;

@@ -56,7 +56,10 @@ export function PlanCard({
   const modified = entry.phase === 'modified';
   const [editing, setEditing] = useState(false);
   const [adjustment, setAdjustment] = useState('');
+  // #646-v2 UI 定稿：执行中可收起步骤块（大卡里的子项行折起来），状态行仍报进度。
+  const [collapsed, setCollapsed] = useState(false);
 
+  const doneCount = entry.steps.filter((s) => entry.stepStatus?.[s.name] === 'done').length;
   const statusLabel = done
     ? '已完成'
     : cancelled
@@ -64,7 +67,7 @@ export function PlanCard({
       : modified
         ? '已调整'
         : running
-          ? '执行中'
+          ? `执行中 ${doneCount}/${entry.steps.length}`
           : '等待你的决定';
 
   const permissions = compactPermissions(entry.permissions);
@@ -113,6 +116,17 @@ export function PlanCard({
             >
               {statusLabel}
             </span>
+            {running && (
+              <button
+                type="button"
+                data-testid="plan-collapse"
+                onClick={() => setCollapsed((value) => !value)}
+                className="shrink-0 text-[11px]"
+                style={{ color: 'var(--text-faint, #9aa0a8)' }}
+              >
+                {collapsed ? '展开' : '收起'}
+              </button>
+            )}
           </div>
 
           {goal && (
@@ -125,7 +139,7 @@ export function PlanCard({
           )}
 
           {/* WorkBuddy 风格：一个大块（浅灰底），里面是子项行——不是每步一个卡 */}
-          {shouldShowDetails && (
+          {shouldShowDetails && !(running && collapsed) && (
             <div
               className="mt-2.5 rounded-lg px-3 py-2"
               style={{ background: 'var(--surface-muted, #f6f7f8)' }}
@@ -142,6 +156,8 @@ export function PlanCard({
                       <span className="mt-0.5 grid size-4 shrink-0 place-items-center">
                         {stepState === 'done' ? (
                           <Check size={13} style={{ color: '#2ea45f' }} />
+                        ) : stepState === 'failed' ? (
+                          <X size={12} style={{ color: '#d4544a' }} />
                         ) : stepState === 'running' ? (
                           <Loader2
                             size={13}
