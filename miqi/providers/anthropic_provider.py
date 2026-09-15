@@ -312,10 +312,21 @@ class AnthropicProvider(LLMProvider):
         """Convert an Anthropic Messages response to LLMResponse."""
         tool_calls: list[ToolCallRequest] = []
         text_parts: list[str] = []
+        reasoning_parts: list[str] = []
 
         for block in response.content:
             if block.type == "text":
                 text_parts.append(block.text)
+            elif block.type == "thinking":
+                # 扩展思考（Claude / 平台网关的 Anthropic 兼容通道）：thinking
+                # 块承载模型的 CoT。取文本进 reasoning_content——口径与 Hermes
+                # 一致（agent/chat_completion_helpers.py：thinking_delta →
+                # fire_reasoning_delta）。此前这里只认 text/tool_use，thinking
+                # 被整块丢弃 → 前端 ThinkBlock 拿到空文本整体不渲染（思考过程
+                # 不显示）。redacted_thinking 无文本，忽略。
+                thinking = getattr(block, "thinking", None)
+                if thinking:
+                    reasoning_parts.append(str(thinking))
             elif block.type == "tool_use":
                 input_data = block.input
                 if isinstance(input_data, str):
@@ -334,6 +345,7 @@ class AnthropicProvider(LLMProvider):
                 ))
 
         content = "\n".join(text_parts) if text_parts else None
+        reasoning_content = "\n".join(reasoning_parts) if reasoning_parts else None
 
         # Map Anthropic stop reasons to OpenAI-style finish_reason
         stop_map = {
@@ -359,6 +371,7 @@ class AnthropicProvider(LLMProvider):
             tool_calls=tool_calls,
             finish_reason=finish_reason,
             usage=usage,
+            reasoning_content=reasoning_content,
         )
 
     async def stream_chat(
