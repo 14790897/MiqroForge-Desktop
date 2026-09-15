@@ -93,7 +93,10 @@ export interface PanelWindowSync {
    *  队列之外的窗口变化不会经过 `send()`（例如冷启动的 minOnly 上报为满足最小布局
    *  把窗口撑到目标宽度），此时主进程的 extra 已非 0，而队列内部的 `applied` 仍是旧值；
    *  不同步的话首次拖拽会拿错误基线算相对增量，把那部分撑窗重复计入（CodeRabbit #1047）。
-   *  拖拽中/有在途请求时忽略，避免覆盖正在使用的基线。 */
+   *
+   *  队列忙（拖拽中/在途/有排队）时不立刻覆盖，而是**暂存为待消费基线**，等队列静默后
+   *  与锚点一起平移 `applied`，既不丢这次真实基线、也不破坏正在使用的相对映射
+   *  （sijie-Z #1047）。 */
   syncApplied(value: number): void;
   /** 停掉排队的请求、作废在途响应的写回权，并清掉拖拽锚点（组件卸载）。
    *  实例之后仍可继续使用——见 dispose 实现里的 StrictMode 说明。 */
@@ -150,6 +153,31 @@ export function createPanelWindowSync(options: PanelWindowSyncOptions): PanelWin
   };
 
   /** 队列静默且已松手 → 按主进程最终实际应用到的宽度收尾。 */
+  /** 队列之外回来的「外部基线」(如冷启动 minOnly 撑窗后的 applied)在队列忙时先存这里。 */
+  let pendingBaseline: number | null = null;
+
+  /** 立刻把待消费基线平移进 `applied` 与当前锚点(相对映射保持不变)。 */
+  const shiftToPendingBaseline = () => {
+    if (pendingBaseline === null) return;
+    const shift = pendingBaseline - applied;
+    applied = pendingBaseline;
+    if (anchor) anchor.applied += shift;
+    pendingBaseline = null;
+  };
+
+  /** 消费晚到的外部基线。
+   *
+   *  队列之外的窗口变化可能在拖拽/请求在途时才回来:此时不能直接覆盖 `applied`(正被
+   *  锚点使用),但**也不能丢** —— 丢了会让客户端与主进程的增量模型分叉(首次拖拽按
+   *  错误基线算目标,面板跳变)。做法是等队列静默后**平移**:`applied` 与锚点 `applied`
+   *  同步加减同一个量,相对映射 `anchor.width + (applied - anchor.applied)` 保持不变
+   *  (sijie-Z #1047)。 */
+  const consumePendingBaseline = () => {
+    if (pendingBaseline === null) return;
+    if (inFlight || raf || Number.isFinite(pending)) return; // 队列未静默
+    shiftToPendingBaseline();
+  };
+
   const settle = () => {
     if (!anchor || !anchor.released) return;
     if (inFlight || raf || Number.isFinite(pending)) return; // 队列未静默
@@ -200,6 +228,10 @@ export function createPanelWindowSync(options: PanelWindowSyncOptions): PanelWin
             }
             return;
           }
+          // 晚到的外部基线(如冷启动撑窗)先平移进锚点:锚点按下时用的是旧基线,
+          // 平移量要相对**旧** applied 计算,再写入本次响应值 —— 顺序反了平移量会算成 0,
+          // 投影时仍按旧锚点反推出错误宽度、造成跳变(sijie-Z #1047)。
+          shiftToPendingBaseline();
           applied = r.applied;
           if (anchor) {
             anchor.windowFollowed = true;
@@ -219,6 +251,7 @@ export function createPanelWindowSync(options: PanelWindowSyncOptions): PanelWin
           inFlight = false;
           maybeQueue(); // 在途期间又收到更新宽度 → 补发到最新
           settle(); // 在途期间松了手 → 现在才轮到收尾
+          consumePendingBaseline(); // 晚到的外部基线（如冷启动撑窗）现在可以安全平移
           notifyRequestSettled();
         });
     });
@@ -232,6 +265,7 @@ export function createPanelWindowSync(options: PanelWindowSyncOptions): PanelWin
       return applied;
     },
     beginDrag({ clientX, width }) {
+      consumePendingBaseline(); // 有晚到的外部基线时先平移（此时队列空闲）
       anchor = {
         clientX,
         width,
@@ -257,6 +291,7 @@ export function createPanelWindowSync(options: PanelWindowSyncOptions): PanelWin
       pendingWidth = anchor.targetWidth;
       maybeQueue();
       settle();
+      consumePendingBaseline(); // 收尾后队列若已静默，把晚到基线平移进来
     },
     request(extra) {
       pending = Math.round(extra);
@@ -265,9 +300,14 @@ export function createPanelWindowSync(options: PanelWindowSyncOptions): PanelWin
       maybeQueue();
     },
     syncApplied(value) {
-      // 拖拽中或有在途请求：基线正被使用，别覆盖。
-      if (anchor || inFlight) return;
-      if (Number.isFinite(value) && value !== applied) applied = value;
+      if (!Number.isFinite(value)) return;
+      // 队列忙（拖拽中/在途/有排队）：不能立刻改基线，但**不能丢** —— 记下来，
+      // 等静默后由 consumePendingBaseline() 平移消费（sijie-Z #1047）。
+      if (anchor || inFlight || raf || Number.isFinite(pending)) {
+        pendingBaseline = value;
+        return;
+      }
+      if (value !== applied) applied = value;
     },
     dispose() {
       // 不置永久停用标志：React StrictMode（dev 下 main.tsx 常开）会把 effect 跑成
@@ -288,11 +328,14 @@ export function createPanelWindowSync(options: PanelWindowSyncOptions): PanelWin
       // 去重位与实际宽度也必须回到新生命周期的基线，不能跨 dispose 残留：
       //   · requested 残留 → 新生命周期里同一个目标会被当成「已请求过」直接吞掉；
       //   · applied 残留 → 新拖拽的 anchor.applied 取到脏值，窗口加宽量按错的
-      //     基线算（实测会多扩整整一个面板宽）。
+      //     基线算（实测会多扩整整一个面板宽）；
+      //   · pendingBaseline 残留 → 上一生命周期那份晚到的外部基线会在新生命周期的
+      //     首次拖拽里被消费掉，等于凭空给新基线加了一个不属于它的偏移（P1，baiye-banned）。
       // 卸载时 ChatConsole 会自行把主进程 extra 归零，模块这边必须同步归零。
       requested = NaN;
       applied = 0;
       lastAppliedWidth = NaN;
+      pendingBaseline = null;
     },
   };
 }

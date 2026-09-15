@@ -57,12 +57,14 @@ import {
   FeedbackSubmitInput,
 } from '../../shared/ipc';
 import type {
+  FeedbackPlatformOutcome,
   WslCheckResult,
   WslStatsResult,
   WslInstallProgress,
   WslInstallAndProvisionResult,
 } from '../../shared/ipc';
 import { registerQraftIpcHandlers } from '../qraft/ipc';
+import { readConsentVersion, writeConsentVersion } from '../privacy-consent';
 import {
   classifyKernelInstall,
   classifyWslFeatureState,
@@ -185,6 +187,52 @@ function isApprovalBypassUpdate(updates: Record<string, unknown>): boolean {
   }
 
   return 'approvals' in updates || 'agents' in updates;
+}
+
+/**
+ * 反馈类别 → 平台 feedbackSubmitRequest.type（issue #1054）。
+ * 平台可用值仅有 suggestion / bug / complaint / other，桌面端的
+ * question（使用问题）无对应值，并入 other。
+ */
+const PLATFORM_FEEDBACK_TYPES: Record<string, string> = {
+  bug: 'bug',
+  suggestion: 'suggestion',
+  question: 'other',
+  other: 'other',
+};
+
+/**
+ * 登录态下把反馈加写平台（POST /oauth2/feedback）。
+ * 返回 undefined 表示未登录（平台通道整体跳过，仅走飞书）；
+ * 返回结果对象表示平台通道已尝试过，ok 为 false 时由 UI 提示"平台未同步"。
+ */
+async function submitFeedbackToPlatform(input: {
+  category: string;
+  content: string;
+  contact?: string;
+}): Promise<FeedbackPlatformOutcome | undefined> {
+  let platform: FeedbackPlatformOutcome;
+  try {
+    const { getQraftService } = await import('../qraft/ipc');
+    // 未登录：跳过平台通道（不产生脏数据，也不当作失败）。
+    if (!getQraftService().status().loggedIn) return undefined;
+    platform = await getQraftService().submitPlatformFeedback({
+      type: PLATFORM_FEEDBACK_TYPES[input.category] ?? 'other',
+      content: input.content,
+      contact: input.contact,
+    });
+  } catch (err) {
+    console.error(`[feedback] 平台通道提交异常：${err instanceof Error ? err.message : err}`);
+    platform = {
+      ok: false,
+      code: 'INTERNAL',
+      message: err instanceof Error ? err.message : String(err),
+    };
+  }
+  if (!platform.ok) {
+    console.warn(`[feedback] 平台通道未同步（${platform.code ?? 'UNKNOWN'}）`);
+  }
+  return platform;
 }
 
 export function registerIpcHandlers(bridge: BridgeManager): void {
@@ -2420,7 +2468,16 @@ for m in ("pydantic", "httpx", "loguru"):
   // -- Feedback --------------------------------------------------------------
   ipcMain.handle(IPC.FEEDBACK_SUBMIT, async (_event, payload: unknown) => {
     const input = FeedbackSubmitInput.parse(payload);
-    return bridge.send('feedback:submit', input as unknown as Record<string, unknown>);
+    const result = (await bridge.send(
+      'feedback:submit',
+      input as unknown as Record<string, unknown>
+    )) as Record<string, unknown>;
+
+    // 平台通道（issue #1054）：飞书提交成功后，登录态下加写
+    // POST /oauth2/feedback，把反馈归属到平台账号。平台失败不改变
+    // 提交成功的事实 —— 只在结果里回传原因供 UI 提示"已收到、平台未同步"。
+    const platform = await submitFeedbackToPlatform(input);
+    return platform ? { ...result, platform } : result;
   });
 
   ipcMain.handle(IPC.FEEDBACK_LIST, async (_event, payload: unknown) => {
@@ -2531,6 +2588,17 @@ for m in ("pydantic", "httpx", "loguru"):
   // 统一由主进程 app.quit() 收尾。
   ipcMain.handle(IPC.APP_QUIT, () => {
     app.quit();
+    return { ok: true };
+  });
+
+  // 法律文件同意状态（#1071）：主进程 userData 文件为权威存储。
+  // 读用 sendSync（preload 在页面脚本前同步取一次，渲染层保持同步判定，
+  // 避免确认门闪现）；写用 invoke。
+  ipcMain.on(IPC.PRIVACY_GET_CONSENT, (event) => {
+    event.returnValue = readConsentVersion();
+  });
+  ipcMain.handle(IPC.PRIVACY_SET_CONSENT, (_event, version: unknown) => {
+    writeConsentVersion(typeof version === 'string' && version ? version : null);
     return { ok: true };
   });
 

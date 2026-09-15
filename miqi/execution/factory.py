@@ -26,6 +26,7 @@ def create_default_orchestrator(
     approval_bypass: Any | None = None,
     ledger_runtime: Any | None = None,
     exec_timeout_ms: int | None = None,
+    has_approval_responder: bool = True,
 ) -> Any:
     """Create a ToolOrchestrator with sensible defaults.
 
@@ -79,4 +80,5 @@ def create_default_orchestrator(
         tool_registry=tool_registry,
         event_emitter=emitter,
         ledger_runtime=ledger_runtime,
+        has_approval_responder=has_approval_responder,
     )

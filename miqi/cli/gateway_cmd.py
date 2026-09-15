@@ -78,6 +78,8 @@ def register_gateway_command(
             provider=provider,
             session_id="gateway:default",
             workspace=config.workspace_path,
+            # Gateway is headless — no approval channel (#1045).
+            has_approval_responder=False,
         )
         gateway_client = RuntimeClient(gateway_runtime)
 
