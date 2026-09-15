@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
+from typing import Any
 
 from miqi.agent.skills import SkillsLoader
 from miqi.agent.tools.base import Tool
@@ -34,9 +35,10 @@ def _set_frontmatter_key(content: str, key: str, value: str) -> str:
 class SkillManageTool(Tool):
     """Tool for managing reusable skills (procedural workflows)."""
 
-    def __init__(self, workspace: Path):
+    def __init__(self, workspace: Path, sandbox_manager: Any | None = None):
         self.workspace = workspace
         self._skills = SkillsLoader(workspace)
+        self._sandbox_manager = sandbox_manager
 
     @property
     def name(self) -> str:
@@ -48,6 +50,7 @@ class SkillManageTool(Tool):
             "Manage reusable skills (procedural workflows). "
             "Use action='list' to discover all available skills with their descriptions. "
             "Use action='view' to read a skill's full SKILL.md before applying it. "
+            "Use action='provision' to install a skill's missing Python dependencies. "
             "Create a skill after completing any complex task with 5+ tool calls. "
             "Patch a skill immediately if you notice it is outdated or wrong during use."
         )
@@ -59,8 +62,8 @@ class SkillManageTool(Tool):
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": ["list", "view", "create", "patch", "archive"],
-                    "description": "list all skills, view a skill, create a new skill, patch an existing skill, or archive a skill",
+                    "enum": ["list", "view", "create", "patch", "archive", "provision"],
+                    "description": "list all skills, view a skill, create a new skill, patch an existing skill, archive a skill, or provision (install) a skill's missing Python dependencies",
                 },
                 "name": {
                     "type": "string",
@@ -95,6 +98,8 @@ class SkillManageTool(Tool):
             return self._do_patch(name, patch_text)
         elif action == "archive":
             return self._do_archive(name)
+        elif action == "provision":
+            return await self._do_provision(name)
         else:
             return f"Error: 未知操作 '{action}'"
 
@@ -143,6 +148,15 @@ class SkillManageTool(Tool):
             if missing:
                 content += f"缺失依赖（需先安装）：{', '.join(missing)}\n"
         return content
+
+    async def _do_provision(self, name: str) -> str:
+        if not name:
+            return "Error: provision 操作必须提供 'name'"
+        from miqi.skills.provision import SkillProvisioner
+
+        provisioner = SkillProvisioner(self._skills, self._sandbox_manager)
+        result = await provisioner.provision(name)
+        return json.dumps(result, ensure_ascii=False)
 
     def _do_create(self, name: str, content: str) -> str:
         if not name:
