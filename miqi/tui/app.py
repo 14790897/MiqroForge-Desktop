@@ -69,6 +69,8 @@ class MiQiTui(App):
             provider=provider,
             session_id="tui:default",
             workspace=workspace,
+            # TUI has no approval channel (#1045).
+            has_approval_responder=False,
         )
         await self._runtime.start()
         self._client = RuntimeClient(self._runtime)
