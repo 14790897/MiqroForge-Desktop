@@ -534,6 +534,8 @@ interface TrackedFile {
   truncated?: boolean;
   /** 产出该文件的工具名（如 create_docx / graph_render / write_file），#879 ③ 追溯 */
   sourceTool?: string;
+  /** 产出该文件的回合 id（用于关联同一回合的引用），#879 ③ 追溯 */
+  turnId?: string;
 }
 
 const OFFICE_FILE_RE = /\.(docx|xlsx|pptx|ppt|xls|doc|odt|odp|ods)$/i;
@@ -2858,6 +2860,8 @@ export function ChatConsole({
   );
   /** files touched by the agent during this session */
   const [trackedFiles, setTrackedFiles] = useState<TrackedFile[]>([]);
+  /** turnId → 该回合累积的结构化来源（#879 ③ 文件 → 相关引用）。 */
+  const [turnSourcesMap, setTurnSourcesMap] = useState<Map<string, MessageSource[]>>(new Map());
   /** preview modal */
   const [previewFile, setPreviewFile] = useState<{
     path: string;
@@ -3234,69 +3238,85 @@ export function ChatConsole({
   }, []);
 
   /** Upsert a file into trackedFiles */
-  const trackFile = useCallback((path: string, op: TrackedFile['op'], truncated = false) => {
-    // Normalise sandbox-internal paths before storing so Preview works
-    const normPath = normalizeSandboxPath(path);
-    // Strip surrounding quotes, trailing ellipsis, and leading ./ for dedup
-    const clean = normPath
-      .replace(/^["']|["']$/g, '')
-      .replace(/\.{3,}$/, '')
-      .replace(/[…]$/, '')
-      .replace(/^\.\//, '')
-      .trim();
-    setTrackedFiles((prev) => {
-      // Fuzzy match: compare cleaned base name, then exact path
-      const existing = prev.find((f) => {
-        const fc = f.path
-          .replace(/^["']|["']$/g, '')
-          .replace(/\.{3,}$/, '')
-          .replace(/[…]$/, '')
-          .replace(/^\.\//, '')
-          .trim();
-        // Basename-only matching should only kick in when one side is a bare
-        // filename (no directory), e.g. a tool hint reporting just "foo.pdf"
-        // that needs to match an existing "papers/foo.pdf" entry. Two paths
-        // that both carry (different) directories must not be merged just
-        // because they share a filename.
-        const eitherIsBareFilename = !clean.includes('/') || !fc.includes('/');
-        return (
-          f.path === normPath ||
-          fc === clean ||
-          (eitherIsBareFilename && basename(f.path) === basename(clean))
-        );
-      });
-      if (existing) {
-        // Upgrade: read < edit < write
-        const rank: Record<TrackedFile['op'], number> = { read: 0, edit: 1, write: 2, delete: 3 };
-        const nextOp = rank[op] > rank[existing.op] ? op : existing.op;
-        return prev.map((f) =>
-          f.path === existing.path
-            ? { ...f, op: nextOp, lastSeen: Date.now(), truncated: f.truncated && truncated }
-            : f
-        );
-      }
-      return prev; // new entries are verified for existence async below
-    });
-    // New entries: only surface a file that actually exists — tool hints can
-    // report a filename that was referenced (e.g. an image inside an HTML page)
-    // but never saved. Checked after the write usually lands.
-    fileExists(normPath, currentSessionRef.current).then((exists) => {
-      if (!exists) return;
+  const trackFile = useCallback(
+    (path: string, op: TrackedFile['op'], truncated = false, turnId?: string) => {
+      // Normalise sandbox-internal paths before storing so Preview works
+      const normPath = normalizeSandboxPath(path);
+      // Strip surrounding quotes, trailing ellipsis, and leading ./ for dedup
+      const clean = normPath
+        .replace(/^["']|["']$/g, '')
+        .replace(/\.{3,}$/, '')
+        .replace(/[…]$/, '')
+        .replace(/^\.\//, '')
+        .trim();
       setTrackedFiles((prev) => {
-        const dup = prev.some(
-          (f) =>
+        // Fuzzy match: compare cleaned base name, then exact path
+        const existing = prev.find((f) => {
+          const fc = f.path
+            .replace(/^["']|["']$/g, '')
+            .replace(/\.{3,}$/, '')
+            .replace(/[…]$/, '')
+            .replace(/^\.\//, '')
+            .trim();
+          // Basename-only matching should only kick in when one side is a bare
+          // filename (no directory), e.g. a tool hint reporting just "foo.pdf"
+          // that needs to match an existing "papers/foo.pdf" entry. Two paths
+          // that both carry (different) directories must not be merged just
+          // because they share a filename.
+          const eitherIsBareFilename = !clean.includes('/') || !fc.includes('/');
+          return (
             f.path === normPath ||
-            (basename(f.path) === basename(normPath) &&
-              (!f.path.includes('/') || !normPath.includes('/')))
-        );
-        if (dup) return prev;
-        return [
-          ...prev,
-          { path: normPath, name: basename(normPath), op, lastSeen: Date.now(), truncated },
-        ];
+            fc === clean ||
+            (eitherIsBareFilename && basename(f.path) === basename(clean))
+          );
+        });
+        if (existing) {
+          // Upgrade: read < edit < write
+          const rank: Record<TrackedFile['op'], number> = { read: 0, edit: 1, write: 2, delete: 3 };
+          const nextOp = rank[op] > rank[existing.op] ? op : existing.op;
+          return prev.map((f) =>
+            f.path === existing.path
+              ? {
+                  ...f,
+                  op: nextOp,
+                  lastSeen: Date.now(),
+                  truncated: f.truncated && truncated,
+                  turnId: turnId ?? f.turnId,
+                }
+              : f
+          );
+        }
+        return prev; // new entries are verified for existence async below
       });
-    });
-  }, []);
+      // New entries: only surface a file that actually exists — tool hints can
+      // report a filename that was referenced (e.g. an image inside an HTML page)
+      // but never saved. Checked after the write usually lands.
+      fileExists(normPath, currentSessionRef.current).then((exists) => {
+        if (!exists) return;
+        setTrackedFiles((prev) => {
+          const dup = prev.some(
+            (f) =>
+              f.path === normPath ||
+              (basename(f.path) === basename(normPath) &&
+                (!f.path.includes('/') || !normPath.includes('/')))
+          );
+          if (dup) return prev;
+          return [
+            ...prev,
+            {
+              path: normPath,
+              name: basename(normPath),
+              op,
+              lastSeen: Date.now(),
+              truncated,
+              turnId,
+            },
+          ];
+        });
+      });
+    },
+    []
+  );
 
   useEffect(() => {
     // True only on an actual sessionKey change.  loadTrigger can bump alone
@@ -5217,6 +5237,23 @@ export function ChatConsole({
               })
             );
             const webToolName = structured[0]?.tool || 'web_search';
+            // #879 ③：按回合累积 sources，供文件卡片显示「相关引用」。
+            if (myTurnId) {
+              const turnId = myTurnId;
+              setTurnSourcesMap((prev) => {
+                const next = new Map(prev);
+                const acc = next.get(turnId) ?? [];
+                const seen = new Set(acc.map((s) => s.url));
+                for (const s of structured) {
+                  if (s.url && !seen.has(s.url)) {
+                    seen.add(s.url);
+                    acc.push(s);
+                  }
+                }
+                next.set(turnId, acc);
+                return next;
+              });
+            }
             setMessages((prev) => {
               for (let i = prev.length - 1; i >= 0; i -= 1) {
                 const m = prev[i];
@@ -5324,7 +5361,7 @@ export function ChatConsole({
       // Parse file operations from tool hints
       if (data.tool_hint && data.text) {
         const parsed = parseToolHint(data.text);
-        if (parsed) trackFile(parsed.path, parsed.op, parsed.truncated);
+        if (parsed) trackFile(parsed.path, parsed.op, parsed.truncated, myTurnId ?? undefined);
       }
     });
 
@@ -5480,9 +5517,9 @@ export function ChatConsole({
           const filePath: string = _extractPathFromArgs(fn?.arguments || '{}') || '';
           if (!filePath) continue;
           if (_FILE_WRITE_TOOLS.includes(toolName)) {
-            trackFile(filePath, 'write', false);
+            trackFile(filePath, 'write', false, myTurnId ?? undefined);
           } else if (_FILE_READ_TOOLS.includes(toolName)) {
-            trackFile(filePath, 'read', false);
+            trackFile(filePath, 'read', false, myTurnId ?? undefined);
           }
         }
 
@@ -7547,6 +7584,7 @@ export function ChatConsole({
                         key={f.path}
                         file={f}
                         isResult
+                        citations={turnSourcesMap.get(f.turnId ?? '') ?? []}
                         onPreview={() => handlePreview(f.path)}
                         onDiff={() => handleShowDiff(f.path)}
                         onReveal={() =>
@@ -7568,6 +7606,7 @@ export function ChatConsole({
                       <TrackedFileCard
                         key={f.path}
                         file={f}
+                        citations={turnSourcesMap.get(f.turnId ?? '') ?? []}
                         onPreview={() => handlePreview(f.path)}
                         onDiff={() => handleShowDiff(f.path)}
                       />

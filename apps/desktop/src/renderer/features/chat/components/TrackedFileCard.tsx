@@ -8,6 +8,8 @@ export interface TrackedFile {
   truncated?: boolean;
   /** 产出该文件的工具名（如 create_docx / graph_render / write_file），#879 ③ 追溯 */
   sourceTool?: string;
+  /** 产出该文件的回合 id（用于关联同一回合的引用），#879 ③ 追溯 */
+  turnId?: string;
 }
 
 export const OFFICE_FILE_RE_LEGACY = /\.(docx|xlsx|pptx|ppt)$/i;
@@ -37,6 +39,7 @@ const FILE_TOOL_LABELS: Record<string, string> = {
 export function TrackedFileCard({
   file,
   isResult,
+  citations,
   onPreview,
   onDiff,
   onReveal,
@@ -44,6 +47,8 @@ export function TrackedFileCard({
   file: TrackedFile;
   /** issue #607: result assets get accent border/background + Star + 结果 badge. */
   isResult?: boolean;
+  /** 同一回合的相关引用（#879 ③），文件卡片底部展示 title/url。 */
+  citations?: Array<{ title?: string; url: string }>;
   onPreview: () => void;
   onDiff?: () => void;
   /** issue #607: 定位 → reveal the file in the OS file manager (results only). */
@@ -191,6 +196,31 @@ export function TrackedFileCard({
             <Eye size={10} />
             预览
           </button>
+        </div>
+      )}
+      {citations && citations.length > 0 && (
+        <div className="mt-1.5 pt-1.5 border-t border-[var(--border-subtle)] flex flex-col gap-1">
+          <span className="text-size-2xs font-medium" style={{ color: 'var(--text-faint)' }}>
+            相关引用（{citations.length}）
+          </span>
+          {citations.slice(0, 3).map((c, i) => (
+            <a
+              key={`${c.url}-${i}`}
+              href={c.url}
+              target="_blank"
+              rel="noreferrer"
+              className="text-size-2xs truncate transition-colors"
+              style={{ color: 'var(--text-muted)' }}
+              title={c.url}
+            >
+              {c.title || c.url}
+            </a>
+          ))}
+          {citations.length > 3 && (
+            <span className="text-size-2xs" style={{ color: 'var(--text-faint)' }}>
+              …等 {citations.length} 条
+            </span>
+          )}
         </div>
       )}
     </div>
