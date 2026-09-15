@@ -117,6 +117,12 @@ test.describe('Issue #811 护栏误拦截复现 (real LLM)', () => {
     // 问题误报成护栏失败。发送前先记基线，只认之后新增的。
     // （更稳的做法是给工具调用行挂当前 turn 的唯一标识，但那要动渲染层，先用增量。）
     const execCountBefore = await page.locator('[data-testid="tool-command-copy"]').count();
+    // 同理，SELF_REFUSAL 只能看**本回合新产出的那条助手回复**：main.textContent()
+    // 含整段会话，上一回合要是也出现过自拒措辞，本回合还没输出时就能满足条件，把测试
+    // 错误地跳过（假绿）。记下助手的消息条数做基线，只认之后新增的那条。
+    const assistantCountBefore = await page
+      .locator('[data-testid="chat-message-assistant"]')
+      .count();
 
     await sendMessage(page, prompt);
 
@@ -135,6 +141,19 @@ test.describe('Issue #811 护栏误拦截复现 (real LLM)', () => {
 
     const matches = (t: string) =>
       expectPattern instanceof RegExp ? expectPattern.test(t) : t.includes(expectPattern);
+
+    /**
+     * 本回合的助手回复里是否出现了「自行拒答」措辞。只看本回合新增的那条回复：
+     * 条数没涨（还没输出）就返回 false —— 取不到时判 false 是安全方向，最坏是照旧
+     * 走断言、报一次真红，而不是把没验证过的回合当成前提未满足跳过。
+     */
+    const currentTurnSelfRefused = async (): Promise<boolean> => {
+      const n = await page.locator('[data-testid="chat-message-assistant"]').count();
+      if (n <= assistantCountBefore) return false;
+      const reply =
+        (await page.locator('[data-testid="chat-message-assistant"]').last().textContent()) ?? '';
+      return SELF_REFUSAL.test(reply);
+    };
 
     // 单次 exec spawn 慢（25-30s）。先走一个短的稳定等待——模型回合一旦
     // 结束，textContent 不再增长（容一个小 live-timer 增量）；稳定 ≥3 次
@@ -162,7 +181,7 @@ test.describe('Issue #811 护栏误拦截复现 (real LLM)', () => {
           // 模型自行拒答、且本回合压根没出现过 exec 命令块 → 护栏没被触发。这里**必须
           // 提前收手**：RUN_CAP 正好等于测试超时（480s），让循环自然跑完的话测试会先
           // 超时，下面那个 precondition 判定根本执行不到（这就是上一版没生效的原因）。
-          if (stable >= 3 && !sawExecCommand && SELF_REFUSAL.test(text)) break;
+          if (stable >= 3 && !sawExecCommand && (await currentTurnSelfRefused())) break;
         } else {
           stable = 0;
         }
@@ -183,7 +202,7 @@ test.describe('Issue #811 护栏误拦截复现 (real LLM)', () => {
       // 两个条件缺一不可：① 全程没出现过 exec 命令块（硬信号，见上）；
       // ② 回复里是明确的自拒口吻。少任何一个都照常断言——如果护栏真坏了、模型又调了
       // exec，①为假，走下面的 expect，失败照报。
-      if (!sawExecCommand && !matches(text) && SELF_REFUSAL.test(text)) {
+      if (!sawExecCommand && !matches(text) && (await currentTurnSelfRefused())) {
         console.log(
           '[test] ⚠️ 全程无 exec 命令块且模型自行拒答，沙箱护栏未被触发 — 跳过（precondition 未满足）'
         );
