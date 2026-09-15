@@ -8424,15 +8424,22 @@ function ToolChainGroup({
     }
   }, [done, hasConfirmRow]);
 
-  const label = `深度思考 · ${rows.length} 项工具`;
+  const label = `工具调用 · ${rows.length}`;
   return (
-    <div className="my-0.5 flex min-w-0">
-      <div className="min-w-0 flex-1 pl-2">
+    <div className="my-0.5 flex min-w-0 pl-2">
+      <div className="flex w-4 flex-col items-center self-stretch">
+        <span className="text-[13px] leading-none">🔧</span>
+        <span
+          className="mt-0.5 w-[2px] flex-1 min-h-2 rounded-full"
+          style={{ background: 'var(--border-subtle)' }}
+        />
+      </div>
+      <div className="min-w-0 flex-1">
         <button
           type="button"
           onClick={() => setOpen((v) => !v)}
-          className="flex items-center gap-1.5 py-0.5 text-[11px] cursor-pointer select-none transition-opacity hover:opacity-75"
-          style={{ color: '#a0a6b0' }}
+          className="flex items-center gap-1.5 py-0.5 text-xs cursor-pointer select-none transition-opacity hover:opacity-75"
+          style={{ color: 'var(--info)' }}
           aria-expanded={open}
         >
           <span>{label}</span>
