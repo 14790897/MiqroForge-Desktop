@@ -552,6 +552,26 @@ test.describe('File Attachment Chips', () => {
     await expect(composerChips(page).getByText('batch_b.bin')).toHaveCount(0);
   });
 
+  test('Cross-action race cannot bypass the total cap', async () => {
+    // 同一 JS 任务内连发两次 change（两个 action 都发生在 React commit 之前），
+    // 若只用 attachmentsRef 判断，两个 22MB 都会通过 → 44MB。
+    await page.evaluate(() => {
+      const input = document.querySelector('input[type="file"]') as HTMLInputElement;
+      const mk = (name: string) => new File([new Uint8Array(22 * 1024 * 1024)], name);
+      const a = new DataTransfer();
+      a.items.add(mk('race_a.bin'));
+      input.files = a.files;
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+      const b = new DataTransfer();
+      b.items.add(mk('race_b.bin'));
+      input.files = b.files;
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    await page.waitForTimeout(1200);
+    await expect(composerChips(page).getByText('race_a.bin')).toHaveCount(1);
+    await expect(composerChips(page).getByText('race_b.bin')).toHaveCount(0);
+  });
+
   test('Send button disabled while extracting', async () => {
     await attachFile(page, FILES.largePdf);
     const sendBtn = page

@@ -2630,10 +2630,29 @@ export function ChatConsole({
   /** 附件总量上限（与主进程剪贴板一致）：renderer 侧 input/拖拽/paste 三入口统一。 */
   const MAX_TOTAL_ATTACHMENT_BYTES = 40 * 1024 * 1024;
   const attachmentsRef = useRef<Attachment[]>([]);
+  /** 已接受但尚未被 state 提交的字节（同步预留）：两个异步 action 并发时，
+   *  只读 attachmentsRef 会各自看到旧总量而突破 40MB（review P1）。 */
+  const reservedBytesRef = useRef(0);
+  const committedBytesRef = useRef(0);
   useEffect(() => {
     attachmentsRef.current = attachments;
+    const bytes = attachments.reduce((sum, a) => sum + (a.size || 0), 0);
+    const delta = bytes - committedBytesRef.current;
+    // 新提交的字节从「已预留」转为「已提交」
+    if (delta > 0) reservedBytesRef.current = Math.max(0, reservedBytesRef.current - delta);
+    committedBytesRef.current = bytes;
   }, [attachments]);
-  const attachmentsBytes = () => attachmentsRef.current.reduce((sum, a) => sum + (a.size || 0), 0);
+  const attachmentsBytes = () =>
+    attachmentsRef.current.reduce((sum, a) => sum + (a.size || 0), 0) + reservedBytesRef.current;
+  /** 同步的「检查 + 预留」单一临界操作：跨 action 并发也不会各自读到旧总量。 */
+  const tryReserve = (size: number): boolean => {
+    if (attachmentsBytes() + size > MAX_TOTAL_ATTACHMENT_BYTES) return false;
+    reservedBytesRef.current += size;
+    return true;
+  };
+  const releaseReservation = (size: number) => {
+    reservedBytesRef.current = Math.max(0, reservedBytesRef.current - size);
+  };
   const [historyLoaded, setHistoryLoaded] = useState(false);
   const [downloadingPaperId, setDownloadingPaperId] = useState<string | null>(null);
   /** #668 补：论文下载结果反馈（paperId → done+savePath / failed+error） */
@@ -4140,6 +4159,8 @@ export function ChatConsole({
         if (isTextLike && !isDocument) {
           // Plain text files — read directly as text
           const reader = new FileReader();
+          // 读取失败：释放已预留的字节，避免预留位泄漏把后续附件挡住
+          reader.onerror = () => releaseReservation(file.size);
           reader.onload = () =>
             setAttachments((prev) => [
               ...prev,
@@ -4149,6 +4170,8 @@ export function ChatConsole({
         } else if (isTextLike && isDocument) {
           // Markdown/text files detected as documents — read as text AND as base64 for server fallback
           const reader = new FileReader();
+          // 读取失败：释放已预留的字节，避免预留位泄漏把后续附件挡住
+          reader.onerror = () => releaseReservation(file.size);
           reader.onload = () => {
             const base64 = (reader.result as string).split(',')[1];
             const textContent = new TextDecoder().decode(
@@ -4171,6 +4194,8 @@ export function ChatConsole({
           reader.readAsDataURL(file);
         } else if (isDocument) {
           const reader = new FileReader();
+          // 读取失败：释放已预留的字节，避免预留位泄漏把后续附件挡住
+          reader.onerror = () => releaseReservation(file.size);
           reader.onload = () => {
             const base64 = (reader.result as string).split(',')[1];
             const ext = file.name.split('.').pop()?.toLowerCase() ?? '';
@@ -4194,6 +4219,8 @@ export function ChatConsole({
           reader.readAsDataURL(file);
         } else if (isImage) {
           const reader = new FileReader();
+          // 读取失败：释放已预留的字节，避免预留位泄漏把后续附件挡住
+          reader.onerror = () => releaseReservation(file.size);
           reader.onload = () =>
             setAttachments((prev) => [
               ...prev,
@@ -4203,6 +4230,8 @@ export function ChatConsole({
         } else {
           // 未知类型：保留字节按文档收下（避免“粘贴/拖入后毫无反应”）
           const reader = new FileReader();
+          // 读取失败：释放已预留的字节，避免预留位泄漏把后续附件挡住
+          reader.onerror = () => releaseReservation(file.size);
           reader.onload = () => {
             const base64 = (reader.result as string).split(',')[1];
             const name = file.name || `pasted-file-${Date.now()}`;
@@ -4230,15 +4259,12 @@ export function ChatConsole({
   /** 批内同步累计总量：一次多选/多文件粘贴时 React state 尚未提交，必须用本地 running 值
    *  判断，否则同一批里每个文件都看到旧的 attachmentsRef 而逐个放行（review 09:49 P1）。 */
   const attachBatch = (files: File[], actionId: string, dedupeContent = false): number => {
-    let used = attachmentsBytes();
     let accepted = 0;
     for (const f of files) {
       if (f.size > MAX_ONE_ATTACHMENT_BYTES) continue;
-      if (used + f.size > MAX_TOTAL_ATTACHMENT_BYTES) break;
-      if (attachFromFile(f, actionId, dedupeContent)) {
-        used += f.size;
-        accepted += 1;
-      }
+      if (!tryReserve(f.size)) break;
+      if (attachFromFile(f, actionId, dedupeContent)) accepted += 1;
+      else releaseReservation(f.size); // 去重/Token 去重被拒：释放预留
     }
     return accepted;
   };
@@ -4320,15 +4346,12 @@ export function ChatConsole({
         const items = [...(res?.files ?? []), ...(res?.image ? [res.image] : [])];
         if (items.length === 0) return false;
         const actionId = token ?? newAttachAction();
-        let used = attachmentsBytes();
         let any = false;
         for (const f of items) {
           if (f.size > MAX_ONE_ATTACHMENT_BYTES) continue;
-          if (used + f.size > MAX_TOTAL_ATTACHMENT_BYTES) break;
-          if (attachBase64(f.name, f.base64, f.mime, f.size, actionId)) {
-            used += f.size;
-            any = true;
-          }
+          if (!tryReserve(f.size)) break;
+          if (attachBase64(f.name, f.base64, f.mime, f.size, actionId)) any = true;
+          else releaseReservation(f.size);
         }
         return any;
       } catch {
