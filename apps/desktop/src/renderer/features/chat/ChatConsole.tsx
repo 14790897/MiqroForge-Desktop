@@ -2517,7 +2517,7 @@ export function ChatConsole({
   }, [messages]);
   // sourcesByMsg cache: keyed by a tool-only signature so the map object is
   // stable across typewriter frames (see sourcesByMsg below).
-  const sourcesCacheRef = useRef<{ sig: string; map: Map<Message, MessageSource[]> } | null>(null);
+  const sourcesCacheRef = useRef<{ sig: string; map: Map<number, MessageSource[]> } | null>(null);
   // Tracks the latest messages for the session-switch snapshot.  Kept in
   // sync below; the switch effect snapshots the session we're leaving into
   // moduleMessagesSnapshot so switching back restores it instantly.
@@ -6273,15 +6273,13 @@ export function ChatConsole({
   );
   const sourcesByMsg = useMemo(() => {
     if (sourcesCacheRef.current?.sig === sourcesSig) return sourcesCacheRef.current.map;
-    const map = new Map<Message, MessageSource[]>();
+    const map = new Map<number, MessageSource[]>();
     let pending: MessageSource[] = [];
     let seen = new Set<string>();
     const merge = (next: MessageSource[]) => {
-      for (const s of next) {
-        if (seen.has(s.url)) continue;
-        seen.add(s.url);
-        pending.push(s);
-      }
+      // own 已经过上面的 filter 去重（跨工具行），这里直接累积即可；
+      // 若再走 seen 去重会与 filter 共享 seen、全部跳过，导致 pending 恒空。
+      pending.push(...next);
     };
     for (const m of messages) {
       if (m.role === 'progress') {
@@ -6293,7 +6291,7 @@ export function ChatConsole({
           seen.add(s.url);
           return true;
         });
-        if (own.length > 0) map.set(m, own);
+        if (own.length > 0) map.set(m.timestamp, own);
         merge(own);
       } else if (m.role === 'user') {
         pending = [];
@@ -6304,7 +6302,7 @@ export function ChatConsole({
         // answer all reference the same tool results (#678 用户反馈: 中间
         // "搜索异常改用…" 消息点查看来源竟是空的). Reset happens at the
         // next user message.
-        map.set(m, pending);
+        map.set(m.timestamp, pending);
       }
     }
     return map;
@@ -7113,7 +7111,7 @@ export function ChatConsole({
                         turnIndex={i}
                         execOutputs={execOutputs}
                         inlineExecOutput={inlineExecOutput}
-                        sources={sourcesByMsg.get(group.msg) ?? EMPTY_SOURCES}
+                        sources={sourcesByMsg.get(group.msg.timestamp) ?? EMPTY_SOURCES}
                         toolStepIndex={toolStepByMsg.get(group.msg)}
                         isLast={i === chatGroups.length - 1}
                         streaming={streaming && i === lastAssistantIdx && assistantTailActive}
@@ -8147,7 +8145,7 @@ function ToolChainGroup({
 }: {
   rows: Message[];
   done: boolean;
-  sourcesByMsg: Map<Message, MessageSource[]>;
+  sourcesByMsg: Map<number, MessageSource[]>;
   searchResultsByCallId: Record<string, string>;
 } & Omit<
   ComponentProps<typeof MessageBubble>,
@@ -8195,7 +8193,7 @@ function ToolChainGroup({
               <MessageBubble
                 key={`${row.timestamp}-${i}`}
                 msg={row}
-                sources={sourcesByMsg.get(row) ?? EMPTY_SOURCES}
+                sources={sourcesByMsg.get(row.timestamp) ?? EMPTY_SOURCES}
                 toolStepIndex={i + 1}
                 isLastToolRow={i === rows.length - 1}
                 isLast={false}
