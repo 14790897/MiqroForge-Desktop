@@ -2530,9 +2530,16 @@ const reasoningModeToWelcome = (m: ReasoningMode): WelcomeMode =>
 /**
  * 从 reasoningMode 反推选中卡时要防一个歧义：日常任务与代码任务都映射 think，光看
  * reasoningMode 分不出用户想要哪张卡。已经停在「代码任务」时就别把它顶掉——否则在
- * 输入条切一次「深度研究」或换个会话，代码卡会悄悄变成日常任务，代码模式独有的
- * 「内置技能」入口也跟着消失（#962 CodeRabbit）。
+ * 输入条切一次「深度研究」，代码卡会悄悄变成日常任务，代码模式独有的「内置技能」
+ * 入口也跟着消失（#962 CodeRabbit）。
  * 原来那条「切到 fast 却还高亮代码卡」的问题不受影响：m === 'fast' 时照样落到 fast。
+ *
+ * **只用于「同一会话内切 reasoningMode」这条路径。** 会话边界（sessionKey 变化）不能
+ * 用它：那里的语义正好相反——reasoningMode 只有 fast/think 两态，而选中卡有三态，
+ * daily ─┐
+ *        ├─→ think   // 不可逆，反推不出来
+ * code  ─┘
+ * 带上 prev 只会把上个会话的 code 泄漏进新的空会话（#962 评审 P1）。
  */
 const resolveWelcomeMode = (prev: WelcomeMode, m: ReasoningMode): WelcomeMode =>
   m === 'think' && prev === 'code' ? 'code' : reasoningModeToWelcome(m);
@@ -2811,7 +2818,12 @@ export function ChatConsole({
   // 却因中途切到 fast 而高亮与发送模式不一致（CodeRabbit）。仅随 sessionKey 触发，
   // 不在同一会话内用 reasoningMode 变化覆盖用户手动选卡。
   useEffect(() => {
-    setWelcomeMode((prev) => resolveWelcomeMode(prev, reasoningMode));
+    // 这里**必须**直接派生，不能走 resolveWelcomeMode —— 那个 prev 守卫只对
+    // 「同一会话内切 reasoningMode」成立，放到会话边界上就反了：daily 与 code 都映射
+    // think，带着 prev 走会把 A 会话的 code 泄漏进新的空会话（欢迎页仍高亮「代码任务」、
+    // 「内置技能」也跟着出现，而用户在新会话里可能想干的是日常任务）。这个 effect 的
+    // 本意就是「不沿用上个会话的 code 选择」，与守卫的方向正好相反（#962 评审 P1）。
+    setWelcomeMode(reasoningModeToWelcome(reasoningMode));
     // develop 的会话代际：切会话时 +1，异步附件（FileReader / 剪贴板）提交前校验，
     // 避免旧会话的附件落到新会话。
     sessionGenRef.current += 1;

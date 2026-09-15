@@ -11,6 +11,12 @@
  * 选择态按 title 记身份（不是下标），所以异步插入的「内置技能」项不会把已选场景
  * 挤到隔壁去（评审 P1）。title 的唯一性由单测 welcomeScenes.test.ts 守住。
  *
+ * 未覆盖：**会话边界**（sessionKey 变化）那条路径。实测点「新建会话」不会换 key——
+ * 空会话会被复用（空会话在侧栏里本就隐藏，见 #1061），只有先让当前会话非空才切得动，
+ * 而那就得真发一条消息（依赖真实模型）。所以那条路径目前只有代码层面的保证：
+ * sessionKey 的 effect 用 reasoningMode 直接派生，不带 prev（见 ChatConsole 里
+ * resolveWelcomeMode 的注释）。
+ *
  * Run: cd apps/desktop && npx playwright test --config=playwright.config.ts --project=electron welcome-starters.spec.ts
  */
 
