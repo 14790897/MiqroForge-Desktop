@@ -7,6 +7,7 @@ import { BridgeManager } from './bridge';
 import { writeMainProcessLog } from './electron-log';
 import { createSplash, closeSplash } from './splash';
 import { safeWrite, guardStdStreams } from './console-guard';
+import { WINDOW_MIN_WIDTH } from '../shared/layout';
 
 const originalConsoleLog = console.log.bind(console);
 const originalConsoleWarn = console.warn.bind(console);
@@ -30,7 +31,7 @@ function createWindow(): void {
   mainWindow = new BrowserWindow({
     width: 1280,
     height: 860,
-    minWidth: 900,
+    minWidth: WINDOW_MIN_WIDTH,
     minHeight: 760,
     title: 'MiQroForge Desktop',
     icon: getIconPath(),

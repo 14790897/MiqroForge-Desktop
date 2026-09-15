@@ -8,6 +8,7 @@ import {
   type ComponentProps,
 } from 'react';
 import { createPortal } from 'react-dom';
+import { ASSET_PANEL_MIN_WIDTH } from '../../../shared/layout';
 import { AgentAvatar } from './components/Avatars';
 import { MiQroForgeLogo } from '../../components/MiQroForgeLogo';
 import { MarkdownContent } from './components/MarkdownContent';
@@ -2644,6 +2645,9 @@ export function ChatConsole({
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [historyLoaded, sessionKey]);
+  // 面板默认展开;窗口不够宽时由主进程的 syncWindowMin 负责**撑到目标最小宽度**
+  // (minOnly 只表示「不应用 panel extra」,并不禁止为满足最小布局扩窗)—— 不藏面板,
+  // 否则依赖面板的 e2e/用户路径会直接看不到面板(macOS CI 窗口 < 1100 时曾因此挂 10 条)。
   const [panelOpen, setPanelOpen] = useState(true);
   const [panelWidth, setPanelWidth] = useState(280);
   const panelResizing = useRef(false);
@@ -2707,6 +2711,22 @@ export function ChatConsole({
   useEffect(() => {
     panelWidthRef.current = panelWidth;
   }, [panelWidth]);
+
+  // 上报「面板当前是否占宽」给主进程用于抬高窗口最小宽度(不改窗口宽):冷启动面板默认
+  // 展开且没有加宽请求,不报的话缩窗会把聊天列/输入框压到最小宽度以下;关闭时上报 0 还原。
+  //
+  // 只依赖 panelOpen,且传占用标志(1/0):主进程只用 target > 0,不关心具体宽度,
+  // 所以依赖 panelWidth 只会让每次宽度提交多打一次无意义的 IPC(baiye-banned #1047)。
+  //
+  // 该上报可能会为满足最小布局把窗口撑到目标宽度 —— 这次变化不经拖拽队列的 send(),
+  // 因此要把返回的 applied 同步进队列基线,否则首次拖拽会拿旧基线把撑窗量重复计入
+  // (CodeRabbit #1047)。
+  useEffect(() => {
+    void window.miqi.app
+      .setPanelWindowExtra(panelOpen ? 1 : 0, true)
+      .then((r) => panelSync.syncApplied(r.applied))
+      .catch(() => {});
+  }, [panelOpen, panelSync]);
 
   useEffect(() => {
     const timer = window.setInterval(() => setClockTick(Date.now()), 60_000);
@@ -7420,9 +7440,10 @@ export function ChatConsole({
           <div
             data-testid="task-assets-panel"
             ref={assetsPanelRef}
-            className="flex flex-col shrink-0 border-l overflow-y-auto relative"
+            className="flex flex-col shrink border-l overflow-y-auto relative"
             style={{
               width: panelWidth,
+              minWidth: ASSET_PANEL_MIN_WIDTH,
               background: 'var(--panel-bg)',
               borderColor: 'var(--panel-border)',
             }}
