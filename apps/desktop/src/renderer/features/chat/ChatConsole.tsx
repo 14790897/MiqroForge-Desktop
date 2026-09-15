@@ -2599,10 +2599,13 @@ export function ChatConsole({
     let cancelled = false;
     const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
     void (async () => {
-      // 这个 effect 在挂载时就跑，早于 runtime 就绪，所以 skills.list() 有相当概率
-      // 撞上「桥还没起来」而被拒。只试一次的话，一次瞬时失败会让「内置技能」整场
-      // 会话都不出现（e2e 冷启动时就是间歇性这样挂的）。退避重试几次。
-      for (let attempt = 0; attempt < 5; attempt++) {
+      // 这个 effect 在挂载时就跑，早于 runtime 就绪，所以有两种失败都要退避重试：
+      //   ① 直接抛（桥还没起来）；
+      //   ② **回了个空清单**（桥起来了、但技能索引还没建好）—— 这个尤其阴：不抛错，
+      //      看着就像"这台机器没装技能"，而 effect 只跑一次，「内置技能」这一项会
+      //      整场会话都不出现。e2e 并行起多个 app 时能稳定复现这种空清单。
+      const LAST = 9;
+      for (let attempt = 0; attempt <= LAST; attempt++) {
         try {
           const res = await window.miqi.skills.list();
           if (cancelled) return;
@@ -2617,21 +2620,24 @@ export function ChatConsole({
           );
           // 顺序与上架范围都以 SKILL_ORDER 为准：技能清单本身来自文件系统，顺序不稳定，
           // 而且没装的技能不该在首屏留空位。
-          setBuiltinSkillTasks(
-            SKILL_ORDER.map((name) =>
-              byName.has(name) ? (SKILL_STARTERS[name] ?? null) : null
-            ).filter((t): t is StarterTask => t !== null)
-          );
-          return;
+          const tasks = SKILL_ORDER.map((name) =>
+            byName.has(name) ? (SKILL_STARTERS[name] ?? null) : null
+          ).filter((t): t is StarterTask => t !== null);
+
+          if (tasks.length > 0) {
+            setBuiltinSkillTasks(tasks);
+            return;
+          }
+          // 空清单：本轮先不上架，退避后再试；最后一次仍为空才认（可能真的没装）
+          if (attempt === LAST) return;
         } catch (e) {
-          // 技能清单不可用只是让这一项不出现——它不是必需入口
           if (cancelled) return;
-          if (attempt === 4) {
+          if (attempt === LAST) {
             console.warn('[MiQroForge] skills.list() 连续失败，「内置技能」入口本次会话不显示', e);
             return;
           }
-          await sleep(300 * (attempt + 1));
         }
+        await sleep(400 * (attempt + 1));
       }
     })();
     return () => {
@@ -2662,8 +2668,16 @@ export function ChatConsole({
     });
   }, []);
   // 换模式 / 技能清单回来会换掉整排 chips，容器宽度跟着变，重挂载后要重新量一次。
+  // 窗口缩放、资产面板开合同样会改宽度，但那两件事既不改 welcomeScenes 也不触发
+  // scroll——少了这一层，列变窄、chips 变得可滚了，右箭头却还停在 disabled 上，
+  // 后面的场景就点不到了（#962 CodeRabbit）。
   useEffect(() => {
+    const el = sceneChipsRef.current;
     syncChipScroll();
+    if (!el || typeof ResizeObserver === 'undefined') return;
+    const ro = new ResizeObserver(() => syncChipScroll());
+    ro.observe(el);
+    return () => ro.disconnect();
   }, [welcomeScenes, syncChipScroll]);
   const pickedScene =
     pickedSceneTitle === null
@@ -2717,6 +2731,11 @@ export function ChatConsole({
   // 不在同一会话内用 reasoningMode 变化覆盖用户手动选卡。
   useEffect(() => {
     setWelcomeMode((prev) => resolveWelcomeMode(prev, reasoningMode));
+    // 会话换了就把起点任务的两层选择一起清掉。ChatConsole 是常驻组件，而上面那个
+    // [welcomeMode] 的清理只在模式真的变了时才跑——新会话如果还是 code，上个会话
+    // 的选中态和输入框胶囊就会跟着显示出来（#962 CodeRabbit）。
+    setPickedSceneTitle(null);
+    setPickedTaskTitle(null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionKey]);
   const [streaming, setStreaming] = useState(false);

@@ -163,4 +163,33 @@ test.describe('Welcome Starters E2E (#962)', () => {
     expect(await pressed('内置技能')).toBe(true);
     await expect(cards()).toHaveCount(6);
   });
+
+  test('输入法组字中按回车不会把半成品发出去', async () => {
+    await resetStarters();
+
+    // 真实 IME 没法在 e2e 里驱动，直接派发一个 isComposing=true 的回车——
+    // Composer.handleKeyDown 读的就是 nativeEvent.isComposing。
+    await textarea().click();
+    await textarea().evaluate((el) => {
+      const t = el as HTMLTextAreaElement;
+      t.value = '我正在打拼音';
+      t.dispatchEvent(new Event('input', { bubbles: true }));
+      t.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'Enter',
+          bubbles: true,
+          cancelable: true,
+          isComposing: true,
+        })
+      );
+    });
+    await page.waitForTimeout(600);
+
+    // 没发出去：还停在欢迎页（发过消息后欢迎块就没了）
+    await expect(page.locator('[data-testid="chat-message-user"]')).toHaveCount(0);
+    await expect(chip('内置技能')).toBeVisible();
+
+    // 别把这段半成品留给后面的用例
+    await textarea().fill('');
+  });
 });

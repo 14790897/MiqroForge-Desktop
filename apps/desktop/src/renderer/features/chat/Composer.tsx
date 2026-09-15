@@ -116,7 +116,9 @@ function ComposerImpl(
 
   const handleKeyDown = useCallback(
     (e: KeyboardEvent) => {
-      if (e.key === 'Enter' && !e.shiftKey) {
+      // isComposing：中文/日文输入法候选框还开着的时候，回车是「选中这个词」不是
+      // 「发送」。不加这道判断，打一半拼音按回车就把半成品发出去了。
+      if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
         e.preventDefault();
         onSubmit(input);
       }

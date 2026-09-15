@@ -23,6 +23,16 @@ const FIELDS: (keyof StarterTask)[] = ['title', 'icon', 'scenario', 'deliverable
 /** 变体选择符 / ZWJ / 肤色 / 区域指示符：跨平台渲染不稳，一律不用 */
 const EMOJI_UNSAFE = /[\uFE0F\u200D\u{1F3FB}-\u{1F3FF}\u{1F1E6}-\u{1F1FF}]/u;
 
+/**
+ * 先卡类型再 trim：`String(undefined)` 会变成 "undefined"、`String(null)` 变成 "null"，
+ * 两者都能骗过「非空」断言（#962 CodeRabbit）。类型不对时第一条断言就红，而不是走到
+ * `.trim()` 上抛 TypeError。
+ */
+function assertNonEmptyString(value: unknown, where: string) {
+  expect(typeof value, where).toBe('string');
+  expect((value as string).trim(), where).not.toBe('');
+}
+
 const allScenes = MODES.flatMap((m) => MODE_SCENES[m].map((s) => [`${m}/${s.title}`, s] as const));
 
 describe('MODE_SCENES', () => {
@@ -58,7 +68,7 @@ describe('MODE_SCENES', () => {
       expect([...s.icon].length, `${where} 的场景图标不是单码位`).toBe(1);
       for (const t of s.tasks) {
         for (const f of FIELDS) {
-          expect(String(t[f]).trim(), `${where} › ${t.title} › ${f}`).not.toBe('');
+          assertNonEmptyString(t[f], `${where} › ${t.title} › ${f}`);
         }
         expect(t.icon, `${where} › ${t.title}`).not.toMatch(EMOJI_UNSAFE);
         expect([...t.icon].length, `${where} › ${t.title} 的图标不是单码位`).toBe(1);
@@ -84,7 +94,7 @@ describe('SKILL_ORDER / SKILL_STARTERS', () => {
     for (const name of SKILL_ORDER) {
       const copy = SKILL_STARTERS[name];
       for (const f of FIELDS) {
-        expect(String(copy[f]).trim(), `${name} › ${f}`).not.toBe('');
+        assertNonEmptyString(copy[f], `${name} › ${f}`);
       }
       expect(copy.icon, name).not.toMatch(EMOJI_UNSAFE);
       expect([...copy.icon].length, `${name} 的图标不是单码位`).toBe(1);
