@@ -388,12 +388,31 @@ describe('panelWindowSync 基线同步(syncApplied)', () => {
     expect(h.sync.anchor?.applied).toBe(200);
   });
 
-  it('拖拽中忽略,不覆盖正在使用的基线', () => {
+  it('拖拽中晚到的基线被暂存,队列静默后平移生效(不丢)', async () => {
     const h = makeHarness();
     h.sync.syncApplied(120);
     h.sync.beginDrag({ clientX: 500, width: 280 });
-    h.sync.syncApplied(999);
-    expect(h.sync.applied).toBe(120);
+    // 冷启动撑窗的 applied 迟到(此时正在拖拽)
+    h.sync.syncApplied(200);
+    expect(h.sync.applied).toBe(120); // 拖拽中不立刻覆盖
+    h.sync.endDrag();
+    h.flush(); // 发出收尾请求
+    await h.respond(0, { applied: 200 });
+    expect(h.sync.applied).toBe(200); // 基线最终生效,没有被丢掉
+  });
+
+  it('初始化 minOnly 响应晚于 beginDrag:按新基线投影,不出现跳变', async () => {
+    const h = makeHarness();
+    h.sync.beginDrag({ clientX: 500, width: 280 });
+    h.sync.dragTo(300); // 面板 +20
+    // 主进程已因冷启动 minOnly 撑了 200,响应此刻才回来
+    h.sync.syncApplied(200);
+    h.flush();
+    await h.respond(0, { applied: 200 });
+    // 旧实现会用 applied=0 的锚点反推出 280+200=480(跳变);新实现按新基线投影,
+    // 面板宽度不变(宽度相同连 DOM 都不写)。
+    expect(h.sync.applied).toBe(200);
+    expect(h.widths).toEqual([]);
   });
 
   it('非法值忽略', () => {
