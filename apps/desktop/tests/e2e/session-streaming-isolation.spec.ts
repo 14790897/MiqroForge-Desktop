@@ -71,7 +71,7 @@ async function resolveSessionKey(page: Page, marker: string): Promise<string> {
 async function switchAwayAndBack(page: Page, aKey: string, markerA: string) {
   const msgList = page.locator('main [class*="max-w-[760px]"]');
   const sidebar = page.locator('div.flex.flex-col.shrink-0.border-r').first();
-  const sessionButtons = sidebar.locator('button.rounded-xl');
+  const sessionButtons = sidebar.locator('[data-testid="session-item"]');
 
   // A's sidebar button shows its TITLE (derived from the first message, e.g.
   // "只回答RESTORE_A_...") once the backend has generated it; before that it

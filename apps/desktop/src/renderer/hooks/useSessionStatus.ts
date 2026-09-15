@@ -4,10 +4,8 @@ export type SessionStatus = 'IN-PROGRESS' | 'PENDING' | 'REVIEW' | 'COMPLETED' |
 
 export interface StatusDisplayInfo {
   label: string;
-  bg: string;
-  color: string;
-  cardBg: string;
-  cardBorder: string;
+  /** 列表卡片状态点的实心填充色。 */
+  dot: string;
 }
 
 const STORAGE_KEY = 'miqi:sessionStatuses';
@@ -42,46 +40,18 @@ export function useSessionStatus() {
   const getStatusDisplay = useCallback((status: SessionStatus): StatusDisplayInfo => {
     switch (status) {
       case 'IN-PROGRESS':
-        return {
-          label: '进行中',
-          bg: 'var(--tag-inprogress-bg)',
-          color: 'var(--tag-inprogress-text)',
-          cardBg: 'color-mix(in srgb, var(--surface) 90%, var(--tag-inprogress-bg))',
-          cardBorder: 'color-mix(in srgb, var(--border-subtle) 70%, var(--tag-inprogress-bg))',
-        };
+        return { label: '进行中', dot: 'var(--tag-inprogress-bg)' };
       case 'REVIEW':
-        return {
-          label: '待审阅',
-          bg: 'var(--tag-review-bg)',
-          color: 'var(--tag-review-text)',
-          cardBg: 'color-mix(in srgb, var(--surface) 75%, var(--tag-review-bg))',
-          cardBorder: 'color-mix(in srgb, var(--border-subtle) 70%, var(--tag-review-text))',
-        };
+        return { label: '待审阅', dot: 'var(--tag-review-text)' };
       case 'COMPLETED':
-        return {
-          label: '已完成',
-          bg: 'var(--tag-completed-bg)',
-          color: 'var(--tag-completed-text)',
-          cardBg: 'color-mix(in srgb, var(--surface) 75%, var(--tag-completed-bg))',
-          cardBorder: 'color-mix(in srgb, var(--border-subtle) 70%, var(--tag-completed-text))',
-        };
+        // 用 success 绿而不是 --tag-completed-text：后者(#1d6fd8)与进行中的
+        // #3b82f6 同为蓝，缩到 8px 的状态点上肉眼分不出。
+        return { label: '已完成', dot: 'var(--success)' };
       case 'CC':
-        return {
-          label: '抄送 (旧)',
-          bg: 'var(--tag-cc-bg)',
-          color: 'var(--tag-cc-text)',
-          cardBg: 'color-mix(in srgb, var(--surface) 75%, var(--tag-cc-bg))',
-          cardBorder: 'color-mix(in srgb, var(--border-subtle) 70%, var(--tag-cc-text))',
-        };
+        return { label: '抄送 (旧)', dot: 'var(--tag-cc-text)' };
       case 'PENDING':
       default:
-        return {
-          label: '待处理',
-          bg: 'var(--surface-muted)',
-          color: 'var(--text-faint)',
-          cardBg: 'var(--surface)',
-          cardBorder: 'var(--border-subtle)',
-        };
+        return { label: '待处理', dot: 'var(--text-faint)' };
     }
   }, []);
 

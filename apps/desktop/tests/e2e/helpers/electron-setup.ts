@@ -288,11 +288,11 @@ export function userMessage(page: Page, text: string) {
 
 /** Get sidebar session items (clickable buttons that switch sessions).
  *  Scoped to the sidebar panel to avoid picking up buttons in main content.
- *  New UI: session cards use rounded-xl; filter tabs (rounded-md) and the
- *  "New Session" title button are excluded by the class selector. */
+ *  Anchored on the stable data-testid — group headers and filter pills are
+ *  sibling buttons and must not be counted as sessions. */
 export function getSidebarSessionItems(page: Page) {
   const sidebar = page.locator('div.flex.flex-col.shrink-0.border-r').first();
-  return sidebar.locator('button.rounded-xl');
+  return sidebar.locator('[data-testid="session-item"]');
 }
 
 /** Get the count of sidebar session items */
@@ -344,7 +344,7 @@ export async function switchToSessionWithMarker(page: Page, marker: string): Pro
 
   // Get sidebar session items - try multiple selector patterns for robustness
   const sidebarSelectors = [
-    'button.rounded-xl',
+    '[data-testid="session-item"]',
     '[data-testid^="session-"]',
     'div[role="button"][class*="session"]',
   ];
