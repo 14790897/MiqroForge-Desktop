@@ -1,10 +1,20 @@
 name: Sync main into develop
 
-# 发版完成后（release published）把 main 的 release 提交反向同步回 develop，
+# 发版完成后把 main 的 release 提交反向同步回 develop，
 # 并把 develop 的版本号标记为 <已发布版本>-dev（开发中标记）。
 # 反向同步沿用临时分支做法：head 用 chore/sync-main-into-develop，绝不用 main 作 head
 # （仓库开启了合并后自动删除 head 分支，曾两次误删 main）。
+#
+# 触发方式：主触发是 workflow_run（等 Release and Build 跑完），不用 release 事件——
+# semantic-release 的 release 提交 message 带 [skip ci]，GitHub 会连带跳过指向该提交的
+# release / tag 事件的 workflow，实测 release published 的 run 数为 0（v0.29.2 未拉起同步）。
+# release 触发器保留作兜底，两者都依赖下面 needs_sync 判定，重复触发不会重复建 PR。
 on:
+  workflow_run:
+    workflows: ["Release and Build"]
+    types: [completed]
+    # Release and Build 支持任意分支手动触发，限定只认 main 上的完成事件
+    branches: [main]
   release:
     types: [published]
   workflow_dispatch:
@@ -24,8 +34,11 @@ concurrency:
 
 jobs:
   sync:
-    # 仅响应正式版本 tag（跳过 _gh-imgup 等预发布）
-    if: ${{ github.event_name == 'workflow_dispatch' || (github.event.release.prerelease == false && startsWith(github.event.release.tag_name, 'v')) }}
+    # workflow_run 只认 Release and Build 成功结束；release 触发器仅响应正式版本 tag（跳过 _gh-imgup 等预发布）
+    if: >-
+      github.event_name == 'workflow_dispatch'
+      || (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success')
+      || (github.event_name == 'release' && github.event.release.prerelease == false && startsWith(github.event.release.tag_name, 'v'))
     runs-on: ubuntu-latest
     steps:
       - name: Checkout main
