@@ -30,7 +30,12 @@ import { PermissionsPage } from './features/permissions/PermissionsPage';
 import { PluginMarket } from './features/plugins/PluginMarket';
 import { SessionExplorer } from './features/sessions/SessionExplorer';
 import { WorkspacePage } from './features/workspace/WorkspacePage';
-import { PRIVACY_VERSION, isConsentCurrent, readStoredConsent, recordConsent } from './lib/privacy';
+import {
+  PRIVACY_VERSION,
+  isConsentCurrent,
+  readConsentVersion,
+  recordConsent,
+} from './lib/privacy';
 
 type NavId =
   | 'chat'
@@ -79,8 +84,10 @@ function AppShell() {
   const [canSkipSetup, setCanSkipSetup] = useState(false); // true when re-running wizard from settings
   const [settingsTab, setSettingsTab] = useState<SettingsTab>('general');
   // #837: 隐私协议同意门 — 同意状态本地持久化；协议版本更新时重新确认。
-  // E2E（MIQI_E2E=1 → preload 暴露 env.isE2E）跳过确认门，避免全部 E2E 被阻断。
-  const [consentVersion, setConsentVersion] = useState<string | null>(() => readStoredConsent());
+  // #1071: 判定走 readConsentVersion()（localStorage 缓存 + 主进程权威存储），
+  // 双开或缓存丢失时不会重复弹门。E2E（MIQI_E2E=1 → preload 暴露 env.isE2E）
+  // 跳过确认门，避免全部 E2E 被阻断。
+  const [consentVersion, setConsentVersion] = useState<string | null>(() => readConsentVersion());
   const consentBypassed = PRELOAD_OK && window.miqi.env?.isE2E === true;
   const consentOk = consentBypassed || isConsentCurrent(consentVersion);
   // #1000: 同意隐私协议后衔接登录页（协议 → 登录一气呵成）。仅本次挂载内
@@ -398,13 +405,13 @@ function AppShell() {
           <UserInputProvider>
             {/* Full-height flex column */}
             <div className="flex flex-col h-screen" style={{ background: 'var(--background)' }}>
+              {/* #989: 工作目录胶囊已下沉到聊天标题区（ChatConsole），顶栏不再重复展示 */}
               <TopBar
                 onOpenApprovals={openApprovalSettings}
                 onOpenQraft={() => {
                   setSettingsTab('qraft');
                   setActiveNav('settings');
                 }}
-                workspace={workspace ?? undefined}
               />
               <ApprovalBypassBanner onOpenApprovals={openApprovalSettings} />
               {/* Body row */}

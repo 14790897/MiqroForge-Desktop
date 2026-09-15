@@ -100,6 +100,10 @@ def register_agent_command(
                     provider=provider,
                     session_id=session_id,
                     workspace=config.workspace_path,
+                    # Headless CLI: nothing consumes ApprovalRequestedEvent,
+                    # so asking would block for the full timeout and then
+                    # misreport it as a user denial (#1045).
+                    has_approval_responder=False,
                 )
                 await runtime.start()
                 await cron.start()
@@ -177,6 +181,8 @@ async def _run_agent_once_via_runtime(
         provider=provider,
         session_id=session_id,
         workspace=config.workspace_path,
+        # Headless one-shot run: no approval channel exists (#1045).
+        has_approval_responder=False,
     )
     await runtime.start()
     try:

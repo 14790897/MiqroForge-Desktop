@@ -145,7 +145,7 @@ PR title check (CI on `main` branch): 不合规标题会被拒绝。
 - [ ] 📝 文档
 - [ ] ♻️ 重构
 - [ ] 🧪 测试
-- [ ] 🔧 其他
+- [x] 🔧 其他
 
 ## 变更概述
 
@@ -193,7 +193,21 @@ feat(sandbox): add auto-install support    ✅
 add auto-install support                   ❌ 缺少语义前缀
 ```
 
-## develop → main 同步 PR
+## 自动发版与双向同步流水线
+
+| 流水线 | 触发 | 行为 |
+|--------|------|------|
+| `.github/workflows/weekly-release.yml` | 每周三、周五 00:00 (Asia/Shanghai，cron `0 16 * * 2,4` UTC) / 手动 `workflow_dispatch` | 自动创建 develop→main 发布 PR（标题 `chore(release): merge develop into main`）并**立即合并**，随后 release.yml 的 semantic-release 自动发版打包 |
+| `.github/workflows/sync-main-into-develop.yml` | release published（正式 `v*` tag） / 手动 | 用临时分支 `chore/sync-main-into-develop` 把 main 的 release 提交反向同步回 develop，附 `chore(version): develop 版本号标记为 X-dev` 提交并**立即合并** |
+
+- 手动触发：`gh workflow run weekly-release.yml -f dry_run=true`（只建 PR 不合并，用于测试）
+- 发布 PR 的 body 由流水线生成，含全部必填节（`[x] 其他` + `## 截图` 等），能通过 pr-template-check
+- **develop 版本号约定**：反向同步后 develop 的版本号 = 最新已发布版本 + `-dev` 后缀（如 `0.30.0-dev`），用于区分开发中分支与正式发布版
+- **凭证处理（安全）**：两个工作流 checkout 一律 `persist-credentials: false`（仓库 public，后续 fetch 匿名即可）；`RELEASE_TOKEN` 只在需要写权限的步骤显式注入——反向同步的推送用 `https://x-access-token:…` URL 形式 + 显式租约 `--force-with-lease=<ref>:<sha>`，gh 步骤用 env。这样仓库内脚本（`scripts/update-version.sh`）执行时环境里没有凭证可偷
+- **依赖与约束（2026-09-14 核实）**：自动合并依赖 `RELEASE_TOKEN` 是仓库 owner 账号——`develop-quality-gate`（squash-only + required_linear_history + 2 审批 + electron-e2e/check-title）与 `main`（merge-only + code-owner review）两个 ruleset 的 bypass actor 都是该账号（`bypass_mode: always`）。若 token 换成非 bypass 账号，两个 PR 都会合并失败（报错会提示"规则集限制"）。反向同步**刻意**用 merge commit（bypass develop 的 linear_history）：squash 会丢失 main 提交的祖先关系，下一轮同步时版本号/CHANGELOG 行必然冲突
+- 下方手动流程仍适用于加急/临时发布
+
+## develop → main 同步 PR（手动加急流程）
 
 > **硬性要求：只能用远程引用，不能依赖本地分支状态。**
 
@@ -215,7 +229,7 @@ gh pr create --repo 14790897/MiQi --base main --head develop \
   --body "$(cat <<EOF
 ## 类型
 
-- [ ] 🔧 其他
+- [x] 🔧 其他
 
 ## 变更概述
 
@@ -243,6 +257,10 @@ $COMMITS
 - 所有 $COUNT 个提交已在 develop 通过各自 PR 评审并合并
 - 自动化测试在各自原 PR 中已通过
 - 本次为 release 合并，CI 将由 PR template check + title check 触发
+
+## 截图
+
+无界面变更（发布同步 PR）。
 EOF
 )"
 ```
@@ -272,6 +290,12 @@ git fetch origin develop main
 
 # 2. 创建临时分支指向 main 并推送
 git branch chore/sync-main-into-develop origin/main
+
+# 2.5 按约定给 develop 版本号加 -dev 后缀（develop 版本 = 最新已发布版本 + -dev）
+git checkout chore/sync-main-into-develop
+VERSION=$(node -p "require('./package.json').version"); DEV="${VERSION%-dev}-dev"
+bash scripts/update-version.sh "$DEV"
+git commit -am "chore(version): develop 版本号标记为 $DEV [skip ci]"
 git push origin chore/sync-main-into-develop
 
 # 3. 创建 PR：head=临时分支，base=develop
@@ -283,7 +307,7 @@ gh pr create --repo 14790897/MiQi --base develop --head chore/sync-main-into-dev
   --body "$(cat <<EOF
 ## 类型
 
-- [ ] 🔧 其他
+- [x] 🔧 其他
 
 ## 变更概述
 
@@ -310,6 +334,10 @@ $COMMITS
 
 - 提交均为 semantic-release 自动生成的版本标记（CHANGELOG + package.json + pyproject.toml）
 - 无代码逻辑变更，不影响功能
+
+## 截图
+
+无界面变更（反向同步 PR）。
 EOF
 )"
 ```

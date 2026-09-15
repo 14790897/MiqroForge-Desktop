@@ -256,6 +256,36 @@ class ApprovalResolveResult:
     reason: str = ""  # explanation when resolved=False, empty on success
 
 
+#: Human-facing approval-category names, matching the labels on the approvals
+#: settings page. Used to build the deny_no_channel message.
+_APPROVAL_CATEGORY_LABELS: dict[str, str] = {
+    "network": "网络审批",
+    "file_write": "文件写入审批",
+    "tool_confirmation": "工具确认",
+    "exec": "命令审批",
+}
+
+
+def _no_channel_message(decision: Any) -> str:
+    """Text for a fail-closed denial when the session has no approval channel.
+
+    Follows the convention established for system installs (#854, #875 review
+    F3): point at the approvals settings page rather than at raw config keys,
+    and say plainly that nothing ran. Category-aware because the short-circuit
+    fires for every APPROVAL_REQUIRED category — quoting only the network
+    switch would misdirect the user on exec / file_write / tool_confirmation
+    denials (#1045).
+    """
+    category = (getattr(decision, "category", "") or "").strip()
+    label = _APPROVAL_CATEGORY_LABELS.get(category, "该类别")
+    return (
+        f"Error: 「{label}」操作被安全策略拦截——当前会话没有审批通道，"
+        "无法征求你的确认，本次操作未执行。\n"
+        "CLI / 网关等无界面场景无法弹出授权卡。如需继续，"
+        f"请在桌面端「设置 > 审批」中开启「{label}」绕过后重试，或改用桌面端执行。"
+    )
+
+
 class ToolOrchestrator:
     """Orchestrates the full tool execution lifecycle."""
 
@@ -271,6 +301,7 @@ class ToolOrchestrator:
         approval_timeout_ms: int = 60_000,
         session_id: str = "",
         ledger_runtime: Any | None = None,
+        has_approval_responder: bool = True,
     ):
         self.permissions = permission_engine
         self.sandbox = sandbox_engine
@@ -278,6 +309,13 @@ class ToolOrchestrator:
         self.tools = tool_registry
         self.events = event_emitter
         self.approval_timeout_ms = approval_timeout_ms
+        # Whether any frontend can answer ApprovalRequestedEvent in this
+        # session. Desktop / AppServer wire an approvals.resolve handler;
+        # headless frontends (CLI, gateway, cron, TUI) do not, so they pass
+        # False and get an immediate fail-closed denial instead of blocking
+        # for approval_timeout_ms and then reporting the timeout as a user
+        # denial (#1045).
+        self.has_approval_responder = has_approval_responder
         self._session_id = session_id
         # Phase 31.8: ledger runtime for replay-persistent event recording
         self._ledger = ledger_runtime
@@ -376,6 +414,18 @@ class ToolOrchestrator:
                         reason=f"Blocked by hook: {pr_outcome.reason}",
                     )
                     ctx.result = f"权限被拒绝：{pr_outcome.reason}"
+                    ctx.status = OrchestrationResult.DENIED_BY_POLICY
+                    return ctx
+                if not self.has_approval_responder:
+                    # No frontend can answer in this session — fail closed
+                    # now rather than emit an unanswerable request and block
+                    # for the full timeout. Reporting that as a user denial
+                    # would be wrong: nobody was ever asked (#1045).
+                    ctx.permission_decision = PermissionDecision(
+                        verdict=PermissionVerdict.DENY,
+                        reason="deny_no_channel",
+                    )
+                    ctx.result = _no_channel_message(decision)
                     ctx.status = OrchestrationResult.DENIED_BY_POLICY
                     return ctx
                 decision = await self._request_approval(ctx, decision)

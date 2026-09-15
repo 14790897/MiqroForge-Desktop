@@ -129,9 +129,15 @@ class TaskRunner:
             # Pass client_id so the session gets owner_client_id in metadata.
             # The sessions_get_handler calls get_or_create with client_id and
             # raises REQUIRES_CLAIM for unowned sessions.
-            session = self._legacy_sm.get_or_create(session_key, client_id=client_id)
-            session.add_message(role, content, **extra)
-            self._legacy_sm.save(session)
+            # Hold the per-key lock across the whole get_or_create → mutate →
+            # save sequence so a concurrent delete+re-create under a new owner
+            # cannot interleave between the ownership check and the write (#1050
+            # TOCTOU). RLock is reentrant, so the locks inside get_or_create/save
+            # nest safely.
+            with self._legacy_sm._get_session_lock(session_key):
+                session = self._legacy_sm.get_or_create(session_key, client_id=client_id)
+                session.add_message(role, content, **extra)
+                self._legacy_sm.save(session)
         except Exception:
             logger.warning("Failed to mirror message to legacy SessionManager", exc_info=True)
 
@@ -605,6 +611,12 @@ class TaskRunner:
             from miqi.agent.tools.ask_user_confirm import ASK_USER_CONFIRM_INSTRUCTION
 
             effective_system_prompt += "\n\n" + ASK_USER_CONFIRM_INSTRUCTION
+
+        # 回答可视化与引用标注（issue #671）— 技术方案/流程/对比类回答
+        # 追加 Mermaid 流程图与参考文献（前端 MarkdownContent 渲染 mermaid）
+        from miqi.agent.answer_style import VISUAL_ANSWER_INSTRUCTION
+
+        effective_system_prompt += "\n\n" + VISUAL_ANSWER_INSTRUCTION
 
         # ── Inject session workspace into the prompt ─────────────────────
         # The AI must know its working directory without needing `pwd`.

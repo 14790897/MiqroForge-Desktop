@@ -50,6 +50,7 @@ import type {
   FilesOpenExternalResult,
   FilesOpenContainingFolderResult,
   FilesSaveAsResult,
+  ClipboardReadFilesResult,
   HtmlOpenInBrowserResult,
   DocumentsParseResult,
   TrackedFileInfo,
@@ -89,6 +90,21 @@ type FeedbackSubmitInputType = z.infer<typeof FeedbackSubmitInput>;
 // Typed API exposed to the renderer via contextBridge
 // ---------------------------------------------------------------------------
 
+/**
+ * #1071：在页面脚本执行前同步取一次同意版本（主进程 userData 文件为权威存储）。
+ * 区分「读取成功但无记录」（read: true, version: null）与「主进程不可用」
+ * （read: false）——前者是权威结论（未同意），渲染层不得用 localStorage 缓存
+ * 覆盖；后者才允许回退到缓存判定（CodeRabbit 评审）。
+ */
+function readInitialConsent(): { read: boolean; version: string | null } {
+  try {
+    const value = ipcRenderer.sendSync(IPC.PRIVACY_GET_CONSENT) as unknown;
+    return { read: true, version: typeof value === 'string' && value ? value : null };
+  } catch {
+    return { read: false, version: null };
+  }
+}
+
 const api = {
   // -- Environment ------------------------------------------------------------
   // E2E 标记：main 在 MIQI_E2E=1 时通过 additionalArguments 下发 --miqi-e2e，
@@ -105,6 +121,23 @@ const api = {
     quit: (): Promise<{ ok: boolean }> => ipcRenderer.invoke(IPC.APP_QUIT),
     focus: (opts?: { hard?: boolean }): Promise<{ ok: boolean }> =>
       ipcRenderer.invoke(IPC.APP_FOCUS, opts),
+    // 资产面板推开聊天区时加宽窗口(extra≈面板宽),聊天列 flex-1 分到新增宽度
+    // 而保持原宽; 关闭(extra=0)还原。主进程记录实际加宽量,最大化/满屏时跳过。
+    // minOnly=true:只上报面板当前是否占宽(用于抬高窗口最小宽度),不改窗口宽 ——
+    // 冷启动面板默认展开时用它,否则缩窗会把聊天列/输入框压扁。
+    setPanelWindowExtra: (
+      extra: number,
+      minOnly?: boolean
+    ): Promise<{ ok: boolean; applied: number; skipped?: boolean }> =>
+      ipcRenderer.invoke(IPC.APP_PANEL_EXTRA, extra, minOnly),
+  },
+  // -- 法律文件同意状态（#1071）------------------------------------------------
+  // initialConsent 在页面脚本执行前同步取一次（主进程 userData 文件为权威存储）——
+  // 渲染层因此保持同步判定，双开/存储退化时也不会重复弹确认门。
+  privacy: {
+    initialConsent: readInitialConsent(),
+    setConsent: (version: string | null): Promise<{ ok: boolean }> =>
+      ipcRenderer.invoke(IPC.PRIVACY_SET_CONSENT, version),
   },
   // -- Runtime ----------------------------------------------------------------
   runtime: {
@@ -460,6 +493,9 @@ const api = {
       ipcRenderer.invoke(IPC.FILES_ACCEPT, { path, session_key: sessionKey }),
     openExternal: (path: string): Promise<FilesOpenExternalResult> =>
       ipcRenderer.invoke(IPC.FILES_OPEN_EXTERNAL, { path }),
+    /** 预览「系统应用打开」：把字节写成系统临时文件后用默认应用打开（保留扩展名）。 */
+    openBytes: (name: string, dataBase64: string): Promise<FilesOpenExternalResult> =>
+      ipcRenderer.invoke(IPC.FILES_OPEN_BYTES, { name, base64: dataBase64 }),
     openContainingFolder: (path: string): Promise<FilesOpenContainingFolderResult> =>
       ipcRenderer.invoke(IPC.FILES_OPEN_CONTAINING_FOLDER, { path }),
     /** #877: native save dialog for the preview「下载/另存为」button. */
@@ -502,6 +538,9 @@ const api = {
   clipboard: {
     writeText: (text: string): Promise<{ ok: boolean }> =>
       ipcRenderer.invoke(IPC.CLIPBOARD_WRITE_TEXT, { text }),
+    /** Ctrl+V：主进程读系统剪贴板里的文件/图片（Windows 复制文件在 Chromium paste 事件里拿不到）。 */
+    readFiles: (): Promise<ClipboardReadFilesResult> =>
+      ipcRenderer.invoke(IPC.CLIPBOARD_READ_FILES),
   },
 
   // -- Document parsing ----------------------------------------------------

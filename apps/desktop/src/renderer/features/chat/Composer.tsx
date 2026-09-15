@@ -1,0 +1,396 @@
+import {
+  useState,
+  useRef,
+  useCallback,
+  useMemo,
+  memo,
+  forwardRef,
+  useImperativeHandle,
+  type KeyboardEvent,
+  type Ref,
+} from 'react';
+import { Textarea } from '../../components/ui/Textarea';
+import { ContextMenu, type ContextMenuAction } from '../../components/ContextMenu';
+import {
+  ExecutionPolicySelector,
+  type ExecutionPolicy,
+} from '../../components/ExecutionPolicySelector';
+import { ReasoningModeSwitch, type ReasoningMode } from './components/ReasoningModeSwitch';
+import {
+  Send,
+  Square,
+  Paperclip,
+  Scissors,
+  Copy,
+  ClipboardPaste,
+  CheckCircle,
+  X,
+} from 'lucide-react';
+
+/**
+ * Imperative handle so ChatConsole can drive the composer's text from
+ * programmatic paths (edit re-answer / retry prefill, send-failure draft
+ * restore, paper-download instruction, session-switch clear) without lifting
+ * `input` state back to the top — that lift is what made every keystroke
+ * re-render the whole chat tree (#1021).
+ */
+export interface ComposerHandle {
+  setText(text: string): void;
+  /**
+   * 读当前输入框内容。给「撤销起点任务时该不该顺手清空提示词」用（#962 评审 P2）——
+   * 只有还留着任务的原始提示词才清，用户改过就保留。直接读 DOM 而不是 state：
+   * 下面的 useImperativeHandle 依赖是空的（句柄要引用稳定），闭包里的 state 会过期。
+   */
+  getText(): string;
+  clear(): void;
+  focus(): void;
+}
+
+interface ComposerProps {
+  streaming: boolean;
+  /** `attachments.length > 0` — the composer only needs the boolean. */
+  hasAttachments: boolean;
+  adjustHint: boolean;
+  executionPolicy: ExecutionPolicy;
+  onExecutionPolicyChange: (policy: ExecutionPolicy) => void;
+  onOpenApprovals?: () => void;
+  reasoningMode: ReasoningMode;
+  onReasoningModeChange: (mode: ReasoningMode) => void;
+  complexHint: boolean;
+  onComplexHintDismiss: () => void;
+  onAttachClick: () => void;
+  onSubmit: (text: string) => void;
+  onAbort: () => void;
+  /**
+   * #962 起点任务：选中的 L2 子项目 / L3 任务，以可移除胶囊显示在输入框上方。
+   * 传的是数据而不是 JSX —— Composer 是 memo 的（#1042），传元素每次渲染都是新
+   * 引用会让 memo 失效；这几个对象的身份只在用户真的换了选择时才变。
+   */
+  starterScene?: { icon: string; title: string } | null;
+  starterTask?: { icon: string; title: string } | null;
+  onClearStarterScene?: () => void;
+  onClearStarterTask?: () => void;
+  /** 右键「粘贴」：先尝试把剪贴板里的文件/图片挂成附件（返回 true=已处理），否则走文本粘贴。 */
+  onPasteClipboard?: () => Promise<boolean>;
+  /** 附件预览等「框内顶部」内容的挂载点:ChatConsole 用 portal 把预览投到这里,
+   *  让附件预览显示在输入框内部(而不是框外上方)。 */
+  attachmentSlotRef?: (el: HTMLDivElement | null) => void;
+}
+
+function ComposerImpl(
+  {
+    streaming,
+    hasAttachments,
+    adjustHint,
+    executionPolicy,
+    onExecutionPolicyChange,
+    onOpenApprovals,
+    reasoningMode,
+    onReasoningModeChange,
+    complexHint,
+    onComplexHintDismiss,
+    onAttachClick,
+    onSubmit,
+    onAbort,
+    starterScene,
+    starterTask,
+    onClearStarterScene,
+    onClearStarterTask,
+    onPasteClipboard,
+    attachmentSlotRef,
+  }: ComposerProps,
+  ref: Ref<ComposerHandle>
+) {
+  const [input, setInput] = useState('');
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  useImperativeHandle(
+    ref,
+    () => ({
+      setText: (text: string) => setInput(text),
+      getText: () => textareaRef.current?.value ?? '',
+      clear: () => {
+        setInput('');
+        // Reset textarea height after sending (mirrors the pre-#1021 reset).
+        setTimeout(() => {
+          if (textareaRef.current) textareaRef.current.style.height = 'auto';
+        }, 0);
+      },
+      focus: () => textareaRef.current?.focus(),
+    }),
+    []
+  );
+
+  const handleKeyDown = useCallback(
+    (e: KeyboardEvent) => {
+      // IME 组字中（中文/日文）Enter 是「选字确认」，不能当发送。
+      // 本分支与 develop 各自独立修过这一处，语义相同，取 develop 的写法。
+      if (e.key === 'Enter' && !e.shiftKey) {
+        if (e.nativeEvent.isComposing) return;
+        e.preventDefault();
+        onSubmit(input);
+      }
+    },
+    [onSubmit, input]
+  );
+
+  const inputContextItems = useMemo<ContextMenuAction[]>(
+    () => [
+      {
+        label: '剪切',
+        icon: <Scissors size={14} />,
+        shortcut: 'Ctrl+X',
+        onSelect: () => {
+          const el = textareaRef.current;
+          if (!el) return;
+          const s = el.selectionStart,
+            e = el.selectionEnd;
+          if (s === e) return;
+          navigator.clipboard.writeText(el.value.slice(s, e)).catch(() => {});
+          el.setRangeText('', s, e, 'end');
+          // Let React's onChange pick up the new value — manual setInput can
+          // drift from the DOM (deleting then requires two passes).
+          el.dispatchEvent(new Event('input', { bubbles: true }));
+          el.focus();
+        },
+      },
+      {
+        label: '复制',
+        icon: <Copy size={14} />,
+        shortcut: 'Ctrl+C',
+        onSelect: () => {
+          const el = textareaRef.current;
+          if (!el) return;
+          const txt = el.value.slice(el.selectionStart, el.selectionEnd);
+          if (txt) navigator.clipboard.writeText(txt).catch(() => {});
+        },
+      },
+      {
+        label: '粘贴',
+        icon: <ClipboardPaste size={14} />,
+        shortcut: 'Ctrl+V',
+        onSelect: () => {
+          void (async () => {
+            // 剪贴板里是文件/图片 → 挂附件；否则按文本粘贴
+            if (onPasteClipboard && (await onPasteClipboard())) return;
+            const el = textareaRef.current;
+            if (!el) return;
+            try {
+              const text = await navigator.clipboard.readText();
+              if (!text) return;
+              // Insert at the caret like native Ctrl+V — replace the current
+              // selection range instead of always appending at the end.
+              const s = el.selectionStart ?? el.value.length;
+              const e = el.selectionEnd ?? s;
+              el.setRangeText(text, s, e, 'end');
+              // Let React's onChange pick up the new value (single source of
+              // truth for state vs DOM — avoids double-delete drift).
+              el.dispatchEvent(new Event('input', { bubbles: true }));
+              el.focus();
+            } catch {
+              /* clipboard unavailable */
+            }
+          })();
+        },
+      },
+      {
+        label: '全选',
+        icon: <CheckCircle size={14} />,
+        shortcut: 'Ctrl+A',
+        divider: true,
+        onSelect: () => textareaRef.current?.select(),
+      },
+    ],
+    []
+  );
+
+  return (
+    <div
+      className="flex flex-col rounded-3xl px-7 py-3.5 transition-all"
+      data-testid="chat-input-container"
+      style={{
+        background: 'color-mix(in srgb, var(--surface) 85%, transparent)',
+        backdropFilter: 'blur(16px)',
+        WebkitBackdropFilter: 'blur(16px)',
+        border: '1px solid color-mix(in srgb, var(--border) 60%, transparent)',
+        outline: 'none',
+        boxShadow: '0 -4px 20px rgba(0,0,0,0.06), 0 2px 8px rgba(0,0,0,0.04)',
+      }}
+    >
+      {/* 框内顶部插槽：附件预览由 ChatConsole portal 投到这里(显示在输入框内部) */}
+      <div ref={attachmentSlotRef} />
+      {/* issue #962 起点任务：选过的子项目 / 子子项目以可移除胶囊显示在输入框里
+          （形态对齐 WorkBuddy 的「文档处理 ×」）。#1021/#1042 之后输入框被抽成
+          Composer 组件，这段就跟着搬过来——数据由 ChatConsole 传，这里只负责画。
+          排在附件插槽之后，胶囊才紧挨着下方输入的文字。 */}
+      {(starterScene || starterTask) && (
+        <div className="flex flex-wrap items-center gap-1.5 pb-2">
+          {starterScene && (
+            <button
+              type="button"
+              onClick={onClearStarterScene}
+              title="移除这个子项目"
+              className="group flex items-center gap-1.5 rounded-full pl-2.5 pr-1.5 py-1 text-[11.5px] cursor-pointer transition-colors duration-150"
+              style={{
+                // 跟 L2/L3 的选中态用同一套灰（#962 反馈：对话框里的也要一致）
+                background: 'var(--starter-fill-active)',
+                border: '1px solid color-mix(in srgb, var(--text) 12%, transparent)',
+                color: 'var(--text)',
+              }}
+            >
+              <span className="text-[11px] leading-none">{starterScene.icon}</span>
+              {starterScene.title}
+              <X size={11} className="opacity-50 group-hover:opacity-100" />
+            </button>
+          )}
+          {starterTask && (
+            <button
+              type="button"
+              onClick={onClearStarterTask}
+              title="移除这个任务"
+              className="group flex items-center gap-1.5 rounded-full pl-2.5 pr-1.5 py-1 text-[11.5px] cursor-pointer transition-colors duration-150"
+              style={{
+                background: 'var(--starter-fill-active)',
+                border: '1px solid color-mix(in srgb, var(--text) 12%, transparent)',
+                color: 'var(--text)',
+              }}
+            >
+              <span className="text-[11px] leading-none">{starterTask.icon}</span>
+              {starterTask.title}
+              <X size={11} className="opacity-50 group-hover:opacity-100" />
+            </button>
+          )}
+        </div>
+      )}
+      {/* Textarea on top — grows up to 1/3 of viewport (DeepSeek style) */}
+      <ContextMenu items={inputContextItems} minWidth={160}>
+        {({ onContextMenu }) => (
+          <Textarea
+            ref={textareaRef}
+            value={input}
+            onChange={(e) => {
+              setInput(e.target.value);
+            }}
+            onKeyDown={handleKeyDown}
+            onContextMenu={onContextMenu}
+            placeholder={
+              adjustHint
+                ? '请输入调整要求（例如：市场改为海外、步骤精简到 3 步…）'
+                : '请输入消息或拖入文件...'
+            }
+            rows={1}
+            allowResize={true}
+            className="-mx-7 w-[calc(100%+3.5rem)] rounded-none border-0 bg-transparent px-7 py-0 leading-7! focus:ring-0 focus:border-0 min-h-[52px] max-h-[25vh] text-[15px]"
+            style={{ color: 'var(--text)', fieldSizing: 'content' }}
+          />
+        )}
+      </ContextMenu>
+      {/* Icon row at the bottom — no text, like DeepSeek */}
+      <div className="flex items-center gap-3 pt-1.5 mt-0.5 border-t border-[var(--border-subtle)]">
+        <ExecutionPolicySelector
+          policy={executionPolicy}
+          onChange={onExecutionPolicyChange}
+          onOpenApprovals={onOpenApprovals}
+        />
+        {/* 复杂问题角标（#680 跟进）：轻量气泡挂在模式按钮上，
+            3 秒自动消失，不占输入区。 */}
+        <div className="relative">
+          <ReasoningModeSwitch mode={reasoningMode} onChange={onReasoningModeChange} />
+          {complexHint && reasoningMode === 'fast' && (
+            <div
+              className="absolute left-full ml-2 top-1/2 -translate-y-1/2 z-50 flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] whitespace-nowrap"
+              style={{
+                background: '#2f2f3a',
+                border: '1px solid rgba(157,106,223,.45)',
+                color: '#c9a5ef',
+                boxShadow: '0 4px 14px rgba(0,0,0,.35)',
+              }}
+            >
+              {/* 指向按钮的小箭头（左侧） */}
+              <span
+                className="absolute -left-[5px] top-1/2 -translate-y-1/2 w-2 h-2"
+                style={{
+                  background: '#2f2f3a',
+                  borderLeft: '1px solid rgba(157,106,223,.45)',
+                  borderBottom: '1px solid rgba(157,106,223,.45)',
+                  transform: 'translateY(-50%) rotate(45deg)',
+                }}
+              />
+              <span>💡 建议</span>
+              <button
+                type="button"
+                onClick={() => {
+                  onReasoningModeChange('think');
+                  onComplexHintDismiss();
+                }}
+                className="font-semibold cursor-pointer"
+                style={{ color: '#d9b8f5' }}
+              >
+                🧠 深度研究
+              </button>
+              <button
+                type="button"
+                onClick={onComplexHintDismiss}
+                className="opacity-60 hover:opacity-100 cursor-pointer"
+                aria-label="关闭提示"
+              >
+                ✕
+              </button>
+            </div>
+          )}
+        </div>
+        {/* AI disclaimer — centered in the mode row, fades when typing */}
+        <div className="flex-1 flex items-center justify-center">
+          <span
+            className="text-size-2xs leading-relaxed tracking-wide text-[var(--text-faint)] italic select-none transition-opacity duration-300"
+            style={{ opacity: !input.trim() && !hasAttachments ? 1 : 0 }}
+          >
+            AI 也会犯错误，对于重要答案请谨慎验证
+          </span>
+        </div>
+        <button
+          onClick={onAttachClick}
+          className="shrink-0 p-1.5 rounded hover:bg-[var(--surface-muted)] transition-colors"
+          title="附件或图片"
+          aria-label="附件或图片"
+        >
+          <Paperclip size={15} style={{ color: 'var(--text-faint)' }} />
+        </button>
+        {streaming && !input.trim() && !hasAttachments ? (
+          <button
+            onClick={onAbort}
+            title="停止生成"
+            aria-label="停止生成"
+            className="shrink-0 w-8 h-8 rounded-full flex items-center justify-center transition-all duration-200 hover:bg-[var(--surface-muted)] active:scale-95"
+          >
+            <Square size={12} style={{ color: 'var(--text-muted)' }} fill="currentColor" />
+          </button>
+        ) : (
+          <button
+            onClick={() => onSubmit(input)}
+            disabled={!input.trim() && !hasAttachments}
+            title={streaming ? '中断当前生成并发送' : '发送'}
+            aria-label={streaming ? '中断当前生成并发送' : '发送'}
+            className="shrink-0 w-8 h-8 rounded-full flex items-center justify-center transition-all duration-200 hover:brightness-110 hover:-translate-y-px active:scale-95 disabled:opacity-30 disabled:hover:brightness-100 disabled:hover:translate-y-0 disabled:shadow-none"
+            style={{
+              background:
+                'linear-gradient(135deg, var(--accent), color-mix(in srgb, var(--accent) 65%, #000))',
+              boxShadow: '0 2px 10px color-mix(in srgb, var(--accent) 35%, transparent)',
+            }}
+          >
+            <Send size={14} style={{ color: '#fff' }} />
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Memoized (#1042): a parent re-render — streaming frames, session switch, or
+ * any unrelated ChatConsole state — no longer re-renders the composer, as long
+ * as ChatConsole passes stable props (its handlers are useCallback-wrapped and
+ * onSubmit is memoized there too). Keystrokes already only touch the composer's
+ * own state; this closes the other direction.
+ */
+export const Composer = memo(forwardRef<ComposerHandle, ComposerProps>(ComposerImpl));

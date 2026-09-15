@@ -97,7 +97,7 @@ import { PluginMarket } from '../plugins/PluginMarket';
 import WslStatusPage from '../wsl/WslStatusPage';
 import { FeedbackPage } from '../feedback/FeedbackPage';
 import { QraftPage } from './components/QraftPage';
-import { PrivacyPage } from './components/PrivacyPage';
+import { LegalDocumentsPage } from '../legal/LegalDocumentsPage';
 
 export type SettingsTab =
   | 'general'
@@ -118,7 +118,7 @@ export type SettingsTab =
   | 'wsl'
   | 'logs'
   | 'archived'
-  | 'privacy'
+  | 'legal'
   | 'docs'
   | 'feedback';
 
@@ -206,7 +206,7 @@ const SETTINGS_CATEGORIES: SettingsCategory[] = [
       {
         value: 'webtools',
         label: '网页工具',
-        description: 'Web 搜索与网页抓取',
+        description: 'Web 搜索与网页读取',
         keywords: ['web', 'search', '搜索', '网页'],
         icon: Globe,
       },
@@ -286,10 +286,10 @@ const SETTINGS_CATEGORIES: SettingsCategory[] = [
         icon: Archive,
       },
       {
-        value: 'privacy',
-        label: '隐私协议',
-        description: '隐私政策与数据使用',
-        keywords: ['privacy', '隐私', '协议', 'legal'],
+        value: 'legal',
+        label: '法律文件',
+        description: '用户协议与隐私政策',
+        keywords: ['privacy', 'legal', '隐私', '协议', '法律', '用户协议', '隐私协议'],
         icon: Scale,
       },
       {
@@ -2907,11 +2907,11 @@ export function SettingsPage({
         <Tabs.Content value="archived" className="flex-1 overflow-y-auto">
           <ArchivedTab />
         </Tabs.Content>
-        <Tabs.Content value="privacy" className="flex-1 overflow-y-auto">
+        <Tabs.Content value="legal" className="flex-1 min-h-0 flex flex-col">
           <ErrorBoundary
             fallback={(error, reset) => (
               <div className="p-6 text-sm" style={{ color: 'var(--danger)' }}>
-                ⚠️ 隐私协议加载失败: {error.message}
+                ⚠️ 法律文件加载失败: {error.message}
                 <button
                   onClick={reset}
                   className="ml-2 underline"
@@ -2922,7 +2922,7 @@ export function SettingsPage({
               </div>
             )}
           >
-            <PrivacyPage />
+            <LegalDocumentsPage />
           </ErrorBoundary>
         </Tabs.Content>
         <Tabs.Content value="docs" className="flex-1 min-h-0 flex flex-col">
