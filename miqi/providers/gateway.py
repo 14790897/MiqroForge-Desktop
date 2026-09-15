@@ -38,7 +38,7 @@ def gateway_origin() -> str | None:
     """网关 origin（末尾斜杠已归一化）；配置非法返回 None，调用方回退直连。
 
     显式配置的 QRAFT_GATEWAY_BASE 必须为 https:// 开头，否则拒绝接受
-    （CWE-319：明文通道不能承载密钥）。未配置时回退 test env 实测
+    （CWE-319：明文通道禁止承载密钥）。未配置时回退 test env 实测
     http IP（见模块注释），使测试环境仍可实测网关。
     """
     raw = os.environ.get("QRAFT_GATEWAY_BASE")
@@ -55,8 +55,16 @@ def gateway_origin() -> str | None:
 
 
 def gateway_token_file(config: Any) -> Path:
-    """Python 侧 token 文件路径(与 services._build_billing 同源)。"""
-    return Path(config.workspace_path) / ".qraft" / "token.json"
+    """Python 侧 token 文件路径（与 services._build_billing 同源）。
+
+    轻量测试配置或尚未完成配置加载的调用方可能没有 ``workspace_path``。
+    此时返回一个不存在的哨兵路径，让上层凭据读取按“无凭据”安全降级，
+    避免网关接线影响与其无关的 runtime/tool-registry 测试。
+    """
+    workspace = getattr(config, "workspace_path", None)
+    if not isinstance(workspace, (str, os.PathLike)) or not str(workspace):
+        return Path("__miqi_missing_workspace__") / ".qraft" / "token.json"
+    return Path(workspace) / ".qraft" / "token.json"
 
 
 def read_gateway_creds(token_file: Path) -> dict[str, Any] | None:

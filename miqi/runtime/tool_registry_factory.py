@@ -81,13 +81,10 @@ def apply_system_installs_toggle(
         try:
             sandbox_manager.allow_system_installs = enabled
         except Exception as exc:  # noqa: BLE001 - config 已持久化，重启自愈
-            # #875 review: this is an AUTHOR-recognized failure mode —
-            # surface it instead of swallowing it, or the user sees
-            # "允许并记住" accepted while the current runtime still denies
-            # installs (config=true / runtime=false).
             _log.warning(
                 "system install allow: runtime update failed (config "
-                "persisted, restart will apply): %s", exc,
+                "persisted, restart will apply): %s",
+                exc,
             )
             runtime_failed = True
     return persist_failed, runtime_failed
@@ -521,7 +518,8 @@ def create_runtime_tool_registry(
     )
 
     # 3. Web tools
-    from miqi.agent.tools.web import WebFetchTool, WebSearchTool
+    from miqi.agent.tools.gateway_web import GatewayWebSearchTool
+    from miqi.agent.tools.web import WebFetchTool
 
     if web_cfg is not None:
         search_cfg = getattr(web_cfg, "search", None)
@@ -540,8 +538,21 @@ def create_runtime_tool_registry(
         _defaults = getattr(getattr(config, "agents", None), "defaults", None)
         return getattr(_defaults, "model", "") if _defaults is not None else ""
 
+    from miqi.providers.gateway import (
+        GATEWAY_PREFIX,
+        gateway_origin,
+        gateway_token_file,
+        read_gateway_creds,
+    )
+
+    _gateway_origin = gateway_origin() or ""
+    _gateway_creds = read_gateway_creds(gateway_token_file(config))
+    _gateway_key = ""
+    if _gateway_creds is not None:
+        _gateway_key = str(_gateway_creds.get("encryptedApiKey") or "")
+
     registry.register(
-        WebSearchTool(
+        GatewayWebSearchTool(
             provider=getattr(search_cfg, "provider", "auto") if search_cfg is not None else "auto",
             api_key=getattr(search_cfg, "api_key", None) if search_cfg is not None else None,
             tavily_api_key=getattr(search_cfg, "tavily_api_key", None) if search_cfg is not None else None,
@@ -550,6 +561,9 @@ def create_runtime_tool_registry(
             deepseek_api_base=deepseek_api_base or "https://api.deepseek.com",
             model_provider=_current_model_name,
             max_results=getattr(search_cfg, "max_results", 5) if search_cfg is not None else 5,
+            gateway_api_key=_gateway_key,
+            gateway_origin=_gateway_origin,
+            gateway_prefix=GATEWAY_PREFIX,
         )
     )
     registry.register(
