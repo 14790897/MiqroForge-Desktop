@@ -556,6 +556,8 @@ def register_management_commands(
                 provider=provider,
                 session_id=session_id,
                 workspace=config.workspace_path,
+                # Cron runs unattended — nobody can answer a prompt (#1045).
+                has_approval_responder=False,
             )
             await runtime.start()
             try:
