@@ -8767,10 +8767,10 @@ const MessageBubble = memo(function MessageBubble({
                     : undefined
               }
               className={cn(
-                'block min-w-0 text-left font-mono text-[11px] leading-[1.6] break-all rounded-[8px] px-2.5 py-1.5',
-                (canExpandSearch || canExpand) && 'cursor-pointer select-none hover:opacity-85'
+                'block min-w-0 text-left text-[11px] leading-4 break-all transition-opacity',
+                (canExpandSearch || canExpand) && 'cursor-pointer select-none hover:opacity-80'
               )}
-              style={{ background: '#f5f5f5', border: '1px solid #e8e8e8', color: '#333' }}
+              style={{ color: 'var(--info)' }}
               aria-expanded={canExpandSearch ? searchOpen : canExpand ? expanded : undefined}
             >
               {toolLabel}
