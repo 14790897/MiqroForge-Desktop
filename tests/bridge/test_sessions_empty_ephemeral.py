@@ -642,3 +642,64 @@ async def test_create_session_registers_folder_binding_in_app_home(monkeypatch):
     finally:
         _cleanup(sm, [key])
         shutil.rmtree(ws, ignore_errors=True)
+
+
+async def test_create_session_rolls_back_when_binding_write_fails(monkeypatch):
+    """binding 落盘失败必须回滚，不得留下"进程内可用、重启即丢"的会话。
+
+    runtime 已启动、app-home 索引写不进去（I/O、权限、磁盘满、stub 冲突）时，
+    若把写失败吞掉并照样返回成功：进程内会话一切正常、E2E 也照绿，直到 runtime
+    停止或应用重启才暴露——folder 里的对话仍在磁盘，但指向它的 binding 从未落盘，
+    也没有活跃 runtime 可作 seed，入口彻底丢失（评审阻塞项）。此处钉住写失败的
+    三条可观测结果：抛 AppServerError、runtime 已回滚、registry 里不留残留。
+    """
+    import shutil
+
+    import miqi.bridge.server as bridge_module
+    import miqi.runtime.session as sess_mod
+    from miqi.runtime import app_server as app_server_mod
+    from miqi.runtime.app_server import AppServerError
+    from miqi.runtime.session_handlers import _get_session_manager
+
+    sm = _get_session_manager()
+    state = getattr(bridge_module, "_state", None)
+    if state is None:
+        pytest.skip("Bridge state not available")
+    config = state.load_config()
+    key = "eempty-binding-write-fail"
+    ws = Path(tempfile.mkdtemp(prefix="miqi-binding-fail-"))
+    registry = app_server_mod.ClientSessionRegistry()
+
+    stopped = []
+
+    class _FakeRuntime:
+        async def start(self) -> None:
+            pass
+
+        async def stop(self) -> None:
+            stopped.append(True)
+
+    monkeypatch.setattr(
+        sess_mod,
+        "RuntimeSession",
+        type("_FakeRuntimeSession", (), {"create": staticmethod(lambda **kw: _FakeRuntime())}),
+    )
+
+    def _failing_save(self, session):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(SessionManager, "save", _failing_save)
+    try:
+        with pytest.raises(AppServerError):
+            await registry.create_session(
+                client_id="A", session_key=key, config=config, provider=None, workspace=ws
+            )
+        assert stopped == [True], "binding 写失败必须回滚已启动的 runtime"
+        assert not registry.session_exists(f"A:{key}"), (
+            "binding 未落盘时不得把 session 留在 registry 里——那正是重启即丢的状态"
+        )
+        assert await registry.get_session("A", f"A:{key}") is None
+    finally:
+        monkeypatch.undo()
+        _cleanup(sm, [key])
+        shutil.rmtree(ws, ignore_errors=True)
