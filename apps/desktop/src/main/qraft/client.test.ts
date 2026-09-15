@@ -831,3 +831,189 @@ describe('QraftClient.deductPoints', () => {
     });
   });
 });
+
+describe('QraftClient.submitFeedback（issue #1054）', () => {
+  it('POST /oauth2/feedback 携带 type/content/contact，Authorization 走 Bearer', async () => {
+    const calls: Array<{ url: string; auth: string | null; body: string }> = [];
+    const fetch = createFetchMock(
+      [
+        {
+          method: 'POST',
+          url: /\/oauth2\/feedback$/,
+          response: mockResponse(200, JSON.stringify({ code: 200, message: 'ok' }), jsonHeaders()),
+        },
+      ],
+      (url, init) => {
+        const headers = (init as { headers?: Record<string, string> })?.headers ?? {};
+        calls.push({
+          url,
+          auth: headers['Authorization'] ?? null,
+          body: (init as { body?: string })?.body ?? '',
+        });
+      }
+    );
+    const client = new QraftClient(fetch, noopLog);
+    await client.submitFeedback(CONFIG, 'TOKEN', {
+      type: 'bug',
+      content: '提交时闪退',
+      contact: 'user@example.com',
+    });
+
+    expect(calls[0].url).toBe('https://test.forge.miqroera.com/api/oauth2/feedback');
+    expect(calls[0].auth).toBe('Bearer TOKEN');
+    const sent = JSON.parse(calls[0].body) as Record<string, unknown>;
+    expect(sent).toEqual({
+      content: '提交时闪退',
+      type: 'bug',
+      contact: 'user@example.com',
+    });
+  });
+
+  it('可选字段缺失时不写入请求体（type/contact/images）', async () => {
+    const bodies: string[] = [];
+    const fetch = createFetchMock(
+      [
+        {
+          method: 'POST',
+          url: /\/oauth2\/feedback$/,
+          response: mockResponse(200, JSON.stringify({ code: 200 }), jsonHeaders()),
+        },
+      ],
+      (_url, init) => bodies.push((init as { body?: string })?.body ?? '')
+    );
+    const client = new QraftClient(fetch, noopLog);
+    await client.submitFeedback(CONFIG, 'TOKEN', { content: '只有正文' });
+    expect(JSON.parse(bodies[0])).toEqual({ content: '只有正文' });
+  });
+
+  it('images 数组序列化为逗号分隔 URL 串', async () => {
+    const bodies: string[] = [];
+    const fetch = createFetchMock(
+      [
+        {
+          method: 'POST',
+          url: /\/oauth2\/feedback$/,
+          response: mockResponse(200, JSON.stringify({ code: 200 }), jsonHeaders()),
+        },
+      ],
+      (_url, init) => bodies.push((init as { body?: string })?.body ?? '')
+    );
+    const client = new QraftClient(fetch, noopLog);
+    await client.submitFeedback(CONFIG, 'TOKEN', {
+      content: '带图反馈',
+      images: ['https://cdn.example.com/a.png', 'https://cdn.example.com/b.png'],
+    });
+    expect(JSON.parse(bodies[0]).images).toBe(
+      'https://cdn.example.com/a.png,https://cdn.example.com/b.png'
+    );
+  });
+
+  it('业务码 400 参数校验失败 → FEEDBACK_FAILED 透出服务端 message', async () => {
+    const fetch = createFetchMock([
+      {
+        method: 'POST',
+        url: /\/oauth2\/feedback$/,
+        response: mockResponse(
+          200,
+          JSON.stringify({ code: 400, message: 'content 不能为空' }),
+          jsonHeaders()
+        ),
+      },
+    ]);
+    const client = new QraftClient(fetch, noopLog);
+    await expect(client.submitFeedback(CONFIG, 'TOKEN', { content: 'x' })).rejects.toMatchObject({
+      code: 'FEEDBACK_FAILED',
+      message: expect.stringContaining('content 不能为空') as unknown as string,
+    });
+  });
+
+  it('业务码 40101/40102 → SESSION_EXPIRED', async () => {
+    for (const code of [40101, 40102]) {
+      const fetch = createFetchMock([
+        {
+          method: 'POST',
+          url: /\/oauth2\/feedback$/,
+          response: mockResponse(
+            200,
+            JSON.stringify({ code, message: 'access_token 无效或已过期' }),
+            jsonHeaders()
+          ),
+        },
+      ]);
+      const client = new QraftClient(fetch, noopLog);
+      await expect(client.submitFeedback(CONFIG, 'TOKEN', { content: 'x' })).rejects.toMatchObject({
+        code: 'SESSION_EXPIRED',
+      });
+    }
+  });
+
+  it('HTTP 401 → SESSION_EXPIRED', async () => {
+    const fetch = createFetchMock([
+      { method: 'POST', url: /\/oauth2\/feedback$/, response: mockResponse(401, 'unauthorized') },
+    ]);
+    const client = new QraftClient(fetch, noopLog);
+    await expect(client.submitFeedback(CONFIG, 'TOKEN', { content: 'x' })).rejects.toMatchObject({
+      code: 'SESSION_EXPIRED',
+    });
+  });
+
+  it('非 JSON 响应 → FEEDBACK_FAILED', async () => {
+    const fetch = createFetchMock([
+      {
+        method: 'POST',
+        url: /\/oauth2\/feedback$/,
+        response: mockResponse(502, '<html>bad gw</html>'),
+      },
+    ]);
+    const client = new QraftClient(fetch, noopLog);
+    await expect(client.submitFeedback(CONFIG, 'TOKEN', { content: 'x' })).rejects.toMatchObject({
+      code: 'FEEDBACK_FAILED',
+    });
+  });
+});
+
+describe('QraftClient.submitFeedback 重试策略（非幂等，CodeRabbit #1063）', () => {
+  it('网络瞬时失败不重试（重试会产生重复反馈记录）', async () => {
+    let calls = 0;
+    const fetch: FetchLike = async () => {
+      calls += 1;
+      throw new TypeError('fetch failed');
+    };
+    // 默认重试 3 次；提交反馈必须一次失败即返回，否则平台可能收到重复记录。
+    const client = new QraftClient(fetch, noopLog, 5_000, 3);
+    await expect(client.submitFeedback(CONFIG, 'TOKEN', { content: 'x' })).rejects.toMatchObject({
+      code: 'NETWORK_UNREACHABLE',
+    });
+    expect(calls).toBe(1);
+  });
+
+  it('其他接口仍保留默认重试（回归保护）', async () => {
+    let calls = 0;
+    const fetch: FetchLike = async () => {
+      calls += 1;
+      throw new TypeError('fetch failed');
+    };
+    const client = new QraftClient(fetch, noopLog, 5_000, 3);
+    await expect(client.getPointsBalance(CONFIG, 'TOKEN')).rejects.toMatchObject({
+      code: 'NETWORK_UNREACHABLE',
+    });
+    expect(calls).toBe(4); // 1 次 + 3 次重试
+  });
+});
+
+describe('QraftClient.submitFeedback 非 2xx 兜底（CodeRabbit #1063）', () => {
+  it('HTTP 502 的 JSON 错误页不再被当成成功（缺 code 默认 200 的坑）', async () => {
+    const fetch = createFetchMock([
+      {
+        method: 'POST',
+        url: /\/oauth2\/feedback$/,
+        response: mockResponse(502, JSON.stringify({ message: 'bad gateway' }), jsonHeaders()),
+      },
+    ]);
+    const client = new QraftClient(fetch, noopLog);
+    await expect(client.submitFeedback(CONFIG, 'TOKEN', { content: 'x' })).rejects.toMatchObject({
+      code: 'FEEDBACK_FAILED',
+      message: expect.stringContaining('502') as unknown as string,
+    });
+  });
+});

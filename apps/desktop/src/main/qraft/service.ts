@@ -43,7 +43,7 @@ import {
   type QraftStoredState,
   type QraftTokens,
 } from './types';
-import type { QraftBillingHistoryEntry } from '../../shared/ipc';
+import type { FeedbackPlatformOutcome, QraftBillingHistoryEntry } from '../../shared/ipc';
 
 /** 到期前提前刷新的提前量（15 分钟）。 */
 const REFRESH_ADVANCE_MS = 15 * 60_000;
@@ -552,6 +552,80 @@ export class QraftService {
       this.options.log(
         'WARN',
         `qraft: 查询积分余额失败（${err instanceof QraftError ? err.code : err}）`
+      );
+      if (err instanceof QraftError) return { ok: false, code: err.code, message: err.message };
+      return {
+        ok: false,
+        code: 'INTERNAL',
+        message: err instanceof Error ? err.message : String(err),
+      };
+    }
+  }
+
+  /**
+   * 以当前登录用户身份向平台提交反馈（issue #1054）。
+   * 未登录返回 INVALID_CONFIG（调用方据此跳过平台通道）；access_token 失效
+   * 先刷新重试一次，刷新失败按 refreshNow 的语义置 requiresRelogin 并推状态，
+   * 由登录失效三件套（横幅 / 顶栏 chip / 发送拦截）引导重新登录。
+   */
+  async submitPlatformFeedback(req: {
+    type?: string;
+    content: string;
+    contact?: string;
+  }): Promise<FeedbackPlatformOutcome> {
+    const state = this.options.store.current;
+    if (!state) return { ok: false, code: 'INVALID_CONFIG', message: '尚未登录' };
+    const config: ResolvedQraftConfig = {
+      baseUrl: state.baseUrl,
+      clientId: state.clientId,
+      clientSecret: state.clientSecret,
+      redirectUri: state.redirectUri,
+    };
+    const generation = this.authGeneration;
+    const accountSub = state.account.sub;
+    try {
+      await this.options.client.submitFeedback(config, state.tokens.accessToken, req);
+      return { ok: true };
+    } catch (err) {
+      if (err instanceof QraftError && err.code === 'SESSION_EXPIRED') {
+        // 主进程自动刷新可能刚好错过窗口：先刷新再重试一次。
+        const refreshed = await this.refreshNow();
+        if (!refreshed.ok) return { ok: false, code: refreshed.code, message: refreshed.message };
+        const fresh = this.options.store.current;
+        // 刷新期间可能退出登录/换账号：绝不拿新账号的凭据顶替原账号提交。
+        if (!fresh || this.authGeneration !== generation || fresh.account.sub !== accountSub) {
+          return {
+            ok: false,
+            code: 'SESSION_EXPIRED',
+            message: '登录状态已变化，反馈未提交到平台',
+          };
+        }
+        try {
+          await this.options.client.submitFeedback(
+            {
+              baseUrl: fresh.baseUrl,
+              clientId: fresh.clientId,
+              clientSecret: fresh.clientSecret,
+              redirectUri: fresh.redirectUri,
+            },
+            fresh.tokens.accessToken,
+            req
+          );
+          return { ok: true };
+        } catch (retryErr) {
+          if (retryErr instanceof QraftError) {
+            return { ok: false, code: retryErr.code, message: retryErr.message };
+          }
+          return {
+            ok: false,
+            code: 'INTERNAL',
+            message: retryErr instanceof Error ? retryErr.message : String(retryErr),
+          };
+        }
+      }
+      this.options.log(
+        'WARN',
+        `qraft: 反馈平台提交失败（${err instanceof QraftError ? err.code : err}）`
       );
       if (err instanceof QraftError) return { ok: false, code: err.code, message: err.message };
       return {
