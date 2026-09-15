@@ -116,6 +116,33 @@ interface Attachment {
   parseError?: string;
 }
 
+/** 轻量内容指纹：长度 + 头/尾采样（各 ≤200KB）的 FNV-1a——足够区分不同文件且开销小。 */
+function contentFingerprint(payload: string): string {
+  const head = payload.slice(0, 200_000);
+  const tail = payload.length > 200_000 ? payload.slice(-200_000) : '';
+  let h = 0x811c9dc5;
+  const mix = (s: string) => {
+    for (let i = 0; i < s.length; i++) {
+      h ^= s.charCodeAt(i);
+      h = Math.imul(h, 0x01000193);
+    }
+  };
+  mix(head);
+  mix(tail);
+  return `${payload.length}-${(h >>> 0).toString(16)}`;
+}
+
+/** 浏览器 File → 内容指纹（把字节转 base64 后计算，与主进程剪贴板通道的指纹口径一致）。 */
+async function fileFingerprint(file: File): Promise<string> {
+  const buf = new Uint8Array(await file.arrayBuffer());
+  let bin = '';
+  const step = 8192;
+  for (let i = 0; i < buf.length; i += step) {
+    bin += String.fromCharCode(...buf.subarray(i, i + step));
+  }
+  return contentFingerprint(btoa(bin));
+}
+
 const DOCUMENT_SUFFIXES_RE =
   /\.(docx|doc|pptx|ppt|xlsx|xls|pdf|odt|odp|ods|md|markdown|mdown|html|htm|csv|json|xml|yaml|yml|env|log|sql|ini|toml|htaccess|sh|bash|txt|text|rtf)$/i;
 
@@ -2644,20 +2671,14 @@ export function ChatConsole({
     token: null,
     timer: null,
   });
-  const recentContentRef = useRef<{ size: number; mime: string; name: string; ts: number }[]>([]);
-  /** 跨通道去重：同 size+mime，且（同名 或 有一方是合成名 pasted-image-*）才算同一份。
-   *  两个不同图片（a.png / b.png）即使同大小同类型也不会被误删。 */
-  const seenContentRecently = (size: number, mime: string, name: string) => {
+  const recentFpRef = useRef<{ fp: string; ts: number }[]>([]);
+  /** 跨通道去重改用**内容指纹**（长度 + 头/尾采样的 FNV-1a），不再用 size+mime 近似：
+   *  两张同尺寸不同内容的截图不会被误判为同一份。 */
+  const seenFingerprintRecently = (fp: string) => {
     const now = Date.now();
-    const arr = recentContentRef.current.filter((e) => now - e.ts < 1500);
-    const isSynthetic = (n: string) => n.startsWith('pasted-image-');
-    const dup = arr.some(
-      (e) =>
-        e.size === size &&
-        e.mime === mime &&
-        (e.name === name || isSynthetic(e.name) || isSynthetic(name))
-    );
-    recentContentRef.current = [...arr, { size, mime, name, ts: now }].slice(-12);
+    const arr = recentFpRef.current.filter((e) => now - e.ts < 1500);
+    const dup = arr.some((e) => e.fp === fp);
+    recentFpRef.current = [...arr, { fp, ts: now }].slice(-12);
     return dup;
   };
 
@@ -4171,160 +4192,146 @@ export function ChatConsole({
   const handleAttachClick = useCallback(() => fileInputRef.current?.click(), []);
 
   // 统一把 File 转成 Attachment：input change / 剪贴板 / 拖拽共用。
-  const attachFromFile = useCallback(
-    (file: File, actionId: string, dedupeContent = false): boolean => {
-      if (file.size > MAX_ONE_ATTACHMENT_BYTES) return false;
-      // 内容级去重仅用于「剪贴板/粘贴」双通道；用户显式选择/拖拽同一文件应允许重复添加
-      if (
-        dedupeContent &&
-        seenContentRecently(
-          file.size,
-          file.type || (file.name.split('.').pop() || '').toLowerCase(),
-          file.name
-        )
-      ) {
-        return false;
-      }
-      if (!acceptInAttachAction(actionId, `${file.name}:${file.size}`)) return false;
-      {
-        const isImage = file.type.startsWith('image/');
-        const isDocument = DOCUMENT_SUFFIXES_RE.test(file.name);
-        const isTextLike = TEXT_SUFFIXES_RE.test(file.name) || file.type.startsWith('text/');
+  const attachFromFile = useCallback((file: File, actionId: string): boolean => {
+    if (file.size > MAX_ONE_ATTACHMENT_BYTES) return false;
+    if (!acceptInAttachAction(actionId, `${file.name}:${file.size}`)) return false;
+    {
+      const isImage = file.type.startsWith('image/');
+      const isDocument = DOCUMENT_SUFFIXES_RE.test(file.name);
+      const isTextLike = TEXT_SUFFIXES_RE.test(file.name) || file.type.startsWith('text/');
 
-        if (isTextLike && !isDocument) {
-          // Plain text files — read directly as text
-          const reader = new FileReader();
-          // 读取失败：释放已预留的字节，避免预留位泄漏把后续附件挡住
-          reader.onerror = () => releaseReservation(file.size);
-          reader.onload = () =>
-            commitAttachment(
-              (prev) => [
-                ...prev,
-                {
-                  name: file.name,
-                  type: 'text',
-                  content: reader.result as string,
-                  size: file.size,
-                },
-              ],
-              file.size
-            );
-          reader.readAsText(file);
-        } else if (isTextLike && isDocument) {
-          // Markdown/text files detected as documents — read as text AND as base64 for server fallback
-          const reader = new FileReader();
-          // 读取失败：释放已预留的字节，避免预留位泄漏把后续附件挡住
-          reader.onerror = () => releaseReservation(file.size);
-          reader.onload = () => {
-            const base64 = (reader.result as string).split(',')[1];
-            const textContent = new TextDecoder().decode(
-              Uint8Array.from(atob(base64), (c) => c.charCodeAt(0))
-            );
-            commitAttachment(
-              (prev) => [
-                ...prev,
-                {
-                  name: file.name,
-                  type: 'document',
-                  dataBase64: base64,
-                  content: textContent,
-                  dataUrl: reader.result as string,
-                  size: file.size,
-                  mimeType: file.type || getMimeTypeFromName(file.name),
-                  status: 'pending' as const,
-                },
-              ],
-              file.size
-            );
-          };
-          reader.readAsDataURL(file);
-        } else if (isDocument) {
-          const reader = new FileReader();
-          // 读取失败：释放已预留的字节，避免预留位泄漏把后续附件挡住
-          reader.onerror = () => releaseReservation(file.size);
-          reader.onload = () => {
-            const base64 = (reader.result as string).split(',')[1];
-            const ext = file.name.split('.').pop()?.toLowerCase() ?? '';
-            // PDF/MD/text parse instantly client-side → done; Office/RTF needs server → pending
-            const isServerParsed = /^(docx|doc|pptx|ppt|xlsx|xls|odt|odp|ods|rtf)$/i.test(ext);
-            const parseStatus: Attachment['status'] = isServerParsed ? 'pending' : 'done';
+      if (isTextLike && !isDocument) {
+        // Plain text files — read directly as text
+        const reader = new FileReader();
+        // 读取失败：释放已预留的字节，避免预留位泄漏把后续附件挡住
+        reader.onerror = () => releaseReservation(file.size);
+        reader.onload = () =>
+          commitAttachment(
+            (prev) => [
+              ...prev,
+              {
+                name: file.name,
+                type: 'text',
+                content: reader.result as string,
+                size: file.size,
+              },
+            ],
+            file.size
+          );
+        reader.readAsText(file);
+      } else if (isTextLike && isDocument) {
+        // Markdown/text files detected as documents — read as text AND as base64 for server fallback
+        const reader = new FileReader();
+        // 读取失败：释放已预留的字节，避免预留位泄漏把后续附件挡住
+        reader.onerror = () => releaseReservation(file.size);
+        reader.onload = () => {
+          const base64 = (reader.result as string).split(',')[1];
+          const textContent = new TextDecoder().decode(
+            Uint8Array.from(atob(base64), (c) => c.charCodeAt(0))
+          );
+          commitAttachment(
+            (prev) => [
+              ...prev,
+              {
+                name: file.name,
+                type: 'document',
+                dataBase64: base64,
+                content: textContent,
+                dataUrl: reader.result as string,
+                size: file.size,
+                mimeType: file.type || getMimeTypeFromName(file.name),
+                status: 'pending' as const,
+              },
+            ],
+            file.size
+          );
+        };
+        reader.readAsDataURL(file);
+      } else if (isDocument) {
+        const reader = new FileReader();
+        // 读取失败：释放已预留的字节，避免预留位泄漏把后续附件挡住
+        reader.onerror = () => releaseReservation(file.size);
+        reader.onload = () => {
+          const base64 = (reader.result as string).split(',')[1];
+          const ext = file.name.split('.').pop()?.toLowerCase() ?? '';
+          // PDF/MD/text parse instantly client-side → done; Office/RTF needs server → pending
+          const isServerParsed = /^(docx|doc|pptx|ppt|xlsx|xls|odt|odp|ods|rtf)$/i.test(ext);
+          const parseStatus: Attachment['status'] = isServerParsed ? 'pending' : 'done';
 
-            commitAttachment(
-              (prev) => [
-                ...prev,
-                {
-                  name: file.name,
-                  type: 'document',
-                  dataUrl: reader.result as string,
-                  dataBase64: base64,
-                  size: file.size,
-                  mimeType: file.type || getMimeTypeFromName(file.name),
-                  status: parseStatus,
-                },
-              ],
-              file.size
-            );
-          };
-          reader.readAsDataURL(file);
-        } else if (isImage) {
-          const reader = new FileReader();
-          // 读取失败：释放已预留的字节，避免预留位泄漏把后续附件挡住
-          reader.onerror = () => releaseReservation(file.size);
-          reader.onload = () =>
-            commitAttachment(
-              (prev) => [
-                ...prev,
-                {
-                  name: file.name,
-                  type: 'image',
-                  dataUrl: reader.result as string,
-                  size: file.size,
-                },
-              ],
-              file.size
-            );
-          reader.readAsDataURL(file);
-        } else {
-          // 未知类型：保留字节按文档收下（避免“粘贴/拖入后毫无反应”）
-          const reader = new FileReader();
-          // 读取失败：释放已预留的字节，避免预留位泄漏把后续附件挡住
-          reader.onerror = () => releaseReservation(file.size);
-          reader.onload = () => {
-            const base64 = (reader.result as string).split(',')[1];
-            const name = file.name || `pasted-file-${Date.now()}`;
-            commitAttachment(
-              (prev) => [
-                ...prev,
-                {
-                  name,
-                  type: 'document',
-                  dataBase64: base64,
-                  dataUrl: reader.result as string,
-                  size: file.size,
-                  mimeType: file.type || getMimeTypeFromName(name),
-                  status: 'done' as const,
-                },
-              ],
-              file.size
-            );
-          };
-          reader.readAsDataURL(file);
-        }
+          commitAttachment(
+            (prev) => [
+              ...prev,
+              {
+                name: file.name,
+                type: 'document',
+                dataUrl: reader.result as string,
+                dataBase64: base64,
+                size: file.size,
+                mimeType: file.type || getMimeTypeFromName(file.name),
+                status: parseStatus,
+              },
+            ],
+            file.size
+          );
+        };
+        reader.readAsDataURL(file);
+      } else if (isImage) {
+        const reader = new FileReader();
+        // 读取失败：释放已预留的字节，避免预留位泄漏把后续附件挡住
+        reader.onerror = () => releaseReservation(file.size);
+        reader.onload = () =>
+          commitAttachment(
+            (prev) => [
+              ...prev,
+              {
+                name: file.name,
+                type: 'image',
+                dataUrl: reader.result as string,
+                size: file.size,
+              },
+            ],
+            file.size
+          );
+        reader.readAsDataURL(file);
+      } else {
+        // 未知类型：保留字节按文档收下（避免“粘贴/拖入后毫无反应”）
+        const reader = new FileReader();
+        // 读取失败：释放已预留的字节，避免预留位泄漏把后续附件挡住
+        reader.onerror = () => releaseReservation(file.size);
+        reader.onload = () => {
+          const base64 = (reader.result as string).split(',')[1];
+          const name = file.name || `pasted-file-${Date.now()}`;
+          commitAttachment(
+            (prev) => [
+              ...prev,
+              {
+                name,
+                type: 'document',
+                dataBase64: base64,
+                dataUrl: reader.result as string,
+                size: file.size,
+                mimeType: file.type || getMimeTypeFromName(name),
+                status: 'done' as const,
+              },
+            ],
+            file.size
+          );
+        };
+        reader.readAsDataURL(file);
       }
-      return true;
-    },
-    []
-  );
+    }
+    return true;
+  }, []);
 
   /** 批内同步累计总量：一次多选/多文件粘贴时 React state 尚未提交，必须用本地 running 值
    *  判断，否则同一批里每个文件都看到旧的 attachmentsRef 而逐个放行（review 09:49 P1）。 */
-  const attachBatch = (files: File[], actionId: string, dedupeContent = false): number => {
+  const attachBatch = (files: File[], actionId: string): number => {
     let accepted = 0;
     for (const f of files) {
       if (f.size > MAX_ONE_ATTACHMENT_BYTES) continue;
       if (!tryReserve(f.size)) break;
-      if (attachFromFile(f, actionId, dedupeContent)) accepted += 1;
-      else releaseReservation(f.size); // 去重/Token 去重被拒：释放预留
+      if (attachFromFile(f, actionId)) accepted += 1;
+      else releaseReservation(f.size); // Token 去重被拒：释放预留
     }
     return accepted;
   };
@@ -4357,9 +4364,25 @@ export function ChatConsole({
       const actionId = pending.token ?? newAttachAction();
       if (pending.timer !== null) window.clearTimeout(pending.timer);
       pendingPasteRef.current = { token: null, timer: null };
-      const accepted = attachBatch(files, actionId, true);
-      // 仅当确实挂上附件时才阻止默认（避免把文件路径文本也插进输入框）
-      if (accepted > 0) e.preventDefault();
+      // 剪贴板里确实有文件：交给下面的内容指纹流程处理，并阻止默认粘贴
+      e.preventDefault();
+      void (async () => {
+        for (const f of files) {
+          if (f.size > MAX_ONE_ATTACHMENT_BYTES) continue;
+          if (!tryReserve(f.size)) break;
+          let fp: string;
+          try {
+            fp = await fileFingerprint(f);
+          } catch {
+            fp = `${f.size}:${f.name}`; // 读字节失败时退回元信息指纹
+          }
+          if (seenFingerprintRecently(fp)) {
+            releaseReservation(f.size);
+            continue;
+          }
+          if (!attachFromFile(f, actionId)) releaseReservation(f.size);
+        }
+      })();
     };
     window.addEventListener('paste', onPaste);
     return () => window.removeEventListener('paste', onPaste);
@@ -4370,7 +4393,7 @@ export function ChatConsole({
   const attachBase64 = useCallback(
     (name: string, base64: string, mime: string, size: number, actionId: string): boolean => {
       if (size > MAX_ONE_ATTACHMENT_BYTES) return false;
-      if (seenContentRecently(size, mime, name)) return false;
+      if (seenFingerprintRecently(contentFingerprint(base64))) return false;
       if (!acceptInAttachAction(actionId, `${name}:${size}`)) return false;
       if (mime.startsWith('image/')) {
         commitAttachment(

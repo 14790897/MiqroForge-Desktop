@@ -602,6 +602,23 @@ test.describe('File Attachment Chips', () => {
     await expect(composerChips(page).getByText('leak_c.bin')).toHaveCount(1, { timeout: 10_000 });
   });
 
+  test('Same-size different images are both kept (content fingerprint)', async () => {
+    await page.evaluate(() => {
+      const fire = (byte: number, name: string) => {
+        const dt = new DataTransfer();
+        dt.items.add(new File([new Uint8Array(4096).fill(byte)], name, { type: 'image/png' }));
+        window.dispatchEvent(
+          new ClipboardEvent('paste', { clipboardData: dt, bubbles: true } as ClipboardEventInit)
+        );
+      };
+      // 同尺寸、同 mime、内容不同 → 内容指纹应判为两份
+      fire(1, 'shot_a.png');
+      fire(2, 'shot_b.png');
+    });
+    await expect(composerChips(page).getByText('shot_a.png')).toHaveCount(1, { timeout: 10_000 });
+    await expect(composerChips(page).getByText('shot_b.png')).toHaveCount(1, { timeout: 10_000 });
+  });
+
   test('Send button disabled while extracting', async () => {
     await attachFile(page, FILES.largePdf);
     const sendBtn = page
