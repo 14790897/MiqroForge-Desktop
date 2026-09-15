@@ -59,6 +59,10 @@ export function PlanCard({
   // #646-v2 UI 定稿：执行中可收起步骤块（大卡里的子项行折起来），状态行仍报进度。
   const [collapsed, setCollapsed] = useState(false);
 
+  // 进度数字只在后端真的给了步骤状态时才显示：`stepStatus` 目前无人填充
+  // （全仓 py 零命中，后端只发 steps[].tools），无条件显示会永远停在
+  // 「执行中 0/N」——比不显示更误导。填充后数字会自动出现。
+  const hasStepProgress = Object.keys(entry.stepStatus ?? {}).length > 0;
   const doneCount = entry.steps.filter((s) => entry.stepStatus?.[s.name] === 'done').length;
   const statusLabel = done
     ? '已完成'
@@ -67,7 +71,9 @@ export function PlanCard({
       : modified
         ? '已调整'
         : running
-          ? `执行中 ${doneCount}/${entry.steps.length}`
+          ? hasStepProgress
+            ? `执行中 ${doneCount}/${entry.steps.length}`
+            : '执行中'
           : '等待你的决定';
 
   const permissions = compactPermissions(entry.permissions);
