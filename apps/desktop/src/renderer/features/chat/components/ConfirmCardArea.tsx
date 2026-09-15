@@ -78,7 +78,11 @@ export function ConfirmCardItem({
                 id,
                 choiceId,
                 choiceId === 'confirm' ? '确认' : choiceId === 'modify' ? '修改计划' : '取消',
-                rememberMode !== null,
+                // CR review（#1071）：`rememberMode !== null` 会把 deny（ActionCard
+                // 不传第二参 → undefined）误判成「记住本次选择」——被拒绝的危险动作
+                // 会被持久化为会话级回答，后续同类动作不再询问、直接自动拒绝。
+                // 判据对齐下方 ConfirmCard 路径：只有显式选择 session/always 才记。
+                rememberMode === 'session' || rememberMode === 'always',
                 rememberMode ?? 'session'
               )
             }
