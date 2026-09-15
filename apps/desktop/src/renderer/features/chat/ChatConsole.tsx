@@ -2924,6 +2924,12 @@ export function ChatConsole({
   const [downloadToast, setDownloadToast] = useState<{ filename: string; savePath: string } | null>(
     null
   );
+  /** #1062：结果/过程文件的「定位」「预览」失败时给出可见提示（此前静默无反应）。 */
+  const [assetError, setAssetError] = useState<string | null>(null);
+  const notifyAssetError = useCallback((msg: string) => {
+    setAssetError(msg);
+    window.setTimeout(() => setAssetError(null), 4000);
+  }, []);
   const [toastVisible, setToastVisible] = useState(false);
 
   // Lazily re-read image attachments after session load: the sender embeds
@@ -6757,9 +6763,20 @@ export function ChatConsole({
       }
     }
     // Open with system default application as fallback
-    const result = await window.miqi.files.openExternal(path);
+    let result: { opened?: boolean; error?: string } | null = null;
+    try {
+      result = (await window.miqi.files.openExternal(path)) ?? null;
+    } catch (e: any) {
+      result = { opened: false, error: e?.message ?? String(e) };
+    }
     if (!result?.opened) {
-      setPreviewFile({ path, content: `(Could not open file: ${path})` });
+      const outside = /outside workspace/i.test(String(result?.error ?? ''));
+      setPreviewFile({
+        path,
+        content: outside
+          ? `(无法预览：该文件在会话工作区之外，应用无权读取)\n\n${path}`
+          : `(Could not open file: ${path})`,
+      });
     }
   }, []);
 
@@ -8433,9 +8450,25 @@ export function ChatConsole({
                         isResult
                         onPreview={() => handlePreview(f.path)}
                         onDiff={() => handleShowDiff(f.path)}
-                        onReveal={() =>
-                          window.miqi.files.openContainingFolder(normalizePath(f.path))
-                        }
+                        onReveal={async () => {
+                          // #1062：过去对工作区外文件这里会 reject 被丢弃 → 点了没反应；
+                          // 现在统一收结构化结果，失败时给出可见提示。
+                          try {
+                            const res = await window.miqi.files.openContainingFolder(
+                              normalizePath(f.path)
+                            );
+                            if (!res?.revealed) {
+                              const outside = /outside workspace/i.test(String(res?.error ?? ''));
+                              notifyAssetError(
+                                outside
+                                  ? '无法定位：该文件在会话工作区之外'
+                                  : `定位失败：${res?.error ?? '未知原因'}`
+                              );
+                            }
+                          } catch (e: any) {
+                            notifyAssetError(`定位失败：${e?.message ?? String(e)}`);
+                          }
+                        }}
                       />
                     ))}
                   </AssetSection>
@@ -8956,6 +8989,33 @@ export function ChatConsole({
             }
           }}
         />
+      )}
+      {/* #1062：结果/过程文件「定位 / 预览」失败提示（此前静默无反应） */}
+      {assetError && (
+        <div
+          className="fixed inset-0 z-[100] flex items-end justify-center pb-24 pointer-events-none"
+          style={{ animation: 'msgIn .25s cubic-bezier(.22,.8,.32,1)' }}
+          data-testid="asset-error-toast"
+        >
+          <div
+            className="flex items-center gap-3 rounded-xl px-5 py-3 shadow-lg pointer-events-auto"
+            style={{
+              background: 'var(--surface)',
+              border: '1px solid var(--danger)',
+              boxShadow: '0 12px 40px rgba(0,0,0,.15)',
+            }}
+          >
+            <span
+              className="w-6 h-6 rounded-full flex items-center justify-center text-sm shrink-0"
+              style={{ background: 'var(--danger-bg)', color: 'var(--danger)' }}
+            >
+              !
+            </span>
+            <div className="text-[13px] max-w-[420px]" style={{ color: 'var(--text)' }}>
+              {assetError}
+            </div>
+          </div>
+        </div>
       )}
       {/* #696 补：下载完成 toast（屏幕居中 + 淡入淡出 + 2s 停留） */}
       {downloadToast && (

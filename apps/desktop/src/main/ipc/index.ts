@@ -1976,7 +1976,14 @@ for m in ("pydantic", "httpx", "loguru"):
   ipcMain.handle(IPC.FILES_OPEN_EXTERNAL, async (_event, payload: unknown) => {
     const p = payload as { path: string };
     const raw = p.path;
-    const absolutePath = resolveWorkspacePath(raw);
+    // #1062: 解析必须在 try 内——工作区外路径会 throw，否则异常直接变成 IPC
+    // rejection，渲染层拿不到 {opened:false,error} 而静默失败。
+    let absolutePath: string;
+    try {
+      absolutePath = resolveWorkspacePath(raw);
+    } catch (e: any) {
+      return { opened: false, path: raw, error: e?.message ?? String(e) };
+    }
 
     // On Windows the file may live inside a WSL sandbox.
     const candidates: string[] = [absolutePath];
@@ -2254,8 +2261,9 @@ for m in ("pydantic", "httpx", "loguru"):
     // check always applies.  A previous fast path here (isAbsolute(clean) &&
     // existsSync(clean) → showItemInFolder) skipped that check entirely, letting
     // the renderer reveal any host directory (security regression #955).
-    const absolutePath = resolveWorkspacePath(clean);
+    // #1062: 解析放进 try —— 工作区外路径 throw 会变成 IPC rejection（渲染层静默无反应）。
     try {
+      const absolutePath = resolveWorkspacePath(clean);
       if (!existsSync(absolutePath)) {
         return { revealed: false, path: raw, error: `File not found: ${absolutePath}` };
       }
