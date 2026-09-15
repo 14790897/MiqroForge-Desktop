@@ -7,6 +7,7 @@ import { BridgeManager } from './bridge';
 import { writeMainProcessLog } from './electron-log';
 import { createSplash, closeSplash } from './splash';
 import { safeWrite, guardStdStreams } from './console-guard';
+import { sendToWindow } from './frame-send';
 import { WINDOW_MIN_WIDTH } from '../shared/layout';
 
 const originalConsoleLog = console.log.bind(console);
@@ -178,16 +179,15 @@ export function main(): void {
     bridgeManager = new BridgeManager();
     registerIpcHandlers(bridgeManager);
 
-    // Forward bridge events to renderer
+    // Forward bridge events to renderer. These fire for the whole lifetime of
+    // the window, including after the renderer is gone (#1019: the bridge
+    // restart during a crashed renderer re-triggered this path), so the frame
+    // check inside sendToWindow is what keeps them off a dead frame.
     const onState = (status: unknown) => {
-      if (mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.webContents.send('runtime:state', status);
-      }
+      sendToWindow(mainWindow, 'runtime:state', status);
     };
     const onLog = (msg: string) => {
-      if (mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.webContents.send('runtime:log', msg);
-      }
+      sendToWindow(mainWindow, 'runtime:log', msg);
     };
     bridgeManager.on('state', onState);
     bridgeManager.on('log', onLog);
