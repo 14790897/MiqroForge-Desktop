@@ -1,3 +1,159 @@
+## [0.29.2](https://github.com/14790897/MiqroForge-Desktop/compare/v0.29.1...v0.29.2) (2026-09-15)
+
+
+### Bug Fixes
+
+* **skills:** 修正第三方 import packaging 的 isort 分组（stdlib 与第三方分隔） ([21985c5](https://github.com/14790897/MiqroForge-Desktop/commit/21985c5608304c7500ea369dd509025d10dd5d67))
+* **skills:** 命名直链URL依赖按发行名检查安装状态，不再整体跳过 ([826fb1e](https://github.com/14790897/MiqroForge-Desktop/commit/826fb1e54ba62e4356a4ea352f2583d129f9dff7))
+* **skills:** 按评审意见用 PEP 508 解析 requirements——环境标记/版本约束/直链URL + 缓存失效 ([90a12de](https://github.com/14790897/MiqroForge-Desktop/commit/90a12de0f8a6cada1c7d69326a89affd8ef9688b))
+* **skills:** 移除测试文件未使用的 Path import（修复 ruff F401） ([deb424c](https://github.com/14790897/MiqroForge-Desktop/commit/deb424cfff967eb6911156accd1b3b7cda3afe46))
+* **skills:** 读取 requirements.txt 并在摘要/门禁透出 Python 依赖 ([43e7b8c](https://github.com/14790897/MiqroForge-Desktop/commit/43e7b8cf1779b8afd73ce14c55f0c9310b6c5447))
+
+---
+## 下载说明
+
+macOS 用户请按芯片架构选择安装包：
+
+- **Apple Silicon (M1/M2/M3/M4)**：下载 `0.29.2-arm64.dmg`（ARM 架构）
+- **Intel**：下载 `0.29.2.dmg`（x86 无后缀）
+
+## [0.29.1](https://github.com/14790897/MiqroForge-Desktop/compare/v0.29.0...v0.29.1) (2026-09-11)
+
+
+### Bug Fixes
+
+* **agent:** slurm 计费补扣快作业——COMPLETED 也触发扣费 ([#1037](https://github.com/14790897/MiqroForge-Desktop/issues/1037)) ([5a401e8](https://github.com/14790897/MiqroForge-Desktop/commit/5a401e8cd5edaccae64c3c7fffebaf8a3a0e9295))
+* **sandbox:** 沙箱写边界（层 1+2+3）—— /mnt 只读 + 授权路径 per-call rw bind + python 写系护栏（[#984](https://github.com/14790897/MiqroForge-Desktop/issues/984)） ([#1007](https://github.com/14790897/MiqroForge-Desktop/issues/1007)) ([842e001](https://github.com/14790897/MiqroForge-Desktop/commit/842e00149669a6d09e04932846cf967ee671ef4f)), closes [#821](https://github.com/14790897/MiqroForge-Desktop/issues/821)
+
+---
+## 下载说明
+
+macOS 用户请按芯片架构选择安装包：
+
+- **Apple Silicon (M1/M2/M3/M4)**：下载 `0.29.1-arm64.dmg`（ARM 架构）
+- **Intel**：下载 `0.29.1.dmg`（x86 无后缀）
+
+# [0.29.0](https://github.com/14790897/MiqroForge-Desktop/compare/v0.28.0...v0.29.0) (2026-09-10)
+
+
+### Bug Fixes
+
+* **chat:** 用户消息去重前归一化附件占位符，避免带图/文件消息双显示 ([#968](https://github.com/14790897/MiqroForge-Desktop/issues/968)) ([#969](https://github.com/14790897/MiqroForge-Desktop/issues/969)) ([abb17c8](https://github.com/14790897/MiqroForge-Desktop/commit/abb17c83027d8c00200cd0fa54ad31446275563e)), closes [#659](https://github.com/14790897/MiqroForge-Desktop/issues/659)
+* **ci:** 修复 CI flaky——sqlite 写锁滞留、附件删除冒泡挂死、真实 LLM 限流硬失败 ([#992](https://github.com/14790897/MiqroForge-Desktop/issues/992)) ([c3b2ec7](https://github.com/14790897/MiqroForge-Desktop/commit/c3b2ec7938b09998137cf7110122d4d156b6a2fd))
+* **desktop:** WSL 向导提权安装改为状态后验并过滤不可用发行版 ([#972](https://github.com/14790897/MiqroForge-Desktop/issues/972)) ([2ab1621](https://github.com/14790897/MiqroForge-Desktop/commit/2ab16215a1a6c4913ededc44cc2fb56ca22913ad))
+* **desktop:** 侧边栏拖拽调宽失效——usePanelResize 依赖内联 computeWidth 致拖拽中途被 reset ([#977](https://github.com/14790897/MiqroForge-Desktop/issues/977)) ([#995](https://github.com/14790897/MiqroForge-Desktop/issues/995)) ([cfee266](https://github.com/14790897/MiqroForge-Desktop/commit/cfee2668ba1c055928c0e8150f514466f8c6326e))
+* **desktop:** 内置 slurm MCP 网关放行 http 连接与凭据注入 ([#1029](https://github.com/14790897/MiqroForge-Desktop/issues/1029)) ([ae1192d](https://github.com/14790897/MiqroForge-Desktop/commit/ae1192d1e7d92dffacfe4ef40ecff78412d51d60))
+* **desktop:** 堵住 openExternal/openContainingFolder 的路径校验绕过 ([#955](https://github.com/14790897/MiqroForge-Desktop/issues/955)) ([#999](https://github.com/14790897/MiqroForge-Desktop/issues/999)) ([a49dfba](https://github.com/14790897/MiqroForge-Desktop/commit/a49dfba4d74ed6a5e9066bb6b1c806d248a8e5e0))
+* **desktop:** 桥进程父死看门狗——Electron 硬杀后不再遗留孤儿 bridge ([#959](https://github.com/14790897/MiqroForge-Desktop/issues/959)) ([#982](https://github.com/14790897/MiqroForge-Desktop/issues/982)) ([0894a43](https://github.com/14790897/MiqroForge-Desktop/commit/0894a43beaad3f8982915aa19696a4489afbebab))
+* **desktop:** 登录后 AI 网关可直接生效——保存门控对齐运行时网关路由并自动设置网关模型 ([#991](https://github.com/14790897/MiqroForge-Desktop/issues/991)) ([86fa0e6](https://github.com/14790897/MiqroForge-Desktop/commit/86fa0e636ea0e65859faeca440c62a7d37e74660)), closes [#929](https://github.com/14790897/MiqroForge-Desktop/issues/929)
+* **desktop:** 登录后发送仍被拦成「未配置模型服务」——发送门禁改用 active_model_resolvable 判定 ([#1025](https://github.com/14790897/MiqroForge-Desktop/issues/1025)) ([f9d2b50](https://github.com/14790897/MiqroForge-Desktop/commit/f9d2b50c1f6638c21ded1f2e270a93faf59cc767)), closes [#922](https://github.com/14790897/MiqroForge-Desktop/issues/922) [#835](https://github.com/14790897/MiqroForge-Desktop/issues/835)
+* **documents:** 文档工具路径边界——会话 key 派生分叉 + docx/pptx 图片块无界读（[#1005](https://github.com/14790897/MiqroForge-Desktop/issues/1005)） ([#1006](https://github.com/14790897/MiqroForge-Desktop/issues/1006)) ([59b942d](https://github.com/14790897/MiqroForge-Desktop/commit/59b942dad61bda50b35efec0430f50011daf478c)), closes [#1003](https://github.com/14790897/MiqroForge-Desktop/issues/1003) [#994](https://github.com/14790897/MiqroForge-Desktop/issues/994) [#994](https://github.com/14790897/MiqroForge-Desktop/issues/994)
+* **e2e:** 隔离 qraft 登录态——E2E 继承开发机真实平台凭据致模型调用走真实网关而非 mock ([#952](https://github.com/14790897/MiqroForge-Desktop/issues/952)) ([#957](https://github.com/14790897/MiqroForge-Desktop/issues/957)) ([fae5288](https://github.com/14790897/MiqroForge-Desktop/commit/fae52884f25e9872a9bf3946cde3fe0bba87deaa))
+* **mcp:** [#975](https://github.com/14790897/MiqroForge-Desktop/issues/975) MCP binary artifact 可信交付（Artifact Boundary）——客户端消费端闭环 ([#988](https://github.com/14790897/MiqroForge-Desktop/issues/988)) ([e85bae6](https://github.com/14790897/MiqroForge-Desktop/commit/e85bae6d103c09eaba2095f76daa42bce8c12a3e)), closes [#927](https://github.com/14790897/MiqroForge-Desktop/issues/927)
+* **mcp:** 编辑弹窗不回显已保存配置——条件挂载重置表单 + upsert schema 补 type/insecure_http ([#950](https://github.com/14790897/MiqroForge-Desktop/issues/950)) ([#953](https://github.com/14790897/MiqroForge-Desktop/issues/953)) ([743c0e2](https://github.com/14790897/MiqroForge-Desktop/commit/743c0e23cbccd82ae98c12b226fd7fd70407fe71))
+* **providers:** 平台内容安全 403 被误判为认证失败——内容拦截独立分类并给出正确指引 ([#1027](https://github.com/14790897/MiqroForge-Desktop/issues/1027)) ([b5536b2](https://github.com/14790897/MiqroForge-Desktop/commit/b5536b21ee831314481647b2d6afbbcd0e6194c3))
+
+
+### Features
+
+* **agent:** DeepSeek 搜索不可用时 auto 链自动切换兜底 + 零配置搜索 E2E ([#979](https://github.com/14790897/MiqroForge-Desktop/issues/979)) ([#996](https://github.com/14790897/MiqroForge-Desktop/issues/996)) ([8a9db42](https://github.com/14790897/MiqroForge-Desktop/commit/8a9db42f013eee51f58ca41198243d3302cedd9b))
+* **desktop:** 参数对比表结构化展示组件([#878](https://github.com/14790897/MiqroForge-Desktop/issues/878)) ([#961](https://github.com/14790897/MiqroForge-Desktop/issues/961)) ([ae8bf3d](https://github.com/14790897/MiqroForge-Desktop/commit/ae8bf3d078ded0ff9496f356ca6d45967a0bb2ea))
+* **desktop:** 平台登录失效全局告知——横幅、顶栏失效 chip、发送拦截重登引导 ([#1016](https://github.com/14790897/MiqroForge-Desktop/issues/1016)) ([ce96217](https://github.com/14790897/MiqroForge-Desktop/commit/ce96217b701240908d096d9a37a013009fcc416f))
+* **desktop:** 登录入口显性化——首屏/顶栏入口、拦截一键登录、隐私协议衔接登录页 ([#1000](https://github.com/14790897/MiqroForge-Desktop/issues/1000)) ([#1010](https://github.com/14790897/MiqroForge-Desktop/issues/1010)) ([5ccf4bc](https://github.com/14790897/MiqroForge-Desktop/commit/5ccf4bc4a6f5a92ad31920ca1022da2eda565d09))
+* **desktop:** 设置页隐藏 MCP 配置界面收口([#974](https://github.com/14790897/MiqroForge-Desktop/issues/974)) ([#978](https://github.com/14790897/MiqroForge-Desktop/issues/978)) ([87c2693](https://github.com/14790897/MiqroForge-Desktop/commit/87c269383231cda8252e8c5a8255fdcc8fd34e38))
+
+---
+## 下载说明
+
+macOS 用户请按芯片架构选择安装包：
+
+- **Apple Silicon (M1/M2/M3/M4)**：下载 `0.29.0-arm64.dmg`（ARM 架构）
+- **Intel**：下载 `0.29.0.dmg`（x86 无后缀）
+
+# [0.28.0](https://github.com/14790897/MiqroForge-Desktop/compare/v0.27.0...v0.28.0) (2026-09-08)
+
+
+### Bug Fixes
+
+* **desktop:** 修复 [#902](https://github.com/14790897/MiqroForge-Desktop/issues/902) exec 命令展开 smoke 用例（[#918](https://github.com/14790897/MiqroForge-Desktop/issues/918) 改版后注入失效） ([#964](https://github.com/14790897/MiqroForge-Desktop/issues/964)) ([a10c1f3](https://github.com/14790897/MiqroForge-Desktop/commit/a10c1f390d1800d0407c052b5654254329a3f920))
+* **desktop:** 修复中断+切会话后看门狗误报「后端 60s 无响应」 ([#947](https://github.com/14790897/MiqroForge-Desktop/issues/947)) ([a719d34](https://github.com/14790897/MiqroForge-Desktop/commit/a719d34dfba17470ea6d232ef68034204bd56b3c))
+* **e2e:** 夹具剥离 providerActivation 标记，避免内置激活端点钉死劫持 mock 测试 ([#941](https://github.com/14790897/MiqroForge-Desktop/issues/941)) ([3abcd7c](https://github.com/14790897/MiqroForge-Desktop/commit/3abcd7cd25293a89cc7e6e7204727f0287493d97)), closes [#933](https://github.com/14790897/MiqroForge-Desktop/issues/933)
+
+
+### Features
+
+* **billing:** Slurm MCP 作业运行时每次扣 10 积分，扣费由 Desktop 发起 ([#936](https://github.com/14790897/MiqroForge-Desktop/issues/936)) ([45c4672](https://github.com/14790897/MiqroForge-Desktop/commit/45c4672754ccc27bfa24b7b72fdc7e6fad23fada)), closes [#915](https://github.com/14790897/MiqroForge-Desktop/issues/915) [#927](https://github.com/14790897/MiqroForge-Desktop/issues/927)
+* **chat:** 空状态改版欢迎页：问候 + 三种做事方式 + 空会话不落盘（[#774](https://github.com/14790897/MiqroForge-Desktop/issues/774)） ([#918](https://github.com/14790897/MiqroForge-Desktop/issues/918)) ([ddfe059](https://github.com/14790897/MiqroForge-Desktop/commit/ddfe05910c8a04227190a40b9435af1758f9e4d9)), closes [#612](https://github.com/14790897/MiqroForge-Desktop/issues/612) [#891](https://github.com/14790897/MiqroForge-Desktop/issues/891)
+* **desktop:** 模型设置页显示 Qraft AI 网关使用状态 ([#965](https://github.com/14790897/MiqroForge-Desktop/issues/965)) ([77bdf78](https://github.com/14790897/MiqroForge-Desktop/commit/77bdf784937f39ea62a6808a28369fb65b42e800))
+* **desktop:** 状态栏显示平台积分余额，并清理 [#918](https://github.com/14790897/MiqroForge-Desktop/issues/918) 改版后过期的 smoke 用例 ([#954](https://github.com/14790897/MiqroForge-Desktop/issues/954)) ([12073d7](https://github.com/14790897/MiqroForge-Desktop/commit/12073d77b5276971ee8a42fdd9b366f6668036e9))
+* **desktop:** 状态栏点击积分弹出扣费历史明细 ([#963](https://github.com/14790897/MiqroForge-Desktop/issues/963)) ([ee8a9fa](https://github.com/14790897/MiqroForge-Desktop/commit/ee8a9faf13b8aed7d9061a132b4f3aa9f06785d6))
+* **desktop:** 登录后获取 encryptedApiKey，模型调用走 AI 网关 ([#922](https://github.com/14790897/MiqroForge-Desktop/issues/922)) ([#943](https://github.com/14790897/MiqroForge-Desktop/issues/943)) ([75e499b](https://github.com/14790897/MiqroForge-Desktop/commit/75e499bfee39429f77b57ddcb40fc9d5d88433d3)), closes [923/#924](https://github.com/14790897/MiqroForge-Desktop/issues/924) [#923](https://github.com/14790897/MiqroForge-Desktop/issues/923)
+* **desktop:** 登录后获取 encryptedApiKey，模型调用走 AI 网关 ([#922](https://github.com/14790897/MiqroForge-Desktop/issues/922)) ([#946](https://github.com/14790897/MiqroForge-Desktop/issues/946)) ([9722325](https://github.com/14790897/MiqroForge-Desktop/commit/9722325d28603755886ada05bfa4ea073de48685)), closes [923/#924](https://github.com/14790897/MiqroForge-Desktop/issues/924) [#933](https://github.com/14790897/MiqroForge-Desktop/issues/933) [#923](https://github.com/14790897/MiqroForge-Desktop/issues/923)
+* **desktop:** 登录页仅保留 OAuth 浏览器登录入口 ([#966](https://github.com/14790897/MiqroForge-Desktop/issues/966)) ([d51da4f](https://github.com/14790897/MiqroForge-Desktop/commit/d51da4fc090e5c7cebd521746341d3fa8cd79985))
+* **mcp:** SSE 传输支持——接入平台托管 MCP 网关（miqroforge） ([#948](https://github.com/14790897/MiqroForge-Desktop/issues/948)) ([b7e47f6](https://github.com/14790897/MiqroForge-Desktop/commit/b7e47f60be136a4f432d83d85884cd03fad434a8))
+* **mcp:** 内置默认 MCP 服务器——平台托管 slurm 网关零配置预置 + 登录态凭据注入 ([#951](https://github.com/14790897/MiqroForge-Desktop/issues/951)) ([395e053](https://github.com/14790897/MiqroForge-Desktop/commit/395e0531aaada3fafe56d79b946a2bdd60a4fedf)), closes [#936](https://github.com/14790897/MiqroForge-Desktop/issues/936) [#949](https://github.com/14790897/MiqroForge-Desktop/issues/949)
+* **sandbox:** [#854](https://github.com/14790897/MiqroForge-Desktop/issues/854) allow_system_installs 开通路径——设置页开关 + 系统包安装授权确认卡 ([#875](https://github.com/14790897/MiqroForge-Desktop/issues/875)) ([4ab1559](https://github.com/14790897/MiqroForge-Desktop/commit/4ab1559ccfd5ab1217fb5ef7f4c06f3940dd0138)), closes [#864](https://github.com/14790897/MiqroForge-Desktop/issues/864) [#7](https://github.com/14790897/MiqroForge-Desktop/issues/7) [#833](https://github.com/14790897/MiqroForge-Desktop/issues/833) [#936](https://github.com/14790897/MiqroForge-Desktop/issues/936)
+
+
+### Reverts
+
+* Revert "feat(desktop): 登录后获取 encryptedApiKey，模型调用走 AI 网关 ([#922](https://github.com/14790897/MiqroForge-Desktop/issues/922)) ([#943](https://github.com/14790897/MiqroForge-Desktop/issues/943))" ([#945](https://github.com/14790897/MiqroForge-Desktop/issues/945)) ([71c86a1](https://github.com/14790897/MiqroForge-Desktop/commit/71c86a132b5372281a86230300205ad679169198))
+
+---
+## 下载说明
+
+macOS 用户请按芯片架构选择安装包：
+
+- **Apple Silicon (M1/M2/M3/M4)**：下载 `0.28.0-arm64.dmg`（ARM 架构）
+- **Intel**：下载 `0.28.0.dmg`（x86 无后缀）
+
+# [0.27.0](https://github.com/14790897/MiqroForge-Desktop/compare/v0.26.0...v0.27.0) (2026-09-04)
+
+
+### Bug Fixes
+
+* **chat:** 会话加载中发送的消息立即渲染 + regression-480 测试加固 ([#872](https://github.com/14790897/MiqroForge-Desktop/issues/872)) ([#891](https://github.com/14790897/MiqroForge-Desktop/issues/891)) ([252c2ea](https://github.com/14790897/MiqroForge-Desktop/commit/252c2ea7a7bb2ca1c52d1ef06ed1dfa57ecf6e92)), closes [#2](https://github.com/14790897/MiqroForge-Desktop/issues/2) [#1](https://github.com/14790897/MiqroForge-Desktop/issues/1) [#2](https://github.com/14790897/MiqroForge-Desktop/issues/2) [#3](https://github.com/14790897/MiqroForge-Desktop/issues/3) [#8](https://github.com/14790897/MiqroForge-Desktop/issues/8) [#5](https://github.com/14790897/MiqroForge-Desktop/issues/5) [#875](https://github.com/14790897/MiqroForge-Desktop/issues/875) [#875](https://github.com/14790897/MiqroForge-Desktop/issues/875)
+* **desktop:** 修复 [#929](https://github.com/14790897/MiqroForge-Desktop/issues/929) 收口审查问题——模型门控改为可解析且凭据可用 + 内置密钥聊天端点收口 ([#933](https://github.com/14790897/MiqroForge-Desktop/issues/933)) ([5c97f0e](https://github.com/14790897/MiqroForge-Desktop/commit/5c97f0e0e8c7a7af8531ff36a5ad42612bc03b51))
+
+
+### Features
+
+* **desktop:** 模型列表移除 deepseek-chat 与 deepseek-reasoner，仅保留 v4-flash ([#938](https://github.com/14790897/MiqroForge-Desktop/issues/938)) ([4ade1e0](https://github.com/14790897/MiqroForge-Desktop/commit/4ade1e045a4aaefcee690c0dabc673422d7dfaa7))
+
+---
+## 下载说明
+
+macOS 用户请按芯片架构选择安装包：
+
+- **Apple Silicon (M1/M2/M3/M4)**：下载 `0.27.0-arm64.dmg`（ARM 架构）
+- **Intel**：下载 `0.27.0.dmg`（x86 无后缀）
+
+# [0.26.0](https://github.com/14790897/MiqroForge-Desktop/compare/v0.25.0...v0.26.0) (2026-09-03)
+
+
+### Bug Fixes
+
+* **agent:** 归一化写入交付真实路径——请求路径与会话 files 目录双声明 ([#906](https://github.com/14790897/MiqroForge-Desktop/issues/906)) ([d4ea2fd](https://github.com/14790897/MiqroForge-Desktop/commit/d4ea2fd6c59e827da7bfb9037cf709efb38ea25d)), closes [#731](https://github.com/14790897/MiqroForge-Desktop/issues/731)
+* **chat:** ToolErrorEvent 不再渲染成红色报错框——降级为警示行 ([#921](https://github.com/14790897/MiqroForge-Desktop/issues/921)) ([#926](https://github.com/14790897/MiqroForge-Desktop/issues/926)) ([f86213c](https://github.com/14790897/MiqroForge-Desktop/commit/f86213cce39d3b809ea0788d03eb0d3e2c8562b8))
+* **qraft:** refresh_token 失效停止无限重试并引导重登 ([#917](https://github.com/14790897/MiqroForge-Desktop/issues/917)) ([7fc79d5](https://github.com/14790897/MiqroForge-Desktop/commit/7fc79d5f775dffc81239e79d554152efac97372b))
+* **qraft:** 密码登录授权码流程适配 Electron net.fetch manual 302 行为 ([#925](https://github.com/14790897/MiqroForge-Desktop/issues/925)) ([53537ea](https://github.com/14790897/MiqroForge-Desktop/commit/53537ea0cd32b2b8ee07e317308ddd80bf499477))
+
+
+### Features
+
+* **agent:** 会话启动时连接配置的 MCP 服务器并注册工具 ([#919](https://github.com/14790897/MiqroForge-Desktop/issues/919)) ([f115513](https://github.com/14790897/MiqroForge-Desktop/commit/f11551345159d872068d709c325ec0fb2014bb71))
+* **chat:** 点击工具调用行可展开查看完整执行命令([#902](https://github.com/14790897/MiqroForge-Desktop/issues/902)) ([#908](https://github.com/14790897/MiqroForge-Desktop/issues/908)) ([e716592](https://github.com/14790897/MiqroForge-Desktop/commit/e716592ddacb2884db870339e2e4f4eea6fbfa3a)), closes [#897](https://github.com/14790897/MiqroForge-Desktop/issues/897)
+* **desktop:** 模型选择收口——移除自定义 provider/model 配置入口 ([#835](https://github.com/14790897/MiqroForge-Desktop/issues/835)) ([#929](https://github.com/14790897/MiqroForge-Desktop/issues/929)) ([9f7b1ed](https://github.com/14790897/MiqroForge-Desktop/commit/9f7b1ed77cbba68ad5dc2b05a5d93e34c5a313f5))
+* **qraft:** 平台积分计费——会话首次工具执行扣 30 分，余额不足阻止任务 ([#915](https://github.com/14790897/MiqroForge-Desktop/issues/915)) ([acad065](https://github.com/14790897/MiqroForge-Desktop/commit/acad06566150b57415bd935c7b32de3872f06c55)), closes [#837](https://github.com/14790897/MiqroForge-Desktop/issues/837) [#789](https://github.com/14790897/MiqroForge-Desktop/issues/789)
+
+---
+## 下载说明
+
+macOS 用户请按芯片架构选择安装包：
+
+- **Apple Silicon (M1/M2/M3/M4)**：下载 `0.26.0-arm64.dmg`（ARM 架构）
+- **Intel**：下载 `0.26.0.dmg`（x86 无后缀）
+
 # [0.25.0](https://github.com/14790897/MiqroForge-Desktop/compare/v0.24.0...v0.25.0) (2026-09-02)
 
 
