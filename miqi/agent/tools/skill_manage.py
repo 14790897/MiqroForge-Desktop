@@ -133,6 +133,15 @@ class SkillManageTool(Tool):
                 content.rstrip()
                 + f"\n\n---\n本技能的脚本目录（运行技能脚本时使用）：{script_dir}\n"
             )
+        reqs = self._skills._read_requirements(name)
+        if reqs:
+            missing = self._skills._missing_python_deps(name)
+            content = (
+                content.rstrip()
+                + f"\n\n---\n本技能的 Python 依赖（requirements.txt）：{', '.join(r.name for r in reqs)}\n"
+            )
+            if missing:
+                content += f"缺失依赖（需先安装）：{', '.join(missing)}\n"
         return content
 
     def _do_create(self, name: str, content: str) -> str:
