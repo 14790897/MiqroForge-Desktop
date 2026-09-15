@@ -237,7 +237,11 @@ test.describe('System Install Card (real LLM, #854/#875)', () => {
       });
       // 三选项齐全（允许本次 / 允许并记住 / 拒绝）
       await expect(cardArea.getByRole('button', { name: '允许本次安装' }).first()).toBeVisible();
-      await expect(cardArea.getByRole('button', { name: '拒绝' }).first()).toBeVisible();
+      // #646-v2：本卡的「拒绝」payload 是 {id:'deny'}（非 role=cancel/id=cancel），
+      // ConfirmCard 判定它属于**自定义选项**——只在展开区渲染（ConfirmCard.tsx
+      // 的 customChoices），栏上不出现（栏上的 deny 走 cancelChoice，本卡为
+      // 空时 fallback「取消」）。CI 实测：展开前断言「拒绝」→ element not found。
+      // 断言挪到下方展开逻辑之后。
       // #646-v2：「允许并记住（开启开关）」是二级选项——Hermes 式确认条默认折叠，
       // 只有条上的允许/拒绝常驻。行已展开就不再点（避免反而收起），未展开则点行头。
       const rememberBtn = cardArea.getByRole('button', { name: '允许并记住（开启开关）' }).first();
@@ -245,6 +249,8 @@ test.describe('System Install Card (real LLM, #854/#875)', () => {
         await cardArea.getByRole('button', { name: '系统包安装授权' }).first().click();
       }
       await expect(rememberBtn).toBeVisible();
+      // 展开区可见后，「拒绝」也在（同属自定义选项组）
+      await expect(cardArea.getByRole('button', { name: '拒绝' }).first()).toBeVisible();
 
       await page.screenshot({
         path: `test-results/${test.info().title.replace(/\s+/g, '-')}-card.png`,
