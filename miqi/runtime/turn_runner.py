@@ -766,16 +766,39 @@ class TurnRunner:
                         ),
                         phase_history=phases,
                     ):
+                        # #646-v2（2026-09-15 定稿，对齐 Claude Code 的 ExitPlanMode 语义）：
+                        # 计划内容必须由**模型**产出——闸门先请模型给出自己的计划（走
+                        # Collaborative 的重规划循环；模型下一轮的 ask_user_plan_confirm
+                        # 内容即卡片内容），模型仍不给时才退回策略卡兜底（可靠性不出让）。
+                        if (
+                            getattr(self, "supports_plan_replan", False)
+                            and not getattr(turn, "_plan_request_sent", False)
+                        ):
+                            turn._plan_request_sent = True
+                            turn._plan_request_pending = (
+                                "【系统】这是一个多步骤任务。请先调用 ask_user_plan_confirm 展示"
+                                "你的执行计划（title / goal / 3-8 个用户可读步骤），等用户确认后"
+                                "再动手；不要先执行工具，也不要拿工具名/标签凑步骤——按你真正"
+                                "要做的事写。"
+                            )
+                            return TurnResult(
+                                final_content="",
+                                messages=messages,
+                                tools_used=[],
+                                token_usage={},
+                                messages_delta=[],
+                                reasoning=None,
+                            )
                         choice = await self._harness_plan_confirm(turn, seen_names)
                         if choice == "confirm":
                             # CodeRabbit Critical ③：仅用户确认（choice_id=confirm）才置位——
                             # 取消/超时不得跳过后续确认门（否则 write 可绕过安全边界）
                             turn._plan_confirm_done = True
                         elif choice == "modify":
-                            # 用户要求修改计划 → 界面保持干净（Hermes 式：审批后
-                            # 无多余消息框）——不 emit AI 消息；前端计划卡置"已修改"
-                            # 态 + 输入框聚焦（lastAdjustAt），用户直接输入调整意见，
-                            # 模型重新规划后弹新计划卡
+                            # 用户要求修改计划 → 不再执行本回合工具；由 Collaborative
+                            # TurnRunner 用 choice_label（用户调整意见）追加一轮重规划，
+                            # 新计划卡随后出现。前端不再聚焦输入框（2026-09-15 定稿：
+                            # 有卡等待时输入框隐藏 + 调整意见一次输入即可）。
                             return TurnResult(
                                 final_content="",
                                 messages=messages,

@@ -2999,27 +2999,18 @@ export function ChatConsole({
       streaming || messages.some((m) => m.role === 'user' || m.role === 'assistant');
     onSessionActivityChange?.(hasActivity);
   }, [streaming, messages, onSessionActivityChange]);
-  const { lastAdjustAt, setActiveSession } = useUserInput();
-  // 调整提示占位词用 state 驱动（而非直接改 DOM placeholder）——React 不会
-  // 主动重写该属性，直改会永久残留（CodeRabbit #711）。
-  const [adjustHint, setAdjustHint] = useState(false);
+  const { setActiveSession } = useUserInput();
+  // #646-v2（2026-09-15 定稿，对齐 Claude Code 的 resubmit 语义）：用户在计划卡里
+  // 提交调整意见后，由后端在**同一回合**重新规划（CollaborativeTurnRunner 的
+  // _plan_adjustment_pending → 追加一轮 provider → 新计划卡）。前端**不再**聚焦底部
+  // 输入框、不再提示"请输入调整要求"——否则与「有卡等待时输入框隐藏」的定稿冲突，
+  // 并且诱导用户把同一意见再输一遍（旧 lastAdjustAt/adjustHint 机制已移除）。
+  const adjustHint = false;
   // 会话隔离（CodeRabbit #666）：切会话 → 清空全部确认卡
   useEffect(() => {
     setActiveSession(sessionKey);
-    setAdjustHint(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionKey]);
-  // 用户点了"调整方案"→ 聚焦输入框并提示输入调整要求（issue #646）。
-  // 聚焦在 composer 重新可用（流式结束）之后执行——disabled 状态下
-  // focus 无效，回合结束后焦点会丢失（CodeRabbit #711）。
-  useEffect(() => {
-    if (!lastAdjustAt) return;
-    setAdjustHint(true);
-  }, [lastAdjustAt]);
-  useEffect(() => {
-    if (!adjustHint || streaming) return;
-    composerRef.current?.focus();
-  }, [adjustHint, streaming]);
   // 原生 window.confirm 模态框关闭后，Chromium 可能不把“真实的 OS 激活”交还
   // renderer：键盘事件被吞、点输入条无光标，刷新重建页面才恢复（手动复现）。
   // 早期版本里空/非空输入条是两棵子树，删除对话时旧 textarea 卸载重挂会顺带
