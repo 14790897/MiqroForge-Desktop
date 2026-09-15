@@ -1,6 +1,7 @@
 import {
   useState,
   useEffect,
+  useSyncExternalStore,
   useRef,
   useCallback,
   useMemo,
@@ -33,7 +34,7 @@ import { Tooltip } from '../../components/ui/Tooltip';
 import { ContextMenu, type ContextMenuAction } from '../../components/ContextMenu';
 import { cn } from '../../lib/utils';
 import { Modal } from '../../components/shared';
-import { formatRelativeTime } from '../../lib/formatTime';
+import { formatRelativeTime, formatChatTime } from '../../lib/formatTime';
 import { type ExecutionPolicy } from '../../components/ExecutionPolicySelector';
 import { type ReasoningMode } from './components/ReasoningModeSwitch';
 import { clampPanelWidth, createPanelWindowSync } from './panelWindowSync';
@@ -622,6 +623,40 @@ function getDocIcon(name: string) {
       return FileType;
   }
 }
+
+/** 全局分钟 ticker(#1011,review):所有 TimestampLabel 共享同一个 60s
+ *  interval,label 通过 useSyncExternalStore 订阅 —— 避免每条用户消息
+ *  各自建立长期 setInterval(长会话数百 timer)。 */
+let minuteTickValue = 0;
+const minuteTickListeners = new Set<() => void>();
+if (typeof window !== 'undefined') {
+  window.setInterval(() => {
+    minuteTickValue += 1;
+    minuteTickListeners.forEach((notify) => notify());
+  }, 60_000);
+}
+function subscribeMinuteTick(notify: () => void): () => void {
+  minuteTickListeners.add(notify);
+  return () => {
+    minuteTickListeners.delete(notify);
+  };
+}
+function getMinuteTickSnapshot(): number {
+  return minuteTickValue;
+}
+
+/** 用户消息时间标签——订阅全局分钟 tick,跨午夜自动刷新;隔离于 memo
+ *  气泡树(不牵动整棵 MessageBubble 重渲染)。 */
+const TimestampLabel = memo(function TimestampLabel({ timestamp }: { timestamp: number }) {
+  useSyncExternalStore(subscribeMinuteTick, getMinuteTickSnapshot, getMinuteTickSnapshot);
+  const label = formatChatTime(timestamp);
+  if (!label) return null;
+  return (
+    <div className="w-full text-center pt-1 pb-0.5">
+      <span className="text-[11px] leading-none text-[var(--text-faint)] select-none">{label}</span>
+    </div>
+  );
+});
 
 function relativeTimeLabel(timestamp?: number | string | null, now = Date.now()): string {
   if (timestamp === undefined || timestamp === null) return '尚未更新';
@@ -4561,6 +4596,17 @@ export function ChatConsole({
    *  session's pending send.  Comparing the stored id against this closure's
    *  own id lets a superseded / re-sent / cancelled send know it lost the turn. */
   const pendingSendIdsRef = useRef<Map<string, number>>(new Map());
+  /** 编辑重答原子化(#828):handleSend 同步段的接受结果——
+   *  被 pending guard 等预检拒绝时标 'rejected',handleEdit 据此回滚截断。 */
+  const editSendOutcomeRef = useRef<'accepted' | 'rejected' | null>(null);
+  /** 编辑重答回滚点(待绑定,#1011)。handleEdit 设置,handleSend 在生成
+   *  thisSendId 后转入 editRollbacksRef 按 sendId 绑定。 */
+  const editPendingRollbackRef = useRef<{ snapshot: Message[]; sessionKey: string } | null>(null);
+  /** 编辑重答回滚点(按 sendId 绑定,#1011;CodeRabbit:发送可跨 session
+   *  重叠,单槽会被别的 send 误消费——每个 send 只取自己绑定的回滚点)。 */
+  const editRollbacksRef = useRef<Map<number, { snapshot: Message[]; sessionKey: string }>>(
+    new Map()
+  );
   /** Monotonic id for pendingSendIdsRef — distinguishes "this send" from any
    *  newer send that started for the same session. */
   const sendSeqRef = useRef(0);
@@ -4617,10 +4663,13 @@ export function ChatConsole({
     // state 更新后的渲染 flush（旧闭包读到的 input state 是旧值）。
     const programmaticText = programmaticTextRef.current;
     programmaticTextRef.current = null;
-    const text = (payload?.text ?? programmaticText ?? '').trim();
+    // payload(编辑重答/重试)文本原样发送,不经 trim —— 保留用户刻意的
+    // 首尾空格/换行(CodeRabbit #1011);trim 仅用于空输入校验。
+    const text = payload?.text ?? (programmaticText ?? '').trim();
     const atts = payload?.attachments ?? attachments;
-    if (!text && atts.length === 0 && !_resumeId) {
+    if (!text.trim() && atts.length === 0 && !_resumeId) {
       retryPayloadRef.current = null;
+      editSendOutcomeRef.current = 'rejected';
       return;
     }
     // 复杂问题 + 极速模式 → 提示建议切 🧠 深度研究（不阻断，可忽略）
@@ -4638,6 +4687,7 @@ export function ChatConsole({
       // A blocked regenerate must not leak its payload into the next manual
       // send — clear it before bailing (CodeRabbit #681).
       retryPayloadRef.current = null;
+      editSendOutcomeRef.current = 'rejected';
       return;
     }
     // Retry/regenerate: nudge the model to answer differently — the stored
@@ -4687,10 +4737,18 @@ export function ChatConsole({
 
     const wasStreaming = streaming;
     retryPayloadRef.current = null;
+    editSendOutcomeRef.current = 'accepted';
     // Unique id for THIS send, stored in the pending map.  A later send for
     // the same session overwrites it, so this closure can tell it lost the
     // turn (its provider check must not proceed).
     const thisSendId = ++sendSeqRef.current;
+    // 编辑重答(#1011):把待绑定回滚点绑到本次 send —— 按 sendId 绑定,
+    // 避免跨 session 的其它 send 消费/清除它(CodeRabbit)。
+    const pendingEditRollback = editPendingRollbackRef.current;
+    if (pendingEditRollback && pendingEditRollback.sessionKey === sendSessionKey) {
+      editRollbacksRef.current.set(thisSendId, pendingEditRollback);
+    }
+    editPendingRollbackRef.current = null;
     pendingSendIdsRef.current.set(sendSessionKey, thisSendId);
     setSendingFor(sendSessionKey, userMsg.timestamp);
     setStreaming(true);
@@ -4749,6 +4807,12 @@ export function ChatConsole({
     // the optimistic UI has already shown the message, and this resolves in
     // the background.  If it rejects, the send proceeds anyway — the bridge
     // surfaces the underlying runtime error through the stream/error path.
+    //
+    // #1011 P1(review):记录 chat.send 是否真正送出 —— 只有确定「未派发」
+    // 的失败(此前的附件/内容构造/thread start 等)才允许恢复编辑快照;
+    // chat.send 调用之后的 reject(bridge/IPC/timeout)可能请求已送达后端,
+    // 此时恢复旧列表会与后端状态分叉,一律不做。
+    let turnDispatched = false;
     try {
       // #922/#1000：网关状态先取一次，供「未登录 → 登录引导」与
       // 「已登录但网关未就绪 → 网关提示」两个分支共用。旧 preload/
@@ -4807,14 +4871,21 @@ export function ChatConsole({
         streamingBySession.delete(sendSessionKey);
         setSendingFor(sendSessionKey, null);
         if (currentSessionRef.current === sendSessionKey) {
+          const rollback = editRollbacksRef.current.get(thisSendId);
+          editRollbacksRef.current.delete(thisSendId);
           setStreaming(false);
-          setMessages((prev) => {
-            const last = prev[prev.length - 1];
-            if (last?.timestamp === userMsg.timestamp) {
-              return [...prev.slice(0, -1), createGatewayBlockedMessage()];
-            }
-            return prev;
-          });
+          if (rollback && rollback.sessionKey === sendSessionKey) {
+            // 编辑重答:恢复截断前的完整列表,错误提示追加在末尾(#1011)
+            setMessages([...rollback.snapshot, createGatewayBlockedMessage()]);
+          } else {
+            setMessages((prev) => {
+              const last = prev[prev.length - 1];
+              if (last?.timestamp === userMsg.timestamp) {
+                return [...prev.slice(0, -1), createGatewayBlockedMessage()];
+              }
+              return prev;
+            });
+          }
           composerRef.current?.setText(text);
           setAttachments(atts);
         }
@@ -4859,14 +4930,21 @@ export function ChatConsole({
         streamingBySession.delete(sendSessionKey);
         setSendingFor(sendSessionKey, null);
         if (currentSessionRef.current === sendSessionKey) {
+          const rollback = editRollbacksRef.current.get(thisSendId);
+          editRollbacksRef.current.delete(thisSendId);
           setStreaming(false);
-          setMessages((prev) => {
-            const last = prev[prev.length - 1];
-            if (last?.timestamp === userMsg.timestamp) {
-              return [...prev.slice(0, -1), guidance];
-            }
-            return prev;
-          });
+          if (rollback && rollback.sessionKey === sendSessionKey) {
+            // 编辑重答:恢复截断前的完整列表,错误提示追加在末尾(#1011)
+            setMessages([...rollback.snapshot, guidance]);
+          } else {
+            setMessages((prev) => {
+              const last = prev[prev.length - 1];
+              if (last?.timestamp === userMsg.timestamp) {
+                return [...prev.slice(0, -1), guidance];
+              }
+              return prev;
+            });
+          }
           composerRef.current?.setText(text);
           setAttachments(atts);
         }
@@ -4887,16 +4965,27 @@ export function ChatConsole({
       streamingBySession.delete(sendSessionKey);
       setSendingFor(sendSessionKey, null);
       if (currentSessionRef.current === sendSessionKey) {
-        setMessages((prev) => {
-          const last = prev[prev.length - 1];
-          if (last?.timestamp === userMsg.timestamp) return prev.slice(0, -1);
-          return prev;
-        });
+        const rollback = editRollbacksRef.current.get(thisSendId);
+        editRollbacksRef.current.delete(thisSendId);
+        if (rollback && rollback.sessionKey === sendSessionKey) {
+          // 编辑重答被 stop/superseded:恢复截断前的完整列表(#1011)
+          setMessages(rollback.snapshot);
+        } else {
+          setMessages((prev) => {
+            const last = prev[prev.length - 1];
+            if (last?.timestamp === userMsg.timestamp) return prev.slice(0, -1);
+            return prev;
+          });
+        }
         composerRef.current?.setText(text);
         setAttachments(atts);
       }
       return;
     }
+
+    // 编辑回滚点保留至真正派发(#1011 P1,review):预派发检查通过≠已发出,
+    // 附件/内容构造/thread start/send 仍可能失败,过早清除会导致无法恢复。
+    // (本处不再删除,改在 chat.send 发出成功后清除)
 
     // If a reveal animation is still running from the previous response,
     // cancel it and abort the in-flight request so we can start fresh.  A
@@ -4983,12 +5072,19 @@ export function ChatConsole({
       // awaited, and the composer / setAttachments / setMessages act on the
       // currently displayed session.
       if (currentSessionRef.current === sendSessionKey) {
+        const rollback = editRollbacksRef.current.get(thisSendId);
+        editRollbacksRef.current.delete(thisSendId);
         setStreaming(false);
-        setMessages((prev) => {
-          const last = prev[prev.length - 1];
-          if (last?.timestamp === userMsg.timestamp) return prev.slice(0, -1);
-          return prev;
-        });
+        if (rollback && rollback.sessionKey === sendSessionKey) {
+          // 编辑重答被取消(#1011):恢复截断前的完整列表
+          setMessages(rollback.snapshot);
+        } else {
+          setMessages((prev) => {
+            const last = prev[prev.length - 1];
+            if (last?.timestamp === userMsg.timestamp) return prev.slice(0, -1);
+            return prev;
+          });
+        }
         composerRef.current?.setText(text);
         setAttachments(atts);
       }
@@ -5956,16 +6052,37 @@ export function ChatConsole({
       }
 
       // Fire send — server parses synchronously in _chat_send_handler
-      const sendPromise = window.miqi.chat.send(
-        content,
-        key,
-        threadId ?? undefined,
-        executionPolicy,
-        chatAttachments.length > 0 ? chatAttachments : undefined,
-        workspace ?? undefined,
-        reasoningModeRef.current,
-        _resumeId ?? undefined
-      );
+      // #1011 P1(baiye-banned review):判定点必须早于「请求可能已送出」的
+      // 第一刻。chat.send 内部是 ipcRenderer.invoke → main → bridge.send,
+      // 一旦调用,即使 Promise 之后 reject,请求也可能已被后端接收并开始
+      // turn —— 此时恢复旧 snapshot 会造成前后端状态分叉。因此:
+      //   · chat.send 调用之前的失败(附件/内容构造/thread start)= 确定未派发 → 允许恢复
+      //   · 调用之后的一切失败(resolve 或 reject 皆然)= 可能已派发 → 不恢复
+      //     (与普通发送失败语义一致:保留列表 + 错误提示)
+      // #1011 P3(baiye-banned 终审):区分「同步 throw」——preload 的 chat.send
+      // 是普通函数,参数序列化失败 / API 缺失会在调用时同步抛出,此时请求
+      // 从未进入 IPC;仅在调用成功返回 Promise 后才标记 dispatched,
+      // 同步 throw 交由外层 catch 走「确定未派发」的恢复路径。
+      let sendPromise: Promise<unknown>;
+      try {
+        sendPromise = window.miqi.chat.send(
+          content,
+          key,
+          threadId ?? undefined,
+          executionPolicy,
+          chatAttachments.length > 0 ? chatAttachments : undefined,
+          workspace ?? undefined,
+          reasoningModeRef.current,
+          _resumeId ?? undefined
+        );
+        turnDispatched = true;
+      } catch (syncSendError) {
+        // 同步 throw:未进入 IPC —— 保持 turnDispatched=false,允许恢复
+        throw syncSendError;
+      }
+      // 请求已发出 —— 清除本次 send 的编辑回滚点(此后失败一律不恢复,
+      // 见上方 turnDispatched 注释;此处删除防 Map 泄漏)
+      editRollbacksRef.current.delete(thisSendId);
 
       // Mark as done after a tick — server parsing is synchronous, already complete
       if (sentAttachments.some((a) => a.type === 'document')) {
@@ -6012,6 +6129,8 @@ export function ChatConsole({
         settleLifecycle();
         setStreaming(false);
         setSendingFor(sendSessionKey, null);
+        // 流错误已在流处理器内渲染(turn 已派发)——仅清理本次回滚点防泄漏
+        editRollbacksRef.current.delete(thisSendId);
         sendCleanup();
         // Identity-scoped: only THIS invocation's listeners — the shared
         // unsubsRef may point at a newer overlapping send.
@@ -6020,13 +6139,28 @@ export function ChatConsole({
         return;
       }
       const errMsg = sanitizeUiMessage(e?.message ?? String(e ?? '未知错误'));
+      // 编辑重答(#1011 P1):仅当「确定未派发」(chat.send 尚未送出)时才恢复
+      // 截断前的完整列表;已送出后的 reject 可能请求已达后端,恢复会造成
+      // 前后端状态分叉 —— 此时保留截断后的列表 + 错误提示。
+      const sendFailRollback = editRollbacksRef.current.get(thisSendId);
+      editRollbacksRef.current.delete(thisSendId);
+      const sendFailRollbackApplies =
+        !turnDispatched &&
+        !!sendFailRollback &&
+        sendFailRollback.sessionKey === sendSessionKey &&
+        currentSessionRef.current === sendSessionKey;
       if (isProviderConfigurationProblem(errMsg, e?.code)) {
-        setMessages((prev) => [
-          ...prev,
-          createProviderConfigMessage(
-            requiresReloginRef.current ? RELOGIN_INTERCEPT_TEXT : errMsg,
-            loggedInRef.current && !requiresReloginRef.current ? 'open-provider-settings' : 'login'
-          ),
+        const failMsg = createProviderConfigMessage(
+          requiresReloginRef.current ? RELOGIN_INTERCEPT_TEXT : errMsg,
+          loggedInRef.current && !requiresReloginRef.current ? 'open-provider-settings' : 'login'
+        );
+        setMessages((prev) =>
+          sendFailRollbackApplies ? [...sendFailRollback!.snapshot, failMsg] : [...prev, failMsg]
+        );
+      } else if (sendFailRollbackApplies) {
+        setMessages([
+          ...sendFailRollback!.snapshot,
+          { role: 'error' as const, content: errMsg, timestamp: Date.now() },
         ]);
       } else if (e?.code) {
         setMessages((prev) => [
@@ -6587,6 +6721,45 @@ export function ChatConsole({
       composerRef.current?.setText(userMsg.content);
       setAttachments(userMsg.attachments ?? []);
       requestAnimationFrame(() => handleSendRef.current());
+    },
+    [streaming]
+  );
+
+  /* 编辑用户消息并重新回答(#828 学 Hermes edit → rewind → resubmit):
+     截断到该消息之前,用编辑后的文本重新发送 —— 复用 regenerate 机制。
+     原子化(外部审查 P1):发送前预检 pending guard;handleSend 若在同步段
+     被拒(editSendOutcomeRef='rejected'),回滚截断恢复原消息列表。 */
+  const handleEdit = useCallback(
+    async (original: Message, newText: string) => {
+      if (streaming) return;
+      // 预检:同 session 有 pending 发送时不得截断(截断后必然被 handleSend 拒绝)
+      if (pendingSendIdsRef.current.has(currentSessionRef.current)) return;
+      const text = newText;
+      // 仅用 trim 判空,不改变实际 payload(保留用户刻意换行/空格)
+      if (!text.trim()) return;
+      const msgs = messagesRef.current;
+      const idx = msgs.indexOf(original);
+      if (idx < 0) return;
+      const snapshot = msgs;
+      retryPayloadRef.current = {
+        text,
+        attachments: original.attachments ?? [],
+        // 编辑是"修改后重新提问",不是重试 — 不带"换角度重新回答"提示词
+        retry: false,
+      };
+      setMessages((prev) => prev.slice(0, idx));
+      // 记录回滚点:异步预派发失败时恢复(见 handleSend 的 provider/网关检查)
+      editPendingRollbackRef.current = { snapshot, sessionKey: currentSessionRef.current };
+      // 同步原子调用:handleSend 经 retryPayload 读文本,不依赖 setInput 渲染
+      // flush —— 不排 RAF(窗口不可见时 RAF 可能不触发,导致"截断但不发送")。
+      editSendOutcomeRef.current = null;
+      handleSendRef.current();
+      // handleSend 的同步段此时已执行完:被拒 → 回滚,避免"截断成功、重发失败"
+      if (editSendOutcomeRef.current === 'rejected') {
+        retryPayloadRef.current = null;
+        setMessages(snapshot);
+        editPendingRollbackRef.current = null;
+      }
     },
     [streaming]
   );
@@ -7164,9 +7337,10 @@ export function ChatConsole({
             style={{ background: 'var(--background)' }}
           >
             <div
-              className={`max-w-[760px] mx-auto px-4 py-5 flex flex-col gap-2 ${
+              className={`max-w-[760px] mx-auto px-4 pt-5 flex flex-col gap-3 ${
                 historyLoaded && messages.length === 0 ? 'min-h-full' : ''
               }`}
+              style={{ paddingBottom: '20vh' }}
             >
               {/* Only show the "connecting" spinner while loading AND no messages
                   yet.  A user can send before the session's load() finishes
@@ -7310,6 +7484,7 @@ export function ChatConsole({
                         hideHeader={group.kind === 'reply-content'}
                         sessionKey={sessionKey}
                         turnIndex={i}
+                        onEdit={handleEdit}
                         execOutputs={execOutputs}
                         inlineExecOutput={inlineExecOutput}
                         sources={sourcesByMsg.get(group.msg) ?? EMPTY_SOURCES}
@@ -8529,6 +8704,8 @@ interface MessageBubbleProps {
   isLastToolRow?: boolean;
   /** web_search result text for this row (click-to-expand cards). */
   searchResults?: string;
+  /** 编辑用户消息并重新回答(#828)。 */
+  onEdit?: (msg: Message, newText: string) => void;
   /** #740: resume/restart an interrupted turn (half-generated reply).
    *  Takes the message (#1042) so the render site can pass its stable
    *  useCallback reference instead of building an inline lambda — that keeps
@@ -8562,12 +8739,16 @@ const MessageBubble = memo(function MessageBubble({
   turnIndex,
   copyIdx,
   sending,
+  onEdit,
   onResume,
   onRestart,
   reasoningMode,
 }: MessageBubbleProps) {
   const [expanded, setExpanded] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
+  // 编辑态(#828):用户消息原地变输入框,提交后截断重发
+  const [editing, setEditing] = useState(false);
+  const [editText, setEditText] = useState('');
   // Message action bar (copy/regenerate/feedback/sources) — restored from
   // #547 after #577 dropped the whole bar, leaving only a hover-only copy
   // button (#577 功能回归修复).  Feedback is persisted to localStorage
@@ -8602,7 +8783,6 @@ const MessageBubble = memo(function MessageBubble({
   // main path — React throws "Rendered fewer hooks than expected".
   const bubbleRef = useRef<HTMLDivElement>(null);
   const capturedSelectionRef = useRef('');
-  const [copyHovered, setCopyHovered] = useState(false);
   // #880: 消息渲染失败兜底——「显示原文」切换为查看原始 markdown/HTML 文本
   const [showRawOnError, setShowRawOnError] = useState(false);
 
@@ -9125,6 +9305,9 @@ const MessageBubble = memo(function MessageBubble({
 
   return (
     <>
+      {/* 用户消息时间戳——居中显示在上一回答与本提问之间(ChatGPT 式),
+          组件自维护分钟 tick,不牵动整棵 memo 气泡树 */}
+      {isUser && <TimestampLabel timestamp={msg.timestamp} />}
       <ContextMenu items={contextItems}>
         {({ onContextMenu }) => (
           <div
@@ -9308,11 +9491,61 @@ const MessageBubble = memo(function MessageBubble({
                   ...(isUser
                     ? { background: 'var(--bubble-user-bg)', color: 'var(--bubble-user-text)' }
                     : { color: 'var(--bubble-ai-text)' }),
-                  // 经典蓝色框（#547 hover 复制预览）：跟随气泡/正文外框
-                  ...(copyHovered ? { boxShadow: '0 0 0 2px var(--accent)' } : {}),
                 }}
               >
-                {showRawOnError ? (
+                {isUser && editing ? (
+                  /* 编辑态(#828):原地变输入框,提交 = 截断到此处并用新文本重新回答 */
+                  <div className="flex flex-col gap-2 min-w-[320px] max-w-full">
+                    <textarea
+                      value={editText}
+                      onChange={(e) => setEditText(e.target.value)}
+                      autoFocus
+                      rows={3}
+                      data-testid="edit-message-input"
+                      className="w-full resize-none rounded-lg px-3 py-2 text-sm bg-[var(--surface)] text-[var(--text)] border border-[var(--border)] focus:outline-none focus:border-[var(--accent)]"
+                      style={{ lineHeight: 'var(--leading-relaxed)' }}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Escape') setEditing(false);
+                        if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+                          if (
+                            editText.trim() !== '' &&
+                            editText !== extractFileChips(msg.content).cleanContent
+                          ) {
+                            onEdit?.(msg, editText);
+                          }
+                          setEditing(false);
+                        }
+                      }}
+                    />
+                    <div className="flex items-center justify-end gap-2">
+                      <button
+                        onClick={() => setEditing(false)}
+                        className="px-3 py-1.5 text-xs rounded-lg bg-[var(--surface)] text-[var(--text-muted)] hover:text-[var(--text)] transition-colors"
+                      >
+                        取消
+                      </button>
+                      <button
+                        onClick={() => {
+                          if (
+                            editText.trim() !== '' &&
+                            editText !== extractFileChips(msg.content).cleanContent
+                          ) {
+                            onEdit?.(msg, editText);
+                          }
+                          setEditing(false);
+                        }}
+                        disabled={
+                          editText.trim() === '' ||
+                          editText === extractFileChips(msg.content).cleanContent
+                        }
+                        data-testid="edit-message-submit"
+                        className="px-3 py-1.5 text-xs rounded-lg bg-[var(--accent)] text-white disabled:opacity-40 transition-opacity"
+                      >
+                        重新回答
+                      </button>
+                    </div>
+                  </div>
+                ) : showRawOnError ? (
                   <div>
                     <pre
                       className="p-3 text-xs font-mono leading-relaxed whitespace-pre-wrap break-all overflow-auto"
@@ -9397,6 +9630,46 @@ const MessageBubble = memo(function MessageBubble({
                 )}
               </div>
 
+              {/* 用户消息操作 — 复制 / 编辑(仅鼠标靠近/hover 消息时显示,#828;
+                  编辑态下隐藏,避免与编辑框叠在一起) */}
+              {isUser && msg.content !== '' && !editing && (
+                <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 transition-opacity mt-1">
+                  <button
+                    onClick={() =>
+                      // 复制与编辑同一套 cleanContent 语义(review):
+                      // 附件消息的 content 含内部序列化块,不能把内部标记复制出去
+                      onCopy(extractFileChips(msg.content).cleanContent, copyIdx ?? turnIndex ?? 0)
+                    }
+                    title="复制"
+                    aria-label="复制"
+                    className="flex items-center justify-center w-8 h-8 rounded-lg bg-[var(--surface-muted)]/70 text-[var(--text-muted)] hover:bg-[var(--surface-muted)] hover:text-[var(--text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)] transition-colors"
+                  >
+                    {isCopied ? (
+                      <Check size={14} style={{ color: 'var(--success)' }} />
+                    ) : (
+                      <Copy size={14} />
+                    )}
+                  </button>
+                  {onEdit && (
+                    <button
+                      onClick={() => {
+                        setEditing(true);
+                        // 附件消息的 content 含序列化文件块 — 编辑器只带可见文本,
+                        // 附件原样保留在 original.attachments(CodeRabbit #1011)
+                        setEditText(extractFileChips(msg.content).cleanContent);
+                      }}
+                      disabled={streaming}
+                      title={streaming ? '生成中,暂不可编辑' : '编辑并重新回答'}
+                      aria-label="编辑并重新回答"
+                      data-testid="edit-message-btn"
+                      className="flex items-center justify-center w-8 h-8 rounded-lg bg-[var(--surface-muted)]/70 text-[var(--text-muted)] hover:bg-[var(--surface-muted)] hover:text-[var(--text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)] transition-colors disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-[var(--surface-muted)]/70"
+                    >
+                      <Pencil size={14} />
+                    </button>
+                  )}
+                </div>
+              )}
+
               {/* 常驻免责声明（#836）—— 每条 AI 回答正文底部 */}
               {!isUser && msg.content !== '' && (
                 <div className="mt-0.5" data-testid="chat-disclaimer">
@@ -9407,30 +9680,23 @@ const MessageBubble = memo(function MessageBubble({
               )}
 
               {/* Message action bar — copy / regenerate / feedback / sources.
-                Restored from #547 (dropped by the #577 rewrite). */}
+                #828: 按钮放大(浅灰底大点击区)、复制不再 hover 选中/高亮框、
+                常驻显示(不随 hover 出现消失) */}
               {!isUser && msg.content !== '' && (
                 <div
-                  className="flex items-center gap-0.5 self-start opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 transition-opacity"
+                  className="flex items-center gap-1.5 self-start mt-3 mb-3"
                   data-testid="message-actions"
                 >
                   <button
                     onClick={() => onCopy(msg.content, copyIdx ?? turnIndex ?? 0)}
-                    onMouseEnter={() => {
-                      setCopyHovered(true);
-                      selectMessageText();
-                    }}
-                    onMouseLeave={() => {
-                      setCopyHovered(false);
-                      deselectMessageText();
-                    }}
                     title="复制"
                     aria-label="复制"
-                    className="p-1 rounded hover:bg-[var(--surface-muted)] hover:text-[var(--text)] transition-colors"
+                    className="flex items-center justify-center w-9 h-9 rounded-lg bg-[var(--surface-muted)]/70 text-[var(--text-muted)] hover:bg-[var(--surface-muted)] hover:text-[var(--text)] transition-colors"
                   >
                     {isCopied ? (
-                      <Check size={13} style={{ color: 'var(--success)' }} />
+                      <Check size={16} style={{ color: 'var(--success)' }} />
                     ) : (
-                      <Copy size={13} />
+                      <Copy size={16} />
                     )}
                   </button>
                   {onRegenerate && (
@@ -9438,9 +9704,9 @@ const MessageBubble = memo(function MessageBubble({
                       onClick={() => onRegenerate?.(msg)}
                       title="重新生成"
                       aria-label="重新生成"
-                      className="p-1 rounded hover:bg-[var(--surface-muted)] hover:text-[var(--text)] transition-colors"
+                      className="flex items-center justify-center w-9 h-9 rounded-lg bg-[var(--surface-muted)]/70 text-[var(--text-muted)] hover:bg-[var(--surface-muted)] hover:text-[var(--text)] transition-colors"
                     >
-                      <RefreshCw size={13} />
+                      <RefreshCw size={16} />
                     </button>
                   )}
                   <button
@@ -9451,11 +9717,13 @@ const MessageBubble = memo(function MessageBubble({
                     }}
                     title="喜欢"
                     aria-label="喜欢"
-                    className={`p-1 rounded hover:bg-[var(--surface-muted)] transition-colors ${
-                      feedback === 'up' ? 'text-[var(--accent)]' : ''
+                    className={`flex items-center justify-center w-9 h-9 rounded-lg border border-[var(--border-subtle)] bg-[var(--surface-muted)]/50 transition-colors ${
+                      feedback === 'up'
+                        ? 'text-[var(--accent)] bg-[var(--accent-soft)]'
+                        : 'text-[var(--text-muted)] hover:bg-[var(--surface-muted)] hover:text-[var(--text)]'
                     }`}
                   >
-                    <ThumbsUp size={13} />
+                    <ThumbsUp size={16} />
                   </button>
                   <button
                     onClick={() => {
@@ -9470,20 +9738,22 @@ const MessageBubble = memo(function MessageBubble({
                     }}
                     title="不喜欢"
                     aria-label="不喜欢"
-                    className={`p-1 rounded hover:bg-[var(--surface-muted)] transition-colors ${
-                      feedback === 'down' ? 'text-[var(--danger)]' : ''
+                    className={`flex items-center justify-center w-9 h-9 rounded-lg border border-[var(--border-subtle)] bg-[var(--surface-muted)]/50 transition-colors ${
+                      feedback === 'down'
+                        ? 'text-[var(--danger)] bg-[var(--danger-bg)]'
+                        : 'text-[var(--text-muted)] hover:bg-[var(--surface-muted)] hover:text-[var(--text)]'
                     }`}
                   >
-                    <ThumbsDown size={13} />
+                    <ThumbsDown size={16} />
                   </button>
                   {/* 查看来源 always visible (#547 原版行为) — 无来源时弹窗给提示 */}
                   <button
                     onClick={() => setShowSources(true)}
                     title="查看来源"
                     aria-label="查看来源"
-                    className="p-1 rounded hover:bg-[var(--surface-muted)] hover:text-[var(--text)] transition-colors"
+                    className="flex items-center justify-center w-9 h-9 rounded-lg bg-[var(--surface-muted)]/70 text-[var(--text-muted)] hover:bg-[var(--surface-muted)] hover:text-[var(--text)] transition-colors"
                   >
-                    <ExternalLink size={13} />
+                    <ExternalLink size={16} />
                   </button>
                 </div>
               )}
@@ -9787,7 +10057,8 @@ function areMessageBubblePropsEqual(a: MessageBubbleProps, b: MessageBubbleProps
     // useCallback and MessageBubble binds the message itself), so comparing
     // them is safe and closes the last gap in this comparator.
     a.onResume === b.onResume &&
-    a.onRestart === b.onRestart
+    a.onRestart === b.onRestart &&
+    a.onEdit === b.onEdit
   );
 }
 
