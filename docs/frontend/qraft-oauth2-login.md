@@ -180,7 +180,10 @@ slurm MCP 工具（服务器名含 "slurm"）实际执行前，`MCPToolWrapper.e
   charge_id（同一作业提交尝试只扣一次，历史文件持久化跨重启不重复扣费）；
 - 历史持久化：`userData/qraft-billing-history.json`（上限 200 条，含
   billed/insufficient/error 三种状态），设置页经 `qraft:billingHistory`
-  IPC 展示（作业 ID、参数摘要、扣分、扣后余额、时间）；
+  IPC 展示（作业 ID、参数摘要、扣分、扣后余额、时间）；**登出不删除**，
+  读取时按当前账号 `account.sub` 过滤（未登录不外发任何记录），换账号
+  不会看到前任账号的记录，同一账号重新登录（如平台轮换 refresh_token
+  后重登）记录仍在；
 - 聊天区提示复用 points 事件流（`stream=points`，billed=安静活动行、
   blocked=醒目错误行）；
 - 余额缓存：扣费成功后 deduct 响应余额直接更新 `status.points` 并推送

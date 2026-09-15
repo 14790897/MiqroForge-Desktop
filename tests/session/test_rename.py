@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 from miqi.session.manager import OwnershipError, SessionManager
+from miqi.session.session_keys import session_files_dir_key
 
 
 def _make_manager(tmp_path: Path) -> SessionManager:
@@ -20,8 +21,8 @@ def _make_manager(tmp_path: Path) -> SessionManager:
 
 
 def _read_metadata_on_disk(sessions_dir: Path, key: str) -> dict:
-    safe_key = key.replace(":", "_")
-    path = sessions_dir / safe_key / "conversation.jsonl"
+    """读回 rename 写下的元数据（当前目录形态，同写侧派生，#1014）。"""
+    path = sessions_dir / session_files_dir_key(key) / "conversation.jsonl"
     with open(path, encoding="utf-8") as f:
         return json.loads(f.readline())
 
@@ -127,6 +128,8 @@ def test_rename_global_legacy_session_requires_claim(tmp_path):
     sm = SessionManager(tmp_path, legacy_sessions_dir=legacy_dir)
 
     key = "desktop:legacy"
+    # 刻意保留 raw：这里模拟的是**旧全局布局**留下的文件，名字在写入时冻结为
+    # raw（``_get_legacy_session_path`` 也按 raw 找），不是当前目录名派生（#1014）。
     safe_key = key.replace(":", "_")
     (legacy_dir / f"{safe_key}.jsonl").write_text(
         json.dumps(

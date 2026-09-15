@@ -197,7 +197,7 @@ add auto-install support                   ❌ 缺少语义前缀
 
 | 流水线 | 触发 | 行为 |
 |--------|------|------|
-| `.github/workflows/weekly-release.yml` | 每周五 00:00 (Asia/Shanghai，cron `0 16 * * 4` UTC) / 手动 `workflow_dispatch` | 自动创建 develop→main 发布 PR（标题 `chore(release): merge develop into main`）并**立即合并**，随后 release.yml 的 semantic-release 自动发版打包 |
+| `.github/workflows/weekly-release.yml` | 每周三、周五 00:00 (Asia/Shanghai，cron `0 16 * * 2,4` UTC) / 手动 `workflow_dispatch` | 自动创建 develop→main 发布 PR（标题 `chore(release): merge develop into main`）并**立即合并**，随后 release.yml 的 semantic-release 自动发版打包 |
 | `.github/workflows/sync-main-into-develop.yml` | release published（正式 `v*` tag） / 手动 | 用临时分支 `chore/sync-main-into-develop` 把 main 的 release 提交反向同步回 develop，附 `chore(version): develop 版本号标记为 X-dev` 提交并**立即合并** |
 
 - 手动触发：`gh workflow run weekly-release.yml -f dry_run=true`（只建 PR 不合并，用于测试）

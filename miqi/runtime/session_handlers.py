@@ -148,9 +148,10 @@ def _tracked_files_store_key(session_key: str) -> str:
     会读到 ``sessions/miqi-desktop_desktop_983/``，而条目实际落在
     ``sessions/desktop_983/``。
 
-    两段 key（现网唯一形态，如 ``desktop:1786...``）派生结果与
-    ``key.replace(":", "_")``（``get_session_dir`` 的目录名规则）逐字相同，
-    故本次归一不改变既有行为；只有三段 key 才会分叉。
+    两段 key（现网唯一形态，如 ``desktop:1786...``）派生结果与历史 raw 约定
+    ``key.replace(":", "_")`` 逐字相同——raw 是 canonical 之前的目录名规则，
+    #1014 起 ``get_session_dir`` 的规则是 canonical；两段键下两者等价，故本次
+    归一不改变既有行为，只有三段 key 才会分叉。
 
     归一发生在 ownership 校验之前：读路径由 ``load_tracked_files(key,
     client_id=...)`` 内部、清理路径由 ``clear_tracked_files(key,
@@ -379,58 +380,65 @@ async def sessions_get_handler(
     try:
         sm = _get_session_manager()
         ws = Path(typed.workspace) if typed.workspace else None
-        disk_session = sm.get_or_create(session_key, client_id=client_id, workspace=ws)
+        # Hold the per-key lock across the get_or_create → save/delete sequence
+        # for the same reason as _save_to_session_manager: close the #1050
+        # TOCTOU window between the ownership check and the disk write.
+        with sm._get_session_lock(session_key):
+            disk_session = sm.get_or_create(session_key, client_id=client_id, workspace=ws)
 
-        # #956: folder-bound sessions write their real conversation under the
-        # bound workspace root while the app-home copy is an empty stub.  When
-        # the stub is empty, resolve the authoritative copy (explicit workspace
-        # → recent-workspace scan) and backfill the binding so later reads and
-        # sessions.list resolve without another scan.
-        if not disk_session.messages:
-            found = _find_folder_session(
-                sm, session_key, client_id, extra_workspace=str(ws) if ws else None,
-            )
-            if found is not None:
-                folder_session, authoritative_ws = found
-                disk_session = folder_session
-                # A legacy folder copy carries no owner_client_id.  Mirror the
-                # app-home REQUIRES_CLAIM path exactly: the history stays
-                # readable and is reported as unowned, and no owned binding is
-                # stamped for a session this client never claimed — otherwise
-                # the same session would answer "owned" from the folder root
-                # and "unowned" from app-home.
-                if folder_session.metadata.get("owner_client_id") is None:
-                    ownership = "unowned"
-                else:
-                    try:
-                        stub = sm.get_or_create(
-                            session_key, client_id=client_id, workspace=authoritative_ws,
-                        )
-                        # Binding-only stub: never copy the folder's messages into
-                        # the app-home root — the folder stays authoritative.
-                        sm.save(stub)
-                    except Exception as exc:
-                        logger.debug("sessions.get: binding backfill failed: {}", exc)
-
-        if authoritative_ws is None:
-            # 空会话是临时的：首条消息写入前不进 sessions.list（左端不残留默认会话）。
-            # 但显式带 workspace 的空会话仍要落盘——用户先切工作目录、后发首条消息时，
-            # workspace 元数据需跨 get/重启存活（workspace E2E 依赖该契约）。
-            # 保留条件要覆盖"已落盘的 workspace 绑定"：切目录后的一次裸 get（无 workspace
-            # 参数，如历史重载/列表刷新）不能把空会话当残留 GC 掉，否则首条消息会落在
-            # 丢失 workspace 的会话上。仅当空会话既无显式 workspace、磁盘上也没有任何
-            # workspace 元数据时，才把它当作旧版本无条件 save 留下的空白残留删除。
+            # #956: folder-bound sessions write their real conversation under the
+            # bound workspace root while the app-home copy is an empty stub.  When
+            # the stub is empty, resolve the authoritative copy (explicit workspace
+            # → recent-workspace scan) and backfill the binding so later reads and
+            # sessions.list resolve without another scan.
             if not disk_session.messages:
-                existing_ws = disk_session.metadata.get("workspace")
-                if ws is not None or existing_ws is not None:
+                found = _find_folder_session(
+                    sm, session_key, client_id, extra_workspace=str(ws) if ws else None,
+                )
+                if found is not None:
+                    folder_session, authoritative_ws = found
+                    disk_session = folder_session
+                    # A legacy folder copy carries no owner_client_id.  Mirror the
+                    # app-home REQUIRES_CLAIM path exactly: the history stays
+                    # readable and is reported as unowned, and no owned binding is
+                    # stamped for a session this client never claimed — otherwise
+                    # the same session would answer "owned" from the folder root
+                    # and "unowned" from app-home.
+                    if folder_session.metadata.get("owner_client_id") is None:
+                        ownership = "unowned"
+                    else:
+                        try:
+                            stub = sm.get_or_create(
+                                session_key, client_id=client_id, workspace=authoritative_ws,
+                            )
+                            # Binding-only stub: never copy the folder's messages into
+                            # the app-home root — the folder stays authoritative.
+                            sm.save(stub)
+                        except Exception as exc:
+                            logger.debug("sessions.get: binding backfill failed: {}", exc)
+
+            # Adopting a folder copy means disk_session is no longer the app-home
+            # entry: the GC below writes through `sm` (app-home), so it must not
+            # run on a session the folder root owns.
+            if authoritative_ws is None:
+                # 空会话是临时的：首条消息写入前不进 sessions.list（左端不残留默认会话）。
+                # 但显式带 workspace 的空会话仍要落盘——用户先切工作目录、后发首条消息时，
+                # workspace 元数据需跨 get/重启存活（workspace E2E 依赖该契约）。
+                # 保留条件要覆盖"已落盘的 workspace 绑定"：切目录后的一次裸 get（无 workspace
+                # 参数，如历史重载/列表刷新）不能把空会话当残留 GC 掉，否则首条消息会落在
+                # 丢失 workspace 的会话上。仅当空会话既无显式 workspace、磁盘上也没有任何
+                # workspace 元数据时，才把它当作旧版本无条件 save 留下的空白残留删除。
+                if not disk_session.messages:
+                    existing_ws = disk_session.metadata.get("workspace")
+                    if ws is not None or existing_ws is not None:
+                        sm.save(disk_session)
+                    elif sm.get_session_dir(session_key).exists():
+                        sm.delete(session_key, client_id=client_id)
+                        disk_session = sm.get_or_create(
+                            session_key, client_id=client_id, workspace=ws
+                        )
+                else:
                     sm.save(disk_session)
-                elif sm.get_session_dir(session_key).exists():
-                    sm.delete(session_key, client_id=client_id)
-                    disk_session = sm.get_or_create(
-                        session_key, client_id=client_id, workspace=ws
-                    )
-            else:
-                sm.save(disk_session)
 
         messages = disk_session.messages
         created_at = disk_session.created_at.isoformat()
@@ -697,7 +705,7 @@ async def sessions_list_archived_handler(
     """List only archived sessions (client-scoped)."""
     validate_session_params("sessions.list_archived", params)
 
-    from miqi.session.manager import safe_filename
+    from miqi.session.session_keys import session_files_dir_key
 
     sm = _get_session_manager()
     sessions = sm.list_sessions(
@@ -707,7 +715,9 @@ async def sessions_list_archived_handler(
     # Filter to only archived ones (already client-scoped by list_sessions)
     archived = []
     for s in sessions:
-        safe_key = safe_filename(s["key"].replace(":", "_"))
+        # Must match where ``SessionManager.archive`` writes the marker —
+        # ``get_session_dir`` uses this same canonical derivation (#1005).
+        safe_key = session_files_dir_key(s["key"])
         marker = sm.sessions_dir / safe_key / ".archived"
         if marker.exists():
             archived.append(s)
@@ -726,7 +736,7 @@ async def sessions_list_archived_handler(
                     fkey = s.get("key", "")
                     if any(a.get("key") == fkey for a in archived):
                         continue
-                    safe_key = safe_filename(fkey.replace(":", "_"))
+                    safe_key = session_files_dir_key(fkey)
                     marker = folder_sm.sessions_dir / safe_key / ".archived"
                     if marker.exists():
                         archived.append({**s, "workspace": str(root)})

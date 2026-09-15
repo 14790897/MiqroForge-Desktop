@@ -35,11 +35,14 @@ def _setup_session(session_key: str, client_id: str | None, *, set_owner: bool =
 
 
 def _ensure_session_file(workspace, session_key: str, filename: str, content: str = "data"):
-    """Create a file in the session's files directory."""
-    from miqi.utils.helpers import safe_filename
+    """Create a file in the session's files directory.
 
-    safe_key = safe_filename(session_key.replace(":", "_"))
-    files_dir = workspace / "sessions" / safe_key / "files"
+    目录名走公共派生（#1014）：这里模拟的是**当前**写侧会创建的目录，
+    三段 namespaced key 下 raw 公式会建到 handler 找不到的地方。
+    """
+    from miqi.session.session_keys import session_files_dir_key
+
+    files_dir = workspace / "sessions" / session_files_dir_key(session_key) / "files"
     files_dir.mkdir(parents=True, exist_ok=True)
     (files_dir / filename).write_text(content, encoding="utf-8")
     return files_dir / filename
