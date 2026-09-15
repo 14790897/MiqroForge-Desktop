@@ -572,6 +572,36 @@ test.describe('File Attachment Chips', () => {
     await expect(composerChips(page).getByText('race_b.bin')).toHaveCount(0);
   });
 
+  test('Capacity is not leaked after removing while a file is pending', async () => {
+    // 24MB 已提交
+    const a = path.join(FIXTURE_DIR, 'leak_a.bin');
+    fs.writeFileSync(a, Buffer.alloc(24 * 1024 * 1024));
+    await attachFile(page, a);
+    await expect(composerChips(page).getByText('leak_a.bin')).toHaveCount(1, { timeout: 10_000 });
+
+    // 同一 JS 任务内：移除 24MB，并发起 12MB 新附件（模拟“删旧 + pending 提交”交错）
+    await page.evaluate(() => {
+      const remove = Array.from(document.querySelectorAll('button')).find((b) =>
+        (b.getAttribute('aria-label') || '').includes('移除 leak_a.bin')
+      );
+      remove?.click();
+      const input = document.querySelector('input[type="file"]') as HTMLInputElement;
+      const dt = new DataTransfer();
+      dt.items.add(new File([new Uint8Array(12 * 1024 * 1024)], 'leak_b.bin'));
+      input.files = dt.files;
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    await expect(composerChips(page).getByText('leak_b.bin')).toHaveCount(1, { timeout: 10_000 });
+    await expect(composerChips(page).getByText('leak_a.bin')).toHaveCount(0);
+
+    // 若 reservation 泄漏（12MB 被重复计），下面 22MB 会被误拒（12+12+22>40）；
+    // 正确记账应为 12+22=34 → 允许。
+    const c = path.join(FIXTURE_DIR, 'leak_c.bin');
+    fs.writeFileSync(c, Buffer.alloc(22 * 1024 * 1024));
+    await attachFile(page, c);
+    await expect(composerChips(page).getByText('leak_c.bin')).toHaveCount(1, { timeout: 10_000 });
+  });
+
   test('Send button disabled while extracting', async () => {
     await attachFile(page, FILES.largePdf);
     const sendBtn = page

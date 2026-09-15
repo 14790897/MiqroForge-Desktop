@@ -2630,17 +2630,11 @@ export function ChatConsole({
   /** 附件总量上限（与主进程剪贴板一致）：renderer 侧 input/拖拽/paste 三入口统一。 */
   const MAX_TOTAL_ATTACHMENT_BYTES = 40 * 1024 * 1024;
   const attachmentsRef = useRef<Attachment[]>([]);
-  /** 已接受但尚未被 state 提交的字节（同步预留）：两个异步 action 并发时，
+  /** 已接受但尚未提交的字节（同步预留）：两个异步 action 并发时，
    *  只读 attachmentsRef 会各自看到旧总量而突破 40MB（review P1）。 */
   const reservedBytesRef = useRef(0);
-  const committedBytesRef = useRef(0);
   useEffect(() => {
     attachmentsRef.current = attachments;
-    const bytes = attachments.reduce((sum, a) => sum + (a.size || 0), 0);
-    const delta = bytes - committedBytesRef.current;
-    // 新提交的字节从「已预留」转为「已提交」
-    if (delta > 0) reservedBytesRef.current = Math.max(0, reservedBytesRef.current - delta);
-    committedBytesRef.current = bytes;
   }, [attachments]);
   const attachmentsBytes = () =>
     attachmentsRef.current.reduce((sum, a) => sum + (a.size || 0), 0) + reservedBytesRef.current;
@@ -2652,6 +2646,12 @@ export function ChatConsole({
   };
   const releaseReservation = (size: number) => {
     reservedBytesRef.current = Math.max(0, reservedBytesRef.current - size);
+  };
+  /** 附件真正提交进 state 时，释放它自己的预留。不能用「提交后总字节的净变化」推断：
+   *  用户先删旧附件、随后 pending 附件提交时净变化为负，会漏释放（reservation 泄漏）。 */
+  const commitAttachment = (add: (prev: Attachment[]) => Attachment[], size: number) => {
+    setAttachments(add);
+    releaseReservation(size);
   };
   const [historyLoaded, setHistoryLoaded] = useState(false);
   const [downloadingPaperId, setDownloadingPaperId] = useState<string | null>(null);
@@ -4162,10 +4162,18 @@ export function ChatConsole({
           // 读取失败：释放已预留的字节，避免预留位泄漏把后续附件挡住
           reader.onerror = () => releaseReservation(file.size);
           reader.onload = () =>
-            setAttachments((prev) => [
-              ...prev,
-              { name: file.name, type: 'text', content: reader.result as string, size: file.size },
-            ]);
+            commitAttachment(
+              (prev) => [
+                ...prev,
+                {
+                  name: file.name,
+                  type: 'text',
+                  content: reader.result as string,
+                  size: file.size,
+                },
+              ],
+              file.size
+            );
           reader.readAsText(file);
         } else if (isTextLike && isDocument) {
           // Markdown/text files detected as documents — read as text AND as base64 for server fallback
@@ -4177,19 +4185,22 @@ export function ChatConsole({
             const textContent = new TextDecoder().decode(
               Uint8Array.from(atob(base64), (c) => c.charCodeAt(0))
             );
-            setAttachments((prev) => [
-              ...prev,
-              {
-                name: file.name,
-                type: 'document',
-                dataBase64: base64,
-                content: textContent,
-                dataUrl: reader.result as string,
-                size: file.size,
-                mimeType: file.type || getMimeTypeFromName(file.name),
-                status: 'pending' as const,
-              },
-            ]);
+            commitAttachment(
+              (prev) => [
+                ...prev,
+                {
+                  name: file.name,
+                  type: 'document',
+                  dataBase64: base64,
+                  content: textContent,
+                  dataUrl: reader.result as string,
+                  size: file.size,
+                  mimeType: file.type || getMimeTypeFromName(file.name),
+                  status: 'pending' as const,
+                },
+              ],
+              file.size
+            );
           };
           reader.readAsDataURL(file);
         } else if (isDocument) {
@@ -4203,18 +4214,21 @@ export function ChatConsole({
             const isServerParsed = /^(docx|doc|pptx|ppt|xlsx|xls|odt|odp|ods|rtf)$/i.test(ext);
             const parseStatus: Attachment['status'] = isServerParsed ? 'pending' : 'done';
 
-            setAttachments((prev) => [
-              ...prev,
-              {
-                name: file.name,
-                type: 'document',
-                dataUrl: reader.result as string,
-                dataBase64: base64,
-                size: file.size,
-                mimeType: file.type || getMimeTypeFromName(file.name),
-                status: parseStatus,
-              },
-            ]);
+            commitAttachment(
+              (prev) => [
+                ...prev,
+                {
+                  name: file.name,
+                  type: 'document',
+                  dataUrl: reader.result as string,
+                  dataBase64: base64,
+                  size: file.size,
+                  mimeType: file.type || getMimeTypeFromName(file.name),
+                  status: parseStatus,
+                },
+              ],
+              file.size
+            );
           };
           reader.readAsDataURL(file);
         } else if (isImage) {
@@ -4222,10 +4236,18 @@ export function ChatConsole({
           // 读取失败：释放已预留的字节，避免预留位泄漏把后续附件挡住
           reader.onerror = () => releaseReservation(file.size);
           reader.onload = () =>
-            setAttachments((prev) => [
-              ...prev,
-              { name: file.name, type: 'image', dataUrl: reader.result as string, size: file.size },
-            ]);
+            commitAttachment(
+              (prev) => [
+                ...prev,
+                {
+                  name: file.name,
+                  type: 'image',
+                  dataUrl: reader.result as string,
+                  size: file.size,
+                },
+              ],
+              file.size
+            );
           reader.readAsDataURL(file);
         } else {
           // 未知类型：保留字节按文档收下（避免“粘贴/拖入后毫无反应”）
@@ -4235,18 +4257,21 @@ export function ChatConsole({
           reader.onload = () => {
             const base64 = (reader.result as string).split(',')[1];
             const name = file.name || `pasted-file-${Date.now()}`;
-            setAttachments((prev) => [
-              ...prev,
-              {
-                name,
-                type: 'document',
-                dataBase64: base64,
-                dataUrl: reader.result as string,
-                size: file.size,
-                mimeType: file.type || getMimeTypeFromName(name),
-                status: 'done' as const,
-              },
-            ]);
+            commitAttachment(
+              (prev) => [
+                ...prev,
+                {
+                  name,
+                  type: 'document',
+                  dataBase64: base64,
+                  dataUrl: reader.result as string,
+                  size: file.size,
+                  mimeType: file.type || getMimeTypeFromName(name),
+                  status: 'done' as const,
+                },
+              ],
+              file.size
+            );
           };
           reader.readAsDataURL(file);
         }
@@ -4313,26 +4338,32 @@ export function ChatConsole({
       if (seenContentRecently(size, mime, name)) return false;
       if (!acceptInAttachAction(actionId, `${name}:${size}`)) return false;
       if (mime.startsWith('image/')) {
-        setAttachments((prev) => [
-          ...prev,
-          { name, type: 'image', dataUrl: `data:${mime};base64,${base64}`, size },
-        ]);
+        commitAttachment(
+          (prev) => [
+            ...prev,
+            { name, type: 'image', dataUrl: `data:${mime};base64,${base64}`, size },
+          ],
+          size
+        );
         return true;
       }
       const ext = name.split('.').pop()?.toLowerCase() ?? '';
       const isServerParsed = /^(docx|doc|pptx|ppt|xlsx|xls|odt|odp|ods|rtf)$/i.test(ext);
-      setAttachments((prev) => [
-        ...prev,
-        {
-          name,
-          type: 'document',
-          dataBase64: base64,
-          dataUrl: `data:${mime};base64,${base64}`,
-          size,
-          mimeType: mime,
-          status: isServerParsed ? 'pending' : 'done',
-        },
-      ]);
+      commitAttachment(
+        (prev) => [
+          ...prev,
+          {
+            name,
+            type: 'document',
+            dataBase64: base64,
+            dataUrl: `data:${mime};base64,${base64}`,
+            size,
+            mimeType: mime,
+            status: isServerParsed ? 'pending' : 'done',
+          },
+        ],
+        size
+      );
       return true;
     },
     []
