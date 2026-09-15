@@ -100,6 +100,12 @@ test.describe('Issue #811 护栏误拦截复现 (real LLM)', () => {
    *  往返 + 每次 exec 25-30s spawn。模型安全对齐可能对「危险命令」抢跑拒答，
    *  但 tool_host 的 collab gate（非 ask_user_confirm_card）会弹确认卡，这里
    *  点掉 primary 按钮让回合继续，直到护栏结构化文本落地。 */
+  /**
+   * 模型「按自身安全对齐抢跑拒答」时的常见措辞。命中它意味着模型压根没去调 exec，
+   * 沙箱护栏因此没被触发——那是前提未满足，不是护栏回归。
+   */
+  const SELF_REFUSAL = /我不能执行|不会执行|无法执行|拒绝执行|不能帮你执行/;
+
   async function driveExecAndAssert(
     prompt: string,
     expectPattern: RegExp | string,
@@ -143,20 +149,25 @@ test.describe('Issue #811 护栏误拦截复现 (real LLM)', () => {
       }
       text = (await page.locator('main').textContent()) ?? '';
       const len = text.length;
+      // 先更新 exec 信号再判稳定，让下面的提前收手用的是本回合的最新状态
+      if (!sawExecCommand) {
+        sawExecCommand =
+          (await page.locator('[data-testid="tool-command-copy"]').count()) > execCountBefore;
+      }
       if (len > 0) {
         if (lastLen !== -1 && Math.abs(len - lastLen) < 10) {
           stable += 1;
           if (stable >= 3 && matches(text)) break;
           if (stable >= 3 && rejectKeyword && text.includes(rejectKeyword)) break;
+          // 模型自行拒答、且本回合压根没出现过 exec 命令块 → 护栏没被触发。这里**必须
+          // 提前收手**：RUN_CAP 正好等于测试超时（480s），让循环自然跑完的话测试会先
+          // 超时，下面那个 precondition 判定根本执行不到（这就是上一版没生效的原因）。
+          if (stable >= 3 && !sawExecCommand && SELF_REFUSAL.test(text)) break;
         } else {
           stable = 0;
         }
       }
       lastLen = len;
-      if (!sawExecCommand) {
-        sawExecCommand =
-          (await page.locator('[data-testid="tool-command-copy"]').count()) > execCountBefore;
-      }
       if (text !== lastText) {
         lastText = text;
         idleDeadline = Date.now() + IDLE_DEADLINE;
@@ -172,11 +183,7 @@ test.describe('Issue #811 护栏误拦截复现 (real LLM)', () => {
       // 两个条件缺一不可：① 全程没出现过 exec 命令块（硬信号，见上）；
       // ② 回复里是明确的自拒口吻。少任何一个都照常断言——如果护栏真坏了、模型又调了
       // exec，①为假，走下面的 expect，失败照报。
-      if (
-        !sawExecCommand &&
-        !matches(text) &&
-        /我不能执行|不会执行|无法执行|拒绝执行|不能帮你执行/.test(text)
-      ) {
+      if (!sawExecCommand && !matches(text) && SELF_REFUSAL.test(text)) {
         console.log(
           '[test] ⚠️ 全程无 exec 命令块且模型自行拒答，沙箱护栏未被触发 — 跳过（precondition 未满足）'
         );
