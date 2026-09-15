@@ -594,9 +594,9 @@ async def test_get_tracked_files_ignores_stale_copy_of_rebound_session(tmp_path)
     """#1061 复审：改绑后旧文件夹里的零消息副本不得遮蔽真账本。
 
     一份零消息的副本本身说明不了它是不是本会话的账本所在：同一个 key 可以因为
-    改绑而在旧文件夹留下一份。扫描按 stub 的 updated_at 倒序走，旧副本在前，
-    ``require_messages=False`` 又让它成为「合法的零消息副本」——于是它被当成
-    本会话的账本所在，资产面板读回空列表。扫描候选必须真的持有 tracked_files.json。
+    改绑而在旧文件夹留下一份。扫描按 stub 的 updated_at 倒序走，旧副本排在前，
+    若解析只看「会话副本存在」就选它，资产面板读回空列表。扫描候选必须真的持有
+    tracked_files.json。
     """
     from miqi.runtime.app_server import ClientSessionRegistry
     from miqi.runtime.session_handlers import sessions_get_tracked_files_handler
@@ -638,6 +638,78 @@ async def test_clear_tracked_files_ignores_stale_copy_of_rebound_session(tmp_pat
     finally:
         sm.delete(key, client_id="client-A")
         sm.delete(anchor, client_id="client-A")
+
+
+def _rebound_without_binding(tmp_path, key: str, *, asset: str):
+    """同上，但 app-home 对 key 没有 stub——冷启动没有 binding 可作种子，只能扫描。
+
+    旧文件夹的 stub 带更晚的 ``updated_at``，扫描顺序里它排第一：拿到真账本只能
+    靠「候选必须自己持有 tracked_files.json」，靠不了顺序。
+    """
+    from datetime import timedelta
+    from pathlib import Path
+
+    stale = tmp_path / "stale-ws"
+    live = tmp_path / "live-ws"
+    stale.mkdir()
+    live.mkdir()
+    _make_folder_session(stale, key, "client-A")
+    _make_folder_session(live, key, "client-A", asset=asset)
+
+    anchor_a = "desktop:1061-scan-anchor-a"
+    anchor_b = "desktop:1061-scan-anchor-b"
+    sm, _ws = _setup_session(anchor_a, "client-A")
+    a_stub = sm.get_or_create(anchor_a, client_id="client-A", workspace=stale)
+    a_stub.updated_at = a_stub.updated_at + timedelta(days=1)
+    sm.save(a_stub)
+    sm.save(sm.get_or_create(anchor_b, client_id="client-A", workspace=live))
+    sm.invalidate(anchor_a)
+    sm.invalidate(anchor_b)
+
+    order = [
+        str(Path(p).expanduser().resolve())
+        for p in sm.list_bound_workspaces(client_id="client-A", include_archived=True)
+    ]
+    assert order.index(str(stale.resolve())) < order.index(str(live.resolve())), order
+    return stale, live, sm, anchor_a, anchor_b
+
+
+@pytest.mark.asyncio
+async def test_tracked_files_resolve_ledger_owner_without_binding(tmp_path):
+    """评审要求的场景：同 key 在 A 有空副本且无账本、B 有真账本，冷启动无 runtime。
+
+    app-home 对本会话没有 stub，没有 binding 可作种子，解析只能走扫描；而扫描按
+    stub 的 updated_at 倒序，A 排在前。副本存在说明不了它持有账本——读和清都必须
+    落在 B 上，否则读回空列表、清理清错文件夹。
+    """
+    from miqi.agent.tools.filesystem import _session_files_dir_key
+    from miqi.runtime.app_server import ClientSessionRegistry
+    from miqi.runtime.session_handlers import (
+        sessions_clear_tracked_files_handler,
+        sessions_get_tracked_files_handler,
+    )
+
+    key = "desktop:1061-scan-ledger"
+    stale, live, sm, anchor_a, anchor_b = _rebound_without_binding(
+        tmp_path, key, asset="real.txt"
+    )
+    store = live / "sessions" / _session_files_dir_key(key) / "tracked_files.json"
+    assert store.exists()
+    try:
+        out = await sessions_get_tracked_files_handler(
+            "req-1", {"session_key": key}, "client-A", None, ClientSessionRegistry(),
+        )
+        paths = {item["path"] for item in out["result"]["tracked_files"]}
+        assert any(p.endswith("real.txt") for p in paths), paths
+
+        cleared = await sessions_clear_tracked_files_handler(
+            "req-1", {"session_key": key}, "client-A", None, ClientSessionRegistry(),
+        )
+        assert cleared["result"]["cleared"] is True
+        assert not store.exists(), f"clear 没落到真账本：{store}"
+    finally:
+        sm.delete(anchor_a, client_id="client-A")
+        sm.delete(anchor_b, client_id="client-A")
 
 
 # ── #983 缺口 2：DownloadSink 产物进 tracked（面板读端回路）────────────────

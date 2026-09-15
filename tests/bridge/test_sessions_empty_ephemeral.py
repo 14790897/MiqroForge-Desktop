@@ -560,11 +560,11 @@ async def test_sessions_list_resolves_folder_bound_sessions_from_workspace():
 
 @pytest.mark.asyncio
 async def test_sessions_get_ignores_message_less_folder_copy():
-    """require_messages 默认 True 是刻意的：无消息的文件夹副本不是历史权威。
+    """无消息的文件夹副本不是历史权威——读对话这条路径不接受它。
 
     #1061 让资产面板认「零消息的文件夹副本」（资产与历史无关），但那只适用于
-    tracked files 的解析。读对话这条路径若一并放宽，一份空副本就会被当成会话
-    历史——这里把该默认值钉住。
+    tracked files 那条解析（`_find_ledger_root`）。读对话的 `_find_folder_session`
+    若一并放宽，一份空副本就会被当成会话历史——这里把这条规则钉住。
     """
     import shutil
 

@@ -97,68 +97,108 @@ def _candidate_workspace_roots(
     return roots
 
 
+def _probe_folder(root: Path, session_key: str, client_id: str) -> tuple[Any, Any] | None:
+    """``(SessionManager, session)`` when ``root`` holds a client-owned copy.
+
+    None when the root has no copy at all, or holds one owned by another client —
+    folder copies are never adopted across clients.
+    """
+    from miqi.session.manager import SessionManager
+
+    try:
+        folder_sm = SessionManager(root)
+        folder_session = folder_sm.load_existing(session_key)
+    except Exception:
+        return None
+    if folder_session is None:
+        return None
+    owner = folder_session.metadata.get("owner_client_id")
+    if owner is not None and owner != client_id:
+        return None
+    return folder_sm, folder_session
+
+
 def _find_folder_session(
     sm: Any,
     session_key: str,
     client_id: str,
     *,
     extra_workspace: str | None = None,
-    require_messages: bool = True,
-    require_ledger_in_scan: bool = False,
 ) -> tuple[Any, Path] | None:
-    """Locate the authoritative folder-root copy of a session.
+    """Locate the authoritative folder-root copy of a session's *conversation*.
 
     Returns (folder_session, folder_root) for the first known root that holds
-    the session, or None.  Sessions owned by a different client are skipped —
-    never leak another client's data.
+    the session, or None.  An empty copy is not authoritative for history, so a
+    session whose folder copy has no message yet stays app-home's.
 
-    ``require_messages`` defaults to True: callers resolving the *conversation*
-    need an empty copy rejected, since it is not authoritative for history.
-    Callers resolving state that outlives the conversation — tracked files,
-    which the runtime writes under its own workspace root whether or not a
-    message was ever sent — must pass False, or a session with assets but no
-    history resolves back to app-home and reads an empty ledger (#1061).
-
-    ``require_ledger_in_scan`` applies to the *scanned* roots only.  A root
-    handed in through ``extra_workspace`` is authoritative by construction (it
-    is the live runtime's own workspace, or the folder this session's stub is
-    bound to) and is accepted on the session's presence alone.  Roots reached by
-    scanning are guesses, and with ``require_messages`` off a message-less copy
-    is indistinguishable from the real one: one key can have copies under
-    several folders, since rebinding a session through the workspace picker
-    leaves the old folder's copy on disk.  Scanning walks roots newest-stub
-    first, so that stale copy can come first and shadow the ledger — reads come
-    back empty and clears wipe the wrong folder.  Demanding the candidate hold
-    this session's tracked_files.json is what tells the real one apart.
+    Readers of state that outlives the conversation — tracked files, which the
+    runtime writes under its own workspace root whether or not a message was
+    ever sent — need a different authority rule and go through
+    ``_find_ledger_root`` instead (#1061).
     """
-    from miqi.session.manager import SessionManager
-
-    seed: Path | None = None
-    if extra_workspace:
-        try:
-            seed = SessionManager._validate_workspace(Path(extra_workspace))
-        except Exception:
-            seed = None
-
     for root in _candidate_workspace_roots(
         sm, client_id, extra=[extra_workspace] if extra_workspace else None,
     ):
-        try:
-            folder_sm = SessionManager(root)
-            folder_session = folder_sm.load_existing(session_key)
-            if folder_session is None:
-                continue
-            if require_messages and not folder_session.messages:
-                continue
-            if require_ledger_in_scan and (seed is None or root != seed):
-                if not folder_sm.load_tracked_files(session_key, client_id=client_id):
-                    continue
-        except Exception:
+        probed = _probe_folder(root, session_key, client_id)
+        if probed is None:
             continue
-        owner = folder_session.metadata.get("owner_client_id")
-        if owner is not None and owner != client_id:
+        folder_session = probed[1]
+        if not folder_session.messages:
             continue
         return folder_session, root
+    return None
+
+
+def _find_ledger_root(
+    sm: Any,
+    session_key: str,
+    client_id: str,
+    *,
+    runtime_workspace: str | None = None,
+) -> Path | None:
+    """Root whose copy of this session owns its ``tracked_files.json`` (#1061).
+
+    Tracked files resolve by a different authority rule than the conversation,
+    so they get their own resolver instead of a mode flag on that one.
+
+    Two roots are authoritative, in the order writes follow them: the live
+    runtime's workspace (also the only handle on the folder when the session
+    carries no app-home stub at all), then the folder this session's stub is
+    bound to.  They are accepted on the session's presence, because they *are*
+    the answer to "where does this session live" — a ledger that has not been
+    written there yet must not be answered by some other folder.
+
+    Roots discovered by scanning are guesses, and a copy of the session is not
+    evidence: one key can have copies under several folders, since rebinding a
+    session through the workspace picker leaves the old folder's copy behind.
+    Scanning walks stubs newest-first, so a stale ledger-less copy comes first
+    and answers for the ledger — reads come back empty and clears wipe the wrong
+    folder.  Scan candidates must hold the ledger themselves to qualify.
+    """
+    from miqi.session.manager import SessionManager
+
+    stub = sm.load_existing(session_key)
+    seeds = [runtime_workspace, stub.metadata.get("workspace") if stub else None]
+    for seed in seeds:
+        if not seed:
+            continue
+        try:
+            seed_root = SessionManager._validate_workspace(Path(seed))
+        except Exception:
+            continue
+        if _probe_folder(seed_root, session_key, client_id) is not None:
+            return seed_root
+
+    for root in _candidate_workspace_roots(sm, client_id):
+        probed = _probe_folder(root, session_key, client_id)
+        if probed is None:
+            continue
+        try:
+            if not probed[0].load_tracked_files(session_key, client_id=client_id):
+                continue
+        except Exception:
+            continue
+        return root
     return None
 
 
@@ -196,18 +236,8 @@ async def _tracked_files_manager(
 ) -> Any:
     """SessionManager holding this session's tracked-files ledger (#1061).
 
-    Falls back to ``sm`` (app-home) when no folder copy holds the ledger.
-    Tracked files are written by the runtime into its own workspace root and are
-    independent of conversation history, so this resolution deliberately does
-    not require messages.
-
-    Two roots are authoritative, and the order between them is the order writes
-    follow: a live runtime (also the only handle on the folder when the session
-    carries no app-home stub at all), then the folder this session's stub is
-    bound to.  Seeding them keeps precedence honest — a scanned root that merely
-    *has* a ledger must not outrank the folder the session actually lives in, or
-    a stale copy under an old folder would shadow the real ledger and the assets
-    panel would show another folder's files.
+    Falls back to ``sm`` (app-home) when no folder copy owns the ledger; the
+    rule that picks the owner lives in ``_find_ledger_root``.
     """
     from miqi.session.manager import SessionManager
 
@@ -221,20 +251,13 @@ async def _tracked_files_manager(
             logger.debug(
                 "tracked files: runtime lookup failed for {}: {}", session_key, exc,
             )
-    authoritative = _active_runtime_workspace(runtime)
-    if authoritative is None:
-        stub = sm.load_existing(session_key)
-        if stub is not None:
-            authoritative = stub.metadata.get("workspace") or None
-    found = _find_folder_session(
+    root = _find_ledger_root(
         sm,
         session_key,
         client_id,
-        extra_workspace=authoritative,
-        require_messages=False,
-        require_ledger_in_scan=True,
+        runtime_workspace=_active_runtime_workspace(runtime),
     )
-    return SessionManager(found[1]) if found is not None else sm
+    return SessionManager(root) if root is not None else sm
 
 
 def _tracked_files_store_key(session_key: str) -> str:
@@ -499,8 +522,6 @@ async def sessions_get_handler(
                     session_key,
                     client_id,
                     extra_workspace=str(ws) if ws else _active_runtime_workspace(runtime),
-                    # Reading the conversation: an empty copy is not authoritative.
-                    require_messages=True,
                 )
                 if found is not None:
                     folder_session, authoritative_ws = found
