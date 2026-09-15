@@ -33,7 +33,6 @@ export function extractDoi(url: string): string | undefined {
 }
 
 const TRAILING_URL_RE = /(https?:\/\/\S+)/i;
-const YEAR_RE = /\b(?:19|20)\d{2}\b/;
 
 /**
  * 从 markdown 里解析文末「参考文献」列表。
