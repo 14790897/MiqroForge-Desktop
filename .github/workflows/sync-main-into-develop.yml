@@ -13,6 +13,8 @@ on:
   workflow_run:
     workflows: ["Release and Build"]
     types: [completed]
+    # Release and Build 支持任意分支手动触发，限定只认 main 上的完成事件
+    branches: [main]
   release:
     types: [published]
   workflow_dispatch:
