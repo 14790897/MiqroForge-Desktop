@@ -196,7 +196,7 @@ test.describe.serial('Privacy consent gate (#837)', () => {
     expect(refilled).toBe('2.0');
     // preload 同步读到的权威存储值也应一致
     const durable = await page.evaluate(
-      () => (window as any).miqi?.privacy?.initialConsentVersion ?? null
+      () => (window as any).miqi?.privacy?.initialConsent?.version ?? null
     );
     expect(durable).toBe('2.0');
   });

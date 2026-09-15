@@ -8,7 +8,7 @@
  * Chromium 存储懒刷盘影响）。渲染层 localStorage 保留为快速缓存。
  */
 import { join } from 'node:path';
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { electron } from '../shared/electron';
 
 const { app } = electron;
@@ -37,11 +37,16 @@ export function writeConsentVersion(version: string | null): void {
       return;
     }
     mkdirSync(app.getPath('userData'), { recursive: true });
+    // 先写临时文件再原子改名：直接 writeFileSync 会先截断目标文件，
+    // 中途中断会留下半截 JSON → readConsentVersion 读成 null → 已同意的
+    // 用户又被弹一次确认门（CodeRabbit 评审）。
+    const tmpPath = `${storePath()}.tmp`;
     writeFileSync(
-      storePath(),
+      tmpPath,
       JSON.stringify({ version, updatedAt: new Date().toISOString() }, null, 2),
       'utf8'
     );
+    renameSync(tmpPath, storePath());
   } catch {
     /* 磁盘不可写：本实例仍以内存态继续，渲染层缓存不受影响 */
   }

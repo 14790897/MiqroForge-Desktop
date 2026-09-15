@@ -88,14 +88,7 @@ export function recordConsent(
   storage?: Pick<Storage, 'setItem'> | null,
   version: string = PRIVACY_VERSION
 ): void {
-  const s = storage ?? resolveLocalStorage();
-  if (s) {
-    try {
-      s.setItem(PRIVACY_CONSENT_KEY, version);
-    } catch {
-      /* storage unavailable — consent applies for this session only */
-    }
-  }
+  writeConsentCache(version, storage);
   const bridge = resolvePrivacyBridge();
   try {
     void bridge?.setConsent(version)?.catch?.(() => {
@@ -106,28 +99,49 @@ export function recordConsent(
   }
 }
 
-/** 主进程权威存储中的同意版本（preload 在页面脚本之前同步读到）。 */
-export function readDurableConsent(): string | null {
-  const bridge = resolvePrivacyBridge();
+/** 只写 localStorage 缓存（权威值回填用，不再回写主进程）。 */
+function writeConsentCache(version: string, storage?: Pick<Storage, 'setItem'> | null): void {
+  const s = storage ?? resolveLocalStorage();
+  if (!s) return;
   try {
-    const value = bridge?.initialConsentVersion;
-    return typeof value === 'string' && value ? value : null;
+    s.setItem(PRIVACY_CONSENT_KEY, version);
   } catch {
-    return null;
+    /* storage unavailable — consent applies for this session only */
   }
 }
 
+/** 主进程权威存储的读取结果：read=false 表示主进程不可用，而非「未同意」。 */
+export interface DurableConsent {
+  read: boolean;
+  version: string | null;
+}
+
+/** 主进程权威存储中的同意版本（preload 在页面脚本之前同步读到）。 */
+export function readDurableConsent(): DurableConsent {
+  const bridge = resolvePrivacyBridge();
+  const value = bridge?.initialConsent;
+  if (value && typeof value.read === 'boolean') {
+    return {
+      read: value.read,
+      version: typeof value.version === 'string' && value.version ? value.version : null,
+    };
+  }
+  return { read: false, version: null };
+}
+
 /**
- * 解析当前同意版本（#1071）：localStorage 缓存优先；缓存为空时回落到主进程
- * 权威存储并回填缓存 —— 双开（第二个实例的 Chromium 存储退化成内存）或
- * 缓存被清时，用户不会再次被强制确认。
+ * 解析当前同意版本（#1071）：主进程存储是权威来源——读取成功时以它为准
+ * （包括「无记录」的 null），localStorage 仅在主进程不可用时兜底；权威版本
+ * 回填缓存以便下次走快路径。缓存不会覆盖权威结论：过期缓存（例如权威记录
+ * 已被清除）不能放行未经同意的启动（CodeRabbit 评审）。
  */
 export function readConsentVersion(): string | null {
-  const cached = readStoredConsent();
-  if (cached) return cached;
   const durable = readDurableConsent();
-  if (durable) recordConsent(undefined, durable);
-  return durable;
+  if (durable.read) {
+    if (durable.version) writeConsentCache(durable.version);
+    return durable.version;
+  }
+  return readStoredConsent();
 }
 
 /** 清除同意记录（localStorage 缓存 + 主进程存储）。 */

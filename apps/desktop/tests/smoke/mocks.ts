@@ -203,9 +203,10 @@ export function buildMockBridgeScript(opts: MockBridgeOptions = {}): string {
 
   window.miqi = {
     // #1071：同意状态的权威存储由主进程持有；smoke 场景已用
-    // localStorage 预置同意版本（见 addInitScript），这里只补 no-op 接口。
+    // localStorage 预置同意版本（见 addInitScript），这里回同样的值，
+    // 保持「权威存储读取成功且与缓存一致」的语义。
     privacy: {
-      initialConsentVersion: null,
+      initialConsent: { read: true, version: '2.0' },
       setConsent: function() { return Promise.resolve({ ok: true }); },
     },
     runtime: {

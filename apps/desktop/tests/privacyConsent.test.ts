@@ -32,15 +32,15 @@ const makeStorage = (entries: Record<string, string> = {}) => {
 };
 
 /** 桩：preload 暴露的 privacy 桥接（记录 setConsent 调用）。 */
-const makePrivacyBridge = (initialConsentVersion: string | null = null) => {
+const makePrivacyBridge = (version: string | null = null, read = true) => {
   const calls: Array<string | null> = [];
   return {
     calls,
     bridge: {
       privacy: {
-        initialConsentVersion,
-        setConsent: async (version: string | null) => {
-          calls.push(version);
+        initialConsent: { read, version },
+        setConsent: async (v: string | null) => {
+          calls.push(v);
           return { ok: true };
         },
       },
@@ -177,26 +177,46 @@ describe('CONSENT_NOTICE_TEXT（首次启动弹窗提示）', () => {
 describe('主进程权威存储（#1071，缓存丢失兜底）', () => {
   afterEach(() => vi.unstubAllGlobals());
 
-  it('缓存为空时回落到权威存储并回填缓存', () => {
+  it('缓存为空时用权威存储的值并回填缓存', () => {
     const storage = makeStorage();
     const { calls, bridge } = makePrivacyBridge('2.0');
     vi.stubGlobal('localStorage', storage);
     vi.stubGlobal('window', { miqi: bridge });
 
     expect(readConsentVersion()).toBe('2.0');
-    // 回填缓存（下次启动走快路径），同时把权威存储值原样写回
+    // 回填缓存（下次走快路径），但不再回写权威存储
     expect(storage.getItem(PRIVACY_CONSENT_KEY)).toBe('2.0');
-    expect(calls).toEqual(['2.0']);
+    expect(calls).toEqual([]);
   });
 
-  it('缓存优先：有缓存时不依赖权威存储', () => {
+  it('权威存储读取成功时以其为准：过期缓存不放行（权威 null）', () => {
     const storage = makeStorage({ [PRIVACY_CONSENT_KEY]: '2.0' });
-    const { calls, bridge } = makePrivacyBridge('1.0');
+    const { bridge } = makePrivacyBridge(null);
+    vi.stubGlobal('localStorage', storage);
+    vi.stubGlobal('window', { miqi: bridge });
+
+    expect(readConsentVersion()).toBeNull();
+    expect(isConsentCurrent(readConsentVersion())).toBe(false);
+  });
+
+  it('权威存储的旧版本覆盖更新的缓存（以权威为准）', () => {
+    const storage = makeStorage({ [PRIVACY_CONSENT_KEY]: '2.0' });
+    const { bridge } = makePrivacyBridge('1.0');
+    vi.stubGlobal('localStorage', storage);
+    vi.stubGlobal('window', { miqi: bridge });
+
+    expect(readConsentVersion()).toBe('1.0');
+    expect(isConsentCurrent(readConsentVersion())).toBe(false);
+  });
+
+  it('主进程不可用（read=false）时回退 localStorage 缓存', () => {
+    const storage = makeStorage({ [PRIVACY_CONSENT_KEY]: '2.0' });
+    const { bridge } = makePrivacyBridge(null, false);
     vi.stubGlobal('localStorage', storage);
     vi.stubGlobal('window', { miqi: bridge });
 
     expect(readConsentVersion()).toBe('2.0');
-    expect(calls).toEqual([]);
+    expect(isConsentCurrent(readConsentVersion())).toBe(true);
   });
 
   it('两处都为空时返回 null（需要确认）', () => {
@@ -205,7 +225,7 @@ describe('主进程权威存储（#1071，缓存丢失兜底）', () => {
     vi.stubGlobal('window', { miqi: bridge });
 
     expect(readConsentVersion()).toBeNull();
-    expect(readDurableConsent()).toBeNull();
+    expect(readDurableConsent()).toEqual({ read: true, version: null });
     expect(isConsentCurrent(readConsentVersion())).toBe(false);
   });
 
@@ -236,7 +256,7 @@ describe('主进程权威存储（#1071，缓存丢失兜底）', () => {
     // 不 stub window：node 环境没有 window
     expect(() => readConsentVersion()).not.toThrow();
     expect(readConsentVersion()).toBeNull();
-    expect(readDurableConsent()).toBeNull();
+    expect(readDurableConsent()).toEqual({ read: false, version: null });
     expect(() => recordConsent()).not.toThrow();
     expect(() => clearConsent()).not.toThrow();
   });

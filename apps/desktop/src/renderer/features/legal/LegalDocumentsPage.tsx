@@ -6,7 +6,7 @@ import {
   PRIVACY_VERSION,
   getLegalDocument,
   isConsentCurrent,
-  readStoredConsent,
+  readConsentVersion,
   type LegalDocumentId,
 } from '../../lib/privacy';
 import { LegalDocContent } from './LegalDocContent';
@@ -20,7 +20,9 @@ export function LegalDocumentsPage() {
   const [consented, setConsented] = useState(false);
 
   useEffect(() => {
-    setConsented(isConsentCurrent(readStoredConsent()));
+    // 与 AppShell 同一判定来源（缓存 + 主进程权威存储），避免缓存丢失时
+    // 应用已放行而徽标显示「未同意」（CodeRabbit 评审）。
+    setConsented(isConsentCurrent(readConsentVersion()));
   }, []);
 
   const doc = getLegalDocument(activeId);

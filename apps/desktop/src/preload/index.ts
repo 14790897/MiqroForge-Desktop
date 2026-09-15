@@ -91,15 +91,16 @@ type FeedbackSubmitInputType = z.infer<typeof FeedbackSubmitInput>;
 
 /**
  * #1071：在页面脚本执行前同步取一次同意版本（主进程 userData 文件为权威存储）。
- * 主进程不可用（未注册 / 抛错）时返回 null —— 渲染层退回 localStorage 缓存判定，
- * 不能因为这一次读取失败而让整个 preload 抛错。
+ * 区分「读取成功但无记录」（read: true, version: null）与「主进程不可用」
+ * （read: false）——前者是权威结论（未同意），渲染层不得用 localStorage 缓存
+ * 覆盖；后者才允许回退到缓存判定（CodeRabbit 评审）。
  */
-function readInitialConsentVersion(): string | null {
+function readInitialConsent(): { read: boolean; version: string | null } {
   try {
     const value = ipcRenderer.sendSync(IPC.PRIVACY_GET_CONSENT) as unknown;
-    return typeof value === 'string' && value ? value : null;
+    return { read: true, version: typeof value === 'string' && value ? value : null };
   } catch {
-    return null;
+    return { read: false, version: null };
   }
 }
 
@@ -127,10 +128,10 @@ const api = {
       ipcRenderer.invoke(IPC.APP_PANEL_EXTRA, extra),
   },
   // -- 法律文件同意状态（#1071）------------------------------------------------
-  // initialConsentVersion 在页面脚本执行前同步取一次（主进程 userData 文件为
-  // 权威存储）——渲染层因此保持同步判定，双开/存储退化时也不会重复弹确认门。
+  // initialConsent 在页面脚本执行前同步取一次（主进程 userData 文件为权威存储）——
+  // 渲染层因此保持同步判定，双开/存储退化时也不会重复弹确认门。
   privacy: {
-    initialConsentVersion: readInitialConsentVersion(),
+    initialConsent: readInitialConsent(),
     setConsent: (version: string | null): Promise<{ ok: boolean }> =>
       ipcRenderer.invoke(IPC.PRIVACY_SET_CONSENT, version),
   },
