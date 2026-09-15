@@ -17,10 +17,6 @@ _MAX_REPLANS_PER_TURN = 5
 class CollaborativeTurnRunner(TurnRunner):
     """TurnRunner variant with an editable, model-driven plan boundary."""
 
-    # 基类计划闸门据此判断"本 runner 支持计划重规划循环"——支持时闸门先请模型
-    # 产出计划（而不是用工具标签代笔拼模板）。见 turn_runner.py 计划闸门段。
-    supports_plan_replan = True
-
     async def run(self, *, turn: Any, user_content: str, **kwargs: Any) -> Any:
         """Run the turn, restarting planning when the user adjusts the plan."""
         base_content = user_content
@@ -41,27 +37,8 @@ class CollaborativeTurnRunner(TurnRunner):
             adjustment = str(
                 getattr(turn, "_plan_adjustment_pending", "") or ""
             ).strip()
-            # #646-v2（2026-09-15）：闸门请求模型给出计划（而不是 harness 代笔）。
-            plan_request = str(
-                getattr(turn, "_plan_request_pending", "") or ""
-            ).strip()
-            if not adjustment and not plan_request:
+            if not adjustment:
                 return result
-
-            if plan_request:
-                # 追加一轮：把"请先给出计划"作为本轮约束注入，模型下一轮的
-                # ask_user_plan_confirm 内容即卡片内容（对齐 Claude Code
-                # ExitPlanMode 语义：计划由模型提交、审批由用户完成）。
-                current_content = f"{base_content}\n\n{plan_request}"
-                setattr(turn, "_plan_request_pending", "")
-                setattr(turn, "_plan_gate_blocked", False)
-                setattr(turn, "_plan_confirm_done", False)
-                setattr(turn, "_plan_phases", [])
-                setattr(turn, "_plan_seen_tools", [])
-                setattr(turn, "_plan_calls", [])
-                setattr(turn, "_plan_timeline_shown", False)
-                setattr(turn, "_run_ctx", None)
-                continue
 
             # Base TurnRunner returns before PlanSnapshot/TodoState creation
             # when the decision is "modify". Reset all per-plan state so the
