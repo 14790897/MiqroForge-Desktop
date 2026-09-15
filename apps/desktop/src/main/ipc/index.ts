@@ -54,6 +54,7 @@ import type {
   WslInstallAndProvisionResult,
 } from '../../shared/ipc';
 import { registerQraftIpcHandlers } from '../qraft/ipc';
+import { readConsentVersion, writeConsentVersion } from '../privacy-consent';
 import {
   classifyKernelInstall,
   classifyWslFeatureState,
@@ -2347,6 +2348,17 @@ for m in ("pydantic", "httpx", "loguru"):
   // 统一由主进程 app.quit() 收尾。
   ipcMain.handle(IPC.APP_QUIT, () => {
     app.quit();
+    return { ok: true };
+  });
+
+  // 法律文件同意状态（#1071）：主进程 userData 文件为权威存储。
+  // 读用 sendSync（preload 在页面脚本前同步取一次，渲染层保持同步判定，
+  // 避免确认门闪现）；写用 invoke。
+  ipcMain.on(IPC.PRIVACY_GET_CONSENT, (event) => {
+    event.returnValue = readConsentVersion();
+  });
+  ipcMain.handle(IPC.PRIVACY_SET_CONSENT, (_event, version: unknown) => {
+    writeConsentVersion(typeof version === 'string' && version ? version : null);
     return { ok: true };
   });
 

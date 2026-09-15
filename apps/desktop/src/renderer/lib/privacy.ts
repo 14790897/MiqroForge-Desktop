@@ -83,16 +83,79 @@ export function isConsentCurrent(
   return stored === version;
 }
 
-/** 记录同意（持久化到 localStorage）。 */
+/** 记录同意（localStorage 缓存 + 主进程权威存储）。 */
 export function recordConsent(
   storage?: Pick<Storage, 'setItem'> | null,
   version: string = PRIVACY_VERSION
 ): void {
   const s = storage ?? resolveLocalStorage();
-  if (!s) return;
+  if (s) {
+    try {
+      s.setItem(PRIVACY_CONSENT_KEY, version);
+    } catch {
+      /* storage unavailable — consent applies for this session only */
+    }
+  }
+  const bridge = resolvePrivacyBridge();
   try {
-    s.setItem(PRIVACY_CONSENT_KEY, version);
+    void bridge?.setConsent(version)?.catch?.(() => {
+      /* 主进程不可用：本次已在缓存/内存生效 */
+    });
   } catch {
-    /* storage unavailable — consent applies for this session only */
+    /* 桥接同步异常：同上 */
+  }
+}
+
+/** 主进程权威存储中的同意版本（preload 在页面脚本之前同步读到）。 */
+export function readDurableConsent(): string | null {
+  const bridge = resolvePrivacyBridge();
+  try {
+    const value = bridge?.initialConsentVersion;
+    return typeof value === 'string' && value ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 解析当前同意版本（#1071）：localStorage 缓存优先；缓存为空时回落到主进程
+ * 权威存储并回填缓存 —— 双开（第二个实例的 Chromium 存储退化成内存）或
+ * 缓存被清时，用户不会再次被强制确认。
+ */
+export function readConsentVersion(): string | null {
+  const cached = readStoredConsent();
+  if (cached) return cached;
+  const durable = readDurableConsent();
+  if (durable) recordConsent(undefined, durable);
+  return durable;
+}
+
+/** 清除同意记录（localStorage 缓存 + 主进程存储）。 */
+export function clearConsent(): void {
+  const s = resolveLocalStorage();
+  if (s) {
+    try {
+      s.removeItem(PRIVACY_CONSENT_KEY);
+    } catch {
+      /* ignore */
+    }
+  }
+  const bridge = resolvePrivacyBridge();
+  try {
+    void bridge?.setConsent(null)?.catch?.(() => {
+      /* ignore */
+    });
+  } catch {
+    /* ignore */
+  }
+}
+
+/** 取 preload 暴露的隐私桥接；非 Electron 环境（单测/浏览器）返回 null。 */
+function resolvePrivacyBridge(): Window['miqi']['privacy'] | null {
+  try {
+    if (typeof window === 'undefined') return null;
+    return window.miqi?.privacy ?? null;
+  } catch {
+    return null;
   }
 }

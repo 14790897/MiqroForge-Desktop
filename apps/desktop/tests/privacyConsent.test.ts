@@ -8,7 +8,10 @@ import {
   PRIVACY_CONSENT_KEY,
   LEGAL_DOCUMENTS,
   CONSENT_NOTICE_TEXT,
+  clearConsent,
   getLegalDocument,
+  readConsentVersion,
+  readDurableConsent,
   readStoredConsent,
   isConsentCurrent,
   recordConsent,
@@ -21,6 +24,26 @@ const makeStorage = (entries: Record<string, string> = {}) => {
     getItem: (key: string) => store.get(key) ?? null,
     setItem: (key: string, value: string) => {
       store.set(key, value);
+    },
+    removeItem: (key: string) => {
+      store.delete(key);
+    },
+  };
+};
+
+/** 桩：preload 暴露的 privacy 桥接（记录 setConsent 调用）。 */
+const makePrivacyBridge = (initialConsentVersion: string | null = null) => {
+  const calls: Array<string | null> = [];
+  return {
+    calls,
+    bridge: {
+      privacy: {
+        initialConsentVersion,
+        setConsent: async (version: string | null) => {
+          calls.push(version);
+          return { ok: true };
+        },
+      },
     },
   };
 };
@@ -148,5 +171,73 @@ describe('CONSENT_NOTICE_TEXT（首次启动弹窗提示）', () => {
     );
     expect(rendered).toContain('制定了《隐私政策》(以下简称“隐私政策”)和《用户协议》，请您在使用');
     expect(rendered).not.toContain('{{');
+  });
+});
+
+describe('主进程权威存储（#1071，缓存丢失兜底）', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('缓存为空时回落到权威存储并回填缓存', () => {
+    const storage = makeStorage();
+    const { calls, bridge } = makePrivacyBridge('2.0');
+    vi.stubGlobal('localStorage', storage);
+    vi.stubGlobal('window', { miqi: bridge });
+
+    expect(readConsentVersion()).toBe('2.0');
+    // 回填缓存（下次启动走快路径），同时把权威存储值原样写回
+    expect(storage.getItem(PRIVACY_CONSENT_KEY)).toBe('2.0');
+    expect(calls).toEqual(['2.0']);
+  });
+
+  it('缓存优先：有缓存时不依赖权威存储', () => {
+    const storage = makeStorage({ [PRIVACY_CONSENT_KEY]: '2.0' });
+    const { calls, bridge } = makePrivacyBridge('1.0');
+    vi.stubGlobal('localStorage', storage);
+    vi.stubGlobal('window', { miqi: bridge });
+
+    expect(readConsentVersion()).toBe('2.0');
+    expect(calls).toEqual([]);
+  });
+
+  it('两处都为空时返回 null（需要确认）', () => {
+    vi.stubGlobal('localStorage', makeStorage());
+    const { bridge } = makePrivacyBridge(null);
+    vi.stubGlobal('window', { miqi: bridge });
+
+    expect(readConsentVersion()).toBeNull();
+    expect(readDurableConsent()).toBeNull();
+    expect(isConsentCurrent(readConsentVersion())).toBe(false);
+  });
+
+  it('recordConsent 同时写缓存与权威存储', () => {
+    const storage = makeStorage();
+    const { calls, bridge } = makePrivacyBridge(null);
+    vi.stubGlobal('localStorage', storage);
+    vi.stubGlobal('window', { miqi: bridge });
+
+    recordConsent();
+    expect(storage.getItem(PRIVACY_CONSENT_KEY)).toBe(PRIVACY_VERSION);
+    expect(calls).toEqual([PRIVACY_VERSION]);
+  });
+
+  it('clearConsent 清缓存与权威存储（撤回同意/E2E 重置）', () => {
+    const storage = makeStorage({ [PRIVACY_CONSENT_KEY]: '2.0' });
+    const { calls, bridge } = makePrivacyBridge('2.0');
+    vi.stubGlobal('localStorage', storage);
+    vi.stubGlobal('window', { miqi: bridge });
+
+    clearConsent();
+    expect(storage.getItem(PRIVACY_CONSENT_KEY)).toBeNull();
+    expect(calls).toEqual([null]);
+  });
+
+  it('无 window/桥接（浏览器或单测环境）时安全降级', () => {
+    vi.stubGlobal('localStorage', makeStorage());
+    // 不 stub window：node 环境没有 window
+    expect(() => readConsentVersion()).not.toThrow();
+    expect(readConsentVersion()).toBeNull();
+    expect(readDurableConsent()).toBeNull();
+    expect(() => recordConsent()).not.toThrow();
+    expect(() => clearConsent()).not.toThrow();
   });
 });

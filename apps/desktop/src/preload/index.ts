@@ -89,6 +89,20 @@ type FeedbackSubmitInputType = z.infer<typeof FeedbackSubmitInput>;
 // Typed API exposed to the renderer via contextBridge
 // ---------------------------------------------------------------------------
 
+/**
+ * #1071：在页面脚本执行前同步取一次同意版本（主进程 userData 文件为权威存储）。
+ * 主进程不可用（未注册 / 抛错）时返回 null —— 渲染层退回 localStorage 缓存判定，
+ * 不能因为这一次读取失败而让整个 preload 抛错。
+ */
+function readInitialConsentVersion(): string | null {
+  try {
+    const value = ipcRenderer.sendSync(IPC.PRIVACY_GET_CONSENT) as unknown;
+    return typeof value === 'string' && value ? value : null;
+  } catch {
+    return null;
+  }
+}
+
 const api = {
   // -- Environment ------------------------------------------------------------
   // E2E 标记：main 在 MIQI_E2E=1 时通过 additionalArguments 下发 --miqi-e2e，
@@ -111,6 +125,14 @@ const api = {
       extra: number
     ): Promise<{ ok: boolean; applied: number; skipped?: boolean }> =>
       ipcRenderer.invoke(IPC.APP_PANEL_EXTRA, extra),
+  },
+  // -- 法律文件同意状态（#1071）------------------------------------------------
+  // initialConsentVersion 在页面脚本执行前同步取一次（主进程 userData 文件为
+  // 权威存储）——渲染层因此保持同步判定，双开/存储退化时也不会重复弹确认门。
+  privacy: {
+    initialConsentVersion: readInitialConsentVersion(),
+    setConsent: (version: string | null): Promise<{ ok: boolean }> =>
+      ipcRenderer.invoke(IPC.PRIVACY_SET_CONSENT, version),
   },
   // -- Runtime ----------------------------------------------------------------
   runtime: {

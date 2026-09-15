@@ -202,6 +202,12 @@ export function buildMockBridgeScript(opts: MockBridgeOptions = {}): string {
   // ── window.miqi ──────────────────────────────────────────────────
 
   window.miqi = {
+    // #1071：同意状态的权威存储由主进程持有；smoke 场景已用
+    // localStorage 预置同意版本（见 addInitScript），这里只补 no-op 接口。
+    privacy: {
+      initialConsentVersion: null,
+      setConsent: function() { return Promise.resolve({ ok: true }); },
+    },
     runtime: {
       start: function() { return Promise.resolve({ state: 'running', pid: 12345 }); },
       stop: function() { return Promise.resolve({ state: 'stopped', pid: 0 }); },

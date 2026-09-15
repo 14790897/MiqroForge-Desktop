@@ -1,15 +1,17 @@
 /**
  * 法律文件确认门 E2E (issue #837 / #1068) — 首次启动法律文件确认与设置页查阅。
  *
- * 覆盖四条路径（全部禁用 MIQI_E2E 绕过，走真实确认门）：
+ * 覆盖五条路径（全部禁用 MIQI_E2E 绕过，走真实确认门）：
  *  1. 拒绝并退出：首次启动展示《温馨提示》→ 点「不同意，退出」→ 应用退出；
  *  2. 同意进入：重启（同一 MIQI_HOME，同意未持久化）→ 门再次出现 →
  *     文内《隐私政策》链接可查看全文 → 倒计时结束后「同意」启用 → 点击 →
  *     主界面加载；
  *  3. 同意持久化：page.reload() 重挂载 AppShell → 门不再出现（同
- *     readStoredConsent/门判定路径；不重启进程——CI 上 close 后
+ *     readConsentVersion/门判定路径；不重启进程——CI 上 close 后
  *     relaunch 存在桥接端口残留，主界面长期不加载）；
- *  4. 应用内入口：设置 → 法律文件 页可查阅五份文件全文。
+ *  4. 缓存丢失兜底（#1071）：清掉 localStorage 缓存后重挂载 → 门不出现，
+ *     同意状态由主进程 userData 文件兜底并回填缓存；
+ *  5. 应用内入口：设置 → 法律文件 页可查阅五份文件全文。
  *
  * serial 模式：测试共享同一个 MIQI_HOME 的同意状态，必须按序执行
  * （playwright.config.ts 全局 fullyParallel）。
@@ -26,8 +28,24 @@ import { test, expect } from '@playwright/test';
 import type { ElectronApplication, Page } from '@playwright/test';
 import { launchElectronApp, relaunchElectronApp, closeElectronApp } from './helpers/electron-setup';
 
-/** 清掉共享 userData 里的同意记录（幂等）。 */
+/** 清掉同意记录（localStorage 缓存 + 主进程权威存储，幂等）。 */
 async function clearStoredConsent(page: Page) {
+  await page.evaluate(async () => {
+    try {
+      localStorage.removeItem('miqi:privacyConsentVersion');
+    } catch {
+      /* ignore */
+    }
+    try {
+      await (window as any).miqi?.privacy?.setConsent(null);
+    } catch {
+      /* ignore */
+    }
+  });
+}
+
+/** 只清 localStorage 缓存，保留主进程权威存储（#1071 回归用）。 */
+async function clearCachedConsentOnly(page: Page) {
   await page.evaluate(() => {
     try {
       localStorage.removeItem('miqi:privacyConsentVersion');
@@ -153,12 +171,34 @@ test.describe.serial('Privacy consent gate (#837)', () => {
   test('同意持久化：重挂载后不再展示确认门', { timeout: 180_000 }, async () => {
     // 不重启进程：CI 上 close 后 relaunch 存在桥接端口残留，主界面长期
     // 不加载。page.reload() 重新执行渲染层入口，AppShell 重新挂载，
-    // 走与冷启动完全相同的 readStoredConsent + 门判定路径。
+    // 走与冷启动完全相同的 readConsentVersion + 门判定路径。
     await page.reload();
     await expect(page.getByTestId('app-title')).toBeVisible({ timeout: 120_000 });
     await expect(page.getByTestId('privacy-consent-gate')).toHaveCount(0);
     // #1000：登录衔接页只在同意动作后出现一次，重挂载（已有同意记录）不再出现
     await expect(page.getByTestId('login-step')).toHaveCount(0);
+  });
+
+  test('同意不依赖 localStorage：缓存清空后仍不弹门（#1071）', { timeout: 180_000 }, async () => {
+    // 用户反馈「每次打开都强制看协议」：双开时第二个实例的 Chromium 存储
+    // 退化成内存，localStorage 既读不到也写不进。同意版本现在由主进程
+    // userData 文件兜底，这里模拟「缓存丢失」验证兜底路径。
+    await page.reload();
+    await expect(page.getByTestId('app-title')).toBeVisible({ timeout: 120_000 });
+
+    await clearCachedConsentOnly(page);
+    await page.reload();
+
+    // 纯 localStorage 丢失不再触发确认门，且缓存被权威存储回填
+    await expect(page.getByTestId('app-title')).toBeVisible({ timeout: 120_000 });
+    await expect(page.getByTestId('privacy-consent-gate')).toHaveCount(0);
+    const refilled = await page.evaluate(() => localStorage.getItem('miqi:privacyConsentVersion'));
+    expect(refilled).toBe('2.0');
+    // preload 同步读到的权威存储值也应一致
+    const durable = await page.evaluate(
+      () => (window as any).miqi?.privacy?.initialConsentVersion ?? null
+    );
+    expect(durable).toBe('2.0');
   });
 
   test('设置页可查阅五份法律文件', { timeout: 90_000 }, async () => {

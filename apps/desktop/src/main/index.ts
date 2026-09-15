@@ -153,6 +153,26 @@ export function main(): void {
     app.setPath('userData', join(app.getPath('appData'), 'miqi-desktop-dev', `ws-${wsHash}`));
   }
 
+  // ── 单实例（打包版，#1071）──────────────────────────────────────────
+  // 双开共享同一 Chromium userData 时，第二个实例的存储退化成内存：读不到
+  // 第一个实例写入的同意记录（每次都弹确认门），自己写的同意也不落盘，还会
+  // 与第一个实例争用 profile。拿不到锁直接退出，并把已有窗口带回前台。
+  // dev/E2E 保持多实例：E2E 并行 worker 依赖同 checkout 多开（dev 的
+  // userData 已按 checkout 路径隔离，各 checkout 互不影响）。
+  if (app.isPackaged) {
+    if (!app.requestSingleInstanceLock()) {
+      app.quit();
+      return;
+    }
+    app.on('second-instance', () => {
+      const win = mainWindow;
+      if (!win || win.isDestroyed()) return;
+      if (win.isMinimized()) win.restore();
+      win.show();
+      win.focus();
+    });
+  }
+
   app.whenReady().then(() => {
     bridgeManager = new BridgeManager();
     registerIpcHandlers(bridgeManager);
