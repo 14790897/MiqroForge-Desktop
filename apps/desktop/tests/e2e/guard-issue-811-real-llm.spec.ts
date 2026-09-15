@@ -143,16 +143,19 @@ test.describe('Issue #811 护栏误拦截复现 (real LLM)', () => {
       expectPattern instanceof RegExp ? expectPattern.test(t) : t.includes(expectPattern);
 
     /**
-     * 本回合的助手回复里是否出现了「自行拒答」措辞。只看本回合新增的那条回复：
-     * 条数没涨（还没输出）就返回 false —— 取不到时判 false 是安全方向，最坏是照旧
-     * 走断言、报一次真红，而不是把没验证过的回合当成前提未满足跳过。
+     * 本回合**助手回复**的文本；本回合还没产生回复时返回空串。
+     *
+     * 四个判据——exec 信号、SELF_REFUSAL、expectPattern、rejectKeyword——必须全部
+     * 限定在这一条上。整个 describe 共用一个 page，`main.textContent()` 含历史回合：
+     * 拿它判的话，上一轮留下的「护栏拦截」就能满足本轮的 expectPattern，循环提前
+     * break、最终断言也被历史文本满足——于是在「护栏压根没跑」的情况下报通过。
+     * 这个测试守的是沙箱护栏，**假绿比假红危险得多**。
+     * 取不到时返回空串是刻意选的安全方向：最坏照旧走断言、报一次真红。
      */
-    const currentTurnSelfRefused = async (): Promise<boolean> => {
-      const n = await page.locator('[data-testid="chat-message-assistant"]').count();
-      if (n <= assistantCountBefore) return false;
-      const reply =
-        (await page.locator('[data-testid="chat-message-assistant"]').last().textContent()) ?? '';
-      return SELF_REFUSAL.test(reply);
+    const currentAssistantText = async (): Promise<string> => {
+      const nodes = page.locator('[data-testid="chat-message-assistant"]');
+      if ((await nodes.count()) <= assistantCountBefore) return '';
+      return (await nodes.last().textContent()) ?? '';
     };
 
     // 单次 exec spawn 慢（25-30s）。先走一个短的稳定等待——模型回合一旦
@@ -176,12 +179,13 @@ test.describe('Issue #811 护栏误拦截复现 (real LLM)', () => {
       if (len > 0) {
         if (lastLen !== -1 && Math.abs(len - lastLen) < 10) {
           stable += 1;
-          if (stable >= 3 && matches(text)) break;
-          if (stable >= 3 && rejectKeyword && text.includes(rejectKeyword)) break;
+          const currentText = await currentAssistantText();
+          if (stable >= 3 && matches(currentText)) break;
+          if (stable >= 3 && rejectKeyword && currentText.includes(rejectKeyword)) break;
           // 模型自行拒答、且本回合压根没出现过 exec 命令块 → 护栏没被触发。这里**必须
           // 提前收手**：RUN_CAP 正好等于测试超时（480s），让循环自然跑完的话测试会先
           // 超时，下面那个 precondition 判定根本执行不到（这就是上一版没生效的原因）。
-          if (stable >= 3 && !sawExecCommand && (await currentTurnSelfRefused())) break;
+          if (stable >= 3 && !sawExecCommand && SELF_REFUSAL.test(currentText)) break;
         } else {
           stable = 0;
         }
@@ -194,6 +198,8 @@ test.describe('Issue #811 护栏误拦截复现 (real LLM)', () => {
       await page.waitForTimeout(1000);
     }
 
+    // 断言同样只看本回合的助手回复，不看整页历史文本
+    const finalText = await currentAssistantText();
     if (expectPattern instanceof RegExp) {
       // 「模型压根没调 exec、直接按自身安全对齐拒答」是这个 spec 顶部注释就记过的
       // 失败模式，CI 上会复现。这时沙箱护栏根本没被触发，断言「护栏拦截」必然落空
@@ -202,19 +208,19 @@ test.describe('Issue #811 护栏误拦截复现 (real LLM)', () => {
       // 两个条件缺一不可：① 全程没出现过 exec 命令块（硬信号，见上）；
       // ② 回复里是明确的自拒口吻。少任何一个都照常断言——如果护栏真坏了、模型又调了
       // exec，①为假，走下面的 expect，失败照报。
-      if (!sawExecCommand && !matches(text) && (await currentTurnSelfRefused())) {
+      if (!sawExecCommand && !matches(finalText) && SELF_REFUSAL.test(finalText)) {
         console.log(
           '[test] ⚠️ 全程无 exec 命令块且模型自行拒答，沙箱护栏未被触发 — 跳过（precondition 未满足）'
         );
         test.skip(true, 'model self-refused without invoking exec; guardrail not exercised');
-        return text;
+        return finalText;
       }
-      expect(text).toMatch(expectPattern);
-    } else if (!rejectKeyword || !text.includes(rejectKeyword)) {
-      expect(text).toContain(expectPattern);
+      expect(finalText).toMatch(expectPattern);
+    } else if (!rejectKeyword || !finalText.includes(rejectKeyword)) {
+      expect(finalText).toContain(expectPattern);
     }
     await waitForResponseComplete(page, LLM_TIMEOUT);
-    return text;
+    return finalText;
   }
 
   test(
