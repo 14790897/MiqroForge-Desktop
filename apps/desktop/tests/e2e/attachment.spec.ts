@@ -16,7 +16,12 @@ import fs from 'fs';
 import os from 'os';
 
 // ── Test fixture directory ─────────────────────────────────────────────
-const FIXTURE_DIR = path.join(os.tmpdir(), 'miqi-e2e-attachment-fixtures');
+// 按 worker 隔离：CI 并行（fullyParallel/workers=4）时若共用目录，
+// 各 worker 的 beforeEach「先删再建」会互相踩（EPERM/ENOENT）。
+const FIXTURE_DIR = path.join(
+  os.tmpdir(),
+  `miqi-e2e-attachment-fixtures-w${process.env.TEST_PARALLEL_INDEX ?? '0'}`
+);
 
 // 107-char filename that overflows the user-bubble chip without truncation
 // (regression of #591 fix — issue #698).
@@ -447,6 +452,171 @@ test.describe('File Attachment Chips', () => {
     await expect(composerChips(page).getByText('bug_fix.docx')).toBeVisible({
       timeout: 10_000,
     });
+  });
+
+  test('Attachment chip exposes preview + remove buttons (a11y)', async () => {
+    await attachFile(page, FILES.pdf);
+    const chip = composerChips(page);
+    await expect(chip.getByRole('button', { name: /预览 board_report\.pdf/ })).toBeVisible({
+      timeout: 10_000,
+    });
+    await expect(chip.getByRole('button', { name: /移除 board_report\.pdf/ })).toBeVisible();
+  });
+
+  test('Pasting a file attaches it (window paste)', async () => {
+    await page.evaluate(() => {
+      const dt = new DataTransfer();
+      dt.items.add(
+        new File([new Uint8Array([1, 2, 3])], 'pasted_note.txt', { type: 'text/plain' })
+      );
+      window.dispatchEvent(
+        new ClipboardEvent('paste', { clipboardData: dt, bubbles: true } as ClipboardEventInit)
+      );
+    });
+    await expect(composerChips(page).getByText('pasted_note.txt')).toBeVisible({ timeout: 10_000 });
+  });
+
+  test('Plain path text paste is not swallowed', async () => {
+    const prevented = await page.evaluate(() => {
+      const dt = new DataTransfer();
+      dt.setData('text/plain', 'C:\\Users\\Alice\\Desktop\\report.pdf');
+      const ev = new ClipboardEvent('paste', {
+        clipboardData: dt,
+        bubbles: true,
+      } as ClipboardEventInit);
+      window.dispatchEvent(ev);
+      return ev.defaultPrevented;
+    });
+    expect(prevented).toBe(false);
+  });
+
+  test('openBytes rejects non-allowlisted extension', async () => {
+    const res = await page.evaluate(async () => {
+      const b64 = btoa('MZ');
+      return (window as any).miqi.files.openBytes('evil.exe', b64);
+    });
+    expect(res.opened).toBe(false);
+    expect(String(res.error)).toContain('allowlist');
+  });
+
+  test('openBytes rejects executable ext even with trailing space', async () => {
+    const res = await page.evaluate(async () => {
+      const b64 = btoa('MZ');
+      return (window as any).miqi.files.openBytes('evil.exe ', b64);
+    });
+    expect(res.opened).toBe(false);
+    expect(String(res.error)).toContain('allowlist');
+  });
+
+  test('Same file can be attached twice (no false dedupe)', async () => {
+    await attachFile(page, FILES.pdf);
+    await expect(composerChips(page).getByText('board_report.pdf')).toHaveCount(1, {
+      timeout: 10_000,
+    });
+    await attachFile(page, FILES.pdf);
+    await expect(composerChips(page).getByText('board_report.pdf')).toHaveCount(2, {
+      timeout: 10_000,
+    });
+  });
+
+  test('Oversized file is rejected over the 25MB cap', async () => {
+    const big = path.join(FIXTURE_DIR, 'big_26mb.bin');
+    fs.writeFileSync(big, Buffer.alloc(26 * 1024 * 1024));
+    await attachFile(page, big);
+    await page.waitForTimeout(600);
+    await expect(composerChips(page).getByText('big_26mb.bin')).toHaveCount(0);
+  });
+
+  test('Total attachment size cap blocks the overflow file', async () => {
+    const a = path.join(FIXTURE_DIR, 'big_a.bin');
+    const b = path.join(FIXTURE_DIR, 'big_b.bin');
+    fs.writeFileSync(a, Buffer.alloc(22 * 1024 * 1024));
+    fs.writeFileSync(b, Buffer.alloc(22 * 1024 * 1024));
+    await attachFile(page, a);
+    await page.waitForTimeout(500);
+    await attachFile(page, b);
+    await page.waitForTimeout(700);
+    await expect(composerChips(page).getByText('big_a.bin')).toHaveCount(1);
+    await expect(composerChips(page).getByText('big_b.bin')).toHaveCount(0);
+  });
+
+  test('Batch selection cannot bypass the total cap', async () => {
+    const a = path.join(FIXTURE_DIR, 'batch_a.bin');
+    const b = path.join(FIXTURE_DIR, 'batch_b.bin');
+    fs.writeFileSync(a, Buffer.alloc(22 * 1024 * 1024));
+    fs.writeFileSync(b, Buffer.alloc(22 * 1024 * 1024));
+    // 一次选择两个文件：批内必须用本地累计值判断，第二个应被拒
+    await page.locator('input[type="file"]').setInputFiles([a, b]);
+    await page.waitForTimeout(900);
+    await expect(composerChips(page).getByText('batch_a.bin')).toHaveCount(1);
+    await expect(composerChips(page).getByText('batch_b.bin')).toHaveCount(0);
+  });
+
+  test('Cross-action race cannot bypass the total cap', async () => {
+    // 同一 JS 任务内连发两次 change（两个 action 都发生在 React commit 之前），
+    // 若只用 attachmentsRef 判断，两个 22MB 都会通过 → 44MB。
+    await page.evaluate(() => {
+      const input = document.querySelector('input[type="file"]') as HTMLInputElement;
+      const mk = (name: string) => new File([new Uint8Array(22 * 1024 * 1024)], name);
+      const a = new DataTransfer();
+      a.items.add(mk('race_a.bin'));
+      input.files = a.files;
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+      const b = new DataTransfer();
+      b.items.add(mk('race_b.bin'));
+      input.files = b.files;
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    await page.waitForTimeout(1200);
+    await expect(composerChips(page).getByText('race_a.bin')).toHaveCount(1);
+    await expect(composerChips(page).getByText('race_b.bin')).toHaveCount(0);
+  });
+
+  test('Capacity is not leaked after removing while a file is pending', async () => {
+    // 24MB 已提交
+    const a = path.join(FIXTURE_DIR, 'leak_a.bin');
+    fs.writeFileSync(a, Buffer.alloc(24 * 1024 * 1024));
+    await attachFile(page, a);
+    await expect(composerChips(page).getByText('leak_a.bin')).toHaveCount(1, { timeout: 10_000 });
+
+    // 同一 JS 任务内：移除 24MB，并发起 12MB 新附件（模拟“删旧 + pending 提交”交错）
+    await page.evaluate(() => {
+      const remove = Array.from(document.querySelectorAll('button')).find((b) =>
+        (b.getAttribute('aria-label') || '').includes('移除 leak_a.bin')
+      );
+      remove?.click();
+      const input = document.querySelector('input[type="file"]') as HTMLInputElement;
+      const dt = new DataTransfer();
+      dt.items.add(new File([new Uint8Array(12 * 1024 * 1024)], 'leak_b.bin'));
+      input.files = dt.files;
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    await expect(composerChips(page).getByText('leak_b.bin')).toHaveCount(1, { timeout: 10_000 });
+    await expect(composerChips(page).getByText('leak_a.bin')).toHaveCount(0);
+
+    // 若 reservation 泄漏（12MB 被重复计），下面 22MB 会被误拒（12+12+22>40）；
+    // 正确记账应为 12+22=34 → 允许。
+    const c = path.join(FIXTURE_DIR, 'leak_c.bin');
+    fs.writeFileSync(c, Buffer.alloc(22 * 1024 * 1024));
+    await attachFile(page, c);
+    await expect(composerChips(page).getByText('leak_c.bin')).toHaveCount(1, { timeout: 10_000 });
+  });
+
+  test('Same-size different images are both kept (content fingerprint)', async () => {
+    await page.evaluate(() => {
+      const fire = (byte: number, name: string) => {
+        const dt = new DataTransfer();
+        dt.items.add(new File([new Uint8Array(4096).fill(byte)], name, { type: 'image/png' }));
+        window.dispatchEvent(
+          new ClipboardEvent('paste', { clipboardData: dt, bubbles: true } as ClipboardEventInit)
+        );
+      };
+      // 同尺寸、同 mime、内容不同 → 内容指纹应判为两份
+      fire(1, 'shot_a.png');
+      fire(2, 'shot_b.png');
+    });
+    await expect(composerChips(page).getByText('shot_a.png')).toHaveCount(1, { timeout: 10_000 });
+    await expect(composerChips(page).getByText('shot_b.png')).toHaveCount(1, { timeout: 10_000 });
   });
 
   test('Send button disabled while extracting', async () => {

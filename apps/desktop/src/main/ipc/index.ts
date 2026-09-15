@@ -2,10 +2,19 @@ import { electron } from '../../shared/electron';
 import { spawn, spawnSync } from 'child_process';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync, unlinkSync } from 'fs';
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  statSync,
+  writeFileSync,
+  unlinkSync,
+} from 'fs';
+import { readFile as readFileAsync } from 'fs/promises';
 import { homedir, tmpdir } from 'os';
 import { randomUUID } from 'crypto';
-import { join } from 'path';
+import { basename, join } from 'path';
 import type { BrowserWindow } from 'electron';
 import type { BridgeManager } from '../bridge';
 import {
@@ -48,12 +57,14 @@ import {
   FeedbackSubmitInput,
 } from '../../shared/ipc';
 import type {
+  FeedbackPlatformOutcome,
   WslCheckResult,
   WslStatsResult,
   WslInstallProgress,
   WslInstallAndProvisionResult,
 } from '../../shared/ipc';
 import { registerQraftIpcHandlers } from '../qraft/ipc';
+import { readConsentVersion, writeConsentVersion } from '../privacy-consent';
 import {
   classifyKernelInstall,
   classifyWslFeatureState,
@@ -72,8 +83,9 @@ import {
   readLocalConfig,
   resolveWorkspacePath,
 } from './workspace-path';
+import { clampMinToWindow, panelWindowMinWidth } from '../../shared/layout';
 
-const { ipcMain, dialog, shell, app } = electron;
+const { ipcMain, dialog, shell, app, clipboard } = electron;
 
 function readWorkspaceLogLines(
   projectRoot: string,
@@ -175,6 +187,52 @@ function isApprovalBypassUpdate(updates: Record<string, unknown>): boolean {
   }
 
   return 'approvals' in updates || 'agents' in updates;
+}
+
+/**
+ * 反馈类别 → 平台 feedbackSubmitRequest.type（issue #1054）。
+ * 平台可用值仅有 suggestion / bug / complaint / other，桌面端的
+ * question（使用问题）无对应值，并入 other。
+ */
+const PLATFORM_FEEDBACK_TYPES: Record<string, string> = {
+  bug: 'bug',
+  suggestion: 'suggestion',
+  question: 'other',
+  other: 'other',
+};
+
+/**
+ * 登录态下把反馈加写平台（POST /oauth2/feedback）。
+ * 返回 undefined 表示未登录（平台通道整体跳过，仅走飞书）；
+ * 返回结果对象表示平台通道已尝试过，ok 为 false 时由 UI 提示"平台未同步"。
+ */
+async function submitFeedbackToPlatform(input: {
+  category: string;
+  content: string;
+  contact?: string;
+}): Promise<FeedbackPlatformOutcome | undefined> {
+  let platform: FeedbackPlatformOutcome;
+  try {
+    const { getQraftService } = await import('../qraft/ipc');
+    // 未登录：跳过平台通道（不产生脏数据，也不当作失败）。
+    if (!getQraftService().status().loggedIn) return undefined;
+    platform = await getQraftService().submitPlatformFeedback({
+      type: PLATFORM_FEEDBACK_TYPES[input.category] ?? 'other',
+      content: input.content,
+      contact: input.contact,
+    });
+  } catch (err) {
+    console.error(`[feedback] 平台通道提交异常：${err instanceof Error ? err.message : err}`);
+    platform = {
+      ok: false,
+      code: 'INTERNAL',
+      message: err instanceof Error ? err.message : String(err),
+    };
+  }
+  if (!platform.ok) {
+    console.warn(`[feedback] 平台通道未同步（${platform.code ?? 'UNKNOWN'}）`);
+  }
+  return platform;
 }
 
 export function registerIpcHandlers(bridge: BridgeManager): void {
@@ -1985,6 +2043,180 @@ for m in ("pydantic", "httpx", "loguru"):
     return { opened: true, path: raw };
   });
 
+  // -- Open raw bytes with the system default application ----------------
+  // 预览弹窗「系统应用打开」：把字节写成系统临时文件（保留扩展名，命中默认应用或弹出
+  // Windows「打开方式」），再交给 OS。临时目录在 workspace 之外，故不走 canonical 校验。
+  ipcMain.handle(IPC.FILES_OPEN_BYTES, async (_event, payload: unknown) => {
+    const p = payload as { name?: string; base64?: string };
+    const rawName = typeof p?.name === 'string' && p.name ? p.name : 'file';
+    const base64 = typeof p?.base64 === 'string' ? p.base64 : '';
+    if (!base64) return { opened: false, path: rawName, error: 'Empty payload' };
+    // 本 IPC 自带硬上限（25MB 原始字节 ≈ 34MB base64），安全策略不依赖调用方
+    if (base64.length > 36 * 1024 * 1024) {
+      return { opened: false, path: rawName, error: 'Payload too large' };
+    }
+
+    // 安全（CodeRabbit #1048 / CWE-434）：白名单——仅「安全可打开」的类型交给系统
+    // 默认应用，其余（可执行/脚本宿主/宏文档等）一律拒绝，调用方在被拒时不得回退。
+    const ALLOWED_OPEN_EXTS = new Set([
+      'pdf',
+      'docx',
+      'odt',
+      'rtf',
+      'xlsx',
+      'ods',
+      'csv',
+      'pptx',
+      'odp',
+      'txt',
+      'text',
+      'md',
+      'markdown',
+      'mdown',
+      'json',
+      'xml',
+      'yml',
+      'yaml',
+      'log',
+      'ini',
+      'toml',
+      'env',
+      'png',
+      'jpg',
+      'jpeg',
+      'gif',
+      'webp',
+      'bmp',
+      'tif',
+      'tiff',
+      'ico',
+      'avif',
+    ]);
+    const extForBlock = (rawName.split('.').pop() || '').toLowerCase();
+    if (!ALLOWED_OPEN_EXTS.has(extForBlock)) {
+      return {
+        opened: false,
+        path: rawName,
+        error: `Blocked file type (not in safe allowlist): .${extForBlock}`,
+      };
+    }
+
+    const dot = rawName.lastIndexOf('.');
+    const stem = dot > 0 ? rawName.slice(0, dot) : rawName;
+    const ext = dot > 0 ? rawName.slice(dot) : '';
+    const safeStem = stem.replace(/[^\w一-龥.-]/g, '_').slice(-60) || 'file';
+    const safeExt = ext.replace(/[^\w.]/g, '').slice(0, 10);
+    const tmpPath = join(tmpdir(), `miqi-open-${randomUUID()}-${safeStem}${safeExt}`);
+
+    try {
+      writeFileSync(tmpPath, Buffer.from(base64, 'base64'), { mode: 0o600 });
+    } catch (e: any) {
+      return { opened: false, path: tmpPath, error: e?.message ?? String(e) };
+    }
+    const error = await shell.openPath(tmpPath);
+    // 外部应用可能稍后异步读取，延迟清理而不是立刻删除
+    setTimeout(() => {
+      try {
+        unlinkSync(tmpPath);
+      } catch {
+        /* already gone */
+      }
+    }, 10 * 60_000);
+    return error ? { opened: false, path: tmpPath, error } : { opened: true, path: tmpPath };
+  });
+
+  // -- Read files/images from the SYSTEM clipboard (Ctrl+V) ---------------
+  // Windows「复制文件」只提供 CF_HDROP，Chromium 的 paste 事件拿不到；改在主进程读：
+  // FileNameW/FileName → 路径列表；否则 readImage()（截图）。本 handler 不接收渲染层
+  // 参数（路径来自系统剪贴板），因此渲染层无法借它任意读盘。
+  ipcMain.handle(IPC.CLIPBOARD_READ_FILES, async () => {
+    const MAX_ONE = 25 * 1024 * 1024;
+    const MAX_TOTAL = 40 * 1024 * 1024;
+    const MAX_FILES = 8;
+    type ClipFile = { name: string; base64: string; mime: string; size: number };
+    const files: ClipFile[] = [];
+    let image: ClipFile | undefined;
+    let total = 0;
+
+    const mimeOf = (p: string): string => {
+      const e = (p.split('.').pop() || '').toLowerCase();
+      const m: Record<string, string> = {
+        png: 'image/png',
+        jpg: 'image/jpeg',
+        jpeg: 'image/jpeg',
+        gif: 'image/gif',
+        webp: 'image/webp',
+        bmp: 'image/bmp',
+        pdf: 'application/pdf',
+        txt: 'text/plain',
+        md: 'text/markdown',
+        csv: 'text/csv',
+        json: 'application/json',
+        xml: 'application/xml',
+        zip: 'application/zip',
+        docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+      };
+      return m[e] || 'application/octet-stream';
+    };
+
+    try {
+      for (const fmt of ['FileNameW', 'FileName']) {
+        let buf: Buffer;
+        try {
+          buf = clipboard.readBuffer(fmt);
+        } catch {
+          continue;
+        }
+        if (!buf || buf.length === 0) continue;
+        const text = fmt.endsWith('W') ? buf.toString('utf16le') : buf.toString('latin1');
+        const paths = text
+          .split('\0')
+          .map((s) => s.trim())
+          .filter(Boolean)
+          .slice(0, MAX_FILES);
+        for (const p of paths) {
+          if (files.length >= MAX_FILES || total >= MAX_TOTAL) break;
+          try {
+            const st = statSync(p);
+            if (!st.isFile() || st.size > MAX_ONE || total + st.size > MAX_TOTAL) continue;
+            // 异步读，避免阻塞主进程（批量粘贴时尤其重要）
+            const data = await readFileAsync(p);
+            total += data.length;
+            files.push({
+              name: basename(p),
+              base64: data.toString('base64'),
+              mime: mimeOf(p),
+              size: data.length,
+            });
+          } catch {
+            /* skip unreadable */
+          }
+        }
+        if (files.length > 0) break;
+      }
+
+      if (files.length === 0) {
+        const img = clipboard.readImage();
+        if (img && !img.isEmpty()) {
+          const png = img.toPNG();
+          if (png.length > 0 && png.length <= MAX_ONE) {
+            image = {
+              name: `pasted-image-${Date.now()}.png`,
+              base64: png.toString('base64'),
+              mime: 'image/png',
+              size: png.length,
+            };
+          }
+        }
+      }
+    } catch {
+      /* clipboard unavailable */
+    }
+    return { files, image };
+  });
+
   // -- Open an HTML string in the system default browser -------------------
   // Write the content to a temp .html file (so relative CSS/scripts resolve
   // normally) and hand it to the OS default handler — the browser for .html.
@@ -2236,7 +2468,16 @@ for m in ("pydantic", "httpx", "loguru"):
   // -- Feedback --------------------------------------------------------------
   ipcMain.handle(IPC.FEEDBACK_SUBMIT, async (_event, payload: unknown) => {
     const input = FeedbackSubmitInput.parse(payload);
-    return bridge.send('feedback:submit', input as unknown as Record<string, unknown>);
+    const result = (await bridge.send(
+      'feedback:submit',
+      input as unknown as Record<string, unknown>
+    )) as Record<string, unknown>;
+
+    // 平台通道（issue #1054）：飞书提交成功后，登录态下加写
+    // POST /oauth2/feedback，把反馈归属到平台账号。平台失败不改变
+    // 提交成功的事实 —— 只在结果里回传原因供 UI 提示"已收到、平台未同步"。
+    const platform = await submitFeedbackToPlatform(input);
+    return platform ? { ...result, platform } : result;
   });
 
   ipcMain.handle(IPC.FEEDBACK_LIST, async (_event, payload: unknown) => {
@@ -2350,6 +2591,17 @@ for m in ("pydantic", "httpx", "loguru"):
     return { ok: true };
   });
 
+  // 法律文件同意状态（#1071）：主进程 userData 文件为权威存储。
+  // 读用 sendSync（preload 在页面脚本前同步取一次，渲染层保持同步判定，
+  // 避免确认门闪现）；写用 invoke。
+  ipcMain.on(IPC.PRIVACY_GET_CONSENT, (event) => {
+    event.returnValue = readConsentVersion();
+  });
+  ipcMain.handle(IPC.PRIVACY_SET_CONSENT, (_event, version: unknown) => {
+    writeConsentVersion(typeof version === 'string' && version ? version : null);
+    return { ok: true };
+  });
+
   // 空会话回到欢迎态后把窗口带回前台（renderer 触发）。best-effort：窗口未聚焦
   // 则 restore/show/focus；仍不聚焦则 moveTop 重试。{ hard: true } 表示 renderer
   // 检测到 document.hasFocus()==false（window.confirm 模态关闭后页面焦点未交还）——
@@ -2387,6 +2639,9 @@ for m in ("pydantic", "httpx", "loguru"):
        *  做不了，但目标必须留下来 —— 否则「最大化期间关掉面板」会被整个丢掉，恢复
        *  窗口后那 280px 就永远撑在窗口上（面板已关、窗口仍宽一截）。 */
       wanted: number;
+      /** 面板当前是否占用窗口宽度(渲染层上报,含冷启动默认展开)。用于把窗口最小宽度
+       *  抬到「基准 + PANEL_MIN_FLOOR」;不同于 extra —— 冷启动面板展开但 extra 为 0。 */
+      occupied: boolean;
     }
   >();
   /** 我们自己 setBounds 产生的、**尚未被 resize 事件消费**的宽度集合。
@@ -2416,6 +2671,8 @@ for m in ("pydantic", "httpx", "loguru"):
    *  记的不是「用户设的总宽」而是**扣掉面板那部分之后**的基线 —— 否则用户在面板
    *  开着时拖窗，会把面板的 280 一起吸收进基线，之后关面板一像素都收不回来。 */
   const userWidth = new WeakMap<BrowserWindow, number>();
+  /** 面板未展开时的窗口最小宽度(基准)。 */
+  const baseMinByWin = new WeakMap<BrowserWindow, { width: number; height: number }>();
   const windowHooked = new WeakSet<BrowserWindow>();
   /** 从最大化/最小化恢复后补应用一次逻辑目标：那些状态下 setBounds 是 skipped 的，
    *  但期间用户可能开/关了面板 —— 恢复时必须把窗口拉回与逻辑目标一致，否则就留下
@@ -2430,6 +2687,11 @@ for m in ("pydantic", "httpx", "loguru"):
   const hookWindow = (win: BrowserWindow) => {
     if (windowHooked.has(win)) return;
     windowHooked.add(win);
+    // 基准最小宽度必须在任何面板加宽之前记下(此时仍是 createWindow 的 minWidth)。
+    if (!baseMinByWin.has(win)) {
+      const [minW, minH] = win.getMinimumSize();
+      baseMinByWin.set(win, { width: minW, height: minH });
+    }
     win.on('resize', () => {
       if (win.isDestroyed()) return;
       const w = win.getBounds().width;
@@ -2441,27 +2703,75 @@ for m in ("pydantic", "httpx", "loguru"):
     win.on('unmaximize', () => reconcileOnRestore(win));
     win.on('restore', () => reconcileOnRestore(win));
   };
+  /** 把窗口加宽 delta 像素(优先向右扩、右缘到工作区边界后向左借位),并把实际扩出量
+   *  记进 rec(关面板时按此收回)。返回实际扩出的宽度。 */
+  const growWindow = (
+    win: BrowserWindow,
+    rec: { extra: number; left: number; right: number },
+    delta: number
+  ): number => {
+    if (delta <= 0) return 0;
+    const b = win.getBounds();
+    const wa = electron.screen.getDisplayMatching(b).workArea;
+    const growRight = Math.min(delta, Math.max(0, wa.x + wa.width - (b.x + b.width)));
+    const growLeft = Math.min(delta - growRight, Math.max(0, b.x - wa.x));
+    const grown = growRight + growLeft;
+    if (grown > 0) {
+      const nextWidth = b.width + grown;
+      markSelfResize(win, nextWidth);
+      win.setBounds({ x: b.x - growLeft, y: b.y, width: nextWidth, height: b.height });
+      rec.right += growRight;
+      rec.left += growLeft;
+      rec.extra += grown;
+    }
+    return grown;
+  };
+  /** 同步窗口最小宽度到「面板开/关」对应的目标(不变量见 shared/layout.panelWindowMinWidth)。
+   *
+   *  窗口比目标还窄时**先把窗口撑到目标**(记账进 extra,关面板会收回),撑不动
+   *  (屏幕边缘/最大化)才退化为当前宽 —— 否则窗口本来就偏窄时聊天列仍会被挤压
+   *  (sijie-Z #1047)。
+   *
+   *  对冷启动的「minOnly」上报同样适用:minOnly 只表示**不应用 panel extra**,并不禁止
+   *  为满足最小布局而扩窗 —— 否则面板默认展开却挤着聊天列(baiye-banned #1047 P1)。 */
+  const syncWindowMin = (win: BrowserWindow, panelOpen: boolean) => {
+    const base = baseMinByWin.get(win);
+    if (!base) return;
+    const want = panelWindowMinWidth(base.width, panelOpen);
+    const rec = panelExtraByWin.get(win);
+    if (
+      rec &&
+      want > win.getBounds().width &&
+      !win.isMaximized() &&
+      !win.isFullScreen() &&
+      win.isResizable()
+    ) {
+      growWindow(win, rec, want - win.getBounds().width);
+      panelExtraByWin.set(win, rec);
+    }
+    const safe = clampMinToWindow(want, win.getBounds().width);
+    if (win.getMinimumSize()[0] !== safe) win.setMinimumSize(safe, base.height);
+  };
   /** 把窗口加宽/收窄到 target 对应的状态，返回实际应用到的 extra。 */
   const applyPanelExtra = (win: BrowserWindow, target: number): number => {
-    const rec = panelExtraByWin.get(win) ?? { extra: 0, left: 0, right: 0, wanted: target };
+    const rec = panelExtraByWin.get(win) ?? {
+      extra: 0,
+      left: 0,
+      right: 0,
+      wanted: target,
+      occupied: false,
+    };
     rec.wanted = target;
+    rec.occupied = target > 0;
+    // 先按最新 occupied 还原/抬高最小宽度,再算收缩量:否则关面板时 maxRemove 会拿
+    // 「展开态的旧最小宽度」当上限,收不干净残留 rec.extra(CodeRabbit #1047)。
+    syncWindowMin(win, rec.occupied);
     const delta = target - rec.extra;
     if (delta !== 0) {
       const b = win.getBounds();
-      const wa = electron.screen.getDisplayMatching(b).workArea;
       if (delta > 0) {
         // 优先向右扩(左缘不动),右缘到工作区边界后向左借位把窗口整体放中间可多补
-        const growRight = Math.min(delta, Math.max(0, wa.x + wa.width - (b.x + b.width)));
-        const growLeft = Math.min(delta - growRight, Math.max(0, b.x - wa.x));
-        const grown = growRight + growLeft;
-        if (grown > 0) {
-          const nextWidth = b.width + grown;
-          markSelfResize(win, nextWidth);
-          win.setBounds({ x: b.x - growLeft, y: b.y, width: nextWidth, height: b.height });
-          rec.right += growRight;
-          rec.left += growLeft;
-          rec.extra += grown;
-        }
+        growWindow(win, rec, delta);
       } else {
         // 收窄:先还左借位再收右侧,总量不越过最小宽(minWidth)。绝不主动抹掉
         // 用户自己拉宽的窗口——仅收回本面板实际加宽的 px。
@@ -2489,10 +2799,11 @@ for m in ("pydantic", "httpx", "loguru"):
       }
       panelExtraByWin.set(win, rec);
     }
+    syncWindowMin(win, rec.occupied);
     return rec.extra;
   };
 
-  ipcMain.handle(IPC.APP_PANEL_EXTRA, (event, raw: unknown) => {
+  ipcMain.handle(IPC.APP_PANEL_EXTRA, (event, raw: unknown, minOnly?: boolean) => {
     const win = electron.BrowserWindow.fromWebContents(event.sender);
     const target = Math.max(
       0,
@@ -2502,12 +2813,39 @@ for m in ("pydantic", "httpx", "loguru"):
       return { ok: false, applied: 0, skipped: true };
     }
     hookWindow(win);
+    if (minOnly) {
+      // 只上报「面板当前是否占宽」以抬高窗口最小宽度,不动窗口:冷启动面板默认展开、
+      // 没有任何加宽请求(extra=0),但不报的话缩窗会把聊天列/输入框压扁。
+      const rec = panelExtraByWin.get(win) ?? {
+        extra: 0,
+        left: 0,
+        right: 0,
+        wanted: 0,
+        occupied: false,
+      };
+      rec.occupied = target > 0;
+      panelExtraByWin.set(win, rec);
+      // minOnly 只表示「不应用 panel extra」,不禁止为满足最小布局而扩窗:冷启动默认
+      // 展开时窗口若不足目标最小宽度,这里把它撑到目标(baiye-banned #1047 P1)。
+      syncWindowMin(win, rec.occupied);
+      return { ok: true, applied: rec.extra, skipped: false };
+    }
     if (win.isMaximized() || win.isFullScreen() || !win.isResizable()) {
       // 现在动不了，但逻辑目标要留下（见 rec.wanted）—— 恢复窗口时由
       // reconcileOnRestore 补应用。不能像以前那样直接返回、什么都不记：那样
       // 「最大化期间关面板」会被整个丢掉，恢复后窗口仍被面板撑宽 280px。
-      const rec = panelExtraByWin.get(win) ?? { extra: 0, left: 0, right: 0, wanted: target };
+      const rec = panelExtraByWin.get(win) ?? {
+        extra: 0,
+        left: 0,
+        right: 0,
+        wanted: target,
+        occupied: false,
+      };
       rec.wanted = target;
+      rec.occupied = target > 0;
+      // 最大化/满屏也要同步最小宽度:否则恢复窗口时 applyPanelExtra 会按展开态的旧
+      // 最小宽度算收缩上限,关面板收不干净(CodeRabbit #1047)。maximized 下不会真的加宽。
+      syncWindowMin(win, rec.occupied);
       panelExtraByWin.set(win, rec);
       return { ok: false, applied: rec.extra, skipped: true };
     }

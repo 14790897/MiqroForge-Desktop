@@ -70,6 +70,11 @@ interface ComposerProps {
   starterTask?: { icon: string; title: string } | null;
   onClearStarterScene?: () => void;
   onClearStarterTask?: () => void;
+  /** 右键「粘贴」：先尝试把剪贴板里的文件/图片挂成附件（返回 true=已处理），否则走文本粘贴。 */
+  onPasteClipboard?: () => Promise<boolean>;
+  /** 附件预览等「框内顶部」内容的挂载点:ChatConsole 用 portal 把预览投到这里,
+   *  让附件预览显示在输入框内部(而不是框外上方)。 */
+  attachmentSlotRef?: (el: HTMLDivElement | null) => void;
 }
 
 function ComposerImpl(
@@ -91,6 +96,8 @@ function ComposerImpl(
     starterTask,
     onClearStarterScene,
     onClearStarterTask,
+    onPasteClipboard,
+    attachmentSlotRef,
   }: ComposerProps,
   ref: Ref<ComposerHandle>
 ) {
@@ -116,9 +123,10 @@ function ComposerImpl(
 
   const handleKeyDown = useCallback(
     (e: KeyboardEvent) => {
-      // isComposing：中文/日文输入法候选框还开着的时候，回车是「选中这个词」不是
-      // 「发送」。不加这道判断，打一半拼音按回车就把半成品发出去了。
-      if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
+      // IME 组字中（中文/日文）Enter 是「选字确认」，不能当发送。
+      // 本分支与 develop 各自独立修过这一处，语义相同，取 develop 的写法。
+      if (e.key === 'Enter' && !e.shiftKey) {
+        if (e.nativeEvent.isComposing) return;
         e.preventDefault();
         onSubmit(input);
       }
@@ -162,11 +170,13 @@ function ComposerImpl(
         icon: <ClipboardPaste size={14} />,
         shortcut: 'Ctrl+V',
         onSelect: () => {
-          const el = textareaRef.current;
-          if (!el) return;
-          navigator.clipboard
-            .readText()
-            .then((text) => {
+          void (async () => {
+            // 剪贴板里是文件/图片 → 挂附件；否则按文本粘贴
+            if (onPasteClipboard && (await onPasteClipboard())) return;
+            const el = textareaRef.current;
+            if (!el) return;
+            try {
+              const text = await navigator.clipboard.readText();
               if (!text) return;
               // Insert at the caret like native Ctrl+V — replace the current
               // selection range instead of always appending at the end.
@@ -177,8 +187,10 @@ function ComposerImpl(
               // truth for state vs DOM — avoids double-delete drift).
               el.dispatchEvent(new Event('input', { bubbles: true }));
               el.focus();
-            })
-            .catch(() => {});
+            } catch {
+              /* clipboard unavailable */
+            }
+          })();
         },
       },
       {
@@ -205,9 +217,12 @@ function ComposerImpl(
         boxShadow: '0 -4px 20px rgba(0,0,0,0.06), 0 2px 8px rgba(0,0,0,0.04)',
       }}
     >
+      {/* 框内顶部插槽：附件预览由 ChatConsole portal 投到这里(显示在输入框内部) */}
+      <div ref={attachmentSlotRef} />
       {/* issue #962 起点任务：选过的子项目 / 子子项目以可移除胶囊显示在输入框里
           （形态对齐 WorkBuddy 的「文档处理 ×」）。#1021/#1042 之后输入框被抽成
-          Composer 组件，这段就跟着搬过来——数据由 ChatConsole 传，这里只负责画。 */}
+          Composer 组件，这段就跟着搬过来——数据由 ChatConsole 传，这里只负责画。
+          排在附件插槽之后，胶囊才紧挨着下方输入的文字。 */}
       {(starterScene || starterTask) && (
         <div className="flex flex-wrap items-center gap-1.5 pb-2">
           {starterScene && (
@@ -265,7 +280,7 @@ function ComposerImpl(
             }
             rows={1}
             allowResize={true}
-            className="w-full border-0 bg-transparent p-0! leading-7! focus:ring-0 focus:border-0 min-h-[52px] max-h-[25vh] text-[15px]"
+            className="-mx-7 w-[calc(100%+3.5rem)] rounded-none border-0 bg-transparent px-7 py-0 leading-7! focus:ring-0 focus:border-0 min-h-[52px] max-h-[25vh] text-[15px]"
             style={{ color: 'var(--text)', fieldSizing: 'content' }}
           />
         )}
