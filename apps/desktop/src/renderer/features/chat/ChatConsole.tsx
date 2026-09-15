@@ -2599,11 +2599,12 @@ export function ChatConsole({
     let cancelled = false;
     const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
     void (async () => {
-      // 这个 effect 在挂载时就跑，早于 runtime 就绪，所以有两种失败都要退避重试：
+      // 两种失败都退避重试：
       //   ① 直接抛（桥还没起来）；
       //   ② **回了个空清单**（桥起来了、但技能索引还没建好）—— 这个尤其阴：不抛错，
-      //      看着就像"这台机器没装技能"，而 effect 只跑一次，「内置技能」这一项会
-      //      整场会话都不出现。e2e 并行起多个 app 时能稳定复现这种空清单。
+      //      看起来就像"这台机器没装技能"，而 effect 只在挂载 / loadTrigger 变化时跑，
+      //      一旦静默失败，「内置技能」这一项就整场会话都不出现。
+      //      e2e 并行起多个 app 时能稳定复现这种空清单。
       const LAST = 9;
       for (let attempt = 0; attempt <= LAST; attempt++) {
         try {
@@ -2643,7 +2644,11 @@ export function ChatConsole({
     return () => {
       cancelled = true;
     };
-  }, []);
+    // 依赖 loadTrigger：App 在 bridge 变成 running 时会把 runtimeReadyKey +1（并顺手
+    // 预热技能索引），那一刻才是清单真正可用的时刻，重跑一次比在挂载时死磕更对症。
+    // 保留退避重试是因为「running」之后索引仍可能在建，会先回一个空清单。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loadTrigger]);
   const welcomeScenes = useMemo(() => {
     const base = MODE_SCENES[welcomeMode];
     if (welcomeMode !== 'code' || builtinSkillTasks.length === 0) return base;
