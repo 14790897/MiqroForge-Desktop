@@ -3239,7 +3239,13 @@ export function ChatConsole({
 
   /** Upsert a file into trackedFiles */
   const trackFile = useCallback(
-    (path: string, op: TrackedFile['op'], truncated = false, turnId?: string) => {
+    (
+      path: string,
+      op: TrackedFile['op'],
+      truncated = false,
+      turnId?: string,
+      sourceTool?: string
+    ) => {
       // Normalise sandbox-internal paths before storing so Preview works
       const normPath = normalizeSandboxPath(path);
       // Strip surrounding quotes, trailing ellipsis, and leading ./ for dedup
@@ -3282,6 +3288,7 @@ export function ChatConsole({
                   lastSeen: Date.now(),
                   truncated: f.truncated && truncated,
                   turnId: turnId ?? f.turnId,
+                  sourceTool: sourceTool ?? f.sourceTool,
                 }
               : f
           );
@@ -3310,6 +3317,7 @@ export function ChatConsole({
               lastSeen: Date.now(),
               truncated,
               turnId,
+              sourceTool,
             },
           ];
         });
@@ -5517,9 +5525,9 @@ export function ChatConsole({
           const filePath: string = _extractPathFromArgs(fn?.arguments || '{}') || '';
           if (!filePath) continue;
           if (_FILE_WRITE_TOOLS.includes(toolName)) {
-            trackFile(filePath, 'write', false, myTurnId ?? undefined);
+            trackFile(filePath, 'write', false, myTurnId ?? undefined, toolName);
           } else if (_FILE_READ_TOOLS.includes(toolName)) {
-            trackFile(filePath, 'read', false, myTurnId ?? undefined);
+            trackFile(filePath, 'read', false, myTurnId ?? undefined, toolName);
           }
         }
 
