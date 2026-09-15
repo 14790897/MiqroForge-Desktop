@@ -747,6 +747,7 @@ function makeChargeService(clientStub: ChargeClientStub): QraftService {
     makeRedirectUri: () => 'http://localhost:38000/callback',
     tokenFilePath: () => join(dir, 'qraft-token.json'),
     billingHistoryPath: () => join(dir, 'billing-history.json'),
+    billedJobIdsPath: () => join(dir, 'billed-job-ids.json'),
     onStatusChanged: (status) => statusEvents.push(status),
   });
 }
@@ -820,6 +821,100 @@ describe('QraftService Slurm 作业扣费（issue #927）', () => {
     const third = await svc2.chargeSlurmJob(SLURM_PAYLOAD);
     expect(third.ok).toBe(true);
     expect(client.deductPoints).toHaveBeenCalledTimes(1);
+  });
+
+  it('登出保留扣费历史与去重索引：重新登录同一账号记录仍在、同作业不重复扣费', async () => {
+    const client = makeChargeClient();
+    client.deductPoints.mockResolvedValue({
+      availablePoints: 840,
+      heldPoints: 0,
+      totalEarned: 0,
+      totalSpent: 10,
+    });
+    store.save(makeStoredState());
+    const svc = makeChargeService(client);
+    await svc.chargeSlurmJob(SLURM_PAYLOAD);
+    expect(svc.getBillingHistory()).toHaveLength(1);
+
+    svc.logout();
+    // 未登录不展示任何记录（文件保留，但没有账号作过滤依据）
+    expect(svc.getBillingHistory()).toEqual([]);
+    expect(store.current).toBeNull();
+
+    // 重新登录同一账号（模拟平台轮换 refresh_token 后重新登录 + 重启应用）
+    store.save(makeStoredState());
+    const svc2 = makeChargeService(client);
+    expect(svc2.getBillingHistory()).toHaveLength(1);
+    expect(svc2.getBillingHistory()[0].chargeId).toBe('charge-abc');
+
+    // 去重索引独立于展示历史：模拟展示历史上限（200 条）把该记录挤出，
+    // 再用**新的 charge_id** 报同一作业 —— 只能由登出后仍保留的持久化
+    // 作业 ID 索引挡住（CodeRabbit #1067）。
+    rmSync(join(dir, 'billing-history.json'), { force: true });
+    const svc3 = makeChargeService(client); // 重启：索引与去重集合从文件恢复
+    const again = await svc3.chargeSlurmJob({ ...SLURM_PAYLOAD, charge_id: 'charge-new' });
+    expect(again.ok).toBe(true);
+    expect((again as { dedup?: boolean }).dedup).toBe(true);
+    expect(client.deductPoints).toHaveBeenCalledTimes(1);
+  });
+
+  it('账号身份未知（空 sub）时不外发历史、也不与他账号串用去重键', async () => {
+    const client = makeChargeClient();
+    client.deductPoints.mockResolvedValue({
+      availablePoints: 840,
+      heldPoints: 0,
+      totalEarned: 0,
+      totalSpent: 10,
+    });
+    store.save(makeStoredState());
+    const svc = makeChargeService(client);
+    await svc.chargeSlurmJob(SLURM_PAYLOAD); // sub 19 的既有记录
+
+    svc.logout();
+    // 浏览器登录 userinfo 失败会留下空 sub 的登录态（loginWithCode 兜底）
+    store.save(makeStoredState({ account: { phone: '', sub: '', username: '', nickname: '' } }));
+    const svc2 = makeChargeService(client);
+    // 空 sub 无过滤依据 → 不外发任何历史（含他账号记录）
+    expect(svc2.getBillingHistory()).toEqual([]);
+
+    // 同一 server/job_id 以新 charge_id 上报：不被 sub 19 的记录误挡
+    const again = await svc2.chargeSlurmJob({ ...SLURM_PAYLOAD, charge_id: 'charge-unknown' });
+    expect(again.ok).toBe(true);
+    expect((again as { dedup?: boolean }).dedup).toBeUndefined();
+    expect(client.deductPoints).toHaveBeenCalledTimes(2);
+
+    // 空 sub 的这次扣费不落跨账号作业键（索引里只有 sub 19 的那条）
+    const index = JSON.parse(readFileSync(join(dir, 'billed-job-ids.json'), 'utf8')) as string[];
+    expect(index).toEqual(['19::slurm::12345']);
+  });
+
+  it('换账号登录看不到前任账号的扣费记录（读取时按 account.sub 过滤）', async () => {
+    const client = makeChargeClient();
+    client.deductPoints.mockResolvedValue({
+      availablePoints: 840,
+      heldPoints: 0,
+      totalEarned: 0,
+      totalSpent: 10,
+    });
+    store.save(makeStoredState());
+    const svc = makeChargeService(client);
+    await svc.chargeSlurmJob(SLURM_PAYLOAD);
+
+    svc.logout();
+    store.save(
+      makeStoredState({
+        account: { phone: '18600000000', sub: '77', username: 'U-OTHER', nickname: '其他账号' },
+      })
+    );
+    const svc2 = makeChargeService(client);
+    expect(svc2.getBillingHistory()).toEqual([]);
+    // 另一位账号的同一作业照常独立计费（去重键含 account.sub）
+    const other = await svc2.chargeSlurmJob({
+      ...SLURM_PAYLOAD,
+      charge_id: 'charge-other',
+    });
+    expect(other.ok).toBe(true);
+    expect(client.deductPoints).toHaveBeenCalledTimes(2);
   });
 
   it('余额不足（40003）fail-closed：返回阻止并记 insufficient 历史', async () => {

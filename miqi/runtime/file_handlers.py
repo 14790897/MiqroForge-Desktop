@@ -40,7 +40,7 @@ from miqi.agent.tools.filesystem import (
 from miqi.runtime.app_server import AppServerError
 from miqi.runtime.fs_protocol import decode_data_base64, encode_data_base64
 from miqi.session.manager import OwnershipError
-from miqi.utils.helpers import safe_filename
+from miqi.session.session_keys import session_files_dir_key
 
 # ── workspace / SessionManager access ──────────────────────────────────────
 
@@ -93,11 +93,11 @@ def _resolve_session_files_path(client_id: str, session_key: str) -> Path:
 
     Verifies session ownership before returning the path.
     Uses the same session directory naming as SessionManager
-    (safe_filename(session_key)), gated by ownership verification.
+    (``session_files_dir_key``), gated by ownership verification.
     """
     _verify_session_ownership(client_id, session_key)
     workspace = _get_workspace_path()
-    safe_key = safe_filename(session_key.replace(":", "_"))
+    safe_key = session_files_dir_key(session_key)
     files_dir = workspace / "sessions" / safe_key / "files"
     files_dir.mkdir(parents=True, exist_ok=True)
     return files_dir
@@ -110,7 +110,7 @@ def _resolve_session_snapshot_dir(client_id: str, session_key: str) -> Path:
     """
     _verify_session_ownership(client_id, session_key)
     workspace = _get_workspace_path()
-    safe_key = safe_filename(session_key.replace(":", "_"))
+    safe_key = session_files_dir_key(session_key)
     snap_dir = workspace / "sessions" / safe_key / "snapshots"
     snap_dir.mkdir(parents=True, exist_ok=True)
     return snap_dir
@@ -753,7 +753,12 @@ async def files_write_handler(
             code="INVALID_PARAMS",
         )
 
-    # Update tracked_files with client_id ownership check (BUG FIX A.3)
+    # Update tracked_files with client_id ownership check (BUG FIX A.3).
+    # The RAW session_key is passed on purpose (#1005): normalization happens
+    # one layer down — SessionManager.get_session_dir applies
+    # ``session_files_dir_key`` — so the tracked_files.json lands in the same
+    # session directory this handler just resolved above.  Do not "fix" this
+    # call site by pre-normalizing the key; that would derive the name twice.
     if session_key:
         sm = _get_session_manager()
         try:

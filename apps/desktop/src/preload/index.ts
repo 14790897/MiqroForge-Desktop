@@ -108,10 +108,13 @@ const api = {
       ipcRenderer.invoke(IPC.APP_FOCUS, opts),
     // 资产面板推开聊天区时加宽窗口(extra≈面板宽),聊天列 flex-1 分到新增宽度
     // 而保持原宽; 关闭(extra=0)还原。主进程记录实际加宽量,最大化/满屏时跳过。
+    // minOnly=true:只上报面板当前是否占宽(用于抬高窗口最小宽度),不改窗口宽 ——
+    // 冷启动面板默认展开时用它,否则缩窗会把聊天列/输入框压扁。
     setPanelWindowExtra: (
-      extra: number
+      extra: number,
+      minOnly?: boolean
     ): Promise<{ ok: boolean; applied: number; skipped?: boolean }> =>
-      ipcRenderer.invoke(IPC.APP_PANEL_EXTRA, extra),
+      ipcRenderer.invoke(IPC.APP_PANEL_EXTRA, extra, minOnly),
   },
   // -- Runtime ----------------------------------------------------------------
   runtime: {
