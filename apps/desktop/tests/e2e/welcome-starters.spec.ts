@@ -169,12 +169,13 @@ test.describe('Welcome Starters E2E (#962)', () => {
 
     // 真实 IME 没法在 e2e 里驱动，直接派发一个 isComposing=true 的回车——
     // Composer.handleKeyDown 读的就是 nativeEvent.isComposing。
-    await textarea().click();
+    //
+    // 注意必须用 fill() 走真实输入路径：直接赋 el.value 只会同步 React 的 value
+    // tracker，onChange 不触发、state 仍是空串，那样 Enter 提交的是空串、本来就被
+    // handleSend 忽略——即便把 isComposing 判断删掉这条测试也会过（假绿）。
+    await textarea().fill('我正在打拼音');
     await textarea().evaluate((el) => {
-      const t = el as HTMLTextAreaElement;
-      t.value = '我正在打拼音';
-      t.dispatchEvent(new Event('input', { bubbles: true }));
-      t.dispatchEvent(
+      el.dispatchEvent(
         new KeyboardEvent('keydown', {
           key: 'Enter',
           bubbles: true,

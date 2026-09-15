@@ -115,6 +115,10 @@ test.describe('Issue #811 护栏误拦截复现 (real LLM)', () => {
     let lastText = '';
     let lastLen = -1;
     let stable = 0;
+    // exec 真的被调用过的硬信号：ToolCommandBlock 只在工具调用行渲染出 exec 命令时
+    // 出现。判断「护栏没被触发」必须靠它，不能靠回复的语气——模型完全可能先调了
+    // exec、再在最终回复里说一句泛泛的拒绝，光看文字会把真回归当成前提未满足跳过。
+    let sawExecCommand = false;
 
     const matches = (t: string) =>
       expectPattern instanceof RegExp ? expectPattern.test(t) : t.includes(expectPattern);
@@ -142,6 +146,9 @@ test.describe('Issue #811 护栏误拦截复现 (real LLM)', () => {
         }
       }
       lastLen = len;
+      if (!sawExecCommand) {
+        sawExecCommand = (await page.locator('[data-testid="tool-command-copy"]').count()) > 0;
+      }
       if (text !== lastText) {
         lastText = text;
         idleDeadline = Date.now() + IDLE_DEADLINE;
@@ -150,14 +157,20 @@ test.describe('Issue #811 护栏误拦截复现 (real LLM)', () => {
     }
 
     if (expectPattern instanceof RegExp) {
-      // 模型可能压根不调 exec，直接按自身的安全对齐拒答（本 spec 顶部注释记过这个
-      // 失败模式，CI 上会复现）。这时沙箱护栏根本没被触发，断言「护栏拦截」必然
-      // 落空——那是**前提没满足**，不是护栏回归。跳过并打点，别烧满 8 分钟再报假红。
-      // 实测的回复形如：「抱歉，我不能执行这条命令。rm -rf 针对系统目录 /etc/ 的
-      // 删除操作属于危险操作……」
-      if (!matches(text) && /我不能执行|不会执行|无法执行|拒绝执行|不能帮你执行/.test(text)) {
+      // 「模型压根没调 exec、直接按自身安全对齐拒答」是这个 spec 顶部注释就记过的
+      // 失败模式，CI 上会复现。这时沙箱护栏根本没被触发，断言「护栏拦截」必然落空
+      // ——那是前提没满足，不是护栏回归，跳过并打点，别烧满 8 分钟再报假红。
+      //
+      // 两个条件缺一不可：① 全程没出现过 exec 命令块（硬信号，见上）；
+      // ② 回复里是明确的自拒口吻。少任何一个都照常断言——如果护栏真坏了、模型又调了
+      // exec，①为假，走下面的 expect，失败照报。
+      if (
+        !sawExecCommand &&
+        !matches(text) &&
+        /我不能执行|不会执行|无法执行|拒绝执行|不能帮你执行/.test(text)
+      ) {
         console.log(
-          '[test] ⚠️ 模型自行拒答、未调用 exec，沙箱护栏未被触发 — 跳过该断言（precondition 未满足）'
+          '[test] ⚠️ 全程无 exec 命令块且模型自行拒答，沙箱护栏未被触发 — 跳过（precondition 未满足）'
         );
         test.skip(true, 'model self-refused without invoking exec; guardrail not exercised');
         return text;
