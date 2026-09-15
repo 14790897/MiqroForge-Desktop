@@ -87,16 +87,17 @@ test.describe('Issue #879 [n] 脚注 → 来源详情', () => {
     mockServer = mock.proc;
 
     const fixture = await launchElectronApp((config: any) => {
-      config.providers = config.providers ?? {};
-      delete config.providers.deepseek;
-      config.providers.openai = { apiKey: 'mock-key', apiBase: mock.mockUrl };
-      config.agents = {
-        ...(config.agents ?? {}),
-        defaults: {
-          ...(config.agents?.defaults ?? {}),
-          model: 'openai/gpt-4o-mini',
-        },
-      };
+      // Point EVERY configured provider at the mock（provider resolution 由
+      // agents.defaults.model 决定，fast 模式可能走 deepseek 等非 openai 路径）
+      // —— mock 忽略 model 名/key，见 regression-delete-all-focus.spec.ts。
+      const providers = config.providers ?? {};
+      for (const [name, p] of Object.entries(providers)) {
+        if (p && typeof p === 'object') {
+          (p as any).apiBase = mock.mockUrl;
+          if (!(p as any).apiKey) (p as any).apiKey = 'mock-key';
+        }
+      }
+      config.providers = providers;
     });
     electronApp = fixture.electronApp;
     page = fixture.page;
@@ -117,10 +118,11 @@ test.describe('Issue #879 [n] 脚注 → 来源详情', () => {
     await sendMessage(page, 'MOF 造粒如何避免 BET 损失？');
 
     // 1. 等待 [n] 脚注渲染成可点击 citation（需要全文 + 参考文献到位）。
-    await expect(page.getByTestId('citation-ref-1')).toBeVisible({ timeout: 90_000 });
+    //    正文 [1] 与参考文献列表的 [1] 都会 linkify → 取第一个（正文里的）。
+    await expect(page.getByTestId('citation-ref-1').first()).toBeVisible({ timeout: 90_000 });
 
     // 2. 点击 [1] 脚注 → 来源详情弹窗。
-    await page.getByTestId('citation-ref-1').click();
+    await page.getByTestId('citation-ref-1').first().click();
 
     // 3. 弹窗内展示题名/作者/期刊/年份/DOI（scope 到 dialog 避免误匹配）。
     const dialog = page.getByRole('dialog');
@@ -131,7 +133,7 @@ test.describe('Issue #879 [n] 脚注 → 来源详情', () => {
     await expect(dialog.getByText('10.1016/j.matt.2023.01.001')).toBeVisible();
 
     // 4. 截图并上传到 PR。
-    const shotPath = `test-results/${test.info().title.replace(/\s+/g, '-')}.png`;
+    const shotPath = 'test-results/issue-879-citation-footnotes.png';
     await page.screenshot({ path: shotPath, fullPage: true });
     await postScreenshotToPr(
       shotPath,

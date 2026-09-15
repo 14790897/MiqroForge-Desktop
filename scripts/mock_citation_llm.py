@@ -74,7 +74,8 @@ class Handler(BaseHTTPRequestHandler):
 def main():
     port = int(sys.argv[1])
     srv = ThreadingHTTPServer(("127.0.0.1", port), Handler)
-    print(f"http://127.0.0.1:{port}/v1", flush=True)
+    # port 0 = OS 分配 → 必须打印 server_address 的实际端口，否则客户端连 0 端口失败。
+    print(f"http://127.0.0.1:{srv.server_address[1]}/v1", flush=True)
     srv.serve_forever()
 
 
