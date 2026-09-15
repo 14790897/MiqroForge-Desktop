@@ -138,7 +138,7 @@ class SkillManageTool(Tool):
             missing = self._skills._missing_python_deps(name)
             content = (
                 content.rstrip()
-                + f"\n\n---\n本技能的 Python 依赖（requirements.txt）：{', '.join(reqs)}\n"
+                + f"\n\n---\n本技能的 Python 依赖（requirements.txt）：{', '.join(r.name for r in reqs)}\n"
             )
             if missing:
                 content += f"缺失依赖（需先安装）：{', '.join(missing)}\n"

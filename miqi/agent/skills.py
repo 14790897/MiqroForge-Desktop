@@ -5,6 +5,7 @@ import os
 import re
 import shutil
 from dataclasses import dataclass, field
+from packaging.requirements import InvalidRequirement, Requirement
 from pathlib import Path
 
 # Default builtin skills directory (relative to this file)
@@ -60,27 +61,26 @@ def invalidate_skill_index(workspace: Path | None = None) -> None:
         idx.generation += 1
 
 
-def _parse_requirements_text(text: str) -> list[str]:
-    """Parse requirements.txt content into top-level distribution names.
+def _parse_requirements_text(text: str) -> list[Requirement]:
+    """Parse requirements.txt content into PEP 508 requirements.
 
     Drops comments, blank lines, ``-r``/``-e`` includes, ``--index-url``
-    options, and VCS/URL requirements (``git+``, ``http``). For the remaining
-    lines it strips environment markers (``;``), extras (``[...]``) and version
-    specifiers (``>=``, ``==``, ``~=``, …).
+    options, and bare VCS/URL lines. Returns parsed requirements so callers
+    can evaluate environment markers, inspect version specifiers, and detect
+    named direct-URL references (``pkg @ https://…``).
     """
-    names: list[str] = []
+    reqs: list[Requirement] = []
     for line in text.splitlines():
         line = line.split("#", 1)[0].strip()
         if not line:
             continue
         if line.startswith(("-", "git+", "http:", "https:")):
             continue
-        line = line.split(";", 1)[0].strip()   # environment markers
-        line = line.split("[", 1)[0].strip()   # extras
-        name = re.split(r"[<>=!~]", line, 1)[0].strip()  # version specifiers
-        if name:
-            names.append(name)
-    return names
+        try:
+            reqs.append(Requirement(line))
+        except InvalidRequirement:
+            continue
+    return reqs
 
 
 class SkillsLoader:
@@ -102,8 +102,8 @@ class SkillsLoader:
         self._index = get_skill_index(workspace, self.builtin_skills)
         self._meta_cache: dict[str, dict | None] = self._index.meta_cache
         self._content_cache: dict[str, str | None] = {}
-        # requirements.txt 解析缓存（实例级，key=name → 包名列表）
-        self._requirements_cache: dict[str, list[str]] = {}
+        # requirements.txt 解析缓存（实例级，key=name → 已解析需求列表）
+        self._requirements_cache: dict[str, list[Requirement]] = {}
         # nested 技能 name→SKILL.md 索引（懒构建，替代 load_skill 里的全树 glob）
         self._nested_index: dict[str, Path] | None = None
         # 进程级索引的代际快照——检测磁盘变更，变了就清本实例的正文缓存
@@ -119,6 +119,7 @@ class SkillsLoader:
         """
         if self._index.generation != self._index_generation:
             self._content_cache.clear()
+            self._requirements_cache.clear()
             self._nested_index = None
             self._index_generation = self._index.generation
 
@@ -394,7 +395,7 @@ class SkillsLoader:
             reqs = self._read_requirements(s["name"])
             if reqs:
                 lines.append("    <requirements>" +
-                             ", ".join(escape_xml(r) for r in reqs) +
+                             ", ".join(escape_xml(r.name) for r in reqs) +
                              "</requirements>")
 
             # Surface references/ siblings so the agent knows there's a
@@ -480,41 +481,49 @@ class SkillsLoader:
         meta = self.get_skill_metadata(name) or {}
         return self._parse_skill_metadata(meta.get("metadata", ""))
 
-    def _read_requirements(self, name: str) -> list[str]:
-        """Read and parse a skill's requirements.txt into package names.
+    def _read_requirements(self, name: str) -> list[Requirement]:
+        """Read and parse a skill's requirements.txt into PEP 508 requirements.
 
         Returns an empty list when the skill has no requirements.txt. Results
-        are cached per instance.
+        are cached per instance and invalidated when the skill index changes.
         """
+        self._sync_index_generation()
         if name in self._requirements_cache:
             return self._requirements_cache[name]
         path = self.get_skill_path(name)
         req_file = path.parent / "requirements.txt" if path else None
-        names: list[str] = []
+        reqs: list[Requirement] = []
         if req_file is not None and req_file.exists():
-            names = _parse_requirements_text(req_file.read_text(encoding="utf-8"))
-        self._requirements_cache[name] = names
-        return names
+            reqs = _parse_requirements_text(req_file.read_text(encoding="utf-8"))
+        self._requirements_cache[name] = reqs
+        return reqs
 
     def _missing_python_deps(self, name: str) -> list[str]:
-        """Return the subset of a skill's requirements.txt packages not installed.
+        """Return requirements that are missing or version-incompatible.
 
-        Checks by distribution name via :mod:`importlib.metadata` (PEP 503
-        normalised), which is what ``pip`` uses for names — so a requirement
-        like ``PyMuPDF`` maps to the installed ``pymupdf`` dist (whose import
-        name is ``fitz``). Checked against the host interpreter the loader runs
-        in; the sandbox interpreter may differ, so this is an approximation
-        consistent with ``requires.bins`` using ``shutil.which`` on the host
-        PATH.
+        Skips named direct-URL references (``pkg @ https://…``) and
+        requirements whose environment marker is inactive on the current
+        interpreter. For the rest, checks the installed distribution against
+        the requirement's version specifier via :mod:`importlib.metadata`.
+        Checked against the host interpreter the loader runs in; the sandbox
+        interpreter may differ, so this is an approximation consistent with
+        ``requires.bins`` using ``shutil.which`` on the host PATH.
         """
         from importlib import metadata
 
         missing: list[str] = []
-        for dist_name in self._read_requirements(name):
+        for req in self._read_requirements(name):
+            if req.url:
+                continue  # named direct-URL reference, not a resolvable dist
+            if req.marker is not None and not req.marker.evaluate():
+                continue  # marker inactive on this interpreter
             try:
-                metadata.distribution(dist_name)
+                dist = metadata.distribution(req.name)
             except (metadata.PackageNotFoundError, ValueError):
-                missing.append(dist_name)
+                missing.append(req.name)
+                continue
+            if req.specifier and not req.specifier.contains(dist.version, prereleases=True):
+                missing.append(f"{req.name}{req.specifier}")
         return missing
 
     def get_always_skills(self) -> list[str]:

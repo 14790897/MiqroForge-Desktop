@@ -1302,7 +1302,7 @@ wheels = [
 
 [[package]]
 name = "miqi"
-version = "0.25.0"
+version = "0.29.1"
 source = { editable = "." }
 dependencies = [
     { name = "aiosqlite" },
@@ -1318,6 +1318,7 @@ dependencies = [
     { name = "mcp" },
     { name = "openai" },
     { name = "openpyxl" },
+    { name = "packaging" },
     { name = "pdfplumber" },
     { name = "prompt-toolkit" },
     { name = "pydantic" },
@@ -1382,6 +1383,7 @@ requires-dist = [
     { name = "openpyxl", specifier = ">=3.1.5" },
     { name = "opentelemetry-exporter-otlp", marker = "extra == 'otel'", specifier = ">=1.27.0" },
     { name = "opentelemetry-sdk", marker = "extra == 'otel'", specifier = ">=1.27.0" },
+    { name = "packaging", specifier = ">=24.0" },
     { name = "pdfplumber", specifier = ">=0.11.0" },
     { name = "prompt-toolkit", specifier = ">=3.0.50,<4.0.0" },
     { name = "pydantic", specifier = ">=2.12.0,<3.0.0" },

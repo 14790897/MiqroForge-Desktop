@@ -7,6 +7,7 @@ _MISSING_DIST = "miqi-nonexistent-pkg-xyz"
 
 
 def _make_skill(parent, name, description, requirements=None):
+    """Write a minimal SKILL.md (and optional requirements.txt) under parent."""
     skill_dir = parent / name
     skill_dir.mkdir(parents=True, exist_ok=True)
     (skill_dir / "SKILL.md").write_text(
@@ -26,6 +27,7 @@ def _loader(tmp_path, ws_name="ws"):
 
 
 def test_parse_requirements_text_strips_noise():
+    """Comments, includes, URL lines and options are dropped; names survive."""
     text = (
         "# a comment\n"
         "matplotlib>=3.7\n"
@@ -40,7 +42,7 @@ def test_parse_requirements_text_strips_noise():
         "\n"
         "--index-url https://example.com/simple\n"
     )
-    assert _parse_requirements_text(text) == [
+    assert [r.name for r in _parse_requirements_text(text)] == [
         "matplotlib",
         "numpy",
         "pymupdf",
@@ -50,6 +52,7 @@ def test_parse_requirements_text_strips_noise():
 
 
 def test_read_requirements_returns_empty_without_file(tmp_path):
+    """A skill without requirements.txt has no declared Python deps."""
     loader, workspace = _loader(tmp_path)
     _make_skill(workspace / "skills", "no-reqs", "No requirements")
     assert loader._read_requirements("no-reqs") == []
@@ -57,6 +60,7 @@ def test_read_requirements_returns_empty_without_file(tmp_path):
 
 
 def test_missing_python_dep_marks_skill_unavailable(tmp_path):
+    """A declared-but-uninstalled package makes the skill unavailable."""
     loader, workspace = _loader(tmp_path)
     _make_skill(
         workspace / "skills",
@@ -64,7 +68,9 @@ def test_missing_python_dep_marks_skill_unavailable(tmp_path):
         "Needs a missing dep",
         requirements=f"{_MISSING_DIST}>=1.0\n",
     )
-    assert loader._read_requirements("needs-missing") == [_MISSING_DIST]
+    assert [r.name for r in loader._read_requirements("needs-missing")] == [
+        _MISSING_DIST
+    ]
     assert loader._check_requirements("needs-missing") is False
     assert (
         f"Python: {_MISSING_DIST}"
@@ -73,6 +79,7 @@ def test_missing_python_dep_marks_skill_unavailable(tmp_path):
 
 
 def test_installed_package_not_reported_missing(tmp_path):
+    """An installed distribution satisfies a bare requirement."""
     loader, workspace = _loader(tmp_path)
     # pydantic is a hard runtime dependency, so it is always installed.
     _make_skill(
@@ -85,7 +92,59 @@ def test_installed_package_not_reported_missing(tmp_path):
     assert loader._get_missing_requirements("needs-pydantic") == ""
 
 
+def test_installed_compatible_version_satisfies(tmp_path):
+    """An installed version matching the specifier is not reported missing."""
+    loader, workspace = _loader(tmp_path)
+    _make_skill(
+        workspace / "skills",
+        "needs-pydantic-v2",
+        "Needs pydantic v2",
+        requirements="pydantic>=2.0\n",
+    )
+    assert loader._check_requirements("needs-pydantic-v2") is True
+
+
+def test_installed_but_incompatible_version_reported(tmp_path):
+    """An installed but incompatible version is reported as missing."""
+    loader, workspace = _loader(tmp_path)
+    _make_skill(
+        workspace / "skills",
+        "needs-future-pydantic",
+        "Needs a future pydantic",
+        requirements="pydantic>=999\n",
+    )
+    assert loader._check_requirements("needs-future-pydantic") is False
+    assert "pydantic" in loader._get_missing_requirements("needs-future-pydantic")
+
+
+def test_inactive_environment_marker_is_skipped(tmp_path):
+    """A requirement with an inactive marker is not checked."""
+    loader, workspace = _loader(tmp_path)
+    _make_skill(
+        workspace / "skills",
+        "marker-off",
+        "Marker off",
+        requirements=f'{_MISSING_DIST}; python_version < "3.0"\n',
+    )
+    assert loader._missing_python_deps("marker-off") == []
+    assert loader._check_requirements("marker-off") is True
+
+
+def test_named_direct_url_requirement_is_skipped(tmp_path):
+    """A named direct-URL reference is skipped (not resolvable by dist name)."""
+    loader, workspace = _loader(tmp_path)
+    _make_skill(
+        workspace / "skills",
+        "direct-url",
+        "Direct URL",
+        requirements="pkg @ https://example.com/pkg.whl\n",
+    )
+    assert loader._missing_python_deps("direct-url") == []
+    assert loader._check_requirements("direct-url") is True
+
+
 def test_build_skills_summary_includes_requirements(tmp_path):
+    """The summary exposes <requirements> and marks unavailable skills."""
     loader, workspace = _loader(tmp_path)
     _make_skill(
         workspace / "skills",
@@ -101,6 +160,7 @@ def test_build_skills_summary_includes_requirements(tmp_path):
 
 
 def test_list_skills_filters_unavailable_python_deps(tmp_path):
+    """Unavailable skills (missing Python deps) are filtered from listings."""
     loader, workspace = _loader(tmp_path)
     _make_skill(workspace / "skills", "good", "No deps")
     _make_skill(
@@ -111,3 +171,21 @@ def test_list_skills_filters_unavailable_python_deps(tmp_path):
     )
     names = {s["name"] for s in loader.list_skills(filter_unavailable=True)}
     assert names == {"good"}
+
+
+def test_requirements_cache_invalidated_on_index_change(tmp_path):
+    """Editing requirements.txt is reflected after invalidate_skill_index."""
+    loader, workspace = _loader(tmp_path)
+    _make_skill(
+        workspace / "skills", "evolving", "Evolving", requirements="pydantic\n"
+    )
+    assert loader._check_requirements("evolving") is True
+
+    # Rewrite requirements.txt to require a missing dist, then invalidate.
+    (workspace / "skills" / "evolving" / "requirements.txt").write_text(
+        f"{_MISSING_DIST}\n", encoding="utf-8"
+    )
+    from miqi.agent.skills import invalidate_skill_index
+
+    invalidate_skill_index(workspace)
+    assert loader._check_requirements("evolving") is False
