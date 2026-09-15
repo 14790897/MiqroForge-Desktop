@@ -50,6 +50,7 @@ import type {
   FilesOpenExternalResult,
   FilesOpenContainingFolderResult,
   FilesSaveAsResult,
+  ClipboardReadFilesResult,
   HtmlOpenInBrowserResult,
   DocumentsParseResult,
   TrackedFileInfo,
@@ -492,6 +493,9 @@ const api = {
       ipcRenderer.invoke(IPC.FILES_ACCEPT, { path, session_key: sessionKey }),
     openExternal: (path: string): Promise<FilesOpenExternalResult> =>
       ipcRenderer.invoke(IPC.FILES_OPEN_EXTERNAL, { path }),
+    /** 预览「系统应用打开」：把字节写成系统临时文件后用默认应用打开（保留扩展名）。 */
+    openBytes: (name: string, dataBase64: string): Promise<FilesOpenExternalResult> =>
+      ipcRenderer.invoke(IPC.FILES_OPEN_BYTES, { name, base64: dataBase64 }),
     openContainingFolder: (path: string): Promise<FilesOpenContainingFolderResult> =>
       ipcRenderer.invoke(IPC.FILES_OPEN_CONTAINING_FOLDER, { path }),
     /** #877: native save dialog for the preview「下载/另存为」button. */
@@ -534,6 +538,9 @@ const api = {
   clipboard: {
     writeText: (text: string): Promise<{ ok: boolean }> =>
       ipcRenderer.invoke(IPC.CLIPBOARD_WRITE_TEXT, { text }),
+    /** Ctrl+V：主进程读系统剪贴板里的文件/图片（Windows 复制文件在 Chromium paste 事件里拿不到）。 */
+    readFiles: (): Promise<ClipboardReadFilesResult> =>
+      ipcRenderer.invoke(IPC.CLIPBOARD_READ_FILES),
   },
 
   // -- Document parsing ----------------------------------------------------

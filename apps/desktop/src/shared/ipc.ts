@@ -99,6 +99,8 @@ export const IPC = {
   FILES_REVERT: 'files:revert',
   FILES_ACCEPT: 'files:accept',
   FILES_OPEN_EXTERNAL: 'files:openExternal',
+  FILES_OPEN_BYTES: 'files:openBytes', // 预览：字节 → 系统临时文件 → 默认应用打开
+  CLIPBOARD_READ_FILES: 'clipboard:readFiles', // Ctrl+V：主进程读系统剪贴板里的文件/图片
   FILES_OPEN_CONTAINING_FOLDER: 'files:openContainingFolder',
   FILES_SAVE_AS: 'files:saveAs', // #877: 预览弹窗「下载/另存为」
   HTML_OPEN_IN_BROWSER: 'html:openInBrowser',
@@ -902,6 +904,19 @@ export interface FilesOpenExternalResult {
   opened: boolean;
   path: string;
   error?: string;
+}
+
+/** Ctrl+V 粘贴：主进程从系统剪贴板读到的文件/图片（renderer 不传参，避免任意读盘）。 */
+export interface ClipboardAttachmentFile {
+  name: string;
+  base64: string;
+  mime: string;
+  size: number;
+}
+
+export interface ClipboardReadFilesResult {
+  files: ClipboardAttachmentFile[];
+  image?: ClipboardAttachmentFile;
 }
 
 /** Result of writing an HTML string to a temp file and opening it in the

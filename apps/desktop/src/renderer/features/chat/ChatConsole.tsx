@@ -116,6 +116,43 @@ interface Attachment {
   parseError?: string;
 }
 
+/** 内容指纹：优先 crypto.subtle 的 SHA-256（全量字节），不可用时退回双种子 FNV-1a（同样是全量）。
+ *  两条通道（浏览器 paste / 主进程剪贴板）都走这里，保证表示一致。 */
+async function sha256HexOrFallback(bytes: Uint8Array): Promise<string> {
+  const subtle = globalThis.crypto?.subtle;
+  if (subtle?.digest) {
+    try {
+      const digest = await subtle.digest('SHA-256', bytes as unknown as BufferSource);
+      return Array.from(new Uint8Array(digest))
+        .map((b) => b.toString(16).padStart(2, '0'))
+        .join('');
+    } catch {
+      /* fall through */
+    }
+  }
+  let h1 = 0x811c9dc5;
+  let h2 = 0x7fed2e1f;
+  for (let i = 0; i < bytes.length; i++) {
+    h1 ^= bytes[i];
+    h1 = Math.imul(h1, 0x01000193);
+    h2 ^= bytes[bytes.length - 1 - i];
+    h2 = Math.imul(h2, 0x01000193);
+  }
+  return `${bytes.length}-${(h1 >>> 0).toString(16)}-${(h2 >>> 0).toString(16)}`;
+}
+
+function bytesFromBase64(b64: string): Uint8Array {
+  const bin = atob(b64);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+
+/** 浏览器 File → 内容指纹（与主进程通道口径一致）。 */
+async function fileFingerprint(file: File): Promise<string> {
+  return sha256HexOrFallback(new Uint8Array(await file.arrayBuffer()));
+}
+
 const DOCUMENT_SUFFIXES_RE =
   /\.(docx|doc|pptx|ppt|xlsx|xls|pdf|odt|odp|ods|md|markdown|mdown|html|htm|csv|json|xml|yaml|yml|env|log|sql|ini|toml|htaccess|sh|bash|txt|text|rtf)$/i;
 
@@ -2603,16 +2640,97 @@ export function ChatConsole({
     },
     [messages.length]
   );
+  /** 会话代际：切会话时 +1；异步附件（FileReader / 剪贴板）提交前校验，
+   *  避免旧会话的附件落到新会话（ChatConsole 跨会话常驻）。 */
+  const sessionGenRef = useRef(0);
   // 切到新会话时按当前 reasoningMode 重新派生选中卡：避免沿用上个会话的 code 选择，
   // 却因中途切到 fast 而高亮与发送模式不一致（CodeRabbit）。仅随 sessionKey 触发，
   // 不在同一会话内用 reasoningMode 变化覆盖用户手动选卡。
   useEffect(() => {
     setWelcomeMode(reasoningMode === 'think' ? 'think' : 'fast');
+    sessionGenRef.current += 1;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionKey]);
   const [streaming, setStreaming] = useState(false);
   const [copiedIdx, setCopiedIdx] = useState<number | null>(null);
   const [attachments, setAttachments] = useState<Attachment[]>([]);
+  /** 事件级去重：一次「动作」(选择/粘贴) 内同名同大小只挂一次；
+   *  跨通道（浏览器 paste 与主进程剪贴板）在 500ms 内算同一动作，避免重复挂载。
+   *  不再用“1s 内全局 name:size”去重——那会误杀合法的同名同大小附件。 */
+  const attachActionRef = useRef<{ id: string; ts: number; seen: Set<string> }>({
+    id: '',
+    ts: 0,
+    seen: new Set<string>(),
+  });
+  const newAttachAction = () => {
+    const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    attachActionRef.current = { id, ts: Date.now(), seen: new Set<string>() };
+    return id;
+  };
+  const acceptInAttachAction = (actionId: string, key: string) => {
+    if (attachActionRef.current.id !== actionId) {
+      attachActionRef.current = { id: actionId, ts: Date.now(), seen: new Set<string>() };
+    }
+    const act = attachActionRef.current;
+    act.ts = Date.now();
+    if (act.seen.has(key)) return false;
+    act.seen.add(key);
+    return true;
+  };
+  /** Ctrl+V 有两条通道：原生 paste 与主进程读剪贴板。keydown 只登记一个 token，
+   *  真正的 paste 事件决定是否取消 fallback；若浏览器始终没给 paste，再由 timeout
+   *  走主进程读取。两条通道共用同一 token，并按「内容特征」(size:mime) 去重，
+   *  避免同名不同源（image.png vs pasted-image-*.png）绕过 name:size 去重。 */
+  const pendingPasteRef = useRef<{ token: string | null; timer: number | null }>({
+    token: null,
+    timer: null,
+  });
+  const recentFpRef = useRef<{ fp: string; ts: number }[]>([]);
+  /** 跨通道去重改用**内容指纹**（长度 + 头/尾采样的 FNV-1a），不再用 size+mime 近似：
+   *  两张同尺寸不同内容的截图不会被误判为同一份。 */
+  const seenFingerprintRecently = (fp: string) => {
+    const now = Date.now();
+    const arr = recentFpRef.current.filter((e) => now - e.ts < 1500);
+    const dup = arr.some((e) => e.fp === fp);
+    recentFpRef.current = [...arr, { fp, ts: now }].slice(-12);
+    return dup;
+  };
+
+  const MAX_ONE_ATTACHMENT_BYTES = 25 * 1024 * 1024;
+  /** 附件总量上限（与主进程剪贴板一致）：renderer 侧 input/拖拽/paste 三入口统一。 */
+  const MAX_TOTAL_ATTACHMENT_BYTES = 40 * 1024 * 1024;
+  const attachmentsRef = useRef<Attachment[]>([]);
+  /** 已接受但尚未提交的字节（同步预留）：两个异步 action 并发时，
+   *  只读 attachmentsRef 会各自看到旧总量而突破 40MB（review P1）。 */
+  const reservedBytesRef = useRef(0);
+  useEffect(() => {
+    attachmentsRef.current = attachments;
+  }, [attachments]);
+  const attachmentsBytes = () =>
+    attachmentsRef.current.reduce((sum, a) => sum + (a.size || 0), 0) + reservedBytesRef.current;
+  /** 同步的「检查 + 预留」单一临界操作：跨 action 并发也不会各自读到旧总量。 */
+  const tryReserve = (size: number): boolean => {
+    if (attachmentsBytes() + size > MAX_TOTAL_ATTACHMENT_BYTES) return false;
+    reservedBytesRef.current += size;
+    return true;
+  };
+  const releaseReservation = (size: number) => {
+    reservedBytesRef.current = Math.max(0, reservedBytesRef.current - size);
+  };
+  /** 附件真正提交进 state 时，释放它自己的预留。不能用「提交后总字节的净变化」推断：
+   *  用户先删旧附件、随后 pending 附件提交时净变化为负，会漏释放（reservation 泄漏）。 */
+  const commitAttachment = (add: (prev: Attachment[]) => Attachment[], size: number) => {
+    setAttachments(add);
+    releaseReservation(size);
+  };
+  const commitIfGen = (gen: number, add: (prev: Attachment[]) => Attachment[], size: number) => {
+    if (gen !== sessionGenRef.current) {
+      releaseReservation(size);
+      return false;
+    }
+    commitAttachment(add, size);
+    return true;
+  };
   const [historyLoaded, setHistoryLoaded] = useState(false);
   const [downloadingPaperId, setDownloadingPaperId] = useState<string | null>(null);
   /** #668 补：论文下载结果反馈（paperId → done+savePath / failed+error） */
@@ -2690,6 +2808,8 @@ export function ChatConsole({
    *  (含长回复消息树)重建 VDOM——内容多的对话会因此卡。 */
   const assetsPanelRef = useRef<HTMLDivElement | null>(null);
   const panelWidthRef = useRef(panelWidth);
+  /** 附件预览的投送目标:Composer 框内插槽节点(见下方 portal)。 */
+  const [attachmentSlot, setAttachmentSlot] = useState<HTMLDivElement | null>(null);
   /** 点「文件面板」打开时置位：等主进程真的把窗口加宽了，才让面板出现。
    *  见下面 onRequestSettled。 */
   const pendingPanelReveal = useRef(false);
@@ -2891,8 +3011,10 @@ export function ChatConsole({
     content?: string;
     dataBase64?: string;
     /** #877: rich render kind — pdf iframe / spreadsheet table / docx blocks. */
-    kind?: 'pdf' | 'spreadsheet' | 'document';
+    kind?: 'pdf' | 'spreadsheet' | 'document' | 'image';
     pdfUrl?: string;
+    /** kind==='image' 时的图片源（data URL）。 */
+    imageUrl?: string;
     spreadsheet?: SpreadsheetData;
     docBlocks?: DocumentBlocks;
   } | null>(null);
@@ -4091,87 +4213,313 @@ export function ChatConsole({
   // useCallback (#1042): stable prop for the memoized Composer.
   const handleAttachClick = useCallback(() => fileInputRef.current?.click(), []);
 
-  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    Array.from(e.target.files ?? []).forEach((file) => {
-      const isImage = file.type.startsWith('image/');
-      const isDocument = DOCUMENT_SUFFIXES_RE.test(file.name);
-      const isTextLike = TEXT_SUFFIXES_RE.test(file.name) || file.type.startsWith('text/');
+  // 统一把 File 转成 Attachment：input change / 剪贴板 / 拖拽共用。
+  const attachFromFile = useCallback(
+    (file: File, actionId: string, gen: number = sessionGenRef.current): boolean => {
+      if (file.size > MAX_ONE_ATTACHMENT_BYTES) return false;
+      if (!acceptInAttachAction(actionId, `${file.name}:${file.size}`)) return false;
+      {
+        const isImage = file.type.startsWith('image/');
+        const isDocument = DOCUMENT_SUFFIXES_RE.test(file.name);
+        const isTextLike = TEXT_SUFFIXES_RE.test(file.name) || file.type.startsWith('text/');
 
-      if (isTextLike && !isDocument) {
-        // Plain text files — read directly as text
-        const reader = new FileReader();
-        reader.onload = () =>
-          setAttachments((prev) => [
-            ...prev,
-            { name: file.name, type: 'text', content: reader.result as string, size: file.size },
-          ]);
-        reader.readAsText(file);
-      } else if (isTextLike && isDocument) {
-        // Markdown/text files detected as documents — read as text AND as base64 for server fallback
-        const reader = new FileReader();
-        reader.onload = () => {
-          const base64 = (reader.result as string).split(',')[1];
-          const textContent = new TextDecoder().decode(
-            Uint8Array.from(atob(base64), (c) => c.charCodeAt(0))
-          );
-          setAttachments((prev) => [
-            ...prev,
-            {
-              name: file.name,
-              type: 'document',
-              dataBase64: base64,
-              content: textContent,
-              dataUrl: reader.result as string,
-              size: file.size,
-              mimeType: file.type || getMimeTypeFromName(file.name),
-              status: 'pending' as const,
-            },
-          ]);
-        };
-        reader.readAsDataURL(file);
-      } else if (isDocument) {
-        const reader = new FileReader();
-        reader.onload = () => {
-          const base64 = (reader.result as string).split(',')[1];
-          const ext = file.name.split('.').pop()?.toLowerCase() ?? '';
-          // PDF/MD/text parse instantly client-side → done; Office/RTF needs server → pending
-          const isServerParsed = /^(docx|doc|pptx|ppt|xlsx|xls|odt|odp|ods|rtf)$/i.test(ext);
-          const parseStatus: Attachment['status'] = isServerParsed ? 'pending' : 'done';
+        if (isTextLike && !isDocument) {
+          // Plain text files — read directly as text
+          const reader = new FileReader();
+          // 读取失败：释放已预留的字节，避免预留位泄漏把后续附件挡住
+          reader.onerror = () => releaseReservation(file.size);
+          reader.onload = () =>
+            commitIfGen(
+              gen,
+              (prev) => [
+                ...prev,
+                {
+                  name: file.name,
+                  type: 'text',
+                  content: reader.result as string,
+                  size: file.size,
+                },
+              ],
+              file.size
+            );
+          reader.readAsText(file);
+        } else if (isTextLike && isDocument) {
+          // Markdown/text files detected as documents — read as text AND as base64 for server fallback
+          const reader = new FileReader();
+          // 读取失败：释放已预留的字节，避免预留位泄漏把后续附件挡住
+          reader.onerror = () => releaseReservation(file.size);
+          reader.onload = () => {
+            const base64 = (reader.result as string).split(',')[1];
+            const textContent = new TextDecoder().decode(
+              Uint8Array.from(atob(base64), (c) => c.charCodeAt(0))
+            );
+            commitIfGen(
+              gen,
+              (prev) => [
+                ...prev,
+                {
+                  name: file.name,
+                  type: 'document',
+                  dataBase64: base64,
+                  content: textContent,
+                  dataUrl: reader.result as string,
+                  size: file.size,
+                  mimeType: file.type || getMimeTypeFromName(file.name),
+                  status: 'pending' as const,
+                },
+              ],
+              file.size
+            );
+          };
+          reader.readAsDataURL(file);
+        } else if (isDocument) {
+          const reader = new FileReader();
+          // 读取失败：释放已预留的字节，避免预留位泄漏把后续附件挡住
+          reader.onerror = () => releaseReservation(file.size);
+          reader.onload = () => {
+            const base64 = (reader.result as string).split(',')[1];
+            const ext = file.name.split('.').pop()?.toLowerCase() ?? '';
+            // PDF/MD/text parse instantly client-side → done; Office/RTF needs server → pending
+            const isServerParsed = /^(docx|doc|pptx|ppt|xlsx|xls|odt|odp|ods|rtf)$/i.test(ext);
+            const parseStatus: Attachment['status'] = isServerParsed ? 'pending' : 'done';
 
-          setAttachments((prev) => [
-            ...prev,
-            {
-              name: file.name,
-              type: 'document',
-              dataUrl: reader.result as string,
-              dataBase64: base64,
-              size: file.size,
-              mimeType: file.type || getMimeTypeFromName(file.name),
-              status: parseStatus,
-            },
-          ]);
-        };
-        reader.readAsDataURL(file);
-      } else if (isImage) {
-        const reader = new FileReader();
-        reader.onload = () =>
-          setAttachments((prev) => [
-            ...prev,
-            { name: file.name, type: 'image', dataUrl: reader.result as string, size: file.size },
-          ]);
-        reader.readAsDataURL(file);
-      } else {
-        const reader = new FileReader();
-        reader.onload = () =>
-          setAttachments((prev) => [
-            ...prev,
-            { name: file.name, type: 'text', content: reader.result as string, size: file.size },
-          ]);
-        reader.readAsText(file);
+            commitIfGen(
+              gen,
+              (prev) => [
+                ...prev,
+                {
+                  name: file.name,
+                  type: 'document',
+                  dataUrl: reader.result as string,
+                  dataBase64: base64,
+                  size: file.size,
+                  mimeType: file.type || getMimeTypeFromName(file.name),
+                  status: parseStatus,
+                },
+              ],
+              file.size
+            );
+          };
+          reader.readAsDataURL(file);
+        } else if (isImage) {
+          const reader = new FileReader();
+          // 读取失败：释放已预留的字节，避免预留位泄漏把后续附件挡住
+          reader.onerror = () => releaseReservation(file.size);
+          reader.onload = () =>
+            commitIfGen(
+              gen,
+              (prev) => [
+                ...prev,
+                {
+                  name: file.name,
+                  type: 'image',
+                  dataUrl: reader.result as string,
+                  size: file.size,
+                },
+              ],
+              file.size
+            );
+          reader.readAsDataURL(file);
+        } else {
+          // 未知类型：保留字节按文档收下（避免“粘贴/拖入后毫无反应”）
+          const reader = new FileReader();
+          // 读取失败：释放已预留的字节，避免预留位泄漏把后续附件挡住
+          reader.onerror = () => releaseReservation(file.size);
+          reader.onload = () => {
+            const base64 = (reader.result as string).split(',')[1];
+            const name = file.name || `pasted-file-${Date.now()}`;
+            commitIfGen(
+              gen,
+              (prev) => [
+                ...prev,
+                {
+                  name,
+                  type: 'document',
+                  dataBase64: base64,
+                  dataUrl: reader.result as string,
+                  size: file.size,
+                  mimeType: file.type || getMimeTypeFromName(name),
+                  status: 'done' as const,
+                },
+              ],
+              file.size
+            );
+          };
+          reader.readAsDataURL(file);
+        }
       }
-    });
+      return true;
+    },
+    []
+  );
+
+  /** 批内同步累计总量：一次多选/多文件粘贴时 React state 尚未提交，必须用本地 running 值
+   *  判断，否则同一批里每个文件都看到旧的 attachmentsRef 而逐个放行（review 09:49 P1）。 */
+  const attachBatch = (files: File[], actionId: string): number => {
+    let accepted = 0;
+    for (const f of files) {
+      if (f.size > MAX_ONE_ATTACHMENT_BYTES) continue;
+      if (!tryReserve(f.size)) break;
+      if (attachFromFile(f, actionId)) accepted += 1;
+      else releaseReservation(f.size); // Token 去重被拒：释放预留
+    }
+    return accepted;
+  };
+
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const actionId = newAttachAction();
+    attachBatch(Array.from(e.target.files ?? []), actionId);
     e.target.value = '';
   };
+
+  // 全局剪贴板粘贴（Ctrl+V）：文件/图片。用 window 监听以覆盖“焦点不在输入框”的情况；
+  // 仅当剪贴板含文件时拦截，纯文本粘贴不受影响。
+  useEffect(() => {
+    const onPaste = (e: ClipboardEvent) => {
+      const dt = e.clipboardData;
+      if (!dt) return;
+      const files: File[] = [];
+      for (let i = 0; i < (dt.items?.length ?? 0); i++) {
+        const it = dt.items[i];
+        if (it.kind === 'file') {
+          const f = it.getAsFile();
+          if (f) files.push(f);
+        }
+      }
+      if (files.length === 0 && dt.files?.length) files.push(...Array.from(dt.files));
+      // 没有文件 → 交给浏览器默认行为（纯文本/路径文本都照常粘贴，绝不吞）
+      if (files.length === 0) return;
+      // 复用 keydown 登记的 token（若有），并取消主进程读取的 fallback
+      const pending = pendingPasteRef.current;
+      const actionId = pending.token ?? newAttachAction();
+      if (pending.timer !== null) window.clearTimeout(pending.timer);
+      pendingPasteRef.current = { token: null, timer: null };
+      // 剪贴板里确实有文件：交给下面的内容指纹流程处理，并阻止默认粘贴
+      e.preventDefault();
+      const gen = sessionGenRef.current;
+      void (async () => {
+        for (const f of files) {
+          if (f.size > MAX_ONE_ATTACHMENT_BYTES) continue;
+          if (!tryReserve(f.size)) break;
+          let fp: string;
+          try {
+            fp = await fileFingerprint(f);
+          } catch {
+            fp = `${f.size}:${f.name}`; // 读字节失败时退回元信息指纹
+          }
+          if (gen !== sessionGenRef.current) {
+            releaseReservation(f.size);
+            break; // 期间切了会话：丢弃
+          }
+          if (seenFingerprintRecently(fp)) {
+            releaseReservation(f.size);
+            continue;
+          }
+          if (!attachFromFile(f, actionId, gen)) releaseReservation(f.size);
+        }
+      })();
+    };
+    window.addEventListener('paste', onPaste);
+    return () => window.removeEventListener('paste', onPaste);
+  }, [attachFromFile]);
+
+  // 主进程读系统剪贴板（Ctrl+V）：Windows「复制文件」/截图在 Chromium 的 paste 事件里
+  // 拿不到，改由主进程读 CF_HDROP/剪贴板图片，再作为附件挂上。
+  const attachBase64 = useCallback(
+    async (
+      name: string,
+      base64: string,
+      mime: string,
+      size: number,
+      actionId: string,
+      gen: number = sessionGenRef.current
+    ): Promise<boolean> => {
+      if (size > MAX_ONE_ATTACHMENT_BYTES) return false;
+      if (seenFingerprintRecently(await sha256HexOrFallback(bytesFromBase64(base64)))) return false;
+      if (!acceptInAttachAction(actionId, `${name}:${size}`)) return false;
+      if (mime.startsWith('image/')) {
+        commitIfGen(
+          gen,
+          (prev) => [
+            ...prev,
+            { name, type: 'image', dataUrl: `data:${mime};base64,${base64}`, size },
+          ],
+          size
+        );
+        return true;
+      }
+      const ext = name.split('.').pop()?.toLowerCase() ?? '';
+      const isServerParsed = /^(docx|doc|pptx|ppt|xlsx|xls|odt|odp|ods|rtf)$/i.test(ext);
+      commitIfGen(
+        gen,
+        (prev) => [
+          ...prev,
+          {
+            name,
+            type: 'document',
+            dataBase64: base64,
+            dataUrl: `data:${mime};base64,${base64}`,
+            size,
+            mimeType: mime,
+            status: isServerParsed ? 'pending' : 'done',
+          },
+        ],
+        size
+      );
+      return true;
+    },
+    []
+  );
+
+  // 剪贴板 → 附件（主进程读）：Ctrl+V 与右键「粘贴」共用；返回是否挂了文件
+  const pasteClipboardFiles = useCallback(
+    async (token?: string): Promise<boolean> => {
+      const gen = sessionGenRef.current;
+      try {
+        const res = await window.miqi.clipboard.readFiles();
+        // 读取期间切了会话 → 丢弃这次剪贴板结果
+        if (gen !== sessionGenRef.current) return false;
+        const items = [...(res?.files ?? []), ...(res?.image ? [res.image] : [])];
+        if (items.length === 0) return false;
+        const actionId = token ?? newAttachAction();
+        let any = false;
+        for (const f of items) {
+          if (gen !== sessionGenRef.current) break;
+          if (f.size > MAX_ONE_ATTACHMENT_BYTES) continue;
+          if (!tryReserve(f.size)) break;
+          if (await attachBase64(f.name, f.base64, f.mime, f.size, actionId, gen)) any = true;
+          else releaseReservation(f.size);
+        }
+        return any;
+      } catch {
+        return false;
+      }
+    },
+    [attachBase64]
+  );
+
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (!(e.ctrlKey || e.metaKey) || e.key.toLowerCase() !== 'v') return;
+      // 只登记一个 token；真正的 paste 事件会消费它并取消 fallback。
+      const token = newAttachAction();
+      const p = pendingPasteRef.current;
+      if (p.timer !== null) window.clearTimeout(p.timer);
+      p.token = token;
+      p.timer = window.setTimeout(() => {
+        if (pendingPasteRef.current.token === token) {
+          pendingPasteRef.current = { token: null, timer: null };
+          void pasteClipboardFiles(token);
+        }
+      }, 400);
+    };
+    window.addEventListener('keydown', onKeyDown, true);
+    return () => {
+      window.removeEventListener('keydown', onKeyDown, true);
+      const p = pendingPasteRef.current;
+      if (p.timer !== null) window.clearTimeout(p.timer);
+    };
+  }, [pasteClipboardFiles]);
 
   const removeAttachment = (idx: number) =>
     setAttachments((prev) => prev.filter((_, i) => i !== idx));
@@ -6284,53 +6632,6 @@ export function ChatConsole({
     fileInputRef.current.dispatchEvent(new Event('change', { bubbles: true }));
   };
 
-  // Handle clipboard paste for files and images (Ctrl+V)
-  const handlePaste = useCallback((e: React.ClipboardEvent) => {
-    const items = e.clipboardData?.items;
-    if (!items) return;
-    for (let i = 0; i < items.length; i++) {
-      const item = items[i];
-      if (item.kind !== 'file') continue;
-      const file = item.getAsFile();
-      if (!file) continue;
-      const isDocument = DOCUMENT_SUFFIXES_RE.test(file.name);
-      if (isDocument) {
-        const reader = new FileReader();
-        reader.onload = () => {
-          const base64 = (reader.result as string).split(',')[1];
-          const ext = file.name.split('.').pop()?.toLowerCase() ?? '';
-          const isServerParsed = /^(docx|doc|pptx|ppt|xlsx|xls|odt|odp|ods|rtf)$/i.test(ext);
-          const parseStatus: Attachment['status'] = isServerParsed ? 'pending' : 'done';
-          setAttachments((prev) => [
-            ...prev,
-            {
-              name: file.name,
-              type: 'document',
-              dataBase64: base64,
-              size: file.size,
-              mimeType: file.type || getMimeTypeFromName(file.name),
-              status: parseStatus,
-            },
-          ]);
-        };
-        reader.readAsDataURL(file);
-      } else if (file.type.startsWith('image/')) {
-        const reader = new FileReader();
-        reader.onload = () =>
-          setAttachments((prev) => [
-            ...prev,
-            {
-              name: file.name || 'pasted-image.png',
-              type: 'image',
-              dataUrl: reader.result as string,
-              size: file.size,
-            },
-          ]);
-        reader.readAsDataURL(file);
-      }
-    }
-  }, []);
-
   const handleCopy = useCallback(async (text: string, idx: number) => {
     // Electron clipboard bridge via main process — navigator.clipboard fails
     // under file:// (non-secure context) in packaged builds; only show
@@ -6743,7 +7044,6 @@ export function ChatConsole({
       style={previewFile ? { pointerEvents: 'none' } : undefined}
       onDrop={handleDrop}
       onDragOver={(e) => e.preventDefault()}
-      onPaste={handlePaste}
     >
       <input
         ref={fileInputRef}
@@ -7307,209 +7607,255 @@ export function ChatConsole({
             }}
           >
             <div className="max-w-[760px] min-w-[min(360px,100%)] mx-auto">
-              {attachments.length > 0 && (
-                <div className="flex flex-wrap gap-2 mb-2">
-                  {attachments.map((att, i) => {
-                    const isDoc = att.type === 'document';
-                    const cat = isDoc ? getDocCategory(att.name) : null;
-                    const isPending = isDoc && (!att.status || att.status === 'pending');
-                    const isParsing = isDoc && att.status === 'parsing';
-                    const isDone = isDoc && att.status === 'done';
-                    const isError = isDoc && att.status === 'error';
+              {attachments.length > 0 &&
+                (() => {
+                  // 附件预览渲染到输入框「内部」:portal 投到 Composer 的框内插槽,
+                  // 插槽尚未挂载时先原地渲染一帧兜底。
+                  const preview = (
+                    <div className="flex flex-wrap gap-1.5 mb-1.5 max-h-[104px] overflow-y-auto">
+                      {attachments.map((att, i) => {
+                        const isDoc = att.type === 'document';
+                        const cat = isDoc ? getDocCategory(att.name) : null;
+                        const isPending = isDoc && (!att.status || att.status === 'pending');
+                        const isParsing = isDoc && att.status === 'parsing';
+                        const isDone = isDoc && att.status === 'done';
+                        const isError = isDoc && att.status === 'error';
+                        // 格式标签（WorkBuddy 风：只显示名字 + 格式，不显示大小）
+                        const extTag = (att.name.split('.').pop() || '').toUpperCase().slice(0, 4);
 
-                    return (
-                      <div
-                        key={i}
-                        className="flex items-center gap-2 rounded-lg pl-2 pr-1.5 py-1.5 text-xs group max-w-[240px] cursor-pointer hover:brightness-95 transition-all"
-                        style={{
-                          background: isDoc && cat ? cat.bg : 'var(--surface-muted)',
-                          border: `1px solid ${isDoc && cat ? cat.color + '40' : 'var(--border-subtle)'}`,
-                        }}
-                        onClick={async (e) => {
-                          // Ignore clicks that arrive right after closing preview
-                          // (the close button click can fall through to the chip behind)
-                          if (previewJustClosed.current) return;
-                          if (!isDoc || !att.dataBase64) return;
-                          const ext = att.name.split('.').pop()?.toLowerCase() ?? '';
-
-                          // #877: PDF → proper paginated rendering (iframe blob)
-                          if (ext === 'pdf') {
-                            try {
-                              setPreviewFile({
-                                path: att.name,
-                                kind: 'pdf',
-                                pdfUrl: base64ToBlobUrl(att.dataBase64, 'application/pdf'),
-                                dataBase64: att.dataBase64,
-                              });
-                              return;
-                            } catch {
-                              /* fall through to client-side text */
-                            }
-                          }
-
-                          // #877: Office/CSV → backend structured parse of the
-                          // in-memory bytes (rich table / document render).
-                          if (/^(xlsx|xls|ods|csv|docx|doc|odt)$/i.test(ext)) {
-                            try {
-                              const result = await window.miqi.documents.parse(
-                                att.name,
-                                undefined,
-                                {
-                                  preview: true,
-                                  structured: true,
-                                  dataBase64: att.dataBase64,
-                                }
-                              );
-                              if (result?.structured) {
-                                if (result.structured.kind === 'spreadsheet') {
-                                  setPreviewFile({
-                                    path: att.name,
-                                    kind: 'spreadsheet',
-                                    spreadsheet: result.structured,
-                                    content: result.text,
-                                    dataBase64: att.dataBase64,
-                                  });
-                                  return;
-                                }
-                                setPreviewFile({
-                                  path: att.name,
-                                  kind: 'document',
-                                  docBlocks: result.structured,
-                                  content: result.text,
-                                  dataBase64: att.dataBase64,
-                                });
-                                return;
-                              }
-                              // No structure (e.g. .xls/.odt) — use the backend text
-                              if (result?.text) {
-                                setPreviewFile({
-                                  path: att.name,
-                                  content: result.text.slice(0, 50000),
-                                  dataBase64: att.dataBase64,
-                                });
-                                return;
-                              }
-                            } catch {
-                              /* fall through to client-side text */
-                            }
-                          }
-
-                          let previewText = '';
-
-                          // Client-side extraction only (fast, no server round-trip)
-                          try {
-                            const raw = Uint8Array.from(atob(att.dataBase64), (c) =>
-                              c.charCodeAt(0)
-                            );
-                            if (ext === 'pdf') {
-                              previewText = extractPdfText(raw.buffer);
-                            } else if (
-                              /^(md|markdown|mdown|txt|text|csv|json|ya?ml|xml|py|ts|js|log|html|htm|env|sql|ini|toml|htaccess|sh|bash)$/i.test(
-                                ext
-                              )
-                            ) {
-                              previewText = new TextDecoder().decode(raw);
-                            } else {
-                              previewText = '(Office 文件 —— 发送后服务端解析)';
-                            }
-                          } catch {
-                            previewText = '(无法预览)';
-                          }
-                          if (!previewText || !previewText.trim()) {
-                            previewText = '(扫描件或二进制文件，无文本内容)';
-                          }
-                          setPreviewFile({
-                            path: att.name,
-                            content: previewText.slice(0, 50000),
-                            dataBase64: att.dataBase64,
-                          });
-                        }}
-                      >
-                        {/* File type badge */}
-                        {isDoc && cat ? (
-                          <span
-                            className="shrink-0 rounded font-bold text-[10px] px-1.5 py-0.5 leading-none"
-                            style={{ background: cat.color, color: '#fff' }}
+                        return (
+                          <div
+                            key={i}
+                            className="flex items-center gap-1.5 rounded-md pl-1.5 pr-1 py-1 text-[11px] group max-w-[196px]"
+                            style={{
+                              background: isDoc && cat ? cat.bg : 'var(--surface-muted)',
+                              border: `1px solid ${isDoc && cat ? cat.color + '40' : 'var(--border-subtle)'}`,
+                            }}
                           >
-                            {cat.label}
-                          </span>
-                        ) : att.type === 'image' ? (
-                          att.dataUrl ? (
-                            <img
-                              src={att.dataUrl}
-                              alt={att.name}
-                              className="h-12 w-12 shrink-0 rounded object-cover"
-                              style={{ border: '1px solid var(--border-subtle)' }}
-                            />
-                          ) : (
-                            <Image
-                              size={14}
-                              className="shrink-0"
-                              style={{ color: 'var(--info)' }}
-                            />
-                          )
-                        ) : (
-                          <FileText size={14} className="shrink-0 text-text-faint" />
-                        )}
+                            <button
+                              type="button"
+                              aria-label={`预览 ${att.name}`}
+                              className="flex items-center gap-1.5 min-w-0 flex-1 cursor-pointer bg-transparent border-0 p-0 text-left hover:brightness-95 transition-all"
+                              onClick={async (e) => {
+                                // Ignore clicks that arrive right after closing preview
+                                // (the close button click can fall through to the chip behind)
+                                if (previewJustClosed.current) return;
+                                // 图片：点击打开预览（芯片内不再显示缩略图，保证所有文件芯片等高）
+                                if (att.type === 'image') {
+                                  const imgExt = (att.name.split('.').pop() || '').toLowerCase();
+                                  const mime =
+                                    imgExt === 'jpg' || imgExt === 'jpeg'
+                                      ? 'image/jpeg'
+                                      : imgExt === 'gif'
+                                        ? 'image/gif'
+                                        : imgExt === 'webp'
+                                          ? 'image/webp'
+                                          : imgExt === 'bmp'
+                                            ? 'image/bmp'
+                                            : 'image/png';
+                                  const imageUrl =
+                                    att.dataUrl ||
+                                    (att.dataBase64
+                                      ? `data:${mime};base64,${att.dataBase64}`
+                                      : undefined);
+                                  // 同时带上 base64：预览里的「下载/另存为」「系统应用打开」
+                                  // 需要它写临时文件再交给系统打开（仅有 imageUrl 时
+                                  // openExternal 只会拿到文件名而失败）。
+                                  const imageBase64 =
+                                    att.dataBase64 ||
+                                    (att.dataUrl ? att.dataUrl.split(',')[1] : undefined);
+                                  if (imageUrl) {
+                                    setPreviewFile({
+                                      path: att.name,
+                                      kind: 'image',
+                                      imageUrl,
+                                      dataBase64: imageBase64,
+                                    });
+                                    return;
+                                  }
+                                }
+                                if (!isDoc || !att.dataBase64) return;
+                                const ext = att.name.split('.').pop()?.toLowerCase() ?? '';
 
-                        {/* Name + size */}
-                        <div className="flex flex-col min-w-0 leading-tight">
-                          <span className="truncate font-medium text-text">
-                            {att.name.length > 28
-                              ? att.name.slice(0, 25) + '…' + att.name.slice(-4)
-                              : att.name}
-                          </span>
-                          <span className="text-[10px] text-text-muted">
-                            {formatFileSize(att.size)}
-                            {isDoc && isParsing && ' · 解析中…'}
-                            {isDoc && isDone && ' · 已就绪'}
-                            {isDoc && isError && ' · 解析失败'}
-                          </span>
-                        </div>
+                                // #877: PDF → proper paginated rendering (iframe blob)
+                                if (ext === 'pdf') {
+                                  try {
+                                    setPreviewFile({
+                                      path: att.name,
+                                      kind: 'pdf',
+                                      pdfUrl: base64ToBlobUrl(att.dataBase64, 'application/pdf'),
+                                      dataBase64: att.dataBase64,
+                                    });
+                                    return;
+                                  } catch {
+                                    /* fall through to client-side text */
+                                  }
+                                }
 
-                        {/* Status icon — only after send */}
-                        {isDoc && isParsing && (
-                          <Loader2
-                            size={13}
-                            className="shrink-0 animate-spin"
-                            style={{ color: cat?.color ?? 'var(--text-faint)' }}
-                          />
-                        )}
-                        {isDoc && isDone && (
-                          <CheckCircle
-                            size={13}
-                            className="shrink-0"
-                            style={{ color: 'var(--success)' }}
-                          />
-                        )}
-                        {isDoc && isError && (
-                          <AlertCircle
-                            size={13}
-                            className="shrink-0"
-                            style={{ color: 'var(--danger)' }}
-                          />
-                        )}
+                                // #877: Office/CSV → backend structured parse of the
+                                // in-memory bytes (rich table / document render).
+                                if (/^(xlsx|xls|ods|csv|docx|doc|odt)$/i.test(ext)) {
+                                  try {
+                                    const result = await window.miqi.documents.parse(
+                                      att.name,
+                                      undefined,
+                                      {
+                                        preview: true,
+                                        structured: true,
+                                        dataBase64: att.dataBase64,
+                                      }
+                                    );
+                                    if (result?.structured) {
+                                      if (result.structured.kind === 'spreadsheet') {
+                                        setPreviewFile({
+                                          path: att.name,
+                                          kind: 'spreadsheet',
+                                          spreadsheet: result.structured,
+                                          content: result.text,
+                                          dataBase64: att.dataBase64,
+                                        });
+                                        return;
+                                      }
+                                      setPreviewFile({
+                                        path: att.name,
+                                        kind: 'document',
+                                        docBlocks: result.structured,
+                                        content: result.text,
+                                        dataBase64: att.dataBase64,
+                                      });
+                                      return;
+                                    }
+                                    // No structure (e.g. .xls/.odt) — use the backend text
+                                    if (result?.text) {
+                                      setPreviewFile({
+                                        path: att.name,
+                                        content: result.text.slice(0, 50000),
+                                        dataBase64: att.dataBase64,
+                                      });
+                                      return;
+                                    }
+                                  } catch {
+                                    /* fall through to client-side text */
+                                  }
+                                }
 
-                        {/* Remove */}
-                        <button
-                          onClick={(e) => {
-                            // The chip container opens the preview on click —
-                            // without stopPropagation the remove click bubbles
-                            // up and pops the preview modal for the just-removed
-                            // file (and the modal then eats further input, e.g.
-                            // the attachment.spec cleanup loop in CI).
-                            e.stopPropagation();
-                            removeAttachment(i);
-                          }}
-                          className="shrink-0 opacity-0 group-hover:opacity-100 transition-opacity hover:bg-[rgba(0,0,0,0.1)] rounded p-0.5"
-                        >
-                          <X size={11} style={{ color: 'var(--text-faint)' }} />
-                        </button>
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
+                                let previewText = '';
+
+                                // Client-side extraction only (fast, no server round-trip)
+                                try {
+                                  const raw = Uint8Array.from(atob(att.dataBase64), (c) =>
+                                    c.charCodeAt(0)
+                                  );
+                                  if (ext === 'pdf') {
+                                    previewText = extractPdfText(raw.buffer);
+                                  } else if (
+                                    /^(md|markdown|mdown|txt|text|csv|json|ya?ml|xml|py|ts|js|log|html|htm|env|sql|ini|toml|htaccess|sh|bash)$/i.test(
+                                      ext
+                                    )
+                                  ) {
+                                    previewText = new TextDecoder().decode(raw);
+                                  } else {
+                                    previewText = '(Office 文件 —— 发送后服务端解析)';
+                                  }
+                                } catch {
+                                  previewText = '(无法预览)';
+                                }
+                                if (!previewText || !previewText.trim()) {
+                                  previewText = '(扫描件或二进制文件，无文本内容)';
+                                }
+                                setPreviewFile({
+                                  path: att.name,
+                                  content: previewText.slice(0, 50000),
+                                  dataBase64: att.dataBase64,
+                                });
+                              }}
+                            >
+                              {/* File type badge */}
+                              {isDoc && cat ? (
+                                <span
+                                  className="shrink-0 rounded font-bold text-[9px] px-1 py-[1px] leading-none"
+                                  style={{ background: cat.color, color: '#fff' }}
+                                >
+                                  {cat.label}
+                                </span>
+                              ) : att.type === 'image' ? (
+                                <Image
+                                  size={12}
+                                  className="shrink-0"
+                                  style={{ color: 'var(--info)' }}
+                                />
+                              ) : (
+                                <FileText size={12} className="shrink-0 text-text-faint" />
+                              )}
+
+                              {/* Name + format（不显示大小，参考 WorkBuddy） */}
+                              <div className="flex items-center gap-1.5 min-w-0 leading-tight">
+                                <span className="truncate font-medium text-text">
+                                  {att.name.length > 22
+                                    ? att.name.slice(0, 18) + '…' + att.name.slice(-3)
+                                    : att.name}
+                                </span>
+                                {!isDoc && extTag && (
+                                  <span
+                                    className="shrink-0 rounded font-bold text-[9px] px-1 py-[1px] leading-none"
+                                    style={{
+                                      background: 'var(--surface-3)',
+                                      color: 'var(--text-muted)',
+                                    }}
+                                  >
+                                    {extTag}
+                                  </span>
+                                )}
+                              </div>
+
+                              {/* Status icon — only after send */}
+                              {isDoc && isParsing && (
+                                <Loader2
+                                  size={11}
+                                  className="shrink-0 animate-spin"
+                                  style={{ color: cat?.color ?? 'var(--text-faint)' }}
+                                />
+                              )}
+                              {isDoc && isDone && (
+                                <CheckCircle
+                                  size={11}
+                                  className="shrink-0"
+                                  style={{ color: 'var(--success)' }}
+                                />
+                              )}
+                              {isDoc && isError && (
+                                <AlertCircle
+                                  size={11}
+                                  className="shrink-0"
+                                  style={{ color: 'var(--danger)' }}
+                                />
+                              )}
+                            </button>
+
+                            {/* Remove */}
+                            <button
+                              type="button"
+                              aria-label={`移除 ${att.name}`}
+                              onClick={(e) => {
+                                // The chip container opens the preview on click —
+                                // without stopPropagation the remove click bubbles
+                                // up and pops the preview modal for the just-removed
+                                // file (and the modal then eats further input, e.g.
+                                // the attachment.spec cleanup loop in CI).
+                                e.stopPropagation();
+                                removeAttachment(i);
+                              }}
+                              className="shrink-0 opacity-0 group-hover:opacity-100 transition-opacity hover:bg-[rgba(0,0,0,0.1)] rounded p-0.5"
+                            >
+                              <X size={10} style={{ color: 'var(--text-faint)' }} />
+                            </button>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  );
+                  return attachmentSlot ? createPortal(preview, attachmentSlot) : preview;
+                })()}
 
               {/* Turn status (issue #646: 等待你的确认) */}
               <TurnStatusBar />
@@ -7565,6 +7911,8 @@ export function ChatConsole({
                 onAttachClick={handleAttachClick}
                 onSubmit={handleComposerSubmit}
                 onAbort={handleAbort}
+                onPasteClipboard={pasteClipboardFiles}
+                attachmentSlotRef={setAttachmentSlot}
               />
             </div>
           </div>
@@ -7857,12 +8205,13 @@ export function ChatConsole({
             if (!o) closePreview();
           }}
           hideClose
-          className="max-w-[980px] p-0"
+          className="max-w-[980px] p-0 bg-transparent border-0 shadow-none"
         >
           <div
             className="flex flex-col rounded-xl shadow-2xl overflow-hidden"
             style={{
-              width: previewFile.kind ? 940 : 820,
+              width: '100%',
+              maxWidth: previewFile.kind ? 940 : 820,
               maxHeight: '85vh',
               background: 'var(--surface-elevated)',
               border: '1px solid var(--border)',
@@ -7958,16 +8307,22 @@ export function ChatConsole({
                 </button>
                 <button
                   onClick={async () => {
+                    // 有字节流 → openBytes（主进程写临时文件并交系统打开）；
+                    // 被拒（含危险扩展名拦截）时不回退，避免绕过安全校验。
                     if (previewFile.dataBase64) {
-                      const tmp = `_open_${Date.now()}_${previewFile.path}`;
+                      const name = previewFile.path.split(/[\\/]/).pop() || 'file';
                       try {
-                        await window.miqi.files.write(tmp, '', undefined, previewFile.dataBase64);
-                        await window.miqi.files.openExternal(tmp);
+                        const res = await window.miqi.files.openBytes(name, previewFile.dataBase64);
+                        if (res?.opened) return;
+                        if (res?.error) return;
                       } catch {
-                        /* fallback */
+                        /* fall through to path */
                       }
-                    } else {
-                      window.miqi.files.openExternal(previewFile.path);
+                    }
+                    try {
+                      await window.miqi.files.openExternal(previewFile.path);
+                    } catch {
+                      /* ignore */
                     }
                   }}
                   className="flex items-center gap-1 px-2 py-1 rounded text-[11px] text-[var(--accent)] hover:bg-[var(--accent-soft)] transition-colors"
@@ -7989,7 +8344,22 @@ export function ChatConsole({
               </div>
             </div>
             <div className="flex-1 overflow-auto">
-              {previewFile.kind === 'pdf' && previewFile.pdfUrl ? (
+              {previewFile.kind === 'image' && previewFile.imageUrl ? (
+                <div
+                  className="flex items-center justify-center p-4"
+                  style={{
+                    background: 'var(--surface-muted)',
+                    maxHeight: '75vh',
+                    overflow: 'auto',
+                  }}
+                >
+                  <img
+                    src={previewFile.imageUrl}
+                    alt={previewFile.path}
+                    style={{ maxWidth: '100%', maxHeight: '72vh', borderRadius: 8 }}
+                  />
+                </div>
+              ) : previewFile.kind === 'pdf' && previewFile.pdfUrl ? (
                 <iframe
                   src={previewFile.pdfUrl}
                   title={previewFile.path}
