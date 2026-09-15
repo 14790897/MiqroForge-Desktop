@@ -175,6 +175,11 @@ export const IPC = {
   APP_FOCUS: 'app:focus',
   // #assets window auto-widen: 资产面板推开聊天区时,主进程把窗口加宽,聊天列不变
   APP_PANEL_EXTRA: 'app:panel-extra',
+
+  // 法律文件同意状态（#1071）：主进程 userData 文件为权威存储，
+  // 渲染层 localStorage 只作快速缓存（双开时 Chromium 存储会退化成内存）。
+  PRIVACY_GET_CONSENT: 'privacy:get-consent',
+  PRIVACY_SET_CONSENT: 'privacy:set-consent',
 } as const;
 
 // ---------------------------------------------------------------------------
