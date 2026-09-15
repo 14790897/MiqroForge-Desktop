@@ -532,6 +532,8 @@ interface TrackedFile {
   lastSeen: number;
   /** path was truncated in the progress message (ends with ...) */
   truncated?: boolean;
+  /** 产出该文件的工具名（如 create_docx / graph_render / write_file），#879 ③ 追溯 */
+  sourceTool?: string;
 }
 
 const OFFICE_FILE_RE = /\.(docx|xlsx|pptx|ppt|xls|doc|odt|odp|ods)$/i;
@@ -917,7 +919,13 @@ async function fileExists(path: string, sessionKey: string | null | undefined): 
  *  Same-named files in different directories stay distinct. */
 function mergeTrackedFiles(
   existing: TrackedFile[],
-  incoming: Array<{ path: string; name?: string; op?: TrackedFile['op']; lastSeen?: number }>
+  incoming: Array<{
+    path: string;
+    name?: string;
+    op?: TrackedFile['op'];
+    lastSeen?: number;
+    sourceTool?: string;
+  }>
 ): TrackedFile[] {
   const out = [...existing];
   for (const f of incoming) {
@@ -928,6 +936,7 @@ function mergeTrackedFiles(
       name: f.name ?? basename(np),
       op: f.op ?? 'read',
       lastSeen: f.lastSeen ?? Date.now(),
+      sourceTool: f.sourceTool,
     };
     const existingIdx = out.findIndex((p) => {
       const np2 = normalizeTrackedPath(p.path);
@@ -935,8 +944,10 @@ function mergeTrackedFiles(
       const oneIsBare = !np2.includes('/') || !np.includes('/');
       return oneIsBare && basename(np2) === basename(np);
     });
-    if (existingIdx >= 0) out[existingIdx] = entry;
-    else out.push(entry);
+    if (existingIdx >= 0) {
+      // 后端下发（backend）不含 sourceTool 时，保留消息提取（existing）的 sourceTool
+      out[existingIdx] = { ...entry, sourceTool: entry.sourceTool ?? out[existingIdx].sourceTool };
+    } else out.push(entry);
   }
   return out;
 }
@@ -2124,11 +2135,11 @@ function _extractPathFromArgs(argsStr: string): string | null {
  *  2. tool_calls array on assistant messages (raw provider format)
  *  3. name field on tool result messages (raw provider format)
  */
-function extractTrackedFilesFromMessages(rawMsgs: any[]): TrackedFile[] {
+export function extractTrackedFilesFromMessages(rawMsgs: any[]): TrackedFile[] {
   const fileMap = new Map<string, TrackedFile>();
   const rank: Record<TrackedFile['op'], number> = { read: 0, edit: 1, write: 2, delete: 3 };
 
-  const upsert = (path: string, op: TrackedFile['op'], timestamp?: string) => {
+  const upsert = (path: string, op: TrackedFile['op'], timestamp?: string, tool?: string) => {
     const key = normalizeSandboxPath(path).replace(/\\/g, '/');
     const existing = fileMap.get(key);
     if (!existing || rank[op] > rank[existing.op]) {
@@ -2138,6 +2149,7 @@ function extractTrackedFilesFromMessages(rawMsgs: any[]): TrackedFile[] {
         op,
         lastSeen: timestamp ? new Date(timestamp).getTime() : Date.now(),
         truncated: false,
+        sourceTool: tool,
       });
     }
   };
@@ -2162,9 +2174,14 @@ function extractTrackedFilesFromMessages(rawMsgs: any[]): TrackedFile[] {
         const filePath = _extractPathFromArgs(argsStr);
         if (!filePath) continue;
         if (_FILE_WRITE_TOOLS.includes(toolName)) {
-          upsert(filePath, toolName === 'delete_file' ? 'delete' : 'write', msg.timestamp);
+          upsert(
+            filePath,
+            toolName === 'delete_file' ? 'delete' : 'write',
+            msg.timestamp,
+            toolName
+          );
         } else if (_FILE_READ_TOOLS.includes(toolName)) {
-          upsert(filePath, 'read', msg.timestamp);
+          upsert(filePath, 'read', msg.timestamp, toolName);
         }
       }
     }
@@ -2175,7 +2192,7 @@ function extractTrackedFilesFromMessages(rawMsgs: any[]): TrackedFile[] {
       // Try to extract path from content (often contains the file path)
       const contentPath = parseToolHint(String(msg.content || ''));
       if (contentPath) {
-        upsert(contentPath.path, contentPath.op, msg.timestamp);
+        upsert(contentPath.path, contentPath.op, msg.timestamp, toolName);
       } else if (_FILE_WRITE_TOOLS.includes(toolName)) {
         // Tool result without parsable content — try to infer from tool name
         // (best-effort; actual path is in the paired assistant tool_calls message)

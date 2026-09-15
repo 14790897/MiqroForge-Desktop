@@ -6,9 +6,33 @@ export interface TrackedFile {
   op: 'read' | 'write' | 'edit' | 'delete';
   lastSeen: number;
   truncated?: boolean;
+  /** 产出该文件的工具名（如 create_docx / graph_render / write_file），#879 ③ 追溯 */
+  sourceTool?: string;
 }
 
 export const OFFICE_FILE_RE_LEGACY = /\.(docx|xlsx|pptx|ppt)$/i;
+
+/** 文件产出工具名 → 中文标签（#879 ③ 来源工具追溯） */
+const FILE_TOOL_LABELS: Record<string, string> = {
+  write_file: '写入文件',
+  edit_file: '编辑文件',
+  delete_file: '删除文件',
+  apply_patch: '应用补丁',
+  create_docx: '创建 Word',
+  create_xlsx: '创建 Excel',
+  create_pptx: '创建 PPT',
+  create_pdf: '创建 PDF',
+  pdf_write: '写 PDF',
+  docx_write: '写 Word',
+  xlsx_write: '写 Excel',
+  pptx_write: '写 PPT',
+  edit_docx: '编辑 Word',
+  append_xlsx: '追加 Excel',
+  graph_render: '渲染图',
+  paper_download: '下载论文',
+  exec: '执行命令',
+  skill_manage: '技能管理',
+};
 
 export function TrackedFileCard({
   file,
@@ -82,6 +106,15 @@ export function TrackedFileCard({
             >
               {OP_LABELS[file.op]}
             </span>
+            {file.sourceTool && (
+              <span
+                className="text-size-2xs px-1.5 py-0.5 rounded font-semibold shrink-0"
+                data-testid="file-source-tool"
+                style={{ background: 'var(--surface-muted)', color: 'var(--text-faint)' }}
+              >
+                {FILE_TOOL_LABELS[file.sourceTool] || file.sourceTool}
+              </span>
+            )}
             {isResult && (
               <span
                 className="text-size-2xs px-1.5 py-0.5 rounded font-semibold shrink-0"

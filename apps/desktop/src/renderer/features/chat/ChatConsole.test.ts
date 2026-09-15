@@ -23,6 +23,7 @@ import {
   _markUserTwinMatches,
   _sha256HexOfBase64,
   extractMessageSources,
+  extractTrackedFilesFromMessages,
 } from './ChatConsole';
 
 describe('ChatConsole thinking block regression (#858 → #905)', () => {
@@ -584,6 +585,46 @@ describe('extractMessageSources 结构化来源 (#879)', () => {
     };
     expect(extractMessageSources(msg as never)).toEqual([
       { tool: 'web_search', url: 'https://example.com/a' },
+    ]);
+  });
+});
+
+describe('extractTrackedFilesFromMessages 来源工具追溯 (#879 ③)', () => {
+  it('Format 2：tool_calls 记录来源工具 create_docx', () => {
+    const files = extractTrackedFilesFromMessages([
+      {
+        role: 'assistant',
+        tool_calls: [
+          {
+            function: {
+              name: 'create_docx',
+              arguments: JSON.stringify({ path: 'report.docx' }),
+            },
+          },
+        ],
+      },
+    ]);
+    expect(files).toEqual([
+      expect.objectContaining({ name: 'report.docx', op: 'write', sourceTool: 'create_docx' }),
+    ]);
+  });
+
+  it('Format 2：write_file 记录 sourceTool', () => {
+    const files = extractTrackedFilesFromMessages([
+      {
+        role: 'assistant',
+        tool_calls: [
+          {
+            function: {
+              name: 'write_file',
+              arguments: JSON.stringify({ path: 'out.txt' }),
+            },
+          },
+        ],
+      },
+    ]);
+    expect(files).toEqual([
+      expect.objectContaining({ name: 'out.txt', op: 'write', sourceTool: 'write_file' }),
     ]);
   });
 });
