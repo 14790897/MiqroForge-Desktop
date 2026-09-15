@@ -2620,14 +2620,24 @@ export function ChatConsole({
     const msgTurnIds = new Set(
       messages.filter((m) => m.role === 'assistant' && m.turnId).map((m) => m.turnId as string)
     );
-    // #646-v2（CI strict violation）：工具链在 turn 进行中也会渲染确认卡——
-    // 该 turn 的 progress 工具行出现（或仍在流式的 active turn）后，兜底区
-    // 必须同步排除，否则同一张卡在工具链与兜底区形成双 DOM 实例。
+    // #646-v2（CI strict violation）：工具链在 turn 进行中也会渲染确认卡——但
+    // **只有链里真有 ask_user_confirm_card 行时才会画**（见 ToolChain：
+    // `isConfirmRow && card` 才渲染）。所以这里只把「确实有确认卡行」的 turn
+    // 记为已匹配，否则像写授权卡这种**不产生工具行**的确认卡（filesystem 直接
+    // 经 user-input 通道弹卡）会被兜底区当成"已内联"排除，而工具链又没有行可
+    // 挂 → 卡两边都不画、直接消失（E2E: write-authorization / system-install
+    // 卡在「等待你的确认…」超时）。
+    const hasConfirmRow = (m: Message) =>
+      m.role === 'progress' &&
+      (m.toolName === 'ask_user_confirm_card' ||
+        (m.content ?? '').includes('ask_user_confirm_card'));
     for (const m of messages) {
-      if (m.role === 'progress' && m.turnId) msgTurnIds.add(m.turnId);
+      if (m.turnId && hasConfirmRow(m)) msgTurnIds.add(m.turnId);
     }
     const active = activeTurnIdRef.current;
-    if (active) msgTurnIds.add(active);
+    if (active && messages.some((m) => m.turnId === active && hasConfirmRow(m))) {
+      msgTurnIds.add(active);
+    }
     return new Set([...cardsByTurn.keys()].filter((t) => msgTurnIds.has(t)));
   }, [cardsByTurn, messages]);
   // sourcesByMsg cache: keyed by a tool-only signature so the map object is
@@ -9413,7 +9423,7 @@ const MessageBubble = memo(function MessageBubble({
 
   if (msg.role === 'subagent') {
     return (
-      <div className="flex items-start gap-3">
+      <div className="flex items-start gap-3" data-testid="subagent-result">
         <GitMerge size={18} style={{ color: 'var(--accent)', marginTop: 6 }} />
         <div
           className="text-sm rounded-2xl px-4 py-3 prose prose-sm max-w-none break-words overflow-x-auto"
