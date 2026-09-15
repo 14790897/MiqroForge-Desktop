@@ -1,3 +1,22 @@
+## [0.29.2](https://github.com/14790897/MiqroForge-Desktop/compare/v0.29.1...v0.29.2) (2026-09-15)
+
+
+### Bug Fixes
+
+* **skills:** 修正第三方 import packaging 的 isort 分组（stdlib 与第三方分隔） ([21985c5](https://github.com/14790897/MiqroForge-Desktop/commit/21985c5608304c7500ea369dd509025d10dd5d67))
+* **skills:** 命名直链URL依赖按发行名检查安装状态，不再整体跳过 ([826fb1e](https://github.com/14790897/MiqroForge-Desktop/commit/826fb1e54ba62e4356a4ea352f2583d129f9dff7))
+* **skills:** 按评审意见用 PEP 508 解析 requirements——环境标记/版本约束/直链URL + 缓存失效 ([90a12de](https://github.com/14790897/MiqroForge-Desktop/commit/90a12de0f8a6cada1c7d69326a89affd8ef9688b))
+* **skills:** 移除测试文件未使用的 Path import（修复 ruff F401） ([deb424c](https://github.com/14790897/MiqroForge-Desktop/commit/deb424cfff967eb6911156accd1b3b7cda3afe46))
+* **skills:** 读取 requirements.txt 并在摘要/门禁透出 Python 依赖 ([43e7b8c](https://github.com/14790897/MiqroForge-Desktop/commit/43e7b8cf1779b8afd73ce14c55f0c9310b6c5447))
+
+---
+## 下载说明
+
+macOS 用户请按芯片架构选择安装包：
+
+- **Apple Silicon (M1/M2/M3/M4)**：下载 `0.29.2-arm64.dmg`（ARM 架构）
+- **Intel**：下载 `0.29.2.dmg`（x86 无后缀）
+
 ## [0.29.1](https://github.com/14790897/MiqroForge-Desktop/compare/v0.29.0...v0.29.1) (2026-09-11)
 
 
