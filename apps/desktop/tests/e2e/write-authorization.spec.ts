@@ -139,18 +139,20 @@ test.describe('Write Authorization Card (#864)', () => {
       await sendMessage(page, '写授权测试');
 
       // 写授权卡弹出（title 固定为「授权写入工作区外目录」）
-      await expect(cardArea).toBeVisible({ timeout: 60_000 });
-      await expect(cardArea.getByText('授权写入工作区外目录')).toBeVisible();
-      await expect(cardArea.getByRole('button', { name: '允许本次' })).toBeVisible();
-      await expect(cardArea.getByRole('button', { name: '本目录不再询问' })).toBeVisible();
-      await expect(cardArea.getByRole('button', { name: '拒绝' })).toBeVisible();
+      // #646-v2：卡并进工具链——cardArea 已是 page，页面级断言必须落在定位器上
+      await expect(cardArea.getByText('授权写入工作区外目录').first()).toBeVisible({
+        timeout: 60_000,
+      });
+      await expect(cardArea.getByRole('button', { name: '允许本次' }).first()).toBeVisible();
+      await expect(cardArea.getByRole('button', { name: '本目录不再询问' }).first()).toBeVisible();
+      await expect(cardArea.getByRole('button', { name: '拒绝' }).first()).toBeVisible();
 
       await page.screenshot({
         path: `test-results/${test.info().title.replace(/\s+/g, '-')}-card.png`,
       });
 
       // 点「允许本次」→ 写放行
-      await cardArea.getByRole('button', { name: '允许本次' }).click();
+      await cardArea.getByRole('button', { name: '允许本次' }).first().click();
       await expect(resolvedArea.getByText(/授权写入工作区外目录/)).toBeVisible({
         timeout: 30_000,
       });
@@ -227,7 +229,8 @@ test.describe('Write Authorization Bypass (#864)', () => {
       const content = readFileSync(target, 'utf-8');
       expect(content).toContain('authorization-card-e2e-probe');
 
-      await expect(cardArea).toBeHidden();
+      // #646-v2：cardArea 已是 page——"没有卡"必须用定位器计数断言
+      await expect(cardArea.getByText('授权写入工作区外目录')).toHaveCount(0);
       console.log(`[test] ✅ bypass 下写 workspace 外目录无需授权卡`);
     }
   );

@@ -198,7 +198,10 @@ test.describe('System Install Card (real LLM, #854/#875)', () => {
 
       // 路由拦截 → 授权卡出现（含具体命令文本——显示 = 执行）
       try {
-        await expect(cardArea).toBeVisible({ timeout: 120_000 });
+        // #646-v2：卡并进工具链——cardArea 已是 page，断言落在定位器上
+        await expect(cardArea.getByText('系统包安装授权').first()).toBeVisible({
+          timeout: 120_000,
+        });
       } catch (err) {
         // 诊断 dump：卡片从未渲染时的链路证据（renderer 事件 + main 进程转发）
         const dump = await page.evaluate(() => {
@@ -222,19 +225,21 @@ test.describe('System Install Card (real LLM, #854/#875)', () => {
         console.log('[debug] __mainSends (userInput/chat) =', JSON.stringify(mainSends, null, 2));
         throw err;
       }
-      await expect(cardArea.getByText('系统包安装授权')).toBeVisible();
-      await expect(cardArea.getByText(/apt-get install -y figlet/)).toBeVisible();
+      await expect(cardArea.getByText('系统包安装授权').first()).toBeVisible();
+      await expect(cardArea.getByText(/apt-get install -y figlet/).first()).toBeVisible();
       // 三选项齐全（允许本次 / 允许并记住 / 拒绝）
-      await expect(cardArea.getByRole('button', { name: '允许本次安装' })).toBeVisible();
-      await expect(cardArea.getByRole('button', { name: '允许并记住（开启开关）' })).toBeVisible();
-      await expect(cardArea.getByRole('button', { name: '拒绝' })).toBeVisible();
+      await expect(cardArea.getByRole('button', { name: '允许本次安装' }).first()).toBeVisible();
+      await expect(
+        cardArea.getByRole('button', { name: '允许并记住（开启开关）' }).first()
+      ).toBeVisible();
+      await expect(cardArea.getByRole('button', { name: '拒绝' }).first()).toBeVisible();
 
       await page.screenshot({
         path: `test-results/${test.info().title.replace(/\s+/g, '-')}-card.png`,
       });
 
       // 允许本次 → 决议回传 → 路由以 root 在 WSL 发行版执行
-      await cardArea.getByRole('button', { name: '允许本次安装' }).click();
+      await cardArea.getByRole('button', { name: '允许本次安装' }).first().click();
       await expect(page.locator('[data-receipt="true"]').getByText('已确认')).toBeVisible({
         timeout: 30_000,
       });
