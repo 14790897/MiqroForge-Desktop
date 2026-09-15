@@ -420,4 +420,16 @@ describe('panelWindowSync 基线同步(syncApplied)', () => {
     h.sync.syncApplied(Number.NaN);
     expect(h.sync.applied).toBe(0);
   });
+
+  it('dispose 清掉待消费基线:新生命周期不被上一轮的基线污染', () => {
+    const h = makeHarness();
+    h.sync.syncApplied(120);
+    h.sync.beginDrag({ clientX: 500, width: 280 }); // 队列忙
+    h.sync.syncApplied(200); // 晚到基线 → 暂存为 pendingBaseline
+    h.sync.dispose(); // 生命周期结束(实例会被 StrictMode 复用)
+    h.sync.beginDrag({ clientX: 500, width: 280 }); // 新生命周期
+    // 旧生命周期那份 200 不得泄漏进新基线
+    expect(h.sync.applied).toBe(0);
+    expect(h.sync.anchor?.applied).toBe(0);
+  });
 });
