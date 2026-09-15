@@ -152,6 +152,37 @@ class ClientSessionRegistry:
             )
             await runtime.start()
 
+            # Register the key→workspace binding in the app-home index now that
+            # the runtime is up.  The conversation mirror task_runner writes
+            # lands in SessionManager(workspace) (the folder), while
+            # sessions.get/sessions.list read from the app-home
+            # SessionManager (config.workspace_path) and resolve folder
+            # sessions through this metadata.  Without it, a folder session is
+            # invisible (empty) after the runtime stops or the app restarts.
+            #
+            # Deliberately after start(): a session that never came up must not
+            # leave a metadata-only stub behind, since an empty app-home copy is
+            # exactly what #918's exclude_empty hides.  Best-effort by design —
+            # a bookkeeping write must never be the reason a session cannot be
+            # created; a later sessions.get heals the binding from the live
+            # runtime's workspace.
+            try:
+                _home = Path(config.workspace_path).expanduser().resolve()
+                _ws_root = Path(workspace).expanduser().resolve()
+                if _ws_root != _home:
+                    from miqi.session.manager import SessionManager
+
+                    _index = SessionManager(config.workspace_path)
+                    _bound = _index.get_or_create(session_key, client_id=client_id)
+                    if _bound.metadata.get("workspace") != str(workspace):
+                        _bound.metadata["workspace"] = str(workspace)
+                        _index.save(_bound)
+            except Exception as exc:
+                logger.warning(
+                    "create_session: failed to register workspace binding for {}: {}",
+                    session_id, exc,
+                )
+
             self._sessions[session_id] = runtime
             self._client_sessions.setdefault(client_id, set()).add(session_id)
             self._session_clients[session_id] = {client_id}
