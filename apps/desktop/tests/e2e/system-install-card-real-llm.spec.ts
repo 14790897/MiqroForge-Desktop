@@ -169,7 +169,8 @@ test.describe('System Install Card (real LLM, #854/#875)', () => {
     '真实模型触发安装 → 授权卡（含命令）→ 允许本次 → 路由执行 → 回合完成',
     { timeout: LLM_TIMEOUT },
     async () => {
-      const cardArea = page.getByTestId('confirm-card-area');
+      // #646-v2：确认卡并进工具链（Hermes 式）——断言页面级
+      const cardArea = page;
 
       // 关键：bwrap_available 在会话的 RuntimeServices 构造时冻结
       // （services.py:194，enabled && _initialized）——renderer 启动即
@@ -234,9 +235,9 @@ test.describe('System Install Card (real LLM, #854/#875)', () => {
 
       // 允许本次 → 决议回传 → 路由以 root 在 WSL 发行版执行
       await cardArea.getByRole('button', { name: '允许本次安装' }).click();
-      await expect(
-        page.getByTestId('confirm-card-resolved').getByText('已选择「允许本次安装」')
-      ).toBeVisible({ timeout: 30_000 });
+      await expect(page.locator('[data-receipt="true"]').getByText('已确认')).toBeVisible({
+        timeout: 30_000,
+      });
 
       await waitForResponseComplete(page, LLM_TIMEOUT);
       // 回合正常收尾：至少一条 assistant 回复元素已挂载（真实模型生成的
