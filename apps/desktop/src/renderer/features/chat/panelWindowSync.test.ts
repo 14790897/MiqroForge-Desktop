@@ -377,3 +377,28 @@ describe('panelWindowSync 拖拽队列', () => {
     expect(h.sync.applied).toBe(280);
   });
 });
+
+describe('panelWindowSync 基线同步(syncApplied)', () => {
+  it('空闲时写入基线,并作为后续拖拽锚点的 applied', () => {
+    const h = makeHarness();
+    // 模拟冷启动 minOnly 为满足最小布局把窗口撑了 200px(不经队列 send)
+    h.sync.syncApplied(200);
+    expect(h.sync.applied).toBe(200);
+    h.sync.beginDrag({ clientX: 500, width: 280 });
+    expect(h.sync.anchor?.applied).toBe(200);
+  });
+
+  it('拖拽中忽略,不覆盖正在使用的基线', () => {
+    const h = makeHarness();
+    h.sync.syncApplied(120);
+    h.sync.beginDrag({ clientX: 500, width: 280 });
+    h.sync.syncApplied(999);
+    expect(h.sync.applied).toBe(120);
+  });
+
+  it('非法值忽略', () => {
+    const h = makeHarness();
+    h.sync.syncApplied(Number.NaN);
+    expect(h.sync.applied).toBe(0);
+  });
+});

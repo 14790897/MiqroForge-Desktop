@@ -705,6 +705,12 @@ export async function launchElectronApp(
   if (!env.MIQI_QRAFT_STORE) {
     env.MIQI_QRAFT_STORE = join(miqiHome, 'qraft-auth.json');
   }
+  // Same isolation for the billing history / dedup index files (they live in
+  // the same shared dev userData dir): redirect to the temp home so specs can
+  // preset and assert them without touching the developer's records.
+  if (!env.MIQI_QRAFT_BILLING_DIR) {
+    env.MIQI_QRAFT_BILLING_DIR = join(miqiHome, 'billing');
+  }
   // E2E default: set MIQI_E2E so the main process skips the #837 privacy-consent
   // gate (fresh userData has no stored consent). The privacy-consent spec opts
   // out via noConsentBypass to exercise the gate itself.
@@ -851,6 +857,10 @@ export async function relaunchElectronApp(
   // Same #952 login-store isolation as launchElectronApp (see above).
   if (!env.MIQI_QRAFT_STORE) {
     env.MIQI_QRAFT_STORE = join(miqiHome, 'qraft-auth.json');
+  }
+  // Same billing-file isolation as launchElectronApp (see above).
+  if (!env.MIQI_QRAFT_BILLING_DIR) {
+    env.MIQI_QRAFT_BILLING_DIR = join(miqiHome, 'billing');
   }
   // Same #837 consent-gate bypass logic as launchElectronApp (see above).
   if (opts?.noConsentBypass) {

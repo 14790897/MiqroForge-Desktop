@@ -175,6 +175,9 @@ class FeedbackConfig(Base):
     feishu_app_secret: str = "0mutMgBMlqCOH4xoR2vkTcxSFQvrRIWk"
     bitable_app_token: str = "XdLzbs2cUaLubKsDisBcVnXknrf"
     bitable_table_id: str = "tblXphMl4M8vjyco"
+    # Test-only: skip the Feishu Bitable call so E2E runs can exercise the
+    # platform feedback channel (issue #1054) without real Bitable credentials.
+    skip_feishu: bool = False
 
 
 class ChannelsConfig(Base):
