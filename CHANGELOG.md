@@ -1,3 +1,46 @@
+# [0.30.0](https://github.com/14790897/MiqroForge-Desktop/compare/v0.29.2...v0.30.0) (2026-09-15)
+
+
+### Bug Fixes
+
+* **#983:** skill 产物进任务附件——tracked 存储根解耦 + store key 统一 + 下载产物登记 + 面板级 e2e ([#1003](https://github.com/14790897/MiqroForge-Desktop/issues/1003)) ([09569eb](https://github.com/14790897/MiqroForge-Desktop/commit/09569ebd58d620a4f7b0dc942a5efe9a3d17ed34)), closes [#983](https://github.com/14790897/MiqroForge-Desktop/issues/983) [#983](https://github.com/14790897/MiqroForge-Desktop/issues/983) [#983](https://github.com/14790897/MiqroForge-Desktop/issues/983) [#1005](https://github.com/14790897/MiqroForge-Desktop/issues/1005) [#983](https://github.com/14790897/MiqroForge-Desktop/issues/983) [#975](https://github.com/14790897/MiqroForge-Desktop/issues/975) [#975](https://github.com/14790897/MiqroForge-Desktop/issues/975) [#877](https://github.com/14790897/MiqroForge-Desktop/issues/877) [#983](https://github.com/14790897/MiqroForge-Desktop/issues/983) [#877](https://github.com/14790897/MiqroForge-Desktop/issues/877) [#983](https://github.com/14790897/MiqroForge-Desktop/issues/983)
+* **agent:** CLI 无审批通道时立即 fail-closed，不再静默等 60s ([#1045](https://github.com/14790897/MiqroForge-Desktop/issues/1045)) ([#1075](https://github.com/14790897/MiqroForge-Desktop/issues/1075)) ([fbfeaf8](https://github.com/14790897/MiqroForge-Desktop/commit/fbfeaf83d291197923370f7a8b6a07d171578fd6))
+* **desktop:** WSL2 一键安装失败原因被兜底文案掩盖，回传提权退出码并按场景分类 ([#1033](https://github.com/14790897/MiqroForge-Desktop/issues/1033)) ([215fa5d](https://github.com/14790897/MiqroForge-Desktop/commit/215fa5d5566768cb1785cf3f4e22b9f8ebe58e4c)), closes [#1031](https://github.com/14790897/MiqroForge-Desktop/issues/1031) [#1029](https://github.com/14790897/MiqroForge-Desktop/issues/1029)
+* **desktop:** 平台登录失效横幅未居中——动画 transform 与 v4 translate 属性叠加 ([#1065](https://github.com/14790897/MiqroForge-Desktop/issues/1065)) ([7ebcf3b](https://github.com/14790897/MiqroForge-Desktop/commit/7ebcf3b51c04d8ea5e462892722aa744b16c3d7f))
+* **desktop:** 扣费历史不随退出登录删除，改按账号过滤展示 ([#1067](https://github.com/14790897/MiqroForge-Desktop/issues/1067)) ([f508c91](https://github.com/14790897/MiqroForge-Desktop/commit/f508c91c16fe29b00f698c8ee840699720dbf299))
+* **desktop:** 晚到的窗口基线不再丢弃([#1047](https://github.com/14790897/MiqroForge-Desktop/issues/1047) follow-up) ([#1074](https://github.com/14790897/MiqroForge-Desktop/issues/1074)) ([bef6165](https://github.com/14790897/MiqroForge-Desktop/commit/bef616554b46a61e7bbb9256516a7cf00388f173))
+* **desktop:** 输入框击键不再重渲染整个聊天界面 ([#1021](https://github.com/14790897/MiqroForge-Desktop/issues/1021)) ([#1041](https://github.com/14790897/MiqroForge-Desktop/issues/1041)) ([0d9ea44](https://github.com/14790897/MiqroForge-Desktop/commit/0d9ea44b72b52f1a20f074052dfc0c6c61a7451a))
+* **desktop:** 面板展开后缩窗不再挤压输入框(关联 [#940](https://github.com/14790897/MiqroForge-Desktop/issues/940)) ([#1047](https://github.com/14790897/MiqroForge-Desktop/issues/1047)) ([c16d462](https://github.com/14790897/MiqroForge-Desktop/commit/c16d462ca0e3ec072db4763a6e21f36d473b12ee))
+* **session:** 会话换属主 TOCTOU 收口——所有权校验纳入 key 锁 ([#1050](https://github.com/14790897/MiqroForge-Desktop/issues/1050)) ([#1053](https://github.com/14790897/MiqroForge-Desktop/issues/1053)) ([169eb40](https://github.com/14790897/MiqroForge-Desktop/commit/169eb40f5274a790d5636e14da1f67a5228fa1cc)), closes [#983](https://github.com/14790897/MiqroForge-Desktop/issues/983)
+* **session:** 会话目录 key 派生统一——file_handlers 三处 + 附件落盘 + helper 下沉（[#1014](https://github.com/14790897/MiqroForge-Desktop/issues/1014)） ([#1057](https://github.com/14790897/MiqroForge-Desktop/issues/1057)) ([692a766](https://github.com/14790897/MiqroForge-Desktop/commit/692a7662ebbb8046fccff804e7e2f112242d8d6a)), closes [#1003](https://github.com/14790897/MiqroForge-Desktop/issues/1003) [#1003](https://github.com/14790897/MiqroForge-Desktop/issues/1003) [#1005](https://github.com/14790897/MiqroForge-Desktop/issues/1005)
+* **session:** 文件夹绑定会话切换后历史丢失、输入框卡生成中，重启后侧栏消失（[#956](https://github.com/14790897/MiqroForge-Desktop/issues/956)） ([#1040](https://github.com/14790897/MiqroForge-Desktop/issues/1040)) ([be52fca](https://github.com/14790897/MiqroForge-Desktop/commit/be52fcaef64fdd48dc1ee948825ec64d6734b254)), closes [_#imgup](https://github.com/_/issues/imgup)
+
+
+### Features
+
+* **chat:** 回答支持 Mermaid 流程图渲染与引用来源标注（[#671](https://github.com/14790897/MiqroForge-Desktop/issues/671)） ([#843](https://github.com/14790897/MiqroForge-Desktop/issues/843)) ([e6e6b7c](https://github.com/14790897/MiqroForge-Desktop/commit/e6e6b7c47203fb890c6819e5b7a43c32b0c5596b)), closes [#878](https://github.com/14790897/MiqroForge-Desktop/issues/878) [_#imgup](https://github.com/_/issues/imgup)
+* **chat:** 消息操作栏升级 + 时间戳居中 + 编辑重答 + 间距优化([#828](https://github.com/14790897/MiqroForge-Desktop/issues/828) 视觉验收) ([#1011](https://github.com/14790897/MiqroForge-Desktop/issues/1011)) ([750c06a](https://github.com/14790897/MiqroForge-Desktop/commit/750c06a3fda7ceaa5dbe382c27f1e40c0ebdea2b))
+* **desktop:** dev 模式版本号包含提交 hash ([#1055](https://github.com/14790897/MiqroForge-Desktop/issues/1055)) ([#1079](https://github.com/14790897/MiqroForge-Desktop/issues/1079)) ([bf9e000](https://github.com/14790897/MiqroForge-Desktop/commit/bf9e00068e377ce3eab374a0792f4a3b9981d552))
+* **desktop:** 标题区工作目录胶囊收敛 + 资产面板窗口平滑跟随(关联 [#940](https://github.com/14790897/MiqroForge-Desktop/issues/940)) ([#989](https://github.com/14790897/MiqroForge-Desktop/issues/989)) ([14d89cf](https://github.com/14790897/MiqroForge-Desktop/commit/14d89cfbd32505daf77280e946a9ed433dcac532)), closes [#1029](https://github.com/14790897/MiqroForge-Desktop/issues/1029) [#1016](https://github.com/14790897/MiqroForge-Desktop/issues/1016)
+* **desktop:** 欢迎页按「做事方式」给出可一键启用的起点任务 ([#962](https://github.com/14790897/MiqroForge-Desktop/issues/962)) ([#1070](https://github.com/14790897/MiqroForge-Desktop/issues/1070)) ([da852c1](https://github.com/14790897/MiqroForge-Desktop/commit/da852c1de817ea7882e0f16912a8c15fecb3e897))
+* **desktop:** 法律文件上线——首次弹窗换温馨提示、设置页法律文件中心 ([#1069](https://github.com/14790897/MiqroForge-Desktop/issues/1069)) ([b9ceca2](https://github.com/14790897/MiqroForge-Desktop/commit/b9ceca24f7870b0ff956bb53ab5e0c4e135de3d3))
+* **desktop:** 附件输入体系——预览入框 + 系统剪贴板粘贴 + 安全 openBytes ([#1048](https://github.com/14790897/MiqroForge-Desktop/issues/1048)) ([e1bfd5e](https://github.com/14790897/MiqroForge-Desktop/commit/e1bfd5ee7ec994291f86bda66b5987b30fce4e30))
+* **documents:** create_pdf content_path 源稿直渲 + 渲染质量完善（行内 MD/图片/& 转义） ([#994](https://github.com/14790897/MiqroForge-Desktop/issues/994)) ([dfee18c](https://github.com/14790897/MiqroForge-Desktop/commit/dfee18c951b70a1da708f1c67a858e3bd6cfda35)), closes [#821](https://github.com/14790897/MiqroForge-Desktop/issues/821) [#993](https://github.com/14790897/MiqroForge-Desktop/issues/993) [#993](https://github.com/14790897/MiqroForge-Desktop/issues/993) [#993](https://github.com/14790897/MiqroForge-Desktop/issues/993)
+* **feedback:** 反馈接入平台接口 POST /oauth2/feedback（登录态提交）([#1054](https://github.com/14790897/MiqroForge-Desktop/issues/1054)) ([#1063](https://github.com/14790897/MiqroForge-Desktop/issues/1063)) ([4ec284e](https://github.com/14790897/MiqroForge-Desktop/commit/4ec284e18910861ef7cf231c799e3a3a75be0527))
+
+
+### Performance Improvements
+
+* **desktop:** Composer 渲染隔离收口——memo 化 Composer + 稳定回调 ([#1042](https://github.com/14790897/MiqroForge-Desktop/issues/1042)) ([#1043](https://github.com/14790897/MiqroForge-Desktop/issues/1043)) ([92cc4fe](https://github.com/14790897/MiqroForge-Desktop/commit/92cc4fec46c1f0186f98bd5a505730c733533acf)), closes [#1021](https://github.com/14790897/MiqroForge-Desktop/issues/1021)
+
+---
+## 下载说明
+
+macOS 用户请按芯片架构选择安装包：
+
+- **Apple Silicon (M1/M2/M3/M4)**：下载 `0.30.0-arm64.dmg`（ARM 架构）
+- **Intel**：下载 `0.30.0.dmg`（x86 无后缀）
+
 ## [0.29.2](https://github.com/14790897/MiqroForge-Desktop/compare/v0.29.1...v0.29.2) (2026-09-15)
 
 
