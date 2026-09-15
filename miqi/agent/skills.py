@@ -5,8 +5,9 @@ import os
 import re
 import shutil
 from dataclasses import dataclass, field
-from packaging.requirements import InvalidRequirement, Requirement
 from pathlib import Path
+
+from packaging.requirements import InvalidRequirement, Requirement
 
 # Default builtin skills directory (relative to this file)
 BUILTIN_SKILLS_DIR = Path(__file__).parent.parent / "skills"
