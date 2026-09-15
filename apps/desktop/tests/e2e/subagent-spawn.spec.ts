@@ -140,13 +140,11 @@ test.describe('Subagent Spawn E2E', () => {
     //    subagent card appears (card count increases) AND the newest ✅ card
     //    actually contains the task text (proof the subagent ran it, not just
     //    the main agent echoing the prompt).
-    const countCards = (t: string) => (t.match(/(?:✅|❌) Subagent/g) || []).length;
-    const initialCards = countCards(
-      (await page
-        .locator('main')
-        .textContent()
-        .catch(() => '')) || ''
-    );
+    // #646-v2：工具行改为 Hermes 式渲染后，卡片正文里不再有旧 UI 的
+    // 「✅ Subagent …」标记——改为按 subagent 结果卡本身定位（data-testid，
+    // 断言不依赖文案与折叠状态）。
+    const cardsLocator = page.locator('[data-testid="subagent-result"]');
+    const initialCards = await cardsLocator.count().catch(() => 0);
     const deadline = Date.now() + 180_000;
     let rendered = false;
     let lastText = '';
@@ -157,10 +155,14 @@ test.describe('Subagent Spawn E2E', () => {
           .textContent()
           .catch(() => '')) || '';
       lastText = mainText;
-      if (countCards(mainText) > initialCards) {
-        // New card appeared — extract the newest ✅ card and check its body.
-        const lastIdx = mainText.lastIndexOf('✅ Subagent');
-        const newestCard = lastIdx >= 0 ? mainText.slice(lastIdx) : '';
+      const cardCount = await cardsLocator.count().catch(() => 0);
+      if (cardCount > initialCards) {
+        // New subagent result card appeared — check its body.
+        const newestCard =
+          (await cardsLocator
+            .last()
+            .textContent()
+            .catch(() => '')) || '';
         if (newestCard.includes('hello-ai-spawn')) {
           rendered = true;
           break;

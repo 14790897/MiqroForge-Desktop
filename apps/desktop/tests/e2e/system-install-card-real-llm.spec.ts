@@ -229,10 +229,14 @@ test.describe('System Install Card (real LLM, #854/#875)', () => {
       await expect(cardArea.getByText(/apt-get install -y figlet/).first()).toBeVisible();
       // 三选项齐全（允许本次 / 允许并记住 / 拒绝）
       await expect(cardArea.getByRole('button', { name: '允许本次安装' }).first()).toBeVisible();
-      await expect(
-        cardArea.getByRole('button', { name: '允许并记住（开启开关）' }).first()
-      ).toBeVisible();
       await expect(cardArea.getByRole('button', { name: '拒绝' }).first()).toBeVisible();
+      // #646-v2：「允许并记住（开启开关）」是二级选项——Hermes 式确认条默认折叠，
+      // 只有条上的允许/拒绝常驻。行已展开就不再点（避免反而收起），未展开则点行头。
+      const rememberBtn = cardArea.getByRole('button', { name: '允许并记住（开启开关）' }).first();
+      if (!(await rememberBtn.isVisible().catch(() => false))) {
+        await cardArea.getByRole('button', { name: '系统包安装授权' }).first().click();
+      }
+      await expect(rememberBtn).toBeVisible();
 
       await page.screenshot({
         path: `test-results/${test.info().title.replace(/\s+/g, '-')}-card.png`,

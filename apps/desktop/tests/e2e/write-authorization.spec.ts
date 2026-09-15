@@ -141,8 +141,12 @@ test.describe('Write Authorization Card (#864)', () => {
         timeout: 60_000,
       });
       await expect(cardArea.getByRole('button', { name: '允许本次' }).first()).toBeVisible();
-      await expect(cardArea.getByRole('button', { name: '本目录不再询问' }).first()).toBeVisible();
       await expect(cardArea.getByRole('button', { name: '拒绝' }).first()).toBeVisible();
+      // 「本目录不再询问」是二级选项：Hermes 式确认条默认折叠（只有条上的
+      // 允许本次/拒绝常驻），点行头展开后才出现（2026-09-15 卡设计定稿）——
+      // 别要求它默认可见。
+      await cardArea.getByRole('button', { name: '授权写入工作区外目录' }).first().click();
+      await expect(cardArea.getByRole('button', { name: '本目录不再询问' }).first()).toBeVisible();
 
       await page.screenshot({
         path: `test-results/${test.info().title.replace(/\s+/g, '-')}-card.png`,
