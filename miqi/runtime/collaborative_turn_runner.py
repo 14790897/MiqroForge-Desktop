@@ -23,7 +23,11 @@ class CollaborativeTurnRunner(TurnRunner):
         current_content = base_content
         last_result: Any = None
 
-        for _ in range(_MAX_REPLANS_PER_TURN):
+        # CR review（#1071）：循环上界=最大重规划次数 + 1——初始一轮之外，每一次
+        # 被接受的调整都必须真的送到模型执行。旧写法 range(_MAX_REPLANS_PER_TURN)
+        # 会在第 5 次调整时把新约束准备好就耗尽循环 → 最后一轮永远不发给模型、
+        # 用户拿到空回答（CR 实测指出，两处评论同一根因）。
+        for _ in range(_MAX_REPLANS_PER_TURN + 1):
             # TurnContext deliberately has no user_content field. The plan
             # boundary uses this transient value only for the plan-card goal.
             setattr(turn, "user_content", current_content)

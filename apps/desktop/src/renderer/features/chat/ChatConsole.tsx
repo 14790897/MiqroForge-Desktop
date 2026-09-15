@@ -2615,18 +2615,17 @@ export function ChatConsole({
     return map;
   }, [allCards]);
   const matchedTurnIds = useMemo(() => {
-    // 只算"消息流里已存在该 turn 的消息"的卡——turn 进行中（AI 消息未生成）
-    // 卡留在兜底区显示，消息生成后才内联进消息
-    const msgTurnIds = new Set(
-      messages.filter((m) => m.role === 'assistant' && m.turnId).map((m) => m.turnId as string)
-    );
-    // #646-v2（CI strict violation）：工具链在 turn 进行中也会渲染确认卡——但
-    // **只有链里真有 ask_user_confirm_card 行时才会画**（见 ToolChain：
-    // `isConfirmRow && card` 才渲染）。所以这里只把「确实有确认卡行」的 turn
-    // 记为已匹配，否则像写授权卡这种**不产生工具行**的确认卡（filesystem 直接
-    // 经 user-input 通道弹卡）会被兜底区当成"已内联"排除，而工具链又没有行可
-    // 挂 → 卡两边都不画、直接消失（E2E: write-authorization / system-install
-    // 卡在「等待你的确认…」超时）。
+    // #646-v2：本集合的唯一消费方是 ConfirmCardArea 的「确认卡是否已内联」排除
+    // 过滤（plan/action 卡不受影响）。工具链只有在**链里真有 ask_user_confirm_card
+    // 行**时才内联画确认卡（ToolChain：`isConfirmRow && card`）——因此只有
+    // 「确实有确认卡行」的 turn 才能算已匹配：
+    //  · 不带工具行的确认卡（写授权卡 / 安装授权卡，filesystem 等经 user-input
+    //    通道直接弹卡）永远留在兜底区，否则两边都不画、直接消失（E2E 实测）；
+    //  · CR review（#1071, 2026-09-15）：此前还把「有 assistant 消息的 turn」
+    //    一并算已匹配，但 MessageBubble 已不渲染确认卡——该条件只会让
+    //    「有 assistant 消息 + 链里无确认卡行」的确认卡被误排除 → 卡消失。
+    //    故仅保留确认卡行这一个条件。
+    const msgTurnIds = new Set<string>();
     const hasConfirmRow = (m: Message) =>
       m.role === 'progress' &&
       (m.toolName === 'ask_user_confirm_card' ||

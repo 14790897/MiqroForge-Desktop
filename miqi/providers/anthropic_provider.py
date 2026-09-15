@@ -496,8 +496,9 @@ class AnthropicProvider(LLMProvider):
         if first_reasoning_elapsed is not None:
             response.reasoning_elapsed_s = first_reasoning_elapsed
         if reasoning_chunks:
+            # stdlib logging 用 %-style 占位符（CR #1071 review）。
             logger.info(
-                "stream_chat: reasoning complete chunks={} chars={} for model={}",
+                "stream_chat: reasoning complete chunks=%s chars=%s for model=%s",
                 reasoning_chunks,
                 len(response.reasoning_content or ""),
                 resolved,
