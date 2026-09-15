@@ -105,6 +105,13 @@ test.describe('Issue #811 护栏误拦截复现 (real LLM)', () => {
     expectPattern: RegExp | string,
     rejectKeyword?: string
   ): Promise<string> {
+    // exec 是否被调用要按「本回合的增量」判断，不能全页 count() > 0：整个 describe
+    // 共用一个 page，历史消息里的工具调用块会留在 DOM 里，全页查询会把上一轮的 exec
+    // 算成这一轮的——那样当前回合即便压根没调 exec 也进不了 skip 分支，反而把环境
+    // 问题误报成护栏失败。发送前先记基线，只认之后新增的。
+    // （更稳的做法是给工具调用行挂当前 turn 的唯一标识，但那要动渲染层，先用增量。）
+    const execCountBefore = await page.locator('[data-testid="tool-command-copy"]').count();
+
     await sendMessage(page, prompt);
 
     const RUN_CAP = 8 * 60_000; // hard cap from test start
@@ -147,7 +154,8 @@ test.describe('Issue #811 护栏误拦截复现 (real LLM)', () => {
       }
       lastLen = len;
       if (!sawExecCommand) {
-        sawExecCommand = (await page.locator('[data-testid="tool-command-copy"]').count()) > 0;
+        sawExecCommand =
+          (await page.locator('[data-testid="tool-command-copy"]').count()) > execCountBefore;
       }
       if (text !== lastText) {
         lastText = text;
