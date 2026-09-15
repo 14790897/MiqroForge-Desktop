@@ -146,11 +146,11 @@ test.describe('#956 folder-bound session', () => {
       // After the turn completes, the folder session must appear EXACTLY once
       // in the sidebar (the active registry + folder-scan must not duplicate it).
       await expect(
-        page.locator(`${SIDEBAR} button.rounded-xl`, { hasText: 'Q956A' }).first()
+        page.locator(`${SIDEBAR} [data-testid="session-item"]`, { hasText: 'Q956A' }).first()
       ).toBeVisible({ timeout: 60_000 });
-      await expect(page.locator(`${SIDEBAR} button.rounded-xl`, { hasText: 'Q956A' })).toHaveCount(
-        1
-      );
+      await expect(
+        page.locator(`${SIDEBAR} [data-testid="session-item"]`, { hasText: 'Q956A' })
+      ).toHaveCount(1);
 
       // Switch away and back — the reported bug lost the history here.
       await createNewConversation(page);
@@ -205,9 +205,9 @@ test.describe('#956 folder-bound session', () => {
       await expect(page.locator(SIDEBAR).getByText('Q956B', { exact: false }).first()).toBeVisible({
         timeout: 90_000,
       });
-      await expect(page.locator(`${SIDEBAR} button.rounded-xl`, { hasText: 'Q956B' })).toHaveCount(
-        1
-      );
+      await expect(
+        page.locator(`${SIDEBAR} [data-testid="session-item"]`, { hasText: 'Q956B' })
+      ).toHaveCount(1);
 
       const switched = await switchToSessionWithMarker(page, 'Q956B');
       expect(switched, 'folder session must be clickable after restart').toBe(true);
