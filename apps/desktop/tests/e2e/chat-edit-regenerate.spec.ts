@@ -132,5 +132,8 @@ test.describe.serial('编辑消息重答(#1011)', () => {
 
     // 断言:错误提示出现(消息列表仍渲染内容,不进入空白坏状态)
     await expect(page.getByText(/错误|失败|error|Error/).first()).toBeVisible({ timeout: 90_000 });
+    // P1 保守判定固化(已触及 chat.send 的失败不回滚):截断后的新消息仍在,
+    // 不恢复成编辑前的旧分支 —— 避免与可能已接收请求的后端状态分叉
+    await expect(page.getByTestId('chat-message-user').first()).toContainText('触发失败回滚');
   });
 });

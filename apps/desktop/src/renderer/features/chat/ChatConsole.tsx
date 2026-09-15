@@ -5755,6 +5755,14 @@ export function ChatConsole({
       }
 
       // Fire send — server parses synchronously in _chat_send_handler
+      // #1011 P1(baiye-banned review):判定点必须早于「请求可能已送出」的
+      // 第一刻。chat.send 内部是 ipcRenderer.invoke → main → bridge.send,
+      // 一旦调用,即使 Promise 之后 reject,请求也可能已被后端接收并开始
+      // turn —— 此时恢复旧 snapshot 会造成前后端状态分叉。因此:
+      //   · chat.send 调用之前的失败(附件/内容构造/thread start)= 确定未派发 → 允许恢复
+      //   · 调用之后的一切失败(resolve 或 reject 皆然)= 可能已派发 → 不恢复
+      //     (与普通发送失败语义一致:保留列表 + 错误提示)
+      turnDispatched = true;
       const sendPromise = window.miqi.chat.send(
         content,
         key,
@@ -5765,10 +5773,8 @@ export function ChatConsole({
         reasoningModeRef.current,
         _resumeId ?? undefined
       );
-      // chat.send 已发出(turn 已派发)——此刻清除本次 send 的编辑回滚点
-      // (#1011 P1):此前的失败路径(附件/内容构造/thread start/send 调用)
-      // 都保留了回滚点可供恢复。
-      turnDispatched = true;
+      // 请求已发出 —— 清除本次 send 的编辑回滚点(此后失败一律不恢复,
+      // 见上方 turnDispatched 注释;此处删除防 Map 泄漏)
       editRollbacksRef.current.delete(thisSendId);
 
       // Mark as done after a tick — server parsing is synchronous, already complete
