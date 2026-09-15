@@ -2,10 +2,19 @@ import { electron } from '../../shared/electron';
 import { spawn, spawnSync } from 'child_process';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync, unlinkSync } from 'fs';
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  statSync,
+  writeFileSync,
+  unlinkSync,
+} from 'fs';
+import { readFile as readFileAsync } from 'fs/promises';
 import { homedir, tmpdir } from 'os';
 import { randomUUID } from 'crypto';
-import { join } from 'path';
+import { basename, join } from 'path';
 import type { BrowserWindow } from 'electron';
 import type { BridgeManager } from '../bridge';
 import {
@@ -76,7 +85,7 @@ import {
 } from './workspace-path';
 import { clampMinToWindow, panelWindowMinWidth } from '../../shared/layout';
 
-const { ipcMain, dialog, shell, app } = electron;
+const { ipcMain, dialog, shell, app, clipboard } = electron;
 
 function readWorkspaceLogLines(
   projectRoot: string,
@@ -2032,6 +2041,180 @@ for m in ("pydantic", "httpx", "loguru"):
       };
     }
     return { opened: true, path: raw };
+  });
+
+  // -- Open raw bytes with the system default application ----------------
+  // 预览弹窗「系统应用打开」：把字节写成系统临时文件（保留扩展名，命中默认应用或弹出
+  // Windows「打开方式」），再交给 OS。临时目录在 workspace 之外，故不走 canonical 校验。
+  ipcMain.handle(IPC.FILES_OPEN_BYTES, async (_event, payload: unknown) => {
+    const p = payload as { name?: string; base64?: string };
+    const rawName = typeof p?.name === 'string' && p.name ? p.name : 'file';
+    const base64 = typeof p?.base64 === 'string' ? p.base64 : '';
+    if (!base64) return { opened: false, path: rawName, error: 'Empty payload' };
+    // 本 IPC 自带硬上限（25MB 原始字节 ≈ 34MB base64），安全策略不依赖调用方
+    if (base64.length > 36 * 1024 * 1024) {
+      return { opened: false, path: rawName, error: 'Payload too large' };
+    }
+
+    // 安全（CodeRabbit #1048 / CWE-434）：白名单——仅「安全可打开」的类型交给系统
+    // 默认应用，其余（可执行/脚本宿主/宏文档等）一律拒绝，调用方在被拒时不得回退。
+    const ALLOWED_OPEN_EXTS = new Set([
+      'pdf',
+      'docx',
+      'odt',
+      'rtf',
+      'xlsx',
+      'ods',
+      'csv',
+      'pptx',
+      'odp',
+      'txt',
+      'text',
+      'md',
+      'markdown',
+      'mdown',
+      'json',
+      'xml',
+      'yml',
+      'yaml',
+      'log',
+      'ini',
+      'toml',
+      'env',
+      'png',
+      'jpg',
+      'jpeg',
+      'gif',
+      'webp',
+      'bmp',
+      'tif',
+      'tiff',
+      'ico',
+      'avif',
+    ]);
+    const extForBlock = (rawName.split('.').pop() || '').toLowerCase();
+    if (!ALLOWED_OPEN_EXTS.has(extForBlock)) {
+      return {
+        opened: false,
+        path: rawName,
+        error: `Blocked file type (not in safe allowlist): .${extForBlock}`,
+      };
+    }
+
+    const dot = rawName.lastIndexOf('.');
+    const stem = dot > 0 ? rawName.slice(0, dot) : rawName;
+    const ext = dot > 0 ? rawName.slice(dot) : '';
+    const safeStem = stem.replace(/[^\w一-龥.-]/g, '_').slice(-60) || 'file';
+    const safeExt = ext.replace(/[^\w.]/g, '').slice(0, 10);
+    const tmpPath = join(tmpdir(), `miqi-open-${randomUUID()}-${safeStem}${safeExt}`);
+
+    try {
+      writeFileSync(tmpPath, Buffer.from(base64, 'base64'), { mode: 0o600 });
+    } catch (e: any) {
+      return { opened: false, path: tmpPath, error: e?.message ?? String(e) };
+    }
+    const error = await shell.openPath(tmpPath);
+    // 外部应用可能稍后异步读取，延迟清理而不是立刻删除
+    setTimeout(() => {
+      try {
+        unlinkSync(tmpPath);
+      } catch {
+        /* already gone */
+      }
+    }, 10 * 60_000);
+    return error ? { opened: false, path: tmpPath, error } : { opened: true, path: tmpPath };
+  });
+
+  // -- Read files/images from the SYSTEM clipboard (Ctrl+V) ---------------
+  // Windows「复制文件」只提供 CF_HDROP，Chromium 的 paste 事件拿不到；改在主进程读：
+  // FileNameW/FileName → 路径列表；否则 readImage()（截图）。本 handler 不接收渲染层
+  // 参数（路径来自系统剪贴板），因此渲染层无法借它任意读盘。
+  ipcMain.handle(IPC.CLIPBOARD_READ_FILES, async () => {
+    const MAX_ONE = 25 * 1024 * 1024;
+    const MAX_TOTAL = 40 * 1024 * 1024;
+    const MAX_FILES = 8;
+    type ClipFile = { name: string; base64: string; mime: string; size: number };
+    const files: ClipFile[] = [];
+    let image: ClipFile | undefined;
+    let total = 0;
+
+    const mimeOf = (p: string): string => {
+      const e = (p.split('.').pop() || '').toLowerCase();
+      const m: Record<string, string> = {
+        png: 'image/png',
+        jpg: 'image/jpeg',
+        jpeg: 'image/jpeg',
+        gif: 'image/gif',
+        webp: 'image/webp',
+        bmp: 'image/bmp',
+        pdf: 'application/pdf',
+        txt: 'text/plain',
+        md: 'text/markdown',
+        csv: 'text/csv',
+        json: 'application/json',
+        xml: 'application/xml',
+        zip: 'application/zip',
+        docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+      };
+      return m[e] || 'application/octet-stream';
+    };
+
+    try {
+      for (const fmt of ['FileNameW', 'FileName']) {
+        let buf: Buffer;
+        try {
+          buf = clipboard.readBuffer(fmt);
+        } catch {
+          continue;
+        }
+        if (!buf || buf.length === 0) continue;
+        const text = fmt.endsWith('W') ? buf.toString('utf16le') : buf.toString('latin1');
+        const paths = text
+          .split('\0')
+          .map((s) => s.trim())
+          .filter(Boolean)
+          .slice(0, MAX_FILES);
+        for (const p of paths) {
+          if (files.length >= MAX_FILES || total >= MAX_TOTAL) break;
+          try {
+            const st = statSync(p);
+            if (!st.isFile() || st.size > MAX_ONE || total + st.size > MAX_TOTAL) continue;
+            // 异步读，避免阻塞主进程（批量粘贴时尤其重要）
+            const data = await readFileAsync(p);
+            total += data.length;
+            files.push({
+              name: basename(p),
+              base64: data.toString('base64'),
+              mime: mimeOf(p),
+              size: data.length,
+            });
+          } catch {
+            /* skip unreadable */
+          }
+        }
+        if (files.length > 0) break;
+      }
+
+      if (files.length === 0) {
+        const img = clipboard.readImage();
+        if (img && !img.isEmpty()) {
+          const png = img.toPNG();
+          if (png.length > 0 && png.length <= MAX_ONE) {
+            image = {
+              name: `pasted-image-${Date.now()}.png`,
+              base64: png.toString('base64'),
+              mime: 'image/png',
+              size: png.length,
+            };
+          }
+        }
+      }
+    } catch {
+      /* clipboard unavailable */
+    }
+    return { files, image };
   });
 
   // -- Open an HTML string in the system default browser -------------------
