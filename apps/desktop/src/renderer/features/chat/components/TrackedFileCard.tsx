@@ -8,8 +8,8 @@ export interface TrackedFile {
   truncated?: boolean;
   /** 产出该文件的工具名（如 create_docx / graph_render / write_file），#879 ③ 追溯 */
   sourceTool?: string;
-  /** 产出该文件的回合 id（用于关联同一回合的引用），#879 ③ 追溯 */
-  turnId?: string;
+  /** 产出该文件的回合序号（第几个 user 回合，从 0 起），#879 ③ 追溯 */
+  turnId?: number;
 }
 
 export const OFFICE_FILE_RE_LEGACY = /\.(docx|xlsx|pptx|ppt)$/i;

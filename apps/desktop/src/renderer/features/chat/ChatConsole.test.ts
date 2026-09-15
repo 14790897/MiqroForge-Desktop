@@ -24,6 +24,7 @@ import {
   _sha256HexOfBase64,
   extractMessageSources,
   extractTrackedFilesFromMessages,
+  extractTurnSourcesFromMessages,
 } from './ChatConsole';
 
 describe('ChatConsole thinking block regression (#858 → #905)', () => {
@@ -625,6 +626,55 @@ describe('extractTrackedFilesFromMessages 来源工具追溯 (#879 ③)', () => 
     ]);
     expect(files).toEqual([
       expect.objectContaining({ name: 'out.txt', op: 'write', sourceTool: 'write_file' }),
+    ]);
+  });
+});
+
+describe('extractTurnSourcesFromMessages 冷启动恢复 (#879 ③)', () => {
+  it('按回合从 web_search 结果解析来源（user 消息分隔回合）', () => {
+    const map = extractTurnSourcesFromMessages([
+      { role: 'user', content: '查天气' },
+      {
+        role: 'tool',
+        name: 'web_search',
+        content: 'Results for: 天气\n1. 北京天气\n   https://weather.com.cn/beijing\n   今天晴',
+      },
+      { role: 'assistant', content: '北京今天晴' },
+      { role: 'user', content: '查论文' },
+      {
+        role: 'tool',
+        name: 'web_search',
+        content: 'Results for: 论文\n1. 论文A\n   https://arxiv.org/a\n   摘要A',
+      },
+    ]);
+    expect(map.get(0)).toEqual([
+      {
+        tool: 'web_search',
+        url: 'https://weather.com.cn/beijing',
+        title: '北京天气',
+        snippet: '今天晴',
+      },
+    ]);
+    expect(map.get(1)).toEqual([
+      { tool: 'web_search', url: 'https://arxiv.org/a', title: '论文A', snippet: '摘要A' },
+    ]);
+  });
+
+  it('web_fetch 结果解析为单个来源（JSON）', () => {
+    const map = extractTurnSourcesFromMessages([
+      { role: 'user', content: '抓网页' },
+      {
+        role: 'tool',
+        name: 'web_fetch',
+        content: JSON.stringify({
+          url: 'https://example.com',
+          finalUrl: 'https://example.com/x',
+          title: '示例页',
+        }),
+      },
+    ]);
+    expect(map.get(0)).toEqual([
+      { tool: 'web_fetch', url: 'https://example.com/x', title: '示例页', snippet: '' },
     ]);
   });
 });

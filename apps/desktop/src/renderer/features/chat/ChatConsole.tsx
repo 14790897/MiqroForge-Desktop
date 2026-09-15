@@ -534,8 +534,8 @@ interface TrackedFile {
   truncated?: boolean;
   /** 产出该文件的工具名（如 create_docx / graph_render / write_file），#879 ③ 追溯 */
   sourceTool?: string;
-  /** 产出该文件的回合 id（用于关联同一回合的引用），#879 ③ 追溯 */
-  turnId?: string;
+  /** 产出该文件的回合序号（第几个 user 回合，从 0 起），#879 ③ 追溯 */
+  turnId?: number;
 }
 
 const OFFICE_FILE_RE = /\.(docx|xlsx|pptx|ppt|xls|doc|odt|odp|ods)$/i;
@@ -2140,8 +2140,15 @@ function _extractPathFromArgs(argsStr: string): string | null {
 export function extractTrackedFilesFromMessages(rawMsgs: any[]): TrackedFile[] {
   const fileMap = new Map<string, TrackedFile>();
   const rank: Record<TrackedFile['op'], number> = { read: 0, edit: 1, write: 2, delete: 3 };
+  let turnSeq = -1; // 当前回合序号（第几个 user 回合，从 0 起）
 
-  const upsert = (path: string, op: TrackedFile['op'], timestamp?: string, tool?: string) => {
+  const upsert = (
+    path: string,
+    op: TrackedFile['op'],
+    timestamp?: string,
+    tool?: string,
+    turnId?: number
+  ) => {
     const key = normalizeSandboxPath(path).replace(/\\/g, '/');
     const existing = fileMap.get(key);
     if (!existing || rank[op] > rank[existing.op]) {
@@ -2152,17 +2159,19 @@ export function extractTrackedFilesFromMessages(rawMsgs: any[]): TrackedFile[] {
         lastSeen: timestamp ? new Date(timestamp).getTime() : Date.now(),
         truncated: false,
         sourceTool: tool,
+        turnId,
       });
     }
   };
 
   for (const msg of rawMsgs) {
+    if (msg?.role === 'user') turnSeq += 1;
     // Format 1: _tool_hint metadata (persisted progress events)
     const hintText = msg._tool_hint_text || msg.content;
     if (msg._tool_hint && hintText) {
       const parsed = parseToolHint(hintText);
       if (parsed) {
-        upsert(parsed.path, parsed.op, msg.timestamp);
+        upsert(parsed.path, parsed.op, msg.timestamp, undefined, turnSeq);
       }
     }
 
@@ -2180,10 +2189,11 @@ export function extractTrackedFilesFromMessages(rawMsgs: any[]): TrackedFile[] {
             filePath,
             toolName === 'delete_file' ? 'delete' : 'write',
             msg.timestamp,
-            toolName
+            toolName,
+            turnSeq
           );
         } else if (_FILE_READ_TOOLS.includes(toolName)) {
-          upsert(filePath, 'read', msg.timestamp, toolName);
+          upsert(filePath, 'read', msg.timestamp, toolName, turnSeq);
         }
       }
     }
@@ -2194,7 +2204,7 @@ export function extractTrackedFilesFromMessages(rawMsgs: any[]): TrackedFile[] {
       // Try to extract path from content (often contains the file path)
       const contentPath = parseToolHint(String(msg.content || ''));
       if (contentPath) {
-        upsert(contentPath.path, contentPath.op, msg.timestamp, toolName);
+        upsert(contentPath.path, contentPath.op, msg.timestamp, toolName, turnSeq);
       } else if (_FILE_WRITE_TOOLS.includes(toolName)) {
         // Tool result without parsable content — try to infer from tool name
         // (best-effort; actual path is in the paired assistant tool_calls message)
@@ -2202,6 +2212,54 @@ export function extractTrackedFilesFromMessages(rawMsgs: any[]): TrackedFile[] {
     }
   }
   return Array.from(fileMap.values());
+}
+
+/** 从消息推导「回合序号 → 该回合的结构化来源」（#879 ③ 冷启动恢复）。
+ *  web_sources 实时通过事件下发、不持久化，冷启动后从 web_search / web_fetch
+ *  的结果文本重新解析，按回合（user 消息分隔）累积，供文件卡片显示相关引用。 */
+export function extractTurnSourcesFromMessages(rawMsgs: any[]): Map<number, MessageSource[]> {
+  const map = new Map<number, MessageSource[]>();
+  let turnSeq = -1;
+  for (const msg of rawMsgs) {
+    if (msg?.role === 'user') turnSeq += 1;
+    if (msg?.role !== 'tool' || !msg?.name) continue;
+    const content = String(msg.content ?? '');
+    if (msg.name === 'web_search') {
+      const items = parseWebSearchResults(content);
+      if (items.length === 0) continue;
+      const acc = map.get(turnSeq) ?? [];
+      const seen = new Set(acc.map((s) => s.url));
+      for (const it of items) {
+        if (it.url && !seen.has(it.url)) {
+          seen.add(it.url);
+          acc.push({ tool: 'web_search', url: it.url, title: it.title, snippet: it.snippet });
+        }
+      }
+      map.set(turnSeq, acc);
+    } else if (msg.name === 'web_fetch') {
+      try {
+        const payload = JSON.parse(content);
+        const url = (payload?.finalUrl as string) || (payload?.url as string);
+        if (url) {
+          const acc = map.get(turnSeq) ?? [];
+          const seen = new Set(acc.map((s) => s.url));
+          if (!seen.has(url)) {
+            seen.add(url);
+            acc.push({
+              tool: 'web_fetch',
+              url,
+              title: (payload?.title as string) || url,
+              snippet: '',
+            });
+          }
+          map.set(turnSeq, acc);
+        }
+      } catch {
+        /* not JSON, ignore */
+      }
+    }
+  }
+  return map;
 }
 
 // ── Cross-session in-flight event cache (#378) ──────────────────
@@ -2860,8 +2918,8 @@ export function ChatConsole({
   );
   /** files touched by the agent during this session */
   const [trackedFiles, setTrackedFiles] = useState<TrackedFile[]>([]);
-  /** turnId → 该回合累积的结构化来源（#879 ③ 文件 → 相关引用）。 */
-  const [turnSourcesMap, setTurnSourcesMap] = useState<Map<string, MessageSource[]>>(new Map());
+  /** 回合序号 → 该回合累积的结构化来源（#879 ③ 文件 → 相关引用）。 */
+  const [turnSourcesMap, setTurnSourcesMap] = useState<Map<number, MessageSource[]>>(new Map());
   /** preview modal */
   const [previewFile, setPreviewFile] = useState<{
     path: string;
@@ -3243,7 +3301,7 @@ export function ChatConsole({
       path: string,
       op: TrackedFile['op'],
       truncated = false,
-      turnId?: string,
+      turnId?: number,
       sourceTool?: string
     ) => {
       // Normalise sandbox-internal paths before storing so Preview works
@@ -3941,6 +3999,11 @@ export function ChatConsole({
           lastSeen: f.lastSeen ?? Date.now(),
         }));
         setTrackedFiles(mergeTrackedFiles(existingFromMessages, backendMapped));
+        // #879 ③ 冷启动恢复：从消息重新推导「回合 → 来源」，供文件卡片显示相关引用。
+        setTurnSourcesMap(extractTurnSourcesFromMessages(rawMsgs));
+        // 回合序号与会话内 user 消息数对齐（turnSeqRef 跨会话累计，需重置），
+        // 否则实时追踪的 turnId 与恢复推导的序号错位。
+        turnSeqRef.current = (rawMsgs ?? []).filter((m) => m?.role === 'user').length - 1;
 
         // ── Issue #490: resume this session's most-recent active thread ──
         // currentThreadIdRef is reset to null on every sessionKey/remount
@@ -5246,22 +5309,20 @@ export function ChatConsole({
             );
             const webToolName = structured[0]?.tool || 'web_search';
             // #879 ③：按回合累积 sources，供文件卡片显示「相关引用」。
-            if (myTurnId) {
-              const turnId = myTurnId;
-              setTurnSourcesMap((prev) => {
-                const next = new Map(prev);
-                const acc = next.get(turnId) ?? [];
-                const seen = new Set(acc.map((s) => s.url));
-                for (const s of structured) {
-                  if (s.url && !seen.has(s.url)) {
-                    seen.add(s.url);
-                    acc.push(s);
-                  }
+            const turnSeq = turnSeqRef.current;
+            setTurnSourcesMap((prev) => {
+              const next = new Map(prev);
+              const acc = next.get(turnSeq) ?? [];
+              const seen = new Set(acc.map((s) => s.url));
+              for (const s of structured) {
+                if (s.url && !seen.has(s.url)) {
+                  seen.add(s.url);
+                  acc.push(s);
                 }
-                next.set(turnId, acc);
-                return next;
-              });
-            }
+              }
+              next.set(turnSeq, acc);
+              return next;
+            });
             setMessages((prev) => {
               for (let i = prev.length - 1; i >= 0; i -= 1) {
                 const m = prev[i];
@@ -5369,7 +5430,7 @@ export function ChatConsole({
       // Parse file operations from tool hints
       if (data.tool_hint && data.text) {
         const parsed = parseToolHint(data.text);
-        if (parsed) trackFile(parsed.path, parsed.op, parsed.truncated, myTurnId ?? undefined);
+        if (parsed) trackFile(parsed.path, parsed.op, parsed.truncated, turnSeqRef.current);
       }
     });
 
@@ -5525,9 +5586,9 @@ export function ChatConsole({
           const filePath: string = _extractPathFromArgs(fn?.arguments || '{}') || '';
           if (!filePath) continue;
           if (_FILE_WRITE_TOOLS.includes(toolName)) {
-            trackFile(filePath, 'write', false, myTurnId ?? undefined, toolName);
+            trackFile(filePath, 'write', false, turnSeqRef.current, toolName);
           } else if (_FILE_READ_TOOLS.includes(toolName)) {
-            trackFile(filePath, 'read', false, myTurnId ?? undefined, toolName);
+            trackFile(filePath, 'read', false, turnSeqRef.current, toolName);
           }
         }
 
@@ -7592,7 +7653,7 @@ export function ChatConsole({
                         key={f.path}
                         file={f}
                         isResult
-                        citations={turnSourcesMap.get(f.turnId ?? '') ?? []}
+                        citations={turnSourcesMap.get(f.turnId ?? -1) ?? []}
                         onPreview={() => handlePreview(f.path)}
                         onDiff={() => handleShowDiff(f.path)}
                         onReveal={() =>
@@ -7614,7 +7675,7 @@ export function ChatConsole({
                       <TrackedFileCard
                         key={f.path}
                         file={f}
-                        citations={turnSourcesMap.get(f.turnId ?? '') ?? []}
+                        citations={turnSourcesMap.get(f.turnId ?? -1) ?? []}
                         onPreview={() => handlePreview(f.path)}
                         onDiff={() => handleShowDiff(f.path)}
                       />
