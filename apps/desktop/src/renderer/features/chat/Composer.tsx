@@ -36,6 +36,12 @@ import {
  */
 export interface ComposerHandle {
   setText(text: string): void;
+  /**
+   * 读当前输入框内容。给「撤销起点任务时该不该顺手清空提示词」用（#962 评审 P2）——
+   * 只有还留着任务的原始提示词才清，用户改过就保留。直接读 DOM 而不是 state：
+   * 下面的 useImperativeHandle 依赖是空的（句柄要引用稳定），闭包里的 state 会过期。
+   */
+  getText(): string;
   clear(): void;
   focus(): void;
 }
@@ -95,6 +101,7 @@ function ComposerImpl(
     ref,
     () => ({
       setText: (text: string) => setInput(text),
+      getText: () => textareaRef.current?.value ?? '',
       clear: () => {
         setInput('');
         // Reset textarea height after sending (mirrors the pre-#1021 reset).

@@ -2584,33 +2584,54 @@ export function ChatConsole({
   };
   // issue #962 起点任务：三层渐进选择（模式 → 子项目 → 子子项目）。未选时是 null，
   // 这样"点了子项目才冒出子子项目行、点了子子项目才显示详细内容"的渐进流程才成立。
-  const [pickedSceneIdx, setPickedSceneIdx] = useState<number | null>(null);
-  const [pickedTaskIdx, setPickedTaskIdx] = useState<number | null>(null);
+  //
+  // 存的是「身份」（title）而不是下标：「内置技能」是 skills.list() 回来之后才插到
+  // welcomeScenes 最前面的，用下标的话整个列表被挤位一格，用户先选好的场景/任务会
+  // 悄悄指到隔壁去（#962 评审 P1：异步 prepend + index state 的状态不一致）。
+  // title 在数据里唯一，welcomeScenes.test.ts 守着这条约束，所以当身份用是稳的；
+  // 将来数据动态化/本地化时，把它换成显式 id 即可（见该文件头部说明）。
+  const [pickedSceneTitle, setPickedSceneTitle] = useState<string | null>(null);
+  const [pickedTaskTitle, setPickedTaskTitle] = useState<string | null>(null);
   // issue #962：代码任务的子项目里额外挂一项「内置技能」，内容来自 skills.list()，
   // 但只上架 SKILL_ORDER 白名单里的几个（首屏不铺开全部内置技能），拿不到就整项不显示。
   const [builtinSkillTasks, setBuiltinSkillTasks] = useState<readonly StarterTask[]>([]);
   useEffect(() => {
     let cancelled = false;
+    const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
     void (async () => {
-      try {
-        const res = await window.miqi.skills.list();
-        if (cancelled) return;
-        const byName = new Map(
-          (res?.skills ?? [])
-            // 这里是纯字符串匹配，而 Windows 上 skills.list() 回的是反斜杠路径
-            // （Python 侧 str(Path)），只写 '/kwp/' 在 Windows 上一条都匹配不上。
-            .filter((s) => s.source === 'builtin' && !s.path.replace(/\\/g, '/').includes('/kwp/'))
-            .map((s) => [s.name, s] as const)
-        );
-        // 顺序与上架范围都以 SKILL_ORDER 为准：技能清单本身来自文件系统，顺序不稳定，
-        // 而且没装的技能不该在首屏留空位。
-        setBuiltinSkillTasks(
-          SKILL_ORDER.map((name) =>
-            byName.has(name) ? (SKILL_STARTERS[name] ?? null) : null
-          ).filter((t): t is StarterTask => t !== null)
-        );
-      } catch {
-        // 技能清单不可用时这一项直接不出现——它不是必需入口
+      // 这个 effect 在挂载时就跑，早于 runtime 就绪，所以 skills.list() 有相当概率
+      // 撞上「桥还没起来」而被拒。只试一次的话，一次瞬时失败会让「内置技能」整场
+      // 会话都不出现（e2e 冷启动时就是间歇性这样挂的）。退避重试几次。
+      for (let attempt = 0; attempt < 5; attempt++) {
+        try {
+          const res = await window.miqi.skills.list();
+          if (cancelled) return;
+          const byName = new Map(
+            (res?.skills ?? [])
+              // 这里是纯字符串匹配，而 Windows 上 skills.list() 回的是反斜杠路径
+              // （Python 侧 str(Path)），只写 '/kwp/' 在 Windows 上一条都匹配不上。
+              .filter(
+                (s) => s.source === 'builtin' && !s.path.replace(/\\/g, '/').includes('/kwp/')
+              )
+              .map((s) => [s.name, s] as const)
+          );
+          // 顺序与上架范围都以 SKILL_ORDER 为准：技能清单本身来自文件系统，顺序不稳定，
+          // 而且没装的技能不该在首屏留空位。
+          setBuiltinSkillTasks(
+            SKILL_ORDER.map((name) =>
+              byName.has(name) ? (SKILL_STARTERS[name] ?? null) : null
+            ).filter((t): t is StarterTask => t !== null)
+          );
+          return;
+        } catch (e) {
+          // 技能清单不可用只是让这一项不出现——它不是必需入口
+          if (cancelled) return;
+          if (attempt === 4) {
+            console.warn('[MiQroForge] skills.list() 连续失败，「内置技能」入口本次会话不显示', e);
+            return;
+          }
+          await sleep(300 * (attempt + 1));
+        }
       }
     })();
     return () => {
@@ -2630,28 +2651,52 @@ export function ChatConsole({
   const isWelcomeEmpty = messages.length === 0;
   // 子项目 chips 行的横向翻页（两侧箭头）
   const sceneChipsRef = useRef<HTMLDivElement>(null);
-  const pickedScene = pickedSceneIdx === null ? null : (welcomeScenes[pickedSceneIdx] ?? null);
+  // 到边就把箭头置灰（#962 评审 P3）：能滚多远取决于内容宽度，只能实时量。
+  const [chipScroll, setChipScroll] = useState({ left: false, right: false });
+  const syncChipScroll = useCallback(() => {
+    const el = sceneChipsRef.current;
+    if (!el) return;
+    setChipScroll({
+      left: el.scrollLeft > 1,
+      right: el.scrollLeft < el.scrollWidth - el.clientWidth - 1,
+    });
+  }, []);
+  // 换模式 / 技能清单回来会换掉整排 chips，容器宽度跟着变，重挂载后要重新量一次。
+  useEffect(() => {
+    syncChipScroll();
+  }, [welcomeScenes, syncChipScroll]);
+  const pickedScene =
+    pickedSceneTitle === null
+      ? null
+      : (welcomeScenes.find((s) => s.title === pickedSceneTitle) ?? null);
   const pickedTask =
-    pickedScene && pickedTaskIdx !== null ? (pickedScene.tasks[pickedTaskIdx] ?? null) : null;
+    pickedScene && pickedTaskTitle !== null
+      ? (pickedScene.tasks.find((t) => t.title === pickedTaskTitle) ?? null)
+      : null;
   // 传给 Composer 的清空回调必须引用稳定（Composer 是 memo 的，#1042），否则
   // 每次 ChatConsole 渲染都会把 memo 打穿。
-  const clearStarterScene = useCallback(() => setPickedSceneIdx(null), []);
-  const clearStarterTask = useCallback(() => setPickedTaskIdx(null), []);
+  const clearStarterScene = useCallback(() => setPickedSceneTitle(null), []);
+  const clearStarterTask = useCallback(() => setPickedTaskTitle(null), []);
   // 换模式 → 两层都清空；换子项目 → 只清子子项目。
   useEffect(() => {
-    setPickedSceneIdx(null);
-    setPickedTaskIdx(null);
+    setPickedSceneTitle(null);
+    setPickedTaskTitle(null);
   }, [welcomeMode]);
   useEffect(() => {
-    setPickedTaskIdx(null);
-  }, [pickedSceneIdx]);
-  // 「内置技能」是 skills.list() 回来之后才插到最前面的，整个 welcomeScenes 因此右移
-  // 一位。用户如果在这之前就选了子项目，那个下标会指到隔壁场景上，而输入框里还留着
-  // 上一个任务的提示词——列表一变就把选择清掉，宁可让用户重选（#962 CodeRabbit）。
+    setPickedTaskTitle(null);
+  }, [pickedSceneTitle]);
+  // 记下"这条任务的提示词是我填进去的"。撤销任务时（胶囊 ×、换 L2、换模式、换会话
+  // 都会走到）如果输入框里还是这段原文就一并清掉——否则 UI 显示「没选任务」、输入框
+  // 却留着整段 prompt，看着像 × 没生效（#962 评审 P2）。用户手动改过就不动，别误删。
+  const appliedTaskAskRef = useRef<string | null>(null);
   useEffect(() => {
-    setPickedSceneIdx(null);
-    setPickedTaskIdx(null);
-  }, [builtinSkillTasks]);
+    if (pickedTask) return;
+    const ask = appliedTaskAskRef.current;
+    appliedTaskAskRef.current = null;
+    if (ask && composerRef.current?.getText().trim() === ask.trim()) {
+      composerRef.current.setText('');
+    }
+  }, [pickedTask]);
   // Composer 侧的推理模式切换(ReasoningModeSwitch / 建议提示)同样要同步 welcome
   // 卡高亮——否则空态下先选了「代码任务」再从输入条切 fast,welcomeMode 停在 code、
   // 发送却用 fast,高亮与真实模式不一致(CodeRabbit)。会话已有消息后 welcome 卡不
@@ -7167,10 +7212,11 @@ export function ChatConsole({
                     <button
                       type="button"
                       aria-label="上一组子项目"
+                      disabled={!chipScroll.left}
                       onClick={() =>
                         sceneChipsRef.current?.scrollBy({ left: -170, behavior: 'smooth' })
                       }
-                      className="starter-chip shrink-0 w-7 h-7 flex items-center justify-center rounded-full cursor-pointer text-text-faint hover:text-[var(--text)]"
+                      className="starter-chip shrink-0 w-7 h-7 flex items-center justify-center rounded-full cursor-pointer text-text-faint hover:text-[var(--text)] disabled:opacity-35 disabled:cursor-default disabled:pointer-events-none"
                       style={{ border: '1px solid transparent' }}
                     >
                       <ChevronLeft size={13} />
@@ -7183,18 +7229,19 @@ export function ChatConsole({
                       // 算成 auto，chips 的 ring 与投影上下都会被这个滚动容器直接裁掉（#962 反馈
                       // 「上下框子看不见」）；拿负 margin 把多出来的 24px 抵回去，布局高度不变。
                       className="flex-1 min-w-0 flex items-center gap-1.5 overflow-x-auto scroll-smooth py-3 -my-3 [&::-webkit-scrollbar]:hidden"
+                      onScroll={syncChipScroll}
                       style={{
                         animation: 'welcomeChipsIn 220ms ease-out',
                         scrollbarWidth: 'none',
                       }}
                     >
-                      {welcomeScenes.map((s, i) => {
-                        const on = i === pickedSceneIdx;
+                      {welcomeScenes.map((s) => {
+                        const on = s.title === pickedSceneTitle;
                         return (
                           <button
                             key={s.title}
                             type="button"
-                            onClick={() => setPickedSceneIdx(on ? null : i)}
+                            onClick={() => setPickedSceneTitle(on ? null : s.title)}
                             aria-pressed={on}
                             className={cn(
                               'starter-chip flex items-center gap-2 shrink-0 rounded-full px-4 py-2 text-[13px] cursor-pointer',
@@ -7221,10 +7268,11 @@ export function ChatConsole({
                     <button
                       type="button"
                       aria-label="下一组子项目"
+                      disabled={!chipScroll.right}
                       onClick={() =>
                         sceneChipsRef.current?.scrollBy({ left: 170, behavior: 'smooth' })
                       }
-                      className="starter-chip shrink-0 w-7 h-7 flex items-center justify-center rounded-full cursor-pointer text-text-faint hover:text-[var(--text)]"
+                      className="starter-chip shrink-0 w-7 h-7 flex items-center justify-center rounded-full cursor-pointer text-text-faint hover:text-[var(--text)] disabled:opacity-35 disabled:cursor-default disabled:pointer-events-none"
                       style={{ border: '1px solid transparent' }}
                     >
                       <ChevronRight size={13} />
@@ -7236,7 +7284,7 @@ export function ChatConsole({
                       对齐 WorkBuddy 第三层的做法；展开后直接看到提示词与任务详情。 */}
                   {pickedScene && (
                     <div
-                      key={`${welcomeMode}-${pickedSceneIdx}`}
+                      key={`${welcomeMode}-${pickedSceneTitle}`}
                       className="relative w-full max-w-[560px] flex flex-col gap-1.5 pl-4"
                       style={{
                         animation: 'welcomeChipsIn 220ms ease-out',
@@ -7244,8 +7292,8 @@ export function ChatConsole({
                         borderLeft: '2px solid color-mix(in srgb, var(--text) 14%, transparent)',
                       }}
                     >
-                      {pickedScene.tasks.map((t, i) => {
-                        const open = i === pickedTaskIdx;
+                      {pickedScene.tasks.map((t) => {
+                        const open = t.title === pickedTaskTitle;
                         return (
                           <div
                             key={t.title}
@@ -7257,13 +7305,14 @@ export function ChatConsole({
                               type="button"
                               onClick={() => {
                                 if (open) {
-                                  setPickedTaskIdx(null);
+                                  setPickedTaskTitle(null);
                                   return;
                                 }
-                                setPickedTaskIdx(i);
+                                setPickedTaskTitle(t.title);
                                 // 展开的同时把提示词放进输入框（#962 反馈：详细的提示信息
                                 // 得在对话框里）。用替换而不是追加，连点不会堆成一长串。
                                 // #1021/#1042 之后 input state 住在 Composer 里，只能走 ref 写。
+                                appliedTaskAskRef.current = t.ask;
                                 composerRef.current?.setText(t.ask);
                                 composerRef.current?.focus();
                               }}
