@@ -218,8 +218,17 @@ test.describe('Issue #879 web_sources 结构化来源', () => {
       // 4. 弹窗打开，标题带来源计数且 > 0
       await expect(page.getByText(/查看来源（\d+）/).first()).toBeVisible({ timeout: 15_000 });
 
-      // 5. 弹窗里渲染出结构化来源链接（title 主行 + url，而非空提示）
-      await expect(page.locator('a[href^="http"]').first()).toBeVisible({ timeout: 15_000 });
+      // 5. 弹窗里渲染出结构化来源：主行是「web_search · 标题」（非 URL），
+      //    而非启发式回退的裸 URL。scope 到 dialog 避免误匹配页面其它链接，
+      //    并断言主行 title ≠ URL（CodeRabbit review）。
+      const dialog = page.getByRole('dialog');
+      await expect(dialog).toBeVisible({ timeout: 15_000 });
+      const sourceLink = dialog.locator('a[href^="http"]').first();
+      await expect(sourceLink).toBeVisible({ timeout: 15_000 });
+      const mainLine = sourceLink.locator('span span').first();
+      const mainText = (await mainLine.textContent()) ?? '';
+      expect(mainText).toContain('web_search · ');
+      expect(mainText).not.toContain('https://');
       const modalText = await page.locator('main').textContent();
       expect(modalText).not.toContain('该回答未使用网络工具');
 
