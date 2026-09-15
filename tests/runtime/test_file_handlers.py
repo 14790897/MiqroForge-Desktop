@@ -436,6 +436,124 @@ async def test_clear_tracked_files_namespaced_key_clears_write_path_store(tmp_pa
     assert not store.exists(), f"clear 未删到写端落盘的文件：{store}"
 
 
+# ── #1061：文件夹绑定会话的资产读/清（对话历史可以为空）─────────────────────
+
+
+def _make_folder_session(folder, key: str, client_id: str, asset: str | None = None):
+    """文件夹工区里建一个**零消息**会话；asset 非空时同时登记一条资产。
+
+    资产由运行时的写端落在会话自己的工区，与有没有对话历史无关——这正是
+    「按消息行判定会话是否存在」会踩空的地方。
+    """
+    from miqi.agent.tools.filesystem import _persist_tracked_file, _session_files_dir_key
+    from miqi.session.manager import SessionManager
+
+    folder_sm = SessionManager(folder)
+    session = folder_sm.get_or_create(key, client_id=client_id)
+    session.metadata["owner_client_id"] = client_id
+    folder_sm.save(session)
+    folder_sm.invalidate(key)
+    if asset is not None:
+        files_dir = folder / "sessions" / _session_files_dir_key(key) / "files"
+        files_dir.mkdir(parents=True, exist_ok=True)
+        target = files_dir / asset
+        target.write_text("payload", encoding="utf-8")
+        _persist_tracked_file(folder, target, op="write", session_key=key)
+    return folder_sm
+
+
+@pytest.mark.asyncio
+async def test_get_tracked_files_reads_message_less_folder_ledger(tmp_path):
+    """#1061：有资产、零消息的文件夹会话，资产面板必须读到会话自己的账本。
+
+    app-home 对该会话没有 stub，唯一能指出文件夹根的线索是活跃 runtime 的
+    workspace。若解析沿用「文件夹副本必须有消息行」（读对话处需要它来判定历史
+    权威），这类会话会被判为不存在，回落到 app-home 的空账本 → 面板恒为空。
+    """
+    from types import SimpleNamespace
+
+    from miqi.agent.tools.filesystem import _session_files_dir_key
+    from miqi.runtime.session_handlers import sessions_get_tracked_files_handler
+
+    key = "desktop:1061-get-assets"
+    folder = tmp_path / "folder-ws"
+    folder.mkdir()
+    _make_folder_session(folder, key, "client-A", asset="asset.txt")
+
+    runtime = SimpleNamespace(services=SimpleNamespace(workspace=folder))
+
+    async def _get_session(cid, sid):
+        return runtime
+
+    out = await sessions_get_tracked_files_handler(
+        "req-1", {"session_key": key}, "client-A", None,
+        SimpleNamespace(get_session=_get_session),
+    )
+    paths = {item["path"] for item in out["result"]["tracked_files"]}
+    expected = f"sessions/{_session_files_dir_key(key)}/files/asset.txt"
+    assert expected in paths, paths
+
+
+@pytest.mark.asyncio
+async def test_clear_tracked_files_clears_message_less_folder_ledger(tmp_path):
+    """#1061：零消息的文件夹会话，「清空资产」必须删到它自己那份账本。
+
+    否则清理落在 app-home 的空账本上（无操作）而文件夹那份仍在——下次读回来
+    资产照旧，表现为「清理不掉」。
+    """
+    from types import SimpleNamespace
+
+    from miqi.agent.tools.filesystem import _session_files_dir_key
+    from miqi.runtime.session_handlers import sessions_clear_tracked_files_handler
+
+    key = "desktop:1061-clear-assets"
+    folder = tmp_path / "folder-ws"
+    folder.mkdir()
+    _make_folder_session(folder, key, "client-A", asset="gone.txt")
+    store = folder / "sessions" / _session_files_dir_key(key) / "tracked_files.json"
+    assert store.exists()
+
+    runtime = SimpleNamespace(services=SimpleNamespace(workspace=folder))
+
+    async def _get_session(cid, sid):
+        return runtime
+
+    out = await sessions_clear_tracked_files_handler(
+        "req-1", {"session_key": key}, "client-A", None,
+        SimpleNamespace(get_session=_get_session),
+    )
+    assert out["result"]["cleared"] is True
+    assert not store.exists(), f"clear 未删到文件夹工区的账本：{store}"
+
+
+@pytest.mark.asyncio
+async def test_get_tracked_files_reads_folder_ledger_via_anchor_without_runtime(tmp_path):
+    """重启后无 runtime：靠其它会话的 workspace 绑定仍能定位文件夹账本。"""
+    from miqi.runtime.app_server import ClientSessionRegistry
+    from miqi.runtime.session_handlers import sessions_get_tracked_files_handler
+
+    key = "desktop:1061-cold-assets"
+    anchor = "desktop:1061-cold-anchor"
+    folder = tmp_path / "folder-ws"
+    folder.mkdir()
+    _make_folder_session(folder, key, "client-A", asset="cold.txt")
+
+    # 另一个会话在 app-home 声明了该文件夹 → 冷启动时仍能枚举到这个根。
+    sm, _ws = _setup_session(anchor, "client-A")
+    stub = sm.get_or_create(anchor, client_id="client-A", workspace=folder)
+    sm.save(stub)
+    sm.invalidate(anchor)
+
+    try:
+        out = await sessions_get_tracked_files_handler(
+            "req-1", {"session_key": key}, "client-A", None, ClientSessionRegistry(),
+        )
+        paths = {item["path"] for item in out["result"]["tracked_files"]}
+        assert any(p.endswith("cold.txt") for p in paths), paths
+    finally:
+        sm.delete(anchor, client_id="client-A")
+
+
 # ── #983 缺口 2：DownloadSink 产物进 tracked（面板读端回路）────────────────
 
 
