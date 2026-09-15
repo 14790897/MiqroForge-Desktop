@@ -31,6 +31,7 @@ import {
   closeElectronApp,
   APPS_DESKTOP,
 } from './helpers/electron-setup';
+import { patchConfigForMock } from './helpers/mock-openai';
 
 const REPO_ROOT = join(APPS_DESKTOP, '..', '..');
 
@@ -95,14 +96,10 @@ test.describe('Write Authorization Card (#864)', () => {
 
     const fixture = await launchElectronApp(
       (config: any) => {
-        const providers = config.providers ?? {};
-        for (const [name, p] of Object.entries(providers)) {
-          if (p && typeof p === 'object') {
-            (p as any).apiBase = mock.mockUrl;
-            if (!(p as any).apiKey) (p as any).apiKey = 'mock-key';
-          }
-        }
-        config.providers = providers;
+        // 门禁适配（#1000/#1025）：统一走共享 patchConfigForMock——注入 mock
+        // provider + 可解析默认模型；否则本机 providers 为空时发送被拦（CI
+        // 用的是带凭据的 config 才没暴露，本地必挂）。
+        patchConfigForMock(config, mock.mockUrl);
         const tools = config.tools ?? {};
         config.tools = { ...tools, restrictToWorkspace: true };
       },
@@ -193,14 +190,8 @@ test.describe('Write Authorization Bypass (#864)', () => {
 
     // bypassAll 默认 true（electron-setup 的默认行为）——写授权卡应被跳过。
     const fixture = await launchElectronApp((config: any) => {
-      const providers = config.providers ?? {};
-      for (const [name, p] of Object.entries(providers)) {
-        if (p && typeof p === 'object') {
-          (p as any).apiBase = mock.mockUrl;
-          if (!(p as any).apiKey) (p as any).apiKey = 'mock-key';
-        }
-      }
-      config.providers = providers;
+      // 门禁适配（#1000/#1025）：同第一个 describe——共享 patchConfigForMock
+      patchConfigForMock(config, mock.mockUrl);
       const tools = config.tools ?? {};
       config.tools = { ...tools, restrictToWorkspace: true };
     });
