@@ -295,6 +295,14 @@ interface MessageSource {
 // on every keystroke (#1021).
 const EMPTY_SOURCES: MessageSource[] = [];
 
+/** sourcesByMsg 的键。progress 行用 toolCallId（后端每工具调用唯一），其余用
+ *  timestamp。此前直接拿 Date.now() 的 timestamp 当键：同毫秒创建的两个
+ *  progress 行会互相覆盖来源（先一行显示后一行的来源，#879 ③ CodeRabbit）。
+ *  加 role 前缀 + toolCallId 去碰撞。 */
+function sourcesKey(m: Message): string {
+  return m.role === 'progress' ? `p:${m.toolCallId ?? m.timestamp}` : `a:${m.timestamp}`;
+}
+
 const TOOL_LABELS: Record<string, string> = {
   web_fetch: '网页抓取',
   web_search: '网页搜索',
@@ -927,6 +935,7 @@ function mergeTrackedFiles(
     op?: TrackedFile['op'];
     lastSeen?: number;
     sourceTool?: string;
+    turnId?: number;
   }>
 ): TrackedFile[] {
   const out = [...existing];
@@ -939,6 +948,7 @@ function mergeTrackedFiles(
       op: f.op ?? 'read',
       lastSeen: f.lastSeen ?? Date.now(),
       sourceTool: f.sourceTool,
+      turnId: f.turnId,
     };
     const existingIdx = out.findIndex((p) => {
       const np2 = normalizeTrackedPath(p.path);
@@ -947,8 +957,13 @@ function mergeTrackedFiles(
       return oneIsBare && basename(np2) === basename(np);
     });
     if (existingIdx >= 0) {
-      // 后端下发（backend）不含 sourceTool 时，保留消息提取（existing）的 sourceTool
-      out[existingIdx] = { ...entry, sourceTool: entry.sourceTool ?? out[existingIdx].sourceTool };
+      // 后端下发（backend）不含 sourceTool/turnId 时，保留消息提取（existing）的字段，
+      // 否则文件卡片的「相关引用」会在会话加载/最终刷新时被清空（#879 ③ CodeRabbit）。
+      out[existingIdx] = {
+        ...entry,
+        sourceTool: entry.sourceTool ?? out[existingIdx].sourceTool,
+        turnId: entry.turnId ?? out[existingIdx].turnId,
+      };
     } else out.push(entry);
   }
   return out;
@@ -2151,15 +2166,19 @@ export function extractTrackedFilesFromMessages(rawMsgs: any[]): TrackedFile[] {
   ) => {
     const key = normalizeSandboxPath(path).replace(/\\/g, '/');
     const existing = fileMap.get(key);
-    if (!existing || rank[op] > rank[existing.op]) {
+    // `>=`（而非 `>`）：write_file/edit_file 都映射成 op='write'，同一路径的
+    // 后一次等 rank 操作此前被忽略，导致 sourceTool/turnId 停留在更早消息上、
+    // 文件卡片用旧 turnId 取错引用（#879 ③ CodeRabbit）。等 rank 时刷新，
+    // 同时保留新事件未提供的元数据（如 _tool_hint 无 tool 名）。
+    if (!existing || rank[op] >= rank[existing.op]) {
       fileMap.set(key, {
         path: key,
         name: basename(key),
         op,
         lastSeen: timestamp ? new Date(timestamp).getTime() : Date.now(),
         truncated: false,
-        sourceTool: tool,
-        turnId,
+        sourceTool: tool ?? existing?.sourceTool,
+        turnId: turnId ?? existing?.turnId,
       });
     }
   };
@@ -2594,7 +2613,7 @@ export function ChatConsole({
   }, [messages]);
   // sourcesByMsg cache: keyed by a tool-only signature so the map object is
   // stable across typewriter frames (see sourcesByMsg below).
-  const sourcesCacheRef = useRef<{ sig: string; map: Map<number, MessageSource[]> } | null>(null);
+  const sourcesCacheRef = useRef<{ sig: string; map: Map<string, MessageSource[]> } | null>(null);
   // Tracks the latest messages for the session-switch snapshot.  Kept in
   // sync below; the switch effect snapshots the session we're leaving into
   // moduleMessagesSnapshot so switching back restores it instantly.
@@ -3188,7 +3207,12 @@ export function ChatConsole({
   const lifecycleRef = useRef<{ id: number; promise: Promise<void>; sessionKey: string } | null>(
     null
   );
-  // Monotonic id for lifecycleRef identity checks.
+  // Monotonic id for lifecycleRef identity checks — never reset, so a session
+  // switch cannot reuse an old turn's id and collide with a still-in-flight
+  // lifecycle (would let an old settle clear the NEW lifecycle) (#879 ③ CodeRabbit).
+  const lifecycleSeqRef = useRef(0);
+  // 回合序号（第几个 user 回合，从 0 起）——source 回合索引（turnSourcesMap /
+  // 文件卡片「相关引用」）。会话加载时重置；与 lifecycleSeqRef 分离。
   const turnSeqRef = useRef(0);
   const liveReasoningTsRef = useRef<number | null>(null);
   // Anchor of the first reasoning delta of the current turn — thinking
@@ -4778,7 +4802,10 @@ export function ChatConsole({
     // This turn's lifecycle — registered BEFORE any await (threads.start,
     // chat.send) so a subsequent interrupt-and-resend can always serialize
     // against it, even mid thread-init.
-    const turnId = ++turnSeqRef.current;
+    const turnId = ++lifecycleSeqRef.current;
+    // source 回合索引随每次发送前进（会话加载时已对齐 user 消息数），与上面
+    // 的 lifecycle 身份分账——见 lifecycleSeqRef 注释。
+    turnSeqRef.current += 1;
     let resolveLifecycle: () => void = () => {};
     const lifecyclePromise = new Promise<void>((resolve) => {
       resolveLifecycle = resolve;
@@ -6396,7 +6423,7 @@ export function ChatConsole({
   );
   const sourcesByMsg = useMemo(() => {
     if (sourcesCacheRef.current?.sig === sourcesSig) return sourcesCacheRef.current.map;
-    const map = new Map<number, MessageSource[]>();
+    const map = new Map<string, MessageSource[]>();
     let pending: MessageSource[] = [];
     let seen = new Set<string>();
     const merge = (next: MessageSource[]) => {
@@ -6414,7 +6441,7 @@ export function ChatConsole({
           seen.add(s.url);
           return true;
         });
-        if (own.length > 0) map.set(m.timestamp, own);
+        if (own.length > 0) map.set(sourcesKey(m), own);
         merge(own);
       } else if (m.role === 'user') {
         pending = [];
@@ -6425,7 +6452,7 @@ export function ChatConsole({
         // answer all reference the same tool results (#678 用户反馈: 中间
         // "搜索异常改用…" 消息点查看来源竟是空的). Reset happens at the
         // next user message.
-        map.set(m.timestamp, pending);
+        map.set(sourcesKey(m), pending);
       }
     }
     return map;
@@ -7234,7 +7261,7 @@ export function ChatConsole({
                         turnIndex={i}
                         execOutputs={execOutputs}
                         inlineExecOutput={inlineExecOutput}
-                        sources={sourcesByMsg.get(group.msg.timestamp) ?? EMPTY_SOURCES}
+                        sources={sourcesByMsg.get(sourcesKey(group.msg)) ?? EMPTY_SOURCES}
                         toolStepIndex={toolStepByMsg.get(group.msg)}
                         isLast={i === chatGroups.length - 1}
                         streaming={streaming && i === lastAssistantIdx && assistantTailActive}
@@ -8270,7 +8297,7 @@ function ToolChainGroup({
 }: {
   rows: Message[];
   done: boolean;
-  sourcesByMsg: Map<number, MessageSource[]>;
+  sourcesByMsg: Map<string, MessageSource[]>;
   searchResultsByCallId: Record<string, string>;
 } & Omit<
   ComponentProps<typeof MessageBubble>,
@@ -8318,7 +8345,7 @@ function ToolChainGroup({
               <MessageBubble
                 key={`${row.timestamp}-${i}`}
                 msg={row}
-                sources={sourcesByMsg.get(row.timestamp) ?? EMPTY_SOURCES}
+                sources={sourcesByMsg.get(sourcesKey(row)) ?? EMPTY_SOURCES}
                 toolStepIndex={i + 1}
                 isLastToolRow={i === rows.length - 1}
                 isLast={false}
