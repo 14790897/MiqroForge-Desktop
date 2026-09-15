@@ -130,17 +130,17 @@ def test_inactive_environment_marker_is_skipped(tmp_path):
     assert loader._check_requirements("marker-off") is True
 
 
-def test_named_direct_url_requirement_is_skipped(tmp_path):
-    """A named direct-URL reference is skipped (not resolvable by dist name)."""
+def test_missing_named_direct_url_requirement_marks_skill_unavailable(tmp_path):
+    """An uninstalled named direct-URL requirement makes the skill unavailable."""
     loader, workspace = _loader(tmp_path)
     _make_skill(
         workspace / "skills",
         "direct-url",
         "Direct URL",
-        requirements="pkg @ https://example.com/pkg.whl\n",
+        requirements=f"{_MISSING_DIST} @ https://example.com/pkg.whl\n",
     )
-    assert loader._missing_python_deps("direct-url") == []
-    assert loader._check_requirements("direct-url") is True
+    assert loader._check_requirements("direct-url") is False
+    assert _MISSING_DIST in loader._get_missing_requirements("direct-url")
 
 
 def test_build_skills_summary_includes_requirements(tmp_path):

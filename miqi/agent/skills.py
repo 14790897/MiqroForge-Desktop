@@ -502,10 +502,11 @@ class SkillsLoader:
     def _missing_python_deps(self, name: str) -> list[str]:
         """Return requirements that are missing or version-incompatible.
 
-        Skips named direct-URL references (``pkg @ https://…``) and
-        requirements whose environment marker is inactive on the current
+        Skips requirements whose environment marker is inactive on the current
         interpreter. For the rest, checks the installed distribution against
         the requirement's version specifier via :mod:`importlib.metadata`.
+        Named direct-URL requirements (``pkg @ https://…``) are checked by
+        their distribution name only — URL provenance is not validated.
         Checked against the host interpreter the loader runs in; the sandbox
         interpreter may differ, so this is an approximation consistent with
         ``requires.bins`` using ``shutil.which`` on the host PATH.
@@ -514,8 +515,6 @@ class SkillsLoader:
 
         missing: list[str] = []
         for req in self._read_requirements(name):
-            if req.url:
-                continue  # named direct-URL reference, not a resolvable dist
             if req.marker is not None and not req.marker.evaluate():
                 continue  # marker inactive on this interpreter
             try:
