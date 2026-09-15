@@ -950,7 +950,7 @@ tbody tr:nth-child(even) td {
    对齐 WorkBuddy 的过渡——旧内容先淡出、新内容再淡入，只做 opacity + 3px 位移，
    不做横向滑动（横滑会和 chips 自己的横向滚动打架）。
    用法：给容器加 key={welcomeMode}，React 重挂载即重放动画。 */
-@keyframes welcomeChipsIn {
+@keyframes welcome-chips-in {
   from {
     opacity: 0;
     transform: translateY(3px);

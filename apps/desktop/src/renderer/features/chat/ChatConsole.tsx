@@ -7250,7 +7250,7 @@ export function ChatConsole({
                       className="flex-1 min-w-0 flex items-center gap-1.5 overflow-x-auto scroll-smooth py-3 -my-3 [&::-webkit-scrollbar]:hidden"
                       onScroll={syncChipScroll}
                       style={{
-                        animation: 'welcomeChipsIn 220ms ease-out',
+                        animation: 'welcome-chips-in 220ms ease-out',
                         scrollbarWidth: 'none',
                       }}
                     >
@@ -7306,7 +7306,7 @@ export function ChatConsole({
                       key={`${welcomeMode}-${pickedSceneTitle}`}
                       className="relative w-full max-w-[560px] flex flex-col gap-1.5 pl-4"
                       style={{
-                        animation: 'welcomeChipsIn 220ms ease-out',
+                        animation: 'welcome-chips-in 220ms ease-out',
                         // 这条竖线只是把 L3 归到选中的 L2 名下，跟卡片一样走中性灰（#962：所有都灰）
                         borderLeft: '2px solid color-mix(in srgb, var(--text) 14%, transparent)',
                       }}
