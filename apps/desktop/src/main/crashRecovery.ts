@@ -220,7 +220,7 @@ export async function handleRendererCrash(
   const { response } = await showBox({
     type: 'error',
     title: '界面反复崩溃',
-    message: `界面在 10 分钟内已崩溃 ${budget.recent.length} 次，已停止自动重载。`,
+    message: `界面在 10 分钟内已重载 ${budget.recent.length} 次，已停止自动重载。`,
     detail:
       `原因：${reason}（exitCode=${exitCode}）\n` +
       '重新加载可以再试一次；若仍然崩溃，选择退出后重启应用更稳妥。',

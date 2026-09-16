@@ -2740,15 +2740,21 @@ export function ChatConsole({
     if (pending.targetSessions.length > 0 && !pending.targetSessions.includes(cur)) return;
     if (messages.some((m) => m.noticeId === pending.id)) return;
     pending.inserted += 1;
-    setMessages((prev) => [
-      ...prev,
-      {
-        role: 'system' as const,
-        content: RENDERER_RECOVERY_NOTICE_TEXT,
-        timestamp: pending.crashedAt,
-        noticeId: pending.id,
-      },
-    ]);
+    // 幂等插入：StrictMode 双执行 / 卸载-重挂可能让两个闭包都通过上面的快照
+    // 检查，故在更新器内部再按 noticeId 去重，防止同一提示插入两次。
+    setMessages((prev) =>
+      prev.some((m) => m.noticeId === pending.id)
+        ? prev
+        : [
+            ...prev,
+            {
+              role: 'system' as const,
+              content: RENDERER_RECOVERY_NOTICE_TEXT,
+              timestamp: pending.crashedAt,
+              noticeId: pending.id,
+            },
+          ]
+    );
     // sessionKey 进依赖：切会话时本 effect 必须重跑一次（上面用它做归属判定）。
   }, [messages, noticeEnsureEpoch, sessionKey]);
   // sourcesByMsg cache: keyed by a tool-only signature so the map object is
