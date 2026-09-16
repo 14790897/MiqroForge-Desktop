@@ -57,6 +57,15 @@ describe('#1034 splitReasoningSegments', () => {
     expect(splitReasoningSegments('- 甲\n\n- 乙')).toEqual(['- 甲\n\n- 乙']);
   });
 
+  it('空行后是缩进续行时不分段（loose list 的段落续行、缩进代码）', () => {
+    // 切开会让 `1. step` 与它的缩进续行变成两个块，缩进语义丢失
+    expect(splitReasoningSegments('1. step\n\n   detail')).toEqual(['1. step\n\n   detail']);
+    expect(splitReasoningSegments('1. step\n\n     detail')).toEqual(['1. step\n\n     detail']);
+    expect(splitReasoningSegments('- 甲\n\n  续行文字')).toEqual(['- 甲\n\n  续行文字']);
+    // 缩进不足 2 空格依旧是普通块边界，切段行为不变
+    expect(splitReasoningSegments('第一段\n\n 缩进一格的段')).toEqual(['第一段', ' 缩进一格的段']);
+  });
+
   it('尾随空行不产生空段', () => {
     expect(splitReasoningSegments('只有一段\n')).toEqual(['只有一段']);
   });

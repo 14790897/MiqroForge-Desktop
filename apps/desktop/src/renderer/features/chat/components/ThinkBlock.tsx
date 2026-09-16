@@ -6,6 +6,8 @@ import { MarkdownContent } from './MarkdownContent';
  *  NOT a safe segmentation point (CommonMark would restart ordered-list
  *  numbering and drop the loose-list spacing). */
 const LIST_ITEM_RE = /^\s{0,3}(?:[-*+]|\d{1,9}[.)])\s/;
+/** 空行后缩进 ≥2 空格的续行（loose list 的段落、缩进代码块），不是分段边界。 */
+const INDENTED_CONT_RE = /^\s{2,}\S/;
 /** Fence openers/closers (``` or ~~~, indented at most 3 spaces). */
 const FENCE_RE = /^\s{0,3}(`{3,}|~{3,})\s*$/;
 const FENCE_OPEN_RE = /^\s{0,3}(`{3,}|~{3,})/;
@@ -21,8 +23,10 @@ const FENCE_OPEN_RE = /^\s{0,3}(`{3,}|~{3,})/;
  * makes the per-flush cost proportional to the newest block only.
  *
  * Not every blank line is a boundary: blank lines inside fenced code blocks
- * are content, and a blank line before a list item belongs to the same list.
- * Both cases stay in one segment, so the rendered markdown is unchanged.
+ * are content, a blank line before a list item belongs to the same list, and
+ * an indented continuation line (loose-list paragraph, indented code) still
+ * belongs to the block it continues.  These cases stay in one segment, so the
+ * rendered markdown is unchanged.
  * A segment's rendered output is identical to rendering the whole text, since
  * a blank line is a block separator in CommonMark.
  */
@@ -52,7 +56,7 @@ export function splitReasoningSegments(text: string): string[] {
       if (current.length > 0) pending.push(line);
       continue;
     }
-    if (pending.length > 0 && !LIST_ITEM_RE.test(line)) flush();
+    if (pending.length > 0 && !LIST_ITEM_RE.test(line) && !INDENTED_CONT_RE.test(line)) flush();
     current.push(...pending);
     pending = [];
     current.push(line);

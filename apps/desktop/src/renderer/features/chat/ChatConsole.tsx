@@ -2519,6 +2519,9 @@ export function pushInFlightEvent(snapshot: InFlightSnapshot, event: InFlightEve
       if (mergedBytes <= IN_FLIGHT_MAX_BYTES) {
         snapshot.bytes += mergedBytes - inFlightEventBytes(last);
         snapshot.events[snapshot.events.length - 1] = merged;
+        // 长单流 turn 每次都在最后一条上合并，若这里直接 return，回收检查
+        // 在整段流期间永远不会跑（CR 复审 finding）：合并纳入后同样要跑。
+        evictInFlightOverflow(snapshot);
         return;
       }
     }

@@ -54,6 +54,17 @@ describe('#1034 在途事件缓存上限', () => {
     expect(buf.events.map((e) => (e.data as { delta: string }).delta)).toEqual(['a', 'b', 'c']);
   });
 
+  it('同一流但不同 tool_call_id 的相邻 delta 不折叠（回放归属不同）', () => {
+    const buf = createInFlightSnapshot();
+    pushInFlightEvent(buf, progress('a', 'stdout', 'c1'));
+    pushInFlightEvent(buf, progress('b', 'stdout', 'c2'));
+    expect(buf.events.length).toBe(2);
+    expect(buf.events.map((e) => (e.data as { delta: string }).delta)).toEqual(['a', 'b']);
+    expect(
+      buf.events.map((e) => (e.data as { delta: string; tool_call_id: string }).tool_call_id)
+    ).toEqual(['c1', 'c2']);
+  });
+
   it('没有 delta 的 progress（如 doc_progress）不参与折叠', () => {
     const buf = createInFlightSnapshot();
     pushInFlightEvent(buf, docProgress('a.docx'));
@@ -118,6 +129,24 @@ describe('#1034 在途事件缓存上限', () => {
     for (const e of buf.events) {
       expect(inFlightEventBytes(e)).toBeLessThanOrEqual(IN_FLIGHT_MAX_BYTES);
     }
+    expect(buf.bytes).toBe(buf.events.reduce((sum, e) => sum + inFlightEventBytes(e), 0));
+  });
+
+  it('单流连续 merge 把记账总量推过字节上限时，合并路径同样触发回收', () => {
+    const buf = createInFlightSnapshot();
+    // 填充事件压在字节上限之下一点点；它不是最后一条，因此不参与折叠。
+    pushInFlightEvent(buf, progress('x'.repeat(IN_FLIGHT_MAX_BYTES / 2 - 400), 'stdout', 'c1'));
+    // 末尾一条很小：合并只发生在它身上，合并后单条仍远低于上限（不走拒绝分支）
+    pushInFlightEvent(buf, progress('L', 'stderr', 'c2'));
+    expect(buf.bytes).toBeLessThanOrEqual(IN_FLIGHT_MAX_BYTES);
+    expect(buf.events.length).toBe(2);
+
+    // 同流同 tool_call_id 的 400 字 delta 合入末尾一条：记账量越界，而合并本身合法
+    // （946 字节 ≪ 上限）→ 只能靠合并路径上的回收把总量拉回来。
+    pushInFlightEvent(buf, progress('y'.repeat(400), 'stderr', 'c2'));
+    expect(buf.bytes).toBeLessThanOrEqual(IN_FLIGHT_MAX_BYTES);
+    expect(buf.events.length).toBe(1); // 最旧的 progress（填充事件）被驱逐
+    expect((buf.events[0].data as { delta: string }).delta.length).toBe(401);
     expect(buf.bytes).toBe(buf.events.reduce((sum, e) => sum + inFlightEventBytes(e), 0));
   });
 });
