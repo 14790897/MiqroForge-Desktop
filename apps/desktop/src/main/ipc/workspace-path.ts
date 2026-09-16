@@ -165,20 +165,21 @@ export function resolveWorkspacePath(
     resolved = resolve(anchorRoot(wsRoot, extraRoots), normalised);
   }
 
-  // Enforce root containment — prevent escape via .. or absolute paths that
-  // land outside every allowed root.  Case-folding happens in isUnder so a
-  // workspace configured with a lowercase drive letter still matches a
-  // /mnt/<DRIVE>/ path.
+  // Enforce root containment — prevent escape via .., absolute paths that land
+  // outside every allowed root, and symlinks that lead out of one.  Case-folding
+  // happens in isUnder so a workspace configured with a lowercase drive letter
+  // still matches a /mnt/<DRIVE>/ path.
   //
-  // Both spellings of the same location must pass: the path as given, and its
-  // canonical form.  A folder-bound session's root comes back canonical from
-  // the runtime while the path the renderer holds may still be unresolved
-  // (macOS /var → /private/var), and comparing only lexically refused those
-  // outright (#1062).  Canonicalising is strictly tighter, never looser: the
-  // comparison still lands on the real location.
+  // The comparison is canonical on **both** sides, and canonical only.  A
+  // lexical check accepts `link/secret` when `link` points outside the root, and
+  // OR-ing it with the canonical verdict let that lexical answer short-circuit
+  // past the canonical one (#1103 review).  `canonicalWithMissingTail` is what
+  // keeps paths that do not exist yet working, including the folder-bound case
+  // where the runtime's root is canonical and the caller's path is not
+  // (macOS /var → /private/var).
   const canonicalResolved = canonicalWithMissingTail(resolved);
-  const contained = allowedRoots(wsRoot, extraRoots).some(
-    (root) => isUnder(resolved, root) || isUnder(canonicalResolved, canonicalWithMissingTail(root))
+  const contained = allowedRoots(wsRoot, extraRoots).some((root) =>
+    isUnder(canonicalResolved, canonicalWithMissingTail(root))
   );
   if (!contained) {
     throw new Error(`Path outside workspace: ${raw}`);

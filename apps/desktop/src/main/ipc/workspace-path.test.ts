@@ -239,4 +239,19 @@ describe('symlinked allowed root (#1062 macOS /var)', () => {
       /outside workspace/
     );
   });
+
+  it('rejects a symlink inside the workspace that points outside it', () => {
+    // 词法上 `escape/secret.txt` 就在工作区里，真实位置却在外面 —— 只做词法比较
+    // 会放它过去，`openExternal` 那条路径没有第二次 canonical 校验（#1103 review）。
+    const outside = join(home, 'outside-dir');
+    mkdirSync(outside, { recursive: true });
+    const link = join(wsRoot, 'escape');
+    try {
+      symlinkSync(outside, link, 'junction');
+    } catch {
+      return; // 该环境不支持创建符号链接 / junction
+    }
+
+    expect(() => resolveWorkspacePath(join(link, 'secret.txt'), [])).toThrow(/outside workspace/);
+  });
 });

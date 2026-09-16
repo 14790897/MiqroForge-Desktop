@@ -275,7 +275,17 @@ def _validate_file_path(
                 raise AppServerError(
                     "Invalid file path", code="INVALID_PARAMS",
                 )
-            file_path = _relativize(candidate, roots, raw)
+            # Containment first, then answer with the absolute path **as given**.
+            # Relativising here threw away *which* root matched: the relative
+            # name was later re-anchored on the session's root, so a bound
+            # session asking for `<global>/report.md` read `<bound>/report.md`
+            # — a different file that merely shares the name (#1103 review).
+            _relativize(candidate, roots, raw)
+            if session_key:
+                # The session branch below verifies ownership on its way to
+                # resolving; returning early must do that check itself.
+                _verify_session_ownership(client_id, session_key)
+            return candidate
 
     # Session-scoped path resolution
     if session_key:

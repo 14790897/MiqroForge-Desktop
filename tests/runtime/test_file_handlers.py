@@ -8,6 +8,8 @@ Validates:
 - files.tree workspace vs session-scoped
 """
 
+import sys
+
 import pytest
 
 # ── helpers ──────────────────────────────────────────────────────────────────
@@ -992,6 +994,45 @@ async def test_files_read_bound_folder_session_succeeds(fake_config, fake_provid
         "client-1", None, registry,
     )
     assert result["result"]["content"] == "do re mi"
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason=(
+        "这个分支只在 POSIX 上可达：绝对路径的归一条件是 file_path 以 '/' 开头，"
+        "而 Windows 的绝对路径是 'C:\\\\…'，根本不进 Case 2（那边恰好由 Path 拼接的"
+        "绝对语义兜住了）。CI 的 ubuntu job 会真正跑它。"
+    ),
+)
+@pytest.mark.asyncio
+async def test_files_read_absolute_global_path_keeps_its_root(fake_config, fake_provider, tmp_path):
+    """#1103 review：绑定会话里请求**绝对**路径时，必须保留它实际所属的那个根。
+
+    `_relativize` 把绝对路径压成相对名，而相对名随后又被拼到会话根上——于是
+    ``<全局>/note.txt`` 被读成 ``<绑定>/note.txt``。两个根下放同名但内容不同的文件，
+    才能把「读错文件」这件事钉死（只放一个的话两边都读得到，看不出区别）。
+    """
+    from miqi.runtime.app_server import ClientSessionRegistry
+    from miqi.runtime.file_handlers import files_read_handler
+
+    folder = tmp_path / "bound"
+    folder.mkdir()
+    sm, ws = _setup_session("bound-abs", "client-1")
+    _bind_session_to_folder(sm, "bound-abs", folder, "client-1")
+
+    global_file = ws / "note.txt"
+    global_file.write_text("GLOBAL", encoding="utf-8")
+    (folder / "note.txt").write_text("BOUND", encoding="utf-8")
+
+    registry = ClientSessionRegistry()
+    result = await files_read_handler(
+        "req-1",
+        {"path": str(global_file.resolve()), "session_key": "bound-abs"},
+        "client-1", None, registry,
+    )
+    assert result["result"]["content"] == "GLOBAL", (
+        "绝对路径必须回到它自己所属的根，而不是被换成会话根下的同名字段"
+    )
 
 
 @pytest.mark.asyncio
