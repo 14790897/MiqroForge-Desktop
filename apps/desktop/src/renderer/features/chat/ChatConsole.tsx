@@ -8698,8 +8698,7 @@ export function ChatConsole({
                                 style={{
                                   background:
                                     f.op === 'write' ? 'var(--accent)' : 'rgba(234,179,8,0.15)',
-                                  color:
-                                    f.op === 'write' ? 'var(--accent-text)' : 'var(--warning)',
+                                  color: f.op === 'write' ? 'var(--accent-text)' : 'var(--warning)',
                                 }}
                               >
                                 {f.op.toUpperCase()}
