@@ -103,6 +103,8 @@ _SESSION_KEY_TOOLS = frozenset({
     "edit_docx", "append_xlsx",
     "paper_download",
     "graph_render",
+    # #1104: 交付物登记（结果文件区显式入口），写会话台账需 session key
+    "declare_result_files",
 })
 
 # File tools that accept the injected ``_user_roots`` — directories the
