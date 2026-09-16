@@ -99,7 +99,22 @@ def resolve_user_input(
     req = _gate.pending_request(input_id)
     if req is not None:
         choice_id = str((answers or {}).get("choice_id", ""))
-        choice_role = str((answers or {}).get("choice_role", ""))
+        # #1071 G7 P2：choice_role 不能只读 answers —— 那是 UserInputGate.resolve()
+        # 在**本函数返回之后**才回填的（见下方 _gate.resolve），所以此前这行审计里
+        # 「用户究竟点了哪一档」恒为空串。改为按 choice_id 从卡片 choices 反查，
+        # 口径与 gate 的推导一致（choices 是 {id,label,role?} 的 dict 列表）。
+        # answers 兜底保留：无档位卡（choices 为空）或调用方自带 choice_role 时，
+        # 仍能记到值；两条来源都取不到才是 ""。
+        choice_role = next(
+            (
+                str(choice.get("role"))
+                for choice in req.choices
+                if isinstance(choice, dict)
+                and str(choice.get("id", "")) == choice_id
+                and choice.get("role")
+            ),
+            "",
+        ) or str((answers or {}).get("choice_role", ""))
         _logger.info(
             "audit confirm-card resolved: input_id=%s request_type=%s choice_id=%s choice_role=%s remember=%s",
             input_id,

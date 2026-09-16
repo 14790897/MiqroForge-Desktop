@@ -38,8 +38,8 @@ class PlanSnapshot:                       # immutable（用户批准事实）
     goal: str
     steps: list[PlanStep]
     approved_scope: ApprovedScope
-    plan_version: int = 1
     approved_at: str
+    plan_version: int = 1
     approved_by: str = "user"
 
 @dataclass
@@ -53,8 +53,8 @@ class TodoItem:
 @dataclass
 class TodoState:
     run_id: str
-    revision: int = 0
     items: list[TodoItem]
+    revision: int = 0
 
 @dataclass
 class AgentRunContext:                    # 一次 Agent 工作流执行实例（非 session）
