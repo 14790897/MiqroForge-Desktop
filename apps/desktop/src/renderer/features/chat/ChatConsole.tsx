@@ -99,6 +99,7 @@ import type {
 import { extractProgressMessage, type ProgressPayload } from './progressUtils';
 import { sanitizeUiMessage } from '../../lib/sanitizeUiMessage';
 import { classifyTrackedFiles } from '../../lib/taskAssetClassification';
+import { sameTrackedFile } from '../../lib/tracked-path';
 import { SpreadsheetPreview } from './components/SpreadsheetPreview';
 import { DocxPreview } from './components/DocxPreview';
 import PaperSearchResult, {
@@ -983,21 +984,6 @@ async function fileExists(path: string, sessionKey: string | null | undefined): 
   } catch {
     return false;
   }
-}
-
-/** Whether two tracked paths denote the same file written two ways: a
- *  workspace-relative key (what the ledger stores) vs the absolute path a tool
- *  reported. `normalizeTrackedPath` only strips a `/workspace/` prefix, so for
- *  a folder-bound session — whose root is somewhere else entirely — the two
- *  forms of one file never compared equal and the panel listed it twice.
- *  Collapsing on a path-segment suffix closes that. It stays stricter than the
- *  bare-name rule, which merges on filename alone: two files with different
- *  directories still stay distinct. */
-function sameTrackedFile(a: string, b: string): boolean {
-  const na = a.replace(/\\/g, '/');
-  const nb = b.replace(/\\/g, '/');
-  if (na === nb) return true;
-  return na.endsWith('/' + nb) || nb.endsWith('/' + na);
 }
 
 /** Merge tracked files, collapsing entries that point at the same file:
