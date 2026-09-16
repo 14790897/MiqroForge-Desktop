@@ -112,10 +112,7 @@ export function HermesConfirmBar({
    *   ② onResolve 正常返回 false（resolve 内部回滚后的返回值约定）。
    * 成功（返回 undefined/true）保持上锁，防重复提交。
    */
-  const resolveOnce = (
-    choice: HermesConfirmChoice,
-    rememberMode?: 'session' | 'always' | null
-  ) => {
+  const resolveOnce = (choice: HermesConfirmChoice, rememberMode?: 'session' | 'always' | null) => {
     if (submitLockRef.current) return;
     submitLockRef.current = true;
     setSubmitting(choice);
