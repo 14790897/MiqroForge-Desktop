@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { ArrowRight, Check, Circle, Loader2, MessageSquareText, PencilLine, X } from 'lucide-react';
 
 export interface PlanCardEntry {
@@ -61,6 +61,11 @@ export function PlanCard({
   const [adjustment, setAdjustment] = useState('');
   // #646-v2 UI 定稿：执行中可收起步骤块（大卡里的子项行折起来），状态行仍报进度。
   const [collapsed, setCollapsed] = useState(false);
+  // #1071 R3（CR item 9）：确认类动作一次性上锁，双击/重复点击只 resolve 一次。
+  // 锁体用 ref 而不是 state：同一 tick 内连点两次时 React 还没重渲染，闭包里的
+  // `submitting` 仍是 false，只有 ref 能同步拦住第二次；state 只负责按钮 disabled。
+  const submitLockRef = useRef(false);
+  const [submitting, setSubmitting] = useState(false);
 
   // 进度数字只在后端真的给了步骤状态时才显示：`stepStatus` 目前无人填充
   // （全仓 py 零命中，后端只发 steps[].tools），无条件显示会永远停在
@@ -82,10 +87,18 @@ export function PlanCard({
   const permissions = compactPermissions(entry.permissions);
   const shouldShowDetails = waiting || running || initialExpanded;
 
+  /** 一次性放行：拿到锁的动作才会真正 resolve，之后所有确认类按钮都失效。 */
+  const resolveOnce = (choiceId: string, choiceLabel?: string) => {
+    if (submitLockRef.current) return;
+    submitLockRef.current = true;
+    setSubmitting(true);
+    onResolve(choiceId, choiceLabel);
+  };
+
   const submitAdjustment = () => {
     const text = adjustment.trim();
     if (!text) return;
-    onResolve('modify', text);
+    resolveOnce('modify', text);
   };
 
   const goal = entry.goal ? displayGoal(entry.goal) : '';
@@ -218,8 +231,9 @@ export function PlanCard({
             <button
               type="button"
               data-testid="plan-confirm"
-              onClick={() => onResolve('confirm', '按当前方案执行')}
-              className="inline-flex h-9 items-center gap-1.5 rounded-lg px-4 text-[13px] font-medium transition-colors"
+              disabled={submitting}
+              onClick={() => resolveOnce('confirm', '按当前方案执行')}
+              className="inline-flex h-9 items-center gap-1.5 rounded-lg px-4 text-[13px] font-medium transition-colors disabled:opacity-60"
               style={{
                 background: 'var(--accent, #ea653d)',
                 border: '1px solid var(--accent, #ea653d)',
@@ -232,8 +246,13 @@ export function PlanCard({
             <button
               type="button"
               data-testid="plan-modify"
-              onClick={() => setEditing(true)}
-              className="inline-flex h-9 items-center gap-1.5 rounded-lg px-4 text-[13px] font-medium transition-colors"
+              disabled={submitting}
+              onClick={() => {
+                // 本地切到编辑态，重复点击本来就无副作用；锁住只是为了不和确认/取消抢跑。
+                if (submitLockRef.current) return;
+                setEditing(true);
+              }}
+              className="inline-flex h-9 items-center gap-1.5 rounded-lg px-4 text-[13px] font-medium transition-colors disabled:opacity-60"
               style={{
                 background: 'transparent',
                 border: '1px solid var(--border, #dcdde0)',
@@ -245,8 +264,9 @@ export function PlanCard({
             <button
               type="button"
               data-testid="plan-cancel"
-              onClick={() => onResolve('cancel', '取消任务')}
-              className="h-9 px-2 text-[13px]"
+              disabled={submitting}
+              onClick={() => resolveOnce('cancel', '取消任务')}
+              className="h-9 px-2 text-[13px] disabled:opacity-60"
               style={{ color: 'var(--text-faint, #7c7c84)' }}
             >
               取消
@@ -303,7 +323,7 @@ export function PlanCard({
                 type="button"
                 data-testid="plan-submit-adjustment"
                 onClick={submitAdjustment}
-                disabled={!adjustment.trim()}
+                disabled={submitting || !adjustment.trim()}
                 className="inline-flex h-9 items-center gap-1.5 rounded-lg px-4 text-[13px] font-medium disabled:opacity-40"
                 style={{
                   background: 'var(--accent, #ea653d)',
