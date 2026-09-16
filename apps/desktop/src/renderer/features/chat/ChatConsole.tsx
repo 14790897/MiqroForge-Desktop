@@ -284,7 +284,7 @@ function extractFileChips(content: string): { cleanContent: string; chips: FileC
 }
 
 interface Message {
-  role: 'user' | 'assistant' | 'progress' | 'error' | 'subagent';
+  role: 'user' | 'assistant' | 'progress' | 'error' | 'subagent' | 'system';
   content: string;
   /** Reasoning mode used when this message was sent (issue #680): fast/think */
   reasoningMode?: 'fast' | 'think';
@@ -2313,6 +2313,14 @@ const moduleInFlightCache = boundedMap<string, InFlightSnapshot>(MODULE_CACHE_MA
 // (module-level, survives the component staying mounted across switches).
 const moduleMessagesSnapshot = boundedMap<string, Message[]>(MODULE_CACHE_MAX_SESSIONS);
 
+// #1035 渲染进程崩溃恢复提示。文案按 issue #1035 期望行为 3 原文。
+const RENDERER_RECOVERY_NOTICE_TEXT =
+  '界面曾崩溃并已重新加载；进行中的 turn 输出可能不完整（若后台仍在运行，切回会话可继续看到新输出）';
+// 已插入过的 notice.id 集合（主进程按崩溃时刻生成）。必须是模块级：本次挂载
+// 期间可能被多次读到（StrictMode 双调用、会话切换重挂），组件内的 state 会
+// 被清掉。它在整页 reload 时清空——正好让"一次崩溃一条系统消息"成立。
+const insertedRecoveryNoticeIds = new Set<string>();
+
 // Typewriter reveal state per session.  `revealNext` runs in the handleSend
 // closure, whose local vars (fullContent/displayed/animId) would die with the
 // closure's RAF chain if we stopped it on switch-away.  Holding the state at
@@ -2620,6 +2628,35 @@ export function ChatConsole({
       }
     }
   }, [messages]);
+  // #1035: 渲染进程崩溃重载后，挂载时主动向主进程拉取恢复提示，自己插一条
+  // 系统消息。刻意不走 chat:progress 推送——那一路没有常驻订阅者（唯一订阅点
+  // 在 handleSend 的闭包里，abort/error/切会话即摘除），重载后若没有在飞 turn
+  // 就没有任何监听者，消息会被静默丢弃。
+  // 空依赖：ChatConsole 是常驻组件，本效果每次页面加载（= 每次重载）只跑一次。
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const notice = await window.miqi.chat.getRecoveryNotice();
+        if (cancelled || !notice) return;
+        if (insertedRecoveryNoticeIds.has(notice.id)) return;
+        insertedRecoveryNoticeIds.add(notice.id);
+        setMessages((prev) => [
+          ...prev,
+          {
+            role: 'system' as const,
+            content: RENDERER_RECOVERY_NOTICE_TEXT,
+            timestamp: notice.crashedAt,
+          },
+        ]);
+      } catch {
+        // 拉取失败只是一条提示，不该影响正常使用
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
   // sourcesByMsg cache: keyed by a tool-only signature so the map object is
   // stable across typewriter frames (see sourcesByMsg below).
   const sourcesCacheRef = useRef<{ sig: string; map: Map<Message, MessageSource[]> } | null>(null);
@@ -9682,6 +9719,27 @@ const MessageBubble = memo(function MessageBubble({
               onLoggedIn={() => onLoginSuccess?.(msg)}
             />
           )}
+        </div>
+      </div>
+    );
+  }
+
+  // #1035 崩溃恢复提示：中性样式，不能沿用 error 的红色危险气泡——这条不是
+  // 错误，是"已经自动恢复好了"的告知。
+  if (msg.role === 'system') {
+    return (
+      <div className="flex items-start gap-3" data-testid="chat-system-notice">
+        <RefreshCw size={16} style={{ color: 'var(--text-muted)', marginTop: 6 }} />
+        <div
+          className="text-xs rounded-xl px-3 py-2 break-words"
+          style={{
+            background: 'var(--surface-muted)',
+            color: 'var(--text-muted)',
+            border: '1px solid var(--border-subtle)',
+            maxWidth: '82%',
+          }}
+        >
+          {msg.content}
         </div>
       </div>
     );

@@ -59,6 +59,7 @@ import type {
   ChatError,
   ChatAborted,
   ChatSubagentResult,
+  RecoveryNotice,
   PythonCheckResult,
   WslCheckResult,
   LiveAgentInfo,
@@ -197,6 +198,10 @@ const api = {
         resume_turn_id: resumeTurnId,
         session_key: sessionKey,
       }),
+    // #1035: 渲染进程崩溃重载后，渲染层挂载时主动拉取恢复提示。只读、不消费
+    // ——去重由渲染层的模块级 Set（按 notice.id）负责，主进程这侧可以重复读。
+    getRecoveryNotice: (): Promise<RecoveryNotice | null> =>
+      ipcRenderer.invoke(IPC.CHAT_GET_RECOVERY_NOTICE),
     onProgress: (callback: (data: ChatProgress) => void) => {
       const handler = (_event: Electron.IpcRendererEvent, data: ChatProgress) => callback(data);
       ipcRenderer.on(IPC_EVENTS.CHAT_PROGRESS, handler);
