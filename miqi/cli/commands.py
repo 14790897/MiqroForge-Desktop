@@ -22,7 +22,7 @@ from miqi.cli.gateway_cmd import register_gateway_command
 from miqi.cli.management import register_management_commands
 from miqi.cli.onboard import register_onboard_command
 from miqi.cli.trace_cmd import trace_app
-from miqi.config.schema import Config, DEFAULT_AGENT_NAME
+from miqi.config.schema import DEFAULT_AGENT_NAME, Config
 
 app = typer.Typer(
     name="miqi",

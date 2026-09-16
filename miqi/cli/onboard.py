@@ -23,7 +23,7 @@ def register_onboard_command(
     def onboard():
         """Initialize MiQi configuration and workspace."""
         from miqi.config.loader import get_config_path, load_config, save_config
-        from miqi.config.schema import Config, DEFAULT_AGENT_NAME
+        from miqi.config.schema import DEFAULT_AGENT_NAME, Config
         from miqi.utils.helpers import get_workspace_path
 
         config_path = get_config_path()

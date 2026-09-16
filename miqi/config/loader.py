@@ -8,7 +8,7 @@ from typing import Callable
 
 from loguru import logger
 
-from miqi.config.schema import Config, DEFAULT_AGENT_NAME, LEGACY_AGENT_NAME
+from miqi.config.schema import DEFAULT_AGENT_NAME, LEGACY_AGENT_NAME, Config
 from miqi.paths import get_config_path, get_legacy_config_path
 
 _cache: dict[tuple, tuple[float, Config]] = {}
