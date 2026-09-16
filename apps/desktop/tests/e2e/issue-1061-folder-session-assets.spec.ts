@@ -136,6 +136,20 @@ function trackedLedgerKeys(sessionsRoot: string): string[] {
   return out;
 }
 
+/** Recursively locate a file by name under `root`; returns its absolute path. */
+function findUnder(root: string, name: string): string | null {
+  for (const entry of readdirSync(root, { withFileTypes: true })) {
+    const p = join(root, entry.name);
+    if (entry.isDirectory()) {
+      const hit = findUnder(p, name);
+      if (hit) return hit;
+    } else if (entry.name === name) {
+      return p;
+    }
+  }
+  return null;
+}
+
 /** Move a session dir OUT of the sessions root so the app sees no stub for it. *
  *  The destination matters: list_sessions() enumerates every
  *  "<dir>/conversation.jsonl" one level under the root, so a sibling rename
@@ -373,11 +387,20 @@ test.describe('#1096 exec 产物与文档产物同账本', () => {
 
       const key = await resolveFolderSessionKey(page, folderMarker);
 
-      // 前提：合成产物确实落在绑定根，否则下面的断言可能因为别的原因通过。
+      // 前提：合成产物确实产生了。**不钉死它在哪个目录** —— 提示词要求写进 sub/，
+      // 但 agent 用什么工具、放哪个目录都不保证，钉死会让这条用例因为 LLM 的路径
+      // 选择而变红（CI 上就是这么挂的：重试三次都找不到 sub/m…html）。
+      // 写入侧的精确机制由 Python 回归用例钉死（批处理 + mirror 各一条）；这条测
+      // 的是用户可见结果：产物进绑定根账本、不进 app-home、面板只列一次。
+      const found = findUnder(folderRoot, mergedName);
       expect(
-        existsSync(join(folderRoot, merged)),
-        `exec must actually create ${join(folderRoot, merged)}`
-      ).toBe(true);
+        found,
+        `exec must create ${mergedName} somewhere under the bound folder`
+      ).not.toBeNull();
+      const mergedRel = found!
+        .slice(folderRoot.length)
+        .replace(/^[\\/]/, '')
+        .replace(/\\/g, '/');
 
       const folderSessions = join(folderRoot, 'sessions');
       // 诊断：失败时把两份账本的 key 全带出来。踩过一次坑——只看
@@ -392,7 +415,7 @@ test.describe('#1096 exec 产物与文档产物同账本', () => {
         key
       );
       const paths: string[] = (tracked?.tracked_files ?? []).map((f: any) => String(f?.path ?? ''));
-      for (const name of [in1, in2, merged]) {
+      for (const name of [in1, in2, mergedRel]) {
         expect(
           paths.some((p) => p.includes(name)),
           `${name} must be in the bound-folder ledger ${diag}, got: ${JSON.stringify(paths)}`
