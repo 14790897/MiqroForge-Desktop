@@ -3254,12 +3254,14 @@ class ExecTool(Tool):
             roots.append(p)
 
         _add(cwd)
-        for r in list(user_roots or []):
-            _add(r)
+        # 先加命令声明的 out-dir：它在截断（_MAX_SNAPSHOT_ROOTS）时必须存活——
+        # 用户根很多时把它排在后面会被丢掉，产物又 diff 不到（CodeRabbit 复审）
         for m in self._OUT_DIR_FLAG_RE.finditer(command or ""):
             value = next((g for g in m.groups() if g), None)
             if value:
                 _add(value)
+        for r in list(user_roots or []):
+            _add(r)
         return roots[: self._MAX_SNAPSHOT_ROOTS]
 
     def _snapshot_roots_map(

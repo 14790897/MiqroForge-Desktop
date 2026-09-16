@@ -95,6 +95,27 @@ async def test_nonexistent_out_dir_is_tracked_after_creation(
     assert any(k.endswith("summary.json") for k in tracked)
 
 
+def test_out_dir_survives_root_truncation(exec_tool, tmp_path):
+    """用户根很多导致截断时，命令声明的 out-dir 必须存活（CodeRabbit 复审）。
+
+    截断按加入顺序取前 N 个；out-dir 若排在用户根之后就会被丢掉，
+    产物又回到「diff 不到」的状态。
+    """
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    out_dir = tmp_path / "declared_out"
+    out_dir.mkdir()
+    user_roots = []
+    for i in range(12):
+        d = tmp_path / f"u{i}"
+        d.mkdir()
+        user_roots.append(str(d))
+
+    roots = exec_tool._snapshot_roots(cwd, user_roots, f'run --out-dir "{out_dir}"')
+    assert len(roots) <= exec_tool._MAX_SNAPSHOT_ROOTS
+    assert out_dir in roots, f"out-dir 被截断丢了：{roots}"
+
+
 @pytest.mark.asyncio
 async def test_multi_root_tracking_captures_files_outside_cwd(
     exec_tool, fake_workspace, tmp_path,
