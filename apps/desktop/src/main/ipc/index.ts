@@ -307,80 +307,82 @@ export function registerIpcHandlers(bridge: BridgeManager): void {
     };
     // 通道异常结束（bridge 抛错）也算 turn 结束，否则登记表里会留下永远不会被
     // 摘掉的"在飞"会话，下一次崩溃的恢复提示就会撒谎。
-    const result = await bridge.send(
-      'chat.send',
-      {
-        content: input.content,
-        session_key: sessionKey,
-        thread_id: (input as any).thread_id ?? undefined,
-        mode: input.mode,
-        attachments: input.attachments,
-        workspace: input.workspace,
-        resume_turn_id: (input as any).resume_turn_id ?? undefined,
-      },
-      (type: string, data: unknown) => {
-        if (type === 'progress') {
-          safeSend('chat:progress', data);
-        } else if (type === 'final') {
-          settleTurn();
-          safeSend('chat:final', data);
-        } else if (type === 'error') {
-          settleTurn();
-          safeSend('chat:error', data);
-        } else if (type === 'aborted') {
-          settleTurn();
-          safeSend('chat:aborted', data);
-        } else if (type === 'approval_request') {
-          safeSend('approval:request', data);
-        } else if (type === 'approval_cleared') {
-          safeSend('approval:cleared', data);
-        } else if (type === 'user_input_requested') {
-          safeSend('userInput:request', data);
-        } else if (type === 'user_input_resolved') {
-          safeSend('userInput:resolved', data);
-        } else if (type === 'subagent_result') {
-          safeSend('chat:subagent_result', data);
-        } else if (type === 'slurm_job_running') {
-          // Slurm 作业 RUNNING 扣费（issue #927）：主进程发起扣费（10 分/次，
-          // 按作业 ID 去重），结果以 #915 的 points 事件流在聊天区展示。
-          // 作业已在运行，扣费失败（余额不足等）不阻断作业，仅记录并提示。
-          void (async () => {
-            const { getQraftService } = await import('../qraft/ipc');
-            const payload = (data ?? {}) as Record<string, unknown>;
-            const result = await getQraftService().chargeSlurmJob({
-              charge_id: String(payload.charge_id ?? ''),
-              job_id: String(payload.job_id ?? ''),
-              server_name: String(payload.server_name ?? ''),
-              tool_name: String(payload.tool_name ?? ''),
-              args_summary: String(payload.args_summary ?? ''),
-              session_key: String(payload.session_key ?? ''),
-              turn_id: String(payload.turn_id ?? ''),
+    const result = await bridge
+      .send(
+        'chat.send',
+        {
+          content: input.content,
+          session_key: sessionKey,
+          thread_id: (input as any).thread_id ?? undefined,
+          mode: input.mode,
+          attachments: input.attachments,
+          workspace: input.workspace,
+          resume_turn_id: (input as any).resume_turn_id ?? undefined,
+        },
+        (type: string, data: unknown) => {
+          if (type === 'progress') {
+            safeSend('chat:progress', data);
+          } else if (type === 'final') {
+            settleTurn();
+            safeSend('chat:final', data);
+          } else if (type === 'error') {
+            settleTurn();
+            safeSend('chat:error', data);
+          } else if (type === 'aborted') {
+            settleTurn();
+            safeSend('chat:aborted', data);
+          } else if (type === 'approval_request') {
+            safeSend('approval:request', data);
+          } else if (type === 'approval_cleared') {
+            safeSend('approval:cleared', data);
+          } else if (type === 'user_input_requested') {
+            safeSend('userInput:request', data);
+          } else if (type === 'user_input_resolved') {
+            safeSend('userInput:resolved', data);
+          } else if (type === 'subagent_result') {
+            safeSend('chat:subagent_result', data);
+          } else if (type === 'slurm_job_running') {
+            // Slurm 作业 RUNNING 扣费（issue #927）：主进程发起扣费（10 分/次，
+            // 按作业 ID 去重），结果以 #915 的 points 事件流在聊天区展示。
+            // 作业已在运行，扣费失败（余额不足等）不阻断作业，仅记录并提示。
+            void (async () => {
+              const { getQraftService } = await import('../qraft/ipc');
+              const payload = (data ?? {}) as Record<string, unknown>;
+              const result = await getQraftService().chargeSlurmJob({
+                charge_id: String(payload.charge_id ?? ''),
+                job_id: String(payload.job_id ?? ''),
+                server_name: String(payload.server_name ?? ''),
+                tool_name: String(payload.tool_name ?? ''),
+                args_summary: String(payload.args_summary ?? ''),
+                session_key: String(payload.session_key ?? ''),
+                turn_id: String(payload.turn_id ?? ''),
+              });
+              // 去重命中（该作业已计费过）：不当作新的扣费播报，聊天区
+              // 不出现重复的「已扣 10 积分」（CodeRabbit #936 评审）。
+              if (result.dedup) return;
+              safeSend('chat:progress', {
+                stream: 'points',
+                type: result.ok ? 'billed' : 'blocked',
+                points_cost: 10,
+                balance: result.balance ?? null,
+                message: result.ok
+                  ? `Slurm 作业已扣 10 积分，可用余额 ${result.balance}`
+                  : (result.message ?? 'Slurm 作业计费失败'),
+              });
+            })().catch((err) => {
+              console.error(
+                `[qraft] slurm 计费处理异常：${err instanceof Error ? err.message : err}`
+              );
             });
-            // 去重命中（该作业已计费过）：不当作新的扣费播报，聊天区
-            // 不出现重复的「已扣 10 积分」（CodeRabbit #936 评审）。
-            if (result.dedup) return;
-            safeSend('chat:progress', {
-              stream: 'points',
-              type: result.ok ? 'billed' : 'blocked',
-              points_cost: 10,
-              balance: result.balance ?? null,
-              message: result.ok
-                ? `Slurm 作业已扣 10 积分，可用余额 ${result.balance}`
-                : (result.message ?? 'Slurm 作业计费失败'),
-            });
-          })().catch((err) => {
-            console.error(
-              `[qraft] slurm 计费处理异常：${err instanceof Error ? err.message : err}`
-            );
-          });
-        } else if (type === 'chat:delta' || type === 'delta') {
-          safeSend('chat:progress', data);
+          } else if (type === 'chat:delta' || type === 'delta') {
+            safeSend('chat:progress', data);
+          }
         }
-      }
-    ).catch((err) => {
-      settleTurn();
-      throw err;
-    });
+      )
+      .catch((err) => {
+        settleTurn();
+        throw err;
+      });
 
     return result;
   });
