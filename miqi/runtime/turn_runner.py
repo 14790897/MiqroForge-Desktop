@@ -14,6 +14,7 @@ import asyncio
 import json
 import time
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 from typing import Any, Callable
 
 from loguru import logger
@@ -734,7 +735,6 @@ class TurnRunner:
             # answering from what it has.
             _skipped_ctx: list[tuple[Any, Any]] = []
             if _rmode == "fast":
-                from types import SimpleNamespace
                 _kept: list[Any] = []
                 for tc in response.tool_calls:
                     reason = _budget_skip_reason(tc.name)
@@ -747,6 +747,30 @@ class TurnRunner:
                     else:
                         _kept.append(tc)
                 response.tool_calls = _kept
+
+            # #1094：参数被输出上限截断的调用拒绝执行（provider 已标记 truncated）
+            # 与预算跳过同理，塞一条合成结果让模型看到"为什么没执行"并自纠。
+            _truncated_ctx: list[tuple[Any, Any]] = []
+            _kept_calls: list[Any] = []
+            for tc in response.tool_calls:
+                if getattr(tc, "truncated", False):
+                    _truncated_ctx.append((tc, SimpleNamespace(
+                        result=(
+                            f"⚠️ 该工具调用未执行：模型单次输出达到上限（max_tokens={turn.max_tokens}）被截断，"
+                            "参数不完整；执行残缺参数可能造成错误动作。请减小单次参数体积后重试"
+                            "（例如分片写入、或先写文件再传路径）。"
+                        ),
+                        status=OrchestrationResult.TOOL_ERROR,
+                        duration_ms=0,
+                    )))
+                else:
+                    _kept_calls.append(tc)
+            if _truncated_ctx:
+                logger.warning(
+                    "turn_runner: refused {} truncated tool call(s) (max_tokens={}) turn={}",
+                    len(_truncated_ctx), turn.max_tokens, turn.turn_id,
+                )
+            response.tool_calls = _kept_calls
 
             for tc in response.tool_calls:
                 await self._events.emit(ToolCallBeginEvent(
@@ -805,9 +829,15 @@ class TurnRunner:
                     )
 
             # 1. Build assistant tool-call entries (no message mutation yet)
+            # #1094: refused truncation calls are echoed here too — otherwise their
+            # refusal tool_result would be an orphan (pre-send guard prunes it and
+            # the model would never learn why the call was refused).
+            _echo_calls = list(response.tool_calls) + [tc for tc, _ in _truncated_ctx]
+            _refused_ids = {tc.id for tc, _ in _truncated_ctx}
             assistant_tool_calls: list[dict[str, Any]] = []
-            for tool_call in response.tool_calls:
-                tools_used.append(tool_call.name)
+            for tool_call in _echo_calls:
+                if tool_call.id not in _refused_ids:
+                    tools_used.append(tool_call.name)
                 assistant_tool_calls.append({
                     "id": tool_call.id,
                     "type": "function",
@@ -853,7 +883,7 @@ class TurnRunner:
             # 3. Append tool results in order (assistant → tool → tool → …)
             # Budget-skipped calls (fast) get their synthetic skip results here
             # so the model sees the reason and pivots to answering.
-            _all_pairs = list(zip(response.tool_calls, contexts)) + _skipped_ctx
+            _all_pairs = list(zip(response.tool_calls, contexts)) + _skipped_ctx + _truncated_ctx
             for tool_call, ctx in _all_pairs:
                 messages = self._context.add_tool_result(
                     messages=messages,
