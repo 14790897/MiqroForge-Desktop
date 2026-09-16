@@ -581,6 +581,16 @@ class TurnRunner:
                 turn_level_reasoning_parts.append(reasoning_content)
 
             if not response.has_tool_calls:
+                # #1094（审计 F3）：纯文本被 length 截断时无工具调用可拒执，
+                # 此前零留痕。只记日志、不动控制流，让"回答其实不完整"可审计。
+                if getattr(response, "finish_reason", None) == "length":
+                    logger.warning(
+                        "turn_runner: 输出被 max_tokens 截断（纯文本，无工具调用），"
+                        "内容不完整 (max_tokens={}) turn={}",
+                        turn.max_tokens,
+                        turn.turn_id,
+                    )
+
                 # Phase 41: drain steering messages before completing
                 steers = await _drain_steer_messages()
                 if steers:
