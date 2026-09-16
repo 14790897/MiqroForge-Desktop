@@ -484,6 +484,40 @@ describe('QraftService 手动刷新与退出', () => {
     expect(store.current?.tokens.accessToken).toBe('DEDUPED');
   });
 
+  it('并发刷新失败去重：同一在途刷新只调度一次退避重试（CodeRabbit #1114）', async () => {
+    vi.useFakeTimers();
+    let rejectFirst!: (e: QraftError) => void;
+    const stub = makeClientStub();
+    stub.refreshTokens
+      .mockImplementationOnce(() => new Promise<QraftTokens>((_, reject) => (rejectFirst = reject)))
+      .mockImplementation(async () =>
+        makeTokens({ accessToken: 'RECOVERED', expiresAt: Date.now() + 7_199_000 })
+      );
+    store.save(makeStoredState());
+    const service = makeService(stub);
+
+    // 手动与自动并发：手动立即发起，自动在到期前 15 分钟触发
+    const manual = service.refreshNow();
+    const delay = 7_199_000 - 15 * 60_000;
+    await vi.advanceTimersByTimeAsync(delay + 100);
+    // 两条路径共享同一次 refreshTokens（inFlightRefresh 去重）
+    expect(stub.refreshTokens).toHaveBeenCalledTimes(1);
+
+    rejectFirst(new QraftError('REFRESH_FAILED', '平台 5xx'));
+    const result = await manual;
+    expect(result.ok).toBe(false);
+    expect(service.status().refreshError).toBe('REFRESH_FAILED');
+    expect(service.status().requiresRelogin).toBe(false);
+    // 失败只处理一次：退避代数只递增一次，首次重试仍按 1 分钟排
+    expect((service.status().refreshScheduledAt ?? 0) - Date.now()).toBe(60_000);
+
+    // 1 分钟后唯一的一次重试成功 → 错误清除、token 恢复
+    await vi.advanceTimersByTimeAsync(60_000 + 100);
+    expect(stub.refreshTokens).toHaveBeenCalledTimes(2);
+    expect(service.status().refreshError).toBeUndefined();
+    expect(store.current?.tokens.accessToken).toBe('RECOVERED');
+  });
+
   it('logout 清除 cookie 与 token，推送未登录状态', async () => {
     const stub = makeClientStub();
     store.save(makeStoredState());
