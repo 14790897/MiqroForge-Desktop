@@ -2,7 +2,15 @@
 
 from unittest.mock import AsyncMock
 
-from miqi.skills.provision import APT_NAME_MAP, VENV_ROOT, SkillProvisioner, venv_python
+from miqi.skills.provision import (
+    APT_NAME_MAP,
+    VENV_ROOT,
+    SkillProvisioner,
+    get_provisioned,
+    has_provisioned_venv,
+    record_provision,
+    venv_python,
+)
 
 
 class _FakeLoader:
@@ -134,3 +142,47 @@ async def test_provision_rejects_invalid_name():
     result = await provisioner.provision("bad'name;rm -rf /")
     assert result["ok"] is False
     assert result["errors"]
+
+
+def test_plan_tracks_apt_source():
+    """plan() records which original requirements were routed to apt."""
+    provisioner, _ = _provisioner(["matplotlib", "some-unique-pkg"])
+    plan = provisioner.plan("skill-a")
+    assert plan["apt_src"] == ["matplotlib"]
+
+
+async def test_provision_records_provisioned_deps():
+    """A successful provision flips the host-side registry for availability."""
+    provisioner, _ = _provisioner(["matplotlib", "some-unique-pkg"])
+    result = await provisioner.provision("skill-a")
+    assert result["ok"] is True
+    assert result["provisioned"] == ["matplotlib", "some-unique-pkg"]
+    assert get_provisioned("skill-a") == ["matplotlib", "some-unique-pkg"]
+    assert has_provisioned_venv("skill-a") is True
+
+
+async def test_provision_apt_only_records_no_venv():
+    """apt-only provisioning records deps but does not create a venv."""
+    provisioner, _ = _provisioner(["matplotlib"])
+    result = await provisioner.provision("skill-a")
+    assert result["ok"] is True
+    assert get_provisioned("skill-a") == ["matplotlib"]
+    assert has_provisioned_venv("skill-a") is False
+
+
+async def test_provision_failed_apt_records_nothing():
+    """A failed install records no deps, so availability is unaffected."""
+    provisioner, sandbox = _provisioner(["matplotlib"])
+    sandbox.run_in_distro_root.return_value = (1, "", "apt error")
+    result = await provisioner.provision("skill-a")
+    assert result["ok"] is False
+    assert result["provisioned"] == []
+    assert get_provisioned("skill-a") == []
+
+
+def test_record_provision_merges_and_persists():
+    """record_provision merges into existing deps and preserves has_venv."""
+    record_provision("skill-a", ["numpy"], has_venv=False)
+    record_provision("skill-a", ["pydantic>=999"], has_venv=True)
+    assert get_provisioned("skill-a") == ["numpy", "pydantic>=999"]
+    assert has_provisioned_venv("skill-a") is True
