@@ -33,6 +33,13 @@
  * 沙箱创建之前执行，与沙箱无关；exec 在主机直执行（Windows Git Bash /
  * Linux bash）。
  *
+ * 轮询预算（desktop-ci run 35064775546 复现）：RUN_CAP 曾与测试超时同为
+ * 480s，回合一旦拖长，Playwright 先在 `waitForTimeout` 里把测试杀掉，
+ * 后面的 expect 与 precondition 跳过都执行不到，日志只剩「Test timeout
+ * of 480000ms exceeded」。现在 RUN_CAP=6.5min 严格小于 8min 超时，退出循环
+ * 后一定会走到断言或跳过；同时按「去掉 已深度思考 · N 秒 计数器后的文本」
+ * 判空闲，live timer 不再无限推迟空闲判定。
+ *
  * Run: cd apps/desktop && npx playwright test \
  *      --config=playwright.config.ts --project=electron -g "real LLM"
  */
@@ -126,12 +133,24 @@ test.describe('Issue #811 护栏误拦截复现 (real LLM)', () => {
 
     await sendMessage(page, prompt);
 
-    const RUN_CAP = 8 * 60_000; // hard cap from test start
+    // RUN_CAP must stay strictly below the test timeout (8 min): if the loop
+    // can outlive the test, Playwright kills the run mid-poll and the failure
+    // reads "Test timeout of 480000ms exceeded" at `page.waitForTimeout` —
+    // exactly what desktop-ci run 35064775546 reported for case D, with the
+    // assertion and the precondition-skip below never getting a chance to run.
+    const RUN_CAP = 6.5 * 60_000; // hard cap from turn start
     const IDLE_DEADLINE = 3 * 60_000; // slow CI LLM stretches
+    // The "已深度思考 · N 秒" live counter rewrites a few characters every
+    // second for as long as the turn runs, so any raw text diff reads as
+    // "still streaming" and pushes the idle deadline out forever.  Compare a
+    // signature with those counters scrubbed: the loop then idles out on real
+    // content changes only, and a settled-but-unmatched turn is reported as
+    // an assertion failure with the model's own text instead of a timeout.
+    const scrubLiveCounters = (t: string) => t.replace(/\d+\s*秒/g, 'N 秒');
     const runStart = Date.now();
     let idleDeadline = runStart + IDLE_DEADLINE;
     let text = '';
-    let lastText = '';
+    let lastSignature = '';
     let lastLen = -1;
     let stable = 0;
     // exec 真的被调用过的硬信号：ToolCommandBlock 只在工具调用行渲染出 exec 命令时
@@ -183,16 +202,17 @@ test.describe('Issue #811 护栏误拦截复现 (real LLM)', () => {
           if (stable >= 3 && matches(currentText)) break;
           if (stable >= 3 && rejectKeyword && currentText.includes(rejectKeyword)) break;
           // 模型自行拒答、且本回合压根没出现过 exec 命令块 → 护栏没被触发。这里**必须
-          // 提前收手**：RUN_CAP 正好等于测试超时（480s），让循环自然跑完的话测试会先
-          // 超时，下面那个 precondition 判定根本执行不到（这就是上一版没生效的原因）。
+          // 提前收手**：RUN_CAP 一旦逼近测试超时，让循环自然跑完的话测试会先超时，
+          // 下面那个 precondition 判定根本执行不到（这就是上一版没生效的原因）。
           if (stable >= 3 && !sawExecCommand && SELF_REFUSAL.test(currentText)) break;
         } else {
           stable = 0;
         }
       }
       lastLen = len;
-      if (text !== lastText) {
-        lastText = text;
+      const signature = scrubLiveCounters(text);
+      if (signature !== lastSignature) {
+        lastSignature = signature;
         idleDeadline = Date.now() + IDLE_DEADLINE;
       }
       await page.waitForTimeout(1000);
@@ -200,6 +220,12 @@ test.describe('Issue #811 护栏误拦截复现 (real LLM)', () => {
 
     // 断言同样只看本回合的助手回复，不看整页历史文本
     const finalText = await currentAssistantText();
+    // 轮询退出时打点：无论后面是断言失败还是 precondition 跳过，CI 日志里
+    // 都要能看出「跑了多久 / exec 到底有没有被调用 / 模型最后说了什么」。
+    console.log(
+      `[test] poll loop exited after ${Math.round((Date.now() - runStart) / 1000)}s ` +
+        `(exec invoked: ${sawExecCommand}) — reply: "${finalText.slice(0, 200)}"`
+    );
     if (expectPattern instanceof RegExp) {
       // 「模型压根没调 exec、直接按自身安全对齐拒答」是这个 spec 顶部注释就记过的
       // 失败模式，CI 上会复现。这时沙箱护栏根本没被触发，断言「护栏拦截」必然落空

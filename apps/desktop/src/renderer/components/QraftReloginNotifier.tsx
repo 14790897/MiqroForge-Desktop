@@ -1,39 +1,18 @@
 import { useEffect, useState } from 'react';
 import { AlertTriangle, X } from 'lucide-react';
 import { useQraftStatus } from '../hooks/useQraftStatus';
-import type { QraftErrorCode } from '../../shared/ipc';
 
 /**
- * 平台登录失效的全局告知 —— 主进程自动刷新失败置 requiresRelogin 时，
- * 无论用户身处哪个页面都弹出顶部横幅：
- *   - REFRESH_TOKEN_INVALID（refresh_token 被平台作废）：永久失效，
- *     引导重新登录；
- *   - 其他瞬时失败（网络等）：提示"将自动重试"，主进程 30 分钟后
- *     重试成功（requiresRelogin 复位）时横幅自动消失。
+ * 平台登录失效的全局告知 —— 主进程只在平台作废 refresh_token
+ * （REFRESH_TOKEN_INVALID，永久失效）时置 requiresRelogin，此时
+ * 无论用户身处哪个页面都弹出顶部横幅引导重新登录；瞬时失败（网络等）
+ * 由主进程静默退避重试，不置 requiresRelogin、不弹横幅（issue #1087）。
  *
  * 横幅常驻（不自动消失），可手动关闭；顶栏账号 chip 同时切换为
  * 失效态（见 TopBar），保证关闭横幅后仍有持续提示。
  */
 
-/** 失效告知的横幅文案：按最近一次刷新错误码区分"永久作废"与"瞬时失败"。 */
-export function reloginNotifyCopy(refreshError: QraftErrorCode | undefined): {
-  text: string;
-  action: string;
-} {
-  if (refreshError === 'REFRESH_TOKEN_INVALID') {
-    return {
-      text: 'MiQroForge 平台登录已失效，请重新登录恢复平台功能。',
-      action: '去重新登录',
-    };
-  }
-  return {
-    text: 'MiQroForge 平台登录刷新失败，部分平台功能暂不可用（将自动重试）。',
-    action: '去查看',
-  };
-}
-
-/**
- * 告知状态机（纯函数，便于单测）：
+/** 失效告知状态机（纯函数，便于单测）：
  *   - requiresRelogin 由 false 变 true → 弹横幅并标记已告知；
  *   - 初始快照即 true（应用启动即发现 token 已作废）→ 同样弹横幅；
  *   - 已告知期间（用户关闭横幅）不再重复弹；
@@ -59,7 +38,10 @@ export function QraftReloginNotifier({ onOpenQraft }: { onOpenQraft: () => void 
 
   if (!state.visible) return null;
 
-  const { text, action } = reloginNotifyCopy(status?.refreshError);
+  // requiresRelogin 只在平台作废 refresh_token（永久失效）时置位，
+  // 横幅文案固定为引导重新登录（瞬时失败由主进程静默重试）。
+  const text = 'MiQroForge 平台登录已失效，请重新登录恢复平台功能。';
+  const action = '去重新登录';
 
   return (
     <div
