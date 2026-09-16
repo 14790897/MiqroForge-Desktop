@@ -5615,6 +5615,9 @@ export function ChatConsole({
           const ts = userMsg.timestamp + 1;
           setMessages((prev) => {
             const last = prev[prev.length - 1];
+            // #1071 review P1（2026-09-16）：binding 必须用 invocation-local 的 myTurnId——
+            // activeTurnIdRef 跨 invocation 共享，别的 turn 的 turn_started 会改写它，
+            // 导致本消息被绑到错误的 turn。
             if (
               last?.role === 'assistant' &&
               last.timestamp === ts &&
@@ -5622,13 +5625,14 @@ export function ChatConsole({
             ) {
               return [
                 ...prev.slice(0, -1),
-                { ...last, content: fullContent, turnId: activeTurnIdRef.current ?? last.turnId },
+                { ...last, content: fullContent, turnId: myTurnId ?? last.turnId },
               ];
             }
+            // #1071 review P1（2026-09-16）：分支②同一竞态，一律用 invocation-local myTurnId。
             if (last?.role === 'assistant' && last.content !== fullContent) {
               return [
                 ...prev.slice(0, -1),
-                { ...last, content: fullContent, turnId: activeTurnIdRef.current ?? last.turnId },
+                { ...last, content: fullContent, turnId: myTurnId ?? last.turnId },
               ];
             }
             if (!last || last.role !== 'assistant') {
@@ -5638,7 +5642,8 @@ export function ChatConsole({
                   role: 'assistant',
                   content: fullContent,
                   timestamp: ts,
-                  turnId: activeTurnIdRef.current ?? undefined,
+                  // #1071 review P1（2026-09-16）：新建 bubble 的 turnId 同样取 invocation-local myTurnId。
+                  turnId: myTurnId ?? undefined,
                 },
               ];
             }
@@ -5974,7 +5979,10 @@ export function ChatConsole({
               ? toolArgsByCallId.current.get(data.tool_call_id)
               : undefined,
           // CodeRabbit（9-11）：链卡按 turn 归属需要行级 turnId（实时路径）
-          turnId: activeTurnIdRef.current ?? undefined,
+          // #1071 review P1（2026-09-16）：binding 必须用 invocation-local 的 myTurnId——
+          // activeTurnIdRef 跨 invocation 共享，别的 turn 的 turn_started 会改写它，
+          // 导致本消息被绑到错误的 turn。（review 只点了 reveal 三处，此处同一竞态一并统一）
+          turnId: myTurnId ?? undefined,
           timestamp: Date.now(),
         };
         setMessages((prev) => {
