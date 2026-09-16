@@ -387,13 +387,13 @@ class Handler(BaseHTTPRequestHandler):
             if n_action == 0:
                 print("  [mock] Auto 分支 → ActionCard", flush=True)
                 self._respond(tc("request_action_confirmation", {
-                    "action": "upload", "target": "Qraft", "file_name": "mof-report.json",
+                    "action": "upload", "target": "MiqroForge", "file_name": "mof-report.json",
                     "size_bytes": 23552, "sha256": "deadbeef1234567890abcdef1234567890",
-                    "description": "上传 MOF-5 实验报告到 Qraft",
+                    "description": "上传 MOF-5 实验报告到 MiqroForge",
                 }, "call_a_action"))
                 return
             print("  [mock] Auto 分支 → 完成", flush=True)
-            self._respond(text("✅ 已完成：MOF-5 实验报告已生成并上传 Qraft。"))
+            self._respond(text("✅ 已完成：MOF-5 实验报告已生成并上传 MiqroForge。"))
             return
         if "计划" in last_user:
             # CodeRabbit（9-11）：计划被取消后不得继续推进状态机
@@ -406,11 +406,11 @@ class Handler(BaseHTTPRequestHandler):
                 print("  [mock] PlanCard 分支 → ask_user_plan_confirm", flush=True)
                 self._respond(tc("ask_user_plan_confirm", {
                     "title": "生成 MOF-5 实验报告",
-                    "goal": "搜索论文并生成报告，上传到 Qraft",
+                    "goal": "搜索论文并生成报告，上传到 MiqroForge",
                     "steps": [
                         {"name": "搜集论文资料", "tools": ["web_search"]},
                         {"name": "创建实验报告", "tools": ["write_file"]},
-                        {"name": "上传到 Qraft", "tools": ["upload"]},
+                        {"name": "上传到 MiqroForge", "tools": ["upload"]},
                     ],
                     "permissions": ["network_read", "workspace_write", "external_upload"],
                     "timeout_seconds": 120,
@@ -425,7 +425,7 @@ class Handler(BaseHTTPRequestHandler):
                         {"name": "搜集论文资料", "tools": ["web_search"]},
                         {"name": "对比合成成本", "tools": ["web_search"]},
                         {"name": "创建实验报告", "tools": ["write_file"]},
-                        {"name": "上传到 Qraft", "tools": ["upload"]},
+                        {"name": "上传到 MiqroForge", "tools": ["upload"]},
                     ],
                     "permissions": ["network_read", "workspace_write", "external_upload"],
                     "timeout_seconds": 120,
@@ -445,14 +445,14 @@ class Handler(BaseHTTPRequestHandler):
             if n_plan >= 1 and n_action == 0:
                 print("  [mock] R4 → ActionCard（上传确认）", flush=True)
                 self._respond(tc("request_action_confirmation", {
-                    "action": "upload", "target": "Qraft", "file_name": "mof-report.json",
+                    "action": "upload", "target": "MiqroForge", "file_name": "mof-report.json",
                     "size_bytes": 23552, "sha256": "deadbeef1234567890abcdef1234567890",
-                    "description": "上传 MOF-5 实验报告到 Qraft",
+                    "description": "上传 MOF-5 实验报告到 MiqroForge",
                 }, "call_action"))
                 return
             if n_plan >= 1 and n_action >= 1:
                 print("  [mock] R5 → 完成", flush=True)
-                self._respond(text("✅ 已完成：MOF-5 实验报告已生成并上传 Qraft。"))
+                self._respond(text("✅ 已完成：MOF-5 实验报告已生成并上传 MiqroForge。"))
                 return
 
         # ── state machine（按工具调用序列推进） ──

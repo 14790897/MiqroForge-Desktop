@@ -103,7 +103,7 @@ test.describe('Auto Timeline (#646-v2)', () => {
       const actionCard = page.getByTestId('action-card').first();
       await expect(actionCard).toBeVisible({ timeout: 60_000 });
       await expect(actionCard.getByText('☁ 上传').first()).toBeVisible();
-      await expect(actionCard.getByText('Qraft').first()).toBeVisible();
+      await expect(actionCard.getByText('MiqroForge').first()).toBeVisible();
       await expect(actionCard.getByText('mof-report.json').first()).toBeVisible();
       await expect(actionCard.getByText(/23\.0 KB/)).toBeVisible();
 
