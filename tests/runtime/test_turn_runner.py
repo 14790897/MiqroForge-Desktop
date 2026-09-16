@@ -32,11 +32,13 @@ class _FakeResponse:
 
 
 class _FakeToolCall:
-    def __init__(self, name="read_file", args=None, tc_id="tc-1"):
+    def __init__(self, name="read_file", args=None, tc_id="tc-1", truncated=False):
         self.name = name
         self.arguments = args or {"path": "/tmp/x"}
         self.id = tc_id
         self.arguments_json = '{"path": "/tmp/x"}'
+        # #1094: provider marks calls cut off by the output cap.
+        self.truncated = truncated
 
 
 @pytest.fixture
@@ -259,6 +261,103 @@ async def test_turn_runner_handles_tool_calls(turn_runner, fake_turn_context, fa
     assert "read_file" in result.tools_used
     assert call_count == 2  # stream_chat was called twice
     fake_tool_runtime.execute_many.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_turn_runner_refuses_truncated_tool_call(
+    turn_runner, fake_turn_context, fake_tool_runtime
+):
+    """#1094：被输出上限截断（truncated=True）的调用不得执行，且模型侧要收到
+    「未执行」的显式结果（与 assistant tool_call 成对，不会被 presend 清成孤儿）。"""
+    from miqi.providers.base import LLMStreamEvent
+
+    runner, provider = turn_runner
+    tc = _FakeToolCall("read_file", tc_id="tc-trunc", truncated=True)
+    call_count = 0
+    seen_messages: list[list[dict]] = []
+
+    async def _stream_side_effect(**kwargs):
+        nonlocal call_count
+        call_count += 1
+        seen_messages.append(kwargs.get("messages") or [])
+        if call_count == 1:
+            yield LLMStreamEvent(
+                kind="completed",
+                response=_FakeResponse(tool_calls=[tc]),
+            )
+        else:
+            yield LLMStreamEvent(
+                kind="completed",
+                response=_FakeResponse(content="recovered"),
+            )
+
+    provider.stream_chat = _stream_side_effect
+
+    result = await runner.run(
+        turn=fake_turn_context,
+        user_content="task",
+        system_prompt="sys",
+        tools=[{"type": "function", "function": {"name": "read_file", "parameters": {}}}],
+    )
+
+    assert result.final_content == "recovered"
+    # 未被当作"用过的工具"
+    assert "read_file" not in result.tools_used
+    # 工具从未被真实执行（execute_many 至多收到空列表）
+    for c in fake_tool_runtime.execute_many.await_args_list:
+        calls_arg = c.args[1] if len(c.args) > 1 else c.kwargs.get("calls")
+        assert calls_arg == []
+
+    # 第二轮发给模型的消息里带着"未执行"的拒绝理由
+    assert call_count == 2
+    second_msgs = seen_messages[1]
+    tool_msgs = [m for m in second_msgs if m.get("role") == "tool"]
+    assert tool_msgs
+    assert any("未执行" in (m.get("content") or "") for m in tool_msgs)
+    # 拒绝结果与 assistant tool_call 严格配对（#753 同类：不留孤儿 tool）
+    declared_ids = {
+        tc_entry["id"]
+        for m in second_msgs
+        if m.get("role") == "assistant"
+        for tc_entry in (m.get("tool_calls") or [])
+    }
+    assert all(m.get("tool_call_id") in declared_ids for m in tool_msgs)
+
+
+@pytest.mark.asyncio
+async def test_turn_runner_still_runs_non_truncated_tool_call(
+    turn_runner, fake_turn_context, fake_tool_runtime
+):
+    """对照组：truncated=False 的调用照常执行。"""
+    from miqi.providers.base import LLMStreamEvent
+
+    runner, provider = turn_runner
+    tc = _FakeToolCall("read_file", tc_id="tc-ok", truncated=False)
+    call_count = 0
+
+    async def _stream_side_effect(**kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            yield LLMStreamEvent(kind="completed", response=_FakeResponse(tool_calls=[tc]))
+        else:
+            yield LLMStreamEvent(kind="completed", response=_FakeResponse(content="done"))
+
+    provider.stream_chat = _stream_side_effect
+
+    result = await runner.run(
+        turn=fake_turn_context,
+        user_content="task",
+        system_prompt="sys",
+        tools=[{"type": "function", "function": {"name": "read_file", "parameters": {}}}],
+    )
+
+    assert "read_file" in result.tools_used
+    executed = [
+        c.args[1] if len(c.args) > 1 else c.kwargs.get("calls")
+        for c in fake_tool_runtime.execute_many.await_args_list
+    ]
+    assert any(calls for calls in executed)
 
 
 @pytest.mark.asyncio
