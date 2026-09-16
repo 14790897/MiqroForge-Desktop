@@ -1165,3 +1165,85 @@ async def test_running_flag_resets_when_turn_end_hook_raises():
         )
     # The hook exception still propagates, but the guard is released.
     assert runner._running is False
+
+
+@pytest.mark.asyncio
+async def test_refused_truncated_call_gets_paired_ledger_completion(
+    fake_turn_context, fake_tool_runtime, fake_context_runtime,
+):
+    """CR #1100：被拒执（参数截断）的调用不能只在 ledger 里留 `tool_call_started`。
+
+    Replay 靠 started/completed 配对重建工具行，只写 started 的话该行永远 pending。
+    本用例断言拒执调用与正常调用一样拿到 `tool_call_completed`，且 payload 与已执行
+    调用**同形**（不新造 item 类型）、拒执语义随 `result` 落库。
+    """
+    from miqi.providers.base import LLMStreamEvent
+
+    class _FakeLedger:
+        def __init__(self):
+            self.items: list[dict] = []
+
+        async def append_item(self, *, thread_id, turn_id, item_type, payload):
+            self.items.append({
+                "thread_id": thread_id,
+                "turn_id": turn_id,
+                "item_type": item_type,
+                "payload": payload,
+            })
+
+    provider = MagicMock()
+    provider.get_default_model.return_value = "test-model"
+    bad = _FakeToolCall("write_file", tc_id="tc-trunc", truncated=True)
+    good = _FakeToolCall("read_file", tc_id="tc-ok", truncated=False)
+    call_count = 0
+
+    async def _stream(**kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            yield LLMStreamEvent(
+                kind="completed", response=_FakeResponse(tool_calls=[bad, good]),
+            )
+        else:
+            yield LLMStreamEvent(
+                kind="completed", response=_FakeResponse(content="recovered"),
+            )
+
+    provider.stream_chat = _stream
+    ev = MagicMock()
+    ev.emit = AsyncMock()
+    ledger = _FakeLedger()
+
+    runner = TurnRunner(
+        provider=provider,
+        tool_runtime=fake_tool_runtime,
+        context_runtime=fake_context_runtime,
+        event_emitter=ev,
+        max_iterations=3,
+        ledger_runtime=ledger,
+    )
+
+    result = await runner.run(
+        turn=fake_turn_context,
+        user_content="task",
+        system_prompt="sys",
+        tools=[{"type": "function", "function": {"name": "read_file", "parameters": {}}}],
+    )
+
+    assert result.final_content == "recovered"
+    started = [i for i in ledger.items if i["item_type"] == "tool_call_started"]
+    completed = [i for i in ledger.items if i["item_type"] == "tool_call_completed"]
+    # 两个调用都成对：started / completed 覆盖同一组 id，无 pending 残留
+    ids = {"tc-ok", "tc-trunc"}
+    assert {i["payload"]["tool_call_id"] for i in started} == ids
+    assert {i["payload"]["tool_call_id"] for i in completed} == ids
+    assert len(completed) == len(started) == 2
+
+    by_id = {i["payload"]["tool_call_id"]: i["payload"] for i in completed}
+    # 拒执那条与已执行那条 payload 同形（字段集一致，未新造 item 类型）
+    assert set(by_id["tc-trunc"]) == set(by_id["tc-ok"])
+    # 拒执语义沿用既有 TOOL_ERROR 表达：result 即拒执说明
+    assert "未执行" in by_id["tc-trunc"]["result"]
+    assert by_id["tc-trunc"]["duration_ms"] == 0
+    # 对照组：正常调用照旧记真实结果
+    assert by_id["tc-ok"]["result"] == "result-for-read_file"

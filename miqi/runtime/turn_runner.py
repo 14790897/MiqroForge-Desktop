@@ -838,6 +838,27 @@ class TurnRunner:
                         },
                     )
 
+            # CR #1100：被拒执（参数截断）的调用同样要落终态。上面已为**所有**本轮
+            # 调用写过 `tool_call_started`，这里若不补 `tool_call_completed`，Replay
+            # 重建时会把它们永远显示为 pending。payload 与上面的已执行调用**同形**
+            # （不新造 item 类型），错误语义沿用既有的 TOOL_ERROR 表达：`result` 就是
+            # 拒执说明，其余字段取"未执行"的中性值。
+            if self._ledger is not None:
+                for tc, ctx in _truncated_ctx:
+                    await self._ledger.append_item(
+                        thread_id=turn.thread_id,
+                        turn_id=turn.turn_id,
+                        item_type="tool_call_completed",
+                        payload={
+                            "tool_call_id": tc.id,
+                            "result": ctx.result,
+                            "duration_ms": getattr(ctx, "duration_ms", 0),
+                            "retry_count": 0,
+                            "permission_verdict": None,
+                            "sandbox_type": None,
+                        },
+                    )
+
             # 1. Build assistant tool-call entries (no message mutation yet)
             # #1094: refused truncation calls are echoed here too — otherwise their
             # refusal tool_result would be an orphan (pre-send guard prunes it and
