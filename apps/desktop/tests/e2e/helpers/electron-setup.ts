@@ -126,8 +126,17 @@ export async function sendUntilDoneOrProviderDown(
     // 处理，返回 false 让调用方 skip，而不是把环境问题当成回归 fail。
     try {
       await sendMessage(page, text);
-    } catch {
-      return false;
+    } catch (err) {
+      // 只有两种可判明的「环境不可用 / 门禁拦截」情形才降级为 skip：
+      //  1) 发送后门禁引导气泡已出现（未登录/无可用模型 → fail-fast 拦下，
+      //     user 气泡根本没挂载，sendMessage 内部的计数断言因此抛错）；
+      //  2) 发送后出现了新的 provider 错误气泡（相对发送前快照 errCountBefore
+      //     的增量，即这次发送招来的错误）。
+      // 其它异常（断言失败、选择器超时、真实功能回归等）一律原样重抛——
+      // 早先无条件 return false 会把真实回归吞成 skip，掩盖缺陷。
+      if ((await gateLocator.count()) > 0) return false;
+      if ((await errLocator.count()) > errCountBefore) return false;
+      throw err;
     }
     let sawError = false;
 
