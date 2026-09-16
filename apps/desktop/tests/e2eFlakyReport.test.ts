@@ -243,6 +243,15 @@ describe('buildMarkdown', () => {
     expect(markdown).toContain('`` `foo` broke ``');
   });
 
+  it('用例标题以反引号结尾时，清单条同样补空格', () => {
+    const report = makeReport();
+    report.suites[0].suites[0].specs[0].title = 'renders `foo`';
+
+    const markdown = buildMarkdown(report);
+
+    expect(markdown).toContain('renders `foo` ``');
+  });
+
   it('projectName 为空时省掉项目前缀，不输出 []', () => {
     const report = makeReport();
     report.suites[0].suites[0].specs[0].tests[0].projectName = '';
