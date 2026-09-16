@@ -15,8 +15,8 @@
  * 在 timeout / cancel 时先发 SIGINT，Playwright 的 SigIntWatcher 会收下它、把运行标成
  * interrupted 后照常 onEnd —— 于是落盘的是一份部分报告（没跑到的用例 results 为空、
  * 在跑的用例 status 是 interrupted）。两种情况都会在摘要里明说，不会拿残缺数据报一个
- * 好看的 `flaky 0`。CI 里另用 PLAYWRIGHT_JSON_OUTPUT_FILE 把连通性探针的输出引开，
- * 免得它那份「只有 1 条用例」的报告盖住这次运行的。
+ * 好看的 `flaky 0`。CI 里连通性探针那一步带 `--reporter=list`（命令行 reporter 会整组替换
+ * config 的 reporter），所以它不产出 JSON 报告，这份报告只可能来自主 E2E 那次运行。
  *
  * 用法：node scripts/e2e-flaky-report.mjs [报告路径]   （默认 test-reports/results.json）
  */

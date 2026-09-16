@@ -137,18 +137,16 @@ jobs:
           CONFEOF
 
       - name: AI connectivity probe — fail fast if provider unreachable
+        # --reporter=list：命令行 reporter 会整组替换 config 里的 html+json（实测：加它之后
+        # test-reports/results.json 不再生成），所以探针这一步不产出 JSON 报告 —— 主 E2E 那份
+        # 报告不会被它抢先写掉，主步一份都没产出时汇总步能如实报「没找到报告」（#1107）。
         run: |
           xvfb-run --auto-servernum \
             npx playwright test --config=playwright.config.ts --project=electron \
-            --grep "AI Connectivity"
+            --grep "AI Connectivity" --reporter=list
         timeout-minutes: 10
         env:
           PLAYWRIGHT_SKIP_WEB_SERVER: '1'
-          # 探针用的是同一个 config，json reporter 默认写 test-reports/results.json。正常顺序下
-          # 主步在后、会覆盖掉探针这份，但主步若一份报告都没产出（被杀/OOM），下面的汇总步就会
-          # 把探针这份「只有 1 条用例」的报告当成本次运行的结论。把探针的输出引开，那种情况下
-          # 汇总步才读得到「没有找到报告」（#1107）。
-          PLAYWRIGHT_JSON_OUTPUT_FILE: test-reports/probe-results.json
 
       - name: Run Electron E2E
         # --workers=2 (#1107): ubuntu-latest runners are 4 vCPU, and each worker is a
@@ -276,15 +274,13 @@ jobs:
           CONFEOF
 
       - name: AI connectivity probe (macOS) — fail fast if provider unreachable
+        # 同 Linux 侧：--reporter=list 让探针不产出 JSON 报告，不占用主 E2E 那份（#1107）。
         run: |
           npx playwright test --config=playwright.config.ts --project=electron \
-            --grep "AI Connectivity"
+            --grep "AI Connectivity" --reporter=list
         timeout-minutes: 10
         env:
           PLAYWRIGHT_SKIP_WEB_SERVER: '1'
-          # 同 Linux 侧：引开探针的 json 报告 —— 主步没产出报告时，汇总步不该把探针那份
-          # 「只有 1 条用例」的结果当成本次运行的结论（#1107）。
-          PLAYWRIGHT_JSON_OUTPUT_FILE: test-reports/probe-results.json
 
       - name: Run Electron E2E (macOS)
         # --workers=2: macos-latest runners (3 vCPU) can't sustain 4 parallel
