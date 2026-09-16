@@ -125,12 +125,15 @@ export function ConfirmCardItem({
         ) : (
           <ConfirmCard
             entry={entry as never}
+            // #1071 G7 P1：**必须 return** resolve(...) 的 Promise —— 上面
+            // ActionCard / PlanCard 两处是表达式箭头函数（隐式返回），此处是块体，
+            // 漏 return 就等于把 Promise 吞掉，「提交失败→解锁重试」链路断在这。
             onResolve={(choiceId: string, rememberMode?: 'session' | 'always' | null) => {
               const choices =
                 (entry.request.choices as { id: string; label?: string }[] | undefined) ?? [];
               const label = choices.find((choice) => choice.id === choiceId)?.label ?? choiceId;
               const remember = rememberMode === 'always' || rememberMode === 'session';
-              resolve(id, choiceId, label, remember, rememberMode ?? 'session');
+              return resolve(id, choiceId, label, remember, rememberMode ?? 'session');
             }}
             onTimeout={timeoutCard}
           />

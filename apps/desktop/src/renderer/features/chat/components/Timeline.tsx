@@ -120,7 +120,7 @@ export function Timeline({ entry }: { entry: TimelineEntry }) {
         <div className="w-full min-w-0 pl-5">
           {entry.goal && (
             <div
-              className="mb-1 truncate text-[11.5px] text-(--conversation-scaffold-text, #6b7280)"
+              className="mb-1 truncate text-[11.5px] text-[var(--conversation-scaffold-text,#6b7280)]"
               title={entry.goal}
             >
               {entry.goal}

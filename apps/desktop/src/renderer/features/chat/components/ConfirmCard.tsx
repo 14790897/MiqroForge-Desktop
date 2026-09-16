@@ -19,7 +19,11 @@ export function ConfirmCard({
   initialExpanded,
 }: {
   entry: UserInputCardEntry;
-  onResolve: (choiceId: string, rememberMode?: 'session' | 'always' | null) => void;
+  /** #1071 G7 P1：透传调用方 Promise——HermesConfirmBar 据此在失败时释放提交锁。 */
+  onResolve: (
+    choiceId: string,
+    rememberMode?: 'session' | 'always' | null
+  ) => void | Promise<boolean | void>;
   onTimeout?: (inputId: string) => void;
   initialExpanded?: boolean;
 }) {
@@ -135,16 +139,19 @@ export function ConfirmCard({
     (c) => c.id !== confirmChoice?.id && c.id !== adjustChoice?.id && c.id !== cancelChoice?.id
   );
 
+  // #1071 G7 P1：三个分支都必须 **return** —— HermesConfirmBar 的 resolveOnce 要
+  // await 到 UserInputContext.resolve 的结果，才知道该不该释放提交锁；不 return
+  // 就只是 `undefined`，失败路径无法回传（评审点名的缺陷）。
   const handleBarResolve = (
     choice: HermesConfirmChoice,
     rememberMode?: 'session' | 'always' | null
   ) => {
     if (choice === 'confirm' || choice === 'session' || choice === 'always') {
-      onResolve(confirmChoice?.id ?? choices[0]?.id ?? '', rememberMode);
+      return onResolve(confirmChoice?.id ?? choices[0]?.id ?? '', rememberMode);
     } else if (choice === 'modify') {
-      onResolve(adjustChoice?.id ?? 'modify', rememberMode);
+      return onResolve(adjustChoice?.id ?? 'modify', rememberMode);
     } else if (choice === 'deny') {
-      onResolve(cancelChoice?.id ?? 'cancel', rememberMode);
+      return onResolve(cancelChoice?.id ?? 'cancel', rememberMode);
     }
   };
 

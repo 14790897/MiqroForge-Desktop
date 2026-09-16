@@ -274,10 +274,12 @@ export function UserInputProvider({ children }: { children: ReactNode }) {
           });
           upsertPending({ ...entry, state: 'pending' });
         }
-        // #1071 S5a（终审 F1）：回滚后**不 rethrow**——其余卡片（ActionCard/
-        // ConfirmCard/HermesConfirmBar）的调用方都不接 Promise，rethrow 会变成
-        // unhandled rejection。改用返回值告诉调用方：false = 已回滚到 pending，
-        // 卡片实例可复用，PlanCard 据此释放提交锁。
+        // #1071 S5a（终审 F1）：回滚后**不 rethrow**——rethrow 会在调用方没接
+        // Promise 的旧调用点上变成 unhandled rejection（且回滚已经做完了，重抛
+        // 不带来额外信息）。改用返回值告诉调用方：false = 已回滚到 pending，
+        // 卡片实例可复用。
+        // #1071 G7 P1：PlanCard / HermesConfirmBar 现在都接住这个返回值并按
+        // 「false → 释放提交锁」处理，失败路径因此可重试。
         return false;
       }
     },

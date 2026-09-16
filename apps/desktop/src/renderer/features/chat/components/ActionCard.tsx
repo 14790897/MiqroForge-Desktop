@@ -1,4 +1,3 @@
-import { useState } from 'react';
 import { HermesConfirmBar, type HermesConfirmChoice } from './HermesConfirmBar';
 import { HermesToolRow, TOOL_PRE_CLASS } from './HermesToolRow';
 
@@ -16,7 +15,11 @@ interface ActionCardProps {
     sha256?: string;
     description?: string;
   };
-  onResolve: (choiceId: string, rememberMode?: 'session' | 'always' | null) => void;
+  /** #1071 G7 P1：与 ConfirmCard 同步——把调用方 Promise 透传给 HermesConfirmBar。 */
+  onResolve: (
+    choiceId: string,
+    rememberMode?: 'session' | 'always' | null
+  ) => void | Promise<boolean | void>;
 }
 
 function formatSize(bytes?: number): string {
@@ -35,23 +38,28 @@ const ACTION_META: Record<string, { icon: string; title: string; tone: 'normal' 
 };
 
 export function ActionCard({ entry, onResolve }: ActionCardProps) {
-  const [submitting, setSubmitting] = useState<string | null>(null);
   const meta = ACTION_META[entry.action] ?? {
     icon: '⚠',
     title: '高风险操作',
     tone: 'danger' as const,
   };
 
+  /**
+   * #1071 G7 P1（外部评审）：这里**不再**自持提交锁。此前 ActionCard 自己拿一个
+   * `submitting` state 当闸门，而它从不在失败时释放——resolve 失败、卡片被回滚成
+   * pending 后，这张卡永久点不动；同时它与下面 HermesConfirmBar 内部的锁各管各的，
+   * 两把锁语义还不一致（bar 的锁认 Promise，这张的锁只认点击）。
+   * 现在唯一的锁在 HermesConfirmBar.resolveOnce（ref + state），本组件只做 id 映射，
+   * 并把 Promise 原样 return 上去，由 bar 决定失败时是否解锁。
+   */
   const handleResolve = (
     choice: HermesConfirmChoice,
     rememberMode?: 'session' | 'always' | null
   ) => {
-    if (submitting) return;
-    setSubmitting(choice);
-    if (choice === 'deny') onResolve('cancel');
-    else if (choice === 'session') onResolve('confirm', 'session');
-    else if (choice === 'always') onResolve('confirm', 'always');
-    else onResolve(choice, rememberMode ?? null);
+    if (choice === 'deny') return onResolve('cancel');
+    if (choice === 'session') return onResolve('confirm', 'session');
+    if (choice === 'always') return onResolve('confirm', 'always');
+    return onResolve(choice, rememberMode ?? null);
   };
 
   const dangerAccent = meta.tone === 'danger' ? '#c0392b' : 'rgba(0,0,0,.12)';

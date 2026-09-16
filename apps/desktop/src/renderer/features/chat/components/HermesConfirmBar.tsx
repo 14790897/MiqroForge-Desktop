@@ -25,7 +25,16 @@ export type HermesConfirmChoice = 'confirm' | 'session' | 'always' | 'deny' | 'm
 interface HermesConfirmBarProps {
   /** 主按钮文案（开始执行 / 确认上传 / 确认执行…） */
   runLabel: string;
-  onResolve: (choice: HermesConfirmChoice, rememberMode?: 'session' | 'always' | null) => void;
+  /**
+   * #1071 G7 P1（外部评审）：允许返回 Promise，进而在失败时释放提交锁。
+   * 约定与 PlanCard.resolveOnce 一致——`false` = 调用方已回滚（卡片会被重挂成
+   * pending）、抛错 / rejected = 提交失败；两者都解锁让用户重试。
+   * 成功（`true` / `undefined`）保持上锁到卡片消失，防重复提交。
+   */
+  onResolve: (
+    choice: HermesConfirmChoice,
+    rememberMode?: 'session' | 'always' | null
+  ) => void | Promise<boolean | void>;
   /** 外部 busy（如后端已受理、卡片即将关闭）——禁用所有按钮 */
   busy?: boolean;
   /** 主条色调：accent（计划/普通确认）| danger（危险动作——删除/支付） */
@@ -78,6 +87,48 @@ export function HermesConfirmBar({
   // Hermes 新版对齐：无档位时隐藏下拉与分隔线（hasMoreOptions）
   const hasMoreOptions = allowSession || allowAlways;
 
+  /**
+   * #1071 G7 P1（外部评审）：提交锁用 ref 而不是只靠 state——同一 tick 内连点
+   * 两次时 React 还没重渲染，闭包里的 `submitting` 仍是 null，只有 ref 能同步
+   * 拦住第二次；state 只负责按钮 disabled / Loader 显示。
+   */
+  const submitLockRef = useRef(false);
+
+  /** 解锁：onResolve 失败后按钮恢复可点，用户拿回重试路径。 */
+  const releaseSubmitLock = () => {
+    submitLockRef.current = false;
+    setSubmitting(null);
+  };
+
+  /**
+   * 一次性放行：**所有** onResolve 调用点都走这里（主按钮 / 下拉三档 / Esc /
+   * Ctrl⏎ / always 二次确认弹窗）。
+   *
+   * 背景（外部评审 P1）：resolve 失败时 UserInputContext.resolve 会把卡片回滚成
+   * pending、按钮重新可点，但组件实例里的 ref/state 还锁着——不同步释放就是
+   * `busyNow` 永久为真、按钮永久 disabled，用户失去重试路径。失败有两种形态，
+   * 都接：
+   *   ① onResolve 抛错 / 返回 rejected Promise；
+   *   ② onResolve 正常返回 false（resolve 内部回滚后的返回值约定）。
+   * 成功（返回 undefined/true）保持上锁，防重复提交。
+   */
+  const resolveOnce = (
+    choice: HermesConfirmChoice,
+    rememberMode?: 'session' | 'always' | null
+  ) => {
+    if (submitLockRef.current) return;
+    submitLockRef.current = true;
+    setSubmitting(choice);
+    void (async () => {
+      try {
+        const delivered = await onResolve(choice, rememberMode);
+        if (delivered === false) releaseSubmitLock();
+      } catch {
+        releaseSubmitLock();
+      }
+    })();
+  };
+
   const respond = (choice: HermesConfirmChoice) => {
     if (busyNow) return;
     if (choice === 'always') {
@@ -86,8 +137,7 @@ export function HermesConfirmBar({
       setConfirmAlways(true);
       return;
     }
-    setSubmitting(choice);
-    onResolve(choice);
+    resolveOnce(choice);
   };
 
   // Ctrl/⌘+Enter → run；Esc → deny。always Dialog 打开时键盘让位（Esc 关 Dialog）。
@@ -116,8 +166,7 @@ export function HermesConfirmBar({
         event.preventDefault();
         event.__miqiResolved = true;
         if (!busyRef.current) {
-          setSubmitting('confirm');
-          onResolve('confirm');
+          resolveOnce('confirm');
         }
       } else if (event.key === 'Escape') {
         if (editing) return; // 输入框 Esc 不拒绝
@@ -125,8 +174,7 @@ export function HermesConfirmBar({
         event.preventDefault();
         event.__miqiResolved = true;
         if (!busyRef.current) {
-          setSubmitting('deny');
-          onResolve('deny');
+          resolveOnce('deny');
         }
       }
     };
@@ -199,10 +247,7 @@ export function HermesConfirmBar({
               >
                 {allowSession && (
                   <DropdownMenu.Item
-                    onSelect={() => {
-                      setSubmitting('session');
-                      onResolve('session');
-                    }}
+                    onSelect={() => resolveOnce('session')}
                     className="cursor-pointer rounded-md px-2.5 py-1.5 text-xs outline-none hover:bg-[#f0f2f5]"
                   >
                     本会话允许
@@ -217,10 +262,7 @@ export function HermesConfirmBar({
                   </DropdownMenu.Item>
                 )}
                 <DropdownMenu.Item
-                  onSelect={() => {
-                    setSubmitting('deny');
-                    onResolve('deny');
-                  }}
+                  onSelect={() => resolveOnce('deny')}
                   className="cursor-pointer rounded-md px-2.5 py-1.5 text-xs outline-none hover:bg-[#fdf0ef]"
                   style={{ color: '#d64545' }}
                 >
@@ -345,8 +387,7 @@ export function HermesConfirmBar({
               <button
                 onClick={() => {
                   setConfirmAlways(false);
-                  setSubmitting('always');
-                  onResolve('always');
+                  resolveOnce('always');
                 }}
                 className="rounded-md px-3 py-1.5 text-xs font-medium cursor-pointer"
                 style={{
