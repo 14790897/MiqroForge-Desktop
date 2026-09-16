@@ -40,6 +40,15 @@ import { type ExecutionPolicy } from '../../components/ExecutionPolicySelector';
 import { type ReasoningMode } from './components/ReasoningModeSwitch';
 import { clampPanelWidth, createPanelWindowSync } from './panelWindowSync';
 import {
+  MODE_SCENES,
+  SKILL_ORDER,
+  SKILL_SCENE_ICON,
+  SKILL_SCENE_TITLE,
+  SKILL_STARTERS,
+  type StarterTask,
+  type WelcomeMode,
+} from './welcomeScenes';
+import {
   Send,
   Loader2,
   Copy,
@@ -54,7 +63,9 @@ import {
   Eye,
   GitMerge,
   ChevronDown,
+  ChevronLeft,
   ChevronRight,
+  ChevronUp,
   ArrowDown,
   Pencil,
   BookOpen,
@@ -2517,6 +2528,32 @@ const TURN_TERMINAL_GRACE_MS = 500;
 // 常驻免责声明文案（#836）—— 法务/产品最终确认后替换；后续接入 i18n 时可迁移
 const CHAT_DISCLAIMER_ZH = 'AI 生成内容仅供参考，可能存在错误，请自行核实关键信息';
 
+// issue #962：三张模式卡映射到两档推理模式（日常任务与代码任务都走 think）。反向回写时
+// think 一律落到中间那张卡，与旧行为一致（原来中间那张是「深度研究」）。
+const WELCOME_MODE_REASONING: Record<WelcomeMode, ReasoningMode> = {
+  fast: 'fast',
+  daily: 'think',
+  code: 'think',
+};
+const reasoningModeToWelcome = (m: ReasoningMode): WelcomeMode =>
+  m === 'think' ? 'daily' : 'fast';
+/**
+ * 从 reasoningMode 反推选中卡时要防一个歧义：日常任务与代码任务都映射 think，光看
+ * reasoningMode 分不出用户想要哪张卡。已经停在「代码任务」时就别把它顶掉——否则在
+ * 输入条切一次「深度研究」，代码卡会悄悄变成日常任务，代码模式独有的「内置技能」
+ * 入口也跟着消失（#962 CodeRabbit）。
+ * 原来那条「切到 fast 却还高亮代码卡」的问题不受影响：m === 'fast' 时照样落到 fast。
+ *
+ * **只用于「同一会话内切 reasoningMode」这条路径。** 会话边界（sessionKey 变化）不能
+ * 用它：那里的语义正好相反——reasoningMode 只有 fast/think 两态，而选中卡有三态，
+ * daily ─┐
+ *        ├─→ think   // 不可逆，反推不出来
+ * code  ─┘
+ * 带上 prev 只会把上个会话的 code 泄漏进新的空会话（#962 评审 P1）。
+ */
+const resolveWelcomeMode = (prev: WelcomeMode, m: ReasoningMode): WelcomeMode =>
+  m === 'think' && prev === 'code' ? 'code' : reasoningModeToWelcome(m);
+
 export function ChatConsole({
   sessionKey = DEFAULT_SESSION,
   loadTrigger,
@@ -2677,16 +2714,150 @@ export function ChatConsole({
       // ignore
     }
   }, [reasoningMode]);
-  // EB-1 欢迎页模式卡选中态：独立于 reasoningMode（深度研究与代码任务都映射 think，
+  // EB-1 欢迎页模式卡选中态：独立于 reasoningMode（日常任务与代码任务都映射 think，
   // 若用 reasoningMode 推导会同时高亮两张卡）。welcomeMode 是组件级 state，跨会话
   // 不随欢迎页重挂而重置（ChatConsole 常驻），见下方 sessionKey effect。
-  const [welcomeMode, setWelcomeMode] = useState<'fast' | 'think' | 'code'>(
-    reasoningMode === 'think' ? 'think' : 'fast'
+  const [welcomeMode, setWelcomeMode] = useState<WelcomeMode>(
+    reasoningMode === 'think' ? 'daily' : 'fast'
   );
-  const selectWelcomeMode = (k: 'fast' | 'think' | 'code') => {
+  const selectWelcomeMode = (k: WelcomeMode) => {
     setWelcomeMode(k);
-    setReasoningMode(k === 'code' ? 'think' : k);
+    setReasoningMode(WELCOME_MODE_REASONING[k]);
   };
+  // issue #962 起点任务：三层渐进选择（模式 → 子项目 → 子子项目）。未选时是 null，
+  // 这样"点了子项目才冒出子子项目行、点了子子项目才显示详细内容"的渐进流程才成立。
+  //
+  // 存的是「身份」（title）而不是下标：「内置技能」是 skills.list() 回来之后才插到
+  // welcomeScenes 最前面的，用下标的话整个列表被挤位一格，用户先选好的场景/任务会
+  // 悄悄指到隔壁去（#962 评审 P1：异步 prepend + index state 的状态不一致）。
+  // title 在数据里唯一，welcomeScenes.test.ts 守着这条约束，所以当身份用是稳的；
+  // 将来数据动态化/本地化时，把它换成显式 id 即可（见该文件头部说明）。
+  const [pickedSceneTitle, setPickedSceneTitle] = useState<string | null>(null);
+  const [pickedTaskTitle, setPickedTaskTitle] = useState<string | null>(null);
+  // issue #962：代码任务的子项目里额外挂一项「内置技能」，内容来自 skills.list()，
+  // 但只上架 SKILL_ORDER 白名单里的几个（首屏不铺开全部内置技能），拿不到就整项不显示。
+  const [builtinSkillTasks, setBuiltinSkillTasks] = useState<readonly StarterTask[]>([]);
+  useEffect(() => {
+    let cancelled = false;
+    const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+    void (async () => {
+      // 两种失败都退避重试：
+      //   ① 直接抛（桥还没起来）；
+      //   ② **回了个空清单**（桥起来了、但技能索引还没建好）—— 这个尤其阴：不抛错，
+      //      看起来就像"这台机器没装技能"，而 effect 只在挂载 / loadTrigger 变化时跑，
+      //      一旦静默失败，「内置技能」这一项就整场会话都不出现。
+      //      e2e 并行起多个 app 时能稳定复现这种空清单。
+      const LAST = 9;
+      for (let attempt = 0; attempt <= LAST; attempt++) {
+        try {
+          const res = await window.miqi.skills.list();
+          if (cancelled) return;
+          const byName = new Map(
+            (res?.skills ?? [])
+              // 这里是纯字符串匹配，而 Windows 上 skills.list() 回的是反斜杠路径
+              // （Python 侧 str(Path)），只写 '/kwp/' 在 Windows 上一条都匹配不上。
+              .filter(
+                (s) => s.source === 'builtin' && !s.path.replace(/\\/g, '/').includes('/kwp/')
+              )
+              .map((s) => [s.name, s] as const)
+          );
+          // 顺序与上架范围都以 SKILL_ORDER 为准：技能清单本身来自文件系统，顺序不稳定，
+          // 而且没装的技能不该在首屏留空位。
+          const tasks = SKILL_ORDER.map((name) =>
+            byName.has(name) ? (SKILL_STARTERS[name] ?? null) : null
+          ).filter((t): t is StarterTask => t !== null);
+
+          if (tasks.length > 0) {
+            setBuiltinSkillTasks(tasks);
+            return;
+          }
+          // 空清单：本轮先不上架，退避后再试；最后一次仍为空才认（可能真的没装）
+          if (attempt === LAST) return;
+        } catch (e) {
+          if (cancelled) return;
+          if (attempt === LAST) {
+            console.warn('[MiQroForge] skills.list() 连续失败，「内置技能」入口本次会话不显示', e);
+            return;
+          }
+        }
+        await sleep(400 * (attempt + 1));
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // 依赖 loadTrigger：App 在 bridge 变成 running 时会把 runtimeReadyKey +1（并顺手
+    // 预热技能索引），那一刻才是清单真正可用的时刻，重跑一次比在挂载时死磕更对症。
+    // 保留退避重试是因为「running」之后索引仍可能在建，会先回一个空清单。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loadTrigger]);
+  const welcomeScenes = useMemo(() => {
+    const base = MODE_SCENES[welcomeMode];
+    if (welcomeMode !== 'code' || builtinSkillTasks.length === 0) return base;
+    return [
+      // 内置技能排在最前（产品要求）：它是"开箱即用"的入口，优先级高于场景模板
+      { title: SKILL_SCENE_TITLE, icon: SKILL_SCENE_ICON, tasks: builtinSkillTasks },
+      ...base,
+    ];
+  }, [welcomeMode, builtinSkillTasks]);
+  // 空态欢迎页（起点任务只在这里出现，有消息后胶囊与详细内容都应消失）
+  const isWelcomeEmpty = messages.length === 0;
+  // 子项目 chips 行的横向翻页（两侧箭头）
+  const sceneChipsRef = useRef<HTMLDivElement>(null);
+  // 到边就把箭头置灰（#962 评审 P3）：能滚多远取决于内容宽度，只能实时量。
+  const [chipScroll, setChipScroll] = useState({ left: false, right: false });
+  const syncChipScroll = useCallback(() => {
+    const el = sceneChipsRef.current;
+    if (!el) return;
+    setChipScroll({
+      left: el.scrollLeft > 1,
+      right: el.scrollLeft < el.scrollWidth - el.clientWidth - 1,
+    });
+  }, []);
+  // 换模式 / 技能清单回来会换掉整排 chips，容器宽度跟着变，重挂载后要重新量一次。
+  // 窗口缩放、资产面板开合同样会改宽度，但那两件事既不改 welcomeScenes 也不触发
+  // scroll——少了这一层，列变窄、chips 变得可滚了，右箭头却还停在 disabled 上，
+  // 后面的场景就点不到了（#962 CodeRabbit）。
+  useEffect(() => {
+    const el = sceneChipsRef.current;
+    syncChipScroll();
+    if (!el || typeof ResizeObserver === 'undefined') return;
+    const ro = new ResizeObserver(() => syncChipScroll());
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [welcomeScenes, syncChipScroll]);
+  const pickedScene =
+    pickedSceneTitle === null
+      ? null
+      : (welcomeScenes.find((s) => s.title === pickedSceneTitle) ?? null);
+  const pickedTask =
+    pickedScene && pickedTaskTitle !== null
+      ? (pickedScene.tasks.find((t) => t.title === pickedTaskTitle) ?? null)
+      : null;
+  // 传给 Composer 的清空回调必须引用稳定（Composer 是 memo 的，#1042），否则
+  // 每次 ChatConsole 渲染都会把 memo 打穿。
+  const clearStarterScene = useCallback(() => setPickedSceneTitle(null), []);
+  const clearStarterTask = useCallback(() => setPickedTaskTitle(null), []);
+  // 换模式 → 两层都清空；换子项目 → 只清子子项目。
+  useEffect(() => {
+    setPickedSceneTitle(null);
+    setPickedTaskTitle(null);
+  }, [welcomeMode]);
+  useEffect(() => {
+    setPickedTaskTitle(null);
+  }, [pickedSceneTitle]);
+  // 记下"这条任务的提示词是我填进去的"。撤销任务时（胶囊 ×、换 L2、换模式、换会话
+  // 都会走到）如果输入框里还是这段原文就一并清掉——否则 UI 显示「没选任务」、输入框
+  // 却留着整段 prompt，看着像 × 没生效（#962 评审 P2）。用户手动改过就不动，别误删。
+  const appliedTaskAskRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (pickedTask) return;
+    const ask = appliedTaskAskRef.current;
+    appliedTaskAskRef.current = null;
+    if (ask && composerRef.current?.getText().trim() === ask.trim()) {
+      composerRef.current.setText('');
+    }
+  }, [pickedTask]);
   // Composer 侧的推理模式切换(ReasoningModeSwitch / 建议提示)同样要同步 welcome
   // 卡高亮——否则空态下先选了「代码任务」再从输入条切 fast,welcomeMode 停在 code、
   // 发送却用 fast,高亮与真实模式不一致(CodeRabbit)。会话已有消息后 welcome 卡不
@@ -2698,7 +2869,7 @@ export function ChatConsole({
   const changeReasoningMode = useCallback(
     (m: ReasoningMode) => {
       setReasoningMode(m);
-      if (messages.length === 0) setWelcomeMode(m);
+      if (messages.length === 0) setWelcomeMode((prev) => resolveWelcomeMode(prev, m));
     },
     [messages.length]
   );
@@ -2709,8 +2880,20 @@ export function ChatConsole({
   // 却因中途切到 fast 而高亮与发送模式不一致（CodeRabbit）。仅随 sessionKey 触发，
   // 不在同一会话内用 reasoningMode 变化覆盖用户手动选卡。
   useEffect(() => {
-    setWelcomeMode(reasoningMode === 'think' ? 'think' : 'fast');
+    // 这里**必须**直接派生，不能走 resolveWelcomeMode —— 那个 prev 守卫只对
+    // 「同一会话内切 reasoningMode」成立，放到会话边界上就反了：daily 与 code 都映射
+    // think，带着 prev 走会把 A 会话的 code 泄漏进新的空会话（欢迎页仍高亮「代码任务」、
+    // 「内置技能」也跟着出现，而用户在新会话里可能想干的是日常任务）。这个 effect 的
+    // 本意就是「不沿用上个会话的 code 选择」，与守卫的方向正好相反（#962 评审 P1）。
+    setWelcomeMode(reasoningModeToWelcome(reasoningMode));
+    // develop 的会话代际：切会话时 +1，异步附件（FileReader / 剪贴板）提交前校验，
+    // 避免旧会话的附件落到新会话。
     sessionGenRef.current += 1;
+    // 会话换了就把起点任务的两层选择一起清掉。ChatConsole 是常驻组件，而上面那个
+    // [welcomeMode] 的清理只在模式真的变了时才跑——新会话如果还是 code，上个会话
+    // 的选中态和输入框胶囊就会跟着显示出来（#962 CodeRabbit）。
+    setPickedSceneTitle(null);
+    setPickedTaskTitle(null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionKey]);
   const [streaming, setStreaming] = useState(false);
@@ -4082,6 +4265,31 @@ export function ChatConsole({
           if (_inFlight.length > 0) merged.push(..._inFlight);
         }
         setMessages(merged);
+        // #956: the persisted history is the authoritative answer.  When it
+        // ends with a completed reply and nothing is in flight (no live send
+        // for this session, no progress-without-final cached while we were
+        // away), the switch-back "生成中" state must not survive — otherwise a
+        // folder session whose reply was restored from the bound workspace
+        // root keeps the send button stuck as "中断当前生成并发送" forever.
+        const _histEndsComplete = (() => {
+          for (let _i = uiMsgs.length - 1; _i >= 0; _i -= 1) {
+            const _m = uiMsgs[_i];
+            if (_m.role === 'user') return false; // last turn has no reply yet
+            if (_m.role === 'assistant' && String(_m.content ?? '').trim().length > 0) {
+              return true;
+            }
+          }
+          return false;
+        })();
+        const _cacheStillLive =
+          !!cached &&
+          cached.events.some((e) => e.type === 'progress') &&
+          !cached.events.some(
+            (e) => e.type === 'final' || e.type === 'error' || e.type === 'aborted'
+          );
+        if (_histEndsComplete && !streamingBySession.has(sessionKey) && !_cacheStillLive) {
+          setStreaming(false);
+        }
         // Snapshot is now reconciled into `merged` — clear it so a later
         // load() (loadTrigger refresh) doesn't re-append stale transient
         // progress on top of history.
@@ -4176,10 +4384,28 @@ export function ChatConsole({
 
   // Scroll to bottom: (a) unconditionally after opening a session,
   // (b) during streaming only if the user hasn't manually scrolled up.
+  // 空态（欢迎页）例外：它比可视区高，粘底会把品牌区顶出屏幕（issue #962 实测
+  // scrollTop 落在最大值，logo 与标题看不见）。进入空态时会有一整块 DOM 替换
+  // （「正在连接…」→ 欢迎页），浏览器的滚动锚定会把位置挪走且时机不定，所以这里
+  // 在随后两帧再钉一次顶部；之后不再干预，用户自己滚下去读「场景方案」不受影响。
+  // justOpened 不消费，留给第一条消息再触发一次粘底。
   useEffect(() => {
     if (!historyLoaded) return;
     const el = scrollRef.current;
     if (!el) return;
+    if (messages.length === 0) {
+      el.scrollTop = 0;
+      userScrolledUp.current = false;
+      const pin = () => {
+        if (scrollRef.current) scrollRef.current.scrollTop = 0;
+      };
+      const raf = requestAnimationFrame(pin);
+      const timer = window.setTimeout(pin, 250);
+      return () => {
+        cancelAnimationFrame(raf);
+        window.clearTimeout(timer);
+      };
+    }
     if (justOpened.current) {
       justOpened.current = false;
       el.scrollTop = el.scrollHeight + el.clientHeight; // clamped to max
@@ -7503,6 +7729,8 @@ export function ChatConsole({
                         'radial-gradient(closest-side, var(--accent-soft), transparent 72%)',
                     }}
                   />
+                  {/* 品牌区维持原来的两层竖排（56px 方块 + 30px 标题）。此前为压缩空态高度
+                      改成过一行 lockup，按产品意见改回——代价是空态内容高约 +86px。 */}
                   <div
                     className="relative w-14 h-14 rounded-2xl flex items-center justify-center shadow-sm"
                     style={{
@@ -7533,11 +7761,11 @@ export function ChatConsole({
                         desc: '即时回答问题、改少量代码，低延迟优先。',
                       },
                       {
-                        key: 'think' as const,
-                        icon: '🧠',
-                        tag: '深度研究',
-                        tagline: '面向复杂任务',
-                        desc: '长链路检索、推理与方案推演，先想后答。',
+                        key: 'daily' as const,
+                        icon: '📋',
+                        tag: '日常任务',
+                        tagline: '面向日常办公',
+                        desc: '文档、表格、邮件、幻灯片等日常事务，说清需求就交付。',
                       },
                       {
                         key: 'code' as const,
@@ -7553,13 +7781,18 @@ export function ChatConsole({
                           key={m.key}
                           type="button"
                           onClick={() => selectWelcomeMode(m.key)}
-                          className={`flex-1 flex flex-col items-center gap-[5px] rounded-xl px-3 py-3 cursor-pointer transition-colors duration-200 border min-h-[132px] ${
+                          className={`flex-1 flex flex-col items-center gap-[5px] rounded-xl px-3 py-3 cursor-pointer transition-colors duration-200 border min-h-[108px] ${
                             active ? 'border-[var(--accent)]' : 'border-[var(--border-subtle)]'
                           } hover:border-[var(--accent)]`}
                           style={{
+                            // 选中卡：底色自上而下由浅入深（底部更浓），配合描边与淡投影
+                            // 让"已选中"在余光里也能看出来。
                             background: active
-                              ? 'color-mix(in srgb, var(--surface) 92%, var(--accent-soft))'
+                              ? 'linear-gradient(to bottom, color-mix(in srgb, var(--surface) 84%, var(--accent-soft)), color-mix(in srgb, var(--surface) 60%, var(--accent-soft)))'
                               : 'var(--surface)',
+                            boxShadow: active
+                              ? '0 2px 10px color-mix(in srgb, var(--accent) 16%, transparent)'
+                              : undefined,
                           }}
                         >
                           <span
@@ -7569,22 +7802,188 @@ export function ChatConsole({
                             <span className="text-[15px]">{m.icon}</span>
                             {m.tag}
                           </span>
-                          <span className="text-[11px] text-text-faint">{m.tagline}</span>
+                          {/* ✓ 仅 active 渲染:opacity 隐藏会让文本留在 DOM,
+                              toContainText 断言不了"取消选中"。并进 tagline 这一行而不是
+                              单独占一行（未选中的卡原本也要为它预留 18px 占位高度，
+                              实测卡片 132 → 108px）；选中态另靠更重的底纹 + 描边 + 淡投影。 */}
+                          <span className="flex items-center gap-1.5 text-[11px] text-text-faint">
+                            <span>{m.tagline}</span>
+                            {active && (
+                              <span className="font-bold" style={{ color: 'var(--accent)' }}>
+                                ✓ 已选择
+                              </span>
+                            )}
+                          </span>
                           <span className="text-[11.5px] text-text-muted leading-snug">
                             {m.desc}
                           </span>
-                          {/* ✓ 仅 active 渲染:opacity 隐藏会让文本留在 DOM,
-                              toContainText 断言不了"取消选中"。占位 div 保持底部对齐。 */}
-                          <div
-                            className="mt-auto flex items-center justify-center"
-                            style={{ minHeight: 16, color: 'var(--accent)' }}
-                          >
-                            {active && <span className="text-[11px] font-bold">✓ 已选择</span>}
-                          </div>
                         </button>
                       );
                     })}
                   </div>
+                  {/* issue #962 起点任务：两级子选项——左栏场景（L2，上下滚动），右栏
+                      该场景下的任务（L3，每条带一句详情）。点任务填入输入框并聚焦。 */}
+                  {/* 起点任务（对齐 WorkBuddy）：子选项从 148px 左栏压成一行横向 chips，
+                      贴在输入框上方；任务列表与「场景方案」移到它上面。原来的双栏面板
+                      固定 268~320px，是空态首屏溢出的最大来源。 */}
+                  {/* issue #962 起点任务（三层渐进，按产品描述）：
+                      ① 点三大项 → 子项目横排一行，右侧箭头翻页；
+                      ② 点子项目 → 它变成输入框里的可移除胶囊，同时冒出它的子子项目行；
+                      ③ 点子子项目 → 详细内容显示在输入框里。
+                      原来的 268px 双栏面板被这两行 chips 取代——它正是空态溢出的最大来源。 */}
+                  <div
+                    data-testid="welcome-starters"
+                    aria-label="起点任务"
+                    className="relative w-full max-w-[560px] flex items-center gap-1.5"
+                  >
+                    <button
+                      type="button"
+                      aria-label="上一组子项目"
+                      disabled={!chipScroll.left}
+                      onClick={() =>
+                        sceneChipsRef.current?.scrollBy({ left: -170, behavior: 'smooth' })
+                      }
+                      className="starter-chip shrink-0 w-7 h-7 flex items-center justify-center rounded-full cursor-pointer text-text-faint hover:text-[var(--text)] disabled:opacity-35 disabled:cursor-default disabled:pointer-events-none"
+                      style={{ border: '1px solid transparent' }}
+                    >
+                      <ChevronLeft size={13} />
+                    </button>
+                    <div
+                      key={welcomeMode}
+                      ref={sceneChipsRef}
+                      // 藏掉横向滚动条（两侧箭头就是它的替代物）：webkit 伪元素 + 标准属性各写一份。
+                      // py-3/-my-3 是给阴影留的余地：overflow-x 一旦不是 visible，overflow-y 会被
+                      // 算成 auto，chips 的 ring 与投影上下都会被这个滚动容器直接裁掉（#962 反馈
+                      // 「上下框子看不见」）；拿负 margin 把多出来的 24px 抵回去，布局高度不变。
+                      className="flex-1 min-w-0 flex items-center gap-1.5 overflow-x-auto scroll-smooth py-3 -my-3 [&::-webkit-scrollbar]:hidden"
+                      onScroll={syncChipScroll}
+                      style={{
+                        animation: 'welcome-chips-in 220ms ease-out',
+                        scrollbarWidth: 'none',
+                      }}
+                    >
+                      {welcomeScenes.map((s) => {
+                        const on = s.title === pickedSceneTitle;
+                        return (
+                          <button
+                            key={s.title}
+                            type="button"
+                            onClick={() => setPickedSceneTitle(on ? null : s.title)}
+                            aria-pressed={on}
+                            className={cn(
+                              'starter-chip flex items-center gap-2 shrink-0 rounded-full px-4 py-2 text-[13px] cursor-pointer',
+                              on ? 'font-semibold' : 'text-text-muted hover:text-[var(--text)]'
+                            )}
+                            style={{
+                              // 底色与描边都交给 .starter-chip（表面色 + ring + 投影），
+                              // 这里只留 1px 透明边占住原来 border 的布局宽度，选中时不跳尺寸。
+                              border: '1px solid transparent',
+                              color: on ? 'var(--text)' : undefined,
+                            }}
+                          >
+                            <span
+                              className="shrink-0 text-[12px] leading-none"
+                              style={on ? undefined : { opacity: 0.55, filter: 'saturate(0.45)' }}
+                            >
+                              {s.icon}
+                            </span>
+                            {s.title}
+                          </button>
+                        );
+                      })}
+                    </div>
+                    <button
+                      type="button"
+                      aria-label="下一组子项目"
+                      disabled={!chipScroll.right}
+                      onClick={() =>
+                        sceneChipsRef.current?.scrollBy({ left: 170, behavior: 'smooth' })
+                      }
+                      className="starter-chip shrink-0 w-7 h-7 flex items-center justify-center rounded-full cursor-pointer text-text-faint hover:text-[var(--text)] disabled:opacity-35 disabled:cursor-default disabled:pointer-events-none"
+                      style={{ border: '1px solid transparent' }}
+                    >
+                      <ChevronRight size={13} />
+                    </button>
+                  </div>
+
+                  {/* 子子项目：换成**可展开的卡片**（#962 反馈：只靠大小区分不够）。
+                      层级感来自"控件类型变了"——L2 是横排 chips，L3 是纵列的带 ⌄ 卡片，
+                      对齐 WorkBuddy 第三层的做法；展开后直接看到提示词与任务详情。 */}
+                  {pickedScene && (
+                    <div
+                      key={`${welcomeMode}-${pickedSceneTitle}`}
+                      className="relative w-full max-w-[560px] flex flex-col gap-1.5 pl-4"
+                      style={{
+                        animation: 'welcome-chips-in 220ms ease-out',
+                        // 这条竖线只是把 L3 归到选中的 L2 名下，跟卡片一样走中性灰（#962：所有都灰）
+                        borderLeft: '2px solid color-mix(in srgb, var(--text) 14%, transparent)',
+                      }}
+                    >
+                      {pickedScene.tasks.map((t) => {
+                        const open = t.title === pickedTaskTitle;
+                        return (
+                          <div
+                            key={t.title}
+                            data-open={open ? '' : undefined}
+                            className="starter-card rounded-lg overflow-hidden text-left"
+                            style={{ border: '1px solid transparent' }}
+                          >
+                            <button
+                              type="button"
+                              onClick={() => {
+                                if (open) {
+                                  setPickedTaskTitle(null);
+                                  return;
+                                }
+                                setPickedTaskTitle(t.title);
+                                // 展开的同时把提示词放进输入框（#962 反馈：详细的提示信息
+                                // 得在对话框里）。用替换而不是追加，连点不会堆成一长串。
+                                // #1021/#1042 之后 input state 住在 Composer 里，只能走 ref 写。
+                                appliedTaskAskRef.current = t.ask;
+                                composerRef.current?.setText(t.ask);
+                                composerRef.current?.focus();
+                              }}
+                              aria-expanded={open}
+                              className="w-full flex items-center gap-2 px-3 py-2 text-left text-[12.5px] leading-snug cursor-pointer transition-colors duration-150"
+                              style={{
+                                color: open ? 'var(--text)' : 'var(--text-muted)',
+                                fontWeight: open ? 600 : 400,
+                              }}
+                            >
+                              <span className="shrink-0 text-[12px] leading-none">{t.icon}</span>
+                              <span className="flex-1 truncate">{t.title}</span>
+                              <span className="shrink-0" style={{ color: 'var(--text-faint)' }}>
+                                {open ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
+                              </span>
+                            </button>
+                            {open && (
+                              <div
+                                className="px-3 pb-3 flex flex-col gap-2.5"
+                                style={{ borderTop: '1px solid var(--border-subtle)' }}
+                              >
+                                {(
+                                  [
+                                    ['适用场景', t.scenario],
+                                    ['你会得到', t.deliverable],
+                                    ['需要你提供', t.needs],
+                                  ] as const
+                                ).map(([label, value]) => (
+                                  <div key={label} className="flex flex-col gap-0.5">
+                                    <span className="text-[10.5px] font-semibold tracking-wide text-text-faint">
+                                      {label}
+                                    </span>
+                                    <span className="text-[12px] leading-[1.7] text-text-muted">
+                                      {value}
+                                    </span>
+                                  </div>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
                 </div>
               ) : (
                 chatGroups.map((group, i) =>
@@ -8007,6 +8406,12 @@ export function ChatConsole({
                 onAttachClick={handleAttachClick}
                 onSubmit={handleComposerSubmit}
                 onAbort={handleAbort}
+                // #962 起点任务胶囊：只在空态显示；过条件而不是传 isWelcomeEmpty，
+                // 是因为 Composer 只需要「画不画这颗胶囊」，不需要知道消息数量。
+                starterScene={isWelcomeEmpty ? pickedScene : null}
+                starterTask={isWelcomeEmpty ? pickedTask : null}
+                onClearStarterScene={clearStarterScene}
+                onClearStarterTask={clearStarterTask}
                 onPasteClipboard={pasteClipboardFiles}
                 attachmentSlotRef={setAttachmentSlot}
               />
