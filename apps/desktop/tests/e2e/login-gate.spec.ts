@@ -84,6 +84,19 @@ async function gotoQraftTab(page: Page): Promise<void> {
     .click();
 }
 
+/**
+ * 「退出应用」→ 确认。确认点击即关窗，Playwright 可能在点击动作收尾前
+ * 看到页面销毁（Target page ... has been closed）——这是预期路径，吞掉该
+ * 报错即可；进程是否真的结束由调用方的 `waitForEvent('close')` 断言。
+ */
+async function quitViaDialog(page: Page): Promise<void> {
+  await page.getByTestId('login-step-quit').click();
+  await page
+    .getByTestId('login-step-quit-confirm')
+    .click({ timeout: 10_000 })
+    .catch(() => {});
+}
+
 let storePath: string;
 
 test.describe.serial('登录门（#1095）', () => {
@@ -162,8 +175,7 @@ test.describe.serial('登录门（#1095）', () => {
 
       // 确认退出：走主进程 app.quit()，进程结束（macOS 上 window.close 不退出）
       const closed = electronApp.waitForEvent('close', { timeout: 30_000 }).catch(() => null);
-      await page.getByTestId('login-step-quit').click();
-      await page.getByTestId('login-step-quit-confirm').click();
+      await quitViaDialog(page);
       expect(await closed).not.toBeNull();
     }
   );
@@ -180,8 +192,7 @@ test.describe.serial('登录门（#1095）', () => {
 
     // 退出应用，为下一条（预置登录态）让路
     const closed = electronApp.waitForEvent('close', { timeout: 30_000 }).catch(() => null);
-    await page.getByTestId('login-step-quit').click();
-    await page.getByTestId('login-step-quit-confirm').click();
+    await quitViaDialog(page);
     expect(await closed).not.toBeNull();
   });
 
