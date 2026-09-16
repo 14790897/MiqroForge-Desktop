@@ -29,7 +29,10 @@ const STREAM_MARKER = 'FRAMEGUARD';
 
 // Stream long enough that the crash always lands mid-stream, and leave enough
 // deltas after the crash for the forwarding path to be exercised.
-const DELTA_COUNT = 900;
+// 1800×50ms=90s：CI（慢 runner）上"预算预支"的 3 次崩溃-重载 + 15s 观测窗
+// 会把 45s 版的长流整段吃掉（实测 25213773 的 electron-e2e：finished 0→1，
+// afterWait.finished 断言挂）——流必须覆盖含预支在内的完整时间线。
+const DELTA_COUNT = 1800;
 const DELTA_INTERVAL_MS = 50;
 
 interface MockStream {
