@@ -119,7 +119,11 @@ def test_guard_different_threads_each_prompt():
 
 
 def test_guard_payload_contract_declares_scope():
-    """卡面明示义务：message 写明同类动作不再逐一询问；记忆选择仍为 False。"""
+    """卡面明示义务：message 写明同类动作不再逐一询问；记忆选择仍为 False。
+
+    #1071 评审 P2-b：卡面还必须写明「对什么执行」——只给 tool_name 等于让用户
+    闭眼确认。具体目标从 ctx.arguments 通用提取（路径/目的地/文件名/大小）。
+    """
     seen = []
 
     async def resolver(payload):
@@ -127,10 +131,42 @@ def test_guard_payload_contract_declares_scope():
         return {"status": "submitted", "answers": {"choice_id": "cancel"}}
 
     engine = PermissionEngine(action_guard_resolver=resolver)
-    asyncio.run(engine.check(_ctx("upload", {"path": "x"})))
+    asyncio.run(
+        engine.check(
+            _ctx(
+                "upload",
+                {
+                    "path": "outputs/mof-report.json",
+                    "destination": "MiqroForge",
+                    "size_bytes": 2048,
+                },
+            )
+        )
+    )
     assert len(seen) == 1
-    assert "不再逐一询问" in seen[0]["message"]
+    message = seen[0]["message"]
+    assert "不再逐一询问" in message
+    # 安全相关参数出现在卡面（而非只有 tool_name）
+    assert "outputs/mof-report.json" in message
+    assert "MiqroForge" in message
+    assert "2048" in message
     assert seen[0]["allow_remember_choice"] is False
+
+
+def test_guard_payload_message_falls_back_without_arguments():
+    """无可提取参数时退回原文案（不留空括号，不改既有语义）。"""
+    seen = []
+
+    async def resolver(payload):
+        seen.append(payload)
+        return {"status": "submitted", "answers": {"choice_id": "cancel"}}
+
+    engine = PermissionEngine(action_guard_resolver=resolver)
+    asyncio.run(engine.check(_ctx("delete_dir", {})))
+    assert seen[0]["message"] == (
+        "模型请求执行高危动作：delete_dir。确认后才真正执行。"
+        "（确认后本对话内同类动作将不再逐一询问）"
+    )
 
 
 def test_guard_confirmed_cache_capped_at_512():

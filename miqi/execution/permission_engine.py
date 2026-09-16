@@ -66,6 +66,38 @@ def _format_manual_hint(tool_name: str, arguments: dict) -> str:
     return tool_name
 
 
+# P2-b（#1071 评审）：Action Guard 卡面原本只有 tool_name，用户看不到「对什么执行」
+# 就等于闭眼确认。这里按通用 key-name 取安全相关字段（不枚举具体工具），拼进 message。
+# 取不到任何字段时返回 ""，调用方退回原文案——本函数不影响任何判定逻辑。
+_SAFETY_ARG_KEYS: tuple[str, ...] = (
+    "path", "file_path", "filepath", "filename", "file_name", "file", "files",
+    "destination", "dest", "dst", "source", "src", "target", "url", "uri",
+    "command", "cmd", "size", "size_bytes", "bytes", "recursive", "dir", "directory",
+)
+_MAX_SAFETY_ARG_VALUE = 80
+_MAX_SAFETY_ARG_SUMMARY = 200
+
+
+def _safety_arg_summary(arguments: Any) -> str:
+    if not isinstance(arguments, dict) or not arguments:
+        return ""
+    lowered: dict[str, Any] = {}
+    for key, value in arguments.items():
+        lowered.setdefault(str(key).lower(), value)
+    parts: list[str] = []
+    for key in _SAFETY_ARG_KEYS:
+        value = lowered.get(key)
+        if value is None or value == "" or value is False:
+            continue
+        if isinstance(value, (dict, list, tuple, set)):
+            # 复合值只留个形状（截断），避免把整个 payload 刷到卡面
+            value = str(value)[:_MAX_SAFETY_ARG_VALUE]
+        else:
+            value = str(value)[:_MAX_SAFETY_ARG_VALUE]
+        parts.append(f"{key}={value}")
+    return "；".join(parts)[:_MAX_SAFETY_ARG_SUMMARY]
+
+
 class PermissionVerdict(str, Enum):
     ALLOW = "allow"
     DENY = "deny"
@@ -185,11 +217,17 @@ class PermissionEngine:
                 description=f"危险动作确认 · {ctx.tool_name}",
                 allow_permanent=False,
             )
+        # P2-b（#1071 评审）：附上安全相关参数，避免用户「闭眼确认」；取不到则退回原口径。
+        _hint = _safety_arg_summary(getattr(ctx, "arguments", None))
         try:
             result = await self.action_guard_resolver(
                 {
                     "title": "危险动作确认",
-                    "message": f"模型请求执行高危动作：{ctx.tool_name}。确认后才真正执行。（确认后本对话内同类动作将不再逐一询问）",
+                    "message": (
+                        f"模型请求执行高危动作：{ctx.tool_name}"
+                        + (f"（{_hint}）" if _hint else "")
+                        + "。确认后才真正执行。（确认后本对话内同类动作将不再逐一询问）"
+                    ),
                     "choices": [
                         {"id": "confirm", "label": "允许执行", "role": "confirm"},
                         {"id": "cancel", "label": "拒绝", "role": "cancel"},
