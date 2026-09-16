@@ -175,11 +175,20 @@ jobs:
         # if: always() —— flaky 用例既不会让 Playwright 失败、也不会让这一步失败，所以这一步
         # 只做一件事：把「重试才通过」的用例写进 job summary，并各发一条 warning 注解（#1107）。
         # 脚本自己捕所有异常、永不非 0 退出，能改变 job 结论的只有上一步的退出码。
-        # 报告缺失（测试没跑起来）或只是「跑了一半」（超时/取消时 Actions 先发 SIGINT，
-        # Playwright 会照常落一份部分报告）都会在摘要里明说，不会拿残缺数据报一个好看的
-        # flaky 0。
+        # 文件存在性检查：workflow 定义取自 base 分支，而 checkout 取 PR head（见上面的 ref），
+        # 所以本步合入 develop 之后，还没把 develop 并进自己分支的兄弟 PR 会拿到「有新步骤、
+        # 没有这个脚本」的组合 —— 那种情况下 node 以 MODULE_NOT_FOUND 退出 1，会把 E2E 全绿的
+        # job 判红。缺文件就跳过（分支同步 develop 后自动生效）。
+        # 报告缺失，或只是「跑了一半」（超时/取消时 Actions 先发 SIGINT，Playwright 收下后照常
+        # 落一份部分报告），或一条用例都没收集到，都会在摘要里明说 —— 不会拿残缺数据报一个
+        # 好看的 flaky 0。
         if: always()
-        run: node scripts/e2e-flaky-report.mjs
+        run: |
+          if [ -f scripts/e2e-flaky-report.mjs ]; then
+            node scripts/e2e-flaky-report.mjs
+          else
+            echo "跳过 flaky 汇总：checkout 里没有 scripts/e2e-flaky-report.mjs（该分支尚未同步 develop）"
+          fi
 
       - name: Upload Playwright report (E2E)
         if: failure()
@@ -304,8 +313,14 @@ jobs:
 
       - name: Summarize flaky E2E tests (macOS)
         # 与 Linux 侧同理（#1107）：retries=2 会把「首次失败、重试通过」的用例藏起来。
+        # 同样先检查脚本在不在 —— 见上面那段的说明。
         if: always()
-        run: node scripts/e2e-flaky-report.mjs
+        run: |
+          if [ -f scripts/e2e-flaky-report.mjs ]; then
+            node scripts/e2e-flaky-report.mjs
+          else
+            echo "跳过 flaky 汇总：checkout 里没有 scripts/e2e-flaky-report.mjs（该分支尚未同步 develop）"
+          fi
 
       - name: Upload Playwright report (macOS E2E)
         if: failure()

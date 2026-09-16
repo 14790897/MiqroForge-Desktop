@@ -45,14 +45,25 @@ function inlineCode(text) {
   return `${fence}${value}${fence}`;
 }
 
+/** Playwright 给每个 worker 硬注入 FORCE_COLOR=1，报告里的报错文本因此带 ANSI 颜色码。 */
+function stripAnsi(text) {
+  // eslint-disable-next-line no-control-regex
+  return String(text).replace(/\[[0-9;]*m/g, '');
+}
+
 /** 报错的 message 是多行的（Locator / Call log 之类），只取首行做归因线索。 */
 function firstLine(message) {
-  const line = String(message ?? '')
+  const line = stripAnsi(message ?? '')
     .split('\n')
     .map((l) => l.trim())
     .find((l) => l.length > 0);
   if (!line) return '';
   return line.length > MAX_ERROR_CHARS ? `${line.slice(0, MAX_ERROR_CHARS)}…` : line;
+}
+
+/** 用例标签：projectName 为空（config 没写 projects 时的隐式默认）就省掉前缀，别输出 `[]`。 */
+function label(entry) {
+  return entry.project ? `[${entry.project}] ` : '';
 }
 
 function formatDuration(ms) {
@@ -131,8 +142,12 @@ export function collectFlaky(report) {
  * interrupted。json reporter 只在 onEnd 落盘，而 Actions 在 timeout / cancel 时先发
  * SIGINT —— Playwright 收下后把运行标成 interrupted 并照常 onEnd，于是落盘的是一份部分
  * 报告。这种报告不能当成「一切正常」来读。
+ *
+ * 另外两种「一条都没跑起来」的形态也要认：报告里一条用例都没收集到（testMatch / project
+ * 改名、文件加载失败），以及 reporter 自己攒的 run 级 errors —— 这两种 stats 全是 0、看起来
+ * 最像「一切正常」。
  */
-function incompleteness(tests) {
+function incompleteness(report, tests) {
   let neverRan = 0;
   let interrupted = 0;
   for (const { test } of tests) {
@@ -140,7 +155,12 @@ function incompleteness(tests) {
     if (!results.length) neverRan++;
     else if (results.some((result) => result.status === 'interrupted')) interrupted++;
   }
-  return { neverRan, interrupted };
+  return {
+    neverRan,
+    interrupted,
+    noTests: tests.length === 0,
+    runErrors: (report?.errors || []).length,
+  };
 }
 
 function countLine(report, tests, flakyCount) {
@@ -161,14 +181,17 @@ function countLine(report, tests, flakyCount) {
 export function buildMarkdown(report) {
   const tests = collectTests(report);
   const flaky = flakyEntries(tests);
-  const { neverRan, interrupted } = incompleteness(tests);
+  const { neverRan, interrupted, noTests, runErrors } = incompleteness(report, tests);
+  const incomplete = neverRan || interrupted || noTests || runErrors;
   const rootDir = report?.config?.rootDir || process.cwd();
   const lines = [HEADING, '', countLine(report, tests, flaky.length), ''];
 
-  if (neverRan || interrupted) {
+  if (incomplete) {
     const detail = [
+      noTests ? '一条用例都没有被收集到' : '',
       neverRan ? `${neverRan} 条用例没有任何结果` : '',
       interrupted ? `${interrupted} 条被中断` : '',
+      runErrors ? `reporter 还报了 ${runErrors} 条 run 级错误` : '',
     ]
       .filter(Boolean)
       .join('、');
@@ -177,9 +200,7 @@ export function buildMarkdown(report) {
 
   if (!flaky.length) {
     lines.push(
-      neverRan || interrupted
-        ? '已经跑完的用例里没有「重试才通过」的。'
-        : '本次运行没有被重试掩盖的用例。'
+      incomplete ? '已经跑完的用例里没有「重试才通过」的。' : '本次运行没有被重试掩盖的用例。'
     );
     return lines.join('\n');
   }
@@ -188,7 +209,7 @@ export function buildMarkdown(report) {
   for (const entry of flaky) {
     // 路径按仓库根来写（与注解里的 file= 一致），方便直接拿去检索。
     const where = `${repoRelative(entry.file, rootDir)}:${entry.line}:${entry.column}`;
-    lines.push(`- ${inlineCode(`[${entry.project}] ${where} › ${entry.title}`)}`);
+    lines.push(`- ${inlineCode(`${label(entry)}${where} › ${entry.title}`)}`);
     for (const attempt of entry.attempts) {
       const suffix = attempt.error ? `：${inlineCode(attempt.error)}` : '';
       lines.push(`  - 第 ${attempt.retry + 1} 次尝试 ${attempt.status}${suffix}`);
@@ -212,13 +233,13 @@ export function buildAnnotations(report) {
     ];
     if (entry.column) props.push(`col=${entry.column}`);
     props.push(`title=${escapeProperty('Flaky E2E test')}`);
-    const message = `[${entry.project}] ${entry.title} — ${failures}（#1107）`;
+    const message = `${label(entry)}${entry.title} — ${failures}（#1107）`;
     return `::warning ${props.join(',')}::${escapeData(message)}`;
   });
 }
 
 /** Step Summary 由 Actions 注入到 GITHUB_STEP_SUMMARY（本地直接跑没有，就只打日志）。 */
-function emit(markdown, annotations) {
+export function emit(markdown, annotations) {
   const summaryPath = process.env.GITHUB_STEP_SUMMARY;
   if (summaryPath) {
     // 写不进摘要只影响可读性：这一步（以及 job）的成败不该由它决定。
