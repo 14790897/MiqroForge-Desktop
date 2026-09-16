@@ -263,10 +263,12 @@ def _tracked_persist_target(
     store_root = _tracked_store_root(workspace, key) or workspace
     ws_str = str(Path(workspace).resolve()).replace("\\", "/")
     rel_str = str(Path(file_path)).replace("\\", "/")
+    # 必须在**路径段边界**上匹配。裸字符串前缀会把 `/tmp/project-old/x.pdf`
+    # 当成 `/tmp/project` 的子路径，裁出错误的 `old/x.pdf` —— 读端随后会去
+    # `<ws>/old/x.pdf` 找一个根本不存在的文件。工作区之外的文件保持绝对 key，
+    # 交给读端的 host-absolute 分支解析。
     if rel_str.startswith(ws_str + "/"):
         rel_path = rel_str[len(ws_str) + 1:]
-    elif rel_str.startswith(ws_str):
-        rel_path = rel_str[len(ws_str):].lstrip("/")
     else:
         rel_path = rel_str
     return store_root, rel_path

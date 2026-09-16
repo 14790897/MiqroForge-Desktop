@@ -3043,7 +3043,19 @@ class ExecTool(Tool):
             return
         try:
             from miqi.runtime.file_handlers import _get_workspace_path
-            workspace = _get_workspace_path()
+
+            # 会话自己的工作区优先。绑定（自定义）工作区会被 bind-mount 到
+            # ``/home/miqi/workspace``（bwrap.py），所以路径映射、包含性检查和
+            # 落账必须用同一个根：用全局工作区会把镜像产物写进 app-home，读端
+            # 看不到，还会在工作区里多出一份位置错误的副本（#1096）。
+            #
+            # 默认工作区下 ``self._workspace_root`` 就是 ``_get_workspace_path()``
+            # 的那个根，因此这条路径的行为逐字节不变。
+            workspace = (
+                Path(self._workspace_root)
+                if self._workspace_root
+                else Path(_get_workspace_path())
+            )
         except Exception:
             return
 
@@ -3141,17 +3153,9 @@ class ExecTool(Tool):
             logger.warning("exec [mirror] failed for {}: {}", sandbox_path, exc)
             return
 
-        # 落账必须与另两个写入口同根同键形（#1096）。这里拿到的 ``workspace``
-        # 是全局工作区，而 exec 的会话工作区是构造时定下的
-        # ``_session_files_dir`` / ``_workspace_root``。用全局工作区落账，绑定
-        # 文件夹会话的镜像产物会写进 app-home 那份账本、key 还是绝对路径 ——
-        # 读端只认绑定根那份，产物就此不显示。
-        _persist_tracked_file(
-            self._session_files_dir or self._workspace_root or workspace,
-            host_path,
-            op="write",
-            session_key=session_key,
-        )
+        # 落账与另两个写入口同根同键形（#1096）：``workspace`` 上面已按会话
+        # 工作区取过，这里直接用，别再退回全局根。
+        _persist_tracked_file(workspace, host_path, op="write", session_key=session_key)
 
 
     # ── Phase 59: subprocess artifact tracking (#607) ───────────────────────

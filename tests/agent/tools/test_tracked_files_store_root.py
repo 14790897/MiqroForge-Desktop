@@ -488,3 +488,87 @@ async def test_write_file_tracks_session_relative_segment():
     expected = f"sessions/{_session_files_dir_key(key)}/files/note.md"
     assert expected in tracked
     assert not _store_path(files_dir, key).exists()
+
+
+def test_tracked_persist_target_rejects_sibling_prefix_collision(tmp_path):
+    """`<ws>-old/x.pdf` 不算 workspace 内部（#1104 review）。
+
+    裸字符串前缀判断会把 `/tmp/project-old/result.pdf` 裁成 `old/result.pdf`，
+    但文件并不在 `/tmp/project` 里 —— 读端随后会去 `<ws>/old/result.pdf` 找一个
+    不存在的文件。这类路径必须保持绝对 key。
+    """
+    from miqi.agent.tools.filesystem import _tracked_persist_target
+
+    ws = tmp_path / "project"
+    ws.mkdir()
+    sibling = tmp_path / "project-old"
+    sibling.mkdir()
+    outside = sibling / "result.pdf"
+    outside.write_text("x")
+
+    target = _tracked_persist_target(ws, str(outside), "desktop:1104")
+    assert target is not None
+    _, rel_key = target
+    assert rel_key == str(outside).replace("\\", "/"), (
+        f"兄弟目录不得被裁成 workspace 相对路径：{rel_key}"
+    )
+
+    # 真正的子路径仍然相对化（别把边界收紧成「一律绝对」）。
+    inside = ws / "sub" / "ok.pdf"
+    inside.parent.mkdir()
+    inside.write_text("y")
+    _, inside_key = _tracked_persist_target(ws, str(inside), "desktop:1104")
+    assert inside_key == "sub/ok.pdf"
+
+
+@pytest.mark.asyncio
+async def test_mirror_uses_session_workspace(tmp_path, monkeypatch):
+    """sandbox→宿主镜像这条写入口也按会话工作区落账（#1104 review）。
+
+    绑定（自定义）工作区会被 bind-mount 到沙箱的 ``/home/miqi/workspace``，所以
+    路径映射、包含性检查和落账必须用同一个根。写死全局工作区会让镜像产物落到
+    app-home（读端看不到），还在全局工作区里多留一份位置错误的副本。
+
+    这里把沙箱侧的几个 helper 打桩，但 ``_sandbox_to_host_path`` 用**真实实现** ——
+    这样才能钉住「映射到会话工作区」这一步，而不只是钉住落账参数。
+    """
+    from miqi.agent.tools.shell import ExecTool
+
+    ws = _default_ws()
+    bound = tmp_path / "bound-dl"
+    bound.mkdir()
+    monkeypatch.setattr(
+        "miqi.runtime.file_handlers._get_workspace_path", lambda: str(ws),
+    )
+
+    class _FakeSandboxManager:
+        async def get_or_create(self, session_key):
+            return object()
+
+    async def _exists(sandbox, path):
+        return True
+
+    async def _read(sandbox, path):
+        return b"%PDF-1.4 downloaded"
+
+    fs = "miqi.agent.tools.filesystem."
+    monkeypatch.setattr(fs + "_get_session_workspace", lambda workspace, sandbox: bound)
+    monkeypatch.setattr(
+        fs + "_resolve_sandbox_path",
+        lambda filename, session_ws, sandbox: "/home/miqi/workspace/dl.pdf",
+    )
+    monkeypatch.setattr(fs + "_sandbox_file_exists", _exists)
+    monkeypatch.setattr(fs + "_sandbox_read_file", _read)
+
+    exec_tool = ExecTool(sandbox_manager=_FakeSandboxManager())
+    exec_tool._workspace_root = str(bound)
+    exec_tool._session_files_dir = None
+
+    key = "desktop:1104mirror"
+    await exec_tool._mirror_downloaded_files(
+        "curl -o dl.pdf https://example.invalid/x.pdf", object(), key,
+    )
+
+    assert (bound / "dl.pdf").exists(), "镜像产物必须落在会话工作区"
+    assert not (ws / "dl.pdf").exists(), "不得落到全局工作区"
+    assert "dl.pdf" in _read_tracked(_store_path(bound, key)), "未落绑定根账本"
