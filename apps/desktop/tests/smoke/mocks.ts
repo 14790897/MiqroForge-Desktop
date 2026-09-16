@@ -209,6 +209,17 @@ export function buildMockBridgeScript(opts: MockBridgeOptions = {}): string {
       initialConsent: { read: true, version: '2.0' },
       setConsent: function() { return Promise.resolve({ ok: true }); },
     },
+    // #1095 登录门：smoke 用 mock 桥接（等价于 E2E），默认绕过登录门——
+    // 登录门自身的行为由 e2e/login-gate.spec.ts 覆盖。
+    env: { isE2E: false, loginBypass: true },
+    // 窗口 API：ChatConsole 冷启动会上报面板占宽（setPanelWindowExtra），
+    // mock 桥接无真实窗口，返回「未加宽」的既定形状即可（applied=0）。
+    app: {
+      quit: function() { return Promise.resolve({ ok: true }); },
+      setPanelWindowExtra: function() {
+        return Promise.resolve({ ok: true, applied: 0, skipped: true });
+      },
+    },
     runtime: {
       start: function() { return Promise.resolve({ state: 'running', pid: 12345 }); },
       stop: function() { return Promise.resolve({ state: 'stopped', pid: 0 }); },
