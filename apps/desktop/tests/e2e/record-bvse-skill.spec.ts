@@ -196,6 +196,12 @@ test.describe('录屏：真实 BVSE 技能 + 任务资产面板（连续）', ()
         defaults: { ...(config.agents?.defaults ?? {}), model: 'openai/gpt-4o-mini' },
       };
       config.tools = { ...config.tools, sandbox: { ...config.tools?.sandbox, enabled: false } };
+      // 打开「内联终端输出」（设置 → 通用）：pipeline 跑 9 分钟，默认折叠时
+      // 界面全程零可见进度，录屏看着像卡住；打开后 exec 输出会实时流进对话。
+      config.desktop = {
+        ...(config.desktop ?? {}),
+        ui: { ...(config.desktop?.ui ?? {}), inlineExecOutput: true },
+      };
     });
     electronApp = fixture.electronApp;
     page = fixture.page;
