@@ -119,6 +119,14 @@ describe('isWithinCanonicalWorkspace', () => {
   it('accepts a non-existent path (lexical check covers it)', () => {
     expect(isWithinCanonicalWorkspace(join(wsRoot, 'no-such-file.txt'), wsRoot)).toBe(true);
   });
+
+  it('does not treat an unresolvable root as containment', () => {
+    // 只有 candidate 解析失败才 fail-open；root 解析不了不是包含的证据。
+    // 旧实现 catch → true 会让一个不存在的 root 把整个 `.some()` 短路成
+    // 「允许」，从而接受一个并不在该 root 下的 candidate。
+    const ghostRoot = join(tmpdir(), `miqi-no-such-root-${Date.now()}`);
+    expect(isWithinCanonicalWorkspace(tmpdir(), ghostRoot)).toBe(false);
+  });
 });
 
 // #1062: 文件夹绑定会话的产物在会话自己的工作区里，主进程把它作为额外允许根。

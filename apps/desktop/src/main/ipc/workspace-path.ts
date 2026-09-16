@@ -149,20 +149,32 @@ export function resolveWorkspacePath(
 
 /**
  * Whether an existing host path resolves (symlinks/junctions followed) to a
- * location inside one of the allowed roots.  Returns true when the path cannot
- * be resolved (e.g. it does not exist) — those are already covered by the
- * lexical containment check in resolveWorkspacePath.
+ * location inside one of the allowed roots.
+ *
+ * Only the *candidate* failing to resolve is fail-open (returns true): a path
+ * that does not exist yet is already covered by the lexical containment check
+ * in resolveWorkspacePath.  A *root* that cannot be canonicalised is not
+ * evidence of containment — treating it as "allowed" would let one unreadable
+ * root short-circuit the whole `.some()` into accepting a candidate that lives
+ * under none of them, and adding roots (#1062) widens that.  Such a root is
+ * skipped instead.
  */
 export function isWithinCanonicalWorkspace(
   candidate: string,
   wsRoot: string,
   extraRoots?: Array<string | null | undefined>
 ): boolean {
+  let canonicalCandidate: string;
+  try {
+    canonicalCandidate = realpathSync.native(candidate);
+  } catch {
+    return true;
+  }
   return allowedRoots(wsRoot, extraRoots).some((root) => {
     try {
-      return isUnder(realpathSync.native(candidate), realpathSync.native(root));
+      return isUnder(canonicalCandidate, realpathSync.native(root));
     } catch {
-      return true;
+      return false;
     }
   });
 }
