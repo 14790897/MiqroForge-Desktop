@@ -123,28 +123,76 @@ def _resolve_session_snapshot_dir(client_id: str, session_key: str) -> Path:
 _SANDBOX_WORKSPACE_PREFIX = "/home/miqi/workspace"
 
 
+# Directory under the workspace root holding the per-session isolation
+# directories.  It is a *session* boundary, not a workspace one: a
+# workspace-scoped operation (no session_key) may never reach into it, and a
+# session-scoped operation may only reach the caller's own session directory.
+# Checking containment against the workspace instead let a relative path with
+# ``..`` land in a sibling session's directory and overwrite its
+# ``conversation.jsonl`` — including its ``owner_client_id`` metadata line
+# (#1051).
+_SESSIONS_DIR_NAME = "sessions"
+
+# Top-level directories that are runtime state rather than user workspace
+# content.  Hidden from the workspace tree so the editor never offers a file
+# the workspace-scoped handlers will refuse to write.
+_RESERVED_ROOT_DIRS = frozenset({_SESSIONS_DIR_NAME, "_legacy_sessions"})
+
+
+def _is_within(path: Path, root: Path) -> bool:
+    """True when *path* is *root* itself, or lives underneath it."""
+    return path == root or path.is_relative_to(root)
+
+
+def _resolve_under(root: Path, file_path: str) -> Path:
+    """Join *file_path* to *root* and resolve it, normalising ``..``.
+
+    Raises AppServerError(INVALID_PARAMS) on paths the OS refuses to resolve,
+    instead of letting a ValueError/OSError escape as an internal error.
+    """
+    try:
+        return (root / file_path).resolve()
+    except (OSError, ValueError, RuntimeError) as exc:
+        raise AppServerError("Invalid file path", code="INVALID_PARAMS") from exc
+
+
+def _strip_sandbox_prefix(file_path: str) -> str:
+    """Drop the sandbox workspace prefix, returning a relative path."""
+    prefix = _SANDBOX_WORKSPACE_PREFIX
+    if file_path == prefix:
+        return "."
+    return file_path[len(prefix) + 1:]
+
+
 def _validate_file_path(
     file_path: str,
     client_id: str,
     session_key: str | None = None,
 ) -> Path:
-    """Resolve a file path with path-traversal protection.
+    """Resolve a file path with session-granularity traversal protection.
 
-    If session_key is provided:
-      1. Verifies ownership via _verify_session_ownership
-      2. Resolves against the session-scoped files directory
-      3. Falls back to workspace root if the resolved path escapes
+    Containment is enforced at the *session* boundary, not the workspace
+    boundary:
 
-    If session_key is None:
-      Resolves against workspace root only.
+    - With a ``session_key``: the result must stay inside the caller's own
+      session directory (``<ws>/sessions/<key>``).  A path is accepted either
+      session-relative (``notes.md`` →
+      ``<ws>/sessions/<key>/files/notes.md``) or workspace-relative when it
+      already names a location inside that same session directory
+      (``sessions/<key>/files/notes.md``).  Ordinary workspace files outside
+      ``<ws>/sessions/`` remain reachable, as before.
+    - Without a ``session_key``: the result must be inside the workspace and
+      **outside** ``<ws>/sessions/``, so a workspace-scoped operation can
+      never address another session's files.
 
     Accepts both relative paths and absolute paths that fall within the
-    workspace.  Absolute paths that start with the sandbox workspace
-    prefix (``/home/miqi/workspace/…``) have the prefix stripped to
-    produce a workspace-relative path.  Other absolute paths are
-    resolved on the filesystem and checked against the workspace root.
+    workspace.  Paths under the sandbox workspace prefix
+    (``/home/miqi/workspace/…``) are treated as workspace-relative; other
+    absolute paths — POSIX-rooted, Windows drive-letter, and UNC alike — are
+    resolved on the filesystem and must fall inside the workspace.
 
-    Blocks absolute paths outside the workspace and path traversal (..).
+    Blocks path traversal (``..``) and absolute paths that escape the
+    permitted root.
     """
     workspace = _get_workspace_path()
 
@@ -153,54 +201,84 @@ def _validate_file_path(
             "path is required", code="INVALID_PARAMS",
         )
 
-    # ── Normalise absolute paths ──────────────────────────────────────────
-    if file_path.startswith("/") or file_path.startswith("\\"):
+    # ── Normalise absolute paths to a workspace-relative form ─────────────
+    prefix = _SANDBOX_WORKSPACE_PREFIX
+    if file_path == prefix or file_path.startswith((prefix + "/", prefix + "\\")):
         # Case 1: sandbox-internal path — the agent ran inside bwrap and
-        # reported a path under /home/miqi/workspace/.  Strip the prefix
-        # to get the workspace-relative path.
-        prefix = _SANDBOX_WORKSPACE_PREFIX
-        if file_path == prefix:
-            file_path = "."
-        elif file_path.startswith(prefix + "/"):
-            file_path = file_path[len(prefix) + 1:]
-        elif file_path.startswith(prefix + "\\"):
-            file_path = file_path[len(prefix) + 1:]
-        else:
-            # Case 2: host absolute path — try to resolve it and verify it
-            # falls inside the workspace.
-            try:
-                candidate = Path(file_path).resolve()
-            except Exception:
-                raise AppServerError(
-                    "Invalid file path", code="INVALID_PARAMS",
-                )
-            try:
-                file_path = str(candidate.relative_to(workspace.resolve()))
-            except ValueError:
-                raise AppServerError(
-                    f"Path is outside workspace: {file_path}"
-                    "（工作区外的文件请改用 exec 命令读取）",
-                    code="INVALID_PARAMS",
-                )
+        # reported a path under /home/miqi/workspace/.  Strip the prefix to
+        # get the workspace-relative path.  Note this is a *prefix strip*, not
+        # a sanitiser: a trailing `..` is still handled by the containment
+        # checks below.
+        file_path = _strip_sandbox_prefix(file_path)
+    elif file_path.startswith(("/", "\\")) or Path(file_path).is_absolute():
+        # Case 2: host absolute path — resolve it, then require it to fall
+        # inside the workspace.  The Windows drive-letter form
+        # (``C:\...``/``C:/...``) reaches here via Path.is_absolute(); it used
+        # to skip normalisation entirely and be re-joined as if relative.
+        candidate = _resolve_under(Path(), file_path)
+        if not _is_within(candidate, workspace):
+            raise AppServerError(
+                f"Path is outside workspace: {file_path}"
+                "（工作区外的文件请改用 exec 命令读取）",
+                code="INVALID_PARAMS",
+            )
+        file_path = str(candidate.relative_to(workspace))
 
-    # Session-scoped path resolution
+    # ── Session-scoped resolution ─────────────────────────────────────────
+    sessions_root = workspace / _SESSIONS_DIR_NAME
     if session_key:
-        try:
-            session_files = _resolve_session_files_path(client_id, session_key)
-        except AppServerError:
-            # If ownership fails, still let the caller handle it explicitly
-            raise
-        resolved = (session_files / file_path).resolve()
-        if str(resolved).startswith(str(workspace) + str(Path("/"))) or resolved == workspace:
-            return resolved
-        # If session files dir doesn't contain this path, fall through to workspace
+        # Verifies ownership before returning the directory.
+        session_files = _resolve_session_files_path(client_id, session_key)
+        session_root = session_files.parent
 
-    # Workspace-scoped path resolution
-    resolved = (workspace / file_path).resolve()
-    if not str(resolved).startswith(str(workspace) + str(Path("/"))) and resolved != workspace:
+        # (a) workspace-relative path that already names a location inside the
+        #     caller's OWN session directory
+        #     (``sessions/<key>/files/…``), as the desktop sends.
+        workspace_candidate = _resolve_under(workspace, file_path)
+        if _is_within(workspace_candidate, session_root):
+            return workspace_candidate
+
+        # A path naming the sessions subtree that is not the caller's own
+        # session is somebody else's session.  It must be rejected rather than
+        # re-interpreted below as a session-relative path — that would quietly
+        # re-root it inside the caller's files directory instead of failing.
+        if _is_within(workspace_candidate, sessions_root):
+            raise AppServerError(
+                f"Path escapes session: {file_path}"
+                "（会话目录外的路径请改用工作区路径或 exec 命令）",
+                code="INVALID_PARAMS",
+            )
+
+        # (b) path relative to the session files directory (``notes.md``).
+        session_candidate = _resolve_under(session_files, file_path)
+        if _is_within(session_candidate, session_files):
+            return session_candidate
+
+        # (c) ordinary workspace files outside the sessions subtree stay
+        #     reachable for session-scoped callers.
+        if _is_within(workspace_candidate, workspace):
+            return workspace_candidate
+
+        raise AppServerError(
+            f"Path escapes session: {file_path}"
+            "（会话目录外的路径请改用工作区路径或 exec 命令）",
+            code="INVALID_PARAMS",
+        )
+
+    # ── Workspace-scoped resolution ───────────────────────────────────────
+    resolved = _resolve_under(workspace, file_path)
+    if not _is_within(resolved, workspace):
         raise AppServerError(
             f"Path escapes workspace: {file_path}"
             "（工作区外的文件请改用 exec 命令读取）",
+            code="INVALID_PARAMS",
+        )
+    # The sessions subtree is per-session isolated state; a workspace-scoped
+    # operation has no session to be scoped to, so it may not enter it at all.
+    if _is_within(resolved, sessions_root):
+        raise AppServerError(
+            f"Path is inside the sessions directory: {file_path}"
+            "（会话目录需带 session_key 访问）",
             code="INVALID_PARAMS",
         )
     return resolved
@@ -280,8 +358,19 @@ _TEXT_SAFE_NAMES = _ALLOWED_NAMES
 # ── files.tree ─────────────────────────────────────────────────────────────
 
 
-def _build_tree(path: Path, relative_to: Path, depth: int = 0, max_depth: int = 6) -> dict:
-    """Build a FileNode tree for a directory."""
+def _build_tree(
+    path: Path,
+    relative_to: Path,
+    depth: int = 0,
+    max_depth: int = 6,
+    skip_dirs: frozenset[str] = frozenset(),
+) -> dict:
+    """Build a FileNode tree for a directory.
+
+    *skip_dirs* hides the named children of the tree root — used to keep the
+    per-session isolation subtree out of the workspace tree, which the
+    workspace-scoped handlers cannot address anyway (#1051).
+    """
     node: dict[str, Any] = {
         "name": path.name or str(path),
         "path": str(path.relative_to(relative_to)).replace("\\", "/"),
@@ -289,9 +378,12 @@ def _build_tree(path: Path, relative_to: Path, depth: int = 0, max_depth: int = 
     }
     if path.is_dir() and depth < max_depth:
         children = []
+        at_root = path == relative_to
         try:
             for child in sorted(path.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower())):
                 if child.name.startswith(".") or child.name == "__pycache__":
+                    continue
+                if at_root and child.is_dir() and child.name in skip_dirs:
                     continue
                 if child.suffix.lower() in _TREE_SKIP_SUFFIXES:
                     continue
@@ -346,7 +438,7 @@ async def files_tree_handler(
                 "workspace_path": str(workspace),
             },
         }
-    root = _build_tree(workspace, workspace)
+    root = _build_tree(workspace, workspace, skip_dirs=_RESERVED_ROOT_DIRS)
     return {"result": {"root": root, "workspace_path": str(workspace)}}
 
 
@@ -480,23 +572,29 @@ def _find_in_sandbox_workspaces(
             if not sandbox_ws:
                 continue
 
-            candidates: list[Path] = []
+            # (candidate, containment_root) pairs.  The raw *file_path* is
+            # joined here, so a `..` segment would otherwise point outside the
+            # sandbox workspace; each candidate is checked against the root it
+            # was built from.
+            candidates: list[tuple[Path, Path]] = []
             # Strip leading separator so an absolute *file_path* cannot
             # discard the sandbox-workspace prefix via Path "/" semantics.
             rel = file_path.lstrip("/").lstrip("\\")
 
             # 1) Check at workspace root
-            candidates.append((Path(sandbox_ws) / rel).resolve())
+            ws_root = Path(sandbox_ws).resolve()
+            candidates.append(((ws_root / rel).resolve(), ws_root))
 
             # 2) Check session-scoped subdirectory
             if session_suffix:
-                candidates.append(
-                    (Path(sandbox_ws) / session_suffix / rel).resolve()
-                )
+                sess_root = (ws_root / session_suffix).resolve()
+                candidates.append(((sess_root / rel).resolve(), sess_root))
 
             distro = entry.get("distro", "")
 
-            for candidate in candidates:
+            for candidate, containment_root in candidates:
+                if not _is_within(candidate, containment_root):
+                    continue
                 try:
                     if candidate.exists() and candidate.is_file():
                         logger.info(
@@ -515,7 +613,9 @@ def _find_in_sandbox_workspaces(
             #    /tmp/miqi-sandboxes/... are not reachable via Path.exists().
             #    Use wsl.exe to probe the file.
             if _is_wsl_sandbox_path(str(sandbox_ws)):
-                for candidate in candidates:
+                for candidate, containment_root in candidates:
+                    if not _is_within(candidate, containment_root):
+                        continue
                     if _wsl_file_exists(str(candidate), distro):
                         logger.info(
                             "[files:read] sandbox fallback found via wsl.exe: {}",

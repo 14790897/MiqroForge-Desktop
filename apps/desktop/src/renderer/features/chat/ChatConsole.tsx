@@ -6630,15 +6630,17 @@ export function ChatConsole({
     // The old openExternal fallback cannot find session-isolated files at all.
     if (/\.html?$/i.test(path)) {
       const bare = path.split(/[\\/]/).pop()!;
-      // Session-isolated files live under sessions/<safe-key>/files/. The full
-      // session-relative path is the ONLY form the bridge reliably reads for
-      // bare tracked names (verified: bare-name reads return null at the
-      // bridge); bare + session_key is also rejected. Build the full path from
-      // the active session key and read it workspace-scoped.
+      // Session-isolated files live under sessions/<safe-key>/files/. Build the
+      // full workspace-relative path from the active session key and read it
+      // WITH the session key: the bridge resolves a workspace-relative path
+      // that lands inside the caller's own session directory (issue #1051),
+      // and session-scoped reads are the only ones allowed to touch
+      // sessions/ — a session-less read of that subtree is now rejected.
       const safeKey = String(currentSessionRef.current ?? '').replace(/[:\\/]/g, '_');
       const fullRel = safeKey ? `sessions/${safeKey}/files/${bare}` : '';
       const reads: Array<Promise<{ content?: string }>> = [];
-      if (fullRel && fullRel !== path) reads.push(window.miqi.files.read(fullRel));
+      if (fullRel && fullRel !== path)
+        reads.push(window.miqi.files.read(fullRel, currentSessionRef.current ?? undefined));
       reads.push(window.miqi.files.read(path));
       if (bare !== path) reads.push(window.miqi.files.read(path, currentSessionRef.current));
       for (const attempt of reads) {
@@ -6671,12 +6673,9 @@ export function ChatConsole({
       const candidates: Array<{ p: string; withSession: boolean }> = [
         { p: path, withSession: true },
       ];
-      // path 本身已是 sessions/<safe>/files/<name> 全路径时,再带 session_key
-      // 会被 files.read 二次拼接会话目录而读不到(桥接对全路径+session_key
-      // 返回 null),补一个 workspace-scoped 候选并优先尝试(CodeRabbit #889)。
-      if (/^sessions\/[^/]+\/files\//.test(path.replace(/\\/g, '/'))) {
-        candidates.unshift({ p: path, withSession: false });
-      }
+      // #1051: a full session-relative path (sessions/<safe>/files/<name>) is
+      // resolved against the caller's own session directory by the bridge, so
+      // it is read WITH the session key like any other candidate.
       const nameOnly = path.replace(/\\/g, '/').split('/').pop()!;
       if (nameOnly !== path) candidates.push({ p: nameOnly, withSession: true });
       if (!path.startsWith('papers/'))
@@ -6684,7 +6683,7 @@ export function ChatConsole({
       if (nameOnly === path) {
         const safeKey = String(currentSessionRef.current ?? '').replace(/[:\\/]/g, '_');
         if (safeKey) {
-          candidates.push({ p: `sessions/${safeKey}/files/${nameOnly}`, withSession: false });
+          candidates.push({ p: `sessions/${safeKey}/files/${nameOnly}`, withSession: true });
         }
       }
 
@@ -8681,7 +8680,10 @@ export function ChatConsole({
                         { p: previewFile.path },
                       ];
                       if (safeKey && nameOnly === previewFile.path) {
-                        reads.push({ p: `sessions/${safeKey}/files/${nameOnly}` });
+                        reads.push({
+                          p: `sessions/${safeKey}/files/${nameOnly}`,
+                          session: currentSessionRef.current,
+                        });
                       }
                       for (const read of reads) {
                         try {
