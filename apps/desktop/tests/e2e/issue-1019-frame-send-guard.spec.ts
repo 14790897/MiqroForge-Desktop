@@ -152,6 +152,22 @@ test.describe('Issue #1019 — no per-event send to a disposed render frame', ()
     electronApp = fixture.electronApp;
     page = fixture.page;
     miqiHome = fixture.miqiHome;
+
+    // (#1035 适配) 崩溃现在会触发主进程自动重载，本 spec 需要一个"真死帧"窗口：
+    // 1) 预热一发 thread/start——源码模式桥冷启动后首发该请求会丢（实测），
+    //    不预热会把首条消息拖 30 秒、把下面的流同步拖爆；
+    // 2) 把原生对话框桩成永不 resolve——被测崩溃会先把 10 分钟/3 次的自动
+    //    重载预算花光，随后走「跳过」路径 await 这个对话框；桩悬停即处理器
+    //    悬停：帧保持真死（不重载、不退出），断言前提得以保留。
+    //    预算预支放在用例里、UI 操作之后（见用例内注释）。
+    await page.evaluate(() => {
+      void (window as any).miqi?.threads?.start?.({ title: 'e2e-warmup' })?.catch?.(() => {});
+    });
+    await electronApp.evaluate(() => {
+      const g = globalThis as any;
+      g.__ELECTRON__.dialog.showMessageBox = () => new Promise(() => {});
+    });
+    await page.waitForTimeout(1_200);
   }, 180_000);
 
   test.afterAll(async () => {
@@ -167,7 +183,7 @@ test.describe('Issue #1019 — no per-event send to a disposed render frame', ()
 
   test(
     'crashing the renderer mid-stream produces zero "Render frame was disposed" lines',
-    { timeout: 240_000 },
+    { timeout: 420_000 },
     async () => {
       // Count Electron's internal send-failure lines in the main process.
       // Electron emits these as console.error('Error sending from webFrameMain: ', err)
@@ -207,7 +223,6 @@ test.describe('Issue #1019 — no per-event send to a disposed render frame', ()
         };
       });
 
-      await waitForInputReady(page);
       await createFreshSession(page);
       await sendMessage(page, 'stream please');
 
@@ -216,7 +231,7 @@ test.describe('Issue #1019 — no per-event send to a disposed render frame', ()
       // not painted progressively, so the first paint lands only after the
       // whole stream is done (i.e. too late to crash mid-stream). Polling the
       // mock is both the real "mid-stream" signal and the non-vacuity check.
-      const deadline = Date.now() + 30_000;
+      const deadline = Date.now() + 60_000;
       while (Date.now() < deadline) {
         const s = mock.stats();
         if (s.deltas >= 100 && s.finished === 0) break;
@@ -232,6 +247,19 @@ test.describe('Issue #1019 — no per-event send to a disposed render frame', ()
       await page
         .screenshot({ path: 'test-results/issue-1019-mid-stream.png', timeout: 10_000 })
         .catch(() => {});
+
+      // (#1035 适配) 预算预支：此刻 UI 操作已全部完成（往下只剩主进程求值与
+      // mock 统计，不再需要 page），连崩 3 次把 10 分钟/3 次的自动重载预算花光。
+      // 否则下面的被测崩溃会被自动重载在毫秒级把死帧换成活帧，「向死帧持续
+      // 发送 ≥50 次守卫检查」的前提就不存在了。放在这里是因为：每次崩溃都会
+      // 更换渲染进程、令 Playwright 的 page 句柄永久作废（连 firstWindow()
+      // 也救不回），而上面的建会话/发消息/同步/截图都还要用 page。
+      for (let i = 0; i < 3; i += 1) {
+        await electronApp.evaluate(({ BrowserWindow }) => {
+          BrowserWindow.getAllWindows()[0]?.webContents.forcefullyCrashRenderer();
+        });
+        await new Promise((r) => setTimeout(r, 3_000)); // 等这次自动重载跑完
+      }
 
       // Kill the renderer the way an OOM does: process gone, frame disposed,
       // WebContents object still alive (which is exactly why the old
