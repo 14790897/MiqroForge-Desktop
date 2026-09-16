@@ -2926,9 +2926,16 @@ export function ChatConsole({
   );
   /** #1062：结果/过程文件的「定位」「预览」失败时给出可见提示（此前静默无反应）。 */
   const [assetError, setAssetError] = useState<string | null>(null);
+  const assetErrorTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const notifyAssetError = useCallback((msg: string) => {
+    // 先取消上一条的定时器：否则它会在自己的 4 秒到点时把后设的、仍然相关的
+    // 消息提前清掉 —— 那会削弱本 PR 要给的保证（失败一定看得见）。
+    if (assetErrorTimerRef.current) window.clearTimeout(assetErrorTimerRef.current);
     setAssetError(msg);
-    window.setTimeout(() => setAssetError(null), 4000);
+    assetErrorTimerRef.current = window.setTimeout(() => {
+      assetErrorTimerRef.current = null;
+      setAssetError(null);
+    }, 4000);
   }, []);
   const [toastVisible, setToastVisible] = useState(false);
 
