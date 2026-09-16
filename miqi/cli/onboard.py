@@ -23,13 +23,13 @@ def register_onboard_command(
     def onboard():
         """Initialize MiQi configuration and workspace."""
         from miqi.config.loader import get_config_path, load_config, save_config
-        from miqi.config.schema import Config
+        from miqi.config.schema import Config, DEFAULT_AGENT_NAME
         from miqi.utils.helpers import get_workspace_path
 
         config_path = get_config_path()
         interactive_onboard = bool(sys.stdin.isatty() and sys.stdout.isatty())
 
-        agent_name = "miqi"
+        agent_name = DEFAULT_AGENT_NAME
         soul_preset = "balanced"
 
         if config_path.exists():
@@ -47,7 +47,7 @@ def register_onboard_command(
             else:
                 config = load_config()
                 save_config(config)
-                agent_name = normalize_agent_name(getattr(config.agents.defaults, "name", "miqi"))
+                agent_name = normalize_agent_name(getattr(config.agents.defaults, "name", DEFAULT_AGENT_NAME))
                 console.print(f"[green]✓[/green] Config refreshed at {config_path} (existing values preserved)")
         else:
             config = Config()

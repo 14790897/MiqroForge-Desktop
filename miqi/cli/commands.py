@@ -22,7 +22,7 @@ from miqi.cli.gateway_cmd import register_gateway_command
 from miqi.cli.management import register_management_commands
 from miqi.cli.onboard import register_onboard_command
 from miqi.cli.trace_cmd import trace_app
-from miqi.config.schema import Config
+from miqi.config.schema import Config, DEFAULT_AGENT_NAME
 
 app = typer.Typer(
     name="miqi",
@@ -509,7 +509,7 @@ def _interactive_onboard_setup(config) -> tuple[str, str]:
 def _normalize_agent_name(name: str) -> str:
     """Normalize agent name from user input."""
     compact = " ".join(name.strip().split())
-    return compact or "miqi"
+    return compact or DEFAULT_AGENT_NAME
 
 
 def _parse_token_list(raw: str, delimiter: str = ",") -> list[str]:
@@ -624,7 +624,7 @@ _SYSTEM_TEMPLATE_FILES = {"TOOLS.md", "AGENTS.md", "HEARTBEAT.md"}
 
 def _create_workspace_templates(
     workspace: Path,
-    agent_name: str = "miqi",
+    agent_name: str = DEFAULT_AGENT_NAME,
     soul_preset: str = "balanced",
 ):
     """Create default workspace template files from bundled templates."""
