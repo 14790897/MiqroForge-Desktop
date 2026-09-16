@@ -138,6 +138,28 @@ async def test_declare_matches_same_file_in_another_path_form():
 
 
 @pytest.mark.asyncio
+async def test_declare_dedupes_same_file_across_path_forms():
+    """同一次调用里同一文件的两种形态（`run/r.md` 与 `run/../run/r.md`）只登记一条。"""
+    ws = _default_ws()
+    key = "desktop:1104dupform"
+    files_dir = _session_files_dir(ws, key)
+    report = files_dir / "run" / "r.md"
+    report.parent.mkdir(parents=True, exist_ok=True)
+    report.write_text("x", encoding="utf-8")
+
+    odd_form = str(files_dir / "run" / ".." / "run" / "r.md")
+    payload = json.loads(
+        await _tool(ws, files_dir).execute(
+            paths=[str(report), odd_form], _session_key=key
+        )
+    )
+    assert payload["ok"] is True
+    tracked = _read_tracked(_store_path(ws, key))
+    assert len(tracked) == 1, f"同一文件出现多条：{sorted(tracked)}"
+    assert next(iter(tracked.values()))["result"] is True
+
+
+@pytest.mark.asyncio
 async def test_declare_reports_missing_but_still_marks():
     ws = _default_ws()
     key = "desktop:1104missing"

@@ -81,6 +81,10 @@ class ToolHostResult:
 
 _PARALLEL_SAFE_NAMES = frozenset({"read", "grep", "find", "ls", "list_dir", "read_file", "web_search", "web_fetch", "paper_search", "paper_get"})
 _NEVER_PARALLEL_NAMES = frozenset({"exec", "bash", "message", "spawn", "cron", "write", "edit", "delete", "move", "apply_patch", "edit_diff"})
+
+# 免审批集合：并行安全集 + 只写会话台账、不动用户文件的登记类工具
+# （legacy 侧对应 permission_engine.READ_ONLY_TOOLS 里的 declare_result_files）
+_APPROVAL_EXEMPT_NAMES = _PARALLEL_SAFE_NAMES | frozenset({"declare_result_files"})
 _MAX_PARALLEL_TOOL_CALLS = 3
 
 # AI-initiated user confirmation (issue #646): blocking human-in-the-loop tool
@@ -578,7 +582,7 @@ def _requires_approval(name: str, approval_policy: str = "auto") -> bool:
         return False
     if approval_policy in ("untrusted", "suggest", "on_request", "always"):
         return True
-    return name not in _PARALLEL_SAFE_NAMES
+    return name not in _APPROVAL_EXEMPT_NAMES
 
 
 def _now_iso() -> str:

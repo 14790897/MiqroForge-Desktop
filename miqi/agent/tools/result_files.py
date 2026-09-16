@@ -149,9 +149,22 @@ class DeclareResultFilesTool(Tool):
             files_dir=self._workspace,
         )
         if marked == 0:
-            logger.debug(
+            # 台账写失败（缺会话上下文或持久化异常）必须如实返回失败——
+            # 否则 agent 以为登记成功就收尾，面板上却什么都没有（CodeRabbit 复审）
+            logger.warning(
                 "declare_result_files: ledger write skipped (session_key={})",
                 bool(_session_key),
+            )
+            return json.dumps(
+                {
+                    "ok": False,
+                    "error": (
+                        "结果文件登记失败：会话台账不可写（缺少会话上下文或持久化异常）。"
+                        "可在最终答复里直接给出文件路径，并告知用户结果文件区可能未更新。"
+                    ),
+                    "declared": declared,
+                },
+                ensure_ascii=False,
             )
 
         result: dict[str, Any] = {

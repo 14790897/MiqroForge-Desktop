@@ -373,13 +373,17 @@ def _persist_tracked_result_files(
         keys: list[str] = []
         seen: set[str] = set()
         for p in file_paths:
-            key = abs_to_key.get(_canonical_path_str(p))
+            # 按规范化绝对路径去重本次入参：`run/r.md` 与 `run/../run/r.md`
+            # 是同一文件，不能因为形态不同就登记两次（CodeRabbit 复审）
+            canon = _canonical_path_str(p)
+            if canon in seen:
+                continue
+            seen.add(canon)
+            key = abs_to_key.get(canon)
             if key is None:
                 # 没有既有条目：以 agent 给的形态建新条目（面板按原样展示）
                 key = str(Path(p)).replace("\\", "/")
-            if key not in seen:
-                seen.add(key)
-                keys.append(key)
+            keys.append(key)
         if not keys:
             return 0
 

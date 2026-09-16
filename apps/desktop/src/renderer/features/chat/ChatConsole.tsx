@@ -8692,6 +8692,25 @@ export function ChatConsole({
                               >
                                 {f.name}
                               </span>
+                              {/* 与散列行同款控件：操作徽标 + 直接看差异（CodeRabbit 复审） */}
+                              <span
+                                className="text-[9px] px-1.5 py-0.5 rounded font-medium shrink-0"
+                                style={{
+                                  background:
+                                    f.op === 'write' ? 'var(--accent)' : 'rgba(234,179,8,0.15)',
+                                  color:
+                                    f.op === 'write' ? 'var(--accent-text)' : 'var(--warning)',
+                                }}
+                              >
+                                {f.op.toUpperCase()}
+                              </span>
+                              <button
+                                onClick={() => handleShowDiff(f.path)}
+                                className="p-1 rounded transition-colors shrink-0 text-text-faint"
+                                title="Compare diff"
+                              >
+                                <GitCompare size={11} />
+                              </button>
                             </div>
                           )}
                         />

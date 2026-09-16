@@ -78,9 +78,7 @@ async function startRecording(
     session.defaultSession.setDisplayMediaRequestHandler(async (_req, cb) => {
       const srcs = await desktopCapturer.getSources({ types: ['window'] });
       const win =
-        srcs.find((s) => s.name === title) ??
-        srcs.find((s) => /miqroforge/i.test(s.name)) ??
-        null;
+        srcs.find((s) => s.name === title) ?? srcs.find((s) => /miqroforge/i.test(s.name)) ?? null;
       if (!win) {
         console.log('[record] 未匹配到应用窗口，可用：' + srcs.map((s) => s.name).join(' | '));
         return cb({});
@@ -282,7 +280,10 @@ test.describe('录屏：真实 BVSE 技能 + 任务资产面板（连续）', ()
         });
         await page.waitForTimeout(2000);
 
-        const sitesGroup = panel.getByTestId('asset-dir-group').filter({ hasText: 'bvse_sites/' }).first();
+        const sitesGroup = panel
+          .getByTestId('asset-dir-group')
+          .filter({ hasText: 'bvse_sites/' })
+          .first();
         if (await sitesGroup.isVisible().catch(() => false)) {
           await sitesGroup.click().catch(() => {}); // 展开 20 个站点文件
           await page.waitForTimeout(2500);
