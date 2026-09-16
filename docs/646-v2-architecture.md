@@ -90,7 +90,7 @@ todo_write(todos: [TodoPatch], merge=True) → {status, summary, revision, rejec
   → system 注入：已批准步骤 id 清单 + "用 todo_write 维护进度"（SHOULD 非 MUST）
   → 模型 todo_write 更新 / harness 工具事件写 observed（兜底——不允许空白）
   → todo_state 事件推前端（DTO 隔离）
-  → ActionGuard（上传/删除/支付永远确认——看真实 ToolResult）
+  → ActionGuard（上传/删除/支付永远确认——看真实 ToolResult；确认范围 = 同一 thread 内同一工具（thread+tool_name），本 thread 内后续同类动作不再逐一询问）
 ```
 
 ## 七、model-preferred, harness-backed（两级进度）
