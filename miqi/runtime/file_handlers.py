@@ -85,6 +85,64 @@ def _verify_session_ownership(client_id: str, session_key: str) -> None:
         raise AppServerError(exc.args[0], code=exc.code) from exc
 
 
+def _require_owned_session(client_id: str, session_key: str) -> None:
+    """Require an on-disk session, owned by client_id, for this key.
+
+    Deliberately stricter than :func:`_verify_session_ownership`, which (via
+    ``SessionManager._verify_ownership_for_mutation``) passes when no session
+    file exists on disk because there is "nothing to protect".  At the file
+    boundary there *is* something to protect — the session directory itself —
+    and the derivation is not injective: ``session_files_dir_key`` folds ``:``
+    to ``_`` and drops the leading client segment, so ``z:desktop:vic`` and
+    ``miqi-desktop:desktop:vic`` both derive ``desktop_vic``.  With no
+    ``conversation.jsonl`` to read an owner from, that let a caller address a
+    sibling session's directory simply by naming a key that derives it (#1051).
+
+    Sessions that exist only in the AppServer registry therefore cannot use
+    session-scoped file operations until they are persisted; that trade is
+    taken deliberately, since the alternative is an unverifiable owner.
+
+    Raises AppServerError with:
+    - REQUIRES_CLAIM: no owned session on disk for this key
+    - UNAUTHORIZED: session is owned by a different client
+    """
+    sm = _get_session_manager()
+    owner = sm.get_owner(session_key)
+    if owner is None:
+        raise AppServerError(
+            f"Session '{session_key}' has no owner on disk; the session must "
+            "exist and be claimed before session-scoped file access.",
+            code="REQUIRES_CLAIM",
+        )
+    if owner != client_id:
+        raise AppServerError(
+            f"Session '{session_key}' is owned by client '{owner}', "
+            f"not '{client_id}'",
+            code="UNAUTHORIZED",
+        )
+
+
+def _session_dir_key(session_key: str) -> str:
+    """Derive the on-disk session directory name, rejecting unsafe results.
+
+    ``session_files_dir_key`` folds ``:`` to ``_`` (so separators cannot
+    survive) but keeps literal ``.``/``..``, which would move the session root
+    outside ``<ws>/sessions/`` and silently disable session isolation.  Names
+    ending in a dot are also rejected: Windows cannot create such a directory,
+    and the failure surfaced as an internal error rather than INVALID_PARAMS.
+    """
+    safe_key = session_files_dir_key(session_key)
+    if not safe_key or safe_key in (".", "..") or safe_key[-1] in (".", " "):
+        raise AppServerError(
+            f"Invalid session key: {session_key!r}", code="INVALID_PARAMS",
+        )
+    if "/" in safe_key or "\\" in safe_key:
+        raise AppServerError(
+            f"Invalid session key: {session_key!r}", code="INVALID_PARAMS",
+        )
+    return safe_key
+
+
 # ── path resolution ────────────────────────────────────────────────────────
 
 
@@ -95,9 +153,9 @@ def _resolve_session_files_path(client_id: str, session_key: str) -> Path:
     Uses the same session directory naming as SessionManager
     (``session_files_dir_key``), gated by ownership verification.
     """
+    safe_key = _session_dir_key(session_key)
     _verify_session_ownership(client_id, session_key)
     workspace = _get_workspace_path()
-    safe_key = session_files_dir_key(session_key)
     files_dir = workspace / "sessions" / safe_key / "files"
     files_dir.mkdir(parents=True, exist_ok=True)
     return files_dir
@@ -108,9 +166,9 @@ def _resolve_session_snapshot_dir(client_id: str, session_key: str) -> Path:
 
     Verifies session ownership before returning the path.
     """
+    safe_key = _session_dir_key(session_key)
     _verify_session_ownership(client_id, session_key)
     workspace = _get_workspace_path()
-    safe_key = session_files_dir_key(session_key)
     snap_dir = workspace / "sessions" / safe_key / "snapshots"
     snap_dir.mkdir(parents=True, exist_ok=True)
     return snap_dir
@@ -227,6 +285,14 @@ def _validate_file_path(
     # ── Session-scoped resolution ─────────────────────────────────────────
     sessions_root = workspace / _SESSIONS_DIR_NAME
     if session_key:
+        # Reject keys whose derived directory name is not a single safe
+        # segment before consulting disk state, so the caller gets a precise
+        # INVALID_PARAMS rather than an ownership error.
+        _session_dir_key(session_key)
+        # Ownership must be conclusive at the file boundary — see
+        # _require_owned_session for why the lenient "no session on disk"
+        # pass is unsafe here.
+        _require_owned_session(client_id, session_key)
         # Verifies ownership before returning the directory.
         session_files = _resolve_session_files_path(client_id, session_key)
         session_root = session_files.parent
@@ -412,6 +478,7 @@ async def files_tree_handler(
     if session_key:
         # Session-scoped tree: verify ownership first
         _verify_session_ownership(client_id, session_key)
+        _require_owned_session(client_id, session_key)
         session_files = _resolve_session_files_path(client_id, session_key)
         if not session_files.exists() or not any(session_files.iterdir()):
             root = {

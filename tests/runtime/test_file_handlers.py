@@ -1247,3 +1247,78 @@ async def test_files_tree_workspace_hides_sessions_dir(
     result = await files_tree_handler("req-1051-tree", {}, "client-A", None, registry)
     names = [child["name"] for child in result["result"]["root"]["children"]]
     assert "sessions" not in names
+
+
+@pytest.mark.asyncio
+async def test_files_reject_colliding_session_key_into_sibling_session(
+    fake_config, fake_provider, tmp_path,
+):
+    """#1051: session keys are not injective — a colliding key must not address
+    a sibling session's directory.
+
+    ``session_files_dir_key`` drops the leading segment for 3+ segment keys, so
+    ``z:desktop:vic`` derives the same directory as ``desktop:vic``.  When the
+    victim's ``conversation.jsonl`` is absent (a session directory that exists
+    with files but no persisted session), ownership is unreadable — so the file
+    boundary must refuse the key rather than hand out the directory.
+    """
+    from miqi.runtime.app_server import AppServerError, ClientSessionRegistry
+    from miqi.runtime.file_handlers import files_read_handler, files_write_handler
+    from miqi.session.session_keys import session_files_dir_key
+
+    _, ws = _setup_session("desktop:vic", "client-B")
+    victim_dir = ws / "sessions" / session_files_dir_key("desktop:vic")
+    # Session directory with content but no persisted session: the shape in
+    # which the ownership check used to be inconclusive.
+    (victim_dir / "conversation.jsonl").unlink()
+    (victim_dir / "files").mkdir(parents=True, exist_ok=True)
+    (victim_dir / "files" / "secret.md").write_text("VICTIM SECRET", encoding="utf-8")
+
+    registry = ClientSessionRegistry()
+    for colliding in ("z:desktop:vic", "client-B:desktop:vic"):
+        assert session_files_dir_key(colliding) == session_files_dir_key("desktop:vic")
+
+        with pytest.raises(AppServerError) as read_exc:
+            await files_read_handler(
+                "req-collide-r",
+                {"path": "secret.md", "session_key": colliding},
+                "client-A", None, registry,
+            )
+        assert read_exc.value.code == "REQUIRES_CLAIM", colliding
+
+        with pytest.raises(AppServerError) as write_exc:
+            await files_write_handler(
+                "req-collide-w",
+                {"path": "pwn.md", "content": "PWNED", "session_key": colliding},
+                "client-A", None, registry,
+            )
+        assert write_exc.value.code == "REQUIRES_CLAIM", colliding
+
+    assert (victim_dir / "files" / "secret.md").read_text(encoding="utf-8") == "VICTIM SECRET"
+    assert not (victim_dir / "files" / "pwn.md").exists()
+
+
+@pytest.mark.asyncio
+async def test_files_reject_session_key_with_unsafe_derived_dir(
+    fake_config, fake_provider, tmp_path,
+):
+    """#1051: derivations that are not a single safe path segment are rejected.
+
+    ``.``/``..`` derive themselves and would move the session root out of
+    ``<ws>/sessions/`` (silently disabling isolation); a name ending in a dot
+    cannot be created on Windows and used to surface as an internal error.
+    """
+    from miqi.runtime.app_server import AppServerError, ClientSessionRegistry
+    from miqi.runtime.file_handlers import files_write_handler
+
+    _setup_session("atk-unsafe", "client-A")
+    registry = ClientSessionRegistry()
+
+    for bad_key in ("..", ".", "a:b:.."):
+        with pytest.raises(AppServerError) as exc_info:
+            await files_write_handler(
+                "req-unsafe",
+                {"path": "x.md", "content": "x", "session_key": bad_key},
+                "client-A", None, registry,
+            )
+        assert exc_info.value.code == "INVALID_PARAMS", bad_key
