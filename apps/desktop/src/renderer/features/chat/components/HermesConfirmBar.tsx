@@ -3,7 +3,7 @@
  *
  * Hermes 原版（apps/desktop/src/components/assistant-ui/tool/approval.tsx）：
  *   [Run(带 ⌘⏎/Ctrl⏎ 提示)] | [▾ 下拉: 本会话 / 总是(二次确认 Dialog) / 拒绝] [拒绝(Esc)] [命令展开]
- *   - 快捷键：Ctrl/⌘+Enter → run，Esc → deny（window keydown capture；Dialog 打开时让位）
+ *   - 快捷键：Ctrl/⌘+Enter → run，Esc → deny（window keydown capture；Dialog / 下拉打开时让位）
  *   - submitting 时主/副按钮显示 Loader
  *   - "总是允许" 走二次确认 Dialog（因为要持久化）
  *
@@ -70,6 +70,8 @@ export function HermesConfirmBar({
   const [submitting, setSubmitting] = useState<HermesConfirmChoice | null>(null);
   const [confirmAlways, setConfirmAlways] = useState(false);
   const [showDetails, setShowDetails] = useState(false);
+  // P2-a（#1071 评审）：下拉菜单打开时 Esc 应关菜单，不能顺手把卡拒掉。
+  const [menuOpen, setMenuOpen] = useState(false);
   const busyNow = busy || submitting !== null;
   const hasDetails = !!expandableText && expandableText.trim().length > 0;
   const btnStyle = tone === 'danger' ? DANGER_BTN : ACCENT_BTN;
@@ -96,6 +98,10 @@ export function HermesConfirmBar({
   // resolve 同一张卡（submitting 变化不会重建 effect）。
   const busyRef = useRef(busyNow);
   busyRef.current = busyNow;
+  // P2-a（#1071 评审）：同上——effect 只在 confirmAlways/busy 变化时重建，直接闭包
+  // 读 menuOpen 会永远是旧值（打开菜单后 Esc 仍会拒绝卡片），故用 ref 读最新值。
+  const menuOpenRef = useRef(menuOpen);
+  menuOpenRef.current = menuOpen;
   useEffect(() => {
     if (confirmAlways) return;
     const onKeyDown = (event: KeyboardEvent & { __miqiResolved?: boolean }) => {
@@ -115,6 +121,7 @@ export function HermesConfirmBar({
         }
       } else if (event.key === 'Escape') {
         if (editing) return; // 输入框 Esc 不拒绝
+        if (menuOpenRef.current) return; // 下拉打开时 Esc 让位（Radix 关菜单，不拒绝）
         event.preventDefault();
         event.__miqiResolved = true;
         if (!busyRef.current) {
@@ -168,7 +175,7 @@ export function HermesConfirmBar({
           />
         )}
         {hasMoreOptions && (
-          <DropdownMenu.Root>
+          <DropdownMenu.Root open={menuOpen} onOpenChange={setMenuOpen}>
             <DropdownMenu.Trigger asChild>
               <button
                 aria-label="更多选项"
