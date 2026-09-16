@@ -1,13 +1,21 @@
 /**
- * Confirm Card E2E (issue #646) — ask_user_confirm_card 全链路。
+ * Confirm Card E2E (issue #646) — 确认卡全链路（confirm-card + ActionCard）。
  *
  * 用本地 mock OpenAI 服务器（scripts/mock_openai.py，确定性状态机）驱动，
  * 验证完整链路：
  *   1. 模型调用 ask_user_confirm_card → 桌面端消息流内弹确认卡（阻塞回合）
  *   2. 用户点击「确认执行」→ 选择以 tool result 回传 → 回合继续
  *      （mock 随后调用真实 web_search / write_file 工具）
- *   3. 第二张卡（是否上传到 MiQroForge？）→ 用户点击「确认上传」
- *   4. 回合完成，最终回复渲染；两张卡均留下「已选择」决议记录
+ *   3. 第二张卡是上传确认——危险动作，唯一模型侧入口是
+ *      request_action_confirmation → 渲染 ActionCard（data-testid="action-card"）
+ *      → 用户点击「确认上传」
+ *   4. 回合完成，最终回复渲染；第一张卡留下「已选择」决议记录，ActionCard
+ *      按设计在决议后卸载（无回执态，ConfirmCardArea 对已决议 action 卡
+ *      return null）
+ *
+ * 边界锚点（#1071 C7）：其余卡（ask_user_confirm_card）的 confirm-card 断言
+ * 一律保持不变——它们是这次"危险动作改走 ActionCard"的回归锚点，只有上传卡
+ * 改为 action-card 断言。
  *
  * 不依赖真实 LLM 行为：mock 按工具调用序列推进，网络工具即使失败
  * （如 CI 无外网）也不会阻断状态机——只统计调用次数。
@@ -181,28 +189,31 @@ test.describe('Confirm Card (ask_user_confirm_card)', () => {
         timeout: 30_000,
       });
 
-      // ── 第二张卡：上传确认（web_search 走真实网络，CI 无外网时工具报错
-      //    不影响状态机推进，但给足超时）──
-      // 按文本 filter 定位上传卡（CI strict 防御：first() 会命中第一张卡的回执——回执无按钮）
-      const uploadCard = page
-        .getByTestId('confirm-card')
-        .filter({ hasText: '是否上传到 MiQroForge' });
-      await expect(uploadCard.first()).toBeVisible({
+      // ── 第二张卡：上传确认 —— 危险动作，走 ActionCard
+      //    （request_action_confirmation；web_search 走真实网络，CI 无外网时
+      //    工具报错不影响状态机推进，但给足超时）──
+      // 上传卡不再是 confirm-card：ActionCard 的 testid 是 action-card，
+      // 标题行为「☁ 上传：MiQroForge」。
+      const uploadCard = page.getByTestId('action-card').first();
+      await expect(uploadCard).toBeVisible({
         timeout: 180_000,
       });
-      await expect(uploadCard.first().getByTestId('confirm-run')).toBeVisible();
+      await expect(uploadCard.getByText('☁ 上传').first()).toBeVisible();
+      await expect(uploadCard.getByText('MiQroForge').first()).toBeVisible();
+      await expect(uploadCard.getByText('mof-price-report.workflow.json').first()).toBeVisible();
+      // 按钮沿用 confirm-run 体系（ActionCard 内部仍是 HermesConfirmBar）
+      await expect(uploadCard.getByTestId('confirm-run')).toBeVisible();
 
       await page.screenshot({
         path: `test-results/${test.info().title.replace(/\s+/g, '-')}-card2.png`,
       });
 
       // 卡片 msgIn 动画（.35s）期间 click 会因元素移动超时——force 点击
-      await uploadCard.first().getByTestId('confirm-run').click({ force: true, timeout: 15_000 });
-      // 两张卡均留在消息流原位：第一张"已确认执行方案"，第二张转"已确认"态
+      await uploadCard.getByTestId('confirm-run').click({ force: true, timeout: 15_000 });
+      // 第一张卡留在消息流原位（"已确认执行方案"）；ActionCard 决议后按设计
+      // 从 DOM 卸载——不转"已确认"回执态，也不占位。
       await expect(cardArea.getByText('已确认执行方案').first()).toBeVisible({ timeout: 30_000 });
-      await expect(cardArea.getByText('方案已完成，是否上传到 MiQroForge')).toBeVisible({
-        timeout: 30_000,
-      });
+      await expect(page.getByTestId('action-card')).toHaveCount(0, { timeout: 30_000 });
 
       // ── 回合完成：最终回复渲染 ──
       await waitForResponseComplete(page, LLM_TIMEOUT);
@@ -212,9 +223,10 @@ test.describe('Confirm Card (ask_user_confirm_card)', () => {
       );
       await expect(page.locator('main')).toContainText('mof-price-report.workflow.json');
 
-      // ── 两张卡均留在消息流原位（决议痕迹 = 卡的状态更新，无折叠入口）──
+      // ── 决议痕迹：第一张卡留在消息流原位（状态更新，无折叠入口）；
+      //    ActionCard 无回执态，决议后即卸载 ──
       await expect(cardArea.getByText('已确认执行方案').first()).toBeVisible();
-      await expect(cardArea.getByText('方案已完成，是否上传到 MiQroForge')).toBeVisible();
+      await expect(page.getByTestId('action-card')).toHaveCount(0);
 
       await page.screenshot({
         path: `test-results/${test.info().title.replace(/\s+/g, '-')}-final.png`,

@@ -5,7 +5,9 @@ State machine driven by tool results already in the request history:
   Round 1: tool_call → ask_user_confirm_card #1 (确认执行方案?, 4 steps)
   Round 2: confirmed → tool_call → web_search (real tool, actually runs)
   Round 3: web_search done → tool_call → write_file (WorkflowDefinition JSON)
-  Round 4: file written → tool_call → ask_user_confirm_card #2 (是否上传到 MiQroForge?)
+  Round 4: file written → tool_call → request_action_confirmation
+           (ActionCard「上传：MiQroForge」——危险动作唯一模型侧入口，
+            上传不再走 ask_user_confirm_card)
   Round 5: confirmed → final text (uploaded + project link)
 
 Dual-card branch (issue #714): when the latest user message contains the
@@ -41,12 +43,18 @@ EXEC_CHOICES = [
 DUAL_TITLE_A = "确认发起网络搜索？"
 DUAL_TITLE_B = "确认创建文档？"
 
-UPLOAD_TITLE = "方案已完成，是否上传到 MiQroForge？"
-UPLOAD_MESSAGE = "工作流方案已生成并通过校验，上传后将作为 WorkflowDefinition 发布到 MiQroForge 平台。"
-UPLOAD_CHOICES = [
-    {"id": "confirm", "label": "确认上传"},
-    {"id": "cancel", "label": "取消"},
-]
+# 上传确认走 ActionCard（request_action_confirmation）——危险动作（上传/
+# 支付/破坏性删除/外发）的唯一模型侧入口，不再用 ask_user_confirm_card。
+# 字段形状与下方 plan / auto 分支的 action 卡一致：用户看到的目标、文件名、
+# 大小、指纹就是被授权的对象。
+UPLOAD_ACTION = {
+    "action": "upload",
+    "target": "MiQroForge",
+    "file_name": "mof-price-report.workflow.json",
+    "size_bytes": 23552,
+    "sha256": "deadbeef1234567890abcdef1234567890",
+    "description": "上传 MOF-5 市场合成价格报告到 MiQroForge",
+}
 
 def _build_steps(text: str) -> list[dict]:
     """动态生成步骤：解析用户调整要求（步数/市场/复杂度），模拟 LLM 理解。"""
@@ -510,11 +518,8 @@ class Handler(BaseHTTPRequestHandler):
             self._respond(tc("read_file", {"path": "README.md"}, "call_write"))
             return
         if n_confirm_cards == 1:
-            print("  [mock] R4 → 上传确认卡", flush=True)
-            self._respond(tc("ask_user_confirm_card", {
-                "title": UPLOAD_TITLE, "message": UPLOAD_MESSAGE,
-                "choices": UPLOAD_CHOICES, "timeout_seconds": 60,
-            }, "call_upload_confirm"))
+            print("  [mock] R4 → 上传 ActionCard（request_action_confirmation）", flush=True)
+            self._respond(tc("request_action_confirmation", UPLOAD_ACTION, "call_upload_confirm"))
             return
 
         print("  [mock] R5 → 上传确认收到 confirmed，输出最终结果", flush=True)
