@@ -1306,7 +1306,9 @@ async def test_files_reject_session_key_with_unsafe_derived_dir(
 
     ``.``/``..`` derive themselves and would move the session root out of
     ``<ws>/sessions/`` (silently disabling isolation); a name ending in a dot
-    cannot be created on Windows and used to surface as an internal error.
+    cannot be created on Windows and used to surface as an internal error;
+    Windows reserved device names (CON/NUL/COM1…) likewise cannot back a
+    session directory.
     """
     from miqi.runtime.app_server import AppServerError, ClientSessionRegistry
     from miqi.runtime.file_handlers import files_write_handler
@@ -1314,7 +1316,7 @@ async def test_files_reject_session_key_with_unsafe_derived_dir(
     _setup_session("atk-unsafe", "client-A")
     registry = ClientSessionRegistry()
 
-    for bad_key in ("..", ".", "a:b:.."):
+    for bad_key in ("..", ".", "a:b:..", "CON", "nul", "com1", "LPT9"):
         with pytest.raises(AppServerError) as exc_info:
             await files_write_handler(
                 "req-unsafe",

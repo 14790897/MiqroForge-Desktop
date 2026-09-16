@@ -130,6 +130,10 @@ def _session_dir_key(session_key: str) -> str:
     outside ``<ws>/sessions/`` and silently disable session isolation.  Names
     ending in a dot are also rejected: Windows cannot create such a directory,
     and the failure surfaced as an internal error rather than INVALID_PARAMS.
+    Windows reserved device names are rejected for the same reason — ``mkdir``
+    on ``CON``/``NUL``/``COM1`` either fails or silently targets the device.
+    The check runs on every platform so the accepted key set does not depend
+    on which OS the bridge happens to run on.
     """
     safe_key = session_files_dir_key(session_key)
     if not safe_key or safe_key in (".", "..") or safe_key[-1] in (".", " "):
@@ -137,6 +141,10 @@ def _session_dir_key(session_key: str) -> str:
             f"Invalid session key: {session_key!r}", code="INVALID_PARAMS",
         )
     if "/" in safe_key or "\\" in safe_key:
+        raise AppServerError(
+            f"Invalid session key: {session_key!r}", code="INVALID_PARAMS",
+        )
+    if safe_key.upper() in _WINDOWS_RESERVED_NAMES:
         raise AppServerError(
             f"Invalid session key: {session_key!r}", code="INVALID_PARAMS",
         )
@@ -195,6 +203,16 @@ _SESSIONS_DIR_NAME = "sessions"
 # content.  Hidden from the workspace tree so the editor never offers a file
 # the workspace-scoped handlers will refuse to write.
 _RESERVED_ROOT_DIRS = frozenset({_SESSIONS_DIR_NAME, "_legacy_sessions"})
+
+# Windows reserves these device names at every directory level, with or without
+# an extension.  A session directory derived from one of them cannot be created
+# (and on some versions the create silently targets the device), so such a key
+# is rejected up front rather than surfacing as INTERNAL.
+_WINDOWS_RESERVED_NAMES = frozenset(
+    ("CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$")
+    + tuple("COM%d" % i for i in range(10))
+    + tuple("LPT%d" % i for i in range(10))
+)
 
 
 def _is_within(path: Path, root: Path) -> bool:
