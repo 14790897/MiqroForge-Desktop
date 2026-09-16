@@ -202,6 +202,19 @@ export function buildMockBridgeScript(opts: MockBridgeOptions = {}): string {
   // ── window.miqi ──────────────────────────────────────────────────
 
   window.miqi = {
+    // 应用生命周期（镜像 src/preload/index.ts app 命名空间）：
+    // ChatConsole 挂载时会经 setPanelWindowExtra 上报资产面板加宽量，
+    // 缺失会导致整个应用渲染崩溃（TypeError → 错误边界）。
+    app: {
+      quit: function() { return Promise.resolve({ ok: true }); },
+      focus: function() { return Promise.resolve({ ok: true }); },
+      setPanelWindowExtra: function(extra, minOnly) {
+        return Promise.resolve({ ok: true, applied: extra || 0 });
+      },
+    },
+    env: {
+      isE2E: false,
+    },
     // #1071：同意状态的权威存储由主进程持有；smoke 场景已用
     // localStorage 预置同意版本（见 addInitScript），这里回同样的值，
     // 保持「权威存储读取成功且与缓存一致」的语义。
