@@ -1,6 +1,6 @@
 import { existsSync, readFileSync, realpathSync } from 'fs';
 import { homedir } from 'os';
-import { isAbsolute, join, resolve } from 'path';
+import { basename, dirname, isAbsolute, join, resolve } from 'path';
 
 /** Directory holding the local config file (`~/.miqi` by default, overridable via MIQI_HOME). */
 export function getConfigDir(): string {
@@ -58,6 +58,35 @@ function isUnder(candidate: string, root: string): boolean {
   const relCmp = normForCompare(candidate);
   const rootCmp = normForCompare(root);
   return relCmp === rootCmp || relCmp.startsWith(rootCmp + '/');
+}
+
+/**
+ * Canonical form of `p` even when `p` does not exist yet: the longest existing
+ * prefix is realpath'd and the missing tail is appended unchanged.
+ *
+ * `realpathSync` alone is not enough here.  A folder-bound session's root comes
+ * back canonical from the runtime — on macOS `mkdtemp` hands out `/var/…` while
+ * the real directory is `/private/var/…` — so a candidate spelled the
+ * unresolved way would never compare equal to its own root, and a perfectly
+ * legitimate file was refused as "outside workspace" (#1062).  Resolving the
+ * existing prefix fixes that without requiring the file to exist: containment
+ * is still decided on the real location, so a symlink that leads outside the
+ * workspace is still rejected.
+ */
+function canonicalWithMissingTail(p: string): string {
+  let head = p;
+  const tail: string[] = [];
+  for (;;) {
+    try {
+      const real = realpathSync.native(head);
+      return tail.length ? join(real, ...tail.reverse()) : real;
+    } catch {
+      const parent = dirname(head);
+      if (parent === head) return p; // hit the root without an existing prefix
+      tail.push(basename(head));
+      head = parent;
+    }
+  }
 }
 
 /**
@@ -140,7 +169,18 @@ export function resolveWorkspacePath(
   // land outside every allowed root.  Case-folding happens in isUnder so a
   // workspace configured with a lowercase drive letter still matches a
   // /mnt/<DRIVE>/ path.
-  if (!allowedRoots(wsRoot, extraRoots).some((root) => isUnder(resolved, root))) {
+  //
+  // Both spellings of the same location must pass: the path as given, and its
+  // canonical form.  A folder-bound session's root comes back canonical from
+  // the runtime while the path the renderer holds may still be unresolved
+  // (macOS /var → /private/var), and comparing only lexically refused those
+  // outright (#1062).  Canonicalising is strictly tighter, never looser: the
+  // comparison still lands on the real location.
+  const canonicalResolved = canonicalWithMissingTail(resolved);
+  const contained = allowedRoots(wsRoot, extraRoots).some(
+    (root) => isUnder(resolved, root) || isUnder(canonicalResolved, canonicalWithMissingTail(root))
+  );
+  if (!contained) {
     throw new Error(`Path outside workspace: ${raw}`);
   }
 

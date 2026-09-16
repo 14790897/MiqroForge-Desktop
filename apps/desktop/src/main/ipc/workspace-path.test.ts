@@ -1,5 +1,5 @@
 import { describe, expect, it, beforeEach, afterEach } from 'vitest';
-import { mkdirSync } from 'fs';
+import { mkdirSync, symlinkSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import {
@@ -200,5 +200,43 @@ describe('extra roots (#1062 folder-bound sessions)', () => {
         /outside workspace/
       );
     });
+  });
+});
+
+// #1062 macOS：运行时返回的会话根是**规范化过**的（`/var` → `/private/var`），
+// 而调用方手里往往是未规范化的同一位置。只做词法比较会把合法文件判成越界。
+describe('symlinked allowed root (#1062 macOS /var)', () => {
+  let home: string;
+  let wsRoot: string;
+
+  beforeEach(() => {
+    home = join(tmpdir(), `miqi-ws-link-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    process.env['MIQI_HOME'] = home;
+    wsRoot = join(home, 'workspace');
+    mkdirSync(wsRoot, { recursive: true });
+  });
+
+  afterEach(() => {
+    delete process.env['MIQI_HOME'];
+  });
+
+  it('accepts the unresolved spelling of a path under a symlinked root', () => {
+    const real = join(home, 'outside-real');
+    mkdirSync(real, { recursive: true });
+    const link = join(wsRoot, 'link');
+    try {
+      symlinkSync(real, link, 'junction');
+    } catch {
+      return; // 该环境不支持创建符号链接 / junction
+    }
+
+    // `real/missing.txt` 词法上不在 `link` 下、也不在工作区下；但它的真实位置
+    // 就是 `link/missing.txt` 的真实位置 —— 必须接受。
+    expect(() => resolveWorkspacePath(join(real, 'missing.txt'), [link])).not.toThrow();
+
+    // 规范化收紧而不是放宽：真正在允许根之外的路径仍然被拒。
+    expect(() => resolveWorkspacePath(join(tmpdir(), 'elsewhere.txt'), [link])).toThrow(
+      /outside workspace/
+    );
   });
 });
