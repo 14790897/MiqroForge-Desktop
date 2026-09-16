@@ -1911,8 +1911,19 @@ for m in ("pydantic", "httpx", "loguru"):
     });
 
   async function findFileInWsl(
-    relPath: string
+    relPath: string,
+    sessionKey?: string
   ): Promise<{ wslAbsPath: string; distro: string } | null> {
+    // Every lookup is scoped to ONE session.  The old script globbed
+    // `/tmp/miqi-sandboxes/*/home/miqi/workspace/` and `sessions/*/files/`, so a
+    // relative name that existed in another session's files dir matched there —
+    // the file was then copied into *this* session's root and passed the
+    // canonical check on the destination, i.e. cross-session disclosure
+    // (#1103 review).  Without a session key there is nothing to scope to, so
+    // the fallback is refused rather than widened.
+    if (!sessionKey) return null;
+    const safeKey = sessionKey.replace(/[:\\/]/g, '_');
+
     const execOpts = { timeout: 10000, encoding: 'utf8' as const, windowsHide: true };
     // List WSL distros
     let distros: string[] = [];
@@ -1931,18 +1942,17 @@ for m in ("pydantic", "httpx", "loguru"):
     const escapedRelPath = shellEscape(relPath);
     const searchScript =
       `RP=$'${escapedRelPath}'\n` +
-      `for d in /tmp/miqi-sandboxes/*/home/miqi/workspace/; do\n` +
-      `  if [ -f "$d$RP" ]; then echo "$d$RP"; exit 0; fi\n` +
-      `  for s in "$d"sessions/*/files/; do\n` +
-      `    if [ -f "$s$RP" ]; then echo "$s$RP"; exit 0; fi\n` +
-      `  done\n` +
-      `done\n` +
-      // Also search the WSL home workspace (where Python tools write files directly)
+      // 本会话自己的沙箱工作区（绑定会话的沙箱工作区就是绑定根）与其私有 files 目录。
+      `W="/tmp/miqi-sandboxes/${safeKey}/home/miqi/workspace"\n` +
+      `if [ -f "$W/$RP" ]; then echo "$W/$RP"; exit 0; fi\n` +
+      `S="$W/sessions/${safeKey}/files"\n` +
+      `if [ -f "$S/$RP" ]; then echo "$S/$RP"; exit 0; fi\n` +
+      // WSL home 工作区：根本身是跨会话共享的（它就是一个允许根），但会话私有目录
+      // 只看本会话 —— 原来这里对 `sessions/*/files` 取通配，会把别的会话的文件认下来。
       `ws="$HOME/.miqi/workspace"\n` +
       `if [ -f "$ws/$RP" ]; then echo "$ws/$RP"; exit 0; fi\n` +
-      `for s in "$ws"/sessions/*/files/; do\n` +
-      `  if [ -f "$s/$RP" ]; then echo "$s/$RP"; exit 0; fi\n` +
-      `done\n` +
+      `s="$ws/sessions/${safeKey}/files"\n` +
+      `if [ -f "$s/$RP" ]; then echo "$s/$RP"; exit 0; fi\n` +
       `exit 1\n`;
 
     for (const distro of distros) {
@@ -2032,7 +2042,7 @@ for m in ("pydantic", "httpx", "loguru"):
       }
 
       try {
-        const found = await findFileInWsl(relPath);
+        const found = await findFileInWsl(relPath, parsed.data.session_key);
         if (found) {
           const hostTarget = join(extraRoots[0] ?? getWorkspacePath(), relPath);
           const copied = await copyFromWsl(found.wslAbsPath, found.distro, hostTarget);

@@ -123,19 +123,12 @@ test.describe('#1062 folder-bound session 预览/定位', () => {
 
       // 前提：文件确实落在绑定目录里。否则下面的断言可能因为别的原因通过。
       //
-      // CI 的 electron-e2e runner 上 bwrap 起不来（`bwrap: setting up uid map:
-      // Permission denied`），而 `runtime.status` 照样报 `sandbox_available: true`，
-      // 所以没有现成的就绪信号可判 —— 自定义工作区里的写入落不了地。同一条 runner
-      // 上既有的 issue-1061 与 workspace-file-read-edit-sandbox 两条 spec 也是这样红
-      // 的，与本 PR 无关。那种环境下这条测不了任何东西，跳过并写明原因；本地和有可用
-      // 沙箱的 runner 上依旧是硬失败。
-      const produced = existsSync(join(folderRoot, filename));
-      test.skip(
-        !produced && !!process.env.CI,
-        'sandbox cannot execute on this runner (bwrap: setting up uid map: Permission denied)'
-      );
+      // 这里曾经在 CI 上因「没产出」而 skip（绕开当时还没修的账本分叉 bug）。
+      // 那个 bug 已随 #1104 合入，且本用例要的是 write_file、不是 exec —— 跳过
+      // 会把「绑定、agent 执行、路径解析」任何一处的新回归一起吞掉，所以去掉：
+      // 没产出就是失败（#1103 review）。
       expect(
-        produced,
+        existsSync(join(folderRoot, filename)),
         `agent output must land in the bound folder: ${join(folderRoot, filename)}`
       ).toBe(true);
 
