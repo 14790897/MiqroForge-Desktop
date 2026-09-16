@@ -71,30 +71,34 @@ export function reloadSkippedLogLine(reason: string, reloadsInWindow: number): s
 /**
  * 主进程侧的内存小状态表。进程内单例见文件末尾的 `crashRecovery`。
  *
- * - `inFlight`：`chat.send` 记、`final`/`error`/`aborted` 清；
+ * - `inFlight`：`chat.send` 记、`final`/`error`/`aborted` 清——按会话计数。
+ *   同一会话可能存在并发 turn（打断-重发：被取代的请求要等 `TURN_ABORT_SETTLE_MS`
+ *   才落定，而新的 `chat.send` 可能已经开始），单值登记会让先落定的那个把
+ *   仍在飞的清掉，令崩溃提示的 `inFlightSessionKeys` 漏掉该会话（CR 复审
+ *   finding，2026-09）；计数保证「会话上还有活跃 turn」直到最后一个落定。
  * - `reloadHistory`：重载时刻，用于 10 分钟预算；
  * - `notice`：最近一次崩溃留下的恢复提示，等渲染层来拉。
- *
- * 已知限制：`inFlight` 是 `Map<sessionKey, startedAt>`，同一会话上的并发 turn
- * 会互相覆盖——后发的 turn 落定（或通道异常结束）时把先发 turn 的登记一并清
- * 掉，于是崩溃提示的 `inFlightSessionKeys` 会漏掉那个会话。当前 UI 不允许同一
- * 会话同时发多个 turn，故未处理；真要支持并发，演进方向是把值换成
- * `Set<turnId>` 或按会话计数的计数器（settle 一次减一）。
  */
 export class CrashRecoveryTracker {
   private readonly inFlight = new Map<string, number>();
   private reloadHistory: number[] = [];
   private notice: RecoveryNotice | null = null;
 
-  /** `chat.send` 受理后登记。 */
-  markTurnStarted(sessionKey: string, now: number = Date.now()): void {
+  /** `chat.send` 受理后登记（按会话累计活跃 turn 数）。 */
+  markTurnStarted(sessionKey: string): void {
     if (!sessionKey) return;
-    this.inFlight.set(sessionKey, now);
+    this.inFlight.set(sessionKey, (this.inFlight.get(sessionKey) ?? 0) + 1);
   }
 
-  /** 收到 `final` / `error` / `aborted`（或通道异常结束）时清除。 */
+  /** 收到 `final` / `error` / `aborted`（或通道异常结束）时递减；减到 0 才摘除。 */
   markTurnSettled(sessionKey: string): void {
-    this.inFlight.delete(sessionKey);
+    const remaining = this.inFlight.get(sessionKey);
+    if (remaining === undefined) return;
+    if (remaining <= 1) {
+      this.inFlight.delete(sessionKey);
+    } else {
+      this.inFlight.set(sessionKey, remaining - 1);
+    }
   }
 
   getInFlightSessionKeys(): string[] {

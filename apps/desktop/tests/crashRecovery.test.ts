@@ -92,12 +92,26 @@ describe('日志行格式（期望行为 2：可检索）', () => {
 describe('CrashRecoveryTracker — 在飞 turn 登记表', () => {
   it('mark / settle：登记后可见，settle 后摘除', () => {
     const tracker = new CrashRecoveryTracker();
-    tracker.markTurnStarted('desktop:default', T0);
-    tracker.markTurnStarted('folder:abc', T0);
+    tracker.markTurnStarted('desktop:default');
+    tracker.markTurnStarted('folder:abc');
     expect(tracker.getInFlightSessionKeys().sort()).toEqual(['desktop:default', 'folder:abc']);
 
     tracker.markTurnSettled('desktop:default');
     expect(tracker.getInFlightSessionKeys()).toEqual(['folder:abc']);
+  });
+
+  it('同一会话并发 turn（打断-重发）：先落定的不清掉仍在飞的', () => {
+    const tracker = new CrashRecoveryTracker();
+    tracker.markTurnStarted('desktop:default');
+    tracker.markTurnStarted('desktop:default'); // 新请求已受理，旧请求尚未落定
+    tracker.markTurnSettled('desktop:default'); // 旧请求落定
+    expect(tracker.getInFlightSessionKeys()).toEqual(['desktop:default']); // 新请求仍在飞
+
+    const { notice } = tracker.onRendererCrash('oom', -536870904, T0);
+    expect(notice.inFlightSessionKeys).toEqual(['desktop:default']);
+
+    tracker.markTurnSettled('desktop:default');
+    expect(tracker.getInFlightSessionKeys()).toEqual([]);
   });
 
   it('settle 未登记的会话是幂等的 no-op', () => {
@@ -114,9 +128,9 @@ describe('CrashRecoveryTracker — 在飞 turn 登记表', () => {
 
   it('turn 结束后重建再崩溃：提示里不再含已结束的会话', () => {
     const tracker = new CrashRecoveryTracker();
-    tracker.markTurnStarted('folder:a', T0);
+    tracker.markTurnStarted('folder:a');
     tracker.markTurnSettled('folder:a');
-    tracker.markTurnStarted('folder:b', T0 + 1000);
+    tracker.markTurnStarted('folder:b');
 
     const { notice } = tracker.onRendererCrash('oom', -536870904, T0 + 2000);
     expect(notice.inFlightSessionKeys).toEqual(['folder:b']);
@@ -179,7 +193,7 @@ describe('CrashRecoveryTracker — 崩溃记账与预算', () => {
 
   it('崩溃不清空在飞登记表（bridge 里的 turn 可能仍在跑）', () => {
     const tracker = new CrashRecoveryTracker();
-    tracker.markTurnStarted('folder:a', T0);
+    tracker.markTurnStarted('folder:a');
     tracker.onRendererCrash('oom', 1, T0 + 1000);
     expect(tracker.getInFlightSessionKeys()).toEqual(['folder:a']);
   });
@@ -236,7 +250,7 @@ describe('CrashRecoveryTracker.peekNotice — 只读、不消费', () => {
 
   it('reset 清空在飞表、预算与 notice', () => {
     const tracker = new CrashRecoveryTracker();
-    tracker.markTurnStarted('folder:a', T0);
+    tracker.markTurnStarted('folder:a');
     tracker.onRendererCrash('oom', 1, T0);
     tracker.reset();
     expect(tracker.getInFlightSessionKeys()).toEqual([]);
