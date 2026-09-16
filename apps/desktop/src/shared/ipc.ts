@@ -167,6 +167,9 @@ export const IPC = {
   QRAFT_LOGIN: 'qraft:login',
   QRAFT_BROWSER_LOGIN: 'qraft:browserLogin',
   QRAFT_STATUS: 'qraft:status',
+  // 同步读取（#1095）：登录门要在首帧就知道登录态，异步取会先闪一帧
+  // 登录页/加载页。preload 在页面脚本前 sendSync 一次。
+  QRAFT_STATUS_SYNC: 'qraft:statusSync',
   QRAFT_REFRESH: 'qraft:refresh',
   QRAFT_LOGOUT: 'qraft:logout',
   QRAFT_POINTS_BALANCE: 'qraft:pointsBalance',

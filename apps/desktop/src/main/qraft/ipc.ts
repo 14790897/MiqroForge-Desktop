@@ -9,6 +9,7 @@
 import { electron } from '../../shared/electron';
 import { join } from 'path';
 import { getWorkspacePath } from '../ipc';
+import { sendToWindow } from '../frame-send';
 import {
   IPC,
   IPC_EVENTS,
@@ -95,7 +96,7 @@ function getService(): QraftService {
     log,
     onStatusChanged: (status: QraftStatus) => {
       for (const win of BrowserWindow.getAllWindows()) {
-        if (!win.isDestroyed()) win.webContents.send(IPC_EVENTS.QRAFT_STATUS_CHANGED, status);
+        sendToWindow(win, IPC_EVENTS.QRAFT_STATUS_CHANGED, status);
       }
     },
     // Slurm 作业扣费历史（issue #927）：与登录态同目录，随 userData 隔离。
@@ -293,6 +294,12 @@ export function registerQraftIpcHandlers(): void {
 
   ipcMain.handle(IPC.QRAFT_STATUS, async (): Promise<QraftStatus> => {
     return getService().status();
+  });
+
+  // 登录门首帧判定（#1095）：preload 在页面脚本执行前同步取一次登录态，
+  // 渲染层据此决定是否停在登录页——异步取会让已登录用户先闪一帧登录页。
+  ipcMain.on(IPC.QRAFT_STATUS_SYNC, (event) => {
+    event.returnValue = getService().status();
   });
 
   ipcMain.handle(IPC.QRAFT_POINTS_BALANCE, async () => {

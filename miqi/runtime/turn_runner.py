@@ -476,11 +476,10 @@ class TurnRunner:
                         if snapshot_buffer.due(self._history):
                             await snapshot_buffer.flush(self._history, turn, status="running")
                     from miqi.protocol.events import AgentReasoningEvent
-                    if reasoning_chunks % 10 == 0:
-                        logger.info(
-                            "turn_runner: got reasoning_delta #{} len={} for turn={}",
-                            reasoning_chunks, len(stream_event.delta), turn.turn_id,
-                        )
+                    # No per-chunk log here (#1019): it used to fire once per 10
+                    # deltas, so a single long reasoning turn wrote thousands of
+                    # lines. Same removal as bridge/loop.py; the per-turn summary
+                    # below carries the totals.
                     await self._events.emit(AgentReasoningEvent(
                         turn_id=turn.turn_id,
                         content=stream_event.delta,
