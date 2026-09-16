@@ -739,27 +739,12 @@ class TurnRunner:
 
             from miqi.protocol.events import ToolCallBeginEvent, ToolCallEndEvent
 
-            # #680 desktop FAST budget — refuse budgeted-out tool calls
-            # (方案 4 search phase + finalizing gate): skipped calls get a
-            # synthetic "跳过" result so the model sees WHY and pivots to
-            # answering from what it has.
-            _skipped_ctx: list[tuple[Any, Any]] = []
-            if _rmode == "fast":
-                _kept: list[Any] = []
-                for tc in response.tool_calls:
-                    reason = _budget_skip_reason(tc.name)
-                    if reason:
-                        _skipped_ctx.append((tc, SimpleNamespace(
-                            result=f"[跳过] {reason}",
-                            status=OrchestrationResult.SUCCESS,
-                            duration_ms=0,
-                        )))
-                    else:
-                        _kept.append(tc)
-                response.tool_calls = _kept
-
             # #1094：参数被输出上限截断的调用拒绝执行（provider 已标记 truncated）
-            # 与预算跳过同理，塞一条合成结果让模型看到"为什么没执行"并自纠。
+            # 塞一条合成结果让模型看到"为什么没执行"并自纠。
+            # 本门**必须先于**下面的 #680 FAST 预算门跑：截断调用若先被判成"预算跳过"，
+            # 拿到的是 SUCCESS + "[跳过]"、且不进 _echo_calls（预算跳过不走回注）→ 这条
+            # tool_result 成孤儿被 presend 剪掉，模型既学不到"参数被截断"也不知该重发。
+            # 截断是硬拒绝（TOOL_ERROR），对调用的处置优先级高于预算让路。
             _truncated_ctx: list[tuple[Any, Any]] = []
             _kept_calls: list[Any] = []
             for tc in response.tool_calls:
@@ -781,6 +766,27 @@ class TurnRunner:
                     len(_truncated_ctx), turn.max_tokens, turn.turn_id,
                 )
             response.tool_calls = _kept_calls
+
+            # #680 desktop FAST budget — refuse budgeted-out tool calls
+            # (方案 4 search phase + finalizing gate): skipped calls get a
+            # synthetic "跳过" result so the model sees WHY and pivots to
+            # answering from what it has.
+            # 只看**截断门剩下的完好调用**：被拒执的截断调用本就没执行，不该消耗
+            # web_search 的相位预算计数。
+            _skipped_ctx: list[tuple[Any, Any]] = []
+            if _rmode == "fast":
+                _kept: list[Any] = []
+                for tc in response.tool_calls:
+                    reason = _budget_skip_reason(tc.name)
+                    if reason:
+                        _skipped_ctx.append((tc, SimpleNamespace(
+                            result=f"[跳过] {reason}",
+                            status=OrchestrationResult.SUCCESS,
+                            duration_ms=0,
+                        )))
+                    else:
+                        _kept.append(tc)
+                response.tool_calls = _kept
 
             for tc in response.tool_calls:
                 await self._events.emit(ToolCallBeginEvent(
