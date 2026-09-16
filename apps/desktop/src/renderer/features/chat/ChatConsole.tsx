@@ -988,10 +988,15 @@ async function fileExists(path: string, sessionKey: string | null | undefined): 
 
 /** Merge tracked files, collapsing entries that point at the same file:
  *  bare filename vs full session path, or absolute vs relative workspace path.
- *  Same-named files in different directories stay distinct. */
+ *  Same-named files in different directories stay distinct.
+ *
+ *  `workspaceRoot` is the session's own workspace — needed to tell "the
+ *  absolute form of this relative key" from "another file with the same tail"
+ *  (#1104 review).  Display-only: it never feeds a containment check. */
 function mergeTrackedFiles(
   existing: TrackedFile[],
-  incoming: Array<{ path: string; name?: string; op?: TrackedFile['op']; lastSeen?: number }>
+  incoming: Array<{ path: string; name?: string; op?: TrackedFile['op']; lastSeen?: number }>,
+  workspaceRoot?: string | null
 ): TrackedFile[] {
   const out = [...existing];
   for (const f of incoming) {
@@ -1005,7 +1010,7 @@ function mergeTrackedFiles(
     };
     const existingIdx = out.findIndex((p) => {
       const np2 = normalizeTrackedPath(p.path);
-      if (sameTrackedFile(np2, np)) return true;
+      if (sameTrackedFile(np2, np, workspaceRoot)) return true;
       const oneIsBare = !np2.includes('/') || !np.includes('/');
       return oneIsBare && basename(np2) === basename(np);
     });
@@ -3595,8 +3600,8 @@ export function ChatConsole({
         return (
           f.path === normPath ||
           fc === clean ||
-          sameTrackedFile(f.path, normPath) ||
-          sameTrackedFile(fc, clean) ||
+          sameTrackedFile(f.path, normPath, workspace) ||
+          sameTrackedFile(fc, clean, workspace) ||
           (eitherIsBareFilename && basename(f.path) === basename(clean))
         );
       });
@@ -3621,7 +3626,7 @@ export function ChatConsole({
         const dup = prev.some(
           (f) =>
             f.path === normPath ||
-            sameTrackedFile(f.path, normPath) ||
+            sameTrackedFile(f.path, normPath, workspace) ||
             (basename(f.path) === basename(normPath) &&
               (!f.path.includes('/') || !normPath.includes('/')))
         );
@@ -4273,7 +4278,7 @@ export function ChatConsole({
           op: f.op,
           lastSeen: f.lastSeen ?? Date.now(),
         }));
-        setTrackedFiles(mergeTrackedFiles(existingFromMessages, backendMapped));
+        setTrackedFiles(mergeTrackedFiles(existingFromMessages, backendMapped, workspace));
 
         // ── Issue #490: resume this session's most-recent active thread ──
         // currentThreadIdRef is reset to null on every sessionKey/remount
@@ -6130,7 +6135,7 @@ export function ChatConsole({
                   op: f.op,
                   lastSeen: f.lastSeen ?? Date.now(),
                 }));
-                return mergeTrackedFiles(prev, mapped);
+                return mergeTrackedFiles(prev, mapped, workspace);
               });
             }
           },
