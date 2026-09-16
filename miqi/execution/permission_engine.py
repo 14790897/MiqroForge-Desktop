@@ -22,6 +22,10 @@ from miqi.execution.exec_policy import PolicyVerdict
 # Shell metacharacters that indicate command chaining or injection
 _SHELL_METACHAR_PATTERN = re.compile(r"[;&|`$(){}\[\]<>!\n\r]")
 
+# Action Guard 确认缓存上界：防长会话无界增长；超限清空重建，最坏退化为多弹卡
+# （安全方向——只可能多问，不可能少问）。
+_MAX_ACTION_GUARD_CONFIRMED = 512
+
 
 def _office_target_path(tool_name: str, arguments: dict[str, Any]) -> str:
     path = arguments.get("path", "") or arguments.get("file_path", "") or arguments.get("filename", "")
@@ -130,11 +134,26 @@ class PermissionEngine:
         # 破坏性删除/外发消息/spawn）在真实派发前强制确认——resolver 即
         # user_input_gate 弹卡通道（无则为 headless，走 APPROVAL_REQUIRED）。
         self.action_guard_resolver = action_guard_resolver
-        # 会话级去重：同一 thread 内已确认过的同类动作不再重复弹卡。
+        # 会话级去重（授权模型，产品拍板 2026-09-16）：
+        # **确认范围＝同一 thread 内同一工具（thread + tool_name）**；本 thread 内
+        # 后续同类动作不再逐一询问——键只有 thread+tool，不看参数。
+        # 卡片 payload 里的「（确认后本对话内同类动作将不再逐一询问）」即本模型的
+        # 用户侧表述，两者必须同时改。
+        #
+        # 概念区分：`_action_guard_confirmed`（本决策，安全层兜底）≠
+        # `session_allowlist` / `permanent_allowlist`（用户显式「允许并记住」，
+        # 按 `_make_key` 键控——参数变了 key 就变）。别把两套机制混在一起改。
+        #
+        # 曾评估「安全参数摘要（thread+tool+args digest）」方案，因摩擦未采纳——
+        # 见 docs/dev-notes/action-guard-confirmation-scope.md。
         self._action_guard_confirmed: set[str] = set()
 
     async def _action_guard(self, ctx: Any) -> "PermissionDecision | None":
         """fail-closed：should_confirm_action 命中的动作未经用户确认不得执行。
+
+        授权模型：确认范围＝同一 thread 内同一工具（thread + tool_name）；本 thread
+        内后续同类动作不再逐一询问。判定仍逐次看参数（should_confirm_action），
+        只是确认缓存按 thread+tool 计。
 
         不依赖模型自觉先调 request_action_confirmation——在真实执行边界兜底。
         """
@@ -146,6 +165,16 @@ class PermissionEngine:
             return None
         key = f"{getattr(ctx, 'thread_id', '')}:{ctx.tool_name}"
         if key in self._action_guard_confirmed:
+            return None
+        # 模型侧 ActionCard 已在本 turn 对同类动作取得用户确认 → 不重复弹卡。
+        # family 级（而非 turn 级）：确认一次 upload 不会顺带放行 spawn/删目录。
+        try:
+            from miqi.execution.task_policy import action_family
+
+            _fam = action_family(ctx.tool_name)
+        except Exception:  # noqa: BLE001
+            _fam = None
+        if _fam and _fam in (getattr(ctx, "action_confirmed_families", None) or frozenset()):
             return None
         if self.action_guard_resolver is None:
             # headless/CLI：无弹卡通道——不静默放行，交给常规审批流显式要求。
@@ -183,6 +212,8 @@ class PermissionEngine:
             and isinstance(answers, dict)
             and answers.get("choice_id") == "confirm"
         ):
+            if len(self._action_guard_confirmed) >= _MAX_ACTION_GUARD_CONFIRMED:
+                self._action_guard_confirmed.clear()
             self._action_guard_confirmed.add(key)
             return None
         return PermissionDecision(
