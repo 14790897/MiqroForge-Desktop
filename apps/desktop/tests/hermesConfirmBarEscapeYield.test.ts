@@ -25,10 +25,7 @@ const CANDIDATES = [
   // vitest 通常以 apps/desktop 为 cwd 运行
   resolve(process.cwd(), 'src/renderer/features/chat/components/HermesConfirmBar.tsx'),
   // 兜底：从仓库根运行
-  resolve(
-    process.cwd(),
-    'apps/desktop/src/renderer/features/chat/components/HermesConfirmBar.tsx'
-  ),
+  resolve(process.cwd(), 'apps/desktop/src/renderer/features/chat/components/HermesConfirmBar.tsx'),
 ];
 
 const sourcePath = CANDIDATES.find((candidate) => existsSync(candidate));
@@ -51,7 +48,9 @@ function escapeBranch(): string {
 
 describe('HermesConfirmBar：Esc 让位给打开中的下拉（#1071 P2-a）', () => {
   it('下拉 Root 受控：open={menuOpen} + onOpenChange 回写状态', () => {
-    expect(source).toMatch(/<DropdownMenu\.Root\s+open=\{menuOpen\}\s+onOpenChange=\{setMenuOpen\}/);
+    expect(source).toMatch(
+      /<DropdownMenu\.Root\s+open=\{menuOpen\}\s+onOpenChange=\{setMenuOpen\}/
+    );
     expect(source).toMatch(/const \[menuOpen, setMenuOpen\] = useState\(false\)/);
   });
 

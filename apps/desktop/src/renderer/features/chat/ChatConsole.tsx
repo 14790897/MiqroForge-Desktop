@@ -8107,10 +8107,7 @@ export function ChatConsole({
                   plan/action 卡）经 inlineCardIds 排除，同一张卡不会有两份
                   DOM；turn 进行中尚未挂到 assistant 消息上的卡继续在这里可见，
                   AI 消息生成后自动移入消息内部（防「卡消失」回归，#1071）。 */}
-              <ConfirmCardArea
-                matchedTurnIds={matchedTurnIds}
-                inlineCardIds={inlineCardIds}
-              />
+              <ConfirmCardArea matchedTurnIds={matchedTurnIds} inlineCardIds={inlineCardIds} />
             </div>
           </div>
 
