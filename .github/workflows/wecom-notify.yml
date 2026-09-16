@@ -33,9 +33,11 @@ jobs:
             echo "release notification comment, skip"
             exit 0
           fi
-          # 企微 markdown 上限 4096 字节：正文最多保留 2500 字节
-          BODY=$(printf '%s' "$BODY_RAW" | head -c 2500 | iconv -c -f UTF-8 -t UTF-8)
-          if [ "$(printf '%s' "$BODY_RAW" | wc -c)" -gt "$(printf '%s' "$BODY" | wc -c)" ]; then
+          # 评论正文只保留前 100 字，避免刷屏
+          BODY=$(printf '%s' "$BODY_RAW" | jq -Rrs '.[0:100]')
+          # 长度按原始事件 JSON 判断：BODY_RAW 经命令替换会丢掉末尾换行，
+          # 拿它比较会把「超出部分是换行」的评论误判成没截断
+          if jq -e '((.comment.body // "") | length) > 100' "$GITHUB_EVENT_PATH" >/dev/null; then
             HINT="$(printf '\n…（内容过长，已截断，全文见链接）')"
           else
             HINT=""
