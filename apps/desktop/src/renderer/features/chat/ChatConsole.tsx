@@ -2676,6 +2676,23 @@ export function ChatConsole({
     }
     return new Set([...cardsByTurn.keys()].filter((t) => msgTurnIds.has(t)));
   }, [cardsByTurn, messages]);
+
+  // #1071 review P1（2026-09-16）：同一张卡只允许一个 DOM 实例。消息内联
+  // （MessageBubble 的 inline-cards）与兜底区（ConfirmCardArea）必须共用
+  // 同一个「哪些卡会被内联渲染」的谓词——此前 cards= 只滤掉确认卡、兜底区
+  // 又对 plan/action 无条件保留，同一张 plan/action 卡会同时出现在两处。
+  // 角色门槛：计划/确认是 AI 回答的一部分，用户气泡不承载卡（用户消息从不
+  // 带 turnId，此门槛当前是防御性空操作，只为与 inlineCardIds 保持同口径）。
+  const inlineCardsForGroup = useCallback(
+    (group: { msg: Message }): UserInputCardEntry[] => {
+      if (group.msg.role === 'user' || !group.msg.turnId) return [];
+      const cards = cardsByTurn.get(group.msg.turnId);
+      if (!cards || cards.length === 0) return [];
+      // 2026-08-27：确认卡由工具链行渲染（Hermes 式）——inline 只留 plan/action 卡
+      return cards.filter((c) => !isConfirmCard(c as never));
+    },
+    [cardsByTurn]
+  );
   // sourcesByMsg cache: keyed by a tool-only signature so the map object is
   // stable across typewriter frames (see sourcesByMsg below).
   const sourcesCacheRef = useRef<{ sig: string; map: Map<Message, MessageSource[]> } | null>(null);
@@ -7040,6 +7057,21 @@ export function ChatConsole({
 
   // Tool rows grouped into collapsible「工具调用 · N」chains for rendering.
   const chatGroups = useMemo(() => groupChatMessages(messages), [messages]);
+  // #1071 review P1（2026-09-16）：会被内联渲染的卡 id 集合——ConfirmCardArea
+  // 用它把「已经在消息里画过」的卡从兜底区排除，保证同一张卡只有一个 DOM 实例。
+  // 与 cards= 传参共用 inlineCardsForGroup，两边谓词不可能再漂移；
+  // 未被内联的卡（无对应 assistant 消息）不在集合里，继续留在兜底区（防卡消失）。
+  const inlineCardIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const group of chatGroups) {
+      if (group.kind === 'chain' || group.kind === 'reply-head') continue;
+      for (const c of inlineCardsForGroup(group)) {
+        const id = c.request.input_id;
+        if (id) ids.add(String(id));
+      }
+    }
+    return ids;
+  }, [chatGroups, inlineCardsForGroup]);
   // #843：活跃 assistant = 最后一条 assistant 分组（追加子代理行/重复 assistant 不影响）
   const lastAssistantIdx = useMemo(() => lastAssistantGroupIndex(chatGroups), [chatGroups]);
   // R5 P2：其后已出现 user 分组时不回溯（新回合 assistant 未挂上的窗口内，
@@ -8059,15 +8091,10 @@ export function ChatConsole({
                         downloadingPaperId={downloadingPaperId}
                         paperDownloadStates={paperDownloadStates}
                         sending={sendingFor(sessionKey)}
-                        cards={
-                          group.msg.turnId
-                            ? (cardsByTurn.get(group.msg.turnId) ?? []).filter(
-                                // 2026-08-27：确认卡由工具链行渲染（Hermes 式）——
-                                // inline 只留 plan/action 卡防重复
-                                (c) => !isConfirmCard(c as never)
-                              )
-                            : undefined
-                        }
+                        // #1071 review P1（2026-09-16）：内联哪几张卡统一走
+                        // inlineCardsForGroup——兜底区（ConfirmCardArea）的
+                        // inlineCardIds 由同一个 helper 推导，保证同源。
+                        cards={inlineCardsForGroup(group)}
                       />
                     </div>
                   )
@@ -8076,9 +8103,14 @@ export function ChatConsole({
 
               {/* 用户明确：#646 确认卡属于「回答界面」——timelines/resolved 跟随消息流；
                   pending 确认卡在输入框位置（variant=bottom，Composer 区） */}
-              {/* 兜底渲染：尚未关联到消息的卡（turn 进行中——AI 消息生成后
-                  卡进入消息内部，此处自动消失） */}
-              <ConfirmCardArea matchedTurnIds={matchedTurnIds} />
+              {/* 兜底渲染：只画**没有被消息内联**的卡——已被内联的场次（含
+                  plan/action 卡）经 inlineCardIds 排除，同一张卡不会有两份
+                  DOM；turn 进行中尚未挂到 assistant 消息上的卡继续在这里可见，
+                  AI 消息生成后自动移入消息内部（防「卡消失」回归，#1071）。 */}
+              <ConfirmCardArea
+                matchedTurnIds={matchedTurnIds}
+                inlineCardIds={inlineCardIds}
+              />
             </div>
           </div>
 

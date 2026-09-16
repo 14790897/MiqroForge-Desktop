@@ -141,18 +141,39 @@ export function ConfirmCardItem({
 }
 
 /** ConfirmCardArea is the fallback for cards not already attached to their originating assistant turn. */
-export function ConfirmCardArea({ matchedTurnIds }: { matchedTurnIds?: Set<string> }) {
+export function ConfirmCardArea({
+  matchedTurnIds,
+  inlineCardIds,
+}: {
+  matchedTurnIds?: Set<string>;
+  /** #1071 review P1：会被消息内联渲染的卡 id（input_id）集合——由 ChatConsole
+   *  的 inlineCardsForGroup 统一推导，此处只做排除，保证同一张卡只有一个 DOM 实例。 */
+  inlineCardIds?: Set<string>;
+}) {
   const { pending, resolved, timelines, resolve, timeoutCard } = useUserInput();
 
   const allEntries = useMemo(() => {
     let merged = [...Object.values(resolved), ...Object.values(pending)];
     merged.sort((a, b) => (a.createdAt ?? 0) - (b.createdAt ?? 0));
+    // #1071 review P1（2026-09-16）：① 先按 id 排除「已被消息内联渲染」的卡。
+    // 此前 plan/action 卡在下面的 isConfirmCard 分支里被无条件保留，于是同一张
+    // 卡既在消息内（inline-cards）又在兜底区各画一份（双 DOM 实例）。
+    // 未被内联的卡（无对应 assistant 消息）不在集合里，继续走下面的兜底路径，
+    // 不会出现「卡消失」。
+    if (inlineCardIds && inlineCardIds.size > 0) {
+      merged = merged.filter((entry) => {
+        const id = entry.request.input_id;
+        return !id || !inlineCardIds.has(String(id));
+      });
+    }
     if (matchedTurnIds && matchedTurnIds.size > 0) {
-      // #646-v2（CI strict 修复 + plan 卡回归修复）：
-      // ① 确认卡（ask_user_confirm_card）由工具链内联渲染——已匹配 turn 的
-      //    确认卡必须从兜底排除，否则同卡双 DOM 实例（strict violation）；
-      // ② plan/action 卡没有工具链渲染路径，唯一渲染点就在这里——绝不能
-      //    因 turn 匹配被排除（否则计划卡整体消失/E2E 超时）。
+      // #646-v2（CI strict 修复）：
+      // ② 确认卡（ask_user_confirm_card）由工具链内联渲染——已匹配 turn 的
+      //    确认卡必须从兜底排除，否则同卡双 DOM 实例（strict violation）。
+      //    不带工具行的确认卡（写授权卡 / 安装授权卡）永远留在兜底区，否则
+      //    两边都不画、直接消失（E2E 实测）。
+      //    plan/action 卡不在此判断内：它们要么已被 ① 排除（有内联），要么
+      //    留在这里渲染（无内联）——绝不再出现「已内联却仍保留」的情形。
       merged = merged.filter((entry) => {
         if (!isConfirmCard(entry as never)) return true;
         const turnId = entry.request.turn_id;
@@ -160,7 +181,7 @@ export function ConfirmCardArea({ matchedTurnIds }: { matchedTurnIds?: Set<strin
       });
     }
     return merged;
-  }, [pending, resolved, matchedTurnIds]);
+  }, [pending, resolved, matchedTurnIds, inlineCardIds]);
 
   if (allEntries.length === 0 && Object.keys(timelines).length === 0) return null;
 
