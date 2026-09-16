@@ -10697,6 +10697,28 @@ function WorkspacePickerMenu({
 }
 
 /**
+ * #1071 review P1（2026-09-16）：`cards` 的浅数组比较。
+ *
+ * 必须**逐项**比身份，不能比数组引用：渲染点写的是
+ * `cards={inlineCardsForGroup(group)}`（L8097），而 `inlineCardsForGroup` 每次
+ * 调用都 `filter` 出一个新数组——比引用会恒为 false，反而把 #538 的 memo 优化
+ * 整个废掉。逐项比身份的正确性来自数据源：卡条目出自 `cardsByTurn`（`useMemo`
+ * 于 `allCards`），卡没变则条目对象不变 → 相等 → 气泡跳过渲染；卡晚到或
+ * pending→confirmed/cancelled/modify 时产生新条目 → 不等 → 重渲染。
+ *
+ * 修的是真缺陷：`inlineCardIds`（L7064）在 memo 之外算，兜底区已把该卡排除，
+ * 气泡若不重渲染，这张卡就哪里都不显示。
+ */
+export function cardsEqual(a?: UserInputCardEntry[], b?: UserInputCardEntry[]): boolean {
+  if (a === b) return true;
+  // undefined 与 [] 同为「无卡」，视为相等（渲染点目前恒传数组，此处是防御）
+  const left = a ?? [];
+  const right = b ?? [];
+  if (left.length !== right.length) return false;
+  return left.every((entry, i) => entry === right[i]);
+}
+
+/**
  * Memo comparator: skip re-render unless a rendering-relevant prop changed.
  * All callbacks are stable useCallback references; msg/sources/searchResults
  * stay referentially stable while the typewriter streams (see sourcesByMsg's
@@ -10706,6 +10728,7 @@ function WorkspacePickerMenu({
 function areMessageBubblePropsEqual(a: MessageBubbleProps, b: MessageBubbleProps): boolean {
   return (
     a.msg === b.msg &&
+    cardsEqual(a.cards, b.cards) &&
     a.sessionKey === b.sessionKey &&
     a.turnIndex === b.turnIndex &&
     a.copyIdx === b.copyIdx &&
