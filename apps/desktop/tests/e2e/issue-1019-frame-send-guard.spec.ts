@@ -274,6 +274,12 @@ test.describe('Issue #1019 — no per-event send to a disposed render frame', ()
           if (await electronApp.evaluate(() => (globalThis as any).__reloadDone === true)) break;
           await new Promise((r) => setTimeout(r, 250));
         }
+        // 超时必须让本轮迭代失败（CR 复审）：否则会在 did-finish-load 未完成的情况下
+        // 开始下一次崩溃循环，而后续断言（崩溃态/事件计数）兜不住它。
+        const reloadDone = await electronApp.evaluate(
+          () => (globalThis as any).__reloadDone === true
+        );
+        expect(reloadDone).toBe(true);
       }
 
       // Kill the renderer the way an OOM does: process gone, frame disposed,
