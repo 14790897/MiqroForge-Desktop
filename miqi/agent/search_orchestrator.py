@@ -21,7 +21,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from miqi.agent.agent_mode import SearchStrategy
-from miqi.agent.tools.web import WebFetchTool, WebSearchTool
+from miqi.agent.tools.web import WebFetchTool, WebSearchTool, _emit_web_sources
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +50,15 @@ def _dedup_urls(urls: list[str], limit: int) -> list[str]:
     return out
 
 
-async def _ddgs_regional_search(query: str, n_queries: int, n: int) -> list[str]:
+async def _ddgs_regional_search(
+    query: str,
+    n_queries: int,
+    n: int,
+    *,
+    event_emitter: Any = None,
+    turn_id: str = "",
+    tool_call_id: str = "",
+) -> list[str]:
     """ddgs 区域变体搜索（无 key 兜底，原 SearchOrchestrator._parallel_search 逻辑）。
 
     每个区域查询有 15s 超时（#804/#803 审阅：ddgs 挂起会拖死整个工具调用——
@@ -77,6 +85,8 @@ async def _ddgs_regional_search(query: str, n_queries: int, n: int) -> list[str]
 
     blocks: list[str] = []
     seen: set[str] = set()
+    sources: list[dict[str, str]] = []  # #879 结构化来源，fan-out 兜底路径也 emit
+    source_seen: set[str] = set()
     for region, raw in zip(regions, raw_lists):
         if not isinstance(raw, list) or not raw:
             continue
@@ -86,10 +96,20 @@ async def _ddgs_regional_search(query: str, n_queries: int, n: int) -> list[str]
             if not href or href in seen:
                 continue
             seen.add(href)
+            if href not in source_seen:
+                source_seen.add(href)
+                sources.append({
+                    "title": item.get("title", ""),
+                    "url": href,
+                    "snippet": item.get("body") or item.get("description", ""),
+                    "tool": "web_search",
+                })
             lines.append(
                 f"- {item.get('title', '')}\n  {href}\n  {item.get('body') or item.get('description', '')}"
             )
         blocks.append("\n".join(lines))
+    if sources:
+        await _emit_web_sources(event_emitter, turn_id, tool_call_id, sources, query=query)
     return blocks
 
 
@@ -100,11 +120,21 @@ class SearchOrchestrator:
         self._search = search_tool
         self._fetch = fetch_tool
 
-    async def run(self, query: str, strategy: SearchStrategy, n_results: int = 8) -> str:
+    async def run(
+        self,
+        query: str,
+        strategy: SearchStrategy,
+        n_results: int = 8,
+        *,
+        event_emitter: Any = None,
+        turn_id: str = "",
+        tool_call_id: str = "",
+    ) -> str:
         """Execute the fan-out. Always returns a usable string (degrades gracefully)."""
         # 1. Parallel queries across regions (rule-based variants)
         search_results = await self._parallel_search(
-            query, strategy.fanout_queries, n_results
+            query, strategy.fanout_queries, n_results,
+            event_emitter=event_emitter, turn_id=turn_id, tool_call_id=tool_call_id,
         )
         if not search_results:
             return f"No results for: {query}"
@@ -123,7 +153,13 @@ class SearchOrchestrator:
         if strategy.fanout_fetches > 0 and urls:
             targets = _dedup_urls(urls, strategy.fanout_fetches)
             pages = await asyncio.gather(
-                *(self._safe_fetch(u) for u in targets), return_exceptions=True
+                *(
+                    self._safe_fetch(
+                        u, event_emitter=event_emitter, turn_id=turn_id, tool_call_id=tool_call_id
+                    )
+                    for u in targets
+                ),
+                return_exceptions=True,
             )
             summaries = [p for p in pages if isinstance(p, str) and p and not p.startswith('{"error"')]
             if summaries:
@@ -131,7 +167,16 @@ class SearchOrchestrator:
 
         return merged
 
-    async def _parallel_search(self, query: str, n_queries: int, n: int) -> list[str]:
+    async def _parallel_search(
+        self,
+        query: str,
+        n_queries: int,
+        n: int,
+        *,
+        event_emitter: Any = None,
+        turn_id: str = "",
+        tool_call_id: str = "",
+    ) -> list[str]:
         """Run up to n_queries ddgs queries concurrently (region variants).
 
         A search tool may provide its own ``_parallel_search`` (tests,
@@ -142,10 +187,23 @@ class SearchOrchestrator:
         """
         impl = getattr(self._search, "_parallel_search", None)
         if callable(impl):
-            return await impl(query, n_queries, n)
-        return await _ddgs_regional_search(query, n_queries, n)
+            return await impl(
+                query, n_queries, n,
+                event_emitter=event_emitter, turn_id=turn_id, tool_call_id=tool_call_id,
+            )
+        return await _ddgs_regional_search(
+            query, n_queries, n,
+            event_emitter=event_emitter, turn_id=turn_id, tool_call_id=tool_call_id,
+        )
 
-    async def _safe_fetch(self, url: str) -> str:
+    async def _safe_fetch(
+        self,
+        url: str,
+        *,
+        event_emitter: Any = None,
+        turn_id: str = "",
+        tool_call_id: str = "",
+    ) -> str:
         """Fetch one page reusing WebFetchTool's extractor; errors → "" (skip).
 
         Rejects non-http(s)/private hosts up front (SSRF guard — CodeRabbit
@@ -160,7 +218,14 @@ class SearchOrchestrator:
             return ""
         try:
             return await asyncio.wait_for(
-                self._fetch.execute(url, extract_mode="markdown", max_chars=3000),
+                self._fetch.execute(
+                    url,
+                    extract_mode="markdown",
+                    max_chars=3000,
+                    _event_emitter=event_emitter,
+                    _turn_id=turn_id,
+                    _tool_call_id=tool_call_id,
+                ),
                 timeout=12.0,
             )
         except Exception as e:
