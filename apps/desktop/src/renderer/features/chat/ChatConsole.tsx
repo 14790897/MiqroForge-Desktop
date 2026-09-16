@@ -98,7 +98,11 @@ import type {
 } from '../../../shared/ipc';
 import { extractProgressMessage, type ProgressPayload } from './progressUtils';
 import { sanitizeUiMessage } from '../../lib/sanitizeUiMessage';
-import { classifyTrackedFiles, dirLabel, groupTrackedByDir } from '../../lib/taskAssetClassification';
+import {
+  classifyTrackedFiles,
+  dirLabel,
+  groupTrackedByDir,
+} from '../../lib/taskAssetClassification';
 import { SpreadsheetPreview } from './components/SpreadsheetPreview';
 import { DocxPreview } from './components/DocxPreview';
 import PaperSearchResult, {

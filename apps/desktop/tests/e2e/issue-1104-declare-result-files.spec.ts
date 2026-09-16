@@ -147,10 +147,9 @@ test.describe('Issue #1104 — declare_result_files 显式声明结果文件', (
       await expect(panel).toBeVisible({ timeout: 10_000 });
 
       // ── ① 面板统计：1 个结果 / 4 个过程
-      await expect(page.getByTestId('task-assets-stats')).toHaveText(
-        /1 个结果 \/ 4 个过程/,
-        { timeout: 30_000 }
-      );
+      await expect(page.getByTestId('task-assets-stats')).toHaveText(/1 个结果 \/ 4 个过程/, {
+        timeout: 30_000,
+      });
 
       // ── ② 结果区 / 过程区各就各位
       const resultSection = panel.getByTestId('asset-section-result');
@@ -160,9 +159,7 @@ test.describe('Issue #1104 — declare_result_files 显式声明结果文件', (
       const processSection = panel.getByTestId('asset-section-process');
       // 过程区默认折叠与否取决于是否存在结果文件——只在确实不可见时点开
       // （盲点会把它反向关掉）
-      const firstCompanion = processSection
-        .getByText(companions[0], { exact: false })
-        .first();
+      const firstCompanion = processSection.getByText(companions[0], { exact: false }).first();
       if (!(await firstCompanion.isVisible().catch(() => false))) {
         await panel.getByTestId('asset-section-toggle-process').click();
       }
@@ -190,15 +187,17 @@ test.describe('Issue #1104 — declare_result_files 显式声明结果文件', (
         sessionDir = findSessionDirWithFile(miqiSessionsDir, report);
         if (!sessionDir) await page.waitForTimeout(500);
       }
-      expect(sessionDir, `artifact ${report} never appeared under ${miqiSessionsDir}/*/files/`)
-        .not.toBeNull();
-      const tracked = JSON.parse(
-        readFileSync(join(sessionDir!, 'tracked_files.json'), 'utf-8')
-      );
+      expect(
+        sessionDir,
+        `artifact ${report} never appeared under ${miqiSessionsDir}/*/files/`
+      ).not.toBeNull();
+      const tracked = JSON.parse(readFileSync(join(sessionDir!, 'tracked_files.json'), 'utf-8'));
       const entries = Object.entries<any>(tracked.files ?? {});
       const reportEntry = entries.find(([k]) => k === report || k.endsWith(`/${report}`));
-      expect(reportEntry, `report entry missing: ${JSON.stringify(Object.keys(tracked.files))}`)
-        .toBeDefined();
+      expect(
+        reportEntry,
+        `report entry missing: ${JSON.stringify(Object.keys(tracked.files))}`
+      ).toBeDefined();
       expect(reportEntry![1].result).toBe(true);
       for (const name of companions) {
         const e = entries.find(([k]) => k === name || k.endsWith(`/${name}`));

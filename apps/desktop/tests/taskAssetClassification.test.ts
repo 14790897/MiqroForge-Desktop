@@ -212,14 +212,21 @@ describe('classifyTrackedFiles (#1104 显式声明结果文件)', () => {
   });
 
   it('explicit declaration beats filename markers (temp_/draft_/… .md)', () => {
-    const files = [declared('temp_extract.md'), declared('draft_summary.md'), f('temp_x.md', 'write', 700)];
+    const files = [
+      declared('temp_extract.md'),
+      declared('draft_summary.md'),
+      f('temp_x.md', 'write', 700),
+    ];
     const { results, process } = classifyTrackedFiles(files);
     expect(results.map((x) => x.name)).toEqual(['temp_extract.md', 'draft_summary.md']);
     expect(process.map((x) => x.name)).toEqual(['temp_x.md']);
   });
 
   it('delete 优先于声明——被删除的文件永不进结果区', () => {
-    const files = [declared('removed_report.md', 'delete'), declared('kept_report.md', 'write', 950)];
+    const files = [
+      declared('removed_report.md', 'delete'),
+      declared('kept_report.md', 'write', 950),
+    ];
     const { results, process } = classifyTrackedFiles(files);
     expect(results.map((x) => x.name)).toEqual(['kept_report.md']);
     expect(process.map((x) => x.name)).toEqual(['removed_report.md']);
@@ -270,11 +277,7 @@ describe('groupTrackedByDir (#1104 批量目录折行)', () => {
   });
 
   it('目录下文件数少于阈值 → 保持散列卡片', () => {
-    const files = [
-      p('out/a.md'),
-      p('out/b.md'),
-      p('loose.md'),
-    ];
+    const files = [p('out/a.md'), p('out/b.md'), p('loose.md')];
     const { loose, groups } = groupTrackedByDir(files);
     expect(groups).toEqual([]);
     expect(loose).toHaveLength(3);

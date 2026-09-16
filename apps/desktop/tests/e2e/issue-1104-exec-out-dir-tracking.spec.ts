@@ -107,11 +107,14 @@ test.describe('#1104 — exec 追踪工作区外产物目录', () => {
     { timeout: 300_000 },
     async () => {
       const outDir = join(miqiHome, 'user_out');
-      expect(existsSync(outDir), 'out-dir 必须运行前不存在，才覆盖「空快照兜底」路径')
-        .toBe(false);
+      expect(existsSync(outDir), 'out-dir 必须运行前不存在，才覆盖「空快照兜底」路径').toBe(false);
 
-      const py = join(REPO_ROOT, '.venv', process.platform === 'win32' ? 'Scripts' : 'bin',
-        process.platform === 'win32' ? 'python.exe' : 'python');
+      const py = join(
+        REPO_ROOT,
+        '.venv',
+        process.platform === 'win32' ? 'Scripts' : 'bin',
+        process.platform === 'win32' ? 'python.exe' : 'python'
+      );
       const files = OUT_FILES.map((n) => `'${n}'`).join(', ');
       const cmd =
         `"${py}" -c "import pathlib; d=pathlib.Path(r'${outDir}'); ` +
@@ -136,8 +139,10 @@ test.describe('#1104 — exec 追踪工作区外产物目录', () => {
       const tracked: any[] = tf?.tracked_files ?? [];
       for (const name of OUT_FILES) {
         const entry = tracked.find((f: any) => String(f.path ?? '').endsWith(`/${name}`));
-        expect(entry, `未进台账：${name}（现有 ${JSON.stringify(tracked.map((t) => t.name))}）`)
-          .toBeDefined();
+        expect(
+          entry,
+          `未进台账：${name}（现有 ${JSON.stringify(tracked.map((t) => t.name))}）`
+        ).toBeDefined();
         expect(entry.op).toBe('write');
       }
 

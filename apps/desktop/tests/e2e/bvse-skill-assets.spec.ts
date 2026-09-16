@@ -160,8 +160,10 @@ test.describe('#1104 — 真实 skill 产物完整性（工作区外输出目录
       while (!existsSync(donePath) && Date.now() < deadline) {
         await page.waitForTimeout(3000);
       }
-      expect(existsSync(donePath), `pipeline 未在 ${PIPELINE_TIMEOUT / 60000} 分钟内产出 DONE.json`)
-        .toBe(true);
+      expect(
+        existsSync(donePath),
+        `pipeline 未在 ${PIPELINE_TIMEOUT / 60000} 分钟内产出 DONE.json`
+      ).toBe(true);
       // 让 mock 的声明轮与 UI 落定
       await expect(
         page.locator('main').getByText('declared report', { exact: false }).first()
@@ -206,16 +208,14 @@ test.describe('#1104 — 真实 skill 产物完整性（工作区外输出目录
         await panel.getByTestId('asset-section-toggle-process').click();
       }
       for (const probe of ['summary.json', '_bvse.cube']) {
-        await expect(
-          processSection.getByText(probe, { exact: false }).first()
-        ).toBeVisible({ timeout: 20_000 });
+        await expect(processSection.getByText(probe, { exact: false }).first()).toBeVisible({
+          timeout: 20_000,
+        });
       }
 
       // ── 批量目录折行：bvse_sites/ 20 个文件折成一行（默认收起，不铺开卡片）
       const groupRows = processSection.getByTestId('asset-dir-group');
-      await expect
-        .poll(async () => groupRows.count(), { timeout: 20_000 })
-        .toBeGreaterThan(0);
+      await expect.poll(async () => groupRows.count(), { timeout: 20_000 }).toBeGreaterThan(0);
       const sitesGroup = groupRows.filter({ hasText: 'bvse_sites/' });
       await expect(sitesGroup.first()).toBeVisible({ timeout: 10_000 });
       await expect(sitesGroup.first()).toContainText('个文件');
@@ -223,9 +223,9 @@ test.describe('#1104 — 真实 skill 产物完整性（工作区外输出目录
       await expect(processSection.getByText('Na_site01.cif', { exact: false })).toHaveCount(0);
       // 展开后可见
       await sitesGroup.first().click();
-      await expect(
-        processSection.getByText('Na_site01.cif', { exact: false }).first()
-      ).toBeVisible({ timeout: 10_000 });
+      await expect(processSection.getByText('Na_site01.cif', { exact: false }).first()).toBeVisible(
+        { timeout: 10_000 }
+      );
 
       // ── 声明的报告 result=true；其余条目无 result
       const reportEntry = (tf?.tracked_files ?? []).find((f: any) =>
@@ -238,7 +238,10 @@ test.describe('#1104 — 真实 skill 产物完整性（工作区外输出目录
       expect(nonResult.every((f: any) => f.result !== true)).toBe(true);
 
       // 截图留给 PR：回到面板顶部、收起批量目录，展示「结果文件」区（真实报告）
-      await sitesGroup.first().click().catch(() => {});
+      await sitesGroup
+        .first()
+        .click()
+        .catch(() => {});
       await panel.evaluate((el) => {
         el.scrollTop = 0;
       });
