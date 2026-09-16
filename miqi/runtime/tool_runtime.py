@@ -79,6 +79,40 @@ class ToolRuntime:
         )
 
     @staticmethod
+    def _plan_confirm_short_circuit(turn: Any, tool_call: Any) -> ToolExecutionContext:
+        """#1093: 计划已确认后的重复 ask_user_plan_confirm —— 不弹卡，直接返回已确认。
+
+        同一回合里闸门卡片（或模型先前的计划卡）已经确认过计划，模型再调用本工具
+        只会让用户看到第二张重复的计划卡。这里直接给出“已确认”的工具结果，让模型
+        继续执行。结果 JSON 与 _confirmation_approved 的判据对齐（status=confirmed
+        + choice_id=confirm），保证兄弟工具调用继续执行而不是被当作未确认拦截。
+        """
+        result = json.dumps(
+            {
+                "status": "confirmed",
+                "choice_id": "confirm",
+                "note": (
+                    "计划已确认（用户已批准当前方案）——请直接继续执行，"
+                    "不要重复调用 ask_user_plan_confirm。"
+                ),
+            },
+            ensure_ascii=False,
+        )
+        return ToolExecutionContext(
+            tool_name=tool_call.name,
+            tool_call_id=tool_call.id,
+            arguments=tool_call.arguments,
+            turn_id=turn.turn_id,
+            thread_id=turn.thread_id,
+            agent_type=turn.agent_metadata.name,
+            result=result,
+            status=OrchestrationResult.SUCCESS,
+            duration_ms=0,
+            bypass_approval=getattr(turn, "bypass_approval", False),
+            force_approval=getattr(turn, "force_approval", False),
+        )
+
+    @staticmethod
     def _is_mutating_tool(tool_name: str) -> bool:
         try:
             from miqi.execution.task_policy import tool_risk
@@ -160,6 +194,12 @@ class ToolRuntime:
         confirmation_contexts: list[ToolExecutionContext] = []
         all_confirmed = True
         for call in confirmation_calls:
+            # #1093: 本 turn 的计划确认已经发生过（闸门卡或模型先前的计划卡已
+            # 确认）——重复的 ask_user_plan_confirm 不再弹第二张卡，直接把
+            # “已确认”作为工具结果返回（approved 语义不变，兄弟调用照常执行）。
+            if call.name == "ask_user_plan_confirm" and getattr(turn, "_plan_confirm_done", False):
+                confirmation_contexts.append(self._plan_confirm_short_circuit(turn, call))
+                continue
             # Interactive confirmations form an explicit FIFO queue. A user
             # decision for one card must not suppress later confirmation cards
             # from the same provider response; they are still shown one by one.
