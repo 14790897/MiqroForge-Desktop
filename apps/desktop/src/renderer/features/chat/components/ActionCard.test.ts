@@ -15,7 +15,7 @@ type Entry = {
 function entry(overrides: Partial<Entry> = {}): Entry {
   return {
     action: 'upload',
-    target: 'Qraft',
+    target: 'MiqroForge',
     fileName: 'workflow.json',
     sizeBytes: 23 * 1024,
     sha256: 'deadbeef1234567890abcdef',
@@ -31,7 +31,7 @@ describe('ActionCard (#646-v2, Hermes 工具行)', () => {
   it('upload: renders target + file + size + hash + confirm', () => {
     const html = render(entry());
     expect(html).toContain('☁ 上传');
-    expect(html).toContain('Qraft');
+    expect(html).toContain('MiqroForge');
     expect(html).toContain('workflow.json');
     expect(html).toContain('23.0 KB');
     expect(html).toContain('deadbeef1234');

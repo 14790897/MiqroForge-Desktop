@@ -2364,7 +2364,7 @@ function pointsEventToMessage(pd: ChatProgress): Message | null {
     content:
       typeof pd.message === 'string' && pd.message
         ? pd.message
-        : '平台积分不足，任务未执行。请到 设置 → Qraft 平台账号 查看余额。',
+        : '平台积分不足，任务未执行。请到 设置 → MiQroForge 平台 查看余额。',
     timestamp: Date.now(),
   };
 }

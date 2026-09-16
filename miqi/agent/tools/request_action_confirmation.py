@@ -50,7 +50,7 @@ class RequestActionConfirmationTool(Tool):
                     "enum": ["upload", "payment", "delete", "external"],
                     "description": "动作类型",
                 },
-                "target": {"type": "string", "description": "目标（如 Qraft / 外部平台 / 文件系统）"},
+                "target": {"type": "string", "description": "目标（如 MiqroForge / 外部平台 / 文件系统）"},
                 "file_name": {"type": "string", "description": "（upload/delete 时）文件名"},
                 "size_bytes": {"type": "integer", "description": "（upload 时）文件大小字节"},
                 "sha256": {"type": "string", "description": "（upload 时）文件指纹"},

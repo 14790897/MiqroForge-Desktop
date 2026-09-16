@@ -170,7 +170,7 @@ TOOL_DESCRIPTION: dict[str, str] = {
     "rm": "删除文件",
     "upload": "上传结果到外部平台",
     "upload_run": "上传运行结果",
-    "qraft_upload": "上传到 Qraft",
+    "qraft_upload": "上传到 MiqroForge",
     "payment": "支付/产生费用",
     "send_message": "发送外部消息",
     "spawn": "启动外部进程",

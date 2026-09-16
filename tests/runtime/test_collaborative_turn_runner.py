@@ -17,7 +17,7 @@ async def test_adjustment_restarts_planning_with_user_constraint(monkeypatch):
         calls += 1
         seen_contents.append(user_content)
         if calls == 1:
-            turn._plan_adjustment_pending = "不要上传 Qraft，先生成本地报告"
+            turn._plan_adjustment_pending = "不要上传 MiqroForge，先生成本地报告"
             turn._plan_gate_blocked = True
             return TurnResult(
                 final_content="",
@@ -51,7 +51,7 @@ async def test_adjustment_restarts_planning_with_user_constraint(monkeypatch):
 
     assert calls == 2
     assert seen_contents[0] == "制作一份研究报告并上传"
-    assert "不要上传 Qraft，先生成本地报告" in seen_contents[1]
+    assert "不要上传 MiqroForge，先生成本地报告" in seen_contents[1]
     assert result.final_content == "已按新计划完成"
     assert turn._plan_confirm_done is False
     assert turn._plan_seen_tools == []

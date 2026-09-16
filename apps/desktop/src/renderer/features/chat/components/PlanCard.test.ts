@@ -10,7 +10,7 @@ function entry(overrides: Partial<PlanCardEntry> = {}): PlanCardEntry {
     steps: [
       { name: '论文检索', tools: ['web_search'] },
       { name: '生成报告', tools: ['write_file'] },
-      { name: '上传 Qraft', tools: ['upload'] },
+      { name: '上传 MiqroForge', tools: ['upload'] },
     ],
     permissions: ['network_read', 'workspace_write', 'external_upload'],
     phase: 'wait_confirm',

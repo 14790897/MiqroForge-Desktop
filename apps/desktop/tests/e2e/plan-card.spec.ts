@@ -47,7 +47,7 @@ test.describe('Plan Card (#646-v2)', () => {
       await expect(planCard).toBeVisible({ timeout: 60_000 });
       await expect(planCard.getByText('生成 MOF-5 实验报告')).toBeVisible();
       await expect(planCard.getByText('搜集论文资料')).toBeVisible();
-      await expect(planCard.getByText('上传到 Qraft').first()).toBeVisible();
+      await expect(planCard.getByText('上传到 MiqroForge').first()).toBeVisible();
       await expect(planCard.getByText('网络')).toBeVisible();
       await expect(planCard.getByText('外部')).toBeVisible();
       await expect(planCard.getByTestId('plan-confirm')).toBeVisible();
@@ -109,7 +109,7 @@ test.describe('Plan Card (#646-v2)', () => {
 
         const adjustment = planCard.getByTestId('plan-adjustment-input');
         await expect(adjustment).toBeVisible();
-        await adjustment.fill('不要上传 Qraft，先完成本地报告并增加成本对比步骤。');
+        await adjustment.fill('不要上传 MiqroForge，先完成本地报告并增加成本对比步骤。');
         await planCard.getByTestId('plan-submit-adjustment').click();
 
         const revised = page.getByTestId('plan-card').last();

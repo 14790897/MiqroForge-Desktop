@@ -32,7 +32,7 @@ function compactPermissions(permissions: string[]): string[] {
 
 function displayGoal(goal: string): string {
   // Keep the destination in the step list instead of repeating it in the goal.
-  return goal.replace(/[，,]\s*上传到\s+Qraft\s*$/, '').trim();
+  return goal.replace(/[，,]\s*上传到\s+(?:Qraft|MiqroForge|MiQroForge)\s*$/, '').trim();
 }
 
 /**
@@ -282,7 +282,7 @@ export function PlanCard({
                   submitAdjustment();
                 }
               }}
-              placeholder="例如：不要上传 Qraft；先完成本地报告，再让我决定是否上传。"
+              placeholder="例如：不要上传 MiqroForge；先完成本地报告，再让我决定是否上传。"
               rows={3}
               className="mt-2 w-full resize-none rounded-md border bg-transparent px-2.5 py-2 text-[12.5px] leading-5 outline-none"
               style={{ borderColor: 'var(--border, #dcdde0)', color: 'var(--text, #30343b)' }}

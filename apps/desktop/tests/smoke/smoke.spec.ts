@@ -229,7 +229,7 @@ test.describe('Status Bar', () => {
     await page.getByTestId('statusbar-points').click();
     await page.getByTestId('statusbar-points-open-settings').click();
     await expect(page.getByTestId('statusbar-points-popover')).toHaveCount(0);
-    // 跳转到设置 → Qraft 平台账号页（含扣费历史区块）
+    // 跳转到设置 → MiqroForge 平台页（含扣费历史区块）
     await expect(page.getByText('MiQroForge 平台账号')).toBeVisible();
   });
 });
