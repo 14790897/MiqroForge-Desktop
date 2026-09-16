@@ -13,6 +13,28 @@
  *   - WSL sandboxes additionally bind-mount /mnt, so host absolute paths
  *     (C:\... → /mnt/c/...) remain reachable when the AI is told the full
  *     path.
+ *
+ * Flake history (desktop-ci run 35064775546): the spec failed twice and then
+ * skipped on the third attempt of the same runner, because it had no
+ * deterministic answer to two questions:
+ *
+ *   1. Can this runner execute bwrap at all?  ubuntu-latest (24.04) blocks
+ *      unprivileged user namespaces via AppArmor, so every `--unshare-user`
+ *      invocation dies with "bwrap: setting up uid map: Permission denied"
+ *      while `runtime.status().sandbox_available` still reports true (the
+ *      manager's init probe only checks that the binary exists).  The old
+ *      guards guessed the environment's health from the model's prose, and
+ *      the same broken runner phrased it "（无文件输出）" once and quoted the
+ *      raw bwrap error another time — so the guards tripped only sometimes.
+ *      `probeBwrapExecutable()` now answers it up front, on the host.
+ *
+ *   2. Has the workspace switch reached the sandbox?  A sandbox binds the
+ *      session workspace it reads from *persisted* session metadata at
+ *      creation time (SandboxManager._resolve_session_workspace), while the
+ *      inline pill renders the new path optimistically.  Starting the first
+ *      exec before the binding lands mounts the default per-session workspace
+ *      (empty) and `ls` then legitimately lists nothing — the exact "no file
+ *      output" symptom.  The spec now waits for the persisted binding.
  */
 import { _electron as electron, test, expect } from '@playwright/test';
 import type { ElectronApplication, Page } from '@playwright/test';
@@ -29,7 +51,113 @@ import {
 } from './helpers/electron-setup';
 import { join } from 'node:path';
 import { writeFileSync, unlinkSync, mkdirSync, rmdirSync, realpathSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
+
+/**
+ * Linux-only prerequisite probe: can this host actually create the
+ * unprivileged user namespace bwrap needs?
+ *
+ * Mirrors the namespaces + uid/gid mapping `BwrapSandbox._build_bwrap_args`
+ * asks for (uid/gid default to 1000).  A runner that cannot map the uid fails
+ * every exec inside the sandbox, so the sandbox-internal assertions below are
+ * unverifiable there — skip them instead of inferring health from the model's
+ * wording.  Non-Linux runners use the WSL/native path and are judged by
+ * `waitForSandboxReady` + the in-app assertions.
+ */
+function probeBwrapExecutable(): { usable: boolean; detail: string } {
+  if (process.platform !== 'linux') {
+    return { usable: true, detail: `non-linux platform (${process.platform}) — host probe N/A` };
+  }
+  const probe = spawnSync(
+    'bwrap',
+    [
+      '--unshare-pid',
+      '--unshare-user',
+      '--uid',
+      '1000',
+      '--gid',
+      '1000',
+      '--proc',
+      '/proc',
+      '--dev',
+      '/dev',
+      '--ro-bind',
+      '/',
+      '/',
+      '/bin/sh',
+      '-c',
+      'true',
+    ],
+    { timeout: 20_000, encoding: 'utf8' }
+  );
+  if (probe.error) {
+    const code = (probe.error as NodeJS.ErrnoException).code;
+    // ENOENT here means the probe binary itself is missing (bwrap is absent
+    // only when the app has no sandbox either — `waitForSandboxReady` already
+    // handled that).  Anything else is a real "cannot run" answer.
+    return code === 'ENOENT'
+      ? { usable: true, detail: 'bwrap binary not found — probe inconclusive' }
+      : { usable: false, detail: `bwrap not runnable: ${probe.error.message}` };
+  }
+  if (probe.status !== 0) {
+    const tail = `${probe.stderr ?? ''}`.trim().split('\n').filter(Boolean).slice(-2).join(' | ');
+    return { usable: false, detail: `bwrap exit ${probe.status}: ${tail || '<no stderr>'}` };
+  }
+  return { usable: true, detail: 'ok' };
+}
+
+/** The renderer persists the active session key here (App.tsx). */
+async function currentSessionKey(page: Page): Promise<string> {
+  return page.evaluate(() => localStorage.getItem('miqi:lastSession') || '');
+}
+
+/** Workspace the session metadata currently reports (null while unset). */
+async function readPersistedWorkspace(page: Page, sessionKey: string): Promise<string | null> {
+  return page.evaluate(async (k) => {
+    try {
+      const detail: any = await (window as any).miqi.sessions.get(k);
+      return (detail?.workspace ?? detail?.metadata?.workspace ?? null) as string | null;
+    } catch {
+      return null;
+    }
+  }, sessionKey);
+}
+
+/**
+ * Wait until the active session's *persisted* metadata carries the custom
+ * workspace, and return the session key it settled on.
+ *
+ * Picking a workspace ("更换" → 浏览) creates a NEW session (createSession →
+ * `desktop:<ts>`) whose binding the renderer applies through a follow-up
+ * `sessions.get(key, { workspace })`; the inline pill renders the new path
+ * optimistically, before that call lands.  The sandbox, however, resolves its
+ * bind mount from the persisted metadata when it is created — so this is the
+ * state the first exec actually depends on.  The key is read fresh on every
+ * poll: the switch repoints it, and the old session key would answer null
+ * forever.
+ */
+async function waitForPersistedWorkspace(
+  page: Page,
+  customWs: string,
+  timeout = 30_000
+): Promise<string> {
+  const basename = customWs.split(/[/\\]/).pop()!;
+  let seenKey = '';
+  let seen: string | null = null;
+  await expect
+    .poll(
+      async () => {
+        seenKey = await currentSessionKey(page);
+        seen = seenKey ? await readPersistedWorkspace(page, seenKey) : null;
+        return !!seen && (seen === customWs || seen.includes(basename));
+      },
+      { timeout, intervals: [500, 1000, 2000] }
+    )
+    .toBe(true);
+  console.log(`[test] ✅ Session metadata workspace persisted: ${seenKey} → ${seen}`);
+  return seenKey;
+}
 
 async function dismissOverlays(page: Page) {
   await page.evaluate(() => {
@@ -47,6 +175,56 @@ async function dismissOverlays(page: Page) {
 /** Text of the LAST assistant bubble — the model's newest reply. */
 async function lastAssistantReply(page: Page): Promise<string> {
   return (await page.locator('[data-testid="chat-message-assistant"]').last().textContent()) || '';
+}
+
+/** Subscribe (once) to exec output deltas and clear the buffer.
+ *
+ *  Both streams are collected: stderr carries bwrap failures (e.g.
+ *  "loopback: Failed RTM_NEWADDR", "setting up uid map: Permission denied"),
+ *  which must trigger the sandboxBroken skip instead of a false assertion. */
+async function resetExecCapture(page: Page): Promise<void> {
+  await page.evaluate(() => {
+    const s = window as any;
+    s.__miqi_exec_stdout = '';
+    if (!s.__miqi_exec_sub) {
+      s.__miqi_exec_sub = s.miqi.chat.onProgress((data: any) => {
+        if (data.stream === 'stdout' || data.stream === 'stderr') {
+          s.__miqi_exec_stdout += data.delta ?? '';
+        }
+      });
+    }
+  });
+}
+
+async function readExecCapture(page: Page): Promise<string> {
+  return page.evaluate(() => (window as any).__miqi_exec_stdout || '');
+}
+
+/** Open the inline workspace picker (「更换」→ 浏览).
+ *
+ *  The pill only mounts once the session has finished loading and is still
+ *  empty (ChatConsole renders it under `historyLoaded && messages.length === 0`),
+ *  so a fixed 5s budget on it races the session restore — under CI load the
+ *  element simply does not exist yet.  Wait for the pill itself and report
+ *  the state we saw when it never shows up. */
+async function openWorkspacePicker(page: Page): Promise<void> {
+  const changeBtn = page.locator('[data-testid="inline-workspace-change-btn"]');
+  try {
+    await expect(changeBtn).toBeVisible({ timeout: 30_000 });
+  } catch (err) {
+    const userMessages = await page.getByTestId('chat-message-user').count();
+    console.log(
+      `[test] workspace pill never mounted (user messages on screen: ${userMessages}) — ` +
+        `${userMessages > 0 ? 'session is not empty' : 'session restore never settled'}`
+    );
+    throw err;
+  }
+  await expect(changeBtn).toBeEnabled({ timeout: 5000 });
+  await changeBtn.click();
+  await expect(page.locator('[data-testid="workspace-picker-modal"]')).toBeVisible({
+    timeout: 5000,
+  });
+  await page.locator('[data-testid="workspace-picker-browse"]').click();
 }
 
 test.describe('Workspace Switch E2E (Sandbox ON)', () => {
@@ -82,7 +260,18 @@ test.describe('Workspace Switch E2E (Sandbox ON)', () => {
         );
         return;
       }
-      console.log('[test] Sandbox available — running sandbox assertions');
+      // `sandbox_available` only proves the manager initialised (bwrap binary
+      // present), not that a sandboxed command can actually run.  Probe the
+      // host directly so a runner that cannot map user namespaces skips here —
+      // deterministically, instead of flipping between prose-matched skips and
+      // hard failures across attempts.
+      const bwrapProbe = probeBwrapExecutable();
+      if (!bwrapProbe.usable) {
+        console.log(`[test] ⚠️ bwrap cannot run on this runner — ${bwrapProbe.detail}`);
+        test.skip(true, `runner cannot execute bwrap (${bwrapProbe.detail})`);
+        return;
+      }
+      console.log(`[test] Sandbox available — running sandbox assertions (${bwrapProbe.detail})`);
 
       await page.evaluate(() => (window as any).miqi.approvals.addPermanent('*:*', 'always'));
 
@@ -114,13 +303,7 @@ test.describe('Workspace Switch E2E (Sandbox ON)', () => {
       );
 
       // ── 4. Click "更换" → picker → browse → workspace switches ──
-      const changeBtn = page.locator('[data-testid="inline-workspace-change-btn"]');
-      await expect(changeBtn).toBeEnabled({ timeout: 5000 });
-      await changeBtn.click();
-      await expect(page.locator('[data-testid="workspace-picker-modal"]')).toBeVisible({
-        timeout: 5000,
-      });
-      await page.locator('[data-testid="workspace-picker-browse"]').click();
+      await openWorkspacePicker(page);
 
       await waitForInputReady(page, 15000);
       await page.waitForTimeout(2000);
@@ -137,6 +320,13 @@ test.describe('Workspace Switch E2E (Sandbox ON)', () => {
         `expected pill "${pillText}" to contain "${customWs}" or "${resolvedCustomWs}" or "${basename}"`
       ).toBe(true);
       console.log(`[test] ✅ Pill reflects custom workspace`);
+
+      // ── 5b. The sandbox reads the session's persisted workspace when it is
+      //    created, so do not start the first exec until the switch has landed
+      //    on disk — otherwise /home/miqi/workspace is bound to the default
+      //    per-session copy (empty) and the ls assertion below fails for a
+      //    reason that has nothing to do with the code under test.
+      await waitForPersistedWorkspace(page, customWs);
 
       // ── 6. Sandbox is ON — already asserted at test start; here we log
       //    it again for visibility. (sandboxOn declared at top of test.)
@@ -215,28 +405,36 @@ test.describe('Workspace Switch E2E (Sandbox ON)', () => {
       //    filename it already knows from earlier file-tool interactions
       //    without ever running `ls`, which would let a broken exec path
       //    pass.  The stream proves `ls` actually ran and printed the file.
-      await page.evaluate(() => {
-        const s = window as any;
-        s.__miqi_exec_stdout = '';
-        if (!s.__miqi_exec_sub) {
-          s.__miqi_exec_sub = s.miqi.chat.onProgress((data: any) => {
-            // Collect both streams: stderr carries bwrap failures (e.g.
-            // "loopback: Failed RTM_NEWADDR" on hosted ubuntu runners),
-            // which must trigger the sandboxBroken skip below instead of
-            // a false assertion failure.
-            if (data.stream === 'stdout' || data.stream === 'stderr') {
-              s.__miqi_exec_stdout += data.delta ?? '';
-            }
-          });
+      //
+      //    Real models occasionally answer without calling exec at all.  That
+      //    is a missing precondition, not a regression, so it gets one
+      //    bounded re-send; `execRan` — a tool-command row rendered for THIS
+      //    turn — is the hard signal that separates the two, instead of the
+      //    reply's wording (the old prose-only guards let the same broken
+      //    runner skip on one attempt and hard-fail on the next).
+      const EXEC_COMMAND_ROW = '[data-testid="tool-command-copy"]';
+      const LS_INSTRUCTION =
+        '用 exec 工具在 /home/miqi/workspace 目录执行 ls，只回复列出的文件名，不要解释。';
+      await resetExecCapture(page);
+      let execStdout = '';
+      let execRan = false;
+      let lsReply = '';
+      for (let attempt = 1; attempt <= 2; attempt++) {
+        const execRowsBefore = await page.locator(EXEC_COMMAND_ROW).count();
+        await sendMessage(page, LS_INSTRUCTION);
+        await waitForResponseComplete(page);
+        execStdout = await readExecCapture(page);
+        execRan = (await page.locator(EXEC_COMMAND_ROW).count()) > execRowsBefore;
+        lsReply = await lastAssistantReply(page);
+        console.log(
+          `[test] exec ls attempt ${attempt}/2: ran=${execRan} ` +
+            `stdout="${execStdout.slice(0, 200)}" reply="${lsReply.slice(0, 150)}"`
+        );
+        if (execRan || lsReply.includes(preExistingFile)) break;
+        if (attempt < 2) {
+          console.log('[test] ⚠️ model answered without invoking exec — re-sending once');
         }
-      });
-      await sendMessage(
-        page,
-        '用 exec 工具在 /home/miqi/workspace 目录执行 ls，只回复列出的文件名，不要解释。'
-      );
-      await waitForResponseComplete(page);
-      const execStdout = await page.evaluate(() => (window as any).__miqi_exec_stdout || '');
-      console.log(`[test] exec ls stdout: ${execStdout?.slice(0, 300)}`);
+      }
       // Same skip guard as step 8: when the sandbox runtime itself is
       // broken on this runner (bwrap/loopback), exec cannot run at all —
       // skip the sandbox-specific assertions rather than failing.
@@ -253,16 +451,13 @@ test.describe('Workspace Switch E2E (Sandbox ON)', () => {
       }
       const lsSeesWorkspace = (execStdout || '').includes(preExistingFile);
       if (!lsSeesWorkspace) {
-        // The stdout stream capture is best-effort: the model may answer
-        // without actually running `ls` (LLM behaviour), or the progress
-        // stream hook missed the deltas. If the model's reply itself
-        // mentions the fixture file, the workspace IS visible to the AI —
-        // treat the missing exec stream as a capture issue, not a broken
-        // sandbox mount (the write/read round-trip below still guards the
-        // sandbox filesystem).
-        const reply = await lastAssistantReply(page);
-        console.log(`[test] exec ls stream empty; model reply: ${reply?.slice(0, 200)}`);
-        if (reply.includes(preExistingFile)) {
+        if (lsReply.includes(preExistingFile)) {
+          // The stdout stream capture is best-effort: the model may answer
+          // from memory without actually running `ls`.  If the reply itself
+          // mentions the fixture file, the workspace IS visible to the AI —
+          // treat the missing exec stream as a capture issue, not a broken
+          // sandbox mount (the write/read round-trip below still guards the
+          // sandbox filesystem).
           console.log(
             '[test] ⚠️ exec stdout stream missed (LLM answered without ls), fixture visible in reply — continuing'
           );
@@ -272,13 +467,23 @@ test.describe('Workspace Switch E2E (Sandbox ON)', () => {
           );
           return;
         }
+        if (!execRan) {
+          // Neither attempt reached exec: the model never invoked the tool.
+          // Precondition unmet (LLM behaviour) — the sandbox exec path was
+          // never exercised, so there is nothing to assert about it.
+          console.log(
+            '[test] ⚠️ exec never invoked (two attempts) — skipping sandbox-internal assertions'
+          );
+          test.skip(true, 'model answered without invoking exec; sandbox exec path not exercised');
+          return;
+        }
         // Sandbox runtime broken on this runner (e.g. bwrap/loopback blocked
         // on hosted ubuntu runners) — AI can't exec at all. Skip rather than
         // report a false failure.
         if (
           sandboxBroken ||
           /bwrap|loopback|Operation not permitted|沙箱|sandbox|exec.*不可用|命令.*失败|目录不存在/i.test(
-            reply ?? ''
+            lsReply ?? ''
           )
         ) {
           console.log(
