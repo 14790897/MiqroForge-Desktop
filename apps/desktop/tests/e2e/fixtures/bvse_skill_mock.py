@@ -54,17 +54,23 @@ def _reply(messages):
     user = _last_user(messages)
     cmd_m = _CMD_RE.search(user)
     glob_m = _GLOB_DIR_RE.search(user)
+    # 录屏/演示场景：用户消息是自然语言，命令与声明目录经环境变量注入
+    # （BVSE_CMD / BVSE_DECLARE_DIR），无需把内部分隔符写进消息。
+    cmd_value = cmd_m.group(1).strip() if cmd_m else os.environ.get("BVSE_CMD", "").strip()
+    glob_dir = (
+        glob_m.group(1).strip().strip('"').strip("'")
+        if glob_m
+        else os.environ.get("BVSE_DECLARE_DIR", "").strip()
+    )
     done = _tool_names(messages)
 
-    if cmd_m and "exec" not in done:
-        command = cmd_m.group(1).strip()
+    if cmd_value and "exec" not in done:
         return _tool_calls_response(
-            [_tool_call("call_exec", "exec", {"command": command, "timeout": 1800})]
+            [_tool_call("call_exec", "exec", {"command": cmd_value, "timeout": 1800})]
         )
 
-    if glob_m and "declare_result_files" not in done:
-        out_dir = glob_m.group(1).strip().strip('"').strip("'")
-        reports = sorted(glob.glob(os.path.join(out_dir, "*_report.md")))
+    if glob_dir and "declare_result_files" not in done:
+        reports = sorted(glob.glob(os.path.join(glob_dir, "*_report.md")))
         if not reports:
             return _text("no report found (mock complete).")
         return _tool_calls_response(
