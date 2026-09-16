@@ -32,7 +32,7 @@ export function extractDoi(url: string): string | undefined {
   return undefined;
 }
 
-const TRAILING_URL_RE = /(https?:\/\/\S+)/i;
+const TRAILING_URL_RE = /(https?:\/\/\S+)$/i;
 
 /**
  * 从 markdown 里解析文末「参考文献」列表。
@@ -135,6 +135,8 @@ export function remarkCitations(validNums: Set<number>): (tree: unknown) => void
 
   const walk = (node: any): void => {
     if (!node || typeof node !== 'object') return;
+    // 链接标签内的 [1]（如 `[report [1]](url)`）不转成 citation，避免嵌套交互元素。
+    if (node.type === 'link' || node.type === 'linkReference') return;
     if (Array.isArray(node.children)) {
       const next: unknown[] = [];
       for (const child of node.children) {

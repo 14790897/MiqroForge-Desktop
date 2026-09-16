@@ -4026,8 +4026,12 @@ export function ChatConsole({
         // #879 ③ 冷启动恢复：从消息重新推导「回合 → 来源」，供文件卡片显示相关引用。
         setTurnSourcesMap(extractTurnSourcesFromMessages(rawMsgs));
         // 回合序号与会话内 user 消息数对齐（turnSeqRef 跨会话累计，需重置），
-        // 否则实时追踪的 turnId 与恢复推导的序号错位。
-        turnSeqRef.current = (rawMsgs ?? []).filter((m) => m?.role === 'user').length - 1;
+        // 否则实时追踪的 turnId 与恢复推导的序号错位。持久化 rawMsgs 可能不含
+        // 尚在乐观阶段的 user 消息——取「持久化数 / 可见数」较大者，避免覆盖
+        // 活跃 turn 已递增的序号（CodeRabbit）。
+        const persistedTurns = (rawMsgs ?? []).filter((m) => m?.role === 'user').length;
+        const visibleTurns = messagesRef.current.filter((m) => m.role === 'user').length;
+        turnSeqRef.current = Math.max(persistedTurns, visibleTurns) - 1;
 
         // ── Issue #490: resume this session's most-recent active thread ──
         // currentThreadIdRef is reset to null on every sessionKey/remount

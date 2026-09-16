@@ -167,6 +167,8 @@ test.describe('Issue #879 [n] 脚注 → 来源详情', () => {
     const dialog = page.getByRole('dialog');
     await expect(dialog.getByText('参考文献 [1]')).toBeVisible({ timeout: 15_000 });
     await expect(dialog.getByText('题名')).toBeVisible();
+    // 标题是真实解析出的（非 mock 无 title 时的兜底「检索结果」）。
+    await expect(dialog.getByText('检索结果')).toHaveCount(0);
     const link = dialog.locator('a[href^="http"]').first();
     await expect(link).toBeVisible();
     const href = (await link.getAttribute('href')) ?? '';

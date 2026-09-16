@@ -79,6 +79,11 @@ describe('parseReferenceList', () => {
   it('ignores markdown link-reference definitions like `[1]: http://…`', () => {
     expect(parseReferenceList('[1]: https://example.com/x')).toEqual([]);
   });
+
+  it('rejects an entry whose URL is not at the end of the line', () => {
+    // `[1] See https://example.com for details` 的 URL 后还有文本，不应被当参考文献
+    expect(parseReferenceList('[1] See https://example.com for details')).toEqual([]);
+  });
 });
 
 describe('remarkCitations', () => {
@@ -104,5 +109,26 @@ describe('remarkCitations', () => {
     expect(para[4].value).toBe(' 但 [3] 不是');
     // code 节点不被触碰
     expect(tree.children[1].value).toBe('代码 [1] 不转');
+  });
+
+  it('does not transform [n] inside existing link labels', () => {
+    const tree: any = {
+      type: 'root',
+      children: [
+        {
+          type: 'paragraph',
+          children: [
+            {
+              type: 'link',
+              url: 'https://example.com',
+              children: [{ type: 'text', value: 'report [1]' }],
+            },
+          ],
+        },
+      ],
+    };
+    remarkCitations(new Set([1]))(tree);
+    // 链接内的 [1] 保持不变，不生成嵌套 citation 链接
+    expect(tree.children[0].children[0].children).toEqual([{ type: 'text', value: 'report [1]' }]);
   });
 });
