@@ -250,6 +250,9 @@ test.describe('#1104 — 真实 skill 产物完整性（工作区外输出目录
       await page.waitForTimeout(400);
       await panel.screenshot({
         path: join(APPS_DESKTOP, 'test-results', 'issue-1104-bvse-panel.png'),
+        // 面板 DOM 大且带动画，默认 30s 稳定等待可能不够
+        timeout: 90_000,
+        animations: 'disabled',
       });
       console.log('[test] ✅ 真实 skill 产物完整性 + 结果/过程分区通过');
     }
