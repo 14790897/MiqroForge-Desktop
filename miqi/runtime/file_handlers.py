@@ -25,6 +25,8 @@ Key semantics:
 from __future__ import annotations
 
 import difflib
+import os
+import stat
 from pathlib import Path
 from typing import Any
 
@@ -144,7 +146,7 @@ def _session_dir_key(session_key: str) -> str:
         raise AppServerError(
             f"Invalid session key: {session_key!r}", code="INVALID_PARAMS",
         )
-    if safe_key.upper() in _WINDOWS_RESERVED_NAMES:
+    if safe_key.split(".", 1)[0].upper() in _WINDOWS_RESERVED_NAMES:
         raise AppServerError(
             f"Invalid session key: {session_key!r}", code="INVALID_PARAMS",
         )
@@ -218,6 +220,24 @@ _WINDOWS_RESERVED_NAMES = frozenset(
 def _is_within(path: Path, root: Path) -> bool:
     """True when *path* is *root* itself, or lives underneath it."""
     return path == root or path.is_relative_to(root)
+
+
+def _is_link(path: Path) -> bool:
+    """True for symlinks and for Windows junctions / other reparse points.
+
+    ``Path.is_symlink()`` misses directory junctions, which on Windows are the
+    link kind a user (or an agent) can create without elevation, and
+    ``Path.is_junction()`` only exists from Python 3.12 while the project
+    targets 3.11 — so inspect the lstat attributes instead.
+    """
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return False
+    if stat.S_ISLNK(st.st_mode):
+        return True
+    reparse = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    return bool(reparse and getattr(st, "st_file_attributes", 0) & reparse)
 
 
 def _resolve_under(root: Path, file_path: str) -> Path:
@@ -301,7 +321,10 @@ def _validate_file_path(
         file_path = str(candidate.relative_to(workspace))
 
     # ── Session-scoped resolution ─────────────────────────────────────────
-    sessions_root = workspace / _SESSIONS_DIR_NAME
+    # Every reserved root (not just sessions/) is off-limits to a
+    # workspace-scoped operation and to a session-scoped one outside its own
+    # session — see _RESERVED_ROOT_DIRS.
+    reserved_roots = tuple(workspace / name for name in _RESERVED_ROOT_DIRS)
     if session_key:
         # Reject keys whose derived directory name is not a single safe
         # segment before consulting disk state, so the caller gets a precise
@@ -322,11 +345,11 @@ def _validate_file_path(
         if _is_within(workspace_candidate, session_root):
             return workspace_candidate
 
-        # A path naming the sessions subtree that is not the caller's own
+        # A path naming a reserved runtime subtree that is not the caller's own
         # session is somebody else's session.  It must be rejected rather than
         # re-interpreted below as a session-relative path — that would quietly
         # re-root it inside the caller's files directory instead of failing.
-        if _is_within(workspace_candidate, sessions_root):
+        if any(_is_within(workspace_candidate, root) for root in reserved_roots):
             raise AppServerError(
                 f"Path escapes session: {file_path}"
                 "（会话目录外的路径请改用工作区路径或 exec 命令）",
@@ -338,7 +361,7 @@ def _validate_file_path(
         if _is_within(session_candidate, session_files):
             return session_candidate
 
-        # (c) ordinary workspace files outside the sessions subtree stay
+        # (c) ordinary workspace files outside the reserved subtrees stay
         #     reachable for session-scoped callers.
         if _is_within(workspace_candidate, workspace):
             return workspace_candidate
@@ -357,9 +380,9 @@ def _validate_file_path(
             "（工作区外的文件请改用 exec 命令读取）",
             code="INVALID_PARAMS",
         )
-    # The sessions subtree is per-session isolated state; a workspace-scoped
-    # operation has no session to be scoped to, so it may not enter it at all.
-    if _is_within(resolved, sessions_root):
+    # The reserved subtrees are per-session isolated state; a workspace-scoped
+    # operation has no session to be scoped to, so it may not enter them at all.
+    if any(_is_within(resolved, root) for root in reserved_roots):
         raise AppServerError(
             f"Path is inside the sessions directory: {file_path}"
             "（会话目录需带 session_key 访问）",
@@ -448,12 +471,19 @@ def _build_tree(
     depth: int = 0,
     max_depth: int = 6,
     skip_dirs: frozenset[str] = frozenset(),
+    reserved_roots: tuple[Path, ...] = (),
 ) -> dict:
     """Build a FileNode tree for a directory.
 
-    *skip_dirs* hides the named children of the tree root — used to keep the
+    *skip_dirs* hides the named children of the tree root, and *reserved_roots*
+    are the workspace subtrees that must never be enumerated — used to keep the
     per-session isolation subtree out of the workspace tree, which the
     workspace-scoped handlers cannot address anyway (#1051).
+
+    A name check alone is not enough: a symlink with an innocuous name (e.g.
+    ``link -> sessions``) would otherwise be recursed into and disclose every
+    session's directory and file names, so symlinked children are resolved and
+    skipped when they land in a reserved root.
     """
     node: dict[str, Any] = {
         "name": path.name or str(path),
@@ -471,7 +501,17 @@ def _build_tree(
                     continue
                 if child.suffix.lower() in _TREE_SKIP_SUFFIXES:
                     continue
-                children.append(_build_tree(child, relative_to, depth + 1, max_depth))
+                if reserved_roots and _is_link(child):
+                    try:
+                        target = child.resolve()
+                    except OSError:
+                        continue
+                    if any(_is_within(target, root) for root in reserved_roots):
+                        continue
+                children.append(_build_tree(
+                    child, relative_to, depth + 1, max_depth,
+                    reserved_roots=reserved_roots,
+                ))
         except PermissionError:
             pass
         node["children"] = children
@@ -493,6 +533,7 @@ async def files_tree_handler(
     workspace = _get_workspace_path()
     session_key = params.get("session_key")
 
+    reserved_roots = tuple(workspace / name for name in _RESERVED_ROOT_DIRS)
     if session_key:
         # Session-scoped tree: verify ownership first
         _verify_session_ownership(client_id, session_key)
@@ -506,7 +547,9 @@ async def files_tree_handler(
                 "children": [],
             }
         else:
-            root = _build_tree(session_files, session_files)
+            root = _build_tree(
+                session_files, session_files, reserved_roots=reserved_roots,
+            )
         return {
             "result": {
                 "root": root,
@@ -523,7 +566,10 @@ async def files_tree_handler(
                 "workspace_path": str(workspace),
             },
         }
-    root = _build_tree(workspace, workspace, skip_dirs=_RESERVED_ROOT_DIRS)
+    root = _build_tree(
+        workspace, workspace, skip_dirs=_RESERVED_ROOT_DIRS,
+        reserved_roots=reserved_roots,
+    )
     return {"result": {"root": root, "workspace_path": str(workspace)}}
 
 

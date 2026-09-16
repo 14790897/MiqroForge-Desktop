@@ -1308,7 +1308,7 @@ async def test_files_reject_session_key_with_unsafe_derived_dir(
     ``<ws>/sessions/`` (silently disabling isolation); a name ending in a dot
     cannot be created on Windows and used to surface as an internal error;
     Windows reserved device names (CON/NUL/COM1…) likewise cannot back a
-    session directory.
+    session directory — with or without an extension.
     """
     from miqi.runtime.app_server import AppServerError, ClientSessionRegistry
     from miqi.runtime.file_handlers import files_write_handler
@@ -1316,7 +1316,8 @@ async def test_files_reject_session_key_with_unsafe_derived_dir(
     _setup_session("atk-unsafe", "client-A")
     registry = ClientSessionRegistry()
 
-    for bad_key in ("..", ".", "a:b:..", "CON", "nul", "com1", "LPT9"):
+    for bad_key in ("..", ".", "a:b:..", "CON", "nul", "com1", "LPT9",
+                    "CON.txt", "nul.json", "COM1.log", "LPT9.md"):
         with pytest.raises(AppServerError) as exc_info:
             await files_write_handler(
                 "req-unsafe",
@@ -1324,3 +1325,78 @@ async def test_files_reject_session_key_with_unsafe_derived_dir(
                 "client-A", None, registry,
             )
         assert exc_info.value.code == "INVALID_PARAMS", bad_key
+
+
+@pytest.mark.asyncio
+async def test_files_reject_reserved_roots_beyond_sessions(
+    fake_config, fake_provider, tmp_path,
+):
+    """#1051 review: every reserved runtime root is off-limits, not just sessions/.
+
+    ``_RESERVED_ROOT_DIRS`` declares the per-session subtrees; enforcing only
+    ``sessions/`` left ``_legacy_sessions/`` reachable, which is the same
+    missing-authorization class if that layout is ever used on disk.
+    """
+    from miqi.runtime.app_server import AppServerError, ClientSessionRegistry
+    from miqi.runtime.file_handlers import files_read_handler, files_write_handler
+
+    _, ws = _setup_session("atk-legacy", "client-A")
+    legacy = ws / "_legacy_sessions"
+    legacy.mkdir(parents=True, exist_ok=True)
+    victim = legacy / "desktop_victim.jsonl"
+    victim.write_text('{"_type":"metadata","owner_client_id":"client-B"}', encoding="utf-8")
+
+    registry = ClientSessionRegistry()
+    for session_key in (None, "atk-legacy"):
+        with pytest.raises(AppServerError) as read_exc:
+            await files_read_handler(
+                "req-legacy-r",
+                {"path": "_legacy_sessions/desktop_victim.jsonl", "session_key": session_key},
+                "client-A", None, registry,
+            )
+        assert read_exc.value.code == "INVALID_PARAMS", session_key
+
+        with pytest.raises(AppServerError) as write_exc:
+            await files_write_handler(
+                "req-legacy-w",
+                {
+                    "path": "_legacy_sessions/desktop_victim.jsonl",
+                    "content": "PWNED",
+                    "session_key": session_key,
+                },
+                "client-A", None, registry,
+            )
+        assert write_exc.value.code == "INVALID_PARAMS", session_key
+
+    assert "client-B" in victim.read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_files_tree_skips_links_into_reserved_roots(
+    fake_config, fake_provider, tmp_path,
+):
+    """#1051 review: a link into sessions/ must not be enumerated.
+
+    The name-based skip only catches a child literally named ``sessions``; a
+    link with an innocuous name (``link -> sessions``) would otherwise be
+    recursed into and disclose every session's directory and file names.
+    Directory junctions count too — ``Path.is_symlink()`` does not report them.
+    """
+    import os
+
+    from miqi.runtime.app_server import ClientSessionRegistry
+    from miqi.runtime.file_handlers import files_tree_handler
+
+    _, ws = _setup_session("atk-link", "client-A")
+    _setup_session("vic-link", "client-B")
+    link = ws / "innocent-link"
+    try:
+        os.symlink(ws / "sessions", link, target_is_directory=True)
+    except (OSError, NotImplementedError) as exc:  # pragma: no cover - platform dependent
+        pytest.skip(f"cannot create a directory link here: {exc}")
+
+    registry = ClientSessionRegistry()
+    result = await files_tree_handler("req-link", {}, "client-A", None, registry)
+    names = [child["name"] for child in result["result"]["root"]["children"]]
+    assert "sessions" not in names
+    assert "innocent-link" not in names
