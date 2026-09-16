@@ -152,6 +152,55 @@ class ClientSessionRegistry:
             )
             await runtime.start()
 
+            # Register the key→workspace binding in the app-home index now that
+            # the runtime is up.  The conversation mirror task_runner writes
+            # lands in SessionManager(workspace) (the folder), while
+            # sessions.get/sessions.list read from the app-home
+            # SessionManager (config.workspace_path) and resolve folder
+            # sessions through this metadata.  Without it, a folder session is
+            # invisible (empty) after the runtime stops or the app restarts.
+            #
+            # Deliberately after start(): a session that never came up must not
+            # leave a metadata-only stub behind, since an empty app-home copy is
+            # exactly what #918's exclude_empty hides.
+            #
+            # A failed write rolls the runtime back and fails the creation
+            # instead of being swallowed.  The alternative — report success
+            # anyway — leaves a session that works right now and is gone after
+            # the next restart: the conversation is on disk, but the binding
+            # that points at it never landed, and the only other way to reach
+            # the folder is a live runtime that no longer exists.  The loss is
+            # silent, which is what makes it worse than a failed creation
+            # (#1061).  Nothing is persisted on this path, so retrying is safe.
+            _home = Path(config.workspace_path).expanduser().resolve()
+            _ws_root = Path(workspace).expanduser().resolve()
+            if _ws_root != _home:
+                try:
+                    from miqi.session.manager import SessionManager
+
+                    _index = SessionManager(config.workspace_path)
+                    _bound = _index.get_or_create(session_key, client_id=client_id)
+                    if _bound.metadata.get("workspace") != str(workspace):
+                        _bound.metadata["workspace"] = str(workspace)
+                        _index.save(_bound)
+                except Exception as exc:
+                    logger.error(
+                        "create_session: workspace binding write failed for {}: {}",
+                        session_id, exc,
+                    )
+                    try:
+                        await runtime.stop()
+                    except Exception as stop_exc:
+                        logger.warning(
+                            "create_session: rollback stop failed for {}: {}",
+                            session_id, stop_exc,
+                        )
+                    raise AppServerError(
+                        "Could not persist the workspace binding for session "
+                        f"{session_key}; session was not created",
+                        code="INTERNAL",
+                    ) from exc
+
             self._sessions[session_id] = runtime
             self._client_sessions.setdefault(client_id, set()).add(session_id)
             self._session_clients[session_id] = {client_id}
