@@ -244,7 +244,6 @@ class Handler(BaseHTTPRequestHandler):
                         calls_seen.append(name)
         n_search = calls_seen.count("web_search")
         n_write = calls_seen.count("write_file")
-        n_read = calls_seen.count("read_file")
         n_confirm_cards = sum(1 for r in results if r.get("status") == "confirmed")
 
         def tc(name, args, cid="call_x"):
@@ -509,13 +508,25 @@ class Handler(BaseHTTPRequestHandler):
             print("  [mock] R2 → 真实执行 web_search（MOF-5 合成价格）", flush=True)
             self._respond(tc("web_search", {"query": "MOF-5 metal-organic framework synthesis cost price", "max_results": 3}, "call_search"))
             return
-        if n_confirm_cards == 1 and n_read == 0:
-            # R3 → 真实执行 read_file（无副作用、本地快）——验证"确认后
-            # 真实工具执行 → 回合继续 → 第二张卡"完整链路（127 根因已定位：
-            # turn_runner 循环无 bug——后端复现 PASS；此前卡住是 E2E 审批
-            # 弹窗环境差异。恢复真实工具覆盖真链路）
-            print("  [mock] R3 → 真实执行 read_file（校验生成物）", flush=True)
-            self._respond(tc("read_file", {"path": "README.md"}, "call_write"))
+        if n_confirm_cards == 1 and n_write == 0:
+            # R3 → 真实执行 write_file（原设计）——落盘 WorkflowDefinition
+            # JSON 产物，验证"确认后真实工具执行 → 回合继续 → 第二张卡"
+            # 完整链路。（调试 127 时曾临时换成 read_file 以排除写权限干扰；
+            # 127 根因已定位在 turn_runner 之外，故恢复真实写入。）
+            print("  [mock] R3 → 真实执行 write_file（落盘 WorkflowDefinition）", flush=True)
+            self._respond(tc("write_file", {
+                "path": "mof-price-report.workflow.json",
+                "content": json.dumps({
+                    "spec_version": "1.0.0",
+                    "name": "MOF-5 市场合成价格报告",
+                    "nodes": [
+                        {"id": "search_papers", "type": "tool", "tool": "web_search"},
+                        {"id": "extract_info", "type": "llm"},
+                        {"id": "build_report", "type": "llm"},
+                        {"id": "export", "type": "tool", "tool": "write_file"},
+                    ],
+                }, ensure_ascii=False, indent=2),
+            }, "call_write"))
             return
         if n_confirm_cards == 1:
             print("  [mock] R4 → 上传 ActionCard（request_action_confirmation）", flush=True)
