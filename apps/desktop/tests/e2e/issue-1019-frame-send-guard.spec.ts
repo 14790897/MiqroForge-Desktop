@@ -254,11 +254,23 @@ test.describe('Issue #1019 — no per-event send to a disposed render frame', ()
       // 发送 ≥50 次守卫检查」的前提就不存在了。放在这里是因为：每次崩溃都会
       // 更换渲染进程、令 Playwright 的 page 句柄永久作废（连 firstWindow()
       // 也救不回），而上面的建会话/发消息/同步/截图都还要用 page。
+      // 每次迭代等重载真正完成（did-finish-load）再进下一次，不用固定 sleep。
       for (let i = 0; i < 3; i += 1) {
         await electronApp.evaluate(({ BrowserWindow }) => {
-          BrowserWindow.getAllWindows()[0]?.webContents.forcefullyCrashRenderer();
+          const g = globalThis as any;
+          g.__reloadDone = false;
+          const wc = BrowserWindow.getAllWindows()[0]?.webContents;
+          if (!wc) return;
+          wc.once('did-finish-load', () => {
+            g.__reloadDone = true;
+          });
+          wc.forcefullyCrashRenderer();
         });
-        await new Promise((r) => setTimeout(r, 3_000)); // 等这次自动重载跑完
+        const deadline = Date.now() + 15_000;
+        while (Date.now() < deadline) {
+          if (await electronApp.evaluate(() => (globalThis as any).__reloadDone === true)) break;
+          await new Promise((r) => setTimeout(r, 250));
+        }
       }
 
       // Kill the renderer the way an OOM does: process gone, frame disposed,
