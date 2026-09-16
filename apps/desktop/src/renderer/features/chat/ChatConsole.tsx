@@ -308,8 +308,23 @@ interface Message {
    *  expandable box instead of activity parsing. */
   toolOutput?: boolean;
   /** Model chain-of-thought (DeepSeek-R1 / Kimi thinking models). Rendered as
-   *  a collapsible thinking block above the message content. Issue #539. */
+   *  a collapsible thinking block above the message content. Issue #539.
+   *  While streaming this is the BOUNDED tail window (#1034) — see
+   *  `liveReasoningTail` / `reasoningOmitted` — and is replaced by the
+   *  backend's full text when the turn finishes. */
   reasoning?: string;
+  /** (#1034) The tail window actually retained for a live reasoning block:
+   *  at most `MAX_LIVE_REASONING_CHARS` characters.  `content`/`reasoning`
+   *  are this window prefixed by `liveReasoningPlaceholder(reasoningOmitted)`
+   *  when the head was dropped.  Kept as its own field so each flush appends
+   *  to a bounded string instead of copying the whole accumulated text
+   *  (the measured OOM amplifier). */
+  liveReasoningTail?: string;
+  /** (#1034) How many characters were dropped from the head of the live
+   *  reasoning text (0 = nothing omitted).  Exposed to the user as
+   *  「…已省略 X 字」.  The full text is never lost — it is persisted
+   *  server-side (reasoning_content) and re-delivered on the final event. */
+  reasoningOmitted?: number;
   /** Marks the live reasoning bubble during streaming so it can be replaced
    *  by the final assistant message once the turn completes. Issue #539. */
   isLiveReasoning?: boolean;
@@ -1998,7 +2013,7 @@ function groupChatMessages(messages: Message[]): ChatGroup[] {
 }
 
 /** Merge adjacent thinking blocks so a turn can never show duplicate headers. */
-function dedupeReasoningBlocks(messages: Message[]): Message[] {
+export function dedupeReasoningBlocks(messages: Message[]): Message[] {
   const out: Message[] = [];
   let pending: Message | null = null;
   for (const m of messages) {
@@ -2009,6 +2024,9 @@ function dedupeReasoningBlocks(messages: Message[]): Message[] {
         pending.reasoningElapsedS = m.reasoningElapsedS ?? pending.reasoningElapsedS;
         pending.timestamp = m.timestamp;
         pending.isLiveReasoning = pending.isLiveReasoning || m.isLiveReasoning;
+        // (#1034) 上面按拼接改写了 content，live 窗口的 tail 必须跟着重新基线化，
+        // 否则下一次 flush 会从拼接前的 tail 续写，把刚并进来的这段文本丢掉。
+        if (pending.isLiveReasoning) rebaseLiveReasoning(pending);
         continue;
       }
       pending = { ...m };
@@ -2081,7 +2099,94 @@ export function insertStandaloneReasoning(
   return [...messages.slice(0, insertAt), block, ...messages.slice(insertAt)];
 }
 
-/** Append a streaming reasoning chunk to the last live thinking bubble. */
+/**
+ * (#1034) Hard upper bound, in characters, on the live reasoning text kept in
+ * the in-memory/rendered thinking block.
+ *
+ * Rationale for 8000: the block only shows *transient* thinking — a user
+ * reads along while it streams, and after the turn the backend's full text
+ * replaces it (see `_closeLiveReasoning` in the final handler; the durable
+ * copy lives in `reasoning_content`: miqi/runtime/turn_runner.py:687 writes
+ * the assistant message, miqi/runtime/history_runtime.py:148 keeps it in
+ * execution_snapshots, miqi/bridge/loop.py:1361 re-sends it on the final
+ * event).  8000 chars is roughly 10+ screens of Chinese text — far more than
+ * anyone reads mid-stream — while keeping the markdown re-parse of the tail
+ * sub-millisecond, so a 60ms flush never pays a cost that grows with the
+ * accumulated length (measured amplifier: ≈458 B of retained memory per 1 B
+ * of text, 300 MB peak).
+ */
+export const MAX_LIVE_REASONING_CHARS = 8000;
+/**
+ * (#1034) When the cap is exceeded the window is trimmed down to this length
+ * (hysteresis) instead of to exactly the cap.  Trimming on *every* flush
+ * would rewrite the head paragraph every 60ms, defeating the per-segment
+ * memoization in ThinkBlock; this way head drops happen only once per
+ * ~2000 new characters, and every flush in between is an append-only write
+ * to the last segment.
+ */
+export const LIVE_REASONING_KEEP_CHARS = 6000;
+
+/** (#1034) Head-collapse placeholder for a live reasoning block, e.g.
+ *  「…已省略 1234 字」.  A trailing blank line keeps it its own markdown
+ *  paragraph so it renders as a separate line, not glued to the tail. */
+export function liveReasoningPlaceholder(omittedChars: number): string {
+  return `…已省略 ${omittedChars} 字\n\n`;
+}
+
+/** Keep a surrogate pair intact when cutting the window at `index`. */
+function alignCodePoint(text: string, index: number): number {
+  if (index <= 0 || index >= text.length) return index;
+  const code = text.charCodeAt(index);
+  // A low surrogate at the cut means the pair started one char earlier.
+  return code >= 0xdc00 && code <= 0xdfff ? index + 1 : index;
+}
+
+/** (#1034) Append `delta` to a bounded tail window, reporting what was
+ *  dropped and what the message's visible text should be. */
+function accumulateLiveReasoning(
+  prevTail: string,
+  prevOmitted: number,
+  delta: string
+): { tail: string; omitted: number; text: string } {
+  let tail = prevTail + delta;
+  let omitted = prevOmitted;
+  if (tail.length > MAX_LIVE_REASONING_CHARS) {
+    const cut = alignCodePoint(tail, tail.length - LIVE_REASONING_KEEP_CHARS);
+    omitted += cut;
+    tail = tail.slice(cut);
+  }
+  return { tail, omitted, text: omitted > 0 ? liveReasoningPlaceholder(omitted) + tail : tail };
+}
+
+/** (#1034) Re-derive a live block's window bookkeeping from its own text.
+ *
+ *  `liveReasoningTail` must always be the *tail of `content`* — otherwise the
+ *  next flush renders `tail + delta` and silently drops the characters in
+ *  between (visible as thinking text disappearing mid-stream).  Appending via
+ *  `accumulateLiveReasoning` maintains that by construction; a path that
+ *  instead rewrites `content` by concatenation must re-base through here.
+ *  Only `dedupeReasoningBlocks` does that today. */
+function rebaseLiveReasoning(msg: Message): void {
+  const omitted = msg.reasoningOmitted ?? 0;
+  const placeholder = omitted > 0 ? liveReasoningPlaceholder(omitted) : '';
+  const body =
+    placeholder && msg.content.startsWith(placeholder)
+      ? msg.content.slice(placeholder.length)
+      : msg.content;
+  const next = accumulateLiveReasoning('', omitted, body);
+  msg.liveReasoningTail = next.tail;
+  msg.reasoningOmitted = next.omitted;
+  msg.content = next.text;
+  msg.reasoning = next.text;
+}
+
+/** Append a streaming reasoning chunk to the last live thinking bubble.
+ *
+ *  (#1034) The accumulated text is a BOUNDED tail window, not the whole
+ *  stream: every flush copies at most `MAX_LIVE_REASONING_CHARS + delta`
+ *  characters, so a single flush no longer costs O(total text length).  The
+ *  dropped head is reported to the user as 「…已省略 X 字」 and is still
+ *  available in full from the backend once the turn ends. */
 export function appendReasoningDelta(
   messages: Message[],
   delta: string,
@@ -2096,22 +2201,32 @@ export function appendReasoningDelta(
     }
   }
   if (idx >= 0) {
-    const next = [...messages];
-    const appended = next[idx].content + delta;
-    next[idx] = {
-      ...next[idx],
-      content: appended,
-      reasoning: appended,
-      reasoningMode: next[idx].reasoningMode ?? mode,
+    const prev = messages[idx];
+    const next = accumulateLiveReasoning(
+      prev.liveReasoningTail ?? prev.reasoning ?? '',
+      prev.reasoningOmitted ?? 0,
+      delta
+    );
+    const out = [...messages];
+    out[idx] = {
+      ...prev,
+      content: next.text,
+      reasoning: next.text,
+      liveReasoningTail: next.tail,
+      reasoningOmitted: next.omitted,
+      reasoningMode: prev.reasoningMode ?? mode,
     };
-    return next;
+    return out;
   }
+  const created = accumulateLiveReasoning('', 0, delta);
   return [
     ...messages,
     {
       role: 'progress',
-      content: delta,
-      reasoning: delta,
+      content: created.text,
+      reasoning: created.text,
+      liveReasoningTail: created.tail,
+      reasoningOmitted: created.omitted,
       reasoningMode: mode,
       isLiveReasoning: true,
       timestamp: ts,
@@ -2285,6 +2400,132 @@ interface InFlightEvent {
 interface InFlightSnapshot {
   events: InFlightEvent[];
   userMsgTimestamp: number;
+  /** (#1034) Running sum of `inFlightEventBytes(e)` over `events`, maintained
+   *  incrementally so the byte cap can be enforced without re-walking the
+   *  whole buffer on every push. */
+  bytes: number;
+}
+/**
+ * (#1034) Caps for the off-session in-flight buffer.
+ *
+ * Before this, `buf.events.push(...)` was unbounded: a long thinking/exec turn
+ * on a session the user switched away from accumulated one object per bridge
+ * event (10^5-scale for a 18-minute stream) — and up to
+ * MODULE_CACHE_MAX_SESSIONS buffers of them.
+ *
+ * 2000 events is far more than any replay needs: consecutive same-stream
+ * deltas are coalesced first (see `pushInFlightEvent`), so what remains is
+ * mostly tool/lifecycle events.  1 MiB of UTF-16 payload is ~500k characters
+ * of text — the same order as the live reasoning window, and small enough that
+ * 20 sessions cannot pin a meaningful amount of memory.
+ */
+export const IN_FLIGHT_MAX_EVENTS = 2000;
+export const IN_FLIGHT_MAX_BYTES = 1024 * 1024;
+/** Rough per-event bookkeeping cost (object + array slot + timestamp). */
+export const IN_FLIGHT_EVENT_OVERHEAD_BYTES = 128;
+
+/** (#1034) UTF-16 byte size of an event's payload: 2 bytes per char plus a
+ *  fixed overhead.  Walks own values only (bounded depth) — the point is a
+ *  cheap, deterministic, additive measure, not an exact heap size. */
+function payloadBytes(value: unknown, depth = 0): number {
+  if (typeof value === 'string') return value.length * 2;
+  if (value === null || typeof value !== 'object' || depth >= 2) return 0;
+  let total = 0;
+  for (const v of Object.values(value as Record<string, unknown>))
+    total += payloadBytes(v, depth + 1);
+  return total;
+}
+
+/** (#1034) Accounted size of one cached event.  Exported so tests can assert
+ *  the snapshot's running total stays exactly consistent with its contents. */
+export function inFlightEventBytes(event: InFlightEvent): number {
+  return IN_FLIGHT_EVENT_OVERHEAD_BYTES + payloadBytes(event.data);
+}
+
+/** (#1034) Empty off-session buffer.  Use instead of the old inline
+ *  `{ events: [], userMsgTimestamp: 0 }` literal so the byte ledger starts
+ *  at zero. */
+export function createInFlightSnapshot(userMsgTimestamp = 0): InFlightSnapshot {
+  return { events: [], userMsgTimestamp, bytes: 0 };
+}
+
+/** (#1034) Get (creating if needed) the off-session buffer for `key`. */
+function getInFlightSnapshot(cache: Map<string, InFlightSnapshot>, key: string): InFlightSnapshot {
+  let snapshot = cache.get(key);
+  if (!snapshot) {
+    snapshot = createInFlightSnapshot();
+    cache.set(key, snapshot);
+  }
+  return snapshot;
+}
+
+/** (#1034) Both events are same-stream deltas of the same tool call → the
+ *  concatenation replays identically (ChatConsole's exec-output replay
+ *  appends `delta` in order; the thinking/reply materializers skip any event
+ *  carrying `stream`).  Anything else (lifecycle, doc_progress, terminal,
+ *  changed tool call) keeps its own slot: order is the semantics. */
+function mergeableDelta(prev: InFlightEvent, next: InFlightEvent): string | null {
+  if (prev.type !== 'progress' || next.type !== 'progress') return null;
+  const a = prev.data as ChatProgress | null;
+  const b = next.data as ChatProgress | null;
+  if (!a || !b || typeof a.delta !== 'string' || typeof b.delta !== 'string') return null;
+  if (!a.stream || a.stream !== b.stream) return null;
+  if ((a.tool_call_id ?? null) !== (b.tool_call_id ?? null)) return null;
+  return b.delta;
+}
+
+/** (#1034) Drop the oldest non-terminal events until both caps hold.  The
+ *  newest event is never a victim, and terminal events (final/error/aborted)
+ *  are never evicted — the replay needs them to settle the session.  Their
+ *  count per turn is bounded by the protocol (one final, plus an optional
+ *  error/aborted), so refusing to evict them cannot grow the buffer. */
+function evictInFlightOverflow(snapshot: InFlightSnapshot): void {
+  while (
+    snapshot.events.length > 1 &&
+    (snapshot.events.length > IN_FLIGHT_MAX_EVENTS || snapshot.bytes > IN_FLIGHT_MAX_BYTES)
+  ) {
+    let victim = -1;
+    for (let i = 0; i < snapshot.events.length - 1; i += 1) {
+      if (snapshot.events[i].type === 'progress') {
+        victim = i;
+        break;
+      }
+    }
+    if (victim < 0) return; // only terminals left — nothing evictable
+    snapshot.bytes -= inFlightEventBytes(snapshot.events[victim]);
+    snapshot.events.splice(victim, 1);
+  }
+}
+
+/** (#1034) Append an off-session event, coalescing consecutive same-stream
+ *  deltas first and evicting the oldest progress events when the count/byte
+ *  caps are exceeded.  Replaces the unbounded `buf.events.push(...)`. */
+export function pushInFlightEvent(snapshot: InFlightSnapshot, event: InFlightEvent): void {
+  const last = snapshot.events[snapshot.events.length - 1];
+  if (last) {
+    const delta = mergeableDelta(last, event);
+    if (delta !== null) {
+      const merged: InFlightEvent = {
+        type: 'progress',
+        data: { ...(last.data as ChatProgress), delta: (last.data as ChatProgress).delta! + delta },
+        // Keep the NEWEST timestamp: the watchdog reads the last event's
+        // timestamp to decide whether the backend is still alive.
+        timestamp: event.timestamp,
+      };
+      const mergedBytes = inFlightEventBytes(merged);
+      // A merge that would breach the byte cap is refused rather than
+      // producing one giant event: the incoming delta gets its own slot and
+      // the ordinary eviction below keeps the total bounded.
+      if (mergedBytes <= IN_FLIGHT_MAX_BYTES) {
+        snapshot.bytes += mergedBytes - inFlightEventBytes(last);
+        snapshot.events[snapshot.events.length - 1] = merged;
+        return;
+      }
+    }
+  }
+  snapshot.events.push(event);
+  snapshot.bytes += inFlightEventBytes(event);
+  evictInFlightOverflow(snapshot);
 }
 /** Map that drops the oldest key once it exceeds `maxSize` entries. */
 function boundedMap<K, V>(maxSize: number): Map<K, V> {
@@ -5737,12 +5978,12 @@ export function ChatConsole({
       // load() never looks up, silently dropping the stream on switch-back.
       const _owner = sendSessionKey;
       if (_owner !== currentSessionRef.current) {
-        var buf = inFlightCacheRef.current.get(_owner);
-        if (!buf) {
-          buf = { events: [], userMsgTimestamp: 0 };
-          inFlightCacheRef.current.set(_owner, buf);
-        }
-        buf.events.push({ type: 'progress', data, timestamp: Date.now() });
+        // #1034: capped + coalescing push (was an unbounded events.push).
+        pushInFlightEvent(getInFlightSnapshot(inFlightCacheRef.current, _owner), {
+          type: 'progress',
+          data,
+          timestamp: Date.now(),
+        });
         return;
       }
       lastEventAt = Date.now();
@@ -5969,12 +6210,11 @@ export function ChatConsole({
       // Route under the UI session owner — see the progress listener.
       const _owner = sendSessionKey;
       if (_owner !== currentSessionRef.current) {
-        var buf = inFlightCacheRef.current.get(_owner);
-        if (!buf) {
-          buf = { events: [], userMsgTimestamp: 0 };
-          inFlightCacheRef.current.set(_owner, buf);
-        }
-        buf.events.push({ type: 'final', data, timestamp: Date.now() });
+        pushInFlightEvent(getInFlightSnapshot(inFlightCacheRef.current, _owner), {
+          type: 'final',
+          data,
+          timestamp: Date.now(),
+        });
         return;
       }
       // Final from a superseded turn (e.g. a pre-abort final racing a quick
@@ -6194,12 +6434,11 @@ export function ChatConsole({
       // Route under the UI session owner — see the progress listener.
       const _owner = sendSessionKey;
       if (_owner !== currentSessionRef.current) {
-        var buf = inFlightCacheRef.current.get(_owner);
-        if (!buf) {
-          buf = { events: [], userMsgTimestamp: 0 };
-          inFlightCacheRef.current.set(_owner, buf);
-        }
-        buf.events.push({ type: 'error', data, timestamp: Date.now() });
+        pushInFlightEvent(getInFlightSnapshot(inFlightCacheRef.current, _owner), {
+          type: 'error',
+          data,
+          timestamp: Date.now(),
+        });
         return;
       }
       // Error from a superseded turn (e.g. an abort-induced error racing a
@@ -6245,12 +6484,11 @@ export function ChatConsole({
       // Route under the UI session owner — see the progress listener.
       const _owner = sendSessionKey;
       if (_owner !== currentSessionRef.current) {
-        var buf = inFlightCacheRef.current.get(_owner);
-        if (!buf) {
-          buf = { events: [], userMsgTimestamp: 0 };
-          inFlightCacheRef.current.set(_owner, buf);
-        }
-        buf.events.push({ type: 'aborted', data: _data, timestamp: Date.now() });
+        pushInFlightEvent(getInFlightSnapshot(inFlightCacheRef.current, _owner), {
+          type: 'aborted',
+          data: _data,
+          timestamp: Date.now(),
+        });
         return;
       }
       // Stale terminal event from a superseded turn: stop-then-quick-send
