@@ -147,6 +147,13 @@ describeFn('托管 slurm MCP 网关 live E2E（opt-in）', () => {
       );
       expect(charged, '应出现「已扣 10 积分」扣费提示').toBe(true);
 
+      // 4. RUNNING 扣费提示（10 积分）——出现即截图，作为证据
+      await expect(page.getByText(/已扣 10 积分/).first()).toBeVisible({ timeout: 300_000 });
+      await page.screenshot({
+        path: 'test-results/slurm-billing-hosted-charge.png',
+        fullPage: true,
+      });
+
       // 5. 模型自主发现并调用了 slurm MCP 提交作业
       const text =
         (await page

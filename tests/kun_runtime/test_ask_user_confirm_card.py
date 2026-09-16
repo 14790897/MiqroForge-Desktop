@@ -926,3 +926,26 @@ class TestMultipleCardsOneTurn:
         for e in history:
             if e["kind"] == "user_input_resolved":
                 assert e["status"] == "submitted"
+
+
+def test_remember_always_persists_across_sessions(tmp_path, monkeypatch):
+    """Hermes 式 always：跨会话持久（JSON 落盘）——新 gate 实例也能复用。"""
+    import miqi.paths as miqi_paths
+    from miqi.kun_runtime.user_input_gate import UserInputGate
+
+    # 隔离 MIQI_HOME（CodeRabbit 9-11）：gate 构造时 _load_always 会读真实
+    # home——若环境已有 key-s 记录，最终断言会误挂。monkeypatch 打在
+    # miqi.paths.get_miqi_home（__init__ 内 from import 逐次读取）。
+    monkeypatch.setattr(miqi_paths, "get_miqi_home", lambda: tmp_path)
+
+    g = UserInputGate()
+    g.remember("t1", "key-a", {"choice_id": "confirm"}, mode="always")
+    assert g.remembered_choice("t1", "key-a")["choice_id"] == "confirm"
+    g2 = UserInputGate()
+    g2._load_always()
+    assert g2.remembered_choice("t2", "key-a")["choice_id"] == "confirm"
+    g3 = UserInputGate()
+    g3.remember("t3", "key-s", {"choice_id": "cancel"})
+    g4 = UserInputGate()
+    g4._load_always()
+    assert g4.remembered_choice("t3", "key-s") is None

@@ -100,7 +100,10 @@ class TraceStore:
         self._conn = sqlite3.connect(
             str(self.db_path),
             check_same_thread=False,
-            timeout=1.0,
+            # CI 实测（ubuntu 并行负载）：1.0s 超时会在短暂写锁竞争下直接抛
+            # sqlite3.OperationalError: database is locked（打断 886 中断重试
+            # 流程）。放宽到 10s：等得过抖动，又不至于让追踪写入长时间阻塞。
+            timeout=10.0,
             isolation_level=None,
         )
         self._conn.row_factory = sqlite3.Row

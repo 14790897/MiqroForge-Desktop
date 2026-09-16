@@ -111,18 +111,31 @@ export async function sendUntilDoneOrProviderDown(
 ): Promise<boolean> {
   const { maxAttempts = 2, perAttemptWaitMs = 150_000, silenceExtendMs = 150_000 } = opts;
   const errLocator = page.getByText(PROVIDER_UNAVAILABLE_TEXT);
+  // 门禁（#1000/#1025）：未登录/无可用模型时发送被 fail-fast 拦下，
+  // 消息被替换成登录引导气泡——这不是 provider 错误，也不是回归。
+  const gateLocator = page.getByText('尚未登录平台账号');
+  if ((await gateLocator.count()) > 0) return false;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     // Snapshot BEFORE the send: an error that surfaces during sendMessage
     // itself must count as this attempt's error. Error bubbles from earlier
     // attempts stay in the message list, so match by count delta — only an
     // error that appeared after this snapshot counts.
     const errCountBefore = await errLocator.count();
-    await sendMessage(page, text);
+    // 发送被拦（未配置/不可用的 provider → 门禁 fail-fast，user 气泡根本
+    // 不会挂载）时，sendMessage 内部的计数断言会抛错——按「provider 不可用」
+    // 处理，返回 false 让调用方 skip，而不是把环境问题当成回归 fail。
+    try {
+      await sendMessage(page, text);
+    } catch {
+      return false;
+    }
     let sawError = false;
 
     let deadline = Date.now() + perAttemptWaitMs;
     while (Date.now() < deadline) {
       if (await isDone()) return true;
+      // 门禁引导气泡（发送后出现）——立即判定为不可用
+      if ((await gateLocator.count()) > 0) return false;
       if ((await errLocator.count()) > errCountBefore) {
         sawError = true;
         break;
@@ -137,6 +150,7 @@ export async function sendUntilDoneOrProviderDown(
       deadline = Date.now() + silenceExtendMs;
       while (Date.now() < deadline) {
         if (await isDone()) return true;
+        if ((await gateLocator.count()) > 0) return false;
         if ((await errLocator.count()) > errCountBefore) {
           sawError = true;
           break;
@@ -224,6 +238,46 @@ export async function waitForResponseComplete(page: Page, timeout = 120_000) {
 
 /** Poll for approval dialogs and click "永久允许" until the AI stops
  *  thinking.  Used by sandbox and session-isolation tests. */
+/**
+ * Auto-approve the harness PlanCard ("开始执行") if it appears.
+ *
+ * #646-v2 plan 常态（edit 模式任何 produces_artifact 工具 → 计划卡）让既有
+ * E2E（exec/write_file/spawn 类真实对话）被计划卡挡住——工具不执行、spec
+ * retry 死循环（CI electron-e2e 30min 超时）。调用方在 sendMessage 后启动
+ * 后台轮询（像 autoApprove 一样），计划卡出现即点"开始执行"。
+ */
+export async function approvePlanCardIfAny(page: Page, timeoutMs = 90_000) {
+  const deadline = Date.now() + timeoutMs;
+  let checked = 0;
+  while (Date.now() < deadline) {
+    try {
+      // CodeRabbit（9-11）：按 testid 定位等待态计划卡的确认钮（plan-confirm
+      // 仅在 waiting && !editing 渲染——天然排除历史已处理卡）；按钮可访问名
+      // 为「按当前方案执行」（PlanCard 重写后），旧 name:'开始执行' 匹配不到。
+      const btn = page.getByTestId('plan-confirm').first();
+      if (await btn.isVisible({ timeout: 400 }).catch(() => false)) {
+        await btn.click({ force: true, timeout: 5_000 });
+        console.log('[test] 自动批准计划卡（按当前方案执行）');
+        return;
+      }
+      checked += 1;
+      if (checked % 20 === 1) {
+        console.log(
+          `[test] approvePlanCardIfAny: 检查 ${checked} 次，计划卡未出现（${Date.now() < deadline ? '继续等' : '超时'}）`
+        );
+      }
+    } catch {
+      // 页面已关闭（测试结束）——静默退出
+      return;
+    }
+    try {
+      await page.waitForTimeout(500);
+    } catch {
+      return; // 页面已关闭
+    }
+  }
+}
+
 export async function approveLoop(page: Page, timeout = 180_000) {
   // The thinking indicator was removed, so completion can't be detected via
   // [data-testid="thinking-indicator"].  Keep auto-approving any dialogs, and
@@ -239,6 +293,13 @@ export async function approveLoop(page: Page, timeout = 180_000) {
     if (await btn.isVisible({ timeout: 1000 }).catch(() => false)) {
       await btn.click();
       console.log('[test] Auto-approved tool');
+    }
+    // #646-v2 plan 常态：edit 模式 produces_artifact 工具 → 计划卡——自动点"开始执行"
+    // CodeRabbit（9-11）：同上——testid 定位等待态确认钮
+    const go = page.getByTestId('plan-confirm').first();
+    if (await go.isVisible({ timeout: 1000 }).catch(() => false)) {
+      await go.click({ force: true, timeout: 5_000 });
+      console.log('[test] Auto-approved plan card (按当前方案执行)');
     }
     const text = await page
       .locator('main')

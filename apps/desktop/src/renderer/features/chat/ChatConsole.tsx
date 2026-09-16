@@ -6,6 +6,7 @@ import {
   useCallback,
   useMemo,
   memo,
+  Fragment,
   type ComponentProps,
 } from 'react';
 import { createPortal } from 'react-dom';
@@ -20,12 +21,12 @@ import { InterruptedTurnCard } from './components/InterruptedTurnCard';
 import { DiffView } from './components/DiffView';
 import { renderContent } from './components/renderContent';
 import { TrackedFileCard } from './components/TrackedFileCard';
-import { ConfirmCardArea } from './components/ConfirmCardArea';
+import { ConfirmCardArea, ConfirmCardItem, isConfirmCard } from './components/ConfirmCardArea';
 import { TurnStatusBar } from './components/TurnStatusBar';
 import { QraftLoginButton, QraftLoginCard } from '../settings/components/QraftLoginCard';
 import { useQraftStatus } from '../../hooks/useQraftStatus';
 import { ToolCommandBlock } from './components/ToolCommandBlock';
-import { useUserInput } from '../../contexts/UserInputContext';
+import { useUserInput, type UserInputCardEntry } from '../../contexts/UserInputContext';
 import { ErrorBoundary } from '../../components/ErrorBoundary';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -292,6 +293,9 @@ interface Message {
   toolCallId?: string;
   /** Tool name for specialized rendering (e.g. 'paper_search') */
   toolName?: string;
+  /** 产生该消息的 turn（流式 assistant 消息由 activeTurnId 标记——
+   *  2026-08-27 卡片内联关联用：计划/确认是 AI 回答的一部分） */
+  turnId?: string;
   /** Parsed tool data for card rendering */
   toolData?: unknown;
   /** Original tool-call arguments (e.g. web_fetch's url) — real references */
@@ -1807,6 +1811,8 @@ export function sessionMsgsToUi(rawMsgs: any[]): Message[] {
             toolName: 'paper_search',
             toolData: paperData,
             collapsed: false,
+            // CodeRabbit（9-11）：链卡按 turn 归属需要行级 turnId（恢复路径）
+            turnId: String((m as { turn_id?: unknown }).turn_id ?? '') || undefined,
             timestamp: ts,
           });
         } else {
@@ -1818,6 +1824,7 @@ export function sessionMsgsToUi(rawMsgs: any[]): Message[] {
             summary: 'paper_search',
             toolHint: true,
             collapsed: true,
+            turnId: String((m as { turn_id?: unknown }).turn_id ?? '') || undefined,
             timestamp: ts,
           });
         }
@@ -1835,6 +1842,7 @@ export function sessionMsgsToUi(rawMsgs: any[]): Message[] {
           toolName,
           toolOutput: true,
           collapsed: true,
+          turnId: String((m as { turn_id?: unknown }).turn_id ?? '') || undefined,
           timestamp: ts,
         });
       }
@@ -2367,7 +2375,7 @@ function pointsEventToMessage(pd: ChatProgress): Message | null {
     content:
       typeof pd.message === 'string' && pd.message
         ? pd.message
-        : '平台积分不足，任务未执行。请到 设置 → Qraft 平台账号 查看余额。',
+        : '平台积分不足，任务未执行。请到 设置 → MiQroForge 平台 查看余额。',
     timestamp: Date.now(),
   };
 }
@@ -2400,6 +2408,8 @@ function cachedEventsToMessages(events: InFlightEvent[], mode?: ReasoningMode): 
           content: fd.content,
           timestamp: Date.now(),
           reasoningMode: mode,
+          // 2026-08-27：turn 关联——卡内联进 AI 回答
+          turnId: (fd as ChatFinal & { turn_id?: string }).turn_id ?? undefined,
         });
       }
     } else if (ev.type === 'error') {
@@ -2601,6 +2611,8 @@ export function ChatConsole({
   // 工具输出里，模型可能摘要掉——用户会误以为「允许并记住」已永久生效。
   // 扫描消息中的失败标记并发 window 事件，由 App 级 toast 呈现（不依赖模型）。
   const warnedInstallWarnRef = useRef(new Map<string, number>());
+  // 2026-08-27：当前 turn 的 id——final 消息打 turnId 标记（卡内联关联用）
+  const activeTurnIdRef = useRef<string | null>(null);
   useEffect(() => {
     const warned = warnedInstallWarnRef.current;
     for (const m of messages) {
@@ -2614,6 +2626,56 @@ export function ChatConsole({
       }
     }
   }, [messages]);
+  // 2026-08-26 用户裁决：有确认/计划卡时输入框隐藏（WorkBuddy 式）
+  // 2026-08-27：计划/确认是 AI 回答的一部分——卡片内联在产生它的消息后
+  const {
+    pending: pendingCards,
+    resolved: resolvedCards,
+    resolve: resolveCard,
+    timeoutCard,
+  } = useUserInput();
+  const allCards = useMemo(
+    () => [...Object.values(resolvedCards), ...Object.values(pendingCards)],
+    [pendingCards, resolvedCards]
+  );
+  // 2026-08-27：卡属于 AI 回答——按 turn_id 关联到消息，在消息内部渲染
+  const cardsByTurn = useMemo(() => {
+    const map = new Map<string, typeof allCards>();
+    for (const c of allCards) {
+      const t = c.request.turn_id;
+      if (t) {
+        const arr = map.get(t) ?? [];
+        arr.push(c);
+        map.set(t, arr);
+      }
+    }
+    return map;
+  }, [allCards]);
+  const matchedTurnIds = useMemo(() => {
+    // #646-v2：本集合的唯一消费方是 ConfirmCardArea 的「确认卡是否已内联」排除
+    // 过滤（plan/action 卡不受影响）。工具链只有在**链里真有 ask_user_confirm_card
+    // 行**时才内联画确认卡（ToolChain：`isConfirmRow && card`）——因此只有
+    // 「确实有确认卡行」的 turn 才能算已匹配：
+    //  · 不带工具行的确认卡（写授权卡 / 安装授权卡，filesystem 等经 user-input
+    //    通道直接弹卡）永远留在兜底区，否则两边都不画、直接消失（E2E 实测）；
+    //  · CR review（#1071, 2026-09-15）：此前还把「有 assistant 消息的 turn」
+    //    一并算已匹配，但 MessageBubble 已不渲染确认卡——该条件只会让
+    //    「有 assistant 消息 + 链里无确认卡行」的确认卡被误排除 → 卡消失。
+    //    故仅保留确认卡行这一个条件。
+    const msgTurnIds = new Set<string>();
+    const hasConfirmRow = (m: Message) =>
+      m.role === 'progress' &&
+      (m.toolName === 'ask_user_confirm_card' ||
+        (m.content ?? '').includes('ask_user_confirm_card'));
+    for (const m of messages) {
+      if (m.turnId && hasConfirmRow(m)) msgTurnIds.add(m.turnId);
+    }
+    const active = activeTurnIdRef.current;
+    if (active && messages.some((m) => m.turnId === active && hasConfirmRow(m))) {
+      msgTurnIds.add(active);
+    }
+    return new Set([...cardsByTurn.keys()].filter((t) => msgTurnIds.has(t)));
+  }, [cardsByTurn, messages]);
   // sourcesByMsg cache: keyed by a tool-only signature so the map object is
   // stable across typewriter frames (see sourcesByMsg below).
   const sourcesCacheRef = useRef<{ sig: string; map: Map<Message, MessageSource[]> } | null>(null);
@@ -3306,27 +3368,18 @@ export function ChatConsole({
       streaming || messages.some((m) => m.role === 'user' || m.role === 'assistant');
     onSessionActivityChange?.(hasActivity);
   }, [streaming, messages, onSessionActivityChange]);
-  const { lastAdjustAt, setActiveSession } = useUserInput();
-  // 调整提示占位词用 state 驱动（而非直接改 DOM placeholder）——React 不会
-  // 主动重写该属性，直改会永久残留（CodeRabbit #711）。
-  const [adjustHint, setAdjustHint] = useState(false);
+  const { setActiveSession } = useUserInput();
+  // #646-v2（2026-09-15 定稿，对齐 Claude Code 的 resubmit 语义）：用户在计划卡里
+  // 提交调整意见后，由后端在**同一回合**重新规划（CollaborativeTurnRunner 的
+  // _plan_adjustment_pending → 追加一轮 provider → 新计划卡）。前端**不再**聚焦底部
+  // 输入框、不再提示"请输入调整要求"——否则与「有卡等待时输入框隐藏」的定稿冲突，
+  // 并且诱导用户把同一意见再输一遍（旧 lastAdjustAt/adjustHint 机制已移除）。
+  const adjustHint = false;
   // 会话隔离（CodeRabbit #666）：切会话 → 清空全部确认卡
   useEffect(() => {
     setActiveSession(sessionKey);
-    setAdjustHint(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionKey]);
-  // 用户点了"调整方案"→ 聚焦输入框并提示输入调整要求（issue #646）。
-  // 聚焦在 composer 重新可用（流式结束）之后执行——disabled 状态下
-  // focus 无效，回合结束后焦点会丢失（CodeRabbit #711）。
-  useEffect(() => {
-    if (!lastAdjustAt) return;
-    setAdjustHint(true);
-  }, [lastAdjustAt]);
-  useEffect(() => {
-    if (!adjustHint || streaming) return;
-    composerRef.current?.focus();
-  }, [adjustHint, streaming]);
   // 原生 window.confirm 模态框关闭后，Chromium 可能不把“真实的 OS 激活”交还
   // renderer：键盘事件被吞、点输入条无光标，刷新重建页面才恢复（手动复现）。
   // 早期版本里空/非空输入条是两棵子树，删除对话时旧 textarea 卸载重挂会顺带
@@ -4950,8 +5003,8 @@ export function ChatConsole({
   }, [complexHint]);
 
   const handleSend = useCallback(async () => {
-    // 发送即清除调整提示——占位词只属于"点了调整方案之后"的输入场景
-    setAdjustHint(false);
+    // #646-v2（2026-09-15 定稿）：调整意见已在计划卡内提交、由后端同轮重规划，
+    // 发送路径不再需要清理任何"调整提示"状态。
     // #740: resume consumes the pending resume-turn id (set by 继续执行).
     const _resumeId = resumeTurnIdRef.current;
     resumeTurnIdRef.current = null;
@@ -5567,13 +5620,27 @@ export function ChatConsole({
               last.timestamp === ts &&
               last.content !== fullContent
             ) {
-              return [...prev.slice(0, -1), { ...last, content: fullContent }];
+              return [
+                ...prev.slice(0, -1),
+                { ...last, content: fullContent, turnId: activeTurnIdRef.current ?? last.turnId },
+              ];
             }
             if (last?.role === 'assistant' && last.content !== fullContent) {
-              return [...prev.slice(0, -1), { ...last, content: fullContent }];
+              return [
+                ...prev.slice(0, -1),
+                { ...last, content: fullContent, turnId: activeTurnIdRef.current ?? last.turnId },
+              ];
             }
             if (!last || last.role !== 'assistant') {
-              return [...prev, { role: 'assistant', content: fullContent, timestamp: ts }];
+              return [
+                ...prev,
+                {
+                  role: 'assistant',
+                  content: fullContent,
+                  timestamp: ts,
+                  turnId: activeTurnIdRef.current ?? undefined,
+                },
+              ];
             }
             return prev;
           });
@@ -5798,6 +5865,7 @@ export function ChatConsole({
       // turn_started can't make this turn's terminals look stale.
       if (data.stream === 'turn' && typeof data.turn_id === 'string') {
         myTurnId = data.turn_id;
+        activeTurnIdRef.current = data.turn_id;
         return;
       }
 
@@ -5905,6 +5973,8 @@ export function ChatConsole({
             : data.tool_call_id
               ? toolArgsByCallId.current.get(data.tool_call_id)
               : undefined,
+          // CodeRabbit（9-11）：链卡按 turn 归属需要行级 turnId（实时路径）
+          turnId: activeTurnIdRef.current ?? undefined,
           timestamp: Date.now(),
         };
         setMessages((prev) => {
@@ -7981,11 +8051,26 @@ export function ChatConsole({
                         downloadingPaperId={downloadingPaperId}
                         paperDownloadStates={paperDownloadStates}
                         sending={sendingFor(sessionKey)}
+                        cards={
+                          group.msg.turnId
+                            ? (cardsByTurn.get(group.msg.turnId) ?? []).filter(
+                                // 2026-08-27：确认卡由工具链行渲染（Hermes 式）——
+                                // inline 只留 plan/action 卡防重复
+                                (c) => !isConfirmCard(c as never)
+                              )
+                            : undefined
+                        }
                       />
                     </div>
                   )
                 )
               )}
+
+              {/* 用户明确：#646 确认卡属于「回答界面」——timelines/resolved 跟随消息流；
+                  pending 确认卡在输入框位置（variant=bottom，Composer 区） */}
+              {/* 兜底渲染：尚未关联到消息的卡（turn 进行中——AI 消息生成后
+                  卡进入消息内部，此处自动消失） */}
+              <ConfirmCardArea matchedTurnIds={matchedTurnIds} />
             </div>
           </div>
 
@@ -7998,14 +8083,25 @@ export function ChatConsole({
             }}
           />
 
-          {/* Composer */}
+          {/* Composer——确认卡弹出时隐藏（WorkBuddy 式：界面只有一个卡片） */}
           <div
             className="shrink-0 px-5 pb-4 pt-3"
             style={{
               background: 'var(--background)',
             }}
           >
-            <div className="max-w-[760px] min-w-[min(360px,100%)] mx-auto">
+            {Object.keys(pendingCards).length > 0 && (
+              <div
+                className="max-w-[760px] mx-auto text-center text-[11px] py-3"
+                style={{ color: '#a0a6b0' }}
+              >
+                等待你的确认…
+              </div>
+            )}
+            <div
+              className="max-w-[760px] min-w-[min(360px,100%)] mx-auto"
+              style={Object.keys(pendingCards).length > 0 ? { display: 'none' } : undefined}
+            >
               {attachments.length > 0 &&
                 (() => {
                   // 附件预览渲染到输入框「内部」:portal 投到 Composer 的框内插槽,
@@ -8259,8 +8355,8 @@ export function ChatConsole({
               {/* Turn status (issue #646: 等待你的确认) */}
               <TurnStatusBar />
 
-              {/* AI-initiated user confirmation cards (issue #646) */}
-              <ConfirmCardArea />
+              {/* #646-v2：兜底 ConfirmCardArea 渲染在消息区尾部（见上方
+                  matchedTurnIds 处，带 turn 过滤）——此处不再重复渲染 */}
 
               {/* 欢迎态工作目录胶囊：独立于输入框、在它正上方（同宽左对齐，不嵌进卡内）。
                   首条消息后隐藏——会话进行中改由子标题栏胶囊承接。与子标题栏用同一套
@@ -9076,14 +9172,41 @@ function ToolChainGroup({
 >) {
   const [open, setOpen] = useState(true);
   const autoCollapsedRef = useRef(false);
+  // 2026-08-27：确认/计划是工具的一部分（Hermes 式）——审批条在工具行下。
+  // 卡按 createdAt 顺序与 ask_user_confirm_card 工具行一一对应（单 turn 主场景）。
+  const {
+    pending: chainPending,
+    resolved: chainResolved,
+    resolve: chainResolve,
+    timeoutCard: chainTimeout,
+  } = useUserInput();
+  // 2026-08-27 Hermes 式：含确认卡的工具链不自动收起——审批条消失后行保留
+  const hasConfirmRow = rows.some(
+    (r) =>
+      r.toolName === 'ask_user_confirm_card' || (r.content ?? '').includes('ask_user_confirm_card')
+  );
+  const chainCards = useMemo(() => {
+    // CodeRabbit（9-11）：① 只保留确认卡——plan/action 卡由 MessageBubble 渲染，
+    // 混入会让 confirmRowIdx 与 confirm 行错位；② 按本链 turn 过滤——多链同屏
+    // 时防止把别条链的卡挂进来（行级 turnId：实时走 activeTurnIdRef，恢复走
+    // raw.turn_id）。
+    const chainTurnId = rows.find((r) => r.turnId)?.turnId;
+    return [...Object.values(chainResolved), ...Object.values(chainPending)]
+      .filter((c) => isConfirmCard(c as never))
+      .filter((c) => !chainTurnId || c.request.turn_id === chainTurnId)
+      .sort((a, b) => (a.createdAt ?? 0) - (b.createdAt ?? 0));
+  }, [chainPending, chainResolved, rows]);
+  // 工具链内 ask_user_confirm_card 行（按顺序）→ 卡队列索引
+  const confirmRowIdxRef = useRef(0);
+  confirmRowIdxRef.current = 0;
   // Auto-fold once, when the turn completes (a later manual expand is kept).
   useEffect(() => {
-    if (done && !autoCollapsedRef.current) {
+    if (done && !autoCollapsedRef.current && !hasConfirmRow) {
       autoCollapsedRef.current = true;
       const t = setTimeout(() => setOpen(false), 1500);
       return () => clearTimeout(t);
     }
-  }, [done]);
+  }, [done, hasConfirmRow]);
 
   const label = `工具调用 · ${rows.length}`;
   return (
@@ -9112,18 +9235,36 @@ function ToolChainGroup({
         </button>
         {open && (
           <div className="mt-0.5 flex flex-col">
-            {rows.map((row, i) => (
-              <MessageBubble
-                key={`${row.timestamp}-${i}`}
-                msg={row}
-                sources={sourcesByMsg.get(row) ?? EMPTY_SOURCES}
-                toolStepIndex={i + 1}
-                isLastToolRow={i === rows.length - 1}
-                isLast={false}
-                searchResults={row.toolCallId ? searchResultsByCallId[row.toolCallId] : undefined}
-                {...bubbleProps}
-              />
-            ))}
+            {rows.map((row, i) => {
+              const isConfirmRow =
+                row.toolName === 'ask_user_confirm_card' ||
+                (row.content ?? '').includes('ask_user_confirm_card');
+              const card = isConfirmRow ? chainCards[confirmRowIdxRef.current++] : undefined;
+              return (
+                <div key={`${row.timestamp}-${i}`}>
+                  <MessageBubble
+                    msg={row}
+                    sources={sourcesByMsg.get(row) ?? EMPTY_SOURCES}
+                    toolStepIndex={i + 1}
+                    isLastToolRow={i === rows.length - 1}
+                    isLast={false}
+                    searchResults={
+                      row.toolCallId ? searchResultsByCallId[row.toolCallId] : undefined
+                    }
+                    {...bubbleProps}
+                  />
+                  {isConfirmRow && card && (
+                    <div className="mt-1">
+                      <ConfirmCardItem
+                        entry={card as never}
+                        resolve={chainResolve}
+                        timeoutCard={chainTimeout}
+                      />
+                    </div>
+                  )}
+                </div>
+              );
+            })}
           </div>
         )}
       </div>
@@ -9180,6 +9321,9 @@ interface MessageBubbleProps {
   isLastToolRow?: boolean;
   /** web_search result text for this row (click-to-expand cards). */
   searchResults?: string;
+  /** 2026-08-27：本 turn 的确认/计划卡——AI 回答的一部分（内容后、操作栏前） */
+  cards?: UserInputCardEntry[];
+  /** #740/#1042: resume/restart an interrupted turn (half-generated reply).
   /** 编辑用户消息并重新回答(#828)。 */
   onEdit?: (msg: Message, newText: string) => void;
   /** #740: resume/restart an interrupted turn (half-generated reply).
@@ -9219,9 +9363,12 @@ const MessageBubble = memo(function MessageBubble({
   onResume,
   onRestart,
   reasoningMode,
+  cards,
 }: MessageBubbleProps) {
   const [expanded, setExpanded] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
+  // 2026-08-27：卡属于 AI 回答——消息内部渲染（resolve/timeout 直接取自 context）
+  const { resolve: resolveCard, timeoutCard } = useUserInput();
   // 编辑态(#828):用户消息原地变输入框,提交后截断重发
   const [editing, setEditing] = useState(false);
   const [editText, setEditText] = useState('');
@@ -9680,7 +9827,7 @@ const MessageBubble = memo(function MessageBubble({
 
   if (msg.role === 'subagent') {
     return (
-      <div className="flex items-start gap-3">
+      <div className="flex items-start gap-3" data-testid="subagent-result">
         <GitMerge size={18} style={{ color: 'var(--accent)', marginTop: 6 }} />
         <div
           className="text-sm rounded-2xl px-4 py-3 prose prose-sm max-w-none break-words overflow-x-auto"
@@ -9803,7 +9950,7 @@ const MessageBubble = memo(function MessageBubble({
             data-testid={isUser ? 'chat-message-user' : 'chat-message-assistant'}
           >
             {!isUser && !hideHeader && (
-              <div className="flex items-center gap-2 mb-3 pl-2">
+              <div className="flex items-center gap-2 mb-3 pl-2" data-testid="assistant-avatar-row">
                 <AgentAvatar />
                 <span
                   className="text-[16px] font-semibold shrink-0 whitespace-nowrap"
@@ -10105,6 +10252,20 @@ const MessageBubble = memo(function MessageBubble({
                   </ErrorBoundary>
                 )}
               </div>
+
+              {/* 2026-08-27：计划/确认是 AI 回答的一部分——卡在消息内容后、操作栏前 */}
+              {cards && cards.length > 0 && (
+                <div className="flex flex-col gap-1 w-full mt-1" data-testid="inline-cards">
+                  {cards.map((c) => (
+                    <ConfirmCardItem
+                      key={c.request.input_id}
+                      entry={c as never}
+                      resolve={resolveCard}
+                      timeoutCard={timeoutCard}
+                    />
+                  ))}
+                </div>
+              )}
 
               {/* 用户消息操作 — 复制 / 编辑(仅鼠标靠近/hover 消息时显示,#828;
                   编辑态下隐藏,避免与编辑框叠在一起) */}

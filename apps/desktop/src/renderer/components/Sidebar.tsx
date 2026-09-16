@@ -440,7 +440,7 @@ export function Sidebar({
                         border: `1px solid ${isActive ? (sessionStatus === 'IN-PROGRESS' ? status.bg : status.color) : status.cardBorder}`,
                       }}
                     >
-                      {/* Top row: status icon + label left · time right */}
+                      {/* Top row: status icon + label left · time right（用户：恢复原版） */}
                       <div className="flex items-center justify-between mb-2">
                         <div className="flex items-center gap-1.5">
                           <span

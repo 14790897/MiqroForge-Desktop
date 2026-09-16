@@ -360,7 +360,7 @@ async def _run_thread_compaction(
                     turn_id,
                     thread_id,
                     "failed",
-                    error_message="Context compaction failed",
+                    error_message="上下文压缩失败，请查看运行时日志。",
                 )
             },
             request_id=request_id,

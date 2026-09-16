@@ -44,8 +44,8 @@ test.describe('Confirm Card (real LLM)', () => {
     '真实模型调用 ask_user_confirm_card — 弹卡、点击确认、tool result 回传、回合完成',
     { timeout: LLM_TIMEOUT * 2 },
     async () => {
-      const cardArea = page.getByTestId('confirm-card-area');
-      const resolvedArea = page.getByTestId('confirm-card-resolved');
+      // 2026-08-28：卡并进工具链（Hermes 式）——断言页面级 + 回执
+      const cardCount = () => page.getByTestId('confirm-card').count();
 
       // 显式指令模型调用工具（真实 HTTP 请求到 provider）。macos-e2e 上共享
       // CI key 限流会让回合报「模型服务暂时不可用」——重发一次；全失败则跳过
@@ -55,30 +55,33 @@ test.describe('Confirm Card (real LLM)', () => {
         '请立即调用 ask_user_confirm_card 工具弹出确认卡片：' +
           'title 用「确认执行方案？」，message 用「开始前需要你确认以下计划」。' +
           '调用后收到结果时直接回复 OK。',
-        async () => (await cardArea.count()) > 0
+        async () => (await cardCount()) > 0
       );
       test.skip(
         !cardAppeared,
         'no AI reply on every attempt (provider unavailable or too slow) — no confirm card to verify'
       );
 
-      // 真实模型往返（本地 deepseek / CI siliconflow）——给足超时
-      await expect(cardArea).toBeVisible({ timeout: 30_000 });
-      await expect(cardArea.getByText('确认执行方案？')).toBeVisible();
-      await expect(cardArea.getByRole('button', { name: '确认执行' })).toBeVisible();
+      const confirmCard = page.getByTestId('confirm-card').first();
+      await expect(confirmCard.getByText('确认执行方案？', { exact: true })).toBeVisible({
+        timeout: 120_000,
+      });
+      await expect(confirmCard.getByTestId('confirm-run')).toBeVisible();
 
       await page.screenshot({
         path: `test-results/${test.info().title.replace(/\s+/g, '-')}-real-card.png`,
       });
 
-      // 点击确认 → 选择回传模型 → 模型继续完成回合
-      await cardArea.getByRole('button', { name: '确认执行' }).click();
-      await expect(resolvedArea.getByText('已选择「确认执行」')).toBeVisible({
+      // 点击确认 → tool result 回传模型 → 模型继续完成回合
+      await confirmCard.getByTestId('confirm-run').click();
+      // 回执内定位（页面级会撞上真实模型输出里的同名文本——CI strict mode）
+      await expect(
+        page.locator('[data-receipt="true"]').getByText('已确认执行方案', { exact: true }).first()
+      ).toBeVisible({
         timeout: 30_000,
       });
 
       await waitForResponseComplete(page, LLM_TIMEOUT);
-      // 回合正常收尾：至少有一条 assistant 回复（内容由真实模型生成，不断言文案）
       const assistantBubbles = page.getByTestId('chat-message-assistant');
       await expect(assistantBubbles.first()).toBeVisible({ timeout: 30_000 });
 

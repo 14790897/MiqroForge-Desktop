@@ -32,12 +32,12 @@ DEFAULT_TIMEOUT_SECONDS = 120
 # System-prompt guidance injected into every KUN turn (issue #646, 功能描述④).
 # Tells the model WHEN to call ask_user_confirm_card and how to interpret it.
 ASK_USER_CONFIRM_INSTRUCTION = (
-    "你可以调用 ask_user_confirm_card 工具，在关键步骤执行前主动弹出一张确认卡片，"
-    "暂停当前任务等待用户做结构化选择。**必须**在以下场景主动调用（不要只在文本里询问）：\n"
-    "1. 执行多步骤 Skill 方案前（先展示步骤列表让用户确认）；\n"
-    "2. 任何外部网络请求、文件写入、可能产生费用的操作前；\n"
-    "3. 向外部平台（如 MiQroForge）上传文件前；\n"
-    "4. 需要用户补充关键参数、或在多个方案间做选择时。\n"
+    "你可以调用 ask_user_confirm_card 工具，在**危险动作执行前**主动弹出一张确认卡片，"
+    "暂停当前任务等待用户做结构化选择。**仅限**以下场景（不要只在文本里询问）：\n"
+    "1. 向外部平台上传文件（如 MiQroForge/microforge）前；\n"
+    "2. 支付/产生费用、删除大量文件、外发数据等不可逆动作前。\n"
+    "**多步骤任务开始前不要调用本工具**——请调用 ask_user_plan_confirm 展示任务计划；"
+    "普通文件写入/网络请求由系统自动放行，不需要确认。\n"
     "调用前先在正文解释为什么需要用户决定；调用后工具会返回用户的选择。"
     "返回 status 为 cancelled（用户取消或超时）时不要继续执行，"
     "choice_id 为 adjust 时应重新规划方案并再次调用本工具。"
@@ -69,12 +69,9 @@ class AskUserConfirmCardTool(Tool):
         return (
             "弹出一张确认卡片，等待用户在桌面端做结构化选择，并把选择结果返回给你。"
             "这是 AI 主动发起的人机握手：调用后当前 Turn 会暂停，直到用户点选或超时。"
-            "**必须在你准备执行以下动作之前主动调用**：涉及外部网络请求、文件写入、"
-            "多步骤 Skill 执行、可能产生费用的操作、或向外部平台上传文件（如 MiQroForge）。"
-            "调用前先在正文里解释为什么需要用户决定。"
-            "返回结果 status 为 confirmed / cancelled（超时或用户取消）；"
-            "用户选择 adjust 时 status 为 cancelled 且 choice_id 为 adjust，"
-            "此时应重新规划方案并再次调用本工具，不要继续执行。"
+            "**仅限危险动作执行前调用**：向外部平台上传文件（MiQroForge/microforge）、支付、"
+            "删除大量文件、外发数据。多步骤任务的计划确认请使用 ask_user_plan_confirm"
+            "（不要在本工具传 steps）。调用前先在正文里解释为什么需要用户决定。"
         )
 
     @property
