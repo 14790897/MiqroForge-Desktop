@@ -117,8 +117,26 @@ function trackedFilesMention(sessionsRoot: string, filename: string): boolean {
   });
 }
 
-/** Move a session dir OUT of the sessions root so the app sees no stub for it.
- *
+/** Every key in every tracked_files.json under `sessionsRoot`, prefixed with the
+ *  session dir it came from. Only used to make assertion failures say WHERE an
+ *  entry landed, instead of just "not here". */
+function trackedLedgerKeys(sessionsRoot: string): string[] {
+  if (!existsSync(sessionsRoot)) return [];
+  const out: string[] = [];
+  for (const entry of readdirSync(sessionsRoot)) {
+    const ledger = join(sessionsRoot, entry, 'tracked_files.json');
+    if (!existsSync(ledger)) continue;
+    try {
+      const files = JSON.parse(readFileSync(ledger, 'utf-8'))?.files ?? {};
+      out.push(...Object.keys(files).map((k) => `${entry}:${k}`));
+    } catch {
+      out.push(`${entry}:<unparseable>`);
+    }
+  }
+  return out;
+}
+
+/** Move a session dir OUT of the sessions root so the app sees no stub for it. *
  *  The destination matters: list_sessions() enumerates every
  *  "<dir>/conversation.jsonl" one level under the root, so a sibling rename
  *  inside the root would still be picked up, list_bound_workspaces would hand
@@ -280,6 +298,137 @@ test.describe('#1061 folder-bound session assets', () => {
       await postScreenshotToPr(
         'test-results/issue-1061-stubless-read.png',
         '✅ E2E 通过：app-home 无 stub 时，活跃 runtime 的工作区仍能读回真对话'
+      );
+    } finally {
+      await closeElectronApp(electronApp, miqiHome);
+      rmSync(folderRoot, { recursive: true, force: true });
+    }
+  });
+});
+
+// ── #1096: exec 产物与文档产物必须写进同一份账本 ───────────────────────────
+//
+// 用户报的场景：让 agent 写两个文件，再「合成一个」第三个，第三个在「任务资产」
+// 里根本不出现，而它在磁盘上确实存在。
+//
+// 根因是两个写入口分叉：文档工具按会话工作区（绑定根）落账、key 是相对路径；
+// exec 产物追踪写死 `SessionManager(_get_workspace_path())`（app-home），key
+// 是绝对路径。读端 `_find_ledger_root` 的规则是「哪份账本已有条目哪份说了算」，
+// 绑定根那份先被文档工具占了，app-home 那份永远读不到 —— 合并产物就此消失。
+//
+// 这条测试走真实用户路径复现：先 write_file 两个输入（文档工具侧），再用 exec
+// 合成第三个。断言三个都在账本里、合成产物在**绑定根那份**账本里、且**不在**
+// app-home 那份里。修复前最后一条为真（bug 就在那），倒数第二条为假。
+
+test.describe('#1096 exec 产物与文档产物同账本', () => {
+  let electronApp: ElectronApplication;
+  let page: Page;
+  let miqiHome: string;
+
+  test.afterEach(async () => {
+    if (test.info().status === 'passed') return;
+    const fail = join(test.info().outputDir, 'test-failed-1.png');
+    if (existsSync(fail)) {
+      await postScreenshotToPr(fail, `❌ E2E 失败：${test.info().title}`);
+    }
+  });
+
+  test('「两个输入 + exec 合成第三个」后，合成产物在绑定根账本且面板可见', async () => {
+    test.setTimeout(LLM_TIMEOUT + 300_000);
+    const fixture = await launchElectronApp();
+    electronApp = fixture.electronApp;
+    page = fixture.page;
+    miqiHome = fixture.miqiHome;
+
+    const folderRoot = mkdtempSync(join(tmpdir(), 'miqi-1096-'));
+    const folderMarker = 'miqi-1096';
+    const stamp = String(Date.now()).slice(-6);
+    const in1 = `in1_${stamp}.txt`;
+    const in2 = `in2_${stamp}.txt`;
+    // 放在绑定根的子目录里：账本存的是相对 key（`sub/m…html`），工具消息报的是
+    // 绝对路径，两边都带目录 —— 只有按路径段后缀折叠才认得出是同一个文件，
+    // 旧的「有一边是裸文件名就按 basename 合并」在这里兜不住。用户那台机器上
+    // 踩的正是这个形态（`冷笑话/冷笑话合集.pdf`）。
+    const merged = `sub/m${stamp}.html`;
+    const mergedName = `m${stamp}.html`;
+
+    try {
+      await seedWorkspace(page, folderRoot);
+      await createFolderSessionViaPicker(page, folderMarker);
+      await page.evaluate(() => (window as any).miqi.approvals.addPermanent('*:*'));
+
+      // 文档工具侧：两个输入。
+      await sendMessage(
+        page,
+        `Use write_file to create ${in1} with content "one" and ${in2} with content "two"`
+      );
+      await waitForResponseComplete(page, LLM_TIMEOUT);
+      // exec 侧：合成第三个。措辞上明确排除 write_file，否则测不到 exec 追踪。
+      await sendMessage(
+        page,
+        `只准使用 exec 工具：执行一条 shell 命令，把当前目录下的 ${in1} 和 ${in2} ` +
+          `合并写入 ${merged}（sub 子目录不存在就先创建）。不要使用 write_file。`
+      );
+      await waitForResponseComplete(page, LLM_TIMEOUT);
+
+      const key = await resolveFolderSessionKey(page, folderMarker);
+
+      // 前提：合成产物确实落在绑定根，否则下面的断言可能因为别的原因通过。
+      expect(
+        existsSync(join(folderRoot, merged)),
+        `exec must actually create ${join(folderRoot, merged)}`
+      ).toBe(true);
+
+      const folderSessions = join(folderRoot, 'sessions');
+      // 诊断：失败时把两份账本的 key 全带出来。踩过一次坑——只看
+      // getTrackedFiles 的返回，分不清产物是「根本没被记」还是「记到了另一份
+      // 账本」，而这两者的修法完全不同。
+      const diag =
+        `[folder=${JSON.stringify(trackedLedgerKeys(folderSessions))} ` +
+        `home=${JSON.stringify(trackedLedgerKeys(fixture.miqiSessionsDir))}]`;
+      // 三个条目都在账本里（读取侧 #1061 已保证读得到绑定根那份）。
+      const tracked = await page.evaluate(
+        async (k) => await (window as any).miqi.sessions.getTrackedFiles(k),
+        key
+      );
+      const paths: string[] = (tracked?.tracked_files ?? []).map((f: any) => String(f?.path ?? ''));
+      for (const name of [in1, in2, merged]) {
+        expect(
+          paths.some((p) => p.includes(name)),
+          `${name} must be in the bound-folder ledger ${diag}, got: ${JSON.stringify(paths)}`
+        ).toBe(true);
+      }
+
+      // #1096 的核心：exec 产物写在绑定根那份账本里，key 是绑定根相对路径。
+      expect(
+        trackedFilesMention(folderSessions, mergedName),
+        'exec output must be persisted under the BOUND FOLDER ledger'
+      ).toBe(true);
+      // 修复前它写在这里（绝对路径），读端永远读不到 —— 让这条测试真的在测这个 bug。
+      expect(
+        trackedFilesMention(fixture.miqiSessionsDir, mergedName),
+        'exec output must NOT be written to the app-home ledger'
+      ).toBe(false);
+
+      // 用户实际看到的症状：合成产物在「结果文件」里出现，且只出现一次。
+      // 范围必须限定在结果文件区块内：面板底部的「修改建议」区块（#607）会把
+      // write/edit 的文件再列一遍，它按设计就会让同一个名字在面板里出现两次，
+      // 不能算作重复条目。
+      const results = page.getByTestId('asset-section-result');
+      const row = results.getByText(mergedName, { exact: false });
+      await expect(row.first()).toBeVisible({ timeout: 60_000 });
+      expect(
+        await row.count(),
+        `结果文件 must list ${mergedName} exactly once (no relative/absolute duplicate)`
+      ).toBe(1);
+
+      await page.screenshot({
+        path: 'test-results/issue-1096-merged-asset.png',
+        fullPage: true,
+      });
+      await postScreenshotToPr(
+        'test-results/issue-1096-merged-asset.png',
+        '✅ E2E 通过：exec 合成产物与文档产物同账本，面板不丢条也不重复'
       );
     } finally {
       await closeElectronApp(electronApp, miqiHome);
