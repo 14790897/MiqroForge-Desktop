@@ -35,6 +35,10 @@ class ToolRuntime:
             session_id=getattr(turn, "session_id", ""),
             bypass_approval=getattr(turn, "bypass_approval", False),
             force_approval=getattr(turn, "force_approval", False),
+            # #646-v2 决策②：把模型侧 ActionCard 的确认结果带进 guard，避免双卡。
+            action_confirmed_families=frozenset(
+                getattr(turn, "_action_confirmed_families", ()) or ()
+            ),
             # #821: user-mentioned output dirs auto-sensed by the turn runner
             user_mentioned_roots=[
                 str(r) for r in getattr(turn, "user_mentioned_roots", []) or []
@@ -76,6 +80,9 @@ class ToolRuntime:
             duration_ms=0,
             bypass_approval=getattr(turn, "bypass_approval", False),
             force_approval=getattr(turn, "force_approval", False),
+            action_confirmed_families=frozenset(
+                getattr(turn, "_action_confirmed_families", ()) or ()
+            ),
         )
 
     @staticmethod
@@ -206,6 +213,14 @@ class ToolRuntime:
             ctx = await self.execute_one(turn, call)
             confirmation_contexts.append(ctx)
             approved = self._confirmation_approved(ctx)
+            if approved and call.name == "request_action_confirmation":
+                # 记录本 turn 已确认的动作族：同族动作随后真实执行时 Action Guard
+                # 不再重复弹卡；跨族仍弹卡，未确认仍拦截。
+                _fam = str((call.arguments or {}).get("action") or "")
+                if _fam:
+                    _set = set(getattr(turn, "_action_confirmed_families", set()) or set())
+                    _set.add(_fam)
+                    setattr(turn, "_action_confirmed_families", _set)
             if call.name == "ask_user_plan_confirm":
                 if approved:
                     # A model-issued plan confirmation is a real approval

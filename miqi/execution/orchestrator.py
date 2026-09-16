@@ -236,6 +236,9 @@ class ToolExecutionContext:
     # Execution policy flags
     bypass_approval: bool = False
     force_approval: bool = False
+    # #646-v2 决策②：本 turn 内已由模型侧 ActionCard 确认过的动作族
+    # （upload/payment/delete/external）——guard 不再对同类动作重复弹卡。
+    action_confirmed_families: frozenset[str] = frozenset()
     # #821: directories the user mentioned this turn (auto-sensed by the
     # turn runner); injected into file tools as ``_user_roots``.
     user_mentioned_roots: list[str] = field(default_factory=list)

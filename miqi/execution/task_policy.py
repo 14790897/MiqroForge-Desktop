@@ -183,18 +183,23 @@ def describe_tool(tool_name: str) -> str:
 
 ACTION_CONFIRM_THRESHOLD = 10
 
-# 危险动作家族（防双卡用；接线在后续轮）。
+# 危险动作家族（防双卡用）：模型侧 ActionCard 确认一次，同族动作不再重复弹卡。
+#
+# 注意：值域必须与 `request_action_confirmation` 的 action enum
+# （upload / payment / delete / external）**逐字一致**。守卫侧用
+# `action_family(ctx.tool_name)` 去匹配卡片记录的 action——两侧词表一旦漂移
+# （例如把 spawn 记成 "spawn" 而卡片写 "external"），同族去重会静默失效。
 ACTION_FAMILY: dict[str, str] = {
     "upload": "upload",
     "upload_run": "upload",
     "qraft_upload": "upload",
+    "payment": "payment",
     "delete_file": "delete",
     "delete_dir": "delete",
     "remove_file": "delete",
     "rm": "delete",
-    "payment": "payment",
-    "send_message": "message",
-    "spawn": "spawn",
+    "send_message": "external",
+    "spawn": "external",
 }
 
 
