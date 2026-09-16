@@ -700,7 +700,14 @@ class WebSearchTool(Tool):
             from miqi.agent.search_orchestrator import SearchOrchestrator
 
             orchestrator = SearchOrchestrator(search_tool=self, fetch_tool=WebFetchTool())
-            return await orchestrator.run(query, search_strategy, n_results=n)
+            return await orchestrator.run(
+                query,
+                search_strategy,
+                n_results=n,
+                event_emitter=kwargs.get("_event_emitter"),
+                turn_id=kwargs.get("_turn_id", ""),
+                tool_call_id=kwargs.get("_tool_call_id", ""),
+            )
 
         result = await self.manager.search(query, n)
         if not result.success:
@@ -727,7 +734,16 @@ class WebSearchTool(Tool):
         )
         return _format_results(query, result.results)
 
-    async def _parallel_search(self, query: str, n_queries: int, n: int) -> list[str]:
+    async def _parallel_search(
+        self,
+        query: str,
+        n_queries: int,
+        n: int,
+        *,
+        event_emitter: Any = None,
+        turn_id: str = "",
+        tool_call_id: str = "",
+    ) -> list[str]:
         """#804: fast 模式扇出搜索先走**配置的 provider 链**（对应模型搜索 → Tavily → Brave → DDGS），
         不再被 SearchOrchestrator 直接 ddgs 绕过——用户配的 key 在 fast 模式
         同样生效（#748 的 fallback 链在默认 fast 路径下此前是死代码）。链失败
@@ -740,6 +756,23 @@ class WebSearchTool(Tool):
         try:
             result = await self.manager.search(query, n)
             if result.success and result.results:
+                # #879：fan-out 也 emit 结构化来源（默认 FAST 路径此前完全绕过）
+                await _emit_web_sources(
+                    event_emitter,
+                    turn_id,
+                    tool_call_id,
+                    [
+                        {
+                            "title": item.get("title", ""),
+                            "url": item.get("url", ""),
+                            "snippet": item.get("snippet", ""),
+                            "tool": self.name,
+                            "provider": result.provider or "",
+                        }
+                        for item in result.results
+                    ],
+                    query=query,
+                )
                 return [_format_results(query, result.results)]
             last_failure = result
         except Exception:
@@ -754,7 +787,10 @@ class WebSearchTool(Tool):
             return []
         from miqi.agent.search_orchestrator import _ddgs_regional_search
 
-        blocks = await _ddgs_regional_search(query, n_queries, n)
+        blocks = await _ddgs_regional_search(
+            query, n_queries, n,
+            event_emitter=event_emitter, turn_id=turn_id, tool_call_id=tool_call_id,
+        )
         if blocks:
             return blocks
         if last_failure is not None and not last_failure.success:

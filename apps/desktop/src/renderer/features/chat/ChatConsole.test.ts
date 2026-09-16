@@ -660,6 +660,26 @@ describe('extractTurnSourcesFromMessages 冷启动恢复 (#879 ③)', () => {
     ]);
   });
 
+  it('FAST fan-out 的 `- title` 格式也能解析（冷启动恢复）', () => {
+    const map = extractTurnSourcesFromMessages([
+      { role: 'user', content: '查天气' },
+      {
+        role: 'tool',
+        name: 'web_search',
+        content:
+          'Results for: 天气 (region: 全球)\n- 北京天气\n  https://weather.com.cn/beijing\n  今天晴',
+      },
+    ]);
+    expect(map.get(0)).toEqual([
+      {
+        tool: 'web_search',
+        url: 'https://weather.com.cn/beijing',
+        title: '北京天气',
+        snippet: '今天晴',
+      },
+    ]);
+  });
+
   it('web_fetch 结果解析为单个来源（JSON）', () => {
     const map = extractTurnSourcesFromMessages([
       { role: 'user', content: '抓网页' },

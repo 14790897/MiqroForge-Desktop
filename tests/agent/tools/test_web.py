@@ -337,7 +337,7 @@ async def test_parallel_search_falls_back_to_regional_ddgs(monkeypatch):
 
     monkeypatch.setattr(SearchProviderManager, "search", _fake_search)
 
-    async def _fake_ddgs(query, n_queries, n):
+    async def _fake_ddgs(query, n_queries, n, **kwargs):
         calls.append("ddgs")
         return ["Results for: hello (region: 全球)\n- T\n  https://example.com/x\n  s"]
 
@@ -358,7 +358,7 @@ async def test_parallel_search_falls_back_on_empty_chain_result(monkeypatch):
 
     monkeypatch.setattr(SearchProviderManager, "search", _fake_search)
 
-    async def _fake_ddgs(query, n_queries, n):
+    async def _fake_ddgs(query, n_queries, n, **kwargs):
         return ["fallback block"]
 
     monkeypatch.setattr(
@@ -377,7 +377,7 @@ async def test_parallel_search_all_down_exposes_reason(monkeypatch):
 
     monkeypatch.setattr(SearchProviderManager, "search", _fake_search)
 
-    async def _empty_ddgs(query, n_queries, n):
+    async def _empty_ddgs(query, n_queries, n, **kwargs):
         return []
 
     monkeypatch.setattr(
@@ -754,7 +754,7 @@ async def test_parallel_search_auto_still_falls_back(monkeypatch):
 
     monkeypatch.setattr(SearchProviderManager, "search", _fake_search)
 
-    async def _ok_ddgs(query, n_queries, n):
+    async def _ok_ddgs(query, n_queries, n, **kwargs):
         return ["ddgs结果块"]
 
     monkeypatch.setattr(
@@ -839,6 +839,31 @@ async def test_web_search_ddgs_source_has_provider(monkeypatch):
     assert len(emitter.events) == 1
     payload = json.loads(emitter.events[0].delta)
     assert payload["payload"]["sources"][0]["provider"] == "ddgs"
+
+
+async def test_fast_fanout_parallel_search_emits_structured_sources(monkeypatch):
+    """FAST fan-out 配置链路径也 emit 结构化 sources（#879 FAST 路径此前完全绕过）。"""
+
+    async def _fake_search(self, query, count):
+        return SearchResult(True, [
+            {"title": "T1", "url": "https://example.com/a", "snippet": "s1"},
+        ], provider="brave")
+
+    monkeypatch.setattr(SearchProviderManager, "search", _fake_search)
+    emitter = _FakeEmitter()
+    tool = WebSearchTool(provider="auto")
+    blocks = await tool._parallel_search(
+        "hello", n_queries=2, n=5,
+        event_emitter=emitter, turn_id="t1", tool_call_id="c1",
+    )
+    assert blocks and "https://example.com/a" in blocks[0]
+    assert len(emitter.events) == 1
+    payload = json.loads(emitter.events[0].delta)
+    assert payload["type"] == "web_sources"
+    assert payload["payload"]["sources"] == [
+        {"title": "T1", "url": "https://example.com/a", "snippet": "s1",
+         "tool": "web_search", "provider": "brave"},
+    ]
 
 
 async def test_web_fetch_emits_structured_source(monkeypatch):

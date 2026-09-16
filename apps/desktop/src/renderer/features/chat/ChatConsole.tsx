@@ -435,11 +435,12 @@ interface WebSearchItem {
 
 function parseWebSearchResults(content: string): WebSearchItem[] {
   const items: WebSearchItem[] = [];
-  const entryRe = /^\d+\.\s+(.+)$/gm;
+  // 兼容两种输出格式：think 模式 `1. title` / FAST fan-out 兜底 `- title`（#879）
+  const entryRe = /^(?:\d+\.|-)\s+(.+)$/gm;
   let m: RegExpExecArray | null;
   while ((m = entryRe.exec(content)) !== null) {
     const title = m[1].trim();
-    const rest = content.slice(m.index + m[0].length).split(/\n(?=\d+\.\s)/)[0];
+    const rest = content.slice(m.index + m[0].length).split(/\n(?=(?:\d+\.|-)\s)/)[0];
     const lines = rest
       .split('\n')
       .map((l) => l.trim())
