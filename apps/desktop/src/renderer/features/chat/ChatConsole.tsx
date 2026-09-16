@@ -985,6 +985,21 @@ async function fileExists(path: string, sessionKey: string | null | undefined): 
   }
 }
 
+/** Whether two tracked paths denote the same file written two ways: a
+ *  workspace-relative key (what the ledger stores) vs the absolute path a tool
+ *  reported. `normalizeTrackedPath` only strips a `/workspace/` prefix, so for
+ *  a folder-bound session — whose root is somewhere else entirely — the two
+ *  forms of one file never compared equal and the panel listed it twice.
+ *  Collapsing on a path-segment suffix closes that. It stays stricter than the
+ *  bare-name rule, which merges on filename alone: two files with different
+ *  directories still stay distinct. */
+function sameTrackedFile(a: string, b: string): boolean {
+  const na = a.replace(/\\/g, '/');
+  const nb = b.replace(/\\/g, '/');
+  if (na === nb) return true;
+  return na.endsWith('/' + nb) || nb.endsWith('/' + na);
+}
+
 /** Merge tracked files, collapsing entries that point at the same file:
  *  bare filename vs full session path, or absolute vs relative workspace path.
  *  Same-named files in different directories stay distinct. */
@@ -1004,7 +1019,7 @@ function mergeTrackedFiles(
     };
     const existingIdx = out.findIndex((p) => {
       const np2 = normalizeTrackedPath(p.path);
-      if (np2 === np) return true;
+      if (sameTrackedFile(np2, np)) return true;
       const oneIsBare = !np2.includes('/') || !np.includes('/');
       return oneIsBare && basename(np2) === basename(np);
     });
@@ -3594,6 +3609,8 @@ export function ChatConsole({
         return (
           f.path === normPath ||
           fc === clean ||
+          sameTrackedFile(f.path, normPath) ||
+          sameTrackedFile(fc, clean) ||
           (eitherIsBareFilename && basename(f.path) === basename(clean))
         );
       });
@@ -3618,6 +3635,7 @@ export function ChatConsole({
         const dup = prev.some(
           (f) =>
             f.path === normPath ||
+            sameTrackedFile(f.path, normPath) ||
             (basename(f.path) === basename(normPath) &&
               (!f.path.includes('/') || !normPath.includes('/')))
         );
