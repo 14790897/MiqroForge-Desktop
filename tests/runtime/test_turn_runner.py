@@ -21,10 +21,12 @@ class _FakeTurnContext:
 
 
 class _FakeResponse:
-    def __init__(self, content="", tool_calls=None):
+    def __init__(self, content="", tool_calls=None, finish_reason=None):
         self.content = content
         self.tool_calls = tool_calls or []
         self._has_tool_calls = bool(tool_calls)
+        # #1094: 默认 None == 旧行为（getattr 取不到值），需要时显式给 "length"。
+        self.finish_reason = finish_reason
 
     @property
     def has_tool_calls(self):
@@ -358,6 +360,117 @@ async def test_turn_runner_still_runs_non_truncated_tool_call(
         for c in fake_tool_runtime.execute_many.await_args_list
     ]
     assert any(calls for calls in executed)
+
+
+@pytest.mark.asyncio
+async def test_turn_runner_mixed_round_runs_only_intact_call(
+    turn_runner, fake_turn_context, fake_tool_runtime
+):
+    """#1094 审计 F6：单轮多枚混合（1 枚截断 + 1 枚正常）互不牵连。
+
+    正常的照常执行，截断的拒执；两者都要成对回注给模型；tools_used 只记正常的。
+    """
+    from miqi.providers.base import LLMStreamEvent
+
+    runner, provider = turn_runner
+    bad = _FakeToolCall("write_file", tc_id="tc-trunc", truncated=True)
+    good = _FakeToolCall("read_file", tc_id="tc-ok", truncated=False)
+    call_count = 0
+    seen_messages: list[list[dict]] = []
+
+    async def _stream_side_effect(**kwargs):
+        nonlocal call_count
+        call_count += 1
+        seen_messages.append(kwargs.get("messages") or [])
+        if call_count == 1:
+            yield LLMStreamEvent(
+                kind="completed",
+                response=_FakeResponse(tool_calls=[bad, good]),
+            )
+        else:
+            yield LLMStreamEvent(kind="completed", response=_FakeResponse(content="done"))
+
+    provider.stream_chat = _stream_side_effect
+
+    result = await runner.run(
+        turn=fake_turn_context,
+        user_content="task",
+        system_prompt="sys",
+        tools=[{"type": "function", "function": {"name": "read_file", "parameters": {}}}],
+    )
+
+    # 只有完好的那枚被真实下发执行
+    executed = [
+        c.args[1] if len(c.args) > 1 else c.kwargs.get("calls")
+        for c in fake_tool_runtime.execute_many.await_args_list
+    ]
+    executed_ids = [tc.id for calls in executed for tc in calls]
+    assert executed_ids == ["tc-ok"]
+
+    # tools_used 只含正常那枚
+    assert result.tools_used == ["read_file"]
+
+    # 成对回注：截断枚拿到拒绝理由，正常枚拿到执行结果，且都在 assistant 里声明过
+    assert call_count == 2
+    second_msgs = seen_messages[1]
+    declared_ids = {
+        entry["id"]
+        for m in second_msgs
+        if m.get("role") == "assistant"
+        for entry in (m.get("tool_calls") or [])
+    }
+    tool_msgs = {m.get("tool_call_id"): (m.get("content") or "")
+                 for m in second_msgs if m.get("role") == "tool"}
+    assert set(tool_msgs) == {"tc-trunc", "tc-ok"}
+    assert set(tool_msgs) <= declared_ids  # 不留孤儿 tool 消息
+    assert "未执行" in tool_msgs["tc-trunc"]
+    # 拒执文案带真实 max_tokens 数值
+    assert f"max_tokens={fake_turn_context.max_tokens}" in tool_msgs["tc-trunc"]
+    assert "result-for-read_file" in tool_msgs["tc-ok"]
+
+
+@pytest.mark.asyncio
+async def test_turn_runner_logs_plain_text_truncation(
+    turn_runner, fake_turn_context
+):
+    """#1094 审计 F3：纯文本被 length 截断时零留痕 → 现在必须有 warning。"""
+    from loguru import logger as loguru_logger
+
+    from miqi.providers.base import LLMStreamEvent
+
+    runner, provider = turn_runner
+    seen_messages: list[list[dict]] = []
+    call_count = 0
+
+    async def _stream_side_effect(**kwargs):
+        nonlocal call_count
+        call_count += 1
+        seen_messages.append(kwargs.get("messages") or [])
+        if call_count == 1:
+            yield LLMStreamEvent(
+                kind="completed",
+                response=_FakeResponse(content="这是被砍断的半句", finish_reason="length"),
+            )
+        else:
+            yield LLMStreamEvent(kind="completed", response=_FakeResponse(content="final"))
+
+    provider.stream_chat = _stream_side_effect
+
+    records: list[str] = []
+    sink_id = loguru_logger.add(lambda msg: records.append(str(msg)), level="WARNING")
+    try:
+        await runner.run(
+            turn=fake_turn_context,
+            user_content="task",
+            system_prompt="sys",
+            tools=[],
+        )
+    finally:
+        loguru_logger.remove(sink_id)
+
+    hits = [r for r in records if "max_tokens 截断" in r]
+    assert hits, records
+    assert str(fake_turn_context.max_tokens) in hits[0]
 
 
 @pytest.mark.asyncio
