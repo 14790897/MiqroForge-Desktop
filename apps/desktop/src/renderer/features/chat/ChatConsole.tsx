@@ -2322,12 +2322,18 @@ const RENDERER_RECOVERY_NOTICE_TEXT =
   '界面曾崩溃并已重新加载；进行中的 turn 输出可能不完整（若后台仍在运行，切回会话可继续看到新输出）';
 // 补插窗口：页面加载后这段时间内，提示被会话历史加载冲掉允许补插；过点即
 // 彻底放手，此后切会话不再弹（有界性见 pendingNotice 注释）。
-const RECOVERY_NOTICE_ENSURE_WINDOW_MS = 15_000;
-// 补插次数上限（含首次插入）：窗口内即使反复被冲掉也不会无限重插。取 3 =
-// 首次插入（挂载）+ 两次补插富余——实测只会被会话历史加载冲掉一次（首次加载
-// 把 setMessages 整个换掉），留余量给 bridge 预热导致的二次加载；同时限制了
-// 窗口内切会话时的补插次数，不会刷屏。
-const RECOVERY_NOTICE_MAX_INSERTS = 3;
+// 取值 60s（原 15s）：窗口要覆盖"崩溃后先切走、再切回崩溃会话"这条路径——
+// 提示只属于崩溃时仍在飞的会话（见 pendingNotice.targetSessions），切走期间
+// 不允许插入，只有切回来那一刻还在窗口内才补得上；切走/切回是人力操作，
+// 秒级到十几秒都正常，15s 会在稍慢的操作下静默失效。窗口是硬上界，插入次数
+// 另有 RECOVERY_NOTICE_MAX_INSERTS 兜底，放长窗口不会变成无限重插。
+const RECOVERY_NOTICE_ENSURE_WINDOW_MS = 60_000;
+// 补插次数上限（含首次插入）：窗口内即使反复被冲掉也不会无限重插。取 10 =
+// 首次插入（挂载）+ 九次补插富余——补插只在"提示确实缺失"时发生（缺一次补一次），
+// 不会刷屏；真正兜底的是 60s 窗口。慢环境/桥预热时同一步可能触发多次会话历史
+// 加载（每次 setMessages 整个换掉），取 3 会被这些重复冲刷耗尽、窗口内再也补不
+// 回来（e2e 隔离用例实测：切走再切回时提示必须仍可见）。
+const RECOVERY_NOTICE_MAX_INSERTS = 10;
 /**
  * 待"确保存在"的恢复提示（主进程按崩溃时刻生成 id）。必须是模块级：本次挂载
  * 期间可能被多次读到（StrictMode 双调用、会话切换重挂），组件内的 state 会
@@ -2339,10 +2345,24 @@ const RECOVERY_NOTICE_MAX_INSERTS = 3;
  * `messages len=0`），消费式语义下再也不会补，提示就此静默消失。所以这里改
  * 成只记「有这么一条提示待确保」，插入动作交给下面随 `messages` 变化的
  * ensure effect——它按 noticeId 判断在不在，缺失才补，因此天然幂等。
+ *
+ * 会话归属（外部评审 P1）：提示描述的是"崩溃瞬间还在飞的那个 turn"，所以它
+ * 只能插进那个 turn 所属的会话。修复前它是纯粹的模块级单例、不带任何会话
+ * 判据，用户在重载后随手切到别的会话就会把提示插进去，切回来还会再插一条
+ * ——提示落在了没崩过的会话里。归属信息主进程早就记着
+ * （`notice.inFlightSessionKeys`），这里把它一并存下来，插入前比对当前会话。
  */
 let pendingNotice: {
   id: string;
   crashedAt: number;
+  /**
+   * 允许插入这条提示的会话（= 崩溃瞬间主进程仍在飞的 sessionKey）。
+   *
+   * 空数组表示主进程没给出任何目标（崩溃时没有在飞 turn，例如空转时被 OOM
+   * 杀掉），此时退回"任意会话都可插"的旧行为：这类崩溃同样值得告知用户，
+   * 而"插错会话"的代价在这里不存在——整页刚重载，用户看到的确实就是那条提示。
+   */
+  targetSessions: string[];
   /** 已插入次数（含首次）。到 RECOVERY_NOTICE_MAX_INSERTS 即放弃。 */
   inserted: number;
   /** 补插窗口截止时刻；过点后 ensure effect 会把它清掉。 */
@@ -2677,6 +2697,10 @@ export function ChatConsole({
         pendingNotice = {
           id: notice.id,
           crashedAt: notice.crashedAt,
+          // 会话归属：主进程在崩溃瞬间登记的、仍有在飞 turn 的 sessionKey。
+          // 与渲染层的 sessionKey 是同一个串——两边都是 `chat.send` 的
+          // session_key（主线程页签见 handleSend 的 routingKey 构造）。
+          targetSessions: notice.inFlightSessionKeys ?? [],
           inserted: 0,
           deadlineAt: Date.now() + RECOVERY_NOTICE_ENSURE_WINDOW_MS,
         };
@@ -2691,11 +2715,20 @@ export function ChatConsole({
       cancelled = true;
     };
   }, []);
-  // #1035 恢复提示的「确保存在」effect：随 messages 变化复查一次——在窗口内且
-  // 次数没用完，就保证这条提示在 messages 里存在；已被会话历史加载冲掉就在这里
-  // 补插回来，还在（noticeId 命中）则什么都不做，因此不会重复插。
+  // #1035 恢复提示的「确保存在」effect：随 messages / 当前会话变化复查一次——
+  // 在窗口内且次数没用完，就保证这条提示在 messages 里存在；已被会话历史加载
+  // 冲掉就在这里补插回来，还在（noticeId 命中）则什么都不做，因此不会重复插。
   // 有界：过了 deadlineAt 或插入次数用尽就地清空 pendingNotice，此后切会话不会
   // 再弹（窗口内最多补插到上限，实测只需补一次）。
+  // 会话归属（外部评审 P1）：本 effect 在切会话时也会跑（messages 换成新会话
+  // 的历史），必须在插入前用 pendingNotice.targetSessions 挡住——提示只属于
+  // 崩溃时还有在飞 turn 的会话，插到用户当下打开的别的会话里就是"张冠李戴"。
+  // 挡住时**不消耗插入次数**（提前 return），所以窗口内的切走/切回不会因为
+  // 来回横跳而把预算耗光。
+  // 判据取本次渲染的 sessionKey，而不是 currentSessionRef.current：后者在下面
+  // 的会话切换 effect（约 L3750）里赋值，而 passive effect 按声明顺序执行——
+  // 切会话那一帧本 effect 声明在前、会先跑，读到的还是上一个会话的 key，正好
+  // 把该挡的放过去（本 effect 的依赖里补 sessionKey 后，这一帧必然重跑）。
   useEffect(() => {
     const pending = pendingNotice;
     if (!pending) return;
@@ -2703,6 +2736,8 @@ export function ChatConsole({
       pendingNotice = null;
       return;
     }
+    const cur = sessionKey;
+    if (pending.targetSessions.length > 0 && !pending.targetSessions.includes(cur)) return;
     if (messages.some((m) => m.noticeId === pending.id)) return;
     pending.inserted += 1;
     setMessages((prev) => [
@@ -2714,7 +2749,8 @@ export function ChatConsole({
         noticeId: pending.id,
       },
     ]);
-  }, [messages, noticeEnsureEpoch]);
+    // sessionKey 进依赖：切会话时本 effect 必须重跑一次（上面用它做归属判定）。
+  }, [messages, noticeEnsureEpoch, sessionKey]);
   // sourcesByMsg cache: keyed by a tool-only signature so the map object is
   // stable across typewriter frames (see sourcesByMsg below).
   const sourcesCacheRef = useRef<{ sig: string; map: Map<Message, MessageSource[]> } | null>(null);

@@ -74,6 +74,12 @@ export function reloadSkippedLogLine(reason: string, reloadsInWindow: number): s
  * - `inFlight`：`chat.send` 记、`final`/`error`/`aborted` 清；
  * - `reloadHistory`：重载时刻，用于 10 分钟预算；
  * - `notice`：最近一次崩溃留下的恢复提示，等渲染层来拉。
+ *
+ * 已知限制：`inFlight` 是 `Map<sessionKey, startedAt>`，同一会话上的并发 turn
+ * 会互相覆盖——后发的 turn 落定（或通道异常结束）时把先发 turn 的登记一并清
+ * 掉，于是崩溃提示的 `inFlightSessionKeys` 会漏掉那个会话。当前 UI 不允许同一
+ * 会话同时发多个 turn，故未处理；真要支持并发，演进方向是把值换成
+ * `Set<turnId>` 或按会话计数的计数器（settle 一次减一）。
  */
 export class CrashRecoveryTracker {
   private readonly inFlight = new Map<string, number>();
