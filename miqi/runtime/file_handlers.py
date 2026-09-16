@@ -88,7 +88,67 @@ def _verify_session_ownership(client_id: str, session_key: str) -> None:
 # ── path resolution ────────────────────────────────────────────────────────
 
 
-def _resolve_session_files_path(client_id: str, session_key: str) -> Path:
+async def _runtime_workspace(client_id: str, session_key: str, registry: Any) -> str | None:
+    """Workspace of this session's live runtime, if it has one (#1062).
+
+    The same seed ``sessions.get_tracked_files`` resolves its manager with, so a
+    preview resolves against the root the assets panel was read from.
+    """
+    if registry is None:
+        return None
+    from miqi.runtime.session_handlers import _runtime_workspace_for_session
+
+    return await _runtime_workspace_for_session(client_id, session_key, registry)
+
+
+def _session_root(
+    client_id: str,
+    session_key: str,
+    *,
+    runtime_workspace: str | None = None,
+) -> Path | None:
+    """Workspace root this session's own files resolve against (#1062).
+
+    None for a session that is not folder-bound, whose files live under the
+    app-home workspace.  Delegates to the tracked-files resolver so a preview
+    resolves against the same root the assets panel was read from.
+    """
+    from miqi.runtime.session_handlers import _session_workspace_root
+
+    return _session_workspace_root(
+        _get_session_manager(),
+        session_key,
+        client_id,
+        runtime_workspace=runtime_workspace,
+    )
+
+
+def _session_files_base(root: Path | None, session_key: str) -> Path:
+    """Directory a session-relative path resolves against.
+
+    ``root`` is the session's own workspace when it is folder-bound, and its
+    files sit directly there — per-session isolation is a default-workspace
+    arrangement, which is also why the ledger for a bound folder sits at
+    ``<root>/sessions/<key>/tracked_files.json`` with paths relative to ``root``.
+
+    ``root is None`` is a session that is not folder-bound: its files live under
+    the global workspace exactly as before.  That shape is built here rather than
+    through ``_session_files_dir_for_key``, which answers None whenever the
+    global workspace is not the app-home default and would silently relocate
+    every session file of a user who configured one.
+    """
+    if root is not None:
+        return root
+    workspace = _get_workspace_path()
+    return workspace / "sessions" / session_files_dir_key(session_key) / "files"
+
+
+def _resolve_session_files_path(
+    client_id: str,
+    session_key: str,
+    *,
+    root: Path | None = None,
+) -> Path:
     """Resolve the client-scoped session files directory.
 
     Verifies session ownership before returning the path.
@@ -96,14 +156,15 @@ def _resolve_session_files_path(client_id: str, session_key: str) -> Path:
     (``session_files_dir_key``), gated by ownership verification.
     """
     _verify_session_ownership(client_id, session_key)
-    workspace = _get_workspace_path()
-    safe_key = session_files_dir_key(session_key)
-    files_dir = workspace / "sessions" / safe_key / "files"
+    files_dir = _session_files_base(root, session_key)
     files_dir.mkdir(parents=True, exist_ok=True)
     return files_dir
 
 
-def _resolve_session_snapshot_dir(client_id: str, session_key: str) -> Path:
+def _resolve_session_snapshot_dir(
+    client_id: str,
+    session_key: str,
+) -> Path:
     """Resolve the client-scoped session snapshot directory.
 
     Verifies session ownership before returning the path.
@@ -123,10 +184,33 @@ def _resolve_session_snapshot_dir(client_id: str, session_key: str) -> Path:
 _SANDBOX_WORKSPACE_PREFIX = "/home/miqi/workspace"
 
 
+def _within_any(path: Path, roots: list[Path]) -> bool:
+    """True when ``path`` is one of ``roots`` or lives underneath one.
+
+    Both sides are already ``.resolve()``d, so a symlink out of a root — and any
+    ``..`` or absolute escape — has been folded away before this runs.
+    """
+    return any(path == root or root in path.parents for root in roots)
+
+
+def _relativize(candidate: Path, roots: list[Path], raw: str) -> str:
+    """Root-relative form of an absolute path, or refuse it."""
+    for root in roots:
+        if candidate == root or root in candidate.parents:
+            return str(candidate.relative_to(root))
+    raise AppServerError(
+        f"Path is outside workspace: {raw}"
+        "（工作区外的文件请改用 exec 命令读取）",
+        code="INVALID_PARAMS",
+    )
+
+
 def _validate_file_path(
     file_path: str,
     client_id: str,
     session_key: str | None = None,
+    *,
+    runtime_workspace: str | None = None,
 ) -> Path:
     """Resolve a file path with path-traversal protection.
 
@@ -145,6 +229,11 @@ def _validate_file_path(
     resolved on the filesystem and checked against the workspace root.
 
     Blocks absolute paths outside the workspace and path traversal (..).
+
+    #1062：文件夹绑定会话的产物落在会话自己的工作区，允许的根因此是
+    {会话根, 全局工作区}。全局根始终在集合内——默认会话和改动前记录的绝对
+    路径条目都靠它。非绑定会话的会话根是 None，根集合退化为 {全局工作区}，
+    与引入本改动前逐字节相同。
     """
     workspace = _get_workspace_path()
 
@@ -152,6 +241,17 @@ def _validate_file_path(
         raise AppServerError(
             "path is required", code="INVALID_PARAMS",
         )
+
+    session_root: Path | None = None
+    if session_key:
+        session_root = _session_root(
+            client_id, session_key, runtime_workspace=runtime_workspace,
+        )
+    roots: list[Path] = [workspace]
+    if session_root is not None:
+        bound = session_root.resolve()
+        if bound not in roots:
+            roots.append(bound)
 
     # ── Normalise absolute paths ──────────────────────────────────────────
     if file_path.startswith("/") or file_path.startswith("\\"):
@@ -166,38 +266,34 @@ def _validate_file_path(
         elif file_path.startswith(prefix + "\\"):
             file_path = file_path[len(prefix) + 1:]
         else:
-            # Case 2: host absolute path — try to resolve it and verify it
-            # falls inside the workspace.
+            # Case 2: host absolute path — resolve it and verify it falls
+            # inside one of the allowed roots.
+            raw = file_path
             try:
                 candidate = Path(file_path).resolve()
             except Exception:
                 raise AppServerError(
                     "Invalid file path", code="INVALID_PARAMS",
                 )
-            try:
-                file_path = str(candidate.relative_to(workspace.resolve()))
-            except ValueError:
-                raise AppServerError(
-                    f"Path is outside workspace: {file_path}"
-                    "（工作区外的文件请改用 exec 命令读取）",
-                    code="INVALID_PARAMS",
-                )
+            file_path = _relativize(candidate, roots, raw)
 
     # Session-scoped path resolution
     if session_key:
         try:
-            session_files = _resolve_session_files_path(client_id, session_key)
+            session_files = _resolve_session_files_path(
+                client_id, session_key, root=session_root,
+            )
         except AppServerError:
             # If ownership fails, still let the caller handle it explicitly
             raise
         resolved = (session_files / file_path).resolve()
-        if str(resolved).startswith(str(workspace) + str(Path("/"))) or resolved == workspace:
+        if _within_any(resolved, roots):
             return resolved
         # If session files dir doesn't contain this path, fall through to workspace
 
     # Workspace-scoped path resolution
     resolved = (workspace / file_path).resolve()
-    if not str(resolved).startswith(str(workspace) + str(Path("/"))) and resolved != workspace:
+    if not _within_any(resolved, roots):
         raise AppServerError(
             f"Path escapes workspace: {file_path}"
             "（工作区外的文件请改用 exec 命令读取）",
@@ -557,8 +653,16 @@ async def files_read_handler(
     if not file_path:
         raise AppServerError("path is required", code="INVALID_PARAMS")
 
+    # #1062：把活跃 runtime 的工作区喂给解析器，使绑定会话的读取解析到和资产
+    # 面板同一个根（非绑定会话这里是 None，解析路径与改动前逐字节相同）。
+    runtime_workspace = (
+        await _runtime_workspace(client_id, session_key, registry) if session_key else None
+    )
+
     try:
-        resolved = _validate_file_path(file_path, client_id, session_key)
+        resolved = _validate_file_path(
+            file_path, client_id, session_key, runtime_workspace=runtime_workspace,
+        )
     except AppServerError:
         raise
     except ValueError as exc:

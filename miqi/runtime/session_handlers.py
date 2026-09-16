@@ -23,9 +23,10 @@ from pathlib import Path
 from typing import Any
 
 from loguru import logger
+from pydantic import ValidationError
 
 from miqi.runtime.app_server import AppServerError
-from miqi.runtime.session_request_models import validate_session_params
+from miqi.runtime.session_request_models import SessionKeyParams, validate_session_params
 from miqi.session.manager import OwnershipError
 
 
@@ -218,6 +219,32 @@ def _active_runtime_workspace(runtime: Any) -> str | None:
     return str(workspace) if workspace else None
 
 
+def _session_workspace_root(
+    sm: Any,
+    session_key: str,
+    client_id: str,
+    *,
+    runtime_workspace: str | None = None,
+) -> Path | None:
+    """Workspace root this session's own files resolve against (#1062).
+
+    None means the session is not folder-bound and its files live under the
+    app-home workspace, so callers must keep resolving against the global root
+    exactly as before.
+
+    Deliberately the same resolver the assets panel goes through — a preview and
+    the panel must not disagree about which root owns a session's files.  A
+    cheaper "stub carries no binding, so it is not bound" shortcut is wrong here:
+    a session written before the binding was stamped, or one born inside a folder
+    window, has a folder copy the shortcut would never look at, and its files
+    would silently resolve against app-home instead.  The seeds keep the common
+    cases cheap; only a session with neither seed scans.
+    """
+    return _find_ledger_root(
+        sm, session_key, client_id, runtime_workspace=runtime_workspace,
+    )
+
+
 def _folder_session_manager(sm: Any, session_key: str, client_id: str) -> Any | None:
     """SessionManager for the authoritative folder-root copy, if one exists."""
     from miqi.session.manager import SessionManager
@@ -226,6 +253,26 @@ def _folder_session_manager(sm: Any, session_key: str, client_id: str) -> Any | 
     if found is None:
         return None
     return SessionManager(found[1])
+
+
+async def _runtime_workspace_for_session(
+    client_id: str,
+    session_key: str,
+    registry: Any,
+) -> str | None:
+    """Workspace of this session's live runtime, or None (#1062)."""
+    if registry is None:
+        return None
+    try:
+        runtime = await registry.get_session(
+            client_id, _client_session_id(client_id, session_key),
+        )
+    except Exception as exc:
+        logger.debug(
+            "runtime workspace lookup failed for {}: {}", session_key, exc,
+        )
+        return None
+    return _active_runtime_workspace(runtime)
 
 
 async def _tracked_files_manager(
@@ -241,21 +288,13 @@ async def _tracked_files_manager(
     """
     from miqi.session.manager import SessionManager
 
-    runtime = None
-    if registry is not None:
-        try:
-            runtime = await registry.get_session(
-                client_id, _client_session_id(client_id, session_key),
-            )
-        except Exception as exc:
-            logger.debug(
-                "tracked files: runtime lookup failed for {}: {}", session_key, exc,
-            )
     root = _find_ledger_root(
         sm,
         session_key,
         client_id,
-        runtime_workspace=_active_runtime_workspace(runtime),
+        runtime_workspace=await _runtime_workspace_for_session(
+            client_id, session_key, registry,
+        ),
     )
     return SessionManager(root) if root is not None else sm
 
@@ -877,6 +916,45 @@ async def sessions_list_archived_handler(
         logger.warning("sessions.list_archived: folder resolution failed: {}", exc)
 
     return {"result": {"sessions": archived}}
+
+
+# ── sessions.workspace ────────────────────────────────────────────────────
+
+
+async def sessions_workspace_handler(
+    request_id: str,
+    params: dict[str, Any],
+    client_id: str,
+    session_id: str | None,
+    registry: Any,
+) -> dict[str, Any]:
+    """Workspace root this session's files resolve against (#1062).
+
+    The caller names a session and never a root: a root the renderer could
+    supply would make the main process's containment checks meaningless (#955).
+    Uses the same resolver as ``sessions.get_tracked_files`` so the root the
+    assets panel was read from and the root a preview resolves against agree.
+
+    ``workspace`` is null for a session that is not folder-bound.
+
+    Validated locally rather than through ``validate_session_params``: this
+    method is deliberately absent from the exported contract, so it must not
+    appear in that map either.
+    """
+    try:
+        typed = SessionKeyParams.model_validate(params)
+    except ValidationError as exc:
+        raise AppServerError("Invalid params", code="INVALID_PARAMS") from exc
+    sm = _get_session_manager()
+    root = _session_workspace_root(
+        sm,
+        typed.session_key,
+        client_id,
+        runtime_workspace=await _runtime_workspace_for_session(
+            client_id, typed.session_key, registry,
+        ),
+    )
+    return {"result": {"workspace": str(root) if root is not None else None}}
 
 
 # ── sessions.get_tracked_files ─────────────────────────────────────────────

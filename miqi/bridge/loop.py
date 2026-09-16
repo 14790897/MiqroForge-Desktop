@@ -474,6 +474,7 @@ class BridgeRuntimeLoop:
             sessions_list_recent_workspaces_handler,
             sessions_rename_handler,
             sessions_unarchive_handler,
+            sessions_workspace_handler,
         )
         self._app_server.register_method("sessions.list", sessions_list_handler, spec=protocol_specs.SESSIONS_LIST)
         self._app_server.register_method("sessions.get", sessions_get_handler, spec=protocol_specs.SESSIONS_GET)
@@ -485,6 +486,9 @@ class BridgeRuntimeLoop:
         self._app_server.register_method("sessions.clear_tracked_files", sessions_clear_tracked_files_handler, spec=protocol_specs.SESSIONS_CLEAR_TRACKED_FILES)
         self._app_server.register_method("sessions.claim_legacy", sessions_claim_legacy_handler, spec=protocol_specs.SESSIONS_CLAIM_LEGACY)
         self._app_server.register_method("sessions.list_recent_workspaces", sessions_list_recent_workspaces_handler)
+        # #1062：无 spec —— 和 list_recent_workspaces 一样是内部只读查询，
+        # 不对外暴露协议面（无 TS 导出、无 request/response model）。
+        self._app_server.register_method("sessions.workspace", sessions_workspace_handler)
         self._app_server.register_method("sessions.rename", sessions_rename_handler, spec=protocol_specs.SESSIONS_RENAME)
 
         # Register Phase 30: files.* handlers (client-scoped ownership)
