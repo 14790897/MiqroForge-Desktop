@@ -201,6 +201,7 @@ class AgentRegistry:
                 "skill_manage", "message", "spawn",
                 "paper_search", "paper_get", "paper_download",
                 "ask_user_confirm_card",
+                "request_action_confirmation",  # #646-v2 危险动作模型侧唯一入口
                 "graph_render",  # issue #715: skill 产物 step-graph/data-graph 渲染
             ],
         ))
