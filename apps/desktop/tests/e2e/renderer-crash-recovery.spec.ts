@@ -34,6 +34,8 @@
 import { test, expect } from '@playwright/test';
 import type { ElectronApplication, Page } from '@playwright/test';
 import http from 'node:http';
+import fs from 'node:fs';
+import path from 'node:path';
 import {
   launchElectronApp,
   closeElectronApp,
@@ -119,6 +121,17 @@ async function installMainProcessProbes(electronApp: ElectronApplication): Promi
         }
         orig(...(a as []));
       };
+      // console.error 另行捕获崩溃事件行：main 日志不进 CI 作业日志（实测），
+      // 若不在这里留副本，"render-process-gone 到底有没有触发"只能靠猜。
+      g.__mainErrLines = [];
+      const origErr = console.error;
+      console.error = (...a: unknown[]) => {
+        const text = a.map((x) => (x instanceof Error ? x.message : String(x))).join(' ');
+        if (/render-process-gone|did-fail-load/.test(text)) {
+          g.__mainErrLines.push(text);
+        }
+        origErr(...(a as []));
+      };
     }
 
     // ── 探针 2：原生对话框桩 ────────────────────────────────────────
@@ -144,15 +157,97 @@ async function installMainProcessProbes(electronApp: ElectronApplication): Promi
   });
 }
 
-/** 真打掉渲染进程（与 OOM 走同一条 render-process-gone）。 */
+/**
+ * 真打掉渲染进程（与 OOM 走同一条 render-process-gone）。
+ *
+ * 不信任单次 `forcefullyCrashRenderer()`：Ubuntu CI（xvfb）实测它会"只 resolve
+ * 不崩"——调用没抛、窗口还在，但 render-process-gone 从未出现、用例空等 60s。
+ * 所以打完先等 `webContents.isCrashed()` 真变 true；没崩就用进程级 kill 补一刀
+ * （getOSProcessId + process.kill，绕开 Electron 内部实现差异），两刀都没成就在
+ * 报错里带全量诊断（窗口表 + 已记录的崩溃事件），不再以"等不到重载行"收场。
+ */
 async function crashRenderer(electronApp: ElectronApplication): Promise<void> {
-  const crashed = await electronApp.evaluate(({ BrowserWindow }) => {
-    const win = BrowserWindow.getAllWindows()[0];
-    if (!win) return false;
+  const target = await electronApp.evaluate(({ BrowserWindow }) => {
+    const g = globalThis as any;
+    // 独立监听所有窗口的 render-process-gone：只判断"事件有没有发"，
+    // 不依赖被测实现把接线挂在哪个窗口上（避免"崩了别的窗口"时误判）。
+    g.__goneEvents = g.__goneEvents ?? [];
+    const wins = BrowserWindow.getAllWindows();
+    for (const w of wins) {
+      const wc = w.webContents as any;
+      if (!wc.__goneHooked) {
+        wc.__goneHooked = true;
+        wc.on('render-process-gone', (_e: unknown, d: any) => {
+          g.__goneEvents.push({
+            winId: w.id,
+            reason: d?.reason,
+            exitCode: d?.exitCode,
+            t: Date.now(),
+          });
+        });
+      }
+    }
+    const win = wins[0];
+    if (!win) return null;
+    const snapshot = {
+      count: wins.length,
+      winId: win.id,
+      title: win.getTitle(),
+      url: win.webContents.getURL().slice(0, 100),
+      goneBaseline: g.__goneEvents.length,
+    };
     win.webContents.forcefullyCrashRenderer();
-    return true;
+    return snapshot;
   });
-  expect(crashed, '应能拿到主窗口并打掉其渲染进程').toBe(true);
+  expect(target, '应能拿到主窗口并打掉其渲染进程').not.toBeNull();
+  if (!target) return; // 类型收窄；为 null 的情况已被上面的断言兜住
+
+  // 成功判据 = 独立监听器收到**新的** render-process-gone，而不是 webContents.isCrashed()：
+  // 实现的重载是毫秒级的，isCrashed() 只在"崩了还没重载"的缝隙里为 true，250ms 轮询
+  // 必然错过（首版就栽在这——崩溃明明发生了却报"打不掉"，还把兜底 kill 打到了
+  // 刚重载起来的新渲染进程上）。用事件计数做判据没有这个时序缝。
+  const gone = await waitForGoneEventCount(electronApp, target.goneBaseline, 10_000);
+  if (!gone) {
+    // 兜底：直接杀渲染进程（跨平台）。Ubuntu CI 实测 forcefullyCrashRenderer
+    // 会"只 resolve 不崩"，这一步保证 render-process-gone 一定发出。
+    await electronApp.evaluate(({ BrowserWindow }) => {
+      const win = BrowserWindow.getAllWindows()[0];
+      if (!win) return;
+      try {
+        process.kill(win.webContents.getOSProcessId());
+      } catch {
+        /* 进程可能刚好已在退出，忽略 */
+      }
+    });
+  }
+  const ok = gone || (await waitForGoneEventCount(electronApp, target.goneBaseline, 10_000));
+  if (!ok) {
+    const diag = await electronApp.evaluate(({ BrowserWindow }) => ({
+      windows: BrowserWindow.getAllWindows().map((w) => ({
+        id: w.id,
+        crashed: w.webContents.isCrashed(),
+      })),
+      goneEvents: (globalThis as any).__goneEvents ?? [],
+    }));
+    throw new Error(
+      `渲染进程打不掉：forcefullyCrashRenderer 与进程级 kill 均未生效；诊断=${JSON.stringify(diag)}`
+    );
+  }
+}
+
+/** 等 `__goneEvents` 条数超过基线（= 收到了一条新的 render-process-gone）。 */
+async function waitForGoneEventCount(
+  electronApp: ElectronApplication,
+  baseline: number,
+  timeoutMs: number
+): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const n = await electronApp.evaluate(() => ((globalThis as any).__goneEvents ?? []).length);
+    if (n > baseline) return true;
+    await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
+  }
+  return false;
 }
 
 /** 轮询主进程，等第 attempt 次重载的日志行落地。 */
@@ -168,10 +263,54 @@ async function waitForReloadLine(
     if (hit) return hit;
     await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
   }
+  const diag = await electronApp
+    .evaluate(({ BrowserWindow }) => ({
+      crashEvents: (globalThis as any).__goneEvents ?? [],
+      mainErrLines: (globalThis as any).__mainErrLines ?? [],
+      isCrashed: BrowserWindow.getAllWindows().map((w) => ({
+        id: w.id,
+        crashed: w.webContents.isCrashed(),
+      })),
+    }))
+    .catch(() => null);
+  await attachAppLogs();
   throw new Error(
     `未等到 renderer-reloaded attempt=${attempt}（对话框桩永不 resolve，` +
-      `若实现 await 了它就永远等不到）；已捕获：${JSON.stringify(seen)}`
+      `若实现 await 了它就永远等不到）；已捕获：${JSON.stringify(seen)}；` +
+      `崩溃诊断：${JSON.stringify(diag)}`
   );
+}
+
+/**
+ * 把 app 落盘的三大日志（main / renderer / bridge，位于 <repo>/workspace/logs）
+ * 作为附件带进测试报告。CI 作业日志读不到 main 的 stdout（实测），出问题时
+ * 这几份文件是唯一能回放"main 侧到底发生了什么"的durable记录。
+ */
+async function attachAppLogs(): Promise<void> {
+  const candidates = [
+    path.resolve(process.cwd(), '..', '..'),
+    path.resolve(process.cwd(), '..', '..', '..'),
+  ];
+  const root = candidates.find((c) => fs.existsSync(path.join(c, 'workspace', 'logs')));
+  if (!root) return;
+  const logDir = path.join(root, 'workspace', 'logs');
+  const files = fs
+    .readdirSync(logDir)
+    .filter((f) => /^(electron-main|renderer|bridge)-.*\.log$/.test(f))
+    .map((f) => path.join(logDir, f))
+    .sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs)
+    .slice(0, 3);
+  for (const file of files) {
+    try {
+      const text = fs.readFileSync(file, 'utf8').split('\n').slice(-200).join('\n');
+      await test.info().attach(`app-log/${path.basename(file)}`, {
+        body: text,
+        contentType: 'text/plain',
+      });
+    } catch {
+      /* 附件尽力而为，不因它再抛 */
+    }
+  }
 }
 
 interface RendererState {
