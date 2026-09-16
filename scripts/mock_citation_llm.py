@@ -29,7 +29,8 @@ def _parse_first_result(tool_content: str):
     for line in tool_content.split("\n"):
         s = line.strip()
         if not title:
-            m = re.match(r"^\d+\.\s*(.+)$", s)
+            # \S 打头避免 `\s*` 与 `.+` 的重叠回溯（CodeQL ReDoS）。
+            m = re.match(r"^\d+\.\s*(\S.*)$", s)
             if m:
                 title = m.group(1).strip()
                 continue
