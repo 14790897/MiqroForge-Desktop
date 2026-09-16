@@ -1,6 +1,10 @@
 """Task and action policy tests for #646."""
 
 from miqi.execution.task_policy import (
+    ACTION_CONFIRM_THRESHOLD,
+    ACTION_FAMILY,
+    TOOL_RISK,
+    action_family,
     complexity_score,
     is_mutation_tool,
     phase_for_tool,
@@ -99,3 +103,47 @@ def test_sensitive_path_force_confirm():
     assert _is_sensitive_path({"path": "/repo/src/main.py"}) is False
     assert _is_sensitive_path({}) is False
     assert should_confirm_action("delete_file", {"path": "/repo/.git/config"}) is True
+
+
+# ── 动作家族（#646-v2 R2d C7：模型侧确认 → guard 同族不重复弹卡）────────────
+
+def test_action_family_mapping():
+    """同族聚合：一次确认覆盖族内全部工具别名；未知工具无族（退回逐次弹卡）。"""
+    for tool in ("upload", "upload_run", "qraft_upload"):
+        assert action_family(tool) == "upload"
+    for tool in ("delete_file", "delete_dir", "remove_file", "rm"):
+        assert action_family(tool) == "delete"
+    for tool in ("send_message", "spawn"):
+        assert action_family(tool) == "external"
+    assert action_family("payment") == "payment"
+    assert action_family("read_file") is None
+    assert action_family("future_tool") is None
+
+
+def test_action_family_values_match_action_card_enum():
+    """两侧词表必须逐字一致：guard 用 action_family() 去匹配 ActionCard 记录的 action。
+
+    漂移会让同族去重静默失效——例如卡片记 ``external`` 而 spawn 记为 ``spawn``，
+    用户已确认却仍弹兜底卡。
+    """
+    from miqi.agent.tools.request_action_confirmation import RequestActionConfirmationTool
+
+    enum = set(
+        RequestActionConfirmationTool().parameters["properties"]["action"]["enum"]
+    )
+    assert enum == {"upload", "payment", "delete", "external"}
+    assert set(ACTION_FAMILY.values()) <= enum
+
+
+def test_action_family_covers_exactly_the_guard_high_risk_set():
+    """家族表 = guard 高危集合（risk >= 阈值），防两张表漂移。
+
+    漏登记的高危工具会静默失去同族去重（退化为多弹卡，方向安全但破坏承诺），
+    此断言把漂移挡在 CI。
+    """
+    high_risk = {
+        name for name, risk in TOOL_RISK.items() if risk >= ACTION_CONFIRM_THRESHOLD
+    }
+    assert set(ACTION_FAMILY) == high_risk
+    for tool in sorted(ACTION_FAMILY):
+        assert should_confirm_action(tool, {"path": "/repo/.git/config"}) is True

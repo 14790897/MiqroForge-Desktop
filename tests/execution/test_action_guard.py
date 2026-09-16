@@ -14,8 +14,9 @@ from types import SimpleNamespace
 from miqi.execution.permission_engine import PermissionEngine, PermissionVerdict
 
 
-def _ctx(tool, args=None, thread="t1", turn="n1", bypass=False):
-    return SimpleNamespace(
+def _ctx(tool, args=None, thread="t1", turn="n1", bypass=False, families=None):
+    """families=None → 不设该字段（等价于现状，供既有用例当回归基线）。"""
+    ctx = SimpleNamespace(
         tool_name=tool,
         arguments=args or {},
         thread_id=thread,
@@ -26,6 +27,9 @@ def _ctx(tool, args=None, thread="t1", turn="n1", bypass=False):
         client_id="",
         session_id="",
     )
+    if families is not None:
+        ctx.action_confirmed_families = frozenset(families)
+    return ctx
 
 
 def test_guard_headless_requires_approval():
@@ -144,3 +148,60 @@ def test_guard_confirmed_cache_capped_at_512():
     assert "Action Guard" not in (decision.reason or "")
     assert len(calls) == 1
     assert engine._action_guard_confirmed == {"t1:upload"}
+
+
+# ── 模型侧 ActionCard 确认后的同族去重（#646-v2 R2d C7）────────────────────
+
+def _counting_engine(choice_id="cancel"):
+    calls = []
+
+    async def resolver(payload):
+        calls.append(payload)
+        return {"status": "submitted", "answers": {"choice_id": choice_id}}
+
+    return PermissionEngine(action_guard_resolver=resolver), calls
+
+
+def test_guard_skips_card_for_confirmed_family():
+    """同族跳过：ActionCard 已确认 upload → upload_run 真实执行时不再弹卡。"""
+    engine, calls = _counting_engine()
+    decision = asyncio.run(
+        engine.check(_ctx("upload_run", {"path": "x"}, families={"upload"}))
+    )
+    assert len(calls) == 0
+    assert "Action Guard" not in (decision.reason or "")
+
+
+def test_guard_still_prompts_for_cross_family():
+    """跨族不放行：已确认 upload 不能顺带放行 delete 家族。"""
+    engine, calls = _counting_engine()
+    decision = asyncio.run(
+        engine.check(_ctx("delete_dir", {"path": "build/"}, families={"upload"}))
+    )
+    assert len(calls) == 1
+    assert decision.verdict == PermissionVerdict.DENY
+    assert "Action Guard" in (decision.reason or "")
+
+
+def test_guard_without_family_field_behaves_as_before():
+    """无该字段（旧 ctx / 非 ActionCard 路径）→ 行为与现状一致：照常弹卡。"""
+    engine, calls = _counting_engine()
+    decision = asyncio.run(engine.check(_ctx("upload", {"path": "x"})))
+    assert len(calls) == 1
+    assert decision.verdict == PermissionVerdict.DENY
+
+
+def test_guard_headless_still_requires_approval_when_family_confirmed():
+    """兜底不因新字段失效：headless 无弹卡通道 → 即使同族已确认仍 APPROVAL_REQUIRED。
+
+    注意断言的是 verdict 而非 reason：同族已确认时 guard **主动弃权**（返回 None），
+    决策改由后续门给出（本夹具里是未知工具门，reason 因此不含 "Action Guard"）。
+    关键是 fail-closed 不变——新字段只免掉重复弹卡，不构成放行通道。
+    """
+    engine = PermissionEngine()
+    for tool, args, family in (
+        ("delete_dir", {"path": "build/"}, "delete"),
+        ("upload", {"path": "x"}, "upload"),
+    ):
+        decision = asyncio.run(engine.check(_ctx(tool, args, families={family})))
+        assert decision.verdict == PermissionVerdict.APPROVAL_REQUIRED

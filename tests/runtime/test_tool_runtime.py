@@ -176,6 +176,89 @@ async def test_confirmation_denial_never_starts_sibling_mutations(fake_turn_cont
     assert by_id["exec-1"].result == "未执行：前置确认未获用户明确批准。"
 
 
+# ── ActionCard 确认 → 动作族记录（#646-v2 R2d C7）─────────────────────────
+
+def _confirming_orchestrator(*, expected_confirmed_ids: set[str] | None = None):
+    """确认卡返回 confirmed，其余工具返回 "executed"（可按 id 指定哪些卡被拒）。"""
+    orchestrator = MagicMock()
+    orchestrator.execute = AsyncMock()
+    rejected = set() if expected_confirmed_ids is None else expected_confirmed_ids
+
+    async def _execute(ctx):
+        if ctx.tool_name == "request_action_confirmation":
+            if ctx.tool_call_id in rejected:
+                ctx.result = '{"status":"cancelled","choice_id":"cancel"}'
+            else:
+                ctx.result = '{"status":"confirmed","choice_id":"confirm"}'
+        else:
+            ctx.result = "executed"
+        return ctx
+
+    orchestrator.execute.side_effect = _execute
+    return orchestrator
+
+
+@pytest.mark.asyncio
+async def test_action_confirmation_records_family_for_siblings(fake_turn_context):
+    """模型侧确认 → turn 记下动作族，同批真实动作的 ctx 带着它进 guard。"""
+    runtime = ToolRuntime(orchestrator=_confirming_orchestrator())
+    calls = [
+        _FakeToolCall(
+            "request_action_confirmation", {"action": "upload", "target": "Qraft"}, "act-1"
+        ),
+        _FakeToolCall("upload_run", {"path": "/tmp/x"}, "up-1"),
+    ]
+
+    results = await runtime.execute_many(fake_turn_context, calls)
+
+    assert fake_turn_context._action_confirmed_families == {"upload"}
+    by_id = {r.tool_call_id: r for r in results}
+    assert by_id["up-1"].action_confirmed_families == frozenset({"upload"})
+
+
+@pytest.mark.asyncio
+async def test_cancelled_action_confirmation_records_no_family(fake_turn_context):
+    """用户取消 → 不记录任何族（guard 照常兜底弹卡），同批动作被阻塞。"""
+    runtime = ToolRuntime(
+        orchestrator=_confirming_orchestrator(expected_confirmed_ids={"act-1"})
+    )
+    calls = [
+        _FakeToolCall(
+            "request_action_confirmation", {"action": "upload", "target": "Qraft"}, "act-1"
+        ),
+        _FakeToolCall("upload_run", {"path": "/tmp/x"}, "up-1"),
+    ]
+
+    results = await runtime.execute_many(fake_turn_context, calls)
+
+    assert not getattr(fake_turn_context, "_action_confirmed_families", set())
+    by_id = {r.tool_call_id: r for r in results}
+    assert by_id["up-1"].status.value == "denied_by_user"
+
+
+@pytest.mark.asyncio
+async def test_multiple_families_merge_across_confirmation_cards(fake_turn_context):
+    """一张批里多张确认卡各自记录，族集合合并（upload + delete）。"""
+    runtime = ToolRuntime(orchestrator=_confirming_orchestrator())
+    calls = [
+        _FakeToolCall(
+            "request_action_confirmation", {"action": "upload", "target": "Qraft"}, "act-1"
+        ),
+        _FakeToolCall(
+            "request_action_confirmation", {"action": "delete", "target": "build/"}, "act-2"
+        ),
+        _FakeToolCall("upload_run", {"path": "/tmp/x"}, "up-1"),
+        _FakeToolCall("delete_dir", {"path": "build/"}, "del-1"),
+    ]
+
+    results = await runtime.execute_many(fake_turn_context, calls)
+
+    assert fake_turn_context._action_confirmed_families == {"upload", "delete"}
+    by_id = {r.tool_call_id: r for r in results}
+    assert by_id["up-1"].action_confirmed_families == frozenset({"upload", "delete"})
+    assert by_id["del-1"].action_confirmed_families == frozenset({"upload", "delete"})
+
+
 def test_tool_runtime_requires_orchestrator():
     """ToolRuntime raises RuntimeError when orchestrator is None."""
     with pytest.raises(RuntimeError, match="ToolRuntime requires a ToolOrchestrator"):
