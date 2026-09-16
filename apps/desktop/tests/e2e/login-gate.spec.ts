@@ -25,11 +25,7 @@ import type { ElectronApplication, Page } from '@playwright/test';
 import { existsSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import {
-  launchElectronApp,
-  relaunchElectronApp,
-  closeElectronApp,
-} from './helpers/electron-setup';
+import { launchElectronApp, relaunchElectronApp, closeElectronApp } from './helpers/electron-setup';
 
 /** 登录态文件位置（helper 默认把 MIQI_QRAFT_STORE 指向临时 home）。 */
 const STORE_ENV = 'MIQI_QRAFT_STORE';
@@ -106,67 +102,71 @@ test.describe.serial('登录门（#1095）', () => {
     if (existsSync(storePath)) rmSync(storePath, { force: true });
   });
 
-  test('未登录 + 未同意协议：同意后停在登录门，退出应用结束进程', { timeout: 300_000 }, async () => {
-    // 两个门都走真实路径：renderer 未设 MIQI_E2E（协议门）也未设
-    // MIQI_LOGIN_BYPASS（登录门）。
-    const fixture = await launchElectronApp(undefined, {
-      noConsentBypass: true,
-      noLoginBypass: true,
-    });
-    electronApp = fixture.electronApp;
-    page = fixture.page;
-    miqiHome = fixture.miqiHome;
-
-    // 清掉历史运行残留的同意记录；若本次启动已跳过协议门，重启一次。
-    await clearStoredConsent(page);
-    if ((await page.getByTestId('privacy-consent-gate').count()) === 0) {
-      await closeElectronApp(electronApp, miqiHome, true);
-      const fresh = await relaunchElectronApp(miqiHome, {
+  test(
+    '未登录 + 未同意协议：同意后停在登录门，退出应用结束进程',
+    { timeout: 300_000 },
+    async () => {
+      // 两个门都走真实路径：renderer 未设 MIQI_E2E（协议门）也未设
+      // MIQI_LOGIN_BYPASS（登录门）。
+      const fixture = await launchElectronApp(undefined, {
         noConsentBypass: true,
         noLoginBypass: true,
       });
-      electronApp = fresh.electronApp;
-      page = fresh.page;
+      electronApp = fixture.electronApp;
+      page = fixture.page;
+      miqiHome = fixture.miqiHome;
+
+      // 清掉历史运行残留的同意记录；若本次启动已跳过协议门，重启一次。
+      await clearStoredConsent(page);
+      if ((await page.getByTestId('privacy-consent-gate').count()) === 0) {
+        await closeElectronApp(electronApp, miqiHome, true);
+        const fresh = await relaunchElectronApp(miqiHome, {
+          noConsentBypass: true,
+          noLoginBypass: true,
+        });
+        electronApp = fresh.electronApp;
+        page = fresh.page;
+      }
+
+      await expect(page.getByTestId('privacy-consent-gate')).toBeVisible({ timeout: 60_000 });
+      const agreeBtn = page.getByTestId('privacy-consent-agree');
+      await expect(agreeBtn).toBeEnabled({ timeout: 10_000 });
+      await agreeBtn.click();
+
+      // #1095：同意协议后未登录 → 停在登录门，不再有「暂不登录」跳过路径
+      await expect(page.getByTestId('login-step')).toBeVisible({ timeout: 60_000 });
+      await expect(page.getByTestId('login-step-login-btn')).toBeVisible();
+      await expect(page.getByTestId('login-step-quit')).toBeVisible();
+      await expect(page.getByTestId('login-step-skip')).toHaveCount(0);
+      // 未登录不进主界面
+      await expect(page.getByTestId('app-title')).toHaveCount(0);
+      await page.screenshot({
+        path: `test-results/${test.info().title.replace(/\s+/g, '-')}-login-gate.png`,
+        fullPage: true,
+      });
+
+      // 退出前先给明确提示（需求 2：避免用户误以为崩溃）
+      await page.getByTestId('login-step-quit').click();
+      const quitDialog = page.getByTestId('login-step-quit-dialog');
+      await expect(quitDialog).toBeVisible({ timeout: 10_000 });
+      await expect(quitDialog).toContainText('需要登录 MiQroForge 账号后才能使用');
+      await page.screenshot({
+        path: `test-results/${test.info().title.replace(/\s+/g, '-')}-quit-dialog.png`,
+        fullPage: true,
+      });
+
+      // 「返回登录」= 取消退出，仍停在登录门
+      await page.getByTestId('login-step-quit-cancel').click();
+      await expect(quitDialog).toHaveCount(0);
+      await expect(page.getByTestId('login-step')).toBeVisible();
+
+      // 确认退出：走主进程 app.quit()，进程结束（macOS 上 window.close 不退出）
+      const closed = electronApp.waitForEvent('close', { timeout: 30_000 }).catch(() => null);
+      await page.getByTestId('login-step-quit').click();
+      await page.getByTestId('login-step-quit-confirm').click();
+      expect(await closed).not.toBeNull();
     }
-
-    await expect(page.getByTestId('privacy-consent-gate')).toBeVisible({ timeout: 60_000 });
-    const agreeBtn = page.getByTestId('privacy-consent-agree');
-    await expect(agreeBtn).toBeEnabled({ timeout: 10_000 });
-    await agreeBtn.click();
-
-    // #1095：同意协议后未登录 → 停在登录门，不再有「暂不登录」跳过路径
-    await expect(page.getByTestId('login-step')).toBeVisible({ timeout: 60_000 });
-    await expect(page.getByTestId('login-step-login-btn')).toBeVisible();
-    await expect(page.getByTestId('login-step-quit')).toBeVisible();
-    await expect(page.getByTestId('login-step-skip')).toHaveCount(0);
-    // 未登录不进主界面
-    await expect(page.getByTestId('app-title')).toHaveCount(0);
-    await page.screenshot({
-      path: `test-results/${test.info().title.replace(/\s+/g, '-')}-login-gate.png`,
-      fullPage: true,
-    });
-
-    // 退出前先给明确提示（需求 2：避免用户误以为崩溃）
-    await page.getByTestId('login-step-quit').click();
-    const quitDialog = page.getByTestId('login-step-quit-dialog');
-    await expect(quitDialog).toBeVisible({ timeout: 10_000 });
-    await expect(quitDialog).toContainText('需要登录 MiQroForge 账号后才能使用');
-    await page.screenshot({
-      path: `test-results/${test.info().title.replace(/\s+/g, '-')}-quit-dialog.png`,
-      fullPage: true,
-    });
-
-    // 「返回登录」= 取消退出，仍停在登录门
-    await page.getByTestId('login-step-quit-cancel').click();
-    await expect(quitDialog).toHaveCount(0);
-    await expect(page.getByTestId('login-step')).toBeVisible();
-
-    // 确认退出：走主进程 app.quit()，进程结束（macOS 上 window.close 不退出）
-    const closed = electronApp.waitForEvent('close', { timeout: 30_000 }).catch(() => null);
-    await page.getByTestId('login-step-quit').click();
-    await page.getByTestId('login-step-quit-confirm').click();
-    expect(await closed).not.toBeNull();
-  });
+  );
 
   test('未登录重启：每次启动都停在登录门', { timeout: 240_000 }, async () => {
     // 上一条已同意协议（记录已持久化）→ 本实例只面对登录门
