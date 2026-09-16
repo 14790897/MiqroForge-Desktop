@@ -51,7 +51,12 @@ def test_guard_denied_without_runtime_confirm():
 
 
 def test_guard_confirmed_then_session_cached():
-    """用户确认 → guard 放行；同 thread 同类动作会话内不再重复弹卡。"""
+    """用户确认 → guard 放行；同 thread 同工具会话内不再重复弹卡（同 thread+tool → 1 张卡）。
+
+    授权模型：确认范围 = 同一 thread 内同一工具（thread + tool_name），键不看参数——
+    见 docs/dev-notes/action-guard-confirmation-scope.md（三条不变式：判定看参数 /
+    缓存按 thread+tool / 卡面明示）。
+    """
     calls = []
 
     async def resolver(payload):
@@ -79,3 +84,63 @@ def test_guard_bypass_respected():
     engine = PermissionEngine()
     decision = asyncio.run(engine.check(_ctx("delete_dir", {"path": "build/"}, bypass=True)))
     assert decision.verdict == PermissionVerdict.ALLOW
+
+
+def test_guard_different_tools_each_prompt():
+    """不同工具各自弹卡：确认 upload 不放行 delete_file（键含 tool_name）。"""
+    calls = []
+
+    async def resolver(payload):
+        calls.append(payload["tool_name"])
+        return {"status": "submitted", "answers": {"choice_id": "confirm"}}
+
+    engine = PermissionEngine(action_guard_resolver=resolver)
+    asyncio.run(engine.check(_ctx("upload", {"path": "x"})))
+    asyncio.run(engine.check(_ctx("delete_file", {"path": ".ssh/id_rsa"})))
+    assert calls == ["upload", "delete_file"]
+
+
+def test_guard_different_threads_each_prompt():
+    """不同 thread 各自弹卡：t1 的确认不继承到 t2（键含 thread_id）。"""
+    calls = []
+
+    async def resolver(payload):
+        calls.append(payload["thread_id"])
+        return {"status": "submitted", "answers": {"choice_id": "confirm"}}
+
+    engine = PermissionEngine(action_guard_resolver=resolver)
+    asyncio.run(engine.check(_ctx("upload", {"path": "x"}, thread="t1")))
+    asyncio.run(engine.check(_ctx("upload", {"path": "x"}, thread="t2")))
+    assert calls == ["t1", "t2"]
+
+
+def test_guard_payload_contract_declares_scope():
+    """卡面明示义务：message 写明同类动作不再逐一询问；记忆选择仍为 False。"""
+    seen = []
+
+    async def resolver(payload):
+        seen.append(payload)
+        return {"status": "submitted", "answers": {"choice_id": "cancel"}}
+
+    engine = PermissionEngine(action_guard_resolver=resolver)
+    asyncio.run(engine.check(_ctx("upload", {"path": "x"})))
+    assert len(seen) == 1
+    assert "不再逐一询问" in seen[0]["message"]
+    assert seen[0]["allow_remember_choice"] is False
+
+
+def test_guard_confirmed_cache_capped_at_512():
+    """缓存上界：预填 512 项 → 再确认一次即清空重建（最坏退化为多弹卡，方向安全）。"""
+    calls = []
+
+    async def resolver(payload):
+        calls.append(payload)
+        return {"status": "submitted", "answers": {"choice_id": "confirm"}}
+
+    engine = PermissionEngine(action_guard_resolver=resolver)
+    engine._action_guard_confirmed.update(f"t{i}:upload" for i in range(100, 612))
+    assert len(engine._action_guard_confirmed) == 512
+    decision = asyncio.run(engine.check(_ctx("upload", {"path": "x"}, thread="t1")))
+    assert "Action Guard" not in (decision.reason or "")
+    assert len(calls) == 1
+    assert engine._action_guard_confirmed == {"t1:upload"}
