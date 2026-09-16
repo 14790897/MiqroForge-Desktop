@@ -1,8 +1,12 @@
 """#1094 S3：anthropic（网关）路径识别被输出上限截断的工具参数。
 
 桌面生产链路是 网关 → AnthropicProvider，故该路径必须与 openai_provider S1
-同口径打标：stop_reason=max_tokens + 参数为非空字符串 + 严格 json.loads 失败
-⇒ ToolCallRequest.truncated=True（arguments 只是 json_repair 的残片打捞）。
+同口径打标。统一判据（CR #1100）为「**不可验证完整即截断**」：
+
+    truncated = finish_reason == "length" and not _args_strict_ok(raw)
+
+即只有「非空字符串 + 严格 json.loads 通过」才算可验证完整；空串 / dict / None /
+解析失败在 length 下一律标截断（arguments 仍只是 json_repair 的残片打捞，行为不动）。
 """
 
 from types import SimpleNamespace
@@ -73,8 +77,13 @@ def test_tool_use_stop_reason_with_broken_json_string_is_not_flagged() -> None:
     assert out.tool_calls[0].truncated is False
 
 
-def test_dict_input_is_not_flagged() -> None:
-    """④ input 已是 dict（SDK 侧解析完成）→ 无"严格解析失败"可言，不标。"""
+def test_dict_input_under_max_tokens_is_flagged() -> None:
+    """④ CR #1100：input 已是 dict + stop_reason=max_tokens → 标截断。
+
+    非流式 SDK 下 dict **无法证明完整性**：Anthropic 文档明确
+    `stop_reason=max_tokens` 可能留下未完成的 `tool_use`，而 SDK 已把 input 解析成
+    dict，原始串是否被砍在这里无从判断。未来真流式可用 `input_json_delta` 原始串再精确。
+    """
     resp = _response(
         [_tool_use_block({"path": "/tmp/a.txt", "content": "hi"})],
         "max_tokens",
@@ -82,15 +91,57 @@ def test_dict_input_is_not_flagged() -> None:
 
     out = _provider()._parse_response(resp)
 
+    assert out.finish_reason == "length"
+    assert out.tool_calls[0].truncated is True
+
+
+def test_dict_input_under_tool_use_stop_is_not_flagged() -> None:
+    """dict + stop_reason=tool_use（正常收尾）→ 不标。"""
+    resp = _response(
+        [_tool_use_block({"path": "/tmp/a.txt", "content": "hi"})],
+        "tool_use",
+    )
+
+    out = _provider()._parse_response(resp)
+
+    assert out.finish_reason == "tool_calls"
     assert out.tool_calls[0].truncated is False
 
 
-def test_empty_string_input_is_not_flagged() -> None:
-    """空串参数窗口不属本修复范围（工具名已出、参数空串→按 {} 执行）。"""
+def test_dict_input_under_end_turn_stop_is_not_flagged() -> None:
+    """dict + stop_reason=end_turn（正常收尾）→ 不标。"""
+    resp = _response(
+        [_tool_use_block({"path": "/tmp/a.txt", "content": "hi"})],
+        "end_turn",
+    )
+
+    out = _provider()._parse_response(resp)
+
+    assert out.finish_reason == "stop"
+    assert out.tool_calls[0].truncated is False
+
+
+def test_empty_string_input_under_max_tokens_is_flagged() -> None:
+    """CR #1100：空串参数 + max_tokens → 截断（工具刚开头就被砍）。
+
+    `arguments` 仍按既有语义落成 `{}`，但拒执判定不再漏放。
+    """
     resp = _response([_tool_use_block("")], "max_tokens")
 
     out = _provider()._parse_response(resp)
 
+    assert out.finish_reason == "length"
+    assert out.tool_calls[0].truncated is True
+    assert out.tool_calls[0].arguments == {}
+
+
+def test_empty_string_input_under_end_turn_is_not_flagged() -> None:
+    """对照组：正常收尾（end_turn）的空串 → 不标（模型确实发了无参调用）。"""
+    resp = _response([_tool_use_block("")], "end_turn")
+
+    out = _provider()._parse_response(resp)
+
+    assert out.finish_reason == "stop"
     assert out.tool_calls[0].truncated is False
     assert out.tool_calls[0].arguments == {}
 

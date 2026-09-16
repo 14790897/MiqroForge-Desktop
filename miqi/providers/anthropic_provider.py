@@ -311,13 +311,18 @@ class AnthropicProvider(LLMProvider):
 
     @staticmethod
     def _args_strict_ok(raw: Any) -> bool:
-        """非空字符串时要求严格 json.loads 通过；空值/非字符串视为可接受。
+        """「可验证完整」判据（#1094；CR #1100 统一口径）：只有**非空字符串**且严格
+        `json.loads` 通过才算数，空串 / `None` / dict 一律 `False`。
 
-        口径与 openai_provider._args_strict_ok 一致（#1094）：finish_reason=="length"
-        + 严格解析失败 ⇒ 参数被输出上限截断。
+        口径与 openai_provider._args_strict_ok 逐字一致。非流式 SDK 下 dict 形态
+        **无法证明完整性**——Anthropic 文档明确 `stop_reason=max_tokens` 可能留下
+        未完成的 `tool_use`，而 SDK 已把 `input` 解析成 dict，原始串是否被砍在这里
+        已经看不出来；空串同理（模型刚吐出 tool_use 头就被砍）。因此
+        `finish_reason == "length"` 下这三者一律按截断处理。未来若改真流式，可用
+        `input_json_delta` 的原始累积串再精确判定。`json_repair` 行为不受影响。
         """
         if not isinstance(raw, str) or not raw:
-            return True
+            return False
         try:
             json.loads(raw)
             return True
@@ -355,19 +360,21 @@ class AnthropicProvider(LLMProvider):
                 if not isinstance(input_data, dict):
                     input_data = {}
 
-                # #1094: cut off by max_tokens → arguments is repair salvage.
-                truncated = (
-                    finish_reason == "length"
-                    and isinstance(block.input, str)
-                    and bool(block.input)
-                    and not _strict_ok
-                )
+                # #1094 / CR #1100: cut off by max_tokens → arguments is repair
+                # salvage. 判据「不可验证完整即截断」。
+                truncated = finish_reason == "length" and not _strict_ok
                 if truncated:
                     logger.warning(
                         "tool args truncated by output cap (stop_reason=max_tokens): "
                         "'{}' args={}",
                         block.name,
-                        block.input[:200],
+                        # CR #1100：判据放宽后 dict 也会走到这里，非字符串只记类型，
+                        # 避免对 dict 切片崩掉（告警正文脱敏见 CR-2）。
+                        (
+                            block.input[:200]
+                            if isinstance(block.input, str)
+                            else f"<{type(block.input).__name__}>"
+                        ),
                     )
 
                 tool_calls.append(ToolCallRequest(
