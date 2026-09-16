@@ -39,7 +39,7 @@ class Emitter:
 
 async def auto_confirm(payload: dict):
     print(f"  [resolver] 自动确认: {payload.get('title', '')[:40]}")
-    return {"status": "confirmed", "choice_id": "confirm", "label": "确认执行"}
+    return {"status": "submitted", "answers": {"choice_id": "confirm", "label": "确认执行"}}
 
 
 class SeqProvider:
