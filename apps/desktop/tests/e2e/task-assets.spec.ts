@@ -20,12 +20,12 @@ import {
  * Expand the 结果文件 and 过程文件 sections (best-effort) so their cards mount.
  *
  * AssetSection renders its children only while `open`, so a collapsed
- * section's cards are absent from the DOM entirely. Both sections are
- * toggled unconditionally — a missing section or an already-open one cannot
- * be detected from the DOM, and the toggle is the only handle on the state.
- * `click({ timeout })` on a header that React unmounted (because it became
- * empty) simply throws and is swallowed; the caller re-checks the card
- * afterwards either way.
+ * section's cards are absent from the DOM entirely. The toggle cannot be
+ * read for its state and the header disappears when a section becomes
+ * empty, so both are clicked blindly: `click({ timeout })` on a header that
+ * React unmounted simply throws and is swallowed. Only reached when the
+ * card was *not* found, so collapsing an already-open section costs
+ * nothing — the caller re-checks for the card afterwards either way.
  */
 async function expandAssetSections(page: Page) {
   for (const key of ['process', 'result'] as const) {
