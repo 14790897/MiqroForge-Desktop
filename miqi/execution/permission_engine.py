@@ -189,7 +189,7 @@ class PermissionEngine:
             result = await self.action_guard_resolver(
                 {
                     "title": "危险动作确认",
-                    "message": f"模型请求执行高危动作：{ctx.tool_name}。确认后才真正执行。",
+                    "message": f"模型请求执行高危动作：{ctx.tool_name}。确认后才真正执行。（确认后本对话内同类动作将不再逐一询问）",
                     "choices": [
                         {"id": "confirm", "label": "允许执行", "role": "confirm"},
                         {"id": "cancel", "label": "拒绝", "role": "cancel"},

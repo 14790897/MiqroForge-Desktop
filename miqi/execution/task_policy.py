@@ -183,6 +183,24 @@ def describe_tool(tool_name: str) -> str:
 
 ACTION_CONFIRM_THRESHOLD = 10
 
+# 危险动作家族（防双卡用；接线在后续轮）。
+ACTION_FAMILY: dict[str, str] = {
+    "upload": "upload",
+    "upload_run": "upload",
+    "qraft_upload": "upload",
+    "delete_file": "delete",
+    "delete_dir": "delete",
+    "remove_file": "delete",
+    "rm": "delete",
+    "payment": "payment",
+    "send_message": "message",
+    "spawn": "spawn",
+}
+
+
+def action_family(tool_name: str) -> str | None:
+    return ACTION_FAMILY.get(tool_name)
+
 
 def action_risk_score(tool_names: list[str]) -> int:
     if not tool_names:
