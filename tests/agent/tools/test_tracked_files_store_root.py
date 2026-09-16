@@ -373,45 +373,59 @@ async def test_exec_batch_persist_shares_session_dir_with_doc_tools(monkeypatch)
 
 @pytest.mark.asyncio
 async def test_exec_batch_custom_workspace_persists_under_bound_root(tmp_path, monkeypatch):
-    """绑定文件夹会话：exec 产物的账本必须落在绑定根，而不是 app-home。
+    """复现用户报的确切场景（#1096）：切到指定工作目录后，一次对话里先生成两个
+    PDF，再用脚本把这两个合成第三个 —— 第三个在「任务资产」里不显示。
 
-    回归「第三个文件不显示」：文档工具把合并前的产物写进绑定根那份
-    ``tracked_files.json``（相对 key），exec 追踪却写进 app-home 那份（绝对
-    key）。读端按「哪份账本已有条目哪份说了算」选中绑定根那份，app-home 那份
-    永远读不到 —— 合并出来的文件就此从面板上消失。
+    写端曾经分叉：`CreatePdfTool` 走 `_persist_tracked_file`（绑定根、相对 key），
+    exec 产物追踪走 `_persist_changed_batch`（app-home、绝对 key）。读端
+    `_find_ledger_root` 按「哪份账本已有条目哪份说了算」只认一份，于是合并产物
+    永远读不到。
+
+    这里从 exec 的**真实调用形态**走一遍（`_track_workspace_changes` + 构造时的
+    两个工作区属性），并断言**读端 API**（`SessionManager.load_tracked_files`，
+    `sessions.get_tracked_files` 用的就是它）能拿到全部三个 —— 即面板真的会显示。
     """
     from miqi.agent.tools.shell import ExecTool
 
     ws = _default_ws()
-    bound = tmp_path / "bound-project"
+    bound = tmp_path / "poems"
     bound.mkdir()
     key = "desktop:1063"
     monkeypatch.setattr(
         "miqi.runtime.file_handlers._get_workspace_path", lambda: str(ws),
     )
 
-    # 文档产物（合并的输入）落绑定根账本
-    doc = _tool("miqi.documents.docx_tool:CreateDocxTool",
+    # 两首诗各一个 PDF（文档工具 → 绑定根账本、相对 key）
+    pdf = _tool("miqi.documents.pdf_create_tool:CreatePdfTool",
                 workspace=bound, allowed_dir=bound)
-    assert "Created:" in await doc.execute(
-        filename="a.docx", title="A", _session_key=key,
-    )
+    for name in ("poem1.pdf", "poem2.pdf"):
+        result = await pdf.execute(
+            filename=name, title=name, content="x", _session_key=key,
+        )
+        assert "Created:" in result, result
 
-    # exec 产物（合并结果，且落在子目录里 —— 相对 key 的路径形态）
-    (bound / "merged").mkdir()
-    merged = bound / "merged" / "merged.docx"
-    merged.write_text("x")
+    # 合并：脚本在会话工作区写出第三个 PDF，随后 exec 追踪做快照差分。
+    # 绑定会话（自定义工作区）里 _session_files_dir 为 None、_workspace_root 是
+    # 绑定根本身 —— 与 tool_registry_factory 构造 ExecTool 时一致。
     exec_tool = ExecTool()
     exec_tool.working_dir = None
-    exec_tool._persist_changed_batch([str(merged)], key, bound)
+    exec_tool._workspace_root = str(bound)
+    exec_tool._session_files_dir = None
+    before = exec_tool._snapshot_workspace(bound)
+    (bound / "poems_merged.pdf").write_bytes(b"%PDF-1.4 merged")
+    await exec_tool._track_workspace_changes(
+        before, key, bound,
+        workspace=exec_tool._session_files_dir or exec_tool._workspace_root,
+    )
 
-    tracked = _read_tracked(_store_path(bound, key))
-    assert "a.docx" in tracked
-    assert "merged/merged.docx" in tracked
-    # app-home 那份不得再收下这台会话的 exec 产物（旧行为在那里写绝对路径）
+    # 读端（面板数据源）必须能看到全部三个，key 都是绑定根相对路径。
+    visible = _panel_tracked(bound, key)
+    for name in ("poem1.pdf", "poem2.pdf", "poems_merged.pdf"):
+        assert name in visible, f"{name} 不在面板读得到的条目里：{sorted(visible)}"
+    # app-home 那份不得收下这台会话的 exec 产物（旧行为在那里写绝对路径）。
     app_home = _store_path(ws, key)
     if app_home.exists():
-        assert str(merged).replace("\\", "/") not in _read_tracked(app_home)
+        assert str(bound / "poems_merged.pdf").replace("\\", "/") not in _read_tracked(app_home)
 
 
 @pytest.mark.asyncio
