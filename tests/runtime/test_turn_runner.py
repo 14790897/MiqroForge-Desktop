@@ -49,6 +49,14 @@ def fake_turn_context():
 
 
 @pytest.fixture
+def fake_fast_turn_context():
+    """#680 极速模式 turn：_rmode == "fast" 时才启用 FAST 预算门。"""
+    turn = _FakeTurnContext()
+    turn.reasoning_mode = "fast"
+    return turn
+
+
+@pytest.fixture
 def fake_tool_runtime():
     runtime = MagicMock()
     runtime.execute_many = AsyncMock()
@@ -427,6 +435,89 @@ async def test_turn_runner_mixed_round_runs_only_intact_call(
     # 拒执文案带真实 max_tokens 数值
     assert f"max_tokens={fake_turn_context.max_tokens}" in tool_msgs["tc-trunc"]
     assert "result-for-read_file" in tool_msgs["tc-ok"]
+
+
+@pytest.mark.asyncio
+async def test_turn_runner_fast_budget_does_not_swallow_truncated_call(
+    turn_runner, fake_fast_turn_context, fake_tool_runtime
+):
+    """CR #1100：fast 模式下截断门必须**先于** FAST 预算门。
+
+    反例（修复前两门顺序颠倒）：同一轮里预算已用尽的 web_search 若同时 truncated，
+    会先被预算门吃掉 → 拿到 SUCCESS + "[跳过]"，而预算跳过不走 _echo_calls →
+    这条 tool_result 成孤儿被 presend 剪掉：模型既学不到"参数被截断"，也不知该重发。
+    修复后：先对全量调用分拣 truncated（拒执 + 成对回注），预算门只处理剩下的完好调用。
+    """
+    from miqi.providers.base import LLMStreamEvent
+
+    runner, provider = turn_runner
+    # 迭代1：完好的 web_search 放行，用掉本轮唯一的搜索相位额度（_search_phases=1）
+    intact = _FakeToolCall("web_search", tc_id="tc-search-1", truncated=False)
+    # 迭代2：同为 web_search，但参数被输出上限截断 → 必须被截断门拒执，而不是被预算门跳过
+    truncated = _FakeToolCall("web_search", tc_id="tc-search-trunc", truncated=True)
+    call_count = 0
+    seen_messages: list[list[dict]] = []
+
+    async def _stream_side_effect(**kwargs):
+        nonlocal call_count
+        call_count += 1
+        seen_messages.append(kwargs.get("messages") or [])
+        if call_count == 1:
+            yield LLMStreamEvent(kind="completed", response=_FakeResponse(tool_calls=[intact]))
+        elif call_count == 2:
+            yield LLMStreamEvent(kind="completed", response=_FakeResponse(tool_calls=[truncated]))
+        else:
+            yield LLMStreamEvent(kind="completed", response=_FakeResponse(content="recovered"))
+
+    provider.stream_chat = _stream_side_effect
+
+    result = await runner.run(
+        turn=fake_fast_turn_context,
+        user_content="task",
+        system_prompt="sys",
+        tools=[{"type": "function", "function": {"name": "web_search", "parameters": {}}}],
+    )
+
+    assert result.final_content == "recovered"
+    assert call_count == 3
+
+    # c) 截断那枚从未真实下发执行；tools_used 只记迭代1 那枚完好的
+    for c in fake_tool_runtime.execute_many.await_args_list:
+        calls_arg = c.args[1] if len(c.args) > 1 else c.kwargs.get("calls")
+        assert truncated.id not in [tc.id for tc in calls_arg]
+    assert result.tools_used == ["web_search"]
+
+    # 落盘证据（messages_delta 不会被 presend 剪裁）：拒执文案带真实 max_tokens 数值。
+    # 修复前这里拿到的是 "[跳过] 极速模式搜索预算已用尽（最多一轮搜索）"。
+    delta_tools = {
+        m["tool_call_id"]: (m.get("content") or "")
+        for m in result.messages_delta
+        if m.get("role") == "tool"
+    }
+    assert "未执行" in delta_tools.get(truncated.id, ""), (
+        f"截断调用被 FAST 预算门吞掉了：{delta_tools.get(truncated.id)!r}"
+    )
+
+    # a) 拒执后发给模型的上下文里，该调用是"未执行/截断"拒执文案，而不是"[跳过]"
+    third_msgs = seen_messages[2]
+    tool_msgs = {
+        m.get("tool_call_id"): (m.get("content") or "")
+        for m in third_msgs
+        if m.get("role") == "tool"
+    }
+    assert truncated.id in tool_msgs  # 没被 presend 当孤儿 tool 剪掉
+    assert "未执行" in tool_msgs[truncated.id]
+    assert "max_tokens" in tool_msgs[truncated.id]
+    assert "[跳过]" not in tool_msgs[truncated.id]
+
+    # b) 拒执结果与 assistant tool_call 严格配对（#753 同类：不留孤儿）
+    declared_ids = {
+        entry["id"]
+        for m in third_msgs
+        if m.get("role") == "assistant"
+        for entry in (m.get("tool_calls") or [])
+    }
+    assert truncated.id in declared_ids
 
 
 @pytest.mark.asyncio
