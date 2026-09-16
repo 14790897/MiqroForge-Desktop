@@ -7,7 +7,13 @@ import { test, expect } from '@playwright/test';
 import type { ElectronApplication, Page } from '@playwright/test';
 import { launchElectronApp, closeElectronApp } from './helpers/electron-setup';
 
-const OUTSIDE = 'D:/definitely-outside-ws/merged.pdf';
+// 必须是**当前平台的绝对路径**。`D:/...` 在 POSIX 上不是绝对路径，会被当成相
+// 对路径锚进工作区里，于是根本不触发包含性检查（退化成 "not found"）—— 这条
+// 用例在 Linux 上就失去了测安全边界的能力。
+const OUTSIDE =
+  process.platform === 'win32'
+    ? 'D:/definitely-outside-ws/merged.pdf'
+    : '/definitely-outside-ws/merged.pdf';
 
 test.describe('#1062 工作区外附件 定位/预览', () => {
   let electronApp: ElectronApplication;
@@ -52,6 +58,12 @@ test.describe('#1062 工作区外附件 定位/预览', () => {
     console.log('[1062] openExternal =', JSON.stringify(res));
     expect(res.ok).toBe(true);
     expect(res.ok && res.value?.opened).toBe(false);
+    // 断言**失败原因**，而不只是「没打开」：否则「包含性检查拒绝了它」和
+    // 「文件不存在 / 别的失败」在测试里无法区分（本 PR 的边界正是前者）。
+    expect(
+      String(res.ok && res.value?.error),
+      'must be refused by the containment check, not by some other failure'
+    ).toMatch(/outside workspace/i);
   });
 
   test('files.read 工作区外不抛异常（返回空，UI 侧给提示）', async () => {
