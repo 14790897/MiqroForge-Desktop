@@ -3264,7 +3264,8 @@ class ExecTool(Tool):
                 return
         try:
             from miqi.agent.tools.filesystem import (
-                _session_files_dir_key, _tracked_persist_target,
+                _session_files_dir_key,
+                _tracked_persist_target,
             )
             from miqi.session.manager import SessionManager
             # Store key 与目录名派生同源（与 _persist_tracked_file 一致）：
