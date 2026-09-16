@@ -146,6 +146,32 @@ def test_empty_string_input_under_end_turn_is_not_flagged() -> None:
     assert out.tool_calls[0].arguments == {}
 
 
+def test_truncation_warning_does_not_leak_raw_args() -> None:
+    """CR #1100（CWE-532）：告警只记工具名 / 调用 ID / 参数长度，不落原始参数。"""
+    from loguru import logger as loguru_logger
+
+    secret = '{"path": "/tmp/a.txt", "content": "TOP-SECRET-BODY'
+    messages: list[str] = []
+    # 收集**格式化后**的文本（record["message"] 只是模板，不是真正落盘的内容）
+    handler_id = loguru_logger.add(
+        lambda m: messages.append(str(m)), level="WARNING",
+    )
+    try:
+        out = _provider()._parse_response(
+            _response([_tool_use_block(secret, id_="toolu_leak")], "max_tokens")
+        )
+    finally:
+        loguru_logger.remove(handler_id)
+
+    assert out.tool_calls[0].truncated is True
+    warns = [m for m in messages if "truncated by output cap" in m]
+    assert warns, messages
+    line = warns[0]
+    assert "write_file" in line and "toolu_leak" in line
+    assert "TOP-SECRET-BODY" not in line, line
+    assert "/tmp/a.txt" not in line, line
+
+
 def test_text_block_mixed_in_does_not_interfere() -> None:
     """text block 混排：正文照旧拼接，只有被截断的那个 tool_use 被标记。"""
     resp = _response(

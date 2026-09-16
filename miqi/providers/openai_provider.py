@@ -225,10 +225,12 @@ class OpenAIProvider(LLMProvider):
         try:
             parsed = json.loads(args)
         except (json.JSONDecodeError, ValueError):
+            # CWE-532：参数串里可能有文件正文 / 路径 / 密钥，只记工具名与长度，
+            # 不落任何原始参数。
             logger.warning(
-                "json_repair fixed malformed tool args for '{}': {}",
+                "json_repair fixed malformed tool args for '{}': len={}",
                 tool_name,
-                args[:200],
+                len(args),
             )
             parsed = repaired
 

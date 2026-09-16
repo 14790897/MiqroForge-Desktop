@@ -718,3 +718,31 @@ async def test_chat_truncated_args_not_flagged_on_normal_stop():
     call = response.tool_calls[0]
     assert call.truncated is False
     assert call.arguments == {"query": "今日要闻"}
+
+
+@pytest.mark.asyncio
+async def test_malformed_args_warning_does_not_leak_raw_args():
+    """CR #1100：json_repair 告警只记工具名与参数长度，不落原始参数串。"""
+    from loguru import logger as loguru_logger
+
+    from miqi.providers.openai_provider import OpenAIProvider
+
+    secret = "{'query': 'TOP-SECRET-QUERY'}"
+    messages: list[str] = []
+
+    # str(Message) 是**格式化后**真正落盘的文本（record["message"] 只是模板），
+    # 泄漏检查必须看格式化文本。
+    handler_id = loguru_logger.add(
+        lambda m: messages.append(str(m)), level="WARNING",
+    )
+    provider = OpenAIProvider(api_key="sk-test")
+    try:
+        response = await _chat_with_tool_args(provider, secret, finish_reason="stop")
+    finally:
+        loguru_logger.remove(handler_id)
+
+    # repair 行为照旧：调用参数仍被打捞出来
+    assert response.tool_calls[0].arguments == {"query": "TOP-SECRET-QUERY"}
+    warns = [m for m in messages if "malformed tool args" in m]
+    assert warns, messages
+    assert "TOP-SECRET-QUERY" not in warns[0], warns[0]

@@ -364,17 +364,16 @@ class AnthropicProvider(LLMProvider):
                 # salvage. 判据「不可验证完整即截断」。
                 truncated = finish_reason == "length" and not _strict_ok
                 if truncated:
+                    # CWE-532：参数串可能有文件正文 / 路径 / 密钥，只记工具名、
+                    # 调用 ID、参数类型与长度（非字符串时长度为 -1），
+                    # 不落任何原始参数。
                     logger.warning(
                         "tool args truncated by output cap (stop_reason=max_tokens): "
-                        "'{}' args={}",
+                        "'{}' id={} args_type={} args_len={}",
                         block.name,
-                        # CR #1100：判据放宽后 dict 也会走到这里，非字符串只记类型，
-                        # 避免对 dict 切片崩掉（告警正文脱敏见 CR-2）。
-                        (
-                            block.input[:200]
-                            if isinstance(block.input, str)
-                            else f"<{type(block.input).__name__}>"
-                        ),
+                        block.id,
+                        type(block.input).__name__,
+                        len(block.input) if isinstance(block.input, str) else -1,
                     )
 
                 tool_calls.append(ToolCallRequest(
