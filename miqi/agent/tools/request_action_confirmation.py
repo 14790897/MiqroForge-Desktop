@@ -15,8 +15,19 @@ from miqi.agent.tools.base import Tool
 DEFAULT_TIMEOUT_SECONDS = 120
 
 REQUEST_ACTION_CONFIRM_INSTRUCTION = (
-    "执行危险动作前（向外部平台上传、支付/产生费用、破坏性删除、外发数据），"
-    "必须调用 request_action_confirmation 工具弹确认卡并等待用户确认。"
+    "危险动作执行前**必须调用 request_action_confirmation** 弹确认卡并等待用户确认——"
+    "这是危险动作唯一的模型侧入口：\n"
+    "1. 向外部平台上传文件（MiQroForge / microforge / Qraft 等）前；\n"
+    "2. 支付 / 产生费用前；\n"
+    "3. 破坏性删除（目录、通配、递归、关键路径）前；\n"
+    "4. 向外部发送数据/消息，或启动外部进程前。\n"
+    "调用时必须如实填写 action（upload / payment / delete / external）、target、"
+    "file_name / size_bytes / sha256（upload 时）与用户可理解的 description——"
+    "用户看到的这些字段就是被授权的对象，写错等于误导用户。\n"
+    "不要用 ask_user_confirm_card 承接危险动作；也不要在计划卡里重复确认。\n"
+    "返回 status=confirmed 才继续执行；cancelled 时必须停止该动作并如实告知用户，"
+    "不要重试、不要换工具绕过。\n"
+    "即使你没有调用本工具，系统也会在真实执行边界弹出兜底确认卡——绕过尝试只会被拒绝。"
 )
 
 
@@ -38,6 +49,7 @@ class RequestActionConfirmationTool(Tool):
         return (
             "危险动作执行前的最后确认：向外部平台上传、支付、破坏性删除、外发数据。"
             "展示动作目标/文件/指纹，等待用户确认。"
+            "危险动作只应通过本工具请求确认（不要用 ask_user_confirm_card 代替）。"
         )
 
     @property
