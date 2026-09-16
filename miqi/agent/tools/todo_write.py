@@ -54,7 +54,11 @@ class TodoWriteTool(Tool):
                             "enum": ["queued", "in_progress", "blocked", "completed", "cancelled"],
                         },
                         "content": {"type": "string", "description": "内容（仅新增 auxiliary 步骤时提供）"},
-                        "kind": {"type": "string", "enum": ["auxiliary", "observed"]},
+                        "kind": {
+                            "type": "string",
+                            "enum": ["auxiliary"],
+                            "description": "仅 auxiliary（模型新增的辅助步骤）；observed 为 harness 内部通道，模型侧不得指定",
+                        },
                         "blocked_reason": {
                             "type": "string",
                             "enum": ["waiting_user", "waiting_permission", "waiting_external", "execution_failed", "unknown"],
