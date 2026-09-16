@@ -209,6 +209,15 @@ export function buildMockBridgeScript(opts: MockBridgeOptions = {}): string {
       initialConsent: { read: true, version: '2.0' },
       setConsent: function() { return Promise.resolve({ ok: true }); },
     },
+    // 渲染层挂载时**无条件**上报「面板是否占宽」（ChatConsole 的
+    // setPanelWindowExtra，#1047）。mock 缺这个命名空间时，effect 里会去读
+    // undefined 的属性直接抛错 → 整棵 UI 渲染成错误页 → 一次挂全挂。
+    // 返回 { applied } —— 渲染层会把它同步进拖拽队列基线。
+    app: {
+      setPanelWindowExtra: function() {
+        return Promise.resolve({ ok: true, applied: 0 });
+      },
+    },
     runtime: {
       start: function() { return Promise.resolve({ state: 'running', pid: 12345 }); },
       stop: function() { return Promise.resolve({ state: 'stopped', pid: 0 }); },
