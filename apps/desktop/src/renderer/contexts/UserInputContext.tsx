@@ -42,7 +42,7 @@ interface UserInputContextValue {
     choiceLabel: string,
     remember?: boolean,
     rememberMode?: 'session' | 'always'
-  ) => Promise<void>;
+  ) => Promise<boolean>;
   timeoutCard: (inputId: string) => void;
   lastAdjustAt?: number;
   activeSession?: string;
@@ -53,7 +53,7 @@ const UserInputContext = createContext<UserInputContextValue>({
   pending: {},
   resolved: {},
   timelines: {},
-  resolve: async () => {},
+  resolve: async () => true,
   timeoutCard: () => {},
   lastAdjustAt: undefined,
   activeSession: undefined,
@@ -263,6 +263,7 @@ export function UserInputProvider({ children }: { children: ReactNode }) {
         if (res && res.resolved === false && entry) {
           markBackendReleased(inputId);
         }
+        return true;
       } catch {
         if (entry) {
           setResolved((prev) => {
@@ -273,6 +274,11 @@ export function UserInputProvider({ children }: { children: ReactNode }) {
           });
           upsertPending({ ...entry, state: 'pending' });
         }
+        // #1071 S5a（终审 F1）：回滚后**不 rethrow**——其余卡片（ActionCard/
+        // ConfirmCard/HermesConfirmBar）的调用方都不接 Promise，rethrow 会变成
+        // unhandled rejection。改用返回值告诉调用方：false = 已回滚到 pending，
+        // 卡片实例可复用，PlanCard 据此释放提交锁。
+        return false;
       }
     },
     [moveToResolved, upsertPending, markBackendReleased]

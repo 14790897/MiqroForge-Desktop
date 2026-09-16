@@ -33,7 +33,7 @@ export function ConfirmCardItem({
     choiceLabel: string,
     remember?: boolean,
     rememberMode?: 'session' | 'always'
-  ) => Promise<void> | void;
+  ) => Promise<boolean> | void;
   timeoutCard: (inputId: string) => void;
 }) {
   const id = entry.request.input_id as string;

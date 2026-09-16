@@ -49,7 +49,11 @@ export function PlanCard({
   initialExpanded,
 }: {
   entry: PlanCardEntry;
-  onResolve: (choiceId: string, choiceLabel?: string) => void;
+  /**
+   * #1071 S5a（终审 F1）：允许返回 Promise —— 失败时调用方要让锁回退，否则
+   * 卡片被回滚成 pending 而按钮仍永久 disabled。
+   */
+  onResolve: (choiceId: string, choiceLabel?: string) => void | Promise<boolean | void>;
   initialExpanded?: boolean;
 }) {
   const waiting = entry.phase === 'wait_confirm';
@@ -87,12 +91,35 @@ export function PlanCard({
   const permissions = compactPermissions(entry.permissions);
   const shouldShowDetails = waiting || running || initialExpanded;
 
-  /** 一次性放行：拿到锁的动作才会真正 resolve，之后所有确认类按钮都失效。 */
+  /** 解锁：失败后按钮恢复可点，用户拿回重试路径。 */
+  const releaseSubmitLock = () => {
+    submitLockRef.current = false;
+    setSubmitting(false);
+  };
+
+  /**
+   * 一次性放行：拿到锁的动作才会真正 resolve，之后所有确认类按钮都失效。
+   *
+   * #1071 S5a（终审 F1）：锁必须是双向的。失败时 UserInputContext.resolve
+   * 会把卡片回滚成 pending、按钮重新可点，但组件实例里的 ref/state 还锁着
+   * ——不同步释放就是三个按钮永久 disabled，用户失去重试路径。
+   * 失败有两种形态，都接：
+   *   ① onResolve 抛错 / 返回 rejected Promise；
+   *   ② onResolve 正常返回 false（resolve 内部回滚后的返回值约定）。
+   * 成功（返回 undefined/true）保持上锁，防重复提交。
+   */
   const resolveOnce = (choiceId: string, choiceLabel?: string) => {
     if (submitLockRef.current) return;
     submitLockRef.current = true;
     setSubmitting(true);
-    onResolve(choiceId, choiceLabel);
+    void (async () => {
+      try {
+        const delivered = await onResolve(choiceId, choiceLabel);
+        if (delivered === false) releaseSubmitLock();
+      } catch {
+        releaseSubmitLock();
+      }
+    })();
   };
 
   const submitAdjustment = () => {

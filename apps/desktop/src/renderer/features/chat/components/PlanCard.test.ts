@@ -76,7 +76,10 @@ describe('PlanCard 提交锁（#1071 R3, CR item 9）', () => {
     container.remove();
   });
 
-  function mount(e: PlanCardEntry, onResolve: () => void): void {
+  function mount(
+    e: PlanCardEntry,
+    onResolve: (choiceId?: string, choiceLabel?: string) => void | Promise<boolean | void>
+  ): void {
     act(() => {
       root.render(createElement(PlanCard, { entry: e, onResolve }));
     });
@@ -160,5 +163,91 @@ describe('PlanCard 提交锁（#1071 R3, CR item 9）', () => {
   it('非 wait_confirm 阶段没有确认按钮（锁不影响其他 phase）', () => {
     mount(entry({ phase: 'running' }), vi.fn());
     expect(container.querySelector('[data-testid="plan-confirm"]')).toBeNull();
+  });
+});
+
+// #1071 S5a（终审 F1）：锁必须能释放。
+// 失败时 UserInputContext.resolve 会把卡片回滚成 pending，此时按钮必须恢复
+// 可点，否则三个按钮永久 disabled、用户失去重试路径。两种失败形态都测：
+// ① onResolve reject；② onResolve 正常返回 false（resolve 内部回滚的约定）。
+describe('PlanCard 提交锁失败释放（#1071 S5a, 终审 F1）', () => {
+  let container: HTMLDivElement;
+  let root: Root;
+
+  beforeEach(() => {
+    (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT =
+      true;
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+  });
+
+  afterEach(() => {
+    act(() => root.unmount());
+    container.remove();
+  });
+
+  function mount(
+    e: PlanCardEntry,
+    onResolve: (choiceId?: string, choiceLabel?: string) => void | Promise<boolean | void>
+  ): void {
+    act(() => {
+      root.render(createElement(PlanCard, { entry: e, onResolve }));
+    });
+  }
+
+  function el(testid: string): HTMLButtonElement {
+    const node = container.querySelector<HTMLButtonElement>(`[data-testid="${testid}"]`);
+    if (!node) throw new Error(`找不到元素 [data-testid="${testid}"]`);
+    return node;
+  }
+
+  async function clickOnce(testid: string): Promise<void> {
+    await act(async () => {
+      el(testid).dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+    });
+  }
+
+  function allWaitingButtons(): HTMLButtonElement[] {
+    return [el('plan-confirm'), el('plan-modify'), el('plan-cancel')];
+  }
+
+  it('onResolve reject → 解锁，三按钮恢复 enabled，且能再次 resolve（重试打通）', async () => {
+    const onResolve = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('IPC resolve 失败'))
+      .mockResolvedValueOnce(undefined);
+    mount(entry(), onResolve);
+
+    await clickOnce('plan-confirm');
+
+    expect(onResolve).toHaveBeenCalledTimes(1);
+    expect(allWaitingButtons().map((b) => b.disabled)).toEqual([false, false, false]);
+
+    // 重试路径：再点一次要真的能再发一次 resolve，而不是被死锁吞掉。
+    await clickOnce('plan-confirm');
+    expect(onResolve).toHaveBeenCalledTimes(2);
+    expect(onResolve).toHaveBeenLastCalledWith('confirm', '按当前方案执行');
+  });
+
+  it('onResolve 返回 false（UserInputContext 回滚约定）→ 同样解锁', async () => {
+    const onResolve = vi.fn().mockResolvedValue(false);
+    mount(entry(), onResolve);
+
+    await clickOnce('plan-cancel');
+
+    expect(onResolve).toHaveBeenCalledTimes(1);
+    expect(allWaitingButtons().map((b) => b.disabled)).toEqual([false, false, false]);
+  });
+
+  it('onResolve 成功（undefined）→ 保持上锁，不因解锁逻辑放松防重复', async () => {
+    const onResolve = vi.fn().mockResolvedValue(undefined);
+    mount(entry(), onResolve);
+
+    await clickOnce('plan-confirm');
+
+    expect(allWaitingButtons().map((b) => b.disabled)).toEqual([true, true, true]);
+    await clickOnce('plan-cancel');
+    expect(onResolve).toHaveBeenCalledTimes(1);
   });
 });
