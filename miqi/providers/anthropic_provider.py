@@ -11,6 +11,7 @@ from typing import Any
 
 import anthropic
 import json_repair
+from loguru import logger
 
 import miqi.providers.resilience as resilience
 from miqi.providers.base import LLMProvider, LLMResponse, ToolCallRequest
@@ -308,16 +309,43 @@ class AnthropicProvider(LLMProvider):
                 error_kind=kind.value,
             )
 
+    @staticmethod
+    def _args_strict_ok(raw: Any) -> bool:
+        """非空字符串时要求严格 json.loads 通过；空值/非字符串视为可接受。
+
+        口径与 openai_provider._args_strict_ok 一致（#1094）：finish_reason=="length"
+        + 严格解析失败 ⇒ 参数被输出上限截断。
+        """
+        if not isinstance(raw, str) or not raw:
+            return True
+        try:
+            json.loads(raw)
+            return True
+        except (json.JSONDecodeError, ValueError):
+            return False
+
     def _parse_response(self, response: Any) -> LLMResponse:
         """Convert an Anthropic Messages response to LLMResponse."""
         tool_calls: list[ToolCallRequest] = []
         text_parts: list[str] = []
+
+        # Map Anthropic stop reasons to OpenAI-style finish_reason.
+        # #1094: resolved *before* the block loop — tool_use blocks need it to
+        # tell "cut off by max_tokens" from a complete tool call.
+        stop_map = {
+            "end_turn": "stop",
+            "tool_use": "tool_calls",
+            "max_tokens": "length",
+            "stop_sequence": "stop",
+        }
+        finish_reason = stop_map.get(response.stop_reason or "", "stop")
 
         for block in response.content:
             if block.type == "text":
                 text_parts.append(block.text)
             elif block.type == "tool_use":
                 input_data = block.input
+                _strict_ok = self._args_strict_ok(input_data)
                 if isinstance(input_data, str):
                     try:
                         input_data = json.loads(input_data)
@@ -327,22 +355,29 @@ class AnthropicProvider(LLMProvider):
                 if not isinstance(input_data, dict):
                     input_data = {}
 
+                # #1094: cut off by max_tokens → arguments is repair salvage.
+                truncated = (
+                    finish_reason == "length"
+                    and isinstance(block.input, str)
+                    and bool(block.input)
+                    and not _strict_ok
+                )
+                if truncated:
+                    logger.warning(
+                        "tool args truncated by output cap (stop_reason=max_tokens): "
+                        "'{}' args={}",
+                        block.name,
+                        block.input[:200],
+                    )
+
                 tool_calls.append(ToolCallRequest(
                     id=block.id,
                     name=block.name,
                     arguments=input_data,
+                    truncated=truncated,
                 ))
 
         content = "\n".join(text_parts) if text_parts else None
-
-        # Map Anthropic stop reasons to OpenAI-style finish_reason
-        stop_map = {
-            "end_turn": "stop",
-            "tool_use": "tool_calls",
-            "max_tokens": "length",
-            "stop_sequence": "stop",
-        }
-        finish_reason = stop_map.get(response.stop_reason or "", "stop")
 
         usage: dict[str, int] = {}
         if hasattr(response, "usage") and response.usage:
