@@ -18,6 +18,7 @@ import { basename, join } from 'path';
 import type { BrowserWindow } from 'electron';
 import type { BridgeManager } from '../bridge';
 import { sendToFrame } from '../frame-send';
+import { crashRecovery } from '../crashRecovery';
 import {
   IPC,
   IPC_EVENTS,
@@ -294,15 +295,23 @@ export function registerIpcHandlers(bridge: BridgeManager): void {
   ipcMain.handle(IPC.CHAT_SEND, async (_event, payload: unknown) => {
     const input = ChatSendInput.parse(payload);
 
+    // #1035: 在飞 turn 登记。渲染进程崩溃时主进程靠这张表判断"哪些会话还在跑"
+    // （渲染层的 moduleInFlightCache 是模块级内存态，reload 后必然为空）。
+    const sessionKey = input.session_key ?? 'desktop:default';
+    crashRecovery.markTurnStarted(sessionKey);
+    const settleTurn = () => crashRecovery.markTurnSettled(sessionKey);
+
     const sender = _event.sender;
     const safeSend = (channel: string, data: unknown) => {
       sendToFrame(sender, channel, data);
     };
+    // 通道异常结束（bridge 抛错）也算 turn 结束，否则登记表里会留下永远不会被
+    // 摘掉的"在飞"会话，下一次崩溃的恢复提示就会撒谎。
     const result = await bridge.send(
       'chat.send',
       {
         content: input.content,
-        session_key: input.session_key ?? 'desktop:default',
+        session_key: sessionKey,
         thread_id: (input as any).thread_id ?? undefined,
         mode: input.mode,
         attachments: input.attachments,
@@ -313,10 +322,13 @@ export function registerIpcHandlers(bridge: BridgeManager): void {
         if (type === 'progress') {
           safeSend('chat:progress', data);
         } else if (type === 'final') {
+          settleTurn();
           safeSend('chat:final', data);
         } else if (type === 'error') {
+          settleTurn();
           safeSend('chat:error', data);
         } else if (type === 'aborted') {
+          settleTurn();
           safeSend('chat:aborted', data);
         } else if (type === 'approval_request') {
           safeSend('approval:request', data);
@@ -365,7 +377,10 @@ export function registerIpcHandlers(bridge: BridgeManager): void {
           safeSend('chat:progress', data);
         }
       }
-    );
+    ).catch((err) => {
+      settleTurn();
+      throw err;
+    });
 
     return result;
   });
@@ -389,6 +404,12 @@ export function registerIpcHandlers(bridge: BridgeManager): void {
       session_key: input.session_key,
     });
   });
+
+  // #1035: 渲染进程崩溃重载后，渲染层挂载时**主动拉取**恢复提示。刻意做成
+  // 只读（不消费）——同一次崩溃可能被多次挂载读到（会话切换、StrictMode 双
+  // 调用），消费式读取会让第一次被丢弃的结果把提示一起吃掉；去重交给渲染层
+  // 的模块级 Set（按 notice.id），它在 reload 时清空，正好一次崩溃一条。
+  ipcMain.handle(IPC.CHAT_GET_RECOVERY_NOTICE, () => crashRecovery.peekNotice());
 
   // Clipboard write from the sandboxed renderer.  The electron clipboard
   // module is NOT available in sandboxed preloads, so the write is routed
