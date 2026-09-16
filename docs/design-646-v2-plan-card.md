@@ -96,6 +96,11 @@
 
 （这是现有 ask_user_confirm_card 的职责——保留）
 
+> **2026-09 更正（#1071 R3）**：本节写成时危险动作卡的模型侧入口是 `ask_user_confirm_card`。
+> 现危险动作已统一走 **`request_action_confirmation`**（独立 ActionCard，带目标/文件/大小/指纹），
+> 是本项目危险动作的**模型侧唯一入口**；`ask_user_confirm_card` 只再承担**非危险**的结构化选择。
+> 见 `docs/dev-notes/confirm-entry-boundary.md`。上文 2026-08-15 定稿原文保留不改。
+
 ## 4. TaskState 状态机
 
 ```
@@ -134,7 +139,7 @@ User request → Agent planning → ask_user_plan_confirm → WAIT_CONFIRM
 | TaskState | 新增（task 级状态机，turn/task 上下文） |
 | Plan Card 前端 | 新组件 PlanCard（计划+权限清单+开始执行）+ 状态进度（Planning→Running→Done） |
 | 提示词 | 注入「复杂任务先弹任务计划卡」 |
-| 保留 | ask_user_confirm_card（危险动作卡）、现有 Safety Approval 不动 |
+| 保留 | ask_user_confirm_card（**非危险**结构化选择）、现有 Safety Approval 不动（危险动作卡 2026-09 起走 `request_action_confirmation`，见上文 §3 更正） |
 
 ### Phase 2
 | 项 | 实现 |
