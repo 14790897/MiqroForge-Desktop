@@ -9,6 +9,7 @@
 import { electron } from '../../shared/electron';
 import { join } from 'path';
 import { getWorkspacePath } from '../ipc';
+import { sendToWindow } from '../frame-send';
 import {
   IPC,
   IPC_EVENTS,
@@ -95,7 +96,7 @@ function getService(): QraftService {
     log,
     onStatusChanged: (status: QraftStatus) => {
       for (const win of BrowserWindow.getAllWindows()) {
-        if (!win.isDestroyed()) win.webContents.send(IPC_EVENTS.QRAFT_STATUS_CHANGED, status);
+        sendToWindow(win, IPC_EVENTS.QRAFT_STATUS_CHANGED, status);
       }
     },
     // Slurm 作业扣费历史（issue #927）：与登录态同目录，随 userData 隔离。

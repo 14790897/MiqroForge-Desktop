@@ -1426,11 +1426,10 @@ class BridgeRuntimeLoop:
                 if isinstance(event, AgentReasoningEvent):
                     reasoning_chunks += 1
                     reasoning_chars += len(event.content)
-                    if reasoning_chunks % 10 == 0:
-                        logger.info(
-                            "forwarding reasoning_delta #{} (len={}) for turn={}",
-                            reasoning_chunks, len(event.content), event.turn_id,
-                        )
+                    # No per-chunk log here (#1019): it used to fire once per 10
+                    # deltas, so a single long reasoning turn wrote ~9.7k lines.
+                    # The turn-level record is the drain summary logged when the
+                    # stream ends.
                     await _emit("progress", {
                         "stream": "reasoning",
                         "delta": event.content,

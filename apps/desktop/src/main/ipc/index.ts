@@ -17,6 +17,7 @@ import { randomUUID } from 'crypto';
 import { basename, join } from 'path';
 import type { BrowserWindow } from 'electron';
 import type { BridgeManager } from '../bridge';
+import { sendToFrame } from '../frame-send';
 import {
   IPC,
   IPC_EVENTS,
@@ -318,9 +319,7 @@ export function registerIpcHandlers(bridge: BridgeManager): void {
 
     const sender = _event.sender;
     const safeSend = (channel: string, data: unknown) => {
-      if (!sender.isDestroyed()) {
-        sender.send(channel, data);
-      }
+      sendToFrame(sender, channel, data);
     };
     const result = await bridge.send(
       'chat.send',
@@ -1000,7 +999,7 @@ for m in ("pydantic", "httpx", "loguru"):
   ipcMain.handle(IPC.WSL_INSTALL_AND_PROVISION, async (_event) => {
     const sender = _event.sender;
     const safeSend = (channel: string, data: unknown) => {
-      if (!sender.isDestroyed()) sender.send(channel, data);
+      sendToFrame(sender, channel, data);
     };
 
     if (process.platform !== 'win32') {
@@ -2566,7 +2565,7 @@ for m in ("pydantic", "httpx", "loguru"):
     const input = TurnStartInput.parse(payload);
     const sender = _event.sender;
     const safeSend = (channel: string, data: unknown) => {
-      if (!sender.isDestroyed()) sender.send(channel, data);
+      sendToFrame(sender, channel, data);
     };
     return bridge.send(
       'turn/start',
