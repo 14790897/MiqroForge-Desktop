@@ -10,6 +10,8 @@ import { isCompareLang, parseCompareJson } from './compareData';
 import { DiagramGalleryProvider } from './DiagramGallery';
 import { MermaidBlock } from './MermaidBlock';
 import { SvgEmbed } from './SvgEmbed';
+import { Modal } from '../../../components/shared';
+import { parseReferenceList, remarkCitations, type CitationReference } from './references';
 /** Strip <think>...</think> reasoning blocks before rendering. */
 function stripThinkBlocks(text: string): string {
   let result = text.replace(/<\/?think>/gi, '');
@@ -80,14 +82,27 @@ export function MarkdownContent({
   content,
   streaming,
   disableDiagrams,
+  sources,
 }: {
   content: string;
   streaming?: boolean;
   disableDiagrams?: boolean;
+  /** 本消息的结构化来源（#879 webSources），用于给 [n] 来源详情补证据片段。 */
+  sources?: Array<{ url: string; snippet?: string; title?: string }>;
 }) {
   const [copiedCode, setCopiedCode] = useState<string | null>(null);
+  // #879：点 [n] 脚注后弹出的「参考文献」来源详情。
+  const [selectedRef, setSelectedRef] = useState<CitationReference | null>(null);
   const displayContent = stripThinkBlocks(content);
   const htmlDoc = detectHtmlDocument(displayContent);
+
+  // #879：解析文末「参考文献」列表，编号 → 条目。
+  const refByNum = useMemo(() => {
+    const m = new Map<number, CitationReference>();
+    for (const ref of parseReferenceList(displayContent)) m.set(ref.num, ref);
+    return m;
+  }, [displayContent]);
+  const validNums = useMemo(() => new Set(refByNum.keys()), [refByNum]);
 
   const handleCopyCode = (code: string) => {
     navigator.clipboard.writeText(code);
@@ -128,19 +143,39 @@ export function MarkdownContent({
       img: ({ src, alt }: any) => (
         <img src={src} alt={alt ?? ''} className="max-w-full h-auto rounded-lg my-2" />
       ),
-      a: ({ href, children }: any) => (
-        <a
-          href={href}
-          className="underline cursor-pointer break-words"
-          style={{ color: 'var(--accent)' }}
-          onClick={(e) => {
-            e.preventDefault();
-            if (href) window.open(href, '_blank');
-          }}
-        >
-          {children}
-        </a>
-      ),
+      a: ({ href, children }: any) => {
+        // #879：remarkCitations 把正文 [n] 转成 href="#citation-N" 的链接，
+        // 这里渲染成可点击脚注（弹出来源详情），而不是打开外链。
+        const citation = typeof href === 'string' ? href.match(/^#citation-(\d+)$/) : null;
+        if (citation) {
+          const num = Number(citation[1]);
+          return (
+            <button
+              type="button"
+              data-testid={`citation-ref-${num}`}
+              onClick={() => setSelectedRef(refByNum.get(num) ?? null)}
+              className="align-super text-[0.75em] font-semibold rounded px-[2px] cursor-pointer hover:opacity-80"
+              style={{ color: 'var(--accent)' }}
+              aria-label={`查看参考文献 ${num}`}
+            >
+              {children}
+            </button>
+          );
+        }
+        return (
+          <a
+            href={href}
+            className="underline cursor-pointer break-words"
+            style={{ color: 'var(--accent)' }}
+            onClick={(e) => {
+              e.preventDefault();
+              if (href) window.open(href, '_blank');
+            }}
+          >
+            {children}
+          </a>
+        );
+      },
       table: ({ children }: any) => (
         <div
           className="overflow-x-auto my-2 rounded-[10px]"
@@ -290,7 +325,7 @@ export function MarkdownContent({
         );
       },
     }),
-    [copiedCode, streaming, disableDiagrams]
+    [copiedCode, streaming, disableDiagrams, refByNum]
   );
 
   // All hooks above run unconditionally — this early return must come after
@@ -302,17 +337,79 @@ export function MarkdownContent({
 
   // DiagramGalleryProvider：#671 图集——本条消息内的所有 mermaid/svg 图
   // 注册到 provider，点卡打开图集查看器（多图 ←/→ + 胶片切换）
+  // #879：selectedRef 命中来源时，补一条「证据片段」（URL 匹配 webSources）。
+  const matchedSnippet = selectedRef?.url
+    ? sources?.find((s) => s.url === selectedRef.url)?.snippet
+    : undefined;
   return (
-    <DiagramGalleryProvider>
-      <div className="min-w-0 break-words" style={{ overflowWrap: 'anywhere' }}>
-        <ReactMarkdown
-          remarkPlugins={[remarkGfm]}
-          rehypePlugins={[[rehypeHighlight, { plainText: ['compare', 'compare-json'] }]]}
-          components={components}
+    <>
+      <DiagramGalleryProvider>
+        <div className="min-w-0 break-words" style={{ overflowWrap: 'anywhere' }}>
+          <ReactMarkdown
+            remarkPlugins={[remarkGfm, [remarkCitations, validNums]]}
+            rehypePlugins={[[rehypeHighlight, { plainText: ['compare', 'compare-json'] }]]}
+            components={components}
+          >
+            {displayContent}
+          </ReactMarkdown>
+        </div>
+      </DiagramGalleryProvider>
+      {selectedRef && (
+        <Modal
+          open
+          onOpenChange={(open) => {
+            if (!open) setSelectedRef(null);
+          }}
+          title={`参考文献 [${selectedRef.num}]`}
         >
-          {displayContent}
-        </ReactMarkdown>
-      </div>
-    </DiagramGalleryProvider>
+          <div className="flex flex-col gap-2 text-xs">
+            {selectedRef.title && (
+              <div>
+                <div className="text-[var(--text-faint)]">题名</div>
+                <div style={{ color: 'var(--text)' }}>{selectedRef.title}</div>
+              </div>
+            )}
+            {selectedRef.authors && (
+              <div>
+                <div className="text-[var(--text-faint)]">作者</div>
+                <div style={{ color: 'var(--text)' }}>{selectedRef.authors}</div>
+              </div>
+            )}
+            {selectedRef.journal && (
+              <div>
+                <div className="text-[var(--text-faint)]">来源</div>
+                <div style={{ color: 'var(--text)' }}>{selectedRef.journal}</div>
+              </div>
+            )}
+            {selectedRef.year && (
+              <div>
+                <div className="text-[var(--text-faint)]">年份</div>
+                <div style={{ color: 'var(--text)' }}>{selectedRef.year}</div>
+              </div>
+            )}
+            {(selectedRef.doi || selectedRef.url) && (
+              <div>
+                <div className="text-[var(--text-faint)]">DOI / 链接</div>
+                <a
+                  href={selectedRef.url}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="underline break-words cursor-pointer"
+                  style={{ color: 'var(--accent)' }}
+                >
+                  {selectedRef.doi || selectedRef.url}
+                </a>
+              </div>
+            )}
+            {matchedSnippet && (
+              <div>
+                <div className="text-[var(--text-faint)]">证据片段</div>
+                <div style={{ color: 'var(--text-muted)' }}>{matchedSnippet}</div>
+              </div>
+            )}
+          </div>
+        </Modal>
+      )}
+    </>
   );
 }

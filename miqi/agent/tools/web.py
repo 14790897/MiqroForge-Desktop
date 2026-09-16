@@ -195,6 +195,38 @@ def _format_results(query: str, results: list[dict[str, str]]) -> str:
     return "\n".join(lines)
 
 
+async def _emit_web_sources(
+    event_emitter: Any,
+    turn_id: str,
+    tool_call_id: str,
+    sources: list[dict[str, str]],
+    *,
+    query: str | None = None,
+) -> None:
+    """Emit structured web sources to the frontend via the output-delta
+    channel that paper_search already uses (#879).
+
+    ``sources`` items carry ``title``/``url``/``snippet``/``tool`` so the
+    frontend can render source cards without heuristically parsing text.
+    Best-effort: never lets card emission break the tool itself.
+    """
+    if not (event_emitter and turn_id and tool_call_id):
+        return
+    try:
+        from miqi.protocol.events import ToolCallOutputDeltaEvent
+
+        await event_emitter.emit(ToolCallOutputDeltaEvent(
+            turn_id=turn_id,
+            tool_call_id=tool_call_id,
+            delta=json.dumps(
+                {"type": "web_sources", "payload": {"sources": sources, "query": query}},
+                ensure_ascii=False,
+            ),
+        ))
+    except Exception:
+        pass
+
+
 class DDGSProvider(SearchProvider):
     """DuckDuckGo via the ddgs library — keyless, always available."""
 
@@ -542,6 +574,10 @@ class SearchProviderManager:
         for provider in chain:
             result = await provider.search(query, count)
             if result.success:
+                # Tag the producing provider so structured sources carry it
+                # even for keyless DDGS results (#879).
+                if not result.provider:
+                    result.provider = provider.name
                 return result
             # Tag the failing provider for error surfacing (#804).
             if not result.provider:
@@ -671,6 +707,24 @@ class WebSearchTool(Tool):
             return _failure_message(result)
         if result.error_type == "NO_RESULT":
             return f"No results for: {query}"
+        # #879: emit structured sources so the frontend renders source cards
+        # from real data instead of heuristically re-parsing the text below.
+        await _emit_web_sources(
+            kwargs.get("_event_emitter"),
+            kwargs.get("_turn_id", ""),
+            kwargs.get("_tool_call_id", ""),
+            [
+                {
+                    "title": item.get("title", ""),
+                    "url": item.get("url", ""),
+                    "snippet": item.get("snippet", ""),
+                    "tool": self.name,
+                    "provider": result.provider or "",
+                }
+                for item in result.results
+            ],
+            query=query,
+        )
         return _format_results(query, result.results)
 
     async def _parallel_search(self, query: str, n_queries: int, n: int) -> list[str]:
@@ -749,13 +803,49 @@ class WebFetchTool(Tool):
         max_chars = kwargs.get("maxChars", max_chars)
 
         if self.provider == "ollama":
-            return await self._ollama_fetch(url, max_chars=max_chars)
-        if self.provider == "hybrid":
+            result = await self._ollama_fetch(url, max_chars=max_chars)
+        elif self.provider == "hybrid":
             result = await self._builtin_fetch(url, extract_mode, max_chars)
-            if not result.startswith('{"error"'):
-                return result
-            return await self._ollama_fetch(url, max_chars=max_chars)
-        return await self._builtin_fetch(url, extract_mode, max_chars)
+            if result.startswith('{"error"'):
+                result = await self._ollama_fetch(url, max_chars=max_chars)
+        else:
+            result = await self._builtin_fetch(url, extract_mode, max_chars)
+
+        # #879: emit the fetched URL as a structured source so the frontend
+        # can render a source card (best-effort, never breaks the tool).
+        await self._emit_fetch_source(
+            kwargs.get("_event_emitter"),
+            kwargs.get("_turn_id", ""),
+            kwargs.get("_tool_call_id", ""),
+            url,
+            result,
+        )
+        return result
+
+    async def _emit_fetch_source(
+        self,
+        event_emitter: Any,
+        turn_id: str,
+        tool_call_id: str,
+        url: str,
+        result: str,
+    ) -> None:
+        """Extract the fetched URL/title from a web_fetch result and emit it
+        as a single structured source. No-op on failure/validation errors."""
+        try:
+            payload = json.loads(result)
+        except (ValueError, TypeError):
+            return
+        if not isinstance(payload, dict) or payload.get("error"):
+            return
+        final_url = payload.get("finalUrl") or payload.get("url") or url
+        source = {
+            "title": payload.get("title") or final_url,
+            "url": final_url,
+            "snippet": "",
+            "tool": self.name,
+        }
+        await _emit_web_sources(event_emitter, turn_id, tool_call_id, [source])
 
     async def _builtin_fetch(
         self,
@@ -802,6 +892,7 @@ class WebFetchTool(Tool):
                 )
 
             ctype = r.headers.get("content-type", "")
+            title = ""
 
             # JSON
             if "application/json" in ctype:
@@ -813,6 +904,7 @@ class WebFetchTool(Tool):
                     text, extractor = "(empty page)", "raw"
                 else:
                     doc = Document(raw_html)
+                    title = doc.title() or ""
                     try:
                         summary_html = doc.summary()
                     except Exception:
@@ -822,8 +914,7 @@ class WebFetchTool(Tool):
                         if extract_mode == "markdown"
                         else _strip_tags(summary_html)
                     )
-                    text = f"# {doc.title()}\n\n{content}" if doc.title(
-                    ) else content
+                    text = f"# {title}\n\n{content}" if title else content
                     extractor = "readability"
             else:
                 text, extractor = r.text, "raw"
@@ -833,7 +924,8 @@ class WebFetchTool(Tool):
                 text = text[:max_chars]
 
             return json.dumps({"url": url, "finalUrl": str(r.url), "status": r.status_code,
-                              "extractor": extractor, "truncated": truncated, "length": len(text), "text": text}, ensure_ascii=False)
+                              "extractor": extractor, "title": title, "truncated": truncated,
+                              "length": len(text), "text": text}, ensure_ascii=False)
         except Exception as e:
             return json.dumps({"error": str(e), "url": url}, ensure_ascii=False)
 

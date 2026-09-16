@@ -294,6 +294,8 @@ interface Message {
   toolName?: string;
   /** Parsed tool data for card rendering */
   toolData?: unknown;
+  /** Structured web sources (title/url/snippet) from web_search/web_fetch (#879) */
+  webSources?: MessageSource[];
   /** Original tool-call arguments (e.g. web_fetch's url) — real references */
   toolArgs?: unknown;
   action?: 'open-provider-settings' | 'retry-load' | 'login';
@@ -332,12 +334,24 @@ interface Message {
 interface MessageSource {
   tool: string;
   url: string;
+  /** Structured title from web_search/web_fetch sources (#879) */
+  title?: string;
+  /** Structured snippet from web_search/web_fetch sources (#879) */
+  snippet?: string;
 }
 
 // Stable empty array for messages without sources — keeps the `sources` prop
 // referentially equal so MessageBubble's memo isn't defeated by a fresh `[]`
 // on every keystroke (#1021).
 const EMPTY_SOURCES: MessageSource[] = [];
+
+/** sourcesByMsg 的键。progress 行用 toolCallId（后端每工具调用唯一），其余用
+ *  timestamp。此前直接拿 Date.now() 的 timestamp 当键：同毫秒创建的两个
+ *  progress 行会互相覆盖来源（先一行显示后一行的来源，#879 ③ CodeRabbit）。
+ *  加 role 前缀 + toolCallId 去碰撞。 */
+function sourcesKey(m: Message): string {
+  return m.role === 'progress' ? `p:${m.toolCallId ?? m.timestamp}` : `a:${m.timestamp}`;
+}
 
 const TOOL_LABELS: Record<string, string> = {
   web_fetch: '网页抓取',
@@ -376,7 +390,12 @@ function hostOf(url: string): string {
 /** Extract reference URLs from a tool/progress message.
  *  Priority: the URL the tool actually touched (toolArgs) > structured
  *  paper_search cards > links found in result text (fallback). */
-function extractMessageSources(msg: Message): MessageSource[] {
+export function extractMessageSources(msg: Message): MessageSource[] {
+  // Structured web sources (#879): web_search/web_fetch emit title/url/snippet
+  // directly — use them verbatim instead of heuristically re-parsing text.
+  if (msg.webSources && msg.webSources.length > 0) {
+    return msg.webSources;
+  }
   const sources: MessageSource[] = [];
   const skip = [
     'api.semanticscholar.org',
@@ -571,6 +590,10 @@ interface TrackedFile {
   lastSeen: number;
   /** path was truncated in the progress message (ends with ...) */
   truncated?: boolean;
+  /** 产出该文件的工具名（如 create_docx / graph_render / write_file），#879 ③ 追溯 */
+  sourceTool?: string;
+  /** 产出该文件的回合序号（第几个 user 回合，从 0 起），#879 ③ 追溯 */
+  turnId?: number;
 }
 
 const OFFICE_FILE_RE = /\.(docx|xlsx|pptx|ppt|xls|doc|odt|odp|ods)$/i;
@@ -990,7 +1013,14 @@ async function fileExists(path: string, sessionKey: string | null | undefined): 
  *  Same-named files in different directories stay distinct. */
 function mergeTrackedFiles(
   existing: TrackedFile[],
-  incoming: Array<{ path: string; name?: string; op?: TrackedFile['op']; lastSeen?: number }>
+  incoming: Array<{
+    path: string;
+    name?: string;
+    op?: TrackedFile['op'];
+    lastSeen?: number;
+    sourceTool?: string;
+    turnId?: number;
+  }>
 ): TrackedFile[] {
   const out = [...existing];
   for (const f of incoming) {
@@ -1001,6 +1031,8 @@ function mergeTrackedFiles(
       name: f.name ?? basename(np),
       op: f.op ?? 'read',
       lastSeen: f.lastSeen ?? Date.now(),
+      sourceTool: f.sourceTool,
+      turnId: f.turnId,
     };
     const existingIdx = out.findIndex((p) => {
       const np2 = normalizeTrackedPath(p.path);
@@ -1008,8 +1040,15 @@ function mergeTrackedFiles(
       const oneIsBare = !np2.includes('/') || !np.includes('/');
       return oneIsBare && basename(np2) === basename(np);
     });
-    if (existingIdx >= 0) out[existingIdx] = entry;
-    else out.push(entry);
+    if (existingIdx >= 0) {
+      // 后端下发（backend）不含 sourceTool/turnId 时，保留消息提取（existing）的字段，
+      // 否则文件卡片的「相关引用」会在会话加载/最终刷新时被清空（#879 ③ CodeRabbit）。
+      out[existingIdx] = {
+        ...entry,
+        sourceTool: entry.sourceTool ?? out[existingIdx].sourceTool,
+        turnId: entry.turnId ?? out[existingIdx].turnId,
+      };
+    } else out.push(entry);
   }
   return out;
 }
@@ -2197,31 +2236,45 @@ function _extractPathFromArgs(argsStr: string): string | null {
  *  2. tool_calls array on assistant messages (raw provider format)
  *  3. name field on tool result messages (raw provider format)
  */
-function extractTrackedFilesFromMessages(rawMsgs: any[]): TrackedFile[] {
+export function extractTrackedFilesFromMessages(rawMsgs: any[]): TrackedFile[] {
   const fileMap = new Map<string, TrackedFile>();
   const rank: Record<TrackedFile['op'], number> = { read: 0, edit: 1, write: 2, delete: 3 };
+  let turnSeq = -1; // 当前回合序号（第几个 user 回合，从 0 起）
 
-  const upsert = (path: string, op: TrackedFile['op'], timestamp?: string) => {
+  const upsert = (
+    path: string,
+    op: TrackedFile['op'],
+    timestamp?: string,
+    tool?: string,
+    turnId?: number
+  ) => {
     const key = normalizeSandboxPath(path).replace(/\\/g, '/');
     const existing = fileMap.get(key);
-    if (!existing || rank[op] > rank[existing.op]) {
+    // `>=`（而非 `>`）：write_file/edit_file 都映射成 op='write'，同一路径的
+    // 后一次等 rank 操作此前被忽略，导致 sourceTool/turnId 停留在更早消息上、
+    // 文件卡片用旧 turnId 取错引用（#879 ③ CodeRabbit）。等 rank 时刷新，
+    // 同时保留新事件未提供的元数据（如 _tool_hint 无 tool 名）。
+    if (!existing || rank[op] >= rank[existing.op]) {
       fileMap.set(key, {
         path: key,
         name: basename(key),
         op,
         lastSeen: timestamp ? new Date(timestamp).getTime() : Date.now(),
         truncated: false,
+        sourceTool: tool ?? existing?.sourceTool,
+        turnId: turnId ?? existing?.turnId,
       });
     }
   };
 
   for (const msg of rawMsgs) {
+    if (msg?.role === 'user') turnSeq += 1;
     // Format 1: _tool_hint metadata (persisted progress events)
     const hintText = msg._tool_hint_text || msg.content;
     if (msg._tool_hint && hintText) {
       const parsed = parseToolHint(hintText);
       if (parsed) {
-        upsert(parsed.path, parsed.op, msg.timestamp);
+        upsert(parsed.path, parsed.op, msg.timestamp, undefined, turnSeq);
       }
     }
 
@@ -2235,9 +2288,15 @@ function extractTrackedFilesFromMessages(rawMsgs: any[]): TrackedFile[] {
         const filePath = _extractPathFromArgs(argsStr);
         if (!filePath) continue;
         if (_FILE_WRITE_TOOLS.includes(toolName)) {
-          upsert(filePath, toolName === 'delete_file' ? 'delete' : 'write', msg.timestamp);
+          upsert(
+            filePath,
+            toolName === 'delete_file' ? 'delete' : 'write',
+            msg.timestamp,
+            toolName,
+            turnSeq
+          );
         } else if (_FILE_READ_TOOLS.includes(toolName)) {
-          upsert(filePath, 'read', msg.timestamp);
+          upsert(filePath, 'read', msg.timestamp, toolName, turnSeq);
         }
       }
     }
@@ -2248,7 +2307,7 @@ function extractTrackedFilesFromMessages(rawMsgs: any[]): TrackedFile[] {
       // Try to extract path from content (often contains the file path)
       const contentPath = parseToolHint(String(msg.content || ''));
       if (contentPath) {
-        upsert(contentPath.path, contentPath.op, msg.timestamp);
+        upsert(contentPath.path, contentPath.op, msg.timestamp, toolName, turnSeq);
       } else if (_FILE_WRITE_TOOLS.includes(toolName)) {
         // Tool result without parsable content — try to infer from tool name
         // (best-effort; actual path is in the paired assistant tool_calls message)
@@ -2256,6 +2315,54 @@ function extractTrackedFilesFromMessages(rawMsgs: any[]): TrackedFile[] {
     }
   }
   return Array.from(fileMap.values());
+}
+
+/** 从消息推导「回合序号 → 该回合的结构化来源」（#879 ③ 冷启动恢复）。
+ *  web_sources 实时通过事件下发、不持久化，冷启动后从 web_search / web_fetch
+ *  的结果文本重新解析，按回合（user 消息分隔）累积，供文件卡片显示相关引用。 */
+export function extractTurnSourcesFromMessages(rawMsgs: any[]): Map<number, MessageSource[]> {
+  const map = new Map<number, MessageSource[]>();
+  let turnSeq = -1;
+  for (const msg of rawMsgs) {
+    if (msg?.role === 'user') turnSeq += 1;
+    if (msg?.role !== 'tool' || !msg?.name) continue;
+    const content = String(msg.content ?? '');
+    if (msg.name === 'web_search') {
+      const items = parseWebSearchResults(content);
+      if (items.length === 0) continue;
+      const acc = map.get(turnSeq) ?? [];
+      const seen = new Set(acc.map((s) => s.url));
+      for (const it of items) {
+        if (it.url && !seen.has(it.url)) {
+          seen.add(it.url);
+          acc.push({ tool: 'web_search', url: it.url, title: it.title, snippet: it.snippet });
+        }
+      }
+      map.set(turnSeq, acc);
+    } else if (msg.name === 'web_fetch') {
+      try {
+        const payload = JSON.parse(content);
+        const url = (payload?.finalUrl as string) || (payload?.url as string);
+        if (url) {
+          const acc = map.get(turnSeq) ?? [];
+          const seen = new Set(acc.map((s) => s.url));
+          if (!seen.has(url)) {
+            seen.add(url);
+            acc.push({
+              tool: 'web_fetch',
+              url,
+              title: (payload?.title as string) || url,
+              snippet: '',
+            });
+          }
+          map.set(turnSeq, acc);
+        }
+      } catch {
+        /* not JSON, ignore */
+      }
+    }
+  }
+  return map;
 }
 
 // ── Cross-session in-flight event cache (#378) ──────────────────
@@ -2616,7 +2723,7 @@ export function ChatConsole({
   }, [messages]);
   // sourcesByMsg cache: keyed by a tool-only signature so the map object is
   // stable across typewriter frames (see sourcesByMsg below).
-  const sourcesCacheRef = useRef<{ sig: string; map: Map<Message, MessageSource[]> } | null>(null);
+  const sourcesCacheRef = useRef<{ sig: string; map: Map<string, MessageSource[]> } | null>(null);
   // Tracks the latest messages for the session-switch snapshot.  Kept in
   // sync below; the switch effect snapshots the session we're leaving into
   // moduleMessagesSnapshot so switching back restores it instantly.
@@ -3188,6 +3295,8 @@ export function ChatConsole({
   );
   /** files touched by the agent during this session */
   const [trackedFiles, setTrackedFiles] = useState<TrackedFile[]>([]);
+  /** 回合序号 → 该回合累积的结构化来源（#879 ③ 文件 → 相关引用）。 */
+  const [turnSourcesMap, setTurnSourcesMap] = useState<Map<number, MessageSource[]>>(new Map());
   /** preview modal */
   const [previewFile, setPreviewFile] = useState<{
     path: string;
@@ -3458,7 +3567,12 @@ export function ChatConsole({
   const lifecycleRef = useRef<{ id: number; promise: Promise<void>; sessionKey: string } | null>(
     null
   );
-  // Monotonic id for lifecycleRef identity checks.
+  // Monotonic id for lifecycleRef identity checks — never reset, so a session
+  // switch cannot reuse an old turn's id and collide with a still-in-flight
+  // lifecycle (would let an old settle clear the NEW lifecycle) (#879 ③ CodeRabbit).
+  const lifecycleSeqRef = useRef(0);
+  // 回合序号（第几个 user 回合，从 0 起）——source 回合索引（turnSourcesMap /
+  // 文件卡片「相关引用」）。会话加载时重置；与 lifecycleSeqRef 分离。
   const turnSeqRef = useRef(0);
   const liveReasoningTsRef = useRef<number | null>(null);
   // Anchor of the first reasoning delta of the current turn — thinking
@@ -3566,69 +3680,93 @@ export function ChatConsole({
   }, []);
 
   /** Upsert a file into trackedFiles */
-  const trackFile = useCallback((path: string, op: TrackedFile['op'], truncated = false) => {
-    // Normalise sandbox-internal paths before storing so Preview works
-    const normPath = normalizeSandboxPath(path);
-    // Strip surrounding quotes, trailing ellipsis, and leading ./ for dedup
-    const clean = normPath
-      .replace(/^["']|["']$/g, '')
-      .replace(/\.{3,}$/, '')
-      .replace(/[…]$/, '')
-      .replace(/^\.\//, '')
-      .trim();
-    setTrackedFiles((prev) => {
-      // Fuzzy match: compare cleaned base name, then exact path
-      const existing = prev.find((f) => {
-        const fc = f.path
-          .replace(/^["']|["']$/g, '')
-          .replace(/\.{3,}$/, '')
-          .replace(/[…]$/, '')
-          .replace(/^\.\//, '')
-          .trim();
-        // Basename-only matching should only kick in when one side is a bare
-        // filename (no directory), e.g. a tool hint reporting just "foo.pdf"
-        // that needs to match an existing "papers/foo.pdf" entry. Two paths
-        // that both carry (different) directories must not be merged just
-        // because they share a filename.
-        const eitherIsBareFilename = !clean.includes('/') || !fc.includes('/');
-        return (
-          f.path === normPath ||
-          fc === clean ||
-          (eitherIsBareFilename && basename(f.path) === basename(clean))
-        );
-      });
-      if (existing) {
-        // Upgrade: read < edit < write
-        const rank: Record<TrackedFile['op'], number> = { read: 0, edit: 1, write: 2, delete: 3 };
-        const nextOp = rank[op] > rank[existing.op] ? op : existing.op;
-        return prev.map((f) =>
-          f.path === existing.path
-            ? { ...f, op: nextOp, lastSeen: Date.now(), truncated: f.truncated && truncated }
-            : f
-        );
-      }
-      return prev; // new entries are verified for existence async below
-    });
-    // New entries: only surface a file that actually exists — tool hints can
-    // report a filename that was referenced (e.g. an image inside an HTML page)
-    // but never saved. Checked after the write usually lands.
-    fileExists(normPath, currentSessionRef.current).then((exists) => {
-      if (!exists) return;
+  const trackFile = useCallback(
+    (
+      path: string,
+      op: TrackedFile['op'],
+      truncated = false,
+      turnId?: number,
+      sourceTool?: string
+    ) => {
+      // Normalise sandbox-internal paths before storing so Preview works
+      const normPath = normalizeSandboxPath(path);
+      // Strip surrounding quotes, trailing ellipsis, and leading ./ for dedup
+      const clean = normPath
+        .replace(/^["']|["']$/g, '')
+        .replace(/\.{3,}$/, '')
+        .replace(/[…]$/, '')
+        .replace(/^\.\//, '')
+        .trim();
       setTrackedFiles((prev) => {
-        const dup = prev.some(
-          (f) =>
+        // Fuzzy match: compare cleaned base name, then exact path
+        const existing = prev.find((f) => {
+          const fc = f.path
+            .replace(/^["']|["']$/g, '')
+            .replace(/\.{3,}$/, '')
+            .replace(/[…]$/, '')
+            .replace(/^\.\//, '')
+            .trim();
+          // Basename-only matching should only kick in when one side is a bare
+          // filename (no directory), e.g. a tool hint reporting just "foo.pdf"
+          // that needs to match an existing "papers/foo.pdf" entry. Two paths
+          // that both carry (different) directories must not be merged just
+          // because they share a filename.
+          const eitherIsBareFilename = !clean.includes('/') || !fc.includes('/');
+          return (
             f.path === normPath ||
-            (basename(f.path) === basename(normPath) &&
-              (!f.path.includes('/') || !normPath.includes('/')))
-        );
-        if (dup) return prev;
-        return [
-          ...prev,
-          { path: normPath, name: basename(normPath), op, lastSeen: Date.now(), truncated },
-        ];
+            fc === clean ||
+            (eitherIsBareFilename && basename(f.path) === basename(clean))
+          );
+        });
+        if (existing) {
+          // Upgrade: read < edit < write
+          const rank: Record<TrackedFile['op'], number> = { read: 0, edit: 1, write: 2, delete: 3 };
+          const nextOp = rank[op] > rank[existing.op] ? op : existing.op;
+          return prev.map((f) =>
+            f.path === existing.path
+              ? {
+                  ...f,
+                  op: nextOp,
+                  lastSeen: Date.now(),
+                  truncated: f.truncated && truncated,
+                  turnId: turnId ?? f.turnId,
+                  sourceTool: sourceTool ?? f.sourceTool,
+                }
+              : f
+          );
+        }
+        return prev; // new entries are verified for existence async below
       });
-    });
-  }, []);
+      // New entries: only surface a file that actually exists — tool hints can
+      // report a filename that was referenced (e.g. an image inside an HTML page)
+      // but never saved. Checked after the write usually lands.
+      fileExists(normPath, currentSessionRef.current).then((exists) => {
+        if (!exists) return;
+        setTrackedFiles((prev) => {
+          const dup = prev.some(
+            (f) =>
+              f.path === normPath ||
+              (basename(f.path) === basename(normPath) &&
+                (!f.path.includes('/') || !normPath.includes('/')))
+          );
+          if (dup) return prev;
+          return [
+            ...prev,
+            {
+              path: normPath,
+              name: basename(normPath),
+              op,
+              lastSeen: Date.now(),
+              truncated,
+              turnId,
+              sourceTool,
+            },
+          ];
+        });
+      });
+    },
+    []
+  );
 
   useEffect(() => {
     // True only on an actual sessionKey change.  loadTrigger can bump alone
@@ -4270,6 +4408,15 @@ export function ChatConsole({
           lastSeen: f.lastSeen ?? Date.now(),
         }));
         setTrackedFiles(mergeTrackedFiles(existingFromMessages, backendMapped));
+        // #879 ③ 冷启动恢复：从消息重新推导「回合 → 来源」，供文件卡片显示相关引用。
+        setTurnSourcesMap(extractTurnSourcesFromMessages(rawMsgs));
+        // 回合序号与会话内 user 消息数对齐（turnSeqRef 跨会话累计，需重置），
+        // 否则实时追踪的 turnId 与恢复推导的序号错位。持久化 rawMsgs 可能不含
+        // 尚在乐观阶段的 user 消息——取「持久化数 / 可见数」较大者，避免覆盖
+        // 活跃 turn 已递增的序号（CodeRabbit）。
+        const persistedTurns = (rawMsgs ?? []).filter((m) => m?.role === 'user').length;
+        const visibleTurns = messagesRef.current.filter((m) => m.role === 'user').length;
+        turnSeqRef.current = Math.max(persistedTurns, visibleTurns) - 1;
 
         // ── Issue #490: resume this session's most-recent active thread ──
         // currentThreadIdRef is reset to null on every sessionKey/remount
@@ -5342,7 +5489,10 @@ export function ChatConsole({
     // This turn's lifecycle — registered BEFORE any await (threads.start,
     // chat.send) so a subsequent interrupt-and-resend can always serialize
     // against it, even mid thread-init.
-    const turnId = ++turnSeqRef.current;
+    const turnId = ++lifecycleSeqRef.current;
+    // source 回合索引随每次发送前进（会话加载时已对齐 user 消息数），与上面
+    // 的 lifecycle 身份分账——见 lifecycleSeqRef 注释。
+    turnSeqRef.current += 1;
     let resolveLifecycle: () => void = () => {};
     const lifecyclePromise = new Promise<void>((resolve) => {
       resolveLifecycle = resolve;
@@ -5859,6 +6009,58 @@ export function ChatConsole({
         return;
       }
 
+      // #879: web_sources structured sources from WebSearchTool/WebFetchTool.
+      // Arrives as a progress delta ({delta, tool_call_id, tool_hint}) which
+      // extractProgressMessage() returns null for — handle it before that gate.
+      if (data.delta && typeof data.delta === 'string' && data.tool_call_id) {
+        try {
+          const inner = JSON.parse(data.delta);
+          if (
+            inner?.type === 'web_sources' &&
+            Array.isArray(inner.payload?.sources) &&
+            inner.payload.sources.length
+          ) {
+            const structured: MessageSource[] = inner.payload.sources.map(
+              (s: { title?: string; url?: string; snippet?: string; tool?: string }) => ({
+                tool: s.tool || 'web_search',
+                url: s.url || '',
+                title: s.title,
+                snippet: s.snippet,
+              })
+            );
+            const webToolName = structured[0]?.tool || 'web_search';
+            // #879 ③：按回合累积 sources，供文件卡片显示「相关引用」。
+            const turnSeq = turnSeqRef.current;
+            setTurnSourcesMap((prev) => {
+              const next = new Map(prev);
+              const acc = next.get(turnSeq) ?? [];
+              const seen = new Set(acc.map((s) => s.url));
+              for (const s of structured) {
+                if (s.url && !seen.has(s.url)) {
+                  seen.add(s.url);
+                  acc.push(s);
+                }
+              }
+              next.set(turnSeq, acc);
+              return next;
+            });
+            setMessages((prev) => {
+              for (let i = prev.length - 1; i >= 0; i -= 1) {
+                const m = prev[i];
+                if (m.role === 'progress' && m.toolHint && m.toolCallId === data.tool_call_id) {
+                  const next = [...prev];
+                  next[i] = { ...m, webSources: structured, toolName: webToolName };
+                  return next;
+                }
+              }
+              return prev;
+            });
+          }
+        } catch {
+          /* not JSON, ignore */
+        }
+      }
+
       // Try structured extraction first, then fall back to raw text
       const extracted = extractProgressMessage(data as ProgressPayload);
 
@@ -5949,7 +6151,7 @@ export function ChatConsole({
       // Parse file operations from tool hints
       if (data.tool_hint && data.text) {
         const parsed = parseToolHint(data.text);
-        if (parsed) trackFile(parsed.path, parsed.op, parsed.truncated);
+        if (parsed) trackFile(parsed.path, parsed.op, parsed.truncated, turnSeqRef.current);
       }
     });
 
@@ -6105,9 +6307,9 @@ export function ChatConsole({
           const filePath: string = _extractPathFromArgs(fn?.arguments || '{}') || '';
           if (!filePath) continue;
           if (_FILE_WRITE_TOOLS.includes(toolName)) {
-            trackFile(filePath, 'write', false);
+            trackFile(filePath, 'write', false, turnSeqRef.current, toolName);
           } else if (_FILE_READ_TOOLS.includes(toolName)) {
-            trackFile(filePath, 'read', false);
+            trackFile(filePath, 'read', false, turnSeqRef.current, toolName);
           }
         }
 
@@ -6897,22 +7099,22 @@ export function ChatConsole({
     () =>
       messages
         .map((m) =>
-          m.role === 'progress' ? `${m.toolCallId ?? ''}:${m.content?.length ?? 0}` : m.role
+          m.role === 'progress'
+            ? `${m.toolCallId ?? ''}:${m.content?.length ?? 0}:${m.webSources?.length ?? 0}`
+            : m.role
         )
         .join('|'),
     [messages]
   );
   const sourcesByMsg = useMemo(() => {
     if (sourcesCacheRef.current?.sig === sourcesSig) return sourcesCacheRef.current.map;
-    const map = new Map<Message, MessageSource[]>();
+    const map = new Map<string, MessageSource[]>();
     let pending: MessageSource[] = [];
     let seen = new Set<string>();
     const merge = (next: MessageSource[]) => {
-      for (const s of next) {
-        if (seen.has(s.url)) continue;
-        seen.add(s.url);
-        pending.push(s);
-      }
+      // own 已经过上面的 filter 去重（跨工具行），这里直接累积即可；
+      // 若再走 seen 去重会与 filter 共享 seen、全部跳过，导致 pending 恒空。
+      pending.push(...next);
     };
     for (const m of messages) {
       if (m.role === 'progress') {
@@ -6924,7 +7126,7 @@ export function ChatConsole({
           seen.add(s.url);
           return true;
         });
-        if (own.length > 0) map.set(m, own);
+        if (own.length > 0) map.set(sourcesKey(m), own);
         merge(own);
       } else if (m.role === 'user') {
         pending = [];
@@ -6935,7 +7137,7 @@ export function ChatConsole({
         // answer all reference the same tool results (#678 用户反馈: 中间
         // "搜索异常改用…" 消息点查看来源竟是空的). Reset happens at the
         // next user message.
-        map.set(m, pending);
+        map.set(sourcesKey(m), pending);
       }
     }
     return map;
@@ -7957,7 +8159,7 @@ export function ChatConsole({
                         onEdit={handleEdit}
                         execOutputs={execOutputs}
                         inlineExecOutput={inlineExecOutput}
-                        sources={sourcesByMsg.get(group.msg) ?? EMPTY_SOURCES}
+                        sources={sourcesByMsg.get(sourcesKey(group.msg)) ?? EMPTY_SOURCES}
                         toolStepIndex={toolStepByMsg.get(group.msg)}
                         isLast={i === chatGroups.length - 1}
                         streaming={streaming && i === lastAssistantIdx && assistantTailActive}
@@ -8431,6 +8633,7 @@ export function ChatConsole({
                         key={f.path}
                         file={f}
                         isResult
+                        citations={turnSourcesMap.get(f.turnId ?? -1) ?? []}
                         onPreview={() => handlePreview(f.path)}
                         onDiff={() => handleShowDiff(f.path)}
                         onReveal={() =>
@@ -8452,6 +8655,7 @@ export function ChatConsole({
                       <TrackedFileCard
                         key={f.path}
                         file={f}
+                        citations={turnSourcesMap.get(f.turnId ?? -1) ?? []}
                         onPreview={() => handlePreview(f.path)}
                         onDiff={() => handleShowDiff(f.path)}
                       />
@@ -9068,7 +9272,7 @@ function ToolChainGroup({
 }: {
   rows: Message[];
   done: boolean;
-  sourcesByMsg: Map<Message, MessageSource[]>;
+  sourcesByMsg: Map<string, MessageSource[]>;
   searchResultsByCallId: Record<string, string>;
 } & Omit<
   ComponentProps<typeof MessageBubble>,
@@ -9116,7 +9320,7 @@ function ToolChainGroup({
               <MessageBubble
                 key={`${row.timestamp}-${i}`}
                 msg={row}
-                sources={sourcesByMsg.get(row) ?? EMPTY_SOURCES}
+                sources={sourcesByMsg.get(sourcesKey(row)) ?? EMPTY_SOURCES}
                 toolStepIndex={i + 1}
                 isLastToolRow={i === rows.length - 1}
                 isLast={false}
@@ -10097,7 +10301,11 @@ const MessageBubble = memo(function MessageBubble({
                             CodeRabbit 修订：改用真实生成信号 streaming（2722/2724 由
                             turn 生命周期驱动），不再用乐观 sending 时间戳 ——
                             sending 是用户回合信号，assistant 回复期间可能已为 null。 */}
-                        <MarkdownContent content={msg.content} streaming={streaming} />
+                        <MarkdownContent
+                          content={msg.content}
+                          streaming={streaming}
+                          sources={sources}
+                        />
                       </>
                     ) : (
                       renderContent((msg as any).__cleanContent ?? msg.content)
@@ -10251,12 +10459,20 @@ const MessageBubble = memo(function MessageBubble({
               href={s.url}
               target="_blank"
               rel="noreferrer"
-              className="flex items-center gap-2 rounded-lg px-2.5 py-2 text-xs hover:bg-[var(--surface-muted)] transition-colors"
+              className="flex items-start gap-2 rounded-lg px-2.5 py-2 text-xs hover:bg-[var(--surface-muted)] transition-colors"
             >
-              <ExternalLink size={12} className="shrink-0" />
-              <span className="truncate">
-                {s.tool ? `${s.tool} · ` : ''}
-                {s.url}
+              <ExternalLink size={12} className="shrink-0 mt-0.5" />
+              <span className="min-w-0 flex-1">
+                <span className="block truncate">
+                  {s.tool ? `${s.tool} · ` : ''}
+                  {s.title || s.url}
+                </span>
+                {s.title && s.title !== s.url && (
+                  <span className="block truncate text-[var(--text-muted)]">{s.url}</span>
+                )}
+                {s.snippet && (
+                  <span className="block truncate text-[var(--text-muted)]">{s.snippet}</span>
+                )}
               </span>
             </a>
           ))}

@@ -22,6 +22,9 @@ import {
   insertInterruptedTurns,
   _markUserTwinMatches,
   _sha256HexOfBase64,
+  extractMessageSources,
+  extractTrackedFilesFromMessages,
+  extractTurnSourcesFromMessages,
 } from './ChatConsole';
 
 describe('ChatConsole thinking block regression (#858 → #905)', () => {
@@ -553,5 +556,125 @@ describe('_markUserTwinMatches 一对一去重匹配（#891 复核 + #968）', (
     // as never 绕过闭合联合，模拟扩展后的运行时形态。
     const frontend = u('听这段', T, [{ name: 'clip.wav', type: 'audio' } as never]);
     expect(_markUserTwinMatches([frontend], [u('听这段', T)])).toEqual([false]);
+  });
+});
+
+describe('extractMessageSources 结构化来源 (#879)', () => {
+  it('有 webSources 时优先返回结构化来源（含 title/snippet）', () => {
+    const msg = {
+      role: 'progress',
+      content: 'Results for: x\n1. title\n   https://example.com/raw',
+      toolName: 'web_search',
+      webSources: [
+        { tool: 'web_search', url: 'https://example.com/a', title: '标题A', snippet: '摘要A' },
+        { tool: 'web_search', url: 'https://example.com/b', title: '标题B', snippet: '摘要B' },
+      ],
+      timestamp: 0,
+    };
+    expect(extractMessageSources(msg as never)).toEqual([
+      { tool: 'web_search', url: 'https://example.com/a', title: '标题A', snippet: '摘要A' },
+      { tool: 'web_search', url: 'https://example.com/b', title: '标题B', snippet: '摘要B' },
+    ]);
+  });
+
+  it('无 webSources 时回退到启发式 URL 提取（旧行为不变）', () => {
+    const msg = {
+      role: 'progress',
+      content: 'Results for: x\n1. title\n   https://example.com/a',
+      toolName: 'web_search',
+      timestamp: 0,
+    };
+    expect(extractMessageSources(msg as never)).toEqual([
+      { tool: 'web_search', url: 'https://example.com/a' },
+    ]);
+  });
+});
+
+describe('extractTrackedFilesFromMessages 来源工具追溯 (#879 ③)', () => {
+  it('Format 2：tool_calls 记录来源工具 create_docx', () => {
+    const files = extractTrackedFilesFromMessages([
+      {
+        role: 'assistant',
+        tool_calls: [
+          {
+            function: {
+              name: 'create_docx',
+              arguments: JSON.stringify({ path: 'report.docx' }),
+            },
+          },
+        ],
+      },
+    ]);
+    expect(files).toEqual([
+      expect.objectContaining({ name: 'report.docx', op: 'write', sourceTool: 'create_docx' }),
+    ]);
+  });
+
+  it('Format 2：write_file 记录 sourceTool', () => {
+    const files = extractTrackedFilesFromMessages([
+      {
+        role: 'assistant',
+        tool_calls: [
+          {
+            function: {
+              name: 'write_file',
+              arguments: JSON.stringify({ path: 'out.txt' }),
+            },
+          },
+        ],
+      },
+    ]);
+    expect(files).toEqual([
+      expect.objectContaining({ name: 'out.txt', op: 'write', sourceTool: 'write_file' }),
+    ]);
+  });
+});
+
+describe('extractTurnSourcesFromMessages 冷启动恢复 (#879 ③)', () => {
+  it('按回合从 web_search 结果解析来源（user 消息分隔回合）', () => {
+    const map = extractTurnSourcesFromMessages([
+      { role: 'user', content: '查天气' },
+      {
+        role: 'tool',
+        name: 'web_search',
+        content: 'Results for: 天气\n1. 北京天气\n   https://weather.com.cn/beijing\n   今天晴',
+      },
+      { role: 'assistant', content: '北京今天晴' },
+      { role: 'user', content: '查论文' },
+      {
+        role: 'tool',
+        name: 'web_search',
+        content: 'Results for: 论文\n1. 论文A\n   https://arxiv.org/a\n   摘要A',
+      },
+    ]);
+    expect(map.get(0)).toEqual([
+      {
+        tool: 'web_search',
+        url: 'https://weather.com.cn/beijing',
+        title: '北京天气',
+        snippet: '今天晴',
+      },
+    ]);
+    expect(map.get(1)).toEqual([
+      { tool: 'web_search', url: 'https://arxiv.org/a', title: '论文A', snippet: '摘要A' },
+    ]);
+  });
+
+  it('web_fetch 结果解析为单个来源（JSON）', () => {
+    const map = extractTurnSourcesFromMessages([
+      { role: 'user', content: '抓网页' },
+      {
+        role: 'tool',
+        name: 'web_fetch',
+        content: JSON.stringify({
+          url: 'https://example.com',
+          finalUrl: 'https://example.com/x',
+          title: '示例页',
+        }),
+      },
+    ]);
+    expect(map.get(0)).toEqual([
+      { tool: 'web_fetch', url: 'https://example.com/x', title: '示例页', snippet: '' },
+    ]);
   });
 });
