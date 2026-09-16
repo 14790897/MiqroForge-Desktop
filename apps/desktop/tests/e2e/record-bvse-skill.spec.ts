@@ -66,14 +66,31 @@ async function drainChunks(page: Page, file: string): Promise<number> {
   return parts.length;
 }
 
-async function startRecording(electronApp: ElectronApplication, page: Page): Promise<string> {
-  await electronApp.evaluate(async ({ session, desktopCapturer }) => {
+async function startRecording(
+  electronApp: ElectronApplication,
+  page: Page
+): Promise<{ surface: string; w: number; h: number; label: string }> {
+  // 用「应用主窗口标题」精确匹配捕获源——之前用固定名 'MiQroForge Desktop'
+  // 匹配不上（窗口标题带会话名），回退 srcs[0] 录到了别的程序窗口。
+  const picked = await electronApp.evaluate(async ({ session, desktopCapturer, BrowserWindow }) => {
+    const title = BrowserWindow.getAllWindows()[0]?.getTitle() ?? '';
+    let chosen: string | null = null;
     session.defaultSession.setDisplayMediaRequestHandler(async (_req, cb) => {
       const srcs = await desktopCapturer.getSources({ types: ['window'] });
-      const win = srcs.find((s) => s.name === 'MiQroForge Desktop') ?? srcs[0];
+      const win =
+        srcs.find((s) => s.name === title) ??
+        srcs.find((s) => /miqroforge/i.test(s.name)) ??
+        null;
+      if (!win) {
+        console.log('[record] 未匹配到应用窗口，可用：' + srcs.map((s) => s.name).join(' | '));
+        return cb({});
+      }
+      chosen = win.name;
       cb({ video: win });
     });
+    return title;
   });
+  console.log(`[record] 应用窗口标题="${picked}"`);
   const surface = await page.evaluate(async () => {
     const stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false });
     const rec = new MediaRecorder(stream, {
@@ -86,10 +103,17 @@ async function startRecording(electronApp: ElectronApplication, page: Page): Pro
     };
     rec.start(1000);
     const track = stream.getVideoTracks()[0];
-    return { surface: track.getSettings().displaySurface, w: track.getSettings().width, h: track.getSettings().height };
+    return {
+      surface: track.getSettings().displaySurface,
+      w: track.getSettings().width,
+      h: track.getSettings().height,
+      label: track.label,
+    };
   });
-  console.log(`[record] 窗口流: ${surface.surface} ${surface.w}x${surface.h}`);
-  return surface.surface;
+  console.log(
+    `[record] 窗口流: ${surface.surface} ${surface.w}x${surface.h} label="${surface.label}"`
+  );
+  return surface;
 }
 
 async function stopRecording(page: Page, file: string): Promise<void> {
@@ -182,9 +206,10 @@ test.describe('录屏：真实 BVSE 技能 + 任务资产面板（连续）', ()
       if (s) console.log(`[app-stderr] ${s.slice(0, 400)}`);
     });
     await waitForBridgeInitialized(page);
-    // 窗口缩到 1280 宽：1080p 整窗 VP9 录制太重（上次跑到一半应用退出）
+    // 窗口缩到 1280 宽：1080p 整窗 VP9 录制太重；取可见窗口（可能有隐藏窗口）
     await electronApp.evaluate(({ BrowserWindow }) => {
-      const win = BrowserWindow.getAllWindows()[0];
+      const all = BrowserWindow.getAllWindows();
+      const win = all.find((w) => w.isVisible()) ?? all[0];
       if (win) win.setSize(1280, 860);
     });
     await page.waitForTimeout(1500);
@@ -199,9 +224,14 @@ test.describe('录屏：真实 BVSE 技能 + 任务资产面板（连续）', ()
     '全程连续录制：发请求 → 真实 pipeline → 面板结果/过程分区与预览',
     { timeout: 25 * 60_000 },
     async () => {
+      // ⚠️ describe 层的 test.skip() 会让单测级 timeout 选项失效（实测
+      // info.timeout 仍是项目默认 600s）——这里用命令式 API 兜底。
+      test.setTimeout(25 * 60_000);
       writeFileSync(RECORD_FILE, Buffer.alloc(0));
-      const surface = await startRecording(electronApp, page);
-      expect(surface).toBe('window');
+      const rec = await startRecording(electronApp, page);
+      expect(rec.surface).toBe('window');
+      // 录制流必须是应用窗口本身，否则（窗口匹配失败回退）会录到别的程序窗口
+      expect(rec.label, `录到了错误的窗口：label="${rec.label}"`).toMatch(/miqroforge/i);
 
       try {
         // ── ① 发请求（真实用户口吻；命令与输出目录由 mock 环境变量注入）

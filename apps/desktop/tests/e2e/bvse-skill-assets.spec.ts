@@ -140,6 +140,8 @@ test.describe('#1104 — 真实 skill 产物完整性（工作区外输出目录
     'pipeline 写到用户目录 → 面板列全产物 + 报告进结果区',
     { timeout: PIPELINE_TIMEOUT + 300_000 },
     async () => {
+      // ⚠️ describe 层的 test.skip() 会让单测级 timeout 选项失效——命令式兜底
+      test.setTimeout(PIPELINE_TIMEOUT + 300_000);
       const outDir = join(miqiHome, 'user_output', 'bvse_run');
       const command = [
         `"${SKILL_PY}"`,
