@@ -17,21 +17,69 @@ import {
 // ─── Helpers ──────────────────────────────────────────────────────
 
 /**
- * Wait for a file card with the given filename to appear in Task Assets.
+ * Expand the 结果文件 and 过程文件 sections (best-effort) so their cards mount.
  *
- * The card root is TrackedFileCard's `.rounded-lg.p-2\.5` div (stable class
- * in the component source). Wait for the card first, then for ITS OWN
- * preview button — the buttons row renders in the same card, so the two
- * waits together mean "file tracked AND previewable". A chained
- * `filter({ has })` with a panel-rooted inner locator proved unreliable in
- * CI (resolved to 0 elements while the card + 预览 button were on screen),
- * so keep the locator flat.
+ * AssetSection renders its children only while `open`, so a collapsed
+ * section's cards are absent from the DOM entirely. Both sections are
+ * toggled unconditionally — a missing section or an already-open one cannot
+ * be detected from the DOM, and the toggle is the only handle on the state.
+ * `click({ timeout })` on a header that React unmounted (because it became
+ * empty) simply throws and is swallowed; the caller re-checks the card
+ * afterwards either way.
+ */
+async function expandAssetSections(page: Page) {
+  for (const key of ['process', 'result'] as const) {
+    const toggle = page.getByTestId(`asset-section-toggle-${key}`);
+    if ((await toggle.count()) === 0) continue;
+    await toggle.click({ timeout: 2_000 }).catch(() => {});
+    console.log(`[test] expanded the 资产面板 ${key} section`);
+  }
+}
+
+/**
+ * The rendered card for `filename` — the one whose 预览 button exists.
+ *
+ * A tracked file yields up to two cards inside the panel: one in the
+ * 结果文件/过程文件 asset section, one in the bottom 「修改建议」 list.
+ * Only the asset-section card carries the button row, so requiring it (and
+ * *not* falling back to `.last()`) keeps the locator pinned there instead
+ * of resolving to the 修改建议 card and then asserting the wrong element.
+ */
+function renderedFileCard(page: Page, filename: string) {
+  return page
+    .getByTestId('task-assets-panel')
+    .locator('.rounded-lg.p-2\\.5', { hasText: filename })
+    .filter({ has: page.getByTestId('file-preview-btn') })
+    .last();
+}
+
+/**
+ * Wait for the file's card in Task Assets and return it.
+ *
+ * AssetSection seeds `open` from `defaultOpen` — `resultFiles.length === 0`
+ * for 过程文件 — and only on first mount. This suite runs its tests against
+ * one app + session, so the .pdf created by "AI creates .txt file → …"
+ * leaves `resultFiles` non-empty and 过程文件 mounts collapsed for the next
+ * test. The .txt card then lives nowhere in the DOM (the card in the bottom
+ * 「修改建议」 list is a different element), `toBeVisible()` reports
+ * "element(s) not found", and CI records the retry as a flake. Expand both
+ * sections and re-check instead of waiting on a card that cannot appear.
  */
 async function waitForFileInPanel(page: Page, filename: string, timeout = 60_000) {
-  const assetsPanel = page.getByTestId('task-assets-panel');
-  const card = assetsPanel.locator('.rounded-lg.p-2\\.5', { hasText: filename }).last();
+  const card = renderedFileCard(page, filename);
 
-  await expect(card).toBeVisible({ timeout });
+  try {
+    await expect(card).toBeVisible({ timeout });
+  } catch (err) {
+    await expandAssetSections(page);
+    try {
+      await expect(card).toBeVisible({ timeout: 15_000 });
+    } catch {
+      throw err;
+    }
+    console.log(`[test] "${filename}" was in a collapsed 资产面板 section — expanded it`);
+    await page.screenshot({ path: 'test-results/task-assets-expanded-section.png' });
+  }
   await expect(card.getByTestId('file-preview-btn')).toBeVisible({ timeout: 10_000 });
 
   // Panel should no longer show empty state
