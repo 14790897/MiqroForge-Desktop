@@ -556,11 +556,10 @@ class OpenAIProvider(LLMProvider):
                     interleaved_reasoning = True
                 reasoning_parts.append(reasoning_text)
                 reasoning_chunks += 1
-                if reasoning_chunks % 10 == 0:
-                    logger.info(
-                        "stream_chat: got reasoning delta #{} len={} for model={}",
-                        reasoning_chunks, len(reasoning_text), resolved,
-                    )
+                # No per-chunk log here (#1019): it used to fire once per 10
+                # deltas, so a single long reasoning turn wrote thousands of
+                # lines. Same removal as bridge/loop.py; the per-turn summary
+                # below carries the totals.
                 yield LLMStreamEvent(kind="reasoning_delta", delta=reasoning_text)
 
             # Tool calls — incremental accumulation

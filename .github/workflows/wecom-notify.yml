@@ -21,6 +21,22 @@ jobs:
           SENDER="${{ github.actor }}"
           TITLE=$(jq -r '(.issue.title // .pull_request.title // "")' "$GITHUB_EVENT_PATH")
           URL=$(jq -r '(.comment.html_url // .issue.html_url // .pull_request.html_url // "")' "$GITHUB_EVENT_PATH")
+          # 发版 / 反向同步 PR 是自动化产物（每周三、周五自动发版 + 发版后 main→develop 同步），
+          # 不发通知避免刷屏。head 分支优先（develop = 发版 PR，chore/sync-main-into-develop = 反向同步 PR），
+          # 分支名变化时按标题兜底
+          if [ "$EVENT" = "pull_request" ]; then
+            HEAD_REF=$(jq -r '(.pull_request.head.ref // "")' "$GITHUB_EVENT_PATH")
+            case "$HEAD_REF" in
+              develop|chore/sync-main-into-develop)
+                echo "release/sync PR (head=$HEAD_REF), skip"
+                exit 0
+                ;;
+            esac
+            if printf '%s' "$TITLE" | grep -qE '^chore\(release\): merge (develop into main|main into develop)$'; then
+              echo "release/sync PR (title), skip"
+              exit 0
+            fi
+          fi
           # 只有评论通知带正文；PR/issue 只带标题，避免刷屏
           if [ "$EVENT" = "issue_comment" ]; then
             BODY_RAW=$(jq -r '(.comment.body // "")' "$GITHUB_EVENT_PATH")
@@ -33,9 +49,11 @@ jobs:
             echo "release notification comment, skip"
             exit 0
           fi
-          # 企微 markdown 上限 4096 字节：正文最多保留 2500 字节
-          BODY=$(printf '%s' "$BODY_RAW" | head -c 2500 | iconv -c -f UTF-8 -t UTF-8)
-          if [ "$(printf '%s' "$BODY_RAW" | wc -c)" -gt "$(printf '%s' "$BODY" | wc -c)" ]; then
+          # 评论正文只保留前 100 字，避免刷屏
+          BODY=$(printf '%s' "$BODY_RAW" | jq -Rrs '.[0:100]')
+          # 长度按原始事件 JSON 判断：BODY_RAW 经命令替换会丢掉末尾换行，
+          # 拿它比较会把「超出部分是换行」的评论误判成没截断
+          if jq -e '((.comment.body // "") | length) > 100' "$GITHUB_EVENT_PATH" >/dev/null; then
             HINT="$(printf '\n…（内容过长，已截断，全文见链接）')"
           else
             HINT=""

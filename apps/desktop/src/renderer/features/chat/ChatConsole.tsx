@@ -103,6 +103,7 @@ import {
   dirLabel,
   groupTrackedByDir,
 } from '../../lib/taskAssetClassification';
+import { sameTrackedFile } from '../../lib/tracked-path';
 import { SpreadsheetPreview } from './components/SpreadsheetPreview';
 import { DocxPreview } from './components/DocxPreview';
 import PaperSearchResult, {
@@ -1028,7 +1029,11 @@ async function fileExists(path: string, sessionKey: string | null | undefined): 
 
 /** Merge tracked files, collapsing entries that point at the same file:
  *  bare filename vs full session path, or absolute vs relative workspace path.
- *  Same-named files in different directories stay distinct. */
+ *  Same-named files in different directories stay distinct.
+ *
+ *  `workspaceRoot` is the session's own workspace — needed to tell "the
+ *  absolute form of this relative key" from "another file with the same tail"
+ *  (#1104 review).  Display-only: it never feeds a containment check. */
 function mergeTrackedFiles(
   existing: TrackedFile[],
   incoming: Array<{
@@ -1038,7 +1043,8 @@ function mergeTrackedFiles(
     lastSeen?: number;
     /** #1104: agent 显式声明的结果文件标记——合并时 sticky，不被后续流式更新抹掉 */
     result?: boolean;
-  }>
+  }>,
+  workspaceRoot?: string | null
 ): TrackedFile[] {
   const out = [...existing];
   for (const f of incoming) {
@@ -1052,7 +1058,7 @@ function mergeTrackedFiles(
     };
     const existingIdx = out.findIndex((p) => {
       const np2 = normalizeTrackedPath(p.path);
-      if (np2 === np) return true;
+      if (sameTrackedFile(np2, np, workspaceRoot)) return true;
       const oneIsBare = !np2.includes('/') || !np.includes('/');
       return oneIsBare && basename(np2) === basename(np);
     });
@@ -3646,6 +3652,8 @@ export function ChatConsole({
         return (
           f.path === normPath ||
           fc === clean ||
+          sameTrackedFile(f.path, normPath, workspace) ||
+          sameTrackedFile(fc, clean, workspace) ||
           (eitherIsBareFilename && basename(f.path) === basename(clean))
         );
       });
@@ -3670,6 +3678,7 @@ export function ChatConsole({
         const dup = prev.some(
           (f) =>
             f.path === normPath ||
+            sameTrackedFile(f.path, normPath, workspace) ||
             (basename(f.path) === basename(normPath) &&
               (!f.path.includes('/') || !normPath.includes('/')))
         );
@@ -4323,7 +4332,7 @@ export function ChatConsole({
           // #1104: declare_result_files 写入的显式结果标记
           result: f.result === true,
         }));
-        setTrackedFiles(mergeTrackedFiles(existingFromMessages, backendMapped));
+        setTrackedFiles(mergeTrackedFiles(existingFromMessages, backendMapped, workspace));
 
         // ── Issue #490: resume this session's most-recent active thread ──
         // currentThreadIdRef is reset to null on every sessionKey/remount
@@ -6183,7 +6192,7 @@ export function ChatConsole({
                   // 必须带上，否则标记只活到下一次刷新）
                   result: f.result === true,
                 }));
-                return mergeTrackedFiles(prev, mapped);
+                return mergeTrackedFiles(prev, mapped, workspace);
               });
             }
           },
