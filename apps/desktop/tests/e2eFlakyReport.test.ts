@@ -315,15 +315,27 @@ describe('buildAnnotations', () => {
     expect(annotation).toContain('file=apps/desktop/tests/e2e/issue-877-rich-preview.spec.ts');
   });
 
-  it('注解里的报错换行按 GitHub workflow command 规则转义', () => {
-    delete process.env.GITHUB_WORKSPACE;
-
+  it('注解是一条、且不引入换行', () => {
     const [annotation] = buildAnnotations(makeReport());
 
     expect(annotation).toContain('::warning ');
     expect(annotation.match(/::warning /g)).toHaveLength(1);
     expect(annotation).not.toContain('\n');
     expect(annotation).toContain('第 1 次 failed');
+  });
+
+  // 换行在 firstLine 里已经去掉了，所以「不含换行」本身证明不了转义 —— 用 % 与 CR
+  // （它们会原样活到转义那一步）以及带 : 和 , 的路径把转义真正钉住。
+  it('注解按 GitHub workflow command 规则转义 %、CR 与属性里的 : ,', () => {
+    const report = makeReport();
+    report.suites[0].suites[0].specs[0].tests[0].results[0].error.message =
+      'Error: 100% done\rmore text';
+    report.suites[0].suites[0].specs[0].file = 'tests/e2e/a,b:c.spec.ts';
+
+    const [annotation] = buildAnnotations(report);
+
+    expect(annotation).toContain('file=tests/e2e/a%2Cb%3Ac.spec.ts');
+    expect(annotation).toContain('100%25 done%0Dmore text');
   });
 });
 

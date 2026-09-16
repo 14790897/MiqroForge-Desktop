@@ -144,8 +144,10 @@ jobs:
         timeout-minutes: 10
         env:
           PLAYWRIGHT_SKIP_WEB_SERVER: '1'
-          # 探针用的是同一个 config，json reporter 默认会写 test-reports/results.json。
-          # 引开它，免得下面 flaky 汇总读到「只有 1 条用例」的探针结果（#1107）。
+          # 探针用的是同一个 config，json reporter 默认写 test-reports/results.json。正常顺序下
+          # 主步在后、会覆盖掉探针这份，但主步若一份报告都没产出（被杀/OOM），下面的汇总步就会
+          # 把探针这份「只有 1 条用例」的报告当成本次运行的结论。把探针的输出引开，那种情况下
+          # 汇总步才读得到「没有找到报告」（#1107）。
           PLAYWRIGHT_JSON_OUTPUT_FILE: test-reports/probe-results.json
 
       - name: Run Electron E2E
@@ -280,7 +282,8 @@ jobs:
         timeout-minutes: 10
         env:
           PLAYWRIGHT_SKIP_WEB_SERVER: '1'
-          # 同 Linux 侧：引开探针的 json 报告，别覆盖 flaky 汇总要读的那一份（#1107）。
+          # 同 Linux 侧：引开探针的 json 报告 —— 主步没产出报告时，汇总步不该把探针那份
+          # 「只有 1 条用例」的结果当成本次运行的结论（#1107）。
           PLAYWRIGHT_JSON_OUTPUT_FILE: test-reports/probe-results.json
 
       - name: Run Electron E2E (macOS)
@@ -300,9 +303,11 @@ jobs:
         # Both are fully covered by the Linux electron-e2e job, which runs the
         # whole suite.
         #
-        # --workers=2 cut the flakiness down but did not remove it (runs #1107
-        # looked at still had one or two flaky specs each), which is why the
-        # summarize step below exists rather than another round of tuning.
+        # --workers=2 cut the flakiness down but did not remove it — a 6-run sample
+        # still had 0-2 flaky specs per run, with repeated hits on the same test
+        # (task-assets.spec.ts:143, which looks deterministic rather than
+        # load-induced).  That is why the summarize step below exists instead of
+        # another round of parallelism tuning.
         run: |
           npx playwright test --config=playwright.config.ts --project=electron \
             --grep-invert "Sandbox Exec|Sandbox Toggle|Sandbox toggle ready|Workspace Switch E2E \(Sandbox ON\)|session-key-mapping|PPTX Generator|Native Electron E2E|Feedback Page E2E|Execution Policy E2E" \
