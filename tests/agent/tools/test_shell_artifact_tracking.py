@@ -96,11 +96,10 @@ async def test_track_persists_new_files_as_write(exec_tool, fake_workspace, monk
     assert tf.exists(), "tracked_files.json written via batch persist"
     files = json.loads(tf.read_text(encoding="utf-8"))["files"]
 
-    def norm(p):
-        return str(p).replace("\\", "/")
-
-    assert files[norm(fake_workspace / "output" / "report.md")]["op"] == "write"
-    assert files[norm(fake_workspace / "data.csv")]["op"] == "write"
+    # Keys are workspace-relative — the same shape the document tools write,
+    # which is what the reader resolves against the session's own root.
+    assert files["output/report.md"]["op"] == "write"
+    assert files["data.csv"]["op"] == "write"
 
 
 @pytest.mark.asyncio
@@ -154,11 +153,7 @@ async def test_track_empty_before_diffs_everything(exec_tool, fake_workspace, mo
     assert tf.exists()
     files = json.loads(tf.read_text(encoding="utf-8"))["files"]
 
-    def norm(p):
-        return str(p).replace("\\", "/")
-
-    assert norm(fake_workspace / "output" / "deliverable.md") in files
-
+    assert "output/deliverable.md" in files
 
 @pytest.mark.asyncio
 async def test_track_ignores_tracked_files_json_self_write(
@@ -220,13 +215,19 @@ async def test_track_changes_uses_explicit_root(exec_tool, fake_workspace, monke
 
     persisted: list[tuple] = []
 
-    def _fake_batch(changed, session_key):
-        persisted.append((list(changed), session_key))
+    def _fake_batch(changed, session_key, workspace=None):
+        persisted.append((list(changed), session_key, workspace))
 
     monkeypatch.setattr(exec_tool, "_persist_changed_batch", _fake_batch)
 
-    await exec_tool._track_workspace_changes(before, "desktop:test", custom)
+    await exec_tool._track_workspace_changes(
+        before, "desktop:test", custom, workspace=custom,
+    )
     assert persisted, "batch persist called"
-    paths = persisted[0][0]
+    paths, _, workspace_arg = persisted[0]
     assert str(custom / "output" / "report.pdf") in paths
     assert str(custom / "seed.txt") in paths
+    # The session workspace rides along: the batch writer keys the ledger by
+    # it, never by the global workspace — that split is what lost a bound
+    # session's script output from the assets panel.
+    assert workspace_arg == custom

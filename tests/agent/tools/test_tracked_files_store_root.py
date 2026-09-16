@@ -353,20 +353,65 @@ async def test_exec_batch_persist_shares_session_dir_with_doc_tools(monkeypatch)
         filename="cli.docx", title="T", _session_key=key,
     )
 
-    # exec 产物
+    # exec 产物（真实调用形态：ExecTool 把会话自己的工作区一并传下去，
+    # 写端才能与文档工具同根、同键形）
     exec_tool = ExecTool()
     exec_tool.working_dir = None
     artifact = files_dir / "out.md"
-    exec_tool._persist_changed_batch([str(artifact)], key)
+    exec_tool._persist_changed_batch([str(artifact)], key, files_dir)
 
     # 字面目录名钉住派生：两者同落 sessions/cli_direct/
     tracked = _read_tracked(ws / "sessions" / "cli_direct" / "tracked_files.json")
     assert "cli.docx" in tracked
-    assert str(artifact).replace("\\", "/") in tracked
+    # 与文档产物同样的相对 key 形态（工作区相对），不再是绝对路径
+    assert "out.md" in tracked
     # 旧剥离规则目录（sessions/direct）不得再出现
     assert not (ws / "sessions" / "direct" / "tracked_files.json").exists()
     # 面板读取回路能读到 exec 产物
-    assert str(artifact).replace("\\", "/") in _panel_tracked(ws, key)
+    assert "out.md" in _panel_tracked(ws, key)
+
+
+@pytest.mark.asyncio
+async def test_exec_batch_custom_workspace_persists_under_bound_root(tmp_path, monkeypatch):
+    """绑定文件夹会话：exec 产物的账本必须落在绑定根，而不是 app-home。
+
+    回归「第三个文件不显示」：文档工具把合并前的产物写进绑定根那份
+    ``tracked_files.json``（相对 key），exec 追踪却写进 app-home 那份（绝对
+    key）。读端按「哪份账本已有条目哪份说了算」选中绑定根那份，app-home 那份
+    永远读不到 —— 合并出来的文件就此从面板上消失。
+    """
+    from miqi.agent.tools.shell import ExecTool
+
+    ws = _default_ws()
+    bound = tmp_path / "bound-project"
+    bound.mkdir()
+    key = "desktop:1063"
+    monkeypatch.setattr(
+        "miqi.runtime.file_handlers._get_workspace_path", lambda: str(ws),
+    )
+
+    # 文档产物（合并的输入）落绑定根账本
+    doc = _tool("miqi.documents.docx_tool:CreateDocxTool",
+                workspace=bound, allowed_dir=bound)
+    assert "Created:" in await doc.execute(
+        filename="a.docx", title="A", _session_key=key,
+    )
+
+    # exec 产物（合并结果，且落在子目录里 —— 相对 key 的路径形态）
+    (bound / "merged").mkdir()
+    merged = bound / "merged" / "merged.docx"
+    merged.write_text("x")
+    exec_tool = ExecTool()
+    exec_tool.working_dir = None
+    exec_tool._persist_changed_batch([str(merged)], key, bound)
+
+    tracked = _read_tracked(_store_path(bound, key))
+    assert "a.docx" in tracked
+    assert "merged/merged.docx" in tracked
+    # app-home 那份不得再收下这台会话的 exec 产物（旧行为在那里写绝对路径）
+    app_home = _store_path(ws, key)
+    if app_home.exists():
+        assert str(merged).replace("\\", "/") not in _read_tracked(app_home)
 
 
 @pytest.mark.asyncio
