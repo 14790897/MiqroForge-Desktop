@@ -132,6 +132,7 @@ test.describe('Issue #1019 — no per-event send to a disposed render frame', ()
   let electronApp: ElectronApplication;
   let page: Page;
   let mock: MockStream;
+  let miqiHome: string | undefined;
 
   test.beforeAll(async () => {
     mock = await startStreamingMock();
@@ -150,11 +151,14 @@ test.describe('Issue #1019 — no per-event send to a disposed render frame', ()
     });
     electronApp = fixture.electronApp;
     page = fixture.page;
+    miqiHome = fixture.miqiHome;
   }, 180_000);
 
   test.afterAll(async () => {
     try {
-      await closeElectronApp(electronApp);
+      // Pass the temp home so closeElectronApp removes it — without the second
+      // argument the directory is left behind on every run.
+      await closeElectronApp(electronApp, miqiHome);
     } catch {
       /* renderer was crashed on purpose; teardown may be noisy */
     }
@@ -178,6 +182,28 @@ test.describe('Issue #1019 — no per-event send to a disposed render frame', ()
           const text = a.map((x) => (x instanceof Error ? x.message : String(x))).join(' ');
           if (text.includes('Render frame was disposed')) g.__disposedLines += 1;
           orig(...(a as []));
+        };
+      });
+
+      // Count invocations of the guard's own liveness check. sendToFrame calls
+      // isFrameAlive -> contents.mainFrame.isDestroyed(), so a rise in this
+      // counter after the crash is direct proof that post-crash progress events
+      // reached the guarded send path. The mock's delta count alone only shows
+      // the mock kept writing — if desktop forwarding stopped before the guard,
+      // deltas would still climb and disposedLines would still read 0.
+      await electronApp.evaluate(({ BrowserWindow }) => {
+        const g = globalThis as any;
+        g.__frameChecks = 0;
+        const wc = BrowserWindow.getAllWindows()[0]?.webContents;
+        if (!wc) return;
+        // WebFrameMain is not exported from the electron module, so reach its
+        // prototype through a live instance; the prototype is shared by every
+        // frame, so patching it here covers the frames used later.
+        const proto = Object.getPrototypeOf(wc.mainFrame);
+        const orig = proto.isDestroyed;
+        proto.isDestroyed = function (this: unknown) {
+          g.__frameChecks += 1;
+          return orig.call(this);
         };
       });
 
@@ -217,11 +243,14 @@ test.describe('Issue #1019 — no per-event send to a disposed render frame', ()
         return 'crashed';
       });
       expect(state).toBe('crashed');
+      // Only guard invocations from here on count as "post-crash".
+      const checksAtCrash = await electronApp.evaluate(() => (globalThis as any).__frameChecks);
 
       // Let the still-running turn keep emitting progress events at the dead frame.
       await new Promise((r) => setTimeout(r, 15_000));
 
       const disposedLines = await electronApp.evaluate(() => (globalThis as any).__disposedLines);
+      const afterChecks = await electronApp.evaluate(() => (globalThis as any).__frameChecks);
       const afterWait = mock.stats();
 
       // Non-vacuity: the mock kept emitting reasoning deltas after the crash, so
@@ -232,6 +261,10 @@ test.describe('Issue #1019 — no per-event send to a disposed render frame', ()
       // clear of noise.
       expect(afterWait.deltas - beforeCrash.deltas).toBeGreaterThanOrEqual(50);
       expect(afterWait.finished).toBe(beforeCrash.finished);
+
+      // ...and that those events actually reached the guarded send path: the
+      // frame-liveness check itself ran, on a disposed frame, ≥50 times.
+      expect(afterChecks - checksAtCrash).toBeGreaterThanOrEqual(50);
 
       // The assertion this whole spec exists for.
       expect(disposedLines).toBe(0);
