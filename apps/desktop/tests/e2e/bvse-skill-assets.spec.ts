@@ -230,13 +230,11 @@ test.describe('#1104 — 真实 skill 产物完整性（工作区外输出目录
       );
 
       // ── 声明的报告 result=true；其余条目无 result
-      const reportEntry = (tf?.tracked_files ?? []).find((f: any) =>
-        String(f.path ?? '').endsWith(report!)
-      );
+      // 台账路径在 Windows 可能是反斜杠，先归一（与 L187-189 同口径）
+      const norm = (f: any) => String(f.path ?? '').replace(/\\/g, '/');
+      const reportEntry = (tf?.tracked_files ?? []).find((f: any) => norm(f).endsWith(report!));
       expect(reportEntry?.result).toBe(true);
-      const nonResult = (tf?.tracked_files ?? []).filter(
-        (f: any) => !String(f.path ?? '').endsWith(report!)
-      );
+      const nonResult = (tf?.tracked_files ?? []).filter((f: any) => !norm(f).endsWith(report!));
       expect(nonResult.every((f: any) => f.result !== true)).toBe(true);
 
       // 截图留给 PR：回到面板顶部、收起批量目录，展示「结果文件」区（真实报告）

@@ -3238,14 +3238,18 @@ class ExecTool(Tool):
         roots: list[Path] = []
         seen: set[str] = set()
 
-        def _add(raw: Any) -> None:
+        def _add(raw: Any, *, relative_to_cwd: bool = False) -> None:
             if raw is None or not str(raw).strip():
                 return
             try:
                 p = Path(str(raw)).expanduser()
-                if not p.is_absolute() and cwd:
+                # 只对 out-dir / 用户根做相对解析：cwd 自身若再拼一次会变成
+                # ``project/project``（CodeRabbit 复审）
+                if relative_to_cwd and not p.is_absolute() and cwd:
                     p = Path(cwd) / p
-                key = str(p).replace("\\", "/").lower()
+                # 平台感知去重键：Windows 折叠大小写与斜杠；POSIX 上
+                # /tmp/Out 与 /tmp/out 是两个目录，不得合并（CodeRabbit 复审）
+                key = os.path.normcase(os.path.abspath(p))
             except (TypeError, ValueError, OSError):
                 return
             if key in seen:
@@ -3259,9 +3263,9 @@ class ExecTool(Tool):
         for m in self._OUT_DIR_FLAG_RE.finditer(command or ""):
             value = next((g for g in m.groups() if g), None)
             if value:
-                _add(value)
+                _add(value, relative_to_cwd=True)
         for r in list(user_roots or []):
-            _add(r)
+            _add(r, relative_to_cwd=True)
         return roots[: self._MAX_SNAPSHOT_ROOTS]
 
     def _snapshot_roots_map(

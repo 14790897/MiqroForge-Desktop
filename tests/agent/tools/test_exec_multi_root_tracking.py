@@ -6,6 +6,7 @@ cwd + 用户点名目录（#821 ``_user_roots``）+ 命令里声明的 ``--out-d
 """
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -114,6 +115,25 @@ def test_out_dir_survives_root_truncation(exec_tool, tmp_path):
     roots = exec_tool._snapshot_roots(cwd, user_roots, f'run --out-dir "{out_dir}"')
     assert len(roots) <= exec_tool._MAX_SNAPSHOT_ROOTS
     assert out_dir in roots, f"out-dir 被截断丢了：{roots}"
+
+
+def test_relative_cwd_is_not_re_relativized(exec_tool):
+    """cwd 是相对路径时不得再拼一次自身（project/project）——CodeRabbit 复审。"""
+    roots = exec_tool._snapshot_roots("project", [], "run")
+    assert len(roots) == 1
+    assert Path(roots[0]).name == "project", f"cwd 被重复拼接：{roots[0]}"
+
+
+def test_dedupe_key_is_platform_aware(exec_tool, tmp_path):
+    """POSIX 上 /tmp/Out 与 /tmp/out 是两个目录，去重键不得折叠大小写。"""
+    if os.name == "nt":
+        pytest.skip("大小写敏感性只在 POSIX 上有意义")
+    upper = tmp_path / "Out"
+    lower = tmp_path / "out"
+    upper.mkdir()
+    lower.mkdir()
+    roots = exec_tool._snapshot_roots(upper, [], f"run --out-dir {lower}")
+    assert {str(r) for r in roots} == {str(upper), str(lower)}
 
 
 @pytest.mark.asyncio

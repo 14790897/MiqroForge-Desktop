@@ -94,7 +94,14 @@ export function dirLabel(dir: string): string {
  *  交付根自身的顶层产物（报告、cube、summary.json…）永远保持逐张显示——用户
  *  2026-09-16 反馈里明确要看这些。 */
 export function groupTrackedByDir<T extends { path: string }>(
-  files: T[]
+  files: T[],
+  /**
+   * 全量已追踪文件的路径（结果 + 过程）。祖先判定必须用**完整集合**：交付根的
+   * 顶层产物常常是「结果文件」（如 out/report.pdf），若只看待分组的子集，
+   * out/batch/*.cif 会因为「out 不在子集里」而永远折不起来（CodeRabbit 复审）。
+   * 省略时退化为仅用 files 自身。
+   */
+  allPaths?: Iterable<string>
 ): { loose: T[]; groups: Array<{ dir: string; files: T[] }> } {
   const byDir = new Map<string, T[]>();
   const loose: T[] = [];
@@ -108,9 +115,17 @@ export function groupTrackedByDir<T extends { path: string }>(
     if (arr) arr.push(f);
     else byDir.set(dir, [f]);
   }
-  const dirs = [...byDir.keys()];
-  const hasTrackedAncestor = (dir: string): boolean =>
-    dirs.some((other) => other !== dir && dir.startsWith(`${other}/`));
+  const ancestorDirs = new Set<string>(byDir.keys());
+  for (const p of allPaths ?? []) {
+    const d = dirnameOf(p);
+    if (d) ancestorDirs.add(d);
+  }
+  const hasTrackedAncestor = (dir: string): boolean => {
+    for (const other of ancestorDirs) {
+      if (other !== dir && dir.startsWith(`${other}/`)) return true;
+    }
+    return false;
+  };
   const groups: Array<{ dir: string; files: T[] }> = [];
   for (const [dir, arr] of byDir) {
     if (arr.length >= BULK_DIR_MIN_FILES && hasTrackedAncestor(dir)) {

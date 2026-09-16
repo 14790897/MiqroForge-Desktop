@@ -7220,10 +7220,12 @@ export function ChatConsole({
     () => classifyTrackedFiles(trackedFiles),
     [trackedFiles]
   );
-  // #1104：过程文件里的批量目录（如 bvse_sites/ 20 个 cif）折成目录行
+  // #1104：过程文件里的批量目录（如 bvse_sites/ 20 个 cif）折成目录行；
+  // 祖先判定用全量追踪路径（结果是交付根顶层产物时也要能撑起折叠）
+  const allTrackedPaths = useMemo(() => trackedFiles.map((f) => f.path), [trackedFiles]);
   const { loose: processLoose, groups: processGroups } = useMemo(
-    () => groupTrackedByDir(processFiles),
-    [processFiles]
+    () => groupTrackedByDir(processFiles, allTrackedPaths),
+    [processFiles, allTrackedPaths]
   );
   // 「修改建议」区只关心本次会话 write/edit 过的文件；按分类拆成两组
   // （用户反馈 2026-08-13：合并前结果/过程混排，合并（op→read）后才分类）。
@@ -7239,10 +7241,10 @@ export function ChatConsole({
     () => writeEditFiles.filter((f) => !resultFiles.some((r) => r.path === f.path)),
     [writeEditFiles, resultFiles]
   );
-  // #1104：修改建议里的批量目录同样折行
+  // #1104：修改建议里的批量目录同样折行（祖先判定同样用全量路径）
   const { loose: processWriteEditLoose, groups: processWriteEditGroups } = useMemo(
-    () => groupTrackedByDir(processWriteEdit),
-    [processWriteEdit]
+    () => groupTrackedByDir(processWriteEdit, allTrackedPaths),
+    [processWriteEdit, allTrackedPaths]
   );
   // 分享/导出默认只包含结果文件；无结果文件时回退为全部文件
   const shareFiles = resultFiles.length > 0 ? resultFiles : trackedFiles;

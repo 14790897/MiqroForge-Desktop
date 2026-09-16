@@ -305,6 +305,20 @@ describe('groupTrackedByDir (#1104 批量目录折行)', () => {
     expect(loose).toHaveLength(4);
   });
 
+  it('交付根的结果文件也要能撑起子目录折叠（祖先判定用全量集合）', () => {
+    const report = p('out/report.pdf');
+    const batch = Array.from({ length: 5 }, (_, i) => p(`out/batch/Na_site${i + 1}.cif`));
+
+    // 旧行为：只拿过程子集 → out 不在集合里 → 折不起来
+    expect(groupTrackedByDir(batch).groups).toEqual([]);
+
+    // 传入全量路径（结果 + 过程）→ out/batch 正常折叠，report.pdf 不受影响
+    const { loose, groups } = groupTrackedByDir(batch, [report.path, ...batch.map((f) => f.path)]);
+    expect(groups.map((g) => g.dir)).toEqual(['out/batch']);
+    expect(groups[0].files).toHaveLength(5);
+    expect(loose).toEqual([]);
+  });
+
   it('多个批量目录各自成组；绝对路径与反斜杠同样聚合', () => {
     const files = [
       p('C:/tmp/run/summary.json'),
