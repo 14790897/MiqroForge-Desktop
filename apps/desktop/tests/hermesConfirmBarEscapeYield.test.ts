@@ -10,8 +10,12 @@ import { describe, expect, it } from 'vitest';
  * 菜单还没关——用户想关菜单，结果卡没了。
  *
  * 不变量：Esc 分支必须先让位给打开中的下拉（`menuOpenRef.current` → return），
- * 且该让位判断要早于 `preventDefault()` / `onResolve('deny')`。
+ * 且该让位判断要早于 `preventDefault()` / 拒绝提交（`resolveOnce('deny')`）。
  * 另外菜单必须是**受控**的（`open={menuOpen}` + `onOpenChange`），否则 ref 拿不到真值。
+ *
+ * #1071 G7 P1（外部评审）后：Esc 的拒绝也改走统一的提交闸门 `resolveOnce`（失败可
+ * 重试），不再是裸 `onResolve('deny')`——本锁随之改为锁定 `resolveOnce('deny')`，
+ * 并**反向断言**这里没有绕过闸门直呼 onResolve。
  *
  * 本文件是**源码文本锁**：该行为依赖 Radix 菜单真实开合 + window capture 时序，
  * jsdom 下无法稳定复现（本仓库组件测试只有 react-dom/server 的静态渲染）。锁的是
@@ -54,16 +58,16 @@ describe('HermesConfirmBar：Esc 让位给打开中的下拉（#1071 P2-a）', (
     expect(source).toMatch(/const \[menuOpen, setMenuOpen\] = useState\(false\)/);
   });
 
-  it('Esc 分支先让位再拒绝：menuOpenRef 判断早于 preventDefault / onResolve', () => {
+  it('Esc 分支先让位再拒绝：menuOpenRef 判断早于 preventDefault / resolveOnce', () => {
     const branch = escapeBranch();
     const yieldIdx = branch.indexOf('menuOpenRef.current');
     const preventIdx = branch.indexOf('preventDefault');
-    const denyIdx = branch.indexOf("onResolve('deny')");
+    const denyIdx = branch.indexOf("resolveOnce('deny')");
     expect(yieldIdx, 'Esc 分支缺少「下拉打开时让位」判断').toBeGreaterThan(-1);
     expect(preventIdx).toBeGreaterThan(-1);
     expect(denyIdx).toBeGreaterThan(-1);
     expect(yieldIdx, '让位判断必须在 preventDefault 之前').toBeLessThan(preventIdx);
-    expect(yieldIdx, '让位判断必须在 onResolve(deny) 之前').toBeLessThan(denyIdx);
+    expect(yieldIdx, '让位判断必须在拒绝提交之前').toBeLessThan(denyIdx);
   });
 
   it('让位用 ref 读最新值（effect 不因 menuOpen 重建闭包）', () => {
@@ -71,10 +75,13 @@ describe('HermesConfirmBar：Esc 让位给打开中的下拉（#1071 P2-a）', (
     expect(source).toMatch(/menuOpenRef\.current = menuOpen/);
   });
 
-  it('未打开菜单时 Esc 仍然拒绝（没有把功能一起让掉）', () => {
+  it('未打开菜单时 Esc 仍然拒绝（没有把功能一起让掉），且必须走统一提交闸门', () => {
     const branch = escapeBranch();
     expect(branch).toContain('event.__miqiResolved = true');
-    expect(branch).toContain("onResolve('deny')");
+    expect(branch).toContain("resolveOnce('deny')");
+    // G7 P1：Esc 与主按钮共用同一把锁——这里不能再有绕过闸门的裸调用，
+    // 否则失败后按钮解锁、Esc 那条路仍然会重复提交同一张卡。
+    expect(branch).not.toContain('onResolve(');
     // 输入框让位不受影响
     expect(branch).toContain('editing');
   });
