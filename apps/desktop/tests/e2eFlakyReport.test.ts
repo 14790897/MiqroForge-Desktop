@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -110,6 +110,12 @@ function makeReport(overrides = {}) {
 }
 
 const originalWorkspace = process.env.GITHUB_WORKSPACE;
+
+// 路径输出取决于 GITHUB_WORKSPACE（CI 里 Actions 一定会设它），所以默认清掉，
+// 需要它的用例自己设置 —— 否则同一份断言在本地过、在 CI 挂。
+beforeEach(() => {
+  delete process.env.GITHUB_WORKSPACE;
+});
 
 afterEach(() => {
   if (originalWorkspace === undefined) delete process.env.GITHUB_WORKSPACE;
