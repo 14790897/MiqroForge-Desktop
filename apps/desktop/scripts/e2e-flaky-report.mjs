@@ -37,12 +37,19 @@ function escapeProperty(text) {
   return escapeData(text).replace(/:/g, '%3A').replace(/,/g, '%2C');
 }
 
-/** 行内代码：文本里本来就有反引号时用更长的围栏，免得把摘要渲染坏。 */
+/**
+ * 行内代码：文本里本来就有反引号时用更长的围栏，免得把摘要渲染坏。
+ *
+ * 值本身以反引号开头或结尾时，还要在围栏内侧补一个空格 —— 否则围栏会和内容的首/尾反引号
+ * 并成一串，GitHub 实测会把这种输出渲染成纯文本、或吃掉边界的反引号。补空格后 CommonMark
+ * 会把这对外侧空格去掉，内容照旧。
+ */
 function inlineCode(text) {
   const value = String(text);
   const runs = value.match(/`+/g) || [];
   const fence = '`'.repeat(Math.max(1, ...runs.map((run) => run.length + 1)));
-  return `${fence}${value}${fence}`;
+  const content = /^`|`$/.test(value) ? ` ${value} ` : value;
+  return `${fence}${content}${fence}`;
 }
 
 /** Playwright 给每个 worker 硬注入 FORCE_COLOR=1，报告里的报错文本因此带 ANSI 颜色码。 */

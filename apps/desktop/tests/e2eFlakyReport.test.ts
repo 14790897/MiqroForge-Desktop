@@ -232,6 +232,17 @@ describe('buildMarkdown', () => {
     expect(annotation).not.toContain(esc);
   });
 
+  // GitHub 的 /markdown 实测：值以反引号开头/结尾时，围栏会和内容的首/尾反引号并成一串，
+  // 输出要么被渲染成纯文本、要么吃掉边界的反引号；围栏内侧补一个空格即可。
+  it('值以反引号开头或结尾时补空格，围栏不会和内容并成一串', () => {
+    const report = makeReport();
+    report.suites[0].suites[0].specs[0].tests[0].results[0].error.message = '`foo` broke';
+
+    const markdown = buildMarkdown(report);
+
+    expect(markdown).toContain('`` `foo` broke ``');
+  });
+
   it('projectName 为空时省掉项目前缀，不输出 []', () => {
     const report = makeReport();
     report.suites[0].suites[0].specs[0].tests[0].projectName = '';

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { spawnSync } from 'node:child_process';
-import { existsSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, renameSync, rmSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 
 // 这条链路（#1107）是：连通性探针与主 E2E 跑同一个 config，两者都会写 test-reports/results.json；
@@ -23,18 +23,20 @@ describe('探针与主 E2E 的报告隔离', () => {
 
   const reportState = () => (existsSync(reportPath) ? statSync(reportPath).mtimeMs : null);
 
-  /** 跑会写报告的命令前后做快照/还原 —— 别动开发者本地那些产物。 */
+  /**
+   * 把整个 test-reports 目录挪开再跑，跑完原样挪回来 —— 内容、mtime、html 目录都不动，
+   * 不留痕（开发者本地那份也一样）。测试崩在中间时只会留下一个备份目录名，不会丢东西。
+   */
   function preservingReports(run) {
-    const htmlDir = join(cwd, 'test-reports', 'html');
-    const hadReport = existsSync(reportPath);
-    const backup = hadReport ? readFileSync(reportPath) : null;
-    const hadHtml = existsSync(htmlDir);
+    const reportsDir = join(cwd, 'test-reports');
+    const backupDir = join(cwd, '.test-reports-backup');
+    const existed = existsSync(reportsDir);
+    if (existed) renameSync(reportsDir, backupDir);
     try {
       return run();
     } finally {
-      if (hadReport) writeFileSync(reportPath, backup);
-      else rmSync(reportPath, { force: true });
-      if (!hadHtml) rmSync(htmlDir, { recursive: true, force: true });
+      rmSync(reportsDir, { recursive: true, force: true });
+      if (existed) renameSync(backupDir, reportsDir);
     }
   }
 
@@ -56,8 +58,6 @@ describe('探针与主 E2E 的报告隔离', () => {
 
   it('主 E2E 那一步（不覆盖 reporter）才会写这份报告', () => {
     preservingReports(() => {
-      rmSync(reportPath, { force: true });
-
       const result = runPlaywright(['--project=electron', '--list']);
 
       expect(result.status).toBe(0);
