@@ -106,6 +106,20 @@ function readInitialConsent(): { read: boolean; version: string | null } {
   }
 }
 
+/**
+ * #1095：在页面脚本执行前同步取一次登录态，供登录门首帧判定
+ *（异步取会先渲染一帧登录页，已登录用户会看到闪屏）。
+ * 读取失败返回 null，渲染层按「登录态未知」处理（停在加载屏，不放行主界面）。
+ */
+function readInitialQraftStatus(): QraftStatus | null {
+  try {
+    const value = ipcRenderer.sendSync(IPC.QRAFT_STATUS_SYNC) as unknown;
+    return (value as QraftStatus | null) ?? null;
+  } catch {
+    return null;
+  }
+}
+
 const api = {
   // -- Environment ------------------------------------------------------------
   // E2E 标记：main 在 MIQI_E2E=1 时通过 additionalArguments 下发 --miqi-e2e，
@@ -115,6 +129,12 @@ const api = {
       typeof process !== 'undefined' &&
       Array.isArray(process.argv) &&
       process.argv.includes('--miqi-e2e'),
+    // #1095 登录门绕过：main 在 MIQI_LOGIN_BYPASS=1 时下发
+    // --miqi-login-bypass（仅未打包环境，E2E 默认开启）。
+    loginBypass:
+      typeof process !== 'undefined' &&
+      Array.isArray(process.argv) &&
+      process.argv.includes('--miqi-login-bypass'),
   },
   // -- App lifecycle -----------------------------------------------------------
   // 隐私协议拒绝退出 (#837)：走主进程 app.quit()（macOS 上 window.close 不退出）。
@@ -764,6 +784,8 @@ const api = {
       redirectUri?: string;
     }): Promise<QraftLoginResult> => ipcRenderer.invoke(IPC.QRAFT_BROWSER_LOGIN, opts ?? {}),
     status: (): Promise<QraftStatus> => ipcRenderer.invoke(IPC.QRAFT_STATUS),
+    // #1095 登录门：preload 阶段同步取到的初始登录态（可能为 null = 未知）。
+    initialStatus: readInitialQraftStatus(),
     refresh: (): Promise<QraftLoginResult> => ipcRenderer.invoke(IPC.QRAFT_REFRESH),
     logout: (): Promise<{ ok: boolean }> => ipcRenderer.invoke(IPC.QRAFT_LOGOUT),
     pointsBalance: (): Promise<
