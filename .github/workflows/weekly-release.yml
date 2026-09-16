@@ -1,11 +1,11 @@
-name: Weekly Release (develop into main)
+name: Scheduled Release (develop into main)
 
-# 每周五 00:00 (Asia/Shanghai = 前一天周四 16:00 UTC) 自动创建并立即合并 develop → main 的发布 PR，
+# 每周三、周五 00:00 (Asia/Shanghai = 前一天周二/周四 16:00 UTC) 自动创建并立即合并 develop → main 的发布 PR，
 # 合并产生的 main push 由 release.yml 触发 semantic-release 发版与打包。
 # 也可在 Actions 页手动触发（dry_run 只建 PR 不合并）。
 on:
   schedule:
-    - cron: '0 16 * * 4'
+    - cron: '0 16 * * 2,4'
   workflow_dispatch:
     inputs:
       dry_run:
@@ -62,8 +62,8 @@ jobs:
 
           {
             printf '## 类型\n\n- [x] 🔧 其他\n\n'
-            printf '## 变更概述\n\n自动发布：合并 develop 到 main，触发 semantic-release 发版（每周自动发版流水线创建）。\n\n'
-            printf '## 背景/问题\n\ndevelop 分支包含 %s 个尚未合入 main 的提交，本 PR 由每周五自动发版流水线创建并立即合并，随后由 release.yml 发布新版本并打包。\n\n' "${{ steps.check.outputs.count }}"
+            printf '## 变更概述\n\n自动发布：合并 develop 到 main，触发 semantic-release 发版（每周三、周五自动发版流水线创建）。\n\n'
+            printf '## 背景/问题\n\ndevelop 分支包含 %s 个尚未合入 main 的提交，本 PR 由自动发版流水线（每周三、周五 00:00）创建并立即合并，随后由 release.yml 发布新版本并打包。\n\n' "${{ steps.check.outputs.count }}"
             printf '## 变更内容\n\n本次 develop → main 合并包含以下提交：\n\n'
             sed 's/^\([0-9a-f]\{7,\}\) /- `\1` /' commits.txt
             printf '\n## 日志/验证证据\n\n```\n$ git log --oneline origin/main..origin/develop --no-merges --invert-grep --grep="^chore(version):"\n'

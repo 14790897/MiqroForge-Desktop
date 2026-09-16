@@ -277,59 +277,6 @@ jobs:
           retention-days: 7
 
   # ────────────────────────────────────────────────────────────
-  # macOS packaging smoke — 验证 Mac 包能否构建
+  # macOS 打包（dmg/zip）不在这里跑：每个 PR 都起 macos runner 成本高，
+  # 产物也没有下游消费方。发版时由 release.yml 的 build-mac 构建并上传 release。
   # ────────────────────────────────────────────────────────────
-  macos-build:
-    permissions:
-      contents: read
-    concurrency:
-      group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}-macos-build
-      cancel-in-progress: true
-    runs-on: macos-latest
-    defaults:
-      run:
-        working-directory: apps/desktop
-
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || github.ref }}
-          persist-credentials: false
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: apps/desktop/package-lock.json
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - name: Install dependencies
-        run: |
-          npm ci
-          pip install uv
-          cd ../..
-          uv sync
-
-      - name: Build miqi-bridge
-        working-directory: .
-        run: uv run pyinstaller miqi.spec
-
-      - name: Build Electron app
-        working-directory: apps/desktop
-        run: npm run build
-
-      - name: Package macOS app
-        working-directory: apps/desktop
-        run: npx electron-builder --mac --publish never
-
-      - name: Upload macOS artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: miqi-desktop-macos
-          path: |
-            dist-new/*.dmg
-            dist-new/*-mac.zip
-          retention-days: 7

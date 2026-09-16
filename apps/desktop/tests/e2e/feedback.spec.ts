@@ -72,8 +72,9 @@ test.describe('Feedback Page E2E', () => {
   test('feedback tab loads with empty state', async () => {
     await openFeedbackTab(page);
 
-    // Empty state should show (button "提交第一条反馈" is visible)
-    await expect(page.getByText('提交反馈将自动附加日志并发送到飞书')).toBeVisible({
+    // Empty state should show (button "提交第一条反馈" is visible).
+    // 文案随登录态变化（#1054）：未登录走飞书通道，登录后加写平台账号。
+    await expect(page.getByText(/提交反馈将自动附加日志/)).toBeVisible({
       timeout: 5_000,
     });
     await expect(page.getByRole('button', { name: /提交第一条反馈/ })).toBeVisible();
@@ -94,15 +95,17 @@ test.describe('Feedback Page E2E', () => {
     // Modal heading
     await expect(page.getByRole('heading', { name: '提交反馈' })).toBeVisible();
 
-    // Submit button should be disabled (title/content empty)
+    // Submit button should be disabled (content empty)
     const submitButton = page
       .locator('div.bg-\\[var\\(--surface\\)\\]')
       .getByRole('button', { name: '提交', exact: true });
     await expect(submitButton).toBeDisabled();
 
-    // Fill title and content
-    await page.getByPlaceholder('简要描述你的问题或建议').fill('E2E 测试标题');
-    await page.getByPlaceholder('请详细描述你的问题或建议...').fill('E2E 测试内容 - 验证表单收集');
+    // 标题输入框已移除（#1054）：平台 feedbackSubmitRequest 无 title 字段。
+    await expect(page.getByText('标题', { exact: true })).toHaveCount(0);
+
+    // Fill content
+    await page.getByPlaceholder(/简要描述你的问题或建议/).fill('E2E 测试内容 - 验证表单收集');
 
     // Submit button should now be enabled
     await expect(submitButton).toBeEnabled();
@@ -129,7 +132,7 @@ test.describe('Feedback Page E2E', () => {
     await headerBtn.click();
     const modalHeading = page.getByRole('heading', { name: '提交反馈' });
     await expect(modalHeading).toBeVisible();
-    await page.getByPlaceholder('简要描述你的问题或建议').fill('测试未保存拦截');
+    await page.getByPlaceholder(/简要描述你的问题或建议/).fill('测试未保存拦截');
 
     // Esc: dismiss keeps open, accept closes
     let dismissCalled = false;
@@ -148,7 +151,7 @@ test.describe('Feedback Page E2E', () => {
       expect(dismissCalled).toBe(true);
       await expect(modalHeading).toBeVisible({ timeout: 2_000 });
 
-      await page.getByPlaceholder('简要描述你的问题或建议').click();
+      await page.getByPlaceholder(/简要描述你的问题或建议/).click();
       await page.waitForTimeout(300);
       await page.keyboard.press('Escape');
       await expect(modalHeading).not.toBeVisible({ timeout: 5_000 });
@@ -158,7 +161,7 @@ test.describe('Feedback Page E2E', () => {
 
     // Overlay click: dismiss keeps open, accept closes
     await headerBtn.click();
-    await page.getByPlaceholder('简要描述你的问题或建议').fill('覆盖层点击测试');
+    await page.getByPlaceholder(/简要描述你的问题或建议/).fill('覆盖层点击测试');
     await expect(modalHeading).toBeVisible();
 
     let overlayDismissed = false;
@@ -178,7 +181,7 @@ test.describe('Feedback Page E2E', () => {
       expect(overlayDismissed).toBe(true);
       await expect(modalHeading).toBeVisible({ timeout: 2_000 });
 
-      await page.getByPlaceholder('简要描述你的问题或建议').click();
+      await page.getByPlaceholder(/简要描述你的问题或建议/).click();
       await page.waitForTimeout(300);
       await page.mouse.click(10, 10);
       await expect(modalHeading).not.toBeVisible({ timeout: 5_000 });
@@ -235,7 +238,7 @@ test.describe('Feedback Page E2E', () => {
       .getByRole('button', { name: '提交反馈', exact: true });
     await headerBtn.click();
     await expect(page.getByRole('heading', { name: '提交反馈' })).toBeVisible();
-    await expect(page.getByText('日志将在提交时自动附加并发送到飞书')).toBeVisible();
+    await expect(page.getByText('日志将在提交时自动附加并发送给开发团队')).toBeVisible();
     await expect(
       page.getByText('提示：建议先复制已填写的提示词，避免因意外关闭而丢失')
     ).toBeVisible();
@@ -248,8 +251,7 @@ test.describe('Feedback Page E2E', () => {
       .getByRole('button', { name: '提交反馈', exact: true });
     await headerBtn.click();
 
-    await page.getByPlaceholder('简要描述你的问题或建议').fill('E2E test title');
-    await page.getByPlaceholder('请详细描述你的问题或建议...').fill('E2E test content');
+    await page.getByPlaceholder(/简要描述你的问题或建议/).fill('E2E test content');
 
     const submitButton = page
       .locator('div.bg-\\[var\\(--surface\\)\\]')
@@ -290,7 +292,6 @@ test.describe('Feedback Page E2E', () => {
           entries: box.map((s: any, i: number) => ({
             id: `mock_${i}`,
             category: s.category,
-            title: s.title,
             content: s.content,
             contact: s.contact || '',
             app_version: s.app_version || 'dev',
@@ -314,11 +315,8 @@ test.describe('Feedback Page E2E', () => {
     await expect(page.getByRole('heading', { name: '提交反馈' })).toBeVisible();
 
     // Fill form
-    await page.getByPlaceholder('简要描述你的问题或建议').fill('E2E mock submission');
-    await page
-      .getByPlaceholder('请详细描述你的问题或建议...')
-      .fill('Mocked success-path content for E2E.');
-    await page.getByPlaceholder('邮箱或飞书账号，方便我们联系你').fill('e2e@test.com');
+    await page.getByPlaceholder(/简要描述你的问题或建议/).fill('E2E mock submission');
+    await page.getByPlaceholder('邮箱或手机号，方便我们联系你').fill('e2e@test.com');
 
     // Submit
     const submitButton = page
@@ -333,18 +331,19 @@ test.describe('Feedback Page E2E', () => {
     await expect(page.getByText('E2E mock submission')).toBeVisible({ timeout: 5_000 });
 
     // Verify the captured payload went through the IPC pipeline
+    // （#1054：提交不再携带 title，正文即唯一必填项）
     const captured = await electronApp.evaluate(async () => {
       const box = (global as any).__capturedSubmits ?? [];
       return box.map((s: any) => ({
-        title: s.title,
+        keys: Object.keys(s).sort(),
         content: s.content,
         contact: s.contact,
         category: s.category,
       }));
     });
     expect(captured).toHaveLength(1);
-    expect(captured[0].title).toBe('E2E mock submission');
-    expect(captured[0].content).toContain('Mocked success-path');
+    expect(captured[0].keys).not.toContain('title');
+    expect(captured[0].content).toContain('E2E mock submission');
     expect(captured[0].contact).toBe('e2e@test.com');
   });
 

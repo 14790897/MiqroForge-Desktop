@@ -9,6 +9,7 @@
 import { electron } from '../../shared/electron';
 import { join } from 'path';
 import { getWorkspacePath } from '../ipc';
+import { sendToWindow } from '../frame-send';
 import {
   IPC,
   IPC_EVENTS,
@@ -67,6 +68,11 @@ async function netFetchWithManualFallback(
   }
 }
 
+/** 扣费历史与去重索引的存放目录；E2E 用环境变量改道，默认随 userData。 */
+function billingDir(): string {
+  return process.env.MIQI_QRAFT_BILLING_DIR?.trim() || app.getPath('userData');
+}
+
 function getService(): QraftService {
   if (service) return service;
   const log: QraftLogger = (level, message) => {
@@ -90,13 +96,15 @@ function getService(): QraftService {
     log,
     onStatusChanged: (status: QraftStatus) => {
       for (const win of BrowserWindow.getAllWindows()) {
-        if (!win.isDestroyed()) win.webContents.send(IPC_EVENTS.QRAFT_STATUS_CHANGED, status);
+        sendToWindow(win, IPC_EVENTS.QRAFT_STATUS_CHANGED, status);
       }
     },
     // Slurm 作业扣费历史（issue #927）：与登录态同目录，随 userData 隔离。
-    billingHistoryPath: () => join(app.getPath('userData'), 'qraft-billing-history.json'),
+    // E2E 通过 MIQI_QRAFT_BILLING_DIR 指向临时目录（同 MIQI_QRAFT_STORE），
+    // 避免测试写进开发态 userData 并支持预置历史文件。
+    billingHistoryPath: () => join(billingDir(), 'qraft-billing-history.json'),
     // 已计费作业 ID 无上限索引（展示历史 200 条截断，去重索引完整保留）。
-    billedJobIdsPath: () => join(app.getPath('userData'), 'qraft-billed-job-ids.json'),
+    billedJobIdsPath: () => join(billingDir(), 'qraft-billed-job-ids.json'),
     // Skill/agent 读取 access_token 的通道：workspace 在沙箱中 bind-mount，
     // 文件放 workspace 下即可被沙箱内 Skill 读取（见 docs qraft-oauth2-login.md 第 6 节）。
     tokenFilePath: () => {

@@ -353,20 +353,79 @@ async def test_exec_batch_persist_shares_session_dir_with_doc_tools(monkeypatch)
         filename="cli.docx", title="T", _session_key=key,
     )
 
-    # exec 产物
+    # exec 产物（真实调用形态：ExecTool 把会话自己的工作区一并传下去，
+    # 写端才能与文档工具同根、同键形）
     exec_tool = ExecTool()
     exec_tool.working_dir = None
     artifact = files_dir / "out.md"
-    exec_tool._persist_changed_batch([str(artifact)], key)
+    exec_tool._persist_changed_batch([str(artifact)], key, files_dir)
 
     # 字面目录名钉住派生：两者同落 sessions/cli_direct/
     tracked = _read_tracked(ws / "sessions" / "cli_direct" / "tracked_files.json")
     assert "cli.docx" in tracked
-    assert str(artifact).replace("\\", "/") in tracked
+    # 与文档产物同样的相对 key 形态（工作区相对），不再是绝对路径
+    assert "out.md" in tracked
     # 旧剥离规则目录（sessions/direct）不得再出现
     assert not (ws / "sessions" / "direct" / "tracked_files.json").exists()
     # 面板读取回路能读到 exec 产物
-    assert str(artifact).replace("\\", "/") in _panel_tracked(ws, key)
+    assert "out.md" in _panel_tracked(ws, key)
+
+
+@pytest.mark.asyncio
+async def test_exec_batch_custom_workspace_persists_under_bound_root(tmp_path, monkeypatch):
+    """复现用户报的确切场景（#1096）：切到指定工作目录后，一次对话里先生成两个
+    PDF，再用脚本把这两个合成第三个 —— 第三个在「任务资产」里不显示。
+
+    写端曾经分叉：`CreatePdfTool` 走 `_persist_tracked_file`（绑定根、相对 key），
+    exec 产物追踪走 `_persist_changed_batch`（app-home、绝对 key）。读端
+    `_find_ledger_root` 按「哪份账本已有条目哪份说了算」只认一份，于是合并产物
+    永远读不到。
+
+    这里从 exec 的**真实调用形态**走一遍（`_track_workspace_changes` + 构造时的
+    两个工作区属性），并断言**读端 API**（`SessionManager.load_tracked_files`，
+    `sessions.get_tracked_files` 用的就是它）能拿到全部三个 —— 即面板真的会显示。
+    """
+    from miqi.agent.tools.shell import ExecTool
+
+    ws = _default_ws()
+    bound = tmp_path / "poems"
+    bound.mkdir()
+    key = "desktop:1063"
+    monkeypatch.setattr(
+        "miqi.runtime.file_handlers._get_workspace_path", lambda: str(ws),
+    )
+
+    # 两首诗各一个 PDF（文档工具 → 绑定根账本、相对 key）
+    pdf = _tool("miqi.documents.pdf_create_tool:CreatePdfTool",
+                workspace=bound, allowed_dir=bound)
+    for name in ("poem1.pdf", "poem2.pdf"):
+        result = await pdf.execute(
+            filename=name, title=name, content="x", _session_key=key,
+        )
+        assert "Created:" in result, result
+
+    # 合并：脚本在会话工作区写出第三个 PDF，随后 exec 追踪做快照差分。
+    # 绑定会话（自定义工作区）里 _session_files_dir 为 None、_workspace_root 是
+    # 绑定根本身 —— 与 tool_registry_factory 构造 ExecTool 时一致。
+    exec_tool = ExecTool()
+    exec_tool.working_dir = None
+    exec_tool._workspace_root = str(bound)
+    exec_tool._session_files_dir = None
+    before = exec_tool._snapshot_workspace(bound)
+    (bound / "poems_merged.pdf").write_bytes(b"%PDF-1.4 merged")
+    await exec_tool._track_workspace_changes(
+        before, key, bound,
+        workspace=exec_tool._session_files_dir or exec_tool._workspace_root,
+    )
+
+    # 读端（面板数据源）必须能看到全部三个，key 都是绑定根相对路径。
+    visible = _panel_tracked(bound, key)
+    for name in ("poem1.pdf", "poem2.pdf", "poems_merged.pdf"):
+        assert name in visible, f"{name} 不在面板读得到的条目里：{sorted(visible)}"
+    # app-home 那份不得收下这台会话的 exec 产物（旧行为在那里写绝对路径）。
+    app_home = _store_path(ws, key)
+    if app_home.exists():
+        assert str(bound / "poems_merged.pdf").replace("\\", "/") not in _read_tracked(app_home)
 
 
 @pytest.mark.asyncio
@@ -429,3 +488,87 @@ async def test_write_file_tracks_session_relative_segment():
     expected = f"sessions/{_session_files_dir_key(key)}/files/note.md"
     assert expected in tracked
     assert not _store_path(files_dir, key).exists()
+
+
+def test_tracked_persist_target_rejects_sibling_prefix_collision(tmp_path):
+    """`<ws>-old/x.pdf` 不算 workspace 内部（#1104 review）。
+
+    裸字符串前缀判断会把 `/tmp/project-old/result.pdf` 裁成 `old/result.pdf`，
+    但文件并不在 `/tmp/project` 里 —— 读端随后会去 `<ws>/old/result.pdf` 找一个
+    不存在的文件。这类路径必须保持绝对 key。
+    """
+    from miqi.agent.tools.filesystem import _tracked_persist_target
+
+    ws = tmp_path / "project"
+    ws.mkdir()
+    sibling = tmp_path / "project-old"
+    sibling.mkdir()
+    outside = sibling / "result.pdf"
+    outside.write_text("x")
+
+    target = _tracked_persist_target(ws, str(outside), "desktop:1104")
+    assert target is not None
+    _, rel_key = target
+    assert rel_key == str(outside).replace("\\", "/"), (
+        f"兄弟目录不得被裁成 workspace 相对路径：{rel_key}"
+    )
+
+    # 真正的子路径仍然相对化（别把边界收紧成「一律绝对」）。
+    inside = ws / "sub" / "ok.pdf"
+    inside.parent.mkdir()
+    inside.write_text("y")
+    _, inside_key = _tracked_persist_target(ws, str(inside), "desktop:1104")
+    assert inside_key == "sub/ok.pdf"
+
+
+@pytest.mark.asyncio
+async def test_mirror_uses_session_workspace(tmp_path, monkeypatch):
+    """sandbox→宿主镜像这条写入口也按会话工作区落账（#1104 review）。
+
+    绑定（自定义）工作区会被 bind-mount 到沙箱的 ``/home/miqi/workspace``，所以
+    路径映射、包含性检查和落账必须用同一个根。写死全局工作区会让镜像产物落到
+    app-home（读端看不到），还在全局工作区里多留一份位置错误的副本。
+
+    这里把沙箱侧的几个 helper 打桩，但 ``_sandbox_to_host_path`` 用**真实实现** ——
+    这样才能钉住「映射到会话工作区」这一步，而不只是钉住落账参数。
+    """
+    from miqi.agent.tools.shell import ExecTool
+
+    ws = _default_ws()
+    bound = tmp_path / "bound-dl"
+    bound.mkdir()
+    monkeypatch.setattr(
+        "miqi.runtime.file_handlers._get_workspace_path", lambda: str(ws),
+    )
+
+    class _FakeSandboxManager:
+        async def get_or_create(self, session_key):
+            return object()
+
+    async def _exists(sandbox, path):
+        return True
+
+    async def _read(sandbox, path):
+        return b"%PDF-1.4 downloaded"
+
+    fs = "miqi.agent.tools.filesystem."
+    monkeypatch.setattr(fs + "_get_session_workspace", lambda workspace, sandbox: bound)
+    monkeypatch.setattr(
+        fs + "_resolve_sandbox_path",
+        lambda filename, session_ws, sandbox: "/home/miqi/workspace/dl.pdf",
+    )
+    monkeypatch.setattr(fs + "_sandbox_file_exists", _exists)
+    monkeypatch.setattr(fs + "_sandbox_read_file", _read)
+
+    exec_tool = ExecTool(sandbox_manager=_FakeSandboxManager())
+    exec_tool._workspace_root = str(bound)
+    exec_tool._session_files_dir = None
+
+    key = "desktop:1104mirror"
+    await exec_tool._mirror_downloaded_files(
+        "curl -o dl.pdf https://example.invalid/x.pdf", object(), key,
+    )
+
+    assert (bound / "dl.pdf").exists(), "镜像产物必须落在会话工作区"
+    assert not (ws / "dl.pdf").exists(), "不得落到全局工作区"
+    assert "dl.pdf" in _read_tracked(_store_path(bound, key)), "未落绑定根账本"

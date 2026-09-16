@@ -258,10 +258,7 @@ def _get_data_home() -> str:
 
 def _get_miqi_version() -> str:
     """Get the MiQi package version."""
-    try:
-        return getattr(miqi, "__version__", "0.1.0")
-    except Exception:
-        return "0.1.0"
+    return miqi.__version__
 
 
 def build_initialize_result(

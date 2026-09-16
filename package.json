@@ -1,6 +1,6 @@
 {
   "name": "miqi-desktop-release",
-  "version": "0.25.0",
+  "version": "0.30.0-dev",
   "private": true,
   "description": "Release tooling for MiQroForge Desktop",
   "repository": {
@@ -71,7 +71,8 @@
             "CHANGELOG.md",
             "package.json",
             "pyproject.toml",
-            "apps/desktop/package.json"
+            "apps/desktop/package.json",
+            "miqi/__init__.py"
           ],
           "message": "chore(release): ${nextRelease.version} [skip ci]"
         }

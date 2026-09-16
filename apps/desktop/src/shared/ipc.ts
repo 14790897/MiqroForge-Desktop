@@ -99,6 +99,8 @@ export const IPC = {
   FILES_REVERT: 'files:revert',
   FILES_ACCEPT: 'files:accept',
   FILES_OPEN_EXTERNAL: 'files:openExternal',
+  FILES_OPEN_BYTES: 'files:openBytes', // 预览：字节 → 系统临时文件 → 默认应用打开
+  CLIPBOARD_READ_FILES: 'clipboard:readFiles', // Ctrl+V：主进程读系统剪贴板里的文件/图片
   FILES_OPEN_CONTAINING_FOLDER: 'files:openContainingFolder',
   FILES_SAVE_AS: 'files:saveAs', // #877: 预览弹窗「下载/另存为」
   HTML_OPEN_IN_BROWSER: 'html:openInBrowser',
@@ -175,6 +177,11 @@ export const IPC = {
   APP_FOCUS: 'app:focus',
   // #assets window auto-widen: 资产面板推开聊天区时,主进程把窗口加宽,聊天列不变
   APP_PANEL_EXTRA: 'app:panel-extra',
+
+  // 法律文件同意状态（#1071）：主进程 userData 文件为权威存储，
+  // 渲染层 localStorage 只作快速缓存（双开时 Chromium 存储会退化成内存）。
+  PRIVACY_GET_CONSENT: 'privacy:get-consent',
+  PRIVACY_SET_CONSENT: 'privacy:set-consent',
 } as const;
 
 // ---------------------------------------------------------------------------
@@ -899,6 +906,19 @@ export interface FilesOpenExternalResult {
   error?: string;
 }
 
+/** Ctrl+V 粘贴：主进程从系统剪贴板读到的文件/图片（renderer 不传参，避免任意读盘）。 */
+export interface ClipboardAttachmentFile {
+  name: string;
+  base64: string;
+  mime: string;
+  size: number;
+}
+
+export interface ClipboardReadFilesResult {
+  files: ClipboardAttachmentFile[];
+  image?: ClipboardAttachmentFile;
+}
+
 /** Result of writing an HTML string to a temp file and opening it in the
  *  system default browser. */
 export interface HtmlOpenInBrowserResult {
@@ -1333,7 +1353,6 @@ const dataUrlScreenshot = z
 
 export const FeedbackSubmitInput = z.object({
   category: z.enum(['bug', 'question', 'suggestion', 'other']),
-  title: z.string().min(1).max(200),
   content: z.string().min(1).max(10000),
   contact: z.string().max(200).optional(),
   app_version: z.string().max(50).optional(),
@@ -1345,7 +1364,6 @@ export const FeedbackSubmitInput = z.object({
 export interface FeedbackEntry {
   id: string;
   category: 'bug' | 'question' | 'suggestion' | 'other';
-  title: string;
   content: string;
   contact: string;
   app_version: string;
@@ -1359,9 +1377,21 @@ export interface FeedbackListResult {
   entries: FeedbackEntry[];
 }
 
+/** 平台通道（POST /oauth2/feedback）同步结果；未登录时整体省略。 */
+export interface FeedbackPlatformOutcome {
+  ok: boolean;
+  code?: QraftErrorCode;
+  message?: string;
+}
+
 export interface FeedbackSubmitResult {
   ok: boolean;
   record_id: string;
+  /**
+   * 登录态下加写平台通道的结果（issue #1054）。飞书通道始终兜底，
+   * 平台失败只提示"已收到、平台侧未同步"，不影响提交成功。
+   */
+  platform?: FeedbackPlatformOutcome;
 }
 
 // ---------------------------------------------------------------------------
@@ -1428,6 +1458,7 @@ export type QraftErrorCode =
   | 'INVALID_CONFIG'
   | 'POINTS_FAILED'
   | 'INSUFFICIENT_POINTS'
+  | 'FEEDBACK_FAILED'
   | 'INTERNAL';
 
 export interface QraftLoginResult {

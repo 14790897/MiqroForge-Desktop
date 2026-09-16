@@ -43,7 +43,7 @@ import {
   type QraftStoredState,
   type QraftTokens,
 } from './types';
-import type { QraftBillingHistoryEntry } from '../../shared/ipc';
+import type { FeedbackPlatformOutcome, QraftBillingHistoryEntry } from '../../shared/ipc';
 
 /** 到期前提前刷新的提前量（15 分钟）。 */
 const REFRESH_ADVANCE_MS = 15 * 60_000;
@@ -518,32 +518,11 @@ export class QraftService {
     this.refreshError = null;
     this.requiresRelogin = false;
     this.pointsBalance = null;
-    // Slurm 扣费历史随登出清除（换账号后不展示前任账号的计费记录）。
-    this.billedChargeIds.clear();
-    this.billedJobIds.clear();
+    // 扣费历史与已计费作业索引不随登出删除：读取时按 account.sub 过滤，
+    // 换账号自然看不到前任账号的记录；删除会让同一账号重新登录后历史
+    // 全丢（平台轮换 refresh_token 迫使重新登录是常态），并把跨重启
+    // 去重一并放开导致同一作业被重复扣费。
     this.inFlightCharges.clear();
-    const jobIdsPath = this.options.billedJobIdsPath?.();
-    if (jobIdsPath) {
-      try {
-        rmSync(jobIdsPath, { force: true });
-      } catch (err) {
-        this.options.log(
-          'WARN',
-          `qraft: 计费索引删除失败（${err instanceof Error ? err.message : err}）`
-        );
-      }
-    }
-    const historyPath = this.options.billingHistoryPath?.();
-    if (historyPath) {
-      try {
-        rmSync(historyPath, { force: true });
-      } catch (err) {
-        this.options.log(
-          'WARN',
-          `qraft: 扣费历史删除失败（${err instanceof Error ? err.message : err}）`
-        );
-      }
-    }
     this.options.log('INFO', 'qraft: 已退出登录（cookie 与 token 均已清除）');
     this.emitStatus();
   }
@@ -573,6 +552,80 @@ export class QraftService {
       this.options.log(
         'WARN',
         `qraft: 查询积分余额失败（${err instanceof QraftError ? err.code : err}）`
+      );
+      if (err instanceof QraftError) return { ok: false, code: err.code, message: err.message };
+      return {
+        ok: false,
+        code: 'INTERNAL',
+        message: err instanceof Error ? err.message : String(err),
+      };
+    }
+  }
+
+  /**
+   * 以当前登录用户身份向平台提交反馈（issue #1054）。
+   * 未登录返回 INVALID_CONFIG（调用方据此跳过平台通道）；access_token 失效
+   * 先刷新重试一次，刷新失败按 refreshNow 的语义置 requiresRelogin 并推状态，
+   * 由登录失效三件套（横幅 / 顶栏 chip / 发送拦截）引导重新登录。
+   */
+  async submitPlatformFeedback(req: {
+    type?: string;
+    content: string;
+    contact?: string;
+  }): Promise<FeedbackPlatformOutcome> {
+    const state = this.options.store.current;
+    if (!state) return { ok: false, code: 'INVALID_CONFIG', message: '尚未登录' };
+    const config: ResolvedQraftConfig = {
+      baseUrl: state.baseUrl,
+      clientId: state.clientId,
+      clientSecret: state.clientSecret,
+      redirectUri: state.redirectUri,
+    };
+    const generation = this.authGeneration;
+    const accountSub = state.account.sub;
+    try {
+      await this.options.client.submitFeedback(config, state.tokens.accessToken, req);
+      return { ok: true };
+    } catch (err) {
+      if (err instanceof QraftError && err.code === 'SESSION_EXPIRED') {
+        // 主进程自动刷新可能刚好错过窗口：先刷新再重试一次。
+        const refreshed = await this.refreshNow();
+        if (!refreshed.ok) return { ok: false, code: refreshed.code, message: refreshed.message };
+        const fresh = this.options.store.current;
+        // 刷新期间可能退出登录/换账号：绝不拿新账号的凭据顶替原账号提交。
+        if (!fresh || this.authGeneration !== generation || fresh.account.sub !== accountSub) {
+          return {
+            ok: false,
+            code: 'SESSION_EXPIRED',
+            message: '登录状态已变化，反馈未提交到平台',
+          };
+        }
+        try {
+          await this.options.client.submitFeedback(
+            {
+              baseUrl: fresh.baseUrl,
+              clientId: fresh.clientId,
+              clientSecret: fresh.clientSecret,
+              redirectUri: fresh.redirectUri,
+            },
+            fresh.tokens.accessToken,
+            req
+          );
+          return { ok: true };
+        } catch (retryErr) {
+          if (retryErr instanceof QraftError) {
+            return { ok: false, code: retryErr.code, message: retryErr.message };
+          }
+          return {
+            ok: false,
+            code: 'INTERNAL',
+            message: retryErr instanceof Error ? retryErr.message : String(retryErr),
+          };
+        }
+      }
+      this.options.log(
+        'WARN',
+        `qraft: 反馈平台提交失败（${err instanceof QraftError ? err.code : err}）`
       );
       if (err instanceof QraftError) return { ok: false, code: err.code, message: err.message };
       return {
@@ -623,14 +676,12 @@ export class QraftService {
     // 并发去重：同一 charge_id / 复合作业键（账号+服务器+作业 ID）的
     // 在途请求共享同一次扣费，后到者等待首个结果（状态轮询会并发报告 RUNNING）。
     const inFlightKey = `c:${chargeId}`;
-    const jobKey = jobId
-      ? this.slurmJobKey(
-          this.options.store.current?.account.sub ?? '',
-          String(payload.server_name ?? '').slice(0, 64),
-          jobId
-        )
-      : '';
-    const inFlightJobKey = jobKey ? `j:${jobKey}` : null;
+    // 空 subject（浏览器登录 userinfo 失败）不作复合作业键：索引跨登出保留后
+    // `::server::jobId` 会在账号之间串用，既可能误挡他人作业也可能被人误挡。
+    const inFlightSub = this.options.store.current?.account.sub ?? '';
+    const inFlightJobKey = inFlightSub
+      ? `j:${this.slurmJobKey(inFlightSub, String(payload.server_name ?? '').slice(0, 64), jobId)}`
+      : null;
     const inFlight =
       this.inFlightCharges.get(inFlightKey) ??
       (inFlightJobKey ? this.inFlightCharges.get(inFlightJobKey) : undefined);
@@ -669,7 +720,10 @@ export class QraftService {
     // 重复扣费），历史文件覆盖跨重启。
     const accountSub = state.account.sub;
     const serverName = String(payload.server_name ?? '').slice(0, 64);
-    const jobKey = jobId ? this.slurmJobKey(accountSub, serverName, jobId) : '';
+    // 空 subject 不构键：userinfo 失败留下的空 sub 会让 `::server::jobId`
+    // 在账号之间串用（索引现在跨登出保留），退化为仅按 charge_id（每次
+    // 工具调用新生成的 uuid4）去重，不会牵连其他账号的记录。
+    const jobKey = accountSub ? this.slurmJobKey(accountSub, serverName, jobId) : '';
     const history = this.loadBillingHistory();
     const existing =
       history.find((e) => e.chargeId === chargeId) ||
@@ -808,9 +862,18 @@ export class QraftService {
 
   /** 读取扣费历史（新→旧；只返回当前登录账号的记录）。 */
   getBillingHistory(): QraftBillingHistoryEntry[] {
-    const sub = this.options.store.current?.account.sub;
+    const state = this.options.store.current;
+    // 未登录不外发任何记录：历史文件保留其他账号的条目。
+    if (!state) return [];
+    const sub = state.account.sub;
+    // 账号身份未知（浏览器登录 userinfo 失败会留下空 sub）时同样不外发：
+    // 空 sub 无法作过滤依据，返回全量等于把其他账号的作业与计费数据
+    // 展示给当前用户（CodeRabbit #1067）。
+    if (!sub) return [];
     const history = this.loadBillingHistory();
-    return sub ? history.filter((e) => !e.accountSub || e.accountSub === sub) : history;
+    // 无 accountSub 的是加字段前的老记录（归属不可知，按历史行为展示）；
+    // 空字符串来自身份未知的一次会话，无法归属到任何账号，不外发。
+    return history.filter((e) => e.accountSub === undefined || e.accountSub === sub);
   }
 
   // ── 扣费历史持久化（userData/qraft-billing-history.json）──────────────

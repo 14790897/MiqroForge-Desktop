@@ -15,6 +15,14 @@ from typing import Any, Iterable
 
 from miqi.agent.tools.base import Tool
 
+# The canonical session-dir derivation moved to the session layer (#1014) so
+# that every writer and reader shares one implementation.  This alias keeps
+# the historical private name importable for the call sites that already use
+# it (``_session_files_dir_for_key`` below, runtime file handlers, session
+# handlers, the tool registry factory) and is asserted to be the very same
+# function object — never re-implement the derivation here.
+from miqi.session.session_keys import session_files_dir_key as _session_files_dir_key
+
 _log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -227,6 +235,45 @@ def _tracked_store_root(workspace: Path | None, session_key: str | None) -> Path
     return base
 
 
+def _tracked_persist_target(
+    workspace: Path | None,
+    file_path: str | Path,
+    session_key: str | None,
+) -> tuple[Path, str] | None:
+    """``(store_root, relative_key)`` — the single write contract for tracked files.
+
+    Both writers of a session's ledger (the document tools via
+    ``_persist_tracked_file`` and exec artifact tracking via
+    ``ExecTool._persist_changed_batch``) go through this, because a ledger
+    written under two different roots, or with two different key shapes,
+    splits one session's assets across two files.  The reader can only honour
+    one of them, so the other half of the session's output goes missing from
+    the assets panel — or shows twice, when both forms reach the frontend.
+
+    ``store_root`` is what a ``SessionManager`` must be rooted at for the
+    ledger to land in ``<store_root>/sessions/<derived>/tracked_files.json``;
+    the key is workspace-relative, which is what the read side resolves
+    against the session's own root.
+
+    Returns None when the entry cannot be keyed (no session key or workspace).
+    """
+    if not session_key or not workspace:
+        return None
+    key = _session_files_dir_key(session_key)
+    store_root = _tracked_store_root(workspace, key) or workspace
+    ws_str = str(Path(workspace).resolve()).replace("\\", "/")
+    rel_str = str(Path(file_path)).replace("\\", "/")
+    # 必须在**路径段边界**上匹配。裸字符串前缀会把 `/tmp/project-old/x.pdf`
+    # 当成 `/tmp/project` 的子路径，裁出错误的 `old/x.pdf` —— 读端随后会去
+    # `<ws>/old/x.pdf` 找一个根本不存在的文件。工作区之外的文件保持绝对 key，
+    # 交给读端的 host-absolute 分支解析。
+    if rel_str.startswith(ws_str + "/"):
+        rel_path = rel_str[len(ws_str) + 1:]
+    else:
+        rel_path = rel_str
+    return store_root, rel_path
+
+
 def _persist_tracked_file(
     workspace: Path | None,
     file_path: str | Path,
@@ -239,22 +286,16 @@ def _persist_tracked_file(
     this, files discovered from agent tool calls exist only in the
     frontend's in-memory state and are lost when the component unmounts.
     """
-    if not session_key or not workspace:
+    target = _tracked_persist_target(workspace, file_path, session_key)
+    if target is None:
         _log.debug("_persist_tracked_file: skipped (no session_key or workspace)")
         return
     try:
         from miqi.session.manager import SessionManager
+        store_root, rel_path = target
         # 修复 B：store key 与目录名派生同源（替换原 :213-216 的 client_id 剥离规则）
         session_key = _session_files_dir_key(session_key)
-        sm = SessionManager(_tracked_store_root(workspace, session_key) or workspace)
-        # Use workspace-relative paths for consistent reads across sessions
-        rel_path = str(file_path)
-        ws_str = str(workspace.resolve()).replace("\\", "/")
-        rel_str = str(Path(file_path)).replace("\\", "/")
-        if rel_str.startswith(ws_str + "/"):
-            rel_path = rel_str[len(ws_str) + 1:]
-        elif rel_str.startswith(ws_str):
-            rel_path = rel_str[len(ws_str):].lstrip("/")
+        sm = SessionManager(store_root)
         sm.save_tracked_file(session_key, rel_path, op=op)
         _log.info("_persist_tracked_file: ok session=%s path=%s", session_key, rel_path)
     except Exception as exc:
@@ -538,25 +579,11 @@ def _resolve_session_dir(
     return None
 
 
-def _session_files_dir_key(session_key: str) -> str:
-    """Derive the on-disk per-session directory key from a session key.
-
-    Strips the client_id prefix only for fully namespaced keys (three or
-    more colon segments, e.g. ``miqi-desktop:desktop:1786...`` →
-    ``desktop_1786...``) and keeps the whole key for two-segment channel
-    keys (``desktop:1786...`` → ``desktop_1786...``) — matching the disk
-    convention used by ``files.read`` and attachment saving.
-
-    Idempotent: feeding an already-derived key back in returns it
-    unchanged, so callers may pass either the raw key or a derived key
-    (``_tracked_store_root`` relies on this for its dir-name check).
-    """
-    from miqi.utils.helpers import safe_filename
-
-    parts = session_key.split(":")
-    if len(parts) >= 3:
-        parts = parts[1:]
-    return safe_filename("_".join(parts))
+# ``_session_files_dir_key`` is re-exported above from
+# ``miqi.session.session_keys`` (single implementation, #1014).  Its
+# derivation is idempotent — feeding an already-derived key back in returns
+# it unchanged — which ``_tracked_store_root`` relies on for its dir-name
+# check.
 
 
 def _session_files_dir_for_key(

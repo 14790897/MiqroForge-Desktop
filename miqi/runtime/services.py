@@ -117,6 +117,7 @@ class RuntimeServices:
         event_sink: Any | None = None,
         sandbox_manager: Any = None,
         agent_completion_callback: Any | None = None,
+        has_approval_responder: bool = True,
     ) -> "RuntimeServices":
         """Build the full service graph from a Config + provider.
 
@@ -219,6 +220,7 @@ class RuntimeServices:
             allow_fallback_to_none=_fallback_to_none_allowed,
             approval_bypass=approval_bypass,
             exec_timeout_ms=_resolve_exec_timeout_ms(config),
+            has_approval_responder=has_approval_responder,
         )
 
         # Phase 52: shared agent graph persistence (created before AgentControl)

@@ -110,7 +110,7 @@ def register_skills_app_handlers(server: AppServer) -> None:
                     "path": skill_path,
                     "source": skill["source"],
                     "description": loader._get_skill_description(skill["name"]),
-                    "available": loader._check_requirements(loader._get_skill_meta(skill["name"])),
+                    "available": loader._check_requirements(skill["name"]),
                 })
             for root in roots:
                 if not root.exists():

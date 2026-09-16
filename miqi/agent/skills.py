@@ -7,6 +7,8 @@ import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from packaging.requirements import InvalidRequirement, Requirement
+
 # Default builtin skills directory (relative to this file)
 BUILTIN_SKILLS_DIR = Path(__file__).parent.parent / "skills"
 
@@ -60,6 +62,28 @@ def invalidate_skill_index(workspace: Path | None = None) -> None:
         idx.generation += 1
 
 
+def _parse_requirements_text(text: str) -> list[Requirement]:
+    """Parse requirements.txt content into PEP 508 requirements.
+
+    Drops comments, blank lines, ``-r``/``-e`` includes, ``--index-url``
+    options, and bare VCS/URL lines. Returns parsed requirements so callers
+    can evaluate environment markers, inspect version specifiers, and detect
+    named direct-URL references (``pkg @ https://…``).
+    """
+    reqs: list[Requirement] = []
+    for line in text.splitlines():
+        line = line.split("#", 1)[0].strip()
+        if not line:
+            continue
+        if line.startswith(("-", "git+", "http:", "https:")):
+            continue
+        try:
+            reqs.append(Requirement(line))
+        except InvalidRequirement:
+            continue
+    return reqs
+
+
 class SkillsLoader:
     """
     Loader for agent skills.
@@ -79,6 +103,8 @@ class SkillsLoader:
         self._index = get_skill_index(workspace, self.builtin_skills)
         self._meta_cache: dict[str, dict | None] = self._index.meta_cache
         self._content_cache: dict[str, str | None] = {}
+        # requirements.txt 解析缓存（实例级，key=name → 已解析需求列表）
+        self._requirements_cache: dict[str, list[Requirement]] = {}
         # nested 技能 name→SKILL.md 索引（懒构建，替代 load_skill 里的全树 glob）
         self._nested_index: dict[str, Path] | None = None
         # 进程级索引的代际快照——检测磁盘变更，变了就清本实例的正文缓存
@@ -94,6 +120,7 @@ class SkillsLoader:
         """
         if self._index.generation != self._index_generation:
             self._content_cache.clear()
+            self._requirements_cache.clear()
             self._nested_index = None
             self._index_generation = self._index.generation
 
@@ -165,7 +192,7 @@ class SkillsLoader:
 
         # Filter by requirements
         if filter_unavailable:
-            return [s for s in skills if self._check_requirements(self._get_skill_meta(s["name"]))]
+            return [s for s in skills if self._check_requirements(s["name"])]
         return skills
 
     def _discover_nested_skills(
@@ -357,13 +384,20 @@ class SkillsLoader:
             name = escape_xml(s["name"])
             rel_path = relative_path(s["path"])
             desc = escape_xml(truncate_description(self._get_skill_description(s["name"])))
-            skill_meta = self._get_skill_meta(s["name"])
-            available = self._check_requirements(skill_meta)
+            available = self._check_requirements(s["name"])
 
             lines.append(f'  <skill available="{str(available).lower()}">')
             lines.append(f"    <name>{name}</name>")
             lines.append(f"    <description>{desc}</description>")
             lines.append(f"    <location>{rel_path}</location>")
+
+            # Surface declared Python dependencies (requirements.txt) so the
+            # agent knows what the skill's scripts need before running them.
+            reqs = self._read_requirements(s["name"])
+            if reqs:
+                lines.append("    <requirements>" +
+                             ", ".join(escape_xml(r.name) for r in reqs) +
+                             "</requirements>")
 
             # Surface references/ siblings so the agent knows there's a
             # third layer (Anthropic's progressive-disclosure level 3).
@@ -380,7 +414,7 @@ class SkillsLoader:
 
             # Show missing requirements for unavailable skills
             if not available:
-                missing = self._get_missing_requirements(skill_meta)
+                missing = self._get_missing_requirements(s["name"])
                 if missing:
                     lines.append(f"    <requires>{escape_xml(missing)}</requires>")
 
@@ -389,8 +423,9 @@ class SkillsLoader:
 
         return "\n".join(lines)
 
-    def _get_missing_requirements(self, skill_meta: dict) -> str:
-        """Get a description of missing requirements."""
+    def _get_missing_requirements(self, name: str) -> str:
+        """Get a human-readable description of missing requirements."""
+        skill_meta = self._get_skill_meta(name)
         missing = []
         requires = skill_meta.get("requires", {})
         for b in requires.get("bins", []):
@@ -399,6 +434,8 @@ class SkillsLoader:
         for env in requires.get("env", []):
             if not os.environ.get(env):
                 missing.append(f"ENV: {env}")
+        for pkg in self._missing_python_deps(name):
+            missing.append(f"Python: {pkg}")
         return ", ".join(missing)
 
     def _get_skill_description(self, name: str) -> str:
@@ -426,8 +463,9 @@ class SkillsLoader:
         except (json.JSONDecodeError, TypeError):
             return {}
 
-    def _check_requirements(self, skill_meta: dict) -> bool:
-        """Check if skill requirements are met (bins, env vars)."""
+    def _check_requirements(self, name: str) -> bool:
+        """Check if a skill's requirements are met (CLI bins, env vars, Python deps)."""
+        skill_meta = self._get_skill_meta(name)
         requires = skill_meta.get("requires", {})
         for b in requires.get("bins", []):
             if not shutil.which(b):
@@ -435,12 +473,58 @@ class SkillsLoader:
         for env in requires.get("env", []):
             if not os.environ.get(env):
                 return False
+        if self._missing_python_deps(name):
+            return False
         return True
 
     def _get_skill_meta(self, name: str) -> dict:
         """Get normalized metadata for a skill (cached in frontmatter)."""
         meta = self.get_skill_metadata(name) or {}
         return self._parse_skill_metadata(meta.get("metadata", ""))
+
+    def _read_requirements(self, name: str) -> list[Requirement]:
+        """Read and parse a skill's requirements.txt into PEP 508 requirements.
+
+        Returns an empty list when the skill has no requirements.txt. Results
+        are cached per instance and invalidated when the skill index changes.
+        """
+        self._sync_index_generation()
+        if name in self._requirements_cache:
+            return self._requirements_cache[name]
+        path = self.get_skill_path(name)
+        req_file = path.parent / "requirements.txt" if path else None
+        reqs: list[Requirement] = []
+        if req_file is not None and req_file.exists():
+            reqs = _parse_requirements_text(req_file.read_text(encoding="utf-8"))
+        self._requirements_cache[name] = reqs
+        return reqs
+
+    def _missing_python_deps(self, name: str) -> list[str]:
+        """Return requirements that are missing or version-incompatible.
+
+        Skips requirements whose environment marker is inactive on the current
+        interpreter. For the rest, checks the installed distribution against
+        the requirement's version specifier via :mod:`importlib.metadata`.
+        Named direct-URL requirements (``pkg @ https://…``) are checked by
+        their distribution name only — URL provenance is not validated.
+        Checked against the host interpreter the loader runs in; the sandbox
+        interpreter may differ, so this is an approximation consistent with
+        ``requires.bins`` using ``shutil.which`` on the host PATH.
+        """
+        from importlib import metadata
+
+        missing: list[str] = []
+        for req in self._read_requirements(name):
+            if req.marker is not None and not req.marker.evaluate():
+                continue  # marker inactive on this interpreter
+            try:
+                dist = metadata.distribution(req.name)
+            except (metadata.PackageNotFoundError, ValueError):
+                missing.append(req.name)
+                continue
+            if req.specifier and not req.specifier.contains(dist.version, prereleases=True):
+                missing.append(f"{req.name}{req.specifier}")
+        return missing
 
     def get_always_skills(self) -> list[str]:
         """Get skills marked as always=true that meet requirements."""
