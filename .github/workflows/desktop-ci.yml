@@ -43,8 +43,11 @@ jobs:
         run: npx playwright install chromium --with-deps
 
       - name: Mock smoke tests (Playwright)
+        # 作为门禁跑：smoke 覆盖渲染层启动路径（协议门 / 登录门 / 主界面）。
+        # 此前 continue-on-error 期间，mock 缺 window.miqi.app 让 ChatConsole
+        # 挂载即崩，65/75 用例静默失效（#1095 修复时才暴露）。瞬时抖动由
+        # playwright.config.ts 的全局 CI retries=2 兜住。
         run: npx playwright test --config=playwright.config.ts --project=smoke --quiet
-        continue-on-error: true  # flaky in headless, don't block
 
       - name: Upload Playwright report
         if: failure()
