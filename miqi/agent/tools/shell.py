@@ -3141,7 +3141,17 @@ class ExecTool(Tool):
             logger.warning("exec [mirror] failed for {}: {}", sandbox_path, exc)
             return
 
-        _persist_tracked_file(workspace, host_path, op="write", session_key=session_key)
+        # 落账必须与另两个写入口同根同键形（#1096）。这里拿到的 ``workspace``
+        # 是全局工作区，而 exec 的会话工作区是构造时定下的
+        # ``_session_files_dir`` / ``_workspace_root``。用全局工作区落账，绑定
+        # 文件夹会话的镜像产物会写进 app-home 那份账本、key 还是绝对路径 ——
+        # 读端只认绑定根那份，产物就此不显示。
+        _persist_tracked_file(
+            self._session_files_dir or self._workspace_root or workspace,
+            host_path,
+            op="write",
+            session_key=session_key,
+        )
 
 
     # ── Phase 59: subprocess artifact tracking (#607) ───────────────────────
