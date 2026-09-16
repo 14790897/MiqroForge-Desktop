@@ -8766,15 +8766,28 @@ export function ChatConsole({
                       try {
                         const res = await window.miqi.files.openBytes(name, previewFile.dataBase64);
                         if (res?.opened) return;
-                        if (res?.error) return;
+                        // 被拒也要说话：静默 return 正是 #1062 要消灭的那种失败。
+                        if (res?.error) {
+                          notifyAssetError(`打开失败：${res.error}`);
+                          return;
+                        }
                       } catch {
                         /* fall through to path */
                       }
                     }
                     try {
-                      await window.miqi.files.openExternal(previewFile.path);
-                    } catch {
-                      /* ignore */
+                      // #1062：必须带会话 key。不带的话主进程只按全局工作区校验，
+                      // 绑定文件夹会话里的合法文件也会被判「工作区之外」——而空
+                      // catch 会把这次失败整个吞掉，点了没反应。
+                      const res = await window.miqi.files.openExternal(
+                        previewFile.path,
+                        currentSessionRef.current
+                      );
+                      if (!res?.opened) {
+                        notifyAssetError(`打开失败：${res?.error ?? '未知原因'}`);
+                      }
+                    } catch (e: any) {
+                      notifyAssetError(`打开失败：${e?.message ?? String(e)}`);
                     }
                   }}
                   className="flex items-center gap-1 px-2 py-1 rounded text-[11px] text-[var(--accent)] hover:bg-[var(--accent-soft)] transition-colors"
