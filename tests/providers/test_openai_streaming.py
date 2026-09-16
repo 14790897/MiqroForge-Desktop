@@ -220,13 +220,15 @@ class _FakeToolCall:
         self.function = _FakeFunction(name=name, arguments=arguments)
 
 
-async def _stream_with_tool_args(provider, arguments_str: str) -> list[LLMStreamEvent]:
+async def _stream_with_tool_args(
+    provider, arguments_str: str, finish_reason: str = "tool_calls",
+) -> list[LLMStreamEvent]:
     """Stream a single tool call whose accumulated arguments = arguments_str."""
     chunks = [
         [_FakeChoice(_FakeDelta(tool_calls=[_FakeToolCall(
             index=0, call_id="call_1", name="web_search", arguments=arguments_str,
         )]))],
-        [_FakeChoice(_FakeDelta(), finish_reason="tool_calls")],
+        [_FakeChoice(_FakeDelta(), finish_reason=finish_reason)],
     ]
 
     async def _fake_create(**kw):
@@ -527,3 +529,192 @@ async def test_stream_buffered_provider_not_suppressed_by_capability():
     assert completed.response.reasoning_elapsed_s is not None
     assert completed.response.reasoning_elapsed_s >= 0.15
     assert completed.response.reasoning_elapsed_suppressed is False
+
+
+# ── #1094 S1: output-cap truncation must be flagged (not silently executed) ──
+
+# Real-incident shape: an MCP job script cut off mid-string by max_tokens.
+# Strict json.loads fails; json_repair silently closes the string, so the
+# salvage looks like a legitimate (but devastating) partial call.
+_TRUNCATED_ARGS = '{"path": "/tmp/run.sh", "content": "echo hi'
+# Repair-able but NOT truncation — the plain json_repair path (#24).
+_MALFORMED_ARGS = "{'query': '今日要闻'}"
+_COMPLETE_ARGS = '{"path": "/tmp/run.sh", "content": "echo hi"}'
+
+
+class _FakeMessage:
+    """Simulates a non-streaming OpenAI assistant message."""
+
+    def __init__(self, tool_calls=None, content=None):
+        self.content = content
+        self.tool_calls = tool_calls
+        self.reasoning_content = None
+
+
+class _FakeResponse:
+    """Simulates a non-streaming OpenAI chat-completion response."""
+
+    def __init__(self, tool_calls=None, finish_reason="stop"):
+        self.choices = [
+            type("Choice", (), {
+                "message": _FakeMessage(tool_calls=tool_calls),
+                "finish_reason": finish_reason,
+                "index": 0,
+            })()
+        ]
+        self.usage = None
+
+
+async def _chat_with_tool_args(
+    provider, arguments_str: str, finish_reason: str = "stop",
+):
+    """Drive provider.chat() with one tool call carrying arguments_str."""
+    tc = _FakeToolCall(
+        index=0, call_id="call_1", name="submit_job", arguments=arguments_str,
+    )
+
+    async def _fake_create(**kw):
+        """Fake create for this test scenario."""
+        return _FakeResponse(tool_calls=[tc], finish_reason=finish_reason)
+
+    provider._client.chat.completions.create = _fake_create
+    return await provider.chat(
+        messages=[{"role": "user", "content": "submit the job"}],
+        model="gpt-4o",
+    )
+
+
+def _capture_warnings():
+    """Return (messages, remove) — a loguru sink collecting WARNING+ records."""
+    from loguru import logger as loguru_logger
+
+    messages: list[str] = []
+
+    def _sink(message):
+        messages.append(str(message.record["message"]))
+
+    handler_id = loguru_logger.add(_sink, level="WARNING")
+    return messages, lambda: loguru_logger.remove(handler_id)
+
+
+# -- _args_strict_ok: the three-state predicate -------------------------
+
+
+def test_args_strict_ok_three_states():
+    """Empty/non-string args pass; valid JSON passes; truncated JSON fails."""
+    from miqi.providers.openai_provider import OpenAIProvider
+
+    assert OpenAIProvider._args_strict_ok("") is True  # empty → not truncation
+    assert OpenAIProvider._args_strict_ok(None) is True  # non-string → N/A
+    assert OpenAIProvider._args_strict_ok({}) is True
+    assert OpenAIProvider._args_strict_ok(_COMPLETE_ARGS) is True
+    assert OpenAIProvider._args_strict_ok(_TRUNCATED_ARGS) is False
+
+
+# -- streaming ----------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_stream_truncated_args_flagged_when_finish_reason_length():
+    """#1094: finish_reason=length + unparseable args → truncated=True, and the
+    args themselves stay json_repair's salvage (repair behaviour unchanged)."""
+    from miqi.providers.openai_provider import OpenAIProvider
+
+    provider = OpenAIProvider(api_key="sk-test")
+    messages, remove = _capture_warnings()
+    try:
+        events = await _stream_with_tool_args(
+            provider, _TRUNCATED_ARGS, finish_reason="length",
+        )
+    finally:
+        remove()
+
+    completed = events[-1]
+    call = completed.response.tool_calls[0]
+    assert call.truncated is True
+    # Repair path must NOT change: salvage is still delivered for diagnosis.
+    assert call.arguments.get("path") == "/tmp/run.sh", call.arguments
+    assert any("truncated by output cap" in m for m in messages), messages
+
+
+@pytest.mark.asyncio
+async def test_stream_length_finish_with_complete_args_not_flagged():
+    """A clean max_tokens stop that still emitted complete JSON is not truncated."""
+    from miqi.providers.openai_provider import OpenAIProvider
+
+    provider = OpenAIProvider(api_key="sk-test")
+    events = await _stream_with_tool_args(
+        provider, _COMPLETE_ARGS, finish_reason="length",
+    )
+
+    call = events[-1].response.tool_calls[0]
+    assert call.truncated is False
+    assert call.arguments == {"path": "/tmp/run.sh", "content": "echo hi"}
+
+
+@pytest.mark.asyncio
+async def test_stream_truncated_args_not_flagged_on_normal_stop():
+    """Normal stop + malformed args keeps the pre-#1094 json_repair behaviour."""
+    from miqi.providers.openai_provider import OpenAIProvider
+
+    provider = OpenAIProvider(api_key="sk-test")
+    events = await _stream_with_tool_args(
+        provider, _MALFORMED_ARGS, finish_reason="tool_calls",
+    )
+
+    call = events[-1].response.tool_calls[0]
+    assert call.truncated is False
+    assert call.arguments == {"query": "今日要闻"}
+
+
+# -- non-streaming chat() ----------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_chat_truncated_args_flagged_when_finish_reason_length():
+    """Non-stream parity: finish_reason=length + unparseable args → truncated."""
+    from miqi.providers.openai_provider import OpenAIProvider
+
+    provider = OpenAIProvider(api_key="sk-test")
+    messages, remove = _capture_warnings()
+    try:
+        response = await _chat_with_tool_args(
+            provider, _TRUNCATED_ARGS, finish_reason="length",
+        )
+    finally:
+        remove()
+
+    call = response.tool_calls[0]
+    assert call.truncated is True
+    assert call.arguments.get("path") == "/tmp/run.sh", call.arguments
+    assert any("truncated by output cap" in m for m in messages), messages
+
+
+@pytest.mark.asyncio
+async def test_chat_length_finish_with_complete_args_not_flagged():
+    """Non-stream: length finish with strictly-valid args is not a truncation."""
+    from miqi.providers.openai_provider import OpenAIProvider
+
+    provider = OpenAIProvider(api_key="sk-test")
+    response = await _chat_with_tool_args(
+        provider, _COMPLETE_ARGS, finish_reason="length",
+    )
+
+    call = response.tool_calls[0]
+    assert call.truncated is False
+    assert call.arguments == {"path": "/tmp/run.sh", "content": "echo hi"}
+
+
+@pytest.mark.asyncio
+async def test_chat_truncated_args_not_flagged_on_normal_stop():
+    """Non-stream: normal stop keeps the pre-#1094 json_repair behaviour."""
+    from miqi.providers.openai_provider import OpenAIProvider
+
+    provider = OpenAIProvider(api_key="sk-test")
+    response = await _chat_with_tool_args(
+        provider, _MALFORMED_ARGS, finish_reason="stop",
+    )
+
+    call = response.tool_calls[0]
+    assert call.truncated is False
+    assert call.arguments == {"query": "今日要闻"}

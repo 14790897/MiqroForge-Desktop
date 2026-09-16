@@ -199,6 +199,20 @@ class OpenAIProvider(LLMProvider):
         """Return True for retryable transient errors."""
         return resilience.classify_error(error) == ErrorKind.TRANSIENT
 
+    @staticmethod
+    def _args_strict_ok(raw: Any) -> bool:
+        """非空字符串时要求严格 json.loads 通过；空值/非字符串视为可接受。
+
+        finish_reason=="length" + 严格解析失败 ⇒ 参数被输出上限截断（#1094）。
+        """
+        if not isinstance(raw, str) or not raw:
+            return True
+        try:
+            json.loads(raw)
+            return True
+        except (json.JSONDecodeError, ValueError):
+            return False
+
     def _parse_tool_call_arguments(self, tool_name: str, args: Any) -> dict[str, Any]:
         """Parse tool-call arguments with json_repair fallback."""
         if not isinstance(args, str):
@@ -285,6 +299,7 @@ class OpenAIProvider(LLMProvider):
             return LLMResponse(content=None, finish_reason="stop")
         choice = response.choices[0]
         message = choice.message
+        _finish = choice.finish_reason or "stop"
 
         tool_calls: list[ToolCallRequest] = []
         if hasattr(message, "tool_calls") and message.tool_calls:
@@ -296,7 +311,19 @@ class OpenAIProvider(LLMProvider):
                         tc.function.name,
                         tc.function.arguments,
                     ),
+                    # #1094: cut off by max_tokens → arguments is repair salvage.
+                    truncated=(
+                        _finish == "length"
+                        and not self._args_strict_ok(tc.function.arguments)
+                    ),
                 ))
+            _flagged = [tc for tc in tool_calls if getattr(tc, "truncated", False)]
+            if _flagged:
+                logger.warning(
+                    "tool args truncated by output cap (finish_reason=length): "
+                    "{} call(s) flagged: {}",
+                    len(_flagged), [tc.name for tc in _flagged],
+                )
 
         if not tool_calls and isinstance(message.content, str):
             fallback = self._parse_tool_call_from_content(message.content)
@@ -323,7 +350,7 @@ class OpenAIProvider(LLMProvider):
         return LLMResponse(
             content=message.content,
             tool_calls=tool_calls,
-            finish_reason=choice.finish_reason or "stop",
+            finish_reason=_finish,
             usage=usage,
             reasoning_content=reasoning_content,
         )
@@ -604,7 +631,19 @@ class OpenAIProvider(LLMProvider):
                     acc["function"]["name"],
                     acc["function"]["arguments"],
                 ),
+                # #1094: same rule as the non-stream path above.
+                truncated=(
+                    finish_reason == "length"
+                    and not self._args_strict_ok(acc["function"]["arguments"])
+                ),
             ))
+        _flagged = [tc for tc in parsed_tool_calls if getattr(tc, "truncated", False)]
+        if _flagged:
+            logger.warning(
+                "tool args truncated by output cap (finish_reason=length): "
+                "{} call(s) flagged: {}",
+                len(_flagged), [tc.name for tc in _flagged],
+            )
 
         yield LLMStreamEvent(
             kind="completed",
