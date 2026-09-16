@@ -27,7 +27,6 @@ from miqi.kun_runtime.model_client import (
 )
 from miqi.kun_runtime.stores import FileSessionStore, FileThreadStore
 from miqi.kun_runtime.tool_host import (
-    ASK_USER_CONFIRM_TOOL,
     ToolCallLike,
     ToolHostContext,
     ToolHostResult,
@@ -513,14 +512,13 @@ class AgentLoop:
             request.context_instructions = request.context_instructions or []
             request.context_instructions.append(TOKEN_ECONOMY_INSTRUCTION)
 
-        # ask_user_confirm_card usage guidance (issue #646, 功能描述④)
-        if any(t.name == ASK_USER_CONFIRM_TOOL for t in tool_specs):
-            from miqi.agent.tools.ask_user_confirm import ASK_USER_CONFIRM_INSTRUCTION
-            from miqi.agent.tools.ask_user_plan_confirm import ASK_PLAN_CONFIRM_INSTRUCTION
+        # 确认类工具 usage guidance（issue #646 功能描述④ / #646-v2）——
+        # 逐工具判名，统一走共享助手（三个工具各自独立 gate）。
+        from miqi.agent.tools.confirm_instructions import instructions_for_tools
+
+        for _instr in instructions_for_tools([t.name for t in tool_specs]):
             request.context_instructions = request.context_instructions or []
-            request.context_instructions.append(ASK_USER_CONFIRM_INSTRUCTION)
-            # #646-v2: 多步骤任务先弹任务计划卡
-            request.context_instructions.append(ASK_PLAN_CONFIRM_INSTRUCTION)
+            request.context_instructions.append(_instr)
 
         # 回答可视化与引用标注（issue #671）
         from miqi.agent.answer_style import VISUAL_ANSWER_INSTRUCTION

@@ -616,10 +616,9 @@ class TaskRunner:
             "具体文章页面，不要批量抓取 RSS 聚合源或新闻站点首页。"
         )
 
-        # ask_user_confirm_card usage guidance (issue #646, 功能描述④) —
-        # mirrors the KUN loop injection: when the tool is exposed to the
-        # model, the prompt must tell it WHEN to call it.
-        # CodeRabbit（9-11）：两个工具各自独立 gate——能力集只暴露
+        # 确认类工具 usage guidance（issue #646 功能描述④ / #646-v2）—
+        # 统一走共享助手：按暴露的工具名逐工具注入（保序、去重）。
+        # CodeRabbit（9-11）：两个工具各自独立 gate——只暴露
         # ask_user_plan_confirm（不含 confirm_card）时也要注入计划卡引导，
         # 否则模型不知道何时弹计划卡。
         _tool_names = {
@@ -627,15 +626,10 @@ class TaskRunner:
             for t in tools
             if isinstance(t, dict)
         }
-        if "ask_user_confirm_card" in _tool_names:
-            from miqi.agent.tools.ask_user_confirm import ASK_USER_CONFIRM_INSTRUCTION
+        from miqi.agent.tools.confirm_instructions import instructions_for_tools
 
-            effective_system_prompt += "\n\n" + ASK_USER_CONFIRM_INSTRUCTION
-        if "ask_user_plan_confirm" in _tool_names:
-            from miqi.agent.tools.ask_user_plan_confirm import ASK_PLAN_CONFIRM_INSTRUCTION
-
-            # #646-v2: 多步骤任务先弹任务计划卡（Task Plan Card）
-            effective_system_prompt += "\n\n" + ASK_PLAN_CONFIRM_INSTRUCTION
+        for _instr in instructions_for_tools(_tool_names):
+            effective_system_prompt += "\n\n" + _instr
 
         # 回答可视化与引用标注（issue #671）— 技术方案/流程/对比类回答
         # 追加 Mermaid 流程图与参考文献（前端 MarkdownContent 渲染 mermaid）
