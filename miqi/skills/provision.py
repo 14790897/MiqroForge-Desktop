@@ -126,10 +126,12 @@ class SkillProvisioner:
     """Install a skill's missing Python deps persistently (apt + per-skill venv)."""
 
     def __init__(self, loader: Any, sandbox_manager: Any):
+        """Bind the skill loader and sandbox manager used to install deps."""
         self._loader = loader
         self._sandbox_manager = sandbox_manager
 
     def _active_sandbox(self) -> Any:
+        """Return the manager's active sandbox (or ``None`` when absent)."""
         return getattr(self._sandbox_manager, "active_sandbox", None)
 
     def _system_installs_available(self) -> bool:
@@ -169,6 +171,7 @@ class SkillProvisioner:
 
     @staticmethod
     def _fail(name: str, message: str) -> dict[str, Any]:
+        """Build a structured failure summary for a rejected/invalid provision."""
         return {
             "ok": False,
             "skill": name,
