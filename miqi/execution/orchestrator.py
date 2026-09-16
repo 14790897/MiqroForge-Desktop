@@ -24,6 +24,7 @@ from typing import Any
 
 from loguru import logger
 
+from miqi.agent.tools.write_grants import get_write_grants
 from miqi.execution.hook_runtime import HookPoint, HookRuntime
 from miqi.execution.permission_engine import (
     PermissionDecision,
@@ -968,7 +969,19 @@ class ToolOrchestrator:
             # #821: auto-sensed user-mentioned output dirs — mirrors the KUN
             # tool host injection so file tools accept the user's explicitly
             # requested output location (e.g. Desktop/test_result).
-            kwargs["_user_roots"] = list(ctx.user_mentioned_roots or [])
+            #
+            # #1013: plus this SESSION's write-card grants ("本目录不再询问" /
+            # approval-bypass), which the file tools publish to the shared
+            # store.  ``_user_roots`` is exec's only authorization channel
+            # (``_exec_rw_binds`` / ``_guard_write_roots``), so without them
+            # exec kept refusing a directory the user had just authorized in
+            # the same session.  Sorted → deterministic list and bind order;
+            # empty when nothing was granted (fail-closed, unchanged from
+            # before #1013).
+            kwargs["_user_roots"] = [
+                *(ctx.user_mentioned_roots or []),
+                *sorted(get_write_grants().get(ctx.session_id)),
+            ]
         elif ctx.tool_name.startswith("mcp_"):
             # MCP 工具（issue #927）：注入会话上下文供 slurm 计费握手使用
             #（MCPToolWrapper 会 pop 掉，不传给 MCP 服务端）。

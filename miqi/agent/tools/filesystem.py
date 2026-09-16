@@ -14,6 +14,11 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from miqi.agent.tools.base import Tool
+from miqi.agent.tools.write_grants import (
+    SessionWriteGrants,
+    get_write_grants,
+    norm_session_key,
+)
 
 # The canonical session-dir derivation moved to the session layer (#1014) so
 # that every writer and reader shares one implementation.  This alias keeps
@@ -950,6 +955,30 @@ async def _ask_write_permission(write_resolver, target: Path, grant_dir: Path) -
     return cid if cid in ("once", "always_dir") else "deny"
 
 
+def _grant_session_dir(
+    grant_dir: Path,
+    granted: set[str],
+    session_key: str | None,
+    write_grants: SessionWriteGrants | None,
+) -> None:
+    """Record a SESSION-scoped grant, on the tool instance and the shared store.
+
+    The instance set is what the file tools check; the store is what makes the
+    SAME session's ``exec`` honour the grant too (#1013) — ``ExecTool`` only
+    trusts the harness-injected ``_user_roots``, and the orchestrator builds
+    that list from ``store.get(session_id)``.
+
+    The "允许本次" branch deliberately does NOT come through here: a
+    ``once_granted`` entry is invocation-scoped, and publishing it would turn
+    one click into a session-wide exec grant.
+    """
+    import os as _os
+
+    granted.add(_os.path.normcase(str(grant_dir)))
+    if write_grants is not None:
+        write_grants.add(session_key, grant_dir)
+
+
 async def _resolve_write_shared_roots(
     path: str,
     *,
@@ -962,6 +991,8 @@ async def _resolve_write_shared_roots(
     persist_extra_root=None,
     boundary_enforced: bool = True,
     bypass: bool = False,
+    session_key: str | None = None,
+    write_grants: SessionWriteGrants | None = None,
 ) -> list[Path] | None:
     """Pre-flight write authorization (issue #864).
 
@@ -976,7 +1007,10 @@ async def _resolve_write_shared_roots(
     actual write whitelist (WSL sandbox containment, or native
     ``restrict_to_workspace``).  When False — the native unrestricted path —
     there is no whitelist to widen, so the card must not fire and deny an
-    otherwise-legal write.
+    otherwise-legal write.  This is a declared design boundary, not a missing
+    authorization channel; the user-visible rules (when the card appears, what
+    each choice grants) are documented in ``docs/configuration.md``
+    («写授权卡何时出现»).
 
     ``bypass`` reflects the approval-bypass switches (``approvals.bypass_all`` /
     ``approvals.bypass_file_write_approval``).  When True the card is skipped
@@ -990,6 +1024,13 @@ async def _resolve_write_shared_roots(
     INVOCATION-scoped set shared by the authorize_paths pre-flight and the
     actual write path WITHIN one tool call — "允许本次" is recorded there, so
     a later tool call must re-authorize (it is not a session-wide grant).
+
+    ``session_key`` + ``write_grants`` additionally publish the SESSION-scoped
+    grants (and only those) to the process-level store, which is how the same
+    session's ``exec`` learns about them (#1013 — exec reads the store through
+    the orchestrator's ``_user_roots`` injection; ``once_granted`` never goes
+    there).  Both default to "no store": direct/headless callers keep the
+    pre-#1013 behavior byte for byte.
     """
     import os as _os
 
@@ -1023,14 +1064,17 @@ async def _resolve_write_shared_roots(
         return None
     if bypass:
         # Approval bypass: skip the card, grant the directory for this session.
-        granted.add(_os.path.normcase(str(grant_dir)))
+        # Published to the shared store like "本目录不再询问" (#1013): the user
+        # turned the approval prompt OFF for file writes, so the session grant
+        # exec receives is the same one the file tools already act on.
+        _grant_session_dir(grant_dir, granted, session_key, write_grants)
         return [*shared_list, grant_dir]
     if write_resolver is None:
         return None
 
     choice = await _ask_write_permission(write_resolver, target, grant_dir)
     if choice == "always_dir":
-        granted.add(_os.path.normcase(str(grant_dir)))
+        _grant_session_dir(grant_dir, granted, session_key, write_grants)
         if persist_extra_root is not None:
             try:
                 await persist_extra_root(grant_dir)
@@ -1415,6 +1459,7 @@ class WriteFileTool(Tool):
         write_resolver=None,
         persist_extra_root=None,
         bypass_approval: bool = False,
+        write_grants: SessionWriteGrants | None = None,
     ):
         self._workspace = workspace
         self._allowed_dir = allowed_dir
@@ -1434,11 +1479,17 @@ class WriteFileTool(Tool):
         # Session-scoped grants: a single tool instance serves every session in
         # the runtime, so "允许本次 / 本目录不再询问" must never leak a grant
         # from one session into another (CodeRabbit #866).
+        #
+        # #1013: the same grants are published to *write_grants* (process-level,
+        # session-keyed) so the SAME session's ``exec`` honours them — exec's
+        # only authorization channel is the harness-injected ``_user_roots``,
+        # which the orchestrator now builds from that store.
+        self._write_grants = write_grants or get_write_grants()
         self._granted: dict[str, set[str]] = {}
 
     def _session_granted(self, session_key: str | None) -> set[str]:
         """Return the session-scoped grant set for *session_key*."""
-        return self._granted.setdefault(session_key or "", set())
+        return self._granted.setdefault(norm_session_key(session_key), set())
 
     @property
     def _tracking_workspace(self) -> Path | None:
@@ -1510,6 +1561,8 @@ class WriteFileTool(Tool):
                 persist_extra_root=self._persist_extra_root,
                 boundary_enforced=boundary_enforced,
                 bypass=self._bypass_approval,
+                session_key=session_key,
+                write_grants=self._write_grants,
             )
             if result is None:
                 return f"Error: 权限被拒绝：用户未授权写入 {p}"
@@ -1589,6 +1642,8 @@ class WriteFileTool(Tool):
             persist_extra_root=self._persist_extra_root,
             boundary_enforced=boundary_enforced,
             bypass=self._bypass_approval,
+            session_key=_sess_key,
+            write_grants=self._write_grants,
         )
         if authorized is not None:
             shared = authorized
@@ -1679,6 +1734,7 @@ class EditFileTool(Tool):
         write_resolver=None,
         persist_extra_root=None,
         bypass_approval: bool = False,
+        write_grants: SessionWriteGrants | None = None,
     ):
         self._workspace = workspace
         self._allowed_dir = allowed_dir
@@ -1692,12 +1748,14 @@ class EditFileTool(Tool):
         self._write_resolver = write_resolver
         self._persist_extra_root = persist_extra_root
         self._bypass_approval = bypass_approval
-        # Session-scoped grants (CodeRabbit #866).
+        # Session-scoped grants (CodeRabbit #866); published to the shared,
+        # session-keyed store so exec honours them too (#1013).
+        self._write_grants = write_grants or get_write_grants()
         self._granted: dict[str, set[str]] = {}
 
     def _session_granted(self, session_key: str | None) -> set[str]:
         """Return the session-scoped grant set for *session_key*."""
-        return self._granted.setdefault(session_key or "", set())
+        return self._granted.setdefault(norm_session_key(session_key), set())
 
     @property
     def _tracking_workspace(self) -> Path | None:
@@ -1768,6 +1826,8 @@ class EditFileTool(Tool):
                 persist_extra_root=self._persist_extra_root,
                 boundary_enforced=boundary_enforced,
                 bypass=self._bypass_approval,
+                session_key=session_key,
+                write_grants=self._write_grants,
             )
             if result is None:
                 return f"Error: 权限被拒绝：用户未授权写入 {p}"
@@ -1827,6 +1887,8 @@ class EditFileTool(Tool):
             persist_extra_root=self._persist_extra_root,
             boundary_enforced=boundary_enforced,
             bypass=self._bypass_approval,
+            session_key=_sess_key,
+            write_grants=self._write_grants,
         )
         if authorized is not None:
             shared = authorized
