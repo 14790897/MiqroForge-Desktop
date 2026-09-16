@@ -10,6 +10,7 @@ import type { TypedAppClient } from '../shared/app-client';
 import type { RuntimeState, RuntimeStatus } from '../shared/ipc';
 import { IPC_EVENTS } from '../shared/ipc';
 import { writeMainProcessLog } from './electron-log';
+import { sendToWindow } from './frame-send';
 
 /** Strip ANSI escape codes (color/bold/reset) from log text. */
 function stripAnsi(text: string): string {
@@ -485,9 +486,7 @@ export class BridgeManager extends EventEmitter {
             if (channel) {
               const allWindows = BrowserWindow.getAllWindows();
               for (const win of allWindows) {
-                if (!win.isDestroyed()) {
-                  win.webContents.send(channel, resp.data);
-                }
+                sendToWindow(win, channel, resp.data);
               }
             }
           }
