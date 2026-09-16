@@ -144,14 +144,42 @@ jobs:
         timeout-minutes: 10
         env:
           PLAYWRIGHT_SKIP_WEB_SERVER: '1'
+          # 探针用的是同一个 config，json reporter 默认会写 test-reports/results.json。
+          # 引开它，免得下面 flaky 汇总读到「只有 1 条用例」的探针结果（#1107）。
+          PLAYWRIGHT_JSON_OUTPUT_FILE: test-reports/probe-results.json
 
       - name: Run Electron E2E
+        # --workers=2 (#1107): ubuntu-latest runners are 4 vCPU, and each worker is a
+        # full Electron app plus its Python bridge driving real LLM calls — 4 of them
+        # leave the runner no headroom, which surfaces as actionability timeouts at
+        # random spec points (first attempt fails, retry passes) and the job still
+        # reports success.  Same parallelism as the macOS job below, for the same reason.
+        #
+        # This is load reduction, not a cure: the macOS job has run 2 workers for a
+        # while and still has flaky runs.  The other half of #1107 is the next step,
+        # which makes whatever flakiness remains visible instead of silent.
+        #
+        # Halving parallelism roughly doubles wall clock (the full suite takes 15-20
+        # min at 4 workers, 199-233 tests), so the step timeout goes 30 -> 60 min: a
+        # 2-worker run lands somewhere in the 30-40 min range, and the estimate has
+        # not been confirmed by a real CI run yet.
         run: |
           xvfb-run --auto-servernum \
-            npx playwright test --config=playwright.config.ts --project=electron
-        timeout-minutes: 30
+            npx playwright test --config=playwright.config.ts --project=electron \
+            --workers=2
+        timeout-minutes: 60
         env:
           PLAYWRIGHT_SKIP_WEB_SERVER: '1'
+
+      - name: Summarize flaky E2E tests
+        # if: always() —— flaky 用例既不会让 Playwright 失败、也不会让这一步失败，所以这一步
+        # 只做一件事：把「重试才通过」的用例写进 job summary，并各发一条 warning 注解（#1107）。
+        # 脚本自己捕所有异常、永不非 0 退出，能改变 job 结论的只有上一步的退出码。
+        # 报告缺失（测试没跑起来）或只是「跑了一半」（超时/取消时 Actions 先发 SIGINT，
+        # Playwright 会照常落一份部分报告）都会在摘要里明说，不会拿残缺数据报一个好看的
+        # flaky 0。
+        if: always()
+        run: node scripts/e2e-flaky-report.mjs
 
       - name: Upload Playwright report (E2E)
         if: failure()
@@ -243,6 +271,8 @@ jobs:
         timeout-minutes: 10
         env:
           PLAYWRIGHT_SKIP_WEB_SERVER: '1'
+          # 同 Linux 侧：引开探针的 json 报告，别覆盖 flaky 汇总要读的那一份（#1107）。
+          PLAYWRIGHT_JSON_OUTPUT_FILE: test-reports/probe-results.json
 
       - name: Run Electron E2E (macOS)
         # --workers=2: macos-latest runners (3 vCPU) can't sustain 4 parallel
@@ -260,6 +290,10 @@ jobs:
         #     Execution Policy E2E): 34 long streaming tests that double the run.
         # Both are fully covered by the Linux electron-e2e job, which runs the
         # whole suite.
+        #
+        # --workers=2 cut the flakiness down but did not remove it (runs #1107
+        # looked at still had one or two flaky specs each), which is why the
+        # summarize step below exists rather than another round of tuning.
         run: |
           npx playwright test --config=playwright.config.ts --project=electron \
             --grep-invert "Sandbox Exec|Sandbox Toggle|Sandbox toggle ready|Workspace Switch E2E \(Sandbox ON\)|session-key-mapping|PPTX Generator|Native Electron E2E|Feedback Page E2E|Execution Policy E2E" \
@@ -267,6 +301,11 @@ jobs:
         timeout-minutes: 45
         env:
           PLAYWRIGHT_SKIP_WEB_SERVER: '1'
+
+      - name: Summarize flaky E2E tests (macOS)
+        # 与 Linux 侧同理（#1107）：retries=2 会把「首次失败、重试通过」的用例藏起来。
+        if: always()
+        run: node scripts/e2e-flaky-report.mjs
 
       - name: Upload Playwright report (macOS E2E)
         if: failure()
