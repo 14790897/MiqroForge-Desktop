@@ -2,6 +2,8 @@
 
 from unittest.mock import AsyncMock
 
+from packaging.requirements import Requirement
+
 from miqi.skills.provision import (
     APT_NAME_MAP,
     VENV_ROOT,
@@ -14,13 +16,13 @@ from miqi.skills.provision import (
 
 
 class _FakeLoader:
-    """Stand-in for SkillsLoader exposing only _missing_python_deps."""
+    """Stand-in for SkillsLoader exposing only _read_requirements."""
 
-    def __init__(self, missing):
-        self._missing = list(missing)
+    def __init__(self, reqs):
+        self._reqs = [Requirement(r) for r in reqs]
 
-    def _missing_python_deps(self, name):
-        return list(self._missing)
+    def _read_requirements(self, name):
+        return list(self._reqs)
 
 
 class _FakeSandbox:
@@ -89,7 +91,7 @@ async def test_provision_runs_apt_and_venv():
 
     calls = [c.args[0] for c in sandbox.run_in_distro_root.call_args_list]
     assert any("apt-get install -y python3-matplotlib" in c for c in calls)
-    assert any(f"python3 -m venv {VENV_ROOT}/skill-a" in c for c in calls)
+    assert any(f"python3 -m venv --system-site-packages {VENV_ROOT}/skill-a" in c for c in calls)
     assert any("pip install some-unique-pkg" in c for c in calls)
 
     assert result["ok"] is True
@@ -185,4 +187,12 @@ def test_record_provision_merges_and_persists():
     record_provision("skill-a", ["numpy"], has_venv=False)
     record_provision("skill-a", ["pydantic>=999"], has_venv=True)
     assert get_provisioned("skill-a") == ["numpy", "pydantic>=999"]
+    assert has_provisioned_venv("skill-a") is True
+
+
+def test_record_provision_overwrites_same_package():
+    """A later provision of the same package replaces the older specifier."""
+    record_provision("skill-a", ["pydantic>=999"], has_venv=True)
+    record_provision("skill-a", ["pydantic>=2.5"], has_venv=True)
+    assert get_provisioned("skill-a") == ["pydantic>=2.5"]
     assert has_provisioned_venv("skill-a") is True

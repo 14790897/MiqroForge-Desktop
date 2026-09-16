@@ -529,16 +529,15 @@ class SkillsLoader:
         for req in reqs:
             if req.marker is not None and not req.marker.evaluate():
                 continue  # marker inactive on this interpreter
+            if str(req) in provisioned:
+                continue  # already provisioned into the skill's venv/system
             try:
                 dist = metadata.distribution(req.name)
             except (metadata.PackageNotFoundError, ValueError):
-                if req.name not in provisioned:
-                    missing.append(req.name)
+                missing.append(str(req))
                 continue
             if req.specifier and not req.specifier.contains(dist.version, prereleases=True):
-                spec_str = f"{req.name}{req.specifier}"
-                if spec_str not in provisioned:
-                    missing.append(spec_str)
+                missing.append(str(req))
         return missing
 
     def get_always_skills(self) -> list[str]:

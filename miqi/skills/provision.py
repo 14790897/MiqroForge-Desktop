@@ -29,6 +29,8 @@ import shlex
 from pathlib import Path
 from typing import Any
 
+from packaging.requirements import InvalidRequirement, Requirement
+
 _log = logging.getLogger(__name__)
 
 # pip distribution name (PEP 503 normalised) → Debian/Ubuntu apt package name.
@@ -80,9 +82,13 @@ def _save_registry(registry: dict[str, Any]) -> None:
 
 
 def get_provisioned(name: str) -> list[str]:
-    """Return the original requirement strings provisioned for *name*."""
+    """Return the provisioned requirement strings for *name* (latest per package)."""
     entry = _load_registry().get(name, {})
-    deps = entry.get("deps", []) if isinstance(entry, dict) else []
+    if not isinstance(entry, dict):
+        return []
+    deps = entry.get("deps", {})
+    if isinstance(deps, dict):
+        return list(deps.values())
     return list(deps) if isinstance(deps, list) else []
 
 
@@ -92,24 +98,39 @@ def has_provisioned_venv(name: str) -> bool:
     return bool(isinstance(entry, dict) and entry.get("has_venv", False))
 
 
-def record_provision(name: str, deps: list[str], has_venv: bool) -> None:
-    """Merge a successful provision into the registry (best-effort).
+def record_provision(name: str, deps: list[str], has_venv: bool) -> bool:
+    """Merge a successful provision into the registry (keyed by package name).
 
-    The registry is the host-side source of truth for a skill's provisioned
-    dependencies, since the Windows host cannot inspect the WSL venv.  A write
-    failure is non-fatal — the install already succeeded — and only means the
-    skill keeps showing as unavailable until the registry can be written.
+    Each requirement is stored under its base package name, so a later
+    provision of ``pkg==2`` overwrites an earlier ``pkg==1`` instead of
+    accumulating both (the venv holds only one version).  Returns ``False``
+    when the registry cannot be written — the caller must surface the failure,
+    otherwise the skill stays unavailable while the install reported success.
     """
     registry = _load_registry()
     entry = registry.get(name, {}) or {}
-    existing = entry.get("deps", []) if isinstance(entry, dict) else []
-    entry["deps"] = sorted(set(existing if isinstance(existing, list) else []) | set(deps))
+    existing = entry.get("deps", {})
+    if not isinstance(existing, dict):
+        existing = {}
+    for dep in deps:
+        existing[_base_name(dep)] = dep
+    entry["deps"] = existing
     entry["has_venv"] = bool(entry.get("has_venv", False) or has_venv)
     registry[name] = entry
     try:
         _save_registry(registry)
+        return True
     except OSError as exc:
         _log.warning("skill provisioning registry write failed: %s", exc)
+        return False
+
+
+def _base_name(dep: str) -> str:
+    """Canonical package name for a requirement string (drops extras/specifier)."""
+    try:
+        return Requirement(dep).name
+    except InvalidRequirement:
+        return _dist_name(dep)
 
 
 def _dist_name(dist: str) -> str:
@@ -144,29 +165,36 @@ class SkillProvisioner:
         return bool(getattr(self._sandbox_manager, "allow_system_installs", False))
 
     def plan(self, name: str) -> dict[str, list[str]]:
-        """Split a skill's missing deps into apt-installable vs venv-required.
+        """Split a skill's unprovisioned requirements into apt vs venv routes.
 
-        ``apt`` holds apt package names — only plain, unversioned deps are
-        eligible (a specifier like ``numpy==1.26`` must go through venv/pip so
-        the version is honoured). ``venv`` holds the original requirement
-        strings for pip, and ``apt_src`` the original requirement strings
-        routed to apt (so the caller can record exactly which deps were
-        provisioned).
+        Targets the sandbox interpreter, not the host: a package already on
+        the host but absent from the skill's venv must still be installed, so
+        the plan starts from ALL active requirements and subtracts those
+        already provisioned (registry). ``apt`` holds apt package names — only
+        plain, unversioned, mapped deps are eligible (a specifier like
+        ``numpy==1.26`` must go through venv/pip so the version is honoured).
+        ``venv`` holds the original requirement strings for pip, and
+        ``apt_src`` the originals routed to apt (so the caller can record
+        exactly which deps were provisioned).
         """
-        missing = self._loader._missing_python_deps(name)
+        reqs = self._loader._read_requirements(name)
+        provisioned = set(get_provisioned(name))
         apt: list[str] = []
         apt_src: list[str] = []
         venv: list[str] = []
-        if self._system_installs_available():
-            for dist in missing:
-                base = _dist_name(dist)
-                if dist == base and base in APT_NAME_MAP:
-                    apt.append(APT_NAME_MAP[base])
-                    apt_src.append(dist)
-                else:
-                    venv.append(dist)
-        else:
-            venv = list(missing)
+        system = self._system_installs_available()
+        for req in reqs:
+            if req.marker is not None and not req.marker.evaluate():
+                continue  # marker inactive on this interpreter
+            dist = str(req)
+            if dist in provisioned:
+                continue  # already installed into the venv/system
+            base = _dist_name(dist)
+            if system and dist == base and base in APT_NAME_MAP:
+                apt.append(APT_NAME_MAP[base])
+                apt_src.append(dist)
+            else:
+                venv.append(dist)
         return {"apt": apt, "apt_src": apt_src, "venv": venv}
 
     @staticmethod
@@ -211,9 +239,11 @@ class SkillProvisioner:
             vpy_q = shlex.quote(vpy)
             vdir_q = shlex.quote(f"{VENV_ROOT}/{name}")
             reqs = " ".join(shlex.quote(r) for r in plan["venv"])
+            # --system-site-packages so the venv python also sees the
+            # apt-installed packages (they live in the distro's /usr).
             cmd = (
                 f"mkdir -p {shlex.quote(VENV_ROOT)} && "
-                f"(test -x {vpy_q} || python3 -m venv {vdir_q}) && "
+                f"(test -x {vpy_q} || python3 -m venv --system-site-packages {vdir_q}) && "
                 f"{vpy_q} -m pip install {reqs}"
             )
             rc, _out, err = await sandbox.run_in_distro_root(cmd, timeout=1200.0)
@@ -229,8 +259,10 @@ class SkillProvisioner:
             provisioned.extend(plan["apt_src"])
         if installed_venv:
             provisioned.extend(installed_venv)
-        if provisioned:
-            record_provision(name, provisioned, has_venv=bool(installed_venv))
+        if provisioned and not record_provision(
+            name, provisioned, has_venv=bool(installed_venv)
+        ):
+            errors.append("依赖已安装，但可用性记录（registry）写入失败，available 不会更新")
 
         return {
             "ok": not errors,
