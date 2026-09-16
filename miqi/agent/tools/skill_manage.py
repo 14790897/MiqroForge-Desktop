@@ -5,9 +5,11 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
+from typing import Any
 
 from miqi.agent.skills import SkillsLoader
 from miqi.agent.tools.base import Tool
+from miqi.skills.provision import has_provisioned_venv, venv_python
 
 
 def _set_frontmatter_key(content: str, key: str, value: str) -> str:
@@ -34,33 +36,39 @@ def _set_frontmatter_key(content: str, key: str, value: str) -> str:
 class SkillManageTool(Tool):
     """Tool for managing reusable skills (procedural workflows)."""
 
-    def __init__(self, workspace: Path):
+    def __init__(self, workspace: Path, sandbox_manager: Any | None = None):
+        """Bind the workspace, a ``SkillsLoader`` and the optional sandbox manager."""
         self.workspace = workspace
         self._skills = SkillsLoader(workspace)
+        self._sandbox_manager = sandbox_manager
 
     @property
     def name(self) -> str:
+        """Tool name exposed to the model."""
         return "skill_manage"
 
     @property
     def description(self) -> str:
+        """Describe the tool's purpose and its available actions."""
         return (
             "Manage reusable skills (procedural workflows). "
             "Use action='list' to discover all available skills with their descriptions. "
             "Use action='view' to read a skill's full SKILL.md before applying it. "
+            "Use action='provision' to install a skill's missing Python dependencies. "
             "Create a skill after completing any complex task with 5+ tool calls. "
             "Patch a skill immediately if you notice it is outdated or wrong during use."
         )
 
     @property
     def parameters(self) -> dict:
+        """JSON-schema parameter definitions for the tool."""
         return {
             "type": "object",
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": ["list", "view", "create", "patch", "archive"],
-                    "description": "list all skills, view a skill, create a new skill, patch an existing skill, or archive a skill",
+                    "enum": ["list", "view", "create", "patch", "archive", "provision"],
+                    "description": "list all skills, view a skill, create a new skill, patch an existing skill, archive a skill, or provision (install) a skill's missing Python dependencies",
                 },
                 "name": {
                     "type": "string",
@@ -85,6 +93,7 @@ class SkillManageTool(Tool):
         content: str = "",
         patch_text: str = "",
     ) -> str:
+        """Dispatch an action to the matching handler."""
         if action == "list":
             return self._do_list()
         elif action == "view":
@@ -95,10 +104,13 @@ class SkillManageTool(Tool):
             return self._do_patch(name, patch_text)
         elif action == "archive":
             return self._do_archive(name)
+        elif action == "provision":
+            return await self._do_provision(name)
         else:
             return f"Error: 未知操作 '{action}'"
 
     def _do_list(self) -> str:
+        """List all skills (including unavailable ones) as JSON."""
         skills = self._skills.list_skills(filter_unavailable=False)
         results = []
         for s in skills:
@@ -112,6 +124,7 @@ class SkillManageTool(Tool):
         return json.dumps({"skills": results}, ensure_ascii=False)
 
     def _do_view(self, name: str) -> str:
+        """Return a skill's content plus its resolved script dir and deps."""
         if not name:
             return "Error: view 操作必须提供 'name'"
         content = self._skills.load_skill(name)
@@ -124,8 +137,6 @@ class SkillManageTool(Tool):
         script_dir = ""
         for s in self._skills.list_skills(filter_unavailable=False):
             if s["name"] == name:
-                from pathlib import Path
-
                 script_dir = str(Path(s["path"]).parent)
                 break
         if script_dir:
@@ -142,9 +153,27 @@ class SkillManageTool(Tool):
             )
             if missing:
                 content += f"缺失依赖（需先安装）：{', '.join(missing)}\n"
+        # If a per-skill venv was provisioned, tell the agent to run scripts
+        # with that venv's interpreter (the deps live inside the sandbox venv).
+        if has_provisioned_venv(name):
+            content = (
+                content.rstrip()
+                + f"\n\n---\n本技能依赖已供给到 per-skill venv。运行脚本请使用：{venv_python(name)} 脚本.py\n"
+            )
         return content
 
+    async def _do_provision(self, name: str) -> str:
+        """Install a skill's missing Python dependencies persistently."""
+        if not name:
+            return "Error: provision 操作必须提供 'name'"
+        from miqi.skills.provision import SkillProvisioner
+
+        provisioner = SkillProvisioner(self._skills, self._sandbox_manager)
+        result = await provisioner.provision(name)
+        return json.dumps(result, ensure_ascii=False)
+
     def _do_create(self, name: str, content: str) -> str:
+        """Create a new workspace skill from SKILL.md content."""
         if not name:
             return "Error: create 操作必须提供 'name'"
         if not content.strip():
@@ -160,6 +189,7 @@ class SkillManageTool(Tool):
         return f'{{"ok": true, "action": "create", "name": "{name}"}}'
 
     def _do_patch(self, name: str, patch_text: str) -> str:
+        """Append patch_text to a workspace skill's SKILL.md."""
         if not name:
             return "Error: patch 操作必须提供 'name'"
         if not patch_text.strip():
@@ -176,6 +206,7 @@ class SkillManageTool(Tool):
         return f'{{"ok": true, "action": "patch", "name": "{name}"}}'
 
     def _do_archive(self, name: str) -> str:
+        """Mark a workspace skill as archived."""
         if not name:
             return "Error: archive 操作必须提供 'name'"
 

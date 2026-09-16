@@ -510,20 +510,35 @@ class SkillsLoader:
         Checked against the host interpreter the loader runs in; the sandbox
         interpreter may differ, so this is an approximation consistent with
         ``requires.bins`` using ``shutil.which`` on the host PATH.
+
+        Requirements already provisioned into a per-skill venv (recorded by
+        :func:`miqi.skills.provision.record_provision`) are treated as
+        satisfied — the host interpreter cannot see the WSL venv, so the
+        registry is the host-side source of truth for provisioned deps.
         """
+        reqs = self._read_requirements(name)
+        if not reqs:
+            return []
         from importlib import metadata
 
+        from miqi.skills.provision import get_provisioned
+
+        provisioned = set(get_provisioned(name))
+
         missing: list[str] = []
-        for req in self._read_requirements(name):
+        for req in reqs:
             if req.marker is not None and not req.marker.evaluate():
                 continue  # marker inactive on this interpreter
             try:
                 dist = metadata.distribution(req.name)
             except (metadata.PackageNotFoundError, ValueError):
-                missing.append(req.name)
+                if req.name not in provisioned:
+                    missing.append(req.name)
                 continue
             if req.specifier and not req.specifier.contains(dist.version, prereleases=True):
-                missing.append(f"{req.name}{req.specifier}")
+                spec_str = f"{req.name}{req.specifier}"
+                if spec_str not in provisioned:
+                    missing.append(spec_str)
         return missing
 
     def get_always_skills(self) -> list[str]:

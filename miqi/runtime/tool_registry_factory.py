@@ -599,7 +599,7 @@ def create_runtime_tool_registry(
     # 5. Skill manage tool
     from miqi.agent.tools.skill_manage import SkillManageTool
 
-    registry.register(SkillManageTool(workspace=workspace))
+    registry.register(SkillManageTool(workspace=workspace, sandbox_manager=_sbm))
 
     # 6. Office document tools
     from miqi.documents.docx_tool import CreateDocxTool, DocxReadTool, DocxWriteTool, EditDocxTool
