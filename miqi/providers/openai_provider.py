@@ -201,12 +201,17 @@ class OpenAIProvider(LLMProvider):
 
     @staticmethod
     def _args_strict_ok(raw: Any) -> bool:
-        """非空字符串时要求严格 json.loads 通过；空值/非字符串视为可接受。
+        """「可验证完整」判据（#1094；CR #1100 统一口径）：只有**非空字符串**且严格
+        `json.loads` 通过才算数，空串 / `None` / dict 一律 `False`。
 
-        finish_reason=="length" + 严格解析失败 ⇒ 参数被输出上限截断（#1094）。
+        非流式响应里后三者拿不出任何"参数完整"的证据：空串通常是输出被砍在参数
+        开头，dict 则是 SDK 预解析后原始串已丢失（Anthropic 文档明确
+        `stop_reason=max_tokens` 可能留下未完成的 `tool_use`，已解析的 dict 看不出
+        这点）。`finish_reason == "length"` 下判据取反即"截断"。
+        `json_repair` 行为不受本判据影响。
         """
         if not isinstance(raw, str) or not raw:
-            return True
+            return False
         try:
             json.loads(raw)
             return True
@@ -313,7 +318,9 @@ class OpenAIProvider(LLMProvider):
                         tc.function.name,
                         tc.function.arguments,
                     ),
-                    # #1094: cut off by max_tokens → arguments is repair salvage.
+                    # #1094 / CR #1100: cut off by max_tokens → arguments is repair
+                    # salvage. 判据「不可验证完整即截断」：空串 / dict / 解析失败
+                    # 在 length 下一律算截断。
                     truncated=(
                         _finish == "length"
                         and not self._args_strict_ok(tc.function.arguments)
@@ -633,7 +640,8 @@ class OpenAIProvider(LLMProvider):
                     acc["function"]["name"],
                     acc["function"]["arguments"],
                 ),
-                # #1094: same rule as the non-stream path above.
+                # #1094 / CR #1100: same rule as the non-stream path above —
+                # 空串（一次参数 delta 都没到就被 length 截断）同样算截断。
                 truncated=(
                     finish_reason == "length"
                     and not self._args_strict_ok(acc["function"]["arguments"])

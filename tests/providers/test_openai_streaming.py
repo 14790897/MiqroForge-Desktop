@@ -597,16 +597,20 @@ def _capture_warnings():
     return messages, lambda: loguru_logger.remove(handler_id)
 
 
-# -- _args_strict_ok: the three-state predicate -------------------------
+# -- _args_strict_ok: the "verifiably complete" predicate ---------------
 
 
-def test_args_strict_ok_three_states():
-    """Empty/non-string args pass; valid JSON passes; truncated JSON fails."""
+def test_args_strict_ok_requires_verifiably_complete_json():
+    """#1094 / CR #1100：只有非空字符串 + 严格 json.loads 通过才算「可验证完整」。
+
+    空串 / None / dict 一律 False —— 它们在 length 下拿不出完整性证据。
+    （本用例由三态版同步而来：`""`/None/`{}` 三条断言由 True 改为 False。）
+    """
     from miqi.providers.openai_provider import OpenAIProvider
 
-    assert OpenAIProvider._args_strict_ok("") is True  # empty → not truncation
-    assert OpenAIProvider._args_strict_ok(None) is True  # non-string → N/A
-    assert OpenAIProvider._args_strict_ok({}) is True
+    assert OpenAIProvider._args_strict_ok("") is False  # empty → 不可验证
+    assert OpenAIProvider._args_strict_ok(None) is False  # non-string → 不可验证
+    assert OpenAIProvider._args_strict_ok({}) is False  # dict → 不可验证
     assert OpenAIProvider._args_strict_ok(_COMPLETE_ARGS) is True
     assert OpenAIProvider._args_strict_ok(_TRUNCATED_ARGS) is False
 
@@ -667,6 +671,40 @@ async def test_stream_truncated_args_not_flagged_on_normal_stop():
     assert call.arguments == {"query": "今日要闻"}
 
 
+@pytest.mark.asyncio
+async def test_stream_empty_args_flagged_when_finish_reason_length():
+    """CR #1100：一个参数 delta 都没到就被 length 砍掉 → 空串同样算截断。
+
+    arguments 仍是 {}（json_repair 口径不动），但不再漏放。
+    """
+    from miqi.providers.openai_provider import OpenAIProvider
+
+    provider = OpenAIProvider(api_key="sk-test")
+    messages, remove = _capture_warnings()
+    try:
+        events = await _stream_with_tool_args(provider, "", finish_reason="length")
+    finally:
+        remove()
+
+    call = events[-1].response.tool_calls[0]
+    assert call.truncated is True
+    assert call.arguments == {}
+    assert any("truncated by output cap" in m for m in messages), messages
+
+
+@pytest.mark.asyncio
+async def test_stream_empty_args_not_flagged_on_normal_stop():
+    """对照组：正常收尾的空串（模型确实发了无参调用）→ 不标。"""
+    from miqi.providers.openai_provider import OpenAIProvider
+
+    provider = OpenAIProvider(api_key="sk-test")
+    events = await _stream_with_tool_args(provider, "", finish_reason="tool_calls")
+
+    call = events[-1].response.tool_calls[0]
+    assert call.truncated is False
+    assert call.arguments == {}
+
+
 # -- non-streaming chat() ----------------------------------------------
 
 
@@ -718,6 +756,40 @@ async def test_chat_truncated_args_not_flagged_on_normal_stop():
     call = response.tool_calls[0]
     assert call.truncated is False
     assert call.arguments == {"query": "今日要闻"}
+
+
+@pytest.mark.asyncio
+async def test_chat_empty_args_flagged_when_finish_reason_length():
+    """CR #1100 非流式对照：空串 + length → 截断（arguments 仍是 {}）。"""
+    from miqi.providers.openai_provider import OpenAIProvider
+
+    provider = OpenAIProvider(api_key="sk-test")
+    messages, remove = _capture_warnings()
+    try:
+        response = await _chat_with_tool_args(provider, "", finish_reason="length")
+    finally:
+        remove()
+
+    call = response.tool_calls[0]
+    assert call.truncated is True
+    assert call.arguments == {}
+    assert any("truncated by output cap" in m for m in messages), messages
+
+
+@pytest.mark.asyncio
+async def test_chat_empty_args_not_flagged_on_normal_finish():
+    """对照组：正常收尾（stop）的空串 → 不标，既有行为不变。"""
+    from miqi.providers.openai_provider import OpenAIProvider
+
+    provider = OpenAIProvider(api_key="sk-test")
+    response = await _chat_with_tool_args(provider, "", finish_reason="stop")
+
+    call = response.tool_calls[0]
+    assert call.truncated is False
+    assert call.arguments == {}
+
+
+# -- log redaction (CWE-532) --------------------------------------------
 
 
 @pytest.mark.asyncio
