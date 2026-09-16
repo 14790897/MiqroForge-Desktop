@@ -44,6 +44,7 @@
 | 8 | TaskState 冻结 | PLANNING/WAIT_USER_PLAN_CONFIRM/RUNNING/WAIT_ACTION_CONFIRM/COMPLETED | 单元测试 |
 | 9 | Edit 模式文件自动放行 | permission_profile GRANULAR(file_write=never)——写文件不弹审批，exec/危险仍确认 | 单元测试 50 passed + 实测修复 |
 | 10 | 确认类工具不触发审批 | permission_engine 6b 分支（ask_user_confirm_card/ask_user_plan_confirm/request_action_confirmation 直接 ALLOW） | E2E（Kimi 看截图定位的 bug 修复） |
+- #646-v2 边界（2026-09）：危险动作模型侧唯一入口 = request_action_confirmation；非危险结构化选择走 ask_user_confirm_card（见 docs/dev-notes/confirm-entry-boundary.md）。
 | 11 | modify 循环 | PlanCard「修改计划」→ choice_id=modify → 模型重规划弹新卡 | 提示词第 4 条 + build_result |
 | 12 | 确认后折叠 | PlanCard resolved 默认收起（思维列表式）+ 展开详情 | 组件测试 |
 | 13 | 长任务不重复确认 | _plan_confirm_done 一次性；危险动作走 ActionCard | E2E |
