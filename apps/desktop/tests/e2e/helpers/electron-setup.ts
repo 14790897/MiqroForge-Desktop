@@ -572,7 +572,7 @@ export async function browserLogin(
  */
 export async function launchElectronApp(
   patchConfig?: (config: any) => any,
-  opts?: { bypassAll?: boolean; noConsentBypass?: boolean }
+  opts?: { bypassAll?: boolean; noConsentBypass?: boolean; noLoginBypass?: boolean }
 ): Promise<ElectronFixture> {
   // Create unique temporary home per test worker for full isolation.
   // Parallel workers each get their own MIQI_HOME → no race on sessions/.
@@ -658,6 +658,13 @@ export async function launchElectronApp(
   } else {
     env.MIQI_E2E = '1';
   }
+  // #1095 登录门（未登录不得进入主界面）默认同样绕过：几乎所有用例都要在
+  // 未登录状态下操作主界面。login-gate.spec.ts 用 noLoginBypass 走真实登录门。
+  if (opts?.noLoginBypass) {
+    delete env.MIQI_LOGIN_BYPASS;
+  } else {
+    env.MIQI_LOGIN_BYPASS = '1';
+  }
 
   // The bridge is spawned per E2E run (cold start).  If MIQI_PYTHON_PATH
   // points at a python that cannot even run (e.g. a stale uv-managed
@@ -729,9 +736,15 @@ export async function launchElectronApp(
 
   // With noConsentBypass the app is parked on the privacy-consent gate —
   // app-title / chat input never mount, so skip the UI-readiness tail and
-  // let the spec drive the gate interaction itself.
-  if (opts?.noConsentBypass) {
-    console.log('[test] Launched with consent gate (no MIQI_E2E)');
+  // let the spec drive the gate interaction itself.  Same for noLoginBypass
+  // (#1095): 未登录时停在登录门，主界面不会挂载（预置已登录 store 的用例
+  // 自行等待 app-title）。
+  if (opts?.noConsentBypass || opts?.noLoginBypass) {
+    console.log(
+      `[test] Launched with real gate(s) — consent=${
+        opts?.noConsentBypass ? 'real' : 'bypassed'
+      } login=${opts?.noLoginBypass ? 'real' : 'bypassed'}`
+    );
     return { electronApp, page, miqiHome, miqiSessionsDir };
   }
 
@@ -773,7 +786,7 @@ export async function launchElectronApp(
  *  run doesn't hang on dialogs or hit real feedback channels. */
 export async function relaunchElectronApp(
   miqiHome: string,
-  opts?: { noConsentBypass?: boolean }
+  opts?: { noConsentBypass?: boolean; noLoginBypass?: boolean }
 ): Promise<ElectronFixture> {
   const miqiSessionsDir = getMiqiSessionsDir(miqiHome);
 
@@ -806,6 +819,12 @@ export async function relaunchElectronApp(
     delete env.MIQI_E2E;
   } else {
     env.MIQI_E2E = '1';
+  }
+  // Same #1095 login-gate bypass logic as launchElectronApp (see above).
+  if (opts?.noLoginBypass) {
+    delete env.MIQI_LOGIN_BYPASS;
+  } else {
+    env.MIQI_LOGIN_BYPASS = '1';
   }
   // Same broken-MIQI_PYTHON_PATH fallback as launchElectronApp (see above).
   if (env.MIQI_PYTHON_PATH) {
@@ -866,9 +885,14 @@ export async function relaunchElectronApp(
     }
   });
 
-  // Same as launchElectronApp: parked on the consent gate, no UI tail.
-  if (opts?.noConsentBypass) {
-    console.log('[test] Relaunched with consent gate (no MIQI_E2E)');
+  // Same as launchElectronApp: parked on a real gate (consent #837 / login #1095),
+  // no UI readiness tail.
+  if (opts?.noConsentBypass || opts?.noLoginBypass) {
+    console.log(
+      `[test] Relaunched with real gate(s) — consent=${
+        opts?.noConsentBypass ? 'real' : 'bypassed'
+      } login=${opts?.noLoginBypass ? 'real' : 'bypassed'}`
+    );
     return { electronApp, page, miqiHome, miqiSessionsDir };
   }
 

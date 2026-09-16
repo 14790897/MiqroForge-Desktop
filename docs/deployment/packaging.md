@@ -124,11 +124,11 @@ publish:
 
 | 文件 | 描述 | 平台 |
 |------|------|------|
-| `dist-new/MiQroForge Desktop 0.1.0.exe` | 便携版 | Windows |
-| `dist-new/MiQroForge Desktop Setup 0.1.0.exe` | NSIS 安装器 | Windows |
+| `dist-new/MiQroForge Desktop 0.30.0.exe` | 便携版 | Windows |
+| `dist-new/MiQroForge Desktop Setup 0.30.0.exe` | NSIS 安装器 | Windows |
 | `dist/miqi-bridge.exe` | Python 后端（自包含） | Windows |
-| `dist/miqi-0.1.4.tar.gz` | Python 源码包 | 通用 |
-| `dist/miqi-0.1.4-py3-none-any.whl` | Python Wheel | 通用 |
+| `dist/miqi-0.30.0.tar.gz` | Python 源码包 | 通用 |
+| `dist/miqi-0.30.0-py3-none-any.whl` | Python Wheel | 通用 |
 
 ## miqi-bridge.exe 自检模式
 
@@ -175,8 +175,8 @@ Setup Wizard 的 PYTHON_CHECK IPC handler（`apps/desktop/src/main/ipc/index.ts`
 ```bash
 uv build
 # 输出:
-# dist/miqi-0.1.4.tar.gz
-# dist/miqi-0.1.4-py3-none-any.whl
+# dist/miqi-0.30.0.tar.gz
+# dist/miqi-0.30.0-py3-none-any.whl
 ```
 
 Wheel 包含：
@@ -188,14 +188,22 @@ Wheel 包含：
 
 ## 版本管理
 
-版本号定义在 `pyproject.toml`：
+发版由 semantic-release 从提交历史推导版本号，再调用 `scripts/update-version.sh`
+把它同时写入四个文件 —— 没有哪一个文件是「源头」，四者必须始终一致：
 
-```toml
-[project]
-version = "0.1.4.post1"
-```
+| 文件 | 字段 | 用途 |
+|------|------|------|
+| `pyproject.toml` | `[project].version` | Python 包元数据 |
+| `miqi/__init__.py` | `__version__` | CLI 版本横幅、协议握手 `serverInfo.version`、诊断脚本输出 |
+| `package.json` | `version` | 发版工具链 |
+| `apps/desktop/package.json` | `version` | 桌面端版本（electron-builder 从此读取并写入安装器） |
 
-构建时自动同步到 `electron-builder.yml` 的 `version` 字段。
+`tests/test_version_sync.py` 会在任一方漂移时让 CI 失败，因此不要手工只改其中一个；
+发版时 `@semantic-release/git` 也会把四个文件一并提交。
+
+`uv.lock` 里也有一个 `miqi` 的 `version`（`[[package]] name = "miqi"`），
+但它由 `uv sync` / `uv lock` 自动重写、且写成 PEP 440 规范形式
+（`0.30.0-dev` → `0.30.0.dev0`），不需要也不应该手工维护。
 
 ## 常见问题与解决方案
 
