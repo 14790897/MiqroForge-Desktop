@@ -40,7 +40,8 @@ truncated = (
 ```
 
 `_args_strict_ok` 只对**非空字符串**要求严格解析通过，其余（`None` / dict / 空串）一律视为可接受。
-打标时补一条 warning（`tool args truncated by output cap ...`，含工具名与参数串前 200 字符）。
+打标时补 warning（`tool args truncated by output cap ...`，含工具名）：**anthropic 侧**另带参数串前
+200 字符；**openai 侧**（`chat` 与流式路径各一条）只列被标记调用的工具名。
 **`json_repair` 行为一行没动**——残片仍被打捞进 `arguments`，供上层展示和拒执文案使用。
 
 ### 为什么 anthropic 那条是桌面生产路径
