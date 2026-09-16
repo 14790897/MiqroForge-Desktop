@@ -43,6 +43,7 @@ import {
   MemoryLessonUnlearnInput,
   SkillsGetInput,
   FilesReadInput,
+  FilesOpenInput,
   FilesWriteInput,
   FilesSaveAsInput,
   McpUpsertInput,
@@ -233,6 +234,28 @@ async function submitFeedbackToPlatform(input: {
     console.warn(`[feedback] 平台通道未同步（${platform.code ?? 'UNKNOWN'}）`);
   }
   return platform;
+}
+
+/**
+ * Workspace a folder-bound session's own files live in, as extra roots for the
+ * containment checks (#1062).
+ *
+ * Derived server-side from the session key.  The renderer names a session and
+ * never a root: a root it could supply would make the containment check in
+ * `resolveWorkspacePath` meaningless (#955).  Returns [] for an unbound session
+ * or when the bridge cannot answer, which leaves the global workspace as the
+ * only root — the behavior before this change.
+ */
+async function sessionWorkspaceRoots(
+  bridge: BridgeManager,
+  sessionKey?: string
+): Promise<string[]> {
+  if (!sessionKey) return [];
+  const res = (await bridge.sendSafe('sessions.workspace', {
+    session_key: sessionKey,
+  })) as { workspace?: string | null } | null;
+  const workspace = res?.workspace;
+  return typeof workspace === 'string' && workspace ? [workspace] : [];
 }
 
 export function registerIpcHandlers(bridge: BridgeManager): void {
@@ -1974,13 +1997,18 @@ for m in ("pydantic", "httpx", "loguru"):
 
   // -- Open file with system default application -------------------------
   ipcMain.handle(IPC.FILES_OPEN_EXTERNAL, async (_event, payload: unknown) => {
-    const p = payload as { path: string };
-    const raw = p.path;
+    const parsed = FilesOpenInput.safeParse(payload);
+    if (!parsed.success) {
+      return { opened: false, path: '', error: 'Invalid path payload' };
+    }
+    const raw = parsed.data.path;
+    // #1062: 文件夹绑定会话的产物落在会话自己的工作区，作为额外允许根由服务端推导。
+    const extraRoots = await sessionWorkspaceRoots(bridge, parsed.data.session_key);
     // #1062: 解析必须在 try 内——工作区外路径会 throw，否则异常直接变成 IPC
     // rejection，渲染层拿不到 {opened:false,error} 而静默失败。
     let absolutePath: string;
     try {
-      absolutePath = resolveWorkspacePath(raw);
+      absolutePath = resolveWorkspacePath(raw, extraRoots);
     } catch (e: any) {
       return { opened: false, path: raw, error: e?.message ?? String(e) };
     }
@@ -2007,7 +2035,7 @@ for m in ("pydantic", "httpx", "loguru"):
       try {
         const found = await findFileInWsl(relPath);
         if (found) {
-          const hostTarget = join(getWorkspacePath(), relPath);
+          const hostTarget = join(extraRoots[0] ?? getWorkspacePath(), relPath);
           const copied = await copyFromWsl(found.wslAbsPath, found.distro, hostTarget);
           if (copied) candidates.push(hostTarget);
           candidates.push(`\\\\wsl$\\${found.distro}\\${found.wslAbsPath.replace(/\//g, '\\')}`);
@@ -2026,7 +2054,7 @@ for m in ("pydantic", "httpx", "loguru"):
         // WSL UNC paths live inside the sandbox distro, not on the host — skip
         // the host-workspace canonical check (relPath was vetted above).
         const isWslUnc = candidate.startsWith('\\\\wsl$');
-        if (!isWslUnc && !isWithinCanonicalWorkspace(candidate, getWorkspacePath())) {
+        if (!isWslUnc && !isWithinCanonicalWorkspace(candidate, getWorkspacePath(), extraRoots)) {
           continue;
         }
         const error = await shell.openPath(candidate);
@@ -2252,8 +2280,13 @@ for m in ("pydantic", "httpx", "loguru"):
 
   // -- Reveal file in system file manager (Explorer / Finder) ------------
   ipcMain.handle(IPC.FILES_OPEN_CONTAINING_FOLDER, async (_event, payload: unknown) => {
-    const p = payload as { path: string };
-    const raw = p.path;
+    const parsed = FilesOpenInput.safeParse(payload);
+    if (!parsed.success) {
+      return { revealed: false, path: '', error: 'Invalid path payload' };
+    }
+    const raw = parsed.data.path;
+    // #1062: 文件夹绑定会话的产物落在会话自己的工作区，作为额外允许根由服务端推导。
+    const extraRoots = await sessionWorkspaceRoots(bridge, parsed.data.session_key);
     // Session metadata may store workspace as a string (Path str) —
     // resolve "Path('...')" wrapper to a plain path string before opening.
     const clean = raw.replace(/^Path\(['"]/, '').replace(/['"]\)$/, '');
@@ -2263,13 +2296,13 @@ for m in ("pydantic", "httpx", "loguru"):
     // the renderer reveal any host directory (security regression #955).
     // #1062: 解析放进 try —— 工作区外路径 throw 会变成 IPC rejection（渲染层静默无反应）。
     try {
-      const absolutePath = resolveWorkspacePath(clean);
+      const absolutePath = resolveWorkspacePath(clean, extraRoots);
       if (!existsSync(absolutePath)) {
         return { revealed: false, path: raw, error: `File not found: ${absolutePath}` };
       }
       // Follow symlinks/junctions so a link pointing outside the workspace can't
       // reveal a host directory through the lexical containment check (#955).
-      if (!isWithinCanonicalWorkspace(absolutePath, getWorkspacePath())) {
+      if (!isWithinCanonicalWorkspace(absolutePath, getWorkspacePath(), extraRoots)) {
         return { revealed: false, path: raw, error: `Path outside workspace: ${raw}` };
       }
       shell.showItemInFolder(absolutePath);

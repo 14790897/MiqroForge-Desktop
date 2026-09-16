@@ -47,6 +47,52 @@ export function getWorkspacePath(): string {
   return raw;
 }
 
+/** Slash-normalised, case-folded form used for prefix containment comparison. */
+function normForCompare(p: string): string {
+  const rel = p.replace(/\\/g, '/');
+  return process.platform === 'win32' ? rel.toLowerCase() : rel;
+}
+
+/** Whether `candidate` is `root` itself or lives underneath it. */
+function isUnder(candidate: string, root: string): boolean {
+  const relCmp = normForCompare(candidate);
+  const rootCmp = normForCompare(root);
+  return relCmp === rootCmp || relCmp.startsWith(rootCmp + '/');
+}
+
+/**
+ * Absolute roots a path is allowed to land in (#1062).
+ *
+ * `extraRoots` carries a folder-bound session's own workspace.  It is derived
+ * server-side from the session key — never sent by the renderer — because a
+ * root the renderer could name would make this containment check meaningless
+ * (#955).  Entries that are empty or not absolute are dropped rather than
+ * trusted.
+ */
+function allowedRoots(wsRoot: string, extraRoots?: Array<string | null | undefined>): string[] {
+  const roots = [wsRoot];
+  for (const extra of extraRoots ?? []) {
+    if (!extra || !isAbsolute(extra)) continue;
+    roots.push(resolve(extra));
+  }
+  return roots;
+}
+
+/**
+ * Root a relative path is joined with (#1062).
+ *
+ * A folder-bound session's ledger stores its paths relative to the session's own
+ * workspace, and the Python side resolves them the same way.  Anchoring such a
+ * path on the global workspace would look in the wrong place and report a file
+ * that exists as "not found" — which is what made 定位 fail before.
+ */
+function anchorRoot(wsRoot: string, extraRoots?: Array<string | null | undefined>): string {
+  for (const extra of extraRoots ?? []) {
+    if (extra && isAbsolute(extra)) return resolve(extra);
+  }
+  return resolve(wsRoot);
+}
+
 /** Strip sandbox prefix and resolve against the host workspace.
  *
  *  The bwrap sandbox mounts at /home/miqi/workspace/.  Paths reported
@@ -54,7 +100,10 @@ export function getWorkspacePath(): string {
  *  to workspace-relative form and then joined with the host workspace
  *  root.  Absolute paths outside the workspace are rejected.
  */
-export function resolveWorkspacePath(raw: string): string {
+export function resolveWorkspacePath(
+  raw: string,
+  extraRoots?: Array<string | null | undefined>
+): string {
   // Convert WSL /mnt/<drive>/ paths to Windows <drive>:\ paths
   // (e.g. /mnt/c/Users/... -> C:\Users\...).  Fold the result into
   // `normalised` instead of returning early, so the workspace-containment
@@ -84,18 +133,14 @@ export function resolveWorkspacePath(raw: string): string {
   if (isAbsolute(normalised)) {
     resolved = resolve(normalised);
   } else {
-    resolved = resolve(wsRoot, normalised);
+    resolved = resolve(anchorRoot(wsRoot, extraRoots), normalised);
   }
 
-  // Enforce workspace containment — prevent escape via .. or absolute
-  // paths that land outside the workspace root.  Case-fold on Windows
-  // (its filesystem is case-insensitive) so a workspace configured with a
-  // lowercase drive letter still matches a /mnt/<DRIVE>/ path.
-  const rel = resolved.replace(/\\/g, '/');
-  const wsNorm = wsRoot.replace(/\\/g, '/');
-  const relCmp = process.platform === 'win32' ? rel.toLowerCase() : rel;
-  const wsCmp = process.platform === 'win32' ? wsNorm.toLowerCase() : wsNorm;
-  if (!(relCmp + '/').startsWith(wsCmp + '/') && relCmp !== wsCmp) {
+  // Enforce root containment — prevent escape via .. or absolute paths that
+  // land outside every allowed root.  Case-folding happens in isUnder so a
+  // workspace configured with a lowercase drive letter still matches a
+  // /mnt/<DRIVE>/ path.
+  if (!allowedRoots(wsRoot, extraRoots).some((root) => isUnder(resolved, root))) {
     throw new Error(`Path outside workspace: ${raw}`);
   }
 
@@ -104,20 +149,20 @@ export function resolveWorkspacePath(raw: string): string {
 
 /**
  * Whether an existing host path resolves (symlinks/junctions followed) to a
- * location inside the workspace root.  Returns true when the path cannot be
- * resolved (e.g. it does not exist) — those are already covered by the lexical
- * containment check in resolveWorkspacePath.
+ * location inside one of the allowed roots.  Returns true when the path cannot
+ * be resolved (e.g. it does not exist) — those are already covered by the
+ * lexical containment check in resolveWorkspacePath.
  */
-export function isWithinCanonicalWorkspace(candidate: string, wsRoot: string): boolean {
-  try {
-    const realCandidate = realpathSync.native(candidate);
-    const realRoot = realpathSync.native(wsRoot);
-    const rel = realCandidate.replace(/\\/g, '/');
-    const root = realRoot.replace(/\\/g, '/');
-    const relCmp = process.platform === 'win32' ? rel.toLowerCase() : rel;
-    const rootCmp = process.platform === 'win32' ? root.toLowerCase() : root;
-    return relCmp === rootCmp || relCmp.startsWith(rootCmp + '/');
-  } catch {
-    return true;
-  }
+export function isWithinCanonicalWorkspace(
+  candidate: string,
+  wsRoot: string,
+  extraRoots?: Array<string | null | undefined>
+): boolean {
+  return allowedRoots(wsRoot, extraRoots).some((root) => {
+    try {
+      return isUnder(realpathSync.native(candidate), realpathSync.native(root));
+    } catch {
+      return true;
+    }
+  });
 }

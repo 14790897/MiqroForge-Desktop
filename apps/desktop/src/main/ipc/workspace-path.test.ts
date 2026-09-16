@@ -120,3 +120,77 @@ describe('isWithinCanonicalWorkspace', () => {
     expect(isWithinCanonicalWorkspace(join(wsRoot, 'no-such-file.txt'), wsRoot)).toBe(true);
   });
 });
+
+// #1062: 文件夹绑定会话的产物在会话自己的工作区里，主进程把它作为额外允许根。
+// 根由服务端从 session_key 推导，所以这里只验证「额外根是否生效」这一契约。
+describe('extra roots (#1062 folder-bound sessions)', () => {
+  let wsRoot: string;
+  let bound: string;
+
+  beforeEach(() => {
+    const home = join(
+      tmpdir(),
+      `miqi-ws-extra-${Date.now()}-${Math.random().toString(36).slice(2)}`
+    );
+    process.env['MIQI_HOME'] = home;
+    wsRoot = getWorkspacePath();
+    bound = join(tmpdir(), `miqi-bound-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+  });
+
+  afterEach(() => {
+    delete process.env['MIQI_HOME'];
+  });
+
+  it('accepts a path under an extra root', () => {
+    const target = join(bound, 'song.pdf');
+    expect(norm(resolveWorkspacePath(target, [bound]))).toBe(norm(target));
+  });
+
+  it('anchors a relative path on the extra root, not the global workspace', () => {
+    // 账本里存的是相对路径，绑定会话的相对路径就是相对它自己的工作区——
+    // 锚在全局根上会去错地方找，把存在的文件报成「找不到」。
+    expect(norm(resolveWorkspacePath('report.md', [bound]))).toBe(norm(join(bound, 'report.md')));
+  });
+
+  it('keeps anchoring on the global workspace when no extra root applies', () => {
+    expect(resolveWorkspacePath('report.md')).toBe(join(wsRoot, 'report.md'));
+    expect(resolveWorkspacePath('report.md', [])).toBe(join(wsRoot, 'report.md'));
+    expect(resolveWorkspacePath('report.md', [null, undefined])).toBe(join(wsRoot, 'report.md'));
+  });
+
+  it('rejects a path under neither root', () => {
+    expect(() => resolveWorkspacePath(join(tmpdir(), 'elsewhere.txt'), [bound])).toThrow(
+      /outside workspace/
+    );
+  });
+
+  it('rejects .. escaping the extra root', () => {
+    expect(() => resolveWorkspacePath(join(bound, '..', 'elsewhere.txt'), [bound])).toThrow(
+      /outside workspace/
+    );
+  });
+
+  it('ignores a non-absolute extra root instead of trusting it', () => {
+    expect(() => resolveWorkspacePath(join(tmpdir(), 'elsewhere.txt'), ['../../..'])).toThrow(
+      /outside workspace/
+    );
+  });
+
+  it('accepts a path inside either root canonically', () => {
+    expect(isWithinCanonicalWorkspace(wsRoot, wsRoot, [bound])).toBe(true);
+  });
+
+  const winOnly = isWin ? describe : describe.skip;
+  winOnly('Windows /mnt with an extra root', () => {
+    it('accepts a /mnt path inside the extra root', () => {
+      const target = join(bound, 'song.pdf');
+      expect(norm(resolveWorkspacePath(toMnt(target), [bound]))).toBe(norm(target));
+    });
+
+    it('rejects a /mnt path outside both roots', () => {
+      expect(() => resolveWorkspacePath('/mnt/c/Windows/System32/calc.exe', [bound])).toThrow(
+        /outside workspace/
+      );
+    });
+  });
+});

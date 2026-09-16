@@ -6763,9 +6763,11 @@ export function ChatConsole({
       }
     }
     // Open with system default application as fallback
+    // #1062: 带上会话 key——文件夹绑定会话的产物在会话自己的工作区里，不带 key
+    // 主进程只按全局工作区做包含性校验，会把它们判成「工作区之外」。
     let result: { opened?: boolean; error?: string } | null = null;
     try {
-      result = (await window.miqi.files.openExternal(path)) ?? null;
+      result = (await window.miqi.files.openExternal(path, currentSessionRef.current)) ?? null;
     } catch (e: any) {
       result = { opened: false, error: e?.message ?? String(e) };
     }
@@ -8455,7 +8457,10 @@ export function ChatConsole({
                           // 现在统一收结构化结果，失败时给出可见提示。
                           try {
                             const res = await window.miqi.files.openContainingFolder(
-                              normalizePath(f.path)
+                              normalizePath(f.path),
+                              // #1062: 带上会话 key，主进程才能把文件夹绑定会话的
+                              // 工作区算进允许根；传的是会话而非根，渲染层无法放宽校验。
+                              currentSessionRef.current
                             );
                             if (!res?.revealed) {
                               const outside = /outside workspace/i.test(String(res?.error ?? ''));
