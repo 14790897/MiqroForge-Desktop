@@ -257,7 +257,9 @@ test.describe('Issue #1019 — no per-event send to a disposed render frame', ()
       // 发送 ≥50 次守卫检查」的前提就不存在了。放在这里是因为：每次崩溃都会
       // 更换渲染进程、令 Playwright 的 page 句柄永久作废（连 firstWindow()
       // 也救不回），而上面的建会话/发消息/同步/截图都还要用 page。
-      // 每次迭代等重载真正完成（did-finish-load）再进下一次，不用固定 sleep。
+      // 每次迭代：崩溃前登记 did-finish-load 监听 → 硬崩溃（forcefullyCrashRenderer
+      // 在 Ubuntu CI 上会"只 resolve 不崩"，crashRendererHard 带 SIGKILL 兜底）→
+      // 等重载真正完成再进下一次（超时即断言失败，不静默放过）。
       for (let i = 0; i < 3; i += 1) {
         await electronApp.evaluate(({ BrowserWindow }) => {
           const g = globalThis as any;
@@ -267,8 +269,8 @@ test.describe('Issue #1019 — no per-event send to a disposed render frame', ()
           wc.once('did-finish-load', () => {
             g.__reloadDone = true;
           });
-          wc.forcefullyCrashRenderer();
         });
+        await crashRendererHard(electronApp);
         const deadline = Date.now() + 15_000;
         while (Date.now() < deadline) {
           if (await electronApp.evaluate(() => (globalThis as any).__reloadDone === true)) break;
@@ -285,13 +287,8 @@ test.describe('Issue #1019 — no per-event send to a disposed render frame', ()
       // Kill the renderer the way an OOM does: process gone, frame disposed,
       // WebContents object still alive (which is exactly why the old
       // `!wc.isDestroyed()` guard let every event through).
-      const state = await electronApp.evaluate(({ BrowserWindow }) => {
-        const win = BrowserWindow.getAllWindows()[0];
-        if (!win) return 'no-window';
-        win.webContents.forcefullyCrashRenderer();
-        return 'crashed';
-      });
-      expect(state).toBe('crashed');
+      // 同样走硬崩溃：被预算拦截后处理器悬停在对话框桩上，帧保持真死。
+      await crashRendererHard(electronApp);
       // Only guard invocations from here on count as "post-crash".
       const checksAtCrash = await electronApp.evaluate(() => (globalThis as any).__frameChecks);
 
@@ -331,4 +328,66 @@ async function createFreshSession(page: Page): Promise<void> {
     await newBtn.click();
     await page.waitForTimeout(500);
   }
+}
+
+/**
+ * 打掉渲染进程（硬崩溃，带兜底）。
+ *
+ * `forcefullyCrashRenderer()` 在 Ubuntu CI 上会"只 resolve 不崩"（与本仓库
+ * #1035 的 e2e 同款实测）：调用不抛、窗口还在，但 render-process-gone 从不
+ * 发出。所以这里在崩溃前挂一个独立的 render-process-gone 计数器，打完等它
+ * 增长；没等到就用进程级 SIGKILL 补一刀（Chromium 渲染进程忽略 SIGTERM，
+ * 必须显式 SIGKILL）。
+ */
+async function crashRendererHard(electronApp: ElectronApplication): Promise<void> {
+  const before = await electronApp.evaluate(({ BrowserWindow }) => {
+    const g = globalThis as any;
+    g.__goneCount = g.__goneCount ?? 0;
+    const wc = BrowserWindow.getAllWindows()[0]?.webContents;
+    if (!wc) return -1;
+    if (!(wc as any).__goneHooked) {
+      (wc as any).__goneHooked = true;
+      wc.on('render-process-gone', () => {
+        g.__goneCount += 1;
+      });
+    }
+    const baseline = g.__goneCount as number;
+    wc.forcefullyCrashRenderer();
+    return baseline;
+  });
+  expect(before, '应能拿到主窗口').toBeGreaterThanOrEqual(0);
+
+  const goneDeadline = Date.now() + 3_000;
+  let gone = false;
+  while (Date.now() < goneDeadline) {
+    // 注意：electronApp.evaluate 的 pageFunction 第一个参数固定是 electron 模块，
+    // 自定义参数在第二位（首版把模块当基线值比较，恒 false）。
+    gone = await electronApp.evaluate(
+      (_electron, baseline) => ((globalThis as any).__goneCount ?? 0) > baseline,
+      before
+    );
+    if (gone) break;
+    await new Promise((r) => setTimeout(r, 200));
+  }
+  if (!gone) {
+    await electronApp.evaluate(({ BrowserWindow }) => {
+      const wc = BrowserWindow.getAllWindows()[0]?.webContents;
+      if (!wc) return;
+      try {
+        process.kill(wc.getOSProcessId(), 'SIGKILL');
+      } catch {
+        /* 渲染进程可能刚好已在退出，忽略 */
+      }
+    });
+    const killDeadline = Date.now() + 3_000;
+    while (Date.now() < killDeadline) {
+      gone = await electronApp.evaluate(
+        (_electron, baseline) => ((globalThis as any).__goneCount ?? 0) > baseline,
+        before
+      );
+      if (gone) break;
+      await new Promise((r) => setTimeout(r, 200));
+    }
+  }
+  expect(gone, 'forcefullyCrashRenderer 与进程级 SIGKILL 都未产生 render-process-gone').toBe(true);
 }
