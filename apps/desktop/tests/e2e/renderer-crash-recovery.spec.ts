@@ -210,14 +210,20 @@ async function crashRenderer(electronApp: ElectronApplication): Promise<void> {
   if (!gone) {
     // 兜底：直接杀渲染进程（跨平台）。Ubuntu CI 实测 forcefullyCrashRenderer
     // 会"只 resolve 不崩"，这一步保证 render-process-gone 一定发出。
+    // 必须显式 SIGKILL：Chromium 渲染进程忽略 SIGTERM（CI 实测默认信号打不死它，
+    // 事件一直不来）；kill 的结果记下来进诊断——静默 catch 是上一轮的盲区。
     await electronApp.evaluate(({ BrowserWindow }) => {
+      const g = globalThis as any;
+      g.__killAttempts = g.__killAttempts ?? [];
       const win = BrowserWindow.getAllWindows()[0];
-      if (!win) return;
+      const pid = win ? win.webContents.getOSProcessId() : -1;
+      let err: string | null = null;
       try {
-        process.kill(win.webContents.getOSProcessId());
-      } catch {
-        /* 进程可能刚好已在退出，忽略 */
+        process.kill(pid, 'SIGKILL');
+      } catch (e) {
+        err = String(e);
       }
+      g.__killAttempts.push({ pid, err, t: Date.now() });
     });
   }
   const ok = gone || (await waitForGoneEventCount(electronApp, target.goneBaseline, 10_000));
@@ -228,6 +234,7 @@ async function crashRenderer(electronApp: ElectronApplication): Promise<void> {
         crashed: w.webContents.isCrashed(),
       })),
       goneEvents: (globalThis as any).__goneEvents ?? [],
+      killAttempts: (globalThis as any).__killAttempts ?? [],
     }));
     throw new Error(
       `渲染进程打不掉：forcefullyCrashRenderer 与进程级 kill 均未生效；诊断=${JSON.stringify(diag)}`
@@ -267,6 +274,7 @@ async function waitForReloadLine(
     .evaluate(({ BrowserWindow }) => ({
       crashEvents: (globalThis as any).__goneEvents ?? [],
       mainErrLines: (globalThis as any).__mainErrLines ?? [],
+      killAttempts: (globalThis as any).__killAttempts ?? [],
       isCrashed: BrowserWindow.getAllWindows().map((w) => ({
         id: w.id,
         crashed: w.webContents.isCrashed(),
