@@ -885,7 +885,10 @@ class ExecTool(Tool):
             # copies (non bind-mounted) never reach the host, so their
             # outputs stay out of scope (#507 semantics).
             if result.exit_code == 0:
-                await self._track_workspace_changes(before, _session_key, cwd)
+                await self._track_workspace_changes(
+                    before, _session_key, cwd,
+                    workspace=self._session_files_dir or self._workspace_root,
+                )
             return result
 
         exec_result = await _run()
@@ -3040,7 +3043,19 @@ class ExecTool(Tool):
             return
         try:
             from miqi.runtime.file_handlers import _get_workspace_path
-            workspace = _get_workspace_path()
+
+            # 会话自己的工作区优先。绑定（自定义）工作区会被 bind-mount 到
+            # ``/home/miqi/workspace``（bwrap.py），所以路径映射、包含性检查和
+            # 落账必须用同一个根：用全局工作区会把镜像产物写进 app-home，读端
+            # 看不到，还会在工作区里多出一份位置错误的副本（#1096）。
+            #
+            # 默认工作区下 ``self._workspace_root`` 就是 ``_get_workspace_path()``
+            # 的那个根，因此这条路径的行为逐字节不变。
+            workspace = (
+                Path(self._workspace_root)
+                if self._workspace_root
+                else Path(_get_workspace_path())
+            )
         except Exception:
             return
 
@@ -3138,6 +3153,8 @@ class ExecTool(Tool):
             logger.warning("exec [mirror] failed for {}: {}", sandbox_path, exc)
             return
 
+        # 落账与另两个写入口同根同键形（#1096）：``workspace`` 上面已按会话
+        # 工作区取过，这里直接用，别再退回全局根。
         _persist_tracked_file(workspace, host_path, op="write", session_key=session_key)
 
 
@@ -3200,6 +3217,7 @@ class ExecTool(Tool):
     async def _track_workspace_changes(
         self, before: dict[str, tuple[int, int]] | None, session_key: str | None,
         root: str | Path | None = None,
+        workspace: str | Path | None = None,
     ) -> None:
         """Persist files the subprocess created/modified as write tracked files."""
         if before is None:
@@ -3219,33 +3237,54 @@ class ExecTool(Tool):
             return
         try:
             await asyncio.to_thread(
-                self._persist_changed_batch, changed, session_key,
+                self._persist_changed_batch, changed, session_key, workspace,
             )
         except Exception:
             logger.debug("exec [track] batch persist failed", exc_info=True)
 
     def _persist_changed_batch(
         self, changed: list[str], session_key: str | None,
+        workspace: str | Path | None = None,
     ) -> None:
-        """Synchronous batch persist of exec-created files (off-loop)."""
+        """Synchronous batch persist of exec-created files (off-loop).
+
+        ``workspace`` is the session's own workspace — the bound folder, or
+        the session's files dir under the default root. It must be the same
+        value the document tools persist under: keying exec output against the
+        global workspace instead put it in a *different* ledger, with absolute
+        paths, so a bound session's script output never reached the assets
+        panel (the reader honours one ledger per session, and the doc tools had
+        already claimed it).
+        """
         if not session_key:
             return
-        try:
-            from pathlib import Path
+        base = Path(workspace) if workspace is not None else None
+        if base is None:
+            try:
+                from miqi.runtime.file_handlers import _get_workspace_path
 
-            from miqi.runtime.file_handlers import _get_workspace_path
-            workspace = Path(_get_workspace_path())
-        except Exception:
-            return
+                base = Path(_get_workspace_path())
+            except Exception:
+                return
         try:
-            from miqi.agent.tools.filesystem import _session_files_dir_key
+            from miqi.agent.tools.filesystem import (
+                _session_files_dir_key,
+                _tracked_persist_target,
+            )
             from miqi.session.manager import SessionManager
-            sm = SessionManager(workspace)
             # Store key 与目录名派生同源（与 _persist_tracked_file 一致）：
             # ``cli:direct`` → ``cli_direct``，exec 产物与文档产物落同一会话目录。
             session_key = _session_files_dir_key(session_key)
-            sm.save_tracked_files_batch(
-                session_key, [(p, "write") for p in changed],
-            )
+            batches: dict[str, list[tuple[str, str]]] = {}
+            for p in changed:
+                target = _tracked_persist_target(base, p, session_key)
+                if target is None:
+                    continue
+                store_root, rel_path = target
+                batches.setdefault(str(store_root), []).append((rel_path, "write"))
+            for root_str, batch in batches.items():
+                SessionManager(Path(root_str)).save_tracked_files_batch(
+                    session_key, batch,
+                )
         except Exception as exc:
             logger.debug("exec [track] batch persist failed: {}", exc)
