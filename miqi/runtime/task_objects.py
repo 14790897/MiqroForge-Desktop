@@ -103,26 +103,35 @@ class TodoState:
                     "id": item_id,
                 })
                 continue
-            if content and existing.kind == "auxiliary":
-                existing.content = str(content)
-                if not status:
+            # #1071 R1：先构造候选值 → 全部校验 → 一次性提交。旧实现在 auxiliary
+            # 分支先把 content 写进 existing、再校验 status：status 非法走 rejected
+            # 时 content 已经改了、revision 却没计——部分提交让 UI 拿到一个"没发生
+            # 过"的变更，且 revision 与内容不一致。rejected 路径必须零副作用：
+            # content/status/blocked_reason/revision 全都不动。
+            new_content = str(content) if content and existing.kind == "auxiliary" else None
+            if not status:
+                # 仅改内容、不改状态（auxiliary 允许；其他 kind 仍是 no-op）
+                if new_content is not None:
+                    existing.content = new_content
                     self.revision += 1
-                    continue
-            if status:
-                new_status = str(status)
-                if not validate_transition(existing.status, new_status):
-                    rejected.append({
-                        "status": "rejected",
-                        "reason": f"INVALID_TRANSITION: {existing.status} -> {status}",
-                        "id": item_id,
-                    })
-                    continue
-                existing.status = new_status  # type: ignore[assignment]
-                if new_status == "blocked" and p.get("blocked_reason"):
-                    existing.blocked_reason = str(p["blocked_reason"])
-                elif new_status != "blocked":
-                    existing.blocked_reason = None
-                self.revision += 1
+                continue
+            new_status = str(status)
+            if not validate_transition(existing.status, new_status):
+                rejected.append({
+                    "status": "rejected",
+                    "reason": f"INVALID_TRANSITION: {existing.status} -> {status}",
+                    "id": item_id,
+                })
+                continue
+            # 校验全部通过——以下才是提交点
+            if new_content is not None:
+                existing.content = new_content
+            existing.status = new_status  # type: ignore[assignment]
+            if new_status == "blocked" and p.get("blocked_reason"):
+                existing.blocked_reason = str(p["blocked_reason"])
+            elif new_status != "blocked":
+                existing.blocked_reason = None
+            self.revision += 1
         return rejected
 
     def summary(self) -> dict:

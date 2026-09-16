@@ -972,10 +972,6 @@ class TurnRunner:
                     except Exception:  # pragma: no cover - defensive
                         pass
 
-            # v3.3 Step 4（后端）：Todo 变更推前端（display=todo_state——DTO 隔离：
-            # 只有 id/title/status；source/kind 不进 UI）
-            await self._emit_todo_state(turn)
-
             for tc, ctx in zip(response.tool_calls, contexts):
                 result_text = ctx.result or ""
                 # paper_search / web_search: keep full result so frontend can
@@ -1007,6 +1003,13 @@ class TurnRunner:
                         "status": "completed" if _ok else "blocked",
                         "blocked_reason": None if _ok else "execution_failed",
                     }])
+
+            # v3.3 Step 4（后端）：Todo 变更推前端（display=todo_state——DTO 隔离：
+            # 只有 id/title/status；source/kind 不进 UI）
+            # #1071 R1：emit 必须晚于本轮 observed 的完成态 merge。旧位置在工具
+            # 执行之后、完成态写入之前——于是"最后一轮的 completed 永远不上屏"
+            # （前端停在 in_progress）。仍保持每轮恰好一次 emit（搬移，非新增）。
+            await self._emit_todo_state(turn)
 
             # Phase 24: record tool call completions in ledger
             if self._ledger is not None:

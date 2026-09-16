@@ -110,6 +110,139 @@ def test_observed_source_item():
     assert it is not None and it.source == "harness" and it.kind == "observed"
 
 
+# --- #1071 R1：merge 的 rejected 路径必须零副作用 -------------------------
+#
+# 旧实现先把 content 写进 existing、再校验 status；status 非法走 rejected 时
+# content 已被改掉、revision 却没计——部分提交让 UI 拿到一个"没发生过"的
+# 变更，且 revision 与内容不一致（前端无法据此判断该帧是否可信）。
+
+
+def _aux_state() -> TodoState:
+    """一个含 auxiliary 条目的状态（revision 已推进到 2）。"""
+    ts = TodoState(run_id="r1")
+    ts.initialize_from_plan([("a", "搜索论文")])
+    rejected = ts.merge([{"id": "aux-1", "content": "下载补充论文", "kind": "auxiliary"}])
+    assert rejected == []
+    assert ts.item("aux-1").status == "queued"
+    assert ts.revision == 2
+    return ts
+
+
+def test_merge_invalid_transition_leaves_content_untouched():
+    """核心回归：非法 transition + content → rejected 且 content/revision 不变。
+
+    修前：content 被写成"偷偷改完的版本"，revision 原地踏步。
+    """
+    ts = _aux_state()
+    before_revision = ts.revision
+    before_content = ts.item("aux-1").content
+
+    # queued→completed 不是合法迁移（queued 只能 → in_progress/cancelled）
+    rejected = ts.merge([{"id": "aux-1", "content": "被偷偷改掉的内容", "status": "completed"}])
+
+    assert rejected and "INVALID_TRANSITION" in rejected[0]["reason"]
+    assert rejected[0]["id"] == "aux-1"
+    assert ts.item("aux-1").content == before_content, "rejected 路径不得修改 content"
+    assert ts.item("aux-1").status == "queued"
+    assert ts.revision == before_revision, "rejected 路径不得推进 revision"
+
+
+def test_merge_invalid_status_string_zero_side_effects():
+    """非法状态字面量（不在状态机内）同样零副作用。"""
+    ts = _aux_state()
+    before = (ts.item("aux-1").content, ts.item("aux-1").status, ts.revision)
+
+    rejected = ts.merge([{"id": "aux-1", "content": "新内容", "status": "bogus_status"}])
+
+    assert rejected and "INVALID_TRANSITION" in rejected[0]["reason"]
+    assert (ts.item("aux-1").content, ts.item("aux-1").status, ts.revision) == before
+
+
+def test_merge_invalid_transition_leaves_blocked_reason_untouched():
+    """blocked_reason 也在提交点内：rejected 时不得被清/被改。"""
+    ts = _aux_state()
+    ts.merge([{"id": "aux-1", "status": "in_progress"}])
+    ts.merge([{"id": "aux-1", "status": "blocked", "blocked_reason": "network"}])
+    assert ts.item("aux-1").blocked_reason == "network"
+    before = (ts.item("aux-1").content, ts.item("aux-1").status, ts.item("aux-1").blocked_reason, ts.revision)
+
+    # blocked→completed 非法
+    rejected = ts.merge([{"id": "aux-1", "content": "偷改", "status": "completed"}])
+
+    assert rejected and "INVALID_TRANSITION" in rejected[0]["reason"]
+    assert (ts.item("aux-1").content, ts.item("aux-1").status,
+            ts.item("aux-1").blocked_reason, ts.revision) == before
+
+
+def test_merge_auxiliary_content_plus_valid_status_commits_atomically():
+    """合法路径与现状一致：content 与 status 一起生效，revision 只 +1。"""
+    ts = _aux_state()
+    rejected = ts.merge([{"id": "aux-1", "content": "下载补充论文v2", "status": "in_progress"}])
+
+    assert rejected == []
+    assert ts.item("aux-1").content == "下载补充论文v2"
+    assert ts.item("aux-1").status == "in_progress"
+    assert ts.revision == 3
+
+
+def test_merge_auxiliary_content_only_path_preserved():
+    """「仅改内容不改状态」路径保持：content 生效 + revision +1（bulk replace）。"""
+    ts = _aux_state()
+    rejected = ts.merge([{"id": "aux-1", "content": "扩充后的描述"}])
+
+    assert rejected == []
+    assert ts.item("aux-1").content == "扩充后的描述"
+    assert ts.item("aux-1").status == "queued"
+    assert ts.revision == 3
+
+
+def test_merge_non_auxiliary_content_only_is_still_noop():
+    """非 auxiliary、非 plan 的纯 content patch 仍是 no-op（不写、不计 revision）。
+
+    plan 走的是更早的 PLAN_MUTATION_REQUIRES_CONFIRMATION 分支，见
+    test_merge_plan_content_change_rejected；这里覆盖 observed 这类"够得着
+    新代码"的条目。
+    """
+    ts = TodoState(run_id="r1")
+    ts.initialize_from_plan([("a", "搜索论文")])
+    ts.merge([{"id": "obs-1", "content": "读文件", "kind": "observed", "status": "completed"}])
+    rev_after_add = ts.revision
+
+    rejected = ts.merge([{"id": "obs-1", "content": "偷改 observed"}])
+
+    assert rejected == []  # 与现状一致：静默忽略，不报 rejected
+    assert ts.item("obs-1").content == "读文件"
+    assert ts.item("obs-1").status == "completed"
+    assert ts.revision == rev_after_add
+
+
+def test_merge_mixed_batch_revision_counts_only_commits():
+    """同一批 patch 里 rejected 与合法项并存：只有真正提交的才推进 revision。"""
+    ts = _aux_state()
+    rejected = ts.merge([
+        {"id": "aux-1", "content": "偷改", "status": "completed"},  # 非法 → 零副作用
+        {"id": "a", "status": "in_progress"},                        # 合法
+    ])
+
+    assert len(rejected) == 1 and rejected[0]["id"] == "aux-1"
+    assert ts.item("aux-1").content == "下载补充论文"
+    assert ts.item("a").status == "in_progress"
+    assert ts.revision == 3, "只应为合法的 1 次提交 +1（2 → 3）"
+
+
+def test_merge_rollback_with_content_zero_side_effects():
+    """第二种形态：completed→in_progress 回滚 + content，同样零副作用。"""
+    ts = _aux_state()
+    ts.merge([{"id": "aux-1", "status": "in_progress"}])
+    ts.merge([{"id": "aux-1", "status": "completed"}])
+    before = (ts.item("aux-1").content, ts.item("aux-1").status, ts.revision)
+
+    rejected = ts.merge([{"id": "aux-1", "content": "回滚时偷改", "status": "in_progress"}])
+
+    assert rejected and "INVALID_TRANSITION" in rejected[0]["reason"]
+    assert (ts.item("aux-1").content, ts.item("aux-1").status, ts.revision) == before
+
+
 def test_approved_scope_structured():
     scope = ApprovedScope(
         sources=["academic papers"],
