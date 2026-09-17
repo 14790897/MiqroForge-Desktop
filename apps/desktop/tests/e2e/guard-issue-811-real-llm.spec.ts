@@ -182,7 +182,7 @@ test.describe('Issue #811 护栏误拦截复现 (real LLM)', () => {
     // 再进入标记轮询。确认卡（collab gate 的 CONFIRM，非 ask_user_confirm_card）
     // 用 primary 按钮点掉继续。
     while (Date.now() - runStart < RUN_CAP && Date.now() < idleDeadline) {
-      const primary = page.getByTestId('confirm-card-primary');
+      const primary = page.locator('[data-testid="confirm-card"]').getByTestId('confirm-run');
       if (await primary.isVisible({ timeout: 300 }).catch(() => false)) {
         await primary.first().click();
         await page.waitForTimeout(2000);
