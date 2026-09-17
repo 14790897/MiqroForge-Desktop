@@ -17,23 +17,27 @@ import {
 // ─── Helpers ──────────────────────────────────────────────────────
 
 /**
- * Expand the 结果文件 and 过程文件 sections (best-effort) so their cards mount.
+ * Expand `asset-section-<key>` so its cards mount, and only if it is collapsed.
  *
  * AssetSection renders its children only while `open`, so a collapsed
- * section's cards are absent from the DOM entirely. The toggle cannot be
- * read for its state and the header disappears when a section becomes
- * empty, so both are clicked blindly: `click({ timeout })` on a header that
- * React unmounted simply throws and is swallowed. Only reached when the
- * card was *not* found, so collapsing an already-open section costs
- * nothing — the caller re-checks for the card afterwards either way.
+ * section's cards are absent from the DOM entirely. Clicking the toggle is
+ * NOT idempotent — it flips the state in both directions, so an
+ * already-open section would get *closed*. Because collapsed children are
+ * unmounted, "open" can be detected from the DOM: a non-empty open section
+ * holds at least one card (`.rounded-lg.p-2\.5`). A section that becomes
+ * empty unmounts its own header, which the caller treats as "nothing to do".
+ * Only reached after the target card failed to appear, so at most one of
+ * the two sections can currently be rendering the card.
  */
-async function expandAssetSections(page: Page) {
-  for (const key of ['process', 'result'] as const) {
-    const toggle = page.getByTestId(`asset-section-toggle-${key}`);
-    if ((await toggle.count()) === 0) continue;
-    await toggle.click({ timeout: 2_000 }).catch(() => {});
-    console.log(`[test] expanded the 资产面板 ${key} section`);
-  }
+async function expandAssetSection(page: Page, key: 'result' | 'process') {
+  const section = page.getByTestId(`asset-section-${key}`);
+  if ((await section.count()) === 0) return;
+  const anyCard = await section.locator('.rounded-lg.p-2\\.5').count();
+  if (anyCard > 0) return; // already open — do not toggle it closed
+  const toggle = section.getByTestId(`asset-section-toggle-${key}`);
+  if ((await toggle.count()) === 0) return; // empty section — header unmounted
+  await toggle.click({ timeout: 2_000 }).catch(() => {});
+  console.log(`[test] expanded the 资产面板 ${key} section`);
 }
 
 /**
@@ -62,23 +66,51 @@ function renderedFileCard(page: Page, filename: string) {
  * leaves `resultFiles` non-empty and 过程文件 mounts collapsed for the next
  * test. The .txt card then lives nowhere in the DOM (the card in the bottom
  * 「修改建议」 list is a different element), `toBeVisible()` reports
- * "element(s) not found", and CI records the retry as a flake. Expand both
- * sections and re-check instead of waiting on a card that cannot appear.
+ * "element(s) not found", and CI records the retry as a flake. Expand the
+ * collapsed section(s) and re-check instead of waiting on a card that
+ * cannot appear. On the second failure we rethrow the second error — not
+ * the first — because by then "expand did not help" is the actionable
+ * signal, and it carries the more recent DOM state.
  */
 async function waitForFileInPanel(page: Page, filename: string, timeout = 60_000) {
   const card = renderedFileCard(page, filename);
 
   try {
     await expect(card).toBeVisible({ timeout });
-  } catch (err) {
-    await expandAssetSections(page);
+  } catch {
+    // Only expand the section(s) that are collapsed — a toggle is not a
+    // "ensure open" action, and closing an already-open section is how this
+    // helper used to turn one recovery into a fresh failure.
+    await Promise.all([expandAssetSection(page, 'process'), expandAssetSection(page, 'result')]);
     try {
       await expect(card).toBeVisible({ timeout: 15_000 });
-    } catch {
-      throw err;
+    } catch (secondErr) {
+      // "Still not found after expanding" is the actionable failure; attach
+      // the current panel text so the error shows what the DOM actually held.
+      const panelText = await page
+        .getByTestId('task-assets-panel')
+        .textContent()
+        .catch(() => null);
+      throw new Error(
+        `card for "${filename}" not found even after expanding 资产面板 sections. ` +
+          `Panel text: ${(panelText ?? '(unavailable)').replace(/\s+/g, ' ').slice(0, 300)}`,
+        { cause: secondErr }
+      );
     }
     console.log(`[test] "${filename}" was in a collapsed 资产面板 section — expanded it`);
     await page.screenshot({ path: 'test-results/task-assets-expanded-section.png' });
+    // P1 on PR #1113: expanding must be idempotent — an already-open section
+    // must NOT have been toggled back shut. The target card is visible; also
+    // require every section is still rendering at least one card (a section
+    // that got closed renders zero). Selector is exact — not the `^=` prefix
+    // that also catches the `asset-section-toggle-*` header buttons.
+    for (const key of ['result', 'process'] as const) {
+      const section = page.getByTestId(`asset-section-${key}`);
+      expect(
+        await section.locator('.rounded-lg.p-2\\.5').count(),
+        `${key} should still be open after recovery`
+      ).toBeGreaterThan(0);
+    }
   }
   await expect(card.getByTestId('file-preview-btn')).toBeVisible({ timeout: 10_000 });
 
