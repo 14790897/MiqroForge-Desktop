@@ -818,3 +818,88 @@ async def test_malformed_args_warning_does_not_leak_raw_args():
     warns = [m for m in messages if "malformed tool args" in m]
     assert warns, messages
     assert "TOP-SECRET-QUERY" not in warns[0], warns[0]
+
+
+# -- #1094 / content fallback 复用同一截断门 ------------------------------
+
+
+def _fallback_response(content: str, finish_reason: str):
+    """非流式响应：无结构化 tool_calls、content 里内嵌 JSON 工具调用。
+
+    这是 OpenAI 兼容层为「把工具调用当普通文本输出」的模型保留的 legacy
+    路径（`_parse_tool_call_from_content`）——它必须与标准 tool_calls 路径
+    共用同一个截断门，否则 length 下会绕过拒执。
+    """
+    resp = _FakeResponse(tool_calls=None, finish_reason=finish_reason)
+    resp.choices[0].message.content = content
+    return resp
+
+
+async def _chat_with_content_fallback(
+    provider, content: str, finish_reason: str = "stop",
+):
+    """Drive provider.chat() with a content-embedded (fallback) tool call."""
+
+    async def _fake_create(**kw):
+        """Fake create returning a content-embedded tool call."""
+        return _fallback_response(content, finish_reason)
+
+    provider._client.chat.completions.create = _fake_create
+    return await provider.chat(
+        messages=[{"role": "user", "content": "write the file"}],
+        model="gpt-4o",
+    )
+
+
+_FALLBACK_JSON = (
+    '{"name": "write_file", "arguments": {"path": "/tmp/a.txt", "content": "hush"}}'
+)
+
+
+@pytest.mark.asyncio
+async def test_chat_content_fallback_flagged_when_finish_reason_length():
+    """#1094：content 内嵌 JSON 的 fallback 调用在 length 下同样判截断。
+
+    原始 arguments 拿不到「可验证完整」证据（JSON 语法完整 ≠ 模型没继续
+    生成更多调用），故保守拒执；解析出的参数仍交付诊断（salvage 口径不变）。
+    """
+    from loguru import logger as loguru_logger
+
+    from miqi.providers.openai_provider import OpenAIProvider
+
+    rendered: list[str] = []
+    handler_id = loguru_logger.add(
+        lambda m: rendered.append(str(m)), level="WARNING",
+    )
+    provider = OpenAIProvider(api_key="sk-test")
+    try:
+        response = await _chat_with_content_fallback(
+            provider, _FALLBACK_JSON, finish_reason="length",
+        )
+    finally:
+        loguru_logger.remove(handler_id)
+
+    call = response.tool_calls[0]
+    assert call.name == "write_file"
+    assert call.truncated is True
+    # salvage 仍交付：fallback 解析出的参数保持不变。
+    assert call.arguments == {"path": "/tmp/a.txt", "content": "hush"}
+    warns = [m for m in rendered if "truncated by output cap" in m]
+    assert warns, rendered
+    # 脱敏（CWE-532）：只到 name/id，不含参数内容（格式化文本上检查）。
+    assert "hush" not in warns[0] and "/tmp/a.txt" not in warns[0], warns[0]
+
+
+@pytest.mark.asyncio
+async def test_chat_content_fallback_not_flagged_on_normal_stop():
+    """对照组：正常收尾的 content 内嵌调用 → 不标，legacy 兼容路径不变。"""
+    from miqi.providers.openai_provider import OpenAIProvider
+
+    provider = OpenAIProvider(api_key="sk-test")
+    response = await _chat_with_content_fallback(
+        provider, _FALLBACK_JSON, finish_reason="stop",
+    )
+
+    call = response.tool_calls[0]
+    assert call.truncated is False
+    assert call.arguments == {"path": "/tmp/a.txt", "content": "hush"}

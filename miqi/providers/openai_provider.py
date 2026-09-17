@@ -337,6 +337,19 @@ class OpenAIProvider(LLMProvider):
         if not tool_calls and isinstance(message.content, str):
             fallback = self._parse_tool_call_from_content(message.content)
             if fallback:
+                # #1094 / CR #1100: content 内嵌 JSON 是第二条 tool-call 路径，
+                # 必须纳入同一个截断门。它的原始 arguments 拿不到「可验证完整」
+                # 的证据（解析成功只证明 JSON 语法完整，不证明模型没继续生成
+                # 更多调用），故 length 下一律按截断拒执——与 Anthropic SDK
+                # dict 输入的保守原则一致。
+                fallback.truncated = _finish == "length"
+                if fallback.truncated:
+                    logger.warning(
+                        "tool args truncated by output cap (finish_reason=length): "
+                        "content fallback tool call name={} id={}",
+                        fallback.name,
+                        fallback.id,
+                    )
                 tool_calls.append(fallback)
 
         usage: dict[str, int] = {}
