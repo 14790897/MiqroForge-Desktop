@@ -2793,6 +2793,21 @@ interface InFlightSnapshot {
  */
 export const IN_FLIGHT_MAX_EVENTS = 2000;
 export const IN_FLIGHT_MAX_BYTES = 1024 * 1024;
+/** (#1034 复审 P1) Hard ceiling for a single *progress* event.
+ *
+ *  IN_FLIGHT_MAX_BYTES on its own was only a soft bound: one provider chunk
+ *  carrying a multi-MB `delta` — or two legal deltas that merge into one — sat
+ *  in the buffer as a single oversized event, and the newest event is never
+ *  evicted.  `pushInFlightEvent` now cuts such a delta into consecutive chunks
+ *  of at most this size (replay appends `delta` in order, so the text is
+ *  unchanged) and refuses a merge that would exceed it, which makes
+ *  `every progress event <= 64 KiB` an invariant of construction rather than
+ *  of luck.
+ *
+ *  Terminals are bounded separately by TERMINAL_PAYLOAD_MAX_BYTES: a `final`'s
+ *  content is the answer itself and cannot be rejoined from pieces the way a
+ *  stream delta can. */
+export const IN_FLIGHT_MAX_EVENT_BYTES = 64 * 1024;
 /** Rough per-event bookkeeping cost (object + array slot + timestamp). */
 export const IN_FLIGHT_EVENT_OVERHEAD_BYTES = 128;
 /** (#1034 复审 P1) Hard ceiling `capTerminalEventData` guarantees for a single
@@ -3039,10 +3054,79 @@ function evictInFlightOverflow(snapshot: InFlightSnapshot): void {
   }
 }
 
+/** (#1034 复审 P1) Cut an over-cap `progress` event into consecutive chunks
+ *  that each fit `maxBytes`.  Returns `[event]` unchanged when the event needs
+ *  no cut, or when no cut can help.
+ *
+ *  The cut length is found by binary search over `inFlightEventBytes`, not by
+ *  guessing a character budget: that measurement runs through
+ *  `JSON.stringify`, so escaping, the other fields of `data` and the fixed
+ *  event overhead are all priced in.  `inFlightEventBytes` is monotone in the
+ *  prefix length, which is what makes the search valid.
+ *
+ *  Replay is unaffected: exec output appends `delta` in order and every other
+ *  materializer skips events carrying `stream`, so `chunk1 + chunk2 + …` spells
+ *  out exactly the original delta.
+ *
+ *  Cutting cannot help when the bytes are outside `delta` (an empty delta
+ *  already exceeds the cap) or when not even one character fits.  The caller
+ *  then takes the ordinary path — the snapshot byte cap is the only bound left
+ *  for that shape, and the buffer keeps a single such event at most (the newest
+ *  event is never evicted). */
+function splitProgressEventByBytes(event: InFlightEvent, maxBytes: number): InFlightEvent[] {
+  const data = event.data as ChatProgress | null | undefined;
+  if (!data || typeof data.delta !== 'string') return [event];
+  if (inFlightEventBytes(event) <= maxBytes) return [event];
+
+  const chunk = (text: string): InFlightEvent => ({ ...event, data: { ...data, delta: text } });
+  const fits = (text: string): boolean => inFlightEventBytes(chunk(text)) <= maxBytes;
+  // Bytes outside `delta` are over budget on their own: splitting `delta`
+  // cannot bring this event under the cap.
+  if (!fits('')) return [event];
+
+  const parts: InFlightEvent[] = [];
+  let rest = data.delta;
+  while (rest.length > 0) {
+    // A fitting cut is at most `maxBytes` characters long (each character is at
+    // least one byte of payload), so this bound never excludes the answer.
+    let lo = 0;
+    let hi = Math.min(rest.length, maxBytes);
+    while (lo < hi) {
+      const mid = Math.ceil((lo + hi) / 2);
+      if (fits(rest.slice(0, mid))) lo = mid;
+      else hi = mid - 1;
+    }
+    if (lo >= rest.length) {
+      parts.push(chunk(rest));
+      break;
+    }
+    // Never leave half a surrogate pair at the end of a chunk: `alignCodePoint`
+    // moves such a cut past the low surrogate, completing the pair.  That can
+    // push the chunk one character over budget, in which case the pair is left
+    // whole on the *next* chunk instead (the search already proved the shorter
+    // cut fits).
+    let cut = alignCodePoint(rest, lo);
+    if (cut !== lo && !fits(rest.slice(0, cut))) cut = lo - 1;
+    if (cut <= 0) return [event]; // cannot make progress — leave it whole
+    parts.push(chunk(rest.slice(0, cut)));
+    rest = rest.slice(cut);
+  }
+  return parts;
+}
+
 /** (#1034) Append an off-session event, coalescing consecutive same-stream
  *  deltas first and evicting the oldest progress events when the count/byte
  *  caps are exceeded.  Replaces the unbounded `buf.events.push(...)`. */
 export function pushInFlightEvent(snapshot: InFlightSnapshot, event: InFlightEvent): void {
+  // Over-cap progress deltas are cut up *before* anything else, so no single
+  // event can exceed IN_FLIGHT_MAX_EVENT_BYTES.  Each chunk then goes through
+  // the ordinary path below — consecutive same-stream chunks still coalesce
+  // while they fit, and eviction runs as the chunks land.
+  const chunks = splitProgressEventByBytes(event, IN_FLIGHT_MAX_EVENT_BYTES);
+  if (chunks.length > 1) {
+    for (const chunk of chunks) pushInFlightEvent(snapshot, chunk);
+    return;
+  }
   const last = snapshot.events[snapshot.events.length - 1];
   if (last) {
     const delta = mergeableDelta(last, event);
@@ -3055,10 +3139,12 @@ export function pushInFlightEvent(snapshot: InFlightSnapshot, event: InFlightEve
         timestamp: event.timestamp,
       };
       const mergedBytes = inFlightEventBytes(merged);
-      // A merge that would breach the byte cap is refused rather than
-      // producing one giant event: the incoming delta gets its own slot and
-      // the ordinary eviction below keeps the total bounded.
-      if (mergedBytes <= IN_FLIGHT_MAX_BYTES) {
+      // A merge that would breach the SINGLE-EVENT cap is refused rather than
+      // producing one giant event (the merge is lossless, but two legal events
+      // adding up past the per-event bound is exactly how a "bounded" buffer
+      // used to end up with 1 MiB residents).  The incoming delta gets its own
+      // slot instead; the ordinary eviction below keeps the total bounded.
+      if (mergedBytes <= IN_FLIGHT_MAX_EVENT_BYTES) {
         snapshot.bytes += mergedBytes - inFlightEventBytes(last);
         snapshot.events[snapshot.events.length - 1] = merged;
         // 长单流 turn 每次都在最后一条上合并，若这里直接 return，回收检查
