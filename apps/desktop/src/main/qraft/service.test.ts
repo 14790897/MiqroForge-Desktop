@@ -107,7 +107,7 @@ describe('resolveConfig', () => {
 
   it('生产环境默认 client_secret 使用硬编码默认值（测试阶段开箱即用）、不自动生成 redirect_uri', () => {
     const config = resolveConfig({ env: 'prod' }, null, () => 'http://localhost:1/callback');
-    expect(config.baseUrl).toBe('https://forge.miqroera.com/api');
+    expect(config.baseUrl).toBe('https://www.miqroforge.com/api');
     expect(config.clientSecret).toBe('miqi123456');
     expect(config.redirectUri).toBe('');
   });
@@ -148,7 +148,7 @@ describe('resolveConfig', () => {
       redirectUri: 'http://localhost:38000/callback',
     });
     const config = resolveConfig({ env: 'prod' }, stored, () => 'http://localhost:9/callback');
-    expect(config.baseUrl).toBe('https://forge.miqroera.com/api');
+    expect(config.baseUrl).toBe('https://www.miqroforge.com/api');
     expect(config.clientSecret).toBe('miqi123456'); // 生产默认值，非测试环境存储值
     expect(config.redirectUri).toBe('');
   });
