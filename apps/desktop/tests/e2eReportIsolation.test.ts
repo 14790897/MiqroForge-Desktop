@@ -33,12 +33,13 @@ describe('探针与主 E2E 的报告隔离', () => {
 
   /**
    * 把整个 test-reports 目录挪开再跑，跑完原样挪回来 —— 内容、mtime、html 目录都不动，
-   * 不留痕（开发者本地那份也一样）。测试崩在中间时只会留下一个备份目录名，不会丢东西。
+   * 不留痕（开发者本地那份也一样）。备份目录用唯一名字：上一次运行被强杀留下的备份不会
+   * 让这次 renameSync 撞 EEXIST（评审 P2）。
    */
   function preservingReports(run) {
     const reportsDir = join(cwd, 'test-reports');
-    const backupDir = join(cwd, '.test-reports-backup');
     const existed = existsSync(reportsDir);
+    const backupDir = join(cwd, `.test-reports-backup-${process.pid}-${Date.now()}`);
     if (existed) renameSync(reportsDir, backupDir);
     try {
       return run();

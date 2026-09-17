@@ -219,7 +219,11 @@ jobs:
 
 
       - name: Upload Playwright report (E2E)
-        if: failure()
+        # 只在 push（develop 等仓库自己的分支，代码可信）的运行里留存失败产物：test-results/
+        # 的内容由 PR 控制的测试进程写出，而这些进程是在 provider 凭据落到 ~/.miqi/config.json
+        # **之后**跑的 —— 对 pull_request_target 的运行上传，等于给任意 PR 一条把 runner 上
+        # 文件公开出去的通道（artifact 对仓库读者可下载）。PR 运行的失败详情仍在作业日志里。
+        if: failure() && github.event_name == 'push'
         uses: actions/upload-artifact@v4
         with:
           name: playwright-report-e2e
@@ -376,7 +380,9 @@ jobs:
 
 
       - name: Upload Playwright report (macOS E2E)
-        if: failure()
+        # 同 Linux 侧：只在 push（代码可信）的运行里留存，pull_request_target 下不上传
+        # PR 可控的 test-results/（见上面那段的说明）。
+        if: failure() && github.event_name == 'push'
         uses: actions/upload-artifact@v4
         with:
           name: playwright-report-macos-e2e

@@ -313,6 +313,23 @@ describe('buildMarkdown', () => {
 
     expect(buildMarkdown(report)).toContain('run 级错误');
   });
+
+  // 清单长度同样由 PR 决定，截断处要写清楚，别让人以为只有这些。
+  it('flaky 条数超过上限时截断，并说明还有多少条', () => {
+    const report = makeReport();
+    const suite = report.suites[0].suites[0];
+    suite.specs = Array.from({ length: 60 }, (_, i) => ({
+      ...suite.specs[0],
+      title: `case ${i}`,
+      line: 100 + i,
+    }));
+
+    const markdown = buildMarkdown(report);
+
+    expect(markdown).toContain('case 0'); // 前 50 条照常列出
+    expect(markdown).not.toContain('case 59'); // 第 60 条被截掉
+    expect(markdown).toContain('只列出前 50 条，另有 10 条');
+  });
 });
 
 describe('summarizeReport', () => {
@@ -335,6 +352,21 @@ describe('summarizeReport', () => {
       const { markdown } = summarizeReport(file);
       expect(markdown).toContain('读取报告失败');
       expect(markdown).not.toContain('flaky **0**');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // 报告内容由 PR 决定：不能让它决定汇总步骤的开销（评审 P2）。
+  it('报告超过大小上限时跳过解析', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'miqi-1107-big-'));
+    const file = join(dir, 'results.json');
+    writeFileSync(file, Buffer.alloc(10 * 1024 * 1024 + 1, 0x20)); // 刚好超过 10 MiB 上限
+
+    try {
+      const { markdown } = summarizeReport(file);
+      expect(markdown).toContain('超过');
+      expect(markdown).toContain('跳过解析');
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

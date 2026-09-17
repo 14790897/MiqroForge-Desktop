@@ -20,13 +20,16 @@
  *
  * 用法：node scripts/e2e-flaky-report.mjs [报告路径]   （默认 test-reports/results.json）
  */
-import { appendFileSync, readFileSync } from 'node:fs';
+import { appendFileSync, readFileSync, statSync } from 'node:fs';
 import { isAbsolute, relative, resolve, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 const DEFAULT_REPORT = 'test-reports/results.json';
 const MAX_ERROR_CHARS = 200;
 const HEADING = '### E2E flaky 检查（#1107）';
+/** 报告内容由 PR 决定：解析前先卡大小、渲染时再卡条数，别让构造出来的超大报告把汇总步骤拖垮。 */
+const MAX_REPORT_BYTES = 10 * 1024 * 1024;
+const MAX_LISTED_FLAKY = 50;
 
 /** GitHub 注解的转义规则：`%`、CR、LF 先转，属性值里还有 `:` 和 `,`。 */
 function escapeData(text) {
@@ -244,7 +247,7 @@ export function buildMarkdown(report) {
   }
 
   lines.push('以下用例首次失败、重试才通过 —— job 仍是 success，但需要归因：', '');
-  for (const entry of flaky) {
+  for (const entry of flaky.slice(0, MAX_LISTED_FLAKY)) {
     // 路径按仓库根来写（与注解里的 file= 一致），方便直接拿去检索。
     const where = `${repoRelative(entry.file, rootDir)}:${entry.line}:${entry.column}`;
     lines.push(`- ${inlineCode(`${label(entry)}${where} › ${entry.title}`)}`);
@@ -252,6 +255,13 @@ export function buildMarkdown(report) {
       const suffix = attempt.error ? `：${inlineCode(attempt.error)}` : '';
       lines.push(`  - 第 ${attempt.retry + 1} 次尝试 ${attempt.status}${suffix}`);
     }
+  }
+  // 报告内容由 PR 决定，清单长度不能跟着它无限涨 —— 截断处明确写出来，别让人以为只有这些。
+  if (flaky.length > MAX_LISTED_FLAKY) {
+    lines.push(
+      '',
+      `（只列出前 ${MAX_LISTED_FLAKY} 条，另有 ${flaky.length - MAX_LISTED_FLAKY} 条见作业日志）`
+    );
   }
   return lines.join('\n');
 }
@@ -291,10 +301,18 @@ export function emit(markdown, annotations) {
   for (const annotation of annotations) console.log(annotation);
 }
 
-/** 读报告并生成 { markdown, annotations }。读不到/读不懂都返回可读的说明，不抛。 */
+/** 读报告并生成 { markdown, annotations }。读不到/读不懂/太大都返回可读的说明，不抛。 */
 export function summarizeReport(reportPath) {
   let report;
   try {
+    const { size } = statSync(reportPath);
+    if (size > MAX_REPORT_BYTES) {
+      const mib = (size / 1024 / 1024).toFixed(1);
+      return {
+        markdown: `${HEADING}\n\n报告 ${mib} MiB，超过 ${MAX_REPORT_BYTES / 1024 / 1024} MiB 上限，跳过解析（报告内容由 PR 决定，不能让它决定汇总步骤的开销）。`,
+        annotations: [],
+      };
+    }
     report = JSON.parse(readFileSync(reportPath, 'utf8'));
   } catch (error) {
     // 报告不存在 = 测试没跑到产出报告（安装/构建/前置步骤就失败了），不是这一步的问题。
