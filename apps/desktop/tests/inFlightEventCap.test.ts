@@ -583,12 +583,43 @@ describe('#1034 复审二轮：terminal payload 递归硬上限 + 多终态快�
     ).toBe(true);
   });
 
-  it('P2：停在超限状态时一定已无可回收项（不白扔内容的不变量）', () => {
+  it('P2：停在超限状态时一定已无可回收项（不白扔内容的不变量，逐次 push 检查）', () => {
     // 扫「n 条近满终态 × 尾部事件」共 18 种组合。不变量有两条：
     //   1) 若还能靠掏空回到上限内，就不允许停在超限状态——那是拿内容换了个
     //      仍然超限的结果；
     //   2) 记账恒等于事件字节之和。
+    // 近满终态：约 1 MB/条（payload 压在终态预算之下，capTerminalEventData
+    // 原样返回），两条就超限，能真正走到「掏空」与「掏空也救不回」两条路径。
+    const nearMaxPayload = (ch: string) => capTerminalEventData({ blob: ch.repeat(500 * 1024) });
     const violations: string[] = [];
+    let overBudgetStates = 0;
+
+    // 每次 push 之后立刻检查：pushInFlightEvent 是同步回收的，超限状态就是
+    // 回收后的结果，正是要断言的那一刻（只看最终态会漏掉中间过程）。
+    const checkInvariant = (buf: ReturnType<typeof createInFlightSnapshot>, label: string) => {
+      // 掏空每条尚未掏空的终态还能回收多少字节（与实现的占位形状一致：error
+      // 保留 200 字 message 头部）。
+      let reclaimable = 0;
+      for (const e of buf.events) {
+        if (e.type === 'progress' || isStrippedPayload(e.data)) continue;
+        const message = (e.data as { message?: unknown } | null)?.message;
+        const strippedData =
+          typeof message === 'string'
+            ? { _evicted: true, message: message.slice(0, 200) }
+            : { _evicted: true };
+        reclaimable +=
+          inFlightEventBytes(e) - inFlightEventBytes({ type: e.type, data: strippedData } as Ev);
+      }
+      if (buf.bytes > IN_FLIGHT_MAX_BYTES) {
+        overBudgetStates += 1;
+        if (buf.bytes - reclaimable <= IN_FLIGHT_MAX_BYTES) {
+          violations.push(`${label}: bytes=${buf.bytes} reclaimable=${reclaimable}`);
+        }
+      }
+      const ledger = buf.events.reduce((sum, e) => sum + inFlightEventBytes(e), 0);
+      if (ledger !== buf.bytes) violations.push(`${label}: ledger ${ledger} != ${buf.bytes}`);
+    };
+
     for (let n = 1; n <= 6; n += 1) {
       for (const tail of ['progress-big', 'progress-small', 'none'] as const) {
         const buf = createInFlightSnapshot();
@@ -596,9 +627,10 @@ describe('#1034 复审二轮：terminal payload 递归硬上限 + 多终态快�
         for (let i = 0; i < n; i += 1) {
           pushInFlightEvent(buf, {
             type: types[i % 3],
-            data: capTerminalEventData(bigPayload(String.fromCharCode(102 + i).repeat(300 * 1024))),
+            data: nearMaxPayload(String.fromCharCode(102 + i)),
             timestamp: i,
           } as Ev);
+          checkInvariant(buf, `n=${n} ${tail} push#${i}`);
         }
         if (tail === 'progress-big') {
           pushInFlightEvent(buf, {
@@ -606,6 +638,7 @@ describe('#1034 复审二轮：terminal payload 递归硬上限 + 多终态快�
             data: { stream: 'stdout', delta: 'p'.repeat(600 * 1024), tool_call_id: 'c1' },
             timestamp: 99,
           } as Ev);
+          checkInvariant(buf, `n=${n} ${tail} tail`);
         }
         if (tail === 'progress-small') {
           pushInFlightEvent(buf, {
@@ -613,29 +646,34 @@ describe('#1034 复审二轮：terminal payload 递归硬上限 + 多终态快�
             data: { stream: 'stdout', delta: 'p'.repeat(1024), tool_call_id: 'c1' },
             timestamp: 99,
           } as Ev);
+          checkInvariant(buf, `n=${n} ${tail} tail`);
         }
-
-        // 掏空每条尚未掏空的终态还能回收多少字节。
-        let reclaimable = 0;
-        for (const e of buf.events) {
-          if (e.type === 'progress' || isStrippedPayload(e.data)) continue;
-          reclaimable +=
-            inFlightEventBytes(e) -
-            inFlightEventBytes({
-              type: e.type,
-              data: { _evicted: true },
-              timestamp: e.timestamp,
-            } as Ev);
-        }
-        const label = `n=${n} ${tail}`;
-        if (buf.bytes > IN_FLIGHT_MAX_BYTES && buf.bytes - reclaimable <= IN_FLIGHT_MAX_BYTES) {
-          violations.push(`${label}: bytes=${buf.bytes} reclaimable=${reclaimable}`);
-        }
-        const ledger = buf.events.reduce((sum, e) => sum + inFlightEventBytes(e), 0);
-        if (ledger !== buf.bytes) violations.push(`${label}: ledger ${ledger} != ${buf.bytes}`);
       }
     }
+    // 扫到的组合必须真的走到过超限状态，否则这条不变量就是空转。
+    expect(overBudgetStates).toBeGreaterThan(0);
     expect(violations).toEqual([]);
+  });
+
+  it('P2：三条满额终态时最新终态也让出 payload（最后手段分支）', () => {
+    // 每条都贴着终态预算（payloadBytes ≈ TERMINAL_PAYLOAD_MAX_BYTES）。掏空两条
+    // 旧的之后，剩下的"最新终态 + 两个占位"仍然超限，此时只能让最新终态也
+    // 交出 payload——没有这个最后手段分支，这里就会停在超限状态。
+    const atMax = (ch: string) =>
+      capTerminalEventData({ blob: ch.repeat(Math.floor((TERMINAL_PAYLOAD_MAX_BYTES - 32) / 2)) });
+    expect(
+      inFlightEventBytes({ type: 'final', data: atMax('v'), timestamp: 0 } as Ev)
+    ).toBeGreaterThan(IN_FLIGHT_MAX_BYTES / 3);
+
+    const buf = createInFlightSnapshot();
+    pushInFlightEvent(buf, { type: 'final', data: atMax('f'), timestamp: 1 } as Ev);
+    pushInFlightEvent(buf, { type: 'error', data: atMax('e'), timestamp: 2 } as Ev);
+    pushInFlightEvent(buf, { type: 'aborted', data: atMax('a'), timestamp: 3 } as Ev);
+
+    // 三条事件都还在（回放的终态判定不受影响），记账守恒，且确实回到上限内。
+    expect(buf.events.map((e) => e.type)).toEqual(['final', 'error', 'aborted']);
+    expect(buf.bytes).toBe(buf.events.reduce((sum, e) => sum + inFlightEventBytes(e), 0));
+    expect(buf.bytes).toBeLessThanOrEqual(IN_FLIGHT_MAX_BYTES);
   });
 
   it('P2：环状载荷的字节计费走兜底 walker 且能终止（seen 路径）', () => {
