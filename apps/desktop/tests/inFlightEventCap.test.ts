@@ -464,14 +464,17 @@ describe('#1034 复审二轮：terminal payload 递归硬上限 + 多终态快�
 
     expect(buf.bytes).toBeLessThanOrEqual(IN_FLIGHT_MAX_BYTES);
     expect(buf.bytes).toBe(buf.events.reduce((sum, e) => sum + inFlightEventBytes(e), 0));
-    // 只剩最新终态：回放只需要它来 settle 会话，旧的 final 可弃。
-    expect(buf.events.length).toBe(1);
-    expect(buf.events[0].type).toBe('error');
-    expect(buf.events[0].timestamp).toBe(10);
-    expect((buf.events[0].data as { content: string }).content).toBe(errorData.content);
+    // 最新终态保留完整数据；旧 final 只被掏空 payload，事件本身留下。
+    const newest = buf.events[buf.events.length - 1];
+    expect(newest.type).toBe('error');
+    expect(newest.timestamp).toBe(10);
+    expect((newest.data as { content: string }).content).toBe(errorData.content);
+    // 回放契约：`turnDone`/`finalHandledSessions` 看的是 final 事件"在不在"
+    // （Audit #1 的「思考中…」卡死守卫），所以 final 不能被整条删掉。
+    expect(buf.events.some((e) => e.type === 'final')).toBe(true);
   });
 
-  it('P2：final + aborted 同样组合——最新 aborted 保留，旧 final 被驱逐', () => {
+  it('P2：final + aborted 同样组合——最新 aborted 保留，旧 final 只剩占位', () => {
     const buf = createInFlightSnapshot();
     const finalData = capTerminalEventData(bigPayload('f'.repeat(300 * 1024)));
     const abortedData = capTerminalEventData(bigPayload('a'.repeat(300 * 1024)));
@@ -481,9 +484,69 @@ describe('#1034 复审二轮：terminal payload 递归硬上限 + 多终态快�
 
     expect(buf.bytes).toBeLessThanOrEqual(IN_FLIGHT_MAX_BYTES);
     expect(buf.bytes).toBe(buf.events.reduce((sum, e) => sum + inFlightEventBytes(e), 0));
+    const newest = buf.events[buf.events.length - 1];
+    expect(newest.type).toBe('aborted');
+    expect(newest.timestamp).toBe(11);
+    expect((newest.data as { content: string }).content).toBe(abortedData.content);
+    // 旧 final 仅剩占位（type + timestamp），事件的"在场"保留。
+    const oldest = buf.events[0];
+    expect(oldest.type).toBe('final');
+    expect((oldest.data as { _evicted?: boolean })._evicted).toBe(true);
+    expect(inFlightEventBytes(oldest)).toBeLessThan(1024);
+  });
+
+  it('P2：环状载荷的字节计费走兜底 walker 且能终止（seen 路径）', () => {
+    const cyc: Record<string, unknown> = { blob: 'z'.repeat(1024 * 1024) };
+    cyc.self = cyc;
+
+    // JSON.stringify 会抛，payloadBytes 必须落到全深度 walker：环要能被
+    // seen 挡住，且 1 MiB 的深层字符串照样计入。
+    expect(inFlightEventBytes({ type: 'final', data: cyc, timestamp: 9 } as Ev)).toBeGreaterThan(
+      IN_FLIGHT_MAX_BYTES
+    );
+
+    const capped = capTerminalEventData(cyc);
+    expect(capped).not.toBe(cyc);
+    const buf = createInFlightSnapshot();
+    pushInFlightEvent(buf, { type: 'final', data: capped, timestamp: 9 } as Ev);
+    expect(buf.bytes).toBeLessThanOrEqual(IN_FLIGHT_MAX_BYTES);
+  });
+
+  it('P2：最新事件是超大 progress 时，终态让出 payload 把预算拉回来', () => {
+    const buf = createInFlightSnapshot();
+    const finalData = capTerminalEventData(bigPayload('f'.repeat(300 * 1024)));
+    pushInFlightEvent(buf, { type: 'final', data: finalData, timestamp: 9 } as Ev);
+    pushInFlightEvent(buf, {
+      type: 'progress',
+      data: { stream: 'stdout', delta: 'p'.repeat(300 * 1024), tool_call_id: 'c1' },
+      timestamp: 10,
+    } as Ev);
+
+    // progress 是最新事件、且未经终态封顶：它不能被驱逐（watchdog 读它的
+    // 时间戳判活），只能让终态交出 payload——预算回到上限内，终态"在场"
+    // 仍在（回放照旧判定 turnDone），时间戳不变。
+    expect(buf.bytes).toBeLessThanOrEqual(IN_FLIGHT_MAX_BYTES);
+    expect(buf.bytes).toBe(buf.events.reduce((sum, e) => sum + inFlightEventBytes(e), 0));
+    expect(buf.events.map((e) => e.type)).toEqual(['final', 'progress']);
+    expect((buf.events[0].data as { _evicted?: boolean })._evicted).toBe(true);
+    expect(buf.events[0].timestamp).toBe(9);
+    expect(buf.events[1].timestamp).toBe(10);
+  });
+
+  it('P2：单条超大 progress 独占缓存时无法回收（已知边界，如实锁住）', () => {
+    // 这条 progress 未封顶且是唯一事件：最新事件永不驱逐，没有任何可回收
+    // 对象，函数只能原样返回。上限在此形状下照顾不到——与其假装守住，
+    // 不如把行为钉死，形状变化时立刻可见。
+    const buf = createInFlightSnapshot();
+    pushInFlightEvent(buf, {
+      type: 'progress',
+      data: { stream: 'stdout', delta: 'p'.repeat(600 * 1024), tool_call_id: 'c1' },
+      timestamp: 1,
+    } as Ev);
+
+    expect(buf.bytes).toBeGreaterThan(IN_FLIGHT_MAX_BYTES);
     expect(buf.events.length).toBe(1);
-    expect(buf.events[0].type).toBe('aborted');
-    expect(buf.events[0].timestamp).toBe(11);
+    expect(buf.events[0].timestamp).toBe(1);
   });
 
   it('P2：有 progress 可弃时不丢终态——先弃 progress，终态留在快照里', () => {

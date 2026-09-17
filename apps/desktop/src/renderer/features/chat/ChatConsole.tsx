@@ -2284,7 +2284,7 @@ export function capTerminalReasoning(reasoning: string | undefined): string | un
  *  Post-condition, for any JSON-like input:
  *  `payloadBytes(result) <= TERMINAL_PAYLOAD_MAX_BYTES`.  It is what lets
  *  `evictInFlightOverflow` keep the snapshot under IN_FLIGHT_MAX_BYTES even
- *  though terminal events are no longer un-evictable.
+ *  though terminals may not be evicted outright.
  *
  *  Identity is preserved when the payload already fits (no copy is made). */
 export function capTerminalEventData<T extends object>(data: T): T {
@@ -2800,7 +2800,7 @@ export const IN_FLIGHT_EVENT_OVERHEAD_BYTES = 128;
  *  overhead, minus a 256-byte margin for whatever the capping itself adds
  *  (rolled-up `_truncated` markers, spread keys, the ellipsis).  Keeping one
  *  terminal under this is what makes the snapshot recoverable once eviction
- *  is allowed to drop older terminals. */
+ *  is allowed to strip older terminals down to their type. */
 export const TERMINAL_PAYLOAD_MAX_BYTES =
   IN_FLIGHT_MAX_BYTES - IN_FLIGHT_EVENT_OVERHEAD_BYTES - 256;
 /** (#1034 复审 P1) Truncation width for a terminal's `content` / `message`
@@ -2901,23 +2901,48 @@ function mergeableDelta(prev: InFlightEvent, next: InFlightEvent): string | null
   return b.delta;
 }
 
+/** (#1034 复审 P2) Marker left as a stripped terminal's payload.  Named apart
+ *  from `capTerminalEventData`'s `_truncated` so the two cannot be confused. */
+const TERMINAL_STRIPPED_DATA = { _evicted: true } as const;
+
+/** (#1034 复审 P2) Payload of an older terminal that was emptied to free
+ *  bytes: `type` and `timestamp` survive, so replay still sees a settled turn;
+ *  nothing else does. */
+function stripTerminalPayload(event: InFlightEvent): InFlightEvent {
+  return { type: event.type, data: TERMINAL_STRIPPED_DATA, timestamp: event.timestamp };
+}
+
+function isStrippedTerminal(event: InFlightEvent): boolean {
+  return (
+    event.type !== 'progress' &&
+    (event.data as { _evicted?: boolean } | null | undefined)?._evicted === true
+  );
+}
+
 /** (#1034) Drop the oldest evictable events until both caps hold: progress
  *  events first (they are re-derivable from the live stream), and — (#1034
- *  复审 P2) only if the byte cap is still breached — terminals *older than the
- *  newest one*.
+ *  复审 P2) only if the byte cap is still breached — the payloads of terminals
+ *  *older than the newest one*.
  *
- *  Replay settles a session from its newest terminal alone, so older terminals
- *  are droppable: a turn that emits both a `final` and a trailing `error`
- *  (or `aborted`) used to leave two hard-capped payloads resident forever, and
- *  two payloads that individually sit just under the terminal budget add up to
- *  more than IN_FLIGHT_MAX_BYTES.  Keeping the newest terminal is enough to
- *  settle the session; the dropped one's content is still in the session's
- *  persisted history.
+ *  Why the payload goes but the event stays: a turn that emits both a `final`
+ *  and a trailing `error` (or `aborted`) used to keep two hard-capped payloads
+ *  resident forever, and two payloads that individually sit just under
+ *  TERMINAL_PAYLOAD_MAX_BYTES add up to more than IN_FLIGHT_MAX_BYTES.  The
+ *  byte cap has to win, but replay does not merely need "some terminal": it
+ *  asks whether a `final` is *present* to decide the turn is over
+ *  (`turnDone` — the Audit #1 guard against a permanently stuck 「思考中…」 —
+ *  and the `finalHandledSessions` dedupe of a live `onFinal`).  Removing the
+ *  event would bring that stuck-thinking bug back, so the event is reduced to
+ *  its type + timestamp instead: the turn still reads as settled, the newest
+ *  terminal keeps its full data, and the older content is still in the
+ *  session's persisted history.
  *
- *  The newest event is never a victim, and one terminal always survives: its
- *  payload is capped at TERMINAL_PAYLOAD_MAX_BYTES at ingest, i.e. below the
- *  whole-snapshot budget, so a buffer of exactly one event can never be over
- *  budget. */
+ *  The newest event is never removed and its timestamp is never touched (the
+ *  watchdog reads it to decide the backend is alive); its payload can be
+ *  stripped once everything else has been.  A lone *terminal* event can never
+ *  be over budget on its own (its payload is capped at ingest), so stripping
+ *  always restores the budget — the one shape this cannot fix is a single
+ *  uncapped progress delta, which nothing may remove. */
 function evictInFlightOverflow(snapshot: InFlightSnapshot): void {
   while (
     snapshot.events.length > 1 &&
@@ -2931,30 +2956,48 @@ function evictInFlightOverflow(snapshot: InFlightSnapshot): void {
       }
     }
 
+    if (victim >= 0) {
+      snapshot.bytes -= inFlightEventBytes(snapshot.events[victim]);
+      snapshot.events.splice(victim, 1);
+      continue;
+    }
+
+    // Only terminals left. An over-long *count* cannot happen here (the
+    // protocol allows one final plus an optional error/aborted), so a byte
+    // breach is the only reason to keep going — and then the newest terminal
+    // must keep its data.
+    if (snapshot.bytes <= IN_FLIGHT_MAX_BYTES) return;
+    let newestTerminal = -1;
+    for (let i = snapshot.events.length - 1; i >= 0; i -= 1) {
+      if (snapshot.events[i].type !== 'progress') {
+        newestTerminal = i;
+        break;
+      }
+    }
+    for (let i = 0; i < snapshot.events.length - 1; i += 1) {
+      if (i !== newestTerminal && !isStrippedTerminal(snapshot.events[i])) {
+        victim = i;
+        break;
+      }
+    }
+    if (victim < 0 && newestTerminal >= 0 && !isStrippedTerminal(snapshot.events[newestTerminal])) {
+      // Nothing else left to give: take the newest terminal's payload too.  It
+      // stays in the buffer — so `turnDone` still reads true — and only its
+      // bytes go.  This is the case where the newest *event* is an uncapped
+      // progress delta: it can never be dropped (the watchdog reads its
+      // timestamp), so the alternative to stripping here is leaving the buffer
+      // over budget, which is the failure this module exists to prevent.  The
+      // content is still in the session's persisted history.
+      victim = newestTerminal;
+    }
     if (victim < 0) {
-      // Only terminals left. An over-long *count* cannot happen here (the
-      // protocol allows one final plus an optional error/aborted), so a byte
-      // breach is the only reason to keep going — and then the newest
-      // terminal must stay.
-      if (snapshot.bytes <= IN_FLIGHT_MAX_BYTES) return;
-      let newestTerminal = -1;
-      for (let i = snapshot.events.length - 1; i >= 0; i -= 1) {
-        if (snapshot.events[i].type !== 'progress') {
-          newestTerminal = i;
-          break;
-        }
-      }
-      for (let i = 0; i < snapshot.events.length - 1; i += 1) {
-        if (i !== newestTerminal) {
-          victim = i;
-          break;
-        }
-      }
-      if (victim < 0) return; // a single, newest terminal — nothing to drop
+      // A single, already-stripped terminal: nothing left to give.
+      return;
     }
 
     snapshot.bytes -= inFlightEventBytes(snapshot.events[victim]);
-    snapshot.events.splice(victim, 1);
+    snapshot.events[victim] = stripTerminalPayload(snapshot.events[victim]);
+    snapshot.bytes += inFlightEventBytes(snapshot.events[victim]);
   }
 }
 
