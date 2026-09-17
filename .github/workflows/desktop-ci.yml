@@ -190,17 +190,33 @@ jobs:
         env:
           PLAYWRIGHT_SKIP_WEB_SERVER: '1'
 
-      - name: Upload E2E JSON report as artifact
-        # #1107 / 安全评审：report 先以 artifact 形式暂存，由后面不检出 PR head 的独立 job
-        # 上传到 release asset。本 job 不接触 GH_TOKEN/contents:write。
+      - name: Summarize flaky E2E tests
+        # #1107：flaky 清单就地汇总，报告**不离开这个 job**。两个理由：
+        # 1) 上传 artifact / release asset 都会把「内容由 PR 决定」的字节送到公开位置（报告里的
+        #    字段来自 PR 检出的 playwright.config.ts 与 spec），等于给任意 PR 一条把 runner 上
+        #    文件（例如 ~/.miqi/config.json）公开出去的通道；
+        # 2) pull_request_target 下**只跑 base 分支这份脚本的可信副本**，PR 改不到它，步骤里
+        #    因此不执行任何 PR 代码；base 里还没有这个脚本（本 PR 自己的运行）就跳过。
+        # push / workflow_dispatch 的运行，检出的代码就是仓库自己的，直接用。
         if: always()
-        id: upload-e2e-report
-        uses: actions/upload-artifact@v4
-        with:
-          name: e2e-report-linux
-          path: apps/desktop/test-reports/results.json
-          retention-days: 7
-          if-no-files-found: ignore
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -uo pipefail
+          if [ "${{ github.event_name }}" = "pull_request_target" ]; then
+            trusted_script="/tmp/e2e-flaky-report.mjs"
+            gh api -H "Accept: application/vnd.github.raw" \
+              "repos/$GITHUB_REPOSITORY/contents/apps/desktop/scripts/e2e-flaky-report.mjs?ref=${{ github.event.pull_request.base.sha }}" \
+              > "$trusted_script" 2>/dev/null || true
+            if [ ! -s "$trusted_script" ]; then
+              echo "跳过 flaky 汇总：base 分支里还没有 scripts/e2e-flaky-report.mjs（本 PR 自己的运行就是这种情况）"
+              exit 0
+            fi
+            node "$trusted_script" test-reports/results.json
+          else
+            node scripts/e2e-flaky-report.mjs test-reports/results.json
+          fi
+
 
       - name: Upload Playwright report (E2E)
         if: failure()
@@ -331,15 +347,33 @@ jobs:
         env:
           PLAYWRIGHT_SKIP_WEB_SERVER: '1'
 
-      - name: Upload E2E JSON report as artifact (macOS)
+      - name: Summarize flaky E2E tests (macOS)
+        # #1107：flaky 清单就地汇总，报告**不离开这个 job**。两个理由：
+        # 1) 上传 artifact / release asset 都会把「内容由 PR 决定」的字节送到公开位置（报告里的
+        #    字段来自 PR 检出的 playwright.config.ts 与 spec），等于给任意 PR 一条把 runner 上
+        #    文件（例如 ~/.miqi/config.json）公开出去的通道；
+        # 2) pull_request_target 下**只跑 base 分支这份脚本的可信副本**，PR 改不到它，步骤里
+        #    因此不执行任何 PR 代码；base 里还没有这个脚本（本 PR 自己的运行）就跳过。
+        # push / workflow_dispatch 的运行，检出的代码就是仓库自己的，直接用。
         if: always()
-        id: upload-e2e-report
-        uses: actions/upload-artifact@v4
-        with:
-          name: e2e-report-macos
-          path: apps/desktop/test-reports/results.json
-          retention-days: 7
-          if-no-files-found: ignore
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -uo pipefail
+          if [ "${{ github.event_name }}" = "pull_request_target" ]; then
+            trusted_script="/tmp/e2e-flaky-report.mjs"
+            gh api -H "Accept: application/vnd.github.raw" \
+              "repos/$GITHUB_REPOSITORY/contents/apps/desktop/scripts/e2e-flaky-report.mjs?ref=${{ github.event.pull_request.base.sha }}" \
+              > "$trusted_script" 2>/dev/null || true
+            if [ ! -s "$trusted_script" ]; then
+              echo "跳过 flaky 汇总：base 分支里还没有 scripts/e2e-flaky-report.mjs（本 PR 自己的运行就是这种情况）"
+              exit 0
+            fi
+            node "$trusted_script" test-reports/results.json
+          else
+            node scripts/e2e-flaky-report.mjs test-reports/results.json
+          fi
+
 
       - name: Upload Playwright report (macOS E2E)
         if: failure()
@@ -348,71 +382,6 @@ jobs:
           name: playwright-report-macos-e2e
           path: apps/desktop/test-results/
           retention-days: 7
-
-  # ────────────────────────────────────────────────────────────
-  # Job 4: flaky 汇总 —— 无 provider secrets，只下载 E2E job 留下的报告 artifact 再解析（#1107）。
-  # 两条边界：(a) 本 job 没有任何 provider 凭据，解析脚本即便是 PR 检出的也没有 key 可窃取；
-  # (b) 报告只在这个 run 内部以 artifact 传递，不发布到任何公开位置 —— 报告内容由 PR 决定，
-  # 一旦发布成公开 release asset，任意 PR 都能把 runner 上的文件（例如 ~/.miqi/config.json）
-  # 塞进 results.json 再公开出去。
-  # ────────────────────────────────────────────────────────────
-  summarize-flaky:
-    concurrency:
-      group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}-summarize-flaky
-      cancel-in-progress: true
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      actions: read
-    needs: [electron-e2e, macos-e2e]
-    if: always()
-    defaults:
-      run:
-        working-directory: apps/desktop
-
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || github.ref }}
-          # 这里同样执行 PR 检出的脚本；token 在本 job 只是只读，但没必要留在工作区里。
-          persist-credentials: false
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: apps/desktop/package-lock.json
-
-      - name: Download Linux E2E report
-        uses: actions/download-artifact@v4
-        with:
-          name: e2e-report-linux
-          path: reports/linux
-        continue-on-error: true
-
-      - name: Download macOS E2E report
-        uses: actions/download-artifact@v4
-        with:
-          name: e2e-report-macos
-          path: reports/macos
-        continue-on-error: true
-
-      - name: Summarize flaky E2E tests
-        run: |
-          found=""
-          for platform in linux macos; do
-            report="reports/$platform/results.json"
-            [ -f "$report" ] || continue
-            found="$found $platform"
-            node scripts/e2e-flaky-report.mjs "$report"
-          done
-          if [ -z "$found" ]; then
-            # 汇总本身只作观察，缺报告就说清楚，别改变 run 的结论。
-            echo "两个 E2E job 都没有留下报告 artifact（主步没跑完 / 被取消 / 前置步骤就失败），本轮没有 flaky 清单可汇总" \
-              | tee -a "$GITHUB_STEP_SUMMARY"
-          else
-            echo "已汇总平台：$found"
-          fi
 
   # ────────────────────────────────────────────────────────────
   # macOS 打包（dmg/zip）不在这里跑：每个 PR 都起 macos runner 成本高，
