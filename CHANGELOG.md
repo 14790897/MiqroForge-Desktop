@@ -1,3 +1,18 @@
+## [0.31.1](https://github.com/14790897/MiqroForge-Desktop/compare/v0.31.0...v0.31.1) (2026-09-17)
+
+
+### Bug Fixes
+
+* **session:** 会话文件路径解析收紧到会话目录，堵跨会话读写删（[#1051](https://github.com/14790897/MiqroForge-Desktop/issues/1051)） ([#1109](https://github.com/14790897/MiqroForge-Desktop/issues/1109)) ([df8419b](https://github.com/14790897/MiqroForge-Desktop/commit/df8419bc787d1b6e9ae4835fb62e2115399aab7d)), closes [#1005](https://github.com/14790897/MiqroForge-Desktop/issues/1005)
+
+---
+## 下载说明
+
+macOS 用户请按芯片架构选择安装包：
+
+- **Apple Silicon (M1/M2/M3/M4)**：下载 `0.31.1-arm64.dmg`（ARM 架构）
+- **Intel**：下载 `0.31.1.dmg`（x86 无后缀）
+
 # [0.31.0](https://github.com/14790897/MiqroForge-Desktop/compare/v0.30.0...v0.31.0) (2026-09-17)
 
 
