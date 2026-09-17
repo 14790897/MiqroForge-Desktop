@@ -11,7 +11,7 @@
  *
  * 可选覆盖：
  *   QRAFT_ACCESS_TOKEN  给定则跳过登录，只跑 userinfo + 网关段（重试免重登）
- *   QRAFT_BASE_URL      平台 baseUrl，默认 https://forge.miqroera.com/api
+ *   QRAFT_BASE_URL      平台 baseUrl，默认 https://www.miqroforge.com/api
  *   QRAFT_CLIENT_ID     默认 miqi
  *   QRAFT_CLIENT_SECRET 默认 miqi123456
  *   QRAFT_REDIRECT_URI  生产必须为平台注册值，默认 http://localhost:38000/callback
@@ -34,7 +34,7 @@ const ACCESS_TOKEN = process.env.QRAFT_ACCESS_TOKEN ?? '';
 // 快路径只依赖 access_token，无需手机号/密码登录
 const READY = LIVE && (ACCESS_TOKEN !== '' || (PHONE !== '' && PASSWORD !== ''));
 
-const BASE_URL = process.env.QRAFT_BASE_URL ?? 'https://forge.miqroera.com/api';
+const BASE_URL = process.env.QRAFT_BASE_URL ?? 'https://www.miqroforge.com/api';
 const CLIENT_ID = process.env.QRAFT_CLIENT_ID ?? 'miqi';
 const CLIENT_SECRET = process.env.QRAFT_CLIENT_SECRET ?? 'miqi123456';
 const REDIRECT_URI = process.env.QRAFT_REDIRECT_URI ?? 'http://localhost:38000/callback';
