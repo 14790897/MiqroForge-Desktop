@@ -258,32 +258,45 @@ export function shellEscape(s: string): string {
 /**
  * Build the bash script used to locate a workspace-relative file inside WSL.
  *
- * The script searches the session sandbox, the session-private files directory,
- * the global WSL workspace, and the global session files directory.  When a
- * file is found it canonicalizes both the candidate and its authorization root
- * and rejects the result if the canonical candidate lives outside the root,
- * closing a symlink-escape path (#1103 review).
+ * The script searches the session sandbox and the session-private files
+ * directory — plus, unless `allowGlobalWorkspace` is false, the global WSL
+ * workspace and the global session files directory.  A folder-bound session
+ * passes false: its relative paths resolve against the bound folder, so a miss
+ * there must not be answered from the global root — the hit would be copied
+ * into the bound folder and opened, i.e. another root's file (#1103 review).
+ *
+ * When a file is found the script canonicalizes both the candidate and its
+ * authorization root and rejects the result if the canonical candidate lives
+ * outside the root, closing a symlink-escape path (#1103 review).
  *
  * The sandbox path uses the full sanitized session key, while the
  * session-private files directory uses `sessionFilesDirKey` so it matches the
  * canonical on-disk layout used by the Python side.
  */
-export function buildWslSearchScript(relPath: string, sessionKey: string): string {
+export function buildWslSearchScript(
+  relPath: string,
+  sessionKey: string,
+  opts: { allowGlobalWorkspace?: boolean } = {}
+): string {
   const escapedRelPath = shellEscape(relPath);
   const sandboxKey = sanitizeSessionKeyForPath(sessionKey);
   const sessionFilesKey = sessionFilesDirKey(sessionKey);
+  const allowGlobal = opts.allowGlobalWorkspace ?? true;
   return (
     `RP=$'${escapedRelPath}'\n` +
     `W="/tmp/miqi-sandboxes/${sandboxKey}/home/miqi/workspace"\n` +
     `S="$W/sessions/${sessionFilesKey}/files"\n` +
-    `ws="$HOME/.miqi/workspace"\n` +
-    `s="$ws/sessions/${sessionFilesKey}/files"\n` +
+    (allowGlobal
+      ? `ws="$HOME/.miqi/workspace"\n` + `s="$ws/sessions/${sessionFilesKey}/files"\n`
+      : '') +
     `found=""\n` +
     `root=""\n` +
     `if [ -f "$W/$RP" ]; then found="$W/$RP"; root="$W"; fi\n` +
     `if [ -z "$found" ] && [ -f "$S/$RP" ]; then found="$S/$RP"; root="$W"; fi\n` +
-    `if [ -z "$found" ] && [ -f "$ws/$RP" ]; then found="$ws/$RP"; root="$ws"; fi\n` +
-    `if [ -z "$found" ] && [ -f "$s/$RP" ]; then found="$s/$RP"; root="$ws"; fi\n` +
+    (allowGlobal
+      ? `if [ -z "$found" ] && [ -f "$ws/$RP" ]; then found="$ws/$RP"; root="$ws"; fi\n` +
+        `if [ -z "$found" ] && [ -f "$s/$RP" ]; then found="$s/$RP"; root="$ws"; fi\n`
+      : '') +
     `if [ -z "$found" ]; then exit 1; fi\n` +
     `canon=$(readlink -f "$found") || exit 1\n` +
     `root_canon=$(readlink -f "$root") || exit 1\n` +

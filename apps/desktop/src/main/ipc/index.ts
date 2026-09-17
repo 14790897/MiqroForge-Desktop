@@ -1924,7 +1924,8 @@ for m in ("pydantic", "httpx", "loguru"):
 
   async function findFileInWsl(
     relPath: string,
-    sessionKey?: string
+    sessionKey?: string,
+    opts: { allowGlobalWorkspace?: boolean } = {}
   ): Promise<{ wslAbsPath: string; distro: string } | null> {
     // Every lookup is scoped to ONE session.  The old script globbed
     // `/tmp/miqi-sandboxes/*/home/miqi/workspace/` and `sessions/*/files/`, so a
@@ -1952,7 +1953,7 @@ for m in ("pydantic", "httpx", "loguru"):
     // WSL interop does not need to import it from the Windows environment.
     // The script canonicalizes both the candidate and its root inside WSL to
     // reject workspace symlinks that point outside (#1103 review).
-    const searchScript = buildWslSearchScript(relPath, sessionKey);
+    const searchScript = buildWslSearchScript(relPath, sessionKey, opts);
 
     for (const distro of distros) {
       try {
@@ -2048,7 +2049,14 @@ for m in ("pydantic", "httpx", "loguru"):
       }
 
       try {
-        const found = await findFileInWsl(relPath, parsed.data.session_key);
+        const found = await findFileInWsl(relPath, parsed.data.session_key, {
+          // #1103 review: a folder-bound session resolves `relPath` against the
+          // bound folder.  If the miss fell back to the global WSL workspace,
+          // the hit would be copied into the bound folder (hostTarget below)
+          // and opened — the same wrong-root rebinding already fixed for
+          // absolute paths, one stage later.
+          allowGlobalWorkspace: extraRoots.length === 0,
+        });
         if (found) {
           const hostTarget = join(extraRoots[0] ?? getWorkspacePath(), relPath);
           const copied = await copyFromWsl(found.wslAbsPath, found.distro, hostTarget);

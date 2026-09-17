@@ -334,6 +334,20 @@ describe('buildWslSearchScript (#1103)', () => {
     expect(script).toContain('$HOME/.miqi/workspace');
   });
 
+  it('omits the global workspace for folder-bound sessions (#1103 review)', () => {
+    const script = buildWslSearchScript('report.md', 'desktop:123', {
+      allowGlobalWorkspace: false,
+    });
+    // 绑定会话的相对路径锚在绑定目录上：那里没有就该报 not found，不能退到全局
+    // 工作区——否则全局的同名文件会被 copyFromWsl 复制进绑定目录再打开。
+    expect(script).not.toContain('$HOME/.miqi/workspace');
+    expect(script).not.toContain('"$ws/$RP"');
+    expect(script).not.toContain('"$s/$RP"');
+    // 会话自己的 WSL 位置仍然可搜
+    expect(script).toContain('"$W/$RP"');
+    expect(script).toContain('"$S/$RP"');
+  });
+
   it('uses the canonical session-files directory for namespaced keys', () => {
     const script = buildWslSearchScript('report.md', 'miqi-desktop:desktop:123');
     expect(script).toContain('/tmp/miqi-sandboxes/miqi-desktop_desktop_123/home/miqi/workspace');
