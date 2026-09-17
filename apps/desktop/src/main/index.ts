@@ -8,7 +8,9 @@ import { writeMainProcessLog } from './electron-log';
 import { createSplash, closeSplash } from './splash';
 import { safeWrite, guardStdStreams } from './console-guard';
 import { sendToWindow } from './frame-send';
+import { createUpdater, type Updater } from './updater';
 import { WINDOW_MIN_WIDTH } from '../shared/layout';
+import type { UpdateSnapshot } from '../shared/ipc';
 
 const originalConsoleLog = console.log.bind(console);
 const originalConsoleWarn = console.warn.bind(console);
@@ -125,6 +127,60 @@ function createWindow(): void {
   }
 }
 
+/**
+ * 自动更新（#1124）。
+ *
+ * 只有打包环境有 electron-builder 由 publish 配置生成的 app-update.yml
+ * （GitHub Release 的 latest.yml 为 feed），开发环境状态固定 unsupported。
+ * MIQI_UPDATE_FEED_URL 覆盖 feed 地址，仅用于本地验证更新链路
+ * （本地 static server 提供 latest.yml + 安装包）。
+ */
+async function createAppUpdater(): Promise<Updater> {
+  const broadcast = (snapshot: UpdateSnapshot) => {
+    sendToWindow(mainWindow, 'update:changed', snapshot);
+  };
+  const currentVersion = app.getVersion();
+
+  if (!app.isPackaged || process.platform !== 'win32') {
+    // 仅 Windows 安装版（NSIS）支持自动更新：macOS 包未签名，
+    // electron-updater 无法在未签名应用上完成替换安装。
+    return createUpdater({ autoUpdater: null, currentVersion, enabled: false, broadcast });
+  }
+
+  // 懒加载：开发环境（vitest / dev 启动）不引入 electron-updater
+  let autoUpdater: Awaited<typeof import('electron-updater')>['autoUpdater'];
+  try {
+    const mod = await import('electron-updater');
+    // CJS 互操作坑：electron-updater 用 defineProperty(getter) 导出，打包成 CJS 后
+    // Node 的 ESM 命名导出探测拿不到 autoUpdater（实测为 undefined），需从
+    // default（module.exports）兜底。
+    autoUpdater =
+      mod.autoUpdater ??
+      (mod as unknown as { default?: { autoUpdater?: typeof autoUpdater } }).default?.autoUpdater;
+    if (!autoUpdater) throw new Error('autoUpdater export not found');
+  } catch (err) {
+    // 依赖缺失/损坏不得拖垮启动：降级为 unsupported，更新入口显示不可用
+    console.warn(`[updater] electron-updater unavailable: ${String(err)}`);
+    return createUpdater({ autoUpdater: null, currentVersion, enabled: false, broadcast });
+  }
+  const feedOverride = process.env['MIQI_UPDATE_FEED_URL'];
+  // 更新过程写主进程日志（console 已被重定向到应用日志文件），便于线上排障
+  autoUpdater.logger = console;
+  if (feedOverride) {
+    autoUpdater.setFeedURL({ provider: 'generic', url: feedOverride });
+  }
+  return createUpdater({
+    autoUpdater,
+    currentVersion,
+    broadcast,
+    log: (level, message) => {
+      if (level === 'INFO') console.log(message);
+      else if (level === 'WARN') console.warn(message);
+      else console.error(message);
+    },
+  });
+}
+
 export function main(): void {
   const formatLogArgs = (args: unknown[]) =>
     args.map((arg) => (typeof arg === 'string' ? arg : inspect(arg, { depth: 4 }))).join(' ');
@@ -182,9 +238,11 @@ export function main(): void {
     });
   }
 
-  app.whenReady().then(() => {
+  app.whenReady().then(async () => {
     bridgeManager = new BridgeManager();
-    registerIpcHandlers(bridgeManager);
+
+    const updater = await createAppUpdater();
+    registerIpcHandlers(bridgeManager, updater);
 
     // Forward bridge events to renderer. These fire for the whole lifetime of
     // the window, including after the renderer is gone (#1019: the bridge
@@ -203,6 +261,9 @@ export function main(): void {
       closeSplash();
     });
     createWindow();
+
+    // 启动后延迟检查（默认 30s）：避开启动瞬间的桥初始化与登录流程
+    updater.start();
 
     app.on('activate', () => {
       if (BrowserWindow.getAllWindows().length === 0) {

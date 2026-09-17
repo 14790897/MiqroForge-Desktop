@@ -116,8 +116,28 @@ extraResources:
     to: miqi-bridge.exe
 
 publish:
-  provider: generic
-  url: https://releases.example.com
+  provider: github
+  owner: 14790897
+  repo: MiqroForge-Desktop
+```
+
+## 自动更新（#1124）
+
+- **客户端**：主进程 `src/main/updater.ts` + `electron-updater`。启动后延迟 30s 自动检查，
+  设置页「关于」可手动检查；发现新版本自动下载，完成后弹横幅引导「立即重启」。
+  检查/下载失败静默重试（状态在关于页展示），不打扰用户。
+- **仅 Windows 安装版（NSIS）生效**：macOS 包未签名，无法在应用内替换安装。
+- **feed**：构建时由 `publish` 配置写入 `resources/app-update.yml`（GitHub Release 为源）。
+  发版流水线需上传 `latest.yml` + `*.blockmap`（见 `release.yml`），否则客户端 404。
+- **channel 规则**：版本号带预发布后缀（如 `0.31.0-dev`）时 electron-updater 读 `dev.yml`；
+  正式版读 `latest.yml`。CI 只在正式版发版，故线上依赖 `latest.yml`。
+- **产物命名**：`nsis.artifactName` 固定为 `MiQroForge.Desktop.Setup.${version}.${ext}`——
+  GitHub 上传会把文件名空格替换成 `.`，latest.yml 里的 path 必须与资产名完全一致。
+- **本地验证更新链路**：`MIQI_UPDATE_FEED_URL` 覆盖 feed 地址（仅打包版生效），
+  指向任意静态服务器（需提供对应 channel 的 yml + 安装包），例如：
+
+```bash
+MIQI_UPDATE_FEED_URL=http://127.0.0.1:8899 "MiQroForge Desktop.exe"
 ```
 
 ## 构建产物

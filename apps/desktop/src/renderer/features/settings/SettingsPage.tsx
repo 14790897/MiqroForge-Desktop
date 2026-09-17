@@ -53,6 +53,7 @@ import {
   MessageSquare,
   Scale,
   Package,
+  Info,
   type LucideIcon,
 } from 'lucide-react';
 import { useRuntime } from '../../contexts/RuntimeContext';
@@ -97,6 +98,7 @@ import { PluginMarket } from '../plugins/PluginMarket';
 import WslStatusPage from '../wsl/WslStatusPage';
 import { FeedbackPage } from '../feedback/FeedbackPage';
 import { QraftPage } from './components/QraftPage';
+import { AboutTab } from './components/AboutTab';
 import { LegalDocumentsPage } from '../legal/LegalDocumentsPage';
 
 export type SettingsTab =
@@ -120,7 +122,8 @@ export type SettingsTab =
   | 'archived'
   | 'legal'
   | 'docs'
-  | 'feedback';
+  | 'feedback'
+  | 'about';
 
 interface SettingsNavItem {
   value: SettingsTab;
@@ -305,6 +308,13 @@ const SETTINGS_CATEGORIES: SettingsCategory[] = [
         description: '问题与功能建议',
         keywords: ['feedback', '反馈', 'suggestion'],
         icon: MessageSquare,
+      },
+      {
+        value: 'about',
+        label: '关于',
+        description: '版本与软件更新',
+        keywords: ['about', 'version', 'update', '关于', '版本', '更新', '升级'],
+        icon: Info,
       },
     ],
   },
@@ -2959,6 +2969,24 @@ export function SettingsPage({
             )}
           >
             <FeedbackPage />
+          </ErrorBoundary>
+        </Tabs.Content>
+        <Tabs.Content value="about" className="flex-1 overflow-y-auto">
+          <ErrorBoundary
+            fallback={(error, reset) => (
+              <div className="p-6 text-sm" style={{ color: 'var(--danger)' }}>
+                ⚠️ 关于页加载失败: {error.message}
+                <button
+                  onClick={reset}
+                  className="ml-2 underline"
+                  style={{ color: 'var(--accent)' }}
+                >
+                  重试
+                </button>
+              </div>
+            )}
+          >
+            <AboutTab />
           </ErrorBoundary>
         </Tabs.Content>
       </Tabs.Root>

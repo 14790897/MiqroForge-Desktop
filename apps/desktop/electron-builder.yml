@@ -53,6 +53,10 @@ nsis:
   # 按用户安装（不设 perMachine）：免 UAC，存量 %LOCALAPPDATA%\Programs 副本可原地
   # 覆盖升级；perMachine 模式要求管理员且固定装 Program Files，会切断更新链路（#1124）。
   oneClick: false
+  # 固定产物名（#1124）：GitHub 上传会把文件名空格替换成 `.`，latest.yml 里记录的
+  # path 必须与资产名完全一致，否则 electron-updater 下载 404。此命名与现有公开
+  # 资产（MiQroForge.Desktop.Setup.0.31.0.exe）保持一致。
+  artifactName: MiQroForge.Desktop.Setup.${version}.${ext}
   createDesktopShortcut: true
   createStartMenuShortcut: true
 dmg:
@@ -61,5 +65,9 @@ dmg:
   # 应用内首次启动隐私协议确认门兜底（#837）。
   license: null
 publish:
-  - provider: generic
-    url: ""
+  # 自动更新源（#1124）：构建时写入 resources/app-update.yml，运行时
+  # electron-updater 从 GitHub Release 资产读取 latest.yml（见 release.yml
+  # 上传 *.yml/*.blockmap）。仅 NSIS 目标参与自动更新，portable/zip/msi 不参与。
+  - provider: github
+    owner: 14790897
+    repo: MiqroForge-Desktop

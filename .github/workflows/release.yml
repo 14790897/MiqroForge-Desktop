@@ -118,6 +118,8 @@ jobs:
             dist-new/*.exe
             dist-new/*.msi
             dist-new/*.zip
+            dist-new/*.blockmap
+            dist-new/latest.yml
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
