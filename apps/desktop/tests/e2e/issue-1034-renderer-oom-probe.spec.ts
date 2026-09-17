@@ -22,15 +22,21 @@
  * 硬前置断言（issue 要求）：注入开始后必须先在 UI 看到思考块在**增长**，证明
  * 事件确实被消费；否则本轮测量无效，直接判失败。
  *
+ * ⚠️ **默认跳过**：这是测量用长跑探针（默认口径 200k 条 ≈17 分钟），不进常规
+ * e2e/CI 套件——否则 electron-e2e 会被拖过 30 分钟 job 超时、macos-e2e 也会因
+ * 反复起 mock 而红。只有显式设了 `MIQI_1034_PROBE=1` 才运行；配套脚本
+ * scripts/measure-reasoning-memory.mjs 会自动带上这个开关。
+ *
  * 运行（推荐用配套脚本，它会带上正确参数并解析结果）：
  *   npm run build
  *   node scripts/measure-reasoning-memory.mjs            # 见 scripts/measure-reasoning-memory.mjs
  *
- * 或直接跑本 spec：
- *   npx playwright test --config=playwright.config.ts --project=electron --workers=1 \
- *     -g "issue1034 probe"
+ * 或直接跑本 spec（**必须显式开开关**，否则整块被 skip）：
+ *   MIQI_1034_PROBE=1 npx playwright test --config=playwright.config.ts --project=electron \
+ *     --workers=1 -g "issue1034 probe"
  *
- * 可调环境变量：MIQI_1034_TARGET / _RATE / _TICK_MS / _MAX_BURST / _PRECONDITION_MS / _OUT
+ * 可调环境变量：MIQI_1034_PROBE（=1 才真跑）/ MIQI_1034_TARGET / _RATE / _TICK_MS /
+ * _MAX_BURST / _PRECONDITION_MS / _OUT
  * （_OUT 是输出目录，JSONL 与摘要都写在那里；默认 apps/desktop/test-reports/issue1034）
  */
 
@@ -49,6 +55,9 @@ import {
 } from './helpers/electron-setup';
 
 const REPO_ROOT = join(APPS_DESKTOP, '..', '..');
+
+/** 探针开关：默认关闭。常规 e2e / CI 里这块整体跳过，只有显式 =1 才跑（见文件头）。 */
+const PROBE_ENABLED = process.env['MIQI_1034_PROBE'] === '1';
 
 const TARGET = Number(process.env['MIQI_1034_TARGET'] ?? 200_000);
 const RATE = Number(process.env['MIQI_1034_RATE'] ?? 200);
@@ -169,6 +178,10 @@ interface UiSample {
 }
 
 test.describe('#1034 renderer memory probe (measurement only)', () => {
+  // describe 级 skip：默认整块跳过（**含 beforeAll**——不起 mock、不 launch Electron、
+  // 不注入 200k）。放在 describe 体里而不是测试体里，才能连 hook 一起挡住。
+  test.skip(!PROBE_ENABLED, '测量用长跑探针默认跳过：设 MIQI_1034_PROBE=1 才运行');
+
   let electronApp: ElectronApplication;
   let page: Page;
   let miqiHome: string;

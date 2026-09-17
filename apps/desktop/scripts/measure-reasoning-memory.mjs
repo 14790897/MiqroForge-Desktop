@@ -4,7 +4,9 @@
  *
  * 口径（与 PR #1118 body 里的 BEFORE 基线完全一致，可直接对比）：
  *   200,000 条 reasoning 事件 @ ~200 msg/s，每条 1 个字符（'x'）；
- *   探针见 tests/e2e/issue-1034-renderer-oom-probe.spec.ts。
+ *   探针见 tests/e2e/issue-1034-renderer-oom-probe.spec.ts——该 spec 默认跳过
+ *   （200k 长跑会把 e2e CI 拖超时），本脚本调用 Playwright 时会带上
+ *   MIQI_1034_PROBE=1 显式开启。
  *
  * 采集：renderer workingSetSize(KB)、JS heapUsed/heapTotal/heapLimit、DOM 节点数、
  * 落到 UI 的推理字符数、renderer-crash、注入量与 wall time。
@@ -90,6 +92,8 @@ function usage() {
       '  --skip-build-check  跳过构建产物检查',
       '',
       '先 npm run build —— 探针启动的是构建产物，不是源码。',
+      '',
+      '探针 spec 默认跳过；本脚本会自动设 MIQI_1034_PROBE=1 开启（直接跑 spec 时要自己带上）。',
     ].join('\n')
   );
 }
@@ -120,6 +124,8 @@ function runProbe(opts) {
       MIQI_1034_TARGET: String(opts.target),
       MIQI_1034_RATE: String(opts.rate),
       MIQI_1034_OUT: opts.out,
+      // 探针 spec 默认跳过（200k 长跑不能混进常规 e2e/CI）——脚本路径必须显式开开关。
+      MIQI_1034_PROBE: '1',
       // electron project 不需要 smoke 的静态服务器，别让它占 3458 端口。
       PLAYWRIGHT_SKIP_WEB_SERVER: '1',
     },
