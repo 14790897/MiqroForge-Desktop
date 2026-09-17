@@ -2265,21 +2265,30 @@ export function capTerminalReasoning(reasoning: string | undefined): string | un
 }
 
 /** (#1034 复审 P1) Hard byte cap over an entire terminal payload before it is
- *  pushed into the in-flight cache.  Final/error/aborted events are never
- *  evicted, so a single multi-MB `content`, `message`, or `tool_calls` payload
- *  would otherwise defeat IN_FLIGHT_MAX_BYTES by construction.
+ *  pushed into the in-flight cache.  A terminal is either never evicted (the
+ *  newest one, which replay needs to settle the session) or evicted only as a
+ *  last resort, so a single multi-MB `content`, `message`, or `tool_calls`
+ *  payload would otherwise defeat IN_FLIGHT_MAX_BYTES by construction.
  *
  *  The cap is applied in order of least semantic damage:
  *   1. `reasoning` uses the same tail window as the live stream.
  *   2. `tool_calls` keeps their names but truncates `function.arguments`,
  *      falling back to a `{ _truncated, count, names }` summary if still over budget.
  *   3. `content` and `message` are truncated with an ellipsis marker.
- *   4. Any remaining unknown string fields are halved iteratively until the
- *      budget is met.
+ *   4. Every remaining string *anywhere in the tree* — nested objects and
+ *      array elements included — is trimmed longest-first until the budget
+ *      holds.
+ *   5. A payload still over budget (bytes hidden in object keys, or sheer
+ *      field count) degrades to a bounded type/size summary.
+ *
+ *  Post-condition, for any JSON-like input:
+ *  `payloadBytes(result) <= TERMINAL_PAYLOAD_MAX_BYTES`.  It is what lets
+ *  `evictInFlightOverflow` keep the snapshot under IN_FLIGHT_MAX_BYTES even
+ *  though terminal events are no longer un-evictable.
  *
  *  Identity is preserved when the payload already fits (no copy is made). */
 export function capTerminalEventData<T extends object>(data: T): T {
-  const budget = IN_FLIGHT_MAX_BYTES - IN_FLIGHT_EVENT_OVERHEAD_BYTES - 256;
+  const budget = TERMINAL_PAYLOAD_MAX_BYTES;
   if (payloadBytes(data) <= budget) return data;
 
   // `T extends object` is not assignable to an index signature, so the cast
@@ -2318,18 +2327,42 @@ export function capTerminalEventData<T extends object>(data: T): T {
 
   // 3. `content` / `message`: truncate with ellipsis.
   if (typeof capped.content === 'string') {
-    capped = { ...capped, content: truncateTerminalString(capped.content, 20000) };
+    capped = {
+      ...capped,
+      content: truncateTerminalString(capped.content, MAX_TERMINAL_STRING_CHARS),
+    };
   }
   if (payloadBytes(capped) <= budget) return capped as T;
 
   if (typeof capped.message === 'string') {
-    capped = { ...capped, message: truncateTerminalString(capped.message, 20000) };
+    capped = {
+      ...capped,
+      message: truncateTerminalString(capped.message, MAX_TERMINAL_STRING_CHARS),
+    };
   }
   if (payloadBytes(capped) <= budget) return capped as T;
 
-  // 4. Fallback: iteratively halve the largest remaining string field.
-  capped = truncateLargestStringFields(capped, budget);
-  return capped as T;
+  // 4. Fallback: recursively trim the longest string anywhere in the tree.
+  //    Only looking at top-level fields (as this used to) let a nested
+  //    `{ metadata: { details: { hugeText: 2 MiB } } }` sail past the budget
+  //    untouched — the 复审 P1 hole.
+  //
+  //    The walk descends once per nesting level, so a tree deeper than the
+  //    engine's stack (already too deep for JSON.stringify, and therefore for
+  //    `payloadBytes` too) overflows: swallow that and take the summary below,
+  //    rather than letting a RangeError escape into the ingest path.
+  let trimmed = capped;
+  try {
+    trimmed = truncateLargestStrings(capped, budget);
+  } catch {
+    // fall through to the bounded summary
+  }
+  if (payloadBytes(trimmed) <= budget) return trimmed as T;
+
+  // 5. Bytes still unaccounted for (object keys, thousands of small fields, or
+  //    a tree too deep to walk): degrade to a summary that is under budget by
+  //    construction.
+  return boundedTerminalSummary(trimmed, budget) as T;
 }
 
 /** Truncate a terminal string to at most `maxChars`, adding an ellipsis marker. */
@@ -2338,32 +2371,185 @@ function truncateTerminalString(text: string, maxChars: number): string {
   return `${text.slice(0, maxChars)}…`;
 }
 
-/** Repeatedly halve the largest string field until the payload fits the byte
- *  budget or no shrinkable strings remain. */
-function truncateLargestStringFields(
-  payload: Record<string, unknown>,
-  budget: number,
-  maxRounds = 50
-): Record<string, unknown> {
+/** (#1034 复审 P1) A string reachable from the payload root: the key/index
+ *  path that leads to it, plus its current character count. */
+interface StringSlot {
+  path: (string | number)[];
+  chars: number;
+}
+
+/** Collect every string in a JSON-like tree, nested objects and array elements
+ *  included.  `seen` guards against cycles so the walk always terminates
+ *  (IPC payloads are acyclic, but this runs on the ingest hot path). */
+function collectStringSlots(
+  value: unknown,
+  path: (string | number)[],
+  out: StringSlot[],
+  seen: WeakSet<object>
+): void {
+  if (typeof value === 'string') {
+    out.push({ path, chars: value.length });
+    return;
+  }
+  if (value === null || typeof value !== 'object') return;
+  if (seen.has(value)) return;
+  seen.add(value);
+  if (Array.isArray(value)) {
+    // Indexed loop, not `.map`: a sparse array must not be visited through its
+    // holes (JSON never produces one, but a throw here would reach ingest).
+    for (let i = 0; i < value.length; i += 1) {
+      collectStringSlots(value[i], [...path, i], out, seen);
+    }
+    return;
+  }
+  for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+    collectStringSlots(child, [...path, key], out, seen);
+  }
+}
+
+/** Read a value by key path. */
+function readPath(root: unknown, path: (string | number)[]): unknown {
+  let node: unknown = root;
+  for (const key of path) node = (node as Record<string | number, unknown>)[key];
+  return node;
+}
+
+/** Copy-on-write write by key path: every container along the way is rebuilt,
+ *  so the caller's payload is never mutated (the shallow spread at the top of
+ *  `capTerminalEventData` shares nested objects with it).
+ *
+ *  `copies` memoizes the rebuilt containers for one round, and callers always
+ *  walk from that round's *starting* tree.  Without that, each of a thousand
+ *  strings living in the same object would rebuild — and then discard — the
+ *  whole object again: quadratic work on exactly the payloads this fallback
+ *  exists to tame. */
+function replacePath(
+  root: unknown,
+  path: (string | number)[],
+  next: unknown,
+  copies: Map<object, Record<string | number, unknown>>
+): unknown {
+  if (path.length === 0) return next;
+  const [head, ...rest] = path;
+  const container = root as Record<string | number, unknown>;
+  const childNext = replacePath(container[head], rest, next, copies);
+
+  let copy = copies.get(root as object);
+  if (!copy) {
+    copy = (
+      Array.isArray(root) ? (root as unknown[]).slice() : { ...(root as Record<string, unknown>) }
+    ) as Record<string | number, unknown>;
+    copies.set(root as object, copy);
+  }
+  copy[head] = childNext;
+  return copy;
+}
+
+/** (#1034 复审 P1) Trim the longest strings anywhere in the tree — nested and
+ *  array-nested strings included — until the payload fits.
+ *
+ *  Each round first measures the deficit, then walks the strings longest-first
+ *  taking at most half of each (and only as much as the remaining deficit
+ *  needs).  Measuring matters: trimming a single string per round cannot
+ *  converge on a payload made of many medium strings — it would spend 64
+ *  stringify passes shrinking a 6 MiB tree by 80 KiB a round — whereas taking
+ *  a proportional bite out of every large string fits such a payload in one or
+ *  two rounds.  Strings small enough to be harmless are never reached (the
+ *  walk stops once the deficit is covered), so short fields pass through.
+ *
+ *  The round cap bounds the work on shapes this cannot fix at all: bytes spent
+ *  on object *keys* or on sheer field count make no progress, and the caller
+ *  degrades to a bounded summary instead. */
+function truncateLargestStrings<T>(payload: T, budget: number, maxRounds = 16): T {
   let current = payload;
   for (let round = 0; round < maxRounds; round += 1) {
-    if (payloadBytes(current) <= budget) break;
+    const bytes = payloadBytes(current);
+    if (bytes <= budget) break;
 
-    let largestKey: string | null = null;
-    let largestLen = 0;
-    for (const [key, value] of Object.entries(current)) {
-      if (typeof value === 'string' && value.length > largestLen) {
-        largestKey = key;
-        largestLen = value.length;
-      }
+    const slots: StringSlot[] = [];
+    collectStringSlots(current, [], slots, new WeakSet());
+    slots.sort((a, b) => b.chars - a.chars);
+
+    // Characters that have to go (2 bytes each), plus one for each ellipsis
+    // marker this round may add.  Bytes are counted by JSON.stringify, so a
+    // string full of escapable characters shrinks faster than this estimates —
+    // erring high only means dropping a little more text.
+    let deficit = Math.ceil((bytes - budget) / 2) + slots.length;
+    // Every patch is applied to the round's starting tree (see `replacePath`),
+    // so the copies they share are created once.
+    const base = current;
+    const copies = new Map<object, Record<string | number, unknown>>();
+    let trimmed = 0;
+    for (const slot of slots) {
+      if (deficit <= 0) break;
+      const text = readPath(base, slot.path) as string;
+      // Fields already this small cannot matter to a >=1 MiB budget, and
+      // chipping at them would eat visible text to close an approximation.
+      if (text.length <= MIN_TRIMMABLE_STRING_CHARS) continue;
+      // Never more than half: a string smaller than the deficit cannot close
+      // it alone, and gutting it would cost detail for nothing.
+      const take = Math.min(Math.floor(text.length / 2), deficit);
+      if (take <= 0) continue;
+      // Align the cut so a surrogate pair is never split — the lone half would
+      // render as U+FFFD right before the ellipsis (same rule as the live
+      // reasoning window's).  Aligning can land the cut one unit later, and
+      // when that is the whole of `take` the round would shorten nothing (a
+      // surrogate-heavy string would then spin out its rounds and drop to the
+      // summary): step one more character, aligned the same way, so every
+      // round makes progress.
+      let cut = alignCodePoint(text, text.length - take);
+      if (text.length - cut < 2) cut = alignCodePoint(text, Math.max(0, text.length - take - 2));
+      current = replacePath(base, slot.path, `${text.slice(0, cut)}…`, copies) as T;
+      deficit -= take;
+      trimmed += 1;
     }
-    if (!largestKey) break;
-
-    const value = current[largestKey] as string;
-    const next = value.length <= 1 ? '' : `${value.slice(0, Math.floor(value.length / 2))}…`;
-    current = { ...current, [largestKey]: next };
+    // Only short strings, keys and structure left: this walker cannot shrink
+    // those.
+    if (trimmed === 0) break;
   }
   return current;
+}
+
+/** (#1034 复审 P1) Last resort for a payload this module cannot trim any
+ *  further.  Keeps the top-level shape and, crucially, the *types* replay
+ *  depends on: a string field stays a string (its head), so a `content` /
+ *  `message` / `type` / `code` that lands here is still readable rather than
+ *  replaced by a descriptor.  Objects and arrays collapse to a type+size
+ *  descriptor.  Bounded in field count, key length and per-field size, so the
+ *  result fits the budget by construction; the final `payloadBytes` check is
+ *  belt-and-braces for pathological key sets. */
+const MAX_SUMMARY_FIELDS = 64;
+const MAX_SUMMARY_KEY_CHARS = 64;
+const MAX_SUMMARY_VALUE_CHARS = 64;
+
+function summarizeTerminalValue(value: unknown): unknown {
+  if (value === null) return null;
+  const kind = typeof value;
+  if (kind === 'number' || kind === 'boolean' || kind === 'undefined') return value;
+  if (kind === 'string') {
+    const text = value as string;
+    return text.length <= MAX_SUMMARY_VALUE_CHARS
+      ? text
+      : `${text.slice(0, MAX_SUMMARY_VALUE_CHARS)}…`;
+  }
+  return { type: Array.isArray(value) ? 'array' : 'object', size: payloadBytes(value) };
+}
+
+function boundedTerminalSummary(
+  payload: Record<string, unknown>,
+  budget: number
+): Record<string, unknown> {
+  const summary: Record<string, unknown> = { _truncated: true, size: payloadBytes(payload) };
+  let kept = 0;
+  for (const [key, value] of Object.entries(payload)) {
+    if (kept >= MAX_SUMMARY_FIELDS) break;
+    const label =
+      key.length > MAX_SUMMARY_KEY_CHARS ? `${key.slice(0, MAX_SUMMARY_KEY_CHARS)}…` : key;
+    summary[label] = summarizeTerminalValue(value);
+    kept += 1;
+  }
+  // A single short record is the floor: it cannot exceed any sane budget.
+  return payloadBytes(summary) <= budget ? summary : { _truncated: true, type: 'object' };
 }
 
 /** Append a streaming reasoning chunk to the last live thinking bubble.
@@ -2609,6 +2795,22 @@ export const IN_FLIGHT_MAX_EVENTS = 2000;
 export const IN_FLIGHT_MAX_BYTES = 1024 * 1024;
 /** Rough per-event bookkeeping cost (object + array slot + timestamp). */
 export const IN_FLIGHT_EVENT_OVERHEAD_BYTES = 128;
+/** (#1034 复审 P1) Hard ceiling `capTerminalEventData` guarantees for a single
+ *  terminal event's payload: the snapshot budget minus that event's own
+ *  overhead, minus a 256-byte margin for whatever the capping itself adds
+ *  (rolled-up `_truncated` markers, spread keys, the ellipsis).  Keeping one
+ *  terminal under this is what makes the snapshot recoverable once eviction
+ *  is allowed to drop older terminals. */
+export const TERMINAL_PAYLOAD_MAX_BYTES =
+  IN_FLIGHT_MAX_BYTES - IN_FLIGHT_EVENT_OVERHEAD_BYTES - 256;
+/** (#1034 复审 P1) Truncation width for a terminal's `content` / `message`
+ *  (step 3 of `capTerminalEventData`). */
+const MAX_TERMINAL_STRING_CHARS = 20000;
+/** (#1034 复审 P1) Strings at or below this length are left alone by the
+ *  recursive fallback: at 2 bytes per char they cannot meaningfully offset a
+ *  `TERMINAL_PAYLOAD_MAX_BYTES`-sized budget, so trimming them would only cost
+ *  visible text. */
+const MIN_TRIMMABLE_STRING_CHARS = 64;
 
 /** (#1034) UTF-16 byte size of an event's payload: 2 bytes per char plus a
  *  fixed overhead.
@@ -2623,8 +2825,9 @@ export const IN_FLIGHT_EVENT_OVERHEAD_BYTES = 128;
  *  hard cap.
  *
  *  Cycles cannot come from IPC-shaped JSON; if a value still makes
- *  stringify throw, fall back to the old bounded walker (rough, but
- *  terminating) instead of throwing from inside the hot path. */
+ *  stringify throw (a cycle, or nesting deeper than the engine's stack),
+ *  fall back to walking the tree instead of throwing from inside the hot
+ *  path. */
 function payloadBytes(value: unknown): number {
   if (typeof value === 'string') return value.length * 2;
   if (value === null || typeof value !== 'object') return 0;
@@ -2635,15 +2838,28 @@ function payloadBytes(value: unknown): number {
   }
 }
 
-/** (#1034) Bounded-depth fallback for values `JSON.stringify` cannot take
- *  (e.g. a cycle): counts own string values up to depth 2, like the
- *  original accounting did. */
-function walkPayloadBytes(value: unknown, depth = 0): number {
-  if (typeof value === 'string') return value.length * 2;
-  if (value === null || typeof value !== 'object' || depth >= 2) return 0;
+/** (#1034 复审 P1) Full-depth fallback for values `JSON.stringify` cannot
+ *  take.  It counts every string in the tree, at any depth: an earlier
+ *  depth-2 bound here under-reported a deeply nested multi-MB string as 0, so
+ *  `capTerminalEventData` saw a "small" payload and returned it untouched —
+ *  the exact payload the cap exists to catch.  The explicit stack (rather than
+ *  recursion) is what lets it survive the nesting that overflowed stringify,
+ *  and `seen` keeps a cyclic payload terminating. */
+function walkPayloadBytes(value: unknown): number {
+  const seen = new WeakSet<object>();
+  const stack: unknown[] = [value];
   let total = 0;
-  for (const v of Object.values(value as Record<string, unknown>))
-    total += walkPayloadBytes(v, depth + 1);
+  while (stack.length > 0) {
+    const node = stack.pop();
+    if (typeof node === 'string') {
+      total += node.length * 2;
+      continue;
+    }
+    if (node === null || typeof node !== 'object') continue;
+    if (seen.has(node)) continue;
+    seen.add(node);
+    for (const child of Object.values(node as Record<string, unknown>)) stack.push(child);
+  }
   return total;
 }
 
@@ -2685,13 +2901,23 @@ function mergeableDelta(prev: InFlightEvent, next: InFlightEvent): string | null
   return b.delta;
 }
 
-/** (#1034) Drop the oldest non-terminal events until both caps hold.  The
- *  newest event is never a victim, and terminal events (final/error/aborted)
- *  are never evicted — the replay needs them to settle the session.  Their
- *  count per turn is bounded by the protocol (one final, plus an optional
- *  error/aborted), and their payloads are hard-capped at ingest
- *  (capTerminalEventData), so refusing to evict them cannot grow the buffer
- *  nor blow the byte budget. */
+/** (#1034) Drop the oldest evictable events until both caps hold: progress
+ *  events first (they are re-derivable from the live stream), and — (#1034
+ *  复审 P2) only if the byte cap is still breached — terminals *older than the
+ *  newest one*.
+ *
+ *  Replay settles a session from its newest terminal alone, so older terminals
+ *  are droppable: a turn that emits both a `final` and a trailing `error`
+ *  (or `aborted`) used to leave two hard-capped payloads resident forever, and
+ *  two payloads that individually sit just under the terminal budget add up to
+ *  more than IN_FLIGHT_MAX_BYTES.  Keeping the newest terminal is enough to
+ *  settle the session; the dropped one's content is still in the session's
+ *  persisted history.
+ *
+ *  The newest event is never a victim, and one terminal always survives: its
+ *  payload is capped at TERMINAL_PAYLOAD_MAX_BYTES at ingest, i.e. below the
+ *  whole-snapshot budget, so a buffer of exactly one event can never be over
+ *  budget. */
 function evictInFlightOverflow(snapshot: InFlightSnapshot): void {
   while (
     snapshot.events.length > 1 &&
@@ -2704,7 +2930,29 @@ function evictInFlightOverflow(snapshot: InFlightSnapshot): void {
         break;
       }
     }
-    if (victim < 0) return; // only terminals left — nothing evictable
+
+    if (victim < 0) {
+      // Only terminals left. An over-long *count* cannot happen here (the
+      // protocol allows one final plus an optional error/aborted), so a byte
+      // breach is the only reason to keep going — and then the newest
+      // terminal must stay.
+      if (snapshot.bytes <= IN_FLIGHT_MAX_BYTES) return;
+      let newestTerminal = -1;
+      for (let i = snapshot.events.length - 1; i >= 0; i -= 1) {
+        if (snapshot.events[i].type !== 'progress') {
+          newestTerminal = i;
+          break;
+        }
+      }
+      for (let i = 0; i < snapshot.events.length - 1; i += 1) {
+        if (i !== newestTerminal) {
+          victim = i;
+          break;
+        }
+      }
+      if (victim < 0) return; // a single, newest terminal — nothing to drop
+    }
+
     snapshot.bytes -= inFlightEventBytes(snapshot.events[victim]);
     snapshot.events.splice(victim, 1);
   }
