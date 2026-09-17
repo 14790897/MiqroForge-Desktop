@@ -8,11 +8,19 @@ Safety therefore depends on the filter below being complete.  Never
 remove a tool from this set without verifying it has no write, execute,
 or network-modify capability.  The permission engine's deny-list still
 wins in all modes.
+
+Note (#1102): bypass_approval only skips the category-based approval flow
+in permission_engine.check() — it does NOT skip the Action Guard.  A tool
+that task_policy.should_confirm_action accepts (risk >= the confirm
+threshold; today that is `spawn`, the only such name with a registered
+tool) therefore still requires confirmation in plan and auto mode instead
+of being auto-allowed.  The filter below is a boundary, not the only one.
 """
 
 # Tools blocked in plan mode (read-only strategist).
-# Everything NOT in this set is available to plan mode and will be
-# auto-allowed (bypass_approval=True).  Update carefully.
+# Everything NOT in this set is available to plan mode and auto-allowed by
+# bypass_approval — unless it hits the Action Guard (see module docstring).
+# Update carefully.
 PLAN_BLOCKED_TOOLS: frozenset[str] = frozenset({
     "write_file", "edit_file", "apply_patch", "edit_diff",
     "write", "edit", "delete", "move",

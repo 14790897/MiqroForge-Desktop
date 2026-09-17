@@ -3,11 +3,14 @@
 Consults (in order):
 1. Config-based deny rules (checked first — explicit blocks always win)
 2. Interactive user-input tools → their own inline card, never a second approval dialog
-3. Execution-policy bypass/manual handling
-4. Read-only tools → auto-allow (unless blocked by deny pattern)
-5. Session/permanent allowlists
-6. Shell safety / file / network approval
-7. Default: deny-by-default (APPROVAL_REQUIRED)
+3. Action Guard → high-risk actions always confirm; bypass_approval never skips it
+   (deferred to step 5 for manual-only turns, where every call already asks)
+4. Execution-policy bypass (bypass_approval) → skip the category-based approval flow
+5. Execution-policy manual mode (force_approval) → every call asks
+6. Read-only tools → auto-allow (unless blocked by deny pattern)
+7. Session/permanent allowlists
+8. Shell safety / file / network approval
+9. Default: deny-by-default (APPROVAL_REQUIRED)
 """
 
 from __future__ import annotations
@@ -196,6 +199,9 @@ class PermissionEngine:
             if not should_confirm_action(ctx.tool_name, getattr(ctx, "arguments", None) or {}):
                 return None
         except Exception:
+            # 这里「判定为非高危」与「判定不可用」都返回 None（让位给后续门）。
+            # 更严格的 fail-closed 会让判定表一旦不可用时连读/写类普通动作也要求
+            # 审批，爆炸半径超出 #1102 范围，故不在本次收紧。
             return None
         key = f"{getattr(ctx, 'thread_id', '')}:{ctx.tool_name}"
         if key in self._action_guard_confirmed:
@@ -279,6 +285,29 @@ class PermissionEngine:
                 category="user_input",
             )
 
+        # Action Guard（外部复核 9-11，fail-closed）：高危外部副作用在真实派发前
+        # 强制确认——模型不先调 request_action_confirmation 也无法绕过。
+        #
+        # #1102：必须排在 bypass_approval **之前**。auto 模式由执行策略**自动**置位
+        # bypass_approval（用户在选择器上授权的是「普通动作免确认」，不是「高危动作
+        # 免兜底」——见 docs/design-646-v2-plan-card.md「auto ≠ root」），bypass 若
+        # 短路在前，guard 在 auto / plan 下永不执行。
+        #
+        # 手动模式（force_approval）例外：那里每个动作本来就要确认，guard 的专用卡
+        # 不再叠加——两张卡对同一个动作没有增量安全性，而 guard 卡面「同类动作不再
+        # 逐一询问」的会话缓存语义在 manual 下并不成立（force 会再次拦下），叠加反而
+        # 让卡面文案失真。
+        # 例外只对「纯手动」（force 且非 bypass）成立：两标志同时置位时不该让 bypass
+        # 借道 force 跳过 guard——那正是 #1102 要堵的语义。bypass 仍优先于 force，
+        # 故普通动作在该组合下照旧由 bypass 放行。
+        _manual_only = getattr(ctx, "force_approval", False) and not getattr(
+            ctx, "bypass_approval", False
+        )
+        if not _manual_only:
+            guard_decision = await self._action_guard(ctx)
+            if guard_decision is not None:
+                return guard_decision
+
         if getattr(ctx, "bypass_approval", False):
             return PermissionDecision(
                 verdict=PermissionVerdict.ALLOW,
@@ -296,12 +325,6 @@ class PermissionEngine:
                 allow_permanent=False,
                 description=f"手动模式 · {detail}",
             )
-
-        # Action Guard（外部复核 9-11，fail-closed）：高危外部副作用在真实派发前
-        # 强制确认——模型不先调 request_action_confirmation 也无法绕过。
-        guard_decision = await self._action_guard(ctx)
-        if guard_decision is not None:
-            return guard_decision
 
         cmd_key = self._make_key(ctx)
         if cmd_key in self.session_allowlist:
