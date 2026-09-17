@@ -64,6 +64,18 @@ function jsonBytes(value: unknown): number {
   return JSON.stringify(value).length * 2;
 }
 
+/** 占位载荷的判定（与 ChatConsole 的 isStrippedTerminal 同一形状规则）：
+ *  只剩 `_evicted`，或 `_evicted` + 至多 200 字的 message。 */
+function isStrippedPayload(data: unknown): boolean {
+  const record = data as { _evicted?: boolean; message?: unknown } | null | undefined;
+  if (record?._evicted !== true) return false;
+  const keys = Object.keys(record);
+  return (
+    keys.length === 1 ||
+    (keys.length === 2 && typeof record.message === 'string' && record.message.length <= 200)
+  );
+}
+
 /** 文本里是否存在孤立代理（高位后面不跟低位，或低位前面没有高位）。 */
 function hasLoneSurrogate(text: string): boolean {
   for (let i = 0; i < text.length; i += 1) {
@@ -569,6 +581,61 @@ describe('#1034 复审二轮：terminal payload 递归硬上限 + 多终态快�
     expect(
       (buf.events[buf.events.length - 1].data as { content: string }).content.startsWith('ggg')
     ).toBe(true);
+  });
+
+  it('P2：停在超限状态时一定已无可回收项（不白扔内容的不变量）', () => {
+    // 扫「n 条近满终态 × 尾部事件」共 18 种组合。不变量有两条：
+    //   1) 若还能靠掏空回到上限内，就不允许停在超限状态——那是拿内容换了个
+    //      仍然超限的结果；
+    //   2) 记账恒等于事件字节之和。
+    const violations: string[] = [];
+    for (let n = 1; n <= 6; n += 1) {
+      for (const tail of ['progress-big', 'progress-small', 'none'] as const) {
+        const buf = createInFlightSnapshot();
+        const types = ['final', 'error', 'aborted'] as const;
+        for (let i = 0; i < n; i += 1) {
+          pushInFlightEvent(buf, {
+            type: types[i % 3],
+            data: capTerminalEventData(bigPayload(String.fromCharCode(102 + i).repeat(300 * 1024))),
+            timestamp: i,
+          } as Ev);
+        }
+        if (tail === 'progress-big') {
+          pushInFlightEvent(buf, {
+            type: 'progress',
+            data: { stream: 'stdout', delta: 'p'.repeat(600 * 1024), tool_call_id: 'c1' },
+            timestamp: 99,
+          } as Ev);
+        }
+        if (tail === 'progress-small') {
+          pushInFlightEvent(buf, {
+            type: 'progress',
+            data: { stream: 'stdout', delta: 'p'.repeat(1024), tool_call_id: 'c1' },
+            timestamp: 99,
+          } as Ev);
+        }
+
+        // 掏空每条尚未掏空的终态还能回收多少字节。
+        let reclaimable = 0;
+        for (const e of buf.events) {
+          if (e.type === 'progress' || isStrippedPayload(e.data)) continue;
+          reclaimable +=
+            inFlightEventBytes(e) -
+            inFlightEventBytes({
+              type: e.type,
+              data: { _evicted: true },
+              timestamp: e.timestamp,
+            } as Ev);
+        }
+        const label = `n=${n} ${tail}`;
+        if (buf.bytes > IN_FLIGHT_MAX_BYTES && buf.bytes - reclaimable <= IN_FLIGHT_MAX_BYTES) {
+          violations.push(`${label}: bytes=${buf.bytes} reclaimable=${reclaimable}`);
+        }
+        const ledger = buf.events.reduce((sum, e) => sum + inFlightEventBytes(e), 0);
+        if (ledger !== buf.bytes) violations.push(`${label}: ledger ${ledger} != ${buf.bytes}`);
+      }
+    }
+    expect(violations).toEqual([]);
   });
 
   it('P2：环状载荷的字节计费走兜底 walker 且能终止（seen 路径）', () => {
