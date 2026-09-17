@@ -246,7 +246,15 @@ export function buildMarkdown(report) {
     return lines.join('\n');
   }
 
-  lines.push('以下用例首次失败、重试才通过 —— job 仍是 success，但需要归因：', '');
+  // 「job 仍是 success」只在没有失败用例时成立 —— 混合结果（既有 flaky 又有真失败）下这么说
+  // 会给出错误结论，而「别给错结论」正是这个改动的目的。
+  const hasFailures = (report?.stats?.unexpected ?? 0) > 0;
+  lines.push(
+    hasFailures
+      ? '以下用例首次失败、重试才通过。本次运行还有失败用例（见 Playwright 自己的汇总），下面这些同样需要归因：'
+      : '以下用例首次失败、重试才通过 —— job 仍是 success，但需要归因：',
+    ''
+  );
   for (const entry of flaky.slice(0, MAX_LISTED_FLAKY)) {
     // 路径按仓库根来写（与注解里的 file= 一致），方便直接拿去检索。
     const where = `${repoRelative(entry.file, rootDir)}:${entry.line}:${entry.column}`;

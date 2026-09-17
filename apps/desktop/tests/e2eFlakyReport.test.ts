@@ -314,6 +314,26 @@ describe('buildMarkdown', () => {
     expect(buildMarkdown(report)).toContain('run 级错误');
   });
 
+  // 「job 仍是 success」只在没有失败用例时成立：混合结果下说这句是错的结论（评审 P1-1）。
+  it('没有失败用例时才说「job 仍是 success」', () => {
+    const report = makeReport();
+    report.stats = { ...report.stats, unexpected: 0 };
+
+    const markdown = buildMarkdown(report);
+
+    expect(markdown).toContain('job 仍是 success');
+  });
+
+  it('同时有失败用例时不宣称 job 成功', () => {
+    const report = makeReport(); // fixture 的 stats.unexpected = 1
+    expect(report.stats.unexpected).toBeGreaterThan(0);
+
+    const markdown = buildMarkdown(report);
+
+    expect(markdown).not.toContain('job 仍是 success');
+    expect(markdown).toContain('本次运行还有失败用例');
+  });
+
   // 清单长度同样由 PR 决定，截断处要写清楚，别让人以为只有这些。
   it('flaky 条数超过上限时截断，并说明还有多少条', () => {
     const report = makeReport();
