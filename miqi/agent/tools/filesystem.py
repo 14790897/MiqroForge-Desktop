@@ -302,6 +302,102 @@ def _persist_tracked_file(
         _log.warning("_persist_tracked_file: failed session=%s path=%s: %s", session_key, file_path, exc)
 
 
+def _canonical_path_str(p: str | Path) -> str:
+    """Canonical forward-slash form of a path for ledger comparison.
+
+    Windows 允许同一文件以多种写法出现（8.3 短名 ``INTERS~1`` vs 长名、
+    ``..`` 段、大小写），台账里因此可能有同一文件的不同形态；比较前一律
+    ``resolve()`` 归一，避免「声明打到重复条目上、原条目没有 result」。
+    """
+    try:
+        return str(Path(p).resolve()).replace("\\", "/")
+    except Exception:
+        return str(p).replace("\\", "/")
+
+
+def _resolve_ledger_entry_to_abs(
+    entry: str, workspace: Path | None, files_dir: Path | None,
+) -> str | None:
+    """Resolve a ledger entry key to its absolute host path (for dedupe).
+
+    Ledger keys are mixed-form by design: file tools store paths relative to
+    their registration workspace (often the session files dir), the exec
+    snapshot stores workspace-relative or absolute paths.  Returns None when
+    a relative entry matches neither base (stale entry).
+    """
+    try:
+        p = Path(entry)
+    except (TypeError, ValueError):
+        return None
+    if p.is_absolute():
+        return _canonical_path_str(p)
+    for base in (files_dir, workspace):
+        if base is None:
+            continue
+        cand = Path(base) / entry
+        if cand.exists():
+            return _canonical_path_str(cand)
+    return None
+
+
+def _persist_tracked_result_files(
+    workspace: Path | None,
+    file_paths: list[str | Path],
+    session_key: str | None,
+    files_dir: Path | None = None,
+) -> int:
+    """Mark declared deliverables (``result: true``) in the session's ledger.
+
+    Single write path for the ``declare_result_files`` tool — mirrors
+    ``_persist_tracked_file``.  Declared paths are absolute host paths; any
+    existing ledger entry that resolves to the same file is marked instead of
+    a duplicate being added (the ledger legitimately mixes absolute and
+    relative forms for one file).  Returns the number of entries marked, or 0
+    on failure (a declaration must never break the turn).
+    """
+    if not session_key or not workspace or not file_paths:
+        _log.debug("_persist_tracked_result_files: skipped (missing args)")
+        return 0
+    try:
+        from miqi.session.manager import SessionManager
+        session_key = _session_files_dir_key(session_key)
+        sm = SessionManager(_tracked_store_root(workspace, session_key) or workspace)
+
+        existing = sm.load_tracked_files(session_key)
+        abs_to_key: dict[str, str] = {}
+        for key in existing:
+            resolved = _resolve_ledger_entry_to_abs(key, workspace, files_dir)
+            if resolved:
+                abs_to_key.setdefault(resolved, key)
+
+        keys: list[str] = []
+        seen: set[str] = set()
+        for p in file_paths:
+            # 按规范化绝对路径去重本次入参：`run/r.md` 与 `run/../run/r.md`
+            # 是同一文件，不能因为形态不同就登记两次（CodeRabbit 复审）
+            canon = _canonical_path_str(p)
+            if canon in seen:
+                continue
+            seen.add(canon)
+            key = abs_to_key.get(canon)
+            if key is None:
+                # 没有既有条目：以 agent 给的形态建新条目（面板按原样展示）
+                key = str(Path(p)).replace("\\", "/")
+            keys.append(key)
+        if not keys:
+            return 0
+
+        marked = sm.mark_tracked_file_result(session_key, keys)
+        _log.info(
+            "_persist_tracked_result_files: ok session=%s marked=%d",
+            session_key, marked,
+        )
+        return marked
+    except Exception as exc:
+        _log.warning("_persist_tracked_result_files: failed session=%s: %s", session_key, exc)
+        return 0
+
+
 def _sandbox_to_host_path(sandbox_path: str, workspace: Path | None, sandbox) -> str:
     """Map sandbox-internal path to host workspace path.
 
