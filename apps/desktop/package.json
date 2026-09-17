@@ -1,6 +1,6 @@
 {
   "name": "miqi-desktop",
-  "version": "0.31.0-dev",
+  "version": "0.31.1-dev",
   "description": "MiQroForge Desktop — native desktop companion for the MiQroForge AI agent",
   "main": "./out/main/electron-trampoline.js",
   "author": "MiQroForge Team",
