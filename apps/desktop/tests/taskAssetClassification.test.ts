@@ -6,8 +6,11 @@
  */
 import { describe, expect, it } from 'vitest';
 import {
+  BULK_DIR_MIN_FILES,
   classifyTrackedFiles,
   DELIVERABLE_EXT_RE,
+  dirLabel,
+  groupTrackedByDir,
   isProcessFileName,
   PROCESS_FILE_NAME_RE,
 } from '../src/renderer/lib/taskAssetClassification';
@@ -16,6 +19,8 @@ interface FixtureFile {
   name: string;
   op: string;
   lastSeen: number;
+  /** #1104: declare_result_files 写入的显式结果标记 */
+  result?: boolean;
 }
 
 const f = (name: string, op: string, lastSeen: number): FixtureFile => ({
@@ -188,5 +193,156 @@ describe('classifyTrackedFiles (issue #607 结果/过程资产分类 — 白名�
     expect(PROCESS_FILE_NAME_RE.test('temp.pdf')).toBe(true);
     expect(PROCESS_FILE_NAME_RE.test('最终报告.pdf')).toBe(false);
     expect(DELIVERABLE_EXT_RE.test('temp.pdf')).toBe(true);
+  });
+});
+
+describe('classifyTrackedFiles (#1104 显式声明结果文件)', () => {
+  const declared = (name: string, op = 'write', lastSeen = 900): FixtureFile => ({
+    name,
+    op,
+    lastSeen,
+    result: true,
+  });
+
+  it('declared .md report → results（白名单外格式）', () => {
+    const files = [declared('ZECKID_Na_report.md', 'write', 1000), f('run.log', 'write', 900)];
+    const { results, process } = classifyTrackedFiles(files);
+    expect(results.map((x) => x.name)).toEqual(['ZECKID_Na_report.md']);
+    expect(process.map((x) => x.name)).toEqual(['run.log']);
+  });
+
+  it('explicit declaration beats filename markers (temp_/draft_/… .md)', () => {
+    const files = [
+      declared('temp_extract.md'),
+      declared('draft_summary.md'),
+      f('temp_x.md', 'write', 700),
+    ];
+    const { results, process } = classifyTrackedFiles(files);
+    expect(results.map((x) => x.name)).toEqual(['temp_extract.md', 'draft_summary.md']);
+    expect(process.map((x) => x.name)).toEqual(['temp_x.md']);
+  });
+
+  it('delete 优先于声明——被删除的文件永不进结果区', () => {
+    const files = [
+      declared('removed_report.md', 'delete'),
+      declared('kept_report.md', 'write', 950),
+    ];
+    const { results, process } = classifyTrackedFiles(files);
+    expect(results.map((x) => x.name)).toEqual(['kept_report.md']);
+    expect(process.map((x) => x.name)).toEqual(['removed_report.md']);
+  });
+
+  it('未声明的同类文件仍按白名单归类（回归）', () => {
+    const files = [f('intermediate.md', 'write', 100), declared('final.md', 'write', 200)];
+    const { results, process } = classifyTrackedFiles(files);
+    expect(results.map((x) => x.name)).toEqual(['final.md']);
+    expect(process.map((x) => x.name)).toEqual(['intermediate.md']);
+  });
+
+  it('声明条目与白名单结果一起按 lastSeen DESC 排序', () => {
+    const files = [
+      f('a.pdf', 'write', 100),
+      declared('b_report.md', 'write', 300),
+      f('c.xlsx', 'write', 200),
+    ];
+    const { results } = classifyTrackedFiles(files);
+    expect(results.map((x) => x.name)).toEqual(['b_report.md', 'c.xlsx', 'a.pdf']);
+  });
+
+  it('result 非 true（undefined/false）按原白名单规则处理', () => {
+    const files = [
+      { name: 'x.md', op: 'write', lastSeen: 100, result: false },
+      { name: 'y.pdf', op: 'write', lastSeen: 200, result: undefined },
+    ];
+    const { results, process } = classifyTrackedFiles(files);
+    expect(results.map((x) => x.name)).toEqual(['y.pdf']);
+    expect(process.map((x) => x.name)).toEqual(['x.md']);
+  });
+});
+
+describe('groupTrackedByDir (#1104 批量目录折行)', () => {
+  const p = (path: string) => ({ path, name: path.split('/').pop()!, op: 'write', lastSeen: 0 });
+
+  it('目录下文件数达到阈值 → 折成一个目录组', () => {
+    const files = [
+      ...Array.from({ length: 20 }, (_, i) => p(`out/bvse_sites/Na_site${i + 1}.cif`)),
+      p('out/summary.json'),
+      p('out/Na_bvse.cube'),
+    ];
+    const { loose, groups } = groupTrackedByDir(files);
+    expect(groups).toHaveLength(1);
+    expect(groups[0].dir).toBe('out/bvse_sites');
+    expect(groups[0].files).toHaveLength(20);
+    expect(loose.map((f) => f.name).sort()).toEqual(['Na_bvse.cube', 'summary.json']);
+  });
+
+  it('目录下文件数少于阈值 → 保持散列卡片', () => {
+    const files = [p('out/a.md'), p('out/b.md'), p('loose.md')];
+    const { loose, groups } = groupTrackedByDir(files);
+    expect(groups).toEqual([]);
+    expect(loose).toHaveLength(3);
+  });
+
+  it('交付根自身的顶层产物永不折叠（即使很多）——用户明确要看这些', () => {
+    const files = [
+      ...Array.from({ length: 12 }, (_, i) => p(`out/file${i}.json`)),
+      ...Array.from({ length: 20 }, (_, i) => p(`out/bvse_sites/Na_site${i + 1}.cif`)),
+    ];
+    const { loose, groups } = groupTrackedByDir(files);
+    expect(groups.map((g) => g.dir)).toEqual(['out/bvse_sites']);
+    expect(loose.filter((f) => f.name.endsWith('.json'))).toHaveLength(12);
+  });
+
+  it('没有产物祖先的目录不折叠（会话目录里几个文件保持散列）', () => {
+    const files = [
+      p('sessions/desktop_default/files/a.py'),
+      p('sessions/desktop_default/files/b.json'),
+      p('sessions/desktop_default/files/c.log'),
+      p('sessions/desktop_default/files/d.md'),
+    ];
+    const { loose, groups } = groupTrackedByDir(files);
+    expect(groups).toEqual([]);
+    expect(loose).toHaveLength(4);
+  });
+
+  it('交付根的结果文件也要能撑起子目录折叠（祖先判定用全量集合）', () => {
+    const report = p('out/report.pdf');
+    const batch = Array.from({ length: 5 }, (_, i) => p(`out/batch/Na_site${i + 1}.cif`));
+
+    // 旧行为：只拿过程子集 → out 不在集合里 → 折不起来
+    expect(groupTrackedByDir(batch).groups).toEqual([]);
+
+    // 传入全量路径（结果 + 过程）→ out/batch 正常折叠，report.pdf 不受影响
+    const { loose, groups } = groupTrackedByDir(batch, [report.path, ...batch.map((f) => f.path)]);
+    expect(groups.map((g) => g.dir)).toEqual(['out/batch']);
+    expect(groups[0].files).toHaveLength(5);
+    expect(loose).toEqual([]);
+  });
+
+  it('多个批量目录各自成组；绝对路径与反斜杠同样聚合', () => {
+    const files = [
+      p('C:/tmp/run/summary.json'),
+      p('C:/tmp/run/analysis/a.json'),
+      p('C:/tmp/run/analysis/b.json'),
+      p('C:/tmp/run/analysis/c.json'),
+      p('C:\\tmp\\run\\bvse_sites\\s1.cif'),
+      p('C:\\tmp\\run\\bvse_sites\\s2.cif'),
+      p('C:\\tmp\\run\\bvse_sites\\s3.cif'),
+    ];
+    const { groups, loose } = groupTrackedByDir(files);
+    expect(groups.map((g) => g.dir).sort()).toEqual([
+      'C:/tmp/run/analysis',
+      'C:/tmp/run/bvse_sites',
+    ]);
+    expect(loose.map((f) => f.name)).toEqual(['summary.json']);
+  });
+
+  it('阈值常量 ≥ 3（避免把两三个文件的目录也折掉）', () => {
+    expect(BULK_DIR_MIN_FILES).toBeGreaterThanOrEqual(3);
+  });
+
+  it('dirLabel 只显示末两级目录并带尾斜杠', () => {
+    expect(dirLabel('C:/Users/x/run/bvse_sites')).toBe('run/bvse_sites/');
+    expect(dirLabel('analysis')).toBe('analysis/');
   });
 });

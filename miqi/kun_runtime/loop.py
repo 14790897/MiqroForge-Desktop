@@ -519,6 +519,12 @@ class AgentLoop:
             request.context_instructions = request.context_instructions or []
             request.context_instructions.append(ASK_USER_CONFIRM_INSTRUCTION)
 
+        # declare_result_files usage guidance (#1104) — same shape as above
+        if any(t.name == "declare_result_files" for t in tool_specs):
+            from miqi.agent.tools.result_files import DECLARE_RESULT_FILES_INSTRUCTION
+            request.context_instructions = request.context_instructions or []
+            request.context_instructions.append(DECLARE_RESULT_FILES_INSTRUCTION)
+
         # 回答可视化与引用标注（issue #671）
         from miqi.agent.answer_style import VISUAL_ANSWER_INSTRUCTION
         request.context_instructions = request.context_instructions or []

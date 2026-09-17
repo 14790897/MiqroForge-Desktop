@@ -102,6 +102,8 @@ class PermissionEngine:
         "read_file", "list_dir",
         "session_search", "trace_search",
         "docx_read", "pptx_read", "xlsx_read",
+        # #1104: 只写会话台账的归类标记，不动用户文件 → 免确认
+        "declare_result_files",
     })
 
     NETWORK_TOOLS: frozenset[str] = frozenset({

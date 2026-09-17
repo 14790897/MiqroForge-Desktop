@@ -165,7 +165,8 @@ test.describe('Issue #726 MiQroForge 平台登录设置页', () => {
         },
         env: 'test',
         expiresAt: Date.now() - 60_000,
-        refreshError: 'REFRESH_FAILED',
+        // requiresRelogin 只在平台作废 refresh_token 时置位（#1087）
+        refreshError: 'REFRESH_TOKEN_INVALID',
         requiresRelogin: true,
       },
     });
