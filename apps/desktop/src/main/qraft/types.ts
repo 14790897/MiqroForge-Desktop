@@ -37,7 +37,7 @@ export const QRAFT_ENV_DEFAULTS: Record<QraftEnv, QraftEnvConfig> = {
     clientId: 'miqi',
   },
   prod: {
-    baseUrl: 'https://forge.miqroera.com/api',
+    baseUrl: 'https://www.miqroforge.com/api',
     clientId: 'miqi',
   },
 };
