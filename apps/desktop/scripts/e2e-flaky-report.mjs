@@ -333,9 +333,14 @@ export function summarizeReport(reportPath) {
   return { markdown: buildMarkdown(report), annotations: buildAnnotations(report) };
 }
 
-function main() {
-  const { markdown, annotations } = summarizeReport(resolve(process.argv[2] || DEFAULT_REPORT));
+/** 跑一次汇总：读报告 → 写 step summary + 发注解。CLI 与 JS action 都走这里。 */
+export function run(reportPath) {
+  const { markdown, annotations } = summarizeReport(reportPath);
   emit(markdown, annotations);
+}
+
+function main() {
+  run(resolve(process.argv[2] || DEFAULT_REPORT));
 }
 
 // 被单测 import 时不要执行。

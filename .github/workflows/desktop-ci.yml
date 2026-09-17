@@ -191,37 +191,15 @@ jobs:
           PLAYWRIGHT_SKIP_WEB_SERVER: '1'
 
       - name: Summarize flaky E2E tests
-        # #1107：flaky 清单就地汇总，报告**不离开这个 job**。两个理由：
-        # 1) 上传 artifact / release asset 都会把「内容由 PR 决定」的字节送到公开位置（报告里的
-        #    字段来自 PR 检出的 playwright.config.ts 与 spec），等于给任意 PR 一条把 runner 上
-        #    文件（例如 ~/.miqi/config.json）公开出去的通道；
-        # 2) pull_request_target 下**只跑 base 分支这份脚本的可信副本**，PR 改不到它，步骤里
-        #    因此不执行任何 PR 代码；base 里还没有这个脚本（本 PR 自己的运行）就跳过。
-        # push / workflow_dispatch 的运行，检出的代码就是仓库自己的，直接用。
+        # #1107：flaky 清单就地汇总，报告**不离开这个 job**（上传 artifact / release asset 都会
+        # 把「内容由 PR 决定」的字节送到公开位置）。
+        # 汇总本身是 JS action、按**受信任 ref** 引用：runner 用自己的 node 绝对路径拉起它，
+        # 代码取自该 ref 拉下来的那份，不经 shell、不读 PATH，也不需要 GH_TOKEN —— 同一 job 里
+        # 先跑过的 PR 代码因此劫持不到这一步（改 PATH / 环境变量都无效）。
         if: always()
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -uo pipefail
-          if [ "${{ github.event_name }}" = "pull_request_target" ]; then
-            trusted_script="/tmp/e2e-flaky-report.mjs"
-            gh api -H "Accept: application/vnd.github.raw" \
-              "repos/$GITHUB_REPOSITORY/contents/apps/desktop/scripts/e2e-flaky-report.mjs?ref=${{ github.event.pull_request.base.sha }}" \
-              > "$trusted_script" 2>/dev/null || true
-            if [ ! -s "$trusted_script" ]; then
-              echo "跳过 flaky 汇总：base 分支里还没有 scripts/e2e-flaky-report.mjs（本 PR 自己的运行就是这种情况）"
-              exit 0
-            fi
-            # 这一步之前跑过 PR 代码，它们能通过 $GITHUB_ENV 给后续步骤注入环境变量 ——
-            # NODE_OPTIONS 就足以让 node 加载任意模块。执行脚本前先把这些清掉。
-            env -u NODE_OPTIONS -u NODE_PATH -u LD_PRELOAD -u LD_LIBRARY_PATH \
-              node "$trusted_script" test-reports/results.json
-          else
-            env -u NODE_OPTIONS -u NODE_PATH -u LD_PRELOAD -u LD_LIBRARY_PATH \
-              node scripts/e2e-flaky-report.mjs test-reports/results.json
-          fi
-
-
+        uses: 14790897/MiqroForge-Desktop/.github/actions/summarize-flaky@develop
+        with:
+          report_path: apps/desktop/test-reports/results.json
       - name: Upload Playwright report (E2E)
         # 只在 push（develop 等仓库自己的分支，代码可信）的运行里留存失败产物：test-results/
         # 的内容由 PR 控制的测试进程写出，而这些进程是在 provider 凭据落到 ~/.miqi/config.json
@@ -356,37 +334,15 @@ jobs:
           PLAYWRIGHT_SKIP_WEB_SERVER: '1'
 
       - name: Summarize flaky E2E tests (macOS)
-        # #1107：flaky 清单就地汇总，报告**不离开这个 job**。两个理由：
-        # 1) 上传 artifact / release asset 都会把「内容由 PR 决定」的字节送到公开位置（报告里的
-        #    字段来自 PR 检出的 playwright.config.ts 与 spec），等于给任意 PR 一条把 runner 上
-        #    文件（例如 ~/.miqi/config.json）公开出去的通道；
-        # 2) pull_request_target 下**只跑 base 分支这份脚本的可信副本**，PR 改不到它，步骤里
-        #    因此不执行任何 PR 代码；base 里还没有这个脚本（本 PR 自己的运行）就跳过。
-        # push / workflow_dispatch 的运行，检出的代码就是仓库自己的，直接用。
+        # #1107：flaky 清单就地汇总，报告**不离开这个 job**（上传 artifact / release asset 都会
+        # 把「内容由 PR 决定」的字节送到公开位置）。
+        # 汇总本身是 JS action、按**受信任 ref** 引用：runner 用自己的 node 绝对路径拉起它，
+        # 代码取自该 ref 拉下来的那份，不经 shell、不读 PATH，也不需要 GH_TOKEN —— 同一 job 里
+        # 先跑过的 PR 代码因此劫持不到这一步（改 PATH / 环境变量都无效）。
         if: always()
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -uo pipefail
-          if [ "${{ github.event_name }}" = "pull_request_target" ]; then
-            trusted_script="/tmp/e2e-flaky-report.mjs"
-            gh api -H "Accept: application/vnd.github.raw" \
-              "repos/$GITHUB_REPOSITORY/contents/apps/desktop/scripts/e2e-flaky-report.mjs?ref=${{ github.event.pull_request.base.sha }}" \
-              > "$trusted_script" 2>/dev/null || true
-            if [ ! -s "$trusted_script" ]; then
-              echo "跳过 flaky 汇总：base 分支里还没有 scripts/e2e-flaky-report.mjs（本 PR 自己的运行就是这种情况）"
-              exit 0
-            fi
-            # 这一步之前跑过 PR 代码，它们能通过 $GITHUB_ENV 给后续步骤注入环境变量 ——
-            # NODE_OPTIONS 就足以让 node 加载任意模块。执行脚本前先把这些清掉。
-            env -u NODE_OPTIONS -u NODE_PATH -u LD_PRELOAD -u LD_LIBRARY_PATH \
-              node "$trusted_script" test-reports/results.json
-          else
-            env -u NODE_OPTIONS -u NODE_PATH -u LD_PRELOAD -u LD_LIBRARY_PATH \
-              node scripts/e2e-flaky-report.mjs test-reports/results.json
-          fi
-
-
+        uses: 14790897/MiqroForge-Desktop/.github/actions/summarize-flaky@develop
+        with:
+          report_path: apps/desktop/test-reports/results.json
       - name: Upload Playwright report (macOS E2E)
         # 同 Linux 侧：只在 push（代码可信）的运行里留存，pull_request_target 下不上传
         # PR 可控的 test-results/（见上面那段的说明）。
@@ -401,3 +357,4 @@ jobs:
   # macOS 打包（dmg/zip）不在这里跑：每个 PR 都起 macos runner 成本高，
   # 产物也没有下游消费方。发版时由 release.yml 的 build-mac 构建并上传 release。
   # ────────────────────────────────────────────────────────────
+

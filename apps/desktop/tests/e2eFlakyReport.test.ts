@@ -532,6 +532,38 @@ describe('emit', () => {
   });
 });
 
+describe('JS action 入口（CI 里按受信任 ref 调用的那份）', () => {
+  const actionPath = fileURLToPath(
+    new URL('../../../.github/actions/summarize-flaky/index.js', import.meta.url)
+  );
+
+  it('按 action 的方式调用时写出摘要与注解', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'miqi-1107-action-'));
+    const report = join(dir, 'results.json');
+    const summary = join(dir, 'summary.md');
+    writeFileSync(report, JSON.stringify(makeReport()));
+
+    try {
+      const result = spawnSync(process.execPath, [actionPath], {
+        cwd: process.cwd(),
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          GITHUB_WORKSPACE: resolve(process.cwd(), '..', '..'),
+          INPUT_REPORT_PATH: report,
+          GITHUB_STEP_SUMMARY: summary,
+        },
+      });
+
+      expect(result.status).toBe(0);
+      expect(readFileSync(summary, 'utf8')).toContain('E2E flaky 检查');
+      expect(result.stdout).toContain('::warning file=apps/desktop/tests/e2e/');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 60_000);
+});
+
 describe('CLI 入口（CI 实际执行的那条路径）', () => {
   const scriptPath = fileURLToPath(new URL('../scripts/e2e-flaky-report.mjs', import.meta.url));
 

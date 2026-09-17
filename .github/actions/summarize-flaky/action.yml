@@ -1,0 +1,13 @@
+name: 'Summarize flaky E2E tests'
+description: '读 Playwright JSON 报告，把「重试才通过」的用例写进 job summary 并发 warning 注解（#1107）'
+author: 'MiQi'
+
+inputs:
+  report_path:
+    description: '相对于仓库根的 JSON 报告路径'
+    required: false
+    default: 'apps/desktop/test-reports/results.json'
+
+runs:
+  using: 'node20'
+  main: 'index.js'
