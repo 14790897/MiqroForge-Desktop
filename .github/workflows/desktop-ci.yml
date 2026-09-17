@@ -71,6 +71,11 @@ jobs:
     #   github.event.pull_request.head.repo.full_name == github.repository ||
     #   contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association)
     runs-on: ubuntu-latest
+    # 需要 contents:write 才能用 gh CLI 创建/上传 release asset；actions:write 给 setup-node
+    # 缓存和失败时上传 playwright 录屏/截图 artifact。GH_TOKEN 只在 trusted gh CLI 步骤出现。
+    permissions:
+      contents: write
+      actions: write
     outputs:
       report-url: ${{ steps.upload-e2e-report.outputs.report-url }}
     defaults:
@@ -184,6 +189,7 @@ jobs:
         if: always()
         id: upload-e2e-report
         run: |
+          set -euo pipefail
           if [ -f test-reports/results.json ]; then
             tag="_gh-artifacts"
             name="e2e-results-linux-${{ github.run_id }}-${{ github.run_attempt }}.json"
@@ -222,6 +228,9 @@ jobs:
       group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}-macos-e2e
       cancel-in-progress: true
     runs-on: macos-latest
+    permissions:
+      contents: write
+      actions: write
     outputs:
       report-url: ${{ steps.upload-e2e-report.outputs.report-url }}
     defaults:
@@ -335,6 +344,7 @@ jobs:
         if: always()
         id: upload-e2e-report
         run: |
+          set -euo pipefail
           if [ -f test-reports/results.json ]; then
             tag="_gh-artifacts"
             name="e2e-results-macos-${{ github.run_id }}-${{ github.run_attempt }}.json"
