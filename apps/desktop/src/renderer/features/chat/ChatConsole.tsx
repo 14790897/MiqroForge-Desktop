@@ -3121,7 +3121,9 @@ function isStrippedTerminal(event: InFlightEvent): boolean {
  *  stripped once everything else has been.  A lone *terminal* event can never
  *  be over budget on its own (its payload is capped at ingest), so stripping
  *  always restores the budget — the one shape this cannot fix is a single
- *  uncapped progress delta, which nothing may remove. */
+ *  progress event whose bytes sit outside `delta` (nothing can split those, and
+ *  nothing may remove the newest event).  A delta-carrying progress event can
+ *  no longer be that shape: `pushInFlightEvent` cuts it up first. */
 function evictInFlightOverflow(snapshot: InFlightSnapshot): void {
   while (
     snapshot.events.length > 1 &&
@@ -3150,9 +3152,10 @@ function evictInFlightOverflow(snapshot: InFlightSnapshot): void {
 
     // Stripping costs content, so check it can actually pay for itself first:
     // if emptying *every* remaining terminal would still leave the buffer over
-    // budget — the newest event is an uncapped progress delta, say, and may
-    // not be removed — then the content would be destroyed for nothing.  Leave
-    // it intact and let the cap be breached instead of losing data for free.
+    // budget — the newest event is a progress event with multi-MB bytes outside
+    // `delta`, say, and may not be removed — then the content would be destroyed
+    // for nothing.  Leave it intact and let the cap be breached instead of
+    // losing data for free.
     let reclaimable = 0;
     for (const event of snapshot.events) {
       if (event.type === 'progress' || isStrippedTerminal(event)) continue;
