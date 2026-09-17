@@ -426,7 +426,7 @@ class Handler(BaseHTTPRequestHandler):
             "- 工作流：MOF-5 市场合成价格报告（4 节点）\n"
             "- 文件：mof-price-report.workflow.json（已生成在工作区）\n"
             "- 校验：WorkflowSpec v1.0.0 通过\n"
-            "- 项目入口：forge.miqroera.com/projects/mof-price-report"
+            "- 项目入口：www.miqroforge.com/projects/mof-price-report"
         ))
 
 

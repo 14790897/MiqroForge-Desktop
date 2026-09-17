@@ -6,6 +6,8 @@ export interface TrackedFile {
   op: 'read' | 'write' | 'edit' | 'delete';
   lastSeen: number;
   truncated?: boolean;
+  /** #1104: agent 通过 declare_result_files 显式声明为结果文件 */
+  result?: boolean;
 }
 
 export const OFFICE_FILE_RE_LEGACY = /\.(docx|xlsx|pptx|ppt)$/i;

@@ -508,11 +508,15 @@ class SessionManager:
             new_rank = rank.get(op, 0)
             if new_rank >= cur_rank:
                 from pathlib import PurePosixPath
-                files[norm] = {
+                entry = {
                     "op": op,
                     "name": name or PurePosixPath(norm).name,
                     "lastSeen": int(datetime.now().timestamp() * 1000),
                 }
+                # result 标记 sticky：声明后后续 write/read 覆盖 op 不得丢标记
+                if existing.get("result"):
+                    entry["result"] = True
+                files[norm] = entry
             path = self._get_tracked_files_path(key)
             path.parent.mkdir(parents=True, exist_ok=True)
             tmp = path.with_suffix(".tmp")
@@ -551,11 +555,15 @@ class SessionManager:
                 norm = file_path.replace("\\", "/")
                 existing = files.get(norm, {})
                 if rank.get(op, 0) >= rank.get(existing.get("op", "read"), 0):
-                    files[norm] = {
+                    entry = {
                         "op": op,
                         "name": PurePosixPath(norm).name,
                         "lastSeen": now,
                     }
+                    # result 标记 sticky：与 save_tracked_file 同语义
+                    if existing.get("result"):
+                        entry["result"] = True
+                    files[norm] = entry
             path = self._get_tracked_files_path(key)
             path.parent.mkdir(parents=True, exist_ok=True)
             tmp = path.with_suffix(".tmp")
@@ -594,6 +602,53 @@ class SessionManager:
                 encoding="utf-8",
             )
             tmp.replace(path)
+
+    def mark_tracked_file_result(
+        self, key: str, file_paths: list[str], *, client_id: str | None = None,
+    ) -> int:
+        """Mark files as declared deliverables (``result: true``).
+
+        Called by the ``declare_result_files`` tool: the 「任务资产」panel
+        shows these under 「结果文件」 regardless of extension.  Existing
+        entries keep their op/name/lastSeen (a declaration is not a file
+        operation); absent entries are created with op ``write`` so the
+        declaration itself brings files outside the exec snapshot into the
+        ledger.  Returns the number of entries marked.
+        """
+        if not file_paths:
+            return 0
+        with self._get_session_lock(key):
+            if client_id is not None:
+                self._verify_ownership_for_mutation(key, client_id)
+            files = self.load_tracked_files(key)
+            now = int(datetime.now().timestamp() * 1000)
+            from pathlib import PurePosixPath
+
+            marked = 0
+            for file_path in file_paths:
+                norm = str(file_path).replace("\\", "/")
+                if not norm:
+                    continue
+                entry = files.get(norm)
+                if entry is None:
+                    entry = {
+                        "op": "write",
+                        "name": PurePosixPath(norm).name,
+                        "lastSeen": now,
+                    }
+                entry["result"] = True
+                files[norm] = entry
+                marked += 1
+            if marked:
+                path = self._get_tracked_files_path(key)
+                path.parent.mkdir(parents=True, exist_ok=True)
+                tmp = path.with_suffix(".tmp")
+                tmp.write_text(
+                    json.dumps({"version": 1, "files": files}, ensure_ascii=False),
+                    encoding="utf-8",
+                )
+                tmp.replace(path)
+            return marked
 
     def remove_tracked_file(
         self, key: str, file_path: str, *, client_id: str | None = None,

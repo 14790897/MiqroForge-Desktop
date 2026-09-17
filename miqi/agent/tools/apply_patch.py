@@ -32,6 +32,11 @@ from miqi.agent.tools.filesystem import (
     _sandbox_write_file,
     bootstrap_sandbox_roots,
 )
+from miqi.agent.tools.write_grants import (
+    SessionWriteGrants,
+    get_write_grants,
+    norm_session_key,
+)
 
 
 class PatchParseError(Exception):
@@ -292,6 +297,7 @@ class ApplyPatchTool(Tool):
         write_resolver=None,
         persist_extra_root=None,
         bypass_approval: bool = False,
+        write_grants: SessionWriteGrants | None = None,
     ):
         self._workspace = workspace
         self._allowed_dir = allowed_dir
@@ -305,12 +311,14 @@ class ApplyPatchTool(Tool):
         self._write_resolver = write_resolver
         self._persist_extra_root = persist_extra_root
         self._bypass_approval = bypass_approval
-        # Session-scoped grants (CodeRabbit #866).
+        # Session-scoped grants (CodeRabbit #866); published to the shared,
+        # session-keyed store so exec honours them too (#1013).
+        self._write_grants = write_grants or get_write_grants()
         self._granted: dict[str, set[str]] = {}
 
     def _session_granted(self, session_key: str | None) -> set[str]:
         """Return the session-scoped grant set for *session_key*."""
-        return self._granted.setdefault(session_key or "", set())
+        return self._granted.setdefault(norm_session_key(session_key), set())
 
     @property
     def name(self) -> str:
@@ -375,6 +383,8 @@ class ApplyPatchTool(Tool):
                     persist_extra_root=self._persist_extra_root,
                     boundary_enforced=boundary_enforced,
                     bypass=self._bypass_approval,
+                    session_key=_sess_key,
+                    write_grants=self._write_grants,
                 )
                 if _auth is None:
                     return f"Error: 权限被拒绝：用户未授权写入 {_p}"
@@ -445,6 +455,8 @@ class ApplyPatchTool(Tool):
                 or self._allowed_dir is not None
             ),
             bypass=self._bypass_approval,
+            session_key=_sess_key,
+            write_grants=self._write_grants,
         )
         if authorized is not None:
             shared = authorized

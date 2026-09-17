@@ -12,6 +12,7 @@ from loguru import logger
 
 from miqi.agent.memory import MemoryStore
 from miqi.agent.skills import SkillsLoader
+from miqi.config.schema import DEFAULT_AGENT_NAME
 
 if TYPE_CHECKING:
     from miqi.agent.trace.store import TraceStore
@@ -179,14 +180,14 @@ class ContextBuilder:
         self,
         workspace: Path,
         memory_store: MemoryStore | None = None,
-        agent_name: str = "miqi",
+        agent_name: str = DEFAULT_AGENT_NAME,
         trace_store: "TraceStore | None" = None,
         session_work_dir: Path | None = None,
     ):
         self.workspace = workspace
         self.memory = memory_store or MemoryStore(workspace)
         self.skills = SkillsLoader(workspace)
-        self.agent_name = agent_name.strip() or "miqi"
+        self.agent_name = agent_name.strip() or DEFAULT_AGENT_NAME
         self.trace_store = trace_store
         self.session_work_dir = session_work_dir
         # Phase 4: SkillsManager for typed skill injection
