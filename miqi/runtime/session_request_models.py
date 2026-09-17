@@ -46,8 +46,8 @@ class SessionKeyParams(_Params):
             raise ValueError("session_key must be a string")
         if "/" in value or "\\" in value:
             raise ValueError("session_key must not contain path separators")
-        if ".." in value:
-            raise ValueError("session_key must not contain ..")
+        if ".." in value or "." in value:
+            raise ValueError("session_key must not contain path traversal markers")
         return value
 
 

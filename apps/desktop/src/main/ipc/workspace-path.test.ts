@@ -3,9 +3,13 @@ import { mkdirSync, symlinkSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import {
+  buildWslSearchScript,
   getWorkspacePath,
   isWithinCanonicalWorkspace,
   resolveWorkspacePath,
+  sanitizeSessionKeyForPath,
+  sessionFilesDirKey,
+  shellEscape,
 } from './workspace-path';
 
 const isWin = process.platform === 'win32';
@@ -253,5 +257,87 @@ describe('symlinked allowed root (#1062 macOS /var)', () => {
     }
 
     expect(() => resolveWorkspacePath(join(link, 'secret.txt'), [])).toThrow(/outside workspace/);
+  });
+});
+
+// #1103: session_key is renderer-controlled and ends up inside the WSL search
+// script.  The sanitizer must neutralize shell metacharacters / command
+// substitution while keeping everyday keys usable.
+describe('sanitizeSessionKeyForPath (#1103)', () => {
+  it('preserves safe session keys', () => {
+    expect(sanitizeSessionKeyForPath('c1:s1')).toBe('c1_s1');
+    expect(sanitizeSessionKeyForPath('session_123')).toBe('session_123');
+    expect(sanitizeSessionKeyForPath('my-session.key')).toBe('my-session.key');
+  });
+
+  it('neutralizes shell command-substitution payloads', () => {
+    expect(sanitizeSessionKeyForPath('$(touch /tmp/pwn)')).toBe('__touch__tmp_pwn_');
+    expect(sanitizeSessionKeyForPath('`touch /tmp/pwn`')).toBe('_touch__tmp_pwn_');
+  });
+
+  it('neutralizes quotes, semicolons and path separators', () => {
+    expect(sanitizeSessionKeyForPath('foo/bar')).toBe('foo_bar');
+    expect(sanitizeSessionKeyForPath('foo\\bar')).toBe('foo_bar');
+    expect(sanitizeSessionKeyForPath('foo"; touch /tmp/pwn; echo "')).toBe(
+      'foo___touch__tmp_pwn__echo__'
+    );
+  });
+
+  it('replaces all unsafe characters with underscores', () => {
+    // Whitespace, unicode, brackets, dollar, ampersand, pipe, etc.
+    expect(sanitizeSessionKeyForPath('a b$c|d&e')).toBe('a_b_c_d_e');
+  });
+});
+
+// #1103: The session-private files directory uses the canonical directory key
+// (`session_files_dir_key` on the Python side), which strips the client_id
+// prefix for fully-namespaced keys.  The sandbox path uses the full sanitized
+// key.  They must not be conflated.
+describe('sessionFilesDirKey (#1103)', () => {
+  it('strips the client_id prefix for fully-namespaced keys', () => {
+    expect(sessionFilesDirKey('miqi-desktop:desktop:1786807046853')).toBe('desktop_1786807046853');
+  });
+
+  it('keeps two-segment keys unchanged', () => {
+    expect(sessionFilesDirKey('desktop:1786807046853')).toBe('desktop_1786807046853');
+    expect(sessionFilesDirKey('cli:direct')).toBe('cli_direct');
+  });
+});
+
+// #1103: WSL search script must sanitize the session key and canonicalize the
+// candidate against its authorization root so a workspace symlink cannot escape.
+describe('buildWslSearchScript (#1103)', () => {
+  it('sanitizes the session key before embedding it in the script', () => {
+    const script = buildWslSearchScript('report.md', '$(touch /tmp/pwn)');
+    expect(script).not.toContain('$(touch /tmp/pwn)');
+    expect(script).toContain('/tmp/miqi-sandboxes/__touch__tmp_pwn_');
+  });
+
+  it('escapes single quotes in the relative path', () => {
+    const script = buildWslSearchScript("it's'here.md", 'desktop:123');
+    expect(script).toContain("it'\\''s'\\''here.md");
+    expect(script).not.toContain("$'it's'here.md'");
+  });
+
+  it('includes canonical containment checks', () => {
+    const script = buildWslSearchScript('report.md', 'desktop:123');
+    expect(script).toContain('readlink -f "$found"');
+    expect(script).toContain('readlink -f "$root"');
+    expect(script).toContain('case "$canon" in');
+    expect(script).toContain('"$root_canon"|"$root_canon"/*');
+  });
+
+  it('searches session sandbox, session files, global workspace and global files', () => {
+    const script = buildWslSearchScript('report.md', 'desktop:123');
+    expect(script).toContain('/tmp/miqi-sandboxes/desktop_123/home/miqi/workspace');
+    expect(script).toContain('/sessions/desktop_123/files');
+    expect(script).toContain('$HOME/.miqi/workspace');
+  });
+
+  it('uses the canonical session-files directory for namespaced keys', () => {
+    const script = buildWslSearchScript('report.md', 'miqi-desktop:desktop:123');
+    expect(script).toContain('/tmp/miqi-sandboxes/miqi-desktop_desktop_123/home/miqi/workspace');
+    expect(script).toContain('/sessions/desktop_123/files');
+    expect(script).not.toContain('/sessions/miqi-desktop_desktop_123/files');
   });
 });

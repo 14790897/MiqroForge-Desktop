@@ -6,7 +6,38 @@ operations properly manage RuntimeSession lifecycle through AppServer.
 
 import pytest
 
-# ── sessions.list ──────────────────────────────────────────────────────────
+from miqi.runtime.session_request_models import SessionKeyParams
+
+
+# ── SessionKeyParams validation ────────────────────────────────────────────
+
+
+def test_session_key_accepts_safe_keys():
+    assert SessionKeyParams(session_key="desktop:123").session_key == "desktop:123"
+    assert SessionKeyParams(session_key="miqi-desktop:desktop:123").session_key == "miqi-desktop:desktop:123"
+    assert SessionKeyParams(sessionKey="my-session_key-1").session_key == "my-session_key-1"
+
+
+def test_session_key_rejects_path_separators():
+    with pytest.raises(ValueError):
+        SessionKeyParams(session_key="a/b")
+    with pytest.raises(ValueError):
+        SessionKeyParams(session_key="a\\b")
+
+
+def test_session_key_rejects_dot_and_dotdot():
+    # #1103 review: '.' and '..' must not reach workspace lookup / WSL search.
+    with pytest.raises(ValueError):
+        SessionKeyParams(session_key=".")
+    with pytest.raises(ValueError):
+        SessionKeyParams(session_key="..")
+    with pytest.raises(ValueError):
+        SessionKeyParams(session_key="a/../b")
+    with pytest.raises(ValueError):
+        SessionKeyParams(session_key="a./b")
+
+
+# ── sessions.list ─────────────────────────────────────────────────────────-
 
 
 @pytest.mark.asyncio

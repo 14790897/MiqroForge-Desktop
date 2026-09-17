@@ -78,12 +78,14 @@ import {
   wslKernelPresent,
 } from './wsl-state';
 import {
+  buildWslSearchScript,
   getConfigDir,
   getConfigPath,
   getWorkspacePath,
   isWithinCanonicalWorkspace,
   readLocalConfig,
   resolveWorkspacePath,
+  shellEscape,
 } from './workspace-path';
 import { clampMinToWindow, panelWindowMinWidth } from '../../shared/layout';
 
@@ -1922,7 +1924,6 @@ for m in ("pydantic", "httpx", "loguru"):
     // (#1103 review).  Without a session key there is nothing to scope to, so
     // the fallback is refused rather than widened.
     if (!sessionKey) return null;
-    const safeKey = sessionKey.replace(/[:\\/]/g, '_');
 
     const execOpts = { timeout: 10000, encoding: 'utf8' as const, windowsHide: true };
     // List WSL distros
@@ -1939,21 +1940,9 @@ for m in ("pydantic", "httpx", "loguru"):
 
     // Pass relPath inline as a positional argument to the bash script so
     // WSL interop does not need to import it from the Windows environment.
-    const escapedRelPath = shellEscape(relPath);
-    const searchScript =
-      `RP=$'${escapedRelPath}'\n` +
-      // 本会话自己的沙箱工作区（绑定会话的沙箱工作区就是绑定根）与其私有 files 目录。
-      `W="/tmp/miqi-sandboxes/${safeKey}/home/miqi/workspace"\n` +
-      `if [ -f "$W/$RP" ]; then echo "$W/$RP"; exit 0; fi\n` +
-      `S="$W/sessions/${safeKey}/files"\n` +
-      `if [ -f "$S/$RP" ]; then echo "$S/$RP"; exit 0; fi\n` +
-      // WSL home 工作区：根本身是跨会话共享的（它就是一个允许根），但会话私有目录
-      // 只看本会话 —— 原来这里对 `sessions/*/files` 取通配，会把别的会话的文件认下来。
-      `ws="$HOME/.miqi/workspace"\n` +
-      `if [ -f "$ws/$RP" ]; then echo "$ws/$RP"; exit 0; fi\n` +
-      `s="$ws/sessions/${safeKey}/files"\n` +
-      `if [ -f "$s/$RP" ]; then echo "$s/$RP"; exit 0; fi\n` +
-      `exit 1\n`;
+    // The script canonicalizes both the candidate and its root inside WSL to
+    // reject workspace symlinks that point outside (#1103 review).
+    const searchScript = buildWslSearchScript(relPath, sessionKey);
 
     for (const distro of distros) {
       try {
@@ -1968,9 +1957,6 @@ for m in ("pydantic", "httpx", "loguru"):
     }
     return null;
   }
-
-  /** Escape a string for safe embedding in a single-quoted bash argument. */
-  const shellEscape = (s: string) => s.replace(/'/g, "'\\''");
 
   async function copyFromWsl(
     wslAbsPath: string,

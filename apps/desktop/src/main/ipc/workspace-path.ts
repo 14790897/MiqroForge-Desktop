@@ -219,3 +219,77 @@ export function isWithinCanonicalWorkspace(
     }
   });
 }
+
+/**
+ * Derive the on-disk per-session directory key from a session key.
+ *
+ * This mirrors `miqi.session.session_keys.session_files_dir_key`: a
+ * fully-namespaced key such as `miqi-desktop:desktop:1786...` drops the
+ * client_id prefix and becomes `desktop_1786...`; two-segment keys such as
+ * `desktop:1786...` keep the whole key (`desktop_1786...`).
+ *
+ * The WSL search script must use this key for `sessions/<key>/files`, not the
+ * sandbox key, otherwise it searches a directory no writer ever creates
+ * (#1103 review).
+ */
+export function sessionFilesDirKey(sessionKey: string): string {
+  const parts = sessionKey.split(':');
+  if (parts.length >= 3) parts.shift();
+  return parts.join('_').replace(/[^A-Za-z0-9._-]/g, '_');
+}
+
+/**
+ * Sanitize a session key so it can safely be embedded in a shell path segment.
+ *
+ * Only alphanumerics, dots, underscores and hyphens survive; every other
+ * character is replaced with an underscore.  This prevents command substitution
+ * and shell metacharacters from leaking into WSL search scripts that build
+ * paths from the key (#1103 review).
+ */
+export function sanitizeSessionKeyForPath(sessionKey: string): string {
+  return sessionKey.replace(/[^A-Za-z0-9._-]/g, '_');
+}
+
+/** Escape a string for safe embedding in a single-quoted bash argument. */
+export function shellEscape(s: string): string {
+  return s.replace(/'/g, "'\\''");
+}
+
+/**
+ * Build the bash script used to locate a workspace-relative file inside WSL.
+ *
+ * The script searches the session sandbox, the session-private files directory,
+ * the global WSL workspace, and the global session files directory.  When a
+ * file is found it canonicalizes both the candidate and its authorization root
+ * and rejects the result if the canonical candidate lives outside the root,
+ * closing a symlink-escape path (#1103 review).
+ *
+ * The sandbox path uses the full sanitized session key, while the
+ * session-private files directory uses `sessionFilesDirKey` so it matches the
+ * canonical on-disk layout used by the Python side.
+ */
+export function buildWslSearchScript(relPath: string, sessionKey: string): string {
+  const escapedRelPath = shellEscape(relPath);
+  const sandboxKey = sanitizeSessionKeyForPath(sessionKey);
+  const sessionFilesKey = sessionFilesDirKey(sessionKey);
+  return (
+    `RP=$'${escapedRelPath}'\n` +
+    `W="/tmp/miqi-sandboxes/${sandboxKey}/home/miqi/workspace"\n` +
+    `S="$W/sessions/${sessionFilesKey}/files"\n` +
+    `ws="$HOME/.miqi/workspace"\n` +
+    `s="$ws/sessions/${sessionFilesKey}/files"\n` +
+    `found=""\n` +
+    `root=""\n` +
+    `if [ -f "$W/$RP" ]; then found="$W/$RP"; root="$W"; fi\n` +
+    `if [ -z "$found" ] && [ -f "$S/$RP" ]; then found="$S/$RP"; root="$W"; fi\n` +
+    `if [ -z "$found" ] && [ -f "$ws/$RP" ]; then found="$ws/$RP"; root="$ws"; fi\n` +
+    `if [ -z "$found" ] && [ -f "$s/$RP" ]; then found="$s/$RP"; root="$ws"; fi\n` +
+    `if [ -z "$found" ]; then exit 1; fi\n` +
+    `canon=$(readlink -f "$found") || exit 1\n` +
+    `root_canon=$(readlink -f "$root") || exit 1\n` +
+    `case "$canon" in\n` +
+    `  "$root_canon"|"$root_canon"/*) echo "$found"; exit 0 ;;\n` +
+    `  *) exit 1 ;;\n` +
+    `esac\n`
+  );
+}
