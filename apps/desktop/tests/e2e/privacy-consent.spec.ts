@@ -16,6 +16,10 @@
  * serial 模式：测试共享同一个 MIQI_HOME 的同意状态，必须按序执行
  * （playwright.config.ts 全局 fullyParallel）。
  *
+ * #1095：本 spec 只测协议门——登录门由 helper 默认的 MIQI_LOGIN_BYPASS
+ * 绕过（否则同意后会被强制登录拦住，到不了主界面）；登录门自身的行为
+ * 由 login-gate.spec.ts 覆盖。
+ *
  * 确定性说明：dev 模式下 userData 按 checkout 共享（main 的 ws-<hash>
  * setPath 覆盖 --user-data-dir），本 checkout 此前运行/重试留下的同意
  * 状态会让门被跳过——依赖门的测试先清记录、必要时重启一次。
@@ -145,17 +149,8 @@ test.describe.serial('Privacy consent gate (#837)', () => {
 
     await agreeBtn.click();
 
-    // #1000：同意后直接衔接登录页（协议 → 登录一气呵成），入口不再藏在设置页。
-    await expect(page.getByTestId('login-step')).toBeVisible({ timeout: 60_000 });
-    await expect(page.getByTestId('login-step-login-btn')).toBeVisible();
-    await page.screenshot({
-      path: `test-results/${test.info().title.replace(/\s+/g, '-')}-login-step.png`,
-      fullPage: true,
-    });
-
-    // 暂不登录进入应用
-    await page.getByTestId('login-step-skip').click();
-
+    // #1095：登录门在本 spec 由 MIQI_LOGIN_BYPASS 绕过（登录门自身的行为由
+    // login-gate.spec.ts 覆盖），同意后不再有「暂不登录」这一步，直接进主界面。
     // CI 冷启动（bridge + python.check）较慢，给足时间
     await expect(page.getByTestId('app-title')).toBeVisible({ timeout: 120_000 });
     await expect(page.getByTestId('privacy-consent-gate')).toHaveCount(0);
@@ -175,8 +170,6 @@ test.describe.serial('Privacy consent gate (#837)', () => {
     await page.reload();
     await expect(page.getByTestId('app-title')).toBeVisible({ timeout: 120_000 });
     await expect(page.getByTestId('privacy-consent-gate')).toHaveCount(0);
-    // #1000：登录衔接页只在同意动作后出现一次，重挂载（已有同意记录）不再出现
-    await expect(page.getByTestId('login-step')).toHaveCount(0);
   });
 
   test('同意不依赖 localStorage：缓存清空后仍不弹门（#1071）', { timeout: 180_000 }, async () => {

@@ -235,6 +235,45 @@ def _tracked_store_root(workspace: Path | None, session_key: str | None) -> Path
     return base
 
 
+def _tracked_persist_target(
+    workspace: Path | None,
+    file_path: str | Path,
+    session_key: str | None,
+) -> tuple[Path, str] | None:
+    """``(store_root, relative_key)`` — the single write contract for tracked files.
+
+    Both writers of a session's ledger (the document tools via
+    ``_persist_tracked_file`` and exec artifact tracking via
+    ``ExecTool._persist_changed_batch``) go through this, because a ledger
+    written under two different roots, or with two different key shapes,
+    splits one session's assets across two files.  The reader can only honour
+    one of them, so the other half of the session's output goes missing from
+    the assets panel — or shows twice, when both forms reach the frontend.
+
+    ``store_root`` is what a ``SessionManager`` must be rooted at for the
+    ledger to land in ``<store_root>/sessions/<derived>/tracked_files.json``;
+    the key is workspace-relative, which is what the read side resolves
+    against the session's own root.
+
+    Returns None when the entry cannot be keyed (no session key or workspace).
+    """
+    if not session_key or not workspace:
+        return None
+    key = _session_files_dir_key(session_key)
+    store_root = _tracked_store_root(workspace, key) or workspace
+    ws_str = str(Path(workspace).resolve()).replace("\\", "/")
+    rel_str = str(Path(file_path)).replace("\\", "/")
+    # 必须在**路径段边界**上匹配。裸字符串前缀会把 `/tmp/project-old/x.pdf`
+    # 当成 `/tmp/project` 的子路径，裁出错误的 `old/x.pdf` —— 读端随后会去
+    # `<ws>/old/x.pdf` 找一个根本不存在的文件。工作区之外的文件保持绝对 key，
+    # 交给读端的 host-absolute 分支解析。
+    if rel_str.startswith(ws_str + "/"):
+        rel_path = rel_str[len(ws_str) + 1:]
+    else:
+        rel_path = rel_str
+    return store_root, rel_path
+
+
 def _persist_tracked_file(
     workspace: Path | None,
     file_path: str | Path,
@@ -247,26 +286,116 @@ def _persist_tracked_file(
     this, files discovered from agent tool calls exist only in the
     frontend's in-memory state and are lost when the component unmounts.
     """
-    if not session_key or not workspace:
+    target = _tracked_persist_target(workspace, file_path, session_key)
+    if target is None:
         _log.debug("_persist_tracked_file: skipped (no session_key or workspace)")
         return
     try:
         from miqi.session.manager import SessionManager
+        store_root, rel_path = target
         # 修复 B：store key 与目录名派生同源（替换原 :213-216 的 client_id 剥离规则）
         session_key = _session_files_dir_key(session_key)
-        sm = SessionManager(_tracked_store_root(workspace, session_key) or workspace)
-        # Use workspace-relative paths for consistent reads across sessions
-        rel_path = str(file_path)
-        ws_str = str(workspace.resolve()).replace("\\", "/")
-        rel_str = str(Path(file_path)).replace("\\", "/")
-        if rel_str.startswith(ws_str + "/"):
-            rel_path = rel_str[len(ws_str) + 1:]
-        elif rel_str.startswith(ws_str):
-            rel_path = rel_str[len(ws_str):].lstrip("/")
+        sm = SessionManager(store_root)
         sm.save_tracked_file(session_key, rel_path, op=op)
         _log.info("_persist_tracked_file: ok session=%s path=%s", session_key, rel_path)
     except Exception as exc:
         _log.warning("_persist_tracked_file: failed session=%s path=%s: %s", session_key, file_path, exc)
+
+
+def _canonical_path_str(p: str | Path) -> str:
+    """Canonical forward-slash form of a path for ledger comparison.
+
+    Windows 允许同一文件以多种写法出现（8.3 短名 ``INTERS~1`` vs 长名、
+    ``..`` 段、大小写），台账里因此可能有同一文件的不同形态；比较前一律
+    ``resolve()`` 归一，避免「声明打到重复条目上、原条目没有 result」。
+    """
+    try:
+        return str(Path(p).resolve()).replace("\\", "/")
+    except Exception:
+        return str(p).replace("\\", "/")
+
+
+def _resolve_ledger_entry_to_abs(
+    entry: str, workspace: Path | None, files_dir: Path | None,
+) -> str | None:
+    """Resolve a ledger entry key to its absolute host path (for dedupe).
+
+    Ledger keys are mixed-form by design: file tools store paths relative to
+    their registration workspace (often the session files dir), the exec
+    snapshot stores workspace-relative or absolute paths.  Returns None when
+    a relative entry matches neither base (stale entry).
+    """
+    try:
+        p = Path(entry)
+    except (TypeError, ValueError):
+        return None
+    if p.is_absolute():
+        return _canonical_path_str(p)
+    for base in (files_dir, workspace):
+        if base is None:
+            continue
+        cand = Path(base) / entry
+        if cand.exists():
+            return _canonical_path_str(cand)
+    return None
+
+
+def _persist_tracked_result_files(
+    workspace: Path | None,
+    file_paths: list[str | Path],
+    session_key: str | None,
+    files_dir: Path | None = None,
+) -> int:
+    """Mark declared deliverables (``result: true``) in the session's ledger.
+
+    Single write path for the ``declare_result_files`` tool — mirrors
+    ``_persist_tracked_file``.  Declared paths are absolute host paths; any
+    existing ledger entry that resolves to the same file is marked instead of
+    a duplicate being added (the ledger legitimately mixes absolute and
+    relative forms for one file).  Returns the number of entries marked, or 0
+    on failure (a declaration must never break the turn).
+    """
+    if not session_key or not workspace or not file_paths:
+        _log.debug("_persist_tracked_result_files: skipped (missing args)")
+        return 0
+    try:
+        from miqi.session.manager import SessionManager
+        session_key = _session_files_dir_key(session_key)
+        sm = SessionManager(_tracked_store_root(workspace, session_key) or workspace)
+
+        existing = sm.load_tracked_files(session_key)
+        abs_to_key: dict[str, str] = {}
+        for key in existing:
+            resolved = _resolve_ledger_entry_to_abs(key, workspace, files_dir)
+            if resolved:
+                abs_to_key.setdefault(resolved, key)
+
+        keys: list[str] = []
+        seen: set[str] = set()
+        for p in file_paths:
+            # 按规范化绝对路径去重本次入参：`run/r.md` 与 `run/../run/r.md`
+            # 是同一文件，不能因为形态不同就登记两次（CodeRabbit 复审）
+            canon = _canonical_path_str(p)
+            if canon in seen:
+                continue
+            seen.add(canon)
+            key = abs_to_key.get(canon)
+            if key is None:
+                # 没有既有条目：以 agent 给的形态建新条目（面板按原样展示）
+                key = str(Path(p)).replace("\\", "/")
+            keys.append(key)
+        if not keys:
+            return 0
+
+        marked = sm.mark_tracked_file_result(session_key, keys)
+        _log.info(
+            "_persist_tracked_result_files: ok session=%s marked=%d",
+            session_key, marked,
+        )
+        return marked
+    except Exception as exc:
+        _log.warning("_persist_tracked_result_files: failed session=%s: %s", session_key, exc)
+        return 0
 
 
 def _sandbox_to_host_path(sandbox_path: str, workspace: Path | None, sandbox) -> str:

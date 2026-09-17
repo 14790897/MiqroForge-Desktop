@@ -818,9 +818,14 @@ class ExecTool(Tool):
             # (process) entries when the agent later inspected them.
             # Snapshot the exec's cwd (not just the global workspace) so
             # artifacts written to a custom workspace are diffed too (#682).
+            # #1104: ALSO snapshot the user-mentioned dirs (#821 ``_user_roots``)
+            # and the command's declared output dir — a skill writing to
+            # ``--out-dir <user folder>`` used to be invisible to the panel,
+            # which showed only a fraction of the artifacts the run produced.
             # Off-loop: os.walk over a large workspace must not stall the
             # bridge event loop (CodeRabbit #682 review).
-            before = await asyncio.to_thread(self._snapshot_workspace, cwd)
+            snapshot_roots = self._snapshot_roots(cwd, _user_roots, command)
+            before_map = await asyncio.to_thread(self._snapshot_roots_map, snapshot_roots)
 
             # ── common args shared by every execution path ──────────
             exec_kwargs = dict(
@@ -885,7 +890,10 @@ class ExecTool(Tool):
             # copies (non bind-mounted) never reach the host, so their
             # outputs stay out of scope (#507 semantics).
             if result.exit_code == 0:
-                await self._track_workspace_changes(before, _session_key, cwd)
+                await self._track_workspace_changes_multi(
+                    before_map, _session_key, snapshot_roots,
+                    workspace=self._session_files_dir or self._workspace_root,
+                )
             return result
 
         exec_result = await _run()
@@ -3040,7 +3048,19 @@ class ExecTool(Tool):
             return
         try:
             from miqi.runtime.file_handlers import _get_workspace_path
-            workspace = _get_workspace_path()
+
+            # 会话自己的工作区优先。绑定（自定义）工作区会被 bind-mount 到
+            # ``/home/miqi/workspace``（bwrap.py），所以路径映射、包含性检查和
+            # 落账必须用同一个根：用全局工作区会把镜像产物写进 app-home，读端
+            # 看不到，还会在工作区里多出一份位置错误的副本（#1096）。
+            #
+            # 默认工作区下 ``self._workspace_root`` 就是 ``_get_workspace_path()``
+            # 的那个根，因此这条路径的行为逐字节不变。
+            workspace = (
+                Path(self._workspace_root)
+                if self._workspace_root
+                else Path(_get_workspace_path())
+            )
         except Exception:
             return
 
@@ -3138,6 +3158,8 @@ class ExecTool(Tool):
             logger.warning("exec [mirror] failed for {}: {}", sandbox_path, exc)
             return
 
+        # 落账与另两个写入口同根同键形（#1096）：``workspace`` 上面已按会话
+        # 工作区取过，这里直接用，别再退回全局根。
         _persist_tracked_file(workspace, host_path, op="write", session_key=session_key)
 
 
@@ -3197,9 +3219,118 @@ class ExecTool(Tool):
                 snap[str(p)] = (st.st_mtime_ns, st.st_size)
         return snap
 
+    # #1104: 命令里显式声明的输出目录（skill 的 --out-dir 约定）。只认长旗标，
+    # 不认 -o/--output —— 后者太泛（gcc -o）会快照无关目录。
+    _OUT_DIR_FLAG_RE = re.compile(
+        r"--(?:out[-_]?dir|output[-_]dir)\s*[= ]\s*(?:\"([^\"]+)\"|'([^']+)'|(\S+))"
+    )
+    _MAX_SNAPSHOT_ROOTS = 8
+
+    def _snapshot_roots(
+        self, cwd: str | Path | None, user_roots: Any, command: str,
+    ) -> list[Path]:
+        """Roots to diff around an exec: cwd + 用户点名目录 + 命令声明的 out-dir.
+
+        #1104：只快照 cwd 时，产物写到用户目录（``--out-dir C:/Users/x/Desktop/项目``）
+        的 skill 运行在面板里只剩零头。相对 out-dir 按 cwd 解析；**不存在的目录也保留**
+        （out-dir 通常运行时才创建，缺了它就永远 diff 不到产物）。
+        """
+        roots: list[Path] = []
+        seen: set[str] = set()
+
+        def _add(raw: Any, *, relative_to_cwd: bool = False) -> None:
+            if raw is None or not str(raw).strip():
+                return
+            try:
+                p = Path(str(raw)).expanduser()
+                # 只对 out-dir / 用户根做相对解析：cwd 自身若再拼一次会变成
+                # ``project/project``（CodeRabbit 复审）
+                if relative_to_cwd and not p.is_absolute() and cwd:
+                    p = Path(cwd) / p
+                # 平台感知去重键：Windows 折叠大小写与斜杠；POSIX 上
+                # /tmp/Out 与 /tmp/out 是两个目录，不得合并（CodeRabbit 复审）
+                key = os.path.normcase(os.path.abspath(p))
+            except (TypeError, ValueError, OSError):
+                return
+            if key in seen:
+                return
+            seen.add(key)
+            roots.append(p)
+
+        _add(cwd)
+        # 先加命令声明的 out-dir：它在截断（_MAX_SNAPSHOT_ROOTS）时必须存活——
+        # 用户根很多时把它排在后面会被丢掉，产物又 diff 不到（CodeRabbit 复审）
+        for m in self._OUT_DIR_FLAG_RE.finditer(command or ""):
+            value = next((g for g in m.groups() if g), None)
+            if value:
+                _add(value, relative_to_cwd=True)
+        for r in list(user_roots or []):
+            _add(r, relative_to_cwd=True)
+        return roots[: self._MAX_SNAPSHOT_ROOTS]
+
+    def _snapshot_roots_map(
+        self, roots: list[Path],
+    ) -> dict[str, dict[str, tuple[int, int]] | None]:
+        """Per-root snapshots; a root that is missing/oversized is skipped
+        independently (#1104: one huge user dir must not disable cwd tracking)."""
+        out: dict[str, dict[str, tuple[int, int]] | None] = {}
+        for root in roots:
+            try:
+                is_dir = Path(root).is_dir()
+            except OSError:
+                is_dir = False
+            if not is_dir:
+                # 目录尚不存在：空快照兜底——运行期间新建的内容全部算新增产物
+                out[str(root)] = {}
+                continue
+            snap = self._snapshot_workspace(root)
+            if snap is None:
+                logger.debug("exec [track] snapshot skipped for root {}", root)
+            out[str(root)] = snap
+        return out
+
+    async def _track_workspace_changes_multi(
+        self,
+        before_map: dict[str, dict[str, tuple[int, int]] | None],
+        session_key: str | None,
+        roots: list[Path],
+        workspace: str | Path | None = None,
+    ) -> None:
+        """Diff every snapshot root and persist the union of changed files.
+
+        ``workspace`` 与 ``_track_workspace_changes`` 同义（会话自己的工作区：
+        绑定文件夹或会话 files 目录）——台账 key 的相对基准由它决定，漏传会
+        把绑定会话的产物写进另一个账本（#1104）。
+        """
+        if not before_map:
+            return
+        changed: list[str] = []
+        seen: set[str] = set()
+        for root in roots:
+            before = before_map.get(str(root))
+            if before is None:
+                continue
+            after = await asyncio.to_thread(self._snapshot_workspace, root)
+            if after is None:
+                continue
+            for path_str, meta in after.items():
+                if before.get(path_str) is None or before[path_str] != meta:
+                    if path_str not in seen:
+                        seen.add(path_str)
+                        changed.append(path_str)
+        if not changed:
+            return
+        try:
+            await asyncio.to_thread(
+                self._persist_changed_batch, changed, session_key, workspace,
+            )
+        except Exception:
+            logger.debug("exec [track] batch persist failed", exc_info=True)
+
     async def _track_workspace_changes(
         self, before: dict[str, tuple[int, int]] | None, session_key: str | None,
         root: str | Path | None = None,
+        workspace: str | Path | None = None,
     ) -> None:
         """Persist files the subprocess created/modified as write tracked files."""
         if before is None:
@@ -3219,33 +3350,54 @@ class ExecTool(Tool):
             return
         try:
             await asyncio.to_thread(
-                self._persist_changed_batch, changed, session_key,
+                self._persist_changed_batch, changed, session_key, workspace,
             )
         except Exception:
             logger.debug("exec [track] batch persist failed", exc_info=True)
 
     def _persist_changed_batch(
         self, changed: list[str], session_key: str | None,
+        workspace: str | Path | None = None,
     ) -> None:
-        """Synchronous batch persist of exec-created files (off-loop)."""
+        """Synchronous batch persist of exec-created files (off-loop).
+
+        ``workspace`` is the session's own workspace — the bound folder, or
+        the session's files dir under the default root. It must be the same
+        value the document tools persist under: keying exec output against the
+        global workspace instead put it in a *different* ledger, with absolute
+        paths, so a bound session's script output never reached the assets
+        panel (the reader honours one ledger per session, and the doc tools had
+        already claimed it).
+        """
         if not session_key:
             return
-        try:
-            from pathlib import Path
+        base = Path(workspace) if workspace is not None else None
+        if base is None:
+            try:
+                from miqi.runtime.file_handlers import _get_workspace_path
 
-            from miqi.runtime.file_handlers import _get_workspace_path
-            workspace = Path(_get_workspace_path())
-        except Exception:
-            return
+                base = Path(_get_workspace_path())
+            except Exception:
+                return
         try:
-            from miqi.agent.tools.filesystem import _session_files_dir_key
+            from miqi.agent.tools.filesystem import (
+                _session_files_dir_key,
+                _tracked_persist_target,
+            )
             from miqi.session.manager import SessionManager
-            sm = SessionManager(workspace)
             # Store key 与目录名派生同源（与 _persist_tracked_file 一致）：
             # ``cli:direct`` → ``cli_direct``，exec 产物与文档产物落同一会话目录。
             session_key = _session_files_dir_key(session_key)
-            sm.save_tracked_files_batch(
-                session_key, [(p, "write") for p in changed],
-            )
+            batches: dict[str, list[tuple[str, str]]] = {}
+            for p in changed:
+                target = _tracked_persist_target(base, p, session_key)
+                if target is None:
+                    continue
+                store_root, rel_path = target
+                batches.setdefault(str(store_root), []).append((rel_path, "write"))
+            for root_str, batch in batches.items():
+                SessionManager(Path(root_str)).save_tracked_files_batch(
+                    session_key, batch,
+                )
         except Exception as exc:
             logger.debug("exec [track] batch persist failed: {}", exc)

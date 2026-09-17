@@ -728,4 +728,19 @@ def create_runtime_tool_registry(
         )
     )
 
+    # 15. 交付物登记（#1104）：agent 显式声明结果文件 → 「任务资产」结果区。
+    #     与 graph_render 同口径的 workspace 解析；持久化走 tracked_files.json。
+    from miqi.agent.tools.result_files import DeclareResultFilesTool
+
+    registry.register(
+        DeclareResultFilesTool(
+            workspace=_write_workspace,
+            allowed_dir=allowed_dir,
+            sandbox_manager=_sbm,
+            shared_roots=_shared_roots,
+            base_workspace=workspace,
+            allow_user_roots=_auto_user_dirs,
+        )
+    )
+
     return registry

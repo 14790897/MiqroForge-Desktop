@@ -4,8 +4,10 @@
  *   → 状态事件推送 → 退出登录清理。
  *
  * 刷新策略按实测数据：access_token 约 2 小时（expires_in=7199），
- * 提前 15 分钟用 refresh_token 刷新；刷新失败标记 requiresRelogin，
- * 由设置页引导用户重新登录。
+ * 提前 15 分钟用 refresh_token 刷新。刷新失败按性质区分（issue #1087）：
+ * 瞬时失败（网络不可达/平台 5xx）静默指数退避重试，不打扰用户；只有
+ * 平台明确作废 refresh_token（REFRESH_TOKEN_INVALID）才置 requiresRelogin，
+ * 由「登录失效三件套」（横幅/顶栏 chip/发送拦截）引导重新登录。
  */
 
 import {
@@ -61,9 +63,17 @@ export interface SlurmChargeResult {
   /** 去重命中（该作业已计费过），未发起新的扣费请求。 */
   dedup?: boolean;
 }
-/** 瞬时失败（网络等）的退避重试间隔（30 分钟后重试）。
+/** 瞬时刷新失败（网络/平台 5xx）的指数退避重试：1 分钟起步翻倍，
+ *  封顶 30 分钟（issue #1087：瞬时失败静默退避，不置 requiresRelogin）。
  *  refresh_token 已失效（REFRESH_TOKEN_INVALID）属永久错误，不重试。 */
-const REFRESH_RETRY_MS = 30 * 60_000;
+const REFRESH_RETRY_BASE_MS = 60_000;
+const REFRESH_RETRY_MAX_MS = 30 * 60_000;
+
+/** 刷新失败的永久性判定：只有平台明确作废 refresh_token 才引导重新登录；
+ *  其余错误码（网络不可达/平台瞬时错误）均按瞬时失败静默退避重试。 */
+export function isPermanentRefreshError(code: QraftErrorCode | null): boolean {
+  return code === 'REFRESH_TOKEN_INVALID';
+}
 
 export interface QraftServiceOptions {
   client: QraftClient;
@@ -157,6 +167,11 @@ export class QraftService {
   private refreshScheduledAt: number | null = null;
   private refreshError: QraftErrorCode | null = null;
   private requiresRelogin = false;
+  /** 瞬时刷新失败的退避重试代数（决定下次重试间隔），成功刷新/登录/登出时归零。 */
+  private refreshRetryAttempt = 0;
+  /** 最近一次已处理失败的在途刷新 Promise：手动与自动路径并发 await
+   *  同一个 inFlightRefresh 时，失败归类与重试调度只做一次（CodeRabbit #1114）。 */
+  private lastHandledRefreshFailure: Promise<void> | null = null;
   /** 登录代际：退出登录时递增，用于丢弃登出前发起的在途刷新结果，
    *  防止"刷新完成于登出之后"把凭据写回磁盘/内存。 */
   private authGeneration = 0;
@@ -367,6 +382,7 @@ export class QraftService {
     };
     this.options.store.save(state);
     this.refreshError = null;
+    this.refreshRetryAttempt = 0;
     this.requiresRelogin = false;
     this.scheduleRefresh(state);
     this.syncTokenFile(state);
@@ -497,8 +513,11 @@ export class QraftService {
       refreshError: this.refreshError ?? undefined,
       requiresRelogin:
         this.requiresRelogin ||
-        // 已过期且最近一次自动刷新失败 → 引导重新登录
-        (this.refreshError !== null && now > state.tokens.expiresAt),
+        // 已过期且最近一次刷新失败属永久作废 → 引导重新登录。
+        // 瞬时失败（网络等）重试中不算失效，不引导重登（issue #1087）。
+        (this.refreshError !== null &&
+          isPermanentRefreshError(this.refreshError) &&
+          now > state.tokens.expiresAt),
       points: this.pointsBalance ?? undefined,
       // 只透出非敏感网关信息（status/configVersion）；encryptedApiKey 不外发渲染进程。
       aiGateway: state.aiGateway
@@ -516,6 +535,7 @@ export class QraftService {
     this.options.store.clear();
     this.deleteTokenFile();
     this.refreshError = null;
+    this.refreshRetryAttempt = 0;
     this.requiresRelogin = false;
     this.pointsBalance = null;
     // 扣费历史与已计费作业索引不随登出删除：读取时按 account.sub 过滤，
@@ -946,8 +966,10 @@ export class QraftService {
   async refreshNow(): Promise<QraftLoginResult> {
     const state = this.options.store.current;
     if (!state) return { ok: false, code: 'INVALID_CONFIG', message: '尚未登录' };
+    const refresh = this.doRefresh(state);
     try {
-      await this.doRefresh(state);
+      await refresh;
+      this.refreshRetryAttempt = 0;
       this.refreshError = null;
       this.requiresRelogin = false;
       this.emitStatus();
@@ -958,14 +980,12 @@ export class QraftService {
         `qraft: 手动刷新失败（${err instanceof QraftError ? err.code : err}）`
       );
       if (err instanceof QraftError) {
-        this.refreshError = err.code;
-        this.requiresRelogin = true;
-        if (err.code === 'REFRESH_TOKEN_INVALID') {
-          // 永久失败：撤销还在排队的自动刷新定时器 —— 用已失效的
-          // refresh_token 重试必然失败，只会在计划时间点再报一次错。
-          this.cancelRefresh();
+        // 手动与自动刷新共享同一个 inFlightRefresh：同一失败的并发观察者
+        // 不再重复处理 —— 先到的路径已归类失败并排好退避重试（CodeRabbit #1114）。
+        if (this.lastHandledRefreshFailure !== refresh) {
+          this.lastHandledRefreshFailure = refresh;
+          this.handleRefreshFailure(err, state, '手动');
         }
-        this.emitStatus();
         return { ok: false, code: err.code, message: err.message };
       }
       return {
@@ -978,7 +998,7 @@ export class QraftService {
 
   // ── 自动刷新调度 ──────────────────────────────────────────────────────
 
-  /** 到期前 15 分钟刷新；刷新失败 30 分钟后重试一次。 */
+  /** 到期前 15 分钟刷新；瞬时失败按指数退避静默重试（见 tickRefresh）。 */
   private scheduleRefresh(state: QraftStoredState): void {
     this.cancelRefresh();
     const now = Date.now();
@@ -1007,32 +1027,59 @@ export class QraftService {
   private async tickRefresh(state: QraftStoredState): Promise<void> {
     // 已退出登录（store 已清）时丢弃过期定时任务，不重试也不写回任何状态。
     if (!this.options.store.current) return;
+    const refresh = this.doRefresh(state);
     try {
-      await this.doRefresh(state);
+      await refresh;
+      this.refreshRetryAttempt = 0;
       this.refreshError = null;
       this.requiresRelogin = false;
       this.emitStatus();
     } catch (err) {
       if (!this.options.store.current) return; // 失败发生在登出前后：同样丢弃
-      const code = err instanceof QraftError ? err.code : 'REFRESH_FAILED';
-      this.refreshError = code;
-      this.requiresRelogin = true;
-      if (code === 'REFRESH_TOKEN_INVALID') {
-        // refresh_token 已失效属永久错误：重试必然失败，停止自动重试，
-        // 由设置页引导重新登录（refreshError 保留错误码供 UI 展示指引）。
-        this.refreshScheduledAt = null;
-        this.options.log(
-          'ERROR',
-          `qraft: 自动刷新失败（${code}）：refresh_token 已失效，请重新登录（不再自动重试）`
-        );
-        this.emitStatus();
-        return;
-      }
-      this.options.log('ERROR', `qraft: 自动刷新失败（${code}），30 分钟后重试`);
-      this.refreshScheduledAt = Date.now() + REFRESH_RETRY_MS;
-      this.refreshTimer = setTimeout(() => void this.tickRefresh(state), REFRESH_RETRY_MS);
-      this.emitStatus();
+      // 同一失败的并发观察者（手动刷新也 await 同一个 inFlightRefresh）：
+      // 失败只处理一次，避免重复递增退避代数、把已排好的重试定时器后推
+      // （CodeRabbit #1114）。
+      if (this.lastHandledRefreshFailure === refresh) return;
+      this.lastHandledRefreshFailure = refresh;
+      this.handleRefreshFailure(err, state, '自动');
     }
+  }
+
+  /**
+   * 刷新失败的统一处理（refreshNow 与 tickRefresh 共用，按在途 Promise
+   * 身份去重后只调用一次）：
+   *   - REFRESH_TOKEN_INVALID（平台作废）：永久失败，置 requiresRelogin 走
+   *     登录失效三件套，撤销定时器不再重试；
+   *   - 其余（网络/平台 5xx）：瞬时失败，不置 requiresRelogin（不弹横幅、
+   *     不拦截发送），指数退避静默重试（issue #1087）。
+   */
+  private handleRefreshFailure(err: unknown, state: QraftStoredState, via: '自动' | '手动'): void {
+    const code = err instanceof QraftError ? err.code : 'REFRESH_FAILED';
+    this.refreshError = code;
+    if (isPermanentRefreshError(code)) {
+      this.requiresRelogin = true;
+      this.cancelRefresh();
+      this.options.log(
+        'ERROR',
+        `qraft: ${via}刷新失败（${code}）：refresh_token 已失效，请重新登录（不再自动重试）`
+      );
+    } else {
+      const delay = this.nextRefreshRetryDelay();
+      this.refreshRetryAttempt += 1;
+      this.cancelRefresh();
+      this.refreshScheduledAt = Date.now() + delay;
+      this.refreshTimer = setTimeout(() => void this.tickRefresh(state), delay);
+      this.options.log(
+        'WARN',
+        `qraft: ${via}刷新失败（${code}），${Math.round(delay / 60_000)} 分钟后静默重试`
+      );
+    }
+    this.emitStatus();
+  }
+
+  /** 当前代数的退避重试间隔：1 分钟起步翻倍，封顶 30 分钟。 */
+  private nextRefreshRetryDelay(): number {
+    return Math.min(REFRESH_RETRY_BASE_MS * 2 ** this.refreshRetryAttempt, REFRESH_RETRY_MAX_MS);
   }
 
   /** 刷新进行中的去重：手动刷新与自动刷新并发时共享同一次请求，避免

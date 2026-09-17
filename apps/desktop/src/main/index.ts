@@ -7,6 +7,7 @@ import { BridgeManager } from './bridge';
 import { writeMainProcessLog } from './electron-log';
 import { createSplash, closeSplash } from './splash';
 import { safeWrite, guardStdStreams } from './console-guard';
+import { sendToWindow } from './frame-send';
 import { WINDOW_MIN_WIDTH } from '../shared/layout';
 
 const originalConsoleLog = console.log.bind(console);
@@ -43,7 +44,14 @@ function createWindow(): void {
       // E2E 专用标记：helper 设 MIQI_E2E=1 时随 argv 下发到 sandbox preload，
       // 渲染层据此跳过隐私协议确认门（#837），避免 E2E 被全屏确认页阻断。
       // 仅限未打包环境——打包产物被外部注入 MIQI_E2E=1 不得绕过确认门。
-      additionalArguments: !app.isPackaged && process.env['MIQI_E2E'] === '1' ? ['--miqi-e2e'] : [],
+      // 登录门（#1095）默认同样绕过（几乎全部用例要未登录的主界面），
+      // 只有专门验证登录门的用例经 helper 去掉 MIQI_LOGIN_BYPASS。
+      additionalArguments: !app.isPackaged
+        ? [
+            ...(process.env['MIQI_E2E'] === '1' ? ['--miqi-e2e'] : []),
+            ...(process.env['MIQI_LOGIN_BYPASS'] === '1' ? ['--miqi-login-bypass'] : []),
+          ]
+        : [],
     },
   });
 
@@ -178,16 +186,15 @@ export function main(): void {
     bridgeManager = new BridgeManager();
     registerIpcHandlers(bridgeManager);
 
-    // Forward bridge events to renderer
+    // Forward bridge events to renderer. These fire for the whole lifetime of
+    // the window, including after the renderer is gone (#1019: the bridge
+    // restart during a crashed renderer re-triggered this path), so the frame
+    // check inside sendToWindow is what keeps them off a dead frame.
     const onState = (status: unknown) => {
-      if (mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.webContents.send('runtime:state', status);
-      }
+      sendToWindow(mainWindow, 'runtime:state', status);
     };
     const onLog = (msg: string) => {
-      if (mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.webContents.send('runtime:log', msg);
-      }
+      sendToWindow(mainWindow, 'runtime:log', msg);
     };
     bridgeManager.on('state', onState);
     bridgeManager.on('log', onLog);
