@@ -38,6 +38,14 @@ function escapeProperty(text) {
 }
 
 /**
+ * 报告字段是 PR 可控的：一个换行就能撑破 markdown 围栏，让摘要里出现作者想写的文字
+ * （伪造结论、钓鱼链接）。凡是往 markdown 里拼的报告字段都先折成一行。
+ */
+function oneLine(text) {
+  return String(text ?? '').replace(/[\r\n]+/g, ' ');
+}
+
+/**
  * 行内代码：文本里本来就有反引号时用更长的围栏，免得把摘要渲染坏。
  *
  * 值本身以反引号开头或结尾时，还要在围栏内侧补一个空格 —— 否则围栏会和内容的首/尾反引号
@@ -45,7 +53,7 @@ function escapeProperty(text) {
  * 会把这对外侧空格去掉，内容照旧。
  */
 function inlineCode(text) {
-  const value = String(text);
+  const value = oneLine(text);
   const runs = value.match(/`+/g) || [];
   const fence = '`'.repeat(Math.max(1, ...runs.map((run) => run.length + 1)));
   const content = /^`|`$/.test(value) ? ` ${value} ` : value;
@@ -70,7 +78,7 @@ function firstLine(message) {
 
 /** 用例标签：projectName 为空（config 没写 projects 时的隐式默认）就省掉前缀，别输出 `[]`。 */
 function label(entry) {
-  return entry.project ? `[${entry.project}] ` : '';
+  return entry.project ? `[${oneLine(entry.project)}] ` : '';
 }
 
 function formatDuration(ms) {
@@ -85,15 +93,33 @@ function formatDuration(ms) {
  * 注解里的 file 要相对仓库根，才能挂到 PR 的文件视图上；spec.file 是相对 config.rootDir 的，
  * 所以基准取报告里的 rootDir，而不是 cwd。
  *
- * 算不出来的时候（没跑在 Actions 里、路径不在 workspace 下、跨盘符）返回原始的 spec.file ——
- * 那不是一个有效的仓库路径，只是为了始终有东西可读。
+ * 报告可能来自另一台 runner：macOS 的报告会被 ubuntu 上的汇总 job 解析，报告的 rootDir 是
+ * `/Users/runner/...` 而本地 workspace 是 `/home/runner/...`，relative() 这时只会给出跨机器的
+ * 回溯路径。那就改用仓库名把绝对路径切回仓库根 —— GitHub Actions 的工作区一定是
+ * `<...>/<owner>/<repo>/<repo>/...`，仓库名取 `GITHUB_REPOSITORY` 的后半段。
+ *
+ * 都算不出来时返回原始的 spec.file —— 那不是一个有效的仓库路径，只是为了始终有东西可读。
  */
 function repoRelative(file, rootDir) {
   const workspace = process.env.GITHUB_WORKSPACE;
-  if (!workspace || !file || isAbsolute(file)) return file;
-  const rel = relative(workspace, resolve(rootDir, file)).split(sep).join('/');
-  // 两个路径不同盘符时 relative() 会退回绝对路径，这种也挂不上，原样返回。
-  return rel.startsWith('..') || isAbsolute(rel) ? file : rel;
+  if (!workspace || !file) return file;
+  const absolute = resolve(rootDir, file).split(sep).join('/');
+
+  if (!isAbsolute(file)) {
+    const rel = relative(workspace, resolve(rootDir, file)).split(sep).join('/');
+    // 两个路径不同盘符时 relative() 会退回绝对路径，这种也挂不上，走下面的兜底。
+    if (!rel.startsWith('..') && !isAbsolute(rel)) return rel;
+  }
+
+  const repo = (process.env.GITHUB_REPOSITORY || '').split('/')[1];
+  if (repo) {
+    const at = absolute.lastIndexOf(`/${repo}/`);
+    if (at >= 0) {
+      const tail = absolute.slice(at + repo.length + 2);
+      if (tail && !tail.startsWith('..')) return tail;
+    }
+  }
+  return file;
 }
 
 /**
@@ -177,7 +203,7 @@ function incompleteness(report, tests) {
 
 function countLine(report, tests, flakyCount) {
   const stats = report?.stats || {};
-  const projects = [...new Set(tests.map(({ test }) => test.projectName).filter(Boolean))];
+  const projects = [...new Set(tests.map(({ test }) => oneLine(test.projectName)).filter(Boolean))];
   const parts = [];
   if (projects.length) parts.push(`项目 ${projects.join(' / ')}`);
   parts.push(

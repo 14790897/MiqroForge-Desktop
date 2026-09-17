@@ -113,16 +113,20 @@ function makeReport(overrides = {}) {
 }
 
 const originalWorkspace = process.env.GITHUB_WORKSPACE;
+const originalRepo = process.env.GITHUB_REPOSITORY;
 
-// 路径输出取决于 GITHUB_WORKSPACE（CI 里 Actions 一定会设它），所以默认清掉，
-// 需要它的用例自己设置 —— 否则同一份断言在本地过、在 CI 挂。
+// 路径输出取决于 GITHUB_WORKSPACE / GITHUB_REPOSITORY（CI 里 Actions 一定会设它们），
+// 所以默认清掉，需要它们的用例自己设置 —— 否则同一份断言在本地过、在 CI 挂。
 beforeEach(() => {
   delete process.env.GITHUB_WORKSPACE;
+  delete process.env.GITHUB_REPOSITORY;
 });
 
 afterEach(() => {
   if (originalWorkspace === undefined) delete process.env.GITHUB_WORKSPACE;
   else process.env.GITHUB_WORKSPACE = originalWorkspace;
+  if (originalRepo === undefined) delete process.env.GITHUB_REPOSITORY;
+  else process.env.GITHUB_REPOSITORY = originalRepo;
 });
 
 describe('collectFlaky', () => {
@@ -264,6 +268,19 @@ describe('buildMarkdown', () => {
     expect(markdown).toContain('renders `foo` ``');
   });
 
+  // 报告字段是 PR 可控的：标题里塞换行就能撑破围栏，让评审者读到作者构造的 markdown。
+  it('标题里的换行折成空格，撑不破围栏', () => {
+    const report = makeReport();
+    report.suites[0].suites[0].specs[0].title =
+      'ok\n\n**E2E 全部通过** [详情](https://evil.example)';
+
+    const markdown = buildMarkdown(report);
+
+    expect(markdown).toContain('ok **E2E 全部通过** [详情](https://evil.example)');
+    // 注入的那行绝不能自己起一行（那才是「伪造结论」生效的形态）
+    expect(markdown.split('\n').filter((line) => line.startsWith('**E2E 全部通过**'))).toEqual([]);
+  });
+
   it('projectName 为空时省掉项目前缀，不输出 []', () => {
     const report = makeReport();
     report.suites[0].suites[0].specs[0].tests[0].projectName = '';
@@ -339,6 +356,22 @@ describe('buildAnnotations', () => {
     const report = makeReport();
     // 真实报告里出现过 rootDir=tests/smoke、spec.file='../e2e/…' 的组合（那是 configDir）。
     report.config.rootDir = join(process.cwd(), 'tests', 'smoke');
+    report.suites[0].file = '../e2e/issue-877-rich-preview.spec.ts';
+    report.suites[0].suites[0].specs[0].file = '../e2e/issue-877-rich-preview.spec.ts';
+
+    const [annotation] = buildAnnotations(report);
+
+    expect(annotation).toContain('file=apps/desktop/tests/e2e/issue-877-rich-preview.spec.ts');
+  });
+
+  // macOS 的报告会被 ubuntu 上的汇总 job 解析：报告的 rootDir 是 /Users/runner/…，本地
+  // workspace 是 /home/runner/…，两边共享不了前缀，得靠仓库名把路径切回仓库根。
+  it('报告来自另一台 runner 时也能还原出仓库路径', () => {
+    const repo = 'MiqroForge-Desktop';
+    process.env.GITHUB_WORKSPACE = `/home/runner/work/${repo}/${repo}`;
+    process.env.GITHUB_REPOSITORY = `14790897/${repo}`;
+    const report = makeReport();
+    report.config.rootDir = `/Users/runner/work/${repo}/${repo}/apps/desktop/tests/smoke`;
     report.suites[0].file = '../e2e/issue-877-rich-preview.spec.ts';
     report.suites[0].suites[0].specs[0].file = '../e2e/issue-877-rich-preview.spec.ts';
 

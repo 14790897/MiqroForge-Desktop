@@ -350,82 +350,11 @@ jobs:
           retention-days: 7
 
   # ────────────────────────────────────────────────────────────
-  # Job 4: 上传 E2E JSON 报告到 release asset —— 不检出 PR head，不执行 PR 控制代码。
-  # E2E job 先把报告以 artifact 形式留档，本 job 下载后用 gh CLI 上传到固定预发布。
-  # 这里持 contents:write，但整个 job 不接触 PR 检出代码，GH_TOKEN 只交给 trusted gh CLI。
-  # ────────────────────────────────────────────────────────────
-  upload-e2e-reports:
-    needs: [electron-e2e, macos-e2e]
-    if: always()
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-      actions: read
-    outputs:
-      linux-report-url: ${{ steps.upload.outputs.linux-report-url }}
-      macos-report-url: ${{ steps.upload.outputs.macos-report-url }}
-
-    steps:
-      - name: Download Linux E2E report
-        uses: actions/download-artifact@v4
-        with:
-          name: e2e-report-linux
-          path: reports/linux/
-        continue-on-error: true
-
-      - name: Download macOS E2E report
-        uses: actions/download-artifact@v4
-        with:
-          name: e2e-report-macos
-          path: reports/macos/
-        continue-on-error: true
-
-      - name: Upload reports to release asset
-        id: upload
-        run: |
-          set -euo pipefail
-          tag="_gh-artifacts"
-          if ! gh release view "$tag" --repo "${{ github.repository }}" >/dev/null 2>&1; then
-            # 不同 PR / 不同平台的运行可能同时创建同一个 release：创建失败说明别家刚建好，
-            # 重读一次复用即可，别让 set -e 把整步判失败（CodeRabbit 评审 #1107）。
-            gh release create "$tag" --prerelease --title "$tag" \
-              --body "CI 产物（E2E 报告等）—— 不要删除。见 .github/workflows/desktop-ci.yml" \
-              --repo "${{ github.repository }}" 2>/dev/null || \
-              gh release view "$tag" --repo "${{ github.repository }}" >/dev/null
-          fi
-
-          linux_url=""
-          if [ -f reports/linux/results.json ]; then
-            linux_name="e2e-results-linux-${{ github.run_id }}-${{ github.run_attempt }}.json"
-            cp reports/linux/results.json "$linux_name"
-            gh release upload "$tag" "$linux_name" --clobber --repo "${{ github.repository }}"
-            linux_url="https://github.com/${{ github.repository }}/releases/download/$tag/$linux_name"
-            rm -f "$linux_name"
-          fi
-
-          macos_url=""
-          if [ -f reports/macos/results.json ]; then
-            macos_name="e2e-results-macos-${{ github.run_id }}-${{ github.run_attempt }}.json"
-            cp reports/macos/results.json "$macos_name"
-            gh release upload "$tag" "$macos_name" --clobber --repo "${{ github.repository }}"
-            macos_url="https://github.com/${{ github.repository }}/releases/download/$tag/$macos_name"
-            rm -f "$macos_name"
-          fi
-
-          # 保留最近 100 个资产（约 50 次双平台运行），避免触及 release 1000 资产上限。
-          gh api "repos/${{ github.repository }}/releases/tags/$tag" \
-            --jq '.assets | sort_by(.created_at) | reverse | .[100:] | .[].id' | \
-            xargs -r -I {} gh api -X DELETE "repos/${{ github.repository }}/releases/assets/{}" --silent
-
-          echo "linux-report-url=$linux_url" >> "$GITHUB_OUTPUT"
-          echo "macos-report-url=$macos_url" >> "$GITHUB_OUTPUT"
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-  # ────────────────────────────────────────────────────────────
-  # Job 5: flaky 汇总 —— 无 provider secrets，只下载并解析主 E2E 上传的 JSON 报告（#1107）。
-  # 这个 job 没有 provider 凭据，因此即便解析脚本来自 PR 检出，也没有 API key 可被窃取；
-  # 但脚本本身确实在 PR 检出的代码上执行（与仓库现有 mock smoke/e2e spec 的信任模型一致）。
+  # Job 4: flaky 汇总 —— 无 provider secrets，只下载 E2E job 留下的报告 artifact 再解析（#1107）。
+  # 两条边界：(a) 本 job 没有任何 provider 凭据，解析脚本即便是 PR 检出的也没有 key 可窃取；
+  # (b) 报告只在这个 run 内部以 artifact 传递，不发布到任何公开位置 —— 报告内容由 PR 决定，
+  # 一旦发布成公开 release asset，任意 PR 都能把 runner 上的文件（例如 ~/.miqi/config.json）
+  # 塞进 results.json 再公开出去。
   # ────────────────────────────────────────────────────────────
   summarize-flaky:
     concurrency:
@@ -434,7 +363,8 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-    needs: [upload-e2e-reports]
+      actions: read
+    needs: [electron-e2e, macos-e2e]
     if: always()
     defaults:
       run:
@@ -453,23 +383,36 @@ jobs:
           cache: npm
           cache-dependency-path: apps/desktop/package-lock.json
 
-      - name: Summarize flaky E2E tests (Linux)
-        if: needs.upload-e2e-reports.outputs.linux-report-url != ''
-        run: |
-          mkdir -p test-reports
-          curl -fsSL "${{ needs.upload-e2e-reports.outputs.linux-report-url }}" -o test-reports/results-linux.json
-          node scripts/e2e-flaky-report.mjs test-reports/results-linux.json
+      - name: Download Linux E2E report
+        uses: actions/download-artifact@v4
+        with:
+          name: e2e-report-linux
+          path: reports/linux
+        continue-on-error: true
 
-      - name: Summarize flaky E2E tests (macOS)
-        if: needs.upload-e2e-reports.outputs.macos-report-url != ''
-        run: |
-          mkdir -p test-reports
-          curl -fsSL "${{ needs.upload-e2e-reports.outputs.macos-report-url }}" -o test-reports/results-macos.json
-          node scripts/e2e-flaky-report.mjs test-reports/results-macos.json
+      - name: Download macOS E2E report
+        uses: actions/download-artifact@v4
+        with:
+          name: e2e-report-macos
+          path: reports/macos
+        continue-on-error: true
 
-      - name: E2E 报告缺失说明
-        if: needs.upload-e2e-reports.outputs.linux-report-url == '' && needs.upload-e2e-reports.outputs.macos-report-url == ''
-        run: echo "两个 E2E job 都没有产出 JSON 报告（主步被杀/OOM），见上面的说明"
+      - name: Summarize flaky E2E tests
+        run: |
+          found=""
+          for platform in linux macos; do
+            report="reports/$platform/results.json"
+            [ -f "$report" ] || continue
+            found="$found $platform"
+            node scripts/e2e-flaky-report.mjs "$report"
+          done
+          if [ -z "$found" ]; then
+            # 汇总本身只作观察，缺报告就说清楚，别改变 run 的结论。
+            echo "两个 E2E job 都没有留下报告 artifact（主步没跑完 / 被取消 / 前置步骤就失败），本轮没有 flaky 清单可汇总" \
+              | tee -a "$GITHUB_STEP_SUMMARY"
+          else
+            echo "已汇总平台：$found"
+          fi
 
   # ────────────────────────────────────────────────────────────
   # macOS 打包（dmg/zip）不在这里跑：每个 PR 都起 macos runner 成本高，
