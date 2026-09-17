@@ -20,11 +20,19 @@
 import { test, expect } from '@playwright/test';
 import type { ElectronApplication, Page } from '@playwright/test';
 import fs from 'node:fs';
+import http from 'node:http';
 import path from 'node:path';
-import { launchElectronApp, closeElectronApp, waitForInputReady } from './helpers/electron-setup';
+import {
+  launchElectronApp,
+  closeElectronApp,
+  waitForInputReady,
+  sendMessage,
+} from './helpers/electron-setup';
 
 const NOTICE_SELECTOR = '[data-testid="chat-system-notice"]';
 const INPUT_SELECTOR = '[data-testid="chat-input-container"]';
+/** Composer 停止按钮（Composer.tsx）：只在 `streaming` 时渲染。 */
+const STOP_BUTTON_SELECTOR = '[aria-label="停止生成"]';
 
 const POLL_INTERVAL_MS = 250;
 const RELOAD_TIMEOUT_MS = 60_000;
@@ -279,6 +287,8 @@ interface RendererState {
   /** document.body.innerText 全文：无提示口径按文案扫描断言。 */
   bodyText: string;
   inputReady: boolean;
+  /** Composer 的「停止生成」按钮是否在屏：`streaming` 且输入框为空时渲染。 */
+  streaming: boolean;
 }
 
 /**
@@ -325,6 +335,7 @@ async function readSnapshotOnce(electronApp: ElectronApplication): Promise<Rende
         noticeText: notices.length ? notices[0].textContent : null,
         bodyText: document.body ? document.body.innerText : '',
         inputReady: !!document.querySelector(${JSON.stringify(INPUT_SELECTOR)}),
+        streaming: !!document.querySelector(${JSON.stringify(STOP_BUTTON_SELECTOR)}),
       };
     })()`
   );
@@ -422,5 +433,191 @@ test.describe('Issue #1035 — 渲染进程崩溃后自动重载与恢复提示'
     const settled = await readSnapshotOnce(electronApp);
     expect(settled, '第二次重载的静置复查应能读到渲染层 DOM').not.toBeNull();
     expect(settled!.noticeCount, `静置 ${SETTLE_RECHECK_MS}ms 后仍不应有任何提示`).toBe(0);
+  });
+});
+
+// ── Issue #1035 P1: backend turn keeps producing output after renderer reload ──
+
+interface RecoveryMockStream {
+  url: string;
+  stats: () => { started: number; finished: number; deltas: number };
+  close: () => Promise<void>;
+}
+
+/**
+ * OpenAI-compatible SSE mock that streams reasoning deltas for ~30s and then
+ * a final content chunk. Used to verify that a turn whose renderer was killed
+ * mid-stream continues to deliver events to the reloaded renderer.
+ */
+async function startRecoveryMock(): Promise<RecoveryMockStream> {
+  let started = 0;
+  let finished = 0;
+  let deltas = 0;
+
+  const server = http.createServer((req, res) => {
+    if (req.url && req.url.startsWith('/stats')) {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ started, finished }));
+      return;
+    }
+    if (!req.url || !req.url.includes('/chat/completions')) {
+      res.writeHead(404);
+      res.end();
+      return;
+    }
+
+    req.on('data', () => {});
+    req.on('end', () => {
+      started += 1;
+      res.writeHead(200, {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        Connection: 'keep-alive',
+      });
+
+      const chunk = (delta: Record<string, unknown>, finish: string | null) =>
+        'data: ' +
+        JSON.stringify({
+          id: 'chatcmpl-recovery',
+          object: 'chat.completion.chunk',
+          created: 0,
+          model: 'recovery-mock',
+          choices: [{ index: 0, delta, finish_reason: finish }],
+        }) +
+        '\n\n';
+
+      res.write(chunk({ role: 'assistant' }, null));
+
+      let i = 0;
+      const timer = setInterval(() => {
+        i += 1;
+        if (i > 600) {
+          clearInterval(timer);
+          res.write(chunk({ content: ' recovery-final' }, 'stop'));
+          res.write('data: [DONE]\n\n');
+          finished += 1;
+          res.end();
+          return;
+        }
+        res.write(chunk({ reasoning_content: `r${i} ` }, null));
+        deltas += 1;
+      }, 50);
+      res.on('close', () => clearInterval(timer));
+    });
+  });
+
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const addr = server.address();
+  const port = typeof addr === 'object' && addr ? addr.port : 0;
+  return {
+    url: `http://127.0.0.1:${port}/v1`,
+    stats: () => ({ started, finished, deltas }),
+    close: () =>
+      new Promise<void>((resolve) => {
+        server.closeAllConnections?.();
+        server.close(() => resolve());
+      }),
+  };
+}
+
+test.describe('Issue #1035 — 崩溃重载后继续接收后台 turn 输出', () => {
+  test.describe.configure({ mode: 'serial', timeout: 180_000 });
+
+  let electronApp: ElectronApplication;
+  let page: Page;
+  let mock: RecoveryMockStream;
+  let miqiHome: string | undefined;
+
+  test.beforeAll(async () => {
+    mock = await startRecoveryMock();
+    const fixture = await launchElectronApp((config: any) => {
+      const providers = config.providers ?? {};
+      for (const [, p] of Object.entries(providers)) {
+        if (p && typeof p === 'object') {
+          (p as any).apiBase = mock.url;
+          if (!(p as any).apiKey) (p as any).apiKey = 'mock-key';
+        }
+      }
+      config.providers = providers;
+    });
+    electronApp = fixture.electronApp;
+    page = fixture.page;
+    miqiHome = fixture.miqiHome;
+
+    const patched = await installMainProcessProbes(electronApp);
+    expect(patched, '主进程探针未能装上（对话框监视桩）').toBe(true);
+  });
+
+  test.afterAll(async () => {
+    try {
+      await closeElectronApp(electronApp, miqiHome);
+    } catch {
+      /* renderer was crashed on purpose; teardown may be noisy */
+    }
+    await mock?.close();
+  });
+
+  test('后台 turn 仍在输出时崩溃重载，重载后仍能看到新进展', async () => {
+    await waitForInputReady(page);
+
+    await sendMessage(page, 'stream please');
+
+    // Wait until the mock has streamed enough deltas and has not finished.
+    const deadline = Date.now() + 60_000;
+    while (Date.now() < deadline) {
+      const s = mock.stats();
+      if (s.deltas >= 30 && s.finished === 0) break;
+      await page.waitForTimeout(250);
+    }
+    const beforeCrash = mock.stats();
+    expect(beforeCrash.deltas, '崩溃前应已开始流式输出').toBeGreaterThanOrEqual(30);
+    expect(beforeCrash.finished, '崩溃前后台 turn 不应已结束').toBe(0);
+
+    await crashRenderer(electronApp);
+
+    const line = await waitForReloadLine(electronApp, 1);
+    expect(line).toContain('[main] renderer-reloaded: attempt=1 reason=');
+
+    const state = await waitForUiReady(electronApp);
+    expect(state, '重载后界面应恢复可用').not.toBeNull();
+    expect(state!.inputReady, '重载后聊天输入框应重新出现').toBe(true);
+
+    // 「对用户不可见」在「崩溃时后台 turn 还在跑」这条路径上同样成立。
+    const calls = await electronApp.evaluate(() => (globalThis as any).__msgBoxCalls);
+    expect(calls, '崩溃恢复不应弹任何对话框').toHaveLength(0);
+    expect(state!.noticeCount, '不应出现任何系统提示消息').toBe(0);
+    for (const t of CRASH_TEXTS) {
+      expect(state!.bodyText, `界面不应出现「${t}」`).not.toContain(t);
+    }
+
+    // 重载后渲染层里唯一能把「生成中」点亮的就是恢复监听器收到的 progress
+    // 事件：reload 没有 handleSend，streaming 初值为 false，load() 的三条
+    // 判活启发式（streamingBySession / inFlightCache / snapshot）在全新挂载上
+    // 全为空。所以「停止生成」按钮在屏 = 后台 turn 的进展真的送达并被应用了；
+    // 轮询 mock 计数做不到这件事（那只是 HTTP 服务端的计数器，与渲染层无关）。
+    const finalDeadline = Date.now() + 60_000;
+    let lastBodyText = state!.bodyText;
+    let sawStreamingAfterReload = false;
+    while (Date.now() < finalDeadline) {
+      const snapshot = await readSnapshotOnce(electronApp);
+      if (snapshot) {
+        lastBodyText = snapshot.bodyText;
+        if (snapshot.streaming) sawStreamingAfterReload = true;
+      }
+      if (lastBodyText.includes('recovery-final')) break;
+      await new Promise((r) => setTimeout(r, 250));
+    }
+    expect(
+      sawStreamingAfterReload,
+      '重载后应回到「生成中」状态——证明后台 turn 的 progress 事件已送达渲染层'
+    ).toBe(true);
+    expect(lastBodyText, '重载后应渲染出后台 turn 的最终内容').toContain('recovery-final');
+    // 终态：后台 turn 真在 mock 上跑完了，且渲染层已退出生成中。
+    expect(mock.stats().finished, '后台 turn 应在 mock 上正常收尾').toBeGreaterThan(
+      beforeCrash.finished
+    );
+    const settled = await readSnapshotOnce(electronApp);
+    expect(settled, '终态应能读到渲染层 DOM').not.toBeNull();
+    expect(settled!.streaming, '收到 final 后不应再停留在生成中').toBe(false);
   });
 });

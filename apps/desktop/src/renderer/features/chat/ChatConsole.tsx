@@ -3518,6 +3518,18 @@ export function ChatConsole({
   );
   // Monotonic id for lifecycleRef identity checks.
   const turnSeqRef = useRef(0);
+  // Crash-recovery turn id (#1035): latched by the mount-time listeners from
+  // the first turn-tagged event after a renderer reload, so that turn's
+  // final/error/aborted are accepted while a superseded turn's are dropped.
+  const recoveryTurnIdRef = useRef<string | null>(null);
+  // Sessions whose stop was already rendered by THIS component (handleAbort).
+  // Aborting releases the bridge's turn lock but its drain task keeps running
+  // until the terminal event, so a late chat:aborted (plus any trailing
+  // progress) still arrives — with the aborted invocation's listeners already
+  // unsubscribed it would otherwise be replayed by the crash-recovery listeners
+  // on top of the「已停止。」handleAbort just appended. Cleared when a new send
+  // starts for the session (#1035).
+  const localAbortSessionsRef = useRef<Set<string>>(new Set());
   const liveReasoningTsRef = useRef<number | null>(null);
   // Anchor of the first reasoning delta of the current turn — thinking
   // duration is measured from this (pure thinking, excluding tool time).
@@ -3690,6 +3702,10 @@ export function ChatConsole({
       });
     });
   }, []);
+  // Ref mirror so crash-recovery listeners (registered once on mount) always
+  // call the latest trackFile closure (#1035).
+  const trackFileRef = useRef(trackFile);
+  trackFileRef.current = trackFile;
 
   useEffect(() => {
     // True only on an actual sessionKey change.  loadTrigger can bump alone
@@ -4456,6 +4472,329 @@ export function ChatConsole({
     };
   }, []);
 
+  // ── Crash-recovery listeners (#1035) ────────────────────────────────────────
+  // When the renderer process crashes and reloads, ChatConsole remounts but no
+  // handleSend() runs, so the per-send chat:progress/final/error/aborted
+  // listeners are never registered. The backend keeps emitting events for the
+  // in-flight turn; these stable mount-time listeners catch them for the
+  // current session and update the UI. They intentionally yield to per-send
+  // listeners whenever a handleSend() turn is active.
+  //
+  // Scope note: only the CURRENT session is adopted. The user was on this
+  // session when the renderer died and `miqi:lastSession` restores it on
+  // reload, so that is the one whose turn is being resumed. Thread-scoped sends
+  // (`desktop:<threadId>`, see routingKey in handleSend) are tagged with the
+  // thread id instead and are therefore not adopted — the thread tab is UI
+  // state that a reload does not restore either.
+  useEffect(() => {
+    const flushReasoning = (ts: number) => {
+      if (reasoningTimerRef.current) {
+        clearTimeout(reasoningTimerRef.current);
+        reasoningTimerRef.current = null;
+      }
+      const buffered = reasoningBufRef.current;
+      reasoningBufRef.current = '';
+      if (buffered) {
+        setMessages((prev) => appendReasoningDelta(prev, buffered, ts, reasoningModeRef.current));
+      }
+    };
+
+    // True while a handleSend() invocation still has listeners subscribed for
+    // `session`. The shared `activeSendCleanupRef` is NOT a sound proxy for
+    // this: onFinal schedules sendCleanup() 100ms out, which nulls that ref
+    // while the invocation's listeners stay subscribed until its send promise
+    // settles. Events landing in that window would be applied twice — once
+    // here and once by the per-send listener. The invocation registry is
+    // populated exactly while those listeners live, so it is the accurate
+    // signal (see the `myUnsubs` registration / teardown in handleSend).
+    const hasLiveSendFor = (session: string) => {
+      for (const entry of sendInvocationRegistryRef.current.values()) {
+        if (entry.sessionKey === session) return true;
+      }
+      return false;
+    };
+
+    // The session this event should be adopted for, or null when it belongs to
+    // another session or to a live per-send invocation that owns it already.
+    const adoptableSession = (data: { session_key?: string }): string | null => {
+      const owner = currentSessionRef.current;
+      if (!owner) return null;
+      // Untagged legacy events fall through and count as this session's.
+      if (data.session_key && data.session_key !== owner) return null;
+      if (hasLiveSendFor(owner)) return null;
+      // Stop already rendered by this renderer — see localAbortSessionsRef.
+      if (localAbortSessionsRef.current.has(owner)) return null;
+      return owner;
+    };
+
+    /**
+     * True when a turn-tagged event belongs to the turn being resumed.
+     *
+     * The turn id cannot be required to match a value captured from the
+     * backend's `stream:'turn'` announcement: TurnStartedEvent fires once, at
+     * turn start, which is BEFORE the crash — a reloaded renderer never sees
+     * it, so a strict comparison against a never-set ref drops every terminal
+     * (verified against miqi/bridge/loop.py: only TurnStartedEvent emits
+     * `stream:'turn'`; final/error/aborted always carry `turn_id`). Latch the
+     * id from the first tagged event instead; a tagged event naming a
+     * DIFFERENT turn afterwards is stale (superseded turn) and still dropped.
+     */
+    const followsTurn = (turnId?: string) => {
+      if (typeof turnId !== 'string' || !turnId) return true;
+      if (recoveryTurnIdRef.current === null) recoveryTurnIdRef.current = turnId;
+      return turnId === recoveryTurnIdRef.current;
+    };
+
+    const unsubProgress = window.miqi.chat.onProgress((data: ChatProgress) => {
+      const owner = adoptableSession(data);
+      if (!owner) return;
+
+      // Out-of-band notices are not turn output: a billing result travels on
+      // its own async side channel, and the 10s heartbeat task is cancelled
+      // only when the drain exits — either can land after the turn's terminal
+      // and would otherwise resurrect the "generating" spinner with no
+      // terminal left to switch it off.
+      if (data.stream !== 'points' && data.stream !== 'heartbeat') {
+        streamingBySession.add(owner);
+        setStreaming(true);
+      }
+
+      if (data.stream === 'turn' && typeof data.turn_id === 'string') {
+        recoveryTurnIdRef.current = data.turn_id;
+        return;
+      }
+
+      if (data.type === 'doc_progress' && data.file) {
+        setAttachments((prev) =>
+          prev.map((a) => {
+            if (a.name !== data.file || a.type !== 'document') return a;
+            const stage = data.stage ?? 'parsing';
+            const status =
+              stage === 'ready' || stage === 'done'
+                ? 'done'
+                : stage === 'error'
+                  ? 'error'
+                  : 'parsing';
+            return {
+              ...a,
+              status,
+              parseError: status === 'error' ? (data.message ?? '') : a.parseError,
+            };
+          })
+        );
+        return;
+      }
+
+      const pointsMessage = pointsEventToMessage(data);
+      if (pointsMessage) {
+        setMessages((prev) => [...prev, pointsMessage]);
+        return;
+      }
+
+      if (data.stream === 'reasoning' && typeof data.delta === 'string') {
+        const ts = Date.now();
+        liveReasoningTsRef.current = ts;
+        if (thinkingStartedAtRef.current === null) {
+          thinkingStartedAtRef.current = ts;
+        }
+        lastReasoningDeltaAtRef.current = ts;
+        reasoningBufRef.current += data.delta;
+        if (!reasoningTimerRef.current) {
+          const flushSession = owner;
+          reasoningTimerRef.current = setTimeout(() => {
+            reasoningTimerRef.current = null;
+            if (currentSessionRef.current !== flushSession) return;
+            const buffered = reasoningBufRef.current;
+            reasoningBufRef.current = '';
+            if (buffered) {
+              setMessages((prev) =>
+                appendReasoningDelta(prev, buffered, Date.now(), reasoningModeRef.current)
+              );
+            }
+          }, 60);
+        }
+        return;
+      }
+
+      if (data.stream && data.delta && data.tool_call_id) {
+        const stream = data.stream;
+        const delta = data.delta;
+        const toolCallId = data.tool_call_id;
+        setExecOutputs((prev) => {
+          const current = prev[toolCallId] || { stdout: '', stderr: '', running: true };
+          const streamKey = stream === 'stdout' ? 'stdout' : 'stderr';
+          return {
+            ...prev,
+            [toolCallId]: {
+              ...current,
+              [streamKey]: current[streamKey] + delta,
+            },
+          };
+        });
+        return;
+      }
+
+      const extracted = extractProgressMessage(data as ProgressPayload);
+      if (extracted) {
+        // paper_search result cards: derived from the event payload itself, so
+        // they survive the reload (unlike toolArgsByCallId, which starts empty
+        // on the remounted component).  Mirrors the per-send listener.
+        let toolName: string | undefined;
+        let toolData: unknown;
+        // Path A: item/toolResult notification (from turn_event_adapter)
+        if (data.tool_hint && data.text && !data.stream) {
+          const parsed = tryParsePaperSearchResult(data.text);
+          if (parsed?.items?.length) {
+            toolName = 'paper_search';
+            toolData = parsed;
+          }
+        }
+        // Path B: toolExecution/outputDelta from PaperSearchTool itself
+        if (!toolData && data.delta && typeof data.delta === 'string') {
+          try {
+            const inner = JSON.parse(data.delta);
+            if (inner?.type === 'paper_search_result' && inner.payload) {
+              toolName = 'paper_search';
+              toolData = inner.payload;
+            }
+          } catch {
+            /* not JSON, ignore */
+          }
+        }
+        const toolMsg: Message = {
+          role: extracted.role === 'error' ? 'error' : 'progress',
+          content: extracted.role === 'warning' ? `⚠️ ${extracted.message}` : extracted.message,
+          toolHint: data.tool_hint || toolName === 'paper_search',
+          toolCallId: data.tool_call_id,
+          toolName,
+          toolData,
+          toolArgs: data.tool_args,
+          timestamp: Date.now(),
+        };
+        setMessages((prev) => {
+          if (toolMsg.toolHint && toolMsg.toolCallId) {
+            for (let i = prev.length - 1; i >= 0; i -= 1) {
+              const m = prev[i];
+              if (m.role === 'progress' && m.toolHint && m.toolCallId === toolMsg.toolCallId) {
+                const next = [...prev];
+                next[i] = {
+                  ...m,
+                  content: toolMsg.content,
+                  toolName: toolMsg.toolName ?? m.toolName,
+                  toolData: toolMsg.toolData ?? m.toolData,
+                  toolArgs: toolMsg.toolArgs ?? m.toolArgs,
+                };
+                return next;
+              }
+            }
+          }
+          return [...prev, toolMsg];
+        });
+        const endCallId = data.tool_call_id;
+        const endOutput = data.tool_output;
+        if (endOutput && endCallId) {
+          setSearchResultsByCallId((prev) => ({ ...prev, [endCallId]: endOutput }));
+        }
+        if (data.tool_hint && data.text) {
+          const parsed = parseToolHint(data.text);
+          if (parsed) trackFileRef.current?.(parsed.path, parsed.op, parsed.truncated);
+        }
+      }
+    });
+
+    const unsubFinal = window.miqi.chat.onFinal((data: ChatFinal) => {
+      const owner = adoptableSession(data);
+      if (!owner) return;
+      if (!followsTurn(data.turn_id)) return;
+
+      setStreaming(false);
+      streamingBySession.delete(owner);
+
+      flushReasoning(Date.now());
+      liveReasoningTsRef.current = null;
+      thinkingStartedAtRef.current = null;
+      lastReasoningDeltaAtRef.current = null;
+
+      const closeLiveReasoning = (prev: Message[]) =>
+        prev.some((m) => m.isLiveReasoning)
+          ? prev.map((m) =>
+              m.isLiveReasoning
+                ? {
+                    ...m,
+                    isLiveReasoning: false,
+                    content: data.reasoning || m.content,
+                    reasoning: data.reasoning || m.content,
+                  }
+                : m
+            )
+          : prev;
+
+      setMessages((prev) => {
+        let cleaned = removeTransientTurnMessagesSinceLastUser(prev);
+        cleaned = closeLiveReasoning(cleaned);
+        if (
+          data.reasoning &&
+          !cleaned.some((m) => m.role === 'progress' && m.reasoning === data.reasoning)
+        ) {
+          cleaned = insertStandaloneReasoning(cleaned, data.reasoning, undefined);
+        }
+        return cleaned;
+      });
+
+      if (data.content) {
+        setMessages((prev) => {
+          const last = prev[prev.length - 1];
+          if (last?.role === 'assistant' && last.content === data.content) return prev;
+          return [...prev, { role: 'assistant', content: data.content, timestamp: Date.now() }];
+        });
+      }
+    });
+
+    const unsubError = window.miqi.chat.onError((data: ChatError) => {
+      const owner = adoptableSession(data);
+      if (!owner) return;
+      if (!followsTurn(data.turn_id)) return;
+
+      setStreaming(false);
+      streamingBySession.delete(owner);
+      flushReasoning(Date.now());
+      liveReasoningTsRef.current = null;
+      thinkingStartedAtRef.current = null;
+      lastReasoningDeltaAtRef.current = null;
+
+      const message = sanitizeUiMessage(data.message);
+      setMessages((prev) => [
+        ...prev.filter((m) => !m.isLiveReasoning),
+        { role: 'error', content: message, timestamp: Date.now() },
+      ]);
+    });
+
+    const unsubAborted = window.miqi.chat.onAborted((data: ChatAborted) => {
+      const owner = adoptableSession(data);
+      if (!owner) return;
+      if (!followsTurn(data.turn_id)) return;
+
+      setStreaming(false);
+      streamingBySession.delete(owner);
+      flushReasoning(Date.now());
+      liveReasoningTsRef.current = null;
+      thinkingStartedAtRef.current = null;
+      lastReasoningDeltaAtRef.current = null;
+
+      setMessages((prev) => [
+        ...prev.filter((m) => !m.isLiveReasoning),
+        { role: 'progress', content: '已停止。', timestamp: Date.now() },
+      ]);
+    });
+
+    return () => {
+      unsubProgress();
+      unsubFinal();
+      unsubError();
+      unsubAborted();
+    };
+  }, []);
+
   const clearFinalCleanupTimer = useCallback(() => {
     if (finalCleanupTimerRef.current) {
       clearTimeout(finalCleanupTimerRef.current);
@@ -4824,6 +5163,13 @@ export function ChatConsole({
       for (const unsub of entry.unsubs) unsub();
       sendInvocationRegistryRef.current.delete(sendId);
     }
+    // The aborted turn's terminal is still coming (the drain task runs until
+    // it lands) and this invocation's listeners are now gone — record that the
+    // stop UI is already on screen so the crash-recovery listeners don't
+    // replay it (#1035).
+    if (currentSessionRef.current) {
+      localAbortSessionsRef.current.add(currentSessionRef.current);
+    }
     clearFinalCleanupTimer();
     if (revealAnimIdRef.current !== null) {
       cancelAnimationFrame(revealAnimIdRef.current);
@@ -5128,6 +5474,9 @@ export function ChatConsole({
     // turn's live final render.
     streamingBySession.add(sendSessionKey);
     finalHandledSessions.delete(sendSessionKey);
+    // A new turn supersedes any earlier stop in this session — drop the
+    // crash-recovery stop marker so this turn's terminal is not ignored (#1035).
+    localAbortSessionsRef.current.delete(sendSessionKey);
     // Only auto-unsubscribe the previous invocation's listeners when it was
     // THIS session's send (same-session supersede).  Unsubscribing across
     // sessions strands the other session's in-flight turn: its terminal
