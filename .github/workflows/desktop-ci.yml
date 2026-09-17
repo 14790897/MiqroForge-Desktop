@@ -174,24 +174,23 @@ jobs:
         env:
           PLAYWRIGHT_SKIP_WEB_SERVER: '1'
 
-      - name: Summarize flaky E2E tests
-        # if: always() —— flaky 用例既不会让 Playwright 失败、也不会让这一步失败，所以这一步
-        # 只做一件事：把「重试才通过」的用例写进 job summary，并各发一条 warning 注解（#1107）。
-        # 脚本自己捕所有异常、永不非 0 退出，能改变 job 结论的只有上一步的退出码。
-        # 文件存在性检查：workflow 定义取自 base 分支，而 checkout 取 PR head（见上面的 ref），
-        # 所以本步合入 develop 之后，还没把 develop 并进自己分支的兄弟 PR 会拿到「有新步骤、
-        # 没有这个脚本」的组合 —— 那种情况下 node 以 MODULE_NOT_FOUND 退出 1，会把 E2E 全绿的
-        # job 判红。缺文件就跳过（分支同步 develop 后自动生效）。
-        # 报告缺失，或只是「跑了一半」（超时/取消时 Actions 先发 SIGINT，Playwright 收下后照常
-        # 落一份部分报告），或一条用例都没收集到，都会在摘要里明说 —— 不会拿残缺数据报一个
-        # 好看的 flaky 0。
+      - name: Upload E2E JSON report (no secrets)
+        # #1107 / 安全评审：让 flaky 可见这件事不能在 secret-bearing 的 job 里执行 PR 检出的
+        # 代码 —— 那会是第三个 secret exfiltration sink（CWE-829）。所以这里**只上传**主 E2E 的
+        # JSON 报告到固定的 `_gh-artifacts` 预发布（release asset，公开可读），解析交给后面那个
+        # 无 secrets 的 summarize-flaky job 去做。GH_TOKEN 只出现在这个 http 请求的头里。
         if: always()
+        id: upload-e2e-report
         run: |
-          if [ -f scripts/e2e-flaky-report.mjs ]; then
-            node scripts/e2e-flaky-report.mjs
+          if [ -f test-reports/results.json ]; then
+            echo "report-url=$(node scripts/gh-artifact-upload.mjs test-reports/results.json \
+              "e2e-results-linux-${{ github.run_id }}.json")" >> "$GITHUB_OUTPUT"
           else
-            echo "跳过 flaky 汇总：checkout 里没有 scripts/e2e-flaky-report.mjs（该分支尚未同步 develop）"
+            echo "report-url=" >> "$GITHUB_OUTPUT"
+            echo "没有产出 test-reports/results.json（主步没跑完），汇总将如实报「没找到报告」"
           fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Upload Playwright report (E2E)
         if: failure()
@@ -315,16 +314,21 @@ jobs:
         env:
           PLAYWRIGHT_SKIP_WEB_SERVER: '1'
 
-      - name: Summarize flaky E2E tests (macOS)
-        # 与 Linux 侧同理（#1107）：retries=2 会把「首次失败、重试通过」的用例藏起来。
-        # 同样先检查脚本在不在 —— 见上面那段的说明。
+      - name: Upload E2E JSON report (no secrets, macOS)
+        # 同 Linux 侧（#1107 / 安全评审）：只上传主 E2E 的 JSON 报告，解析交给无 secrets 的
+        # summarize-flaky job —— 这个 secret-bearing job 里不执行任何 PR 检出的代码。
         if: always()
+        id: upload-e2e-report
         run: |
-          if [ -f scripts/e2e-flaky-report.mjs ]; then
-            node scripts/e2e-flaky-report.mjs
+          if [ -f test-reports/results.json ]; then
+            echo "report-url=$(node scripts/gh-artifact-upload.mjs test-reports/results.json \
+              "e2e-results-macos-${{ github.run_id }}.json")" >> "$GITHUB_OUTPUT"
           else
-            echo "跳过 flaky 汇总：checkout 里没有 scripts/e2e-flaky-report.mjs（该分支尚未同步 develop）"
+            echo "report-url=" >> "$GITHUB_OUTPUT"
+            echo "没有产出 test-reports/results.json（主步没跑完），汇总将如实报「没找到报告」"
           fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Upload Playwright report (macOS E2E)
         if: failure()
@@ -333,6 +337,44 @@ jobs:
           name: playwright-report-macos-e2e
           path: apps/desktop/test-results/
           retention-days: 7
+
+  # ────────────────────────────────────────────────────────────
+  # Job 4: flaky 汇总 —— 无 secrets，只下载并解析主 E2E 上传的 JSON 报告（#1107）。
+  # 这个 job 里没有 provider 凭据、也不执行 PR 检出的代码，是安全评审认可的可信消费方。
+  # ────────────────────────────────────────────────────────────
+  summarize-flaky:
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}-summarize-flaky
+      cancel-in-progress: true
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    needs: [electron-e2e, macos-e2e]
+    if: always()
+    defaults:
+      run:
+        working-directory: apps/desktop
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || github.ref }}
+
+      - name: Summarize flaky E2E tests (Linux)
+        if: needs.electron-e2e.outputs.report-url != ''
+        run: |
+          curl -fsSL "${{ needs.electron-e2e.outputs.report-url }}" -o test-reports/results-linux.json
+          node scripts/e2e-flaky-report.mjs test-reports/results-linux.json
+
+      - name: Summarize flaky E2E tests (macOS)
+        if: needs.macos-e2e.outputs.report-url != ''
+        run: |
+          curl -fsSL "${{ needs.macos-e2e.outputs.report-url }}" -o test-reports/results-macos.json
+          node scripts/e2e-flaky-report.mjs test-reports/results-macos.json
+
+      - name: E2E 报告缺失说明
+        if: needs.electron-e2e.outputs.report-url == '' && needs.macos-e2e.outputs.report-url == ''
+        run: echo "两个 E2E job 都没有产出 JSON 报告（主步被杀/OOM），见上面的说明"
 
   # ────────────────────────────────────────────────────────────
   # macOS 打包（dmg/zip）不在这里跑：每个 PR 都起 macos runner 成本高，
