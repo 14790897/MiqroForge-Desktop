@@ -74,3 +74,29 @@ def test_legacy_billing_key_does_not_break_config_load(tmp_path):
     # 关键断言：不是静默回退的默认空配置——providers 必须原样存活
     assert cfg.providers.deepseek.api_key == "sk-ds-1234567890"
     assert cfg.agents.defaults.model == "deepseek/deepseek-v4-flash"
+
+
+def test_migrate_resets_legacy_agent_name_to_default():
+    """#1097：旧默认 agents.defaults.name = "miqi" 应在读取时迁移为 MiQroForge。"""
+    data = {"agents": {"defaults": {"name": "miqi"}}}
+    migrated = _migrate_config(data)
+    assert migrated["agents"]["defaults"]["name"] == "MiQroForge"
+
+
+def test_migrate_keeps_custom_agent_name():
+    """#1097：用户自定义的 agent 名不应被迁移覆盖。"""
+    data = {"agents": {"defaults": {"name": "MyAssistant"}}}
+    migrated = _migrate_config(data)
+    assert migrated["agents"]["defaults"]["name"] == "MyAssistant"
+
+
+def test_load_config_migrates_persisted_legacy_agent_name(tmp_path):
+    """#1097：已落盘的旧 config.json（name="miqi"）加载后应为 MiQroForge。"""
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps({"agents": {"defaults": {"name": "miqi"}}}),
+        encoding="utf-8",
+    )
+    cfg = load_config(config_path)
+    assert cfg.agents.defaults.name == "MiQroForge"
+
