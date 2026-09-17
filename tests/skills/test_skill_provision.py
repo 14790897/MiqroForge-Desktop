@@ -91,13 +91,34 @@ async def test_provision_runs_apt_and_venv():
 
     calls = [c.args[0] for c in sandbox.run_in_distro_root.call_args_list]
     assert any("apt-get install -y python3-matplotlib" in c for c in calls)
-    assert any(f"python3 -m venv --system-site-packages {VENV_ROOT}/skill-a" in c for c in calls)
+    assert any(
+        f"python3 -m venv --system-site-packages {VENV_ROOT}/skill-a" in c for c in calls
+    )
     assert any("pip install some-unique-pkg" in c for c in calls)
 
     assert result["ok"] is True
     assert result["installed_apt"] == ["python3-matplotlib"]
     assert result["installed_venv"] == ["some-unique-pkg"]
     assert result["venv_python"] == venv_python("skill-a")
+
+
+async def test_provision_rebuilds_venv_without_system_site_packages():
+    """If an existing venv lacks system-site access, it is recreated."""
+    provisioner, sandbox = _provisioner(["some-unique-pkg"])
+    # Simulate an existing interpreter but pyvenv.cfg without include-system-site-packages=true
+    sandbox.run_in_distro_root = AsyncMock(
+        side_effect=[
+            (0, "", ""),  # first call: test -x + grep -> returns 0 (interpreter exists but grep no match)
+            (0, "", ""),  # rm -rf + venv
+            (0, "", ""),  # pip install
+        ]
+    )
+    result = await provisioner.provision("skill-a")
+    assert result["ok"] is True
+    calls = [c.args[0] for c in sandbox.run_in_distro_root.call_args_list]
+    # The command is issued as one shell script; assert it contains the recreation logic.
+    assert any("include-system-site-packages" in c for c in calls)
+    assert any(f"rm -rf {VENV_ROOT}/skill-a" in c for c in calls)
 
 
 async def test_provision_skips_venv_when_none_needed():

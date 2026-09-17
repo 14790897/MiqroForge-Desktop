@@ -238,12 +238,22 @@ class SkillProvisioner:
         if plan["venv"] and sandbox is not None:
             vpy_q = shlex.quote(vpy)
             vdir_q = shlex.quote(f"{VENV_ROOT}/{name}")
+            cfg_q = shlex.quote(f"{VENV_ROOT}/{name}/pyvenv.cfg")
             reqs = " ".join(shlex.quote(r) for r in plan["venv"])
             # --system-site-packages so the venv python also sees the
             # apt-installed packages (they live in the distro's /usr).
+            # If an old venv exists without system-site access, recreate it.
             cmd = (
                 f"mkdir -p {shlex.quote(VENV_ROOT)} && "
-                f"(test -x {vpy_q} || python3 -m venv --system-site-packages {vdir_q}) && "
+                f"if test -x {vpy_q}; then "
+                f"  if test -f {cfg_q} && grep -q '^include-system-site-packages *= *true$' {cfg_q}; then "
+                f"    : ; "
+                f"  else "
+                f"    rm -rf {vdir_q} && python3 -m venv --system-site-packages {vdir_q}; "
+                f"  fi; "
+                f"else "
+                f"  python3 -m venv --system-site-packages {vdir_q}; "
+                f"fi && "
                 f"{vpy_q} -m pip install {reqs}"
             )
             rc, _out, err = await sandbox.run_in_distro_root(cmd, timeout=1200.0)

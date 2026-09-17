@@ -513,8 +513,11 @@ class SkillsLoader:
 
         Requirements already provisioned into a per-skill venv (recorded by
         :func:`miqi.skills.provision.record_provision`) are treated as
-        satisfied — the host interpreter cannot see the WSL venv, so the
-        registry is the host-side source of truth for provisioned deps.
+        satisfied on a best-effort basis. The registry is the host-side source
+        of truth because the Windows host cannot introspect the WSL venv. If a
+        future caller runs the skill without the sandbox (host fallback), the
+        provisioned deps may not be visible — this is the same limitation as
+        other host-sandbox approximations in this loader.
         """
         reqs = self._read_requirements(name)
         if not reqs:
