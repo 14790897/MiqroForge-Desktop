@@ -8,7 +8,6 @@ import pytest
 
 from miqi.runtime.session_request_models import SessionKeyParams
 
-
 # ── SessionKeyParams validation ────────────────────────────────────────────
 
 
@@ -16,6 +15,17 @@ def test_session_key_accepts_safe_keys():
     assert SessionKeyParams(session_key="desktop:123").session_key == "desktop:123"
     assert SessionKeyParams(session_key="miqi-desktop:desktop:123").session_key == "miqi-desktop:desktop:123"
     assert SessionKeyParams(sessionKey="my-session_key-1").session_key == "my-session_key-1"
+
+
+def test_session_key_accepts_ordinary_dots():
+    # Slack 会话是 `slack:{chat_id}:{thread_ts}`，thread_ts 形如
+    # `1789628394.123456` —— 含点是**正常的**，一刀切拒绝会让存量 Slack 会话
+    # 在 sessions.get / sessions.workspace 上直接报 INVALID_PARAMS（#1103 review）。
+    assert (
+        SessionKeyParams(session_key="slack:C0123:1789628394.123456").session_key
+        == "slack:C0123:1789628394.123456"
+    )
+    assert SessionKeyParams(session_key="1789628394.123456").session_key == "1789628394.123456"
 
 
 def test_session_key_rejects_path_separators():
@@ -35,6 +45,11 @@ def test_session_key_rejects_dot_and_dotdot():
         SessionKeyParams(session_key="a/../b")
     with pytest.raises(ValueError):
         SessionKeyParams(session_key="a./b")
+    # 分段：落在冒号之间的 `.` / `..` 同样会被拼进路径，必须拒。
+    with pytest.raises(ValueError):
+        SessionKeyParams(session_key="a:.:b")
+    with pytest.raises(ValueError):
+        SessionKeyParams(session_key="a:..:b")
 
 
 # ── sessions.list ─────────────────────────────────────────────────────────-
