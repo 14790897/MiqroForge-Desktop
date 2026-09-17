@@ -2,7 +2,9 @@
 
 Covers the exec half of the sandbox write boundary:
   * the per-call rw bind SET (workspace ∪ static shared roots ∪ gated
-    ``_user_roots``; #864 card grants are deliberately excluded),
+    ``_user_roots``; #864 card grants arrive through that same per-call
+    channel as of #1013 — ExecTool itself still holds no reference to the
+    file-tool grant sets),
   * the four ``_execute_*`` signatures and all eight ``**splat`` call sites,
   * a missing bind source failing the command WITHOUT falling back to host
     execution,
