@@ -98,11 +98,15 @@ def _candidate_workspace_roots(
     return roots
 
 
-def _probe_folder(root: Path, session_key: str, client_id: str) -> tuple[Any, Any] | None:
-    """``(SessionManager, session)`` when ``root`` holds a client-owned copy.
+def _probe_folder(
+    root: Path, session_key: str, client_id: str, *, require_owned: bool = True
+) -> tuple[Any, Any] | None:
+    """``(SessionManager, session)`` when ``root`` holds a copy of this session.
 
-    None when the root has no copy at all, or holds one owned by another client —
-    folder copies are never adopted across clients.
+    When ``require_owned`` is True (default), a copy owned by another client is
+    treated as absent — folder copies are never adopted across clients.  When
+    False, an unowned (legacy) copy is accepted so callers can report its
+    ownership status without claiming it.
     """
     from miqi.session.manager import SessionManager
 
@@ -115,6 +119,8 @@ def _probe_folder(root: Path, session_key: str, client_id: str) -> tuple[Any, An
         return None
     owner = folder_session.metadata.get("owner_client_id")
     if owner is not None and owner != client_id:
+        return None
+    if require_owned and owner is None:
         return None
     return folder_sm, folder_session
 
@@ -140,7 +146,7 @@ def _find_folder_session(
     for root in _candidate_workspace_roots(
         sm, client_id, extra=[extra_workspace] if extra_workspace else None,
     ):
-        probed = _probe_folder(root, session_key, client_id)
+        probed = _probe_folder(root, session_key, client_id, require_owned=False)
         if probed is None:
             continue
         folder_session = probed[1]

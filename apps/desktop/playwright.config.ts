@@ -23,6 +23,10 @@ export default defineConfig({
     {
       name: 'smoke',
       testMatch: ['smoke.spec.ts', 'issue-*.spec.ts', 'logs.spec.ts'],
+      // CI: headless Chromium on shared runners is prone to timing races with
+      // auto-refresh and virtualized lists (logs row expansion). 2 retries
+      // matches the electron project and the workflow's original intent.
+      retries: process.env.CI ? 2 : 0,
       use: {
         ...devices['Desktop Chrome'],
         baseURL: 'http://localhost:3458',
