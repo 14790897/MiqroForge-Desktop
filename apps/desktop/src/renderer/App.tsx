@@ -36,6 +36,7 @@ import {
   readConsentVersion,
   recordConsent,
 } from './lib/privacy';
+import { useQraftStatus } from './hooks/useQraftStatus';
 
 type NavId =
   | 'chat'
@@ -54,6 +55,49 @@ type NavId =
   | 'settings';
 
 const PRELOAD_OK = typeof window !== 'undefined' && !!(window as any).miqi;
+
+/** 启动加载屏：环境探测完成前、或登录态未知时占位（不放行主界面）。 */
+function StartupLoading() {
+  return (
+    <div
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        height: '100vh',
+        background: 'var(--avatar-dark)',
+        fontFamily: 'Inter, "PingFang SC", "Microsoft YaHei", ui-sans-serif, system-ui, sans-serif',
+      }}
+    >
+      <div
+        style={{
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'center',
+          gap: '12px',
+        }}
+      >
+        <div
+          style={{
+            width: '44px',
+            height: '44px',
+            borderRadius: '10px',
+            background: 'rgba(255,255,255,0.1)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            color: 'white',
+            fontSize: '20px',
+            fontWeight: 700,
+          }}
+        >
+          M
+        </div>
+        <div style={{ fontSize: '13px', color: 'rgba(255,255,255,0.4)' }}>Loading MiQroForge…</div>
+      </div>
+    </div>
+  );
+}
 
 function AppShell() {
   const { status } = useRuntime();
@@ -90,9 +134,11 @@ function AppShell() {
   const [consentVersion, setConsentVersion] = useState<string | null>(() => readConsentVersion());
   const consentBypassed = PRELOAD_OK && window.miqi.env?.isE2E === true;
   const consentOk = consentBypassed || isConsentCurrent(consentVersion);
-  // #1000: 同意隐私协议后衔接登录页（协议 → 登录一气呵成）。仅本次挂载内
-  // 生效：跳过或完成登录后不再出现，后续启动由首屏登录卡片承接入口。
-  const [showLoginStep, setShowLoginStep] = useState(false);
+  // #1095: 登录收口 —— 未登录用户不得进入主界面（不提供「暂不登录」跳过），
+  // 只能登录或退出应用。登录态由 preload 在页面脚本前同步取好，首帧即可判定。
+  // E2E / smoke 默认绕过（仅未打包环境，见 main/index.ts）。
+  const loginBypassed = PRELOAD_OK && window.miqi.env?.loginBypass === true;
+  const { status: qraftStatus, loggedIn } = useQraftStatus();
   const [workspace, setWorkspace] = useState<string | null>(null);
   const [newSessionTrigger, setNewSessionTrigger] = useState(0);
   const pendingWorkspace = useRef<{ sessionKey: string; workspace: string } | null>(null);
@@ -300,67 +346,27 @@ function AppShell() {
           onAgree={() => {
             recordConsent();
             setConsentVersion(PRIVACY_VERSION);
-            // #1000: 同意后直接衔接登录页，登录入口不再藏在设置页深处。
-            setShowLoginStep(true);
           }}
         />
       </TooltipProvider>
     );
   }
 
-  // #1000: 协议 → 登录衔接页（可「暂不登录」跳过；已登录时展示成功态进入应用）。
-  if (showLoginStep) {
-    return (
+  // #1095: 登录门 —— 未登录（且未绕过）时停在登录页，不进入主界面。
+  // 登录态未知（preload 同步读取失败）时给加载屏：既不闪登录页，也不放行。
+  if (!loginBypassed && !loggedIn) {
+    return qraftStatus === null ? (
+      <StartupLoading />
+    ) : (
       <TooltipProvider>
-        <QraftLoginStep onDone={() => setShowLoginStep(false)} />
+        <QraftLoginStep />
       </TooltipProvider>
     );
   }
 
   // Loading state
   if (needsSetup === null) {
-    return (
-      <div
-        style={{
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          height: '100vh',
-          background: 'var(--avatar-dark)',
-          fontFamily:
-            'Inter, "PingFang SC", "Microsoft YaHei", ui-sans-serif, system-ui, sans-serif',
-        }}
-      >
-        <div
-          style={{
-            display: 'flex',
-            flexDirection: 'column',
-            alignItems: 'center',
-            gap: '12px',
-          }}
-        >
-          <div
-            style={{
-              width: '44px',
-              height: '44px',
-              borderRadius: '10px',
-              background: 'rgba(255,255,255,0.1)',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              color: 'white',
-              fontSize: '20px',
-              fontWeight: 700,
-            }}
-          >
-            M
-          </div>
-          <div style={{ fontSize: '13px', color: 'rgba(255,255,255,0.4)' }}>
-            Loading MiQroForge…
-          </div>
-        </div>
-      </div>
-    );
+    return <StartupLoading />;
   }
 
   // Setup wizard
