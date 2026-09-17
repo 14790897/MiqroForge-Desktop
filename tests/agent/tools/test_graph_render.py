@@ -556,3 +556,57 @@ class TestSessionIsolation:
             await tool.execute(str(own), _session_key="desktop:own-session-851")
         )
         assert result["ok"] is True
+
+
+# ── 宿主分支写边界（issue #1013）────────────────────────────────────────
+class TestHostWriteBoundary:
+    """宿主（native、无沙箱）分支的包含性 / 符号链接校验（#1013）。
+
+    工厂此前传 ``allowed_dir=allowed_dir``，而该变量在默认
+    ``tools.restrict_to_workspace=false`` 下是 ``None`` → ``_resolve_path``
+    的包含性检查与 SEC-06 符号链接检查被整体跳过：模型给出的任意绝对
+    ``out_dir``（如 ``C:\\Windows\\...``）会被直接写入，而同一工具的 WSL
+    分支对同一路径报错。修复 = 工厂改传 ``allowed_dir=_write_workspace``，
+    于是「源 JSON 同目录」照常可写，越界绝对路径被拒。
+
+    工厂接线本身由 ``tests/runtime/test_tool_registry_factory.py``
+    ``test_graph_render_tool_write_root_boundary`` 锁定（工具级用例直接构造
+    实例传 ``allowed_dir``，改回工厂那行不会让它们变红）。
+    """
+
+    @staticmethod
+    def _ws_with_graph(tmp_path: Path) -> tuple[Path, Path]:
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        src = ws / "step-graph.json"
+        src.write_text(json.dumps(STEP_GRAPH, ensure_ascii=False), encoding="utf-8")
+        return ws, src
+
+    async def test_out_of_root_out_dir_rejected(self, tmp_path: Path):
+        """越界绝对 out_dir → 渲染失败，且一个字节都不落盘。"""
+        ws, src = self._ws_with_graph(tmp_path)
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        tool = GraphRenderTool(workspace=ws, allowed_dir=ws)
+        result = json.loads(await tool.execute(path=str(src), out_dir=str(outside)))
+        assert result["ok"] is False
+        assert result["error"] == "渲染失败"
+        assert "PermissionError" in result["errors"][0]["error"]
+        assert list(outside.iterdir()) == []
+
+    async def test_same_dir_render_unaffected(self, tmp_path: Path):
+        """省略 out_dir（渲染到源 JSON 同目录）不受新边界影响。"""
+        ws, src = self._ws_with_graph(tmp_path)
+        tool = GraphRenderTool(workspace=ws, allowed_dir=ws)
+        result = json.loads(await tool.execute(path=str(src)))
+        assert result["ok"] is True
+        assert (ws / "step-graph.svg").is_file()
+
+    async def test_in_root_out_dir_allowed(self, tmp_path: Path):
+        """写根之内的 out_dir（工作区子目录，尚未创建）照常渲染。"""
+        ws, src = self._ws_with_graph(tmp_path)
+        out = ws / "graphs"
+        tool = GraphRenderTool(workspace=ws, allowed_dir=ws)
+        result = json.loads(await tool.execute(path=str(src), out_dir=str(out)))
+        assert result["ok"] is True
+        assert (out / "step-graph.svg").is_file()

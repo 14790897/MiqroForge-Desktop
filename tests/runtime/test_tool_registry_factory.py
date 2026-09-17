@@ -458,3 +458,61 @@ def test_resolve_path_allows_shared_roots_with_native_sandbox(tmp_path):
         shared_roots=[extra],
     )
     assert result == target.resolve()
+
+
+# ── #1013: graph_render 宿主分支的写边界 ────────────────────────────────────
+#   工厂必须传 allowed_dir=_write_workspace；默认 restrict_to_workspace=False
+#   下这个值曾是 None，包含性与符号链接检查被整体跳过，模型给出的任意绝对
+#   out_dir 会被直接写入（同一工具的 WSL 分支对同一路径报错）。
+
+_GRAPH_JSON = {
+    "schema_version": "1.0",
+    "graph_type": "step-nodes",
+    "skill": "t",
+    "nodes": [{"id": "S1", "title": "步骤一"}, {"id": "S2", "title": "步骤二"}],
+    "edges": [{"from": "S1", "to": "S2"}],
+}
+
+
+def _graph_render_tool(fake_config, tmp_path):
+    from miqi.runtime.tool_registry_factory import create_runtime_tool_registry
+
+    registry = create_runtime_tool_registry(config=fake_config, workspace=tmp_path)
+    tool = registry.get("graph_render")
+    assert tool is not None
+    return tool
+
+
+@pytest.mark.asyncio
+async def test_factory_graph_render_rejects_out_of_workspace_out_dir(
+    fake_config, tmp_path,
+):
+    """默认配置（restrict_to_workspace=False）下，graph_render 的宿主分支
+    仍须拒绝工作区外的绝对 out_dir，且一个字节都不落盘（#1013）。"""
+    import json
+
+    tool = _graph_render_tool(fake_config, tmp_path)
+    src = tmp_path / "step-graph.json"
+    src.write_text(json.dumps(_GRAPH_JSON, ensure_ascii=False), encoding="utf-8")
+
+    outside = tmp_path.parent / "outside_graph_render_1013"
+    outside.mkdir(exist_ok=True)
+    result = json.loads(await tool.execute(path=str(src), out_dir=str(outside)))
+    assert result["ok"] is False
+    assert not list(outside.glob("step-graph.*"))
+
+
+@pytest.mark.asyncio
+async def test_factory_graph_render_renders_next_to_source_json(
+    fake_config, tmp_path,
+):
+    """省略 out_dir（渲染到源 JSON 同目录）照常工作——新边界不误伤正常用法。"""
+    import json
+
+    tool = _graph_render_tool(fake_config, tmp_path)
+    src = tmp_path / "step-graph.json"
+    src.write_text(json.dumps(_GRAPH_JSON, ensure_ascii=False), encoding="utf-8")
+
+    result = json.loads(await tool.execute(path=str(src)))
+    assert result["ok"] is True
+    assert (tmp_path / "step-graph.svg").is_file()

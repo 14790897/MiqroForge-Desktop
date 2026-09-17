@@ -155,6 +155,26 @@ shows a persistent warning in the top bar.
 > 结构化元数据（duration_ms / timeout_ms / retryable）和超时前的部分输出，
 > 便于模型判断重试或拆分任务。真正超过 30 分钟的任务建议拆分为多个步骤。
 
+> **写授权卡何时出现（#864 / #1013）**：文件写工具（write_file / edit_file /
+> apply_patch）的目标落在所有已授权写根之外时，会弹「允许本次 / 本目录不再询问 /
+> 拒绝」授权卡——但**只有存在真实写边界时才弹**：① 走 WSL 沙箱时；②
+> `tools.restrict_to_workspace=true` 时。native 非沙箱且 `restrict_to_workspace`
+> 保持默认 `false` 时写边界本身并不存在，工作区外的写入**会直接成功**，因此既不
+> 弹卡也没有「可授权的边界」；office 文档工具（create_docx / create_pptx /
+> create_xlsx / create_pdf …）恒以工作区为写根，越界**直接拒绝、不提供授权卡**。
+>
+> 两种授权的范围：「允许本次」只对**当次工具调用**有效（不进会话授权）；
+> 「本目录不再询问」把目录写入 `tools.extra_roots`（**新会话生效**，见下方热更新
+> 表），并在**当前会话**内对 write_file / edit_file / apply_patch 与 `exec` 同时
+> 生效（#1013：exec 经 harness 注入的 `_user_roots` 通道拿到同一份会话授权；
+> `tools.auto_user_dirs=false` 时 exec 不吃卡片授权，文件工具不受影响）。
+>
+> 同一条 `_user_roots` 通道也作用于**读侧**：卡片授权的目录对 `read_file` /
+> `list_dir` 与文档工具的读路径（`resolve_read_path`，`allow_user_roots` 打开时）
+> 由「越界拒绝」变为可读——在存在读边界的场景下（WSL 沙箱或
+> `tools.restrict_to_workspace=true`）；读侧放大同样受 `tools.auto_user_dirs`
+> 总闸约束。即授权一个目录是「这个目录读写都放开」，比只放开写更宽。
+
 ### tools.mcp_servers — MCP 服务器
 
 每个 MCP 服务器可配置：

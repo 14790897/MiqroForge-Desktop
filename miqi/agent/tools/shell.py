@@ -511,11 +511,13 @@ class ExecTool(Tool):
         """Host paths to re-open writable for ONE exec call (#984).
 
         Set (plan v5 §2): workspace root ∪ static ``shared_roots`` ∪
-        per-call user-mentioned roots when ``tools.auto_user_dirs`` is on.
-        The #864 approval-card grants are deliberately NOT part of the exec
-        set — they live on the file-tool instances (``self._granted``) and
-        ExecTool holds no reference to them; exec still reaches user-mentioned
-        dirs through ``_user_roots`` (see the PR body for the residual gap).
+        per-call ``_user_roots`` when ``tools.auto_user_dirs`` is on.
+        The #864 approval-card grants arrive through that same per-call
+        channel, not through this tool: they still live on the file-tool
+        instances (``self._granted``, which ExecTool holds no reference to)
+        and are published to the shared session store, which the orchestrator
+        merges into ``_user_roots`` (#1013).  Only session-scoped grants are
+        published — "允许本次" stays invocation-scoped.
 
         Missing STATIC roots are skipped with a debug log: they come from
         config, and before #984 they were never bound, so a stale entry must

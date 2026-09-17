@@ -718,9 +718,15 @@ def create_runtime_tool_registry(
     registry.register(
         GraphRenderTool(
             # 与写工具一致：相对路径/out_dir 解析到 session 工作区
-            # （_write_workspace），绝对 run 目录路径不受影响（CodeRabbit #761）
+            # （_write_workspace）；绝对 run 目录路径仍可用，但必须落在写根内
+            # ——session 工作区 / 工作区根 / memory·skills / tools.extra_roots /
+            # 本回合用户点名目录（#1013）。此前 allowed_dir=None（默认
+            # restrict_to_workspace=false）时包含性与符号链接检查（SEC-06）被
+            # 整体跳过，模型给的任意绝对 out_dir 会被直接写入，而同一工具的
+            # WSL 分支对同一路径报错；跨会话隔离仍由宿主分支的
+            # _reject_foreign_session_path 兜底（CodeRabbit #761/#851）。
             workspace=_write_workspace,
-            allowed_dir=allowed_dir,
+            allowed_dir=_write_workspace,
             sandbox_manager=_sbm,
             shared_roots=_shared_roots,
             base_workspace=workspace,
