@@ -15,6 +15,11 @@ jobs:
       group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}-quick
       cancel-in-progress: true
     runs-on: ubuntu-latest
+    # 最小权限：本 job 会跑 PR 检出代码（npm test / mock smoke），只保留读代码 + 上传失败报告
+    # 所需的 actions:write，别继承 pull_request_target 的默认可写 token（zizmor excessive-permissions）。
+    permissions:
+      contents: read
+      actions: write
     defaults:
       run:
         working-directory: apps/desktop
@@ -375,10 +380,14 @@ jobs:
         run: |
           set -euo pipefail
           tag="_gh-artifacts"
-          gh release view "$tag" --repo "${{ github.repository }}" >/dev/null 2>&1 || \
+          if ! gh release view "$tag" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            # 不同 PR / 不同平台的运行可能同时创建同一个 release：创建失败说明别家刚建好，
+            # 重读一次复用即可，别让 set -e 把整步判失败（CodeRabbit 评审 #1107）。
             gh release create "$tag" --prerelease --title "$tag" \
               --body "CI 产物（E2E 报告等）—— 不要删除。见 .github/workflows/desktop-ci.yml" \
-              --repo "${{ github.repository }}"
+              --repo "${{ github.repository }}" 2>/dev/null || \
+              gh release view "$tag" --repo "${{ github.repository }}" >/dev/null
+          fi
 
           linux_url=""
           if [ -f reports/linux/results.json ]; then
