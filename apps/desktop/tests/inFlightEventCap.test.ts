@@ -87,6 +87,16 @@ function fatFieldProgress(payload: string, timestamp = 1): Ev {
   } as Ev;
 }
 
+/** 2000 个约 1 KiB 的 key、value 全是数字：没有任何字符串可供裁剪，只能退化到
+ *  有界的类型/长度摘要（`boundedTerminalSummary`）。 */
+function bigKeyPayload(): Record<string, unknown> {
+  const data: Record<string, unknown> = {};
+  for (let i = 0; i < 2000; i += 1) {
+    data[`${i}`.padStart(6, '0') + 'k'.repeat(1024)] = i;
+  }
+  return data;
+}
+
 /** 回放端就是这么还原文本的：按顺序拼接同流同 tool_call_id 的 delta。 */
 function concatDeltas(
   buf: ReturnType<typeof createInFlightSnapshot>,
@@ -420,16 +430,15 @@ describe('#1034 复审 P1-a/P1-b/P2：终态尾窗 + 全深度字节计费', () 
 
     expect(buf.bytes).toBeLessThanOrEqual(IN_FLIGHT_MAX_BYTES);
     expect(buf.bytes).toBe(buf.events.reduce((sum, e) => sum + inFlightEventBytes(e), 0));
-    const stored = buf.events[0].data as {
-      tool_calls: { _truncated: boolean; count: number; names: string[] };
-    };
+    const stored = buf.events[0].data as { tool_calls: unknown[] };
     expect(buf.events[0].type).toBe('final');
-    expect(stored.tool_calls).toBeDefined();
-    expect(stored.tool_calls._truncated).toBe(true);
-    expect(stored.tool_calls.count).toBe(250);
-    expect(stored.tool_calls.names.length).toBe(250);
-    expect(stored.tool_calls.names[0]).toBe('tool_0');
-    expect(stored.tool_calls.names[249]).toBe('tool_249');
+    // 列表被裁成前缀，但**类型仍是数组**（协议形状，见本文件的 active 用例）。
+    expect(Array.isArray(stored.tool_calls)).toBe(true);
+    expect(stored.tool_calls.length).toBeGreaterThan(0);
+    expect(stored.tool_calls.length).toBeLessThan(250);
+    const first = stored.tool_calls[0] as { function: { name: string; arguments: string } };
+    expect(first.function.name).toBe('tool_0');
+    expect(first.function.arguments.length).toBeLessThan(hugeArgs.length);
   });
 
   it('P2（二轮）：终态与 live 同一尾窗口径；短串/缺字段/非 reasoning 载荷原样透传', () => {
@@ -905,5 +914,124 @@ describe('#1034 复审二轮：terminal payload 递归硬上限 + 多终态快�
     expect(buf.bytes).toBeLessThanOrEqual(IN_FLIGHT_MAX_BYTES);
     expect(buf.events.map((e) => e.type)).toEqual(['final']);
     expect(buf.events[0].timestamp).toBe(9);
+  });
+});
+
+describe('#1034 复审 P1：active 终态同一套 payload cap（tool_calls 保持数组）', () => {
+  /** active 路径（onFinal / onError）直接落到 renderer state 的字段。 */
+  function activeFinal(content: string, toolCalls?: unknown[]): Record<string, unknown> {
+    return { content, tool_calls: toolCalls, turn_id: 't1', session_key: 's1' };
+  }
+
+  function toolCallsOf(capped: unknown): unknown[] {
+    const calls = (capped as { tool_calls?: unknown }).tool_calls;
+    expect(Array.isArray(calls)).toBe(true);
+    return calls as unknown[];
+  }
+
+  it('active final + 2 MiB content：封顶后有界，答案头部保留、控制字段原样', () => {
+    const full = 'x'.repeat(2 * 1024 * 1024);
+    const data = { content: full, turn_id: 't1', session_key: 's1' };
+    expect(jsonBytes(data)).toBeGreaterThan(TERMINAL_PAYLOAD_MAX_BYTES);
+
+    const capped = capTerminalEventData(data) as {
+      content: string;
+      turn_id: string;
+      session_key: string;
+    };
+
+    expect(jsonBytes(capped)).toBeLessThanOrEqual(TERMINAL_PAYLOAD_MAX_BYTES);
+    expect(capped.content.length).toBeLessThan(full.length);
+    expect(capped.content.startsWith('xxx')).toBe(true);
+    expect(capped.turn_id).toBe('t1');
+    expect(capped.session_key).toBe('s1');
+  });
+
+  it('active final + 超大 tool_calls：数组类型不变，元素保留 id/type/function.name', () => {
+    const hugeArguments = 'a'.repeat(64 * 1024);
+    const calls = Array.from({ length: 250 }, (_, i) => ({
+      id: `call_${i}`,
+      type: 'function',
+      function: { name: `tool_${i}`, arguments: hugeArguments },
+    }));
+    const data = activeFinal('ok', calls);
+    expect(jsonBytes(data)).toBeGreaterThan(TERMINAL_PAYLOAD_MAX_BYTES);
+
+    const capped = capTerminalEventData(data);
+    const stored = toolCallsOf(capped);
+
+    expect(jsonBytes(capped)).toBeLessThanOrEqual(TERMINAL_PAYLOAD_MAX_BYTES);
+    expect(stored.length).toBeGreaterThan(0);
+    expect(stored.length).toBeLessThan(250);
+    expect((capped as { content: string }).content).toBe('ok'); // 答案不受影响
+    for (const tc of stored) {
+      const call = tc as { id?: string; type?: string; function?: { name?: string } };
+      expect(call.type).toBe('function');
+      expect(typeof call.id).toBe('string');
+      expect(typeof call.function?.name).toBe('string');
+    }
+    expect((stored[0] as { id: string }).id).toBe('call_0');
+  });
+
+  it('active error + 2 MiB message：仍是字符串，回放不会变成 Unknown error', () => {
+    const full = 'm'.repeat(2 * 1024 * 1024);
+    const data = { message: full, code: 'E_BOOM', turn_id: 't1' };
+    expect(jsonBytes(data)).toBeGreaterThan(TERMINAL_PAYLOAD_MAX_BYTES);
+
+    const capped = capTerminalEventData(data) as { message: string; code: string };
+
+    expect(jsonBytes(capped)).toBeLessThanOrEqual(TERMINAL_PAYLOAD_MAX_BYTES);
+    expect(typeof capped.message).toBe('string');
+    expect(capped.message.length).toBeGreaterThan(0);
+    expect(capped.message.length).toBeLessThan(full.length);
+    expect(capped.message.startsWith('mmm')).toBe(true);
+    expect(capped.code).toBe('E_BOOM'); // 短字段原样
+    // 回放端读到的是非空字符串（空串会渲染成「Unknown error」）。
+    expect(capped.message.trim().length).toBeGreaterThan(0);
+  });
+
+  it('各种超限形状下 tool_calls 始终是数组（含退化到摘要的路径）', () => {
+    const shapes: Array<[string, unknown]> = [
+      [
+        '单条 arguments 巨大',
+        activeFinal('ok', [{ function: { name: 'a', arguments: 'x'.repeat(2 * 1024 * 1024) } }]),
+      ],
+      [
+        '大量 call',
+        activeFinal(
+          'ok',
+          Array.from({ length: 3000 }, (_, i) => ({
+            id: `c${i}`,
+            function: { name: `t${i}`, arguments: 'y'.repeat(2048) },
+          }))
+        ),
+      ],
+      [
+        '嵌套大字符串',
+        activeFinal('ok', [
+          {
+            id: 'c0',
+            function: { name: 'a', arguments: '{}' },
+            input: { blob: 'z'.repeat(2 * 1024 * 1024) },
+          },
+        ]),
+      ],
+      ['非对象元素', activeFinal('ok', ['not-an-object', 'x'.repeat(1024 * 1024)])],
+      [
+        '字节藏在 key 里（退化摘要）',
+        { tool_calls: [{ function: { name: 'a', arguments: '{}' } }], ...bigKeyPayload() },
+      ],
+    ];
+
+    for (const [label, data] of shapes) {
+      const capped = capTerminalEventData(data as object) as { tool_calls?: unknown };
+      expect(Array.isArray(capped.tool_calls), `${label}: tool_calls 必须是数组`).toBe(true);
+      expect(jsonBytes(capped), `${label}: 超预算`).toBeLessThanOrEqual(TERMINAL_PAYLOAD_MAX_BYTES);
+    }
+  });
+
+  it('空 tool_calls 数组原样透传（isAssistantWithToolCalls 的判别不受影响）', () => {
+    const data = { content: 'ok', tool_calls: [] };
+    expect(capTerminalEventData(data)).toBe(data);
   });
 });

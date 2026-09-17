@@ -2272,8 +2272,10 @@ export function capTerminalReasoning(reasoning: string | undefined): string | un
  *
  *  The cap is applied in order of least semantic damage:
  *   1. `reasoning` uses the same tail window as the live stream.
- *   2. `tool_calls` keeps their names but truncates `function.arguments`,
- *      falling back to a `{ _truncated, count, names }` summary if still over budget.
+ *   2. `tool_calls` *stays an array*: every kept call keeps its
+ *      `id`/`type`/`function.name` while `function.arguments` is truncated, and
+ *      only a prefix of the list survives if that is still over budget (the
+ *      last kept element is marked `_truncated`).
  *   3. `content` and `message` are truncated with an ellipsis marker.
  *   4. Every remaining string *anywhere in the tree* — nested objects and
  *      array elements included — is trimmed longest-first until the budget
@@ -2281,10 +2283,17 @@ export function capTerminalReasoning(reasoning: string | undefined): string | un
  *   5. A payload still over budget (bytes hidden in object keys, or sheer
  *      field count) degrades to a bounded type/size summary.
  *
- *  Post-condition, for any JSON-like input:
- *  `payloadBytes(result) <= TERMINAL_PAYLOAD_MAX_BYTES`.  It is what lets
- *  `evictInFlightOverflow` keep the snapshot under IN_FLIGHT_MAX_BYTES even
- *  though terminals may not be evicted outright.
+ *  Post-conditions, for any JSON-like input:
+ *   - `payloadBytes(result) <= TERMINAL_PAYLOAD_MAX_BYTES`: what lets
+ *     `evictInFlightOverflow` keep the snapshot under IN_FLIGHT_MAX_BYTES even
+ *     though terminals may not be evicted outright.  (`tool_calls` may end up
+ *     empty when even one call cannot fit — see step 2 — in which case the
+ *     remaining `content` still carries the reply.)
+ *   - `Array.isArray(result.tool_calls)` whenever the input's was an array, for
+ *     every step above (the summary keeps the shape too, emptying the array
+ *     rather than turning it into a descriptor).  The single exception is the
+ *     final `{ _truncated: true, type: 'object' }` fallback, which drops *all*
+ *     fields — including `tool_calls` — rather than reshaping one of them.
  *
  *  Identity is preserved when the payload already fits (no copy is made). */
 export function capTerminalEventData<T extends object>(data: T): T {
@@ -2303,7 +2312,12 @@ export function capTerminalEventData<T extends object>(data: T): T {
   }
   if (payloadBytes(capped) <= budget) return capped as T;
 
-  // 2. tool_calls: preserve names, cap each arguments string, then summarize.
+  // 2. tool_calls: cap each `function.arguments`, then — and only then — drop
+  //    trailing calls.  The value stays an ARRAY throughout: the renderer
+  //    branches on `Array.isArray(msg.tool_calls)` (`isAssistantWithToolCalls`)
+  //    and iterates `for (const tc of msg.tool_calls)` when rebuilding Task
+  //    Assets, so replacing it with a `{ _truncated, count, names }` descriptor
+  //    broke the protocol (复审 P1).
   const toolCalls = (capped as { tool_calls?: unknown }).tool_calls;
   if (Array.isArray(toolCalls)) {
     const bounded = toolCalls.map((tc) => {
@@ -2311,17 +2325,21 @@ export function capTerminalEventData<T extends object>(data: T): T {
       if (!fn || typeof fn !== 'object') return tc;
       const args = fn.arguments;
       const truncatedArgs =
-        typeof args === 'string' && args.length > 4096 ? `${args.slice(0, 4096)}…` : args;
+        typeof args === 'string' && args.length > MAX_TOOL_ARGUMENT_CHARS
+          ? `${args.slice(0, MAX_TOOL_ARGUMENT_CHARS)}…`
+          : args;
       return { ...tc, function: { ...fn, arguments: truncatedArgs } };
     });
     capped = { ...capped, tool_calls: bounded };
     if (payloadBytes(capped) <= budget) return capped as T;
 
-    const names = bounded.map((tc) => {
-      const fn = (tc as { function?: { name?: string } }).function;
-      return typeof fn?.name === 'string' ? fn.name : '?';
-    });
-    capped = { ...capped, tool_calls: { _truncated: true, count: bounded.length, names } };
+    // Hundreds of calls × a bounded `arguments` each still add up.  Keep the
+    // longest prefix that fits, with its cut marked on the last kept element
+    // (`_truncated` on an element, not on the array: an array property would be
+    // dropped by any JSON / structured-clone round trip this payload may still
+    // take).  Every kept element keeps its `id` / `type` / `function.name`, so
+    // the readers of `tc.function.name` and `tc.id` are unaffected.
+    capped = { ...capped, tool_calls: cutToolCallList(bounded, budget, capped) };
   }
   if (payloadBytes(capped) <= budget) return capped as T;
 
@@ -2369,6 +2387,38 @@ export function capTerminalEventData<T extends object>(data: T): T {
 function truncateTerminalString(text: string, maxChars: number): string {
   if (text.length <= maxChars) return text;
   return `${text.slice(0, maxChars)}…`;
+}
+
+/** (#1034 复审 P1) Longest prefix of `calls` that keeps `shell` within
+ *  `budget` once the cut is marked, or `[]` when not even the first call fits.
+ *
+ *  Exact rather than estimated: every candidate is measured with `payloadBytes`,
+ *  so the other fields of `shell` are priced in, and the marker itself is part
+ *  of the measured candidate (adding it after the search could land a payload
+ *  that was exactly at the budget just over it).  Binary search is valid because
+ *  the size is monotone in the prefix length, and it keeps this to ~log2(n)
+ *  stringify passes instead of one per possible cut. */
+function cutToolCallList(
+  calls: unknown[],
+  budget: number,
+  shell: Record<string, unknown>
+): unknown[] {
+  const marked = (count: number): unknown[] => {
+    const prefix = calls.slice(0, count);
+    const last = count > 0 ? prefix[count - 1] : undefined;
+    if (last && typeof last === 'object') {
+      prefix[count - 1] = { ...(last as Record<string, unknown>), _truncated: true };
+    }
+    return prefix;
+  };
+  let lo = 0;
+  let hi = calls.length;
+  while (lo < hi) {
+    const mid = Math.ceil((lo + hi) / 2);
+    if (payloadBytes({ ...shell, tool_calls: marked(mid) }) <= budget) lo = mid;
+    else hi = mid - 1;
+  }
+  return marked(lo);
 }
 
 /** (#1034 复审 P1) A string reachable from the payload root: the key/index
@@ -2532,7 +2582,14 @@ function summarizeTerminalValue(value: unknown): unknown {
       ? text
       : `${text.slice(0, MAX_SUMMARY_VALUE_CHARS)}…`;
   }
-  return { type: Array.isArray(value) ? 'array' : 'object', size: payloadBytes(value) };
+  // (#1034 复审 P1) An array stays an array even here: consumers branch on
+  // `Array.isArray(msg.tool_calls)`, so a `{ type: 'array', size }` descriptor
+  // would flip that branch on exactly the payloads this fallback exists for.
+  // Emptied rather than summary-shaped — nothing in a payload that had to reach
+  // the summary is usable anyway, and the summary's own `size` field records
+  // how much was dropped.
+  if (Array.isArray(value)) return [];
+  return { type: 'object', size: payloadBytes(value) };
 }
 
 function boundedTerminalSummary(
@@ -2821,6 +2878,12 @@ export const TERMINAL_PAYLOAD_MAX_BYTES =
 /** (#1034 复审 P1) Truncation width for a terminal's `content` / `message`
  *  (step 3 of `capTerminalEventData`). */
 const MAX_TERMINAL_STRING_CHARS = 20000;
+/** (#1034 复审 P1) Truncation width for one tool call's `function.arguments`
+ *  (step 2 of `capTerminalEventData`).  Arguments are re-parsed by
+ *  `_extractPathFromArgs` for Task Assets, so the head has to stay valid JSON
+ *  often enough to be worth keeping — a 4 KiB head still parses for the usual
+ *  `{"path": "…"}` shape. */
+const MAX_TOOL_ARGUMENT_CHARS = 4096;
 /** (#1034 复审 P1) Strings at or below this length are left alone by the
  *  recursive fallback: at 2 bytes per char they cannot meaningfully offset a
  *  `TERMINAL_PAYLOAD_MAX_BYTES`-sized budget, so trimming them would only cost
@@ -6865,17 +6928,29 @@ export function ChatConsole({
       if (data.turn_id && data.turn_id !== myTurnId) {
         return;
       }
-      // (#1034 复审 P2) 终态 reasoning 与 live 同一口径的尾窗截断（见
-      // capTerminalReasoning 注释）：放在这里，让下面所有落点（关闭 live
-      // 块、standalone 插入）共享同一个有界值，不再是"完整 reasoning 一次
-      // 性塞回渲染器"。
-      const cappedReasoning = capTerminalReasoning(data.reasoning);
+      // (#1034 复审 P2 → P1) 终态 payload 统一按 terminal 预算封顶，active
+      // 路径与在途缓存回放走同一套（此前只有缓存路径 cap 过，active 路径只
+      // cap 了 reasoning，于是 content / message / tool_calls 仍可把整个原始
+      // payload 挂进 renderer state）。
+      //
+      // 拆成两份用（见 capTerminalEventData 注释）：
+      //   rawData  —— 只做一次性 metadata 提取（Task Assets / tool_call_id /
+      //               文件路径解析），提取结果本身是有界的小对象；
+      //   safeData —— 一切进入 React state / 缓存 / UI 的字段都取自它。
+      // 顺序很重要：先提取再丢弃，原始 payload 不会被长期挂住。
+      const rawData = data;
+      const safeData = capTerminalEventData(data);
+      // reasoning 仍单独走一次尾窗：capTerminalEventData 只在**整个 payload
+      // 超预算**时才裁 reasoning，而 8000 字符的 reasoning 远在 1 MiB 预算
+      // 之下，所以只靠它会让 8k–500k 字之间的 reasoning 原样进入渲染器。
+      // 与 safeData.reasoning 幂等（裁过的再裁一次不变）。
+      const cappedReasoning = capTerminalReasoning(safeData.reasoning);
       clearFinalCleanupTimer();
       if (animId !== null) {
         cancelAnimationFrame(animId);
         animId = null;
       }
-      fullContent = data.content;
+      fullContent = safeData.content;
       displayed = '';
       finalDone = true;
       persistReveal();
@@ -6909,9 +6984,9 @@ export function ChatConsole({
       const finalReasoningElapsedS =
         // CR #856-7: normalize the server value the same way as the cache /
         // snapshot paths (≥1s, rounded) so live and restored views agree.
-        data.reasoning_elapsed_s != null
-          ? Math.max(1, Math.round(data.reasoning_elapsed_s))
-          : data.reasoning || hadLiveReasoning
+        safeData.reasoning_elapsed_s != null
+          ? Math.max(1, Math.round(safeData.reasoning_elapsed_s))
+          : safeData.reasoning || hadLiveReasoning
             ? // Pure thinking span: first→last reasoning delta. Falls back to the
               // final-event time when no live reasoning was seen. Never 0s.
               // (#834) Server-measured value arrives as reasoning_elapsed_s and
@@ -6947,7 +7022,7 @@ export function ChatConsole({
                 : m
             )
           : prev;
-      if (hadLiveReasoning || data.reasoning) {
+      if (hadLiveReasoning || safeData.reasoning) {
         // Order matters (audit P0-3): FLUSH the buffered reasoning deltas
         // FIRST (they append to the still-live block), THEN close the live
         // block.  The old order (close-then-flush) made appendReasoningDelta
@@ -6970,12 +7045,16 @@ export function ChatConsole({
         });
         liveReasoningTsRef.current = null;
       }
-      if (data.tool_calls?.length) {
+      // Metadata extraction runs on the RAW payload (see rawData above): the cap
+      // may drop trailing calls or shorten `arguments`, and a lost path here
+      // would silently drop a Task Assets row.  Nothing from this loop is kept
+      // as-is — only the extracted paths / parsed args, both small.
+      if (rawData.tool_calls?.length) {
         // Track file operations from tool_calls for Task Assets panel.
         // Office tools (create_docx, etc.) don't always produce progress
         // hints that match parseToolHint patterns, so we extract file
         // paths directly from the final tool call list.
-        for (const tc of (data.tool_calls ?? []) as any[]) {
+        for (const tc of (rawData.tool_calls ?? []) as any[]) {
           const fn = tc?.function || tc?.tool?.function || {};
           const toolName: string = fn?.name || '';
           if (!toolName) continue;
@@ -7035,7 +7114,9 @@ export function ChatConsole({
             {
               role: 'assistant',
               content: '',
-              tool_calls: data.tool_calls,
+              // 进入 React state 的那份走 cap 后的副本（仍是数组，见
+              // capTerminalEventData 第 2 步）。
+              tool_calls: safeData.tool_calls,
               timestamp: new Date().toISOString(),
             },
           ]);
@@ -7090,7 +7171,10 @@ export function ChatConsole({
       }
       streamErrorHandled = true;
       if (animId !== null) cancelAnimationFrame(animId);
-      const message = sanitizeUiMessage(data.message);
+      // (#1034 复审 P1) active 路径与缓存回放同一套 payload cap：`message`
+      // 是唯一进入 state 的载荷字段，取 cap 后的副本（2 MiB 的报错正文不再
+      // 一次性挂进 renderer）。`code` 是短字符串标量，原样用。
+      const message = sanitizeUiMessage(capTerminalEventData(data).message);
       flushReasoningRef.current?.(Date.now());
       liveReasoningTsRef.current = null;
       setMessages((prev) => [
@@ -7148,6 +7232,9 @@ export function ChatConsole({
         return;
       }
       if (animId !== null) cancelAnimationFrame(animId);
+      // (#1034 复审 P1) 这条 active 路径不带任何载荷进入 state（下面那行是
+      // 字面量）——aborted 事件本身没有需要 cap 的字段，所以这里不需要
+      // safeData，与缓存路径同样没有无界 renderer state。
       setStreaming(false);
       setSendingFor(sendSessionKey, null);
       streamingBySession.delete(sendSessionKey);
