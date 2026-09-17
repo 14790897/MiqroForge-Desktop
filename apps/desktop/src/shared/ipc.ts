@@ -17,8 +17,6 @@ export const IPC = {
   CHAT_SEND: 'chat:send',
   CHAT_ABORT: 'chat:abort',
   CHAT_DISCARD_RESUME: 'chat:discard-resume',
-  // #1035: 渲染进程崩溃重载后，渲染层挂载时拉取恢复提示（只读，不消费）
-  CHAT_GET_RECOVERY_NOTICE: 'chat:get-recovery-notice',
 
   // Threads (Codex-style, Phase 36+)
   THREAD_START: 'thread:start',
@@ -230,31 +228,6 @@ export const IPC_EVENTS = {
   // MiQroForge 登录态变化（自动刷新/过期时由主进程推送）
   QRAFT_STATUS_CHANGED: 'qraft:statusChanged',
 } as const;
-
-// ---------------------------------------------------------------------------
-// #1035 渲染进程崩溃恢复提示
-// ---------------------------------------------------------------------------
-
-/**
- * 主进程在 `render-process-gone` 时生成的内存态提示，渲染层挂载时通过
- * `IPC.CHAT_GET_RECOVERY_NOTICE` 拉取（只读，主进程不消费）。
- *
- * 之所以由主进程记账：渲染层的 `moduleInFlightCache` / `moduleMessagesSnapshot`
- * 都是模块级内存态，reload 后全部清空，判断不了「turn 还在不在」。
- */
-export interface RecoveryNotice {
-  /** 去重键（= 崩溃时刻的 epoch ms）——渲染层据此保证一次崩溃只插一条系统消息。 */
-  id: string;
-  /** 崩溃时刻（epoch ms）。 */
-  crashedAt: number;
-  /** `render-process-gone` 的 reason，如 `oom` / `crashed`。 */
-  reason: string;
-  exitCode: number;
-  /** 本次崩溃触发的重载序号；超预算未自动重载时为 0。 */
-  attempt: number;
-  /** 崩溃瞬间仍有在飞 turn 的会话（可能仍在后台跑，切回可继续看到输出）。 */
-  inFlightSessionKeys: string[];
-}
 
 // ---------------------------------------------------------------------------
 // Zod schemas for IPC payload validation

@@ -159,16 +159,12 @@ test.describe('Issue #1019 — no per-event send to a disposed render frame', ()
     // (#1035 适配) 崩溃现在会触发主进程自动重载，本 spec 需要一个"真死帧"窗口：
     // 1) 预热一发 thread/start——源码模式桥冷启动后首发该请求会丢（实测），
     //    不预热会把首条消息拖 30 秒、把下面的流同步拖爆；
-    // 2) 把原生对话框桩成永不 resolve——被测崩溃会先把 10 分钟/3 次的自动
-    //    重载预算花光，随后走「跳过」路径 await 这个对话框；桩悬停即处理器
-    //    悬停：帧保持真死（不重载、不退出），断言前提得以保留。
-    //    预算预支放在用例里、UI 操作之后（见用例内注释）。
+    // 2) 被测崩溃前先把 10 分钟/3 次的自动重载预算花光（预算预支放在用例里、
+    //    UI 操作之后，见用例内注释）。超预算后主进程**静默停止**自动重载
+    //    （2026-09 口径：不弹对话框、不退出），帧被崩掉后保持真死，
+    //    断言前提天然保留——不再需要任何对话框桩。
     await page.evaluate(() => {
       void (window as any).miqi?.threads?.start?.({ title: 'e2e-warmup' })?.catch?.(() => {});
-    });
-    await electronApp.evaluate(() => {
-      const g = globalThis as any;
-      g.__ELECTRON__.dialog.showMessageBox = () => new Promise(() => {});
     });
     await page.waitForTimeout(1_200);
   }, 180_000);
@@ -287,7 +283,8 @@ test.describe('Issue #1019 — no per-event send to a disposed render frame', ()
       // Kill the renderer the way an OOM does: process gone, frame disposed,
       // WebContents object still alive (which is exactly why the old
       // `!wc.isDestroyed()` guard let every event through).
-      // 同样走硬崩溃：被预算拦截后处理器悬停在对话框桩上，帧保持真死。
+      // 同样走硬崩溃：预算已花光，主进程走静默跳过路径（不重载、不弹框），
+      // 帧被崩掉后保持真死。
       await crashRendererHard(electronApp);
       // Only guard invocations from here on count as "post-crash".
       const checksAtCrash = await electronApp.evaluate(() => (globalThis as any).__frameChecks);

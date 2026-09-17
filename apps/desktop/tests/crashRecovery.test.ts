@@ -2,7 +2,6 @@ import { describe, it, expect } from 'vitest';
 import {
   CrashRecoveryTracker,
   MAX_RELOADS_PER_WINDOW,
-  NOTICE_TTL_MS,
   RELOAD_WINDOW_MS,
   evaluateReloadBudget,
   reloadLogLine,
@@ -12,9 +11,10 @@ import {
 /**
  * #1035 渲染进程崩溃恢复：预算纯函数、日志行格式、主进程侧状态表。
  *
- * 本文件只碰纯逻辑——`handleRendererCrash` 在调用点才动态 import Electron
- * （见 crashRecovery.ts 顶部注释），所以这里 import 本模块不会触发
- * `src/shared/electron.ts` 的 trampoline 校验。
+ * 恢复动作对用户完全不可见（2026-09 口径）：本模块只做预算记账与日志，
+ * 不再有 notice / 在飞登记表（对应的 UI 通道已全部移除）。本文件只碰纯
+ * 逻辑——本模块对 electron 只做 `import type`（编译期即抹除），import 它
+ * 不会触发 `src/shared/electron.ts` 的 trampoline 校验。
  */
 
 const T0 = 1_700_000_000_000; // 固定时间基准，避免依赖真实时钟
@@ -89,172 +89,77 @@ describe('日志行格式（期望行为 2：可检索）', () => {
   });
 });
 
-describe('CrashRecoveryTracker — 在飞 turn 登记表', () => {
-  it('mark / settle：登记后可见，settle 后摘除', () => {
-    const tracker = new CrashRecoveryTracker();
-    tracker.markTurnStarted('desktop:default');
-    tracker.markTurnStarted('folder:abc');
-    expect(tracker.getInFlightSessionKeys().sort()).toEqual(['desktop:default', 'folder:abc']);
-
-    tracker.markTurnSettled('desktop:default');
-    expect(tracker.getInFlightSessionKeys()).toEqual(['folder:abc']);
-  });
-
-  it('同一会话并发 turn（打断-重发）：先落定的不清掉仍在飞的', () => {
-    const tracker = new CrashRecoveryTracker();
-    tracker.markTurnStarted('desktop:default');
-    tracker.markTurnStarted('desktop:default'); // 新请求已受理，旧请求尚未落定
-    tracker.markTurnSettled('desktop:default'); // 旧请求落定
-    expect(tracker.getInFlightSessionKeys()).toEqual(['desktop:default']); // 新请求仍在飞
-
-    const { notice } = tracker.onRendererCrash('oom', -536870904, T0);
-    expect(notice.inFlightSessionKeys).toEqual(['desktop:default']);
-
-    tracker.markTurnSettled('desktop:default');
-    expect(tracker.getInFlightSessionKeys()).toEqual([]);
-  });
-
-  it('settle 未登记的会话是幂等的 no-op', () => {
-    const tracker = new CrashRecoveryTracker();
-    expect(() => tracker.markTurnSettled('never-started')).not.toThrow();
-    expect(tracker.getInFlightSessionKeys()).toEqual([]);
-  });
-
-  it('空 sessionKey 不登记（避免脏 key 混进恢复提示）', () => {
-    const tracker = new CrashRecoveryTracker();
-    tracker.markTurnStarted('');
-    expect(tracker.getInFlightSessionKeys()).toEqual([]);
-  });
-
-  it('turn 结束后重建再崩溃：提示里不再含已结束的会话', () => {
-    const tracker = new CrashRecoveryTracker();
-    tracker.markTurnStarted('folder:a');
-    tracker.markTurnSettled('folder:a');
-    tracker.markTurnStarted('folder:b');
-
-    const { notice } = tracker.onRendererCrash('oom', -536870904, T0 + 2000);
-    expect(notice.inFlightSessionKeys).toEqual(['folder:b']);
-  });
-});
-
 describe('CrashRecoveryTracker — 崩溃记账与预算', () => {
-  it('预算内连续崩溃：attempt 递增', () => {
+  it('onRendererCrash 只读（不记账）：连续读取序号不变', () => {
     const tracker = new CrashRecoveryTracker();
-    expect(tracker.onRendererCrash('oom', 1, T0).notice.attempt).toBe(1);
-    expect(tracker.onRendererCrash('oom', 1, T0 + 1000).notice.attempt).toBe(2);
-    expect(tracker.onRendererCrash('oom', 1, T0 + 2000).notice.attempt).toBe(3);
+    expect(tracker.onRendererCrash(T0).allowed).toBe(true);
+    expect(tracker.onRendererCrash(T0).attempt).toBe(1);
+    // 再读一次仍是 1——判定不产生副作用，记账是显式的 recordReload
+    expect(tracker.onRendererCrash(T0).attempt).toBe(1);
+    expect(tracker.onRendererCrash(T0).recent).toEqual([]);
   });
 
-  it('第 4 次崩溃超预算：不记账、attempt=0（渲染层与日志都能看出没自动重载）', () => {
+  it('recordReload：记账后序号递增，返回本次序号（日志 attempt 取它）', () => {
     const tracker = new CrashRecoveryTracker();
-    tracker.onRendererCrash('oom', 1, T0);
-    tracker.onRendererCrash('oom', 1, T0 + 1000);
-    tracker.onRendererCrash('oom', 1, T0 + 2000);
-
-    const fourth = tracker.onRendererCrash('oom', 1, T0 + 3000);
-    expect(fourth.budget.allowed).toBe(false);
-    expect(fourth.notice.attempt).toBe(0);
-    // 未记账 ⇒ 窗口内的记录仍是 3 条，超预算对话框据此报数
-    expect(fourth.budget.recent).toHaveLength(MAX_RELOADS_PER_WINDOW);
-
-    // 下一次仍超预算（没有因为 attempt=0 而把预算"用掉"或重置）
-    const fifth = tracker.onRendererCrash('oom', 1, T0 + 4000);
-    expect(fifth.budget.allowed).toBe(false);
+    expect(tracker.recordReload(T0)).toBe(1);
+    expect(tracker.recordReload(T0 + 1000)).toBe(2);
+    expect(tracker.recordReload(T0 + 2000)).toBe(3);
+    expect(tracker.onRendererCrash(T0 + 2000).recent).toHaveLength(3);
   });
 
-  it('窗口是滑动的：只滑出一部分时预算已恢复，但 attempt 接着窗口内剩余次数算', () => {
+  it('第 4 次崩溃超预算：allowed=false、不记账（recent 保持 3 条）', () => {
     const tracker = new CrashRecoveryTracker();
-    tracker.onRendererCrash('oom', 1, T0);
-    tracker.onRendererCrash('oom', 1, T0 + 1000);
-    tracker.onRendererCrash('oom', 1, T0 + 2000);
-    expect(tracker.onRendererCrash('oom', 1, T0 + 3000).budget.allowed).toBe(false);
+    tracker.recordReload(T0);
+    tracker.recordReload(T0 + 1000);
+    tracker.recordReload(T0 + 2000);
+
+    const fourth = tracker.onRendererCrash(T0 + 3000);
+    expect(fourth.allowed).toBe(false);
+    // 未记账 ⇒ 窗口内的记录仍是 3 条，跳过日志据此报数
+    expect(fourth.recent).toHaveLength(MAX_RELOADS_PER_WINDOW);
+
+    // 下一次仍超预算（没有因为"这次没记"而把预算用掉或重置）
+    const fifth = tracker.onRendererCrash(T0 + 4000);
+    expect(fifth.allowed).toBe(false);
+    expect(fifth.recent).toHaveLength(MAX_RELOADS_PER_WINDOW);
+  });
+
+  it('窗口是滑动的：只滑出一部分时预算已恢复，序号接着窗口内剩余次数算', () => {
+    const tracker = new CrashRecoveryTracker();
+    tracker.recordReload(T0);
+    tracker.recordReload(T0 + 1000);
+    tracker.recordReload(T0 + 2000);
+    expect(tracker.onRendererCrash(T0 + 3000).allowed).toBe(false);
 
     // 只够让 T0 那条过期，T0+1000 / T0+2000 仍在窗口内
-    const partial = tracker.onRendererCrash('oom', 1, T0 + RELOAD_WINDOW_MS + 1);
-    expect(partial.budget.allowed).toBe(true);
-    expect(partial.budget.recent).toHaveLength(2);
-    expect(partial.notice.attempt).toBe(3);
+    const partial = tracker.onRendererCrash(T0 + RELOAD_WINDOW_MS + 1);
+    expect(partial.allowed).toBe(true);
+    expect(partial.recent).toHaveLength(2);
+    expect(partial.attempt).toBe(3);
   });
 
   it('窗口整体滑过之后预算完全恢复，无需显式重置', () => {
     const tracker = new CrashRecoveryTracker();
-    tracker.onRendererCrash('oom', 1, T0);
-    tracker.onRendererCrash('oom', 1, T0 + 1000);
-    tracker.onRendererCrash('oom', 1, T0 + 2000);
-    expect(tracker.onRendererCrash('oom', 1, T0 + 3000).budget.allowed).toBe(false);
+    tracker.recordReload(T0);
+    tracker.recordReload(T0 + 1000);
+    tracker.recordReload(T0 + 2000);
+    expect(tracker.onRendererCrash(T0 + 3000).allowed).toBe(false);
 
     // 连最后一条（T0+2000）也过期
     const later = T0 + 2000 + RELOAD_WINDOW_MS + 1;
-    const recovered = tracker.onRendererCrash('oom', 1, later);
-    expect(recovered.budget.allowed).toBe(true);
-    expect(recovered.budget.recent).toEqual([]);
-    expect(recovered.notice.attempt).toBe(1);
+    const recovered = tracker.onRendererCrash(later);
+    expect(recovered.allowed).toBe(true);
+    expect(recovered.recent).toEqual([]);
+    expect(recovered.attempt).toBe(1);
   });
 
-  it('崩溃不清空在飞登记表（bridge 里的 turn 可能仍在跑）', () => {
+  it('reset 清空预算历史', () => {
     const tracker = new CrashRecoveryTracker();
-    tracker.markTurnStarted('folder:a');
-    tracker.onRendererCrash('oom', 1, T0 + 1000);
-    expect(tracker.getInFlightSessionKeys()).toEqual(['folder:a']);
-  });
-
-  it('notice 带上崩溃原因、exitCode 与时刻', () => {
-    const tracker = new CrashRecoveryTracker();
-    const { notice } = tracker.onRendererCrash('oom', -536870904, T0);
-    expect(notice.reason).toBe('oom');
-    expect(notice.exitCode).toBe(-536870904);
-    expect(notice.crashedAt).toBe(T0);
-    expect(notice.id).toBe(String(T0));
-  });
-
-  it('新崩溃覆盖旧 notice（只提示最近一次）', () => {
-    const tracker = new CrashRecoveryTracker();
-    tracker.onRendererCrash('oom', 1, T0);
-    tracker.onRendererCrash('crashed', 2, T0 + 5000);
-    expect(tracker.peekNotice(T0 + 5000)?.reason).toBe('crashed');
-  });
-});
-
-describe('CrashRecoveryTracker.peekNotice — 只读、不消费', () => {
-  it('重复读取返回同一条（多次挂载读到同一 notice）', () => {
-    const tracker = new CrashRecoveryTracker();
-    tracker.onRendererCrash('oom', 1, T0);
-    const first = tracker.peekNotice(T0 + 1000);
-    const second = tracker.peekNotice(T0 + 2000);
-    expect(first).not.toBeNull();
-    expect(second).toEqual(first);
-    // 第三次仍然读得到——消费式读取会让第一次被丢弃的结果把提示一起吃掉
-    expect(tracker.peekNotice(T0 + 3000)).toEqual(first);
-  });
-
-  it('没有崩溃时返回 null', () => {
-    expect(new CrashRecoveryTracker().peekNotice(T0)).toBeNull();
-  });
-
-  it('TTL 内可见，超过 TTL 视为陈旧不再下发', () => {
-    const tracker = new CrashRecoveryTracker();
-    tracker.onRendererCrash('oom', 1, T0);
-    expect(tracker.peekNotice(T0 + NOTICE_TTL_MS)).not.toBeNull();
-    expect(tracker.peekNotice(T0 + NOTICE_TTL_MS + 1)).toBeNull();
-  });
-
-  it('TTL 过期后再次崩溃：新 notice 覆盖陈旧值', () => {
-    const tracker = new CrashRecoveryTracker();
-    tracker.onRendererCrash('oom', 1, T0);
-    expect(tracker.peekNotice(T0 + NOTICE_TTL_MS + 1)).toBeNull();
-
-    const revivedAt = T0 + NOTICE_TTL_MS + 2000;
-    tracker.onRendererCrash('crashed', 2, revivedAt);
-    expect(tracker.peekNotice(revivedAt)?.reason).toBe('crashed');
-  });
-
-  it('reset 清空在飞表、预算与 notice', () => {
-    const tracker = new CrashRecoveryTracker();
-    tracker.markTurnStarted('folder:a');
-    tracker.onRendererCrash('oom', 1, T0);
+    tracker.recordReload(T0);
+    tracker.recordReload(T0 + 1000);
     tracker.reset();
-    expect(tracker.getInFlightSessionKeys()).toEqual([]);
-    expect(tracker.peekNotice(T0)).toBeNull();
-    expect(tracker.onRendererCrash('oom', 1, T0).notice.attempt).toBe(1);
+    expect(tracker.onRendererCrash(T0).recent).toEqual([]);
+    expect(tracker.onRendererCrash(T0).attempt).toBe(1);
+    expect(tracker.recordReload(T0)).toBe(1);
   });
 });

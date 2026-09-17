@@ -80,10 +80,9 @@ function createWindow(): void {
     console.error(
       `[main] render-process-gone: reason=${details.reason} exitCode=${details.exitCode}`
     );
-    // #1035: 崩溃后按预算自动重载 + 原生对话框告知（判定/记账在 crashRecovery.ts，
-    // 纯逻辑可单测）。不 await——事件回调不是 async，且预算内路径的告知框本就
-    // 非阻塞（点击不是重载的前提），超预算路径的对话框自己 await 用户决定。
-    void handleRendererCrash(mainWindow, details.reason, details.exitCode);
+    // #1035: 崩溃后按预算自动重载（判定/记账在 crashRecovery.ts，纯逻辑可单测）。
+    // 恢复动作对用户完全不可见：预算内静默重载、超预算静默停止。
+    handleRendererCrash(mainWindow, details.reason, details.exitCode);
   });
 
   mainWindow.webContents.on('console-message', (_event: unknown, ...args: unknown[]) => {
