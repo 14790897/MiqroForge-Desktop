@@ -202,6 +202,7 @@ class AgentRegistry:
                 "paper_search", "paper_get", "paper_download",
                 "ask_user_confirm_card",
                 "graph_render",  # issue #715: skill 产物 step-graph/data-graph 渲染
+                "declare_result_files",  # #1104: 交付物登记（结果文件区显式入口）
             ],
         ))
 
