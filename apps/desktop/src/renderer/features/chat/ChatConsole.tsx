@@ -3750,6 +3750,11 @@ export function ChatConsole({
     currentThreadIdRef.current = null; // Reset on session change
     toolArgsByCallId.current.clear(); // drop tool-call args from the previous session
     if (_sessionChanged) {
+      // #1035: the crash-recovery latch belongs to ONE turn of ONE session. A
+      // switch must not carry it over — the newly displayed session may have
+      // its own turn in flight from before the crash, and a stale latch would
+      // make its (differently tagged) terminal look superseded and drop it.
+      recoveryTurnIdRef.current = null;
       setHistoryLoaded(false);
       // ── Instant restore ─────────────────────────────────────────
       // sessions.get() is async, so clearing messages here and waiting would
