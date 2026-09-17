@@ -102,6 +102,14 @@ async def test_provision_runs_apt_and_venv():
     assert result["venv_python"] == venv_python("skill-a")
 
 
+async def test_provision_rebuilds_venv_without_system_site_packages():
+    """venv 命令含 pyvenv.cfg 检查，旧 venv 无 system-site 访问时重建。"""
+    provisioner, sandbox = _provisioner(["some-unique-pkg"])
+    result = await provisioner.provision("skill-a")
+    assert result["ok"] is True
+    cmd = sandbox.run_in_distro_root.call_args_list[0].args[0]
+    assert "include-system-site-packages" in cmd
+    assert f"rm -rf {VENV_ROOT}/skill-a" in cmd
 
 
 async def test_provision_skips_venv_when_none_needed():
