@@ -68,6 +68,23 @@ async function createFolderSessionViaPicker(page: Page, folderMarker: string) {
   });
 }
 
+/**
+ * 面板里**我们这个文件**的那张卡 —— 认带「预览」按钮的那张。
+ *
+ * 同名文件可能在页面里出现两张卡（资产分区一张、底部「修改建议」一张），只有
+ * 资产分区那张带按钮行。`.first()` 可能选中另一张，于是后面「预览窗显示
+ * hello 1062」的断言其实打在别的元素上 —— #1103 review 要的就是真断言，选错
+ * 卡会让它变成假断言。
+ */
+function assetCard(page: Page, filename: string) {
+  return page
+    .getByTestId('task-assets-panel')
+    .getByTestId('tracked-file-card')
+    .filter({ hasText: filename })
+    .filter({ has: page.getByTestId('file-preview-btn') })
+    .last();
+}
+
 /** Resolve the folder session's key once its folder copy holds real messages. */
 async function resolveFolderSessionKey(page: Page, folderMarker: string): Promise<string> {
   const deadline = Date.now() + 60_000;
@@ -158,10 +175,7 @@ test.describe('#1062 folder-bound session 预览/定位', () => {
 
       // 3. 用户实际看到的症状：面板里点「预览」要真的弹出预览窗并显示内容。
       //    （「定位」按钮只对结果文件渲染，其包含性校验由上一步的 IPC 探针覆盖。）
-      const panel = page.getByTestId('task-assets-panel');
-      // 精确到**我们这个文件**的卡片：面板里可能还有别的 tracked 文件，取
-      // `.first()` 可能点到别人身上，「预览显示 hello 1062」就成了假断言。
-      const card = panel.getByTestId('tracked-file-card').filter({ hasText: filename }).first();
+      const card = assetCard(page, filename);
       await expect(card).toBeVisible({ timeout: 60_000 });
       const previewBtn = card.getByTestId('file-preview-btn');
       await expect(previewBtn).toBeVisible({ timeout: 15_000 });
