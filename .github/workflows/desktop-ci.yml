@@ -71,10 +71,10 @@ jobs:
     #   github.event.pull_request.head.repo.full_name == github.repository ||
     #   contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association)
     runs-on: ubuntu-latest
-    # 需要 contents:write 才能用 gh CLI 创建/上传 release asset；actions:write 给 setup-node
-    # 缓存和失败时上传 playwright 录屏/截图 artifact。GH_TOKEN 只在 trusted gh CLI 步骤出现。
+    # E2E job 检出并执行 PR head 的测试代码，因此只保留最小只读权限 + artifact 写入。
+    # release asset 上传移到后面不检出 PR head 的独立 job，避免 PR 控制代码接触 contents:write。
     permissions:
-      contents: write
+      contents: read
       actions: write
     outputs:
       report-url: ${{ steps.upload-e2e-report.outputs.report-url }}
@@ -181,36 +181,17 @@ jobs:
         env:
           PLAYWRIGHT_SKIP_WEB_SERVER: '1'
 
-      - name: Upload E2E JSON report (trusted gh CLI)
-        # #1107 / 安全评审：上传动作本身必须在可信 workflow 代码里完成，不能执行 PR 检出的脚本。
-        # 这里用 runner 预装的 gh CLI 把主 E2E 的 JSON 报告上传到固定的 `_gh-artifacts` 预发布；
-        # GH_TOKEN 只出现在 gh CLI 的环境变量里，不交给任何 PR 控制的代码。名称带 run_id + run_attempt，
-        # 重跑时不会覆盖第一次尝试的旧报告，并定时清理旧资产防止触到 GitHub 1000 资产上限。
+      - name: Upload E2E JSON report as artifact
+        # #1107 / 安全评审：report 先以 artifact 形式暂存，由后面不检出 PR head 的独立 job
+        # 上传到 release asset。本 job 不接触 GH_TOKEN/contents:write。
         if: always()
         id: upload-e2e-report
-        run: |
-          set -euo pipefail
-          if [ -f test-reports/results.json ]; then
-            tag="_gh-artifacts"
-            name="e2e-results-linux-${{ github.run_id }}-${{ github.run_attempt }}.json"
-            cp test-reports/results.json "$name"
-            gh release view "$tag" --repo "${{ github.repository }}" >/dev/null 2>&1 || \
-              gh release create "$tag" --prerelease --title "$tag" \
-                --body "CI 产物（E2E 报告等）—— 不要删除。见 .github/workflows/desktop-ci.yml" \
-                --repo "${{ github.repository }}"
-            gh release upload "$tag" "$name" --clobber --repo "${{ github.repository }}"
-            # 保留最近 100 个资产（约 50 次双平台运行），避免触及 release 1000 资产上限。
-            gh api "repos/${{ github.repository }}/releases/tags/$tag" \
-              --jq '.assets | sort_by(.created_at) | reverse | .[100:] | .[].id' | \
-              xargs -r -I {} gh api -X DELETE "repos/${{ github.repository }}/releases/assets/{}" --silent
-            echo "report-url=https://github.com/${{ github.repository }}/releases/download/$tag/$name" >> "$GITHUB_OUTPUT"
-            rm -f "$name"
-          else
-            echo "report-url=" >> "$GITHUB_OUTPUT"
-            echo "没有产出 test-reports/results.json（主步没跑完），汇总将如实报「没找到报告」"
-          fi
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-report-linux
+          path: apps/desktop/test-reports/results.json
+          retention-days: 7
+          if-no-files-found: ignore
 
       - name: Upload Playwright report (E2E)
         if: failure()
@@ -228,8 +209,9 @@ jobs:
       group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}-macos-e2e
       cancel-in-progress: true
     runs-on: macos-latest
+    # 同 Linux：只保留最小只读权限 + artifact 写入，release asset 上传交给独立 job。
     permissions:
-      contents: write
+      contents: read
       actions: write
     outputs:
       report-url: ${{ steps.upload-e2e-report.outputs.report-url }}
@@ -339,33 +321,15 @@ jobs:
         env:
           PLAYWRIGHT_SKIP_WEB_SERVER: '1'
 
-      - name: Upload E2E JSON report (trusted gh CLI, macOS)
-        # 同 Linux 侧（#1107 / 安全评审）：用 runner 预装的 gh CLI 上传，不执行 PR 检出的脚本。
+      - name: Upload E2E JSON report as artifact (macOS)
         if: always()
         id: upload-e2e-report
-        run: |
-          set -euo pipefail
-          if [ -f test-reports/results.json ]; then
-            tag="_gh-artifacts"
-            name="e2e-results-macos-${{ github.run_id }}-${{ github.run_attempt }}.json"
-            cp test-reports/results.json "$name"
-            gh release view "$tag" --repo "${{ github.repository }}" >/dev/null 2>&1 || \
-              gh release create "$tag" --prerelease --title "$tag" \
-                --body "CI 产物（E2E 报告等）—— 不要删除。见 .github/workflows/desktop-ci.yml" \
-                --repo "${{ github.repository }}"
-            gh release upload "$tag" "$name" --clobber --repo "${{ github.repository }}"
-            # 保留最近 100 个资产（约 50 次双平台运行），避免触及 release 1000 资产上限。
-            gh api "repos/${{ github.repository }}/releases/tags/$tag" \
-              --jq '.assets | sort_by(.created_at) | reverse | .[100:] | .[].id' | \
-              xargs -r -I {} gh api -X DELETE "repos/${{ github.repository }}/releases/assets/{}" --silent
-            echo "report-url=https://github.com/${{ github.repository }}/releases/download/$tag/$name" >> "$GITHUB_OUTPUT"
-            rm -f "$name"
-          else
-            echo "report-url=" >> "$GITHUB_OUTPUT"
-            echo "没有产出 test-reports/results.json（主步没跑完），汇总将如实报「没找到报告」"
-          fi
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-report-macos
+          path: apps/desktop/test-reports/results.json
+          retention-days: 7
+          if-no-files-found: ignore
 
       - name: Upload Playwright report (macOS E2E)
         if: failure()
@@ -376,7 +340,76 @@ jobs:
           retention-days: 7
 
   # ────────────────────────────────────────────────────────────
-  # Job 4: flaky 汇总 —— 无 provider secrets，只下载并解析主 E2E 上传的 JSON 报告（#1107）。
+  # Job 4: 上传 E2E JSON 报告到 release asset —— 不检出 PR head，不执行 PR 控制代码。
+  # E2E job 先把报告以 artifact 形式留档，本 job 下载后用 gh CLI 上传到固定预发布。
+  # 这里持 contents:write，但整个 job 不接触 PR 检出代码，GH_TOKEN 只交给 trusted gh CLI。
+  # ────────────────────────────────────────────────────────────
+  upload-e2e-reports:
+    needs: [electron-e2e, macos-e2e]
+    if: always()
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: read
+    outputs:
+      linux-report-url: ${{ steps.upload.outputs.linux-report-url }}
+      macos-report-url: ${{ steps.upload.outputs.macos-report-url }}
+
+    steps:
+      - name: Download Linux E2E report
+        uses: actions/download-artifact@v4
+        with:
+          name: e2e-report-linux
+          path: reports/linux/
+        continue-on-error: true
+
+      - name: Download macOS E2E report
+        uses: actions/download-artifact@v4
+        with:
+          name: e2e-report-macos
+          path: reports/macos/
+        continue-on-error: true
+
+      - name: Upload reports to release asset
+        id: upload
+        run: |
+          set -euo pipefail
+          tag="_gh-artifacts"
+          gh release view "$tag" --repo "${{ github.repository }}" >/dev/null 2>&1 || \
+            gh release create "$tag" --prerelease --title "$tag" \
+              --body "CI 产物（E2E 报告等）—— 不要删除。见 .github/workflows/desktop-ci.yml" \
+              --repo "${{ github.repository }}"
+
+          linux_url=""
+          if [ -f reports/linux/results.json ]; then
+            linux_name="e2e-results-linux-${{ github.run_id }}-${{ github.run_attempt }}.json"
+            cp reports/linux/results.json "$linux_name"
+            gh release upload "$tag" "$linux_name" --clobber --repo "${{ github.repository }}"
+            linux_url="https://github.com/${{ github.repository }}/releases/download/$tag/$linux_name"
+            rm -f "$linux_name"
+          fi
+
+          macos_url=""
+          if [ -f reports/macos/results.json ]; then
+            macos_name="e2e-results-macos-${{ github.run_id }}-${{ github.run_attempt }}.json"
+            cp reports/macos/results.json "$macos_name"
+            gh release upload "$tag" "$macos_name" --clobber --repo "${{ github.repository }}"
+            macos_url="https://github.com/${{ github.repository }}/releases/download/$tag/$macos_name"
+            rm -f "$macos_name"
+          fi
+
+          # 保留最近 100 个资产（约 50 次双平台运行），避免触及 release 1000 资产上限。
+          gh api "repos/${{ github.repository }}/releases/tags/$tag" \
+            --jq '.assets | sort_by(.created_at) | reverse | .[100:] | .[].id' | \
+            xargs -r -I {} gh api -X DELETE "repos/${{ github.repository }}/releases/assets/{}" --silent
+
+          echo "linux-report-url=$linux_url" >> "$GITHUB_OUTPUT"
+          echo "macos-report-url=$macos_url" >> "$GITHUB_OUTPUT"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ────────────────────────────────────────────────────────────
+  # Job 5: flaky 汇总 —— 无 provider secrets，只下载并解析主 E2E 上传的 JSON 报告（#1107）。
   # 这个 job 没有 provider 凭据，因此即便解析脚本来自 PR 检出，也没有 API key 可被窃取；
   # 但脚本本身确实在 PR 检出的代码上执行（与仓库现有 mock smoke/e2e spec 的信任模型一致）。
   # ────────────────────────────────────────────────────────────
@@ -387,7 +420,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-    needs: [electron-e2e, macos-e2e]
+    needs: [upload-e2e-reports]
     if: always()
     defaults:
       run:
@@ -405,21 +438,21 @@ jobs:
           cache-dependency-path: apps/desktop/package-lock.json
 
       - name: Summarize flaky E2E tests (Linux)
-        if: needs.electron-e2e.outputs.report-url != ''
+        if: needs.upload-e2e-reports.outputs.linux-report-url != ''
         run: |
           mkdir -p test-reports
-          curl -fsSL "${{ needs.electron-e2e.outputs.report-url }}" -o test-reports/results-linux.json
+          curl -fsSL "${{ needs.upload-e2e-reports.outputs.linux-report-url }}" -o test-reports/results-linux.json
           node scripts/e2e-flaky-report.mjs test-reports/results-linux.json
 
       - name: Summarize flaky E2E tests (macOS)
-        if: needs.macos-e2e.outputs.report-url != ''
+        if: needs.upload-e2e-reports.outputs.macos-report-url != ''
         run: |
           mkdir -p test-reports
-          curl -fsSL "${{ needs.macos-e2e.outputs.report-url }}" -o test-reports/results-macos.json
+          curl -fsSL "${{ needs.upload-e2e-reports.outputs.macos-report-url }}" -o test-reports/results-macos.json
           node scripts/e2e-flaky-report.mjs test-reports/results-macos.json
 
       - name: E2E 报告缺失说明
-        if: needs.electron-e2e.outputs.report-url == '' && needs.macos-e2e.outputs.report-url == ''
+        if: needs.upload-e2e-reports.outputs.linux-report-url == '' && needs.upload-e2e-reports.outputs.macos-report-url == ''
         run: echo "两个 E2E job 都没有产出 JSON 报告（主步被杀/OOM），见上面的说明"
 
   # ────────────────────────────────────────────────────────────
