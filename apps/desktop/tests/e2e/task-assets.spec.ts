@@ -24,9 +24,9 @@ import {
  * NOT idempotent — it flips the state in both directions, so an
  * already-open section would get *closed*. Because collapsed children are
  * unmounted, "open" can be detected from the DOM: a non-empty open section
- * holds at least one card (`.rounded-lg.p-2\.5`). A section that becomes
- * empty unmounts its own header, which the caller treats as "nothing to do".
- * Only reached after the target card failed to appear, so at most one of
+ * holds at least one card (`.rounded-lg.p-2\.5`). The parent only renders a
+ * section when its file list is non-empty, so a missing section means
+ * "nothing to do". Only reached after the target card failed to appear, so at most one of
  * the two sections can currently be rendering the card.
  */
 async function expandAssetSection(page: Page, key: 'result' | 'process') {
@@ -106,6 +106,7 @@ async function waitForFileInPanel(page: Page, filename: string, timeout = 60_000
     // that also catches the `asset-section-toggle-*` header buttons.
     for (const key of ['result', 'process'] as const) {
       const section = page.getByTestId(`asset-section-${key}`);
+      if ((await section.count()) === 0) continue; // section not rendered — nothing to check
       expect(
         await section.locator('.rounded-lg.p-2\\.5').count(),
         `${key} should still be open after recovery`
