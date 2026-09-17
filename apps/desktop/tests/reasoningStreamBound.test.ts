@@ -87,6 +87,35 @@ describe('#1034 appendReasoningDelta 上界与增量累积', () => {
     expect(live.isLiveReasoning).toBe(true);
   });
 
+  it('单条超大 delta：窗口与省略计数守恒，保留的是它的尾部', () => {
+    // 后端把整段思考一次推下来（而不是逐字流）时，`prevTail + delta` 会先拼出
+    // 一个与 delta 同大的临时字符串再砍掉——这里锁死裁剪发生在拼接之前：
+    // 结果仍是一个常量窗口，且省略计数恰好补上被丢弃的前缀。
+    const huge = `HEAD${'x'.repeat(3_000_000)}`;
+    const msgs = appendReasoningDelta([], huge);
+    const live = msgs[msgs.length - 1];
+    const kept = stripPlaceholder(live.reasoning ?? '').length;
+    expect(kept).toBeLessThanOrEqual(MAX_LIVE_REASONING_CHARS);
+    expect((live.reasoningOmitted ?? 0) + kept).toBe(huge.length);
+    expect(live.reasoning).not.toContain('HEAD');
+    expect(live.reasoning?.endsWith(huge.slice(-100))).toBe(true);
+    expect((live.reasoning ?? '').match(/…已省略/g)?.length).toBe(1);
+  });
+
+  it('单条超大 delta 之后继续 flush：前缀截断的计数不被抹掉', () => {
+    const huge = 'z'.repeat(200_000);
+    let msgs = appendReasoningDelta([], 'PREV');
+    msgs = appendReasoningDelta(msgs, huge);
+    msgs = appendReasoningDelta(msgs, 'THE-END');
+    const live = msgs[msgs.length - 1];
+    const kept = stripPlaceholder(live.reasoning ?? '').length;
+    expect(kept).toBeLessThanOrEqual(MAX_LIVE_REASONING_CHARS);
+    expect((live.reasoningOmitted ?? 0) + kept).toBe(
+      'PREV'.length + huge.length + 'THE-END'.length
+    );
+    expect(stripPlaceholder(live.reasoning ?? '').endsWith('THE-END')).toBe(true);
+  });
+
   it('多次 flush 后保留量恒定（单次 flush 代价与总长无关）', () => {
     let msgs = appendReasoningDelta([], 'seed');
     for (let i = 0; i < 5000; i += 1) msgs = appendReasoningDelta(msgs, 'y'.repeat(200));

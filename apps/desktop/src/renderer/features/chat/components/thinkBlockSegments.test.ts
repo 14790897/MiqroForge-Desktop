@@ -95,3 +95,36 @@ describe('#1034 ThinkBlock 分段渲染保持既有契约', () => {
     expect(markup).toBe('');
   });
 });
+
+describe('#1034 分段只用于流式：终态恢复整篇 CommonMark 语义', () => {
+  /** 链接引用定义跨空行生效——分段渲染会把它切成两个独立文档，定义失效。 */
+  const CROSS_BLOCK = '[ref]: https://example.com "定义"\n\n见 [ref] 与 `code`';
+
+  const render = (live: boolean) =>
+    renderToStaticMarkup(
+      createElement(ThinkBlock, { reasoning: CROSS_BLOCK, live, defaultOpen: true })
+    );
+
+  it('live：分段渲染，引用定义跨不了段（`[ref]` 保持字面量）', () => {
+    // 这是分段模式的已知代价，接受它是因为流式期间每 60ms 只重解析最后一段；
+    // 该用例把代价写进契约，防止有人误以为分段是「等价」渲染。
+    const markup = render(true);
+    expect(markup).toContain('[ref]');
+    expect(markup).not.toContain('href="https://example.com"');
+  });
+
+  it('终态：整篇一次解析，引用定义生效（不再分段）', () => {
+    const markup = render(false);
+    expect(markup).toContain('href="https://example.com"');
+    expect(markup).not.toContain('[ref]');
+  });
+
+  it('终态与 live 都不丢内容：两段文本都在', () => {
+    for (const live of [true, false]) {
+      const markup = render(live);
+      expect(markup).toContain('见');
+      expect(markup).toContain('code');
+      expect(markup).toContain('深度思考');
+    }
+  });
+});

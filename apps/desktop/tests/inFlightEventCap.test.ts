@@ -203,7 +203,9 @@ describe('#1034 复审 P1-a/P1-b/P2：终态尾窗 + 全深度字节计费', () 
 
   it('P1：2MiB content 的 final 入库后不击穿字节上限', () => {
     const full = 'x'.repeat(2 * 1024 * 1024);
-    expect(inFlightEventBytes({ type: 'final', data: { content: full }, timestamp: 9 } as Ev)).toBeGreaterThan(IN_FLIGHT_MAX_BYTES);
+    expect(
+      inFlightEventBytes({ type: 'final', data: { content: full }, timestamp: 9 } as Ev)
+    ).toBeGreaterThan(IN_FLIGHT_MAX_BYTES);
 
     const capped = capTerminalEventData({ content: full });
     const buf = createInFlightSnapshot();
@@ -219,7 +221,9 @@ describe('#1034 复审 P1-a/P1-b/P2：终态尾窗 + 全深度字节计费', () 
 
   it('P1：1.5MiB message 的 error 入库后不击穿字节上限', () => {
     const full = 'm'.repeat(Math.ceil(1.5 * 1024 * 1024));
-    expect(inFlightEventBytes({ type: 'error', data: { message: full }, timestamp: 9 } as Ev)).toBeGreaterThan(IN_FLIGHT_MAX_BYTES);
+    expect(
+      inFlightEventBytes({ type: 'error', data: { message: full }, timestamp: 9 } as Ev)
+    ).toBeGreaterThan(IN_FLIGHT_MAX_BYTES);
 
     const capped = capTerminalEventData({ message: full });
     const buf = createInFlightSnapshot();
@@ -239,7 +243,9 @@ describe('#1034 复审 P1-a/P1-b/P2：终态尾窗 + 全深度字节计费', () 
       function: { name: `tool_${i}`, arguments: hugeArgs },
     }));
     const data = { tool_calls: toolCalls };
-    expect(inFlightEventBytes({ type: 'final', data, timestamp: 9 } as Ev)).toBeGreaterThan(IN_FLIGHT_MAX_BYTES);
+    expect(inFlightEventBytes({ type: 'final', data, timestamp: 9 } as Ev)).toBeGreaterThan(
+      IN_FLIGHT_MAX_BYTES
+    );
 
     const capped = capTerminalEventData(data);
     const buf = createInFlightSnapshot();
@@ -247,7 +253,9 @@ describe('#1034 复审 P1-a/P1-b/P2：终态尾窗 + 全深度字节计费', () 
 
     expect(buf.bytes).toBeLessThanOrEqual(IN_FLIGHT_MAX_BYTES);
     expect(buf.bytes).toBe(buf.events.reduce((sum, e) => sum + inFlightEventBytes(e), 0));
-    const stored = buf.events[0].data as { tool_calls: { _truncated: boolean; count: number; names: string[] } };
+    const stored = buf.events[0].data as {
+      tool_calls: { _truncated: boolean; count: number; names: string[] };
+    };
     expect(buf.events[0].type).toBe('final');
     expect(stored.tool_calls).toBeDefined();
     expect(stored.tool_calls._truncated).toBe(true);

@@ -206,10 +206,19 @@ export function ThinkBlock({
               {/* Render markdown so structured thinking (1./•/** lists) shows
                *  like DeepSeek's, not as raw text. The global `pre` grey box
                *  is avoided since MarkdownContent has no plain-<pre> wrapper.
-               *  #1034: rendered block-by-block (memoized) instead of one
-               *  full-document parse per 60ms flush; the full text still
-               *  renders once streaming ends. */}
-              {children ?? <SegmentedReasoning text={reasoning} />}
+               *  #1034: while streaming, render block-by-block (memoized)
+               *  instead of one full-document parse per 60ms flush. Once the
+               *  stream ends the block is static, so it goes through a single
+               *  full-document parse again — segmentation is a per-flush cost
+               *  optimization, not a rendering model, and splitting a settled
+               *  document would break link-reference definitions and other
+               *  constructs that only resolve across the whole document. */}
+              {children ??
+                (live ? (
+                  <SegmentedReasoning text={reasoning} />
+                ) : (
+                  <MarkdownContent content={reasoning} disableDiagrams />
+                ))}
             </div>
           </div>
         </div>

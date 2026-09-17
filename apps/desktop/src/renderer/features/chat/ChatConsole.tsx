@@ -2194,14 +2194,27 @@ function alignCodePoint(text: string, index: number): number {
 }
 
 /** (#1034) Append `delta` to a bounded tail window, reporting what was
- *  dropped and what the message's visible text should be. */
+ *  dropped and what the message's visible text should be.
+ *
+ *  A single delta can itself be multi-MB (a provider that buffers a whole
+ *  thinking block and emits it in one chunk).  Clipping it *before* the
+ *  concatenation keeps the temporary allocation bounded: `prevTail + delta`
+ *  would otherwise build the full multi-MB string only to slice all but the
+ *  last LIVE_REASONING_KEEP_CHARS away.  Everything dropped here is accounted
+ *  for in `omitted`, so the placeholder stays exact. */
 function accumulateLiveReasoning(
   prevTail: string,
   prevOmitted: number,
   delta: string
 ): { tail: string; omitted: number; text: string } {
-  let tail = prevTail + delta;
   let omitted = prevOmitted;
+  let boundedDelta = delta;
+  if (boundedDelta.length > MAX_LIVE_REASONING_CHARS) {
+    const cut = alignCodePoint(boundedDelta, boundedDelta.length - MAX_LIVE_REASONING_CHARS);
+    omitted += cut;
+    boundedDelta = boundedDelta.slice(cut);
+  }
+  let tail = prevTail + boundedDelta;
   if (tail.length > MAX_LIVE_REASONING_CHARS) {
     const cut = alignCodePoint(tail, tail.length - LIVE_REASONING_KEEP_CHARS);
     omitted += cut;
@@ -2269,7 +2282,9 @@ export function capTerminalEventData<T extends object>(data: T): T {
   const budget = IN_FLIGHT_MAX_BYTES - IN_FLIGHT_EVENT_OVERHEAD_BYTES - 256;
   if (payloadBytes(data) <= budget) return data;
 
-  let capped: Record<string, unknown> = { ...data };
+  // `T extends object` is not assignable to an index signature, so the cast
+  // is what lets the rest of this function work on a plain record.
+  let capped: Record<string, unknown> = { ...(data as Record<string, unknown>) };
 
   // 1. Reasoning tail window (same as live stream).
   const reasoning = (data as { reasoning?: string }).reasoning;
