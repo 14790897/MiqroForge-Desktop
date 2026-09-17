@@ -189,12 +189,12 @@ describe('buildMarkdown', () => {
     expect(markdown).toContain('apps/desktop/tests/e2e/issue-877-rich-preview.spec.ts:121:7');
   });
 
-  // 超时/取消时 Actions 先发 SIGINT，Playwright 收下后照常落一份部分报告：
-  // 没跑到的用例 results 为空、在跑的用例 status 是 interrupted。这种报告不能读成「一切正常」。
+  // 超时/取消时 Actions 先发 SIGINT，Playwright 收下后照常落一份部分报告：没轮到的用例
+  // （预期会跑、却一条 result 都没有）和在跑的用例（status 是 interrupted）都算没跑完。
   it('跑了一半的报告会标明不完整', () => {
     const report = makeReport();
     report.suites[0].suites[0].specs[0].tests[0].status = 'expected';
-    report.suites[0].suites[0].specs[0].tests[0].results = []; // 没跑到
+    report.suites[0].suites[0].specs[0].tests[0].results = []; // 预期会跑、却没跑到
     report.suites[1].specs[0].tests[0].results = [{ retry: 0, status: 'interrupted' }];
 
     const markdown = buildMarkdown(report);
@@ -204,6 +204,18 @@ describe('buildMarkdown', () => {
     expect(markdown).toContain('1 条被中断');
     expect(markdown).toContain('已经跑完的用例里没有「重试才通过」的。');
     expect(markdown).not.toContain('本次运行没有被重试掩盖的用例。');
+  });
+
+  it('合法跳过的用例（test.skip）不算没跑完 —— results 本来就为空', () => {
+    const report = makeReport();
+    report.suites[0].suites[0].specs[0].tests[0].status = 'skipped';
+    report.suites[0].suites[0].specs[0].tests[0].expectedStatus = 'skipped';
+    report.suites[0].suites[0].specs[0].tests[0].results = []; // skip 的用例不会有 result
+
+    const markdown = buildMarkdown(report);
+
+    expect(markdown).not.toContain('没有跑完');
+    expect(markdown).not.toContain('没有任何结果');
   });
 
   it('跑完整了的报告不会误报「没跑完」', () => {

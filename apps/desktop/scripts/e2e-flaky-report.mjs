@@ -145,10 +145,14 @@ export function collectFlaky(report) {
 }
 
 /**
- * 报告是不是「跑了一半」：没跑到的用例 results 为空，被 SIGINT 打断的用例 status 是
- * interrupted。json reporter 只在 onEnd 落盘，而 Actions 在 timeout / cancel 时先发
- * SIGINT —— Playwright 收下后把运行标成 interrupted 并照常 onEnd，于是落盘的是一份部分
- * 报告。这种报告不能当成「一切正常」来读。
+ * 报告是不是「跑了一半」：被 SIGINT 打断的用例 status 是 interrupted；没轮到的用例 results
+ * 为空（json reporter 只在 onEnd 落盘，而 Actions 在 timeout / cancel 时先发 SIGINT ——
+ * Playwright 收下后把运行标成 interrupted 并照常 onEnd，于是落盘的是一份部分报告）。
+ * 这种报告不能当成「一切正常」来读。
+ *
+ * 「results 为空」不能单独当作没跑完的证据：合法跳过的用例（test.skip / test.fixme，
+ * expectedStatus 是 skipped）本来就一条 result 都没有。只有当用例预期会运行（status 与
+ * expectedStatus 都不是 skipped）却一条 result 都没有时，才算「没跑到」。
  *
  * 另外两种「一条都没跑起来」的形态也要认：报告里一条用例都没收集到（testMatch / project
  * 改名、文件加载失败），以及 reporter 自己攒的 run 级 errors —— 这两种 stats 全是 0、看起来
@@ -159,7 +163,8 @@ function incompleteness(report, tests) {
   let interrupted = 0;
   for (const { test } of tests) {
     const results = test.results || [];
-    if (!results.length) neverRan++;
+    const shouldHaveRun = test.status !== 'skipped' && test.expectedStatus !== 'skipped';
+    if (shouldHaveRun && !results.length) neverRan++;
     else if (results.some((result) => result.status === 'interrupted')) interrupted++;
   }
   return {
