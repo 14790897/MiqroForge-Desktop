@@ -28,6 +28,18 @@ function stripPlaceholder(text: string): string {
   return m ? text.slice(m[0].length) : text;
 }
 
+type Msg = Parameters<typeof dedupeReasoningBlocks>[0][number];
+
+/** 不带尾窗记账的块：内容就是全部文本（历史回放里就是这个形状）。 */
+function plainBlock(char: string, count: number, timestamp: number): Msg {
+  return {
+    role: 'progress',
+    content: char.repeat(count),
+    reasoning: char.repeat(count),
+    timestamp,
+  };
+}
+
 describe('#1034 appendReasoningDelta 上界与增量累积', () => {
   it('短流不裁剪：正文原样累积，无省略占位', () => {
     let msgs = appendReasoningDelta([], '第一部分');
@@ -161,5 +173,77 @@ describe('#1034 合并思考块后窗口重新基线化（dedupeReasoningBlocks�
     expect(stripPlaceholder(block.reasoning ?? '')).toContain('b'.repeat(100));
     const next = appendReasoningDelta(merged, 'END')[0];
     expect(stripPlaceholder(next.reasoning ?? '').endsWith('END')).toBe(true);
+  });
+
+  it('两个都已裁剪的 live 块合并：省略相加、占位符只剩一个、右侧内容不丢', () => {
+    const a = appendReasoningDelta([], 'A'.repeat(20000))[0];
+    const b = appendReasoningDelta([], 'B'.repeat(20000))[0];
+    expect(a.reasoningOmitted ?? 0).toBeGreaterThan(0);
+    expect(b.reasoningOmitted ?? 0).toBeGreaterThan(0);
+    const logical =
+      (a.reasoningOmitted ?? 0) +
+      stripPlaceholder(a.reasoning ?? '').length +
+      1 + // 合并时插入的换行
+      (b.reasoningOmitted ?? 0) +
+      stripPlaceholder(b.reasoning ?? '').length;
+    expect(logical).toBe(40001);
+
+    const merged = dedupeReasoningBlocks([a, b]);
+    expect(merged.length).toBe(1);
+    const block = merged[0];
+    const kept = stripPlaceholder(block.reasoning ?? '').length;
+
+    // 守恒：省略 + 保留 == 两块逻辑总字符数（旧实现只留左边那个计数，
+    // 右侧的 12000 字与它自己的占位符一起被当成正文吞掉）
+    expect((block.reasoningOmitted ?? 0) + kept).toBe(logical);
+    expect(kept).toBeLessThanOrEqual(MAX_LIVE_REASONING_CHARS);
+    // 只存在一个「…已省略 X 字」
+    expect(block.reasoning?.match(/…已省略/g) ?? []).toHaveLength(1);
+    // 窗口落在合并正文的尾部：B 的最新内容仍在
+    expect(stripPlaceholder(block.reasoning ?? '').endsWith('B'.repeat(100))).toBe(true);
+
+    // 继续 flush：从重新基线化的 tail 续写，不丢 B，守恒继续成立
+    const next = appendReasoningDelta(merged, 'C')[0];
+    expect(stripPlaceholder(next.reasoning ?? '').endsWith('C')).toBe(true);
+    expect(stripPlaceholder(next.reasoning ?? '')).toContain('B'.repeat(100));
+    expect((next.reasoningOmitted ?? 0) + stripPlaceholder(next.reasoning ?? '').length).toBe(
+      logical + 1
+    );
+    expect(next.reasoning?.match(/…已省略/g) ?? []).toHaveLength(1);
+  });
+
+  it('已折叠的块（只有渲染文本）合并时，计数从自己的占位符还原', () => {
+    // onFinal 会把 live 块的 content 换成后端全文的裁剪版，reasoningOmitted 却
+    // 还停在流式窗口的计数上。合并必须按**看得见的文本**算，否则陈旧字段会把
+    // 守恒关系带偏。
+    const stale: Msg = {
+      role: 'progress',
+      content: `${liveReasoningPlaceholder(5000)}${'z'.repeat(3000)}`,
+      reasoning: `${liveReasoningPlaceholder(5000)}${'z'.repeat(3000)}`,
+      reasoningOmitted: 12345, // 陈旧：与 content 里的标记不一致
+      isLiveReasoning: false,
+      timestamp: 1,
+    };
+    const fresh = appendReasoningDelta([], 'w'.repeat(100), 2)[0];
+
+    const merged = dedupeReasoningBlocks([stale, fresh]);
+    const block = merged[0];
+    const kept = stripPlaceholder(block.reasoning ?? '').length;
+
+    expect((block.reasoningOmitted ?? 0) + kept).toBe(5000 + 3000 + 1 + 100);
+    expect(block.reasoning?.match(/…已省略/g) ?? []).toHaveLength(1);
+    expect(stripPlaceholder(block.reasoning ?? '').endsWith('w'.repeat(100))).toBe(true);
+  });
+
+  it('两侧都没有尾窗时保持整段合并——上界只作用于流式副本', () => {
+    // 持久化历史里的思考块没有尾窗记账，合并必须保持原文（不能顺手把它折叠
+    // 成 6000 字窗口：完整文本是回放的价值所在）。
+    const [merged] = dedupeReasoningBlocks([plainBlock('h', 9000, 1), plainBlock('i', 9000, 2)]);
+
+    expect(merged.reasoning?.length).toBe(18001);
+    expect(merged.reasoning).toContain('h'.repeat(100));
+    expect(merged.reasoning).toContain('i'.repeat(100));
+    expect(merged.reasoning).not.toContain('已省略');
+    expect(merged.reasoningOmitted ?? 0).toBe(0);
   });
 });

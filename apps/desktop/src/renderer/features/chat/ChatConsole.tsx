@@ -2071,14 +2071,31 @@ export function dedupeReasoningBlocks(messages: Message[]): Message[] {
   for (const m of messages) {
     if (m.role === 'progress' && m.reasoning) {
       if (pending) {
-        pending.content = `${pending.content}\n${m.content}`;
-        pending.reasoning = pending.content;
+        // (#1034 复审 P2) 任一侧带尾窗记账（正在流式，或已经折叠出占位符）时
+        // 不能按渲染文本拼接：右侧的「…已省略 N 字」会被当成正文吞进中间，
+        // 它自己的省略计数也会丢（只留左边那个）。走 mergeReasoningBlocks
+        // 把两个 tail 重新开窗，省略计数相加，守恒关系
+        // （省略 + 保留 == 逻辑总字符数）对两个都已裁剪的块同样成立；
+        // liveReasoningTail 也随之重新基线化，下一次 flush 不会丢掉刚并进来
+        // 的这段文本。
+        //
+        // 两侧都没有尾窗（例如整段来自持久化历史）时保持原来的整段拼接：
+        // 上界只作用于流式期间的内存副本（见 MAX_LIVE_REASONING_CHARS），
+        // 已落盘的完整文本不该在合并时被折叠。
+        const windowed = hasReasoningWindow(pending) || hasReasoningWindow(m);
+        if (windowed) {
+          const merged = mergeReasoningBlocks(pending, m);
+          pending.content = merged.text;
+          pending.reasoning = merged.text;
+          pending.liveReasoningTail = merged.tail;
+          pending.reasoningOmitted = merged.omitted;
+        } else {
+          pending.content = `${pending.content}\n${m.content}`;
+          pending.reasoning = pending.content;
+        }
         pending.reasoningElapsedS = m.reasoningElapsedS ?? pending.reasoningElapsedS;
         pending.timestamp = m.timestamp;
         pending.isLiveReasoning = pending.isLiveReasoning || m.isLiveReasoning;
-        // (#1034) 上面按拼接改写了 content，live 窗口的 tail 必须跟着重新基线化，
-        // 否则下一次 flush 会从拼接前的 tail 续写，把刚并进来的这段文本丢掉。
-        if (pending.isLiveReasoning) rebaseLiveReasoning(pending);
         continue;
       }
       pending = { ...m };
@@ -2180,9 +2197,34 @@ export const LIVE_REASONING_KEEP_CHARS = 6000;
 
 /** (#1034) Head-collapse placeholder for a live reasoning block, e.g.
  *  「…已省略 1234 字」.  A trailing blank line keeps it its own markdown
- *  paragraph so it renders as a separate line, not glued to the tail. */
+ *  paragraph so it renders as a separate line, not glued to the tail.
+ *
+ *  `LIVE_REASONING_PLACEHOLDER_PREFIX` / `_SUFFIX` are shared with
+ *  `parseLiveReasoningOmitted` so the marker can never be written one way and
+ *  read back another. */
+const LIVE_REASONING_PLACEHOLDER_PREFIX = '…已省略 ';
+const LIVE_REASONING_PLACEHOLDER_SUFFIX = ' 字\n\n';
+
 export function liveReasoningPlaceholder(omittedChars: number): string {
-  return `…已省略 ${omittedChars} 字\n\n`;
+  return `${LIVE_REASONING_PLACEHOLDER_PREFIX}${omittedChars}${LIVE_REASONING_PLACEHOLDER_SUFFIX}`;
+}
+
+/** (#1034 复审 P2) Read a rendered 「…已省略 N 字」 marker back into its count,
+ *  or `null` when `text` has no marker.
+ *
+ *  Needed because a reasoning block that is no longer live has only its
+ *  rendered text: the final handler replaces `content` with the backend's own
+ *  (re-capped) text while a block's `reasoningOmitted` keeps counting the
+ *  *streaming* window.  Merging must start from what is actually on screen, so
+ *  the count is taken from the marker that produced that text, by *shape*
+ *  rather than by equality — the same rule `isStrippedTerminal` uses. */
+function parseLiveReasoningOmitted(text: string): number | null {
+  if (!text.startsWith(LIVE_REASONING_PLACEHOLDER_PREFIX)) return null;
+  const start = LIVE_REASONING_PLACEHOLDER_PREFIX.length;
+  const end = text.indexOf(LIVE_REASONING_PLACEHOLDER_SUFFIX, start);
+  if (end < 0) return null;
+  const digits = text.slice(start, end);
+  return /^\d+$/.test(digits) ? Number(digits) : null;
 }
 
 /** Keep a surrogate pair intact when cutting the window at `index`. */
@@ -2223,26 +2265,60 @@ function accumulateLiveReasoning(
   return { tail, omitted, text: omitted > 0 ? liveReasoningPlaceholder(omitted) + tail : tail };
 }
 
-/** (#1034) Re-derive a live block's window bookkeeping from its own text.
+/** (#1034 复审 P2) A reasoning block's *own* window, as merging should see it:
+ *  the text the reader still has, and how many characters its head marker (or
+ *  the live bookkeeping) already accounts for.
  *
- *  `liveReasoningTail` must always be the *tail of `content`* — otherwise the
- *  next flush renders `tail + delta` and silently drops the characters in
- *  between (visible as thinking text disappearing mid-stream).  Appending via
- *  `accumulateLiveReasoning` maintains that by construction; a path that
- *  instead rewrites `content` by concatenation must re-base through here.
- *  Only `dedupeReasoningBlocks` does that today. */
-function rebaseLiveReasoning(msg: Message): void {
-  const omitted = msg.reasoningOmitted ?? 0;
-  const placeholder = omitted > 0 ? liveReasoningPlaceholder(omitted) : '';
-  const body =
-    placeholder && msg.content.startsWith(placeholder)
-      ? msg.content.slice(placeholder.length)
-      : msg.content;
-  const next = accumulateLiveReasoning('', omitted, body);
-  msg.liveReasoningTail = next.tail;
-  msg.reasoningOmitted = next.omitted;
-  msg.content = next.text;
-  msg.reasoning = next.text;
+ *  `liveReasoningTail` must always be the tail of `content`, otherwise the next
+ *  flush renders `tail + delta` and silently drops the characters in between
+ *  (visible as thinking text disappearing mid-stream).  `appendReasoningDelta`
+ *  maintains that by construction, so a live block is read straight from the
+ *  bookkeeping.  Any other block is read back from its rendered text: a headed
+ *  block carries the exact count in its marker, and a block with no marker was
+ *  never windowed.  Either way `omitted + tail.length` is that block's full
+ *  logical length — the property `mergeReasoningBlocks` has to preserve. */
+function reasoningWindow(msg: Message): { tail: string; omitted: number } {
+  const text = msg.content ?? msg.reasoning ?? '';
+  if (msg.isLiveReasoning && typeof msg.liveReasoningTail === 'string') {
+    return { tail: msg.liveReasoningTail, omitted: msg.reasoningOmitted ?? 0 };
+  }
+  const omitted = parseLiveReasoningOmitted(text);
+  return omitted === null
+    ? { tail: text, omitted: 0 }
+    : { tail: text.slice(liveReasoningPlaceholder(omitted).length), omitted };
+}
+
+/** (#1034 复审 P2) Does this block carry the bounded window's bookkeeping —
+ *  still streaming, or already collapsed into a head marker?  Plain text (a
+ *  turn restored from persisted history) carries neither, and merging it must
+ *  not start folding it: the bound is a *streaming* bound (see
+ *  MAX_LIVE_REASONING_CHARS). */
+function hasReasoningWindow(msg: Message): boolean {
+  return msg.isLiveReasoning === true || parseLiveReasoningOmitted(msg.content ?? '') !== null;
+}
+
+/** (#1034 复审 P2) Merge two adjacent thinking blocks with exact omission
+ *  accounting.
+ *
+ *  Concatenating the rendered texts (what this used to do) splices the right
+ *  block's 「…已省略 N 字」 marker into the middle of the merged text and drops
+ *  its omission count — the merged block kept only the left one's, so
+ *  `omitted + retained tail` no longer equalled the reasoning that was
+ *  received.  Re-window the two *tails* through `accumulateLiveReasoning`
+ *  instead, with the omission counts summed up front: what the new, longer
+ *  window drops on top is then added by the accumulator itself, and the
+ *  invariant holds by construction. */
+function mergeReasoningBlocks(
+  left: Message,
+  right: Message
+): { tail: string; omitted: number; text: string } {
+  const leftWindow = reasoningWindow(left);
+  const rightWindow = reasoningWindow(right);
+  return accumulateLiveReasoning(
+    `${leftWindow.tail}\n`,
+    leftWindow.omitted + rightWindow.omitted,
+    rightWindow.tail
+  );
 }
 
 /** (#1034 复审 P1-a / P2) Terminal events (final/error/aborted) can never be
