@@ -1140,3 +1140,26 @@ async def test_claim_legacy_gives_folder_copy_ownership(fake_config, fake_provid
         ClientSessionRegistry(),
     )
     assert after["result"]["workspace"] == str(folder)
+
+
+@pytest.mark.asyncio
+async def test_sessions_workspace_does_not_answer_not_bound_on_lookup_failure(
+    fake_config, fake_provider
+):
+    """#1103 review：runtime 查询失败不能答成「未绑定」。
+
+    ``workspace: null`` 是「该会话没绑目录」这个**确定**答案，主进程据此回落到
+    全局工作区。查询失败时我们并不知道答案：照样回 null 的话，绑定会话的相对
+    路径会被重新锚到全局工作区上，``report.md`` 就读到了另一个同名文件。失败
+    必须冒出去，让这次操作失败，而不是安静地从错误的根读。
+    """
+    from miqi.runtime.session_handlers import sessions_workspace_handler
+
+    class _FailingRegistry:
+        async def get_session(self, *_args, **_kwargs):
+            raise RuntimeError("registry unavailable")
+
+    with pytest.raises(RuntimeError):
+        await sessions_workspace_handler(
+            "req-1", {"session_key": "bound"}, "client-1", None, _FailingRegistry(),
+        )

@@ -312,18 +312,21 @@ async def _runtime_workspace_for_session(
     session_key: str,
     registry: Any,
 ) -> str | None:
-    """Workspace of this session's live runtime, or None (#1062)."""
+    """Workspace of this session's live runtime, or None (#1062).
+
+    None means there is no runtime to ask.  A lookup that *fails* is a different
+    answer and is deliberately not folded into it (#1103 review): the callers
+    turn "this session has no runtime" into "resolve against the app-home
+    workspace", which is right for an unbound session but wrong for a bound one,
+    where a session-relative name would address a different file of the same
+    name.  Left to propagate, the failure costs one failed read instead of a
+    silent read from the wrong root.
+    """
     if registry is None:
         return None
-    try:
-        runtime = await registry.get_session(
-            client_id, _client_session_id(client_id, session_key),
-        )
-    except Exception as exc:
-        logger.debug(
-            "runtime workspace lookup failed for {}: {}", session_key, exc,
-        )
-        return None
+    runtime = await registry.get_session(
+        client_id, _client_session_id(client_id, session_key),
+    )
     return _active_runtime_workspace(runtime)
 
 
