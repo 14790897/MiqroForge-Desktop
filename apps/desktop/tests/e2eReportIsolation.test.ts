@@ -26,6 +26,8 @@ describe('探针与主 E2E 的报告隔离', () => {
     spawnSync(process.execPath, [playwrightCli, 'test', '--config=playwright.config.ts', ...args], {
       cwd,
       encoding: 'utf8',
+      // 外层 Vitest timeout 120s 不能中断阻塞的 spawnSync；给子进程 110s，让它在测试超时前退出。
+      timeout: 110_000,
       env: { ...process.env, PLAYWRIGHT_SKIP_WEB_SERVER: '1' },
     });
 

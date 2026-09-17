@@ -176,17 +176,29 @@ jobs:
         env:
           PLAYWRIGHT_SKIP_WEB_SERVER: '1'
 
-      - name: Upload E2E JSON report (no secrets)
-        # #1107 / 安全评审：让 flaky 可见这件事不能在 secret-bearing 的 job 里执行 PR 检出的
-        # 代码 —— 那会是第三个 secret exfiltration sink（CWE-829）。所以这里**只上传**主 E2E 的
-        # JSON 报告到固定的 `_gh-artifacts` 预发布（release asset，公开可读），解析交给后面那个
-        # 无 secrets 的 summarize-flaky job 去做。GH_TOKEN 只出现在这个 http 请求的头里。
+      - name: Upload E2E JSON report (trusted gh CLI)
+        # #1107 / 安全评审：上传动作本身必须在可信 workflow 代码里完成，不能执行 PR 检出的脚本。
+        # 这里用 runner 预装的 gh CLI 把主 E2E 的 JSON 报告上传到固定的 `_gh-artifacts` 预发布；
+        # GH_TOKEN 只出现在 gh CLI 的环境变量里，不交给任何 PR 控制的代码。名称带 run_id + run_attempt，
+        # 重跑时不会覆盖第一次尝试的旧报告，并定时清理旧资产防止触到 GitHub 1000 资产上限。
         if: always()
         id: upload-e2e-report
         run: |
           if [ -f test-reports/results.json ]; then
-            echo "report-url=$(node scripts/gh-artifact-upload.mjs test-reports/results.json \
-              "e2e-results-linux-${{ github.run_id }}.json")" >> "$GITHUB_OUTPUT"
+            tag="_gh-artifacts"
+            name="e2e-results-linux-${{ github.run_id }}-${{ github.run_attempt }}.json"
+            cp test-reports/results.json "$name"
+            gh release view "$tag" --repo "${{ github.repository }}" >/dev/null 2>&1 || \
+              gh release create "$tag" --prerelease --title "$tag" \
+                --body "CI 产物（E2E 报告等）—— 不要删除。见 .github/workflows/desktop-ci.yml" \
+                --repo "${{ github.repository }}"
+            gh release upload "$tag" "$name" --clobber --repo "${{ github.repository }}"
+            # 保留最近 100 个资产（约 50 次双平台运行），避免触及 release 1000 资产上限。
+            gh api "repos/${{ github.repository }}/releases/tags/$tag" \
+              --jq '.assets | sort_by(.created_at) | reverse | .[100:] | .[].id' | \
+              xargs -r -I {} gh api -X DELETE "repos/${{ github.repository }}/releases/assets/{}" --silent
+            echo "report-url=https://github.com/${{ github.repository }}/releases/download/$tag/$name" >> "$GITHUB_OUTPUT"
+            rm -f "$name"
           else
             echo "report-url=" >> "$GITHUB_OUTPUT"
             echo "没有产出 test-reports/results.json（主步没跑完），汇总将如实报「没找到报告」"
@@ -318,15 +330,26 @@ jobs:
         env:
           PLAYWRIGHT_SKIP_WEB_SERVER: '1'
 
-      - name: Upload E2E JSON report (no secrets, macOS)
-        # 同 Linux 侧（#1107 / 安全评审）：只上传主 E2E 的 JSON 报告，解析交给无 secrets 的
-        # summarize-flaky job —— 这个 secret-bearing job 里不执行任何 PR 检出的代码。
+      - name: Upload E2E JSON report (trusted gh CLI, macOS)
+        # 同 Linux 侧（#1107 / 安全评审）：用 runner 预装的 gh CLI 上传，不执行 PR 检出的脚本。
         if: always()
         id: upload-e2e-report
         run: |
           if [ -f test-reports/results.json ]; then
-            echo "report-url=$(node scripts/gh-artifact-upload.mjs test-reports/results.json \
-              "e2e-results-macos-${{ github.run_id }}.json")" >> "$GITHUB_OUTPUT"
+            tag="_gh-artifacts"
+            name="e2e-results-macos-${{ github.run_id }}-${{ github.run_attempt }}.json"
+            cp test-reports/results.json "$name"
+            gh release view "$tag" --repo "${{ github.repository }}" >/dev/null 2>&1 || \
+              gh release create "$tag" --prerelease --title "$tag" \
+                --body "CI 产物（E2E 报告等）—— 不要删除。见 .github/workflows/desktop-ci.yml" \
+                --repo "${{ github.repository }}"
+            gh release upload "$tag" "$name" --clobber --repo "${{ github.repository }}"
+            # 保留最近 100 个资产（约 50 次双平台运行），避免触及 release 1000 资产上限。
+            gh api "repos/${{ github.repository }}/releases/tags/$tag" \
+              --jq '.assets | sort_by(.created_at) | reverse | .[100:] | .[].id' | \
+              xargs -r -I {} gh api -X DELETE "repos/${{ github.repository }}/releases/assets/{}" --silent
+            echo "report-url=https://github.com/${{ github.repository }}/releases/download/$tag/$name" >> "$GITHUB_OUTPUT"
+            rm -f "$name"
           else
             echo "report-url=" >> "$GITHUB_OUTPUT"
             echo "没有产出 test-reports/results.json（主步没跑完），汇总将如实报「没找到报告」"
@@ -374,12 +397,14 @@ jobs:
       - name: Summarize flaky E2E tests (Linux)
         if: needs.electron-e2e.outputs.report-url != ''
         run: |
+          mkdir -p test-reports
           curl -fsSL "${{ needs.electron-e2e.outputs.report-url }}" -o test-reports/results-linux.json
           node scripts/e2e-flaky-report.mjs test-reports/results-linux.json
 
       - name: Summarize flaky E2E tests (macOS)
         if: needs.macos-e2e.outputs.report-url != ''
         run: |
+          mkdir -p test-reports
           curl -fsSL "${{ needs.macos-e2e.outputs.report-url }}" -o test-reports/results-macos.json
           node scripts/e2e-flaky-report.mjs test-reports/results-macos.json
 
