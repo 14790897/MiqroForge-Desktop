@@ -64,6 +64,29 @@ describe('QraftStore', () => {
     expect(loaded).toEqual(state);
   });
 
+  it('存量生产登录态的历史默认地址随域名迁移更新为新默认', () => {
+    const file = join(dir, 'qraft-auth.json');
+    const safe = fakeSafeStorage();
+    const store = new QraftStore(file, safe, noopLog);
+    store.save(makeState({ env: 'prod', baseUrl: 'https://forge.miqroera.com/api' }));
+
+    const loaded = new QraftStore(file, safe, noopLog).load();
+    expect(loaded?.baseUrl).toBe('https://www.miqroforge.com/api');
+    // 迁移只改地址，其余登录态原样保留
+    expect(loaded?.tokens.accessToken).toBe('ACCESS');
+    expect(loaded?.account.sub).toBe('19');
+  });
+
+  it('自定义 baseUrl 不被域名迁移改写', () => {
+    const file = join(dir, 'qraft-auth.json');
+    const safe = fakeSafeStorage();
+    const store = new QraftStore(file, safe, noopLog);
+    store.save(makeState({ env: 'prod', baseUrl: 'https://internal.example.com/api' }));
+
+    const loaded = new QraftStore(file, safe, noopLog).load();
+    expect(loaded?.baseUrl).toBe('https://internal.example.com/api');
+  });
+
   it('安全存储不可用时降级 Base64（仍不落明文），并告警', () => {
     const file = join(dir, 'qraft-auth.json');
     const warnings: string[] = [];
