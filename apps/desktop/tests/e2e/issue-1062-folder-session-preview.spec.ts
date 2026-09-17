@@ -13,7 +13,7 @@
  *   2. `openContainingFolder(<绑定目录下的绝对路径>, key)` 的失败原因不得是
  *      「工作区之外」。用一个**不存在的**文件来问，这样既锁住「绑定根被接受
  *      为允许根」，又不会真的弹出文件管理器。
- *   3. 面板里点「预览」不出现错误提示——这是用户实际看到的症状。
+ *   3. 面板里点「预览」真的弹出预览窗且内容可见——这是用户实际看到的症状。
  *
  * Flow mirrors issue-1061-folder-session-assets.spec.ts: seed a workspace binding
  * so the picker's 最近使用 offers the folder → open the picker from the inline
@@ -156,16 +156,22 @@ test.describe('#1062 folder-bound session 预览/定位', () => {
         'bound-folder path must not be refused as outside the workspace'
       ).not.toMatch(/outside workspace/i);
 
-      // 3. 用户实际看到的症状：面板里点「预览」不该弹错误提示。（「定位」按钮只对
-      //    结果文件渲染，其包含性校验由上一步的 IPC 探针覆盖。）
+      // 3. 用户实际看到的症状：面板里点「预览」要真的弹出预览窗并显示内容。
+      //    （「定位」按钮只对结果文件渲染，其包含性校验由上一步的 IPC 探针覆盖。）
       const panel = page.getByTestId('task-assets-panel');
-      await expect(panel.getByText(filename, { exact: false }).first()).toBeVisible({
-        timeout: 60_000,
-      });
-      const previewBtn = panel.getByTestId('file-preview-btn').first();
+      // 精确到**我们这个文件**的卡片：面板里可能还有别的 tracked 文件，取
+      // `.first()` 可能点到别人身上，「预览显示 hello 1062」就成了假断言。
+      const card = panel.getByTestId('tracked-file-card').filter({ hasText: filename }).first();
+      await expect(card).toBeVisible({ timeout: 60_000 });
+      const previewBtn = card.getByTestId('file-preview-btn');
       await expect(previewBtn).toBeVisible({ timeout: 15_000 });
       await previewBtn.click();
-      await page.waitForTimeout(1500);
+
+      // 断言预览窗**真的打开并显示内容**。「没有 error toast」不够——按钮彻底
+      // 坏掉、点了什么都不发生，同样满足那个条件（#1103 review）。
+      const preview = page.getByTestId('file-preview-modal');
+      await expect(preview).toBeVisible({ timeout: 15_000 });
+      await expect(preview).toContainText('hello 1062', { timeout: 15_000 });
       await expect(
         page.getByTestId('asset-error-toast'),
         '预览 a folder-bound file must not surface an error'

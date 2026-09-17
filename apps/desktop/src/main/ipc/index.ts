@@ -240,25 +240,35 @@ async function submitFeedbackToPlatform(input: {
 }
 
 /**
- * Workspace a folder-bound session's own files live in, as extra roots for the
- * containment checks (#1062).
+ * Extra allowed roots for a session-keyed file operation (#1062).
  *
- * Derived server-side from the session key.  The renderer names a session and
- * never a root: a root it could supply would make the containment check in
- * `resolveWorkspacePath` meaningless (#955).  Returns [] for an unbound session
- * or when the bridge cannot answer, which leaves the global workspace as the
- * only root — the behavior before this change.
+ * The root is derived server-side: a renderer that could name a root would make
+ * every containment check in this file meaningless (#955), so the renderer names
+ * a *session* and the bridge answers with its workspace.
+ *
+ * A failed lookup is not the same answer as "this session is not folder-bound".
+ * The first means we do not know where the session's files live, and quietly
+ * carrying on with the global workspace would re-anchor a session-relative path
+ * onto the wrong root — a `report.md` in the default workspace would answer for
+ * a bound session's `report.md`.  The two are kept apart so callers can fail
+ * closed on the first.
  */
 async function sessionWorkspaceRoots(
   bridge: BridgeManager,
   sessionKey?: string
-): Promise<string[]> {
-  if (!sessionKey) return [];
-  const res = (await bridge.sendSafe('sessions.workspace', {
+): Promise<{ ok: true; roots: string[] } | { ok: false; error: string }> {
+  // No session key: the caller is operating in the default workspace, which is
+  // an allowed root in its own right.  Nothing to resolve, nothing to fail.
+  if (!sessionKey) return { ok: true, roots: [] };
+
+  const res = await bridge.sendSafeWithError('sessions.workspace', {
     session_key: sessionKey,
-  })) as { workspace?: string | null } | null;
-  const workspace = res?.workspace;
-  return typeof workspace === 'string' && workspace ? [workspace] : [];
+  });
+  if (!res.ok) {
+    return { ok: false, error: res.error };
+  }
+  const workspace = (res.value as { workspace?: string | null } | null)?.workspace;
+  return { ok: true, roots: typeof workspace === 'string' && workspace ? [workspace] : [] };
 }
 
 export function registerIpcHandlers(bridge: BridgeManager): void {
@@ -1998,7 +2008,17 @@ for m in ("pydantic", "httpx", "loguru"):
     }
     const raw = parsed.data.path;
     // #1062: 文件夹绑定会话的产物落在会话自己的工作区，作为额外允许根由服务端推导。
-    const extraRoots = await sessionWorkspaceRoots(bridge, parsed.data.session_key);
+    // 解析不出来时 fail closed：宁可这次打开失败，也不要把会话相对路径重新锚到
+    // 全局工作区上——那会打开另一个同名文件。
+    const sessionRoots = await sessionWorkspaceRoots(bridge, parsed.data.session_key);
+    if (!sessionRoots.ok) {
+      return {
+        opened: false,
+        path: raw,
+        error: `无法解析会话工作区，已拒绝打开以免定位到错误的文件：${sessionRoots.error}`,
+      };
+    }
+    const extraRoots = sessionRoots.roots;
     // #1062: 解析必须在 try 内——工作区外路径会 throw，否则异常直接变成 IPC
     // rejection，渲染层拿不到 {opened:false,error} 而静默失败。
     let absolutePath: string;
@@ -2281,7 +2301,16 @@ for m in ("pydantic", "httpx", "loguru"):
     }
     const raw = parsed.data.path;
     // #1062: 文件夹绑定会话的产物落在会话自己的工作区，作为额外允许根由服务端推导。
-    const extraRoots = await sessionWorkspaceRoots(bridge, parsed.data.session_key);
+    // 解析不出来时 fail closed——理由同 FILES_OPEN_EXTERNAL。
+    const sessionRoots = await sessionWorkspaceRoots(bridge, parsed.data.session_key);
+    if (!sessionRoots.ok) {
+      return {
+        revealed: false,
+        path: raw,
+        error: `无法解析会话工作区，已拒绝定位以免指到错误的文件：${sessionRoots.error}`,
+      };
+    }
+    const extraRoots = sessionRoots.roots;
     // Session metadata may store workspace as a string (Path str) —
     // resolve "Path('...')" wrapper to a plain path string before opening.
     const clean = raw.replace(/^Path\(['"]/, '').replace(/['"]\)$/, '');

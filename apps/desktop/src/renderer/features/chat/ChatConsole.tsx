@@ -8669,6 +8669,7 @@ export function ChatConsole({
           className="max-w-[980px] p-0 bg-transparent border-0 shadow-none"
         >
           <div
+            data-testid="file-preview-modal"
             className="flex flex-col rounded-xl shadow-2xl overflow-hidden"
             style={{
               width: '100%',

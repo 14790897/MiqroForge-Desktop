@@ -1090,3 +1090,53 @@ async def test_sessions_workspace_returns_bound_root(fake_config, fake_provider,
         ClientSessionRegistry(),
     )
     assert out["result"]["workspace"] == str(folder)
+
+
+@pytest.mark.asyncio
+async def test_claim_legacy_gives_folder_copy_ownership(fake_config, fake_provider, tmp_path):
+    """#1103 review：claim 只盖 app-home stub 时，绑定根对 resolver 依然不可见。
+
+    legacy 会话的两份 copy 都没有 owner —— app-home 的 stub 和绑定目录里那份。
+    解析器一律走 ``_probe_folder(require_owned=True)``，ownerless 的 folder copy
+    被当成不存在，于是 claim 完 ``sessions.workspace`` 仍返回 null、会话的文件
+    继续按全局工作区解析，正是这个 PR 要修的症状。
+    """
+    from miqi.runtime.app_server import ClientSessionRegistry
+    from miqi.runtime.session_handlers import (
+        sessions_claim_legacy_handler,
+        sessions_workspace_handler,
+    )
+    from miqi.session.manager import SessionManager
+
+    folder = tmp_path / "legacy-bound"
+    folder.mkdir()
+
+    sm, _ws = _setup_session("legacy-bound", None, set_owner=False)
+    stub = sm.load_existing("legacy-bound")
+    stub.metadata["workspace"] = str(folder)
+    sm.save(stub)
+    sm.invalidate("legacy-bound")
+
+    folder_sm = SessionManager(folder)
+    folder_session = folder_sm.get_or_create("legacy-bound")
+    folder_session.metadata.pop("owner_client_id", None)
+    folder_sm.save(folder_session)
+    folder_sm.invalidate("legacy-bound")
+
+    # 认领之前：folder copy 没有 owner，绑定根解析不出来。
+    before = await sessions_workspace_handler(
+        "req-1", {"session_key": "legacy-bound"}, "client-1", None,
+        ClientSessionRegistry(),
+    )
+    assert before["result"]["workspace"] is None
+
+    await sessions_claim_legacy_handler(
+        "req-2", {"session_key": "legacy-bound"}, "client-1", None,
+        ClientSessionRegistry(),
+    )
+
+    after = await sessions_workspace_handler(
+        "req-3", {"session_key": "legacy-bound"}, "client-1", None,
+        ClientSessionRegistry(),
+    )
+    assert after["result"]["workspace"] == str(folder)
