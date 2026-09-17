@@ -43,6 +43,23 @@ export const QRAFT_ENV_DEFAULTS: Record<QraftEnv, QraftEnvConfig> = {
 };
 
 /**
+ * 已知的历史默认 baseUrl（2026-09-17 生产域名由 forge.miqroera.com 迁移）。
+ * 存储值精确命中旧默认时视为「从未自定义」，随当前环境默认更新；
+ * 用户显式填写的自定义地址原样保留。
+ */
+const LEGACY_DEFAULT_BASE_URLS: Record<QraftEnv, readonly string[]> = {
+  test: [],
+  prod: ['https://forge.miqroera.com/api'],
+};
+
+/** 迁移存储中的历史默认 baseUrl（见 LEGACY_DEFAULT_BASE_URLS）。 */
+export function migrateStoredBaseUrl(env: QraftEnv, baseUrl: string): string {
+  return LEGACY_DEFAULT_BASE_URLS[env].includes(baseUrl)
+    ? QRAFT_ENV_DEFAULTS[env].baseUrl
+    : baseUrl;
+}
+
+/**
  * 测试环境 client_secret。当前处于测试阶段，开箱即用优先，默认值硬编码；
  * 可经 QRAFT_TEST_CLIENT_SECRET 环境变量覆盖（转正式环境接入前应移除默认值）。
  */
