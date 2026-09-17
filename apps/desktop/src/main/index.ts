@@ -44,7 +44,14 @@ function createWindow(): void {
       // E2E 专用标记：helper 设 MIQI_E2E=1 时随 argv 下发到 sandbox preload，
       // 渲染层据此跳过隐私协议确认门（#837），避免 E2E 被全屏确认页阻断。
       // 仅限未打包环境——打包产物被外部注入 MIQI_E2E=1 不得绕过确认门。
-      additionalArguments: !app.isPackaged && process.env['MIQI_E2E'] === '1' ? ['--miqi-e2e'] : [],
+      // 登录门（#1095）默认同样绕过（几乎全部用例要未登录的主界面），
+      // 只有专门验证登录门的用例经 helper 去掉 MIQI_LOGIN_BYPASS。
+      additionalArguments: !app.isPackaged
+        ? [
+            ...(process.env['MIQI_E2E'] === '1' ? ['--miqi-e2e'] : []),
+            ...(process.env['MIQI_LOGIN_BYPASS'] === '1' ? ['--miqi-login-bypass'] : []),
+          ]
+        : [],
     },
   });
 

@@ -296,6 +296,12 @@ export function registerQraftIpcHandlers(): void {
     return getService().status();
   });
 
+  // 登录门首帧判定（#1095）：preload 在页面脚本执行前同步取一次登录态，
+  // 渲染层据此决定是否停在登录页——异步取会让已登录用户先闪一帧登录页。
+  ipcMain.on(IPC.QRAFT_STATUS_SYNC, (event) => {
+    event.returnValue = getService().status();
+  });
+
   ipcMain.handle(IPC.QRAFT_POINTS_BALANCE, async () => {
     return getService().fetchPointsBalance();
   });

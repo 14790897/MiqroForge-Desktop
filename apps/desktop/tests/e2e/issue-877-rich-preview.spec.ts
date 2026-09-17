@@ -10,6 +10,16 @@
  * Fixtures live in ./fixtures as base64 files generated once with the
  * backend's own libraries (openpyxl / python-docx / hand-built PDF).
  *
+ * Flake history (desktop-ci run 35064775546, XLSX case): the staged entry was
+ * written to disk, the page reloaded, and the preview button asserted
+ * visible within a fixed 20s — both the first attempt and the retry timed out
+ * ("element(s) not found") while the same flow completes in ~12s on an idle
+ * machine.  The panel paints only after the reload's restore round-trip
+ * (`sessions.get` with its retry/backoff chain, then `getTrackedFiles`), so a
+ * loaded CI runner can outrun any fixed sleep, and the raw timeout said
+ * nothing about which half was slow.  The helper now polls the bridge for the
+ * staged entry first and gives the render its own explicit budget.
+ *
  * Run:
  *   cd apps/desktop
  *   npm run build && npx playwright test --config=playwright.config.ts --project=electron issue-877-rich-preview.spec.ts
@@ -68,11 +78,64 @@ async function stageTrackedFile(
   );
 }
 
-async function openFirstPreview(page: Page): Promise<void> {
+/** Wait until the bridge actually serves the staged entry.
+ *
+ *  The panel paints from `sessions.getTrackedFiles()`, which the reload path
+ *  only reaches after `sessions.get()` — itself retried up to 10× with
+ *  backoff while the bridge warms up.  Under CI load (several Electron +
+ *  Python bridge instances in parallel) that round-trip can outlast any fixed
+ *  sleep, so poll the same bridge call the panel uses: the wait is then bound
+ *  to the real state instead of to a guessed duration, and a genuinely
+ *  missing entry stays distinguishable from a slow one. */
+async function waitForTrackedFileServed(page: Page, key: string, name: string): Promise<void> {
+  await expect
+    .poll(
+      async () =>
+        page.evaluate(
+          async (args) => {
+            try {
+              const res = await (window as any).miqi.sessions.getTrackedFiles(args.key);
+              return ((res?.tracked_files ?? []) as any[]).some(
+                (f) => f?.name === args.name || f?.path === args.name
+              );
+            } catch {
+              return false;
+            }
+          },
+          { key, name }
+        ),
+      { timeout: 60_000, intervals: [500, 1000, 2000] }
+    )
+    .toBe(true);
+}
+
+async function openFirstPreview(page: Page, key: string, name: string): Promise<void> {
+  await waitForTrackedFileServed(page, key, name);
   await page.reload({ waitUntil: 'domcontentloaded' });
   await waitForInputReady(page, 60_000).catch(() => {});
   const previewBtn = page.locator('[data-testid="file-preview-btn"]').first();
-  await expect(previewBtn).toBeVisible({ timeout: 20_000 });
+  try {
+    // Generous but explicit: this waits for the reload's session restore to
+    // complete (sessions.get retry chain + tracked-files fetch), not for a
+    // speculative extra second of app latency.
+    await expect(previewBtn).toBeVisible({ timeout: 60_000 });
+  } catch (err) {
+    // Dump the panel state so a future failure says *which* half broke —
+    // data never served vs. served-but-not-rendered.
+    const emptyState = await page
+      .locator('[data-testid="task-assets-empty"]')
+      .isVisible()
+      .catch(() => false);
+    const panelText = await page
+      .locator('[data-testid="task-assets-panel"]')
+      .textContent()
+      .catch(() => null);
+    console.log(
+      `[test] preview button missing after reload — task-assets-empty=${emptyState}, ` +
+        `panel="${(panelText ?? '<panel not found>').slice(0, 200)}"`
+    );
+    throw err;
+  }
   await previewBtn.click();
   await page.waitForTimeout(1500);
 }
@@ -93,7 +156,7 @@ test.describe('issue #877 rich preview', () => {
       'preview-877.xlsx',
       fixtureBase64('preview-877.xlsx.b64')
     );
-    await openFirstPreview(page);
+    await openFirstPreview(page, key, 'preview-877.xlsx');
 
     // Table cells from sheet 1 (including the merged-cell anchor).  First
     // assertion gets a generous timeout — the backend's first openpyxl import
@@ -133,7 +196,7 @@ test.describe('issue #877 rich preview', () => {
       'preview-877.docx',
       fixtureBase64('preview-877.docx.b64')
     );
-    await openFirstPreview(page);
+    await openFirstPreview(page, key, 'preview-877.docx');
 
     await expect(page.getByText('实验结果', { exact: true }).first()).toBeVisible({
       timeout: 10_000,
@@ -165,7 +228,7 @@ test.describe('issue #877 rich preview', () => {
       'preview-877.pdf',
       fixtureBase64('preview-877.pdf.b64')
     );
-    await openFirstPreview(page);
+    await openFirstPreview(page, key, 'preview-877.pdf');
 
     // The modal body hosts a blob iframe for Chromium's PDF viewer.
     const pdfFrame = page.locator('iframe[src^="blob:"]').last();

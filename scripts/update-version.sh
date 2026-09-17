@@ -6,6 +6,9 @@
 #   - package.json (root)
 #   - pyproject.toml
 #   - apps/desktop/package.json
+#   - miqi/__init__.py
+#
+# All four must stay in sync: tests/test_version_sync.py fails if any drifts.
 
 set -euo pipefail
 
@@ -24,5 +27,9 @@ echo "  ✓ pyproject.toml → ${VERSION}"
 # 3. apps/desktop/package.json
 sed -i "s/\"version\": \".*\"/\"version\": \"${VERSION}\"/" apps/desktop/package.json
 echo "  ✓ apps/desktop/package.json → ${VERSION}"
+
+# 4. miqi/__init__.py (__version__ literal → CLI banner, protocol handshake, diagnose output)
+sed -i "s/^__version__ = \".*\"/__version__ = \"${VERSION}\"/" miqi/__init__.py
+echo "  ✓ miqi/__init__.py → ${VERSION}"
 
 echo "✅ All versions updated to ${VERSION}"
