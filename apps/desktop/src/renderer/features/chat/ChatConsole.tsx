@@ -2905,11 +2905,26 @@ function mergeableDelta(prev: InFlightEvent, next: InFlightEvent): string | null
  *  from `capTerminalEventData`'s `_truncated` so the two cannot be confused. */
 const TERMINAL_STRIPPED_DATA = { _evicted: true } as const;
 
-/** (#1034 复审 P2) Payload of an older terminal that was emptied to free
- *  bytes: `type` and `timestamp` survive, so replay still sees a settled turn;
- *  nothing else does. */
+/** Head kept of an error's `message` when the payload is stripped. */
+const MAX_STRIPPED_MESSAGE_CHARS = 200;
+
+/** (#1034 复审 P2) Payload of a terminal that was emptied to free bytes:
+ *  `type` and `timestamp` survive, so replay still sees a settled turn.
+ *
+ *  An error additionally keeps a short head of its `message` — replay renders
+ *  that as an error bubble, and an emptied one would read 「Unknown error」.
+ *  A final deliberately keeps nothing: replay would render the truncated text
+ *  as the answer and fail the "already persisted" dedupe against the full
+ *  one, so the answer is better left to the persisted history. */
 function stripTerminalPayload(event: InFlightEvent): InFlightEvent {
-  return { type: event.type, data: TERMINAL_STRIPPED_DATA, timestamp: event.timestamp };
+  const message = (event.data as { message?: unknown } | null | undefined)?.message;
+  const head =
+    typeof message === 'string' ? message.slice(0, MAX_STRIPPED_MESSAGE_CHARS) : undefined;
+  return {
+    type: event.type,
+    data: head === undefined ? TERMINAL_STRIPPED_DATA : { _evicted: true, message: head },
+    timestamp: event.timestamp,
+  };
 }
 
 function isStrippedTerminal(event: InFlightEvent): boolean {
@@ -2964,8 +2979,9 @@ function evictInFlightOverflow(snapshot: InFlightSnapshot): void {
 
     // Only terminals left. An over-long *count* cannot happen here (the
     // protocol allows one final plus an optional error/aborted), so a byte
-    // breach is the only reason to keep going — and then the newest terminal
-    // must keep its data.
+    // breach is the only reason to keep going — and the newest terminal is the
+    // last one asked to give up its data, since replay reads the answer from
+    // it.
     if (snapshot.bytes <= IN_FLIGHT_MAX_BYTES) return;
     let newestTerminal = -1;
     for (let i = snapshot.events.length - 1; i >= 0; i -= 1) {

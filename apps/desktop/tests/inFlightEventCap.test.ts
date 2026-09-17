@@ -495,6 +495,32 @@ describe('#1034 复审二轮：terminal payload 递归硬上限 + 多终态快�
     expect(inFlightEventBytes(oldest)).toBeLessThan(1024);
   });
 
+  it('P2：error 被掏空时保留 message 头部，回放不显示「Unknown error」', () => {
+    const buf = createInFlightSnapshot();
+    const errorData = capTerminalEventData({ message: 'E'.repeat(300 * 1024) });
+    pushInFlightEvent(buf, { type: 'error', data: errorData, timestamp: 8 } as Ev);
+    pushInFlightEvent(buf, {
+      type: 'final',
+      data: capTerminalEventData(bigPayload('f'.repeat(300 * 1024))),
+      timestamp: 9,
+    } as Ev);
+
+    expect(buf.bytes).toBeLessThanOrEqual(IN_FLIGHT_MAX_BYTES);
+    // 较旧的 error 先交出 payload，但保留 message 头部：cachedEventsToMessages
+    // 会把 error 渲染成错误气泡，掏空 message 就变成「Unknown error」。
+    const stripped = buf.events[0];
+    expect(stripped.type).toBe('error');
+    expect((stripped.data as { _evicted?: boolean })._evicted).toBe(true);
+    const head = (stripped.data as { message?: unknown }).message;
+    expect(typeof head).toBe('string');
+    expect((head as string).startsWith('EEE')).toBe(true);
+    expect((head as string).length).toBeLessThanOrEqual(200);
+    // 最新终态（final）的数据完整保留。
+    expect(
+      (buf.events[buf.events.length - 1].data as { content: string }).content.startsWith('fff')
+    ).toBe(true);
+  });
+
   it('P2：环状载荷的字节计费走兜底 walker 且能终止（seen 路径）', () => {
     const cyc: Record<string, unknown> = { blob: 'z'.repeat(1024 * 1024) };
     cyc.self = cyc;
