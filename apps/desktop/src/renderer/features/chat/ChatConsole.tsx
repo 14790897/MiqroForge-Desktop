@@ -2192,27 +2192,111 @@ function rebaseLiveReasoning(msg: Message): void {
  *     write when a turn closes (the full text is still in the session's
  *     persisted history).
  *
- *  `content` is deliberately NOT windowed: it is the user-visible answer and
- *  is bounded by the output token budget, while reasoning is the field #1034
- *  measured growing without bound (118k+ chars per turn).  Shorter-than-cap
- *  text passes through untouched. */
+ *  Shorter-than-cap text passes through untouched. */
 export function capTerminalReasoning(reasoning: string | undefined): string | undefined {
   if (!reasoning || reasoning.length <= MAX_LIVE_REASONING_CHARS) return reasoning;
   const cut = alignCodePoint(reasoning, reasoning.length - LIVE_REASONING_KEEP_CHARS);
   return liveReasoningPlaceholder(cut) + reasoning.slice(cut);
 }
 
-/** (#1034 复审 P1-a) Same terminal window, applied to a whole terminal event
- *  payload before it is pushed into the in-flight cache.  Only the fields we
- *  know how to window are touched; every other field is replay-critical
- *  metadata and passes through untouched (identity preserved when nothing
- *  changed).  Accepted for every terminal payload — `final` carries
- *  `reasoning`, `error`/`aborted` don't (the getter just finds nothing). */
+/** (#1034 复审 P1) Hard byte cap over an entire terminal payload before it is
+ *  pushed into the in-flight cache.  Final/error/aborted events are never
+ *  evicted, so a single multi-MB `content`, `message`, or `tool_calls` payload
+ *  would otherwise defeat IN_FLIGHT_MAX_BYTES by construction.
+ *
+ *  The cap is applied in order of least semantic damage:
+ *   1. `reasoning` uses the same tail window as the live stream.
+ *   2. `tool_calls` keeps their names but truncates `function.arguments`,
+ *      falling back to a `{ _truncated, count, names }` summary if still over budget.
+ *   3. `content` and `message` are truncated with an ellipsis marker.
+ *   4. Any remaining unknown string fields are halved iteratively until the
+ *      budget is met.
+ *
+ *  Identity is preserved when the payload already fits (no copy is made). */
 export function capTerminalEventData<T extends object>(data: T): T {
+  const budget = IN_FLIGHT_MAX_BYTES - IN_FLIGHT_EVENT_OVERHEAD_BYTES - 256;
+  if (payloadBytes(data) <= budget) return data;
+
+  let capped: Record<string, unknown> = { ...data };
+
+  // 1. Reasoning tail window (same as live stream).
   const reasoning = (data as { reasoning?: string }).reasoning;
-  const capped = capTerminalReasoning(reasoning);
-  if (capped === reasoning) return data;
-  return { ...data, reasoning: capped } as T;
+  if (typeof reasoning === 'string') {
+    const shrunk = capTerminalReasoning(reasoning);
+    if (shrunk !== reasoning) capped = { ...capped, reasoning: shrunk };
+  }
+  if (payloadBytes(capped) <= budget) return capped as T;
+
+  // 2. tool_calls: preserve names, cap each arguments string, then summarize.
+  const toolCalls = (capped as { tool_calls?: unknown }).tool_calls;
+  if (Array.isArray(toolCalls)) {
+    const bounded = toolCalls.map((tc) => {
+      const fn = (tc as { function?: { name?: string; arguments?: unknown } }).function;
+      if (!fn || typeof fn !== 'object') return tc;
+      const args = fn.arguments;
+      const truncatedArgs =
+        typeof args === 'string' && args.length > 4096 ? `${args.slice(0, 4096)}…` : args;
+      return { ...tc, function: { ...fn, arguments: truncatedArgs } };
+    });
+    capped = { ...capped, tool_calls: bounded };
+    if (payloadBytes(capped) <= budget) return capped as T;
+
+    const names = bounded.map((tc) => {
+      const fn = (tc as { function?: { name?: string } }).function;
+      return typeof fn?.name === 'string' ? fn.name : '?';
+    });
+    capped = { ...capped, tool_calls: { _truncated: true, count: bounded.length, names } };
+  }
+  if (payloadBytes(capped) <= budget) return capped as T;
+
+  // 3. `content` / `message`: truncate with ellipsis.
+  if (typeof capped.content === 'string') {
+    capped = { ...capped, content: truncateTerminalString(capped.content, 20000) };
+  }
+  if (payloadBytes(capped) <= budget) return capped as T;
+
+  if (typeof capped.message === 'string') {
+    capped = { ...capped, message: truncateTerminalString(capped.message, 20000) };
+  }
+  if (payloadBytes(capped) <= budget) return capped as T;
+
+  // 4. Fallback: iteratively halve the largest remaining string field.
+  capped = truncateLargestStringFields(capped, budget);
+  return capped as T;
+}
+
+/** Truncate a terminal string to at most `maxChars`, adding an ellipsis marker. */
+function truncateTerminalString(text: string, maxChars: number): string {
+  if (text.length <= maxChars) return text;
+  return `${text.slice(0, maxChars)}…`;
+}
+
+/** Repeatedly halve the largest string field until the payload fits the byte
+ *  budget or no shrinkable strings remain. */
+function truncateLargestStringFields(
+  payload: Record<string, unknown>,
+  budget: number,
+  maxRounds = 50
+): Record<string, unknown> {
+  let current = payload;
+  for (let round = 0; round < maxRounds; round += 1) {
+    if (payloadBytes(current) <= budget) break;
+
+    let largestKey: string | null = null;
+    let largestLen = 0;
+    for (const [key, value] of Object.entries(current)) {
+      if (typeof value === 'string' && value.length > largestLen) {
+        largestKey = key;
+        largestLen = value.length;
+      }
+    }
+    if (!largestKey) break;
+
+    const value = current[largestKey] as string;
+    const next = value.length <= 1 ? '' : `${value.slice(0, Math.floor(value.length / 2))}…`;
+    current = { ...current, [largestKey]: next };
+  }
+  return current;
 }
 
 /** Append a streaming reasoning chunk to the last live thinking bubble.
@@ -2538,7 +2622,7 @@ function mergeableDelta(prev: InFlightEvent, next: InFlightEvent): string | null
  *  newest event is never a victim, and terminal events (final/error/aborted)
  *  are never evicted — the replay needs them to settle the session.  Their
  *  count per turn is bounded by the protocol (one final, plus an optional
- *  error/aborted), and their payloads are windowed at ingest
+ *  error/aborted), and their payloads are hard-capped at ingest
  *  (capTerminalEventData), so refusing to evict them cannot grow the buffer
  *  nor blow the byte budget. */
 function evictInFlightOverflow(snapshot: InFlightSnapshot): void {

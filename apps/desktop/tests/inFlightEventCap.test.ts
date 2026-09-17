@@ -201,6 +201,62 @@ describe('#1034 复审 P1-a/P1-b/P2：终态尾窗 + 全深度字节计费', () 
     expect(stored.content).toBe('ok'); // 用户可见答案原样保留
   });
 
+  it('P1：2MiB content 的 final 入库后不击穿字节上限', () => {
+    const full = 'x'.repeat(2 * 1024 * 1024);
+    expect(inFlightEventBytes({ type: 'final', data: { content: full }, timestamp: 9 } as Ev)).toBeGreaterThan(IN_FLIGHT_MAX_BYTES);
+
+    const capped = capTerminalEventData({ content: full });
+    const buf = createInFlightSnapshot();
+    pushInFlightEvent(buf, { type: 'final', data: capped, timestamp: 9 } as Ev);
+
+    expect(buf.bytes).toBeLessThanOrEqual(IN_FLIGHT_MAX_BYTES);
+    expect(buf.bytes).toBe(buf.events.reduce((sum, e) => sum + inFlightEventBytes(e), 0));
+    const stored = buf.events[0].data as { content: string };
+    expect(buf.events[0].type).toBe('final');
+    expect(stored.content.length).toBeGreaterThan(0);
+    expect(stored.content).not.toBe(full);
+  });
+
+  it('P1：1.5MiB message 的 error 入库后不击穿字节上限', () => {
+    const full = 'm'.repeat(Math.ceil(1.5 * 1024 * 1024));
+    expect(inFlightEventBytes({ type: 'error', data: { message: full }, timestamp: 9 } as Ev)).toBeGreaterThan(IN_FLIGHT_MAX_BYTES);
+
+    const capped = capTerminalEventData({ message: full });
+    const buf = createInFlightSnapshot();
+    pushInFlightEvent(buf, { type: 'error', data: capped, timestamp: 9 } as Ev);
+
+    expect(buf.bytes).toBeLessThanOrEqual(IN_FLIGHT_MAX_BYTES);
+    expect(buf.bytes).toBe(buf.events.reduce((sum, e) => sum + inFlightEventBytes(e), 0));
+    const stored = buf.events[0].data as { message: string };
+    expect(buf.events[0].type).toBe('error');
+    expect(stored.message.length).toBeGreaterThan(0);
+    expect(stored.message).not.toBe(full);
+  });
+
+  it('P1：超大 tool_calls.arguments 的 final 入库后不击穿字节上限', () => {
+    const hugeArgs = 'a'.repeat(64 * 1024);
+    const toolCalls = Array.from({ length: 250 }, (_, i) => ({
+      function: { name: `tool_${i}`, arguments: hugeArgs },
+    }));
+    const data = { tool_calls: toolCalls };
+    expect(inFlightEventBytes({ type: 'final', data, timestamp: 9 } as Ev)).toBeGreaterThan(IN_FLIGHT_MAX_BYTES);
+
+    const capped = capTerminalEventData(data);
+    const buf = createInFlightSnapshot();
+    pushInFlightEvent(buf, { type: 'final', data: capped, timestamp: 9 } as Ev);
+
+    expect(buf.bytes).toBeLessThanOrEqual(IN_FLIGHT_MAX_BYTES);
+    expect(buf.bytes).toBe(buf.events.reduce((sum, e) => sum + inFlightEventBytes(e), 0));
+    const stored = buf.events[0].data as { tool_calls: { _truncated: boolean; count: number; names: string[] } };
+    expect(buf.events[0].type).toBe('final');
+    expect(stored.tool_calls).toBeDefined();
+    expect(stored.tool_calls._truncated).toBe(true);
+    expect(stored.tool_calls.count).toBe(250);
+    expect(stored.tool_calls.names.length).toBe(250);
+    expect(stored.tool_calls.names[0]).toBe('tool_0');
+    expect(stored.tool_calls.names[249]).toBe('tool_249');
+  });
+
   it('P2：终态与 live 同一尾窗口径；短串/缺字段/非 reasoning 载荷原样透传', () => {
     expect(capTerminalReasoning('short')).toBe('short');
     expect(capTerminalReasoning(undefined)).toBeUndefined();
