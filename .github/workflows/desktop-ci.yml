@@ -71,6 +71,8 @@ jobs:
     #   github.event.pull_request.head.repo.full_name == github.repository ||
     #   contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association)
     runs-on: ubuntu-latest
+    outputs:
+      report-url: ${{ steps.upload-e2e-report.outputs.report-url }}
     defaults:
       run:
         working-directory: apps/desktop
@@ -208,6 +210,8 @@ jobs:
       group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}-macos-e2e
       cancel-in-progress: true
     runs-on: macos-latest
+    outputs:
+      report-url: ${{ steps.upload-e2e-report.outputs.report-url }}
     defaults:
       run:
         working-directory: apps/desktop
@@ -339,8 +343,9 @@ jobs:
           retention-days: 7
 
   # ────────────────────────────────────────────────────────────
-  # Job 4: flaky 汇总 —— 无 secrets，只下载并解析主 E2E 上传的 JSON 报告（#1107）。
-  # 这个 job 里没有 provider 凭据、也不执行 PR 检出的代码，是安全评审认可的可信消费方。
+  # Job 4: flaky 汇总 —— 无 provider secrets，只下载并解析主 E2E 上传的 JSON 报告（#1107）。
+  # 这个 job 没有 provider 凭据，因此即便解析脚本来自 PR 检出，也没有 API key 可被窃取；
+  # 但脚本本身确实在 PR 检出的代码上执行（与仓库现有 mock smoke/e2e spec 的信任模型一致）。
   # ────────────────────────────────────────────────────────────
   summarize-flaky:
     concurrency:
@@ -359,6 +364,12 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || github.ref }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
 
       - name: Summarize flaky E2E tests (Linux)
         if: needs.electron-e2e.outputs.report-url != ''
