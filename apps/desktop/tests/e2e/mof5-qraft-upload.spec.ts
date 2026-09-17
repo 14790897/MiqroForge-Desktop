@@ -158,7 +158,7 @@ test.describe('MOF-5 Qraft Upload E2E', () => {
           .getByTestId('confirm-run');
         // Prefer the card's primary choice (may be a custom label like
         // "PDF 报告" — label-matching alone would let the card time out).
-        const primary = page.locator('[data-testid="confirm-card-primary"]');
+        const primary = page.locator('[data-testid="confirm-card"]').getByTestId('confirm-run');
         if (await actionConfirm.isVisible({ timeout: 300 }).catch(() => false)) {
           await actionConfirm.click();
           console.log('[test] Auto-confirmed card: (action-card 确认)');

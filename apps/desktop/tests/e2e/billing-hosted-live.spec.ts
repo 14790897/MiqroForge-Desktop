@@ -64,7 +64,7 @@ async function driveUntilReady(page: Page, ready: () => Promise<boolean>, timeou
         .catch(() => {});
     }
     // 确认卡（ask_user_confirm_card）：点主按钮「确认提交」
-    const primary = page.getByTestId('confirm-card-primary');
+    const primary = page.locator('[data-testid="confirm-card"]').getByTestId('confirm-run');
     if (await primary.isVisible({ timeout: 300 }).catch(() => false)) {
       await primary
         .first()

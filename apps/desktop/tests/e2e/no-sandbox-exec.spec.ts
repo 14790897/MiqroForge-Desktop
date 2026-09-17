@@ -151,7 +151,7 @@ test.describe('No-Sandbox Host Exec E2E', () => {
       let text = '';
       let lastText = '';
       while (Date.now() - runStart < RUN_CAP && Date.now() < idleDeadline) {
-        const primary = page.locator('[data-testid="confirm-card-primary"]');
+        const primary = page.locator('[data-testid="confirm-card"]').getByTestId('confirm-run');
         if (await primary.isVisible({ timeout: 400 }).catch(() => false)) {
           await primary.first().click();
           idleDeadline = Date.now() + IDLE_DEADLINE;
