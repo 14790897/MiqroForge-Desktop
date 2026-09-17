@@ -2927,10 +2927,20 @@ function stripTerminalPayload(event: InFlightEvent): InFlightEvent {
   };
 }
 
+/** True only for a payload this module emptied itself.  Matching the marker
+ *  *shape* rather than just the flag keeps a backend field that happens to be
+ *  named `_evicted` from making a real payload look un-strippable (which would
+ *  leave the buffer over budget with nothing to reclaim). */
 function isStrippedTerminal(event: InFlightEvent): boolean {
+  if (event.type === 'progress') return false;
+  const data = event.data as Record<string, unknown> | null | undefined;
+  if (!data || data._evicted !== true) return false;
+  const keys = Object.keys(data);
+  if (keys.length === 1) return true;
   return (
-    event.type !== 'progress' &&
-    (event.data as { _evicted?: boolean } | null | undefined)?._evicted === true
+    keys.length === 2 &&
+    typeof data.message === 'string' &&
+    data.message.length <= MAX_STRIPPED_MESSAGE_CHARS
   );
 }
 
@@ -2983,6 +2993,18 @@ function evictInFlightOverflow(snapshot: InFlightSnapshot): void {
     // last one asked to give up its data, since replay reads the answer from
     // it.
     if (snapshot.bytes <= IN_FLIGHT_MAX_BYTES) return;
+
+    // Stripping costs content, so check it can actually pay for itself first:
+    // if emptying *every* remaining terminal would still leave the buffer over
+    // budget — the newest event is an uncapped progress delta, say, and may
+    // not be removed — then the content would be destroyed for nothing.  Leave
+    // it intact and let the cap be breached instead of losing data for free.
+    let reclaimable = 0;
+    for (const event of snapshot.events) {
+      if (event.type === 'progress' || isStrippedTerminal(event)) continue;
+      reclaimable += inFlightEventBytes(event) - inFlightEventBytes(stripTerminalPayload(event));
+    }
+    if (snapshot.bytes - reclaimable > IN_FLIGHT_MAX_BYTES) return;
     let newestTerminal = -1;
     for (let i = snapshot.events.length - 1; i >= 0; i -= 1) {
       if (snapshot.events[i].type !== 'progress') {

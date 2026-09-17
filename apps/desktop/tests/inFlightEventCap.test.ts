@@ -4,8 +4,9 @@
  * 该缓存只在用户切走后接管流事件（切回时回放）。原来 `buf.events.push(...)`
  * 无上界：一个长时间思考的会话在后台可以堆下十万级事件对象，且 20 个会话
  * 各有一份。这里锁死：连续同流 delta 先折叠（**无损**，回放端按顺序拼接
- * delta，见 ChatConsole 的 exec 输出回放），折叠后仍超限则驱逐最旧的
- * progress 事件（终态事件永不驱逐）。
+ * delta，见 ChatConsole 的 exec 输出回放），折叠后仍超限则按序回收——先驱逐
+ * 最旧的 progress，再掏空较旧终态的 payload（保留 type/timestamp，回放的
+ * 终态判定与 watchdog 不受影响；掏空救不回预算时不掏）。最新事件永不驱逐。
  */
 import { describe, expect, it } from 'vitest';
 import {
@@ -518,6 +519,55 @@ describe('#1034 复审二轮：terminal payload 递归硬上限 + 多终态快�
     // 最新终态（final）的数据完整保留。
     expect(
       (buf.events[buf.events.length - 1].data as { content: string }).content.startsWith('fff')
+    ).toBe(true);
+  });
+
+  it('P2：掏空也救不回预算时不掏——不白扔内容', () => {
+    // 最新事件是一条未封顶的 progress（1.2 MiB，独占即超限），它不能被驱逐。
+    // 此时把 error 掏空也回不到上限内，所以必须原样留着 message——掏空前
+    // 这条 error 有 30 万字的报错正文，掏空只换来 181 KiB 的"仍然超限"。
+    const buf = createInFlightSnapshot();
+    const longMessage = 'BOOM: ' + 'x'.repeat(300 * 1024);
+    pushInFlightEvent(buf, {
+      type: 'error',
+      data: capTerminalEventData({ message: longMessage }),
+      timestamp: 8,
+    } as Ev);
+    pushInFlightEvent(buf, {
+      type: 'progress',
+      data: { stream: 'stdout', delta: 'p'.repeat(600 * 1024), tool_call_id: 'c1' },
+      timestamp: 9,
+    } as Ev);
+
+    const errorEvent = buf.events[0];
+    expect((errorEvent.data as { _evicted?: boolean })._evicted).toBeUndefined();
+    expect((errorEvent.data as { message: string }).message).toBe(longMessage);
+    // 已知边界：救不回来就如实超限，而不是毁数据换一个仍然超限的结果。
+    expect(buf.bytes).toBeGreaterThan(IN_FLIGHT_MAX_BYTES);
+    expect(buf.bytes).toBe(buf.events.reduce((sum, e) => sum + inFlightEventBytes(e), 0));
+  });
+
+  it('P2：终态自带 _evicted 字段不冒充"已掏空"', () => {
+    // 后端字段名恰好也叫 _evicted 时，不能被当成我们的占位标记——否则这条
+    // 终态永远不可回收，缓存超限且无计可施。
+    const buf = createInFlightSnapshot();
+    const payload = { _evicted: true, content: 'f'.repeat(300 * 1024) };
+    pushInFlightEvent(buf, {
+      type: 'final',
+      data: capTerminalEventData(payload),
+      timestamp: 8,
+    } as Ev);
+    pushInFlightEvent(buf, {
+      type: 'final',
+      data: capTerminalEventData(bigPayload('g'.repeat(300 * 1024))),
+      timestamp: 9,
+    } as Ev);
+
+    expect(buf.bytes).toBeLessThanOrEqual(IN_FLIGHT_MAX_BYTES);
+    // 旧的那条被真正掏空（只剩占位 + error 之外的类型标记），新的完整保留。
+    expect(Object.keys(buf.events[0].data as object).sort()).toEqual(['_evicted']);
+    expect(
+      (buf.events[buf.events.length - 1].data as { content: string }).content.startsWith('ggg')
     ).toBe(true);
   });
 
