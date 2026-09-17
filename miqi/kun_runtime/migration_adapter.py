@@ -10,6 +10,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from miqi.config.schema import DEFAULT_AGENT_NAME
+
 # Simple in-memory bidirectional mapping.
 # In production this could be backed by a JSON file or SQLite metadata table.
 _SESSION_TO_THREAD: dict[str, str] = {}
@@ -75,7 +77,7 @@ class GatewayKunRuntime:
         provider: Any,
         tool_registry: Any,
         model: str,
-        agent_name: str = "miqi",
+        agent_name: str = DEFAULT_AGENT_NAME,
         mcp_servers: dict[str, Any] | None = None,
     ):
         import threading

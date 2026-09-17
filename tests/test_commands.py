@@ -251,7 +251,7 @@ def test_interactive_onboard_configures_papers_and_skips_feishu(monkeypatch):
 
     agent_name, soul = _interactive_onboard_setup(config)
 
-    assert agent_name == "miqi"
+    assert agent_name == "MiQroForge"
     assert soul == "balanced"
     assert config.tools.web.search.provider == "auto"  # #561: mode 1 = auto 回落链
     assert config.tools.web.search.api_key == ""

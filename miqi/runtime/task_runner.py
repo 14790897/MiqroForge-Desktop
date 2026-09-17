@@ -612,6 +612,19 @@ class TaskRunner:
 
             effective_system_prompt += "\n\n" + ASK_USER_CONFIRM_INSTRUCTION
 
+        # declare_result_files usage guidance (#1104) — same shape: the prompt
+        # must tell the model WHEN to declare deliverables, otherwise the
+        # 「结果文件」区 stays empty for skill-produced reports.
+        if any(
+            (t.get("function", {}) or {}).get("name") == "declare_result_files"
+            or t.get("name") == "declare_result_files"
+            for t in tools
+            if isinstance(t, dict)
+        ):
+            from miqi.agent.tools.result_files import DECLARE_RESULT_FILES_INSTRUCTION
+
+            effective_system_prompt += "\n\n" + DECLARE_RESULT_FILES_INSTRUCTION
+
         # 回答可视化与引用标注（issue #671）— 技术方案/流程/对比类回答
         # 追加 Mermaid 流程图与参考文献（前端 MarkdownContent 渲染 mermaid）
         from miqi.agent.answer_style import VISUAL_ANSWER_INSTRUCTION

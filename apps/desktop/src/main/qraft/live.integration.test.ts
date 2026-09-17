@@ -5,6 +5,8 @@
  *   QRAFT_LIVE=1 QRAFT_PHONE=<测试账号手机号> QRAFT_PASSWORD=<密码> \
  *     npx vitest run src/main/qraft/live.integration.test.ts
  *
+ * QRAFT_BASE_URL 可覆盖平台地址（默认测试环境），用于验证新域名。
+ *
  * 走通完整流程：提取公钥 → 平台登录（RSA 加密）→ authorize → doConfirm
  * → 取 code → 换 token → userinfo → refresh。断言只检查脱敏摘要，
  * 不打印任何凭据。
@@ -25,7 +27,7 @@ const CLIENT_SECRET = process.env.QRAFT_CLIENT_SECRET ?? 'miqi123456';
 const silentLog = (() => undefined) as unknown as QraftLogger;
 
 const CONFIG: ResolvedQraftConfig = {
-  baseUrl: 'https://test.forge.miqroera.com/api',
+  baseUrl: process.env.QRAFT_BASE_URL ?? 'https://test.forge.miqroera.com/api',
   clientId: 'miqi',
   clientSecret: CLIENT_SECRET,
   redirectUri: 'http://localhost:38000/callback',
