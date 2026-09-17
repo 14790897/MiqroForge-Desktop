@@ -28,6 +28,9 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || github.ref }}
+          # 本 job 会执行 PR 检出的代码；checkout 默认把 job token 写进 .git/config，
+          # 那等于把带 actions:write 的凭据放到 PR 代码手里。不持久化，后续步骤也不需要它。
+          persist-credentials: false
 
       - uses: actions/setup-node@v4
         with:
@@ -91,6 +94,9 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || github.ref }}
+          # 本 job 在凭据落盘后执行 PR 检出的代码（spec / 构建脚本），checkout 默认会把 job
+          # token 写进 .git/config —— 别把它交给 PR 代码（CodeRabbit 安全评审 #1107）。
+          persist-credentials: false
 
       - uses: actions/setup-node@v4
         with:
@@ -228,6 +234,9 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || github.ref }}
+          # 本 job 在凭据落盘后执行 PR 检出的代码（spec / 构建脚本），checkout 默认会把 job
+          # token 写进 .git/config —— 别把它交给 PR 代码（CodeRabbit 安全评审 #1107）。
+          persist-credentials: false
 
       - uses: actions/setup-node@v4
         with:
@@ -439,6 +448,8 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || github.ref }}
+          # 这里同样执行 PR 检出的脚本；token 在本 job 只是只读，但没必要留在工作区里。
+          persist-credentials: false
 
       - uses: actions/setup-node@v4
         with:
