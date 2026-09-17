@@ -11,6 +11,9 @@ import { describe, expect, it } from 'vitest';
 import {
   IN_FLIGHT_MAX_BYTES,
   IN_FLIGHT_MAX_EVENTS,
+  MAX_LIVE_REASONING_CHARS,
+  capTerminalEventData,
+  capTerminalReasoning,
   createInFlightSnapshot,
   inFlightEventBytes,
   pushInFlightEvent,
@@ -32,6 +35,21 @@ function docProgress(file: string, timestamp = 1): Ev {
 
 function terminalBrief(type: 'final' | 'error' | 'aborted', timestamp = 9): Ev {
   return { type, data: { content: 'ok' }, timestamp } as Ev;
+}
+
+/** 深层层载荷：`arguments` 落在 `data.tool_calls[].function.arguments`（depth≥3），
+ *  旧限深 2 的 walker 在这里记 0。 */
+function deepToolCallProgress(args: string, timestamp = 1): Ev {
+  return {
+    type: 'progress',
+    data: { tool_calls: [{ function: { name: 'write_file', arguments: args } }] },
+    timestamp,
+  } as Ev;
+}
+
+/** 终态事件：`reasoning` 是 #1034 实测无界增长的那个字段。 */
+function finalWithReasoning(reasoning: string, content = 'ok', timestamp = 9): Ev {
+  return { type: 'final', data: { content, reasoning }, timestamp } as Ev;
 }
 
 describe('#1034 在途事件缓存上限', () => {
@@ -148,5 +166,58 @@ describe('#1034 在途事件缓存上限', () => {
     expect(buf.events.length).toBe(1); // 最旧的 progress（填充事件）被驱逐
     expect((buf.events[0].data as { delta: string }).delta.length).toBe(401);
     expect(buf.bytes).toBe(buf.events.reduce((sum, e) => sum + inFlightEventBytes(e), 0));
+  });
+});
+
+describe('#1034 复审 P1-a/P1-b/P2：终态尾窗 + 全深度字节计费', () => {
+  it('P1-b：深层载荷（tool_calls[].function.arguments）计入字节账', () => {
+    const args = 'a'.repeat(64 * 1024);
+    // 旧 walker 在 depth>=2 直接返回 0 —— 这条 64 KiB 的 arguments 只记 ~128 字节，
+    // 于是任何深埋的大值都能躲过 1MiB 预算。全深度计费后至少 64Ki 字符 × 2 字节。
+    expect(inFlightEventBytes(deepToolCallProgress(args))).toBeGreaterThanOrEqual(64 * 1024 * 2);
+  });
+
+  it('P1-a：2MiB reasoning 的 final 入库后不击穿字节上限（截尾 + 省略标记）', () => {
+    const full = 'r'.repeat(2 * 1024 * 1024);
+    // 未截断的终态事件本身就是超限单条（终态不可驱逐）——这正是复审 P1-a。
+    expect(inFlightEventBytes(finalWithReasoning(full))).toBeGreaterThan(IN_FLIGHT_MAX_BYTES);
+
+    const capped = capTerminalEventData({ content: 'ok', reasoning: full });
+    const buf = createInFlightSnapshot();
+    pushInFlightEvent(buf, { type: 'final', data: capped, timestamp: 9 } as Ev);
+
+    expect(buf.bytes).toBeLessThanOrEqual(IN_FLIGHT_MAX_BYTES);
+    expect(buf.bytes).toBe(buf.events.reduce((sum, e) => sum + inFlightEventBytes(e), 0));
+    const stored = buf.events[0].data as { content: string; reasoning: string };
+    // 尾窗口径：省略头部长度的标记 + 尾部 LIVE_REASONING_KEEP_CHARS(6000) 字符。
+    const omitted = full.length - 6000;
+    const placeholder = `…已省略 ${omitted} 字\n\n`;
+    expect(stored.reasoning.length).toBeLessThanOrEqual(
+      MAX_LIVE_REASONING_CHARS + placeholder.length
+    );
+    expect(stored.reasoning.startsWith('…已省略 ')).toBe(true);
+    expect(stored.reasoning.endsWith(full.slice(-16))).toBe(true);
+    expect(stored.reasoning).toBe(placeholder + full.slice(omitted));
+    expect(stored.content).toBe('ok'); // 用户可见答案原样保留
+  });
+
+  it('P2：终态与 live 同一尾窗口径；短串/缺字段/非 reasoning 载荷原样透传', () => {
+    expect(capTerminalReasoning('short')).toBe('short');
+    expect(capTerminalReasoning(undefined)).toBeUndefined();
+    expect(capTerminalReasoning('x'.repeat(MAX_LIVE_REASONING_CHARS))).toBe(
+      'x'.repeat(MAX_LIVE_REASONING_CHARS)
+    );
+
+    const long = 'x'.repeat(8001);
+    const capped = capTerminalReasoning(long);
+    expect(capped).toBe(`…已省略 ${8001 - 6000} 字\n\n` + long.slice(8001 - 6000));
+    expect(capped!.startsWith('…已省略 ')).toBe(true);
+    expect(capped!.endsWith(long.slice(-6000))).toBe(true);
+
+    // error/aborted 载荷没有 reasoning：必须原样透传（回放要靠这些字段判定会话终态）。
+    const errData = { message: 'boom', code: 'E1' };
+    expect(capTerminalEventData(errData)).toBe(errData);
+    const shortFinal = { content: 'ok', reasoning: 'short' };
+    expect(capTerminalEventData(shortFinal)).toBe(shortFinal);
   });
 });

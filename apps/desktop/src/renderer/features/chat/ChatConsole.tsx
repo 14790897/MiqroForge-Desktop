@@ -2180,6 +2180,41 @@ function rebaseLiveReasoning(msg: Message): void {
   msg.reasoning = next.text;
 }
 
+/** (#1034 复审 P1-a / P2) Terminal events (final/error/aborted) can never be
+ *  evicted — the replay needs them to settle the session — so an unbounded
+ *  `reasoning` inside one final would blow IN_FLIGHT_MAX_BYTES by
+ *  construction.  The live stream already keeps reasoning as a bounded tail
+ *  window (MAX_LIVE_REASONING_CHARS / LIVE_REASONING_KEEP_CHARS); apply the
+ *  same window to a terminal's reasoning so the byte budget stays a real
+ *  budget:
+ *   - at ingest, before the event enters the in-flight cache; and
+ *   - at landing, so the renderer never swallows a multi-MB string in one
+ *     write when a turn closes (the full text is still in the session's
+ *     persisted history).
+ *
+ *  `content` is deliberately NOT windowed: it is the user-visible answer and
+ *  is bounded by the output token budget, while reasoning is the field #1034
+ *  measured growing without bound (118k+ chars per turn).  Shorter-than-cap
+ *  text passes through untouched. */
+export function capTerminalReasoning(reasoning: string | undefined): string | undefined {
+  if (!reasoning || reasoning.length <= MAX_LIVE_REASONING_CHARS) return reasoning;
+  const cut = alignCodePoint(reasoning, reasoning.length - LIVE_REASONING_KEEP_CHARS);
+  return liveReasoningPlaceholder(cut) + reasoning.slice(cut);
+}
+
+/** (#1034 复审 P1-a) Same terminal window, applied to a whole terminal event
+ *  payload before it is pushed into the in-flight cache.  Only the fields we
+ *  know how to window are touched; every other field is replay-critical
+ *  metadata and passes through untouched (identity preserved when nothing
+ *  changed).  Accepted for every terminal payload — `final` carries
+ *  `reasoning`, `error`/`aborted` don't (the getter just finds nothing). */
+export function capTerminalEventData<T extends object>(data: T): T {
+  const reasoning = (data as { reasoning?: string }).reasoning;
+  const capped = capTerminalReasoning(reasoning);
+  if (capped === reasoning) return data;
+  return { ...data, reasoning: capped } as T;
+}
+
 /** Append a streaming reasoning chunk to the last live thinking bubble.
  *
  *  (#1034) The accumulated text is a BOUNDED tail window, not the whole
@@ -2425,14 +2460,39 @@ export const IN_FLIGHT_MAX_BYTES = 1024 * 1024;
 export const IN_FLIGHT_EVENT_OVERHEAD_BYTES = 128;
 
 /** (#1034) UTF-16 byte size of an event's payload: 2 bytes per char plus a
- *  fixed overhead.  Walks own values only (bounded depth) — the point is a
- *  cheap, deterministic, additive measure, not an exact heap size. */
-function payloadBytes(value: unknown, depth = 0): number {
+ *  fixed overhead.
+ *
+ *  (#1034 复审 P1-b) JSON.stringify-based: the previous bounded-depth walker
+ *  stopped accumulating at depth 2, so anything deeper than
+ *  `data.tool_calls[].function` — e.g. the `arguments` string or a nested
+ *  `input` object — was accounted as 0, and a multi-MB value could hide
+ *  behind a "tiny" number, silently defeating the byte cap.  Stringify
+ *  covers the whole tree and deliberately counts structure bytes too:
+ *  over-counting evicts slightly early, while under-counting breaks the
+ *  hard cap.
+ *
+ *  Cycles cannot come from IPC-shaped JSON; if a value still makes
+ *  stringify throw, fall back to the old bounded walker (rough, but
+ *  terminating) instead of throwing from inside the hot path. */
+function payloadBytes(value: unknown): number {
+  if (typeof value === 'string') return value.length * 2;
+  if (value === null || typeof value !== 'object') return 0;
+  try {
+    return JSON.stringify(value).length * 2;
+  } catch {
+    return walkPayloadBytes(value);
+  }
+}
+
+/** (#1034) Bounded-depth fallback for values `JSON.stringify` cannot take
+ *  (e.g. a cycle): counts own string values up to depth 2, like the
+ *  original accounting did. */
+function walkPayloadBytes(value: unknown, depth = 0): number {
   if (typeof value === 'string') return value.length * 2;
   if (value === null || typeof value !== 'object' || depth >= 2) return 0;
   let total = 0;
   for (const v of Object.values(value as Record<string, unknown>))
-    total += payloadBytes(v, depth + 1);
+    total += walkPayloadBytes(v, depth + 1);
   return total;
 }
 
@@ -2478,7 +2538,9 @@ function mergeableDelta(prev: InFlightEvent, next: InFlightEvent): string | null
  *  newest event is never a victim, and terminal events (final/error/aborted)
  *  are never evicted — the replay needs them to settle the session.  Their
  *  count per turn is bounded by the protocol (one final, plus an optional
- *  error/aborted), so refusing to evict them cannot grow the buffer. */
+ *  error/aborted), and their payloads are windowed at ingest
+ *  (capTerminalEventData), so refusing to evict them cannot grow the buffer
+ *  nor blow the byte budget. */
 function evictInFlightOverflow(snapshot: InFlightSnapshot): void {
   while (
     snapshot.events.length > 1 &&
@@ -6215,7 +6277,7 @@ export function ChatConsole({
       if (_owner !== currentSessionRef.current) {
         pushInFlightEvent(getInFlightSnapshot(inFlightCacheRef.current, _owner), {
           type: 'final',
-          data,
+          data: capTerminalEventData(data),
           timestamp: Date.now(),
         });
         return;
@@ -6235,6 +6297,11 @@ export function ChatConsole({
       if (data.turn_id && data.turn_id !== myTurnId) {
         return;
       }
+      // (#1034 复审 P2) 终态 reasoning 与 live 同一口径的尾窗截断（见
+      // capTerminalReasoning 注释）：放在这里，让下面所有落点（关闭 live
+      // 块、standalone 插入）共享同一个有界值，不再是"完整 reasoning 一次
+      // 性塞回渲染器"。
+      const cappedReasoning = capTerminalReasoning(data.reasoning);
       clearFinalCleanupTimer();
       if (animId !== null) {
         cancelAnimationFrame(animId);
@@ -6305,8 +6372,8 @@ export function ChatConsole({
                 ? {
                     ...m,
                     isLiveReasoning: false,
-                    content: data.reasoning || m.content,
-                    reasoning: data.reasoning || m.content,
+                    content: cappedReasoning || m.content,
+                    reasoning: cappedReasoning || m.content,
                     reasoningElapsedS: finalReasoningElapsedS,
                   }
                 : m
@@ -6324,12 +6391,12 @@ export function ChatConsole({
           if (hadLiveReasoning) return cleaned;
           // data.reasoning present without a live block → insert standalone.
           if (
-            data.reasoning &&
+            cappedReasoning &&
             !cleaned.some(
-              (m) => m.role === 'progress' && m.reasoning && m.reasoning === data.reasoning
+              (m) => m.role === 'progress' && m.reasoning && m.reasoning === cappedReasoning
             )
           ) {
-            return insertStandaloneReasoning(cleaned, data.reasoning, finalReasoningElapsedS);
+            return insertStandaloneReasoning(cleaned, cappedReasoning, finalReasoningElapsedS);
           }
           return cleaned;
         });
@@ -6439,7 +6506,7 @@ export function ChatConsole({
       if (_owner !== currentSessionRef.current) {
         pushInFlightEvent(getInFlightSnapshot(inFlightCacheRef.current, _owner), {
           type: 'error',
-          data,
+          data: capTerminalEventData(data),
           timestamp: Date.now(),
         });
         return;
@@ -6489,7 +6556,7 @@ export function ChatConsole({
       if (_owner !== currentSessionRef.current) {
         pushInFlightEvent(getInFlightSnapshot(inFlightCacheRef.current, _owner), {
           type: 'aborted',
-          data: _data,
+          data: capTerminalEventData(_data),
           timestamp: Date.now(),
         });
         return;
