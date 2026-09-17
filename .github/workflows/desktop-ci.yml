@@ -84,8 +84,6 @@ jobs:
     permissions:
       contents: read
       actions: write
-    outputs:
-      report-url: ${{ steps.upload-e2e-report.outputs.report-url }}
     defaults:
       run:
         working-directory: apps/desktop
@@ -224,8 +222,6 @@ jobs:
     permissions:
       contents: read
       actions: write
-    outputs:
-      report-url: ${{ steps.upload-e2e-report.outputs.report-url }}
     defaults:
       run:
         working-directory: apps/desktop
