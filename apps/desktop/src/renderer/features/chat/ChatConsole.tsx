@@ -99,7 +99,11 @@ import type {
 } from '../../../shared/ipc';
 import { extractProgressMessage, type ProgressPayload } from './progressUtils';
 import { sanitizeUiMessage } from '../../lib/sanitizeUiMessage';
-import { classifyTrackedFiles } from '../../lib/taskAssetClassification';
+import {
+  classifyTrackedFiles,
+  dirLabel,
+  groupTrackedByDir,
+} from '../../lib/taskAssetClassification';
 import { sameTrackedFile } from '../../lib/tracked-path';
 import { SpreadsheetPreview } from './components/SpreadsheetPreview';
 import { DocxPreview } from './components/DocxPreview';
@@ -576,6 +580,8 @@ interface TrackedFile {
   lastSeen: number;
   /** path was truncated in the progress message (ends with ...) */
   truncated?: boolean;
+  /** #1104: agent 通过 declare_result_files 显式声明为结果文件 */
+  result?: boolean;
 }
 
 const OFFICE_FILE_RE = /\.(docx|xlsx|pptx|ppt|xls|doc|odt|odp|ods)$/i;
@@ -967,6 +973,41 @@ function basename(path: string): string {
   return path.replace(/\\/g, '/').split('/').pop() ?? path;
 }
 
+/** #1104: collapsible row standing in for a bulk directory's files. */
+function AssetDirGroupRow({
+  dir,
+  files,
+  renderFile,
+}: {
+  dir: string;
+  files: TrackedFile[];
+  renderFile: (file: TrackedFile) => React.ReactNode;
+}) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div data-testid="asset-dir-group">
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        className="w-full flex items-center gap-1.5 rounded-lg px-2.5 py-2 transition-colors hover:opacity-90"
+        style={{
+          background: 'var(--surface-muted)',
+          border: '1px solid var(--border-subtle)',
+        }}
+        title={dir}
+      >
+        {open ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
+        <Folder size={12} className="shrink-0" style={{ color: 'var(--text-faint)' }} />
+        <span className="text-[11px] font-medium truncate flex-1 text-left text-text">
+          {dirLabel(dir)}
+        </span>
+        <span className="text-[10px] shrink-0 text-text-faint">{files.length} 个文件</span>
+      </button>
+      {open && <div className="flex flex-col gap-2 mt-2">{files.map(renderFile)}</div>}
+    </div>
+  );
+}
+
 /** Normalise a tracked path: backslashes→slashes, strip an absolute workspace
  *  prefix so `C:/…/workspace/sessions/<k>/files/x.html` and
  *  `sessions/<k>/files/x.html` collapse to the same string. */
@@ -999,7 +1040,14 @@ async function fileExists(path: string, sessionKey: string | null | undefined): 
  *  (#1104 review).  Display-only: it never feeds a containment check. */
 function mergeTrackedFiles(
   existing: TrackedFile[],
-  incoming: Array<{ path: string; name?: string; op?: TrackedFile['op']; lastSeen?: number }>,
+  incoming: Array<{
+    path: string;
+    name?: string;
+    op?: TrackedFile['op'];
+    lastSeen?: number;
+    /** #1104: agent 显式声明的结果文件标记——合并时 sticky，不被后续流式更新抹掉 */
+    result?: boolean;
+  }>,
   workspaceRoot?: string | null
 ): TrackedFile[] {
   const out = [...existing];
@@ -1018,6 +1066,10 @@ function mergeTrackedFiles(
       const oneIsBare = !np2.includes('/') || !np.includes('/');
       return oneIsBare && basename(np2) === basename(np);
     });
+    // #1104：声明过的结果标记在覆盖合并时必须保留（ledger 加载先于流式更新）
+    if (f.result === true || (existingIdx >= 0 && out[existingIdx].result === true)) {
+      entry.result = true;
+    }
     if (existingIdx >= 0) out[existingIdx] = entry;
     else out.push(entry);
   }
@@ -4347,6 +4399,8 @@ export function ChatConsole({
           name: f.name,
           op: f.op,
           lastSeen: f.lastSeen ?? Date.now(),
+          // #1104: declare_result_files 写入的显式结果标记
+          result: f.result === true,
         }));
         setTrackedFiles(mergeTrackedFiles(existingFromMessages, backendMapped, workspace));
 
@@ -6229,6 +6283,9 @@ export function ChatConsole({
                   name: f.name,
                   op: f.op,
                   lastSeen: f.lastSeen ?? Date.now(),
+                  // #1104: declare_result_files 写入的显式结果标记（回合结束刷新
+                  // 必须带上，否则标记只活到下一次刷新）
+                  result: f.result === true,
                 }));
                 return mergeTrackedFiles(prev, mapped, workspace);
               });
@@ -7273,6 +7330,13 @@ export function ChatConsole({
     () => classifyTrackedFiles(trackedFiles),
     [trackedFiles]
   );
+  // #1104：过程文件里的批量目录（如 bvse_sites/ 20 个 cif）折成目录行；
+  // 祖先判定用全量追踪路径（结果是交付根顶层产物时也要能撑起折叠）
+  const allTrackedPaths = useMemo(() => trackedFiles.map((f) => f.path), [trackedFiles]);
+  const { loose: processLoose, groups: processGroups } = useMemo(
+    () => groupTrackedByDir(processFiles, allTrackedPaths),
+    [processFiles, allTrackedPaths]
+  );
   // 「修改建议」区只关心本次会话 write/edit 过的文件；按分类拆成两组
   // （用户反馈 2026-08-13：合并前结果/过程混排，合并（op→read）后才分类）。
   const writeEditFiles = useMemo(
@@ -7286,6 +7350,11 @@ export function ChatConsole({
   const processWriteEdit = useMemo(
     () => writeEditFiles.filter((f) => !resultFiles.some((r) => r.path === f.path)),
     [writeEditFiles, resultFiles]
+  );
+  // #1104：修改建议里的批量目录同样折行（祖先判定同样用全量路径）
+  const { loose: processWriteEditLoose, groups: processWriteEditGroups } = useMemo(
+    () => groupTrackedByDir(processWriteEdit, allTrackedPaths),
+    [processWriteEdit, allTrackedPaths]
   );
   // 分享/导出默认只包含结果文件；无结果文件时回退为全部文件
   const shareFiles = resultFiles.length > 0 ? resultFiles : trackedFiles;
@@ -8560,8 +8629,11 @@ export function ChatConsole({
             ) : (
               <>
                 {/* issue #607: 结果资产（默认展开、星标强调） + 过程资产（默认折叠） */}
+                {/* #1104: 稳定 key——结果区随 resultFiles 出现/消失时不得让过程区
+                    按位置重挂载（否则用户手动展开的状态被重置回默认折叠） */}
                 {resultFiles.length > 0 && (
                   <AssetSection
+                    key="asset-section-result"
                     label="结果文件"
                     testKey="result"
                     count={resultFiles.length}
@@ -8585,17 +8657,35 @@ export function ChatConsole({
 
                 {processFiles.length > 0 && (
                   <AssetSection
+                    key="asset-section-process"
                     label="过程文件"
                     testKey="process"
                     count={processFiles.length}
                     defaultOpen={resultFiles.length === 0}
                   >
-                    {processFiles.map((f) => (
+                    {/* #1104：目录级聚合——bvse_sites/ 这类批量目录折成一行，
+                        不再逐个铺开几十张卡片（用户反馈 2026-09-16） */}
+                    {processLoose.map((f) => (
                       <TrackedFileCard
                         key={f.path}
                         file={f}
                         onPreview={() => handlePreview(f.path)}
                         onDiff={() => handleShowDiff(f.path)}
+                      />
+                    ))}
+                    {processGroups.map((g) => (
+                      <AssetDirGroupRow
+                        key={g.dir}
+                        dir={g.dir}
+                        files={g.files}
+                        renderFile={(f) => (
+                          <TrackedFileCard
+                            key={f.path}
+                            file={f}
+                            onPreview={() => handlePreview(f.path)}
+                            onDiff={() => handleShowDiff(f.path)}
+                          />
+                        )}
                       />
                     ))}
                   </AssetSection>
@@ -8608,6 +8698,7 @@ export function ChatConsole({
             <div className="flex-1" />
             {writeEditFiles.length > 0 && (
               <div
+                data-testid="task-assets-changes"
                 className="border-t mx-3 mt-2 pt-3 pb-3"
                 style={{ borderColor: 'var(--panel-border)' }}
               >
@@ -8625,9 +8716,11 @@ export function ChatConsole({
                 </div>
                 {resultWriteEdit.length > 0 && (
                   <div className="mb-2">
-                    <div className="text-[10px] font-medium text-text-faint mb-1">结果文件</div>
+                    <div className="text-[10px] font-medium text-text-faint mb-1">
+                      结果文件 ({resultWriteEdit.length})
+                    </div>
                     <div className="flex flex-col gap-1.5">
-                      {resultWriteEdit.slice(0, 3).map((f) => (
+                      {resultWriteEdit.map((f) => (
                         <div
                           key={f.path}
                           className="flex items-center gap-1.5 rounded-lg px-2.5 py-2"
@@ -8668,9 +8761,11 @@ export function ChatConsole({
                 )}
                 {processWriteEdit.length > 0 && (
                   <div>
-                    <div className="text-[10px] font-medium text-text-faint mb-1">过程文件</div>
+                    <div className="text-[10px] font-medium text-text-faint mb-1">
+                      过程文件 ({processWriteEdit.length})
+                    </div>
                     <div className="flex flex-col gap-1.5">
-                      {processWriteEdit.slice(0, 3).map((f) => (
+                      {processWriteEditLoose.map((f) => (
                         <div
                           key={f.path}
                           className="flex items-center gap-1.5 rounded-lg px-2.5 py-2"
@@ -8705,6 +8800,54 @@ export function ChatConsole({
                             <GitCompare size={11} />
                           </button>
                         </div>
+                      ))}
+                      {/* #1104：批量目录折行，避免修改建议被几十个批次文件淹没 */}
+                      {processWriteEditGroups.map((g) => (
+                        <AssetDirGroupRow
+                          key={g.dir}
+                          dir={g.dir}
+                          files={g.files}
+                          renderFile={(f) => (
+                            <div
+                              key={f.path}
+                              className="flex items-center gap-1.5 rounded-lg px-2.5 py-2"
+                              style={{
+                                background: 'var(--surface-muted)',
+                                border: '1px solid var(--border-subtle)',
+                              }}
+                            >
+                              <FileText
+                                size={11}
+                                style={{ color: 'var(--info)' }}
+                                className="shrink-0"
+                              />
+                              <span
+                                className="text-[11px] truncate flex-1 text-text"
+                                title={f.path}
+                              >
+                                {f.name}
+                              </span>
+                              {/* 与散列行同款控件：操作徽标 + 直接看差异（CodeRabbit 复审） */}
+                              <span
+                                className="text-[9px] px-1.5 py-0.5 rounded font-medium shrink-0"
+                                style={{
+                                  background:
+                                    f.op === 'write' ? 'var(--accent)' : 'rgba(234,179,8,0.15)',
+                                  color: f.op === 'write' ? 'var(--accent-text)' : 'var(--warning)',
+                                }}
+                              >
+                                {f.op.toUpperCase()}
+                              </span>
+                              <button
+                                onClick={() => handleShowDiff(f.path)}
+                                className="p-1 rounded transition-colors shrink-0 text-text-faint"
+                                title="Compare diff"
+                              >
+                                <GitCompare size={11} />
+                              </button>
+                            </div>
+                          )}
+                        />
                       ))}
                     </div>
                   </div>

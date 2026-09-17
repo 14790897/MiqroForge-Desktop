@@ -203,6 +203,7 @@ class AgentRegistry:
                 "ask_user_confirm_card",
                 "request_action_confirmation",  # #646-v2 危险动作模型侧唯一入口
                 "graph_render",  # issue #715: skill 产物 step-graph/data-graph 渲染
+                "declare_result_files",  # #1104: 交付物登记（结果文件区显式入口）
             ],
         ))
 
