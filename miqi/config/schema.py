@@ -11,6 +11,13 @@ from pydantic_settings import BaseSettings
 if TYPE_CHECKING:
     from miqi.providers.base import LLMProvider
 
+#: Canonical default agent name — injected into the system prompt and shown in
+#: confirm cards. Kept as a single source of truth so the config default and the
+#: on-read migration stay in lockstep (#1097).
+DEFAULT_AGENT_NAME = "MiQroForge"
+#: Pre-rename default that must be migrated on read (#1097).
+LEGACY_AGENT_NAME = "miqi"
+
 
 class Base(BaseModel):
     """Base model that accepts both camelCase and snake_case keys."""
@@ -199,7 +206,7 @@ class FallbackChainEntry(Base):
 class AgentDefaults(Base):
     """Default agent configuration."""
 
-    name: str = "miqi"
+    name: str = DEFAULT_AGENT_NAME
     workspace: str = "~/.miqi/workspace"
     model: str = "anthropic/claude-opus-4-5"
     max_tokens: int = 8192

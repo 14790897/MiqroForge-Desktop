@@ -223,6 +223,25 @@ function formatFileSize(bytes: number): string {
 }
 
 /**
+ * Mirror the bridge's `session_files_dir_key` (miqi/session/session_keys.py):
+ * fold separators, and for namespaced 3+ segment keys drop the leading client
+ * segment.  A local `replace(/[:\\/]/g, '_')` disagrees with the backend for
+ * `miqi-desktop:desktop:<ts>` — it keeps the client prefix and yields
+ * `miqi-desktop_desktop_<ts>` while the canonical directory is
+ * `desktop_<ts>` — so session-scoped reads built from it miss the real
+ * directory (#1051 review).
+ */
+function sessionFilesDirKey(sessionKey: string | null | undefined): string {
+  if (!sessionKey) return '';
+  const parts = sessionKey.split(':');
+  const kept = parts.length >= 3 ? parts.slice(1) : parts;
+  return kept
+    .join('_')
+    .replace(/[<>:"\/\\|?*]/g, '_')
+    .trim();
+}
+
+/**
  * Parse embedded document content from message body so the UI shows
  * coloured chips instead of raw injection text.  Handles three formats:
  *   1. Client-side preview:  [File: name]\n```\n...\n```
@@ -7050,17 +7069,21 @@ export function ChatConsole({
     // The old openExternal fallback cannot find session-isolated files at all.
     if (/\.html?$/i.test(path)) {
       const bare = path.split(/[\\/]/).pop()!;
-      // Session-isolated files live under sessions/<safe-key>/files/. The full
-      // session-relative path is the ONLY form the bridge reliably reads for
-      // bare tracked names (verified: bare-name reads return null at the
-      // bridge); bare + session_key is also rejected. Build the full path from
-      // the active session key and read it workspace-scoped.
-      const safeKey = String(currentSessionRef.current ?? '').replace(/[:\\/]/g, '_');
+      // Session-isolated files live under sessions/<safe-key>/files/. Build the
+      // full workspace-relative path from the active session key and read it
+      // WITH the session key: the bridge resolves a workspace-relative path
+      // that lands inside the caller's own session directory (issue #1051),
+      // and session-scoped reads are the only ones allowed to touch
+      // sessions/ — a session-less read of that subtree is now rejected.
+      const safeKey = sessionFilesDirKey(currentSessionRef.current);
       const fullRel = safeKey ? `sessions/${safeKey}/files/${bare}` : '';
       const reads: Array<Promise<{ content?: string }>> = [];
-      if (fullRel && fullRel !== path) reads.push(window.miqi.files.read(fullRel));
+      if (fullRel && fullRel !== path)
+        reads.push(window.miqi.files.read(fullRel, currentSessionRef.current ?? undefined));
+      // Session-scoped read before the session-less one: the tracked path may
+      // be a bare name, which only resolves with the session key.
+      reads.push(window.miqi.files.read(path, currentSessionRef.current ?? undefined));
       reads.push(window.miqi.files.read(path));
-      if (bare !== path) reads.push(window.miqi.files.read(path, currentSessionRef.current));
       for (const attempt of reads) {
         try {
           const readResult = await attempt;
@@ -7091,20 +7114,17 @@ export function ChatConsole({
       const candidates: Array<{ p: string; withSession: boolean }> = [
         { p: path, withSession: true },
       ];
-      // path 本身已是 sessions/<safe>/files/<name> 全路径时,再带 session_key
-      // 会被 files.read 二次拼接会话目录而读不到(桥接对全路径+session_key
-      // 返回 null),补一个 workspace-scoped 候选并优先尝试(CodeRabbit #889)。
-      if (/^sessions\/[^/]+\/files\//.test(path.replace(/\\/g, '/'))) {
-        candidates.unshift({ p: path, withSession: false });
-      }
+      // #1051: a full session-relative path (sessions/<safe>/files/<name>) is
+      // resolved against the caller's own session directory by the bridge, so
+      // it is read WITH the session key like any other candidate.
       const nameOnly = path.replace(/\\/g, '/').split('/').pop()!;
       if (nameOnly !== path) candidates.push({ p: nameOnly, withSession: true });
       if (!path.startsWith('papers/'))
         candidates.push({ p: `papers/${nameOnly}`, withSession: true });
       if (nameOnly === path) {
-        const safeKey = String(currentSessionRef.current ?? '').replace(/[:\\/]/g, '_');
+        const safeKey = sessionFilesDirKey(currentSessionRef.current);
         if (safeKey) {
-          candidates.push({ p: `sessions/${safeKey}/files/${nameOnly}`, withSession: false });
+          candidates.push({ p: `sessions/${safeKey}/files/${nameOnly}`, withSession: true });
         }
       }
 
@@ -9178,16 +9198,16 @@ export function ChatConsole({
                     let base64 = previewFile.dataBase64;
                     if (!base64) {
                       const nameOnly = previewFile.path.replace(/\\/g, '/').split('/').pop()!;
-                      const safeKey = String(currentSessionRef.current ?? '').replace(
-                        /[:\\/]/g,
-                        '_'
-                      );
+                      const safeKey = sessionFilesDirKey(currentSessionRef.current);
                       const reads: Array<{ p: string; session?: string }> = [
                         { p: previewFile.path, session: currentSessionRef.current },
                         { p: previewFile.path },
                       ];
                       if (safeKey && nameOnly === previewFile.path) {
-                        reads.push({ p: `sessions/${safeKey}/files/${nameOnly}` });
+                        reads.push({
+                          p: `sessions/${safeKey}/files/${nameOnly}`,
+                          session: currentSessionRef.current,
+                        });
                       }
                       for (const read of reads) {
                         try {
