@@ -15,6 +15,12 @@ jobs:
       group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}-quick
       cancel-in-progress: true
     runs-on: ubuntu-latest
+    # 最小权限：本 job 会跑 PR 检出代码（npm test / mock smoke），只保留读代码，
+    # 不继承 pull_request_target 的默认可写 token（zizmor excessive-permissions）。
+    # 失败产物上传走 Actions runtime token，不需要 GITHUB_TOKEN 的 actions:write
+    # —— 仓库内 python-tests.yml 只用 contents:read 就在传 artifact，是现成的对照。
+    permissions:
+      contents: read
     defaults:
       run:
         working-directory: apps/desktop
@@ -23,6 +29,9 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || github.ref }}
+          # 本 job 会执行 PR 检出的代码；checkout 默认把 job token 写进 .git/config，
+          # 那等于把凭据放到 PR 代码手里。不持久化，后续步骤也不需要它。
+          persist-credentials: false
 
       - uses: actions/setup-node@v4
         with:
@@ -64,33 +73,57 @@ jobs:
     concurrency:
       group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}-electron-e2e
       cancel-in-progress: true
-    # Fork PRs only get secrets if the author is a collaborator.
-    # if: |
-    #   github.event_name == 'push' ||
-    #   github.event_name == 'workflow_dispatch' ||
-    #   github.event.pull_request.head.repo.full_name == github.repository ||
-    #   contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association)
+    # 在此之前这里有一段注释掉的 job 级 if（只让受信任来源跑）；现在由下面的 E2E_TRUSTED
+    # 以**步骤级**实现，语义相同但不会让必需检查漏报（见那段注释）。
     runs-on: ubuntu-latest
+    # 最小权限：本 job 只读代码。失败产物留档（actions/upload-artifact，且只在 push 运行里触发）
+    # 用的是 Actions runtime token，不需要 GITHUB_TOKEN 的 actions:write；flaky 报告本身不出本 job
+    # （见下面的汇总步）。
+    permissions:
+      contents: read
+    # 信任来源门禁（#1107 安全评审的结论）：下面这些会执行 PR 检出代码的步骤，只对受信任来源运行。
+    # 不受信任时（外部 fork 的 pull_request_target）它们整体跳过，于是 PR 代码不再与
+    # DEEPSEEK/BRAVE 凭据同处一个 job —— 这同时收掉了既有的「PR head 的 spec 读 key」暴露。
+    # 用**步骤级** if 而不是 job 级：electron-e2e 是 develop 的必需检查，job 级 if 为假时
+    # check 可能根本不上报，PR 会卡在 "Expected — Waiting for status"。
+    # 这是**仓库的安全策略**（信任边界＝「有写权限的人推上来的代码」），不是强隔离：受信任来源
+    # 的 PR 仍在本 job 内运行其代码。判据有意只用「PR 的 head 分支就在本仓库」——推分支本身
+    # 就需要仓库写权限，因此它精确对应写权限；**不用 author_association**：MEMBER 只表示组织
+    # 成员、COLLABORATOR 还包含只读/分诊角色，都不等价于对本仓库的写权限（评审 P1）。
+    # 要更强的隔离得让带 secrets 的 E2E 完全不跑 PR 代码。
+    env:
+      E2E_TRUSTED: ${{ github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository }}
     defaults:
       run:
         working-directory: apps/desktop
 
     steps:
       - uses: actions/checkout@v4
+        # 不受信任来源直接不检出（与 E2E_TRUSTED 同一条件；这里写成原始表达式是刻意的：
+        # CodeQL 的 actions/untrusted-checkout 只把挂在 checkout 自身上的显式条件当作有效控制检查
+        # —— 条件里的 `head.repo.full_name == github.repository` 会被识别，从而不再报
+        # 「特权上下文里检出未受信任代码」）。
+        if: ${{ github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository }}
         with:
           ref: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || github.ref }}
+          # 本 job 在凭据落盘后执行 PR 检出的代码（spec / 构建脚本），checkout 默认会把 job
+          # token 写进 .git/config —— 别把它交给 PR 代码（CodeRabbit 安全评审 #1107）。
+          persist-credentials: false
 
       - uses: actions/setup-node@v4
+        if: ${{ github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository }}
         with:
           node-version: 22
           cache: npm
           cache-dependency-path: apps/desktop/package-lock.json
 
       - uses: actions/setup-python@v5
+        if: ${{ github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository }}
         with:
           python-version: '3.12'
 
       - name: Install dependencies
+        if: env.E2E_TRUSTED == 'true'
         run: |
           npm ci
           pip install uv
@@ -98,12 +131,15 @@ jobs:
           sudo apt-get update -qq && sudo apt-get install -y -qq bubblewrap
 
       - name: Install Playwright browsers
+        if: env.E2E_TRUSTED == 'true'
         run: npx playwright install chromium --with-deps
 
       - name: Build renderer
+        if: env.E2E_TRUSTED == 'true'
         run: npm run build -- --logLevel warn
 
       - name: Generate config.json
+        if: env.E2E_TRUSTED == 'true'
         run: |
           mkdir -p ~/.miqi
           cat > ~/.miqi/config.json << 'CONFEOF'
@@ -140,24 +176,62 @@ jobs:
           CONFEOF
 
       - name: AI connectivity probe — fail fast if provider unreachable
+        if: env.E2E_TRUSTED == 'true'
+        # --reporter=list：命令行 reporter 会整组替换 config 里的 html+json（实测：加它之后
+        # test-reports/results.json 不再生成），所以探针这一步不产出 JSON 报告 —— 主 E2E 那份
+        # 报告不会被它抢先写掉，主步一份都没产出时汇总步能如实报「没找到报告」（#1107）。
         run: |
           xvfb-run --auto-servernum \
             npx playwright test --config=playwright.config.ts --project=electron \
-            --grep "AI Connectivity"
+            --grep "AI Connectivity" --reporter=list
         timeout-minutes: 10
         env:
           PLAYWRIGHT_SKIP_WEB_SERVER: '1'
 
       - name: Run Electron E2E
+        if: env.E2E_TRUSTED == 'true'
+        # 并行度用 config 的默认值（4）。#1107 最初设想「4 vCPU 跑 4 个并行 Electron 会过载、
+        # 因而随机 flaky」，但实测不支持这个因果：macOS 侧长期 2 workers 仍 flaky，Linux 在
+        # 4 workers 下也是（issue-877 / issue-1061 那批）。降到 2 workers 只把墙钟从 15-20 分钟
+        # 拉到 ~31 分钟（三次实测 30m55s / 31m02s / 31m15s），没换来稳定性 —— 而 PR 反馈速度是
+        # 每个 PR 都要付的成本，所以这里回到 4 workers。
+        # 剩下的 flaky 由下面那一步显式暴露、逐条归因（那才是这个改动的实际交付物）。
+        # timeout 45：4 workers 下套件实测 14.6-19.7 分钟，但个别 LLM 变慢的运行曾顶到旧上限 30。
         run: |
           xvfb-run --auto-servernum \
             npx playwright test --config=playwright.config.ts --project=electron
-        timeout-minutes: 30
+        timeout-minutes: 45
         env:
           PLAYWRIGHT_SKIP_WEB_SERVER: '1'
 
+      - name: Summarize flaky E2E tests
+        # #1107：flaky 清单就地汇总，报告**不离开这个 job**（上传 artifact / release asset 都会
+        # 把「内容由 PR 决定」的字节送到公开位置）。
+        # 汇总逻辑是 .github/actions/summarize-flaky（JS action）：runner 用自己的 node 绝对路径
+        # 拉起它，不经 shell、不读 PATH，这一步也不持有 GH_TOKEN —— 改 PATH / 环境变量都劫持不到。
+        # 用**相对引用**（checkout 出来的那份）而不是 `owner/repo@ref`：后者在合入前会指向还没有
+        # 这个 action 的 develop（bootstrap gap，步骤会解析失败）；有了下面的 E2E_TRUSTED 门禁后，
+        # 不受信任的来源根本走不到这一步，也就不需要再绕一层 ref 去换「可信副本」。
+        if: always() && env.E2E_TRUSTED == 'true'
+        uses: ./.github/actions/summarize-flaky
+        with:
+          report_path: apps/desktop/test-reports/results.json
+        env:
+          # 纵深防御：同一 job 里先跑过 PR 代码，它能经 $GITHUB_ENV 给后续步骤注环境变量。
+          # step 级 env 在 runner 合并顺序里最后应用，所以这里显式清空动态链接器/解释器会读的
+          # 几个（LD_PRELOAD 能往任何后续进程里塞代码）。NODE_OPTIONS 已由 GitHub 自身禁止经
+          # $GITHUB_ENV 注入，一并写上是为了明确意图。
+          # 这不是安全边界：同一 job 内 PR 代码与 provider 凭据共存，任何后续步骤都可能被污染
+          # —— 真正的边界需要仓库级决定（见 PR 讨论）。
+          LD_PRELOAD: ''
+          LD_LIBRARY_PATH: ''
+          NODE_OPTIONS: ''
       - name: Upload Playwright report (E2E)
-        if: failure()
+        # 只在 push（develop 等仓库自己的分支，代码可信）的运行里留存失败产物：test-results/
+        # 的内容由 PR 控制的测试进程写出，而这些进程是在 provider 凭据落到 ~/.miqi/config.json
+        # **之后**跑的 —— 对 pull_request_target 的运行上传，等于给任意 PR 一条把 runner 上
+        # 文件公开出去的通道（artifact 对仓库读者可下载）。PR 运行的失败详情仍在作业日志里。
+        if: failure() && github.event_name == 'push'
         uses: actions/upload-artifact@v4
         with:
           name: playwright-report-e2e
@@ -172,38 +246,58 @@ jobs:
       group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}-macos-e2e
       cancel-in-progress: true
     runs-on: macos-latest
+    # 同 Linux：最小权限（只读代码）+ 信任来源门禁（见 E2E_TRUSTED）。
+    permissions:
+      contents: read
+    # 信任来源门禁：同 electron-e2e —— 本 job 不是必需检查，但沿用同一写法保持一致。
+    env:
+      E2E_TRUSTED: ${{ github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository }}
     defaults:
       run:
         working-directory: apps/desktop
 
     steps:
       - uses: actions/checkout@v4
+        # 不受信任来源直接不检出（与 E2E_TRUSTED 同一条件；这里写成原始表达式是刻意的：
+        # CodeQL 的 actions/untrusted-checkout 只把挂在 checkout 自身上的显式条件当作有效控制检查
+        # —— 条件里的 `head.repo.full_name == github.repository` 会被识别，从而不再报
+        # 「特权上下文里检出未受信任代码」）。
+        if: ${{ github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository }}
         with:
           ref: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || github.ref }}
+          # 本 job 在凭据落盘后执行 PR 检出的代码（spec / 构建脚本），checkout 默认会把 job
+          # token 写进 .git/config —— 别把它交给 PR 代码（CodeRabbit 安全评审 #1107）。
+          persist-credentials: false
 
       - uses: actions/setup-node@v4
+        if: ${{ github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository }}
         with:
           node-version: 22
           cache: npm
           cache-dependency-path: apps/desktop/package-lock.json
 
       - uses: actions/setup-python@v5
+        if: ${{ github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository }}
         with:
           python-version: '3.12'
 
       - name: Install dependencies
+        if: env.E2E_TRUSTED == 'true'
         run: |
           npm ci
           pip install uv
           uv sync
 
       - name: Install Playwright browsers
+        if: env.E2E_TRUSTED == 'true'
         run: npx playwright install chromium --with-deps
 
       - name: Build renderer
+        if: env.E2E_TRUSTED == 'true'
         run: npm run build -- --logLevel warn
 
       - name: Generate config.json
+        if: env.E2E_TRUSTED == 'true'
         run: |
           mkdir -p ~/.miqi
           cat > ~/.miqi/config.json << 'CONFEOF'
@@ -240,14 +334,17 @@ jobs:
           CONFEOF
 
       - name: AI connectivity probe (macOS) — fail fast if provider unreachable
+        if: env.E2E_TRUSTED == 'true'
+        # 同 Linux 侧：--reporter=list 让探针不产出 JSON 报告，不占用主 E2E 那份（#1107）。
         run: |
           npx playwright test --config=playwright.config.ts --project=electron \
-            --grep "AI Connectivity"
+            --grep "AI Connectivity" --reporter=list
         timeout-minutes: 10
         env:
           PLAYWRIGHT_SKIP_WEB_SERVER: '1'
 
       - name: Run Electron E2E (macOS)
+        if: env.E2E_TRUSTED == 'true'
         # --workers=2: macos-latest runners (3 vCPU) can't sustain 4 parallel
         # Electron instances + LLM calls — overloaded runners cause intermittent
         # failures at random spec points (actionability misjudgements, slow
@@ -263,6 +360,15 @@ jobs:
         #     Execution Policy E2E): 34 long streaming tests that double the run.
         # Both are fully covered by the Linux electron-e2e job, which runs the
         # whole suite.
+        #
+        # 也就是说 macOS job 是**选定子集、不是完整覆盖**（README 的 E2E 覆盖表里同样写明），
+        # 判断「某用例有没有在 CI 上跑过」时要按平台分开看。
+        #
+        # --workers=2 cut the flakiness down but did not remove it — a 6-run sample
+        # still had 0-2 flaky specs per run, with repeated hits on the same test
+        # (task-assets.spec.ts:143, which looks deterministic rather than
+        # load-induced).  That is why the summarize step below exists instead of
+        # another round of parallelism tuning.
         run: |
           npx playwright test --config=playwright.config.ts --project=electron \
             --grep-invert "Sandbox Exec|Sandbox Toggle|Sandbox toggle ready|Workspace Switch E2E \(Sandbox ON\)|session-key-mapping|PPTX Generator|Native Electron E2E|Feedback Page E2E|Execution Policy E2E" \
@@ -271,8 +377,30 @@ jobs:
         env:
           PLAYWRIGHT_SKIP_WEB_SERVER: '1'
 
+      - name: Summarize flaky E2E tests (macOS)
+        # #1107：flaky 清单就地汇总，报告**不离开这个 job**（上传 artifact / release asset 都会
+        # 把「内容由 PR 决定」的字节送到公开位置）。
+        # 汇总本身是 JS action、按**受信任 ref** 引用：runner 用自己的 node 绝对路径拉起它，
+        # 代码取自该 ref 拉下来的那份，不经 shell、不读 PATH，也不需要 GH_TOKEN —— 同一 job 里
+        # 先跑过的 PR 代码因此劫持不到这一步（改 PATH / 环境变量都无效）。
+        if: always() && env.E2E_TRUSTED == 'true'
+        uses: ./.github/actions/summarize-flaky
+        with:
+          report_path: apps/desktop/test-reports/results.json
+        env:
+          # 纵深防御：同一 job 里先跑过 PR 代码，它能经 $GITHUB_ENV 给后续步骤注环境变量。
+          # step 级 env 在 runner 合并顺序里最后应用，所以这里显式清空动态链接器/解释器会读的
+          # 几个（LD_PRELOAD 能往任何后续进程里塞代码）。NODE_OPTIONS 已由 GitHub 自身禁止经
+          # $GITHUB_ENV 注入，一并写上是为了明确意图。
+          # 这不是安全边界：同一 job 内 PR 代码与 provider 凭据共存，任何后续步骤都可能被污染
+          # —— 真正的边界需要仓库级决定（见 PR 讨论）。
+          LD_PRELOAD: ''
+          LD_LIBRARY_PATH: ''
+          NODE_OPTIONS: ''
       - name: Upload Playwright report (macOS E2E)
-        if: failure()
+        # 同 Linux 侧：只在 push（代码可信）的运行里留存，pull_request_target 下不上传
+        # PR 可控的 test-results/（见上面那段的说明）。
+        if: failure() && github.event_name == 'push'
         uses: actions/upload-artifact@v4
         with:
           name: playwright-report-macos-e2e
@@ -283,3 +411,4 @@ jobs:
   # macOS 打包（dmg/zip）不在这里跑：每个 PR 都起 macos runner 成本高，
   # 产物也没有下游消费方。发版时由 release.yml 的 build-mac 构建并上传 release。
   # ────────────────────────────────────────────────────────────
+
