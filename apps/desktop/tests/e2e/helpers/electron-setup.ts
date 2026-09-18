@@ -1025,10 +1025,18 @@ export async function closeElectronApp(
     // a stuck `app.close()` would burn the whole CI afterAll timeout (600s)
     // and then the worker force-kill (300s).  Race the close against a
     // 15s deadline and force-kill the Electron process if it overruns.
+    //
+    // The overrun is logged: a force-kill is invisible in the output
+    // otherwise, and 「哪些 spec 关不干净」is exactly what has to be
+    // attributable when a whole job dies on
+    // `worker-N process did not exit within 300000ms`.
+    const closeStartedAt = Date.now();
+    let forced = false;
     await Promise.race([
       app.close().catch(() => {}),
       (async () => {
         await new Promise((r) => setTimeout(r, 15_000));
+        forced = true;
         try {
           if (process.platform === 'win32') {
             // #959: Playwright launches Electron through a cmd.exe shell
@@ -1050,6 +1058,18 @@ export async function closeElectronApp(
         }
       })(),
     ]);
+    const closeMs = Date.now() - closeStartedAt;
+    if (forced) {
+      let who = '';
+      try {
+        who = ` (${test.info().titlePath().slice(1).join(' › ')})`;
+      } catch {
+        /* not inside a test scope */
+      }
+      console.log(
+        `[test] app.close() did not settle in ${closeMs}ms — force-killed the tree${who}`
+      );
+    }
   }
   if (miqiHome && !keepHome && existsSync(miqiHome)) {
     // The bridge may still be tearing down children (exec bash/curl) whose
