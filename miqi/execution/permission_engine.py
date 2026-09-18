@@ -194,15 +194,23 @@ class PermissionEngine:
 
         不依赖模型自觉先调 request_action_confirmation——在真实执行边界兜底。
         """
+        arguments = getattr(ctx, "arguments", None)
         try:
             from miqi.execution.task_policy import should_confirm_action
-            if not should_confirm_action(ctx.tool_name, getattr(ctx, "arguments", None) or {}):
+
+            if not isinstance(arguments, dict):
+                # 畸形参数（非 dict）：参数级判定（敏感路径、破坏性删除）做不了。
+                # 旧写法会让下面的 _is_sensitive_path 抛 AttributeError，冒泡进
+                # except 被吞成「非高危」→ 静默放行。无法判定就按高危处理。
+                return self._guard_indeterminate(ctx, "参数不是对象")
+            if not should_confirm_action(ctx.tool_name, arguments):
                 return None
-        except Exception:
-            # 这里「判定为非高危」与「判定不可用」都返回 None（让位给后续门）。
-            # 更严格的 fail-closed 会让判定表一旦不可用时连读/写类普通动作也要求
-            # 审批，爆炸半径超出 #1102 范围，故不在本次收紧。
-            return None
+        except Exception:  # noqa: BLE001
+            # 「判定为非高危」与「判定不可用」不是一回事：无法证明该动作无害时
+            # 不得放行——本函数的 docstring 声明的是 fail-closed，这里必须做到。
+            # 主路径上畸形参数会先被 orchestrator 的 schema 校验挡掉，判定表本身
+            # 不可用则属于安装损坏，因此这个分支的爆炸半径只在真正的故障态。
+            return self._guard_indeterminate(ctx, "判定不可用")
         key = f"{getattr(ctx, 'thread_id', '')}:{ctx.tool_name}"
         if key in self._action_guard_confirmed:
             return None
@@ -265,6 +273,21 @@ class PermissionEngine:
         return PermissionDecision(
             verdict=PermissionVerdict.DENY,
             reason="用户未确认危险动作（Action Guard）",
+        )
+
+    @staticmethod
+    def _guard_indeterminate(ctx: Any, why: str) -> PermissionDecision:
+        """判定不可用/无法判定时的 fail-closed 决策：不放行，交常规审批准入。
+
+        无弹卡通道时由 orchestrator 兜底（APPROVAL_REQUIRED → 无应答通道即
+        deny_no_channel），方向安全——只可能多问，不可能少问。
+        """
+        return PermissionDecision(
+            verdict=PermissionVerdict.APPROVAL_REQUIRED,
+            category="run",
+            reason=f"危险动作判定不可用（Action Guard fail-closed）：{why}",
+            description=f"危险动作确认 · {ctx.tool_name}",
+            allow_permanent=False,
         )
 
     async def check(self, ctx: Any) -> PermissionDecision:

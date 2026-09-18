@@ -10,11 +10,13 @@ or network-modify capability.  The permission engine's deny-list still
 wins in all modes.
 
 Note (#1102): bypass_approval only skips the category-based approval flow
-in permission_engine.check() — it does NOT skip the Action Guard.  A tool
-that task_policy.should_confirm_action accepts (risk >= the confirm
-threshold; today that is `spawn`, the only such name with a registered
-tool) therefore still requires confirmation in plan and auto mode instead
-of being auto-allowed.  The filter below is a boundary, not the only one.
+in permission_engine.check() — it does NOT skip the Action Guard.  The
+filter below removes `spawn` — today the only registered tool whose risk
+reaches task_policy's confirm threshold — from what plan mode advertises,
+so plan normally has nothing for the guard to catch; auto mode keeps it
+available and the guard requires confirmation for it.  The filter shapes
+what the model is offered, not what the orchestrator can dispatch, so it
+is a boundary, not the only one.
 """
 
 # Tools blocked in plan mode (read-only strategist).

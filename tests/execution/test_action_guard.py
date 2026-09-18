@@ -119,6 +119,41 @@ def test_guard_not_bypassed_still_prompts_with_resolver():
     assert "Action Guard" in (decision.reason or "")
 
 
+def test_guard_fails_closed_on_malformed_arguments():
+    """畸形参数（非 dict）不得被吞成「非高危」而静默放行。
+
+    旧写法会让 should_confirm_action 内部的 `args.get(...)` 抛 AttributeError，
+    冒泡进 except 后返回 None（让位给后续门）——auto 下就是直接 ALLOW。参数级
+    判定做不了时按高危处理。主路径上畸形参数会先被 orchestrator 的 schema 校验
+    挡掉，这里锁的是那条路径被绕过时的兜底。
+    """
+    engine = PermissionEngine()
+    for bad in ("rm -rf /", ["a"], 42, None):
+        ctx = _ctx("spawn", {})
+        ctx.arguments = bad
+        decision = asyncio.run(engine.check(ctx))
+        assert decision.verdict == PermissionVerdict.APPROVAL_REQUIRED, bad
+        assert "fail-closed" in (decision.reason or ""), bad
+
+
+def test_guard_fails_closed_when_decision_table_unavailable(monkeypatch):
+    """判定表不可用 ≠ 判定为非高危——前者不得放行（与 docstring 的 fail-closed 一致）。
+
+    `from ... import should_confirm_action` 每次调用都会重读模块属性，
+    因此 monkeypatch 模块属性即可模拟判定表本身出故障。
+    """
+    import miqi.execution.task_policy as task_policy
+
+    def boom(*_args, **_kwargs):
+        raise RuntimeError("decision table unavailable")
+
+    monkeypatch.setattr(task_policy, "should_confirm_action", boom)
+    engine = PermissionEngine()
+    decision = asyncio.run(engine.check(_ctx("spawn", {})))
+    assert decision.verdict == PermissionVerdict.APPROVAL_REQUIRED
+    assert "fail-closed" in (decision.reason or "")
+
+
 def test_guard_defers_to_manual_mode():
     """manual（force_approval）下 guard 让位：走「手动模式」确认，不叠加专用卡。
 
