@@ -48,6 +48,7 @@ import {
   launchElectronApp,
   closeElectronApp,
   ensurePersistedSession,
+  stopMockServer,
   APPS_DESKTOP,
 } from './helpers/electron-setup';
 
@@ -158,8 +159,17 @@ test.describe('Issue #1131 — 结果文件的「定位」「系统应用打开�
   }, 180_000);
 
   test.afterAll(async () => {
-    await closeElectronApp(electronApp, miqiHome);
-    mock?.kill();
+    try {
+      await closeElectronApp(electronApp, miqiHome);
+      console.log('[test] #1131 afterAll: app closed');
+    } finally {
+      // Always stop the mock, even when the close above throws: a child left
+      // running keeps this Playwright worker's event loop alive, and the
+      // resulting `worker-N process did not exit` force-kill fails the whole
+      // job even when every test passed.
+      await stopMockServer(mock, 'create_pdf mock');
+      console.log('[test] #1131 afterAll: done');
+    }
   });
 
   test(

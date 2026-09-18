@@ -31,6 +31,7 @@ import {
   launchElectronApp,
   closeElectronApp,
   ensurePersistedSession,
+  stopMockServer,
   APPS_DESKTOP,
 } from './helpers/electron-setup';
 
@@ -138,8 +139,14 @@ test.describe('Issue #1104 — declare_result_files 显式声明结果文件', (
   }, 180_000);
 
   test.afterAll(async () => {
-    await closeElectronApp(electronApp, miqiHome);
-    mock?.kill();
+    try {
+      await closeElectronApp(electronApp, miqiHome);
+    } finally {
+      // Always reap the mock: a child left running keeps this Playwright
+      // worker's event loop alive, and the resulting `worker-N process did
+      // not exit` force-kill fails the job even when every test passed.
+      await stopMockServer(mock, 'declare_result mock');
+    }
   });
 
   test(

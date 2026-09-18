@@ -11,7 +11,7 @@ import type { ElectronApplication, Page } from '@playwright/test';
 import { resolve } from 'node:path';
 import { tmpdir, homedir } from 'node:os';
 import { join } from 'node:path';
-import { spawnSync } from 'node:child_process';
+import { spawnSync, type ChildProcess } from 'node:child_process';
 import {
   existsSync,
   mkdtempSync,
@@ -206,6 +206,35 @@ export async function ensurePersistedSession(
  *  streamed in". */
 function mainTextLength(page: Page): Promise<number> {
   return page.evaluate(() => (document.querySelector('main')?.textContent ?? '').length);
+}
+
+/**
+ * Stop a mock server and wait until it is really gone.
+ *
+ * `proc.kill()` alone is fire-and-forget: `afterAll` returns while the child
+ * may still be running, and a live child keeps the Playwright worker's event
+ * loop alive.  A worker that never exits is reported as
+ * `worker-N process did not exit within 300000ms after stop, force-killed it`,
+ * which fails the whole job even when every single test passed.  Escalate to
+ * SIGKILL if the child ignores SIGTERM, and log the outcome so a leaked child
+ * is attributable instead of silent.  Same bounded-shutdown treatment
+ * `closeElectronApp` already gives the Electron process.
+ */
+export async function stopMockServer(
+  proc: ChildProcess | undefined,
+  label: string,
+  graceMs = 10_000
+): Promise<void> {
+  if (!proc || proc.exitCode !== null || proc.signalCode !== null) return;
+  const exited = new Promise<void>((resolve) => proc.once('exit', () => resolve()));
+  proc.kill('SIGTERM');
+  const timer = new Promise<'timeout'>((resolve) => setTimeout(() => resolve('timeout'), graceMs));
+  if ((await Promise.race([exited.then(() => 'exit' as const), timer])) === 'timeout') {
+    console.log(`[test] ${label} still alive after ${graceMs}ms — SIGKILL`);
+    proc.kill('SIGKILL');
+    await Promise.race([exited, new Promise((resolve) => setTimeout(resolve, 5_000))]);
+  }
+  console.log(`[test] ${label} stopped (code=${proc.exitCode} signal=${proc.signalCode})`);
 }
 
 /**
