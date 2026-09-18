@@ -13,6 +13,10 @@
  *   - DOM 节点数 + body 文本里的 'x' 计数（= 真正落到 UI 的推理字符数）；
  *   - 注入量、注入线程耗时、renderer-crash（render-process-gone）、wall time。
  *
+ * 采样窗口：注入期每 5s 一条；**注入停止后再采 60s**（尾窗，观察 working set 是否
+ * 回落）。采样由独立的 `samplingDone` 控制，注入结束（`done`）不跟着停采样——否则
+ * 尾窗一个采样点都没有，配套脚本里的「末尾含回落观察」就成了假口径。
+ *
  * 注入范式取自 tool-error-neutral.spec.ts Test B：
  *   1. 用 scripts/mock_hang.py 起一个永不响应的 provider mock；
  *   2. 发一条真实消息，前端只在回合存活期间注册 chat:progress 监听；
@@ -205,7 +209,10 @@ test.describe('#1034 renderer memory probe (measurement only)', () => {
     try {
       await electronApp?.evaluate(() => {
         const s = (globalThis as any).__miqi1034;
-        if (s) s.done = true;
+        if (s) {
+          s.done = true;
+          s.samplingDone = true;
+        }
       });
     } catch {
       /* renderer/main may already be gone */
@@ -255,11 +262,15 @@ test.describe('#1034 renderer memory probe (measurement only)', () => {
           sessionKey: cfg.sessionKey,
           startedAtMs: Date.now(),
           startedAtIso: new Date().toISOString(),
+          // done = 注入结束；samplingDone = 采样结束。两者**必须分开**：注入一停就停采
+          // 的话，收尾那 60s 观察窗一个采样点都没有（原来就是这么坏的）。
           done: false,
+          samplingDone: false,
           gone: null,
           ui: null,
           uiHistory: [] as any[],
           ticks: 0,
+          stallTicks: 0,
           sendErrors: 0,
           sendMs: 0,
           maxBurstMs: 0,
@@ -279,6 +290,7 @@ test.describe('#1034 renderer memory probe (measurement only)', () => {
             wsKb: state.ui?.wsKb ?? -1,
           };
           state.done = true;
+          state.samplingDone = true;
         });
 
         const injectTick = () => {
@@ -289,6 +301,9 @@ test.describe('#1034 renderer memory probe (measurement only)', () => {
           if (n > cfg.maxBurst) n = cfg.maxBurst;
           if (n > 0) {
             const t0 = Date.now();
+            // 只记真正发出去的条数：send 抛错时循环中断，整批计入 sent 会把
+            // 分母抬高，斜率被稀释（analyze 用的是 sent 差值做分母）。
+            let ok = 0;
             try {
               for (let i = 0; i < n; i++) {
                 wc.send('chat:progress', {
@@ -296,6 +311,7 @@ test.describe('#1034 renderer memory probe (measurement only)', () => {
                   delta: 'x',
                   session_key: cfg.sessionKey,
                 });
+                ok += 1;
               }
             } catch {
               state.sendErrors += 1;
@@ -304,7 +320,18 @@ test.describe('#1034 renderer memory probe (measurement only)', () => {
             state.sendMs += dt;
             state.lastBurstAtMs = Date.now();
             if (dt > state.maxBurstMs) state.maxBurstMs = dt;
-            state.sent += n;
+            state.sent += ok;
+            // sent 现在只记成功数，所以「发不出去」时它到不了 target —— 兜底：连续
+            // 整批失败满 100 个 tick（默认 50ms/tick ≈ 5s）就结束注入，别无限自排期。
+            if (ok === 0) {
+              state.stallTicks += 1;
+              if (state.stallTicks >= 100) {
+                state.done = true;
+                return;
+              }
+            } else {
+              state.stallTicks = 0;
+            }
           }
           state.ticks += 1;
           if (state.sent >= state.target) {
@@ -359,7 +386,8 @@ test.describe('#1034 renderer memory probe (measurement only)', () => {
             };
           }
           if (state.uiHistory.length < 2000) state.uiHistory.push(state.ui);
-          if (!state.done) setTimeout(uiTick, cfg.uiProbeMs);
+          // 跟着 samplingDone 排期（而不是 done）：注入停了还要继续采满观察窗。
+          if (!state.samplingDone) setTimeout(uiTick, cfg.uiProbeMs);
         };
 
         setTimeout(injectTick, cfg.tickMs);
@@ -415,10 +443,13 @@ test.describe('#1034 renderer memory probe (measurement only)', () => {
     }
 
     if (!preconditionOk) {
-      // 本轮测量无效：先停注入，把现场留给排查（turn-alive / 监听注册）。
+      // 本轮测量无效：先停注入和采样，把现场留给排查（turn-alive / 监听注册）。
       await electronApp.evaluate(() => {
         const s = (globalThis as any).__miqi1034;
-        if (s) s.done = true;
+        if (s) {
+          s.done = true;
+          s.samplingDone = true;
+        }
       });
       const lastUi = (await electronApp.evaluate(
         () => (globalThis as any).__miqi1034?.ui
@@ -470,15 +501,28 @@ test.describe('#1034 renderer memory probe (measurement only)', () => {
         break;
       }
       if (snap.done) {
-        console.log('[probe1034] injection finished without a renderer crash');
+        // done 也可能是 stall 兜底拉停的（发送一直失败、sent 到不了 target），
+        // 那种情况别报成「注入正常跑完」——injected 会如实少于 target。
+        console.log(
+          snap.sent >= snap.target
+            ? '[probe1034] injection finished without a renderer crash'
+            : `[probe1034] injection stopped early at ${snap.sent}/${snap.target} ` +
+                '(send stall) without a renderer crash'
+        );
         break;
       }
       await new Promise((r) => setTimeout(r, 3_000));
     }
 
     // 崩溃/收尾后再等 60s（12 个采样周期）：观察注入停止后 working set 是否回落，
-    // 用于区分「常驻增长」与「瞬态垃圾未回收」。
+    // 用于区分「常驻增长」与「瞬态垃圾未回收」。这段窗口里 uiTick 仍在采样——它跟
+    // samplingDone 排期，不跟 done，所以下面是真采到数据，不是空窗。
     await new Promise((r) => setTimeout(r, 60_000));
+    // 观察窗结束，先停采样再读 summary，免得读到一半又追加新采样点。
+    await electronApp.evaluate(() => {
+      const s = (globalThis as any).__miqi1034;
+      if (s) s.samplingDone = true;
+    });
 
     const summary = await electronApp.evaluate(() => {
       const s = (globalThis as any).__miqi1034;
@@ -486,6 +530,7 @@ test.describe('#1034 renderer memory probe (measurement only)', () => {
         sent: s.sent,
         target: s.target,
         ticks: s.ticks,
+        stallTicks: s.stallTicks,
         sendErrors: s.sendErrors,
         sendMs: s.sendMs,
         maxBurstMs: s.maxBurstMs,
@@ -515,7 +560,14 @@ test.describe('#1034 renderer memory probe (measurement only)', () => {
           `ws ${first.wsKb}KB → ${last.wsKb}KB`
       );
     }
-    console.log(`[probe1034] uiHistory samples=${hist.length} jsonl=${PROBE_JSONL}`);
+    // 注入结束之后的采样条数——CR 复审点名要求这段必须真有采样；为 0 说明采样生命周期
+    // 又跟注入一起停掉了。口径与 analyze 的尾窗一致：注入结束那条本身不算尾窗。
+    const endIdx = hist.findIndex((s) => s.sent >= summary.target);
+    const tailSamples = endIdx >= 0 ? hist.length - endIdx - 1 : 0;
+    console.log(
+      `[probe1034] uiHistory samples=${hist.length} (post-injection samples=${tailSamples}) ` +
+        `jsonl=${PROBE_JSONL}`
+    );
 
     // 测量轮不做通过/失败判定（唯一硬门是上面的前置断言）。
     expect(finalSnap).not.toBeNull();

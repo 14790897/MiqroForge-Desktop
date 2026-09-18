@@ -11,6 +11,10 @@
  * 采集：renderer workingSetSize(KB)、JS heapUsed/heapTotal/heapLimit、DOM 节点数、
  * 落到 UI 的推理字符数、renderer-crash、注入量与 wall time。
  *
+ * 采样窗口：注入期每 5s 一条，注入停止后**再采 60s**（尾窗，用于区分「常驻增长」与
+ * 「瞬态垃圾未回收」）。尾窗单独报告：斜率、峰值、heap/DOM 这些要和基线 1:1 对照的
+ * 数字都只算注入窗口内的采样——基线那轮没有尾窗，混进来会让 after 与基线不可比。
+ *
  * 用法（在 apps/desktop 下）：
  *   npm run build                                  # 探针跑的是构建产物
  *   node scripts/measure-reasoning-memory.mjs      # 跑一轮 ~17 分钟并出报告
@@ -32,7 +36,7 @@
  */
 
 import { spawnSync } from 'node:child_process';
-import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -56,6 +60,21 @@ const BASELINE = {
   crash: 'none',
 };
 
+/** 取字符串取值：缺值就报错，别把下一个 flag 当成值吞掉。 */
+function takeStr(flag, raw) {
+  if (raw === undefined || raw.startsWith('--')) throw new Error(`${flag} 缺少取值`);
+  return raw;
+}
+
+/** 取数值取值：只接受有限正数——NaN / 0 / 负数 / Infinity 都会污染注入循环，
+ *  必须在解析阶段就拒绝，而不是等 60s 前置断言超时。 */
+function takeNum(flag, raw) {
+  const s = takeStr(flag, raw);
+  const n = Number(s);
+  if (!Number.isFinite(n) || n <= 0) throw new Error(`${flag} 需要有限正数，收到：${s}`);
+  return n;
+}
+
 function parseArgs(argv) {
   const opts = {
     target: 200_000,
@@ -67,11 +86,11 @@ function parseArgs(argv) {
   };
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
-    if (a === '--target') opts.target = Number(argv[++i]);
-    else if (a === '--rate') opts.rate = Number(argv[++i]);
-    else if (a === '--out') opts.out = resolve(argv[++i]);
-    else if (a === '--label') opts.label = String(argv[++i]);
-    else if (a === '--analyze') opts.analyze = resolve(argv[++i]);
+    if (a === '--target') opts.target = takeNum(a, argv[++i]);
+    else if (a === '--rate') opts.rate = takeNum(a, argv[++i]);
+    else if (a === '--out') opts.out = resolve(takeStr(a, argv[++i]));
+    else if (a === '--label') opts.label = takeStr(a, argv[++i]);
+    else if (a === '--analyze') opts.analyze = resolve(takeStr(a, argv[++i]));
     else if (a === '--skip-build-check') opts.buildCheck = false;
     else if (a === '-h' || a === '--help') opts.help = true;
     else throw new Error(`未知参数：${a}`);
@@ -181,7 +200,26 @@ function analyze(jsonlPath, label) {
     };
   }
 
-  const hist = (summary.uiHistory ?? []).filter((s) => s && s.wsKb >= 0);
+  const all = (summary.uiHistory ?? []).filter((s) => s && s.wsKb >= 0);
+  // 采样在注入结束后还继续 60s（见 spec），报告里分两段：
+  //   - 注入窗口（含最后那条 sent==target 的采样）：与 BEFORE 基线同口径，斜率/峰值都用它；
+  //   - 尾窗（注入结束之后的那几条）：只看回落，混进斜率会让与基线的对比失真。
+  // 注意修复前的 JSONL：采样跟着注入一起停，末尾也会多出一条 sent==target 的采样
+  // （最后一个 in-flight 的 uiTick 推的）。那不是尾窗——见下面 hasTail 的判定。
+  const target = summary.target ?? 0;
+  const endIdx = target > 0 ? all.findIndex((s) => s.sent >= target) : -1;
+  const afterEnd = endIdx >= 0 ? all.slice(endIdx + 1) : [];
+  const tailSpanMs =
+    afterEnd.length > 1
+      ? (afterEnd[afterEnd.length - 1].elapsedMs ?? 0) - (afterEnd[0].elapsedMs ?? 0)
+      : 0;
+  // 判定「真有尾窗」看条数而不是跨度：老 JSONL 只可能多出**恰好一条** sent==target
+  // 的采样（旧 uiTick 在 done 之后不再排期，最多一个 in-flight 的 tick 补一枪）；而
+  // 新 spec 只要采样真的活过注入结束就至少两条。用跨度门槛会把「注入刚结束就崩、
+  // 只多采了一两条」的真尾窗误并回注入窗口，反而把崩溃后的采样算进基线的对照值。
+  const hasTail = afterEnd.length >= 2;
+  const hist = hasTail ? all.slice(0, endIdx + 1) : all;
+  const tail = hasTail ? afterEnd : [];
   const first = hist[0];
   const last = hist[hist.length - 1];
   const peak = hist.reduce((m, s) => Math.max(m, s.wsKb), 0);
@@ -192,12 +230,14 @@ function analyze(jsonlPath, label) {
     from && to && to.sent > from.sent
       ? ((to.wsKb - from.wsKb) / (to.sent - from.sent)) * 1000
       : NaN;
-  // 整轮斜率（含启动预热），与基线口径一致。
+  // 整轮斜率（注入窗口，含启动预热），与基线口径一致。
   const slope = slopeOf(first, last);
   // 干净窗口斜率：跳过前 10% 的预热/首屏分配，只看稳定段——基线里的
   // 「干净窗口斜率」就是这个口径。
-  const cleanFrom = hist.find((s) => s.sent >= summary.target * 0.1) ?? first;
+  const cleanFrom = hist.find((s) => s.sent >= target * 0.1) ?? first;
   const cleanSlope = slopeOf(cleanFrom, last);
+  const tailFirst = tail[0];
+  const tailLast = tail[tail.length - 1];
 
   return {
     ok: true,
@@ -212,9 +252,15 @@ function analyze(jsonlPath, label) {
     sendMs: summary.sendMs,
     maxBurstMs: summary.maxBurstMs,
     crash: summary.gone ?? null,
-    samples: hist.length,
+    samples: all.length,
+    samplesInjection: hist.length,
+    samplesTail: tail.length,
+    tailSpanMs: hasTail ? tailSpanMs : 0,
     wsFirstKb: first?.wsKb ?? null,
     wsLastKb: last?.wsKb ?? null,
+    wsTailFirstKb: tailFirst?.wsKb ?? null,
+    wsTailLastKb: tailLast?.wsKb ?? null,
+    wsTailDeltaKb: tailFirst && tailLast ? tailLast.wsKb - tailFirst.wsKb : null,
     wsPeakKb: peak,
     wsMedianKb: Math.round(median(hist.map((s) => s.wsKb))),
     wsSlopePer1k: Number.isFinite(slope) ? Number(slope.toFixed(2)) : null,
@@ -254,13 +300,25 @@ function report(r) {
     `wall time    : ${wallMin} min (main-thread sendMs=${r.sendMs}, maxBurstMs=${r.maxBurstMs})`
   );
   console.log(`crash        : ${r.crash ? JSON.stringify(r.crash) : 'none'}`);
-  console.log(`samples      : ${r.samples} (每 5s 一条，末尾含注入停止后 60s 的回落观察)`);
-  console.log('─ renderer working set ─');
   console.log(
-    `  first → last : ${r.wsFirstKb} KB → ${r.wsLastKb} KB（末采样时已注入 ${r.sentAtLastSample}）`
+    `samples      : ${r.samples} (每 5s 一条；注入期 ${r.samplesInjection} + 注入停止后 60s 尾窗 ${r.samplesTail})`
+  );
+  console.log('─ renderer working set（注入窗口；尾窗单列）─');
+  console.log(
+    `  first → last : ${r.wsFirstKb} KB → ${r.wsLastKb} KB（注入结束时，已注入 ${r.sentAtLastSample}）`
   );
   console.log(`  peak/median  : ${r.wsPeakKb} KB / ${r.wsMedianKb} KB`);
-  console.log(`  slope        : ${r.wsSlopePer1k} KB / 1000 条事件（整轮，含预热）`);
+  if (r.samplesTail > 0) {
+    const d = r.wsTailDeltaKb;
+    console.log(
+      `  tail 回落    : ${r.wsTailFirstKb} KB → ${r.wsTailLastKb} KB（尾窗跨 ` +
+        `${(r.tailSpanMs / 1000).toFixed(0)}s / ${r.samplesTail} 条，${d > 0 ? '+' : ''}${d} KB；` +
+        `不计入上面的斜率）`
+    );
+  } else {
+    console.log('  tail 回落    : 无注入后采样（采样与注入同停 / 未跑完 / renderer 已崩）');
+  }
+  console.log(`  slope        : ${r.wsSlopePer1k} KB / 1000 条事件（注入窗口，含预热）`);
   console.log(
     `  clean slope  : ${r.wsSlopeCleanPer1k} KB / 1000 条事件（跳过前 10%，从 sent=${r.wsCleanFromSent} 起）`
   );
@@ -298,6 +356,8 @@ function report(r) {
 
 function writeReports(r, outDir) {
   if (!r.ok) return null;
+  // --analyze 模式不跑探针，没人建过 outDir；这里兜底，否则 writeFileSync 抛 ENOENT。
+  mkdirSync(outDir, { recursive: true });
   const stamp = (r.startedAtIso ?? new Date().toISOString()).replace(/[:.]/g, '-');
   const base = join(outDir, `issue1034_summary_${r.label}_${stamp}`);
   writeFileSync(`${base}.json`, JSON.stringify({ ...r, baseline: BASELINE }, null, 2));
@@ -310,10 +370,13 @@ function writeReports(r, outDir) {
       '| --- | --- | --- |',
       `| 注入量 | ${r.sent}/${r.target} | 200000/200000 |`,
       `| wall time | ${(r.wallMs / 60000).toFixed(1)} min | ${BASELINE.wallMin} min |`,
-      `| renderer-ws 首采样 | ${r.wsFirstKb} KB | ${BASELINE.wsFirstKb} KB |`,
-      `| renderer-ws 峰值 | ${r.wsPeakKb} KB | ${BASELINE.wsPeakKb} KB |`,
-      `| renderer-ws 末采样 | ${r.wsLastKb} KB | — |`,
-      `| 斜率 (KB/1000 条，整轮) | ${r.wsSlopePer1k} | ${BASELINE.wsSlopePer1k} |`,
+      `| renderer-ws 首采样（注入窗口） | ${r.wsFirstKb} KB | ${BASELINE.wsFirstKb} KB |`,
+      `| renderer-ws 峰值（注入窗口） | ${r.wsPeakKb} KB | ${BASELINE.wsPeakKb} KB |`,
+      `| renderer-ws 末采样（注入结束） | ${r.wsLastKb} KB | — |`,
+      r.samplesTail > 0
+        ? `| renderer-ws 尾窗（${(r.tailSpanMs / 1000).toFixed(0)}s / ${r.samplesTail} 条采样） | ${r.wsTailFirstKb} → ${r.wsTailLastKb} KB | — |`
+        : '| renderer-ws 尾窗 | 无（注入后不足两条采样） | — |',
+      `| 斜率 (KB/1000 条，注入窗口) | ${r.wsSlopePer1k} | ${BASELINE.wsSlopePer1k} |`,
       `| 斜率 (KB/1000 条，干净窗口) | ${r.wsSlopeCleanPer1k} | ${BASELINE.wsSlopePer1k} |`,
       `| heapUsed | ${JSON.stringify(r.heapUsedBytes)} | ${BASELINE.heapUsedBytes} |`,
       `| domNodes | ${JSON.stringify(r.domNodes)} | ${BASELINE.domNodes} |`,
@@ -327,12 +390,24 @@ function writeReports(r, outDir) {
 }
 
 function main() {
-  const opts = parseArgs(process.argv.slice(2));
+  let opts;
+  try {
+    opts = parseArgs(process.argv.slice(2));
+  } catch (err) {
+    console.error(`[measure] ✗ 参数错误：${err instanceof Error ? err.message : String(err)}`);
+    console.error('[measure] 用法见 --help。');
+    process.exitCode = 2;
+    return;
+  }
   if (opts.help) {
     usage();
     return;
   }
 
+  // Playwright 的退出码要一路带到脚本退出码：探针的 summary JSONL 是在最后那条
+  // `expect(finalSnap).not.toBeNull()` **之前**写的，断言或收尾失败时 analyze 仍
+  // 可能 ok —— 只看 result 会把红跑报成绿。
+  let probeStatus = 0;
   let jsonlPath = opts.analyze;
   if (!jsonlPath) {
     if (opts.buildCheck) checkBuild();
@@ -340,7 +415,11 @@ function main() {
       `[measure] 口径：${opts.target} 条 @ ${opts.rate} msg/s，1 char/event → ` +
         `预计 ${(opts.target / opts.rate / 60).toFixed(1)} 分钟`
     );
-    const { startedAt } = runProbe(opts);
+    const { status, startedAt } = runProbe(opts);
+    probeStatus = status ?? 1;
+    if (probeStatus !== 0) {
+      console.error(`[measure] ✗ 探针以退出码 ${probeStatus} 结束（见上面的 Playwright 输出）`);
+    }
     jsonlPath = findNewestJsonl(opts.out, startedAt);
     if (!jsonlPath) {
       console.error(
@@ -359,7 +438,7 @@ function main() {
   report(result);
   const base = writeReports(result, opts.out);
   if (base) console.log(`[measure] 报告已写入：${base}.json / ${base}.md`);
-  if (!result.ok || result.crash) process.exitCode = 1;
+  if (!result.ok || result.crash || probeStatus !== 0) process.exitCode = 1;
 }
 
 main();
