@@ -884,6 +884,63 @@ describe('#1034 复审二轮：terminal payload 递归硬上限 + 多终态快�
     expect(violations).toEqual([]);
   });
 
+  it('P2（第八轮）：掏空不降反增的短终态不被替换——正文不白丢，回收另找出路', () => {
+    // 形状：一条正文极短的 error（`{message:'x'}` → 占位 `{_evicted:true,message:'x'}`
+    // 反而**更大**），后面跟着两条各自贴着快照预算的大终态。两次大终态入库就顶破
+    // 1 MiB，回收必须动手，而 step 2 的第一个候选正是那条短 error。
+    // 修复前：先把它换成更大的占位（正文降级、预算反增），下一次循环再被 Step 3
+    // 当"已掏空占位"优先驱逐——正文白丢两次，回收的字节还得另找一条大终态出。
+    // 修复后：不划算就不替换，直接落 Step 3（这里没有可弃项）→ Step 4 掏空最新
+    // 终态的 payload，短 error 原样活着。
+    const shortError = {
+      type: 'error',
+      data: capTerminalEventData({ message: 'x' }),
+      timestamp: 1,
+    } as Ev;
+    const strippedForm = {
+      type: 'error',
+      data: { _evicted: true, message: 'x' },
+      timestamp: 1,
+    } as Ev;
+    // 前提：占位确实更大（否则这条用例考的不是"不降反增"）
+    expect(inFlightEventBytes(strippedForm)).toBeGreaterThan(inFlightEventBytes(shortError));
+
+    const buf = createInFlightSnapshot();
+    pushInFlightEvent(buf, shortError);
+    const f1 = {
+      type: 'final',
+      data: capTerminalEventData({ content: 'f'.repeat(300 * 1024) }),
+      timestamp: 2,
+    } as Ev;
+    const f2 = {
+      type: 'final',
+      data: capTerminalEventData({ content: 'g'.repeat(300 * 1024) }),
+      timestamp: 3,
+    } as Ev;
+    pushInFlightEvent(buf, f1);
+    expect(buf.bytes).toBeLessThanOrEqual(IN_FLIGHT_MAX_BYTES); // 一条还不超
+    const before = buf.bytes + inFlightEventBytes(f2);
+    expect(before).toBeGreaterThan(IN_FLIGHT_MAX_BYTES); // 前提：第二条必须触发回收
+
+    pushInFlightEvent(buf, f2);
+
+    // 不变量：记账守恒、回到上限内，且回收这一拍不涨账（swap 不降反增就不会发生）
+    expect(buf.bytes).toBe(buf.events.reduce((sum, e) => sum + inFlightEventBytes(e), 0));
+    expect(buf.bytes).toBeLessThanOrEqual(IN_FLIGHT_MAX_BYTES);
+    expect(buf.bytes).toBeLessThanOrEqual(before);
+    // 主断言：短 error 的正文没有被换成占位（修复前这里是 `_evicted: true`）
+    const err = buf.events.find((e) => e.type === 'error');
+    expect(err).toBeDefined();
+    expect((err!.data as { _evicted?: boolean })._evicted).toBeUndefined();
+    expect((err!.data as { message?: string }).message).toBe('x');
+    // 最新终态仍在场（watchdog 读它的时间戳），预算由它让出 payload 换回来
+    const newest = buf.events[buf.events.length - 1];
+    expect(newest.type).toBe('final');
+    expect(newest.timestamp).toBe(3);
+    expect((newest.data as { _evicted?: boolean })._evicted).toBe(true);
+    expect(buf.events.some((e) => e.type === 'final')).toBe(true);
+  });
+
   it('P2/#1118：三条满额终态时让位的是较旧的占位，最新终态保住 payload', () => {
     // 每条都贴着终态预算（payloadBytes ≈ TERMINAL_PAYLOAD_MAX_BYTES）。掏空两条
     // 旧的之后，剩下的"最新终态 + 两个占位"仍然超限——#1118 之后这一步不再拿

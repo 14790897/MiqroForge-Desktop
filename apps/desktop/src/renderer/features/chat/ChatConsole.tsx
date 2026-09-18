@@ -3406,7 +3406,10 @@ function evictableTerminalIndex(snapshot: InFlightSnapshot): number {
  *      a terminal older than the newest one, which keeps the event (replay
  *      still reads the turn as settled) and takes content the session's
  *      persisted history can still supply (a stripped error keeps a
- *      200-character head for exactly that reason);
+ *      200-character head for exactly that reason).  (#1118 第八轮) Reserved
+ *      for strips that actually shrink the event: a short payload wrapped in
+ *      the placeholder can measure *larger*, and a strip that buys no bytes
+ *      only destroys content — such a terminal goes to step 3 instead;
  *   3. — (#1118) an older terminal dropped outright (`evictableTerminalIndex`);
  *   4. — (#1118) and only when there is nothing left to drop — the newest
  *      terminal's payload.
@@ -3502,10 +3505,20 @@ function evictInFlightOverflow(snapshot: InFlightSnapshot): void {
         }
       }
       if (victim >= 0) {
-        snapshot.bytes -= inFlightEventBytes(snapshot.events[victim]);
-        snapshot.events[victim] = stripTerminalPayload(snapshot.events[victim]);
-        snapshot.bytes += inFlightEventBytes(snapshot.events[victim]);
-        continue;
+        const before = inFlightEventBytes(snapshot.events[victim]);
+        const stripped = stripTerminalPayload(snapshot.events[victim]);
+        const after = inFlightEventBytes(stripped);
+        // (#1118 第八轮 P2) 只有**真的换到空间**才替换：占位不是免费的——一条
+        // 正文很短的 error（`{message:'x'}`）换成 `{_evicted:true,message:'x'}`
+        // 反而更大。不降反增时替换等于白丢正文却一字节都没买回来，而这条终态
+        // 紧接着还会被 Step 3 当"已掏空占位"优先驱逐（见 evictableTerminalIndex
+        // 的偏好）——正文丢了两次。所以不划算就不替换，落到 Step 3 按整条驱逐
+        // 处理；那时回收的字节由别的终态（Step 4 的最后手段）或条数上限来出。
+        if (after < before) {
+          snapshot.bytes += after - before;
+          snapshot.events[victim] = stripped;
+          continue;
+        }
       }
     }
 
