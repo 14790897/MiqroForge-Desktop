@@ -30,6 +30,14 @@
  *     侧计数器回报，用例结束时断言 sent > 0 且记账字节 > 2 × 上限——注入没送到
  *     的话用例直接失败，不会假绿。
  *
+ * ── 用例性质（review 第十节口径）─────────────────────────────────────
+ * 这是**进程内 IPC replay 集成测试**，不是 full-stack E2E：provider 是永不响应的
+ * mock（mock_hang.py），A 的「后台事件」是主进程用 `webContents.send('chat:progress')`
+ * 直接注入的，B 的方向也只是侧边栏切换——真实模型、真实网络、真实工具调用都不在
+ * 这条链路里。它要证明的是渲染层内部那条接线（缓存 → 切走 → 切回 → 回放）在真实
+ * 渲染进程里成立；后端/协议侧的行为由各自的单测与集成测试负责，别把本用例的绿灯
+ * 读成「整条产品链路已验证」。
+ *
  * 前置：`npm run build`（E2E 跑 out/ 构建产物），再
  *   npx playwright test --config=playwright.config.ts --project=electron \
  *     -g "1118 cross-session replay"
