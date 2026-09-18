@@ -26,6 +26,7 @@ import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import {
   LLM_TIMEOUT,
   sendMessage,
+  approvePlanCardIfAny,
   waitForResponseComplete,
   waitForBridgeInitialized,
   launchElectronApp,
@@ -136,6 +137,11 @@ test.describe('Issue #1104 — declare_result_files 显式声明结果文件', (
       const companions = COMPANION_SUFFIXES.map((s) => `${tag}${s}`);
 
       await sendMessage(page, `Write the five files ${tag} and declare the report.`);
+      // #646-v2 计划闸门：edit 模式下这批 write_file 触发了 produces_artifact
+      // 计划卡，卡不点掉回合就停在「等待你的确认…」，mock 的第 3 轮文本永远不
+      // 会出现（实测 240s 超时 ×3）。与 task-assets / subagent-spawn 等 spec
+      // 同一处理方式——后台轮询，卡出现即「按当前方案执行」，没卡则静默超时退出。
+      void approvePlanCardIfAny(page);
 
       // Turn end: wait for the mock's final text (unique per turn).
       await expect(

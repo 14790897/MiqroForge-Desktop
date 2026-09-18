@@ -129,9 +129,10 @@ test.describe('MOF-5 Qraft Upload E2E', () => {
 
       await sendMessage(page, prompt);
 
-      // The skill flow requires user confirmations (方案清单、上传确认)
-      // via ask_user_confirm_card — auto-confirm them while waiting for
-      // the final user-visible outcome: a successful upload.  The deadline
+      // The skill flow requires user confirmations (方案清单、上传确认)。
+      // 上传是危险动作：技能改走 request_action_confirmation 后渲染为
+      // ActionCard（没有 confirm-card-* testid）——两类卡都要自动确认，
+      // 直到出现用户可见的最终结果：上传成功。  The deadline
       // is activity-driven: deep-thinking models can spend many minutes
       // reasoning before the first tool call, so keep extending it while
       // the UI keeps changing (streaming/tool results), capped at MAX_WAIT.
@@ -146,10 +147,23 @@ test.describe('MOF-5 Qraft Upload E2E', () => {
       let text = '';
       let lastText = '';
       while (Date.now() - runStart < RUN_CAP && Date.now() < idleDeadline) {
+        // ActionCard first: 危险动作（上传/支付/破坏性删除）的唯一模型侧
+        // 入口是 request_action_confirmation，渲染成 action-card，没有
+        // confirm-card-* testid。技能改走 ActionCard 后若只认 primary/choice，
+        // 循环会卡在上传确认卡上直到超时——这里只补选择器，不改断言语义
+        // （仍然只等 /上传成功|HTTP 200/）。
+        const actionConfirm = page
+          .locator('[data-testid="action-card"]')
+          .first()
+          .getByTestId('confirm-run');
         // Prefer the card's primary choice (may be a custom label like
         // "PDF 报告" — label-matching alone would let the card time out).
-        const primary = page.locator('[data-testid="confirm-card-primary"]');
-        if (await primary.isVisible({ timeout: 300 }).catch(() => false)) {
+        const primary = page.locator('[data-testid="confirm-card"]').getByTestId('confirm-run');
+        if (await actionConfirm.isVisible({ timeout: 300 }).catch(() => false)) {
+          await actionConfirm.click();
+          console.log('[test] Auto-confirmed card: (action-card 确认)');
+          idleDeadline = Date.now() + IDLE_DEADLINE;
+        } else if (await primary.isVisible({ timeout: 300 }).catch(() => false)) {
           await primary.first().click();
           console.log('[test] Auto-confirmed card: (primary choice)');
           idleDeadline = Date.now() + IDLE_DEADLINE;

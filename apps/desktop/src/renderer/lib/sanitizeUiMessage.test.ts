@@ -94,3 +94,11 @@ describe('sanitizeUiMessage', () => {
     expect(out).toContain('[url]');
   });
 });
+
+it('turn internal error → Chinese message', () => {
+  expect(
+    sanitizeUiMessage(
+      "Error invoking remote method 'chat:send': Error: Turn task failed with an internal error. Check runtime logs."
+    )
+  ).toBe('任务执行失败（内部错误）。请查看运行时日志后重试。');
+});
