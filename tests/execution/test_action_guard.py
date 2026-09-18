@@ -128,12 +128,15 @@ def test_guard_fails_closed_on_malformed_arguments():
     挡掉，这里锁的是那条路径被绕过时的兜底。
     """
     engine = PermissionEngine()
-    for bad in ("rm -rf /", ["a"], 42, None):
-        ctx = _ctx("spawn", {})
-        ctx.arguments = bad
-        decision = asyncio.run(engine.check(ctx))
-        assert decision.verdict == PermissionVerdict.APPROVAL_REQUIRED, bad
-        assert "fail-closed" in (decision.reason or ""), bad
+    # bypass=True 即 auto：guard 必须仍排在 bypass 之前。只测 bypass=False 的话，
+    # 「把 bypass 短路挪回 guard 之前」这类回归不会让本用例变红。
+    for bypass in (False, True):
+        for bad in ("rm -rf /", ["a"], 42, None):
+            ctx = _ctx("spawn", {}, bypass=bypass)
+            ctx.arguments = bad
+            decision = asyncio.run(engine.check(ctx))
+            assert decision.verdict == PermissionVerdict.APPROVAL_REQUIRED, (bypass, bad)
+            assert "fail-closed" in (decision.reason or ""), (bypass, bad)
 
 
 def test_guard_fails_closed_when_decision_table_unavailable(monkeypatch):
@@ -149,9 +152,11 @@ def test_guard_fails_closed_when_decision_table_unavailable(monkeypatch):
 
     monkeypatch.setattr(task_policy, "should_confirm_action", boom)
     engine = PermissionEngine()
-    decision = asyncio.run(engine.check(_ctx("spawn", {})))
-    assert decision.verdict == PermissionVerdict.APPROVAL_REQUIRED
-    assert "fail-closed" in (decision.reason or "")
+    # bypass=True 即 auto：同上，两种取值都测，锁住「guard 早于 bypass」。
+    for bypass in (False, True):
+        decision = asyncio.run(engine.check(_ctx("spawn", {}, bypass=bypass)))
+        assert decision.verdict == PermissionVerdict.APPROVAL_REQUIRED, bypass
+        assert "fail-closed" in (decision.reason or ""), bypass
 
 
 def test_guard_defers_to_manual_mode():
