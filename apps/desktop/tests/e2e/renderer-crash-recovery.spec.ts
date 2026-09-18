@@ -13,6 +13,21 @@
  * 主进程探针（重载日志捕获 + 对话框监视）都装在 `globalThis` 上，和
  * issue-1019-frame-send-guard.spec.ts 同一套路。
  *
+ * ── 状态隔离与防假绿（#1034 第七轮移植）──────────────────────────────
+ * 本 spec 的三条用例都靠「本轮 run 自己起来的会话」立论，所以必须挡住跨 run 的
+ * 状态泄漏：临时 `$MIQI_HOME` 只隔离 sqlite 会话存储，Chromium profile
+ * （Local Storage / Cookie / sessionStorage 的落盘层）不在里面——dev 模式下
+ * main 用 `app.setPath('userData', %APPDATA%/miqi-desktop-dev/ws-<checkout hash>)`
+ * 覆盖 Electron 的 `--user-data-dir`，于是同一个 checkout 的所有 run（串行 +
+ * 并行 worker）共用一份 Local Storage：上一轮的 `miqi:lastSession` 会被本轮当成
+ * 当前会话恢复。修复见 src/main/index.ts 的 MIQI_USER_DATA_DIR 与
+ * helpers/electron-setup.ts（launch/relaunch 都把 profile 钉到本轮临时 home）。
+ * 配套守卫（纯新增）：
+ *   1. `expectFreshProfile` —— 任何会话操作之前，`miqi:lastSession` 必须是全新
+ *      profile 的初始态 `desktop:default`；
+ *   2. `expectMintedThisRun` —— 解析出的 `desktop:<ms>` key 铸出时间必须晚于本轮
+ *      run 起点（空态哨兵 `desktop:default` 无时间戳，放行）。
+ *
  * Run: cd apps/desktop && npx playwright test \
  *      --config=playwright.config.ts --project=electron -g "1035"
  */
@@ -369,6 +384,87 @@ async function waitForUiReady(electronApp: ElectronApplication): Promise<Rendere
   return last;
 }
 
+// ── 防回归：本轮 run 不许吃上一轮 run 的 Chromium profile 状态 ───────────────
+//
+// 本轮 run 的隔离不止 `$MIQI_HOME`：sqlite 会话存储在临时 MIQI_HOME 下，但渲染层
+// 的 Chromium profile（Local Storage / Cache / Cookies）**不在**里面。dev 模式下
+// main 用 `app.setPath('userData', %APPDATA%/miqi-desktop-dev/ws-<hash>)` 覆盖
+// Electron 的 `--user-data-dir`，hash 只跟 checkout 路径有关——修复前同一个
+// checkout 的所有 run（串行 + 并行 worker）共用一份 Local Storage：上一轮写的
+// `miqi:lastSession` 会被下一轮当当前会话恢复，于是「当前会话」根本不是本轮建的，
+// 用例里读出来的 session key / sessionStorage 状态全是上一轮的遗留。修复见
+// src/main/index.ts 的 MIQI_USER_DATA_DIR 与 helpers/electron-setup.ts（每轮 run
+// 独立 profile）。
+//
+// 这两条守卫对本 spec 尤其关键：`readBaseSessionKey` 从
+// `sessionStorage['miqi-active-thread:*']` 反查基础 session key，而注入用的
+// 「另一条 key」就是它——泄漏态下注入会被打到上一轮的会话上，后面
+// 「注入的标记一个都没出现」的断言于是变成**恒真**（真回归能被藏成假绿）。
+
+/**
+ * 会话 key 的铸出时间：`desktop:<Date.now()>` 形式才带时间戳；空态哨兵
+ * `desktop:default` 没有时间戳，返回 null。
+ */
+function keyMintedAt(key: string): number | null {
+  const m = /^desktop:(\d{10,})$/.exec(key);
+  return m ? Number(m[1]) : null;
+}
+
+/**
+ * 防回归：本轮解析出的 key 不能是上一轮 run 的遗留。
+ *
+ * 共享 profile 泄漏时，第一次解析拿到的就是上一轮 run 的 key——它的时间戳早于
+ * 本轮 run 的起点。空态哨兵 `desktop:default` 没有时间戳、也不是遗留状态
+ * （全新 profile 的初始态就是它），直接放行。
+ *
+ * @param runStart 本轮 run（本 describe 的 beforeAll）开始时刻的毫秒时间戳。
+ */
+function expectMintedThisRun(key: string, label: string, runStart: number): void {
+  const stamp = keyMintedAt(key);
+  if (stamp === null) {
+    expect(key, `${label} 无时间戳，只允许是本轮的空态哨兵 desktop:default`).toBe(
+      'desktop:default'
+    );
+    return;
+  }
+  expect(
+    stamp,
+    `${label}=${key} 的铸出时间必须在本轮 run 开始之后 —— 早于起点说明继承了上一轮 run 的状态`
+  ).toBeGreaterThan(runStart - 5_000);
+  expect(stamp, `${label}=${key} 的铸出时间不应在未来`).toBeLessThan(Date.now() + 5_000);
+}
+
+/**
+ * 任何会话操作之前断言本轮 profile 是全新的。
+ *
+ * 隔离生效时 `miqi:lastSession` 就是全新 profile 的初始态 `desktop:default`
+ * （App 挂载时写回自己恢复出来的 sessionKey）；共享 profile 泄漏时这里会读回
+ * 上一轮 run 的最后会话 key。这条失败即说明 MIQI_USER_DATA_DIR 隔离没生效，
+ * 后面所有断言都不必再看。
+ */
+async function expectFreshProfile(page: Page): Promise<void> {
+  // App 挂载后才把恢复出来的 sessionKey 写回 localStorage —— 刚起来那一拍可能
+  // 还没写。轮询到有值再断言，免得把启动时序问题误报成「profile 泄漏」。
+  const deadline = Date.now() + 5_000;
+  let restoredLastSession: string | null = null;
+  while (Date.now() < deadline) {
+    restoredLastSession = await page.evaluate(() => {
+      try {
+        return localStorage.getItem('miqi:lastSession');
+      } catch {
+        return '<localStorage unavailable>';
+      }
+    });
+    if (restoredLastSession) break;
+    await page.waitForTimeout(100);
+  }
+  console.log(`[e2e1035] restored lastSession = ${restoredLastSession}`);
+  expect(
+    restoredLastSession,
+    '启动恢复的 lastSession 必须是本轮 run 的初始态 —— 其它值说明 Chromium profile 跨 run 共享（上一轮的状态漏进了本轮）'
+  ).toBe('desktop:default');
+}
+
 test.describe('Issue #1035 — 渲染进程崩溃后自动重载与恢复提示', () => {
   // 两条用例共享同一个 app 实例、同一份崩溃预算，必须按序执行。
   // 超时走 describe.configure（Playwright 1.62 的 `test(title, {timeout}, fn)`
@@ -378,8 +474,12 @@ test.describe('Issue #1035 — 渲染进程崩溃后自动重载与恢复提示'
   let electronApp: ElectronApplication;
   let page: Page;
   let miqiHome: string | undefined;
+  /** 本轮 run 起点（防回归断言用，见 expectMintedThisRun）。 */
+  let runStart: number;
 
   test.beforeAll(async () => {
+    // 取在启动之前——本轮铸出的 key 一定晚于它，上一轮遗留的 key 一定早于它。
+    runStart = Date.now();
     const fixture = await launchElectronApp();
     electronApp = fixture.electronApp;
     page = fixture.page;
@@ -400,6 +500,9 @@ test.describe('Issue #1035 — 渲染进程崩溃后自动重载与恢复提示'
   test('崩溃后自动重载、界面恢复可用，且全程无任何提示或弹窗', async () => {
     // 崩溃前先确认界面已就绪：ChatConsole 已挂载。
     await waitForInputReady(page);
+    // 任何会话操作之前：本轮 profile 必须是全新的（见 expectFreshProfile）。
+    await expectFreshProfile(page);
+    expect(runStart, 'runStart 应在 beforeAll 里赋值').toBeGreaterThan(0);
 
     await crashRenderer(electronApp);
 
@@ -553,8 +656,11 @@ test.describe('Issue #1035 — 崩溃重载后继续接收后台 turn 输出', (
   let page: Page;
   let mock: RecoveryMockStream;
   let miqiHome: string | undefined;
+  /** 本轮 run 起点（防回归断言用，见 expectMintedThisRun）。 */
+  let runStart: number;
 
   test.beforeAll(async () => {
+    runStart = Date.now();
     mock = await startRecoveryMock();
     const fixture = await launchElectronApp((config: any) => {
       const providers = config.providers ?? {};
@@ -585,6 +691,8 @@ test.describe('Issue #1035 — 崩溃重载后继续接收后台 turn 输出', (
 
   test('后台 turn 仍在输出时崩溃重载，重载后仍能看到新进展', async () => {
     await waitForInputReady(page);
+    await expectFreshProfile(page);
+    expect(runStart, 'runStart 应在 beforeAll 里赋值').toBeGreaterThan(0);
 
     await sendMessage(page, 'stream please');
 
@@ -766,8 +874,11 @@ test.describe('Issue #1035 — thread-scoped turn 崩溃重载后可恢复', () 
   let page: Page;
   let mock: RecoveryMockStream;
   let miqiHome: string | undefined;
+  /** 本轮 run 起点（防回归断言用，见 expectMintedThisRun）。 */
+  let runStart: number;
 
   test.beforeAll(async () => {
+    runStart = Date.now();
     mock = await startRecoveryMock();
     const fixture = await launchElectronApp((config: any) => {
       const providers = config.providers ?? {};
@@ -798,6 +909,8 @@ test.describe('Issue #1035 — thread-scoped turn 崩溃重载后可恢复', () 
 
   test('thread tab 保持 + 重载后继续 progress + final 落 UI', async () => {
     await waitForInputReady(page);
+    await expectFreshProfile(page);
+    expect(runStart, 'runStart 应在 beforeAll 里赋值').toBeGreaterThan(0);
 
     // 造出子线程 tab 并选中它 —— 之后的发送都会走 `desktop:<threadId>`。
     await spawnThreadTab(electronApp, THREAD_ID, THREAD_LABEL);
@@ -1030,8 +1143,11 @@ test.describe('Issue #1035 — 并发 turn：reload 后只恢复当前 tab 的�
   let page: Page;
   let mock: RecoveryMockStream;
   let miqiHome: string | undefined;
+  /** 本轮 run 起点（防回归断言用，见 expectMintedThisRun）。 */
+  let runStart: number;
 
   test.beforeAll(async () => {
+    runStart = Date.now();
     mock = await startRecoveryMock();
     const fixture = await launchElectronApp((config: any) => {
       const providers = config.providers ?? {};
@@ -1062,6 +1178,8 @@ test.describe('Issue #1035 — 并发 turn：reload 后只恢复当前 tab 的�
 
   test('另一条 key 的事件不混入当前 tab，切走不悬挂，当前 tab 的 turn 正常收尾', async () => {
     await waitForInputReady(page);
+    await expectFreshProfile(page);
+    expect(runStart, 'runStart 应在 beforeAll 里赋值').toBeGreaterThan(0);
 
     // ── 造出子线程 tab 并选中，让真 turn 跑在 `desktop:<THREAD_ID>` 上 ──
     await spawnThreadTab(electronApp, THREAD_ID, THREAD_LABEL);
@@ -1104,6 +1222,10 @@ test.describe('Issue #1035 — 并发 turn：reload 后只恢复当前 tab 的�
     const baseKey = await readBaseSessionKey(electronApp);
     expect(baseKey, '应能从渲染层 sessionStorage 反查到基础 session key').toBeTruthy();
     expect(baseKey, '注入的必须是另一条 routing key').not.toBe(`desktop:${THREAD_ID}`);
+    // 防回归：这个 key 必须是**本轮**的。共享 profile 泄漏时 baseKey 会是上一轮
+    // run 的遗留会话（时间戳早于本轮起点），注入于是打在一条与本次运行无关的
+    // key 上——「标记没出现」的断言就失去了意义（真回归能被藏成假绿）。
+    expectMintedThisRun(baseKey as string, 'base session key', runStart);
 
     await startOtherKeyInjection(electronApp, {
       sessionKey: baseKey as string,
@@ -1114,6 +1236,15 @@ test.describe('Issue #1035 — 并发 turn：reload 后只恢复当前 tab 的�
 
     // 注入期间持续取样：标记一次都不许出现；同时当前 tab 的 turn 必须仍在推进
     // （收起 spinner 之外，唯一能把它点亮的就是恢复监听器收到的真 progress）。
+    //
+    // 「标记一次都没出现」非空洞的三条证据链（缺一条，这条断言就在替坏掉的
+    // 注入背书）：
+    //   1. 注入真的发出去了 —— `__otherKeySent` > 0（wc.send 返回后才 +1）；
+    //   2. 恢复监听器真的在跑、真的在认领事件 —— `sawOwnStreaming`：全新挂载的
+    //      渲染层里 streaming 初值是 false，唯一能把它点亮的就是监听器收到并
+    //      采纳了**当前 tab** 那条 routing key 的 progress；
+    //   3. 注入的 key 是**本轮**的 —— `expectMintedThisRun(baseKey, …)` 挡住
+    //      「上一轮 run 的遗留会话」这种把注入打到无关 key 上的泄漏态。
     const injected: string[] = [];
     let sawOwnStreaming = false;
     const bleedDeadline = Date.now() + 12_000;
