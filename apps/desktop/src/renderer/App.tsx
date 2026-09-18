@@ -17,6 +17,7 @@ import { ConfigHotReloadListener } from './components/ConfigHotReloadListener';
 import { GatewayModelAutoSync } from './components/GatewayModelAutoSync';
 import { InstallWarningToaster } from './components/InstallWarningToaster';
 import { QraftReloginNotifier } from './components/QraftReloginNotifier';
+import { UpdateNotifier } from './components/UpdateNotifier';
 import { ApprovalModal } from './features/approvals/ApprovalModal';
 import { CronPage } from './features/cron/CronPage';
 import { MemoryPage } from './features/memory/MemoryPage';
@@ -407,6 +408,8 @@ function AppShell() {
             setActiveNav('settings');
           }}
         />
+        {/* 自动更新（#1124）：下载中/已下载时出现，引导重启安装 */}
+        <UpdateNotifier />
         <ApprovalProvider>
           <UserInputProvider>
             {/* Full-height flex column */}

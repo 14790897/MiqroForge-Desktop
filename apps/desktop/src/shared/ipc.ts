@@ -185,6 +185,11 @@ export const IPC = {
   // 渲染层 localStorage 只作快速缓存（双开时 Chromium 存储会退化成内存）。
   PRIVACY_GET_CONSENT: 'privacy:get-consent',
   PRIVACY_SET_CONSENT: 'privacy:set-consent',
+
+  // 自动更新（#1124）：状态快照 / 手动检查 / 重启安装。
+  UPDATE_STATUS: 'update:status',
+  UPDATE_CHECK: 'update:check',
+  UPDATE_INSTALL: 'update:install',
 } as const;
 
 // ---------------------------------------------------------------------------
@@ -227,6 +232,9 @@ export const IPC_EVENTS = {
 
   // MiQroForge 登录态变化（自动刷新/过期时由主进程推送）
   QRAFT_STATUS_CHANGED: 'qraft:statusChanged',
+
+  // 自动更新状态变化（检查/下载/完成，主进程推送）
+  UPDATE_CHANGED: 'update:changed',
 } as const;
 
 // ---------------------------------------------------------------------------
@@ -1530,4 +1538,39 @@ export interface QraftStatus {
   points?: QraftPointsBalance;
   /** 平台 AI 网关开通状态（登录且 active 时模型调用走网关）。 */
   aiGateway?: QraftAiGatewayInfo;
+}
+
+// ---------------------------------------------------------------------------
+// 自动更新（#1124）
+// ---------------------------------------------------------------------------
+
+/**
+ * 自动更新状态机：
+ *  - unsupported：非打包环境（或有 feed 覆盖的开发环境）——检查不可用；
+ *  - idle：尚未检查；checking：检查中；
+ *  - available：发现新版本，开始自动下载；downloading：下载中（percent 0-100）；
+ *  - downloaded：下载完成，等用户「重启安装」；
+ *  - up-to-date：已是最新；
+ *  - error：检查/下载失败（瞬时网络失败不弹横幅，只在设置页展示）。
+ */
+export type UpdateState =
+  | 'unsupported'
+  | 'idle'
+  | 'checking'
+  | 'available'
+  | 'downloading'
+  | 'downloaded'
+  | 'up-to-date'
+  | 'error';
+
+export interface UpdateSnapshot {
+  state: UpdateState;
+  /** 当前运行版本（app.getVersion()）。 */
+  currentVersion: string;
+  /** 新版本号（available/downloading/downloaded 时有值）。 */
+  version?: string;
+  /** 下载进度 0-100（downloading 时有值）。 */
+  percent?: number;
+  /** 最近一次失败的面向用户信息（error 时有值，已脱敏）。 */
+  error?: string;
 }

@@ -17,6 +17,7 @@ import { randomUUID } from 'crypto';
 import { basename, join } from 'path';
 import type { BrowserWindow } from 'electron';
 import type { BridgeManager } from '../bridge';
+import type { Updater } from '../updater';
 import { sendToFrame } from '../frame-send';
 import {
   IPC,
@@ -236,7 +237,7 @@ async function submitFeedbackToPlatform(input: {
   return platform;
 }
 
-export function registerIpcHandlers(bridge: BridgeManager): void {
+export function registerIpcHandlers(bridge: BridgeManager, updater: Updater): void {
   // -----------------------------------------------------------------------
   // Runtime
   // -----------------------------------------------------------------------
@@ -2850,4 +2851,11 @@ for m in ("pydantic", "httpx", "loguru"):
     }
     return { ok: true, applied: applyPanelExtra(win, target), skipped: false };
   });
+
+  // ── 自动更新（#1124）：状态快照 / 手动检查 / 重启安装 ──────────────
+  // 状态变化通过 update:changed 事件推送（见 main/index.ts 的 broadcast），
+  // 这里的 invoke 只用于首帧快照与用户主动触发。
+  ipcMain.handle(IPC.UPDATE_STATUS, () => updater.snapshot());
+  ipcMain.handle(IPC.UPDATE_CHECK, async () => updater.check());
+  ipcMain.handle(IPC.UPDATE_INSTALL, () => ({ ok: updater.install() }));
 }

@@ -82,6 +82,7 @@ import type {
   QraftErrorCode,
   QraftStatus,
   ConfigUpdatedPayload,
+  UpdateSnapshot,
 } from '../shared/ipc';
 
 type FeedbackSubmitInputType = z.infer<typeof FeedbackSubmitInput>;
@@ -793,6 +794,18 @@ const api = {
       const handler = (_event: Electron.IpcRendererEvent, status: QraftStatus) => callback(status);
       ipcRenderer.on(IPC_EVENTS.QRAFT_STATUS_CHANGED, handler);
       return () => ipcRenderer.removeListener(IPC_EVENTS.QRAFT_STATUS_CHANGED, handler);
+    },
+  },
+  // 自动更新（#1124）
+  update: {
+    status: (): Promise<UpdateSnapshot> => ipcRenderer.invoke(IPC.UPDATE_STATUS),
+    check: (): Promise<UpdateSnapshot> => ipcRenderer.invoke(IPC.UPDATE_CHECK),
+    install: (): Promise<{ ok: boolean }> => ipcRenderer.invoke(IPC.UPDATE_INSTALL),
+    onStatusChanged: (callback: (snapshot: UpdateSnapshot) => void): (() => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, snapshot: UpdateSnapshot) =>
+        callback(snapshot);
+      ipcRenderer.on(IPC_EVENTS.UPDATE_CHANGED, handler);
+      return () => ipcRenderer.removeListener(IPC_EVENTS.UPDATE_CHANGED, handler);
     },
   },
 };
