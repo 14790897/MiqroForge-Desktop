@@ -34,6 +34,24 @@
  *   npx playwright test --config=playwright.config.ts --project=electron \
  *     -g "1118 cross-session replay"
  *
+ * ── 状态隔离与防回归（#1118 第七轮）────────────────────────────────────
+ * 本轮 run 的隔离不止 `$MIQI_HOME`：sqlite 会话存储在临时 MIQI_HOME 下，
+ * 但渲染层的 Chromium profile（Local Storage / Cache / Cookies）**不在**里面。
+ * dev 模式下 main 用 `app.setPath('userData', %APPDATA%/miqi-desktop-dev/ws-<hash>)`
+ * 覆盖 Electron 的 `--user-data-dir`，hash 只跟 checkout 路径有关——所以修复前
+ * 同一个 checkout 的所有 run（串行 + 并行 worker）共用一份 Local Storage，
+ * 上一轮写的 `miqi:lastSession` 会被下一轮当当前会话恢复：App 把上一轮的会话
+ * key 当成自己的当前会话，测试「先建 B 再建 A」的第一步就落在这个幽灵会话上，
+ * `resolveSessionKey` 于是解析出上一轮的 key（实测：`session B = desktop:1789704154596`
+ * 与 `desktop:default`）。修复见 main/index.ts 的 MIQI_USER_DATA_DIR 与
+ * helpers/electron-setup.ts（每轮 run 独立 profile）。
+ *
+ * 两道防回归断言直接锁死「不再吃上一轮状态」：
+ *   1. 用例开头（任何会话操作之前）断言 localStorage 里的 lastSession 就是本轮
+ *      的初始值 `desktop:default`——泄漏的 profile 在这里会读回上一轮的 key；
+ *   2. 解析出的每个会话 key，若带 `desktop:<ms>` 时间戳，则铸出时间必须在本轮
+ *      run 开始之后（空态哨兵 `desktop:default` 无时间戳，直接放行）。
+ *
  * mock：scripts/mock_hang.py —— POST 永不响应，于是 A 的 turn 一直存活、渲染层
  * 的 chat:progress / chat:final 监听一直注册着（缓存路径的前提）。真实 provider
  * 全程不被调用。
@@ -155,6 +173,39 @@ async function resolveSessionKey(page: Page, marker: string): Promise<string> {
 }
 
 /**
+ * 会话 key 的铸出时间：`desktop:<Date.now()>` 形式才带时间戳；空态哨兵
+ * `desktop:default` 没有时间戳，返回 null。
+ */
+function keyMintedAt(key: string): number | null {
+  const m = /^desktop:(\d{10,})$/.exec(key);
+  return m ? Number(m[1]) : null;
+}
+
+/**
+ * 防回归（#1118 第七轮）：本轮解析出的 key 不能是上一轮 run 的遗留。
+ *
+ * 共享 profile 泄漏时，第一次 resolve 拿到的就是上一轮 run 的 key——它的时间戳
+ * 早于本轮 run 的起点。空态哨兵 `desktop:default` 没有时间戳、也不是遗留状态
+ * （全新 profile 的初始态就是它），直接放行。
+ *
+ * @param runStart 本轮 run（本用例的 beforeAll）开始时刻的毫秒时间戳。
+ */
+function expectMintedThisRun(key: string, label: string, runStart: number): void {
+  const stamp = keyMintedAt(key);
+  if (stamp === null) {
+    expect(key, `${label} 无时间戳，只允许是本轮的空态哨兵 desktop:default`).toBe(
+      'desktop:default'
+    );
+    return;
+  }
+  expect(
+    stamp,
+    `${label}=${key} 的铸出时间必须在本轮 run 开始之后 —— 早于起点说明继承了上一轮 run 的状态`
+  ).toBeGreaterThan(runStart - 5_000);
+  expect(stamp, `${label}=${key} 的铸出时间不应在未来`).toBeLessThan(Date.now() + 5_000);
+}
+
+/**
  * **消息列表**（会话正文）的可见文本。
  *
  * 不用 `main` —— `main` 里还有侧边栏/会话切换面板/顶栏的文本，而侧边栏会把每个
@@ -181,11 +232,16 @@ test.describe('#1118 cross-session replay', () => {
   let page: Page;
   let miqiHome: string;
   let mockServer: ChildProcess;
+  /** 本轮 run 起点（beforeAll 里赋值），供防回归断言使用。 */
+  let runStart: number;
 
   // 首条 send 冷启动慢（已知 flaky 基线），等待预算放宽；断言不放宽。
   const COLD_START_MS = 30_000;
 
   test.beforeAll(async () => {
+    // 本轮 run 的起点：防回归断言以它为准（见 expectMintedThisRun）。取在
+    // 启动之前——本轮铸出的 key 一定晚于它，上一轮遗留的 key 一定早于它。
+    runStart = Date.now();
     const mock = await startMockServer('mock_hang.py');
     mockServer = mock.proc;
     const fixture = await launchElectronApp((config: any) => {
@@ -214,17 +270,37 @@ test.describe('#1118 cross-session replay', () => {
     const TAIL = `XREPLAY_TAIL_${stamp}`;
     const REPLY = `XREPLAY_REPLY_${stamp}`;
 
+    // ── 0a. 防回归：本轮 profile 不能带上一轮 run 的状态 ────────────────
+    // 任何会话操作之前先读：隔离生效时这里是全新 profile 的初始态
+    // `desktop:default`；共享 profile 泄漏时这里会是上一轮 run 的最后会话
+    // （#1118 第七轮实测：desktop:1789704154596 之类）。这条断言失败即说明
+    // MIQI_USER_DATA_DIR 隔离没生效，后面所有断言都不必再看。
+    const restoredLastSession = await page.evaluate(() => {
+      try {
+        return localStorage.getItem('miqi:lastSession');
+      } catch {
+        return '<localStorage unavailable>';
+      }
+    });
+    console.log(`[e2e1118] restored lastSession = ${restoredLastSession}`);
+    expect(
+      restoredLastSession,
+      '启动恢复的 lastSession 必须是本轮 run 的初始态 —— 其它值说明 Chromium profile 跨 run 共享（上一轮的状态漏进了本轮）'
+    ).toBe('desktop:default');
+
     // ── 0. 先建 B 再建 A（顺序见文件头：切走只能用侧边栏，不能用「+」）──
     await createNewConversation(page);
     await sendMessage(page, B_PROMPT);
     const bKey = await resolveSessionKey(page, B_PROMPT);
     console.log(`[e2e1118] session B = ${bKey}`);
+    expectMintedThisRun(bKey, 'session B', runStart);
 
     // ── 1. 会话 A：起一个永不结束的 turn ─────────────────────────────
     await createNewConversation(page);
     await sendMessage(page, A_PROMPT);
     const aKey = await resolveSessionKey(page, A_PROMPT);
     console.log(`[e2e1118] session A = ${aKey}`);
+    expectMintedThisRun(aKey, 'session A', runStart);
     // 等 send 把 chat:progress 监听注册好：注入是一次性事件，监听还没挂上就白丢了
     // （探针里同样是 send 之后先 sleep 再注入）。
     await page.waitForTimeout(3000);
