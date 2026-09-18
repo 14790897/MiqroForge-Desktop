@@ -252,6 +252,12 @@ test.describe('Issue #1131 — 结果文件的「定位」「系统应用打开�
       await card.getByRole('button', { name: '预览' }).click();
       const pdfFrame = page.locator('iframe[src^="blob:"]').last();
       await expect(pdfFrame).toBeVisible({ timeout: 20_000 });
+      // Let Chromium's built-in PDF viewer paint before capturing evidence —
+      // a screenshot taken the instant the iframe mounts shows a blank frame.
+      await page.waitForTimeout(3000);
+      await page.screenshot({
+        path: `test-results/issue-1131-preview-${filename}.png`,
+      });
       console.log('[test] ✅ ③ 「预览」渲染出 PDF iframe');
 
       // ── ④ 系统应用打开：必须走 openBytes（主进程写 miqi-open-*.pdf 临时文件）
