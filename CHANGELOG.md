@@ -1,3 +1,24 @@
+# [0.32.0](https://github.com/14790897/MiqroForge-Desktop/compare/v0.31.1...v0.32.0) (2026-09-18)
+
+
+### Bug Fixes
+
+* **desktop:** 文件夹绑定会话的「定位/预览」可用（[#1062](https://github.com/14790897/MiqroForge-Desktop/issues/1062)） ([#1103](https://github.com/14790897/MiqroForge-Desktop/issues/1103)) ([855b416](https://github.com/14790897/MiqroForge-Desktop/commit/855b41637a2b78d4d20fd68c5c6bf7989f726645)), closes [#955](https://github.com/14790897/MiqroForge-Desktop/issues/955) [#955](https://github.com/14790897/MiqroForge-Desktop/issues/955) [#955](https://github.com/14790897/MiqroForge-Desktop/issues/955) [#955](https://github.com/14790897/MiqroForge-Desktop/issues/955) [#1061](https://github.com/14790897/MiqroForge-Desktop/issues/1061) [#1104](https://github.com/14790897/MiqroForge-Desktop/issues/1104)
+* **providers:** 识别并拒执被输出上限截断的工具参数（[#1094](https://github.com/14790897/MiqroForge-Desktop/issues/1094)） ([#1100](https://github.com/14790897/MiqroForge-Desktop/issues/1100)) ([0c12a15](https://github.com/14790897/MiqroForge-Desktop/commit/0c12a156041a19a51a15fb093bdded785e7d460e))
+
+
+### Features
+
+* **skills:** 技能依赖持久供给（per-skill venv + WSL apt 混合） ([#1086](https://github.com/14790897/MiqroForge-Desktop/issues/1086)) ([ed18250](https://github.com/14790897/MiqroForge-Desktop/commit/ed18250c0fd4afa707ebe51fd21c5d318939f439))
+
+---
+## 下载说明
+
+macOS 用户请按芯片架构选择安装包：
+
+- **Apple Silicon (M1/M2/M3/M4)**：下载 `0.32.0-arm64.dmg`（ARM 架构）
+- **Intel**：下载 `0.32.0.dmg`（x86 无后缀）
+
 ## [0.31.1](https://github.com/14790897/MiqroForge-Desktop/compare/v0.31.0...v0.31.1) (2026-09-17)
 
 
