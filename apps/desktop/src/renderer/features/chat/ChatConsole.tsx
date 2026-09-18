@@ -2191,26 +2191,29 @@ export function insertStandaloneReasoning(
  * (#1034) Hard upper bound, in characters, on the live reasoning text kept in
  * the in-memory/rendered thinking block.
  *
- * Rationale for 8000: the block only shows *transient* thinking — a user
- * reads along while it streams, and after the turn the backend's full text
- * replaces it (see `_closeLiveReasoning` in the final handler; the durable
- * copy lives in `reasoning_content`: miqi/runtime/turn_runner.py:687 writes
- * the assistant message, miqi/runtime/history_runtime.py:148 keeps it in
+ * The value 8000 is a bounded operational window chosen from local profiling,
+ * not a claim about reading behaviour: it is the point where the markdown
+ * re-parse of the tail stays sub-millisecond, so a 60 ms flush never pays a
+ * cost that grows with the accumulated length (measured amplifier: ≈458 B of
+ * retained memory per 1 B of text, 300 MB peak — see the #1034 measurement
+ * report).  Nothing is *lost* by the bound: the block only ever shows
+ * transient thinking, and the backend's full text replaces it after the turn
+ * (see `_closeLiveReasoning` in the final handler; the durable copy lives in
+ * `reasoning_content`: miqi/runtime/turn_runner.py:687 writes the assistant
+ * message, miqi/runtime/history_runtime.py:148 keeps it in
  * execution_snapshots, miqi/bridge/loop.py:1361 re-sends it on the final
- * event).  8000 chars is roughly 10+ screens of Chinese text — far more than
- * anyone reads mid-stream — while keeping the markdown re-parse of the tail
- * sub-millisecond, so a 60ms flush never pays a cost that grows with the
- * accumulated length (measured amplifier: ≈458 B of retained memory per 1 B
- * of text, 300 MB peak).
+ * event).
  */
 export const MAX_LIVE_REASONING_CHARS = 8000;
 /**
  * (#1034) When the cap is exceeded the window is trimmed down to this length
- * (hysteresis) instead of to exactly the cap.  Trimming on *every* flush
- * would rewrite the head paragraph every 60ms, defeating the per-segment
- * memoization in ThinkBlock; this way head drops happen only once per
- * ~2000 new characters, and every flush in between is an append-only write
- * to the last segment.
+ * (hysteresis) instead of to exactly the cap.  Like the cap itself, 6000 is a
+ * bounded operational window chosen from local profiling (the 2000-character
+ * gap is what amortises the head rewrite), not a claim about how much text a
+ * reader takes in.  Trimming on *every* flush would rewrite the head
+ * paragraph every 60ms, defeating the per-segment memoization in ThinkBlock;
+ * this way head drops happen only once per ~2000 new characters, and every
+ * flush in between is an append-only write to the last segment.
  */
 export const LIVE_REASONING_KEEP_CHARS = 6000;
 
@@ -3811,8 +3814,12 @@ function cachedEventsToMessages(events: InFlightEvent[], mode?: ReasoningMode): 
 
 /** Split cached events into thinking (progress/error/subagent) vs the final
  *  reply.  Used by load() to merge with history in the correct visual order
- *  (thinking ABOVE the reply). */
-function splitCachedMessages(events: InFlightEvent[]): {
+ *  (thinking ABOVE the reply).
+ *
+ *  (#1118 复审) Exported for the "cache ≠ source of truth" regression test: the
+ *  cache is a gap-filler, so what this returns for an eviction-emptied terminal
+ *  is a contract (`inFlightReplaySource.test.ts`). */
+export function splitCachedMessages(events: InFlightEvent[]): {
   thinking: Message[];
   finalReply: string | null;
   /** #834: server-measured thinking proxy, preserved across the off-session
