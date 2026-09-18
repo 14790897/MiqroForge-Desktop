@@ -76,13 +76,16 @@ function createWindow(): void {
     }
   );
 
-  mainWindow.webContents.on('render-process-gone', (_event, details) => {
+  // #1035 复审：预算按窗口分开记，所以崩溃必须归到「发生崩溃的这个窗口」——
+  // 闭包固定创建时的实例，不走可变的 mainWindow（macOS activate 会重建它）。
+  const crashWindow = mainWindow;
+  crashWindow.webContents.on('render-process-gone', (_event, details) => {
     console.error(
       `[main] render-process-gone: reason=${details.reason} exitCode=${details.exitCode}`
     );
     // #1035: 崩溃后按预算自动重载（判定/记账在 crashRecovery.ts，纯逻辑可单测）。
     // 恢复动作对用户完全不可见：预算内静默重载、超预算静默停止。
-    handleRendererCrash(mainWindow, details.reason, details.exitCode);
+    handleRendererCrash(crashWindow, details.reason, details.exitCode);
   });
 
   mainWindow.webContents.on('console-message', (_event: unknown, ...args: unknown[]) => {

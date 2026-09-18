@@ -1,23 +1,87 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import {
+  CrashRecoveryRegistry,
   CrashRecoveryTracker,
   MAX_RELOADS_PER_WINDOW,
   RELOAD_WINDOW_MS,
+  crashRecovery,
   evaluateReloadBudget,
+  handleRendererCrash,
   reloadLogLine,
   reloadSkippedLogLine,
 } from '../src/main/crashRecovery';
+import type { CrashRecoverableWindow } from '../src/main/crashRecovery';
 
 /**
  * #1035 渲染进程崩溃恢复：预算纯函数、日志行格式、主进程侧状态表。
  *
  * 恢复动作对用户完全不可见（2026-09 口径）：本模块只做预算记账与日志，
  * 不再有 notice / 在飞登记表（对应的 UI 通道已全部移除）。本文件只碰纯
- * 逻辑——本模块对 electron 只做 `import type`（编译期即抹除），import 它
- * 不会触发 `src/shared/electron.ts` 的 trampoline 校验。
+ * 逻辑——本模块不 import electron（窗口只用结构子集 `CrashRecoverableWindow`
+ * 的假实现），import 它不会触发 `src/shared/electron.ts` 的 trampoline 校验。
  */
 
 const T0 = 1_700_000_000_000; // 固定时间基准，避免依赖真实时钟
+
+/**
+ * 假窗口：`CrashRecoverableWindow` 的最小实现。
+ *
+ * id 自增且跨用例唯一——`handleRendererCrash` 写的是模块级单例
+ * `crashRecovery`，各用例用不同 id 才不会互相借预算。
+ */
+let nextWindowId = 1000;
+
+function createFakeWindow(options: { destroyed?: boolean; webContentsDestroyed?: boolean } = {}) {
+  const id = nextWindowId++;
+  const state = {
+    destroyed: options.destroyed ?? false,
+    webContentsDestroyed: options.webContentsDestroyed ?? false,
+    reloads: 0,
+  };
+  const closedListeners: Array<() => void> = [];
+  const win = {
+    id,
+    isDestroyed: () => state.destroyed,
+    once: (event: 'closed', listener: () => void) => {
+      if (event === 'closed') closedListeners.push(listener);
+    },
+    webContents: {
+      isDestroyed: () => state.webContentsDestroyed,
+      reload: () => {
+        state.reloads += 1;
+      },
+    },
+  } satisfies CrashRecoverableWindow;
+
+  return {
+    id,
+    win,
+    /** 窗口销毁（Electron 的 `closed` 事件）。 */
+    close: () => {
+      state.destroyed = true;
+      closedListeners.splice(0).forEach((listener) => listener());
+    },
+    reloads: () => state.reloads,
+  };
+}
+
+/** 捕获 crashRecovery 打出的可检索日志。 */
+function captureCrashLogs() {
+  const logs: string[] = [];
+  const warns: string[] = [];
+  const text = (args: unknown[]) => args.map((a) => String(a)).join(' ');
+  vi.spyOn(console, 'log').mockImplementation((...args: unknown[]) => {
+    logs.push(text(args));
+  });
+  vi.spyOn(console, 'warn').mockImplementation((...args: unknown[]) => {
+    warns.push(text(args));
+  });
+  return { logs, warns };
+}
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
 
 describe('evaluateReloadBudget — 10 分钟窗口 / 最多 3 次', () => {
   it('空历史：允许重载，序号从 1 起', () => {
@@ -161,5 +225,123 @@ describe('CrashRecoveryTracker — 崩溃记账与预算', () => {
     expect(tracker.onRendererCrash(T0).recent).toEqual([]);
     expect(tracker.onRendererCrash(T0).attempt).toBe(1);
     expect(tracker.recordReload(T0)).toBe(1);
+  });
+});
+
+describe('CrashRecoveryRegistry — 预算按 BrowserWindow 分表（#1035 复审）', () => {
+  it('同一窗口复用同一个 tracker；不同窗口各自一份', () => {
+    const registry = new CrashRecoveryRegistry();
+    const a = createFakeWindow();
+    const b = createFakeWindow();
+
+    const trackerA = registry.trackerFor(a.win);
+    expect(registry.trackerFor(a.win)).toBe(trackerA);
+    expect(registry.trackerFor(b.win)).not.toBe(trackerA);
+    expect(registry.size).toBe(2);
+  });
+
+  it('窗口 closed 后条目被清理：不会把旧预算留给复用同一 id 的新窗口', () => {
+    const registry = new CrashRecoveryRegistry();
+    const a = createFakeWindow();
+    const tracker = registry.trackerFor(a.win);
+    tracker.recordReload(T0);
+    expect(registry.size).toBe(1);
+
+    a.close();
+    expect(registry.size).toBe(0);
+
+    const revived = registry.trackerFor(a.win);
+    expect(revived).not.toBe(tracker);
+    expect(revived.onRendererCrash(T0).attempt).toBe(1);
+    expect(revived.onRendererCrash(T0).recent).toEqual([]);
+  });
+
+  it('forget 只丢指定窗口的记录，其余窗口不受影响', () => {
+    const registry = new CrashRecoveryRegistry();
+    const a = createFakeWindow();
+    const b = createFakeWindow();
+    registry.trackerFor(a.win).recordReload(T0);
+    registry.trackerFor(b.win).recordReload(T0);
+
+    registry.forget(a.id);
+    expect(registry.size).toBe(1);
+    expect(registry.trackerFor(a.win).onRendererCrash(T0).attempt).toBe(1);
+    expect(registry.trackerFor(b.win).onRendererCrash(T0).attempt).toBe(2);
+  });
+});
+
+describe('handleRendererCrash — 每个窗口独立预算（#1035 复审）', () => {
+  it('两个窗口的预算互不影响：一个耗尽，另一个照常重载', () => {
+    const { logs, warns } = captureCrashLogs();
+    const a = createFakeWindow();
+    const b = createFakeWindow();
+
+    for (let i = 0; i < MAX_RELOADS_PER_WINDOW; i += 1) {
+      handleRendererCrash(a.win, 'oom', 1, T0 + i);
+    }
+    expect(a.reloads()).toBe(MAX_RELOADS_PER_WINDOW);
+    expect(logs).toEqual([
+      reloadLogLine('oom', 1),
+      reloadLogLine('oom', 2),
+      reloadLogLine('oom', 3),
+    ]);
+
+    // a 的第 4 次崩溃：超预算，静默跳过（不重载、不弹任何东西）
+    handleRendererCrash(a.win, 'oom', 1, T0 + 10);
+    expect(a.reloads()).toBe(MAX_RELOADS_PER_WINDOW);
+    expect(warns).toEqual([reloadSkippedLogLine('oom', MAX_RELOADS_PER_WINDOW)]);
+
+    // b 是另一个窗口：同一时刻的首次崩溃不受 a 耗尽的影响
+    handleRendererCrash(b.win, 'crashed', 1, T0 + 11);
+    expect(b.reloads()).toBe(1);
+    expect(logs.at(-1)).toBe(reloadLogLine('crashed', 1));
+  });
+
+  it('旧窗口耗尽并销毁后，activate 重建的新窗口仍能重载', () => {
+    const { logs, warns } = captureCrashLogs();
+    const sizeBefore = crashRecovery.size;
+
+    const closed = createFakeWindow();
+    for (let i = 0; i < MAX_RELOADS_PER_WINDOW + 1; i += 1) {
+      handleRendererCrash(closed.win, 'oom', 1, T0 + i);
+    }
+    expect(closed.reloads()).toBe(MAX_RELOADS_PER_WINDOW);
+    expect(crashRecovery.size).toBe(sizeBefore + 1);
+
+    // macOS：关闭最后一个窗口不退出应用 → activate → 新建 BrowserWindow
+    closed.close();
+    expect(crashRecovery.size).toBe(sizeBefore);
+
+    const recreated = createFakeWindow();
+    handleRendererCrash(recreated.win, 'oom', 1, T0 + 100);
+    expect(recreated.reloads()).toBe(1);
+    expect(logs.at(-1)).toBe(reloadLogLine('oom', 1));
+    expect(warns).toEqual([reloadSkippedLogLine('oom', MAX_RELOADS_PER_WINDOW)]);
+  });
+
+  it('窗口已销毁：不重载，也不建条目（销毁后不会再发 closed，建了就是残留）', () => {
+    const destroyed = createFakeWindow({ destroyed: true });
+    const sizeBefore = crashRecovery.size;
+
+    handleRendererCrash(destroyed.win, 'oom', 1, T0);
+
+    expect(destroyed.reloads()).toBe(0);
+    expect(crashRecovery.size).toBe(sizeBefore);
+  });
+
+  it('webContents 已销毁：不重载，且不消耗该窗口的预算', () => {
+    const { logs } = captureCrashLogs();
+    const half = createFakeWindow({ webContentsDestroyed: true });
+
+    handleRendererCrash(half.win, 'oom', 1, T0);
+
+    expect(half.reloads()).toBe(0);
+    // 判定通过但没记成重载 ⇒ 没有 renderer-reloaded 行；预算未被用掉
+    expect(logs).toEqual([]);
+    expect(crashRecovery.trackerFor(half.win).onRendererCrash(T0).attempt).toBe(1);
+  });
+
+  it('null 窗口：静默返回（主窗口尚未创建时无从归属）', () => {
+    expect(() => handleRendererCrash(null, 'oom', 1, T0)).not.toThrow();
   });
 });
