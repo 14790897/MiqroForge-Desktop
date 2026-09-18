@@ -84,6 +84,13 @@ jobs:
     permissions:
       contents: read
       actions: write
+    # 信任来源门禁（#1107 安全评审的结论）：下面这些会执行 PR 检出代码的步骤，只对受信任来源运行。
+    # 不受信任时（外部 fork 的 pull_request_target）它们整体跳过，于是 PR 代码不再与
+    # DEEPSEEK/BRAVE 凭据同处一个 job —— 这同时收掉了既有的「PR head 的 spec 读 key」暴露。
+    # 用**步骤级** if 而不是 job 级：electron-e2e 是 develop 的必需检查，job 级 if 为假时
+    # check 可能根本不上报，PR 会卡在 "Expected — Waiting for status"。
+    env:
+      E2E_TRUSTED: ${{ github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association) }}
     defaults:
       run:
         working-directory: apps/desktop
@@ -107,6 +114,7 @@ jobs:
           python-version: '3.12'
 
       - name: Install dependencies
+        if: env.E2E_TRUSTED == 'true'
         run: |
           npm ci
           pip install uv
@@ -114,12 +122,15 @@ jobs:
           sudo apt-get update -qq && sudo apt-get install -y -qq bubblewrap
 
       - name: Install Playwright browsers
+        if: env.E2E_TRUSTED == 'true'
         run: npx playwright install chromium --with-deps
 
       - name: Build renderer
+        if: env.E2E_TRUSTED == 'true'
         run: npm run build -- --logLevel warn
 
       - name: Generate config.json
+        if: env.E2E_TRUSTED == 'true'
         run: |
           mkdir -p ~/.miqi
           cat > ~/.miqi/config.json << 'CONFEOF'
@@ -156,6 +167,7 @@ jobs:
           CONFEOF
 
       - name: AI connectivity probe — fail fast if provider unreachable
+        if: env.E2E_TRUSTED == 'true'
         # --reporter=list：命令行 reporter 会整组替换 config 里的 html+json（实测：加它之后
         # test-reports/results.json 不再生成），所以探针这一步不产出 JSON 报告 —— 主 E2E 那份
         # 报告不会被它抢先写掉，主步一份都没产出时汇总步能如实报「没找到报告」（#1107）。
@@ -168,6 +180,7 @@ jobs:
           PLAYWRIGHT_SKIP_WEB_SERVER: '1'
 
       - name: Run Electron E2E
+        if: env.E2E_TRUSTED == 'true'
         # --workers=2 (#1107): ubuntu-latest runners are 4 vCPU, and each worker is a
         # full Electron app plus its Python bridge driving real LLM calls — 4 of them
         # leave the runner no headroom, which surfaces as actionability timeouts at
@@ -196,7 +209,7 @@ jobs:
         # 汇总本身是 JS action、按**受信任 ref** 引用：runner 用自己的 node 绝对路径拉起它，
         # 代码取自该 ref 拉下来的那份，不经 shell、不读 PATH，也不需要 GH_TOKEN —— 同一 job 里
         # 先跑过的 PR 代码因此劫持不到这一步（改 PATH / 环境变量都无效）。
-        if: always()
+        if: always() && env.E2E_TRUSTED == 'true'
         uses: 14790897/MiqroForge-Desktop/.github/actions/summarize-flaky@develop
         with:
           report_path: apps/desktop/test-reports/results.json
@@ -234,6 +247,13 @@ jobs:
     permissions:
       contents: read
       actions: write
+    # 信任来源门禁（#1107 安全评审的结论）：下面这些会执行 PR 检出代码的步骤，只对受信任来源运行。
+    # 不受信任时（外部 fork 的 pull_request_target）它们整体跳过，于是 PR 代码不再与
+    # DEEPSEEK/BRAVE 凭据同处一个 job —— 这同时收掉了既有的「PR head 的 spec 读 key」暴露。
+    # 用**步骤级** if 而不是 job 级：electron-e2e 是 develop 的必需检查，job 级 if 为假时
+    # check 可能根本不上报，PR 会卡在 "Expected — Waiting for status"。
+    env:
+      E2E_TRUSTED: ${{ github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association) }}
     defaults:
       run:
         working-directory: apps/desktop
@@ -257,18 +277,22 @@ jobs:
           python-version: '3.12'
 
       - name: Install dependencies
+        if: env.E2E_TRUSTED == 'true'
         run: |
           npm ci
           pip install uv
           uv sync
 
       - name: Install Playwright browsers
+        if: env.E2E_TRUSTED == 'true'
         run: npx playwright install chromium --with-deps
 
       - name: Build renderer
+        if: env.E2E_TRUSTED == 'true'
         run: npm run build -- --logLevel warn
 
       - name: Generate config.json
+        if: env.E2E_TRUSTED == 'true'
         run: |
           mkdir -p ~/.miqi
           cat > ~/.miqi/config.json << 'CONFEOF'
@@ -305,6 +329,7 @@ jobs:
           CONFEOF
 
       - name: AI connectivity probe (macOS) — fail fast if provider unreachable
+        if: env.E2E_TRUSTED == 'true'
         # 同 Linux 侧：--reporter=list 让探针不产出 JSON 报告，不占用主 E2E 那份（#1107）。
         run: |
           npx playwright test --config=playwright.config.ts --project=electron \
@@ -314,6 +339,7 @@ jobs:
           PLAYWRIGHT_SKIP_WEB_SERVER: '1'
 
       - name: Run Electron E2E (macOS)
+        if: env.E2E_TRUSTED == 'true'
         # --workers=2: macos-latest runners (3 vCPU) can't sustain 4 parallel
         # Electron instances + LLM calls — overloaded runners cause intermittent
         # failures at random spec points (actionability misjudgements, slow
@@ -349,7 +375,7 @@ jobs:
         # 汇总本身是 JS action、按**受信任 ref** 引用：runner 用自己的 node 绝对路径拉起它，
         # 代码取自该 ref 拉下来的那份，不经 shell、不读 PATH，也不需要 GH_TOKEN —— 同一 job 里
         # 先跑过的 PR 代码因此劫持不到这一步（改 PATH / 环境变量都无效）。
-        if: always()
+        if: always() && env.E2E_TRUSTED == 'true'
         uses: 14790897/MiqroForge-Desktop/.github/actions/summarize-flaky@develop
         with:
           report_path: apps/desktop/test-reports/results.json
