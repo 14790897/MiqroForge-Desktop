@@ -202,12 +202,34 @@ function analyze(jsonlPath, label) {
 
   const all = (summary.uiHistory ?? []).filter((s) => s && s.wsKb >= 0);
   // 采样在注入结束后还继续 60s（见 spec），报告里分两段：
-  //   - 注入窗口（含最后那条 sent==target 的采样）：与 BEFORE 基线同口径，斜率/峰值都用它；
+  //   - 注入窗口（含边界那条采样）：与 BEFORE 基线同口径，斜率/峰值都用它；
   //   - 尾窗（注入结束之后的那几条）：只看回落，混进斜率会让与基线的对比失真。
   // 注意修复前的 JSONL：采样跟着注入一起停，末尾也会多出一条 sent==target 的采样
   // （最后一个 in-flight 的 uiTick 推的）。那不是尾窗——见下面 hasTail 的判定。
   const target = summary.target ?? 0;
-  const endIdx = target > 0 ? all.findIndex((s) => s.sent >= target) : -1;
+  // 注入结束边界（#1118 第八轮 P2b）：优先用样本自带的 `injectionDone` 标记。它是
+  // 注入循环自己翻转的状态，**目标跑满与 stall 兜底拉停都会翻**，所以「发送一直
+  // 失败、sent 到不了 target」的轮次照样能切出真正的尾窗。旧口径 `sent >= target`
+  // 在那类轮次里 findIndex 返回 -1 ⇒ 尾窗被并进注入窗口，slope/cleanSlope/peak 与
+  // 基线的对照全部失真。第八轮之前的 JSONL 没有这个字段：回退旧启发式，并在报告里
+  // 显式注明（找不到边界时说清楚"切不开"，而不是静默按整段统计）。
+  const hasMarker = all.some((s) => s.injectionDone === true);
+  const legacyEndIdx = target > 0 ? all.findIndex((s) => s.sent >= target) : -1;
+  const endIdx = hasMarker ? all.findIndex((s) => s.injectionDone === true) : legacyEndIdx;
+  const boundarySource = hasMarker
+    ? 'injectionDone 标记'
+    : legacyEndIdx >= 0
+      ? 'sent>=target（旧样本，回退启发式）'
+      : '未找到（旧样本 + 提前停：注入窗口与尾窗切不开）';
+  if (!hasMarker) {
+    console.log(
+      `[measure] ⚠️ 该 JSONL 的样本没有 injectionDone 标记（第八轮之前采的）——` +
+        `注入结束边界回退 'sent >= target' 启发式；` +
+        (legacyEndIdx >= 0
+          ? `本文件在 sent=${all[legacyEndIdx]?.sent} 处找到边界。`
+          : `本文件找不到边界（sent 到不了 target=${target}），注入窗口退化为整段（含尾窗），斜率/峰值口径与基线不可比。`)
+    );
+  }
   const afterEnd = endIdx >= 0 ? all.slice(endIdx + 1) : [];
   const tailSpanMs =
     afterEnd.length > 1
@@ -252,6 +274,9 @@ function analyze(jsonlPath, label) {
     sendMs: summary.sendMs,
     maxBurstMs: summary.maxBurstMs,
     crash: summary.gone ?? null,
+    /** 注入结束边界的来源（第八轮 P2b）——报告里要能看出这个切分是不是可信。 */
+    injectionEndSource: boundarySource,
+    injectionEndFound: endIdx >= 0,
     samples: all.length,
     samplesInjection: hist.length,
     samplesTail: tail.length,
@@ -300,6 +325,7 @@ function report(r) {
     `wall time    : ${wallMin} min (main-thread sendMs=${r.sendMs}, maxBurstMs=${r.maxBurstMs})`
   );
   console.log(`crash        : ${r.crash ? JSON.stringify(r.crash) : 'none'}`);
+  console.log(`注入结束边界 : ${r.injectionEndSource}`);
   console.log(
     `samples      : ${r.samples} (每 5s 一条；注入期 ${r.samplesInjection} + 注入停止后 60s 尾窗 ${r.samplesTail})`
   );
@@ -369,6 +395,7 @@ function writeReports(r, outDir) {
       `| 指标 | ${r.label} | before (PR body) |`,
       '| --- | --- | --- |',
       `| 注入量 | ${r.sent}/${r.target} | 200000/200000 |`,
+      `| 注入结束边界来源 | ${r.injectionEndSource} | sent>=target |`,
       `| wall time | ${(r.wallMs / 60000).toFixed(1)} min | ${BASELINE.wallMin} min |`,
       `| renderer-ws 首采样（注入窗口） | ${r.wsFirstKb} KB | ${BASELINE.wsFirstKb} KB |`,
       `| renderer-ws 峰值（注入窗口） | ${r.wsPeakKb} KB | ${BASELINE.wsPeakKb} KB |`,

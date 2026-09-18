@@ -17,6 +17,11 @@
  * 回落）。采样由独立的 `samplingDone` 控制，注入结束（`done`）不跟着停采样——否则
  * 尾窗一个采样点都没有，配套脚本里的「末尾含回落观察」就成了假口径。
  *
+ * 每条样本都带 `injectionDone`（= 采样那一刻的 `done`，第八轮 P2b）：analyzer 用它
+ * 切「注入窗口 / 尾窗」。旧口径（`sent >= target` 找边界）在 stall 兜底提前拉停的
+ * 轮次里永远找不到边界，尾窗会被当成注入窗口算进斜率/峰值；老 JSONL 没有这个字段，
+ * analyzer 会回退旧启发式并显式告警。
+ *
  * 注入范式取自 tool-error-neutral.spec.ts Test B：
  *   1. 用 scripts/mock_hang.py 起一个永不响应的 provider mock；
  *   2. 发一条真实消息，前端只在回合存活期间注册 chat:progress 监听；
@@ -172,6 +177,8 @@ interface UiSample {
   atIso: string;
   elapsedMs: number;
   sent: number;
+  /** 采样这一刻注入是否已结束（#1118 第八轮 P2b）：analyzer 用它切注入窗口/尾窗。 */
+  injectionDone?: boolean;
   xCount: number;
   bodyLen: number;
   domNodes: number;
@@ -348,6 +355,10 @@ test.describe('#1034 renderer memory probe (measurement only)', () => {
             atIso: new Date(atMs).toISOString(),
             elapsedMs: atMs - state.startedAtMs,
             sent: state.sent,
+            // 注入是否已经结束（#1118 第八轮 P2b）：analyzer 用这条标记切「注入窗口 /
+            // 尾窗」，不再靠 `sent >= target` 猜——stall 兜底提前拉停时 sent 永远到不了
+            // target，旧启发式找不到边界，尾窗会被混进注入窗口的斜率/峰值里。
+            injectionDone: state.done,
           };
           try {
             const probe = await Promise.race([
@@ -562,7 +573,11 @@ test.describe('#1034 renderer memory probe (measurement only)', () => {
     }
     // 注入结束之后的采样条数——CR 复审点名要求这段必须真有采样；为 0 说明采样生命周期
     // 又跟注入一起停掉了。口径与 analyze 的尾窗一致：注入结束那条本身不算尾窗。
-    const endIdx = hist.findIndex((s) => s.sent >= summary.target);
+    // 边界优先看样本自带的 injectionDone（#1118 第八轮 P2b），它不依赖 sent 跑满
+    // target——提前停（stall 兜底）的轮次里 `sent >= target` 永远找不到边界。
+    const endIdx = hist.some((s) => (s as any).injectionDone === true)
+      ? hist.findIndex((s) => (s as any).injectionDone === true)
+      : hist.findIndex((s) => s.sent >= summary.target);
     const tailSamples = endIdx >= 0 ? hist.length - endIdx - 1 : 0;
     console.log(
       `[probe1034] uiHistory samples=${hist.length} (post-injection samples=${tailSamples}) ` +
