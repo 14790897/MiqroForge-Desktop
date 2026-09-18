@@ -3,11 +3,14 @@
 Consults (in order):
 1. Config-based deny rules (checked first — explicit blocks always win)
 2. Interactive user-input tools → their own inline card, never a second approval dialog
-3. Execution-policy bypass/manual handling
-4. Read-only tools → auto-allow (unless blocked by deny pattern)
-5. Session/permanent allowlists
-6. Shell safety / file / network approval
-7. Default: deny-by-default (APPROVAL_REQUIRED)
+3. Action Guard → high-risk actions always confirm; bypass_approval never skips it
+   (deferred to step 5 for manual-only turns, where every call already asks)
+4. Execution-policy bypass (bypass_approval) → skip the category-based approval flow
+5. Execution-policy manual mode (force_approval) → every call asks
+6. Read-only tools → auto-allow (unless blocked by deny pattern)
+7. Session/permanent allowlists
+8. Shell safety / file / network approval
+9. Default: deny-by-default (APPROVAL_REQUIRED)
 """
 
 from __future__ import annotations
@@ -191,12 +194,23 @@ class PermissionEngine:
 
         不依赖模型自觉先调 request_action_confirmation——在真实执行边界兜底。
         """
+        arguments = getattr(ctx, "arguments", None)
         try:
             from miqi.execution.task_policy import should_confirm_action
-            if not should_confirm_action(ctx.tool_name, getattr(ctx, "arguments", None) or {}):
+
+            if not isinstance(arguments, dict):
+                # 畸形参数（非 dict）：参数级判定（敏感路径、破坏性删除）做不了。
+                # 旧写法会让下面的 _is_sensitive_path 抛 AttributeError，冒泡进
+                # except 被吞成「非高危」→ 静默放行。无法判定就按高危处理。
+                return self._guard_indeterminate(ctx, "参数不是对象")
+            if not should_confirm_action(ctx.tool_name, arguments):
                 return None
-        except Exception:
-            return None
+        except Exception:  # noqa: BLE001
+            # 「判定为非高危」与「判定不可用」不是一回事：无法证明该动作无害时
+            # 不得放行——本函数的 docstring 声明的是 fail-closed，这里必须做到。
+            # 主路径上畸形参数会先被 orchestrator 的 schema 校验挡掉，判定表本身
+            # 不可用则属于安装损坏，因此这个分支的爆炸半径只在真正的故障态。
+            return self._guard_indeterminate(ctx, "判定不可用")
         key = f"{getattr(ctx, 'thread_id', '')}:{ctx.tool_name}"
         if key in self._action_guard_confirmed:
             return None
@@ -261,6 +275,21 @@ class PermissionEngine:
             reason="用户未确认危险动作（Action Guard）",
         )
 
+    @staticmethod
+    def _guard_indeterminate(ctx: Any, why: str) -> PermissionDecision:
+        """判定不可用/无法判定时的 fail-closed 决策：不放行，交常规审批准入。
+
+        无弹卡通道时由 orchestrator 兜底（APPROVAL_REQUIRED → 无应答通道即
+        deny_no_channel），方向安全——只可能多问，不可能少问。
+        """
+        return PermissionDecision(
+            verdict=PermissionVerdict.APPROVAL_REQUIRED,
+            category="run",
+            reason=f"危险动作判定不可用（Action Guard fail-closed）：{why}",
+            description=f"危险动作确认 · {ctx.tool_name}",
+            allow_permanent=False,
+        )
+
     async def check(self, ctx: Any) -> PermissionDecision:
         tool_name = ctx.tool_name
         profile = getattr(ctx, "permission_profile", None)
@@ -279,6 +308,29 @@ class PermissionEngine:
                 category="user_input",
             )
 
+        # Action Guard（外部复核 9-11，fail-closed）：高危外部副作用在真实派发前
+        # 强制确认——模型不先调 request_action_confirmation 也无法绕过。
+        #
+        # #1102：必须排在 bypass_approval **之前**。auto 模式由执行策略**自动**置位
+        # bypass_approval（用户在选择器上授权的是「普通动作免确认」，不是「高危动作
+        # 免兜底」——见 docs/design-646-v2-plan-card.md「auto ≠ root」），bypass 若
+        # 短路在前，guard 在 auto / plan 下永不执行。
+        #
+        # 手动模式（force_approval）例外：那里每个动作本来就要确认，guard 的专用卡
+        # 不再叠加——两张卡对同一个动作没有增量安全性，而 guard 卡面「同类动作不再
+        # 逐一询问」的会话缓存语义在 manual 下并不成立（force 会再次拦下），叠加反而
+        # 让卡面文案失真。
+        # 例外只对「纯手动」（force 且非 bypass）成立：两标志同时置位时不该让 bypass
+        # 借道 force 跳过 guard——那正是 #1102 要堵的语义。bypass 仍优先于 force，
+        # 故普通动作在该组合下照旧由 bypass 放行。
+        _manual_only = getattr(ctx, "force_approval", False) and not getattr(
+            ctx, "bypass_approval", False
+        )
+        if not _manual_only:
+            guard_decision = await self._action_guard(ctx)
+            if guard_decision is not None:
+                return guard_decision
+
         if getattr(ctx, "bypass_approval", False):
             return PermissionDecision(
                 verdict=PermissionVerdict.ALLOW,
@@ -296,12 +348,6 @@ class PermissionEngine:
                 allow_permanent=False,
                 description=f"手动模式 · {detail}",
             )
-
-        # Action Guard（外部复核 9-11，fail-closed）：高危外部副作用在真实派发前
-        # 强制确认——模型不先调 request_action_confirmation 也无法绕过。
-        guard_decision = await self._action_guard(ctx)
-        if guard_decision is not None:
-            return guard_decision
 
         cmd_key = self._make_key(ctx)
         if cmd_key in self.session_allowlist:

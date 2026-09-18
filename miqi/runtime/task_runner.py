@@ -58,8 +58,10 @@ _MODE_PROMPTS = {
         "危险操作（执行命令、网络请求、删除文件）需要用户确认。高效工作。\n\n"
     ),
     "auto": (
-        "【Agent 模式：自动】你的角色是全权代理。完全自主执行，不中断询问。"
-        "直接完成任务，注意安全底线。用户信任你的判断。\n\n"
+        "【Agent 模式：自动】你的角色是全权代理。完全自主执行，普通操作不会打断你。"
+        "直接完成任务，注意安全底线。"
+        "高危动作（如派生子代理）执行前仍可能要求用户确认一次，那是运行时兜底，"
+        "不要因此对用户声称「无需确认」。用户信任你的判断。\n\n"
     ),
 }
 
@@ -552,7 +554,7 @@ class TaskRunner:
         # Plan:   strategist — read-only, proposes approach
         # Manual: collaborator — all tools, each step confirmed by user
         # Edit:   developer  — all tools, safe auto, dangerous ask
-        # Auto:   agent      — all tools, bypass approval entirely
+        # Auto:   agent      — all tools, bypass approvals except Action Guard
 
         from miqi.runtime.tool_policy import PLAN_BLOCKED_TOOLS
 

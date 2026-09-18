@@ -83,11 +83,140 @@ def test_guard_does_not_touch_low_risk_tools():
         assert "Action Guard" not in (decision.reason or "")
 
 
-def test_guard_bypass_respected():
-    """bypass_approval（用户显式全放行）→ 不弹卡。"""
+def test_guard_not_bypassed_by_execution_policy():
+    """#1102：bypass_approval 只跳过后面的分类审批流，**不跳过** Action Guard 兜底。
+
+    auto 与 plan 都由执行策略自动置位 bypass_approval（用户在模式选择器上授权的是
+    「普通动作免确认」，不是「高危动作免兜底」）。bypass 若短路在 guard 之前，
+    高危动作在 auto 下就没有任何确认环节。
+    """
     engine = PermissionEngine()
-    decision = asyncio.run(engine.check(_ctx("delete_dir", {"path": "build/"}, bypass=True)))
+    decision = asyncio.run(engine.check(_ctx("spawn", {}, bypass=True)))
+    assert decision.verdict == PermissionVerdict.APPROVAL_REQUIRED
+    assert "Action Guard" in (decision.reason or "")
+
+
+def test_guard_not_bypassed_still_prompts_with_resolver():
+    """#1102：auto 下高危动作照常弹卡——确认则放行、拒绝则 DENY。"""
+    calls = []
+
+    async def confirm(payload):
+        calls.append(payload["tool_name"])
+        return {"status": "submitted", "answers": {"choice_id": "confirm"}}
+
+    engine = PermissionEngine(action_guard_resolver=confirm)
+    decision = asyncio.run(engine.check(_ctx("spawn", {}, bypass=True)))
+    assert calls == ["spawn"]
     assert decision.verdict == PermissionVerdict.ALLOW
+
+    async def cancel(payload):
+        calls.append(payload["tool_name"])
+        return {"status": "submitted", "answers": {"choice_id": "cancel"}}
+
+    denying = PermissionEngine(action_guard_resolver=cancel)
+    decision = asyncio.run(denying.check(_ctx("spawn", {}, bypass=True)))
+    assert decision.verdict == PermissionVerdict.DENY
+    assert "Action Guard" in (decision.reason or "")
+
+
+def test_guard_fails_closed_on_malformed_arguments():
+    """畸形参数（非 dict）不得被吞成「非高危」而静默放行。
+
+    旧写法会让 should_confirm_action 内部的 `args.get(...)` 抛 AttributeError，
+    冒泡进 except 后返回 None（让位给后续门）——auto 下就是直接 ALLOW。参数级
+    判定做不了时按高危处理。主路径上畸形参数会先被 orchestrator 的 schema 校验
+    挡掉，这里锁的是那条路径被绕过时的兜底。
+    """
+    engine = PermissionEngine()
+    # bypass=True 即 auto：guard 必须仍排在 bypass 之前。只测 bypass=False 的话，
+    # 「把 bypass 短路挪回 guard 之前」这类回归不会让本用例变红。
+    for bypass in (False, True):
+        for bad in ("rm -rf /", ["a"], 42, None):
+            ctx = _ctx("spawn", {}, bypass=bypass)
+            ctx.arguments = bad
+            decision = asyncio.run(engine.check(ctx))
+            assert decision.verdict == PermissionVerdict.APPROVAL_REQUIRED, (bypass, bad)
+            assert "fail-closed" in (decision.reason or ""), (bypass, bad)
+
+
+def test_guard_fails_closed_when_decision_table_unavailable(monkeypatch):
+    """判定表不可用 ≠ 判定为非高危——前者不得放行（与 docstring 的 fail-closed 一致）。
+
+    `from ... import should_confirm_action` 每次调用都会重读模块属性，
+    因此 monkeypatch 模块属性即可模拟判定表本身出故障。
+    """
+    import miqi.execution.task_policy as task_policy
+
+    def boom(*_args, **_kwargs):
+        raise RuntimeError("decision table unavailable")
+
+    monkeypatch.setattr(task_policy, "should_confirm_action", boom)
+    engine = PermissionEngine()
+    # bypass=True 即 auto：同上，两种取值都测，锁住「guard 早于 bypass」。
+    for bypass in (False, True):
+        decision = asyncio.run(engine.check(_ctx("spawn", {}, bypass=bypass)))
+        assert decision.verdict == PermissionVerdict.APPROVAL_REQUIRED, bypass
+        assert "fail-closed" in (decision.reason or ""), bypass
+
+
+def test_guard_defers_to_manual_mode():
+    """manual（force_approval）下 guard 让位：走「手动模式」确认，不叠加专用卡。
+
+    两张卡对同一个动作没有增量安全性；而 guard 卡面「同类动作不再逐一询问」的
+    会话缓存语义在 manual 下并不成立（guard 弃权后 force 会再次拦下），叠加反而
+    让卡面文案失真。guard 在代码里排在 force 之前，只为满足「早于 bypass」的顺序约束。
+    """
+    engine = PermissionEngine()
+    ctx = _ctx("spawn", {})
+    ctx.force_approval = True
+    decision = asyncio.run(engine.check(ctx))
+    assert decision.verdict == PermissionVerdict.APPROVAL_REQUIRED
+    assert "手动模式" in (decision.description or "")
+    assert "Action Guard" not in (decision.reason or "")
+
+
+def test_guard_survives_both_policy_flags():
+    """bypass + force 同时置位：普通动作照旧 bypass 放行，高危动作仍被 guard 拦下。
+
+    让位条件写的是「force 且非 bypass」——若写成「force」，bypass 会经由 force 这个
+    入口重新绕开 guard（#1102 的语义被换个入口绕过）。生产上没有任何模式同时置位，
+    本用例锁的是这个合成组合。
+    """
+    engine = PermissionEngine()
+
+    normal = _ctx("exec", {"command": "ls"}, bypass=True)
+    normal.force_approval = True
+    decision = asyncio.run(engine.check(normal))
+    assert decision.verdict == PermissionVerdict.ALLOW
+    assert "Bypassed by execution policy" in (decision.reason or "")
+
+    risky = _ctx("spawn", {}, bypass=True)
+    risky.force_approval = True
+    decision = asyncio.run(engine.check(risky))
+    assert decision.verdict == PermissionVerdict.APPROVAL_REQUIRED
+    assert "Action Guard" in (decision.reason or "")
+
+
+def test_bypass_still_skips_normal_approval_flow():
+    """#1102 回归：bypass 对**非高危**工具仍完全免确认——别把 auto 修成 manual。
+
+    同时断言 reason 而不只是 verdict：read_file 虽然也在 READ_ONLY_TOOLS 里，但
+    bypass 分支排在只读放行**之前**，所以这些工具在 bypass 下走的就是 bypass 那条
+    通路。只断言 ALLOW 区分不出「bypass 放行」与「只读/分类放行」，删掉 bypass
+    短路也照样绿。
+    """
+    engine = PermissionEngine()
+    for tool, args in (
+        ("read_file", {"path": "a.txt"}),
+        ("write_file", {"path": "a.txt"}),
+        ("edit_file", {"path": "a.txt"}),
+        ("exec", {"command": "rm -rf build"}),
+        ("web_search", {"query": "x"}),
+        ("memory", {"content": "x"}),
+    ):
+        decision = asyncio.run(engine.check(_ctx(tool, args, bypass=True)))
+        assert decision.verdict == PermissionVerdict.ALLOW, tool
+        assert "Bypassed by execution policy" in (decision.reason or ""), tool
 
 
 def test_guard_different_tools_each_prompt():

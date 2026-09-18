@@ -1190,7 +1190,7 @@ class TurnRunner:
         # Plan: strategist — read-only, proposes approach
         # Manual: collaborator — all tools, each step confirmed by user
         # Edit: developer — all tools, safe auto, dangerous ask
-        # Auto: agent — all tools, bypass approval entirely
+        # Auto: agent — all tools, bypass approvals except Action Guard
 
         from miqi.runtime.tool_policy import PLAN_BLOCKED_TOOLS
 
