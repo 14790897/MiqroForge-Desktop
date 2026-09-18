@@ -7,9 +7,15 @@
  * delta，见 ChatConsole 的 exec 输出回放），折叠后仍超限则按序回收——先驱逐
  * 最旧的 progress，再掏空较旧终态的 payload（保留 type/timestamp，回放的
  * 终态判定与 watchdog 不受影响；掏空救不回预算时不掏）。最新事件永不驱逐。
+ *
+ * （四轮复审）单条 progress 另有一条 64 KiB 硬上限，在入库前强制：delta 可以
+ * 切片再拼回（无损），delta 之外的字节由 `sanitizeProgressEventData` 递归裁剪
+ * 整段 payload（有损，只留头部），所以"最新事件是超大 progress"不再能击穿
+ * 快照的 1 MiB 上限。终态不受这条约束，由 capTerminalEventData 单独封顶。
  */
 import { describe, expect, it } from 'vitest';
 import {
+  IN_FLIGHT_EVENT_OVERHEAD_BYTES,
   IN_FLIGHT_MAX_BYTES,
   IN_FLIGHT_MAX_EVENTS,
   IN_FLIGHT_MAX_EVENT_BYTES,
@@ -20,7 +26,13 @@ import {
   createInFlightSnapshot,
   inFlightEventBytes,
   pushInFlightEvent,
+  sanitizeProgressEventData,
 } from '../src/renderer/features/chat/ChatConsole';
+
+/** 单条 progress 载荷的字节预算：单事件上限减去该事件自身的记账开销。与
+ *  ChatConsole 里 `PROGRESS_PAYLOAD_MAX_BYTES` 同一算式（未导出）——用它断言
+ *  载荷级口径，收紧了实现（严于这个数）不会变红，放松了会。 */
+const PROGRESS_PAYLOAD_MAX_BYTES = IN_FLIGHT_MAX_EVENT_BYTES - IN_FLIGHT_EVENT_OVERHEAD_BYTES;
 
 type Ev = Parameters<typeof pushInFlightEvent>[1];
 
@@ -77,12 +89,29 @@ function isStrippedPayload(data: unknown): boolean {
   );
 }
 
-/** 未封顶的 progress：大字节藏在 `delta` **之外**的字段里，按字节拆分救不了
- *  ——这是单事件上限唯一覆盖不到的形状（拆分只能切 `delta`），如实单独锁住。 */
+/** progress：大字节藏在 `delta` **之外**的字段里，按字节拆分救不了（拆分只能切
+ *  `delta`）。第四轮起这条路径由 `sanitizeProgressEventData` 接管——对整个 payload
+ *  递归有界化（有损：被裁字段只留头部 + 省略号），所以它不再能造出超限事件，而是
+ *  「拆不动就必须裁」这条分支的入口。 */
 function fatFieldProgress(payload: string, timestamp = 1): Ev {
   return {
     type: 'progress',
     data: { stream: 'stdout', delta: '', tool_call_id: 'c1', tool_output: payload },
+    timestamp,
+  } as Ev;
+}
+
+/** progress：大字节藏在**嵌套**字段里（`data.meta.details.huge`，深度 3），
+ *  递归裁剪必须一路走到叶子。 */
+function nestedFatProgress(payload: string, timestamp = 1): Ev {
+  return {
+    type: 'progress',
+    data: {
+      stream: 'stdout',
+      delta: '',
+      tool_call_id: 'c1',
+      meta: { details: { huge: payload } },
+    },
     timestamp,
   } as Ev;
 }
@@ -671,24 +700,46 @@ describe('#1034 复审二轮：terminal payload 递归硬上限 + 多终态快�
     ).toBe(true);
   });
 
-  it('P2：掏空也救不回预算时不掏——不白扔内容', () => {
-    // 最新事件是一条无法拆分的 progress（1.2 MiB 全在 delta 之外的字段里），
-    // 它不能被驱逐。此时把 error 掏空也回不到上限内，所以必须原样留着
-    // message——掏空前这条 error 有 30 万字的报错正文，掏空只换来一个
-    // 仍然超限的结果。
+  it('P2：掏空也救不回预算时不掏——宁可如实超限，也不白扔终态正文', () => {
+    // 第四轮起这条分支不能再由 pushInFlightEvent 造出来：能撑爆预算的 progress
+    // 在入库前就被有界化（≤64 KiB），最新事件再也不是"消不掉的兆级常驻"。剩下
+    // 的入口只有体积：终态永不驱逐、掏空后仍留占位（error 还带 200 字 message
+    // 头部），所以几千条已结算的终态自己就能压过快照预算——这正是 reclaimable
+    // 守卫的判定条件（掏空全部终态也回不到上限内）。这个状态由直接操作快照的
+    // 调用方构造（createInFlightSnapshot 不强制上限），守卫的行为必须钉住：
+    // 掏空只会毁掉正文，换来的仍是一条超限的快照。
     const buf = createInFlightSnapshot();
-    const longMessage = 'BOOM: ' + 'x'.repeat(300 * 1024);
-    pushInFlightEvent(buf, {
+    const message = 'BOOM: ' + 'x'.repeat(300 * 1024);
+    const errorEvent = {
       type: 'error',
-      data: capTerminalEventData({ message: longMessage }),
+      data: capTerminalEventData({ message }),
       timestamp: 8,
-    } as Ev);
-    pushInFlightEvent(buf, fatFieldProgress('p'.repeat(600 * 1024), 9));
+    } as Ev;
+    buf.events.push(errorEvent);
+    buf.bytes += inFlightEventBytes(errorEvent);
+    // 7000 条只剩占位的终态（约 1.1 MiB）——不可回收的那部分自己就超预算。
+    for (let i = 0; i < 7000; i += 1) {
+      const placeholder = { type: 'final', data: { _evicted: true }, timestamp: 9 } as Ev;
+      buf.events.push(placeholder);
+      buf.bytes += inFlightEventBytes(placeholder);
+    }
+    expect(buf.bytes).toBeGreaterThan(IN_FLIGHT_MAX_BYTES);
 
-    const errorEvent = buf.events[0];
-    expect((errorEvent.data as { _evicted?: boolean })._evicted).toBeUndefined();
-    expect((errorEvent.data as { message: string }).message).toBe(longMessage);
-    // 已知边界：救不回来就如实超限，而不是毁数据换一个仍然超限的结果。
+    // 任何一次 push 都会跑回收：这里没有可弃的 progress，只剩"掏空终态"一条路，
+    // 而它救不回预算。
+    pushInFlightEvent(buf, {
+      type: 'progress',
+      data: { stream: 'stderr', delta: 'x', tool_call_id: 'c2' },
+      timestamp: 10,
+    } as Ev);
+
+    // 正文原样留着：没有为了一个仍然超限的结果把 30 万字的报错掏成 200 字。
+    // （断言必须读 buf.events[0]：掏空是"换掉数组里那一项"，手里那个对象引用
+    // 不会被就地改写，读它永远看到原样。）
+    expect((buf.events[0].data as { _evicted?: boolean })._evicted).toBeUndefined();
+    expect((buf.events[0].data as { message: string }).message).toBe(message);
+    expect(buf.events[0]).toBe(errorEvent);
+    // 如实超限，而不是假装守住；记账仍然守恒。
     expect(buf.bytes).toBeGreaterThan(IN_FLIGHT_MAX_BYTES);
     expect(buf.bytes).toBe(buf.events.reduce((sum, e) => sum + inFlightEventBytes(e), 0));
   });
@@ -717,42 +768,55 @@ describe('#1034 复审二轮：terminal payload 递归硬上限 + 多终态快�
     ).toBe(true);
   });
 
-  it('P2：停在超限状态时一定已无可回收项（不白扔内容的不变量，逐次 push 检查）', () => {
-    // 扫「n 条近满终态 × 尾部事件」共 18 种组合。不变量有两条：
-    //   1) 若还能靠掏空回到上限内，就不允许停在超限状态——那是拿内容换了个
-    //      仍然超限的结果；
-    //   2) 记账恒等于事件字节之和。
+  it('P2：每次 push 后两个不变量都成立（单条 ≤64 KiB、总量 ≤1 MiB、记账守恒）', () => {
+    // 扫「n 条近满终态 × 尾部事件」共 24 种组合，逐个 push 之后立刻检查：
+    //   1) 进快照的每条事件都在单事件上限内；
+    //   2) 总量不超过快照上限——包括「最新事件是超大/拆不动的 progress」这种
+    //      第四轮之前会如实超限的形状；
+    //   3) 记账恒等于事件字节之和。
+    // 第四轮起 1) 由 pushInFlightEvent 在入库前保证（拆 delta 或递归裁剪整段
+    // payload），2) 因此才是可证的：回收总能拿到够用的可回收项。
     // 近满终态：约 1 MB/条（payload 压在终态预算之下，capTerminalEventData
-    // 原样返回），两条就超限，能真正走到「掏空」与「掏空也救不回」两条路径。
+    // 原样返回），两条就超限，能真正走到「掏空」路径。
     const nearMaxPayload = (ch: string) => capTerminalEventData({ blob: ch.repeat(500 * 1024) });
     const violations: string[] = [];
-    let overBudgetStates = 0;
+    let sawStrippedTerminal = false;
+    let sawEvictedProgress = false;
 
-    // 每次 push 之后立刻检查：pushInFlightEvent 是同步回收的，超限状态就是
-    // 回收后的结果，正是要断言的那一刻（只看最终态会漏掉中间过程）。
+    // 每次 push 之后立刻检查：pushInFlightEvent 是同步回收的，"超限"状态只会
+    // 是回收后的结果，正是要断言的那一刻（只看最终态会漏掉中间过程）。
     const checkInvariant = (buf: ReturnType<typeof createInFlightSnapshot>, label: string) => {
-      // 掏空每条尚未掏空的终态还能回收多少字节（与实现的占位形状一致：error
-      // 保留 200 字 message 头部）。
-      let reclaimable = 0;
-      for (const e of buf.events) {
-        if (e.type === 'progress' || isStrippedPayload(e.data)) continue;
-        const message = (e.data as { message?: unknown } | null)?.message;
-        const strippedData =
-          typeof message === 'string'
-            ? { _evicted: true, message: message.slice(0, 200) }
-            : { _evicted: true };
-        reclaimable +=
-          inFlightEventBytes(e) - inFlightEventBytes({ type: e.type, data: strippedData } as Ev);
-      }
-      if (buf.bytes > IN_FLIGHT_MAX_BYTES) {
-        overBudgetStates += 1;
-        if (buf.bytes - reclaimable <= IN_FLIGHT_MAX_BYTES) {
-          violations.push(`${label}: bytes=${buf.bytes} reclaimable=${reclaimable}`);
-        }
-      }
       const ledger = buf.events.reduce((sum, e) => sum + inFlightEventBytes(e), 0);
       if (ledger !== buf.bytes) violations.push(`${label}: ledger ${ledger} != ${buf.bytes}`);
+      if (buf.bytes > IN_FLIGHT_MAX_BYTES) {
+        violations.push(`${label}: 总量 ${buf.bytes} 超限`);
+      }
+      for (const e of buf.events) {
+        // 单事件 64 KiB 上限只约束 progress（delta 可以再拼回来）；终态由自己的
+        // payload cap 管——`final` 的正文就是答案本身，不能像流式 delta 那样
+        // 切片（见 ChatConsole 里两条 cap 的注释）。
+        const cap = e.type === 'progress' ? IN_FLIGHT_MAX_EVENT_BYTES : IN_FLIGHT_MAX_BYTES;
+        if (inFlightEventBytes(e) > cap) {
+          violations.push(`${label}: 单条 ${inFlightEventBytes(e)} 超限（${e.type}）`);
+        }
+        if (isStrippedPayload(e.data)) sawStrippedTerminal = true;
+      }
     };
+
+    /** push 之后再检查两个不变量。 */
+    const pushAndCheck = (
+      buf: ReturnType<typeof createInFlightSnapshot>,
+      event: Ev,
+      label: string
+    ) => {
+      pushInFlightEvent(buf, event);
+      checkInvariant(buf, label);
+    };
+
+    /** 可识别的旧 progress：用来证明扫描里真的走到过"驱逐最旧 progress"。
+     *  条数变化看不出来——超大 delta 会在一次 push 里拆成一列 chunk，中间丢
+     *  几条、净增仍是正的——所以这里放一条只有回收才会让它消失的标记事件。 */
+    const isMarker = (e: Ev): boolean => (e.data as { stream?: string }).stream === 'marker-drop';
 
     for (let n = 1; n <= 6; n += 1) {
       for (const tail of [
@@ -764,41 +828,50 @@ describe('#1034 复审二轮：terminal payload 递归硬上限 + 多终态快�
         const buf = createInFlightSnapshot();
         const types = ['final', 'error', 'aborted'] as const;
         for (let i = 0; i < n; i += 1) {
-          pushInFlightEvent(buf, {
-            type: types[i % 3],
-            data: nearMaxPayload(String.fromCharCode(102 + i)),
-            timestamp: i,
-          } as Ev);
-          checkInvariant(buf, `n=${n} ${tail} push#${i}`);
+          pushAndCheck(
+            buf,
+            {
+              type: types[i % 3],
+              data: nearMaxPayload(String.fromCharCode(102 + i)),
+              timestamp: i,
+            } as Ev,
+            `n=${n} ${tail} push#${i}`
+          );
         }
         if (tail === 'progress-delta-big') {
-          // 可拆分的超大 delta：拆分 + 逐条回收必须把它压回总预算内（单事件
-          // 上限落地后，「最新事件是超大 progress」不再能击穿快照上限）。
-          pushInFlightEvent(buf, progress('p'.repeat(600 * 1024), 'stdout', 'c1', 99));
-          checkInvariant(buf, `n=${n} ${tail} tail`);
-          expect(buf.bytes).toBeLessThanOrEqual(IN_FLIGHT_MAX_BYTES);
-          for (const e of buf.events) {
-            expect(inFlightEventBytes(e)).toBeLessThanOrEqual(IN_FLIGHT_MAX_EVENT_BYTES);
-          }
+          // 可拆分的超大 delta：拆分 + 逐条回收必须把它压回总预算内。
+          pushAndCheck(buf, progress('m', 'marker-drop', 'c-marker', 98), `n=${n} ${tail} 标记`);
+          expect(buf.events.some(isMarker)).toBe(true); // 先确认它在场
+          pushAndCheck(
+            buf,
+            progress('p'.repeat(600 * 1024), 'stdout', 'c1', 99),
+            `n=${n} ${tail} tail`
+          );
+          // 标记是最旧的 progress，回收按"最旧的 progress 先丢"把它挤出去。
+          if (!buf.events.some(isMarker)) sawEvictedProgress = true;
         }
         if (tail === 'progress-fat') {
-          // 拆不动的 progress（字节在 delta 之外）：这里才是「停在超限状态」
-          // 的真实入口，不变量 1 要在这里被扫到。
-          pushInFlightEvent(buf, fatFieldProgress('p'.repeat(600 * 1024), 99));
-          checkInvariant(buf, `n=${n} ${tail} tail`);
+          // 拆不动的 progress（字节在 delta 之外）：第四轮之前它会以 1.2 MiB 的
+          // 单条事件留在快照里，是"如实超限"的真实入口；现在入库前就被裁剪，
+          // 两个不变量在这里同样成立。
+          pushAndCheck(buf, fatFieldProgress('p'.repeat(600 * 1024), 99), `n=${n} ${tail} tail`);
         }
         if (tail === 'progress-small') {
-          pushInFlightEvent(buf, {
-            type: 'progress',
-            data: { stream: 'stdout', delta: 'p'.repeat(1024), tool_call_id: 'c1' },
-            timestamp: 99,
-          } as Ev);
-          checkInvariant(buf, `n=${n} ${tail} tail`);
+          pushAndCheck(
+            buf,
+            {
+              type: 'progress',
+              data: { stream: 'stdout', delta: 'p'.repeat(1024), tool_call_id: 'c1' },
+              timestamp: 99,
+            } as Ev,
+            `n=${n} ${tail} tail`
+          );
         }
       }
     }
-    // 扫到的组合必须真的走到过超限状态，否则这条不变量就是空转。
-    expect(overBudgetStates).toBeGreaterThan(0);
+    // 扫描必须真的走到过回收（掏空终态 / 驱逐旧 progress），否则不变量是空转。
+    expect(sawStrippedTerminal).toBe(true);
+    expect(sawEvictedProgress).toBe(true);
     expect(violations).toEqual([]);
   });
 
@@ -886,34 +959,333 @@ describe('#1034 复审二轮：terminal payload 递归硬上限 + 多终态快�
     expect('p'.repeat(600 * 1024).endsWith(kept)).toBe(true);
   });
 
-  it('P2：拆不动的超大 progress 独占缓存时仍无法回收（已知边界，如实锁住）', () => {
-    // 字节藏在 delta 之外：拆分切不到它，又是唯一事件（最新事件永不驱逐），
-    // 没有任何可回收对象。上限在此形状下照顾不到——与其假装守住，不如把
-    // 行为钉死，形状变化时立刻可见。
+  it('P2：拆不动的超大 progress 独占缓存时被就地裁剪（旧边界已闭合）', () => {
+    // 字节藏在 delta 之外：拆分切不到它，它又是唯一事件（最新事件永不驱逐，
+    // watchdog 读它的时间戳）——第四轮之前这是单事件上限唯一照顾不到的形状，
+    // 只能如实超限。现在整段 payload 在入库前被递归有界化，所以"独占缓存"
+    // 不再等于"超限"：单条 ≤64 KiB、总量 ≤1 MiB、时间戳与在场性都不变。
     const buf = createInFlightSnapshot();
-    pushInFlightEvent(buf, fatFieldProgress('p'.repeat(600 * 1024), 1));
+    const payload = 'p'.repeat(600 * 1024);
+    pushInFlightEvent(buf, fatFieldProgress(payload, 1));
 
-    expect(buf.bytes).toBeGreaterThan(IN_FLIGHT_MAX_BYTES);
+    expect(buf.bytes).toBeLessThanOrEqual(IN_FLIGHT_MAX_BYTES);
     expect(buf.events.length).toBe(1);
     expect(buf.events[0].timestamp).toBe(1);
+    expect(inFlightEventBytes(buf.events[0])).toBeLessThanOrEqual(IN_FLIGHT_MAX_EVENT_BYTES);
   });
 
   it('P2：有 progress 可弃时不丢终态——先弃 progress，终态留在快照里', () => {
+    // 单条 progress 现在最多 64 KiB，撑不爆 1 MiB 的预算，所以这里要真的堆够
+    // 字节：先推一条 delta 之外塞满大字段的 progress（入库时被裁到远小于上限，
+    // 但仍然是真事件），再推一条贴着终态预算的 final——两条之和必然超限，回收
+    // 只能落在 progress 上（终态是回放判定 turnDone 的依据）。
     const buf = createInFlightSnapshot();
-    pushInFlightEvent(buf, {
-      type: 'progress',
-      data: bigPayload('p'.repeat(300 * 1024)),
-      timestamp: 8,
-    } as Ev);
+    pushInFlightEvent(buf, fatFieldProgress('p'.repeat(600 * 1024), 8));
+    expect(inFlightEventBytes(buf.events[0])).toBeLessThanOrEqual(IN_FLIGHT_MAX_EVENT_BYTES);
     pushInFlightEvent(buf, {
       type: 'final',
-      data: capTerminalEventData(bigPayload('f'.repeat(300 * 1024))),
+      data: capTerminalEventData({
+        blob: 'f'.repeat(Math.floor((TERMINAL_PAYLOAD_MAX_BYTES - 32) / 2)),
+      }),
       timestamp: 9,
     } as Ev);
 
     expect(buf.bytes).toBeLessThanOrEqual(IN_FLIGHT_MAX_BYTES);
     expect(buf.events.map((e) => e.type)).toEqual(['final']);
     expect(buf.events[0].timestamp).toBe(9);
+  });
+});
+
+describe('#1034 复审四轮 P1：progress 全 payload 硬上限（delta 之外的字节同样有界）', () => {
+  /** 契约：push 之后，快照里每条 **progress** 事件都在单事件上限内、总量在快照
+   *  上限内、记账守恒。只用于本组的纯 progress 缓冲区——终态由另一条（更宽的）
+   *  TERMINAL_PAYLOAD_MAX_BYTES 管，不适用单事件上限。 */
+  function expectBounded(buf: ReturnType<typeof createInFlightSnapshot>, label: string): void {
+    const ledger = buf.events.reduce((sum, e) => sum + inFlightEventBytes(e), 0);
+    expect(ledger, `${label}: 记账`).toBe(buf.bytes);
+    expect(buf.bytes, `${label}: 总量`).toBeLessThanOrEqual(IN_FLIGHT_MAX_BYTES);
+    for (const e of buf.events) {
+      expect(inFlightEventBytes(e), `${label}: 单条`).toBeLessThanOrEqual(
+        IN_FLIGHT_MAX_EVENT_BYTES
+      );
+    }
+  }
+
+  /** 拆 delta 救不了的各种形状：字节在 delta 之外的顶层字段、嵌套字段、纯 key、
+   *  无 delta 的 lifecycle 事件。 */
+  function fatShapes(): Array<[string, Ev]> {
+    return [
+      ['tool_output（顶层非 delta 字段）', fatFieldProgress('p'.repeat(600 * 1024), 9)],
+      ['data.meta.details.huge（嵌套字段）', nestedFatProgress('n'.repeat(600 * 1024), 9)],
+      [
+        'doc_progress 的超大 file（无 delta）',
+        {
+          type: 'progress',
+          data: { type: 'doc_progress', file: 'f'.repeat(600 * 1024), stage: 'ready' },
+          timestamp: 9,
+        } as Ev,
+      ],
+      ['deep tool_calls.arguments（深度 ≥3）', deepToolCallProgress('a'.repeat(600 * 1024), 9)],
+      [
+        '字节全在 key 里（裁无可裁）',
+        {
+          type: 'progress',
+          data: { stream: 'stdout', tool_call_id: 'c1', ...bigKeyPayload() },
+          timestamp: 9,
+        } as Ev,
+      ],
+    ];
+  }
+
+  it('P1：拆不动的超大 progress 入库后单条 ≤64 KiB、总量 ≤1 MiB（各形状逐个扫）', () => {
+    for (const [label, event] of fatShapes()) {
+      expect(inFlightEventBytes(event), `${label}: 用例本身要超限`).toBeGreaterThan(
+        IN_FLIGHT_MAX_EVENT_BYTES
+      );
+      const buf = createInFlightSnapshot();
+      pushInFlightEvent(buf, event);
+      expectBounded(buf, label);
+      // 有界化不改变"在场性"：仍然是一条 progress，时间戳原样（watchdog 靠它判活）。
+      expect(buf.events.length, `${label}: 事件数`).toBe(1);
+      expect(buf.events[0].type, `${label}: 类型`).toBe('progress');
+      expect(buf.events[0].timestamp, `${label}: 时间戳`).toBe(9);
+    }
+  });
+
+  it('P1：裁的是内容不是协议——stream/tool_call_id 原样，被裁字段留头部', () => {
+    const payload = 'p'.repeat(600 * 1024);
+    // 100 字的 session_key/tool_call_id：短于协议字段的裁剪宽度（256），但长于
+    // 递归裁剪的最小可裁长度（64）——递归那一遍必须跳过它们，否则会被砍半。
+    const sessionKey = 'k'.repeat(100);
+    const callId = 'c'.repeat(100);
+    const buf = createInFlightSnapshot();
+    pushInFlightEvent(buf, {
+      type: 'progress',
+      data: {
+        stream: 'stdout',
+        delta: '',
+        tool_call_id: callId,
+        session_key: sessionKey,
+        // 嵌套大字段不在第 1/2 步的按宽裁剪范围内，只有它能把第 3 步（递归
+        // 裁剪）真的拉起来——否则前两步已经把载荷压回预算内，协议字段是否被
+        // 递归跳过就无从验证。
+        meta: { details: { huge: 'n'.repeat(600 * 1024) } },
+        tool_output: payload,
+      },
+      timestamp: 9,
+    } as Ev);
+
+    const data = buf.events[0].data as {
+      stream?: string;
+      tool_call_id?: string;
+      session_key?: string;
+      delta?: string;
+      tool_output?: string;
+    };
+    // 回放要用的路由字段（exec 输出按 stream + tool_call_id 归行，#212 按
+    // session_key 过滤）一个字不动。
+    expect(data.stream).toBe('stdout');
+    expect(data.tool_call_id).toBe(callId);
+    expect(data.session_key).toBe(sessionKey);
+    expect(data.delta).toBe('');
+    // 内容字段有损：保留头部（工具结果卡片的表头还在），尾部丢弃并打省略号。
+    expect(typeof data.tool_output).toBe('string');
+    expect((data.tool_output as string).startsWith('ppp')).toBe(true);
+    expect((data.tool_output as string).length).toBeLessThan(payload.length);
+    expect((data.tool_output as string).endsWith('…')).toBe(true);
+  });
+
+  it('P1：doc_progress 的 file/stage 原样（附件行靠它们落格）', () => {
+    const file = 'f'.repeat(600 * 1024);
+    const buf = createInFlightSnapshot();
+    pushInFlightEvent(buf, {
+      type: 'progress',
+      data: { type: 'doc_progress', file, stage: 'ready' },
+      timestamp: 9,
+    } as Ev);
+
+    const data = buf.events[0].data as { type?: string; file?: string; stage?: string };
+    expect(data.type).toBe('doc_progress');
+    expect(data.stage).toBe('ready');
+    // file 是协议字段：只按协议宽度留头部，不会被递归裁剪吃掉整条路径。
+    expect((data.file as string).startsWith('fff')).toBe(true);
+    expect((data.file as string).endsWith('…')).toBe(true);
+    expect((data.file as string).length).toBeLessThan(file.length);
+  });
+
+  it('P1：嵌套大字段被递归裁剪，中间层结构不变', () => {
+    const huge = 'n'.repeat(600 * 1024);
+    const buf = createInFlightSnapshot();
+    pushInFlightEvent(buf, nestedFatProgress(huge, 9));
+
+    const data = buf.events[0].data as {
+      stream?: string;
+      meta?: { details?: { huge?: string } };
+    };
+    expect(data.stream).toBe('stdout');
+    expect(typeof data.meta?.details?.huge).toBe('string');
+    expect((data.meta?.details?.huge as string).startsWith('nnn')).toBe(true);
+    expect((data.meta?.details?.huge as string).length).toBeLessThan(huge.length);
+  });
+
+  it('P1：裁无可裁时退化为有界摘要，仍带 _truncated 标记与协议字段', () => {
+    // 协议字段**排在几千个垃圾 key 之后**：摘要按字段出现顺序取前 64 个的话，
+    // 它们会被挤掉（live 处理器按 stream + tool_call_id 归行、doc_progress 靠
+    // type + file 落格），所以这里钉住"协议字段先写"。
+    const buf = createInFlightSnapshot();
+    pushInFlightEvent(buf, {
+      type: 'progress',
+      data: {
+        ...bigKeyPayload(),
+        stream: 'stdout',
+        tool_call_id: 'c1',
+        type: 'doc_progress',
+        file: 'report.pdf',
+        session_key: 's1',
+      },
+      timestamp: 9,
+    } as Ev);
+
+    const stored = buf.events[0].data as Record<string, unknown>;
+    expect(stored._truncated).toBe(true);
+    // 摘要不是"什么都不剩"：协议字段先写，不会被几千个 key 挤出字段预算。
+    expect(stored.stream).toBe('stdout');
+    expect(stored.tool_call_id).toBe('c1');
+    expect(stored.type).toBe('doc_progress');
+    expect(stored.file).toBe('report.pdf');
+    expect(stored.session_key).toBe('s1');
+    // 字段数被 MAX_SUMMARY_FIELDS 卡住，字节有界。
+    expect(Object.keys(stored).length).toBeLessThan(100);
+    expect(jsonBytes(stored)).toBeLessThanOrEqual(PROGRESS_PAYLOAD_MAX_BYTES);
+  });
+
+  it('P1：delta 与 delta 之外同时超限时，回放拿到的是 delta 头部（有损，非拼接）', () => {
+    // 拆分是无损的，但它救不了"delta 之外已经超限"的形状：`fits('')` 为假时
+    // 拆分直接放弃，改由递归裁剪兜底——delta 也被当成 bulk 字段只留头部。
+    // 替代行为：回放这段 exec 输出时看到的是原文本的前缀 + 省略号，不再是原
+    // 文（原 delta 仍完整落在这条事件对应的会话持久化历史里）。
+    const delta = 'd'.repeat(600 * 1024);
+    const buf = createInFlightSnapshot();
+    pushInFlightEvent(buf, {
+      type: 'progress',
+      data: {
+        stream: 'stdout',
+        delta,
+        tool_call_id: 'c1',
+        tool_output: 'o'.repeat(600 * 1024),
+      },
+      timestamp: 1,
+    } as Ev);
+
+    expectBounded(buf, 'delta + 非 delta 字段同时超限');
+    const kept = concatDeltas(buf);
+    expect(kept.length).toBeGreaterThan(0);
+    expect(kept.length).toBeLessThan(delta.length);
+    expect(delta.startsWith(kept.replace(/…$/, ''))).toBe(true);
+  });
+
+  it('P1：未超预算的 progress 原样入库（同一引用，无损路径不复制）', () => {
+    const event = progress('hello', 'stdout', 'c1', 1);
+    const buf = createInFlightSnapshot();
+    pushInFlightEvent(buf, event);
+    expect(buf.events[0]).toBe(event);
+    expect(inFlightEventBytes(event)).toBeLessThanOrEqual(IN_FLIGHT_MAX_EVENT_BYTES);
+  });
+
+  it('P1：sanitizeProgressEventData 只读入参——bridge 把同一对象交给 live 处理器', () => {
+    const huge = 'p'.repeat(600 * 1024);
+    const data = { stream: 'stdout', delta: '', tool_call_id: 'c1', tool_output: huge };
+    const capped = sanitizeProgressEventData(data) as Record<string, unknown>;
+
+    expect(capped).not.toBe(data); // 超预算 → 复制而不是就地改
+    expect(data.tool_output).toBe(huge); // 原对象的字段没被动过
+    expect(capped.stream).toBe('stdout');
+    expect(jsonBytes(capped)).toBeLessThanOrEqual(PROGRESS_PAYLOAD_MAX_BYTES);
+  });
+
+  it('P1：递归裁剪（第 3 步）也是 copy-on-write——嵌套容器不会被就地改写', () => {
+    // 第 3 步走 replacePath 逐层重建容器；写错方向就会就地改掉 live 处理器
+    // 正在用的那个对象（同一份 payload 由 bridge 交给两边）。
+    const data = {
+      stream: 'stdout',
+      delta: '',
+      tool_call_id: 'c1',
+      meta: { details: { huge: 'n'.repeat(600 * 1024), note: 'keep' } },
+    };
+    const nested = data.meta.details;
+
+    const capped = sanitizeProgressEventData(data) as typeof data;
+
+    expect(capped).not.toBe(data);
+    expect(capped.meta).not.toBe(data.meta);
+    expect(capped.meta.details).not.toBe(nested);
+    expect(nested.huge.length).toBe(600 * 1024); // 原嵌套对象一字未动
+    expect(nested.note).toBe('keep');
+    expect((capped.meta.details.huge as string).length).toBeLessThan(600 * 1024);
+    expect(jsonBytes(capped)).toBeLessThanOrEqual(PROGRESS_PAYLOAD_MAX_BYTES);
+  });
+
+  it('P1：sanitizeProgressEventData 对未超预算的载荷保持同一引用', () => {
+    const small = { stream: 'stdout', delta: 'hi', tool_call_id: 'c1' };
+    expect(sanitizeProgressEventData(small)).toBe(small);
+  });
+
+  it('P1：递归裁剪点不落在代理对中间（不留孤立半代理）', () => {
+    // 载荷放在**嵌套**字段里：`tool_output` 会被第 1 步按 4096 字宽预裁，那样
+    // 就到不了第 3 步的递归裁剪，对齐逻辑也就没被考到。代理对取奇数个（150001），
+    // 让"取一半"的裁剪点正落在某个低位代理上——不对齐就会留下孤立半代理。
+    const huge = '😀'.repeat(150001);
+    const data = {
+      stream: 'stdout',
+      delta: '',
+      tool_call_id: 'c1',
+      meta: { details: { huge } },
+    };
+    const capped = sanitizeProgressEventData(data) as {
+      meta: { details: { huge: string } };
+    };
+
+    expect(hasLoneSurrogate(capped.meta.details.huge)).toBe(false);
+    expect(jsonBytes(capped)).toBeLessThanOrEqual(PROGRESS_PAYLOAD_MAX_BYTES);
+    // 头保留：第一个码点还在（裁剪点没被前移到别处）。
+    expect(capped.meta.details.huge.startsWith('😀')).toBe(true);
+    expect(capped.meta.details.huge.length).toBeLessThan(huge.length);
+    // 这条用例是有牙的：裁剪点（本载荷取一半 = 下标 150001）正落在某个对的
+    // 低位代理上，不对齐就会留下孤立半代理——上面那条断言因此真的在考对齐。
+    expect(hasLoneSurrogate(huge.slice(0, 150001))).toBe(true);
+  });
+
+  it('P1：JSON.stringify 走不通的载荷里，藏在 key 里的字节同样计入并封顶', () => {
+    // 环让 stringify 抛错，落到 walkPayloadBytes；字节全在 key 名里（value 是
+    // 数字，没有可裁的字符串）。只数 value 的话这种载荷会被记成几百字节、原样
+    // 入库——账面上"有界"，实际留下了 12 MB。
+    const data: Record<string, unknown> = { stream: 'stdout', delta: '', tool_call_id: 'c1' };
+    for (let i = 0; i < 20000; i += 1) data[`${i}`.padStart(6, '0') + 'k'.repeat(300)] = i;
+    data.self = data;
+    expect(() => JSON.stringify(data)).toThrow();
+
+    const buf = createInFlightSnapshot();
+    pushInFlightEvent(buf, { type: 'progress', data, timestamp: 9 } as Ev);
+
+    expectBounded(buf, '环 + key 里的字节');
+    const stored = buf.events[0].data as Record<string, unknown>;
+    // 裁无可裁（key 不是字符串值）→ 退化为有界摘要，只留 64 个字段。
+    expect(stored._truncated).toBe(true);
+    expect(stored.stream).toBe('stdout');
+    expect(Object.keys(stored).length).toBeLessThan(100);
+  });
+
+  it('P1：合并路径同样维持单事件上限——两条合法 delta 相加超限时各自成条', () => {
+    const buf = createInFlightSnapshot();
+    // 各 20 KiB 字符（40 KiB 字节）：单条合法（<64 KiB）。
+    const half = 'h'.repeat(20 * 1024);
+    pushInFlightEvent(buf, progress(half, 'stdout', 'c1', 1));
+    pushInFlightEvent(buf, progress(half, 'stdout', 'c1', 2));
+
+    // 合并后的 40 KiB 字符 = 80 KiB 字节 > 单事件上限 → 拒绝合并，两条各自有界。
+    expect(buf.events.length).toBe(2);
+    expectBounded(buf, '合并被拒');
+    expect(concatDeltas(buf)).toBe(half + half);
   });
 });
 

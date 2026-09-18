@@ -2525,15 +2525,24 @@ interface StringSlot {
 
 /** Collect every string in a JSON-like tree, nested objects and array elements
  *  included.  `seen` guards against cycles so the walk always terminates
- *  (IPC payloads are acyclic, but this runs on the ingest hot path). */
+ *  (IPC payloads are acyclic, but this runs on the ingest hot path).
+ *
+ *  `skipTopLevel` names top-level keys whose own string value is never
+ *  collected — the progress sanitizer protects its routing fields (`stream`,
+ *  `tool_call_id`, …) with it.  Only that scalar is protected: a string nested
+ *  *inside* such a key, or in a sibling field, is still collectable. */
 function collectStringSlots(
   value: unknown,
   path: (string | number)[],
   out: StringSlot[],
-  seen: WeakSet<object>
+  seen: WeakSet<object>,
+  skipTopLevel?: ReadonlySet<string>
 ): void {
   if (typeof value === 'string') {
-    out.push({ path, chars: value.length });
+    const key = path.length === 1 ? path[0] : undefined;
+    if (typeof key !== 'string' || !skipTopLevel?.has(key)) {
+      out.push({ path, chars: value.length });
+    }
     return;
   }
   if (value === null || typeof value !== 'object') return;
@@ -2543,12 +2552,12 @@ function collectStringSlots(
     // Indexed loop, not `.map`: a sparse array must not be visited through its
     // holes (JSON never produces one, but a throw here would reach ingest).
     for (let i = 0; i < value.length; i += 1) {
-      collectStringSlots(value[i], [...path, i], out, seen);
+      collectStringSlots(value[i], [...path, i], out, seen, skipTopLevel);
     }
     return;
   }
   for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
-    collectStringSlots(child, [...path, key], out, seen);
+    collectStringSlots(child, [...path, key], out, seen, skipTopLevel);
   }
 }
 
@@ -2604,15 +2613,26 @@ function replacePath(
  *
  *  The round cap bounds the work on shapes this cannot fix at all: bytes spent
  *  on object *keys* or on sheer field count make no progress, and the caller
- *  degrades to a bounded summary instead. */
-function truncateLargestStrings<T>(payload: T, budget: number, maxRounds = 16): T {
+ *  degrades to a bounded summary instead.
+ *
+ *  `skipTopLevel` is forwarded to the collector (see `collectStringSlots`):
+ *  the walker then holds those top-level strings at their current size, which
+ *  is what lets the progress sanitizer keep routing fields readable.  A
+ *  payload whose bytes sit *only* in such fields makes no progress and falls
+ *  through to the caller's bounded summary. */
+function truncateLargestStrings<T>(
+  payload: T,
+  budget: number,
+  maxRounds = 16,
+  skipTopLevel?: ReadonlySet<string>
+): T {
   let current = payload;
   for (let round = 0; round < maxRounds; round += 1) {
     const bytes = payloadBytes(current);
     if (bytes <= budget) break;
 
     const slots: StringSlot[] = [];
-    collectStringSlots(current, [], slots, new WeakSet());
+    collectStringSlots(current, [], slots, new WeakSet(), skipTopLevel);
     slots.sort((a, b) => b.chars - a.chars);
 
     // Characters that have to go (2 bytes each), plus one for each ellipsis
@@ -2702,6 +2722,126 @@ function boundedTerminalSummary(
   }
   // A single short record is the floor: it cannot exceed any sane budget.
   return payloadBytes(summary) <= budget ? summary : { _truncated: true, type: 'object' };
+}
+
+/** (#1034 复审 P1) Last resort for a progress payload this module cannot trim
+ *  any further: a bounded summary that keeps the protocol fields whatever the
+ *  rest of the shape looks like.  They are written first so a payload with
+ *  thousands of keys (each too short to trim) cannot push them out of the
+ *  field budget, and each value goes through `summarizeTerminalValue`, so the
+ *  result is under any sane `budget` by construction — the final
+ *  `payloadBytes` check only covers a pathological key set, mirroring the
+ *  terminal summary's belt-and-braces fallback. */
+function boundedProgressSummary(payload: unknown, budget: number): Record<string, unknown> {
+  // A non-record payload (array, string, primitive) has no fields to keep; the
+  // summary then says so via `type` rather than pretending to be the value.
+  const isRecord = payload !== null && typeof payload === 'object' && !Array.isArray(payload);
+  const record = isRecord ? (payload as Record<string, unknown>) : {};
+  const summary: Record<string, unknown> = {
+    _truncated: true,
+    type: isRecord ? 'object' : Array.isArray(payload) ? 'array' : typeof payload,
+    size: payloadBytes(payload),
+  };
+  for (const key of PROGRESS_PROTOCOL_FIELDS) {
+    if (Object.prototype.hasOwnProperty.call(record, key)) {
+      summary[key] = summarizeTerminalValue(record[key]);
+    }
+  }
+  let kept = 0;
+  for (const [key, value] of Object.entries(record)) {
+    if (kept >= MAX_SUMMARY_FIELDS) break;
+    const label =
+      key.length > MAX_SUMMARY_KEY_CHARS ? `${key.slice(0, MAX_SUMMARY_KEY_CHARS)}…` : key;
+    if (Object.prototype.hasOwnProperty.call(summary, label)) continue;
+    summary[label] = summarizeTerminalValue(value);
+    kept += 1;
+  }
+  if (payloadBytes(summary) <= budget) return summary;
+
+  // Even the clamped field list does not fit (pathological keys): the protocol
+  // fields alone are the floor, and they are a handful of short strings.
+  const floor: Record<string, unknown> = { _truncated: true };
+  for (const key of PROGRESS_PROTOCOL_FIELDS) {
+    if (Object.prototype.hasOwnProperty.call(record, key)) {
+      floor[key] = summarizeTerminalValue(record[key]);
+    }
+  }
+  return payloadBytes(floor) <= budget ? floor : { _truncated: true };
+}
+
+/** (#1034 复审 P1) Bound an *entire* progress payload, whatever shape the bytes
+ *  are hiding in.  `splitProgressEventByBytes` is the lossless first choice and
+ *  the caller runs it first; what reaches here is what it could not fix — bytes
+ *  sitting outside `delta` (a `tool_output`, a nested `data.meta.details.huge`),
+ *  an event with no `delta` at all, or a `delta` too small to matter next to
+ *  its siblings.
+ *
+ *  The cap is applied in order of least semantic damage:
+ *   1. `PROGRESS_BULK_FIELDS` are cut to MAX_PROGRESS_FIELD_CHARS, head kept.
+ *   2. `PROGRESS_PROTOCOL_FIELDS` are cut to MAX_PROGRESS_PROTOCOL_CHARS and
+ *      then protected from step 3, so replay keeps its routing keys.
+ *   3. Every remaining string anywhere in the tree — nested objects and array
+ *      elements included — is trimmed longest-first until the budget holds.
+ *   4. A payload still over budget (bytes hidden in object keys, thousands of
+ *      small fields, or a tree too deep to walk) degrades to a summary that
+ *      keeps the protocol fields and marks itself `_truncated`.
+ *
+ *  Post-condition, for any input: `payloadBytes(result) <=
+ *  PROGRESS_PAYLOAD_MAX_BYTES`, hence `inFlightEventBytes` of the event
+ *  carrying it is at most IN_FLIGHT_MAX_EVENT_BYTES.  That is the invariant
+ *  `pushInFlightEvent` needs: with every progress event under the per-event
+ *  cap, eviction always has something to reclaim, so the snapshot's own
+ *  IN_FLIGHT_MAX_BYTES cap closes too.
+ *
+ *  Unlike the delta splitter, steps 1–3 are lossy, deliberately: a truncated
+ *  `tool_output` drops the tail of a search-result list and a truncated `text`
+ *  the tail of a progress line.  The alternative is an event that can never be
+ *  evicted (the newest one) pinning multi-MB in the cache.  Nothing is lost
+ *  that the user cannot get back: this cache only feeds the switch-back replay,
+ *  the head it renders is intact, and the full payload is in the session's
+ *  persisted history once the turn settles.
+ *
+ *  Identity is preserved when the payload already fits (no copy is made). */
+export function sanitizeProgressEventData(data: unknown): unknown {
+  const budget = PROGRESS_PAYLOAD_MAX_BYTES;
+  if (payloadBytes(data) <= budget) return data;
+
+  // 1.+2. Field-level cuts, copy-on-write: the caller's payload object is never
+  //       mutated (the bridge hands the same object to the live handlers).
+  let capped: unknown = data;
+  if (data !== null && typeof data === 'object' && !Array.isArray(data)) {
+    let record = { ...(data as Record<string, unknown>) };
+    // `null` = the field is absent or already short enough: skip the copy.
+    const cutTo = (value: unknown, maxChars: number): string | null =>
+      typeof value === 'string' && value.length > maxChars
+        ? `${value.slice(0, alignCodePoint(value, maxChars))}…`
+        : null;
+    for (const key of PROGRESS_BULK_FIELDS) {
+      const shorter = cutTo(record[key], MAX_PROGRESS_FIELD_CHARS);
+      if (shorter !== null) record = { ...record, [key]: shorter };
+    }
+    for (const key of PROGRESS_PROTOCOL_FIELDS) {
+      const shorter = cutTo(record[key], MAX_PROGRESS_PROTOCOL_CHARS);
+      if (shorter !== null) record = { ...record, [key]: shorter };
+    }
+    capped = record;
+    if (payloadBytes(capped) <= budget) return capped;
+  }
+
+  // 3. Recursive longest-first trim.  The walk descends once per nesting level,
+  //    so a tree deeper than the engine's stack overflows — swallow that and
+  //    take the summary below, rather than letting a RangeError escape into the
+  //    ingest path (same rule as `capTerminalEventData`).
+  let trimmed = capped;
+  try {
+    trimmed = truncateLargestStrings(capped, budget, 16, PROGRESS_PROTOCOL_KEY_SET);
+  } catch {
+    // fall through to the bounded summary
+  }
+  if (payloadBytes(trimmed) <= budget) return trimmed;
+
+  // 4. Bytes still unaccounted for: a summary that is bounded by construction.
+  return boundedProgressSummary(trimmed, budget);
 }
 
 /** Append a streaming reasoning chunk to the last live thinking bubble.
@@ -2952,9 +3092,13 @@ export const IN_FLIGHT_MAX_BYTES = 1024 * 1024;
  *  in the buffer as a single oversized event, and the newest event is never
  *  evicted.  `pushInFlightEvent` now cuts such a delta into consecutive chunks
  *  of at most this size (replay appends `delta` in order, so the text is
- *  unchanged) and refuses a merge that would exceed it, which makes
+ *  unchanged), refuses a merge that would exceed it, and — for bytes the split
+ *  cannot reach, i.e. everything outside `delta` — recursively bounds the rest
+ *  of the payload (`sanitizeProgressEventData`).  That makes
  *  `every progress event <= 64 KiB` an invariant of construction rather than
- *  of luck.
+ *  of luck, which is what lets eviction close a progress-driven breach of
+ *  IN_FLIGHT_MAX_BYTES: the newest event — the one eviction may not drop — can
+ *  no longer be the multi-megabyte resident nothing could reclaim.
  *
  *  Terminals are bounded separately by TERMINAL_PAYLOAD_MAX_BYTES: a `final`'s
  *  content is the answer itself and cannot be rejoined from pieces the way a
@@ -2984,6 +3128,69 @@ const MAX_TOOL_ARGUMENT_CHARS = 4096;
  *  `TERMINAL_PAYLOAD_MAX_BYTES`-sized budget, so trimming them would only cost
  *  visible text. */
 const MIN_TRIMMABLE_STRING_CHARS = 64;
+
+/** (#1034 复审 P1) Byte budget for a single *progress* payload: the single-event
+ *  cap minus that event's own bookkeeping.  Written in the same units as
+ *  `inFlightEventBytes` so the post-condition of `sanitizeProgressEventData`
+ *  is directly the invariant `inFlightEventBytes(event) <=
+ *  IN_FLIGHT_MAX_EVENT_BYTES`, with no off-by-overhead left to reason about. */
+const PROGRESS_PAYLOAD_MAX_BYTES = IN_FLIGHT_MAX_EVENT_BYTES - IN_FLIGHT_EVENT_OVERHEAD_BYTES;
+
+/** (#1034 复审 P1) Fields that carry the *bulk* of a progress payload, and are
+ *  therefore cut by width first by `sanitizeProgressEventData`.
+ *
+ *  These are exactly the bytes the delta splitter cannot reach: it only ever
+ *  cuts `delta`, and by the time the sanitizer runs it has already declined
+ *  (the event's non-delta bytes alone are over the cap).  `delta` is on the
+ *  list for the same reason — a multi-MB delta that got here cannot be kept
+ *  whole however it is split, so its head is kept instead, matching what the
+ *  terminal cap does to `content`. */
+const PROGRESS_BULK_FIELDS = [
+  'delta',
+  'tool_output',
+  'tool_args',
+  'text',
+  'message',
+  'content',
+  'output',
+  'stdout',
+  'stderr',
+  'reasoning',
+] as const;
+
+/** Width a bulk field is cut to on that first pass.  The recursive pass takes
+ *  over when a payload holds many such fields — this pass exists to give the
+ *  named content fields a deterministic head, not to close the budget alone. */
+const MAX_PROGRESS_FIELD_CHARS = 4096;
+
+/** (#1034 复审 P1) Fields replay needs to *route* the event, so they are cut
+ *  last and far more gently than content.  Every one of them is consumed by
+ *  `cachedEventsToMessages` / `splitCachedMessages` / the exec-output replay:
+ *  `stream` + `tool_call_id` pick the exec line a `delta` is appended to,
+ *  `type: 'doc_progress'` + `file` the attachment row, `session_key` the
+ *  turn's owner, and `points_cost` / `balance` the billing line. */
+const PROGRESS_PROTOCOL_FIELDS = [
+  'stream',
+  'tool_call_id',
+  'type',
+  'session_key',
+  'turn_id',
+  'tool_hint',
+  'file',
+  'stage',
+  'points_cost',
+  'balance',
+] as const;
+
+/** Set form of `PROGRESS_PROTOCOL_FIELDS`, for the collector's skip test. */
+const PROGRESS_PROTOCOL_KEY_SET: ReadonlySet<string> = new Set(PROGRESS_PROTOCOL_FIELDS);
+
+/** Width a protocol field is cut to when the *whole* payload has to fit.  Real
+ *  values (uuid-ish session keys, `call_ab12…` ids, file names) are far shorter
+ *  than this, so they pass through untouched; the cut only bites a payload that
+ *  tries to bury its bytes in a field replay cannot do without — which is why
+ *  it happens here rather than being left to the summary. */
+const MAX_PROGRESS_PROTOCOL_CHARS = 256;
 
 /** (#1034) UTF-16 byte size of an event's payload: 2 bytes per char plus a
  *  fixed overhead.
@@ -3017,7 +3224,19 @@ function payloadBytes(value: unknown): number {
  *  `capTerminalEventData` saw a "small" payload and returned it untouched —
  *  the exact payload the cap exists to catch.  The explicit stack (rather than
  *  recursion) is what lets it survive the nesting that overflowed stringify,
- *  and `seen` keeps a cyclic payload terminating. */
+ *  and `seen` keeps a cyclic payload terminating.
+ *
+ *  (#1034 复审四轮) Object *keys* are counted too.  They are the one part of a
+ *  payload no string walk can reach — `collectStringSlots` collects values,
+ *  `truncateLargestStrings` replaces values — so a value stringify chokes on
+ *  (a cycle, a `Map`, a `BigInt`, extreme nesting) plus bytes parked in long
+ *  key names used to measure as a few hundred bytes and be returned identity-
+ *  preserved by `sanitizeProgressEventData`: the cap saw a small number while
+ *  the buffer held megabytes.  With keys counted, such a payload measures over
+ *  budget and degrades to `boundedProgressSummary`, which keeps 64 fields
+ *  instead of thousands.  Keys are priced exactly as JSON writes them (two
+ *  bytes per character plus `"`/`:`), and array indices are skipped because
+ *  JSON does not serialize them. */
 function walkPayloadBytes(value: unknown): number {
   const seen = new WeakSet<object>();
   const stack: unknown[] = [value];
@@ -3031,7 +3250,11 @@ function walkPayloadBytes(value: unknown): number {
     if (node === null || typeof node !== 'object') continue;
     if (seen.has(node)) continue;
     seen.add(node);
-    for (const child of Object.values(node as Record<string, unknown>)) stack.push(child);
+    const isArray = Array.isArray(node);
+    for (const [key, child] of Object.entries(node as Record<string, unknown>)) {
+      if (!isArray) total += key.length * 2 + 3;
+      stack.push(child);
+    }
   }
   return total;
 }
@@ -3137,12 +3360,20 @@ function isStrippedTerminal(event: InFlightEvent): boolean {
  *
  *  The newest event is never removed and its timestamp is never touched (the
  *  watchdog reads it to decide the backend is alive); its payload can be
- *  stripped once everything else has been.  A lone *terminal* event can never
- *  be over budget on its own (its payload is capped at ingest), so stripping
- *  always restores the budget — the one shape this cannot fix is a single
- *  progress event whose bytes sit outside `delta` (nothing can split those, and
- *  nothing may remove the newest event).  A delta-carrying progress event can
- *  no longer be that shape: `pushInFlightEvent` cuts it up first. */
+ *  stripped once everything else has been.  Every event that enters the buffer
+ *  is under its own cap by construction — a terminal at
+ *  TERMINAL_PAYLOAD_MAX_BYTES, a progress at IN_FLIGHT_MAX_EVENT_BYTES (see
+ *  `boundInFlightEvent`) — so the breach this module was written for (one
+ *  multi-MB progress event, which nothing could evict and nothing could
+ *  shrink) is gone: what a breach has to reclaim is bounded, and stripping
+ *  restores the budget.  What is *not* bounded by these caps is volume:
+ *  terminals are never evicted and each keeps a placeholder once stripped, so
+ *  a buffer that accumulated thousands of settled turns carries irreducible
+ *  bytes.  The `reclaimable` guard below then declines to strip further
+ *  (content would be destroyed without bringing the buffer back under the
+ *  cap); that shape is out of reach for a session that is switched back to
+ *  (the snapshot is dropped) and for the handful of terminals one turn
+ *  produces. */
 function evictInFlightOverflow(snapshot: InFlightSnapshot): void {
   while (
     snapshot.events.length > 1 &&
@@ -3170,11 +3401,12 @@ function evictInFlightOverflow(snapshot: InFlightSnapshot): void {
     if (snapshot.bytes <= IN_FLIGHT_MAX_BYTES) return;
 
     // Stripping costs content, so check it can actually pay for itself first:
-    // if emptying *every* remaining terminal would still leave the buffer over
-    // budget — the newest event is a progress event with multi-MB bytes outside
-    // `delta`, say, and may not be removed — then the content would be destroyed
-    // for nothing.  Leave it intact and let the cap be breached instead of
-    // losing data for free.
+    // everything below is a terminal, and emptying *all* of them — the newest
+    // one included — still leaves more than IN_FLIGHT_MAX_BYTES resident (only
+    // reachable when the unreclaimable part of the buffer is already over
+    // budget: placeholder-sized stripped terminals in the thousands, or a
+    // caller that pushed past the caps).  Then the content would be destroyed
+    // for nothing, so leave it intact and let the cap be breached instead.
     let reclaimable = 0;
     for (const event of snapshot.events) {
       if (event.type === 'progress' || isStrippedTerminal(event)) continue;
@@ -3197,11 +3429,13 @@ function evictInFlightOverflow(snapshot: InFlightSnapshot): void {
     if (victim < 0 && newestTerminal >= 0 && !isStrippedTerminal(snapshot.events[newestTerminal])) {
       // Nothing else left to give: take the newest terminal's payload too.  It
       // stays in the buffer — so `turnDone` still reads true — and only its
-      // bytes go.  This is the case where the newest *event* is an uncapped
-      // progress delta: it can never be dropped (the watchdog reads its
-      // timestamp), so the alternative to stripping here is leaving the buffer
-      // over budget, which is the failure this module exists to prevent.  The
-      // content is still in the session's persisted history.
+      // bytes go.  This is the case where the newest *event* is a progress
+      // payload: it now enters the buffer under the per-event cap (see
+      // `boundInFlightEvent`), but that cap is 1/16th of this budget and the
+      // newest event can never be dropped (the watchdog reads its timestamp),
+      // so the alternative to stripping here is leaving the buffer over budget,
+      // which is the failure this module exists to prevent.  The content is
+      // still in the session's persisted history.
       victim = newestTerminal;
     }
     if (victim < 0) {
@@ -3222,8 +3456,15 @@ function evictInFlightOverflow(snapshot: InFlightSnapshot): void {
  *  The cut length is found by binary search over `inFlightEventBytes`, not by
  *  guessing a character budget: that measurement runs through
  *  `JSON.stringify`, so escaping, the other fields of `data` and the fixed
- *  event overhead are all priced in.  `inFlightEventBytes` is monotone in the
- *  prefix length, which is what makes the search valid.
+ *  event overhead are all priced in.  The search assumes the measurement grows
+ *  with the prefix length, which holds for well-formed text — the one
+ *  exception is UTF-16 escaping, where an unpaired surrogate costs 6 characters
+ *  and completing the pair costs 2, so a longer prefix can measure *smaller*
+ *  (measured on a `{stream, delta, tool_call_id}` event: `'\uD83D'` 240 bytes,
+ *  `'😀'` 232).  That only makes the
+ *  search conservative (it never picks a prefix it has not measured as
+ *  fitting), and the one fallback that could land a chunk a few bytes over —
+ *  `cut = lo - 1` below — is re-bounded by `boundInFlightEvent` on the way in.
  *
  *  Replay is unaffected: exec output appends `delta` in order and every other
  *  materializer skips events carrying `stream`, so `chunk1 + chunk2 + …` spells
@@ -3231,9 +3472,9 @@ function evictInFlightOverflow(snapshot: InFlightSnapshot): void {
  *
  *  Cutting cannot help when the bytes are outside `delta` (an empty delta
  *  already exceeds the cap) or when not even one character fits.  The caller
- *  then takes the ordinary path — the snapshot byte cap is the only bound left
- *  for that shape, and the buffer keeps a single such event at most (the newest
- *  event is never evicted). */
+ *  then falls back to `sanitizeProgressEventData`, which bounds the whole
+ *  payload recursively: lossy where this splitter is not, but it keeps the
+ *  per-event cap an invariant of construction rather than of luck. */
 function splitProgressEventByBytes(event: InFlightEvent, maxBytes: number): InFlightEvent[] {
   const data = event.data as ChatProgress | null | undefined;
   if (!data || typeof data.delta !== 'string') return [event];
@@ -3279,25 +3520,27 @@ function splitProgressEventByBytes(event: InFlightEvent, maxBytes: number): InFl
  *  deltas first and evicting the oldest progress events when the count/byte
  *  caps are exceeded.  Replaces the unbounded `buf.events.push(...)`. */
 export function pushInFlightEvent(snapshot: InFlightSnapshot, event: InFlightEvent): void {
-  // Over-cap progress deltas are cut up *before* anything else, so no single
-  // event can exceed IN_FLIGHT_MAX_EVENT_BYTES.  Each chunk then goes through
-  // the ordinary path below — consecutive same-stream chunks still coalesce
-  // while they fit, and eviction runs as the chunks land.
-  const chunks = splitProgressEventByBytes(event, IN_FLIGHT_MAX_EVENT_BYTES);
-  if (chunks.length > 1) {
-    for (const chunk of chunks) pushInFlightEvent(snapshot, chunk);
+  // The per-event cap is enforced *before* anything else, so no single event
+  // can exceed IN_FLIGHT_MAX_EVENT_BYTES and eviction is always offered
+  // something to reclaim.  Each resulting chunk then goes through the ordinary
+  // path below — consecutive same-stream chunks still coalesce while they fit,
+  // and eviction runs as the chunks land.
+  const bounded = boundInFlightEvent(event);
+  if (bounded.length > 1) {
+    for (const chunk of bounded) pushInFlightEvent(snapshot, chunk);
     return;
   }
+  const next = bounded[0];
   const last = snapshot.events[snapshot.events.length - 1];
   if (last) {
-    const delta = mergeableDelta(last, event);
+    const delta = mergeableDelta(last, next);
     if (delta !== null) {
       const merged: InFlightEvent = {
         type: 'progress',
         data: { ...(last.data as ChatProgress), delta: (last.data as ChatProgress).delta! + delta },
         // Keep the NEWEST timestamp: the watchdog reads the last event's
         // timestamp to decide whether the backend is still alive.
-        timestamp: event.timestamp,
+        timestamp: next.timestamp,
       };
       const mergedBytes = inFlightEventBytes(merged);
       // A merge that would breach the SINGLE-EVENT cap is refused rather than
@@ -3315,9 +3558,33 @@ export function pushInFlightEvent(snapshot: InFlightSnapshot, event: InFlightEve
       }
     }
   }
-  snapshot.events.push(event);
-  snapshot.bytes += inFlightEventBytes(event);
+  snapshot.events.push(next);
+  snapshot.bytes += inFlightEventBytes(next);
   evictInFlightOverflow(snapshot);
+}
+
+/** (#1034 复审 P1) Force one event under the single-event cap, returning the
+ *  events to push (an over-cap delta becomes several).
+ *
+ *  Order is by damage: the delta splitter is lossless, so it goes first, and
+ *  sanitizing the whole payload — which can cut `tool_output` or a nested
+ *  string — only runs when splitting cannot help.  Terminals are returned
+ *  untouched: they are capped at ingest by `capTerminalEventData`, whose
+ *  budget is deliberately larger (a `final`'s content is the answer itself and
+ *  cannot be rejoined from pieces the way a stream delta can).
+ *
+ *  The returned events satisfy IN_FLIGHT_MAX_EVENT_BYTES by construction, so
+ *  every path in `pushInFlightEvent` (plain push, coalescing merge, eviction)
+ *  inherits the invariant. */
+function boundInFlightEvent(event: InFlightEvent): InFlightEvent[] {
+  if (event.type !== 'progress') return [event];
+  if (inFlightEventBytes(event) <= IN_FLIGHT_MAX_EVENT_BYTES) return [event];
+  const chunks = splitProgressEventByBytes(event, IN_FLIGHT_MAX_EVENT_BYTES);
+  if (chunks.length > 1) return chunks;
+  // Splitting could not help: the bytes are outside `delta`, or there is no
+  // `delta` to cut.  Bound the whole payload instead.
+  const base = chunks[0];
+  return [{ ...base, data: sanitizeProgressEventData(base.data) }];
 }
 /** Map that drops the oldest key once it exceeds `maxSize` entries. */
 function boundedMap<K, V>(maxSize: number): Map<K, V> {
