@@ -331,16 +331,61 @@ async function evalInRenderer<T>(
   electronApp: ElectronApplication,
   script: string
 ): Promise<T | null> {
-  return electronApp.evaluate(async ({ BrowserWindow }, src: string) => {
-    const wc = BrowserWindow.getAllWindows()[0]?.webContents;
-    if (!wc || wc.isDestroyed() || wc.isCrashed()) return null;
+  return evalMainWithFlakeRetry<T>(
+    electronApp,
+    async ({ BrowserWindow }: any, src: string) => {
+      const wc = BrowserWindow.getAllWindows()[0]?.webContents;
+      if (!wc || wc.isDestroyed() || wc.isCrashed()) return null;
+      try {
+        return await wc.executeJavaScript(src);
+      } catch {
+        // 重载途中 document 还没就绪
+        return null;
+      }
+    },
+    script
+  );
+}
+
+/**
+ * `electronApplication.evaluate()` 的**已知缺陷**重试壳（不是万能 catch）。
+ *
+ * Playwright 官方 issue #33737「ElectronApplication.evaluate() is unreliable」
+ * 记录了这个错误：`Resulting promise was garbage collected.` —— 主进程返回的
+ * promise 在 CDP 侧被回收，evaluate 于是以一个与调用方毫无关系的错误失败。
+ * 本 spec 的崩溃路径会踩中它：渲染进程刚被打掉、重载窗口刚起来时，紧随其后那次
+ * `electronApp.evaluate` 会以这个错误失败（本机实测：加壳前该用例 6/6 复现，且
+ * 在**未改动的 HEAD** 上 3/3 同样复现——与被测代码无关的 Playwright 侧缺陷；
+ * 把这一条 evaluate 隔离出来单独重试，第 1 次抛错、第 2 次就正常返回主进程探针
+ * 值，说明主进程完全健康，失败与断言内容无关）。
+ *
+ * 只重试**这一条**错误文本：其它任何异常（以及重试耗尽后的同一条）照常抛出，
+ * 所以这里藏不住真问题——应用真卡住时，重试的那几次会以超时/其它错误失败。
+ */
+async function evalMainWithFlakeRetry<T>(
+  electronApp: ElectronApplication,
+  fn: (...args: any[]) => any,
+  arg?: unknown,
+  attempts = 4
+): Promise<T> {
+  let lastError: unknown = null;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
     try {
-      return await wc.executeJavaScript(src);
-    } catch {
-      // 重载途中 document 还没就绪
-      return null;
+      return (
+        arg === undefined
+          ? await (electronApp.evaluate as any)(fn)
+          : await (electronApp.evaluate as any)(fn, arg)
+      ) as T;
+    } catch (err) {
+      if (!/was garbage collected/.test(String(err))) throw err;
+      lastError = err;
+      console.log(
+        `[e2e1035] electronApplication.evaluate 第 ${attempt}/${attempts} 次撞上 Playwright #33737，重试`
+      );
+      await new Promise((r) => setTimeout(r, 200 * attempt));
     }
-  }, script) as Promise<T | null>;
+  }
+  throw lastError;
 }
 
 /**
@@ -511,7 +556,11 @@ test.describe('Issue #1035 — 渲染进程崩溃后自动重载与恢复提示'
     expect(line).toContain('[main] renderer-reloaded: attempt=1 reason=');
 
     // 恢复动作对用户不可见（2026-09 口径）：不弹任何原生对话框。
-    const calls = await electronApp.evaluate(() => (globalThis as any).__msgBoxCalls);
+    // 崩溃/重载刚过，这里正是 Playwright #33737 的必踩点（见 evalMainWithFlakeRetry）。
+    const calls = await evalMainWithFlakeRetry<any>(
+      electronApp,
+      () => (globalThis as any).__msgBoxCalls
+    );
     expect(calls, '崩溃恢复不应弹任何对话框').toHaveLength(0);
 
     // 窗口恢复可用，且聊天流里没有插入任何崩溃提示。
@@ -616,7 +665,15 @@ async function startRecoveryMock(): Promise<RecoveryMockStream> {
       let i = 0;
       const timer = setInterval(() => {
         i += 1;
-        if (releasing || i > 600) {
+        // `i > 12000` (10 min) is a last-resort fuse, NOT the way a turn is
+        // meant to end: every test that needs the stream to finish calls
+        // release() once it has OBSERVED the state it was waiting for (#1035
+        // 复审 P2a).  The old 600 (≈30 s) fuse made "when does the turn end"
+        // a matter of wall-clock instead of an observed condition — a test that
+        // only ever saw the turn time out never exercised the post-final path.
+        // Kept above every describe's own timeout (300 s) so a hung stream
+        // cannot be the thing that ends a test.
+        if (releasing || i > 12000) {
           clearInterval(timer);
           res.write(chunk({ content: ' recovery-final' }, 'stop'));
           res.write('data: [DONE]\n\n');
@@ -717,7 +774,11 @@ test.describe('Issue #1035 — 崩溃重载后继续接收后台 turn 输出', (
     expect(state!.inputReady, '重载后聊天输入框应重新出现').toBe(true);
 
     // 「对用户不可见」在「崩溃时后台 turn 还在跑」这条路径上同样成立。
-    const calls = await electronApp.evaluate(() => (globalThis as any).__msgBoxCalls);
+    // 崩溃/重载刚过，这里正是 Playwright #33737 的必踩点（见 evalMainWithFlakeRetry）。
+    const calls = await evalMainWithFlakeRetry<any>(
+      electronApp,
+      () => (globalThis as any).__msgBoxCalls
+    );
     expect(calls, '崩溃恢复不应弹任何对话框').toHaveLength(0);
     expect(state!.noticeCount, '不应出现任何系统提示消息').toBe(0);
     for (const t of CRASH_TEXTS) {
@@ -729,22 +790,37 @@ test.describe('Issue #1035 — 崩溃重载后继续接收后台 turn 输出', (
     // 判活启发式（streamingBySession / inFlightCache / snapshot）在全新挂载上
     // 全为空。所以「停止生成」按钮在屏 = 后台 turn 的进展真的送达并被应用了；
     // 轮询 mock 计数做不到这件事（那只是 HTTP 服务端的计数器，与渲染层无关）。
-    const finalDeadline = Date.now() + 60_000;
+    //
+    // 收尾由**观察到的条件**驱动（#1035 复审 P2a）：一旦看到「生成中」回来，
+    // 立刻放开 mock 让它主动发 final —— 这条 turn 何时结束不再取决于 mock 的
+    // 超时兜底，断言路径也就真的走到 final 之后的那几拍（退出生成中）。
+    const streamDeadline = Date.now() + 60_000;
     let lastBodyText = state!.bodyText;
     let sawStreamingAfterReload = false;
-    while (Date.now() < finalDeadline) {
+    while (Date.now() < streamDeadline) {
       const snapshot = await readSnapshotOnce(electronApp);
       if (snapshot) {
         lastBodyText = snapshot.bodyText;
-        if (snapshot.streaming) sawStreamingAfterReload = true;
+        if (snapshot.streaming) {
+          sawStreamingAfterReload = true;
+          break;
+        }
       }
-      if (lastBodyText.includes('recovery-final')) break;
       await new Promise((r) => setTimeout(r, 250));
     }
     expect(
       sawStreamingAfterReload,
       '重载后应回到「生成中」状态——证明后台 turn 的 progress 事件已送达渲染层'
     ).toBe(true);
+    mock.release();
+
+    const finalDeadline = Date.now() + 60_000;
+    while (Date.now() < finalDeadline) {
+      const snapshot = await readSnapshotOnce(electronApp);
+      if (snapshot) lastBodyText = snapshot.bodyText;
+      if (lastBodyText.includes('recovery-final')) break;
+      await new Promise((r) => setTimeout(r, 250));
+    }
     expect(lastBodyText, '重载后应渲染出后台 turn 的最终内容').toContain('recovery-final');
     // 终态：后台 turn 真在 mock 上跑完了，且渲染层已退出生成中。
     expect(mock.stats().finished, '后台 turn 应在 mock 上正常收尾').toBeGreaterThan(
@@ -957,23 +1033,35 @@ test.describe('Issue #1035 — thread-scoped turn 崩溃重载后可恢复', () 
 
     // 2) + 3) progress 继续送达 → 「停止生成」回到屏上；final 落 UI 后退出生成中。
     // 与主 session 用例同理：全新挂载的渲染层里，唯一能把 streaming 点亮的就是
-    // 恢复监听器收到的 progress。
-    const finalDeadline = Date.now() + 60_000;
+    // 恢复监听器收到的 progress。收尾同样由观察到的条件驱动（#1035 复审 P2a）：
+    // 看到「生成中」就放开 mock，不靠 i>12000 的超时兜底。
+    const streamDeadline = Date.now() + 60_000;
     let lastBodyText = state!.bodyText;
     let sawStreamingAfterReload = false;
-    while (Date.now() < finalDeadline) {
+    while (Date.now() < streamDeadline) {
       const snapshot = await readSnapshotOnce(electronApp);
       if (snapshot) {
         lastBodyText = snapshot.bodyText;
-        if (snapshot.streaming) sawStreamingAfterReload = true;
+        if (snapshot.streaming) {
+          sawStreamingAfterReload = true;
+          break;
+        }
       }
-      if (lastBodyText.includes('recovery-final')) break;
       await new Promise((r) => setTimeout(r, 250));
     }
     expect(
       sawStreamingAfterReload,
       '重载后应回到「生成中」——证明 thread turn 的 progress 事件已送达渲染层'
     ).toBe(true);
+    mock.release();
+
+    const finalDeadline = Date.now() + 60_000;
+    while (Date.now() < finalDeadline) {
+      const snapshot = await readSnapshotOnce(electronApp);
+      if (snapshot) lastBodyText = snapshot.bodyText;
+      if (lastBodyText.includes('recovery-final')) break;
+      await new Promise((r) => setTimeout(r, 250));
+    }
     expect(lastBodyText, '重载后应渲染出 thread turn 的最终内容').toContain('recovery-final');
     expect(mock.stats().finished, 'thread turn 应在 mock 上正常收尾').toBeGreaterThan(
       beforeCrash.finished
