@@ -15,11 +15,12 @@ jobs:
       group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}-quick
       cancel-in-progress: true
     runs-on: ubuntu-latest
-    # 最小权限：本 job 会跑 PR 检出代码（npm test / mock smoke），只保留读代码 + 上传失败报告
-    # 所需的 actions:write，别继承 pull_request_target 的默认可写 token（zizmor excessive-permissions）。
+    # 最小权限：本 job 会跑 PR 检出代码（npm test / mock smoke），只保留读代码，
+    # 不继承 pull_request_target 的默认可写 token（zizmor excessive-permissions）。
+    # 失败产物上传走 Actions runtime token，不需要 GITHUB_TOKEN 的 actions:write
+    # —— 仓库内 python-tests.yml 只用 contents:read 就在传 artifact，是现成的对照。
     permissions:
       contents: read
-      actions: write
     defaults:
       run:
         working-directory: apps/desktop
@@ -72,18 +73,14 @@ jobs:
     concurrency:
       group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}-electron-e2e
       cancel-in-progress: true
-    # Fork PRs only get secrets if the author is a collaborator.
-    # if: |
-    #   github.event_name == 'push' ||
-    #   github.event_name == 'workflow_dispatch' ||
-    #   github.event.pull_request.head.repo.full_name == github.repository ||
-    #   contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association)
+    # 在此之前这里有一段注释掉的 job 级 if（只让受信任来源跑）；现在由下面的 E2E_TRUSTED
+    # 以**步骤级**实现，语义相同但不会让必需检查漏报（见那段注释）。
     runs-on: ubuntu-latest
-    # E2E job 检出并执行 PR head 的测试代码，因此只保留最小只读权限 + artifact 写入。
-    # release asset 上传移到后面不检出 PR head 的独立 job，避免 PR 控制代码接触 contents:write。
+    # 最小权限：本 job 只读代码。失败产物留档（actions/upload-artifact，且只在 push 运行里触发）
+    # 用的是 Actions runtime token，不需要 GITHUB_TOKEN 的 actions:write；flaky 报告本身不出本 job
+    # （见下面的汇总步）。
     permissions:
       contents: read
-      actions: write
     # 信任来源门禁（#1107 安全评审的结论）：下面这些会执行 PR 检出代码的步骤，只对受信任来源运行。
     # 不受信任时（外部 fork 的 pull_request_target）它们整体跳过，于是 PR 代码不再与
     # DEEPSEEK/BRAVE 凭据同处一个 job —— 这同时收掉了既有的「PR head 的 spec 读 key」暴露。
@@ -243,15 +240,10 @@ jobs:
       group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}-macos-e2e
       cancel-in-progress: true
     runs-on: macos-latest
-    # 同 Linux：只保留最小只读权限 + artifact 写入，release asset 上传交给独立 job。
+    # 同 Linux：最小权限（只读代码）+ 信任来源门禁（见 E2E_TRUSTED）。
     permissions:
       contents: read
-      actions: write
-    # 信任来源门禁（#1107 安全评审的结论）：下面这些会执行 PR 检出代码的步骤，只对受信任来源运行。
-    # 不受信任时（外部 fork 的 pull_request_target）它们整体跳过，于是 PR 代码不再与
-    # DEEPSEEK/BRAVE 凭据同处一个 job —— 这同时收掉了既有的「PR head 的 spec 读 key」暴露。
-    # 用**步骤级** if 而不是 job 级：electron-e2e 是 develop 的必需检查，job 级 if 为假时
-    # check 可能根本不上报，PR 会卡在 "Expected — Waiting for status"。
+    # 信任来源门禁：同 electron-e2e —— 本 job 不是必需检查，但沿用同一写法保持一致。
     env:
       E2E_TRUSTED: ${{ github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association) }}
     defaults:

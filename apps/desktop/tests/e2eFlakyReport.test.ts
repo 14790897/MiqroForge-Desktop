@@ -416,8 +416,8 @@ describe('buildAnnotations', () => {
     expect(annotation).toContain('file=apps/desktop/tests/e2e/issue-877-rich-preview.spec.ts');
   });
 
-  // macOS 的报告会被 ubuntu 上的汇总 job 解析：报告的 rootDir 是 /Users/runner/…，本地
-  // workspace 是 /home/runner/…，两边共享不了前缀，得靠仓库名把路径切回仓库根。
+  // 防御性兜底：报告若来自另一台 runner（rootDir 是 /Users/runner/…、而本地 workspace 是
+  // /home/runner/…），两边共享不了前缀，得靠仓库名把路径切回仓库根。
   it('报告来自另一台 runner 时也能还原出仓库路径', () => {
     const repo = 'MiqroForge-Desktop';
     process.env.GITHUB_WORKSPACE = `/home/runner/work/${repo}/${repo}`;

@@ -96,10 +96,10 @@ function formatDuration(ms) {
  * 注解里的 file 要相对仓库根，才能挂到 PR 的文件视图上；spec.file 是相对 config.rootDir 的，
  * 所以基准取报告里的 rootDir，而不是 cwd。
  *
- * 报告可能来自另一台 runner：macOS 的报告会被 ubuntu 上的汇总 job 解析，报告的 rootDir 是
- * `/Users/runner/...` 而本地 workspace 是 `/home/runner/...`，relative() 这时只会给出跨机器的
- * 回溯路径。那就改用仓库名把绝对路径切回仓库根 —— GitHub Actions 的工作区一定是
- * `<...>/<owner>/<repo>/<repo>/...`，仓库名取 `GITHUB_REPOSITORY` 的后半段。
+ * 兜底：报告理论上可能来自另一台 runner（rootDir 是 `/Users/runner/...` 而本地 workspace 是
+ * `/home/runner/...`，relative() 只会给出跨机器的回溯路径）。现在两个平台各自在本 job 内解析
+ * 本机报告，这条不在关键路径上，但仍按「用仓库名把绝对路径切回仓库根」处理 —— GitHub Actions
+ * 的工作区一定是 `<...>/<owner>/<repo>/<repo>/...`，仓库名取 `GITHUB_REPOSITORY` 的后半段。
  *
  * 都算不出来时返回原始的 spec.file —— 那不是一个有效的仓库路径，只是为了始终有东西可读。
  */
