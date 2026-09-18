@@ -190,25 +190,17 @@ jobs:
 
       - name: Run Electron E2E
         if: env.E2E_TRUSTED == 'true'
-        # --workers=2 (#1107): ubuntu-latest runners are 4 vCPU, and each worker is a
-        # full Electron app plus its Python bridge driving real LLM calls — 4 of them
-        # leave the runner no headroom, which surfaces as actionability timeouts at
-        # random spec points (first attempt fails, retry passes) and the job still
-        # reports success.  Same parallelism as the macOS job below, for the same reason.
-        #
-        # This is load reduction, not a cure: the macOS job has run 2 workers for a
-        # while and still has flaky runs.  The other half of #1107 is the next step,
-        # which makes whatever flakiness remains visible instead of silent.
-        #
-        # Halving parallelism roughly doubles wall clock (the full suite takes 15-20
-        # min at 4 workers, 199-233 tests), so the step timeout goes 30 -> 60 min: a
-        # 2-worker run lands somewhere in the 30-40 min range, and the estimate has
-        # not been confirmed by a real CI run yet.
+        # 并行度用 config 的默认值（4）。#1107 最初设想「4 vCPU 跑 4 个并行 Electron 会过载、
+        # 因而随机 flaky」，但实测不支持这个因果：macOS 侧长期 2 workers 仍 flaky，Linux 在
+        # 4 workers 下也是（issue-877 / issue-1061 那批）。降到 2 workers 只把墙钟从 15-20 分钟
+        # 拉到 ~31 分钟（三次实测 30m55s / 31m02s / 31m15s），没换来稳定性 —— 而 PR 反馈速度是
+        # 每个 PR 都要付的成本，所以这里回到 4 workers。
+        # 剩下的 flaky 由下面那一步显式暴露、逐条归因（那才是这个改动的实际交付物）。
+        # timeout 45：4 workers 下套件实测 14.6-19.7 分钟，但个别 LLM 变慢的运行曾顶到旧上限 30。
         run: |
           xvfb-run --auto-servernum \
-            npx playwright test --config=playwright.config.ts --project=electron \
-            --workers=2
-        timeout-minutes: 60
+            npx playwright test --config=playwright.config.ts --project=electron
+        timeout-minutes: 45
         env:
           PLAYWRIGHT_SKIP_WEB_SERVER: '1'
 

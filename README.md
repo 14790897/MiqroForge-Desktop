@@ -319,7 +319,7 @@ npm run build && npx playwright test --config=playwright.config.ts --project=ele
 
 | Platform | E2E Coverage | Notes |
 |---|---|---|
-| **Linux** (Ubuntu CI) | Full suite ✓ | bwrap sandbox + all specs；`--workers=2`（4 vCPU runner 上跑 4 个并行 Electron + 各自的 Python bridge 会把机器压到过载） |
+| **Linux** (Ubuntu CI) | Full suite ✓ | bwrap sandbox + all specs；并行度用 config 默认的 4 workers（实测 14.6–19.7 分钟；降到 2 只翻倍墙钟、换不到稳定性） |
 | **Windows** (WSL CI) | Full suite ✓ | WSL bwrap sandbox + all specs (needs `MIQI_RUN_SANDBOX_E2E=1`) |
 | **macOS** (CI) | **选定子集，不是完整覆盖** | 无 bwrap；为控制墙钟又额外排除最重的 LLM 套件 —— 未跑的部分由 Linux job 覆盖 |
 
