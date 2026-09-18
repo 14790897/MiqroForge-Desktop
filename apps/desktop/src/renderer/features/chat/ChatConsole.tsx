@@ -3553,7 +3553,18 @@ export function ChatConsole({
   // Crash-recovery turn id (#1035): latched by the mount-time listeners from
   // the first turn-tagged event after a renderer reload, so that turn's
   // final/error/aborted are accepted while a superseded turn's are dropped.
+  // Scoped to ONE turn of ONE routing key — reset when the user leaves the tab
+  // (or session) that turn belongs to, see the switch effect below.
   const recoveryTurnIdRef = useRef<string | null>(null);
+  // The turn the crash-recovery listeners put on screen (#1035 复审 P1): its
+  // session + routing key, or null when they are not driving the turn UI.
+  // Set where they light `streaming` (the per-send path never sets it — the
+  // hasLiveSend gate keeps the two apart, so a set ref unambiguously means
+  // "the recovery listener owns this turn"), cleared when its terminal settles
+  // it, when the user switches tab/session, or when a handleSend() takes the
+  // turn UI over.  Emphatically NOT derived from `streamingBySession`: that is
+  // session-wide, this is one tab's one turn.
+  const recoveryOwnedTurnRef = useRef<{ session: string; key: string } | null>(null);
   // Sessions whose stop was already rendered by THIS component (handleAbort).
   // Aborting releases the bridge's turn lock but its drain task keeps running
   // until the terminal event, so a late chat:aborted (plus any trailing
@@ -3766,6 +3777,9 @@ export function ChatConsole({
     // must NOT wipe the user's typed input / attachments / streaming state,
     // which this PR's new explicit resets would otherwise do on every reload.
     const _sessionChanged = currentSessionRef.current !== sessionKey;
+    // The session being left, captured before currentSessionRef is repointed
+    // below — the crash-recovery resets key off it.
+    const _leavingSession = _sessionChanged ? currentSessionRef.current : null;
     // Snapshot the session we're leaving so switching back restores the
     // live-rendered thinking/reply instantly.  While on a session its events
     // take the LIVE path (in `messages`), never moduleInFlightCache — so
@@ -3808,6 +3822,18 @@ export function ChatConsole({
       // its own turn in flight from before the crash, and a stale latch would
       // make its (differently tagged) terminal look superseded and drop it.
       recoveryTurnIdRef.current = null;
+      // Same for the turn the recovery listeners had on screen (#1035 复审 P1):
+      // they only adopt events of the CURRENT session, so the leaving session's
+      // turn is abandoned — and its terminal, the only thing that would clear
+      // the spinner, will be rejected. `streamingBySession` is keyed per
+      // session and the switch-back heuristic below RE-LIGHTS the spinner from
+      // it, so a surviving entry means a stuck "生成中" forever; drop it with
+      // the turn it belonged to. (A live send of the leaving session cleans up
+      // after itself through its own listeners — this ref is never set then.)
+      if (_leavingSession && recoveryOwnedTurnRef.current?.session === _leavingSession) {
+        recoveryOwnedTurnRef.current = null;
+        streamingBySession.delete(_leavingSession);
+      }
       setHistoryLoaded(false);
       // ── Instant restore ─────────────────────────────────────────
       // sessions.get() is async, so clearing messages here and waiting would
@@ -4539,13 +4565,22 @@ export function ChatConsole({
   // current session and update the UI. They intentionally yield to per-send
   // listeners whenever a handleSend() turn is active.
   //
-  // Scope note: only the CURRENT session and the tab selected in it are
-  // adopted. The user was on both when the renderer died; `miqi:lastSession`
-  // restores the session and the tab pair is persisted per session
-  // (threadTabs.ts), so the reloaded renderer filters on exactly the routing
-  // key the crashed turn was sent under — the base session on the main tab,
-  // `desktop:<threadId>` on a sub-thread tab (see routingKeyFor). Events of
-  // other sessions/threads are still dropped.
+  // Scope note: exactly ONE turn is adopted — the one of the tab selected in
+  // the CURRENT session. The user was on both when the renderer died;
+  // `miqi:lastSession` restores the session and the tab pair is persisted per
+  // session (threadTabs.ts), so the reloaded renderer filters on exactly the
+  // routing key the crashed turn was sent under — the base session on the main
+  // tab, `desktop:<threadId>` on a sub-thread tab (see routingKeyFor).
+  //
+  // Deliberately key-scoped, NOT session-scoped (#1035 复审 P1): a session can
+  // have several turns in flight at once (main tab + sub-thread tabs), and
+  // this listener drives ONE set of turn-scoped refs — the latched turn id,
+  // the reasoning buffer, `streaming`. Adopting a second key would fuse two
+  // turns' reasoning into one thinking block, and the two terminals would race
+  // for the single latch: the loser is judged superseded, dropped, and its
+  // turn never leaves "生成中". The turn of a tab the user is not on is left
+  // to the normal history/cache path — it is not this listener's to finish.
+  // Events of other sessions/threads are dropped as before.
   useEffect(() => {
     const flushReasoning = (ts: number) => {
       if (reasoningTimerRef.current) {
@@ -4586,8 +4621,9 @@ export function ChatConsole({
       const adopt = shouldAdoptRecoveredEvent({
         // `data.session_key` is the routing key the turn was sent under: the
         // base session for a main-tab turn, `desktop:<threadId>` for a
-        // thread-scoped one. Both belong to the view the user is on; anything
-        // else is another session or another thread's stream.
+        // thread-scoped one. Only the key of the tab selected RIGHT NOW is
+        // adopted; anything else is another session, another thread, or the
+        // concurrent turn of the other tab in this same session.
         eventSessionKey: data.session_key,
         sessionKey: owner,
         threadId: activeThreadIdRef.current,
@@ -4630,6 +4666,12 @@ export function ChatConsole({
       if (data.stream !== 'points' && data.stream !== 'heartbeat') {
         streamingBySession.add(owner);
         setStreaming(true);
+        // This spinner is the recovery listener's, on the tab it filtered for:
+        // record it so leaving that tab can settle the state (below).
+        recoveryOwnedTurnRef.current = {
+          session: owner,
+          key: routingKeyFor(owner, activeThreadIdRef.current),
+        };
       }
 
       if (data.stream === 'turn' && typeof data.turn_id === 'string') {
@@ -4782,6 +4824,7 @@ export function ChatConsole({
 
       setStreaming(false);
       streamingBySession.delete(owner);
+      recoveryOwnedTurnRef.current = null;
 
       flushReasoning(Date.now());
       liveReasoningTsRef.current = null;
@@ -4830,6 +4873,7 @@ export function ChatConsole({
 
       setStreaming(false);
       streamingBySession.delete(owner);
+      recoveryOwnedTurnRef.current = null;
       flushReasoning(Date.now());
       liveReasoningTsRef.current = null;
       thinkingStartedAtRef.current = null;
@@ -4849,6 +4893,7 @@ export function ChatConsole({
 
       setStreaming(false);
       streamingBySession.delete(owner);
+      recoveryOwnedTurnRef.current = null;
       flushReasoning(Date.now());
       liveReasoningTsRef.current = null;
       thinkingStartedAtRef.current = null;
@@ -4867,6 +4912,44 @@ export function ChatConsole({
       unsubAborted();
     };
   }, []);
+
+  // ── Leaving the recovered turn's tab: abandon it cleanly (#1035 复审 P1) ─────
+  // The listener above follows exactly ONE routing key — the selected tab's. The
+  // moment the user picks another tab, that turn's events stop matching: its
+  // terminal, the only thing that would switch the spinner off, is rejected
+  // from then on. So everything the abandoned turn owns has to be settled here
+  // or the UI keeps waiting for a turn that can no longer finish:
+  //   · the latched turn id — otherwise the newly selected tab's turn looks
+  //     "superseded" and its terminal is swallowed;
+  //   · the buffered reasoning tail — otherwise it is emitted into the next
+  //     tab's thinking block, which is the very two-turns-in-one-block mixing
+  //     this route exists to prevent (flushed, not dropped: it is real output
+  //     of a turn the user watched);
+  //   · the spinner and the turn's thinking timestamps, but ONLY for the turn
+  //     the recovery listener lit (see recoveryOwnedTurnRef) — a live send owns
+  //     its own `streaming` across tab switches and must keep it.
+  // The matching case for a session switch is settled in the session-change
+  // effect (it also has to keep the two sessions' flags apart).
+  useEffect(() => {
+    recoveryTurnIdRef.current = null;
+    const owned = recoveryOwnedTurnRef.current;
+    if (!owned) return;
+    // Not ours to clean if the session moved on underneath us (the
+    // session-change effect above runs first and settles that case) — just
+    // drop the stale ref.
+    if (owned.session !== currentSessionRef.current) {
+      recoveryOwnedTurnRef.current = null;
+      return;
+    }
+    if (owned.key === routingKeyFor(owned.session, activeThreadId)) return;
+    recoveryOwnedTurnRef.current = null;
+    flushReasoningRef.current?.(Date.now());
+    liveReasoningTsRef.current = null;
+    thinkingStartedAtRef.current = null;
+    lastReasoningDeltaAtRef.current = null;
+    streamingBySession.delete(owned.session);
+    setStreaming(false);
+  }, [activeThreadId]);
 
   const clearFinalCleanupTimer = useCallback(() => {
     if (finalCleanupTimerRef.current) {
@@ -5550,6 +5633,14 @@ export function ChatConsole({
     // A new turn supersedes any earlier stop in this session — drop the
     // crash-recovery stop marker so this turn's terminal is not ignored (#1035).
     localAbortSessionsRef.current.delete(sendSessionKey);
+    // …and hand the turn UI over from the crash-recovery listener (#1035 复审
+    // P1). From here on `hasLiveSend` gates that listener off, so it cannot own
+    // anything again before this invocation settles — a surviving ownership
+    // record would be a lie the switch effects below act on, letting a tab or
+    // session switch settle THIS live turn's spinner / session flag (which is
+    // the per-send path's to keep). Keeps the ref's invariant: set ⇒ the
+    // recovery listener is the one driving the turn UI.
+    recoveryOwnedTurnRef.current = null;
     // Only auto-unsubscribe the previous invocation's listeners when it was
     // THIS session's send (same-session supersede).  Unsubscribing across
     // sessions strands the other session's in-flight turn: its terminal

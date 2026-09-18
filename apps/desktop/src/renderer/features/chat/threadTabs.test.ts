@@ -3,8 +3,9 @@
  *
  * 这里锁住四件事：
  *  1. routing key 口径（主 tab = 基础 session；子线程 tab = `desktop:<threadId>`）；
- *  2. 恢复监听器的事件匹配口径：接受基础 session 与**当前** tab 的 routing key，
- *     拒绝其它 session / 其它 thread（跨会话泄漏防线）；
+ *  2. 恢复监听器的事件匹配口径：**只认当前 tab 的 routing key**——同一 session
+ *     的另一条 key 也是别的 turn，一律拒绝（并发 turn 混流 / 抢 latch 的防线），
+ *     其它 session / 其它 thread 同样拒绝；
  *  3. 恢复监听器的完整认领判定：上一条之外，本会话有 live send 或已按过停止时
  *     都不认领（turn UI 状态按会话共享，认领会冲掉用户正在看的 turn）；
  *  4. 按会话持久化：reload 后 tab 列表与选中项都能读回来，读坏/串会话不炸。
@@ -59,9 +60,20 @@ describe('routing key 口径 (#1035)', () => {
     expect(isEventForView('desktop:default-x', SESSION, MAIN_THREAD_ID)).toBe(false);
   });
 
-  it('子线程 tab：接受基础 session（主 tab 的 turn）与当前 thread 的 routing key', () => {
-    expect(isEventForView(SESSION, SESSION, 'thread-a')).toBe(true);
+  it('子线程 tab：只接受当前 thread 的 routing key（同期主 tab 的 turn 不并收）', () => {
     expect(isEventForView('desktop:thread-a', SESSION, 'thread-a')).toBe(true);
+    // 同一 session、另一条 key 的 turn（主 tab 正在跑的那条）：这是**另一个
+    // turn**，认领它就会把两条流汇进同一份 reasoning 缓冲 / 抢同一个 latch。
+    expect(isEventForView(SESSION, SESSION, 'thread-a')).toBe(false);
+  });
+
+  it('并发：同一 session 的两条 key 互不认领（各自只看自己选中的那条）', () => {
+    // 主 tab 上 → 只有基础 session 的事件算数，子线程 turn 的不算。
+    expect(isEventForView(SESSION, SESSION, MAIN_THREAD_ID)).toBe(true);
+    expect(isEventForView('desktop:thread-a', SESSION, MAIN_THREAD_ID)).toBe(false);
+    // 子线程 tab 上 → 反过来。
+    expect(isEventForView('desktop:thread-a', SESSION, 'thread-a')).toBe(true);
+    expect(isEventForView(SESSION, SESSION, 'thread-a')).toBe(false);
   });
 
   it('子线程 tab：拒绝其它 thread / 其它会话的事件（跨会话、跨线程不泄漏）', () => {
@@ -96,10 +108,8 @@ describe('恢复监听器的认领判定 shouldAdoptRecoveredEvent (#1035)', () 
     locallyAborted: false,
   };
 
-  it('重载后的干净渲染层：主 tab 收基础 session、子线程 tab 收自己的 routing key', () => {
-    expect(
-      shouldAdoptRecoveredEvent({ ...clean, eventSessionKey: SESSION, threadId: 'thread-a' })
-    ).toBe(true);
+  it('重载后的干净渲染层：只收当前所选 tab 的那条 routing key', () => {
+    expect(shouldAdoptRecoveredEvent({ ...clean, eventSessionKey: SESSION })).toBe(true);
     expect(
       shouldAdoptRecoveredEvent({
         ...clean,
@@ -107,6 +117,17 @@ describe('恢复监听器的认领判定 shouldAdoptRecoveredEvent (#1035)', () 
         threadId: 'thread-a',
       })
     ).toBe(true);
+    // 并发 turn 的防线：同一 session 的另一条 key 不被认领。
+    expect(
+      shouldAdoptRecoveredEvent({ ...clean, eventSessionKey: SESSION, threadId: 'thread-a' })
+    ).toBe(false);
+    expect(
+      shouldAdoptRecoveredEvent({
+        ...clean,
+        eventSessionKey: 'desktop:thread-a',
+        threadId: MAIN_THREAD_ID,
+      })
+    ).toBe(false);
   });
 
   it('会话未就绪（sessionKey 为 null）时不认领任何事件', () => {

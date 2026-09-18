@@ -60,11 +60,19 @@ export function routingKeyFor(sessionKey: string, threadId: string): string {
  * Whether an event tagged `eventSessionKey` belongs to the view the user is on
  * (base session `sessionKey`, selected tab `threadId`).
  *
- * Accepts the base session key — events of a main-tab turn — and the current
- * tab's routing key — events of the thread-scoped turn being resumed.  Any
- * other session / thread key is rejected so a reloaded renderer can never
- * adopt another conversation's stream.  Untagged (legacy) events carry no key
- * to compare and stay this session's, as before.
+ * Only the SELECTED tab's routing key counts (#1035 复审 P1): the base session
+ * on the main tab, `desktop:<threadId>` on a sub-thread tab.  The other tab of
+ * the same session is now rejected too — its events belong to a DIFFERENT
+ * turn, and one listener carries one set of turn-scoped state (latched turn
+ * id, reasoning buffer, `streaming`), so adopting a second key lets two
+ * concurrent turns of one session interleave into it (two turns' reasoning
+ * fused into one thinking block; the first terminal latching the turn id and
+ * the second, differently-tagged one being dropped → a turn that never
+ * settles).  A turn on a tab the user is not on is left to the normal history
+ * / cache path once they switch to it.
+ *
+ * Untagged (legacy) events carry no key to compare and stay this session's,
+ * as before.
  */
 export function isEventForView(
   eventSessionKey: string | undefined,
@@ -72,7 +80,7 @@ export function isEventForView(
   threadId: string
 ): boolean {
   if (!eventSessionKey) return true;
-  return eventSessionKey === sessionKey || eventSessionKey === routingKeyFor(sessionKey, threadId);
+  return eventSessionKey === routingKeyFor(sessionKey, threadId);
 }
 
 /**
@@ -80,10 +88,12 @@ export function isEventForView(
  *
  * Two independent gates, and both must pass:
  *
- *  1. The event must belong to the VIEW the user is on — the base session or
- *     the selected tab's routing key (`isEventForView`). This is what lets a
+ *  1. The event must belong to the VIEW the user is on — exactly the selected
+ *     tab's routing key, nothing else (`isEventForView`). This is what lets a
  *     thread-scoped turn (`desktop:<threadId>`) be resumed at all; the events
- *     of any other session/thread are rejected.
+ *     of any other session/thread — including the other tab of this same
+ *     session — are rejected, so concurrent turns cannot share (and corrupt)
+ *     the one set of turn-scoped refs this listener drives.
  *  2. No live send of the session may own the shared turn state. The per-send
  *     listeners write the same component-global state this listener does
  *     (`streaming`, the reasoning buffers and timers), and the message list is

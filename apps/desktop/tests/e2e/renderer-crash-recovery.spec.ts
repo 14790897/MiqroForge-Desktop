@@ -38,6 +38,18 @@ const POLL_INTERVAL_MS = 250;
 const RELOAD_TIMEOUT_MS = 60_000;
 /** 无提示口径的静置复查时长：确保提示不是"闪现一下又被冲掉"。 */
 const SETTLE_RECHECK_MS = 2_500;
+/**
+ * 崩溃前「turn 已经真的在流」的等待预算（**前置条件**，不是断言）。
+ *
+ * 一条会话的第一条 send 会先走 threads.start（渲染层 30s 后放弃它、直接发
+ * chat.send），而这条后端路径在本机实测偶发要 60–95s 才返回——日志里
+ * `IPC thread/start took 94631ms` / `68614ms` 这类记录 09-17、09-18 都有，
+ * 期间 chat.send 排不上队，mock 一个请求都收不到（表现为本用例先在
+ * 「请求应到达 mock」这一步红，而不是后面任何一条语义断言）。这是环境/后端
+ * 既有的慢，不是本 spec 要验的东西：与其让用例替它背锅，不如给足预算——
+ * 后面每条断言一个都没放宽。
+ */
+const STREAM_WARMUP_TIMEOUT_MS = 150_000;
 
 /** 崩溃相关的全部用户可见文案（对话框标题 + 聊天流提示）：一个都不许出现。 */
 const CRASH_TEXTS = ['界面曾崩溃', '界面已崩溃', '界面反复崩溃'];
@@ -441,6 +453,12 @@ test.describe('Issue #1035 — 渲染进程崩溃后自动重载与恢复提示'
 interface RecoveryMockStream {
   url: string;
   stats: () => { started: number; finished: number; deltas: number };
+  /**
+   * Let the in-flight stream emit its final chunk on the next tick, instead of
+   * waiting out the whole delta budget. Lets a test hold a turn open for as
+   * long as it needs observations, then end it deterministically.
+   */
+  release: () => void;
   close: () => Promise<void>;
 }
 
@@ -453,6 +471,10 @@ async function startRecoveryMock(): Promise<RecoveryMockStream> {
   let started = 0;
   let finished = 0;
   let deltas = 0;
+  // Set by release(): the next tick flushes the final chunk of every stream
+  // still open (and of any stream opened afterwards — the test only releases
+  // when it means it).
+  let releasing = false;
 
   const server = http.createServer((req, res) => {
     if (req.url && req.url.startsWith('/stats')) {
@@ -491,7 +513,7 @@ async function startRecoveryMock(): Promise<RecoveryMockStream> {
       let i = 0;
       const timer = setInterval(() => {
         i += 1;
-        if (i > 600) {
+        if (releasing || i > 600) {
           clearInterval(timer);
           res.write(chunk({ content: ' recovery-final' }, 'stop'));
           res.write('data: [DONE]\n\n');
@@ -512,6 +534,9 @@ async function startRecoveryMock(): Promise<RecoveryMockStream> {
   return {
     url: `http://127.0.0.1:${port}/v1`,
     stats: () => ({ started, finished, deltas }),
+    release: () => {
+      releasing = true;
+    },
     close: () =>
       new Promise<void>((resolve) => {
         server.closeAllConnections?.();
@@ -521,7 +546,8 @@ async function startRecoveryMock(): Promise<RecoveryMockStream> {
 }
 
 test.describe('Issue #1035 — 崩溃重载后继续接收后台 turn 输出', () => {
-  test.describe.configure({ mode: 'serial', timeout: 180_000 });
+  // 300s：含 STREAM_WARMUP_TIMEOUT_MS 的冷启动预算 + 崩溃重载 + 收尾等待。
+  test.describe.configure({ mode: 'serial', timeout: 300_000 });
 
   let electronApp: ElectronApplication;
   let page: Page;
@@ -563,7 +589,7 @@ test.describe('Issue #1035 — 崩溃重载后继续接收后台 turn 输出', (
     await sendMessage(page, 'stream please');
 
     // Wait until the mock has streamed enough deltas and has not finished.
-    const deadline = Date.now() + 60_000;
+    const deadline = Date.now() + STREAM_WARMUP_TIMEOUT_MS;
     while (Date.now() < deadline) {
       const s = mock.stats();
       if (s.deltas >= 30 && s.finished === 0) break;
@@ -657,6 +683,49 @@ async function readThreadTabs(
 }
 
 /**
+ * 切换 thread tab（崩溃重载后也用它，不用 Playwright 的 page 句柄）。
+ *
+ * 和 readThreadTabs / readSnapshotOnce 同一条主进程 executeJavaScript 通道，
+ * 理由也一样：渲染进程是被真打掉再重载的，page 句柄能否跨这次 renderer 更换
+ * 继续可用不是本 issue 要验证的东西。`el.click()` 派发的是会冒泡的原生 click，
+ * React 挂在根上的委托监听器照常收到，等价于点这一下。
+ */
+async function clickThreadTab(
+  electronApp: ElectronApplication,
+  threadId: string
+): Promise<boolean> {
+  return (
+    (await evalInRenderer<boolean>(
+      electronApp,
+      `(() => {
+        const el = document.querySelector(
+          '[data-testid="chat-thread-tab"][data-thread-id=${JSON.stringify(threadId)}]'
+        );
+        if (!el) return false;
+        el.click();
+        return true;
+      })()`
+    )) ?? false
+  );
+}
+
+/** 等某个 thread tab 变成选中态（读渲染层真实属性，不依赖 page 句柄）。 */
+async function waitForActiveThread(
+  electronApp: ElectronApplication,
+  threadId: string,
+  timeoutMs: number
+): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const tabs = await readThreadTabs(electronApp);
+    const hit = tabs?.find((t) => t.threadId === threadId);
+    if (hit?.active) return true;
+    await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
+  }
+  return false;
+}
+
+/**
  * 从主进程注入一个 `agent:spawned` 事件，让渲染层长出子线程 tab。
  *
  * 这是 ChatConsole 真正订阅的那条通道（preload `agents.onSpawned`），只是 E2E
@@ -687,7 +756,8 @@ async function spawnThreadTab(
 }
 
 test.describe('Issue #1035 — thread-scoped turn 崩溃重载后可恢复', () => {
-  test.describe.configure({ mode: 'serial', timeout: 180_000 });
+  // 300s：含 STREAM_WARMUP_TIMEOUT_MS 的冷启动预算 + 崩溃重载 + 收尾等待。
+  test.describe.configure({ mode: 'serial', timeout: 300_000 });
 
   const THREAD_ID = 'e2e-thread-recovery';
   const THREAD_LABEL = 'E2E 子线程';
@@ -740,7 +810,7 @@ test.describe('Issue #1035 — thread-scoped turn 崩溃重载后可恢复', () 
 
     // 崩溃前确认：后台 turn 已经真的在 mock 上跑起来（thread routing key 被后端
     // 正常受理），且在流式输出、尚未结束。
-    const crashDeadline = Date.now() + 60_000;
+    const crashDeadline = Date.now() + STREAM_WARMUP_TIMEOUT_MS;
     let beforeCrash = mock.stats();
     while (Date.now() < crashDeadline) {
       beforeCrash = mock.stats();
@@ -792,6 +862,330 @@ test.describe('Issue #1035 — thread-scoped turn 崩溃重载后可恢复', () 
       '重载后应回到「生成中」——证明 thread turn 的 progress 事件已送达渲染层'
     ).toBe(true);
     expect(lastBodyText, '重载后应渲染出 thread turn 的最终内容').toContain('recovery-final');
+    expect(mock.stats().finished, 'thread turn 应在 mock 上正常收尾').toBeGreaterThan(
+      beforeCrash.finished
+    );
+    const settled = await readSnapshotOnce(electronApp);
+    expect(settled, '终态应能读到渲染层 DOM').not.toBeNull();
+    expect(settled!.streaming, '收到 final 后不应再停留在生成中').toBe(false);
+  });
+});
+
+// ── Issue #1035 复审 P1: 并发 turn —— reload 后只恢复当前 tab 的那条 ─────────
+//
+// 场景：子线程 tab 选中、它的 turn 正在 streaming 时打掉渲染进程。重载后恢复
+// 监听器只能认领**当前选中 tab 的 routing key**（`desktop:<threadId>`）：
+//
+//   1. 同一 session 的另一条 key（主 tab 的会话 key）的事件必须被整条丢弃 ——
+//      认领它就会把两条流汇进同一份 reasoning 缓冲（思考块混流），而且它的
+//      terminal 会先抢到 turn latch，让真正在看的 turn 被当成 superseded 丢掉、
+//      永远停在「生成中」；
+//   2. 当前 tab 的 turn 仍要正常 progress / final 收尾；
+//   3. 切走 tab 时不许把 spinner 悬挂：被放弃的 turn 的 terminal 已经不再被
+//      认领，spinner 必须在切换时同步落下，而不是等一个永远不来的终态。
+//
+// 为什么是「注入另一条 key 的事件」而不是真的并跑两个 turn：handleSend 对同一
+// session 的两次发送是互斥的 —— 新的 send 会 supersede 旧 turn（lifecycleRef
+// 的 sessionKey 是基础 session，与 routing key 无关），UI 上根本起不出两个真
+// 并发 turn；并发的另一条 key 只会来自后端自发的 turn（子 agent / 系统推进）。
+// 所以这里让真 turn 跑在子线程 key 上（走完整的 bridge → main → renderer 链路），
+// 另一条 key 的事件则从主进程按**真实 IPC 通道**注入：preload 的 chat.onProgress
+// /onFinal 就是对该 payload 的直通转发，于是走的仍是渲染层恢复监听器那段代码。
+
+/** 注入用的「另一条 key」turn id —— 与真 turn 的 turn_id 必须不同。 */
+const OTHER_KEY_TURN_ID = 'turn-other-key-e2e';
+/** 注入事件里的呼吸标记：出现在界面上 = 被误认领了。 */
+const OTHER_KEY_BLEED = 'MAIN-KEY-BLEED';
+/** 注入的 terminal 正文：出现说明它的 final 被认领（并抢走了 latch）。 */
+const OTHER_KEY_FINAL = 'MAIN-KEY-LEDGER-FINAL';
+
+/**
+ * 读取渲染层当前会话的**基础 session key**（= 主 tab 的 routing key）。
+ *
+ * 不写死 `desktop:default`：会话 key 是应用状态，不是本用例要验的东西。渲染层
+ * 自己把 tab 状态按 `miqi-active-thread:<sessionKey>` 存进 sessionStorage（也是
+ * 重载后 tab 能恢复的原因），所以从那里反查拿到的就是真 key，且必须跨重载存活。
+ */
+async function readBaseSessionKey(electronApp: ElectronApplication): Promise<string | null> {
+  return evalInRenderer<string | null>(
+    electronApp,
+    `(() => {
+      const prefix = 'miqi-active-thread:';
+      const keys = Object.keys(sessionStorage).filter((k) => k.startsWith(prefix));
+      return keys.length ? keys[0].slice(prefix.length) : null;
+    })()`
+  );
+}
+
+/**
+ * 从主进程起一个定时器，按真实 IPC 通道注入「另一条 routing key」的 turn 事件。
+ *
+ * 每条 progress 都带同一 turn_id；第一拍补一枪 `chat:final` —— 旧实现里它既会
+ * 被认领（同一 session 的基础 session key 在接纳口径内），又会先 latch 住自己
+ * 的 turn_id，让真正在看的 turn 的 final 永远判 superseded。
+ */
+async function startOtherKeyInjection(
+  electronApp: ElectronApplication,
+  arg: { sessionKey: string; turnId: string; bleed: string; finalText: string }
+): Promise<void> {
+  const startedOk = await electronApp.evaluate(
+    (
+      { BrowserWindow },
+      params: { sessionKey: string; turnId: string; bleed: string; finalText: string }
+    ) => {
+      const g = globalThis as any;
+      const win = BrowserWindow.getAllWindows()[0];
+      if (!win || win.webContents.isDestroyed()) return false;
+      let i = 0;
+      g.__otherKeyTicks = 0;
+      // 自证计数：**只有**真正送上 IPC 通道的事件才 +1。标记文本必须由 `params`
+      // 传进来 —— evaluate 的回调是被序列化到主进程里执行的，直接引用测试文件
+      // 模块作用域的常量会在定时器回调里抛 ReferenceError，而且抛在 `wc.send`
+      // 之前：注入一个事件都没发出去，用例却会以「标记没出现」假绿通过（上一轮
+      // 就是这么崩在主进程弹窗上的）。有了这个计数，下面的「无混流」断言才是
+      // 可证伪的：sent === 0 时它直接红，而不是替一个坏掉的注入背书。
+      g.__otherKeySent = 0;
+      g.__otherKeyTimer = setInterval(() => {
+        i += 1;
+        g.__otherKeyTicks = i;
+        const wc = BrowserWindow.getAllWindows()[0]?.webContents;
+        if (!wc || wc.isDestroyed()) return;
+        try {
+          wc.send('chat:progress', {
+            type: 'progress',
+            session_key: params.sessionKey,
+            turn_id: params.turnId,
+            stream: 'reasoning',
+            delta: ` ${params.bleed}-${i} `,
+          });
+          g.__otherKeySent += 1;
+          if (i === 1) {
+            wc.send('chat:final', {
+              type: 'final',
+              session_key: params.sessionKey,
+              turn_id: params.turnId,
+              content: params.finalText,
+            });
+            g.__otherKeySent += 1;
+          }
+        } catch {
+          // 渲染层这一拍已经拆了：什么都没送达，就不计数——别让计数替失败背书。
+        }
+      }, 200);
+      return true;
+    },
+    arg
+  );
+  expect(startedOk, '应能在主进程里装上另一条 key 的事件注入').toBe(true);
+}
+
+/**
+ * 注入实际送上 IPC 通道的事件数（`__otherKeySent`）。注入跑完读一次，为 0 就说明
+ * 注入被上面的作用域类 bug 吞了——此时「标记没出现」的断言毫无意义。
+ */
+async function readOtherKeySentCount(electronApp: ElectronApplication): Promise<number> {
+  return electronApp.evaluate(() => (globalThis as any).__otherKeySent ?? 0);
+}
+
+/** 停掉注入，返回一共注入了多少拍（0 表示它根本没跑过）。 */
+async function stopOtherKeyInjection(electronApp: ElectronApplication): Promise<number> {
+  return electronApp.evaluate(() => {
+    const g = globalThis as any;
+    if (g.__otherKeyTimer) {
+      clearInterval(g.__otherKeyTimer);
+      g.__otherKeyTimer = null;
+    }
+    return g.__otherKeyTicks ?? 0;
+  });
+}
+
+/** 轮询「生成中」标志，直到它变成 `want` 或超时；返回最后一次读数。 */
+async function waitForStreamingFlag(
+  electronApp: ElectronApplication,
+  want: boolean,
+  timeoutMs: number
+): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  let last = !want;
+  while (Date.now() < deadline) {
+    const snapshot = await readSnapshotOnce(electronApp);
+    if (snapshot) {
+      last = snapshot.streaming;
+      if (last === want) return last;
+    }
+    await new Promise((r) => setTimeout(r, 250));
+  }
+  return last;
+}
+
+test.describe('Issue #1035 — 并发 turn：reload 后只恢复当前 tab 的那条', () => {
+  // 300s：含 STREAM_WARMUP_TIMEOUT_MS 的冷启动预算 + 崩溃重载 + 注入窗口 +
+  // 切 tab 观察 + 收尾等待，180s 会被冷启动挤爆。
+  test.describe.configure({ mode: 'serial', timeout: 300_000 });
+
+  const THREAD_ID = 'e2e-thread-concurrent';
+  const THREAD_LABEL = 'E2E 并发子线程';
+
+  let electronApp: ElectronApplication;
+  let page: Page;
+  let mock: RecoveryMockStream;
+  let miqiHome: string | undefined;
+
+  test.beforeAll(async () => {
+    mock = await startRecoveryMock();
+    const fixture = await launchElectronApp((config: any) => {
+      const providers = config.providers ?? {};
+      for (const [, p] of Object.entries(providers)) {
+        if (p && typeof p === 'object') {
+          (p as any).apiBase = mock.url;
+          if (!(p as any).apiKey) (p as any).apiKey = 'mock-key';
+        }
+      }
+      config.providers = providers;
+    });
+    electronApp = fixture.electronApp;
+    page = fixture.page;
+    miqiHome = fixture.miqiHome;
+
+    const patched = await installMainProcessProbes(electronApp);
+    expect(patched, '主进程探针未能装上（对话框监视桩）').toBe(true);
+  });
+
+  test.afterAll(async () => {
+    try {
+      await closeElectronApp(electronApp, miqiHome);
+    } catch {
+      /* renderer was crashed on purpose; teardown may be noisy */
+    }
+    await mock?.close();
+  });
+
+  test('另一条 key 的事件不混入当前 tab，切走不悬挂，当前 tab 的 turn 正常收尾', async () => {
+    await waitForInputReady(page);
+
+    // ── 造出子线程 tab 并选中，让真 turn 跑在 `desktop:<THREAD_ID>` 上 ──
+    await spawnThreadTab(electronApp, THREAD_ID, THREAD_LABEL);
+    const threadTab = page.locator(
+      `[data-testid="chat-thread-tab"][data-thread-id="${THREAD_ID}"]`
+    );
+    await expect(threadTab, '子线程 tab 应出现在 tab 条上').toBeVisible({ timeout: 10_000 });
+    await threadTab.click();
+    await expect(threadTab, '点击后该 tab 应为选中态').toHaveAttribute('data-active', 'true');
+
+    await sendMessage(page, 'concurrent stream please');
+
+    // 崩溃前：turn 已在 mock 上流式输出且尚未结束。
+    const crashDeadline = Date.now() + STREAM_WARMUP_TIMEOUT_MS;
+    let beforeCrash = mock.stats();
+    while (Date.now() < crashDeadline) {
+      beforeCrash = mock.stats();
+      if (beforeCrash.started >= 1 && beforeCrash.deltas >= 30 && beforeCrash.finished === 0) break;
+      await page.waitForTimeout(250);
+    }
+    expect(beforeCrash.started, 'thread turn 的请求应到达 mock').toBeGreaterThanOrEqual(1);
+    expect(beforeCrash.deltas, '崩溃前应已开始流式输出').toBeGreaterThanOrEqual(30);
+    expect(beforeCrash.finished, '崩溃前后台 turn 不应已结束').toBe(0);
+
+    await crashRenderer(electronApp);
+
+    const line = await waitForReloadLine(electronApp, 1);
+    expect(line).toContain('[main] renderer-reloaded: attempt=1 reason=');
+
+    const state = await waitForUiReady(electronApp);
+    expect(state, '重载后界面应恢复可用').not.toBeNull();
+    expect(state!.inputReady, '重载后聊天输入框应重新出现').toBe(true);
+
+    const tabs = await readThreadTabs(electronApp);
+    const restored = tabs?.find((t) => t.threadId === THREAD_ID);
+    expect(restored, `重载后应恢复子线程 tab（实际渲染：${JSON.stringify(tabs)}）`).toBeDefined();
+    expect(restored!.active, '重载后应仍选中崩溃前的 thread tab').toBe(true);
+
+    // ── 注入另一条 key（主 tab 的基础 session）的事件 ──
+    const baseKey = await readBaseSessionKey(electronApp);
+    expect(baseKey, '应能从渲染层 sessionStorage 反查到基础 session key').toBeTruthy();
+    expect(baseKey, '注入的必须是另一条 routing key').not.toBe(`desktop:${THREAD_ID}`);
+
+    await startOtherKeyInjection(electronApp, {
+      sessionKey: baseKey as string,
+      turnId: OTHER_KEY_TURN_ID,
+      bleed: OTHER_KEY_BLEED,
+      finalText: OTHER_KEY_FINAL,
+    });
+
+    // 注入期间持续取样：标记一次都不许出现；同时当前 tab 的 turn 必须仍在推进
+    // （收起 spinner 之外，唯一能把它点亮的就是恢复监听器收到的真 progress）。
+    const injected: string[] = [];
+    let sawOwnStreaming = false;
+    const bleedDeadline = Date.now() + 12_000;
+    while (Date.now() < bleedDeadline) {
+      const snapshot = await readSnapshotOnce(electronApp);
+      if (snapshot) {
+        if (snapshot.streaming) sawOwnStreaming = true;
+        for (const marker of [OTHER_KEY_BLEED, OTHER_KEY_FINAL]) {
+          if (snapshot.bodyText.includes(marker) && !injected.includes(marker)) {
+            injected.push(marker);
+          }
+        }
+      }
+      await new Promise((r) => setTimeout(r, 250));
+    }
+    expect(
+      injected,
+      '另一条 key 的事件被认领了：并发 turn 的 reasoning/terminal 混进了当前 tab'
+    ).toEqual([]);
+    expect(sawOwnStreaming, '当前 tab 的 turn 应仍在「生成中」——它自己的 progress 还在被认领').toBe(
+      true
+    );
+
+    // ── 切走：被放弃的 turn 的 terminal 不再被认领，spinner 不许悬挂 ──
+    const ticks = await stopOtherKeyInjection(electronApp);
+    expect(ticks, '注入应真的跑过（否则这一段没验到东西）').toBeGreaterThan(0);
+    // 注入自证：上面「标记一次都没出现」只有在事件真的发出去过时才有意义。
+    // 计数在 wc.send 返回后才 +1，为 0 就说明这段是假绿（注入被吞了）。
+    expect(
+      await readOtherKeySentCount(electronApp),
+      '注入的事件应真的送上 IPC 通道（为 0 = 注入根本没发生，混流断言是假绿）'
+    ).toBeGreaterThan(0);
+
+    expect(await clickThreadTab(electronApp, 'main'), '应能点到主 tab').toBe(true);
+    expect(await waitForActiveThread(electronApp, 'main', 5_000), '主 tab 应变为选中态').toBe(true);
+    expect(
+      await waitForStreamingFlag(electronApp, false, 5_000),
+      '切走后 spinner 必须落下（那条 turn 的终态已不再被认领，悬挂即 bug）'
+    ).toBe(false);
+    // 再静置一拍：真 turn 的 progress 仍在流，不许把它重新点亮。
+    await new Promise((r) => setTimeout(r, 1_500));
+    const afterSwitch = await readSnapshotOnce(electronApp);
+    expect(afterSwitch, '切换后应能读到渲染层 DOM').not.toBeNull();
+    expect(
+      afterSwitch!.streaming,
+      '切走后当前 tab 不应停留在生成中（另一条 key 的 progress 不该被认领）'
+    ).toBe(false);
+
+    // ── 切回子线程 tab，放开 mock：真 turn 的 final 必须收尾 ──
+    expect(await clickThreadTab(electronApp, THREAD_ID), '应能点回子线程 tab').toBe(true);
+    expect(
+      await waitForActiveThread(electronApp, THREAD_ID, 5_000),
+      '切回后子线程 tab 应重新选中'
+    ).toBe(true);
+    mock.release();
+
+    const finalDeadline = Date.now() + 60_000;
+    let lastBodyText = '';
+    while (Date.now() < finalDeadline) {
+      const snapshot = await readSnapshotOnce(electronApp);
+      if (snapshot) lastBodyText = snapshot.bodyText;
+      if (lastBodyText.includes('recovery-final')) break;
+      await new Promise((r) => setTimeout(r, 250));
+    }
+    expect(
+      lastBodyText,
+      '当前 tab 的 turn 应正常收尾：final 落到 UI（若 latch 被另一条 key 抢走，这里永远等不到）'
+    ).toContain('recovery-final');
+    expect(
+      lastBodyText,
+      '注入的 terminal 不应被认领（否则会渲染出它的 assistant 气泡）'
+    ).not.toContain(OTHER_KEY_FINAL);
     expect(mock.stats().finished, 'thread turn 应在 mock 上正常收尾').toBeGreaterThan(
       beforeCrash.finished
     );
