@@ -65,7 +65,24 @@ def session_files_layout(workspace: Path | None) -> tuple[Path, str] | None:
     return None
 
 
-def normalize_session_prefixed(rel: Path, workspace: Path | None) -> Path | None:
+def normalize_declared_separators(raw: str) -> str:
+    """Rewrite an agent-declared path to POSIX separators for prefix parsing.
+
+    A backslash is an ordinary filename character on POSIX, so
+    ``sessions\\key\\files\\x.pdf`` is a *single* path component there and
+    the session-prefix rule below would never see it.  Windows
+    rooted-relative input (``\\sessions\\key\\files\\x.pdf``) additionally
+    loses its single leading separator.  A genuine POSIX absolute path
+    (``/home/...``) and a UNC path (``//server/share``) are left alone: only
+    a leading separator that came from a backslash is dropped.
+    """
+    normalized = raw.replace("\\", "/")
+    if raw.startswith("\\") and normalized.startswith("/"):
+        return normalized[1:]
+    return normalized
+
+
+def normalize_session_prefixed(rel: str | Path, workspace: Path | None) -> Path | None:
     """Resolve a workspace-base-relative path against the session files root.
 
     *rel* is relative and starts with ``sessions/<key>/files/...``:
@@ -75,12 +92,16 @@ def normalize_session_prefixed(rel: Path, workspace: Path | None) -> Path | None
     - ``key`` is another session: reject — sessions are isolated.
     - *workspace* is not session-structured: return None, so the caller
       falls back to plain ``workspace / rel`` joining.
+
+    Separators are normalized here rather than by each caller: what counts as
+    ``sessions/<key>/files`` is part of this rule, and a caller that forgets
+    the normalization silently gets the pre-#806 nesting back.
     """
     layout = session_files_layout(workspace)
     if layout is None:
         return None
     base, current_key = layout
-    parts = list(rel.parts)
+    parts = list(Path(normalize_declared_separators(str(rel))).parts)
     if len(parts) < 3 or parts[0].lower() != "sessions" or parts[2].lower() != "files":
         return None
     other_key = parts[1]

@@ -20,7 +20,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from miqi.paths import normalize_session_prefixed
+from miqi.paths import normalize_declared_separators, normalize_session_prefixed
 
 
 def raw_output_path(kwargs: dict[str, Any]) -> str:
@@ -80,14 +80,10 @@ def resolve_output_path(
     """
     # Normalize backslashes so `sessions\key\files\...` style paths (as
     # emitted by the agent on Windows) parse correctly on every platform.
-    raw = file_path.replace("\\", "/")
-    # Strip a single leading separator ONLY for backslash-rooted input:
-    # `\sessions\key\files\...` (Windows rooted-relative) is equivalent to
-    # `sessions/key/files/...`.  A forward-slash leading path (`/home/...`)
-    # is a genuine POSIX absolute path and MUST be preserved; UNC
-    # (`//server/share`) is preserved too.
-    if file_path.startswith("\\") and raw.startswith("/"):
-        raw = raw[1:]
+    # The rule lives with the session-path helpers, not here: what counts as
+    # `sessions/<key>/files` is one decision, and both resolving layers have
+    # to read it the same way (#1131).
+    raw = normalize_declared_separators(file_path)
     p = Path(raw).expanduser()
     if not p.is_absolute() and workspace is not None:
         normalized = normalize_session_prefixed(p, workspace)
