@@ -6804,6 +6804,11 @@ export function ChatConsole({
                 path: candidate.p,
                 kind: 'pdf',
                 pdfUrl: base64ToBlobUrl(res.data_base64, res.mime_type || 'application/pdf'),
+                // Keep the bytes alongside the blob URL: 「系统应用打开」 only
+                // takes the reliable openBytes path when they are present, and
+                // otherwise falls back to openExternal(candidate.p) — which
+                // cannot resolve a bare name for a session-scoped file (#1131).
+                dataBase64: res.data_base64,
               });
               return;
             }
