@@ -5147,16 +5147,26 @@ export function ChatConsole({
       // where the heuristics below (cache progress, snapshot thinking, active
       // typewriter) all report false and the thinking indicator wrongly dies.
       const _hasLiveTurn = streamingBySession.has(sessionKey) || _cacheLiveTurn || _snapLiveTurn;
+      // #1118 第七轮：先算出这一拍要显示的基线，**同步**写进 messagesRef 再交给
+      // setMessages。messagesRef 是渲染期赋值（见 `messagesRef.current = messages`），
+      // 而下面 load() 的 sessions.get() 是异步的：切会话这一拍如果渲染还没提交
+      // （列表越大越慢——本用例的 ~6MB reasoning 正是最慢的那档），load() 完成时
+      // 读到的 messagesRef 仍是**上一个会话**的消息，于是 #872 的 in-flight 保留
+      // 分支会把上一个会话的用户气泡/思考块 append 进新会话的 merged 里。实测症状
+      // 就是「切回 A 后 A 的消息列表末尾多了 B 的提问气泡」与「切到 B 后 B 的界面里
+      // 还留着 A 的思考块」。
+      let _initialMessages: Message[];
       if (_snapshot && _snapshot.length > 0) {
         // Exact last-rendered view — best fidelity.
-        setMessages(_snapshot);
-        setHistoryLoaded(true);
+        _initialMessages = _snapshot;
       } else if (_targetCache && _targetCache.events.length > 0) {
-        setMessages(cachedEventsToMessages(_targetCache.events, reasoningMode));
-        setHistoryLoaded(true);
+        _initialMessages = cachedEventsToMessages(_targetCache.events, reasoningMode);
       } else {
-        setMessages([]);
+        _initialMessages = [];
       }
+      messagesRef.current = _initialMessages;
+      setMessages(_initialMessages);
+      if (_initialMessages.length > 0) setHistoryLoaded(true);
       setSessionUpdatedAt(null);
       // The component survives session switches (App.tsx no longer keys it by
       // sessionKey), so state that used to be wiped by remount must be reset
