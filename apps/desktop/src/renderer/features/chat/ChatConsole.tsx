@@ -42,6 +42,7 @@ import {
   addThreadTab,
   closeThreadTab,
   isEventForView,
+  isNewRecoveredTurnStart,
   loadThreadState,
   routingKeyFor,
   safeSessionStorage,
@@ -3571,6 +3572,18 @@ export function ChatConsole({
   // Scoped to ONE turn of ONE routing key — reset when the user leaves the tab
   // (or session) that turn belongs to, see the switch effect below.
   const recoveryTurnIdRef = useRef<string | null>(null);
+  // Terminal-state latch for the recovered turn (#1035 复审 P1): true from the
+  // moment the recovery listeners ACCEPTED a terminal (final/error/aborted) for
+  // the turn they adopted. The turn-id latch above is a different question — it
+  // says WHICH turn, this one says WHETHER that turn is still running. Without
+  // it, a late `chat:progress` of the finished turn (notably `points`, which
+  // `pointsEventToMessage` turns straight into a message) is still adopted and
+  // appends a fresh bubble to a recovery view that has already settled.
+  // Opened by the backend's next turn-start announcement under the same routing
+  // key (see isNewRecoveredTurnStart), and reset — together with the turn-id
+  // latch — on session switch, tab switch and a new handleSend(). Only the
+  // recovery listeners read it; the per-send path is untouched.
+  const recoveryTerminalRef = useRef(false);
   // The turn the crash-recovery listeners put on screen (#1035 复审 P1): its
   // session + routing key, or null when they are not driving the turn UI.
   // Set where they light `streaming` (the per-send path never sets it — the
@@ -3837,6 +3850,10 @@ export function ChatConsole({
       // its own turn in flight from before the crash, and a stale latch would
       // make its (differently tagged) terminal look superseded and drop it.
       recoveryTurnIdRef.current = null;
+      // The terminal latch is scoped to the same one turn of one session: the
+      // session now on screen may hold a turn of its own that is still running,
+      // and a surviving latch would swallow its progress (#1035 复审 P1).
+      recoveryTerminalRef.current = false;
       // Same for the turn the recovery listeners had on screen (#1035 复审 P1):
       // they only adopt events of the CURRENT session, so the leaving session's
       // turn is abandoned — and its terminal, the only thing that would clear
@@ -4683,6 +4700,27 @@ export function ChatConsole({
       const owner = adoptableSession(data);
       if (!owner) return;
 
+      // Terminal latch (#1035 复审 P1): once this listener has accepted the
+      // adopted turn's terminal, nothing more of that turn may reach the UI —
+      // a late `points` event would otherwise be converted into a fresh message
+      // on an already-settled recovery view. The ONE exception is the backend
+      // announcing the NEXT turn under this same routing key (`stream:'turn'`,
+      // emitted once per turn at its start): that is a new adoption, so the
+      // latch opens again. A late event of the finished turn carries either the
+      // latched turn id or no id at all — it can never name a different one.
+      if (recoveryTerminalRef.current) {
+        if (
+          !isNewRecoveredTurnStart({
+            stream: data.stream,
+            turnId: data.turn_id,
+            latchedTurnId: recoveryTurnIdRef.current,
+          })
+        ) {
+          return;
+        }
+        recoveryTerminalRef.current = false;
+      }
+
       // Out-of-band notices are not turn output: a billing result travels on
       // its own async side channel, and the 10s heartbeat task is cancelled
       // only when the drain exits — either can land after the turn's terminal
@@ -4846,6 +4884,8 @@ export function ChatConsole({
       const owner = adoptableSession(data);
       if (!owner) return;
       if (!followsTurn(data.turn_id)) return;
+      // Accepted terminal → close the turn's progress stream for good (#1035 复审 P1).
+      recoveryTerminalRef.current = true;
 
       setStreaming(false);
       streamingBySession.delete(owner);
@@ -4895,6 +4935,8 @@ export function ChatConsole({
       const owner = adoptableSession(data);
       if (!owner) return;
       if (!followsTurn(data.turn_id)) return;
+      // Accepted terminal → close the turn's progress stream for good (#1035 复审 P1).
+      recoveryTerminalRef.current = true;
 
       setStreaming(false);
       streamingBySession.delete(owner);
@@ -4915,6 +4957,8 @@ export function ChatConsole({
       const owner = adoptableSession(data);
       if (!owner) return;
       if (!followsTurn(data.turn_id)) return;
+      // Accepted terminal → close the turn's progress stream for good (#1035 复审 P1).
+      recoveryTerminalRef.current = true;
 
       setStreaming(false);
       streamingBySession.delete(owner);
@@ -4957,6 +5001,10 @@ export function ChatConsole({
   // effect (it also has to keep the two sessions' flags apart).
   useEffect(() => {
     recoveryTurnIdRef.current = null;
+    // Same for the terminal latch: it belongs to the turn of the tab the user
+    // just left, and the newly selected tab may have its own turn in flight
+    // (#1035 复审 P1).
+    recoveryTerminalRef.current = false;
     const owned = recoveryOwnedTurnRef.current;
     if (!owned) return;
     // Not ours to clean if the session moved on underneath us (the
@@ -5666,6 +5714,11 @@ export function ChatConsole({
     // the per-send path's to keep). Keeps the ref's invariant: set ⇒ the
     // recovery listener is the one driving the turn UI.
     recoveryOwnedTurnRef.current = null;
+    // …and the terminal latch too (#1035 复审 P1): this send's turn is a NEW one,
+    // its progress must flow even if the abandoned recovered turn had settled.
+    // (The hasLiveSend gate keeps the recovery listener off this turn anyway —
+    // this only clears state it would otherwise still be holding.)
+    recoveryTerminalRef.current = false;
     // Only auto-unsubscribe the previous invocation's listeners when it was
     // THIS session's send (same-session supersede).  Unsubscribing across
     // sessions strands the other session's in-flight turn: its terminal

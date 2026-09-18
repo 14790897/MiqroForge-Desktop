@@ -1413,3 +1413,326 @@ test.describe('Issue #1035 — 并发 turn：reload 后只恢复当前 tab 的�
     expect(settled!.streaming, '收到 final 后不应再停留在生成中').toBe(false);
   });
 });
+
+// ── Issue #1035 复审 P1: 恢复 turn 收尾后的 terminal latch ────────────────────
+//
+// 恢复监听器认领的 turn 一旦收到 terminal（final / error / aborted），它就不再
+// 是「进行中的 turn」。turn-id latch（recoveryTurnIdRef）只挡**别的 turn** 的
+// terminal：final 之后晚到的 progress——尤其是 points 事件——照样通过认领口径
+// （adoptableSession 只看 session / hasLiveSend / locallyAborted），直接
+// `pointsEventToMessage() → setMessages()`，在已经收尾的恢复界面里补出一行新的
+// 计费/错误气泡。两个 latch 是两回事：turn-id 管「哪条 turn」，terminal-state
+// 管「这条 turn 还在不在跑」。
+//
+// 语义（本用例锁定的口径）：
+//   a. 被接管的 turn 收到 terminal 后被 latch 住 —— 之后**任何** progress 都不再
+//      进入 UI（带同一 turn_id 的、以及不带 turn_id 的 legacy 事件都不行）；
+//   b. 唯一能重新打开 latch 的是后端**新 turn 的公告**（`stream:'turn'`，turn_id
+//      与已收尾的那条不同）——每 turn 恰好一次、在该 turn 起点发出，晚到的旧事件
+//      不可能满足；打开后新 turn 的 progress / points / final 照常被认领；
+//   c. 复位时机：会话切换、tab 切换、用户新发送（handleSend）——见 ChatConsole。
+//
+// 为什么用注入而不是真跑一条 turn：本用例验的是恢复监听器对**事件序列**的反应，
+// 与 turn 由谁产生无关；真 turn 需要 mock LLM + 冷启动预算，而且「晚到的 points」
+// 这一拍在真链路上不可控。注入走的是 preload 的真 IPC 通道，渲染层跑的就是被审
+// 的那段代码。
+//
+// 时序由**观察到的状态**驱动（不是 sleep）：每一拍都等渲染层真的画出上一拍的
+// 结果再发下一拍，所以「晚到的 points 确实晚于终态」是结构上成立的，而不是
+// 「大概比它晚」。注入侧同时记账（__latchSent / __latchLog），否则「标记没出现」
+// 的断言只是在替一个坏掉的注入背书。
+
+interface LatchInjectionPlan {
+  /** 注入用的 routing key：主 tab 选中时就是当前基础 session key。 */
+  sessionKey: string;
+  turn1: string;
+  turn2: string;
+  pointsBefore: string;
+  pointsLateTagged: string;
+  pointsLateUntagged: string;
+  pointsTurn2: string;
+  finalTurn1: string;
+  finalTurn2: string;
+}
+
+/** 注入侧的自证读数：每一拍都只在 `wc.send` 返回后才计数。 */
+interface LatchWitness {
+  sent: number;
+  log: Array<{ kind: string; t: number }>;
+  sawBefore: boolean;
+  sawFinalTurn1: boolean;
+  sawPointsTurn2: boolean;
+  sawFinalTurn2: boolean;
+}
+
+/**
+ * 按真实 IPC 通道注入一段 latch 时序脚本，脚本自己等渲染层画出上一拍再发下一拍。
+ *
+ * 回调体是被序列化进主进程执行的：所有字符串都从 `plan` 取，绝不引用本测试模块
+ * 作用域的常量（那样会在主进程里抛 ReferenceError，而且抛在 `wc.send` 之前——
+ * 一个事件都没发出去，用例却以「标记没出现」假绿通过）。
+ */
+async function startLatchInjection(
+  electronApp: ElectronApplication,
+  plan: LatchInjectionPlan
+): Promise<boolean> {
+  return electronApp.evaluate(async ({ BrowserWindow }, a: LatchInjectionPlan) => {
+    const g = globalThis as any;
+    g.__latchLog = [];
+    g.__latchSent = 0;
+    g.__latchSawBefore = false;
+    g.__latchSawFinalTurn1 = false;
+    g.__latchSawPointsTurn2 = false;
+    g.__latchSawFinalTurn2 = false;
+
+    const bodyText = async (): Promise<string> => {
+      const wc = BrowserWindow.getAllWindows()[0]?.webContents;
+      if (!wc || wc.isDestroyed()) return '';
+      try {
+        return (await wc.executeJavaScript(
+          'document.body ? document.body.innerText : ""'
+        )) as string;
+      } catch {
+        // 渲染层这一拍不可达：当成「还没画出来」，交给轮询重试
+        return '';
+      }
+    };
+    const waitForText = async (marker: string, timeoutMs: number): Promise<boolean> => {
+      const deadline = Date.now() + timeoutMs;
+      while (Date.now() < deadline) {
+        if ((await bodyText()).includes(marker)) return true;
+        await new Promise((r) => setTimeout(r, 100));
+      }
+      return false;
+    };
+    const send = (channel: string, kind: string, payload: Record<string, unknown>): void => {
+      const wc = BrowserWindow.getAllWindows()[0]?.webContents;
+      if (!wc || wc.isDestroyed()) return;
+      try {
+        wc.send(channel, payload);
+        g.__latchSent += 1;
+        g.__latchLog.push({ kind, t: Date.now() });
+      } catch {
+        // 没送达就不计数——别让计数替失败背书
+      }
+    };
+    // points 事件（stream:'points'）：type:'blocked' 时正文就是 message，
+    // 于是标记文本在界面上是可精确断言的。带不带 session_key / turn_id 由调用方定。
+    const points = (
+      marker: string,
+      sessionKey: string | undefined,
+      turnId: string | undefined
+    ): Record<string, unknown> => ({
+      stream: 'points',
+      type: 'blocked',
+      message: marker,
+      ...(sessionKey ? { session_key: sessionKey } : {}),
+      ...(turnId ? { turn_id: turnId } : {}),
+    });
+    const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+    // 1) 收尾前的 points：阳性对照——本 run 里 points 真的能渲染出消息。
+    send('chat:progress', 'points-before', points(a.pointsBefore, a.sessionKey, a.turn1));
+    g.__latchSawBefore = await waitForText(a.pointsBefore, 15_000);
+
+    // 2) T1 的 final：恢复监听器认领它 → terminal latch 从这一拍起为 true。
+    //    等它真的画出来再往下走，「晚到的 points 晚于终态」才是结构性的。
+    send('chat:final', 'final-t1', {
+      content: a.finalTurn1,
+      session_key: a.sessionKey,
+      turn_id: a.turn1,
+    });
+    g.__latchSawFinalTurn1 = await waitForText(a.finalTurn1, 15_000);
+
+    // 3) 终态之后晚到的 points：两拍，带 T1 的 turn_id 与完全不带键的 legacy 形态。
+    for (let k = 0; k < 2; k += 1) {
+      send(
+        'chat:progress',
+        'points-late-tagged',
+        points(a.pointsLateTagged, a.sessionKey, a.turn1)
+      );
+      send(
+        'chat:progress',
+        'points-late-untagged',
+        points(a.pointsLateUntagged, undefined, undefined)
+      );
+      await sleep(300);
+    }
+
+    // 4) 新 turn 的公告：唯一能重新打开 latch 的事件。
+    send('chat:progress', 'turn-t2', {
+      stream: 'turn',
+      session_key: a.sessionKey,
+      turn_id: a.turn2,
+    });
+    await sleep(300);
+
+    // 5) 新 turn 的 points + final：必须照常被认领。
+    send('chat:progress', 'points-t2', points(a.pointsTurn2, a.sessionKey, a.turn2));
+    g.__latchSawPointsTurn2 = await waitForText(a.pointsTurn2, 15_000);
+    send('chat:final', 'final-t2', {
+      content: a.finalTurn2,
+      session_key: a.sessionKey,
+      turn_id: a.turn2,
+    });
+    g.__latchSawFinalTurn2 = await waitForText(a.finalTurn2, 15_000);
+    return true;
+  }, plan);
+}
+
+/** 读注入侧的自证读数。 */
+async function readLatchWitness(electronApp: ElectronApplication): Promise<LatchWitness> {
+  return electronApp.evaluate(() => {
+    const g = globalThis as any;
+    return {
+      sent: g.__latchSent ?? 0,
+      log: g.__latchLog ?? [],
+      sawBefore: !!g.__latchSawBefore,
+      sawFinalTurn1: !!g.__latchSawFinalTurn1,
+      sawPointsTurn2: !!g.__latchSawPointsTurn2,
+      sawFinalTurn2: !!g.__latchSawFinalTurn2,
+    };
+  });
+}
+
+test.describe('Issue #1035 复审 P1 — 恢复 turn 收尾后晚到的 points 不得再渲染', () => {
+  // 300s：一次 Electron 冷启动 + 注入里几段条件等待（各 15s 预算，正常毫秒级）。
+  test.describe.configure({ mode: 'serial', timeout: 300_000 });
+
+  let electronApp: ElectronApplication;
+  let page: Page;
+  let miqiHome: string | undefined;
+  /** 本轮 run 起点（防回归断言用，见 expectMintedThisRun）。 */
+  let runStart: number;
+
+  test.beforeAll(async () => {
+    runStart = Date.now();
+    const fixture = await launchElectronApp();
+    electronApp = fixture.electronApp;
+    page = fixture.page;
+    miqiHome = fixture.miqiHome;
+  });
+
+  test.afterAll(async () => {
+    try {
+      await closeElectronApp(electronApp, miqiHome);
+    } catch {
+      /* bridge 收尾可能嘈杂，不影响断言 */
+    }
+  });
+
+  test('final 之后晚到的 points 被丢弃，新 turn 的公告仍能重新接管', async () => {
+    await waitForInputReady(page);
+    await expectFreshProfile(page);
+    expect(runStart, 'runStart 应在 beforeAll 里赋值').toBeGreaterThan(0);
+
+    // 注入用的 routing key：主 tab 就是当前基础 session key（没切过 tab，持久化
+    // effect 在挂载时就把 `miqi-active-thread:<sessionKey>` 写进 sessionStorage 了）。
+    // 轮询取，避开「刚挂载那一拍还没写」。
+    let baseKey: string | null = null;
+    const keyDeadline = Date.now() + 5_000;
+    while (Date.now() < keyDeadline) {
+      baseKey = await readBaseSessionKey(electronApp);
+      if (baseKey) break;
+      await page.waitForTimeout(100);
+    }
+    expect(baseKey, '应能从渲染层 sessionStorage 反查到基础 session key').toBeTruthy();
+    // 防回归：这个 key 必须是本轮 profile 的（泄漏态下注入会打在上一轮 run 的
+    // 会话上，「晚到的 points 没出现」就变成恒真）。全新 profile 的初始态是哨兵
+    // `desktop:default`，expectMintedThisRun 对无时间戳的哨兵单独放行。
+    expectMintedThisRun(baseKey as string, 'base session key', runStart);
+
+    const nonce = `${Date.now()}`;
+    const plan: LatchInjectionPlan = {
+      sessionKey: baseKey as string,
+      turn1: `turn-latch-1-${nonce}`,
+      turn2: `turn-latch-2-${nonce}`,
+      pointsBefore: `POINTS-BEFORE-${nonce}`,
+      pointsLateTagged: `POINTS-LATE-TAGGED-${nonce}`,
+      pointsLateUntagged: `POINTS-LATE-UNTAGGED-${nonce}`,
+      pointsTurn2: `POINTS-TURN2-${nonce}`,
+      finalTurn1: `T1-FINAL-${nonce}`,
+      finalTurn2: `T2-FINAL-${nonce}`,
+    };
+
+    // 注入脚本自己等渲染层画出上一拍再发下一拍，全部走真 IPC 通道。
+    const installed = await startLatchInjection(electronApp, plan);
+    expect(installed, '应能在主进程里装上 latch 时序注入').toBe(true);
+
+    // 采样整个注入窗口：标记一旦渲染就会留在消息列表里（不是 toast），所以
+    // 「一次都没采样到」等价于「一次都没渲染」。
+    const markers = [
+      plan.pointsBefore,
+      plan.finalTurn1,
+      plan.pointsLateTagged,
+      plan.pointsLateUntagged,
+      plan.pointsTurn2,
+      plan.finalTurn2,
+    ];
+    const seen = new Set<string>();
+    const deadline = Date.now() + 60_000;
+    let lastBodyText = '';
+    while (Date.now() < deadline) {
+      const snapshot = await readSnapshotOnce(electronApp);
+      if (snapshot) {
+        lastBodyText = snapshot.bodyText;
+        for (const marker of markers) {
+          if (lastBodyText.includes(marker)) seen.add(marker);
+        }
+      }
+      if (lastBodyText.includes(plan.finalTurn2)) break;
+      await new Promise((r) => setTimeout(r, 200));
+    }
+
+    const witness = await readLatchWitness(electronApp);
+    console.log(`[e2e1035-latch] witness=${JSON.stringify(witness)}`);
+    console.log(`[e2e1035-latch] seen=${JSON.stringify([...seen])}`);
+
+    // ── 注入自证：让下面「没出现」的结论可证伪 ──
+    // 送达计数：脚本一共发 9 拍（1 points + 1 final + 4 晚到 + 1 turn 公告 +
+    // 1 points + 1 final）。
+    expect(
+      witness.sent,
+      `注入的事件应真的送上 IPC 通道（实际 ${witness.sent}；为 0 说明注入被吞了，下面的断言是假绿）`
+    ).toBeGreaterThanOrEqual(9);
+    // 顺序自证：T1 的正文在发「晚到 points」之前就已经画出来了。
+    const indexOf = (kind: string) => witness.log.findIndex((e) => e.kind === kind);
+    expect(indexOf('final-t1'), '注入日志里应有 final(T1)').toBeGreaterThanOrEqual(0);
+    expect(
+      indexOf('points-late-tagged'),
+      '「晚到」的 points 必须在 final(T1) 之后才发出（否则这条用例什么也没验到）'
+    ).toBeGreaterThan(indexOf('final-t1'));
+    expect(
+      witness.sawBefore,
+      '阳性对照：收尾前的 points 应被渲染出来（它没出现说明本次 run 的 points 路径根本没通）'
+    ).toBe(true);
+    expect(witness.sawFinalTurn1, 'T1 的 final 应落到界面').toBe(true);
+
+    // ── a) final 之后晚到的 points：一条都不许新增 ──
+    expect(
+      seen.has(plan.pointsLateTagged),
+      `final 之后晚到的 points（带 T1 的 turn_id）不许再新增消息`
+    ).toBe(false);
+    expect(
+      seen.has(plan.pointsLateUntagged),
+      `final 之后晚到的 points（不带 turn_id 的 legacy 形态）不许再新增消息`
+    ).toBe(false);
+    expect(lastBodyText, '终态正文里也不许出现晚到的 points').not.toContain(plan.pointsLateTagged);
+    expect(lastBodyText, '终态正文里也不许出现晚到的 points').not.toContain(
+      plan.pointsLateUntagged
+    );
+
+    // ── b) 新 turn 的公告重新打开 latch：新 turn 的事件照常被接管 ──
+    expect(
+      witness.sawPointsTurn2,
+      "新 turn 的 points 应被接管——latch 必须被 `stream:'turn'` 公告打开（否则 latch 会永久封死后续 turn）"
+    ).toBe(true);
+    expect(seen.has(plan.pointsTurn2), '新 turn 的 points 应渲染到界面').toBe(true);
+    expect(seen.has(plan.finalTurn2), '新 turn 的 final 应落到界面').toBe(true);
+
+    // 终态：新 turn 收尾后不许停留在「生成中」。
+    const settled = await readSnapshotOnce(electronApp);
+    expect(settled, '终态应能读到渲染层 DOM').not.toBeNull();
+    expect(settled!.streaming, '收到新 turn 的 final 后不应再停留在生成中').toBe(false);
+  });
+});

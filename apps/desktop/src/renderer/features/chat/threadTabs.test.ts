@@ -18,6 +18,7 @@ import {
   addThreadTab,
   closeThreadTab,
   isEventForView,
+  isNewRecoveredTurnStart,
   loadActiveThread,
   loadThreadState,
   loadThreadTabs,
@@ -200,6 +201,53 @@ describe('恢复监听器的认领判定 shouldAdoptRecoveredEvent (#1035)', () 
   it('未打标（legacy）事件在干净渲染层里仍算本会话的', () => {
     expect(shouldAdoptRecoveredEvent({ ...clean, eventSessionKey: undefined })).toBe(true);
     expect(shouldAdoptRecoveredEvent({ ...clean, eventSessionKey: '' })).toBe(true);
+  });
+});
+
+describe('恢复 turn 的 terminal latch：新 turn 公告判定 (#1035 复审 P1)', () => {
+  const TURN_1 = 'turn-1';
+
+  it("只有 `stream:'turn'` 且 turn_id 与已收尾的那条不同才算「新 turn」", () => {
+    expect(
+      isNewRecoveredTurnStart({ stream: 'turn', turnId: 'turn-2', latchedTurnId: TURN_1 })
+    ).toBe(true);
+  });
+
+  it('同一 turn 的重复公告不算新 turn（不得把 latch 重新打开）', () => {
+    expect(isNewRecoveredTurnStart({ stream: 'turn', turnId: TURN_1, latchedTurnId: TURN_1 })).toBe(
+      false
+    );
+  });
+
+  it('late progress（points / reasoning / tool 输出）一律不算——它们是已收尾 turn 的输出', () => {
+    for (const stream of ['points', 'reasoning', 'stdout', 'stderr', undefined]) {
+      expect(isNewRecoveredTurnStart({ stream, turnId: 'turn-2', latchedTurnId: TURN_1 })).toBe(
+        false
+      );
+      // 带的是已收尾那条的 turn_id（points 的常见形态）同样不算
+      expect(isNewRecoveredTurnStart({ stream, turnId: TURN_1, latchedTurnId: TURN_1 })).toBe(
+        false
+      );
+      // 完全不带 turn_id 的 legacy 形态也不算
+      expect(isNewRecoveredTurnStart({ stream, turnId: undefined, latchedTurnId: TURN_1 })).toBe(
+        false
+      );
+    }
+  });
+
+  it('没有 turn_id 的公告不算（turn-id latch 就是靠它建立的，空值无从比较）', () => {
+    expect(
+      isNewRecoveredTurnStart({ stream: 'turn', turnId: undefined, latchedTurnId: TURN_1 })
+    ).toBe(false);
+    expect(isNewRecoveredTurnStart({ stream: 'turn', turnId: '', latchedTurnId: TURN_1 })).toBe(
+      false
+    );
+  });
+
+  it('还没 latch 过任何 turn 时，第一条带 id 的公告也算新 turn 起点', () => {
+    expect(isNewRecoveredTurnStart({ stream: 'turn', turnId: TURN_1, latchedTurnId: null })).toBe(
+      true
+    );
   });
 });
 

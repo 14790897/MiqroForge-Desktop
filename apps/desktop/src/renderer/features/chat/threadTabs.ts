@@ -128,6 +128,40 @@ export function shouldAdoptRecoveredEvent(params: {
   return true;
 }
 
+/**
+ * Whether a recovered progress event is the announcement of a NEW turn — the ONE
+ * event that re-opens the recovery listener's terminal latch (#1035 复审 P1).
+ *
+ * After the adopted turn's terminal, every late progress event of that turn must
+ * be dropped: `points` events in particular are converted straight into messages
+ * (`pointsEventToMessage` → `setMessages`) and would append a fresh billing/error
+ * bubble onto a recovery view that has already finished. The turn-id latch does
+ * NOT cover this — it only rejects events tagged with a DIFFERENT turn, and a late
+ * event carries either the finished turn's id or no id at all.
+ *
+ * The one exception is the backend's turn-start announcement (`stream:'turn'`,
+ * miqi/bridge/loop.py emits it once per turn, from `TurnStartedEvent`, as the
+ * turn's first event on this channel): a turn under the same routing key that
+ * begins AFTER the previous one finished is a new adoption, not a late event of
+ * the finished one. Its `turn_id` therefore names a turn the latch never saw.
+ *
+ * Untagged turns are not a concern: an announcement without a `turn_id` is
+ * meaningless (the turn-id latch is built from it), so it never re-opens.
+ */
+export function isNewRecoveredTurnStart(params: {
+  /** `stream` carried by the progress event. */
+  stream: string | undefined;
+  /** `turn_id` carried by the progress event. */
+  turnId: string | undefined;
+  /** Turn id the recovery listener has on screen, or null before the first tag. */
+  latchedTurnId: string | null;
+}): boolean {
+  const { stream, turnId, latchedTurnId } = params;
+  if (stream !== 'turn') return false;
+  if (typeof turnId !== 'string' || !turnId) return false;
+  return turnId !== latchedTurnId;
+}
+
 /** Minimal storage surface so the helpers are unit-testable without a DOM. */
 export interface StorageLike {
   getItem(key: string): string | null;
