@@ -621,3 +621,182 @@ test.describe('Issue #1035 — 崩溃重载后继续接收后台 turn 输出', (
     expect(settled!.streaming, '收到 final 后不应再停留在生成中').toBe(false);
   });
 });
+
+// ── Issue #1035 复审 P1: thread-scoped turn 的崩溃重载恢复 ────────────────────
+//
+// 场景：在子线程 tab 里发起一个持续 streaming 的 turn（routing key =
+// `desktop:<threadId>`），打掉渲染进程。重载后必须：
+//   1. 子线程 tab 仍在、且仍是选中态（tab 状态按会话持久化）；
+//   2. 后台 turn 的 progress 继续送达（恢复监听器按 routing key 认领事件，
+//      旧实现只认基础 session，thread 事件被整条丢弃）；
+//   3. final 落到 UI，气泡退出「生成中」。
+
+interface RenderedThreadTab {
+  threadId: string | null;
+  active: boolean;
+  label: string | null;
+}
+
+/**
+ * 渲染层当前渲染出来的 thread tab 列表。
+ *
+ * 走主进程的 executeJavaScript（与 readSnapshotOnce 同一套路）：渲染进程是被
+ * 真打掉再重载的，重载后没有可靠的 page 句柄。
+ */
+async function readThreadTabs(
+  electronApp: ElectronApplication
+): Promise<RenderedThreadTab[] | null> {
+  return evalInRenderer<RenderedThreadTab[]>(
+    electronApp,
+    `(() => Array.from(document.querySelectorAll('[data-testid="chat-thread-tab"]')).map((el) => ({
+      threadId: el.getAttribute('data-thread-id'),
+      active: el.getAttribute('data-active') === 'true',
+      label: el.textContent,
+    })))()`
+  );
+}
+
+/**
+ * 从主进程注入一个 `agent:spawned` 事件，让渲染层长出子线程 tab。
+ *
+ * 这是 ChatConsole 真正订阅的那条通道（preload `agents.onSpawned`），只是 E2E
+ * 里没有可用的真实 spawn 入口：真起一个 subagent 要跑沙箱，托管 runner 上会
+ * 直接 skip（见 subagent-bridge-api.spec.ts）。这里只验证 UI 侧的 thread 路由，
+ * 后端只认 `desktop:<threadId>` 这个 session key，与 subagent 是否真实存在无关。
+ */
+async function spawnThreadTab(
+  electronApp: ElectronApplication,
+  threadId: string,
+  label: string
+): Promise<void> {
+  const sent = await electronApp.evaluate(
+    ({ BrowserWindow }, arg: { threadId: string; label: string }) => {
+      const win = BrowserWindow.getAllWindows()[0];
+      if (!win || win.webContents.isDestroyed()) return false;
+      win.webContents.send('agent:spawned', {
+        sub_agent_id: 'e2e-sub-agent',
+        sub_thread_id: arg.threadId,
+        agent_type: 'code-agent',
+        task_label: arg.label,
+      });
+      return true;
+    },
+    { threadId, label }
+  );
+  expect(sent, '应能把 agent:spawned 事件发进渲染层').toBe(true);
+}
+
+test.describe('Issue #1035 — thread-scoped turn 崩溃重载后可恢复', () => {
+  test.describe.configure({ mode: 'serial', timeout: 180_000 });
+
+  const THREAD_ID = 'e2e-thread-recovery';
+  const THREAD_LABEL = 'E2E 子线程';
+
+  let electronApp: ElectronApplication;
+  let page: Page;
+  let mock: RecoveryMockStream;
+  let miqiHome: string | undefined;
+
+  test.beforeAll(async () => {
+    mock = await startRecoveryMock();
+    const fixture = await launchElectronApp((config: any) => {
+      const providers = config.providers ?? {};
+      for (const [, p] of Object.entries(providers)) {
+        if (p && typeof p === 'object') {
+          (p as any).apiBase = mock.url;
+          if (!(p as any).apiKey) (p as any).apiKey = 'mock-key';
+        }
+      }
+      config.providers = providers;
+    });
+    electronApp = fixture.electronApp;
+    page = fixture.page;
+    miqiHome = fixture.miqiHome;
+
+    const patched = await installMainProcessProbes(electronApp);
+    expect(patched, '主进程探针未能装上（对话框监视桩）').toBe(true);
+  });
+
+  test.afterAll(async () => {
+    try {
+      await closeElectronApp(electronApp, miqiHome);
+    } catch {
+      /* renderer was crashed on purpose; teardown may be noisy */
+    }
+    await mock?.close();
+  });
+
+  test('thread tab 保持 + 重载后继续 progress + final 落 UI', async () => {
+    await waitForInputReady(page);
+
+    // 造出子线程 tab 并选中它 —— 之后的发送都会走 `desktop:<threadId>`。
+    await spawnThreadTab(electronApp, THREAD_ID, THREAD_LABEL);
+    const tab = page.locator(`[data-testid="chat-thread-tab"][data-thread-id="${THREAD_ID}"]`);
+    await expect(tab, '子线程 tab 应出现在 tab 条上').toBeVisible({ timeout: 10_000 });
+    await tab.click();
+    await expect(tab, '点击后该 tab 应为选中态').toHaveAttribute('data-active', 'true');
+
+    await sendMessage(page, 'thread stream please');
+
+    // 崩溃前确认：后台 turn 已经真的在 mock 上跑起来（thread routing key 被后端
+    // 正常受理），且在流式输出、尚未结束。
+    const crashDeadline = Date.now() + 60_000;
+    let beforeCrash = mock.stats();
+    while (Date.now() < crashDeadline) {
+      beforeCrash = mock.stats();
+      if (beforeCrash.started >= 1 && beforeCrash.deltas >= 30 && beforeCrash.finished === 0) break;
+      await page.waitForTimeout(250);
+    }
+    // >= 1（而不是 ==1）：provider 兜底/重试会让同一个 turn 再打一次 mock，
+    // 不影响本用例要验的东西——只确认这个 thread turn 真的到达了 mock。
+    expect(
+      beforeCrash.started,
+      'thread turn 的请求应到达 mock（routing key 已被后端受理）'
+    ).toBeGreaterThanOrEqual(1);
+    expect(beforeCrash.deltas, '崩溃前应已开始流式输出').toBeGreaterThanOrEqual(30);
+    expect(beforeCrash.finished, '崩溃前后台 turn 不应已结束').toBe(0);
+
+    await crashRenderer(electronApp);
+
+    const line = await waitForReloadLine(electronApp, 1);
+    expect(line).toContain('[main] renderer-reloaded: attempt=1 reason=');
+
+    const state = await waitForUiReady(electronApp);
+    expect(state, '重载后界面应恢复可用').not.toBeNull();
+    expect(state!.inputReady, '重载后聊天输入框应重新出现').toBe(true);
+
+    // 1) thread tab 恢复，且回到崩溃前选中的那个（reload 不再把用户甩回主 tab）
+    const tabs = await readThreadTabs(electronApp);
+    expect(tabs, '重载后应能读到渲染层 DOM').not.toBeNull();
+    const restored = tabs!.find((t) => t.threadId === THREAD_ID);
+    expect(restored, `重载后应恢复子线程 tab（实际渲染：${JSON.stringify(tabs)}）`).toBeDefined();
+    expect(restored!.active, '重载后应仍选中崩溃前的 thread tab').toBe(true);
+
+    // 2) + 3) progress 继续送达 → 「停止生成」回到屏上；final 落 UI 后退出生成中。
+    // 与主 session 用例同理：全新挂载的渲染层里，唯一能把 streaming 点亮的就是
+    // 恢复监听器收到的 progress。
+    const finalDeadline = Date.now() + 60_000;
+    let lastBodyText = state!.bodyText;
+    let sawStreamingAfterReload = false;
+    while (Date.now() < finalDeadline) {
+      const snapshot = await readSnapshotOnce(electronApp);
+      if (snapshot) {
+        lastBodyText = snapshot.bodyText;
+        if (snapshot.streaming) sawStreamingAfterReload = true;
+      }
+      if (lastBodyText.includes('recovery-final')) break;
+      await new Promise((r) => setTimeout(r, 250));
+    }
+    expect(
+      sawStreamingAfterReload,
+      '重载后应回到「生成中」——证明 thread turn 的 progress 事件已送达渲染层'
+    ).toBe(true);
+    expect(lastBodyText, '重载后应渲染出 thread turn 的最终内容').toContain('recovery-final');
+    expect(mock.stats().finished, 'thread turn 应在 mock 上正常收尾').toBeGreaterThan(
+      beforeCrash.finished
+    );
+    const settled = await readSnapshotOnce(electronApp);
+    expect(settled, '终态应能读到渲染层 DOM').not.toBeNull();
+    expect(settled!.streaming, '收到 final 后不应再停留在生成中').toBe(false);
+  });
+});

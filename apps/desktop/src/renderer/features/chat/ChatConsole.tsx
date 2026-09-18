@@ -39,6 +39,19 @@ import { type ExecutionPolicy } from '../../components/ExecutionPolicySelector';
 import { type ReasoningMode } from './components/ReasoningModeSwitch';
 import { clampPanelWidth, createPanelWindowSync } from './panelWindowSync';
 import {
+  addThreadTab,
+  closeThreadTab,
+  isEventForView,
+  loadThreadState,
+  routingKeyFor,
+  safeSessionStorage,
+  saveActiveThread,
+  saveThreadTabs,
+  selectThreadTab,
+  shouldAdoptRecoveredEvent,
+  type ThreadTabsState,
+} from './threadTabs';
+import {
   MODE_SCENES,
   SKILL_ORDER,
   SKILL_SCENE_ICON,
@@ -3590,29 +3603,49 @@ export function ChatConsole({
   const activeSendCleanupRef = useRef<(() => void) | null>(null);
 
   // ── Thread tabs for multi-agent support ──
-  interface ThreadTab {
-    threadId: string;
-    agentType: string;
-    label: string;
+  // Tabs + the selected tab are ONE piece of state and are persisted per
+  // session (#1035): a renderer crash reloads the page, and without the pair
+  // the UI would silently fall back to the main tab while the backend turn it
+  // was watching keeps streaming under `desktop:<threadId>` — the routing key
+  // both the per-send and the crash-recovery listeners filter on.
+  const [threadState, setThreadState] = useState<ThreadTabsState>(() =>
+    loadThreadState(sessionKey, safeSessionStorage())
+  );
+  // Which session the tab state describes.  A sessionKey change is applied
+  // during render (React's "adjust state when a prop changes" pattern) — an
+  // effect would be too late: the persistence effect below runs in the SAME
+  // commit and would save the leaving session's tabs under the new session's
+  // key.
+  const [threadStateSession, setThreadStateSession] = useState(sessionKey);
+  if (threadStateSession !== sessionKey) {
+    setThreadStateSession(sessionKey);
+    setThreadState(loadThreadState(sessionKey, safeSessionStorage()));
   }
-  const [threads, setThreads] = useState<ThreadTab[]>([
-    { threadId: 'main', agentType: 'main', label: '主线程' },
-  ]);
-  const [activeThreadId, setActiveThreadId] = useState('main');
+  const threads = threadState.tabs;
+  const activeThreadId = threadState.active;
+  // Ref mirror: the crash-recovery listeners are registered once on mount and
+  // must read the tab selected AT EVENT TIME, not the one captured when they
+  // were subscribed.  handleSend reads it too, so the routing key it sends
+  // under and the key the listeners filter on can never diverge.
+  const activeThreadIdRef = useRef(activeThreadId);
+  activeThreadIdRef.current = activeThreadId;
+  // Persist both halves on every change.  Keyed by the session the state was
+  // loaded for, so a stale pair is never written under another session.
+  useEffect(() => {
+    const store = safeSessionStorage();
+    saveThreadTabs(sessionKey, threadState.tabs, store);
+    saveActiveThread(sessionKey, threadState.active, store);
+  }, [sessionKey, threadState]);
 
   useEffect(() => {
     const unsub = window.miqi.agents?.onSpawned((data) => {
-      setThreads((prev) => {
-        if (prev.find((t) => t.threadId === data.sub_thread_id)) return prev;
-        return [
-          ...prev,
-          {
-            threadId: data.sub_thread_id,
-            agentType: data.agent_type,
-            label: data.task_label || data.agent_type,
-          },
-        ];
-      });
+      setThreadState((prev) =>
+        addThreadTab(prev, {
+          threadId: data.sub_thread_id,
+          agentType: data.agent_type,
+          label: data.task_label || data.agent_type,
+        })
+      );
     });
     return () => {
       if (unsub) unsub();
@@ -3621,11 +3654,12 @@ export function ChatConsole({
 
   useEffect(() => {
     const unsub = window.miqi.agents?.onCompleted((data) => {
-      setThreads((prev) =>
-        prev.map((t) =>
+      setThreadState((prev) => ({
+        ...prev,
+        tabs: prev.tabs.map((t) =>
           t.threadId === data.sub_thread_id ? { ...t, label: `${t.label.replace(/ ✓$/, '')} ✓` } : t
-        )
-      );
+        ),
+      }));
     });
     return () => {
       if (unsub) unsub();
@@ -3856,8 +3890,9 @@ export function ChatConsole({
       }
       setCurrentReqId(null);
       composerRef.current?.clear();
-      setThreads([{ threadId: 'main', agentType: 'main', label: '主线程' }]);
-      setActiveThreadId('main');
+      // NOTE: the thread tab state is NOT reset here — it is swapped for the
+      // new session's persisted tabs during render (see threadStateSession
+      // above), i.e. before this effect would have run.
       setPlan(null);
       setPlanOpen(false);
       fullContentRef.current = '';
@@ -4504,12 +4539,13 @@ export function ChatConsole({
   // current session and update the UI. They intentionally yield to per-send
   // listeners whenever a handleSend() turn is active.
   //
-  // Scope note: only the CURRENT session is adopted. The user was on this
-  // session when the renderer died and `miqi:lastSession` restores it on
-  // reload, so that is the one whose turn is being resumed. Thread-scoped sends
-  // (`desktop:<threadId>`, see routingKey in handleSend) are tagged with the
-  // thread id instead and are therefore not adopted — the thread tab is UI
-  // state that a reload does not restore either.
+  // Scope note: only the CURRENT session and the tab selected in it are
+  // adopted. The user was on both when the renderer died; `miqi:lastSession`
+  // restores the session and the tab pair is persisted per session
+  // (threadTabs.ts), so the reloaded renderer filters on exactly the routing
+  // key the crashed turn was sent under — the base session on the main tab,
+  // `desktop:<threadId>` on a sub-thread tab (see routingKeyFor). Events of
+  // other sessions/threads are still dropped.
   useEffect(() => {
     const flushReasoning = (ts: number) => {
       if (reasoningTimerRef.current) {
@@ -4523,15 +4559,17 @@ export function ChatConsole({
       }
     };
 
-    // True while a handleSend() invocation still has listeners subscribed for
-    // `session`. The shared `activeSendCleanupRef` is NOT a sound proxy for
-    // this: onFinal schedules sendCleanup() 100ms out, which nulls that ref
-    // while the invocation's listeners stay subscribed until its send promise
-    // settles. Events landing in that window would be applied twice — once
-    // here and once by the per-send listener. The invocation registry is
-    // populated exactly while those listeners live, so it is the accurate
-    // signal (see the `myUnsubs` registration / teardown in handleSend).
-    const hasLiveSendFor = (session: string) => {
+    // True while a handleSend() invocation of `session` still has listeners
+    // subscribed — the registry carries the base session for every invocation,
+    // thread-scoped ones included. The shared `activeSendCleanupRef` is NOT a
+    // sound proxy for this: onFinal schedules sendCleanup() 100ms out, which
+    // nulls that ref while the invocation's listeners stay subscribed until its
+    // send promise settles. Events landing in that window would be applied
+    // twice — once here and once by the per-send listener. The invocation
+    // registry is populated exactly while those listeners live, so it is the
+    // accurate signal (see the `myUnsubs` registration / teardown in
+    // handleSend).
+    const hasLiveSendForSession = (session: string) => {
       for (const entry of sendInvocationRegistryRef.current.values()) {
         if (entry.sessionKey === session) return true;
       }
@@ -4539,16 +4577,27 @@ export function ChatConsole({
     };
 
     // The session this event should be adopted for, or null when it belongs to
-    // another session or to a live per-send invocation that owns it already.
+    // another session/thread or to a live per-send invocation that owns it.
+    // The decision itself lives in shouldAdoptRecoveredEvent (unit-tested);
+    // this only supplies the current refs to it.
     const adoptableSession = (data: { session_key?: string }): string | null => {
       const owner = currentSessionRef.current;
       if (!owner) return null;
-      // Untagged legacy events fall through and count as this session's.
-      if (data.session_key && data.session_key !== owner) return null;
-      if (hasLiveSendFor(owner)) return null;
-      // Stop already rendered by this renderer — see localAbortSessionsRef.
-      if (localAbortSessionsRef.current.has(owner)) return null;
-      return owner;
+      const adopt = shouldAdoptRecoveredEvent({
+        // `data.session_key` is the routing key the turn was sent under: the
+        // base session for a main-tab turn, `desktop:<threadId>` for a
+        // thread-scoped one. Both belong to the view the user is on; anything
+        // else is another session or another thread's stream.
+        eventSessionKey: data.session_key,
+        sessionKey: owner,
+        threadId: activeThreadIdRef.current,
+        hasLiveSend: hasLiveSendForSession(owner),
+        // Stop already rendered by this renderer — see localAbortSessionsRef.
+        // Session-scoped on purpose: handleAbort stops every invocation of the
+        // session, whatever routing key it was sent under.
+        locallyAborted: localAbortSessionsRef.current.has(owner),
+      });
+      return adopt ? owner : null;
     };
 
     /**
@@ -6055,8 +6104,11 @@ export function ChatConsole({
     // tagged with a different key before the cache/live branch — otherwise
     // overlapping sends across sessions would each process (and settle on)
     // the other's events.
-    const routingKey =
-      activeThreadId === 'main' ? currentSessionRef.current : `desktop:${activeThreadId}`;
+    // Read through the ref, not the closure: switching tabs does not recreate
+    // this callback (activeThreadId is not a dependency), so the closure's
+    // copy can be the tab the user has already left — the send would then go
+    // out under the wrong key.
+    const routingKey = routingKeyFor(currentSessionRef.current, activeThreadIdRef.current);
 
     // Track last progress event time for watchdog
     let lastEventAt = Date.now();
@@ -7738,7 +7790,10 @@ export function ChatConsole({
           {threads.map((t) => (
             <button
               key={t.threadId}
-              onClick={() => setActiveThreadId(t.threadId)}
+              data-testid="chat-thread-tab"
+              data-thread-id={t.threadId}
+              data-active={activeThreadId === t.threadId}
+              onClick={() => setThreadState((prev) => selectThreadTab(prev, t.threadId))}
               className={cn(
                 'px-3 py-1.5 text-xs rounded-t whitespace-nowrap transition-colors',
                 activeThreadId === t.threadId
@@ -7752,8 +7807,7 @@ export function ChatConsole({
                   className="ml-1.5 text-[var(--text-muted)] hover:text-[var(--danger)]"
                   onClick={(e) => {
                     e.stopPropagation();
-                    setThreads((prev) => prev.filter((th) => th.threadId !== t.threadId));
-                    if (activeThreadId === t.threadId) setActiveThreadId('main');
+                    setThreadState((prev) => closeThreadTab(prev, t.threadId));
                   }}
                 >
                   ×
