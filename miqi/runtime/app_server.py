@@ -469,6 +469,7 @@ class AppServer:
             "chat.send", "chat.abort",
             "sessions.get", "sessions.list",
             "sessions.get_tracked_files",
+            "sessions.workspace",
             "sessions.delete", "sessions.archive", "sessions.unarchive",
             "sessions.rename",
         ):

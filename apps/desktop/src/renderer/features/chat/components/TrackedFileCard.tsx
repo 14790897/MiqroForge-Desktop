@@ -45,6 +45,7 @@ export function TrackedFileCard({
 
   return (
     <div
+      data-testid="tracked-file-card"
       className="rounded-lg p-2.5"
       style={{
         border: isResult
