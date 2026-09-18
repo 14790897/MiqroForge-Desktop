@@ -105,6 +105,7 @@ test.describe('repro: background (minimized) window freezes streaming reply', ()
             ) as HTMLTextAreaElement | null;
             return !!ta && !ta.disabled;
           },
+          undefined,
           { timeout: 180_000 }
         );
         await sendMessage(page, '请继续：直接给出至少 800 字的中文详细回答（不要调用任何工具）。');
