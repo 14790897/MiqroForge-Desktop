@@ -248,6 +248,15 @@ function analyze(jsonlPath, label) {
   const heapValues = [...new Set(hist.map((s) => s.heapUsed).filter((h) => h >= 0))];
   const domValues = hist.map((s) => s.domNodes).filter((d) => d >= 0);
   const xValues = hist.map((s) => s.xCount).filter((x) => x >= 0);
+  // UI 消费窗口（#1118 第八轮 P2b 附带发现）：挂起的 mock 回合约 600s 被终止，之后
+  // 注入的 chat:progress 在渲染层**没有消费者**——UI 里的 'x' 归零、工作集反过来
+  // 回落。两次 200k 实测都停在同一处（09-17：sent=120429 / elapsed=602s；第八轮：
+  // sent=121036 / elapsed=602s），所以「注入窗口」的后段并不代表消费中的行为，
+  // 斜率/峰值混了两段口径。这里显式标出来，不让读者把它当单一口径的数字。
+  const xStoppedIdx = hist.findIndex(
+    (s, i) => i > 0 && s.xCount === 0 && (hist[i - 1].xCount ?? 0) > 0
+  );
+  const uiConsumedUntilSent = xStoppedIdx > 0 ? hist[xStoppedIdx].sent : null;
   const slopeOf = (from, to) =>
     from && to && to.sent > from.sent
       ? ((to.wsKb - from.wsKb) / (to.sent - from.sent)) * 1000
@@ -301,6 +310,9 @@ function analyze(jsonlPath, label) {
             max: Math.max(...domValues),
           },
     uiX: xValues.length === 0 ? null : { first: xValues[0], last: xValues[xValues.length - 1] },
+    /** UI 停止消费注入事件的时刻（sent）。null = 全程都在消费。 */
+    uiConsumedUntilSent,
+    uiXPeak: xValues.length === 0 ? null : Math.max(...xValues),
     sentAtLastSample: last?.sent ?? null,
   };
 }
@@ -352,7 +364,14 @@ function report(r) {
   console.log(`  heapUsed     : ${fmtBytes(r.heapUsedBytes)}`);
   console.log('─ DOM / UI ─');
   console.log(`  domNodes     : ${JSON.stringify(r.domNodes)}`);
-  console.log(`  UI 侧 'x' 数 : ${JSON.stringify(r.uiX)}`);
+  console.log(`  UI 侧 'x' 数 : ${JSON.stringify(r.uiX)}（峰值 ${r.uiXPeak}）`);
+  if (r.uiConsumedUntilSent !== null) {
+    console.log(
+      `  ⚠️ UI 在 sent=${r.uiConsumedUntilSent} 处停止消费注入事件（'x' 归零、工作集反向回落）：` +
+        `挂起 mock 的回合约 600s 被终止，之后渲染层没有消费者。注入窗口的后段与尾窗` +
+        `不代表消费中的行为——上面的斜率/峰值/中位数混了两段口径，别与基线逐位对比。`
+    );
+  }
   console.log('─ 对照基线（修复前）──');
   console.log(
     `  before: ws ${BASELINE.wsFirstKb} KB → ${BASELINE.wsPeakKb} KB peak, ` +
@@ -396,6 +415,9 @@ function writeReports(r, outDir) {
       '| --- | --- | --- |',
       `| 注入量 | ${r.sent}/${r.target} | 200000/200000 |`,
       `| 注入结束边界来源 | ${r.injectionEndSource} | sent>=target |`,
+      r.uiConsumedUntilSent !== null
+        ? `| ⚠️ UI 停止消费于 | sent=${r.uiConsumedUntilSent}（后段口径不可比） | — |`
+        : '| UI 消费窗口 | 全程消费 | 全程消费 |',
       `| wall time | ${(r.wallMs / 60000).toFixed(1)} min | ${BASELINE.wallMin} min |`,
       `| renderer-ws 首采样（注入窗口） | ${r.wsFirstKb} KB | ${BASELINE.wsFirstKb} KB |`,
       `| renderer-ws 峰值（注入窗口） | ${r.wsPeakKb} KB | ${BASELINE.wsPeakKb} KB |`,
