@@ -6,7 +6,18 @@
  * 各有一份。这里锁死：连续同流 delta 先折叠（**无损**，回放端按顺序拼接
  * delta，见 ChatConsole 的 exec 输出回放），折叠后仍超限则按序回收——先驱逐
  * 最旧的 progress，再掏空较旧终态的 payload（保留 type/timestamp，回放的
- * 终态判定与 watchdog 不受影响；掏空救不回预算时不掏）。最新事件永不驱逐。
+ * 终态判定与 watchdog 不受影响），掏空后仍超限则驱逐较旧的**已掏空占位**
+ * （保留"最新 terminal + 最后一条 final"，见 #1118 那一组）；最新终态自己的
+ * payload 是最后手段，排在占位驱逐之后（它是这一回合的收尾行，而持久化历史
+ * 可能还没追上这一回合）。最新事件永不驱逐。
+ *
+ * （#1118）终态占位不是零成本：每条仍留 type/timestamp（约 160 字节；error
+ * 还留 200 字 message 头部，约 590 字节），几千条已结算终态自己就能压过 1 MiB，
+ * 而"终态永不驱逐"让「只剩终态时条数上限 2000」形同虚设。现在只剩终态且仍
+ * 超限时，较旧的占位整条驱逐——回放要的只有两条：最新 terminal（这一回合的
+ * 收尾行，watchdog 判活读它的时间戳）与最后一条 final（回复正文从它来；
+ * `turnDone` / `finalHandledSessions` 判的是
+ * `events.some(e => e.type === 'final')`，不是「任意终态」）。
  *
  * （四轮复审）单条 progress 另有一条 64 KiB 硬上限，在入库前强制：delta 可以
  * 切片再拼回（无损），delta 之外的字节由 `sanitizeProgressEventData` 递归裁剪
@@ -700,14 +711,11 @@ describe('#1034 复审二轮：terminal payload 递归硬上限 + 多终态快�
     ).toBe(true);
   });
 
-  it('P2：掏空也救不回预算时不掏——宁可如实超限，也不白扔终态正文', () => {
-    // 第四轮起这条分支不能再由 pushInFlightEvent 造出来：能撑爆预算的 progress
-    // 在入库前就被有界化（≤64 KiB），最新事件再也不是"消不掉的兆级常驻"。剩下
-    // 的入口只有体积：终态永不驱逐、掏空后仍留占位（error 还带 200 字 message
-    // 头部），所以几千条已结算的终态自己就能压过快照预算——这正是 reclaimable
-    // 守卫的判定条件（掏空全部终态也回不到上限内）。这个状态由直接操作快照的
-    // 调用方构造（createInFlightSnapshot 不强制上限），守卫的行为必须钉住：
-    // 掏空只会毁掉正文，换来的仍是一条超限的快照。
+  it('P2/#1118：掏空救不回预算时改驱逐较旧占位——快照回到两个上限内（旧「如实超限」已闭合）', () => {
+    // 这个形状原来正是 reclaimable 守卫的判定条件：终态永不驱逐、掏空后仍留
+    // 占位（error 还带 200 字 message 头部），几千条已结算终态自己就能压过快照
+    // 预算 ⇒ 掏空也回不到上限内 ⇒ 守卫宁可如实超限。占位可驱逐之后这条路没了：
+    // 掏空旧终态之后接着丢占位，两个上限都必须回到成立。
     const buf = createInFlightSnapshot();
     const message = 'BOOM: ' + 'x'.repeat(300 * 1024);
     const errorEvent = {
@@ -719,29 +727,30 @@ describe('#1034 复审二轮：terminal payload 递归硬上限 + 多终态快�
     buf.bytes += inFlightEventBytes(errorEvent);
     // 7000 条只剩占位的终态（约 1.1 MiB）——不可回收的那部分自己就超预算。
     for (let i = 0; i < 7000; i += 1) {
-      const placeholder = { type: 'final', data: { _evicted: true }, timestamp: 9 } as Ev;
+      const placeholder = { type: 'final', data: { _evicted: true }, timestamp: 100 + i } as Ev;
       buf.events.push(placeholder);
       buf.bytes += inFlightEventBytes(placeholder);
     }
     expect(buf.bytes).toBeGreaterThan(IN_FLIGHT_MAX_BYTES);
 
-    // 任何一次 push 都会跑回收：这里没有可弃的 progress，只剩"掏空终态"一条路，
-    // 而它救不回预算。
+    // 任何一次 push 都会跑回收：没有可弃的 progress，于是先掏空较旧终态的
+    // payload（第 2 步），再驱逐较旧的占位（第 3 步）。
     pushInFlightEvent(buf, {
       type: 'progress',
       data: { stream: 'stderr', delta: 'x', tool_call_id: 'c2' },
       timestamp: 10,
     } as Ev);
 
-    // 正文原样留着：没有为了一个仍然超限的结果把 30 万字的报错掏成 200 字。
-    // （断言必须读 buf.events[0]：掏空是"换掉数组里那一项"，手里那个对象引用
-    // 不会被就地改写，读它永远看到原样。）
-    expect((buf.events[0].data as { _evicted?: boolean })._evicted).toBeUndefined();
-    expect((buf.events[0].data as { message: string }).message).toBe(message);
-    expect(buf.events[0]).toBe(errorEvent);
-    // 如实超限，而不是假装守住；记账仍然守恒。
-    expect(buf.bytes).toBeGreaterThan(IN_FLIGHT_MAX_BYTES);
+    expect(buf.bytes).toBeLessThanOrEqual(IN_FLIGHT_MAX_BYTES);
+    expect(buf.events.length).toBeLessThanOrEqual(IN_FLIGHT_MAX_EVENTS);
     expect(buf.bytes).toBe(buf.events.reduce((sum, e) => sum + inFlightEventBytes(e), 0));
+    // 驱逐按最旧优先：最旧的那些（含"先被掏空、随即整条让位"的那条 error）走人，
+    // 活下来的是尾部占位——最新 terminal 仍在场，回放判定不受影响。
+    const terminals = buf.events.filter((e) => e.type !== 'progress');
+    expect(terminals[terminals.length - 1].type).toBe('final');
+    expect(terminals[terminals.length - 1].timestamp).toBe(100 + 6999);
+    expect(terminals.some((e) => e.timestamp === 100 + 6998)).toBe(true); // 次新的还在
+    expect(terminals.some((e) => e.timestamp === 100)).toBe(false); // 最旧的已被驱逐
   });
 
   it('P2：终态自带 _evicted 字段不冒充"已掏空"', () => {
@@ -875,10 +884,12 @@ describe('#1034 复审二轮：terminal payload 递归硬上限 + 多终态快�
     expect(violations).toEqual([]);
   });
 
-  it('P2：三条满额终态时最新终态也让出 payload（最后手段分支）', () => {
+  it('P2/#1118：三条满额终态时让位的是较旧的占位，最新终态保住 payload', () => {
     // 每条都贴着终态预算（payloadBytes ≈ TERMINAL_PAYLOAD_MAX_BYTES）。掏空两条
-    // 旧的之后，剩下的"最新终态 + 两个占位"仍然超限，此时只能让最新终态也
-    // 交出 payload——没有这个最后手段分支，这里就会停在超限状态。
+    // 旧的之后，剩下的"最新终态 + 两个占位"仍然超限——#1118 之后这一步不再拿
+    // 最新终态的 payload 开刀（它是回放要渲染的回复，而持久化历史可能还没追上
+    // 这一回合），改为驱逐较旧的那条占位：只有"连占位都没有"时最新终端才让出
+    // payload（见下一条用例）。
     const atMax = (ch: string) =>
       capTerminalEventData({ blob: ch.repeat(Math.floor((TERMINAL_PAYLOAD_MAX_BYTES - 32) / 2)) });
     expect(
@@ -890,10 +901,15 @@ describe('#1034 复审二轮：terminal payload 递归硬上限 + 多终态快�
     pushInFlightEvent(buf, { type: 'error', data: atMax('e'), timestamp: 2 } as Ev);
     pushInFlightEvent(buf, { type: 'aborted', data: atMax('a'), timestamp: 3 } as Ev);
 
-    // 三条事件都还在（回放的终态判定不受影响），记账守恒，且确实回到上限内。
-    expect(buf.events.map((e) => e.type)).toEqual(['final', 'error', 'aborted']);
+    // 记账守恒、回到上限内；回放依仗的两条（最后一条 final + 最新 terminal）都在。
     expect(buf.bytes).toBe(buf.events.reduce((sum, e) => sum + inFlightEventBytes(e), 0));
     expect(buf.bytes).toBeLessThanOrEqual(IN_FLIGHT_MAX_BYTES);
+    expect(buf.events.map((e) => e.type)).toEqual(['final', 'aborted']);
+    // 最新终态完整（没被掏空），被驱逐的是中间那条已被掏空的 error 占位。
+    expect(
+      (buf.events[buf.events.length - 1].data as { blob: string }).blob.startsWith('aaa')
+    ).toBe(true);
+    expect((buf.events[0].data as { _evicted?: boolean })._evicted).toBe(true);
   });
 
   it('P2：环状载荷的字节计费走兜底 walker 且能终止（seen 路径）', () => {
@@ -1405,5 +1421,155 @@ describe('#1034 复审 P1：active 终态同一套 payload cap（tool_calls 保�
   it('空 tool_calls 数组原样透传（isAssistantWithToolCalls 的判别不受影响）', () => {
     const data = { content: 'ok', tool_calls: [] };
     expect(capTerminalEventData(data)).toBe(data);
+  });
+});
+
+describe('#1118：结算终态占位也可驱逐（快照 1 MiB / 条数 2000 对任意终态条数都成立）', () => {
+  /** 直接把一条已掏空的占位推进快照（绕过 pushInFlightEvent）。模拟"几千条
+   *  已结算终态"的存量：它们只在直接操作快照时出现——一次 push 之后回收就
+   *  会把存量拉回上限内。 */
+  function seedPlaceholder(
+    buf: ReturnType<typeof createInFlightSnapshot>,
+    type: 'final' | 'error' | 'aborted',
+    timestamp: number
+  ): Ev {
+    const placeholder = { type, data: { _evicted: true }, timestamp } as Ev;
+    buf.events.push(placeholder);
+    buf.bytes += inFlightEventBytes(placeholder);
+    return placeholder;
+  }
+
+  /** 两个不变量 + 记账守恒，任意一次操作之后都必须成立。 */
+  function expectInvariants(buf: ReturnType<typeof createInFlightSnapshot>): void {
+    expect(buf.bytes).toBeLessThanOrEqual(IN_FLIGHT_MAX_BYTES);
+    expect(buf.events.length).toBeLessThanOrEqual(IN_FLIGHT_MAX_EVENTS);
+    expect(buf.bytes).toBe(buf.events.reduce((sum, e) => sum + inFlightEventBytes(e), 0));
+  }
+
+  it('数千条 stripped 终态占位：快照回到 1 MiB / 2000 条内，最新 terminal 仍在', () => {
+    // 只由占位构成的存量：每条 ~160 字节，7000 条自己就压过 1 MiB。旧策略下
+    // 「终态永不驱逐」⇒ 掏空已经是它们的极限，而条数上限对只剩终态的快照形同
+    // 虚设 ⇒ 只能如实超限。现在占位本身可弃。
+    const buf = createInFlightSnapshot();
+    for (let i = 0; i < 7000; i += 1) {
+      seedPlaceholder(buf, 'final', 100 + i);
+    }
+    expect(buf.bytes).toBeGreaterThan(IN_FLIGHT_MAX_BYTES);
+    expect(buf.events.length).toBeGreaterThan(IN_FLIGHT_MAX_EVENTS);
+
+    // 一次 push 就触发回收（没有可弃的 progress，只剩"丢占位"一条路）。
+    pushInFlightEvent(buf, progress('p', 'stdout', 'c1', 9000));
+
+    expectInvariants(buf);
+    // 保留最新 terminal：它是 watchdog 的判活时间戳来源，也是回放 settle 的那条。
+    const terminals = buf.events.filter((e) => e.type !== 'progress');
+    expect(terminals[terminals.length - 1].timestamp).toBe(100 + 6999);
+    // 最旧优先：尾部占位整段留下，头部整段被驱逐。
+    expect(terminals.some((e) => e.timestamp === 100 + 6998)).toBe(true);
+    expect(terminals.some((e) => e.timestamp === 100)).toBe(false);
+  });
+
+  it('混合场景（旧 terminal + 新 progress + 新 final）：不变量成立且最新终态在场', () => {
+    const buf = createInFlightSnapshot();
+    // 一条未掏空的旧终态（约 300 KiB）——第 2 步"掏空旧终态"的对象。
+    const oldFinal = {
+      type: 'final',
+      data: capTerminalEventData({ content: 'o'.repeat(150 * 1024) }),
+      timestamp: 1,
+    } as Ev;
+    pushInFlightEvent(buf, oldFinal);
+    // 存量占位（5000 条 ≈ 800 KiB）：与旧终态一起同时压过字节与条数上限。
+    for (let i = 0; i < 5000; i += 1) {
+      seedPlaceholder(buf, 'aborted', 2 + i);
+    }
+    expect(buf.bytes).toBeGreaterThan(IN_FLIGHT_MAX_BYTES);
+    expect(buf.events.length).toBeGreaterThan(IN_FLIGHT_MAX_EVENTS);
+
+    // 新回合：先 progress，后 final（两条都很小——回放要渲染的就是这条 final）。
+    pushInFlightEvent(buf, progress('p'.repeat(1000), 'stdout', 'c1', 9000));
+    const newFinal = { type: 'final', data: { content: 'the answer' }, timestamp: 9001 } as Ev;
+    pushInFlightEvent(buf, newFinal);
+
+    expectInvariants(buf);
+    // 较旧的未掏空终态按第 2 步先交出 payload（旧策略不变），事件仍在原位。
+    expect(buf.events[0].type).toBe('final');
+    expect((buf.events[0].data as { _evicted?: boolean })._evicted).toBe(true);
+    // 最新终态就是刚推入的 final：在场、完整（最后一条，watchdog 的时间戳也在它身上）。
+    expect(buf.events[buf.events.length - 1]).toBe(newFinal);
+    expect((newFinal.data as { content: string }).content).toBe('the answer');
+    // 回放的 turnDone / finalHandledSessions 判的是 `some(type === 'final')`。
+    expect(buf.events.some((e) => e.type === 'final')).toBe(true);
+    // 存量的掏空占位按最旧优先整条驱逐（尾巴留下）。
+    const terminals = buf.events.filter((e) => e.type !== 'progress');
+    expect(terminals[terminals.length - 2].timestamp).toBe(2 + 4999);
+    expect(terminals.some((e) => e.timestamp === 2)).toBe(false);
+  });
+
+  it('占位足够时不动最新终态的 payload：回复不为占位让路（驱逐优先于最后手段掏空）', () => {
+    // 都是 ~160 字节、正文早已不在的占位，只有最后推入的那条 final 有正文——它是
+    // 回放要渲染的回复，而持久化历史可能还没追上这一回合。所以先丢占位：把
+    // "掏空最新终态"排在驱逐之前（#1118 之前的顺序）会让这里只剩一个空壳，
+    // 正文全部丢失，而占位一条没少。
+    const buf = createInFlightSnapshot();
+    for (let i = 0; i < 3500; i += 1) {
+      seedPlaceholder(buf, 'final', 2 + i);
+    }
+    const answer = 'A'.repeat(260 * 1024);
+    const newest = {
+      type: 'final',
+      data: capTerminalEventData({ content: answer }),
+      timestamp: 9000,
+    } as Ev;
+    pushInFlightEvent(buf, newest);
+
+    expectInvariants(buf);
+    // 最新终态还是原来那条事件（没被换成占位），正文一字不少。
+    const last = buf.events[buf.events.length - 1];
+    expect(last).toBe(newest);
+    expect((last.data as { content: string }).content).toBe(answer);
+    // 让位的是占位：条数被压回上限内，说明丢的确实是那些 ~160 字节的存量。
+    expect(buf.events.filter((e) => e.type !== 'progress').length).toBe(IN_FLIGHT_MAX_EVENTS);
+  });
+
+  it('最后一条 final 不因驱逐消失（turnDone 的 `some(final)` 不回归）', () => {
+    // 唯一的 final 是最旧的事件，其余全是 error/aborted 占位，最新 terminal 是
+    // 占位。只按"最旧先丢"驱逐会先丢掉那条 final ⇒ `some(type === 'final')` 变
+    // false ⇒ 回放的 turnDone 判定失效，「思考中…」卡死回归。所以驱逐必须保住
+    // "最后一条 final"（与最新 terminal 一起，是最小保留集）。
+    const buf = createInFlightSnapshot();
+    const onlyFinal = seedPlaceholder(buf, 'final', 1);
+    for (let i = 0; i < 3000; i += 1) {
+      seedPlaceholder(buf, i % 2 === 0 ? 'error' : 'aborted', 2 + i);
+    }
+    expect(buf.events.length).toBeGreaterThan(IN_FLIGHT_MAX_EVENTS);
+
+    pushInFlightEvent(buf, progress('p', 'stdout', 'c1', 9000));
+
+    expectInvariants(buf);
+    expect(buf.events.some((e) => e.type === 'final')).toBe(true);
+    expect(buf.events.includes(onlyFinal)).toBe(true);
+    // 最新 terminal（最后一条占位，aborted）同样在场。
+    const terminals = buf.events.filter((e) => e.type !== 'progress');
+    expect(terminals[terminals.length - 1].timestamp).toBe(2 + 2999);
+  });
+
+  it('只剩终态时条数上限不再形同虚设：未掏空的终态也按最旧驱逐，最新终态保留', () => {
+    // 条数超限而字节没超：这里没有任何占位可丢，只有未掏空的终态。条数上限必须
+    // 照样成立，且不该为了它去掏空任何一条（掏空不影响条数，只会白扔正文）。
+    const buf = createInFlightSnapshot();
+    const total = IN_FLIGHT_MAX_EVENTS + 500;
+    for (let i = 0; i < total; i += 1) {
+      pushInFlightEvent(buf, terminalBrief('final', i));
+    }
+
+    expectInvariants(buf);
+    expect(buf.events.length).toBe(IN_FLIGHT_MAX_EVENTS);
+    // 最旧的被整条驱逐，活下来的仍是原样的终态（没有为了条数上限被掏空）。
+    const oldestKept = buf.events[0];
+    expect((oldestKept.data as { _evicted?: boolean })._evicted).toBeUndefined();
+    // 最新终态在场，watchdog 读的时间戳还在最后一条上。
+    const last = buf.events[buf.events.length - 1];
+    expect(last.type).toBe('final');
+    expect(last.timestamp).toBe(total - 1);
   });
 });
