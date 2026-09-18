@@ -850,6 +850,18 @@ export const FilesReadInput = z.object({
   as_binary: z.boolean().optional(),
 });
 
+/**
+ * `files.openExternal` / `files.openContainingFolder` (#1062).
+ *
+ * `session_key` only names which session is asking; the workspace that path is
+ * checked against is derived from it server-side.  The renderer never supplies
+ * a root — one it could supply would defeat the containment check (#955).
+ */
+export const FilesOpenInput = z.object({
+  path: z.string().min(1),
+  session_key: z.string().optional(),
+});
+
 export const FilesSaveAsInput = z.object({
   default_name: z.string().min(1),
   data_base64: z.string(),

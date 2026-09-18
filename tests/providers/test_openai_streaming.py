@@ -220,13 +220,15 @@ class _FakeToolCall:
         self.function = _FakeFunction(name=name, arguments=arguments)
 
 
-async def _stream_with_tool_args(provider, arguments_str: str) -> list[LLMStreamEvent]:
+async def _stream_with_tool_args(
+    provider, arguments_str: str, finish_reason: str = "tool_calls",
+) -> list[LLMStreamEvent]:
     """Stream a single tool call whose accumulated arguments = arguments_str."""
     chunks = [
         [_FakeChoice(_FakeDelta(tool_calls=[_FakeToolCall(
             index=0, call_id="call_1", name="web_search", arguments=arguments_str,
         )]))],
-        [_FakeChoice(_FakeDelta(), finish_reason="tool_calls")],
+        [_FakeChoice(_FakeDelta(), finish_reason=finish_reason)],
     ]
 
     async def _fake_create(**kw):
@@ -527,3 +529,377 @@ async def test_stream_buffered_provider_not_suppressed_by_capability():
     assert completed.response.reasoning_elapsed_s is not None
     assert completed.response.reasoning_elapsed_s >= 0.15
     assert completed.response.reasoning_elapsed_suppressed is False
+
+
+# ── #1094 S1: output-cap truncation must be flagged (not silently executed) ──
+
+# Real-incident shape: an MCP job script cut off mid-string by max_tokens.
+# Strict json.loads fails; json_repair silently closes the string, so the
+# salvage looks like a legitimate (but devastating) partial call.
+_TRUNCATED_ARGS = '{"path": "/tmp/run.sh", "content": "echo hi'
+# Repair-able but NOT truncation — the plain json_repair path (#24).
+_MALFORMED_ARGS = "{'query': '今日要闻'}"
+_COMPLETE_ARGS = '{"path": "/tmp/run.sh", "content": "echo hi"}'
+
+
+class _FakeMessage:
+    """Simulates a non-streaming OpenAI assistant message."""
+
+    def __init__(self, tool_calls=None, content=None):
+        self.content = content
+        self.tool_calls = tool_calls
+        self.reasoning_content = None
+
+
+class _FakeResponse:
+    """Simulates a non-streaming OpenAI chat-completion response."""
+
+    def __init__(self, tool_calls=None, finish_reason="stop"):
+        self.choices = [
+            type("Choice", (), {
+                "message": _FakeMessage(tool_calls=tool_calls),
+                "finish_reason": finish_reason,
+                "index": 0,
+            })()
+        ]
+        self.usage = None
+
+
+async def _chat_with_tool_args(
+    provider, arguments_str: str, finish_reason: str = "stop",
+):
+    """Drive provider.chat() with one tool call carrying arguments_str."""
+    tc = _FakeToolCall(
+        index=0, call_id="call_1", name="submit_job", arguments=arguments_str,
+    )
+
+    async def _fake_create(**kw):
+        """Fake create for this test scenario."""
+        return _FakeResponse(tool_calls=[tc], finish_reason=finish_reason)
+
+    provider._client.chat.completions.create = _fake_create
+    return await provider.chat(
+        messages=[{"role": "user", "content": "submit the job"}],
+        model="gpt-4o",
+    )
+
+
+def _capture_warnings():
+    """Return (messages, remove) — a loguru sink collecting WARNING+ records."""
+    from loguru import logger as loguru_logger
+
+    messages: list[str] = []
+
+    def _sink(message):
+        messages.append(str(message.record["message"]))
+
+    handler_id = loguru_logger.add(_sink, level="WARNING")
+    return messages, lambda: loguru_logger.remove(handler_id)
+
+
+# -- _args_strict_ok: the "verifiably complete" predicate ---------------
+
+
+def test_args_strict_ok_requires_verifiably_complete_json():
+    """#1094 / CR #1100：只有非空字符串 + 严格 json.loads 通过才算「可验证完整」。
+
+    空串 / None / dict 一律 False —— 它们在 length 下拿不出完整性证据。
+    （本用例由三态版同步而来：`""`/None/`{}` 三条断言由 True 改为 False。）
+    """
+    from miqi.providers.openai_provider import OpenAIProvider
+
+    assert OpenAIProvider._args_strict_ok("") is False  # empty → 不可验证
+    assert OpenAIProvider._args_strict_ok(None) is False  # non-string → 不可验证
+    assert OpenAIProvider._args_strict_ok({}) is False  # dict → 不可验证
+    assert OpenAIProvider._args_strict_ok(_COMPLETE_ARGS) is True
+    assert OpenAIProvider._args_strict_ok(_TRUNCATED_ARGS) is False
+
+
+# -- streaming ----------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_stream_truncated_args_flagged_when_finish_reason_length():
+    """#1094: finish_reason=length + unparseable args → truncated=True, and the
+    args themselves stay json_repair's salvage (repair behaviour unchanged)."""
+    from miqi.providers.openai_provider import OpenAIProvider
+
+    provider = OpenAIProvider(api_key="sk-test")
+    messages, remove = _capture_warnings()
+    try:
+        events = await _stream_with_tool_args(
+            provider, _TRUNCATED_ARGS, finish_reason="length",
+        )
+    finally:
+        remove()
+
+    completed = events[-1]
+    call = completed.response.tool_calls[0]
+    assert call.truncated is True
+    # Repair path must NOT change: salvage is still delivered for diagnosis.
+    assert call.arguments.get("path") == "/tmp/run.sh", call.arguments
+    assert any("truncated by output cap" in m for m in messages), messages
+
+
+@pytest.mark.asyncio
+async def test_stream_length_finish_with_complete_args_not_flagged():
+    """A clean max_tokens stop that still emitted complete JSON is not truncated."""
+    from miqi.providers.openai_provider import OpenAIProvider
+
+    provider = OpenAIProvider(api_key="sk-test")
+    events = await _stream_with_tool_args(
+        provider, _COMPLETE_ARGS, finish_reason="length",
+    )
+
+    call = events[-1].response.tool_calls[0]
+    assert call.truncated is False
+    assert call.arguments == {"path": "/tmp/run.sh", "content": "echo hi"}
+
+
+@pytest.mark.asyncio
+async def test_stream_truncated_args_not_flagged_on_normal_stop():
+    """Normal stop + malformed args keeps the pre-#1094 json_repair behaviour."""
+    from miqi.providers.openai_provider import OpenAIProvider
+
+    provider = OpenAIProvider(api_key="sk-test")
+    events = await _stream_with_tool_args(
+        provider, _MALFORMED_ARGS, finish_reason="tool_calls",
+    )
+
+    call = events[-1].response.tool_calls[0]
+    assert call.truncated is False
+    assert call.arguments == {"query": "今日要闻"}
+
+
+@pytest.mark.asyncio
+async def test_stream_empty_args_flagged_when_finish_reason_length():
+    """CR #1100：一个参数 delta 都没到就被 length 砍掉 → 空串同样算截断。
+
+    arguments 仍是 {}（json_repair 口径不动），但不再漏放。
+    """
+    from miqi.providers.openai_provider import OpenAIProvider
+
+    provider = OpenAIProvider(api_key="sk-test")
+    messages, remove = _capture_warnings()
+    try:
+        events = await _stream_with_tool_args(provider, "", finish_reason="length")
+    finally:
+        remove()
+
+    call = events[-1].response.tool_calls[0]
+    assert call.truncated is True
+    assert call.arguments == {}
+    assert any("truncated by output cap" in m for m in messages), messages
+
+
+@pytest.mark.asyncio
+async def test_stream_empty_args_not_flagged_on_normal_stop():
+    """对照组：正常收尾的空串（模型确实发了无参调用）→ 不标。"""
+    from miqi.providers.openai_provider import OpenAIProvider
+
+    provider = OpenAIProvider(api_key="sk-test")
+    events = await _stream_with_tool_args(provider, "", finish_reason="tool_calls")
+
+    call = events[-1].response.tool_calls[0]
+    assert call.truncated is False
+    assert call.arguments == {}
+
+
+# -- non-streaming chat() ----------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_chat_truncated_args_flagged_when_finish_reason_length():
+    """Non-stream parity: finish_reason=length + unparseable args → truncated."""
+    from miqi.providers.openai_provider import OpenAIProvider
+
+    provider = OpenAIProvider(api_key="sk-test")
+    messages, remove = _capture_warnings()
+    try:
+        response = await _chat_with_tool_args(
+            provider, _TRUNCATED_ARGS, finish_reason="length",
+        )
+    finally:
+        remove()
+
+    call = response.tool_calls[0]
+    assert call.truncated is True
+    assert call.arguments.get("path") == "/tmp/run.sh", call.arguments
+    assert any("truncated by output cap" in m for m in messages), messages
+
+
+@pytest.mark.asyncio
+async def test_chat_length_finish_with_complete_args_not_flagged():
+    """Non-stream: length finish with strictly-valid args is not a truncation."""
+    from miqi.providers.openai_provider import OpenAIProvider
+
+    provider = OpenAIProvider(api_key="sk-test")
+    response = await _chat_with_tool_args(
+        provider, _COMPLETE_ARGS, finish_reason="length",
+    )
+
+    call = response.tool_calls[0]
+    assert call.truncated is False
+    assert call.arguments == {"path": "/tmp/run.sh", "content": "echo hi"}
+
+
+@pytest.mark.asyncio
+async def test_chat_truncated_args_not_flagged_on_normal_stop():
+    """Non-stream: normal stop keeps the pre-#1094 json_repair behaviour."""
+    from miqi.providers.openai_provider import OpenAIProvider
+
+    provider = OpenAIProvider(api_key="sk-test")
+    response = await _chat_with_tool_args(
+        provider, _MALFORMED_ARGS, finish_reason="stop",
+    )
+
+    call = response.tool_calls[0]
+    assert call.truncated is False
+    assert call.arguments == {"query": "今日要闻"}
+
+
+@pytest.mark.asyncio
+async def test_chat_empty_args_flagged_when_finish_reason_length():
+    """CR #1100 非流式对照：空串 + length → 截断（arguments 仍是 {}）。"""
+    from miqi.providers.openai_provider import OpenAIProvider
+
+    provider = OpenAIProvider(api_key="sk-test")
+    messages, remove = _capture_warnings()
+    try:
+        response = await _chat_with_tool_args(provider, "", finish_reason="length")
+    finally:
+        remove()
+
+    call = response.tool_calls[0]
+    assert call.truncated is True
+    assert call.arguments == {}
+    assert any("truncated by output cap" in m for m in messages), messages
+
+
+@pytest.mark.asyncio
+async def test_chat_empty_args_not_flagged_on_normal_finish():
+    """对照组：正常收尾（stop）的空串 → 不标，既有行为不变。"""
+    from miqi.providers.openai_provider import OpenAIProvider
+
+    provider = OpenAIProvider(api_key="sk-test")
+    response = await _chat_with_tool_args(provider, "", finish_reason="stop")
+
+    call = response.tool_calls[0]
+    assert call.truncated is False
+    assert call.arguments == {}
+
+
+# -- log redaction (CWE-532) --------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_malformed_args_warning_does_not_leak_raw_args():
+    """CR #1100：json_repair 告警只记工具名与参数长度，不落原始参数串。"""
+    from loguru import logger as loguru_logger
+
+    from miqi.providers.openai_provider import OpenAIProvider
+
+    secret = "{'query': 'TOP-SECRET-QUERY'}"
+    messages: list[str] = []
+
+    # str(Message) 是**格式化后**真正落盘的文本（record["message"] 只是模板），
+    # 泄漏检查必须看格式化文本。
+    handler_id = loguru_logger.add(
+        lambda m: messages.append(str(m)), level="WARNING",
+    )
+    provider = OpenAIProvider(api_key="sk-test")
+    try:
+        response = await _chat_with_tool_args(provider, secret, finish_reason="stop")
+    finally:
+        loguru_logger.remove(handler_id)
+
+    # repair 行为照旧：调用参数仍被打捞出来
+    assert response.tool_calls[0].arguments == {"query": "TOP-SECRET-QUERY"}
+    warns = [m for m in messages if "malformed tool args" in m]
+    assert warns, messages
+    assert "TOP-SECRET-QUERY" not in warns[0], warns[0]
+
+
+# -- #1094 / content fallback 复用同一截断门 ------------------------------
+
+
+def _fallback_response(content: str, finish_reason: str):
+    """非流式响应：无结构化 tool_calls、content 里内嵌 JSON 工具调用。
+
+    这是 OpenAI 兼容层为「把工具调用当普通文本输出」的模型保留的 legacy
+    路径（`_parse_tool_call_from_content`）——它必须与标准 tool_calls 路径
+    共用同一个截断门，否则 length 下会绕过拒执。
+    """
+    resp = _FakeResponse(tool_calls=None, finish_reason=finish_reason)
+    resp.choices[0].message.content = content
+    return resp
+
+
+async def _chat_with_content_fallback(
+    provider, content: str, finish_reason: str = "stop",
+):
+    """Drive provider.chat() with a content-embedded (fallback) tool call."""
+
+    async def _fake_create(**kw):
+        """Fake create returning a content-embedded tool call."""
+        return _fallback_response(content, finish_reason)
+
+    provider._client.chat.completions.create = _fake_create
+    return await provider.chat(
+        messages=[{"role": "user", "content": "write the file"}],
+        model="gpt-4o",
+    )
+
+
+_FALLBACK_JSON = (
+    '{"name": "write_file", "arguments": {"path": "/tmp/a.txt", "content": "hush"}}'
+)
+
+
+@pytest.mark.asyncio
+async def test_chat_content_fallback_flagged_when_finish_reason_length():
+    """#1094：content 内嵌 JSON 的 fallback 调用在 length 下同样判截断。
+
+    原始 arguments 拿不到「可验证完整」证据（JSON 语法完整 ≠ 模型没继续
+    生成更多调用），故保守拒执；解析出的参数仍交付诊断（salvage 口径不变）。
+    """
+    from loguru import logger as loguru_logger
+
+    from miqi.providers.openai_provider import OpenAIProvider
+
+    rendered: list[str] = []
+    handler_id = loguru_logger.add(
+        lambda m: rendered.append(str(m)), level="WARNING",
+    )
+    provider = OpenAIProvider(api_key="sk-test")
+    try:
+        response = await _chat_with_content_fallback(
+            provider, _FALLBACK_JSON, finish_reason="length",
+        )
+    finally:
+        loguru_logger.remove(handler_id)
+
+    call = response.tool_calls[0]
+    assert call.name == "write_file"
+    assert call.truncated is True
+    # salvage 仍交付：fallback 解析出的参数保持不变。
+    assert call.arguments == {"path": "/tmp/a.txt", "content": "hush"}
+    warns = [m for m in rendered if "truncated by output cap" in m]
+    assert warns, rendered
+    # 脱敏（CWE-532）：只到 name/id，不含参数内容（格式化文本上检查）。
+    assert "hush" not in warns[0] and "/tmp/a.txt" not in warns[0], warns[0]
+
+
+@pytest.mark.asyncio
+async def test_chat_content_fallback_not_flagged_on_normal_stop():
+    """对照组：正常收尾的 content 内嵌调用 → 不标，legacy 兼容路径不变。"""
+    from miqi.providers.openai_provider import OpenAIProvider
+
+    provider = OpenAIProvider(api_key="sk-test")
+    response = await _chat_with_content_fallback(
+        provider, _FALLBACK_JSON, finish_reason="stop",
+    )
+
+    call = response.tool_calls[0]
+    assert call.truncated is False
+    assert call.arguments == {"path": "/tmp/a.txt", "content": "hush"}
