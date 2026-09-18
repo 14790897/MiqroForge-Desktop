@@ -200,6 +200,16 @@ jobs:
         uses: 14790897/MiqroForge-Desktop/.github/actions/summarize-flaky@develop
         with:
           report_path: apps/desktop/test-reports/results.json
+        env:
+          # 纵深防御：同一 job 里先跑过 PR 代码，它能经 $GITHUB_ENV 给后续步骤注环境变量。
+          # step 级 env 在 runner 合并顺序里最后应用，所以这里显式清空动态链接器/解释器会读的
+          # 几个（LD_PRELOAD 能往任何后续进程里塞代码）。NODE_OPTIONS 已由 GitHub 自身禁止经
+          # $GITHUB_ENV 注入，一并写上是为了明确意图。
+          # 这不是安全边界：同一 job 内 PR 代码与 provider 凭据共存，任何后续步骤都可能被污染
+          # —— 真正的边界需要仓库级决定（见 PR 讨论）。
+          LD_PRELOAD: ''
+          LD_LIBRARY_PATH: ''
+          NODE_OPTIONS: ''
       - name: Upload Playwright report (E2E)
         # 只在 push（develop 等仓库自己的分支，代码可信）的运行里留存失败产物：test-results/
         # 的内容由 PR 控制的测试进程写出，而这些进程是在 provider 凭据落到 ~/.miqi/config.json
@@ -343,6 +353,16 @@ jobs:
         uses: 14790897/MiqroForge-Desktop/.github/actions/summarize-flaky@develop
         with:
           report_path: apps/desktop/test-reports/results.json
+        env:
+          # 纵深防御：同一 job 里先跑过 PR 代码，它能经 $GITHUB_ENV 给后续步骤注环境变量。
+          # step 级 env 在 runner 合并顺序里最后应用，所以这里显式清空动态链接器/解释器会读的
+          # 几个（LD_PRELOAD 能往任何后续进程里塞代码）。NODE_OPTIONS 已由 GitHub 自身禁止经
+          # $GITHUB_ENV 注入，一并写上是为了明确意图。
+          # 这不是安全边界：同一 job 内 PR 代码与 provider 凭据共存，任何后续步骤都可能被污染
+          # —— 真正的边界需要仓库级决定（见 PR 讨论）。
+          LD_PRELOAD: ''
+          LD_LIBRARY_PATH: ''
+          NODE_OPTIONS: ''
       - name: Upload Playwright report (macOS E2E)
         # 同 Linux 侧：只在 push（代码可信）的运行里留存，pull_request_target 下不上传
         # PR 可控的 test-results/（见上面那段的说明）。
