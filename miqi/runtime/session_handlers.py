@@ -23,9 +23,10 @@ from pathlib import Path
 from typing import Any
 
 from loguru import logger
+from pydantic import ValidationError
 
 from miqi.runtime.app_server import AppServerError
-from miqi.runtime.session_request_models import validate_session_params
+from miqi.runtime.session_request_models import SessionKeyParams, validate_session_params
 from miqi.session.manager import OwnershipError
 
 
@@ -97,11 +98,15 @@ def _candidate_workspace_roots(
     return roots
 
 
-def _probe_folder(root: Path, session_key: str, client_id: str) -> tuple[Any, Any] | None:
-    """``(SessionManager, session)`` when ``root`` holds a client-owned copy.
+def _probe_folder(
+    root: Path, session_key: str, client_id: str, *, require_owned: bool = True
+) -> tuple[Any, Any] | None:
+    """``(SessionManager, session)`` when ``root`` holds a copy of this session.
 
-    None when the root has no copy at all, or holds one owned by another client —
-    folder copies are never adopted across clients.
+    When ``require_owned`` is True (default), a copy owned by another client is
+    treated as absent — folder copies are never adopted across clients.  When
+    False, an unowned (legacy) copy is accepted so callers can report its
+    ownership status without claiming it.
     """
     from miqi.session.manager import SessionManager
 
@@ -115,7 +120,55 @@ def _probe_folder(root: Path, session_key: str, client_id: str) -> tuple[Any, An
     owner = folder_session.metadata.get("owner_client_id")
     if owner is not None and owner != client_id:
         return None
+    if require_owned and owner is None:
+        return None
     return folder_sm, folder_session
+
+
+def _claim_folder_copies(sm: Any, session_key: str, client_id: str) -> None:
+    """Stamp ``owner_client_id`` on this session's unowned folder copies (#1103).
+
+    ``SessionManager.claim_session`` only reaches the copy inside its own
+    (app-home) root, and ``sessions.get`` deliberately leaves a legacy folder
+    copy unowned rather than stamping a binding for a session the client never
+    claimed.  Every resolver probes with ``require_owned=True``, which refuses
+    an ownerless copy — so without this step, claiming a legacy session leaves
+    ``_find_ledger_root`` unable to see the bound root and the session's files
+    keep resolving against the app-home workspace.
+
+    A copy owned by a *different* client is left alone: ``require_owned=False``
+    hides exactly those, so a foreign copy keeps failing the ownership check
+    instead of being adopted by whoever claims the app-home stub.
+    """
+    from miqi.session.manager import SessionManager
+
+    roots: list[Path] = []
+    stub = sm.load_existing(session_key)
+    declared = stub.metadata.get("workspace") if stub is not None else None
+    if declared:
+        try:
+            roots.append(SessionManager._validate_workspace(Path(declared)))
+        except Exception:
+            pass
+    for root in _candidate_workspace_roots(sm, client_id):
+        if root not in roots:
+            roots.append(root)
+
+    for root in roots:
+        probed = _probe_folder(root, session_key, client_id, require_owned=False)
+        if probed is None:
+            continue
+        folder_sm, folder_session = probed
+        if folder_session.metadata.get("owner_client_id") == client_id:
+            continue
+        folder_session.metadata["owner_client_id"] = client_id
+        try:
+            folder_sm.save(folder_session)
+        except Exception as exc:
+            logger.debug(
+                "claim_legacy: writing owner to the folder copy at {} failed: {}",
+                root, exc,
+            )
 
 
 def _find_folder_session(
@@ -139,7 +192,7 @@ def _find_folder_session(
     for root in _candidate_workspace_roots(
         sm, client_id, extra=[extra_workspace] if extra_workspace else None,
     ):
-        probed = _probe_folder(root, session_key, client_id)
+        probed = _probe_folder(root, session_key, client_id, require_owned=False)
         if probed is None:
             continue
         folder_session = probed[1]
@@ -218,6 +271,32 @@ def _active_runtime_workspace(runtime: Any) -> str | None:
     return str(workspace) if workspace else None
 
 
+def _session_workspace_root(
+    sm: Any,
+    session_key: str,
+    client_id: str,
+    *,
+    runtime_workspace: str | None = None,
+) -> Path | None:
+    """Workspace root this session's own files resolve against (#1062).
+
+    None means the session is not folder-bound and its files live under the
+    app-home workspace, so callers must keep resolving against the global root
+    exactly as before.
+
+    Deliberately the same resolver the assets panel goes through — a preview and
+    the panel must not disagree about which root owns a session's files.  A
+    cheaper "stub carries no binding, so it is not bound" shortcut is wrong here:
+    a session written before the binding was stamped, or one born inside a folder
+    window, has a folder copy the shortcut would never look at, and its files
+    would silently resolve against app-home instead.  The seeds keep the common
+    cases cheap; only a session with neither seed scans.
+    """
+    return _find_ledger_root(
+        sm, session_key, client_id, runtime_workspace=runtime_workspace,
+    )
+
+
 def _folder_session_manager(sm: Any, session_key: str, client_id: str) -> Any | None:
     """SessionManager for the authoritative folder-root copy, if one exists."""
     from miqi.session.manager import SessionManager
@@ -226,6 +305,29 @@ def _folder_session_manager(sm: Any, session_key: str, client_id: str) -> Any | 
     if found is None:
         return None
     return SessionManager(found[1])
+
+
+async def _runtime_workspace_for_session(
+    client_id: str,
+    session_key: str,
+    registry: Any,
+) -> str | None:
+    """Workspace of this session's live runtime, or None (#1062).
+
+    None means there is no runtime to ask.  A lookup that *fails* is a different
+    answer and is deliberately not folded into it (#1103 review): the callers
+    turn "this session has no runtime" into "resolve against the app-home
+    workspace", which is right for an unbound session but wrong for a bound one,
+    where a session-relative name would address a different file of the same
+    name.  Left to propagate, the failure costs one failed read instead of a
+    silent read from the wrong root.
+    """
+    if registry is None:
+        return None
+    runtime = await registry.get_session(
+        client_id, _client_session_id(client_id, session_key),
+    )
+    return _active_runtime_workspace(runtime)
 
 
 async def _tracked_files_manager(
@@ -241,21 +343,13 @@ async def _tracked_files_manager(
     """
     from miqi.session.manager import SessionManager
 
-    runtime = None
-    if registry is not None:
-        try:
-            runtime = await registry.get_session(
-                client_id, _client_session_id(client_id, session_key),
-            )
-        except Exception as exc:
-            logger.debug(
-                "tracked files: runtime lookup failed for {}: {}", session_key, exc,
-            )
     root = _find_ledger_root(
         sm,
         session_key,
         client_id,
-        runtime_workspace=_active_runtime_workspace(runtime),
+        runtime_workspace=await _runtime_workspace_for_session(
+            client_id, session_key, registry,
+        ),
     )
     return SessionManager(root) if root is not None else sm
 
@@ -879,6 +973,45 @@ async def sessions_list_archived_handler(
     return {"result": {"sessions": archived}}
 
 
+# ── sessions.workspace ────────────────────────────────────────────────────
+
+
+async def sessions_workspace_handler(
+    request_id: str,
+    params: dict[str, Any],
+    client_id: str,
+    session_id: str | None,
+    registry: Any,
+) -> dict[str, Any]:
+    """Workspace root this session's files resolve against (#1062).
+
+    The caller names a session and never a root: a root the renderer could
+    supply would make the main process's containment checks meaningless (#955).
+    Uses the same resolver as ``sessions.get_tracked_files`` so the root the
+    assets panel was read from and the root a preview resolves against agree.
+
+    ``workspace`` is null for a session that is not folder-bound.
+
+    Validated locally rather than through ``validate_session_params``: this
+    method is deliberately absent from the exported contract, so it must not
+    appear in that map either.
+    """
+    try:
+        typed = SessionKeyParams.model_validate(params)
+    except ValidationError as exc:
+        raise AppServerError("Invalid params", code="INVALID_PARAMS") from exc
+    sm = _get_session_manager()
+    root = _session_workspace_root(
+        sm,
+        typed.session_key,
+        client_id,
+        runtime_workspace=await _runtime_workspace_for_session(
+            client_id, typed.session_key, registry,
+        ),
+    )
+    return {"result": {"workspace": str(root) if root is not None else None}}
+
+
 # ── sessions.get_tracked_files ─────────────────────────────────────────────
 
 
@@ -989,6 +1122,11 @@ async def sessions_claim_legacy_handler(
 
     A session that is already owned by a different client cannot be
     claimed — it will return UNAUTHORIZED.
+
+    Claiming covers every copy of the session, not just the app-home one: a
+    folder-bound session's root is only visible to the resolvers once its copy
+    carries the owner, so a stub-only claim leaves ``sessions.workspace``
+    answering null and the session's files resolving against app-home.
     """
     typed = validate_session_params("sessions.claim_legacy", params)
     session_key = typed.session_key
@@ -996,9 +1134,11 @@ async def sessions_claim_legacy_handler(
     sm = _get_session_manager()
     try:
         claimed = sm.claim_session(session_key, client_id)
-        return {"result": {"claimed": True, "was_already_claimed": not claimed}}
     except OwnershipError as exc:
         raise AppServerError(exc.args[0], code=exc.code) from exc
+
+    _claim_folder_copies(sm, session_key, client_id)
+    return {"result": {"claimed": True, "was_already_claimed": not claimed}}
 
 
 # ── sessions.list_recent_workspaces ─────────────────────────────────────────

@@ -943,6 +943,216 @@ async def test_files_read_image_jpg_mime(fake_config, fake_provider, tmp_path):
     assert r["mime_type"] == "image/jpeg"
 
 
+# ── #1062: 文件夹绑定会话的读取/定位 ─────────────────────────────────────────
+
+
+def _bind_session_to_folder(sm, key: str, folder, client_id: str):
+    """把 app-home 的 stub 绑到 ``folder``，并在 ``folder`` 下留一份会话副本。
+
+    这正是 workspace picker 绑定后磁盘上的样子：stub 在 app-home 记录绑定，
+    产物和那份会话一起落在被绑定的目录里。
+    """
+    from miqi.session.manager import SessionManager
+
+    stub = sm.load_existing(key)
+    stub.metadata["workspace"] = str(folder)
+    sm.save(stub)
+
+    folder_sm = SessionManager(folder)
+    session = folder_sm.get_or_create(key, client_id=client_id)
+    session.metadata["owner_client_id"] = client_id
+    folder_sm.save(session)
+    folder_sm.invalidate(key)
+    return folder_sm
+
+
+@pytest.mark.asyncio
+async def test_files_read_bound_folder_session_succeeds(fake_config, fake_provider, tmp_path):
+    """#1062：绑定目录会话的产物在会话自己的工作区里，files.read 必须读得到。
+
+    修复前解析只认全局工作区，绑定目录下的路径一律被判成「工作区之外」，
+    于是右侧资产栏点「预览」读不到内容、「定位」报错——而文件就在那里。
+    """
+    from miqi.runtime.app_server import ClientSessionRegistry
+    from miqi.runtime.file_handlers import files_read_handler
+
+    folder = tmp_path / "bound"
+    folder.mkdir()
+    sm, ws = _setup_session("bound-reader", "client-1")
+    _bind_session_to_folder(sm, "bound-reader", folder, "client-1")
+    (folder / "song.txt").write_text("do re mi", encoding="utf-8")
+
+    # 前提：绑定目录确实在全局工作区之外，否则这条用例证明不了任何事。
+    assert not str(folder.resolve()).startswith(str(ws.resolve()))
+
+    registry = ClientSessionRegistry()
+    result = await files_read_handler(
+        "req-1",
+        {"path": "song.txt", "session_key": "bound-reader"},
+        "client-1", None, registry,
+    )
+    assert result["result"]["content"] == "do re mi"
+
+
+@pytest.mark.asyncio
+async def test_files_read_absolute_global_path_keeps_its_root(fake_config, fake_provider, tmp_path):
+    """#1103 review：绑定会话里请求**绝对**路径时，必须保留它实际所属的那个根。
+
+    绝对路径一旦被压成相对名，那个名字随后就会被拼到会话根上——于是
+    ``<全局>/note.txt`` 被读成 ``<绑定>/note.txt``。两个根下放同名但内容不同的文件，
+    才能把「读错文件」这件事钉死（只放一个的话两边都读得到，看不出区别）。
+    """
+    from miqi.runtime.app_server import ClientSessionRegistry
+    from miqi.runtime.file_handlers import files_read_handler
+
+    folder = tmp_path / "bound"
+    folder.mkdir()
+    sm, ws = _setup_session("bound-abs", "client-1")
+    _bind_session_to_folder(sm, "bound-abs", folder, "client-1")
+
+    global_file = ws / "note.txt"
+    global_file.write_text("GLOBAL", encoding="utf-8")
+    (folder / "note.txt").write_text("BOUND", encoding="utf-8")
+
+    registry = ClientSessionRegistry()
+    result = await files_read_handler(
+        "req-1",
+        {"path": str(global_file.resolve()), "session_key": "bound-abs"},
+        "client-1", None, registry,
+    )
+    assert result["result"]["content"] == "GLOBAL", (
+        "绝对路径必须回到它自己所属的根，而不是被换成会话根下的同名字段"
+    )
+
+
+@pytest.mark.asyncio
+async def test_files_read_bound_folder_rejects_traversal(fake_config, fake_provider, tmp_path):
+    """#1062：放开绑定根不等于放开它外面——``..`` 逃逸仍须拒绝。"""
+    from miqi.runtime.app_server import AppServerError, ClientSessionRegistry
+    from miqi.runtime.file_handlers import files_read_handler
+
+    folder = tmp_path / "bound"
+    folder.mkdir()
+    sm, ws = _setup_session("bound-traverse", "client-1")
+    _bind_session_to_folder(sm, "bound-traverse", folder, "client-1")
+    (tmp_path / "outside.txt").write_text("secret", encoding="utf-8")
+
+    registry = ClientSessionRegistry()
+    with pytest.raises(AppServerError):
+        await files_read_handler(
+            "req-1",
+            {"path": "../outside.txt", "session_key": "bound-traverse"},
+            "client-1", None, registry,
+        )
+
+
+@pytest.mark.asyncio
+async def test_sessions_workspace_none_for_unbound_session(fake_config, fake_provider):
+    """#1062：非绑定会话返回 null，主进程据此只保留全局工作区这一个根。
+
+    快路径也在这里被钉住——不返回 None 的话每次读文件都要扫描全部已绑定工区。
+    """
+    from miqi.runtime.app_server import ClientSessionRegistry
+    from miqi.runtime.session_handlers import sessions_workspace_handler
+
+    _setup_session("plain-session", "client-1")
+
+    out = await sessions_workspace_handler(
+        "req-1", {"session_key": "plain-session"}, "client-1", None,
+        ClientSessionRegistry(),
+    )
+    assert out["result"]["workspace"] is None
+
+
+@pytest.mark.asyncio
+async def test_sessions_workspace_returns_bound_root(fake_config, fake_provider, tmp_path):
+    """#1062：绑定会话返回会话自己的工作区——主进程拿它做包含性校验的额外根。"""
+    from miqi.runtime.app_server import ClientSessionRegistry
+    from miqi.runtime.session_handlers import sessions_workspace_handler
+
+    folder = tmp_path / "bound"
+    folder.mkdir()
+    sm, _ws = _setup_session("bound-ws-query", "client-1")
+    _bind_session_to_folder(sm, "bound-ws-query", folder, "client-1")
+
+    out = await sessions_workspace_handler(
+        "req-1", {"session_key": "bound-ws-query"}, "client-1", None,
+        ClientSessionRegistry(),
+    )
+    assert out["result"]["workspace"] == str(folder)
+
+
+@pytest.mark.asyncio
+async def test_claim_legacy_gives_folder_copy_ownership(fake_config, fake_provider, tmp_path):
+    """#1103 review：claim 只盖 app-home stub 时，绑定根对 resolver 依然不可见。
+
+    legacy 会话的两份 copy 都没有 owner —— app-home 的 stub 和绑定目录里那份。
+    解析器一律走 ``_probe_folder(require_owned=True)``，ownerless 的 folder copy
+    被当成不存在，于是 claim 完 ``sessions.workspace`` 仍返回 null、会话的文件
+    继续按全局工作区解析，正是这个 PR 要修的症状。
+    """
+    from miqi.runtime.app_server import ClientSessionRegistry
+    from miqi.runtime.session_handlers import (
+        sessions_claim_legacy_handler,
+        sessions_workspace_handler,
+    )
+    from miqi.session.manager import SessionManager
+
+    folder = tmp_path / "legacy-bound"
+    folder.mkdir()
+
+    sm, _ws = _setup_session("legacy-bound", None, set_owner=False)
+    stub = sm.load_existing("legacy-bound")
+    stub.metadata["workspace"] = str(folder)
+    sm.save(stub)
+    sm.invalidate("legacy-bound")
+
+    folder_sm = SessionManager(folder)
+    folder_session = folder_sm.get_or_create("legacy-bound")
+    folder_session.metadata.pop("owner_client_id", None)
+    folder_sm.save(folder_session)
+    folder_sm.invalidate("legacy-bound")
+
+    # 认领之前：folder copy 没有 owner，绑定根解析不出来。
+    before = await sessions_workspace_handler(
+        "req-1", {"session_key": "legacy-bound"}, "client-1", None,
+        ClientSessionRegistry(),
+    )
+    assert before["result"]["workspace"] is None
+
+    await sessions_claim_legacy_handler(
+        "req-2", {"session_key": "legacy-bound"}, "client-1", None,
+        ClientSessionRegistry(),
+    )
+
+    after = await sessions_workspace_handler(
+        "req-3", {"session_key": "legacy-bound"}, "client-1", None,
+        ClientSessionRegistry(),
+    )
+    assert after["result"]["workspace"] == str(folder)
+
+
+@pytest.mark.asyncio
+async def test_sessions_workspace_does_not_answer_not_bound_on_lookup_failure(
+    fake_config, fake_provider
+):
+    """#1103 review：runtime 查询失败不能答成「未绑定」。
+
+    ``workspace: null`` 是「该会话没绑目录」这个**确定**答案，主进程据此回落到
+    全局工作区。查询失败时我们并不知道答案：照样回 null 的话，绑定会话的相对
+    路径会被重新锚到全局工作区上，``report.md`` 就读到了另一个同名文件。失败
+    必须冒出去，让这次操作失败，而不是安静地从错误的根读。
+    """
+    from miqi.runtime.session_handlers import sessions_workspace_handler
+
+    class _FailingRegistry:
+        async def get_session(self, *_args, **_kwargs):
+            raise RuntimeError("registry unavailable")
+
+    with pytest.raises(RuntimeError):
+        await sessions_workspace_handler(
+            "req-1", {"session_key": "bound"}, "client-1", None, _FailingRegistry(),
+        )
 # ── session containment (#1051) ──────────────────────────────────────────────
 #
 # Path containment used to be enforced at WORKSPACE granularity: the

@@ -199,6 +199,25 @@ class OpenAIProvider(LLMProvider):
         """Return True for retryable transient errors."""
         return resilience.classify_error(error) == ErrorKind.TRANSIENT
 
+    @staticmethod
+    def _args_strict_ok(raw: Any) -> bool:
+        """「可验证完整」判据（#1094；CR #1100 统一口径）：只有**非空字符串**且严格
+        `json.loads` 通过才算数，空串 / `None` / dict 一律 `False`。
+
+        非流式响应里后三者拿不出任何"参数完整"的证据：空串通常是输出被砍在参数
+        开头，dict 则是 SDK 预解析后原始串已丢失（Anthropic 文档明确
+        `stop_reason=max_tokens` 可能留下未完成的 `tool_use`，已解析的 dict 看不出
+        这点）。`finish_reason == "length"` 下判据取反即"截断"。
+        `json_repair` 行为不受本判据影响。
+        """
+        if not isinstance(raw, str) or not raw:
+            return False
+        try:
+            json.loads(raw)
+            return True
+        except (json.JSONDecodeError, ValueError):
+            return False
+
     def _parse_tool_call_arguments(self, tool_name: str, args: Any) -> dict[str, Any]:
         """Parse tool-call arguments with json_repair fallback."""
         if not isinstance(args, str):
@@ -211,10 +230,12 @@ class OpenAIProvider(LLMProvider):
         try:
             parsed = json.loads(args)
         except (json.JSONDecodeError, ValueError):
+            # CWE-532：参数串里可能有文件正文 / 路径 / 密钥，只记工具名与长度，
+            # 不落任何原始参数。
             logger.warning(
-                "json_repair fixed malformed tool args for '{}': {}",
+                "json_repair fixed malformed tool args for '{}': len={}",
                 tool_name,
-                args[:200],
+                len(args),
             )
             parsed = repaired
 
@@ -285,6 +306,7 @@ class OpenAIProvider(LLMProvider):
             return LLMResponse(content=None, finish_reason="stop")
         choice = response.choices[0]
         message = choice.message
+        _finish = choice.finish_reason or "stop"
 
         tool_calls: list[ToolCallRequest] = []
         if hasattr(message, "tool_calls") and message.tool_calls:
@@ -296,11 +318,38 @@ class OpenAIProvider(LLMProvider):
                         tc.function.name,
                         tc.function.arguments,
                     ),
+                    # #1094 / CR #1100: cut off by max_tokens → arguments is repair
+                    # salvage. 判据「不可验证完整即截断」：空串 / dict / 解析失败
+                    # 在 length 下一律算截断。
+                    truncated=(
+                        _finish == "length"
+                        and not self._args_strict_ok(tc.function.arguments)
+                    ),
                 ))
+            _flagged = [tc for tc in tool_calls if getattr(tc, "truncated", False)]
+            if _flagged:
+                logger.warning(
+                    "tool args truncated by output cap (finish_reason=length): "
+                    "{} call(s) flagged: {}",
+                    len(_flagged), [tc.name for tc in _flagged],
+                )
 
         if not tool_calls and isinstance(message.content, str):
             fallback = self._parse_tool_call_from_content(message.content)
             if fallback:
+                # #1094 / CR #1100: content 内嵌 JSON 是第二条 tool-call 路径，
+                # 必须纳入同一个截断门。它的原始 arguments 拿不到「可验证完整」
+                # 的证据（解析成功只证明 JSON 语法完整，不证明模型没继续生成
+                # 更多调用），故 length 下一律按截断拒执——与 Anthropic SDK
+                # dict 输入的保守原则一致。
+                fallback.truncated = _finish == "length"
+                if fallback.truncated:
+                    logger.warning(
+                        "tool args truncated by output cap (finish_reason=length): "
+                        "content fallback tool call name={} id={}",
+                        fallback.name,
+                        fallback.id,
+                    )
                 tool_calls.append(fallback)
 
         usage: dict[str, int] = {}
@@ -323,7 +372,7 @@ class OpenAIProvider(LLMProvider):
         return LLMResponse(
             content=message.content,
             tool_calls=tool_calls,
-            finish_reason=choice.finish_reason or "stop",
+            finish_reason=_finish,
             usage=usage,
             reasoning_content=reasoning_content,
         )
@@ -604,7 +653,20 @@ class OpenAIProvider(LLMProvider):
                     acc["function"]["name"],
                     acc["function"]["arguments"],
                 ),
+                # #1094 / CR #1100: same rule as the non-stream path above —
+                # 空串（一次参数 delta 都没到就被 length 截断）同样算截断。
+                truncated=(
+                    finish_reason == "length"
+                    and not self._args_strict_ok(acc["function"]["arguments"])
+                ),
             ))
+        _flagged = [tc for tc in parsed_tool_calls if getattr(tc, "truncated", False)]
+        if _flagged:
+            logger.warning(
+                "tool args truncated by output cap (finish_reason=length): "
+                "{} call(s) flagged: {}",
+                len(_flagged), [tc.name for tc in _flagged],
+            )
 
         yield LLMStreamEvent(
             kind="completed",
