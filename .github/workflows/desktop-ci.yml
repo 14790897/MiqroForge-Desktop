@@ -369,6 +369,9 @@ jobs:
         # Both are fully covered by the Linux electron-e2e job, which runs the
         # whole suite.
         #
+        # 也就是说 macOS job 是**选定子集、不是完整覆盖**（README 的 E2E 覆盖表里同样写明），
+        # 判断「某用例有没有在 CI 上跑过」时要按平台分开看。
+        #
         # --workers=2 cut the flakiness down but did not remove it — a 6-run sample
         # still had 0-2 flaky specs per run, with repeated hits on the same test
         # (task-assets.spec.ts:143, which looks deterministic rather than

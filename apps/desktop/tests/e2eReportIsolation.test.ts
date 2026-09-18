@@ -21,13 +21,16 @@ describe('探针与主 E2E 的报告隔离', () => {
   const cwd = process.cwd();
   const reportPath = join(cwd, 'test-reports', 'results.json');
   const playwrightCli = join(cwd, 'node_modules', '@playwright', 'test', 'cli.js');
+  // 两个超时成对定义：spawnSync 阻塞时 Vitest 的 timeout 打断不了它，所以子进程必须**先**超时，
+  // 留出余量让断言把失败原因报出来（而不是整个用例被 Vitest 掐掉、只留一句 timeout）。
+  const CHILD_TIMEOUT_MS = 110_000;
+  const TEST_TIMEOUT_MS = 120_000;
 
   const runPlaywright = (args) =>
     spawnSync(process.execPath, [playwrightCli, 'test', '--config=playwright.config.ts', ...args], {
       cwd,
       encoding: 'utf8',
-      // 外层 Vitest timeout 120s 不能中断阻塞的 spawnSync；给子进程 110s，让它在测试超时前退出。
-      timeout: 110_000,
+      timeout: CHILD_TIMEOUT_MS,
       env: { ...process.env, PLAYWRIGHT_SKIP_WEB_SERVER: '1' },
     });
 
@@ -49,36 +52,44 @@ describe('探针与主 E2E 的报告隔离', () => {
     }
   }
 
-  it('探针那一步（--reporter=list）不产出报告，也不动已有的那份', () => {
-    // 同一条守卫：即便探针哪天被改回去、真写了报告，也不会把产物留在工作区里。
-    preservingReports(() => {
-      // 放一份「上一次运行留下的」报告，验证探针既不写也不碰它。
-      mkdirSync(dirname(reportPath), { recursive: true });
-      const previous = '{"previous":"run"}';
-      writeFileSync(reportPath, previous);
-      const before = statSync(reportPath).mtimeMs;
+  it(
+    '探针那一步（--reporter=list）不产出报告，也不动已有的那份',
+    () => {
+      // 同一条守卫：即便探针哪天被改回去、真写了报告，也不会把产物留在工作区里。
+      preservingReports(() => {
+        // 放一份「上一次运行留下的」报告，验证探针既不写也不碰它。
+        mkdirSync(dirname(reportPath), { recursive: true });
+        const previous = '{"previous":"run"}';
+        writeFileSync(reportPath, previous);
+        const before = statSync(reportPath).mtimeMs;
 
-      const result = runPlaywright([
-        '--project=electron',
-        '--grep',
-        'AI Connectivity',
-        '--reporter=list',
-        '--list',
-      ]);
+        const result = runPlaywright([
+          '--project=electron',
+          '--grep',
+          'AI Connectivity',
+          '--reporter=list',
+          '--list',
+        ]);
 
-      expect(result.status).toBe(0);
-      expect(result.stdout).toContain('AI Connectivity');
-      expect(readFileSync(reportPath, 'utf8')).toBe(previous);
-      expect(statSync(reportPath).mtimeMs).toBe(before);
-    });
-  }, 120_000);
+        expect(result.status).toBe(0);
+        expect(result.stdout).toContain('AI Connectivity');
+        expect(readFileSync(reportPath, 'utf8')).toBe(previous);
+        expect(statSync(reportPath).mtimeMs).toBe(before);
+      });
+    },
+    TEST_TIMEOUT_MS
+  );
 
-  it('主 E2E 那一步（不覆盖 reporter）才会写这份报告', () => {
-    preservingReports(() => {
-      const result = runPlaywright(['--project=electron', '--list']);
+  it(
+    '主 E2E 那一步（不覆盖 reporter）才会写这份报告',
+    () => {
+      preservingReports(() => {
+        const result = runPlaywright(['--project=electron', '--list']);
 
-      expect(result.status).toBe(0);
-      expect(existsSync(reportPath)).toBe(true);
-    });
-  }, 120_000);
+        expect(result.status).toBe(0);
+        expect(existsSync(reportPath)).toBe(true);
+      });
+    },
+    TEST_TIMEOUT_MS
+  );
 });
