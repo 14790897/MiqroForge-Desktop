@@ -156,22 +156,75 @@ def _session_dir_key(session_key: str) -> str:
 # ── path resolution ────────────────────────────────────────────────────────
 
 
-def _resolve_session_files_path(client_id: str, session_key: str) -> Path:
+async def _runtime_workspace(client_id: str, session_key: str, registry: Any) -> str | None:
+    """Workspace of this session's live runtime, if it has one (#1062).
+
+    The same seed ``sessions.get_tracked_files`` resolves its manager with, so a
+    preview resolves against the root the assets panel was read from.
+    """
+    if registry is None:
+        return None
+    from miqi.runtime.session_handlers import _runtime_workspace_for_session
+
+    return await _runtime_workspace_for_session(client_id, session_key, registry)
+
+
+def _session_root(
+    client_id: str,
+    session_key: str,
+    *,
+    runtime_workspace: str | None = None,
+) -> Path | None:
+    """Workspace root this session's own files resolve against (#1062).
+
+    None for a session that is not folder-bound, whose files live under the
+    app-home workspace.  Delegates to the tracked-files resolver so a preview
+    resolves against the same root the assets panel was read from.
+    """
+    from miqi.runtime.session_handlers import _session_workspace_root
+
+    return _session_workspace_root(
+        _get_session_manager(),
+        session_key,
+        client_id,
+        runtime_workspace=runtime_workspace,
+    )
+
+
+def _resolve_session_files_path(
+    client_id: str,
+    session_key: str,
+    *,
+    root: Path | None = None,
+) -> Path:
     """Resolve the client-scoped session files directory.
 
     Verifies session ownership before returning the path.
     Uses the same session directory naming as SessionManager
     (``session_files_dir_key``), gated by ownership verification.
+
+    ``root`` is a folder-bound session's own workspace (#1062): its files sit
+    directly there rather than under ``<ws>/sessions/<key>/files``.  The
+    workspace-side shape is built here rather than through
+    ``_session_files_dir_for_key``, which answers None whenever the global
+    workspace is not the app-home default and would silently relocate every
+    session file of a user who configured one.
     """
     safe_key = _session_dir_key(session_key)
     _verify_session_ownership(client_id, session_key)
-    workspace = _get_workspace_path()
-    files_dir = workspace / "sessions" / safe_key / "files"
+    if root is not None:
+        files_dir = root
+    else:
+        workspace = _get_workspace_path()
+        files_dir = workspace / _SESSIONS_DIR_NAME / safe_key / "files"
     files_dir.mkdir(parents=True, exist_ok=True)
     return files_dir
 
 
-def _resolve_session_snapshot_dir(client_id: str, session_key: str) -> Path:
+def _resolve_session_snapshot_dir(
+    client_id: str,
+    session_key: str,
+) -> Path:
     """Resolve the client-scoped session snapshot directory.
 
     Verifies session ownership before returning the path.
@@ -264,6 +317,8 @@ def _validate_file_path(
     file_path: str,
     client_id: str,
     session_key: str | None = None,
+    *,
+    runtime_workspace: str | None = None,
 ) -> Path:
     """Resolve a file path with session-granularity traversal protection.
 
@@ -276,19 +331,25 @@ def _validate_file_path(
       ``<ws>/sessions/<key>/files/notes.md``) or workspace-relative when it
       already names a location inside that same session directory
       (``sessions/<key>/files/notes.md``).  Ordinary workspace files outside
-      ``<ws>/sessions/`` remain reachable, as before.
+      ``<ws>/sessions/`` remain reachable, as before.  A folder-bound session
+      substitutes its bound folder for both: session-relative resolves inside
+      the bound folder, and an absolute path there is answered as given.
     - Without a ``session_key``: the result must be inside the workspace and
       **outside** ``<ws>/sessions/``, so a workspace-scoped operation can
       never address another session's files.
 
     Accepts both relative paths and absolute paths that fall within the
-    workspace.  Paths under the sandbox workspace prefix
+    permitted root.  Paths under the sandbox workspace prefix
     (``/home/miqi/workspace/…``) are treated as workspace-relative; other
     absolute paths — POSIX-rooted, Windows drive-letter, and UNC alike — are
     resolved on the filesystem and must fall inside the workspace.
 
     Blocks path traversal (``..``) and absolute paths that escape the
     permitted root.
+
+    #1062：文件夹绑定会话的产物落在会话自己的工作区，那个目录因此也是允许的根
+    （见 ``bound_root``）。全局工作区始终留在集合内——默认会话和改动前记录的
+    绝对路径条目都靠它；非绑定会话没有绑定根，行为与引入本改动前逐字节相同。
     """
     workspace = _get_workspace_path()
 
@@ -297,7 +358,24 @@ def _validate_file_path(
             "path is required", code="INVALID_PARAMS",
         )
 
-    # ── Normalise absolute paths to a workspace-relative form ─────────────
+    # #1062: a folder-bound session keeps its files in the bound folder itself,
+    # so that folder is a permitted root too.  ``None`` is an unbound session,
+    # whose resolution below is unchanged.
+    bound_root: Path | None = None
+    if session_key:
+        bound_root = _session_root(
+            client_id, session_key, runtime_workspace=runtime_workspace,
+        )
+        if bound_root is not None:
+            bound_root = bound_root.resolve()
+
+    # Set for an absolute path the caller named inside the workspace.  Such a
+    # path is answered against the workspace and never re-anchored on the
+    # session's own root: `<global>/note.txt` answering with `<bound>/note.txt`
+    # is a different file that merely shares the name (#1103 review).
+    absolute_in_workspace = False
+
+    # ── Normalise absolute paths ──────────────────────────────────────────
     prefix = _SANDBOX_WORKSPACE_PREFIX
     if file_path == prefix or file_path.startswith((prefix + "/", prefix + "\\")):
         # Case 1: sandbox-internal path — the agent ran inside bwrap and
@@ -308,10 +386,17 @@ def _validate_file_path(
         file_path = _strip_sandbox_prefix(file_path)
     elif file_path.startswith(("/", "\\")) or Path(file_path).is_absolute():
         # Case 2: host absolute path — resolve it, then require it to fall
-        # inside the workspace.  The Windows drive-letter form
+        # inside a permitted root.  The Windows drive-letter form
         # (``C:\...``/``C:/...``) reaches here via Path.is_absolute(); it used
         # to skip normalisation entirely and be re-joined as if relative.
         candidate = _resolve_under(Path(), file_path)
+        if bound_root is not None and _is_within(candidate, bound_root):
+            # A bound folder sits outside the workspace, so a path inside it
+            # has no workspace-relative form and is answered as given.  This
+            # returns before the session branch, so ownership — which that
+            # branch would have checked — is checked here.
+            _require_owned_session(client_id, session_key)
+            return candidate
         if not _is_within(candidate, workspace):
             raise AppServerError(
                 f"Path is outside workspace: {file_path}"
@@ -319,6 +404,7 @@ def _validate_file_path(
                 code="INVALID_PARAMS",
             )
         file_path = str(candidate.relative_to(workspace))
+        absolute_in_workspace = True
 
     # ── Session-scoped resolution ─────────────────────────────────────────
     # Every reserved root (not just sessions/) is off-limits to a
@@ -334,15 +420,23 @@ def _validate_file_path(
         # _require_owned_session for why the lenient "no session on disk"
         # pass is unsafe here.
         _require_owned_session(client_id, session_key)
-        # Verifies ownership before returning the directory.
-        session_files = _resolve_session_files_path(client_id, session_key)
-        session_root = session_files.parent
+        # Verifies ownership before returning the directory.  ``root`` is the
+        # bound folder for a folder-bound session (#1062).
+        session_files = _resolve_session_files_path(
+            client_id, session_key, root=bound_root,
+        )
+        # The caller's own area is the bound folder itself when the session is
+        # folder-bound, and the workspace-side session directory otherwise.
+        # Deliberately not ``session_files.parent`` in the bound case: that is
+        # the bound folder's *parent*, and rule (a) would then accept every
+        # workspace-relative path beside it.
+        own_area = session_files if bound_root is not None else session_files.parent
 
         # (a) workspace-relative path that already names a location inside the
         #     caller's OWN session directory
         #     (``sessions/<key>/files/…``), as the desktop sends.
         workspace_candidate = _resolve_under(workspace, file_path)
-        if _is_within(workspace_candidate, session_root):
+        if _is_within(workspace_candidate, own_area):
             return workspace_candidate
 
         # A path naming a reserved runtime subtree that is not the caller's own
@@ -356,10 +450,14 @@ def _validate_file_path(
                 code="INVALID_PARAMS",
             )
 
-        # (b) path relative to the session files directory (``notes.md``).
-        session_candidate = _resolve_under(session_files, file_path)
-        if _is_within(session_candidate, session_files):
-            return session_candidate
+        # (b) path relative to the session files directory (``notes.md``) — the
+        #     bound folder itself for a folder-bound session.  Skipped for a
+        #     path the caller gave absolutely, which rule (c) answers instead:
+        #     re-anchoring that name here is the #1103 review's wrong-file bug.
+        if not absolute_in_workspace:
+            session_candidate = _resolve_under(session_files, file_path)
+            if _is_within(session_candidate, session_files):
+                return session_candidate
 
         # (c) ordinary workspace files outside the reserved subtrees stay
         #     reachable for session-scoped callers.
@@ -788,8 +886,16 @@ async def files_read_handler(
     if not file_path:
         raise AppServerError("path is required", code="INVALID_PARAMS")
 
+    # #1062：把活跃 runtime 的工作区喂给解析器，使绑定会话的读取解析到和资产
+    # 面板同一个根（非绑定会话这里是 None，解析路径与改动前逐字节相同）。
+    runtime_workspace = (
+        await _runtime_workspace(client_id, session_key, registry) if session_key else None
+    )
+
     try:
-        resolved = _validate_file_path(file_path, client_id, session_key)
+        resolved = _validate_file_path(
+            file_path, client_id, session_key, runtime_workspace=runtime_workspace,
+        )
     except AppServerError:
         raise
     except ValueError as exc:

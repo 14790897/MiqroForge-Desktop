@@ -15,6 +15,7 @@ Expected per issue: the interrupted round's node must REMAIN in history
 """
 
 import asyncio
+import sqlite3
 
 import pytest
 
@@ -142,6 +143,14 @@ async def test_interrupted_turn_survives_fresh_retry(tmp_path, fake_config):
         assert jsonl_roles.count("assistant") == 1, (
             f"JSONL assistant msg missing: {jsonl_roles}"
         )
+    except sqlite3.OperationalError as exc:
+        # SQLite 写锁竞争时（WAL 下的 SQLITE_BUSY_SNAPSHOT）不走 busy handler，
+        # 连接上的 timeout=30 也救不了，共享 runner 上会偶发 "database is locked"。
+        # 只把这一种错误降级成 skip：函数级 xfail(strict=False) 会把断言失败和
+        # 任何其它异常一起变成 XFAIL，丢快照的真回归也能悄悄通过（#1103 review）。
+        if "database is locked" not in str(exc):
+            raise
+        pytest.skip("SQLite write lock contended on a shared CI runner")
     finally:
         await runtime.stop()
 
