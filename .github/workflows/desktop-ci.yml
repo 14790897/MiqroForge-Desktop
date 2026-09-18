@@ -30,7 +30,7 @@ jobs:
         with:
           ref: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || github.ref }}
           # 本 job 会执行 PR 检出的代码；checkout 默认把 job token 写进 .git/config，
-          # 那等于把带 actions:write 的凭据放到 PR 代码手里。不持久化，后续步骤也不需要它。
+          # 那等于把凭据放到 PR 代码手里。不持久化，后续步骤也不需要它。
           persist-credentials: false
 
       - uses: actions/setup-node@v4
@@ -97,6 +97,11 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        # 不受信任来源直接不检出（与下面 E2E_TRUSTED 同一条件；这里写成原始表达式是刻意的：
+        # CodeQL 的 actions/untrusted-checkout 只把挂在 checkout 自身上的显式条件当作有效控制检查
+        # —— `head.repo.full_name == github.repository` 与 `author_association` 这两种模式会被识别，
+        # 从而不再报「特权上下文里检出未受信任代码」）。
+        if: ${{ github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association) }}
         with:
           ref: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || github.ref }}
           # 本 job 在凭据落盘后执行 PR 检出的代码（spec / 构建脚本），checkout 默认会把 job
@@ -104,12 +109,14 @@ jobs:
           persist-credentials: false
 
       - uses: actions/setup-node@v4
+        if: ${{ github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association) }}
         with:
           node-version: 22
           cache: npm
           cache-dependency-path: apps/desktop/package-lock.json
 
       - uses: actions/setup-python@v5
+        if: ${{ github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association) }}
         with:
           python-version: '3.12'
 
@@ -257,6 +264,11 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        # 不受信任来源直接不检出（与下面 E2E_TRUSTED 同一条件；这里写成原始表达式是刻意的：
+        # CodeQL 的 actions/untrusted-checkout 只把挂在 checkout 自身上的显式条件当作有效控制检查
+        # —— `head.repo.full_name == github.repository` 与 `author_association` 这两种模式会被识别，
+        # 从而不再报「特权上下文里检出未受信任代码」）。
+        if: ${{ github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association) }}
         with:
           ref: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || github.ref }}
           # 本 job 在凭据落盘后执行 PR 检出的代码（spec / 构建脚本），checkout 默认会把 job
@@ -264,12 +276,14 @@ jobs:
           persist-credentials: false
 
       - uses: actions/setup-node@v4
+        if: ${{ github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association) }}
         with:
           node-version: 22
           cache: npm
           cache-dependency-path: apps/desktop/package-lock.json
 
       - uses: actions/setup-python@v5
+        if: ${{ github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association) }}
         with:
           python-version: '3.12'
 
