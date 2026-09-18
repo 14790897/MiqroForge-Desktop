@@ -73,18 +73,16 @@
 
 import { test, expect } from '@playwright/test';
 import type { ElectronApplication, Page } from '@playwright/test';
-import { spawn, type ChildProcess } from 'node:child_process';
-import { join } from 'node:path';
+import type { ChildProcess } from 'node:child_process';
 import {
-  APPS_DESKTOP,
   createNewConversation,
   closeElectronApp,
   launchElectronApp,
   sendMessage,
   waitForBridgeInitialized,
 } from './helpers/electron-setup';
+import { startMockServer } from './helpers/mock-server';
 
-const REPO_ROOT = join(APPS_DESKTOP, '..', '..');
 /** 消息列表容器（既有 #1034/#378 用例的同一选择器）。 */
 const MSG_LIST = 'main [class*="max-w-[760px]"]';
 /** 侧边栏会话卡容器。 */
@@ -96,43 +94,6 @@ const BALLAST_CHARS = 1_000_000;
 const BALLAST_CHUNKS = 3;
 /** 断言注入量下界（远大于 1 MiB 上限，够触发多轮驱逐）。 */
 const MIN_INJECTED_BYTES = 2 * 1024 * 1024;
-
-/** 起一个 mock provider（scripts/ 下的脚本），等它打出启动行。 */
-async function startMockServer(script: string): Promise<{ proc: ChildProcess; mockUrl: string }> {
-  const python = process.env['MIQI_PYTHON_PATH'] || 'python';
-  const port = 20000 + Math.floor(Math.random() * 20000);
-  const proc = spawn(python, [join(REPO_ROOT, 'scripts', script), String(port)], {
-    cwd: REPO_ROOT,
-    stdio: ['ignore', 'pipe', 'pipe'],
-    env: { ...process.env, PYTHONUNBUFFERED: '1' },
-    windowsHide: true,
-  });
-
-  let readyUrl = '';
-  let stderrTail = '';
-  proc.stdout?.on('data', (d) => {
-    const t = String(d);
-    const m = t.match(/http:\/\/127\.0\.0\.1:(\d+)\/v1/);
-    if (m) readyUrl = `http://127.0.0.1:${m[1]}/v1`;
-  });
-  proc.stderr?.on('data', (d) => {
-    stderrTail = (stderrTail + String(d)).slice(-2000);
-  });
-
-  const deadline = Date.now() + 30_000;
-  while (!readyUrl && Date.now() < deadline) {
-    if (proc.exitCode !== null) {
-      throw new Error(`mock ${script} exited early (code ${proc.exitCode}): ${stderrTail}`);
-    }
-    await new Promise((r) => setTimeout(r, 250));
-  }
-  if (!readyUrl) {
-    proc.kill();
-    throw new Error(`mock ${script} startup line not seen in 30s: ${stderrTail}`);
-  }
-  console.log(`[e2e1118] mock ${script} ready at ${readyUrl}`);
-  return { proc, mockUrl: readyUrl };
-}
 
 /** 把所有 provider 指向 mock，并把默认模型钉到 deepseek —— 真实 API 永不被调用。 */
 function patchProvidersToMock(config: any, mockUrl: string): void {

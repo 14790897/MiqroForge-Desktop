@@ -51,7 +51,7 @@
 
 import { test, expect } from '@playwright/test';
 import type { ElectronApplication, Page } from '@playwright/test';
-import { spawn, type ChildProcess } from 'node:child_process';
+import type { ChildProcess } from 'node:child_process';
 import { appendFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import {
@@ -62,8 +62,7 @@ import {
   createNewConversation,
   APPS_DESKTOP,
 } from './helpers/electron-setup';
-
-const REPO_ROOT = join(APPS_DESKTOP, '..', '..');
+import { startMockServer } from './helpers/mock-server';
 
 /** 探针开关：默认关闭。常规 e2e / CI 里这块整体跳过，只有显式 =1 才跑（见文件头）。 */
 const PROBE_ENABLED = process.env['MIQI_1034_PROBE'] === '1';
@@ -81,43 +80,6 @@ const PROBE_JSONL = join(OUT_DIR, `issue1034_probe_${RUN_ID}.jsonl`);
 
 // 17 分钟长跑：关掉录屏/截图/trace —— 附属产物既拖慢采样又占满磁盘。
 test.use({ video: 'off', screenshot: 'off', trace: 'off' });
-
-/** 起一个 mock provider（scripts/ 下的脚本），等它打出启动行。 */
-async function startMockServer(script: string): Promise<{ proc: ChildProcess; mockUrl: string }> {
-  const python = process.env['MIQI_PYTHON_PATH'] || 'python';
-  const port = 20000 + Math.floor(Math.random() * 20000);
-  const proc = spawn(python, [join(REPO_ROOT, 'scripts', script), String(port)], {
-    cwd: REPO_ROOT,
-    stdio: ['ignore', 'pipe', 'pipe'],
-    env: { ...process.env, PYTHONUNBUFFERED: '1' },
-    windowsHide: true,
-  });
-
-  let readyUrl = '';
-  let stderrTail = '';
-  proc.stdout?.on('data', (d) => {
-    const t = String(d);
-    const m = t.match(/http:\/\/127\.0\.0\.1:(\d+)\/v1/);
-    if (m) readyUrl = `http://127.0.0.1:${m[1]}/v1`;
-  });
-  proc.stderr?.on('data', (d) => {
-    stderrTail = (stderrTail + String(d)).slice(-2000);
-  });
-
-  const deadline = Date.now() + 30_000;
-  while (!readyUrl && Date.now() < deadline) {
-    if (proc.exitCode !== null) {
-      throw new Error(`mock ${script} exited early (code ${proc.exitCode}): ${stderrTail}`);
-    }
-    await new Promise((r) => setTimeout(r, 250));
-  }
-  if (!readyUrl) {
-    proc.kill();
-    throw new Error(`mock ${script} startup line not seen in 30s: ${stderrTail}`);
-  }
-  console.log(`[probe1034] mock ${script} ready at ${readyUrl}`);
-  return { proc, mockUrl: readyUrl };
-}
 
 /** 把所有 provider 指向 mock，并把默认模型钉到 deepseek —— 真实 API 永不被调用。 */
 function patchProvidersToMock(config: any, mockUrl: string): void {
