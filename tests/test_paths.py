@@ -36,6 +36,9 @@ def test_normalize_declared_separators_rewrites_only_windows_forms():
     # 真正的 POSIX 绝对路径与 UNC 路径必须原样保留。
     assert normalize_declared_separators("/home/u/a.pdf") == "/home/u/a.pdf"
     assert normalize_declared_separators("//server/share/a.pdf") == "//server/share/a.pdf"
+    # 反斜杠形态的 UNC 同样要保留**两个**前导分隔符：少一个就变成 POSIX 根路径
+    # `/server/share/a.pdf`，那是另一个位置，边界检查也会锚错根。
+    assert normalize_declared_separators(r"\\server\share\a.pdf") == "//server/share/a.pdf"
 
 
 def test_normalize_session_prefixed_accepts_windows_separators(tmp_path):

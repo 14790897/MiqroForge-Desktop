@@ -73,11 +73,14 @@ def normalize_declared_separators(raw: str) -> str:
     the session-prefix rule below would never see it.  Windows
     rooted-relative input (``\\sessions\\key\\files\\x.pdf``) additionally
     loses its single leading separator.  A genuine POSIX absolute path
-    (``/home/...``) and a UNC path (``//server/share``) are left alone: only
-    a leading separator that came from a backslash is dropped.
+    (``/home/...``) is left alone.
+
+    A UNC root keeps **both** leading separators: ``\\\\server\\share\\x``
+    becomes ``//server/share/x``.  Dropping one would silently turn it into
+    the POSIX-rooted ``/server/share/x``, which is a different location.
     """
     normalized = raw.replace("\\", "/")
-    if raw.startswith("\\") and normalized.startswith("/"):
+    if raw.startswith("\\") and not raw.startswith("\\\\") and normalized.startswith("/"):
         return normalized[1:]
     return normalized
 

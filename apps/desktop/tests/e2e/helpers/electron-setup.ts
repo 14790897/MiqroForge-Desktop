@@ -219,6 +219,11 @@ function mainTextLength(page: Page): Promise<number> {
  * SIGKILL if the child ignores SIGTERM, and log the outcome so a leaked child
  * is attributable instead of silent.  Same bounded-shutdown treatment
  * `closeElectronApp` already gives the Electron process.
+ *
+ * The deadline timers are `unref`'d: `Promise.race` does not cancel the loser,
+ * so in the common case (the child exits promptly) a full `graceMs` timer would
+ * otherwise stay pending in the worker — the very kind of stray handle this
+ * function exists to remove.
  */
 export async function stopMockServer(
   proc: ChildProcess | undefined,
@@ -228,11 +233,18 @@ export async function stopMockServer(
   if (!proc || proc.exitCode !== null || proc.signalCode !== null) return;
   const exited = new Promise<void>((resolve) => proc.once('exit', () => resolve()));
   proc.kill('SIGTERM');
-  const timer = new Promise<'timeout'>((resolve) => setTimeout(() => resolve('timeout'), graceMs));
+  const timer = new Promise<'timeout'>((resolve) => {
+    setTimeout(() => resolve('timeout'), graceMs).unref();
+  });
   if ((await Promise.race([exited.then(() => 'exit' as const), timer])) === 'timeout') {
     console.log(`[test] ${label} still alive after ${graceMs}ms — SIGKILL`);
     proc.kill('SIGKILL');
-    await Promise.race([exited, new Promise((resolve) => setTimeout(resolve, 5_000))]);
+    await Promise.race([
+      exited,
+      new Promise((resolve) => {
+        setTimeout(resolve, 5_000).unref();
+      }),
+    ]);
   }
   console.log(`[test] ${label} stopped (code=${proc.exitCode} signal=${proc.signalCode})`);
 }

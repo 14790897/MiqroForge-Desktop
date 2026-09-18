@@ -271,14 +271,18 @@ test.describe('Issue #1131 — 结果文件的「定位」「系统应用打开�
       console.log('[test] ✅ ③ 「预览」渲染出 PDF iframe');
 
       // ── ④ 系统应用打开：必须走 openBytes（主进程写 miqi-open-*.pdf 临时文件）
+      // Match OUR filename, not just `*.pdf`: `tmpdir()` is shared by all four
+      // Playwright workers, so a sibling spec opening its own PDF between the
+      // snapshot and the poll would otherwise satisfy this assertion for us.
       const before = new Set(openBytesTempFiles());
+      const isOurs = (f: string) => !before.has(f) && f.endsWith(filename);
       await page.getByRole('button', { name: '系统应用打开' }).click();
       await expect
-        .poll(() => openBytesTempFiles().filter((f) => !before.has(f)).length, {
+        .poll(() => openBytesTempFiles().filter(isOurs).length, {
           timeout: 20_000,
         })
         .toBeGreaterThan(0);
-      const created = openBytesTempFiles().filter((f) => !before.has(f));
+      const created = openBytesTempFiles().filter(isOurs);
       const bytes = readFileSync(join(tmpdir(), created[0]));
       console.log(`[test] openBytes temp file = ${created[0]} (${bytes.length} bytes)`);
       expect(bytes.length).toBeGreaterThan(0);
