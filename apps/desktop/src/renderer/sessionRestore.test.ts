@@ -6,7 +6,11 @@
  * 所以只有启动时拿 sessions.list 对照才能发现。
  */
 import { describe, expect, it } from 'vitest';
-import { DEFAULT_SESSION_KEY, shouldFallbackToDefaultSession } from './sessionRestore';
+import {
+  DEFAULT_SESSION_KEY,
+  shouldFallbackToDefaultSession,
+  shouldVerifyRestoredSession,
+} from './sessionRestore';
 
 describe('shouldFallbackToDefaultSession', () => {
   it('会话已不存在（store 里查无此 key）→ 回退', () => {
@@ -44,5 +48,32 @@ describe('shouldFallbackToDefaultSession', () => {
     expect(shouldFallbackToDefaultSession('desktop:my-default', [], 'desktop:my-default')).toBe(
       false
     );
+  });
+});
+
+/**
+ * 第八轮两阶段启动的门：非默认哨兵的恢复 key 必须先校验存在性，ChatConsole 才能
+ * 挂载（否则它会用 get-or-create 的 sessions.get 先把幽灵 key 摸一遍——E2E 实测
+ * 抓到 4 次 ghost get + 1 次 ghost delete）。
+ */
+describe('shouldVerifyRestoredSession', () => {
+  it('恢复出来的是普通会话 key → 必须先校验', () => {
+    expect(shouldVerifyRestoredSession('desktop:1789704154596')).toBe(true);
+    expect(shouldVerifyRestoredSession('doc:月度报告')).toBe(true);
+  });
+
+  it('默认哨兵不用校验（它就是要回退到的目标）', () => {
+    expect(shouldVerifyRestoredSession(DEFAULT_SESSION_KEY)).toBe(false);
+  });
+
+  it('读不到 lastSession（null / undefined / 空串）→ 不用校验', () => {
+    expect(shouldVerifyRestoredSession(null)).toBe(false);
+    expect(shouldVerifyRestoredSession(undefined)).toBe(false);
+    expect(shouldVerifyRestoredSession('')).toBe(false);
+  });
+
+  it('自定义默认 key 时同样成立', () => {
+    expect(shouldVerifyRestoredSession('desktop:9', 'desktop:my-default')).toBe(true);
+    expect(shouldVerifyRestoredSession('desktop:my-default', 'desktop:my-default')).toBe(false);
   });
 });
