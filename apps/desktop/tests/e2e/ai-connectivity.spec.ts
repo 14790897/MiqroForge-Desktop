@@ -18,6 +18,12 @@
  *   5. Streaming delivery   — onProgress / onFinal events
  *   6. React render         — <main> textContent stabilisation
  *
+ * The reply is asserted on the ASSISTANT bubble
+ * ([data-testid="chat-message-assistant"]), never on a <main>-scoped text
+ * match: the marker is also inside the user's own prompt (and in the session
+ * title derived from it), so a main-scoped check passes with no reply at all
+ * (#1120).
+ *
  * When any layer fails the test throws with a diagnostic message that
  * pinpoints the stage, making CI failures self-documenting.
  *
@@ -30,6 +36,7 @@ import { _electron as electron, test, expect } from '@playwright/test';
 import type { ElectronApplication, Page } from '@playwright/test';
 import {
   LLM_TIMEOUT,
+  PROVIDER_UNAVAILABLE_TEXT,
   waitForInputReady,
   sendMessage,
   waitForResponseComplete,
@@ -117,11 +124,33 @@ test.describe('AI Connectivity', () => {
       console.log('[ai-connectivity] Waiting for AI response…');
       await waitForResponseComplete(page);
 
-      // Confirm the marker is visible in <main> — the final proof
-      // that the model replied AND the UI rendered it.
-      const markerEl = page.locator('main').getByText(marker, { exact: false }).first();
-      await markerEl.scrollIntoViewIfNeeded().catch(() => {});
-      await expect(markerEl).toBeVisible({ timeout: 15_000 });
+      // A provider-side failure (quota / rate limit / unreachable resp. 4xx)
+      // ends the turn with the generic unavailable bubble and NO reply, so
+      // textContent still stabilises and waitForResponseComplete returns
+      // happily.  Surface it as a probe failure with the stage named instead
+      // of letting the full (expensive) suite run (#1120).
+      if ((await page.getByText(PROVIDER_UNAVAILABLE_TEXT).count()) > 0) {
+        throw new Error(
+          'AI connectivity check failed (stage=chat): the turn ended with the provider ' +
+            `unavailable bubble ("${PROVIDER_UNAVAILABLE_TEXT}") — provider quota / secrets / upstream`
+        );
+      }
+
+      // Confirm the marker shows up in an ASSISTANT bubble — the final proof
+      // that the model replied AND the UI rendered it.  Scoping matters: the
+      // marker text is also inside the user's own prompt (`只回答OK_…`) and in
+      // the session title derived from it, both of which live under <main>; a
+      // main-scoped `.first()` matches the user's own message and passes even
+      // when the model never replied (#1120).
+      const reply = page
+        .getByTestId('chat-message-assistant')
+        .filter({ hasText: marker, visible: true })
+        .first();
+      await reply.scrollIntoViewIfNeeded().catch(() => {});
+      await expect(
+        reply,
+        `AI connectivity check failed (stage=chat): no assistant reply containing "${marker}"`
+      ).toBeVisible({ timeout: 15_000 });
 
       console.log(
         `[ai-connectivity] ✅ Full chat pipeline verified: ` +
