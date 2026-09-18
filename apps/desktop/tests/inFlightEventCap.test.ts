@@ -199,6 +199,61 @@ describe('#1034 在途事件缓存上限', () => {
     ).toEqual(['c1', 'c2']);
   });
 
+  // #1118 第八轮 P3：上面那条只测了一个到达顺序。合并的判定是「同 stream + 同
+  // tool_call_id」两个键一起比的，两个键的独立性都得与到达顺序无关——回放端按
+  // (stream, tool_call_id) 归行，任何一种顺序下错了都会把两条工具输出串成一条。
+  describe('合并的身份键（两种到达顺序对称）', () => {
+    const orders = [
+      { label: 'c1 → c2', seq: ['c1', 'c2'] },
+      { label: 'c2 → c1', seq: ['c2', 'c1'] },
+    ] as const;
+
+    for (const { label, seq } of orders) {
+      it(`同 stream、不同 tool_call_id（${label}）→ 两条独立事件，顺序保持`, () => {
+        const buf = createInFlightSnapshot();
+        pushInFlightEvent(buf, progress('a', 'stdout', seq[0], 1));
+        pushInFlightEvent(buf, progress('b', 'stdout', seq[1], 2));
+
+        expect(buf.events.length).toBe(2);
+        expect(buf.events.map((e) => (e.data as { tool_call_id: string }).tool_call_id)).toEqual([
+          seq[0],
+          seq[1],
+        ]);
+        expect(buf.events.map((e) => (e.data as { delta: string }).delta)).toEqual(['a', 'b']);
+        // 归行结果：两条各自独立的文本，谁都没被并进对方
+        expect(concatDeltas(buf, 'stdout', seq[0])).toBe('a');
+        expect(concatDeltas(buf, 'stdout', seq[1])).toBe('b');
+      });
+
+      it(`同 stream、同 tool_call_id（${label} 之后）→ 合并成一条，时间戳取最新`, () => {
+        const buf = createInFlightSnapshot();
+        const id = seq[0];
+        pushInFlightEvent(buf, progress('a', 'stdout', id, 1));
+        pushInFlightEvent(buf, progress('b', 'stdout', id, 2));
+
+        expect(buf.events.length).toBe(1);
+        expect((buf.events[0].data as { delta: string }).delta).toBe('ab');
+        expect(concatDeltas(buf, 'stdout', id)).toBe('ab');
+        expect(buf.events[0].timestamp).toBe(2); // watchdog 读最新时间戳
+      });
+    }
+
+    it('一边带 tool_call_id、一边没有 → 不合并（`?? null` 归一化后身份不同）', () => {
+      // 缺 id 的 delta 属于「没有具名 tool call」那一行，与具名行不能混。
+      const buf = createInFlightSnapshot();
+      pushInFlightEvent(buf, {
+        type: 'progress',
+        data: { stream: 'stdout', delta: 'a' },
+        timestamp: 1,
+      } as Ev);
+      pushInFlightEvent(buf, progress('b', 'stdout', 'c1', 2));
+
+      expect(buf.events.length).toBe(2);
+      expect((buf.events[0].data as { delta: string }).delta).toBe('a');
+      expect((buf.events[1].data as { delta: string }).delta).toBe('b');
+    });
+  });
+
   it('没有 delta 的 progress（如 doc_progress）不参与折叠', () => {
     const buf = createInFlightSnapshot();
     pushInFlightEvent(buf, docProgress('a.docx'));
