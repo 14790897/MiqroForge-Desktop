@@ -7,6 +7,7 @@ import {
   crashRecovery,
   evaluateReloadBudget,
   handleRendererCrash,
+  reloadFailedLogLine,
   reloadLogLine,
   reloadSkippedLogLine,
 } from '../src/main/crashRecovery';
@@ -24,43 +25,66 @@ import type { CrashRecoverableWindow } from '../src/main/crashRecovery';
 const T0 = 1_700_000_000_000; // 固定时间基准，避免依赖真实时钟
 
 /**
- * 假窗口：`CrashRecoverableWindow` 的最小实现。
+ * 假窗口：`CrashRecoverableWindow` 的最小实现（含 close/closed 时序）。
  *
  * id 自增且跨用例唯一——`handleRendererCrash` 写的是模块级单例
  * `crashRecovery`，各用例用不同 id 才不会互相借预算。
  */
 let nextWindowId = 1000;
 
-function createFakeWindow(options: { destroyed?: boolean; webContentsDestroyed?: boolean } = {}) {
-  const id = nextWindowId++;
+function createFakeWindow(
+  options: {
+    destroyed?: boolean;
+    webContentsDestroyed?: boolean;
+    /** 指定 id：模拟 Electron 复用 `BrowserWindow.id` 重建窗口。 */
+    id?: number;
+    /** `reload()` 抛出的错误消息（模拟窗口正好在重载途中被销毁）。 */
+    reloadThrows?: string;
+  } = {}
+) {
+  const id = options.id ?? nextWindowId++;
   const state = {
     destroyed: options.destroyed ?? false,
     webContentsDestroyed: options.webContentsDestroyed ?? false,
     reloads: 0,
   };
-  const closedListeners: Array<() => void> = [];
+  const listeners: Record<'close' | 'closed', Array<() => void>> = { close: [], closed: [] };
+  // 累计登记数（fire 会清空数组，所以另记一份）：用来断言 watch 的幂等性
+  const registered: Record<'close' | 'closed', number> = { close: 0, closed: 0 };
   const win = {
     id,
     isDestroyed: () => state.destroyed,
-    once: (event: 'closed', listener: () => void) => {
-      if (event === 'closed') closedListeners.push(listener);
+    once: (event: 'close' | 'closed', listener: () => void) => {
+      registered[event] += 1;
+      listeners[event].push(listener);
     },
     webContents: {
       isDestroyed: () => state.webContentsDestroyed,
       reload: () => {
+        if (options.reloadThrows) throw new Error(options.reloadThrows);
         state.reloads += 1;
       },
     },
   } satisfies CrashRecoverableWindow;
 
+  const fire = (event: 'close' | 'closed') => {
+    listeners[event].splice(0).forEach((listener) => listener());
+  };
+
   return {
     id,
     win,
-    /** 窗口销毁（Electron 的 `closed` 事件）。 */
+    /** 窗口开始关闭、尚未销毁（Electron 的 `close` 事件）。 */
+    beginClose: () => fire('close'),
+    /** 窗口关闭全流程：`close` → 销毁（含 webContents）→ `closed`。 */
     close: () => {
+      fire('close');
       state.destroyed = true;
-      closedListeners.splice(0).forEach((listener) => listener());
+      state.webContentsDestroyed = true;
+      fire('closed');
     },
+    /** 累计登记过的生命周期监听数（断言 watch / trackerFor 的幂等性）。 */
+    registered: () => ({ ...registered }),
     reloads: () => state.reloads,
   };
 }
@@ -150,6 +174,17 @@ describe('日志行格式（期望行为 2：可检索）', () => {
     expect(line).toContain('reason=oom');
     expect(line).toContain(`reloadsInWindow=${MAX_RELOADS_PER_WINDOW}`);
     expect(line).toContain(`max=${MAX_RELOADS_PER_WINDOW}`);
+  });
+
+  it('重载失败的行带 reason/attempt 与错误详情，且与「超预算」区分开（#1035 复审 P2）', () => {
+    const line = reloadFailedLogLine('oom', 2, new Error('Object has been destroyed'));
+    expect(line).toBe(
+      '[main] renderer-reload-failed: attempt=2 reason=oom error=Object has been destroyed'
+    );
+    // 不是 skipped：一条是"没做动作"，一条是"做了但失败"，排查方向不同
+    expect(line).not.toContain('renderer-reload-skipped');
+    // 非 Error 的抛出物也要留下可读文本，不能变成 "undefined"
+    expect(reloadFailedLogLine('crashed', 1, 'boom')).toContain('error=boom');
   });
 });
 
@@ -268,6 +303,52 @@ describe('CrashRecoveryRegistry — 预算按 BrowserWindow 分表（#1035 复�
     expect(registry.trackerFor(a.win).onRendererCrash(T0).attempt).toBe(1);
     expect(registry.trackerFor(b.win).onRendererCrash(T0).attempt).toBe(2);
   });
+
+  it('canRecover：活着的窗口 true；close 后 false；closed 清掉标记', () => {
+    const registry = new CrashRecoveryRegistry();
+    const a = createFakeWindow();
+    registry.watch(a.win);
+    expect(registry.canRecover(a.win)).toBe(true);
+
+    a.beginClose();
+    expect(registry.canRecover(a.win), 'close 已发、尚未销毁 = 不可恢复').toBe(false);
+
+    a.close();
+    // 窗口确实没了：仍然是不可恢复（这回是 isDestroyed 拦下的）
+    expect(registry.canRecover(a.win)).toBe(false);
+    // 而且 closing 标记也不能留在表里——否则复用同一 id 的新窗口会被连坐
+    const revived = createFakeWindow({ id: a.id });
+    registry.watch(revived.win);
+    expect(registry.canRecover(revived.win), '同 id 重建的窗口不得继承上一个的 closing').toBe(true);
+  });
+
+  it('watch 幂等：重复登记不会叠加 close/closed 监听', () => {
+    const registry = new CrashRecoveryRegistry();
+    const a = createFakeWindow();
+    registry.watch(a.win);
+    registry.watch(a.win); // 第二次起应是 no-op
+    registry.watch(a.win);
+
+    // 幂等是 watch 自己的职责：监听器只在首次登记（trackerFor 内部也会调它，
+    // 窗口创建时 index.ts 已经调过一次，重复登记是常态而不是异常）
+    expect(a.registered()).toEqual({ close: 1, closed: 1 });
+
+    a.beginClose();
+    expect(registry.canRecover(a.win)).toBe(false);
+    a.close();
+    expect(registry.size).toBe(0);
+  });
+
+  it('trackerFor 自己也会登记生命周期（直接调用方不至于没有 close/closed 记录）', () => {
+    const registry = new CrashRecoveryRegistry();
+    const a = createFakeWindow();
+
+    registry.trackerFor(a.win); // 不走 watch 的调用方
+    a.beginClose();
+    expect(registry.canRecover(a.win)).toBe(false);
+    a.close();
+    expect(registry.size).toBe(0);
+  });
 });
 
 describe('handleRendererCrash — 每个窗口独立预算（#1035 复审）', () => {
@@ -319,29 +400,120 @@ describe('handleRendererCrash — 每个窗口独立预算（#1035 复审）', (
     expect(warns).toEqual([reloadSkippedLogLine('oom', MAX_RELOADS_PER_WINDOW)]);
   });
 
-  it('窗口已销毁：不重载，也不建条目（销毁后不会再发 closed，建了就是残留）', () => {
-    const destroyed = createFakeWindow({ destroyed: true });
+  it('窗口已销毁：不重载、不建条目、不打任何 reloaded/skipped 日志', () => {
+    const { logs, warns } = captureCrashLogs();
     const sizeBefore = crashRecovery.size;
+    const destroyed = createFakeWindow({ destroyed: true });
 
     handleRendererCrash(destroyed.win, 'oom', 1, T0);
 
     expect(destroyed.reloads()).toBe(0);
+    // 已销毁的窗口不会再发 `closed`，建了条目就是永久残留
     expect(crashRecovery.size).toBe(sizeBefore);
+    // 日志里不许出现"已重载/已跳过"——恢复动作根本没轮到执行，那是误导
+    expect(logs).toEqual([]);
+    expect(warns).toEqual([]);
   });
 
-  it('webContents 已销毁：不重载，且不消耗该窗口的预算', () => {
-    const { logs } = captureCrashLogs();
+  it('webContents 已销毁：不重载、不建条目、不消耗预算', () => {
+    const { logs, warns } = captureCrashLogs();
+    const sizeBefore = crashRecovery.size;
     const half = createFakeWindow({ webContentsDestroyed: true });
 
     handleRendererCrash(half.win, 'oom', 1, T0);
 
     expect(half.reloads()).toBe(0);
-    // 判定通过但没记成重载 ⇒ 没有 renderer-reloaded 行；预算未被用掉
+    expect(crashRecovery.size).toBe(sizeBefore);
     expect(logs).toEqual([]);
-    expect(crashRecovery.trackerFor(half.win).onRendererCrash(T0).attempt).toBe(1);
+    expect(warns).toEqual([]);
+    // 预算没被用掉：这个窗口之后（webContents 活过来）的首次崩溃仍是 attempt=1
+    const revived = crashRecovery.trackerFor(half.win);
+    expect(revived.onRendererCrash(T0).attempt).toBe(1);
+    expect(revived.onRendererCrash(T0).recent).toEqual([]);
   });
 
   it('null 窗口：静默返回（主窗口尚未创建时无从归属）', () => {
     expect(() => handleRendererCrash(null, 'oom', 1, T0)).not.toThrow();
+  });
+
+  it('reload 抛异常：不谎报已重载，改打 renderer-reload-failed（#1035 复审 P2）', () => {
+    const { logs, warns } = captureCrashLogs();
+    const flaky = createFakeWindow({ reloadThrows: 'Object has been destroyed' });
+
+    expect(() => handleRendererCrash(flaky.win, 'oom', 1, T0)).not.toThrow();
+
+    expect(logs, 'reload 没成功就不该有 renderer-reloaded 行').toEqual([]);
+    expect(warns).toEqual([reloadFailedLogLine('oom', 1, new Error('Object has been destroyed'))]);
+    expect(warns[0]).toContain('[main] renderer-reload-failed:');
+    expect(warns[0]).toContain('reason=oom');
+    expect(warns[0]).toContain('error=Object has been destroyed');
+    // 窗口还活着（只是这次重载失败）：再崩一次序号递增，说明预算按"尝试过的
+    // 动作"算——否则反复失败的窗口会无限刷日志行。
+    expect(crashRecovery.trackerFor(flaky.win).onRendererCrash(T0 + 1).attempt).toBe(2);
+  });
+});
+
+/**
+ * #1035 复审 P1：`close` 与 `render-process-gone` 的竞态。
+ *
+ * Electron 的窗口关闭是 `close`（开始关、尚未销毁）→ 销毁 → `closed` 三步，
+ * 中间这个窗口 `isDestroyed()` 还是 false。崩溃事件正好落在这个缝里时，旧实现
+ * 会照着"窗口没销毁"去做恢复动作：给一个正在拆的窗口续命（用户看到关不掉的
+ * 窗口），reload 本身也可能在拆到一半时抛异常。这里用假窗口把三种时序都摆出来。
+ */
+describe('生命周期守卫 — close / destroyed 与 crash 的竞态（#1035 复审 P1）', () => {
+  it('已进入关闭流程（close 已发、尚未 destroyed）：不重载、不建条目、不打日志', () => {
+    const { logs, warns } = captureCrashLogs();
+    const sizeBefore = crashRecovery.size;
+    const win = createFakeWindow();
+    crashRecovery.watch(win.win); // index.ts 在窗口创建时就会登记
+    win.beginClose();
+
+    // 前提：此时窗口还没销毁——旧实现只看 isDestroyed()，这一条会漏过去
+    expect(win.win.isDestroyed()).toBe(false);
+    expect(win.win.webContents.isDestroyed()).toBe(false);
+
+    handleRendererCrash(win.win, 'oom', 1, T0);
+
+    expect(win.reloads()).toBe(0);
+    expect(crashRecovery.size).toBe(sizeBefore);
+    expect(logs).toEqual([]);
+    expect(warns).toEqual([]);
+  });
+
+  it('崩溃先到、close 后到：先正常重载；关闭期间的再次崩溃不再动', () => {
+    const { logs, warns } = captureCrashLogs();
+    const win = createFakeWindow();
+
+    handleRendererCrash(win.win, 'oom', 1, T0);
+    expect(win.reloads(), '窗口还开着：第一次崩溃照常重载').toBe(1);
+
+    win.beginClose();
+    handleRendererCrash(win.win, 'oom', 1, T0 + 1);
+
+    expect(win.reloads(), '窗口正在关闭：不得再重载').toBe(1);
+    expect(logs).toEqual([reloadLogLine('oom', 1)]);
+    expect(warns, '关闭中的崩溃不产生任何跳过/失败日志（压根没轮到动作）').toEqual([]);
+    // 这次崩溃也没消耗预算：窗口内仍只有第一次那条记录
+    expect(crashRecovery.trackerFor(win.win).onRendererCrash(T0 + 1).recent).toHaveLength(1);
+  });
+
+  it('窗口销毁后才到达的崩溃：不泄漏条目、不重载（先崩后关的收尾）', () => {
+    const { logs, warns } = captureCrashLogs();
+    const sizeBefore = crashRecovery.size;
+    const win = createFakeWindow();
+
+    handleRendererCrash(win.win, 'crashed', 1, T0);
+    expect(win.reloads()).toBe(1);
+    expect(crashRecovery.size).toBe(sizeBefore + 1);
+
+    win.close(); // close → destroyed → closed
+    expect(crashRecovery.size, '窗口销毁即清账').toBe(sizeBefore);
+
+    handleRendererCrash(win.win, 'crashed', 1, T0 + 1);
+    expect(win.reloads(), '迟到的崩溃事件不得再触发恢复动作').toBe(1);
+    expect(crashRecovery.size, '不得为已销毁窗口重建条目（它不会再发 closed）').toBe(sizeBefore);
+    expect(logs).toEqual([reloadLogLine('crashed', 1)]);
+    expect(warns).toEqual([]);
   });
 });

@@ -40,6 +40,7 @@
 - [confirm-card-issue-714-fix](confirm-card-issue-714-fix.md) — #714 确认卡排队串行方案要点与踩坑
 - [mcp-desktop-wiring](mcp-desktop-wiring.md) — MCP 桌面主路径接线 + anyio cancel-scope 坑
 - [pr-613-skill-discovery](pr-613-skill-discovery.md) — 技能发现：一条全局规则胜过触发词机制
+- [1094-truncated-tool-args-refusal](1094-truncated-tool-args-refusal.md) — #1094 输出上限截断的工具参数：标记 truncated + 拒执回显防孤儿 + 纯文本留痕
 
 ### 计费 / 平台集成
 

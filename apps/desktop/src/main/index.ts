@@ -8,7 +8,7 @@ import { writeMainProcessLog } from './electron-log';
 import { createSplash, closeSplash } from './splash';
 import { safeWrite, guardStdStreams } from './console-guard';
 import { sendToWindow } from './frame-send';
-import { handleRendererCrash } from './crashRecovery';
+import { crashRecovery, handleRendererCrash } from './crashRecovery';
 import { WINDOW_MIN_WIDTH } from '../shared/layout';
 
 const originalConsoleLog = console.log.bind(console);
@@ -75,6 +75,12 @@ function createWindow(): void {
       );
     }
   );
+
+  // #1035 复审 P1：生命周期登记**必须在这里**（窗口创建时），不能等崩溃发生
+  // 才登记——`close` 是一次性事件，"窗口正在关闭"这个状态只有提前监听了才
+  // 拿得到；等崩溃到来时窗口可能已经在关，恢复动作会去给一个正在拆的窗口
+  // 续命。登记后 handleRendererCrash 才分得清「还能恢复」和「碰不得了」。
+  crashRecovery.watch(mainWindow);
 
   // #1035 复审：预算按窗口分开记，所以崩溃必须归到「发生崩溃的这个窗口」——
   // 闭包固定创建时的实例，不走可变的 mainWindow（macOS activate 会重建它）。

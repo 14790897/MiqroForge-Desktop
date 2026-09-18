@@ -44,6 +44,7 @@ import {
   MemoryLessonUnlearnInput,
   SkillsGetInput,
   FilesReadInput,
+  FilesOpenInput,
   FilesWriteInput,
   FilesSaveAsInput,
   McpUpsertInput,
@@ -77,12 +78,14 @@ import {
   wslKernelPresent,
 } from './wsl-state';
 import {
+  buildWslSearchScript,
   getConfigDir,
   getConfigPath,
   getWorkspacePath,
   isWithinCanonicalWorkspace,
   readLocalConfig,
   resolveWorkspacePath,
+  shellEscape,
 } from './workspace-path';
 import { clampMinToWindow, panelWindowMinWidth } from '../../shared/layout';
 
@@ -236,6 +239,38 @@ async function submitFeedbackToPlatform(input: {
   return platform;
 }
 
+/**
+ * Extra allowed roots for a session-keyed file operation (#1062).
+ *
+ * The root is derived server-side: a renderer that could name a root would make
+ * every containment check in this file meaningless (#955), so the renderer names
+ * a *session* and the bridge answers with its workspace.
+ *
+ * A failed lookup is not the same answer as "this session is not folder-bound".
+ * The first means we do not know where the session's files live, and quietly
+ * carrying on with the global workspace would re-anchor a session-relative path
+ * onto the wrong root — a `report.md` in the default workspace would answer for
+ * a bound session's `report.md`.  The two are kept apart so callers can fail
+ * closed on the first.
+ */
+async function sessionWorkspaceRoots(
+  bridge: BridgeManager,
+  sessionKey?: string
+): Promise<{ ok: true; roots: string[] } | { ok: false; error: string }> {
+  // No session key: the caller is operating in the default workspace, which is
+  // an allowed root in its own right.  Nothing to resolve, nothing to fail.
+  if (!sessionKey) return { ok: true, roots: [] };
+
+  const res = await bridge.sendSafeWithError('sessions.workspace', {
+    session_key: sessionKey,
+  });
+  if (!res.ok) {
+    return { ok: false, error: res.error };
+  }
+  const workspace = (res.value as { workspace?: string | null } | null)?.workspace;
+  return { ok: true, roots: typeof workspace === 'string' && workspace ? [workspace] : [] };
+}
+
 export function registerIpcHandlers(bridge: BridgeManager): void {
   // -----------------------------------------------------------------------
   // Runtime
@@ -302,78 +337,74 @@ export function registerIpcHandlers(bridge: BridgeManager): void {
     };
     // 通道异常结束（bridge 抛错）也算 turn 结束，否则登记表里会留下永远不会被
     // 摘掉的"在飞"会话，下一次崩溃的恢复提示就会撒谎。
-    const result = await bridge
-      .send(
-        'chat.send',
-        {
-          content: input.content,
-          session_key: sessionKey,
-          thread_id: (input as any).thread_id ?? undefined,
-          mode: input.mode,
-          attachments: input.attachments,
-          workspace: input.workspace,
-          resume_turn_id: (input as any).resume_turn_id ?? undefined,
-        },
-        (type: string, data: unknown) => {
-          if (type === 'progress') {
-            safeSend('chat:progress', data);
-          } else if (type === 'final') {
-            safeSend('chat:final', data);
-          } else if (type === 'error') {
-            safeSend('chat:error', data);
-          } else if (type === 'aborted') {
-            safeSend('chat:aborted', data);
-          } else if (type === 'approval_request') {
-            safeSend('approval:request', data);
-          } else if (type === 'approval_cleared') {
-            safeSend('approval:cleared', data);
-          } else if (type === 'user_input_requested') {
-            safeSend('userInput:request', data);
-          } else if (type === 'user_input_resolved') {
-            safeSend('userInput:resolved', data);
-          } else if (type === 'subagent_result') {
-            safeSend('chat:subagent_result', data);
-          } else if (type === 'slurm_job_running') {
-            // Slurm 作业 RUNNING 扣费（issue #927）：主进程发起扣费（10 分/次，
-            // 按作业 ID 去重），结果以 #915 的 points 事件流在聊天区展示。
-            // 作业已在运行，扣费失败（余额不足等）不阻断作业，仅记录并提示。
-            void (async () => {
-              const { getQraftService } = await import('../qraft/ipc');
-              const payload = (data ?? {}) as Record<string, unknown>;
-              const result = await getQraftService().chargeSlurmJob({
-                charge_id: String(payload.charge_id ?? ''),
-                job_id: String(payload.job_id ?? ''),
-                server_name: String(payload.server_name ?? ''),
-                tool_name: String(payload.tool_name ?? ''),
-                args_summary: String(payload.args_summary ?? ''),
-                session_key: String(payload.session_key ?? ''),
-                turn_id: String(payload.turn_id ?? ''),
-              });
-              // 去重命中（该作业已计费过）：不当作新的扣费播报，聊天区
-              // 不出现重复的「已扣 10 积分」（CodeRabbit #936 评审）。
-              if (result.dedup) return;
-              safeSend('chat:progress', {
-                stream: 'points',
-                type: result.ok ? 'billed' : 'blocked',
-                points_cost: 10,
-                balance: result.balance ?? null,
-                message: result.ok
-                  ? `Slurm 作业已扣 10 积分，可用余额 ${result.balance}`
-                  : (result.message ?? 'Slurm 作业计费失败'),
-              });
-            })().catch((err) => {
-              console.error(
-                `[qraft] slurm 计费处理异常：${err instanceof Error ? err.message : err}`
-              );
+    const result = await bridge.send(
+      'chat.send',
+      {
+        content: input.content,
+        session_key: sessionKey,
+        thread_id: (input as any).thread_id ?? undefined,
+        mode: input.mode,
+        attachments: input.attachments,
+        workspace: input.workspace,
+        resume_turn_id: (input as any).resume_turn_id ?? undefined,
+      },
+      (type: string, data: unknown) => {
+        if (type === 'progress') {
+          safeSend('chat:progress', data);
+        } else if (type === 'final') {
+          safeSend('chat:final', data);
+        } else if (type === 'error') {
+          safeSend('chat:error', data);
+        } else if (type === 'aborted') {
+          safeSend('chat:aborted', data);
+        } else if (type === 'approval_request') {
+          safeSend('approval:request', data);
+        } else if (type === 'approval_cleared') {
+          safeSend('approval:cleared', data);
+        } else if (type === 'user_input_requested') {
+          safeSend('userInput:request', data);
+        } else if (type === 'user_input_resolved') {
+          safeSend('userInput:resolved', data);
+        } else if (type === 'subagent_result') {
+          safeSend('chat:subagent_result', data);
+        } else if (type === 'slurm_job_running') {
+          // Slurm 作业 RUNNING 扣费（issue #927）：主进程发起扣费（10 分/次，
+          // 按作业 ID 去重），结果以 #915 的 points 事件流在聊天区展示。
+          // 作业已在运行，扣费失败（余额不足等）不阻断作业，仅记录并提示。
+          void (async () => {
+            const { getQraftService } = await import('../qraft/ipc');
+            const payload = (data ?? {}) as Record<string, unknown>;
+            const result = await getQraftService().chargeSlurmJob({
+              charge_id: String(payload.charge_id ?? ''),
+              job_id: String(payload.job_id ?? ''),
+              server_name: String(payload.server_name ?? ''),
+              tool_name: String(payload.tool_name ?? ''),
+              args_summary: String(payload.args_summary ?? ''),
+              session_key: String(payload.session_key ?? ''),
+              turn_id: String(payload.turn_id ?? ''),
             });
-          } else if (type === 'chat:delta' || type === 'delta') {
-            safeSend('chat:progress', data);
-          }
+            // 去重命中（该作业已计费过）：不当作新的扣费播报，聊天区
+            // 不出现重复的「已扣 10 积分」（CodeRabbit #936 评审）。
+            if (result.dedup) return;
+            safeSend('chat:progress', {
+              stream: 'points',
+              type: result.ok ? 'billed' : 'blocked',
+              points_cost: 10,
+              balance: result.balance ?? null,
+              message: result.ok
+                ? `Slurm 作业已扣 10 积分，可用余额 ${result.balance}`
+                : (result.message ?? 'Slurm 作业计费失败'),
+            });
+          })().catch((err) => {
+            console.error(
+              `[qraft] slurm 计费处理异常：${err instanceof Error ? err.message : err}`
+            );
+          });
+        } else if (type === 'chat:delta' || type === 'delta') {
+          safeSend('chat:progress', data);
         }
-      )
-      .catch((err) => {
-        throw err;
-      });
+      }
+    );
 
     return result;
   });
@@ -1896,8 +1927,19 @@ for m in ("pydantic", "httpx", "loguru"):
     });
 
   async function findFileInWsl(
-    relPath: string
+    relPath: string,
+    sessionKey?: string,
+    opts: { allowGlobalWorkspace?: boolean } = {}
   ): Promise<{ wslAbsPath: string; distro: string } | null> {
+    // Every lookup is scoped to ONE session.  The old script globbed
+    // `/tmp/miqi-sandboxes/*/home/miqi/workspace/` and `sessions/*/files/`, so a
+    // relative name that existed in another session's files dir matched there —
+    // the file was then copied into *this* session's root and passed the
+    // canonical check on the destination, i.e. cross-session disclosure
+    // (#1103 review).  Without a session key there is nothing to scope to, so
+    // the fallback is refused rather than widened.
+    if (!sessionKey) return null;
+
     const execOpts = { timeout: 10000, encoding: 'utf8' as const, windowsHide: true };
     // List WSL distros
     let distros: string[] = [];
@@ -1913,22 +1955,9 @@ for m in ("pydantic", "httpx", "loguru"):
 
     // Pass relPath inline as a positional argument to the bash script so
     // WSL interop does not need to import it from the Windows environment.
-    const escapedRelPath = shellEscape(relPath);
-    const searchScript =
-      `RP=$'${escapedRelPath}'\n` +
-      `for d in /tmp/miqi-sandboxes/*/home/miqi/workspace/; do\n` +
-      `  if [ -f "$d$RP" ]; then echo "$d$RP"; exit 0; fi\n` +
-      `  for s in "$d"sessions/*/files/; do\n` +
-      `    if [ -f "$s$RP" ]; then echo "$s$RP"; exit 0; fi\n` +
-      `  done\n` +
-      `done\n` +
-      // Also search the WSL home workspace (where Python tools write files directly)
-      `ws="$HOME/.miqi/workspace"\n` +
-      `if [ -f "$ws/$RP" ]; then echo "$ws/$RP"; exit 0; fi\n` +
-      `for s in "$ws"/sessions/*/files/; do\n` +
-      `  if [ -f "$s/$RP" ]; then echo "$s/$RP"; exit 0; fi\n` +
-      `done\n` +
-      `exit 1\n`;
+    // The script canonicalizes both the candidate and its root inside WSL to
+    // reject workspace symlinks that point outside (#1103 review).
+    const searchScript = buildWslSearchScript(relPath, sessionKey, opts);
 
     for (const distro of distros) {
       try {
@@ -1943,9 +1972,6 @@ for m in ("pydantic", "httpx", "loguru"):
     }
     return null;
   }
-
-  /** Escape a string for safe embedding in a single-quoted bash argument. */
-  const shellEscape = (s: string) => s.replace(/'/g, "'\\''");
 
   async function copyFromWsl(
     wslAbsPath: string,
@@ -1981,9 +2007,31 @@ for m in ("pydantic", "httpx", "loguru"):
 
   // -- Open file with system default application -------------------------
   ipcMain.handle(IPC.FILES_OPEN_EXTERNAL, async (_event, payload: unknown) => {
-    const p = payload as { path: string };
-    const raw = p.path;
-    const absolutePath = resolveWorkspacePath(raw);
+    const parsed = FilesOpenInput.safeParse(payload);
+    if (!parsed.success) {
+      return { opened: false, path: '', error: 'Invalid path payload' };
+    }
+    const raw = parsed.data.path;
+    // #1062: 文件夹绑定会话的产物落在会话自己的工作区，作为额外允许根由服务端推导。
+    // 解析不出来时 fail closed：宁可这次打开失败，也不要把会话相对路径重新锚到
+    // 全局工作区上——那会打开另一个同名文件。
+    const sessionRoots = await sessionWorkspaceRoots(bridge, parsed.data.session_key);
+    if (!sessionRoots.ok) {
+      return {
+        opened: false,
+        path: raw,
+        error: `无法解析会话工作区，已拒绝打开以免定位到错误的文件：${sessionRoots.error}`,
+      };
+    }
+    const extraRoots = sessionRoots.roots;
+    // #1062: 解析必须在 try 内——工作区外路径会 throw，否则异常直接变成 IPC
+    // rejection，渲染层拿不到 {opened:false,error} 而静默失败。
+    let absolutePath: string;
+    try {
+      absolutePath = resolveWorkspacePath(raw, extraRoots);
+    } catch (e: any) {
+      return { opened: false, path: raw, error: e?.message ?? String(e) };
+    }
 
     // On Windows the file may live inside a WSL sandbox.
     const candidates: string[] = [absolutePath];
@@ -2005,9 +2053,16 @@ for m in ("pydantic", "httpx", "loguru"):
       }
 
       try {
-        const found = await findFileInWsl(relPath);
+        const found = await findFileInWsl(relPath, parsed.data.session_key, {
+          // #1103 review: a folder-bound session resolves `relPath` against the
+          // bound folder.  If the miss fell back to the global WSL workspace,
+          // the hit would be copied into the bound folder (hostTarget below)
+          // and opened — the same wrong-root rebinding already fixed for
+          // absolute paths, one stage later.
+          allowGlobalWorkspace: extraRoots.length === 0,
+        });
         if (found) {
-          const hostTarget = join(getWorkspacePath(), relPath);
+          const hostTarget = join(extraRoots[0] ?? getWorkspacePath(), relPath);
           const copied = await copyFromWsl(found.wslAbsPath, found.distro, hostTarget);
           if (copied) candidates.push(hostTarget);
           candidates.push(`\\\\wsl$\\${found.distro}\\${found.wslAbsPath.replace(/\//g, '\\')}`);
@@ -2026,7 +2081,7 @@ for m in ("pydantic", "httpx", "loguru"):
         // WSL UNC paths live inside the sandbox distro, not on the host — skip
         // the host-workspace canonical check (relPath was vetted above).
         const isWslUnc = candidate.startsWith('\\\\wsl$');
-        if (!isWslUnc && !isWithinCanonicalWorkspace(candidate, getWorkspacePath())) {
+        if (!isWslUnc && !isWithinCanonicalWorkspace(candidate, getWorkspacePath(), extraRoots)) {
           continue;
         }
         const error = await shell.openPath(candidate);
@@ -2252,8 +2307,22 @@ for m in ("pydantic", "httpx", "loguru"):
 
   // -- Reveal file in system file manager (Explorer / Finder) ------------
   ipcMain.handle(IPC.FILES_OPEN_CONTAINING_FOLDER, async (_event, payload: unknown) => {
-    const p = payload as { path: string };
-    const raw = p.path;
+    const parsed = FilesOpenInput.safeParse(payload);
+    if (!parsed.success) {
+      return { revealed: false, path: '', error: 'Invalid path payload' };
+    }
+    const raw = parsed.data.path;
+    // #1062: 文件夹绑定会话的产物落在会话自己的工作区，作为额外允许根由服务端推导。
+    // 解析不出来时 fail closed——理由同 FILES_OPEN_EXTERNAL。
+    const sessionRoots = await sessionWorkspaceRoots(bridge, parsed.data.session_key);
+    if (!sessionRoots.ok) {
+      return {
+        revealed: false,
+        path: raw,
+        error: `无法解析会话工作区，已拒绝定位以免指到错误的文件：${sessionRoots.error}`,
+      };
+    }
+    const extraRoots = sessionRoots.roots;
     // Session metadata may store workspace as a string (Path str) —
     // resolve "Path('...')" wrapper to a plain path string before opening.
     const clean = raw.replace(/^Path\(['"]/, '').replace(/['"]\)$/, '');
@@ -2261,14 +2330,15 @@ for m in ("pydantic", "httpx", "loguru"):
     // check always applies.  A previous fast path here (isAbsolute(clean) &&
     // existsSync(clean) → showItemInFolder) skipped that check entirely, letting
     // the renderer reveal any host directory (security regression #955).
-    const absolutePath = resolveWorkspacePath(clean);
+    // #1062: 解析放进 try —— 工作区外路径 throw 会变成 IPC rejection（渲染层静默无反应）。
     try {
+      const absolutePath = resolveWorkspacePath(clean, extraRoots);
       if (!existsSync(absolutePath)) {
         return { revealed: false, path: raw, error: `File not found: ${absolutePath}` };
       }
       // Follow symlinks/junctions so a link pointing outside the workspace can't
       // reveal a host directory through the lexical containment check (#955).
-      if (!isWithinCanonicalWorkspace(absolutePath, getWorkspacePath())) {
+      if (!isWithinCanonicalWorkspace(absolutePath, getWorkspacePath(), extraRoots)) {
         return { revealed: false, path: raw, error: `Path outside workspace: ${raw}` };
       }
       shell.showItemInFolder(absolutePath);

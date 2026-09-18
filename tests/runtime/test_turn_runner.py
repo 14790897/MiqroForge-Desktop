@@ -21,10 +21,12 @@ class _FakeTurnContext:
 
 
 class _FakeResponse:
-    def __init__(self, content="", tool_calls=None):
+    def __init__(self, content="", tool_calls=None, finish_reason=None):
         self.content = content
         self.tool_calls = tool_calls or []
         self._has_tool_calls = bool(tool_calls)
+        # #1094: 默认 None == 旧行为（getattr 取不到值），需要时显式给 "length"。
+        self.finish_reason = finish_reason
 
     @property
     def has_tool_calls(self):
@@ -32,16 +34,26 @@ class _FakeResponse:
 
 
 class _FakeToolCall:
-    def __init__(self, name="read_file", args=None, tc_id="tc-1"):
+    def __init__(self, name="read_file", args=None, tc_id="tc-1", truncated=False):
         self.name = name
         self.arguments = args or {"path": "/tmp/x"}
         self.id = tc_id
         self.arguments_json = '{"path": "/tmp/x"}'
+        # #1094: provider marks calls cut off by the output cap.
+        self.truncated = truncated
 
 
 @pytest.fixture
 def fake_turn_context():
     return _FakeTurnContext()
+
+
+@pytest.fixture
+def fake_fast_turn_context():
+    """#680 极速模式 turn：_rmode == "fast" 时才启用 FAST 预算门。"""
+    turn = _FakeTurnContext()
+    turn.reasoning_mode = "fast"
+    return turn
 
 
 @pytest.fixture
@@ -259,6 +271,297 @@ async def test_turn_runner_handles_tool_calls(turn_runner, fake_turn_context, fa
     assert "read_file" in result.tools_used
     assert call_count == 2  # stream_chat was called twice
     fake_tool_runtime.execute_many.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_turn_runner_refuses_truncated_tool_call(
+    turn_runner, fake_turn_context, fake_tool_runtime
+):
+    """#1094：被输出上限截断（truncated=True）的调用不得执行，且模型侧要收到
+    「未执行」的显式结果（与 assistant tool_call 成对，不会被 presend 清成孤儿）。"""
+    from miqi.providers.base import LLMStreamEvent
+
+    runner, provider = turn_runner
+    tc = _FakeToolCall("read_file", tc_id="tc-trunc", truncated=True)
+    call_count = 0
+    seen_messages: list[list[dict]] = []
+
+    async def _stream_side_effect(**kwargs):
+        nonlocal call_count
+        call_count += 1
+        seen_messages.append(kwargs.get("messages") or [])
+        if call_count == 1:
+            yield LLMStreamEvent(
+                kind="completed",
+                response=_FakeResponse(tool_calls=[tc]),
+            )
+        else:
+            yield LLMStreamEvent(
+                kind="completed",
+                response=_FakeResponse(content="recovered"),
+            )
+
+    provider.stream_chat = _stream_side_effect
+
+    result = await runner.run(
+        turn=fake_turn_context,
+        user_content="task",
+        system_prompt="sys",
+        tools=[{"type": "function", "function": {"name": "read_file", "parameters": {}}}],
+    )
+
+    assert result.final_content == "recovered"
+    # 未被当作"用过的工具"
+    assert "read_file" not in result.tools_used
+    # 工具从未被真实执行（execute_many 至多收到空列表）
+    for c in fake_tool_runtime.execute_many.await_args_list:
+        calls_arg = c.args[1] if len(c.args) > 1 else c.kwargs.get("calls")
+        assert calls_arg == []
+
+    # 第二轮发给模型的消息里带着"未执行"的拒绝理由
+    assert call_count == 2
+    second_msgs = seen_messages[1]
+    tool_msgs = [m for m in second_msgs if m.get("role") == "tool"]
+    assert tool_msgs
+    assert any("未执行" in (m.get("content") or "") for m in tool_msgs)
+    # 拒绝结果与 assistant tool_call 严格配对（#753 同类：不留孤儿 tool）
+    declared_ids = {
+        tc_entry["id"]
+        for m in second_msgs
+        if m.get("role") == "assistant"
+        for tc_entry in (m.get("tool_calls") or [])
+    }
+    assert all(m.get("tool_call_id") in declared_ids for m in tool_msgs)
+
+
+@pytest.mark.asyncio
+async def test_turn_runner_still_runs_non_truncated_tool_call(
+    turn_runner, fake_turn_context, fake_tool_runtime
+):
+    """对照组：truncated=False 的调用照常执行。"""
+    from miqi.providers.base import LLMStreamEvent
+
+    runner, provider = turn_runner
+    tc = _FakeToolCall("read_file", tc_id="tc-ok", truncated=False)
+    call_count = 0
+
+    async def _stream_side_effect(**kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            yield LLMStreamEvent(kind="completed", response=_FakeResponse(tool_calls=[tc]))
+        else:
+            yield LLMStreamEvent(kind="completed", response=_FakeResponse(content="done"))
+
+    provider.stream_chat = _stream_side_effect
+
+    result = await runner.run(
+        turn=fake_turn_context,
+        user_content="task",
+        system_prompt="sys",
+        tools=[{"type": "function", "function": {"name": "read_file", "parameters": {}}}],
+    )
+
+    assert "read_file" in result.tools_used
+    executed = [
+        c.args[1] if len(c.args) > 1 else c.kwargs.get("calls")
+        for c in fake_tool_runtime.execute_many.await_args_list
+    ]
+    assert any(calls for calls in executed)
+
+
+@pytest.mark.asyncio
+async def test_turn_runner_mixed_round_runs_only_intact_call(
+    turn_runner, fake_turn_context, fake_tool_runtime
+):
+    """#1094 审计 F6：单轮多枚混合（1 枚截断 + 1 枚正常）互不牵连。
+
+    正常的照常执行，截断的拒执；两者都要成对回注给模型；tools_used 只记正常的。
+    """
+    from miqi.providers.base import LLMStreamEvent
+
+    runner, provider = turn_runner
+    bad = _FakeToolCall("write_file", tc_id="tc-trunc", truncated=True)
+    good = _FakeToolCall("read_file", tc_id="tc-ok", truncated=False)
+    call_count = 0
+    seen_messages: list[list[dict]] = []
+
+    async def _stream_side_effect(**kwargs):
+        nonlocal call_count
+        call_count += 1
+        seen_messages.append(kwargs.get("messages") or [])
+        if call_count == 1:
+            yield LLMStreamEvent(
+                kind="completed",
+                response=_FakeResponse(tool_calls=[bad, good]),
+            )
+        else:
+            yield LLMStreamEvent(kind="completed", response=_FakeResponse(content="done"))
+
+    provider.stream_chat = _stream_side_effect
+
+    result = await runner.run(
+        turn=fake_turn_context,
+        user_content="task",
+        system_prompt="sys",
+        tools=[{"type": "function", "function": {"name": "read_file", "parameters": {}}}],
+    )
+
+    # 只有完好的那枚被真实下发执行
+    executed = [
+        c.args[1] if len(c.args) > 1 else c.kwargs.get("calls")
+        for c in fake_tool_runtime.execute_many.await_args_list
+    ]
+    executed_ids = [tc.id for calls in executed for tc in calls]
+    assert executed_ids == ["tc-ok"]
+
+    # tools_used 只含正常那枚
+    assert result.tools_used == ["read_file"]
+
+    # 成对回注：截断枚拿到拒绝理由，正常枚拿到执行结果，且都在 assistant 里声明过
+    assert call_count == 2
+    second_msgs = seen_messages[1]
+    declared_ids = {
+        entry["id"]
+        for m in second_msgs
+        if m.get("role") == "assistant"
+        for entry in (m.get("tool_calls") or [])
+    }
+    tool_msgs = {m.get("tool_call_id"): (m.get("content") or "")
+                 for m in second_msgs if m.get("role") == "tool"}
+    assert set(tool_msgs) == {"tc-trunc", "tc-ok"}
+    assert set(tool_msgs) <= declared_ids  # 不留孤儿 tool 消息
+    assert "未执行" in tool_msgs["tc-trunc"]
+    # 拒执文案带真实 max_tokens 数值
+    assert f"max_tokens={fake_turn_context.max_tokens}" in tool_msgs["tc-trunc"]
+    assert "result-for-read_file" in tool_msgs["tc-ok"]
+
+
+@pytest.mark.asyncio
+async def test_turn_runner_fast_budget_does_not_swallow_truncated_call(
+    turn_runner, fake_fast_turn_context, fake_tool_runtime
+):
+    """CR #1100：fast 模式下截断门必须**先于** FAST 预算门。
+
+    反例（修复前两门顺序颠倒）：同一轮里预算已用尽的 web_search 若同时 truncated，
+    会先被预算门吃掉 → 拿到 SUCCESS + "[跳过]"，而预算跳过不走 _echo_calls →
+    这条 tool_result 成孤儿被 presend 剪掉：模型既学不到"参数被截断"，也不知该重发。
+    修复后：先对全量调用分拣 truncated（拒执 + 成对回注），预算门只处理剩下的完好调用。
+    """
+    from miqi.providers.base import LLMStreamEvent
+
+    runner, provider = turn_runner
+    # 迭代1：完好的 web_search 放行，用掉本轮唯一的搜索相位额度（_search_phases=1）
+    intact = _FakeToolCall("web_search", tc_id="tc-search-1", truncated=False)
+    # 迭代2：同为 web_search，但参数被输出上限截断 → 必须被截断门拒执，而不是被预算门跳过
+    truncated = _FakeToolCall("web_search", tc_id="tc-search-trunc", truncated=True)
+    call_count = 0
+    seen_messages: list[list[dict]] = []
+
+    async def _stream_side_effect(**kwargs):
+        nonlocal call_count
+        call_count += 1
+        seen_messages.append(kwargs.get("messages") or [])
+        if call_count == 1:
+            yield LLMStreamEvent(kind="completed", response=_FakeResponse(tool_calls=[intact]))
+        elif call_count == 2:
+            yield LLMStreamEvent(kind="completed", response=_FakeResponse(tool_calls=[truncated]))
+        else:
+            yield LLMStreamEvent(kind="completed", response=_FakeResponse(content="recovered"))
+
+    provider.stream_chat = _stream_side_effect
+
+    result = await runner.run(
+        turn=fake_fast_turn_context,
+        user_content="task",
+        system_prompt="sys",
+        tools=[{"type": "function", "function": {"name": "web_search", "parameters": {}}}],
+    )
+
+    assert result.final_content == "recovered"
+    assert call_count == 3
+
+    # c) 截断那枚从未真实下发执行；tools_used 只记迭代1 那枚完好的
+    for c in fake_tool_runtime.execute_many.await_args_list:
+        calls_arg = c.args[1] if len(c.args) > 1 else c.kwargs.get("calls")
+        assert truncated.id not in [tc.id for tc in calls_arg]
+    assert result.tools_used == ["web_search"]
+
+    # 落盘证据（messages_delta 不会被 presend 剪裁）：拒执文案带真实 max_tokens 数值。
+    # 修复前这里拿到的是 "[跳过] 极速模式搜索预算已用尽（最多一轮搜索）"。
+    delta_tools = {
+        m["tool_call_id"]: (m.get("content") or "")
+        for m in result.messages_delta
+        if m.get("role") == "tool"
+    }
+    assert "未执行" in delta_tools.get(truncated.id, ""), (
+        f"截断调用被 FAST 预算门吞掉了：{delta_tools.get(truncated.id)!r}"
+    )
+
+    # a) 拒执后发给模型的上下文里，该调用是"未执行/截断"拒执文案，而不是"[跳过]"
+    third_msgs = seen_messages[2]
+    tool_msgs = {
+        m.get("tool_call_id"): (m.get("content") or "")
+        for m in third_msgs
+        if m.get("role") == "tool"
+    }
+    assert truncated.id in tool_msgs  # 没被 presend 当孤儿 tool 剪掉
+    assert "未执行" in tool_msgs[truncated.id]
+    assert "max_tokens" in tool_msgs[truncated.id]
+    assert "[跳过]" not in tool_msgs[truncated.id]
+
+    # b) 拒执结果与 assistant tool_call 严格配对（#753 同类：不留孤儿）
+    declared_ids = {
+        entry["id"]
+        for m in third_msgs
+        if m.get("role") == "assistant"
+        for entry in (m.get("tool_calls") or [])
+    }
+    assert truncated.id in declared_ids
+
+
+@pytest.mark.asyncio
+async def test_turn_runner_logs_plain_text_truncation(
+    turn_runner, fake_turn_context
+):
+    """#1094 审计 F3：纯文本被 length 截断时零留痕 → 现在必须有 warning。"""
+    from loguru import logger as loguru_logger
+
+    from miqi.providers.base import LLMStreamEvent
+
+    runner, provider = turn_runner
+    seen_messages: list[list[dict]] = []
+    call_count = 0
+
+    async def _stream_side_effect(**kwargs):
+        nonlocal call_count
+        call_count += 1
+        seen_messages.append(kwargs.get("messages") or [])
+        if call_count == 1:
+            yield LLMStreamEvent(
+                kind="completed",
+                response=_FakeResponse(content="这是被砍断的半句", finish_reason="length"),
+            )
+        else:
+            yield LLMStreamEvent(kind="completed", response=_FakeResponse(content="final"))
+
+    provider.stream_chat = _stream_side_effect
+
+    records: list[str] = []
+    sink_id = loguru_logger.add(lambda msg: records.append(str(msg)), level="WARNING")
+    try:
+        await runner.run(
+            turn=fake_turn_context,
+            user_content="task",
+            system_prompt="sys",
+            tools=[],
+        )
+    finally:
+        loguru_logger.remove(sink_id)
+
+    hits = [r for r in records if "max_tokens 截断" in r]
+    assert hits, records
+    assert str(fake_turn_context.max_tokens) in hits[0]
 
 
 @pytest.mark.asyncio
@@ -953,3 +1256,85 @@ async def test_running_flag_resets_when_turn_end_hook_raises():
         )
     # The hook exception still propagates, but the guard is released.
     assert runner._running is False
+
+
+@pytest.mark.asyncio
+async def test_refused_truncated_call_gets_paired_ledger_completion(
+    fake_turn_context, fake_tool_runtime, fake_context_runtime,
+):
+    """CR #1100：被拒执（参数截断）的调用不能只在 ledger 里留 `tool_call_started`。
+
+    Replay 靠 started/completed 配对重建工具行，只写 started 的话该行永远 pending。
+    本用例断言拒执调用与正常调用一样拿到 `tool_call_completed`，且 payload 与已执行
+    调用**同形**（不新造 item 类型）、拒执语义随 `result` 落库。
+    """
+    from miqi.providers.base import LLMStreamEvent
+
+    class _FakeLedger:
+        def __init__(self):
+            self.items: list[dict] = []
+
+        async def append_item(self, *, thread_id, turn_id, item_type, payload):
+            self.items.append({
+                "thread_id": thread_id,
+                "turn_id": turn_id,
+                "item_type": item_type,
+                "payload": payload,
+            })
+
+    provider = MagicMock()
+    provider.get_default_model.return_value = "test-model"
+    bad = _FakeToolCall("write_file", tc_id="tc-trunc", truncated=True)
+    good = _FakeToolCall("read_file", tc_id="tc-ok", truncated=False)
+    call_count = 0
+
+    async def _stream(**kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            yield LLMStreamEvent(
+                kind="completed", response=_FakeResponse(tool_calls=[bad, good]),
+            )
+        else:
+            yield LLMStreamEvent(
+                kind="completed", response=_FakeResponse(content="recovered"),
+            )
+
+    provider.stream_chat = _stream
+    ev = MagicMock()
+    ev.emit = AsyncMock()
+    ledger = _FakeLedger()
+
+    runner = TurnRunner(
+        provider=provider,
+        tool_runtime=fake_tool_runtime,
+        context_runtime=fake_context_runtime,
+        event_emitter=ev,
+        max_iterations=3,
+        ledger_runtime=ledger,
+    )
+
+    result = await runner.run(
+        turn=fake_turn_context,
+        user_content="task",
+        system_prompt="sys",
+        tools=[{"type": "function", "function": {"name": "read_file", "parameters": {}}}],
+    )
+
+    assert result.final_content == "recovered"
+    started = [i for i in ledger.items if i["item_type"] == "tool_call_started"]
+    completed = [i for i in ledger.items if i["item_type"] == "tool_call_completed"]
+    # 两个调用都成对：started / completed 覆盖同一组 id，无 pending 残留
+    ids = {"tc-ok", "tc-trunc"}
+    assert {i["payload"]["tool_call_id"] for i in started} == ids
+    assert {i["payload"]["tool_call_id"] for i in completed} == ids
+    assert len(completed) == len(started) == 2
+
+    by_id = {i["payload"]["tool_call_id"]: i["payload"] for i in completed}
+    # 拒执那条与已执行那条 payload 同形（字段集一致，未新造 item 类型）
+    assert set(by_id["tc-trunc"]) == set(by_id["tc-ok"])
+    # 拒执语义沿用既有 TOOL_ERROR 表达：result 即拒执说明
+    assert "未执行" in by_id["tc-trunc"]["result"]
+    assert by_id["tc-trunc"]["duration_ms"] == 0
+    # 对照组：正常调用照旧记真实结果
+    assert by_id["tc-ok"]["result"] == "result-for-read_file"

@@ -14,6 +14,11 @@ class ToolCallRequest:
     id: str
     name: str
     arguments: dict[str, Any]
+    # #1094: True when finish_reason=="length" and the raw argument string was
+    # NOT strictly parseable — i.e. the model was cut off mid-JSON by max_tokens
+    # and `arguments` above is only json_repair's salvage. Runtime layers (S2)
+    # must refuse to execute such a call instead of silently running a partial.
+    truncated: bool = False
 
 
 @dataclass
