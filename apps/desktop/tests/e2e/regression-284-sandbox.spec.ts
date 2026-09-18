@@ -40,6 +40,10 @@ test.describe.serial('Sandbox toggle ready fix', () => {
         timeout: 5_000,
       });
 
+      // NOTE: the third argument is `options`; passing the object second would
+      // make it the pageFunction's `arg` and silently drop both the timeout and
+      // the 10s poll interval (falling back to rAF), which turns the progress
+      // log below into ~60 lines/second of console spam.
       const settled = await page.waitForFunction(
         () => {
           const el = document.querySelector('[data-testid="sandbox-toggle-label"]');
@@ -51,7 +55,8 @@ test.describe.serial('Sandbox toggle ready fix', () => {
           console.log(`[regression-284] ${ts} toggle label: "${text}"`);
           return !text.includes('正在') && (text.includes('已开启') || text.includes('已关闭'));
         },
-        { timeout: 300_000, polling: 10000 }
+        undefined,
+        { timeout: 300_000, polling: 10_000 }
       );
       expect(settled).toBeTruthy();
 

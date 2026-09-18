@@ -178,47 +178,67 @@ export async function ensurePersistedSession(
   throw new Error(`ensurePersistedSession: no session after seeding "${seedText}"`);
 }
 
-/** Wait for streaming to finish (no "Thinking…" indicator) */
+/** Character count of the main pane — the E2E proxy for "how much reply has
+ *  streamed in". */
+function mainTextLength(page: Page): Promise<number> {
+  return page.evaluate(() => (document.querySelector('main')?.textContent ?? '').length);
+}
+
+/**
+ * Wait for the reply of a just-sent message to finish streaming.
+ *
+ * `.tag-inprogress` is the DOM projection of the renderer's per-session
+ * `streaming` flag, which ChatConsole documents as the authoritative
+ * "is this session still generating?" signal (set in handleSend, cleared on
+ * final / error / aborted).  Main-text stability is the fallback for a turn
+ * whose tag was never observed — a mocked provider can reply before the
+ * caller looks.
+ *
+ * Both signals are sampled on an explicit 200 ms interval rather than through
+ * `page.waitForFunction`, whose second parameter is the pageFunction's
+ * *argument*, not its options: passing `{ timeout, polling }` there silently
+ * drops both, leaving rAF polling (≈17 ms/frame) and the default timeout.
+ * Two rAF frames then satisfy any "stable for N samples" rule in ≈33 ms, so a
+ * still-reasoning turn reads as finished and the caller asserts against a
+ * panel that has not been updated yet.
+ */
 export async function waitForResponseComplete(page: Page, timeout = 120_000) {
-  // Phase 1: if the AI used tools, "IN PROGRESS" stays visible while
-  // the tool runs.  Wait for it to hide (tool result rendered).
-  try {
-    await expect(page.locator('.tag-inprogress')).toBeHidden({ timeout: 15_000 });
-  } catch {
-    // Fast responses may never show IN PROGRESS.
+  const deadline = Date.now() + timeout;
+  const inProgress = page.locator('.tag-inprogress');
+
+  let anchor = await mainTextLength(page);
+  let stable = 0;
+  let sawRunning = false;
+
+  while (Date.now() < deadline) {
+    if ((await inProgress.count()) > 0) {
+      sawRunning = true;
+      stable = 0;
+      anchor = await mainTextLength(page);
+    } else {
+      const len = await mainTextLength(page);
+      // Only a jump of ≥10 characters counts as progress: the live
+      // 「已深度思考 · N 秒」 timer adds a character or two per second and
+      // would otherwise keep resetting the stability counter forever.
+      if (len - anchor >= 10) {
+        anchor = len;
+        stable = 0;
+      } else if (len > 0) {
+        stable += 1;
+      }
+      // Having seen the tag, its disappearance *is* the end of the turn — a
+      // short confirmation is enough.  Never having seen it, the text is all
+      // we have, so require a wider window: a real model can pause for more
+      // than a second between tool calls with nothing on screen.
+      if (stable >= (sawRunning ? 3 : 12)) return;
+    }
+    await page.waitForTimeout(200);
   }
 
-  // Phase 2: wait for main textContent to stop changing (streaming done).
-  // Tolerate small growth (a "已深度思考 · N 秒" live timer adds a few chars
-  // per second); a large jump means the reply is still streaming.
-  await page.evaluate(() => {
-    const main = document.querySelector('main');
-    (window as any).__miqi_stream_state = { base: (main?.textContent || '').length, stable: 0 };
-  });
-
-  await page.waitForFunction(
-    () => {
-      const main = document.querySelector('main');
-      if (!main) return false;
-      const text = main.textContent || '';
-      const s = (window as any).__miqi_stream_state;
-      if (!s) {
-        (window as any).__miqi_stream_state = { base: text.length, stable: 0 };
-        return false;
-      }
-      if (text.length - s.base >= 10) {
-        s.base = text.length;
-        s.stable = 0;
-        return false;
-      }
-      s.stable++;
-      return s.stable >= 2;
-      // Respect the caller's timeout: CI LLM providers have been slow enough
-      // that PR-Agent's ai_timeout was raised to 600s (#707).  The old
-      // Math.min(timeout, 90_000) cap made 240s callers time out at 90s and
-      // deterministically fail LLM-dependent tests like regression-480.
-    },
-    { timeout, polling: 200 }
+  throw new Error(
+    `waitForResponseComplete: 回合在 ${timeout}ms 内没有结束（` +
+      (sawRunning ? '「进行中」标签一直没消失' : '未出现「进行中」标签，且主区文本仍在变化') +
+      '）'
   );
 }
 
