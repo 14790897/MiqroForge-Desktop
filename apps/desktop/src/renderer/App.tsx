@@ -37,6 +37,7 @@ import {
   recordConsent,
 } from './lib/privacy';
 import { useQraftStatus } from './hooks/useQraftStatus';
+import { DEFAULT_SESSION_KEY, shouldFallbackToDefaultSession } from './sessionRestore';
 
 type NavId =
   | 'chat'
@@ -104,9 +105,9 @@ function AppShell() {
   const [activeNav, setActiveNav] = useState<NavId>('chat');
   const [sessionKey, setSessionKey] = useState(() => {
     try {
-      return localStorage.getItem('miqi:lastSession') || 'desktop:default';
+      return localStorage.getItem('miqi:lastSession') || DEFAULT_SESSION_KEY;
     } catch {
-      return 'desktop:default';
+      return DEFAULT_SESSION_KEY;
     }
   });
   const [sessionRefreshKey, setSessionRefreshKey] = useState(0);
@@ -178,6 +179,46 @@ function AppShell() {
       /* localStorage unavailable */
     }
   }, [sessionKey]);
+
+  // #1118（#1035 移植）：恢复出来的 lastSession 可能指向一个**已经不存在的会话**
+  // （会话在 SessionExplorer / 设置页被删、在另一个实例里被删、或工作区换目录后
+  // key 不再存在）。bridge 的 sessions.get 对未知 key 走 get_or_create——不报错、
+  // 返回空会话，所以渲染层分不出「已删除」和「空会话」：界面照常显示欢迎页，之后
+  // 的新建和发送都落在这个幽灵 key 上（等于用被删会话的身份开新会话）。
+  // 校验只针对**启动时恢复的那一个 key**、只做一次，且仅当 sessions.list 明确
+  // 查无此 key 才回退；用户已经切走（或列表查询失败）就保持现状——宁可不动，
+  // 也不误切用户正在用的会话。判定逻辑见 sessionRestore.ts。
+  const restoredSessionKeyRef = useRef(sessionKey);
+  const restoredSessionCheckedRef = useRef(false);
+  useEffect(() => {
+    if (restoredSessionCheckedRef.current) return;
+    if (!PRELOAD_OK || status.state !== 'running') return;
+    const restoredKey = restoredSessionKeyRef.current;
+    restoredSessionCheckedRef.current = true;
+    if (restoredKey === DEFAULT_SESSION_KEY) return;
+    void (async () => {
+      try {
+        // 归档列表也要算「存在」：归档只是收起来，会话并没有消失，不该因为
+        // 用户归档过就把他从上次会话里踢回默认态。
+        const [list, archived] = await Promise.all([
+          window.miqi.sessions.list(),
+          window.miqi.sessions.listArchived(),
+        ]);
+        const knownKeys = [...(list?.sessions ?? []), ...(archived?.sessions ?? [])].map(
+          (s) => s.key
+        );
+        if (sessionKeyRef.current !== restoredKey) return; // 用户已切走
+        if (shouldFallbackToDefaultSession(restoredKey, knownKeys)) {
+          console.warn(
+            `[MiQroForge] restored session ${restoredKey} no longer exists — falling back to ${DEFAULT_SESSION_KEY}`
+          );
+          setSessionKey(DEFAULT_SESSION_KEY);
+        }
+      } catch {
+        /* 列表拿不到（bridge 刚起 / 瞬时错误）→ 保持现状，不误切 */
+      }
+    })();
+  }, [status.state]);
 
   // When the bridge becomes ready, trigger a session history reload in ChatConsole
   useEffect(() => {
