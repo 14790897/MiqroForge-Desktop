@@ -86,6 +86,9 @@ jobs:
     # DEEPSEEK/BRAVE 凭据同处一个 job —— 这同时收掉了既有的「PR head 的 spec 读 key」暴露。
     # 用**步骤级** if 而不是 job 级：electron-e2e 是 develop 的必需检查，job 级 if 为假时
     # check 可能根本不上报，PR 会卡在 "Expected — Waiting for status"。
+    # 这是**仓库的安全策略**（信任边界取「有写权限的人推上来的代码」），不是强隔离：受信任作者
+    # 的 PR 仍在本 job 内运行其代码，只是这类作者本就拥有仓库写权限（与 GitHub 对 pwn-request
+    # 的建议一致）；要更强的隔离得让带 secrets 的 E2E 完全不跑 PR 代码。
     env:
       E2E_TRUSTED: ${{ github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association) }}
     defaults:
@@ -203,11 +206,13 @@ jobs:
       - name: Summarize flaky E2E tests
         # #1107：flaky 清单就地汇总，报告**不离开这个 job**（上传 artifact / release asset 都会
         # 把「内容由 PR 决定」的字节送到公开位置）。
-        # 汇总本身是 JS action、按**受信任 ref** 引用：runner 用自己的 node 绝对路径拉起它，
-        # 代码取自该 ref 拉下来的那份，不经 shell、不读 PATH，也不需要 GH_TOKEN —— 同一 job 里
-        # 先跑过的 PR 代码因此劫持不到这一步（改 PATH / 环境变量都无效）。
+        # 汇总逻辑是 .github/actions/summarize-flaky（JS action）：runner 用自己的 node 绝对路径
+        # 拉起它，不经 shell、不读 PATH，这一步也不持有 GH_TOKEN —— 改 PATH / 环境变量都劫持不到。
+        # 用**相对引用**（checkout 出来的那份）而不是 `owner/repo@ref`：后者在合入前会指向还没有
+        # 这个 action 的 develop（bootstrap gap，步骤会解析失败）；有了下面的 E2E_TRUSTED 门禁后，
+        # 不受信任的来源根本走不到这一步，也就不需要再绕一层 ref 去换「可信副本」。
         if: always() && env.E2E_TRUSTED == 'true'
-        uses: 14790897/MiqroForge-Desktop/.github/actions/summarize-flaky@develop
+        uses: ./.github/actions/summarize-flaky
         with:
           report_path: apps/desktop/test-reports/results.json
         env:
@@ -368,7 +373,7 @@ jobs:
         # 代码取自该 ref 拉下来的那份，不经 shell、不读 PATH，也不需要 GH_TOKEN —— 同一 job 里
         # 先跑过的 PR 代码因此劫持不到这一步（改 PATH / 环境变量都无效）。
         if: always() && env.E2E_TRUSTED == 'true'
-        uses: 14790897/MiqroForge-Desktop/.github/actions/summarize-flaky@develop
+        uses: ./.github/actions/summarize-flaky
         with:
           report_path: apps/desktop/test-reports/results.json
         env:
