@@ -575,7 +575,18 @@ export async function launchElectronApp(
   opts?: { bypassAll?: boolean; noConsentBypass?: boolean; noLoginBypass?: boolean }
 ): Promise<ElectronFixture> {
   // Create unique temporary home per test worker for full isolation.
-  // Parallel workers each get their own MIQI_HOME → no race on sessions/.
+  //
+  // ⚠️ 每轮 run 独立的 MIQI_HOME 只隔离了 sqlite 会话存储
+  // （$MIQI_HOME/workspace/sessions）。Chromium 侧的 profile（Local Storage /
+  // Cache / Cookies）**不在** MIQI_HOME 下：dev 模式下 main 用
+  // `app.setPath('userData', %APPDATA%/miqi-desktop-dev/ws-<sha256(repoRoot)>)`
+  // 覆盖 Electron 的 `--user-data-dir`（见 src/main/index.ts 的 dev-mode
+  // 缓存隔离块），hash 只跟 checkout 路径有关——于是同一个 checkout 的
+  // 所有 run（串行 + 并行 worker）共用一份 Local Storage，上一轮 run 写下的
+  // `miqi:lastSession` 会被下一轮当成当前会话恢复，新会话的首次 send 落在
+  // 幽灵会话上（#1034 第七轮实锤；本分支的 renderer-crash-recovery 用例同样
+  // 拿 sessionStorage/leveldb 里的状态做断言）。因此下面额外设
+  // MIQI_USER_DATA_DIR 把 profile 也钉到本轮临时 home。
   const miqiHome = mkdtempSync(join(tmpdir(), 'miqi-e2e-'));
   const miqiSessionsDir = getMiqiSessionsDir(miqiHome);
   console.log(`[test] MIQI_HOME=${miqiHome}`);
@@ -650,6 +661,14 @@ export async function launchElectronApp(
   if (!env.MIQI_QRAFT_BILLING_DIR) {
     env.MIQI_QRAFT_BILLING_DIR = join(miqiHome, 'billing');
   }
+  // Chromium profile isolation (see the MIQI_HOME comment above): redirect the
+  // dev-mode `app.setPath('userData', …)` to this run's temp home so Local
+  // Storage / Cache / Cookies stop being shared across runs and parallel
+  // workers.  Specs may preset their own path to test cross-restart profile
+  // persistence.
+  if (!env.MIQI_USER_DATA_DIR) {
+    env.MIQI_USER_DATA_DIR = join(miqiHome, 'userdata');
+  }
   // E2E default: set MIQI_E2E so the main process skips the #837 privacy-consent
   // gate (fresh userData has no stored consent). The privacy-consent spec opts
   // out via noConsentBypass to exercise the gate itself.
@@ -686,9 +705,9 @@ export async function launchElectronApp(
     }
   }
 
-  // Isolated Electron userData per launch: without it every test instance
-  // (and the dev app) shares the default profile, so sessions/UI state leak
-  // between runs and tests "continue" a previous conversation (#721 实测).
+  // Per-run Chromium profile (MIQI_USER_DATA_DIR above is what actually takes
+  // effect — dev mode's app.setPath overrides this CLI switch).  Both point at
+  // the same dir so the intent is unambiguous no matter which one wins.
   const userDataDir = join(miqiHome, 'userdata');
 
   const electronApp = await electron.launch({
@@ -814,6 +833,13 @@ export async function relaunchElectronApp(
   if (!env.MIQI_QRAFT_BILLING_DIR) {
     env.MIQI_QRAFT_BILLING_DIR = join(miqiHome, 'billing');
   }
+  // Same Chromium-profile isolation as launchElectronApp (see above).  Keyed
+  // on the SAME miqiHome, so a relaunch keeps the profile the first launch
+  // wrote — restart-recovery specs (#490 / session-context-recall) depend on
+  // that surviving, they only need the leak ACROSS runs to be gone.
+  if (!env.MIQI_USER_DATA_DIR) {
+    env.MIQI_USER_DATA_DIR = join(miqiHome, 'userdata');
+  }
   // Same #837 consent-gate bypass logic as launchElectronApp (see above).
   if (opts?.noConsentBypass) {
     delete env.MIQI_E2E;
@@ -841,9 +867,9 @@ export async function relaunchElectronApp(
     }
   }
 
-  // Isolated Electron userData per launch: without it every test instance
-  // (and the dev app) shares the default profile, so sessions/UI state leak
-  // between runs and tests "continue" a previous conversation (#721 实测).
+  // Per-run Chromium profile (MIQI_USER_DATA_DIR above is what actually takes
+  // effect — dev mode's app.setPath overrides this CLI switch).  Both point at
+  // the same dir so the intent is unambiguous no matter which one wins.
   const userDataDir = join(miqiHome, 'userdata');
 
   const electronApp = await electron.launch({

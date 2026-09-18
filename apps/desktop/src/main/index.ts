@@ -169,10 +169,23 @@ export function main(): void {
   // （会话/配置互相覆盖）。开发模式下按仓库绝对路径 hash 出独立子目录
   // （%APPDATA%\miqi-desktop-dev\ws-<hash>），每个工作区各用各的缓存。
   // 打包版保持默认行为（单安装目录，无多实例问题）。
+  //
+  // MIQI_USER_DATA_DIR（仅未打包环境）把该目录改道到调用方给的路径，供 E2E
+  // 每轮 run 拿独立 profile。**必须走这里**：下面的 setPath 会覆盖 Electron 的
+  // `--user-data-dir` 启动参数（见 tests/e2e/login-gate.spec.ts 的说明），所以
+  // 只传 CLI 参数拿不到隔离。没有它的话同一个 checkout 的所有 run（串行 + 并行
+  // worker）共用一份 ws-<hash>，Local Storage 里的 miqi:lastSession 跨 run 泄漏，
+  // 上一轮 run 的最后会话会被下一轮当作当前会话恢复（#1034 第七轮实锤，本分支
+  // 的 crash-recovery/并发 turn 用例同样吃这份状态）。
   if (!app.isPackaged) {
-    const repoRoot = join(__dirname, '../../..');
-    const wsHash = createHash('sha256').update(repoRoot).digest('hex').slice(0, 16);
-    app.setPath('userData', join(app.getPath('appData'), 'miqi-desktop-dev', `ws-${wsHash}`));
+    const userDataOverride = process.env['MIQI_USER_DATA_DIR']?.trim();
+    if (userDataOverride) {
+      app.setPath('userData', userDataOverride);
+    } else {
+      const repoRoot = join(__dirname, '../../..');
+      const wsHash = createHash('sha256').update(repoRoot).digest('hex').slice(0, 16);
+      app.setPath('userData', join(app.getPath('appData'), 'miqi-desktop-dev', `ws-${wsHash}`));
+    }
   }
 
   // ── 单实例（打包版，#1071）──────────────────────────────────────────
