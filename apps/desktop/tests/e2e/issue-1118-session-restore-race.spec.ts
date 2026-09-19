@@ -57,18 +57,16 @@
 
 import { test, expect } from '@playwright/test';
 import type { ElectronApplication, Page } from '@playwright/test';
-import { spawn, type ChildProcess } from 'node:child_process';
-import { join } from 'node:path';
+import type { ChildProcess } from 'node:child_process';
 import {
-  APPS_DESKTOP,
   closeElectronApp,
   createNewConversation,
   launchElectronApp,
   sendMessage,
   waitForBridgeInitialized,
 } from './helpers/electron-setup';
+import { startMockServer } from './helpers/mock-server';
 
-const REPO_ROOT = join(APPS_DESKTOP, '..', '..');
 const SESSIONS_GET = 'sessions:get';
 const SESSIONS_DELETE = 'sessions:delete';
 const DEFAULT_SESSION = 'desktop:default';
@@ -121,43 +119,6 @@ async function installSessionRecorder(app: ElectronApplication): Promise<void> {
 
 async function recordedCalls(app: ElectronApplication): Promise<RecordedCall[]> {
   return (await app.evaluate(() => (globalThis as any).__miqiSessionCalls ?? [])) as RecordedCall[];
-}
-
-/** 起一个永不响应的 mock provider，让真实回合一直存活（会话落盘但不结束）。 */
-async function startMockServer(script: string): Promise<{ proc: ChildProcess; mockUrl: string }> {
-  const python = process.env['MIQI_PYTHON_PATH'] || 'python';
-  const port = 20000 + Math.floor(Math.random() * 20000);
-  const proc = spawn(python, [join(REPO_ROOT, 'scripts', script), String(port)], {
-    cwd: REPO_ROOT,
-    stdio: ['ignore', 'pipe', 'pipe'],
-    env: { ...process.env, PYTHONUNBUFFERED: '1' },
-    windowsHide: true,
-  });
-  let readyUrl = '';
-  let stderrTail = '';
-  proc.stdout?.on('data', (d) => {
-    const t = String(d);
-    console.log(`[mock-${script}] ${t.trim()}`);
-    const m = t.match(/http:\/\/127\.0\.0\.1:(\d+)\/v1/);
-    if (m) readyUrl = `http://127.0.0.1:${m[1]}/v1`;
-  });
-  proc.stderr?.on('data', (d) => {
-    stderrTail = (stderrTail + String(d)).slice(-2000);
-  });
-  proc.on('exit', (code) => console.log(`[test] mock ${script} exited: ${code}`));
-  const deadline = Date.now() + 30_000;
-  while (!readyUrl && Date.now() < deadline) {
-    if (proc.exitCode !== null) {
-      throw new Error(`mock ${script} exited early (code ${proc.exitCode}): ${stderrTail}`);
-    }
-    await new Promise((r) => setTimeout(r, 250));
-  }
-  if (!readyUrl) {
-    proc.kill();
-    throw new Error(`mock ${script} startup line not seen in 30s: ${stderrTail}`);
-  }
-  console.log(`[test] mock ${script} ready at ${readyUrl}`);
-  return { proc, mockUrl: readyUrl };
 }
 
 /** Point every configured provider at *mockUrl* and pin the default model
@@ -266,6 +227,7 @@ test.describe('Issue #1035 — 恢复校验不误伤仍存在的会话（#1118 �
   });
 
   test('restored lastSession 仍存在时原样加载（不回退、不被门挂住）', async () => {
+    // 起一个永不响应的 mock provider，让真实回合一直存活（会话落盘但不结束）。
     const mock = await startMockServer('mock_hang.py');
     mockServer = mock.proc;
     const fixture = await launchElectronApp((config: any) => {
