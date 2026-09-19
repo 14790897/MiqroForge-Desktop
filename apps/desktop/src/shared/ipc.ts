@@ -1021,7 +1021,9 @@ export interface ChatProgress {
   text?: string;
   /** Tool-hint flag — absent for pure-lifecycle events like stream:'turn'. */
   tool_hint?: boolean;
-  stream?: 'stdout' | 'stderr' | 'reasoning' | 'turn' | 'points';
+  /** `heartbeat` is the bridge's 10s liveness ping during silent stretches
+   *  (miqi/bridge/loop.py `_heartbeat`) — it carries no turn output. */
+  stream?: 'stdout' | 'stderr' | 'reasoning' | 'turn' | 'points' | 'heartbeat';
   delta?: string;
   tool_call_id?: string;
   /** Original tool-call arguments (e.g. web_fetch's url) — carried on the

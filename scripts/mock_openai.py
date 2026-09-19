@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import socketserver
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 EXEC_TITLE = "确认执行方案？"
@@ -430,13 +431,25 @@ class Handler(BaseHTTPRequestHandler):
         ))
 
 
+class FastBindHTTPServer(HTTPServer):
+    """HTTPServer.server_bind() 会用 socket.getfqdn(host) 反查 DNS；
+    某些 CI runner（macOS）上该反查会卡住，导致 ready 行永远不打印、
+    serve_forever 永不执行。这里跳过反查：server_name 直接用 host。"""
+
+    def server_bind(self):
+        socketserver.TCPServer.server_bind(self)
+        host, port = self.server_address[:2]
+        self.server_name = host
+        self.server_port = port
+
+
 if __name__ == "__main__":
     # Optional port argument: E2E passes an ephemeral port so parallel
     # workers / CI retries never collide on 8899. Port 0 lets the OS pick.
     import sys
 
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 8899
-    server = HTTPServer(("127.0.0.1", port), Handler)
+    server = FastBindHTTPServer(("127.0.0.1", port), Handler)
     # Print the ACTUAL bound port — with port 0 it differs from argv.
     actual_port = server.server_address[1]
     print(f"Mock OpenAI server on http://127.0.0.1:{actual_port}/v1", flush=True)

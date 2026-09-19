@@ -329,15 +329,19 @@ export function registerIpcHandlers(bridge: BridgeManager): void {
   ipcMain.handle(IPC.CHAT_SEND, async (_event, payload: unknown) => {
     const input = ChatSendInput.parse(payload);
 
+    const sessionKey = input.session_key ?? 'desktop:default';
+
     const sender = _event.sender;
     const safeSend = (channel: string, data: unknown) => {
       sendToFrame(sender, channel, data);
     };
+    // 通道异常结束（bridge 抛错）也算 turn 结束，否则登记表里会留下永远不会被
+    // 摘掉的"在飞"会话，下一次崩溃的恢复提示就会撒谎。
     const result = await bridge.send(
       'chat.send',
       {
         content: input.content,
-        session_key: input.session_key ?? 'desktop:default',
+        session_key: sessionKey,
         thread_id: (input as any).thread_id ?? undefined,
         mode: input.mode,
         attachments: input.attachments,

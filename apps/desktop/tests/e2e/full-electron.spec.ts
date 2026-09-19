@@ -10,10 +10,10 @@
  * Run: cd apps/desktop && npx playwright test --config=playwright.config.ts --project=electron
  */
 
-import { _electron as electron, test, expect } from '@playwright/test';
+import { test, expect } from '@playwright/test';
 import type { ElectronApplication, Page } from '@playwright/test';
+import { basename, dirname } from 'node:path';
 import {
-  APPS_DESKTOP,
   LLM_TIMEOUT,
   waitForInputReady,
   sendMessage,
@@ -26,8 +26,8 @@ import {
   switchToSessionWithMarker,
   waitForBridgeInitialized,
   launchElectronApp,
+  relaunchElectronApp,
   closeElectronApp,
-  applyWindowVisibilityEnv,
 } from './helpers/electron-setup';
 
 // ─── Test Suite ───────────────────────────────────────────────────
@@ -372,18 +372,33 @@ test.describe('Native Electron E2E', () => {
     await closeElectronApp(electronApp);
     await new Promise((r) => setTimeout(r, 3000));
 
-    const env: Record<string, string | undefined> = { ...process.env };
-    env.MIQI_HOME = miqiHome;
-    delete env.ELECTRON_RUN_AS_NODE;
-    // 裸 electron.launch 绕过了 helper：同 helper 默认，本机不开可见窗口
-    applyWindowVisibilityEnv(env);
-    const app2 = await electron.launch({
-      args: [APPS_DESKTOP],
-      executablePath: require('electron') as string,
-      env: env as Record<string, string>,
-      chromiumSandbox: false,
-    });
-    const page2 = await app2.firstWindow();
+    // ── Restart on the SAME profile (#1035 复审 P2b / 上轮镜像遗留项）─────────
+    // 这里原本是手写的 `electron.launch({ env: { ...process.env, MIQI_HOME } })`，
+    // 只钉住了 MIQI_HOME（sqlite 会话存储）。profile 相关 env 一个都没带——而且
+    // 带不了：launchElectronApp 只改自己那份 env 副本，process.env 里从没有过
+    // MIQI_USER_DATA_DIR——于是 dev 模式的 `app.setPath('userData', ws-<checkout
+    // hash>)` 生效，第二次启动落到与第一次**不同**的共享分区：Local Storage /
+    // Cache / Cookies 全部对不上，这条「重启后历史还在」实际比较的是两个 profile，
+    // 语义失真。relaunchElectronApp 复用同一个 miqiHome，并把 MIQI_USER_DATA_DIR
+    // （+ `--user-data-dir`）、qraft 登录/账单隔离、#1095 登录门与 #837 同意门
+    // bypass 一并带上，是仓库里重启恢复用例的统一入口（参
+    // regression-480-startup-history.spec.ts 的同款注释）。
+    const fixture2 = await relaunchElectronApp(miqiHome);
+    const app2 = fixture2.electronApp;
+    const page2 = fixture2.page;
+    // 自证：重启后的 Chromium profile 必须落在本轮临时 home 里。比较目录名而不是
+    // 全路径——Windows 上 os.tmpdir() 可能给 8.3 短名（WANGSA~1），与
+    // app.getPath() 返回的长名逐字符比较会假红；`miqi-e2e-<随机>` 这一段是唯一的。
+    const userDataDir2 = await app2.evaluate(({ app }) => app.getPath('userData'));
+    expect(
+      basename(dirname(userDataDir2)),
+      `重启后的 Chromium profile 应是本轮临时 home（实际 ${userDataDir2}）——对不上说明重启落到了共享分区，后面的历史断言比较的是两个 profile`
+    ).toBe(basename(miqiHome));
+    expect(
+      userDataDir2,
+      `重启后的 Chromium profile 不许是 checkout 共享的 ws-<hash> 分区（实际 ${userDataDir2}）`
+    ).not.toContain('miqi-desktop-dev');
+
     await page2.waitForLoadState('domcontentloaded');
     try {
       await page2.locator('[data-testid="app-title"]').waitFor({ timeout: 30000 });
