@@ -30,6 +30,30 @@ export const APPS_DESKTOP = resolve(__dirname, '../../..');
 /** Default timeout for real LLM calls */
 export const LLM_TIMEOUT = 240_000; // 4 min — gives LLM more time in CI
 
+// ─── Window visibility ───────────────────────────────────────────────
+
+/**
+ * E2E 启动的应用默认不出现在桌面上：本机跑用例时应用窗口（并行 worker 一次
+ * 开好几个）会弹出、遮挡用户操作并抢走焦点。主进程据此把窗口停在显示器
+ * 之外、且不激活（见 src/main/index.ts shouldStartOffscreen）。
+ *
+ * - 本机默认开：不想被窗口打扰。
+ * - CI 默认关：无人看桌面，保持原来的可见窗口行为（出问题时看截图/录屏更直观）。
+ * - `MIQI_E2E_SHOW_WINDOW=1` 或 spec 传 `{ showWindow: true }` 强制窗口出现在
+ *   屏幕上（录屏、需要真实窗口画面的用例）。
+ * - `MIQI_E2E_OFFSCREEN=1|0` 显式覆盖（优先级最高）。
+ */
+export function applyWindowVisibilityEnv(
+  env: Record<string, string | undefined>,
+  showWindow?: boolean
+): void {
+  if (showWindow || process.env.MIQI_E2E_SHOW_WINDOW === '1') {
+    env.MIQI_E2E_OFFSCREEN = '0';
+    return;
+  }
+  env.MIQI_E2E_OFFSCREEN = process.env.MIQI_E2E_OFFSCREEN ?? (process.env.CI ? '0' : '1');
+}
+
 // ─── Session path helpers ────────────────────────────────────────────
 
 /** Derive sessions directory from a MIQI_HOME path */
@@ -572,7 +596,13 @@ export async function browserLogin(
  */
 export async function launchElectronApp(
   patchConfig?: (config: any) => any,
-  opts?: { bypassAll?: boolean; noConsentBypass?: boolean; noLoginBypass?: boolean }
+  opts?: {
+    bypassAll?: boolean;
+    noConsentBypass?: boolean;
+    noLoginBypass?: boolean;
+    /** 强制窗口显示在屏幕上（默认本机启动时停在屏幕外，见 applyWindowVisibilityEnv） */
+    showWindow?: boolean;
+  }
 ): Promise<ElectronFixture> {
   // Create unique temporary home per test worker for full isolation.
   //
@@ -684,6 +714,8 @@ export async function launchElectronApp(
   } else {
     env.MIQI_LOGIN_BYPASS = '1';
   }
+
+  applyWindowVisibilityEnv(env, opts?.showWindow);
 
   // The bridge is spawned per E2E run (cold start).  If MIQI_PYTHON_PATH
   // points at a python that cannot even run (e.g. a stale uv-managed
@@ -805,7 +837,7 @@ export async function launchElectronApp(
  *  run doesn't hang on dialogs or hit real feedback channels. */
 export async function relaunchElectronApp(
   miqiHome: string,
-  opts?: { noConsentBypass?: boolean; noLoginBypass?: boolean }
+  opts?: { noConsentBypass?: boolean; noLoginBypass?: boolean; showWindow?: boolean }
 ): Promise<ElectronFixture> {
   const miqiSessionsDir = getMiqiSessionsDir(miqiHome);
 
@@ -852,6 +884,9 @@ export async function relaunchElectronApp(
   } else {
     env.MIQI_LOGIN_BYPASS = '1';
   }
+
+  // Same E2E off-screen default as launchElectronApp (see above).
+  applyWindowVisibilityEnv(env, opts?.showWindow);
   // Same broken-MIQI_PYTHON_PATH fallback as launchElectronApp (see above).
   if (env.MIQI_PYTHON_PATH) {
     const relaunchProbe = require('node:child_process').spawnSync(
@@ -879,6 +914,7 @@ export async function relaunchElectronApp(
     chromiumSandbox: false,
   });
 
+  // Same title/size main-window pick as launchElectronApp (see above).
   let page;
   for (let i = 0; i < 100; i++) {
     const windows = electronApp.windows();
