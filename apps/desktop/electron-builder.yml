@@ -50,7 +50,8 @@ mac:
     - from: ../../dist/miqi-bridge
       to: miqi-bridge
 nsis:
-  perMachine: true
+  # 按用户安装（不设 perMachine）：免 UAC，存量 %LOCALAPPDATA%\Programs 副本可原地
+  # 覆盖升级；perMachine 模式要求管理员且固定装 Program Files，会切断更新链路（#1124）。
   oneClick: false
   createDesktopShortcut: true
   createStartMenuShortcut: true
