@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
+import { Loader2 } from 'lucide-react';
 import { RuntimeProvider, useRuntime } from './contexts/RuntimeContext';
 import { TooltipProvider } from './components/ui/Tooltip';
 import { Sidebar } from './components/Sidebar';
@@ -37,6 +38,11 @@ import {
   recordConsent,
 } from './lib/privacy';
 import { useQraftStatus } from './hooks/useQraftStatus';
+import {
+  DEFAULT_SESSION_KEY,
+  shouldFallbackToDefaultSession,
+  shouldVerifyRestoredSession,
+} from './sessionRestore';
 
 type NavId =
   | 'chat'
@@ -99,14 +105,41 @@ function StartupLoading() {
   );
 }
 
+/**
+ * 恢复校验期间聊天区的占位（#1118 第八轮）。
+ *
+ * 这一拍**不挂载 ChatConsole**：ChatConsole 的加载 effect 会对当前 key 直接调
+ * `sessions.get`（bridge 侧是 get-or-create），而此刻我们还没验明这个 key 是否
+ * 还存在。视觉对齐 ChatConsole 自己的「正在连接…」态，桥起来后通常只持续一次
+ * IPC 往返。只在「恢复出来的不是默认哨兵」时出现，全新 profile 看不到它。
+ */
+function SessionRestorePlaceholder() {
+  return (
+    <div
+      className="flex flex-1 flex-col items-center justify-center gap-2.5"
+      style={{ background: 'var(--background)' }}
+    >
+      <Loader2 size={16} className="animate-spin text-text-faint" />
+      <p className="text-xs text-text-faint">正在恢复上次会话…</p>
+    </div>
+  );
+}
+
+/**
+ * 恢复校验的兜底时限：桥一直起不来（或反复报错）时不能把启动挂在等待上——
+ * 超时即放行，让 ChatConsole 走它自己的 10× 重试 +「正在连接…」路径，与旧行为
+ * 一致。桥正常时这条路径不会走到（校验在 running 后立刻完成）。
+ */
+const RESTORE_GATE_MAX_MS = 10_000;
+
 function AppShell() {
   const { status } = useRuntime();
   const [activeNav, setActiveNav] = useState<NavId>('chat');
   const [sessionKey, setSessionKey] = useState(() => {
     try {
-      return localStorage.getItem('miqi:lastSession') || 'desktop:default';
+      return localStorage.getItem('miqi:lastSession') || DEFAULT_SESSION_KEY;
     } catch {
-      return 'desktop:default';
+      return DEFAULT_SESSION_KEY;
     }
   });
   const [sessionRefreshKey, setSessionRefreshKey] = useState(0);
@@ -178,6 +211,69 @@ function AppShell() {
       /* localStorage unavailable */
     }
   }, [sessionKey]);
+
+  // #1118: 恢复出来的 lastSession 可能指向一个**已经不存在的会话**（会话在
+  // SessionExplorer / 设置页被删、在另一个实例里被删、或工作区换目录后 key 不再
+  // 存在）。bridge 的 sessions.get 对未知 key 走 get_or_create——不报错、返回空
+  // 会话，所以渲染层分不出「已删除」和「空会话」：界面照常显示欢迎页，之后的新建
+  // 和发送都落在这个幽灵 key 上（等于用被删会话的身份开新会话）。
+  // 校验只针对**启动时恢复的那一个 key**、只做一次，且仅当 sessions.list 明确
+  // 查无此 key 才回退；用户已经切走（或列表查询失败）就保持现状——宁可不动，
+  // 也不误切用户正在用的会话。判定逻辑见 sessionRestore.ts。
+  //
+  // 第八轮（两阶段启动）：校验是**异步**的，而 ChatConsole 在同一次 render 就
+  // 挂载、加载 effect 立刻对 sessionKey 调 `sessions.get`（get-or-create）——
+  // 「先加载幽灵、后判定」的顺序必须掐掉。校验出结论前不挂载 ChatConsole
+  // （占位见 SessionRestorePlaceholder），结论落地才交棒。
+  const restoredSessionKeyRef = useRef(sessionKey);
+  const restoredSessionCheckedRef = useRef(false);
+  const [restorePending, setRestorePending] = useState(
+    () => PRELOAD_OK && shouldVerifyRestoredSession(restoredSessionKeyRef.current)
+  );
+  // 兜底：桥迟迟不到 running 时不得把启动挂在等待上，超时即放行（见常量注释）。
+  useEffect(() => {
+    if (!restorePending) return;
+    const timer = window.setTimeout(() => setRestorePending(false), RESTORE_GATE_MAX_MS);
+    return () => window.clearTimeout(timer);
+  }, [restorePending]);
+  useEffect(() => {
+    if (restoredSessionCheckedRef.current) return;
+    if (!PRELOAD_OK || status.state !== 'running') return;
+    const restoredKey = restoredSessionKeyRef.current;
+    restoredSessionCheckedRef.current = true;
+    if (restoredKey === DEFAULT_SESSION_KEY) {
+      setRestorePending(false); // 哨兵不用校验，直接交棒
+      return;
+    }
+    void (async () => {
+      try {
+        // 归档列表也要算「存在」：归档只是收起来，会话并没有消失，不该因为
+        // 用户归档过就把他从上次会话里踢回默认态。
+        const [list, archived] = await Promise.all([
+          window.miqi.sessions.list(),
+          window.miqi.sessions.listArchived(),
+        ]);
+        const knownKeys = [...(list?.sessions ?? []), ...(archived?.sessions ?? [])].map(
+          (s) => s.key
+        );
+        if (sessionKeyRef.current !== restoredKey) return; // 用户已切走
+        if (shouldFallbackToDefaultSession(restoredKey, knownKeys)) {
+          console.warn(
+            `[miqi] restored session ${restoredKey} no longer exists — falling back to ${DEFAULT_SESSION_KEY}`
+          );
+          setSessionKey(DEFAULT_SESSION_KEY);
+        }
+      } catch {
+        /* 列表拿不到（bridge 刚起 / 瞬时错误）→ 保持现状，不误切 */
+      } finally {
+        // 无论结论如何，门都必须开：失败=保持现状放行，与旧行为一致。
+        setRestorePending(false);
+      }
+    })();
+  }, [status.state]);
+  // 用户已经切走（侧边栏点了别的会话）就立即交棒：校验只针对启动时恢复的那一个
+  // key，用户的选择优先。
+  const restoringSession = restorePending && sessionKey === restoredSessionKeyRef.current;
 
   // When the bridge becomes ready, trigger a session history reload in ChatConsole
   useEffect(() => {
@@ -449,36 +545,43 @@ function AppShell() {
                       activeNav === 'chat' ? 'flex flex-col flex-1 overflow-hidden' : 'hidden'
                     }
                   >
-                    <ChatConsole
-                      sessionKey={sessionKey}
-                      loadTrigger={runtimeReadyKey}
-                      workspace={workspace}
-                      newSessionTrigger={newSessionTrigger}
-                      onNewSession={(newKey: string, workspace?: string | null) =>
-                        handleSessionCreated(newKey, workspace)
-                      }
-                      onSessionActivityChange={handleSessionActivityChange}
-                      pendingWorkspace={pendingWorkspace}
-                      onChatFinished={() => setSessionRefreshKey((k) => k + 1)}
-                      onSessionsChanged={() => setSessionRefreshKey((k) => k + 1)}
-                      renameVersion={renameVersion}
-                      onRename={() => setSessionRefreshKey((k) => k + 1)}
-                      onOpenProviderSettings={() => {
-                        setSettingsTab('providers');
-                        setActiveNav('settings');
-                      }}
-                      onOpenQraftSettings={() => {
-                        setSettingsTab('qraft');
-                        setActiveNav('settings');
-                      }}
-                      onOpenApprovals={() => {
-                        setSettingsTab('approvals');
-                        setActiveNav('settings');
-                      }}
-                      onWorkspaceLoaded={(ws) => {
-                        if (ws) setWorkspace(ws);
-                      }}
-                    />
+                    {/* #1118 第八轮：恢复校验未出结论前不挂载 ChatConsole —— 它一挂载
+                        就会对 sessionKey 调 get-or-create 的 sessions.get（幽灵 key 会
+                        被先加载一遍、切走时还会被当成「上一个会话」GC 删除）。 */}
+                    {restoringSession ? (
+                      <SessionRestorePlaceholder />
+                    ) : (
+                      <ChatConsole
+                        sessionKey={sessionKey}
+                        loadTrigger={runtimeReadyKey}
+                        workspace={workspace}
+                        newSessionTrigger={newSessionTrigger}
+                        onNewSession={(newKey: string, workspace?: string | null) =>
+                          handleSessionCreated(newKey, workspace)
+                        }
+                        onSessionActivityChange={handleSessionActivityChange}
+                        pendingWorkspace={pendingWorkspace}
+                        onChatFinished={() => setSessionRefreshKey((k) => k + 1)}
+                        onSessionsChanged={() => setSessionRefreshKey((k) => k + 1)}
+                        renameVersion={renameVersion}
+                        onRename={() => setSessionRefreshKey((k) => k + 1)}
+                        onOpenProviderSettings={() => {
+                          setSettingsTab('providers');
+                          setActiveNav('settings');
+                        }}
+                        onOpenQraftSettings={() => {
+                          setSettingsTab('qraft');
+                          setActiveNav('settings');
+                        }}
+                        onOpenApprovals={() => {
+                          setSettingsTab('approvals');
+                          setActiveNav('settings');
+                        }}
+                        onWorkspaceLoaded={(ws) => {
+                          if (ws) setWorkspace(ws);
+                        }}
+                      />
+                    )}
                   </div>
                   {activeNav === 'workspace' && <WorkspacePage />}
                   {activeNav === 'cron' && <CronPage />}
