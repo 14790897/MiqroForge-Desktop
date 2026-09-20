@@ -428,6 +428,30 @@ describe('QraftService 自动刷新', () => {
     expect(service.status().loggedIn).toBe(true);
     expect(service.status().refreshScheduledAt).toBeGreaterThan(Date.now());
   });
+
+  it('超长有效期（30 天）封顶调度：不在 1ms 截断下高频循环刷新', async () => {
+    vi.useFakeTimers();
+    const stub = makeClientStub();
+    stub.platformLogin.mockResolvedValue({ sub: '1', username: 'u', nickname: 'n' });
+    // 实测平台刷新返回 30 天有效期（约 43185 分钟，超出 setTimeout 上限）。
+    // 惰性计算 expiresAt：假时钟推进后每次刷新都返回「从现在起 30 天」。
+    const longLived = () => makeTokens({ expiresAt: Date.now() + 2_591_999_000 });
+    stub.authorizeFlow.mockResolvedValue(longLived());
+    stub.getUserInfo.mockResolvedValue({ sub: '1', username: 'u', nickname: 'n' });
+    stub.refreshTokens.mockImplementation(async () => longLived());
+    const service = makeService(stub);
+    await service.login('18500000000', 'p');
+
+    // 首个定时器被 setTimeout 32 位上限（约 24.8 天）封顶。越过封顶点时
+    // 仍未到刷新时刻（30 天 - 15 分钟），只是重新调度，不发任何请求。
+    await vi.advanceTimersByTimeAsync(2_147_483_647 + 100);
+    expect(stub.refreshTokens).toHaveBeenCalledTimes(0);
+
+    // 推进到真正的刷新时刻：恰好刷新一次，并重新调度下一次。
+    await vi.advanceTimersByTimeAsync(2_591_999_000 - 900_000 - 2_147_483_647 + 100);
+    expect(stub.refreshTokens).toHaveBeenCalledTimes(1);
+    expect(service.status().refreshScheduledAt).toBeGreaterThan(Date.now());
+  });
 });
 
 describe('QraftService 手动刷新与退出', () => {
