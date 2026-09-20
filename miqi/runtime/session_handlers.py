@@ -23,9 +23,10 @@ from pathlib import Path
 from typing import Any
 
 from loguru import logger
+from pydantic import ValidationError
 
 from miqi.runtime.app_server import AppServerError
-from miqi.runtime.session_request_models import validate_session_params
+from miqi.runtime.session_request_models import SessionKeyParams, validate_session_params
 from miqi.session.manager import OwnershipError
 
 
@@ -97,6 +98,79 @@ def _candidate_workspace_roots(
     return roots
 
 
+def _probe_folder(
+    root: Path, session_key: str, client_id: str, *, require_owned: bool = True
+) -> tuple[Any, Any] | None:
+    """``(SessionManager, session)`` when ``root`` holds a copy of this session.
+
+    When ``require_owned`` is True (default), a copy owned by another client is
+    treated as absent — folder copies are never adopted across clients.  When
+    False, an unowned (legacy) copy is accepted so callers can report its
+    ownership status without claiming it.
+    """
+    from miqi.session.manager import SessionManager
+
+    try:
+        folder_sm = SessionManager(root)
+        folder_session = folder_sm.load_existing(session_key)
+    except Exception:
+        return None
+    if folder_session is None:
+        return None
+    owner = folder_session.metadata.get("owner_client_id")
+    if owner is not None and owner != client_id:
+        return None
+    if require_owned and owner is None:
+        return None
+    return folder_sm, folder_session
+
+
+def _claim_folder_copies(sm: Any, session_key: str, client_id: str) -> None:
+    """Stamp ``owner_client_id`` on this session's unowned folder copies (#1103).
+
+    ``SessionManager.claim_session`` only reaches the copy inside its own
+    (app-home) root, and ``sessions.get`` deliberately leaves a legacy folder
+    copy unowned rather than stamping a binding for a session the client never
+    claimed.  Every resolver probes with ``require_owned=True``, which refuses
+    an ownerless copy — so without this step, claiming a legacy session leaves
+    ``_find_ledger_root`` unable to see the bound root and the session's files
+    keep resolving against the app-home workspace.
+
+    A copy owned by a *different* client is left alone: ``require_owned=False``
+    hides exactly those, so a foreign copy keeps failing the ownership check
+    instead of being adopted by whoever claims the app-home stub.
+    """
+    from miqi.session.manager import SessionManager
+
+    roots: list[Path] = []
+    stub = sm.load_existing(session_key)
+    declared = stub.metadata.get("workspace") if stub is not None else None
+    if declared:
+        try:
+            roots.append(SessionManager._validate_workspace(Path(declared)))
+        except Exception:
+            pass
+    for root in _candidate_workspace_roots(sm, client_id):
+        if root not in roots:
+            roots.append(root)
+
+    for root in roots:
+        probed = _probe_folder(root, session_key, client_id, require_owned=False)
+        if probed is None:
+            continue
+        folder_sm, folder_session = probed
+        if folder_session.metadata.get("owner_client_id") == client_id:
+            continue
+        folder_session.metadata["owner_client_id"] = client_id
+        try:
+            folder_sm.save(folder_session)
+        except Exception as exc:
+            logger.debug(
+                "claim_legacy: writing owner to the folder copy at {} failed: {}",
+                root, exc,
+            )
+
+
 def _find_folder_session(
     sm: Any,
     session_key: str,
@@ -104,29 +178,123 @@ def _find_folder_session(
     *,
     extra_workspace: str | None = None,
 ) -> tuple[Any, Path] | None:
-    """Locate the authoritative folder-root copy of a session.
+    """Locate the authoritative folder-root copy of a session's *conversation*.
 
     Returns (folder_session, folder_root) for the first known root that holds
-    real messages for ``session_key``, or None.  Sessions owned by a different
-    client are skipped — never leak another client's data.
-    """
-    from miqi.session.manager import SessionManager
+    the session, or None.  An empty copy is not authoritative for history, so a
+    session whose folder copy has no message yet stays app-home's.
 
+    Readers of state that outlives the conversation — tracked files, which the
+    runtime writes under its own workspace root whether or not a message was
+    ever sent — need a different authority rule and go through
+    ``_find_ledger_root`` instead (#1061).
+    """
     for root in _candidate_workspace_roots(
         sm, client_id, extra=[extra_workspace] if extra_workspace else None,
     ):
-        try:
-            folder_sm = SessionManager(root)
-            folder_session = folder_sm.load_existing(session_key)
-        except Exception:
+        probed = _probe_folder(root, session_key, client_id, require_owned=False)
+        if probed is None:
             continue
-        if folder_session is None or not folder_session.messages:
-            continue
-        owner = folder_session.metadata.get("owner_client_id")
-        if owner is not None and owner != client_id:
+        folder_session = probed[1]
+        if not folder_session.messages:
             continue
         return folder_session, root
     return None
+
+
+def _find_ledger_root(
+    sm: Any,
+    session_key: str,
+    client_id: str,
+    *,
+    runtime_workspace: str | None = None,
+) -> Path | None:
+    """Root whose copy of this session owns its ``tracked_files.json`` (#1061).
+
+    Tracked files resolve by a different authority rule than the conversation,
+    so they get their own resolver instead of a mode flag on that one.
+
+    Two roots are authoritative, in the order writes follow them: the live
+    runtime's workspace (also the only handle on the folder when the session
+    carries no app-home stub at all), then the folder this session's stub is
+    bound to.  They are accepted on the session's presence, because they *are*
+    the answer to "where does this session live" — a ledger that has not been
+    written there yet must not be answered by some other folder.
+
+    Roots discovered by scanning are guesses, and a copy of the session is not
+    evidence: one key can have copies under several folders, since rebinding a
+    session through the workspace picker leaves the old folder's copy behind.
+    Scanning walks stubs newest-first, so a stale ledger-less copy comes first
+    and answers for the ledger — reads come back empty and clears wipe the wrong
+    folder.  Scan candidates must hold the ledger themselves to qualify.
+    """
+    from miqi.session.manager import SessionManager
+
+    stub = sm.load_existing(session_key)
+    seeds = [runtime_workspace, stub.metadata.get("workspace") if stub else None]
+    for seed in seeds:
+        if not seed:
+            continue
+        try:
+            seed_root = SessionManager._validate_workspace(Path(seed))
+        except Exception:
+            continue
+        if _probe_folder(seed_root, session_key, client_id) is not None:
+            return seed_root
+
+    for root in _candidate_workspace_roots(sm, client_id):
+        probed = _probe_folder(root, session_key, client_id)
+        if probed is None:
+            continue
+        try:
+            if not probed[0].load_tracked_files(session_key, client_id=client_id):
+                continue
+        except Exception:
+            continue
+        return root
+    return None
+
+
+def _active_runtime_workspace(runtime: Any) -> str | None:
+    """Workspace root a live runtime mirrors its conversation into (#1061).
+
+    A session born inside a folder window has its runtime rooted at that folder
+    and may carry no app-home stub at all, so the persisted-binding scan cannot
+    see it: the binding is only stamped when a runtime is created (or healed on
+    a later read), which leaves sessions written by builds before that stamp
+    existed with nowhere to look.  The live runtime is authoritative for where
+    its own copy lives, so it seeds the folder search.
+    """
+    if runtime is None:
+        return None
+    workspace = getattr(getattr(runtime, "services", None), "workspace", None)
+    return str(workspace) if workspace else None
+
+
+def _session_workspace_root(
+    sm: Any,
+    session_key: str,
+    client_id: str,
+    *,
+    runtime_workspace: str | None = None,
+) -> Path | None:
+    """Workspace root this session's own files resolve against (#1062).
+
+    None means the session is not folder-bound and its files live under the
+    app-home workspace, so callers must keep resolving against the global root
+    exactly as before.
+
+    Deliberately the same resolver the assets panel goes through — a preview and
+    the panel must not disagree about which root owns a session's files.  A
+    cheaper "stub carries no binding, so it is not bound" shortcut is wrong here:
+    a session written before the binding was stamped, or one born inside a folder
+    window, has a folder copy the shortcut would never look at, and its files
+    would silently resolve against app-home instead.  The seeds keep the common
+    cases cheap; only a session with neither seed scans.
+    """
+    return _find_ledger_root(
+        sm, session_key, client_id, runtime_workspace=runtime_workspace,
+    )
 
 
 def _folder_session_manager(sm: Any, session_key: str, client_id: str) -> Any | None:
@@ -137,6 +305,53 @@ def _folder_session_manager(sm: Any, session_key: str, client_id: str) -> Any | 
     if found is None:
         return None
     return SessionManager(found[1])
+
+
+async def _runtime_workspace_for_session(
+    client_id: str,
+    session_key: str,
+    registry: Any,
+) -> str | None:
+    """Workspace of this session's live runtime, or None (#1062).
+
+    None means there is no runtime to ask.  A lookup that *fails* is a different
+    answer and is deliberately not folded into it (#1103 review): the callers
+    turn "this session has no runtime" into "resolve against the app-home
+    workspace", which is right for an unbound session but wrong for a bound one,
+    where a session-relative name would address a different file of the same
+    name.  Left to propagate, the failure costs one failed read instead of a
+    silent read from the wrong root.
+    """
+    if registry is None:
+        return None
+    runtime = await registry.get_session(
+        client_id, _client_session_id(client_id, session_key),
+    )
+    return _active_runtime_workspace(runtime)
+
+
+async def _tracked_files_manager(
+    sm: Any,
+    session_key: str,
+    client_id: str,
+    registry: Any,
+) -> Any:
+    """SessionManager holding this session's tracked-files ledger (#1061).
+
+    Falls back to ``sm`` (app-home) when no folder copy owns the ledger; the
+    rule that picks the owner lives in ``_find_ledger_root``.
+    """
+    from miqi.session.manager import SessionManager
+
+    root = _find_ledger_root(
+        sm,
+        session_key,
+        client_id,
+        runtime_workspace=await _runtime_workspace_for_session(
+            client_id, session_key, registry,
+        ),
+    )
+    return SessionManager(root) if root is not None else sm
 
 
 def _tracked_files_store_key(session_key: str) -> str:
@@ -392,8 +607,15 @@ async def sessions_get_handler(
             # → recent-workspace scan) and backfill the binding so later reads and
             # sessions.list resolve without another scan.
             if not disk_session.messages:
+                # #1061: a live runtime knows its own workspace root.  A folder
+                # window's session has no app-home stub, so without this seed a
+                # bare get returns an empty conversation even though the runtime
+                # is running and the copy on disk is intact.
                 found = _find_folder_session(
-                    sm, session_key, client_id, extra_workspace=str(ws) if ws else None,
+                    sm,
+                    session_key,
+                    client_id,
+                    extra_workspace=str(ws) if ws else _active_runtime_workspace(runtime),
                 )
                 if found is not None:
                     folder_session, authoritative_ws = found
@@ -751,6 +973,45 @@ async def sessions_list_archived_handler(
     return {"result": {"sessions": archived}}
 
 
+# ── sessions.workspace ────────────────────────────────────────────────────
+
+
+async def sessions_workspace_handler(
+    request_id: str,
+    params: dict[str, Any],
+    client_id: str,
+    session_id: str | None,
+    registry: Any,
+) -> dict[str, Any]:
+    """Workspace root this session's files resolve against (#1062).
+
+    The caller names a session and never a root: a root the renderer could
+    supply would make the main process's containment checks meaningless (#955).
+    Uses the same resolver as ``sessions.get_tracked_files`` so the root the
+    assets panel was read from and the root a preview resolves against agree.
+
+    ``workspace`` is null for a session that is not folder-bound.
+
+    Validated locally rather than through ``validate_session_params``: this
+    method is deliberately absent from the exported contract, so it must not
+    appear in that map either.
+    """
+    try:
+        typed = SessionKeyParams.model_validate(params)
+    except ValidationError as exc:
+        raise AppServerError("Invalid params", code="INVALID_PARAMS") from exc
+    sm = _get_session_manager()
+    root = _session_workspace_root(
+        sm,
+        typed.session_key,
+        client_id,
+        runtime_workspace=await _runtime_workspace_for_session(
+            client_id, typed.session_key, registry,
+        ),
+    )
+    return {"result": {"workspace": str(root) if root is not None else None}}
+
+
 # ── sessions.get_tracked_files ─────────────────────────────────────────────
 
 
@@ -765,7 +1026,11 @@ async def sessions_get_tracked_files_handler(
     typed = validate_session_params("sessions.get_tracked_files", params)
     session_key = _tracked_files_store_key(typed.session_key)
 
-    sm = _get_session_manager()
+    # #1061：文件夹绑定会话的资产也写在会话自己的工区；上游 #1040 修了 list/get/
+    # delete/archive，唯独漏了 tracked files —— 这里补上，否则右侧「任务资产」为空。
+    sm = await _tracked_files_manager(
+        _get_session_manager(), typed.session_key, client_id, registry,
+    )
     try:
         files = sm.load_tracked_files(session_key, client_id=client_id)
     except OwnershipError as exc:
@@ -792,7 +1057,10 @@ async def sessions_clear_tracked_files_handler(
     typed = validate_session_params("sessions.clear_tracked_files", params)
     session_key = _tracked_files_store_key(typed.session_key)
 
-    sm = _get_session_manager()
+    # #1061：同上，清理也要落到文件夹绑定工区的那份 tracked_files.json。
+    sm = await _tracked_files_manager(
+        _get_session_manager(), typed.session_key, client_id, registry,
+    )
     try:
         sm.clear_tracked_files(session_key, client_id=client_id)
     except OwnershipError as exc:
@@ -854,6 +1122,11 @@ async def sessions_claim_legacy_handler(
 
     A session that is already owned by a different client cannot be
     claimed — it will return UNAUTHORIZED.
+
+    Claiming covers every copy of the session, not just the app-home one: a
+    folder-bound session's root is only visible to the resolvers once its copy
+    carries the owner, so a stub-only claim leaves ``sessions.workspace``
+    answering null and the session's files resolving against app-home.
     """
     typed = validate_session_params("sessions.claim_legacy", params)
     session_key = typed.session_key
@@ -861,9 +1134,11 @@ async def sessions_claim_legacy_handler(
     sm = _get_session_manager()
     try:
         claimed = sm.claim_session(session_key, client_id)
-        return {"result": {"claimed": True, "was_already_claimed": not claimed}}
     except OwnershipError as exc:
         raise AppServerError(exc.args[0], code=exc.code) from exc
+
+    _claim_folder_copies(sm, session_key, client_id)
+    return {"result": {"claimed": True, "was_already_claimed": not claimed}}
 
 
 # ── sessions.list_recent_workspaces ─────────────────────────────────────────

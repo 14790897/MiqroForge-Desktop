@@ -8,7 +8,7 @@ from typing import Callable
 
 from loguru import logger
 
-from miqi.config.schema import Config
+from miqi.config.schema import DEFAULT_AGENT_NAME, LEGACY_AGENT_NAME, Config
 from miqi.paths import get_config_path, get_legacy_config_path
 
 _cache: dict[tuple, tuple[float, Config]] = {}
@@ -248,4 +248,12 @@ def _migrate_config(data: dict) -> dict:
         )
         model["model"] = _pick_migrated_model(data)
         data.setdefault("agents", {})["defaults"] = model
+
+    # #1097: agents.defaults.name 旧默认 "miqi" → "MiQroForge"。仅改 schema 默认
+    # 值不影响存量用户——已落盘的 config.json 仍写死 "miqi"。读取时把旧默认视为
+    # 未自定义，迁移为新默认（自定义成其它名的用户不受影响）。
+    defaults = (data.get("agents") or {}).get("defaults")
+    if isinstance(defaults, dict) and defaults.get("name") == LEGACY_AGENT_NAME:
+        defaults["name"] = DEFAULT_AGENT_NAME
+        data.setdefault("agents", {})["defaults"] = defaults
     return data

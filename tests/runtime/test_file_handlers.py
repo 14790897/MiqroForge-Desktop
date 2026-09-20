@@ -436,6 +436,282 @@ async def test_clear_tracked_files_namespaced_key_clears_write_path_store(tmp_pa
     assert not store.exists(), f"clear 未删到写端落盘的文件：{store}"
 
 
+# ── #1061：文件夹绑定会话的资产读/清（对话历史可以为空）─────────────────────
+
+
+def _make_folder_session(folder, key: str, client_id: str, asset: str | None = None):
+    """文件夹工区里建一个**零消息**会话；asset 非空时同时登记一条资产。
+
+    资产由运行时的写端落在会话自己的工区，与有没有对话历史无关——这正是
+    「按消息行判定会话是否存在」会踩空的地方。
+    """
+    from miqi.agent.tools.filesystem import _persist_tracked_file, _session_files_dir_key
+    from miqi.session.manager import SessionManager
+
+    folder_sm = SessionManager(folder)
+    session = folder_sm.get_or_create(key, client_id=client_id)
+    session.metadata["owner_client_id"] = client_id
+    folder_sm.save(session)
+    folder_sm.invalidate(key)
+    if asset is not None:
+        files_dir = folder / "sessions" / _session_files_dir_key(key) / "files"
+        files_dir.mkdir(parents=True, exist_ok=True)
+        target = files_dir / asset
+        target.write_text("payload", encoding="utf-8")
+        _persist_tracked_file(folder, target, op="write", session_key=key)
+    return folder_sm
+
+
+@pytest.mark.asyncio
+async def test_get_tracked_files_reads_message_less_folder_ledger(tmp_path):
+    """#1061：有资产、零消息的文件夹会话，资产面板必须读到会话自己的账本。
+
+    app-home 对该会话没有 stub，唯一能指出文件夹根的线索是活跃 runtime 的
+    workspace。若解析沿用「文件夹副本必须有消息行」（读对话处需要它来判定历史
+    权威），这类会话会被判为不存在，回落到 app-home 的空账本 → 面板恒为空。
+    """
+    from types import SimpleNamespace
+
+    from miqi.agent.tools.filesystem import _session_files_dir_key
+    from miqi.runtime.session_handlers import sessions_get_tracked_files_handler
+
+    key = "desktop:1061-get-assets"
+    folder = tmp_path / "folder-ws"
+    folder.mkdir()
+    _make_folder_session(folder, key, "client-A", asset="asset.txt")
+
+    runtime = SimpleNamespace(services=SimpleNamespace(workspace=folder))
+
+    async def _get_session(cid, sid):
+        return runtime
+
+    out = await sessions_get_tracked_files_handler(
+        "req-1", {"session_key": key}, "client-A", None,
+        SimpleNamespace(get_session=_get_session),
+    )
+    paths = {item["path"] for item in out["result"]["tracked_files"]}
+    expected = f"sessions/{_session_files_dir_key(key)}/files/asset.txt"
+    assert expected in paths, paths
+
+
+@pytest.mark.asyncio
+async def test_clear_tracked_files_clears_message_less_folder_ledger(tmp_path):
+    """#1061：零消息的文件夹会话，「清空资产」必须删到它自己那份账本。
+
+    否则清理落在 app-home 的空账本上（无操作）而文件夹那份仍在——下次读回来
+    资产照旧，表现为「清理不掉」。
+    """
+    from types import SimpleNamespace
+
+    from miqi.agent.tools.filesystem import _session_files_dir_key
+    from miqi.runtime.session_handlers import sessions_clear_tracked_files_handler
+
+    key = "desktop:1061-clear-assets"
+    folder = tmp_path / "folder-ws"
+    folder.mkdir()
+    _make_folder_session(folder, key, "client-A", asset="gone.txt")
+    store = folder / "sessions" / _session_files_dir_key(key) / "tracked_files.json"
+    assert store.exists()
+
+    runtime = SimpleNamespace(services=SimpleNamespace(workspace=folder))
+
+    async def _get_session(cid, sid):
+        return runtime
+
+    out = await sessions_clear_tracked_files_handler(
+        "req-1", {"session_key": key}, "client-A", None,
+        SimpleNamespace(get_session=_get_session),
+    )
+    assert out["result"]["cleared"] is True
+    assert not store.exists(), f"clear 未删到文件夹工区的账本：{store}"
+
+
+@pytest.mark.asyncio
+async def test_get_tracked_files_reads_folder_ledger_via_anchor_without_runtime(tmp_path):
+    """重启后无 runtime：靠其它会话的 workspace 绑定仍能定位文件夹账本。"""
+    from miqi.runtime.app_server import ClientSessionRegistry
+    from miqi.runtime.session_handlers import sessions_get_tracked_files_handler
+
+    key = "desktop:1061-cold-assets"
+    anchor = "desktop:1061-cold-anchor"
+    folder = tmp_path / "folder-ws"
+    folder.mkdir()
+    _make_folder_session(folder, key, "client-A", asset="cold.txt")
+
+    # 另一个会话在 app-home 声明了该文件夹 → 冷启动时仍能枚举到这个根。
+    sm, _ws = _setup_session(anchor, "client-A")
+    stub = sm.get_or_create(anchor, client_id="client-A", workspace=folder)
+    sm.save(stub)
+    sm.invalidate(anchor)
+
+    try:
+        out = await sessions_get_tracked_files_handler(
+            "req-1", {"session_key": key}, "client-A", None, ClientSessionRegistry(),
+        )
+        paths = {item["path"] for item in out["result"]["tracked_files"]}
+        assert any(p.endswith("cold.txt") for p in paths), paths
+    finally:
+        sm.delete(anchor, client_id="client-A")
+
+
+def _shadowed_rebound_session(tmp_path, key: str, *, asset: str):
+    """同一个 key 在两个文件夹各留一份副本：旧文件夹 + 当前绑定所在文件夹。
+
+    旧文件夹那份零消息、无账本——用户用工作区选择器把会话改绑到新文件夹后，
+    它就留在磁盘上了。再让旧根对应的 app-home stub 带上更晚的 ``updated_at``，
+    把扫描顺序固定成「旧根在前」：用例因此是在证明解析没有退化成「谁先扫到算
+    谁」，而不是碰运气通过。
+    """
+    from datetime import timedelta
+    from pathlib import Path
+
+    stale = tmp_path / "stale-ws"
+    live = tmp_path / "live-ws"
+    stale.mkdir()
+    live.mkdir()
+    _make_folder_session(stale, key, "client-A")
+    _make_folder_session(live, key, "client-A", asset=asset)
+
+    sm, _ws = _setup_session(key, "client-A")
+    sm.save(sm.get_or_create(key, client_id="client-A", workspace=live))
+    anchor = "desktop:1061-shadow-anchor"
+    anchor_stub = sm.get_or_create(anchor, client_id="client-A", workspace=stale)
+    anchor_stub.updated_at = anchor_stub.updated_at + timedelta(days=1)
+    sm.save(anchor_stub)
+    sm.invalidate(key)
+    sm.invalidate(anchor)
+
+    order = [
+        str(Path(p).expanduser().resolve())
+        for p in sm.list_bound_workspaces(client_id="client-A", include_archived=True)
+    ]
+    assert order.index(str(stale.resolve())) < order.index(str(live.resolve())), order
+    return stale, live, sm, anchor
+
+
+@pytest.mark.asyncio
+async def test_get_tracked_files_ignores_stale_copy_of_rebound_session(tmp_path):
+    """#1061 复审：改绑后旧文件夹里的零消息副本不得遮蔽真账本。
+
+    一份零消息的副本本身说明不了它是不是本会话的账本所在：同一个 key 可以因为
+    改绑而在旧文件夹留下一份。扫描按 stub 的 updated_at 倒序走，旧副本排在前，
+    若解析只看「会话副本存在」就选它，资产面板读回空列表。扫描候选必须真的持有
+    tracked_files.json。
+    """
+    from miqi.runtime.app_server import ClientSessionRegistry
+    from miqi.runtime.session_handlers import sessions_get_tracked_files_handler
+
+    key = "desktop:1061-shadow-read"
+    stale, live, sm, anchor = _shadowed_rebound_session(tmp_path, key, asset="real.txt")
+    try:
+        out = await sessions_get_tracked_files_handler(
+            "req-1", {"session_key": key}, "client-A", None, ClientSessionRegistry(),
+        )
+        paths = {item["path"] for item in out["result"]["tracked_files"]}
+        assert any(p.endswith("real.txt") for p in paths), paths
+    finally:
+        sm.delete(key, client_id="client-A")
+        sm.delete(anchor, client_id="client-A")
+
+
+@pytest.mark.asyncio
+async def test_clear_tracked_files_ignores_stale_copy_of_rebound_session(tmp_path):
+    """#1061 复审：清理同样要落在真账本上——清错文件夹比读空更糟（文件真没了）。
+
+    旧副本没有账本，「清空资产」落在它身上等于什么都没清：真账本原样留在当前
+    文件夹，下次读回来资产照旧，表现为「清理不掉」。
+    """
+    from miqi.agent.tools.filesystem import _session_files_dir_key
+    from miqi.runtime.app_server import ClientSessionRegistry
+    from miqi.runtime.session_handlers import sessions_clear_tracked_files_handler
+
+    key = "desktop:1061-shadow-clear"
+    stale, live, sm, anchor = _shadowed_rebound_session(tmp_path, key, asset="real.txt")
+    store = live / "sessions" / _session_files_dir_key(key) / "tracked_files.json"
+    assert store.exists()
+    try:
+        out = await sessions_clear_tracked_files_handler(
+            "req-1", {"session_key": key}, "client-A", None, ClientSessionRegistry(),
+        )
+        assert out["result"]["cleared"] is True
+        assert not store.exists(), f"clear 没落到真账本：{store}"
+    finally:
+        sm.delete(key, client_id="client-A")
+        sm.delete(anchor, client_id="client-A")
+
+
+def _rebound_without_binding(tmp_path, key: str, *, asset: str):
+    """同上，但 app-home 对 key 没有 stub——冷启动没有 binding 可作种子，只能扫描。
+
+    旧文件夹的 stub 带更晚的 ``updated_at``，扫描顺序里它排第一：拿到真账本只能
+    靠「候选必须自己持有 tracked_files.json」，靠不了顺序。
+    """
+    from datetime import timedelta
+    from pathlib import Path
+
+    stale = tmp_path / "stale-ws"
+    live = tmp_path / "live-ws"
+    stale.mkdir()
+    live.mkdir()
+    _make_folder_session(stale, key, "client-A")
+    _make_folder_session(live, key, "client-A", asset=asset)
+
+    anchor_a = "desktop:1061-scan-anchor-a"
+    anchor_b = "desktop:1061-scan-anchor-b"
+    sm, _ws = _setup_session(anchor_a, "client-A")
+    a_stub = sm.get_or_create(anchor_a, client_id="client-A", workspace=stale)
+    a_stub.updated_at = a_stub.updated_at + timedelta(days=1)
+    sm.save(a_stub)
+    sm.save(sm.get_or_create(anchor_b, client_id="client-A", workspace=live))
+    sm.invalidate(anchor_a)
+    sm.invalidate(anchor_b)
+
+    order = [
+        str(Path(p).expanduser().resolve())
+        for p in sm.list_bound_workspaces(client_id="client-A", include_archived=True)
+    ]
+    assert order.index(str(stale.resolve())) < order.index(str(live.resolve())), order
+    return stale, live, sm, anchor_a, anchor_b
+
+
+@pytest.mark.asyncio
+async def test_tracked_files_resolve_ledger_owner_without_binding(tmp_path):
+    """评审要求的场景：同 key 在 A 有空副本且无账本、B 有真账本，冷启动无 runtime。
+
+    app-home 对本会话没有 stub，没有 binding 可作种子，解析只能走扫描；而扫描按
+    stub 的 updated_at 倒序，A 排在前。副本存在说明不了它持有账本——读和清都必须
+    落在 B 上，否则读回空列表、清理清错文件夹。
+    """
+    from miqi.agent.tools.filesystem import _session_files_dir_key
+    from miqi.runtime.app_server import ClientSessionRegistry
+    from miqi.runtime.session_handlers import (
+        sessions_clear_tracked_files_handler,
+        sessions_get_tracked_files_handler,
+    )
+
+    key = "desktop:1061-scan-ledger"
+    stale, live, sm, anchor_a, anchor_b = _rebound_without_binding(
+        tmp_path, key, asset="real.txt"
+    )
+    store = live / "sessions" / _session_files_dir_key(key) / "tracked_files.json"
+    assert store.exists()
+    try:
+        out = await sessions_get_tracked_files_handler(
+            "req-1", {"session_key": key}, "client-A", None, ClientSessionRegistry(),
+        )
+        paths = {item["path"] for item in out["result"]["tracked_files"]}
+        assert any(p.endswith("real.txt") for p in paths), paths
+
+        cleared = await sessions_clear_tracked_files_handler(
+            "req-1", {"session_key": key}, "client-A", None, ClientSessionRegistry(),
+        )
+        assert cleared["result"]["cleared"] is True
+        assert not store.exists(), f"clear 没落到真账本：{store}"
+    finally:
+        sm.delete(anchor_a, client_id="client-A")
+        sm.delete(anchor_b, client_id="client-A")
+
+
 # ── #983 缺口 2：DownloadSink 产物进 tracked（面板读端回路）────────────────
 
 
@@ -665,3 +941,672 @@ async def test_files_read_image_jpg_mime(fake_config, fake_provider, tmp_path):
     r = result["result"]
     assert r["is_binary"] is True
     assert r["mime_type"] == "image/jpeg"
+
+
+# ── #1062: 文件夹绑定会话的读取/定位 ─────────────────────────────────────────
+
+
+def _bind_session_to_folder(sm, key: str, folder, client_id: str):
+    """把 app-home 的 stub 绑到 ``folder``，并在 ``folder`` 下留一份会话副本。
+
+    这正是 workspace picker 绑定后磁盘上的样子：stub 在 app-home 记录绑定，
+    产物和那份会话一起落在被绑定的目录里。
+    """
+    from miqi.session.manager import SessionManager
+
+    stub = sm.load_existing(key)
+    stub.metadata["workspace"] = str(folder)
+    sm.save(stub)
+
+    folder_sm = SessionManager(folder)
+    session = folder_sm.get_or_create(key, client_id=client_id)
+    session.metadata["owner_client_id"] = client_id
+    folder_sm.save(session)
+    folder_sm.invalidate(key)
+    return folder_sm
+
+
+@pytest.mark.asyncio
+async def test_files_read_bound_folder_session_succeeds(fake_config, fake_provider, tmp_path):
+    """#1062：绑定目录会话的产物在会话自己的工作区里，files.read 必须读得到。
+
+    修复前解析只认全局工作区，绑定目录下的路径一律被判成「工作区之外」，
+    于是右侧资产栏点「预览」读不到内容、「定位」报错——而文件就在那里。
+    """
+    from miqi.runtime.app_server import ClientSessionRegistry
+    from miqi.runtime.file_handlers import files_read_handler
+
+    folder = tmp_path / "bound"
+    folder.mkdir()
+    sm, ws = _setup_session("bound-reader", "client-1")
+    _bind_session_to_folder(sm, "bound-reader", folder, "client-1")
+    (folder / "song.txt").write_text("do re mi", encoding="utf-8")
+
+    # 前提：绑定目录确实在全局工作区之外，否则这条用例证明不了任何事。
+    assert not str(folder.resolve()).startswith(str(ws.resolve()))
+
+    registry = ClientSessionRegistry()
+    result = await files_read_handler(
+        "req-1",
+        {"path": "song.txt", "session_key": "bound-reader"},
+        "client-1", None, registry,
+    )
+    assert result["result"]["content"] == "do re mi"
+
+
+@pytest.mark.asyncio
+async def test_files_read_absolute_global_path_keeps_its_root(fake_config, fake_provider, tmp_path):
+    """#1103 review：绑定会话里请求**绝对**路径时，必须保留它实际所属的那个根。
+
+    绝对路径一旦被压成相对名，那个名字随后就会被拼到会话根上——于是
+    ``<全局>/note.txt`` 被读成 ``<绑定>/note.txt``。两个根下放同名但内容不同的文件，
+    才能把「读错文件」这件事钉死（只放一个的话两边都读得到，看不出区别）。
+    """
+    from miqi.runtime.app_server import ClientSessionRegistry
+    from miqi.runtime.file_handlers import files_read_handler
+
+    folder = tmp_path / "bound"
+    folder.mkdir()
+    sm, ws = _setup_session("bound-abs", "client-1")
+    _bind_session_to_folder(sm, "bound-abs", folder, "client-1")
+
+    global_file = ws / "note.txt"
+    global_file.write_text("GLOBAL", encoding="utf-8")
+    (folder / "note.txt").write_text("BOUND", encoding="utf-8")
+
+    registry = ClientSessionRegistry()
+    result = await files_read_handler(
+        "req-1",
+        {"path": str(global_file.resolve()), "session_key": "bound-abs"},
+        "client-1", None, registry,
+    )
+    assert result["result"]["content"] == "GLOBAL", (
+        "绝对路径必须回到它自己所属的根，而不是被换成会话根下的同名字段"
+    )
+
+
+@pytest.mark.asyncio
+async def test_files_read_bound_folder_rejects_traversal(fake_config, fake_provider, tmp_path):
+    """#1062：放开绑定根不等于放开它外面——``..`` 逃逸仍须拒绝。"""
+    from miqi.runtime.app_server import AppServerError, ClientSessionRegistry
+    from miqi.runtime.file_handlers import files_read_handler
+
+    folder = tmp_path / "bound"
+    folder.mkdir()
+    sm, ws = _setup_session("bound-traverse", "client-1")
+    _bind_session_to_folder(sm, "bound-traverse", folder, "client-1")
+    (tmp_path / "outside.txt").write_text("secret", encoding="utf-8")
+
+    registry = ClientSessionRegistry()
+    with pytest.raises(AppServerError):
+        await files_read_handler(
+            "req-1",
+            {"path": "../outside.txt", "session_key": "bound-traverse"},
+            "client-1", None, registry,
+        )
+
+
+@pytest.mark.asyncio
+async def test_sessions_workspace_none_for_unbound_session(fake_config, fake_provider):
+    """#1062：非绑定会话返回 null，主进程据此只保留全局工作区这一个根。
+
+    快路径也在这里被钉住——不返回 None 的话每次读文件都要扫描全部已绑定工区。
+    """
+    from miqi.runtime.app_server import ClientSessionRegistry
+    from miqi.runtime.session_handlers import sessions_workspace_handler
+
+    _setup_session("plain-session", "client-1")
+
+    out = await sessions_workspace_handler(
+        "req-1", {"session_key": "plain-session"}, "client-1", None,
+        ClientSessionRegistry(),
+    )
+    assert out["result"]["workspace"] is None
+
+
+@pytest.mark.asyncio
+async def test_sessions_workspace_returns_bound_root(fake_config, fake_provider, tmp_path):
+    """#1062：绑定会话返回会话自己的工作区——主进程拿它做包含性校验的额外根。"""
+    from miqi.runtime.app_server import ClientSessionRegistry
+    from miqi.runtime.session_handlers import sessions_workspace_handler
+
+    folder = tmp_path / "bound"
+    folder.mkdir()
+    sm, _ws = _setup_session("bound-ws-query", "client-1")
+    _bind_session_to_folder(sm, "bound-ws-query", folder, "client-1")
+
+    out = await sessions_workspace_handler(
+        "req-1", {"session_key": "bound-ws-query"}, "client-1", None,
+        ClientSessionRegistry(),
+    )
+    assert out["result"]["workspace"] == str(folder)
+
+
+@pytest.mark.asyncio
+async def test_claim_legacy_gives_folder_copy_ownership(fake_config, fake_provider, tmp_path):
+    """#1103 review：claim 只盖 app-home stub 时，绑定根对 resolver 依然不可见。
+
+    legacy 会话的两份 copy 都没有 owner —— app-home 的 stub 和绑定目录里那份。
+    解析器一律走 ``_probe_folder(require_owned=True)``，ownerless 的 folder copy
+    被当成不存在，于是 claim 完 ``sessions.workspace`` 仍返回 null、会话的文件
+    继续按全局工作区解析，正是这个 PR 要修的症状。
+    """
+    from miqi.runtime.app_server import ClientSessionRegistry
+    from miqi.runtime.session_handlers import (
+        sessions_claim_legacy_handler,
+        sessions_workspace_handler,
+    )
+    from miqi.session.manager import SessionManager
+
+    folder = tmp_path / "legacy-bound"
+    folder.mkdir()
+
+    sm, _ws = _setup_session("legacy-bound", None, set_owner=False)
+    stub = sm.load_existing("legacy-bound")
+    stub.metadata["workspace"] = str(folder)
+    sm.save(stub)
+    sm.invalidate("legacy-bound")
+
+    folder_sm = SessionManager(folder)
+    folder_session = folder_sm.get_or_create("legacy-bound")
+    folder_session.metadata.pop("owner_client_id", None)
+    folder_sm.save(folder_session)
+    folder_sm.invalidate("legacy-bound")
+
+    # 认领之前：folder copy 没有 owner，绑定根解析不出来。
+    before = await sessions_workspace_handler(
+        "req-1", {"session_key": "legacy-bound"}, "client-1", None,
+        ClientSessionRegistry(),
+    )
+    assert before["result"]["workspace"] is None
+
+    await sessions_claim_legacy_handler(
+        "req-2", {"session_key": "legacy-bound"}, "client-1", None,
+        ClientSessionRegistry(),
+    )
+
+    after = await sessions_workspace_handler(
+        "req-3", {"session_key": "legacy-bound"}, "client-1", None,
+        ClientSessionRegistry(),
+    )
+    assert after["result"]["workspace"] == str(folder)
+
+
+@pytest.mark.asyncio
+async def test_sessions_workspace_does_not_answer_not_bound_on_lookup_failure(
+    fake_config, fake_provider
+):
+    """#1103 review：runtime 查询失败不能答成「未绑定」。
+
+    ``workspace: null`` 是「该会话没绑目录」这个**确定**答案，主进程据此回落到
+    全局工作区。查询失败时我们并不知道答案：照样回 null 的话，绑定会话的相对
+    路径会被重新锚到全局工作区上，``report.md`` 就读到了另一个同名文件。失败
+    必须冒出去，让这次操作失败，而不是安静地从错误的根读。
+    """
+    from miqi.runtime.session_handlers import sessions_workspace_handler
+
+    class _FailingRegistry:
+        async def get_session(self, *_args, **_kwargs):
+            raise RuntimeError("registry unavailable")
+
+    with pytest.raises(RuntimeError):
+        await sessions_workspace_handler(
+            "req-1", {"session_key": "bound"}, "client-1", None, _FailingRegistry(),
+        )
+# ── session containment (#1051) ──────────────────────────────────────────────
+#
+# Path containment used to be enforced at WORKSPACE granularity: the
+# session-scoped branch resolved against the caller's session directory but
+# then accepted anything under `<ws>/`, and the workspace-scoped branch ran
+# with no ownership check at all when `session_key` was omitted.  Because every
+# session lives at `<ws>/sessions/<key>/`, both let a caller reach a SIBLING
+# session — `../../<other>/conversation.jsonl` with the caller's own key, or a
+# plain `sessions/<other>/conversation.jsonl` with no key at all.  Rewriting
+# that file's `owner_client_id` metadata line reverses session ownership.
+#
+# These tests pin the boundary: session-scoped access stays inside the
+# caller's own session directory, workspace-scoped access never enters
+# `sessions/`, and both benign flows keep working.
+
+
+def _session_dir(ws, session_key: str):
+    from miqi.session.session_keys import session_files_dir_key
+
+    return ws / "sessions" / session_files_dir_key(session_key)
+
+
+def _victim_conversation(ws, session_key: str):
+    return _session_dir(ws, session_key) / "conversation.jsonl"
+
+
+@pytest.mark.asyncio
+async def test_files_write_rejects_traversal_into_sibling_session(
+    fake_config, fake_provider, tmp_path,
+):
+    """#1051: `..` from an owned session must not overwrite a sibling session."""
+    from miqi.runtime.app_server import AppServerError, ClientSessionRegistry
+    from miqi.runtime.file_handlers import files_write_handler
+    from miqi.session.session_keys import session_files_dir_key
+
+    _, ws = _setup_session("atk-1051", "client-A")
+    _setup_session("vic-1051", "client-B")
+    victim = _victim_conversation(ws, "vic-1051")
+    before = victim.read_text(encoding="utf-8")
+
+    registry = ClientSessionRegistry()
+    with pytest.raises(AppServerError) as exc_info:
+        await files_write_handler(
+            "req-1051-w",
+            {
+                "path": "../../%s/conversation.jsonl" % session_files_dir_key("vic-1051"),
+                "content": '{"_type":"metadata","owner_client_id":"client-A"}\n',
+                "session_key": "atk-1051",
+            },
+            "client-A", None, registry,
+        )
+    assert exc_info.value.code == "INVALID_PARAMS"
+    # The point of the bug: the victim's file — and with it its ownership —
+    # must be untouched.
+    assert victim.read_text(encoding="utf-8") == before
+
+
+@pytest.mark.asyncio
+async def test_files_read_and_delete_reject_traversal_into_sibling_session(
+    fake_config, fake_provider, tmp_path,
+):
+    """#1051: the same escape via files.read and files.delete."""
+    from miqi.runtime.app_server import AppServerError, ClientSessionRegistry
+    from miqi.runtime.file_handlers import files_delete_handler, files_read_handler
+    from miqi.session.session_keys import session_files_dir_key
+
+    _, ws = _setup_session("atk-1051-rd", "client-A")
+    _setup_session("vic-1051-rd", "client-B")
+    victim = _victim_conversation(ws, "vic-1051-rd")
+    escape = "../../%s/conversation.jsonl" % session_files_dir_key("vic-1051-rd")
+
+    registry = ClientSessionRegistry()
+    with pytest.raises(AppServerError) as read_exc:
+        await files_read_handler(
+            "req-1051-r", {"path": escape, "session_key": "atk-1051-rd"},
+            "client-A", None, registry,
+        )
+    assert read_exc.value.code == "INVALID_PARAMS"
+
+    with pytest.raises(AppServerError) as del_exc:
+        await files_delete_handler(
+            "req-1051-d", {"path": escape, "session_key": "atk-1051-rd"},
+            "client-A", None, registry,
+        )
+    assert del_exc.value.code == "INVALID_PARAMS"
+    assert victim.exists()
+
+
+@pytest.mark.asyncio
+async def test_files_write_rejects_sessions_path_without_session_key(
+    fake_config, fake_provider, tmp_path,
+):
+    """#1051: omitting session_key must not grant unlimited access to sessions/."""
+    from miqi.runtime.app_server import AppServerError, ClientSessionRegistry
+    from miqi.runtime.file_handlers import files_write_handler
+    from miqi.session.session_keys import session_files_dir_key
+
+    _, ws = _setup_session("atk-1051-ns", "client-A")
+    _setup_session("vic-1051-ns", "client-B")
+    victim = _victim_conversation(ws, "vic-1051-ns")
+    before = victim.read_text(encoding="utf-8")
+
+    registry = ClientSessionRegistry()
+    with pytest.raises(AppServerError) as exc_info:
+        await files_write_handler(
+            "req-1051-ns",
+            {
+                "path": "sessions/%s/conversation.jsonl" % session_files_dir_key("vic-1051-ns"),
+                "content": '{"_type":"metadata","owner_client_id":"client-A"}\n',
+            },
+            "client-A", None, registry,
+        )
+    assert exc_info.value.code == "INVALID_PARAMS"
+    assert victim.read_text(encoding="utf-8") == before
+
+
+@pytest.mark.asyncio
+async def test_files_write_rejects_sessions_path_naming_foreign_session(
+    fake_config, fake_provider, tmp_path,
+):
+    """#1051: naming another session while holding a session_key is rejected.
+
+    A workspace-relative path into `sessions/` is only re-rooted into the
+    caller's files dir when it is the caller's OWN session; anything else must
+    fail rather than silently land somewhere else.
+    """
+    from miqi.runtime.app_server import AppServerError, ClientSessionRegistry
+    from miqi.runtime.file_handlers import files_write_handler
+    from miqi.session.session_keys import session_files_dir_key
+
+    _setup_session("atk-1051-fk", "client-A")
+    _setup_session("vic-1051-fk", "client-B")
+
+    registry = ClientSessionRegistry()
+    with pytest.raises(AppServerError) as exc_info:
+        await files_write_handler(
+            "req-1051-fk",
+            {
+                "path": "sessions/%s/conversation.jsonl" % session_files_dir_key("vic-1051-fk"),
+                "content": "PWNED",
+                "session_key": "atk-1051-fk",
+            },
+            "client-A", None, registry,
+        )
+    assert exc_info.value.code == "INVALID_PARAMS"
+
+
+@pytest.mark.asyncio
+async def test_files_write_rejects_absolute_and_sandbox_paths_into_sibling_session(
+    fake_config, fake_provider, tmp_path,
+):
+    """#1051: absolute (incl. Windows drive-letter) and sandbox-prefixed forms.
+
+    The Windows form used to skip absolute-path normalisation entirely, and the
+    sandbox-prefix strip is a prefix strip rather than a sanitiser, so neither
+    may bypass the session boundary.
+    """
+    from miqi.runtime.app_server import AppServerError, ClientSessionRegistry
+    from miqi.runtime.file_handlers import files_write_handler
+
+    _, ws = _setup_session("atk-1051-abs", "client-A")
+    _setup_session("vic-1051-abs", "client-B")
+    victim = _victim_conversation(ws, "vic-1051-abs")
+    before = victim.read_text(encoding="utf-8")
+
+    registry = ClientSessionRegistry()
+    escapes = [
+        str(victim),
+        str(victim).replace("\\", "/"),
+        "/home/miqi/workspace/../../%s/conversation.jsonl"
+        % _session_dir(ws, "vic-1051-abs").name,
+    ]
+    for escape in escapes:
+        with pytest.raises(AppServerError) as exc_info:
+            await files_write_handler(
+                "req-1051-abs",
+                {"path": escape, "content": "PWNED", "session_key": "atk-1051-abs"},
+                "client-A", None, registry,
+            )
+        assert exc_info.value.code == "INVALID_PARAMS", escape
+    assert victim.read_text(encoding="utf-8") == before
+
+
+@pytest.mark.asyncio
+async def test_files_write_still_rejects_workspace_escape_without_session_key(
+    fake_config, fake_provider, tmp_path,
+):
+    """#1051 control: escaping the workspace entirely is still rejected."""
+    from miqi.runtime.app_server import AppServerError, ClientSessionRegistry
+    from miqi.runtime.file_handlers import files_write_handler
+
+    _setup_session("atk-1051-ctl", "client-A")
+    registry = ClientSessionRegistry()
+
+    for session_key in (None, "atk-1051-ctl"):
+        with pytest.raises(AppServerError) as exc_info:
+            await files_write_handler(
+                "req-1051-ctl",
+                {
+                    "path": "../../../../outside-1051.txt",
+                    "content": "x",
+                    "session_key": session_key,
+                },
+                "client-A", None, registry,
+            )
+        assert exc_info.value.code == "INVALID_PARAMS"
+
+
+@pytest.mark.asyncio
+async def test_files_benign_workspace_and_session_writes_still_work(
+    fake_config, fake_provider, tmp_path,
+):
+    """#1051 control: the tightening must not break the legitimate flows.
+
+    - workspace file with no session_key (the workspace editor)
+    - session-relative file with a session_key
+    - the desktop's workspace-relative path into the caller's OWN session
+    """
+    from miqi.runtime.app_server import ClientSessionRegistry
+    from miqi.runtime.file_handlers import files_read_handler, files_write_handler
+
+    _, ws = _setup_session("atk-1051-ok", "client-A")
+    registry = ClientSessionRegistry()
+
+    ws_file = await files_write_handler(
+        "req-ok-1", {"path": "editor-note-1051.md", "content": "hello"},
+        "client-A", None, registry,
+    )
+    assert ws_file["result"]["saved"] is True
+    assert (ws / "editor-note-1051.md").read_text(encoding="utf-8") == "hello"
+
+    own = await files_write_handler(
+        "req-ok-2",
+        {"path": "in-session-1051.md", "content": "hi", "session_key": "atk-1051-ok"},
+        "client-A", None, registry,
+    )
+    assert own["result"]["saved"] is True
+    assert (_session_dir(ws, "atk-1051-ok") / "files" / "in-session-1051.md").exists()
+
+    # The desktop sends the full workspace-relative path into its own session.
+    read_back = await files_read_handler(
+        "req-ok-3",
+        {
+            "path": "sessions/%s/files/in-session-1051.md"
+            % _session_dir(ws, "atk-1051-ok").name,
+            "session_key": "atk-1051-ok",
+        },
+        "client-A", None, registry,
+    )
+    assert read_back["result"]["content"] == "hi"
+
+
+@pytest.mark.asyncio
+async def test_files_diff_resolves_own_session_full_path(
+    fake_config, fake_provider, tmp_path,
+):
+    """#1051: a full session path + session_key resolves to the real file.
+
+    It used to be re-joined onto the session dir, yielding a nested path that
+    no writer ever created, so diff/revert never found the file they had just
+    written.
+    """
+    from miqi.runtime.app_server import ClientSessionRegistry
+    from miqi.runtime.file_handlers import files_diff_handler, files_write_handler
+
+    _, ws = _setup_session("atk-1051-diff", "client-A")
+    registry = ClientSessionRegistry()
+    full = "sessions/%s/files/diffed-1051.md" % _session_dir(ws, "atk-1051-diff").name
+
+    await files_write_handler(
+        "req-diff-1", {"path": full, "content": "v1", "session_key": "atk-1051-diff"},
+        "client-A", None, registry,
+    )
+    assert (_session_dir(ws, "atk-1051-diff") / "files" / "diffed-1051.md").exists()
+
+    diff = await files_diff_handler(
+        "req-diff-2", {"path": full, "session_key": "atk-1051-diff"},
+        "client-A", None, registry,
+    )
+    # The discriminator: before the fix this resolved to a nested path inside
+    # the session dir, so the handler read nothing back (`current_content`
+    # None).  Now it finds the file the write actually created.
+    assert diff["result"]["current_content"] == "v1"
+
+
+@pytest.mark.asyncio
+async def test_files_tree_workspace_hides_sessions_dir(
+    fake_config, fake_provider, tmp_path,
+):
+    """#1051: the workspace tree must not enumerate the sessions subtree.
+
+    It exposed every sibling session's directory name and conversation.jsonl
+    path, and the editor it feeds cannot write those files any more.
+    """
+    from miqi.runtime.app_server import ClientSessionRegistry
+    from miqi.runtime.file_handlers import files_tree_handler
+
+    _setup_session("atk-1051-tree", "client-A")
+    _setup_session("vic-1051-tree", "client-B")
+    registry = ClientSessionRegistry()
+
+    result = await files_tree_handler("req-1051-tree", {}, "client-A", None, registry)
+    names = [child["name"] for child in result["result"]["root"]["children"]]
+    assert "sessions" not in names
+
+
+@pytest.mark.asyncio
+async def test_files_reject_colliding_session_key_into_sibling_session(
+    fake_config, fake_provider, tmp_path,
+):
+    """#1051: session keys are not injective — a colliding key must not address
+    a sibling session's directory.
+
+    ``session_files_dir_key`` drops the leading segment for 3+ segment keys, so
+    ``z:desktop:vic`` derives the same directory as ``desktop:vic``.  When the
+    victim's ``conversation.jsonl`` is absent (a session directory that exists
+    with files but no persisted session), ownership is unreadable — so the file
+    boundary must refuse the key rather than hand out the directory.
+    """
+    from miqi.runtime.app_server import AppServerError, ClientSessionRegistry
+    from miqi.runtime.file_handlers import files_read_handler, files_write_handler
+    from miqi.session.session_keys import session_files_dir_key
+
+    _, ws = _setup_session("desktop:vic", "client-B")
+    victim_dir = ws / "sessions" / session_files_dir_key("desktop:vic")
+    # Session directory with content but no persisted session: the shape in
+    # which the ownership check used to be inconclusive.
+    (victim_dir / "conversation.jsonl").unlink()
+    (victim_dir / "files").mkdir(parents=True, exist_ok=True)
+    (victim_dir / "files" / "secret.md").write_text("VICTIM SECRET", encoding="utf-8")
+
+    registry = ClientSessionRegistry()
+    for colliding in ("z:desktop:vic", "client-B:desktop:vic"):
+        assert session_files_dir_key(colliding) == session_files_dir_key("desktop:vic")
+
+        with pytest.raises(AppServerError) as read_exc:
+            await files_read_handler(
+                "req-collide-r",
+                {"path": "secret.md", "session_key": colliding},
+                "client-A", None, registry,
+            )
+        assert read_exc.value.code == "REQUIRES_CLAIM", colliding
+
+        with pytest.raises(AppServerError) as write_exc:
+            await files_write_handler(
+                "req-collide-w",
+                {"path": "pwn.md", "content": "PWNED", "session_key": colliding},
+                "client-A", None, registry,
+            )
+        assert write_exc.value.code == "REQUIRES_CLAIM", colliding
+
+    assert (victim_dir / "files" / "secret.md").read_text(encoding="utf-8") == "VICTIM SECRET"
+    assert not (victim_dir / "files" / "pwn.md").exists()
+
+
+@pytest.mark.asyncio
+async def test_files_reject_session_key_with_unsafe_derived_dir(
+    fake_config, fake_provider, tmp_path,
+):
+    """#1051: derivations that are not a single safe path segment are rejected.
+
+    ``.``/``..`` derive themselves and would move the session root out of
+    ``<ws>/sessions/`` (silently disabling isolation); a name ending in a dot
+    cannot be created on Windows and used to surface as an internal error;
+    Windows reserved device names (CON/NUL/COM1…) likewise cannot back a
+    session directory — with or without an extension.
+    """
+    from miqi.runtime.app_server import AppServerError, ClientSessionRegistry
+    from miqi.runtime.file_handlers import files_write_handler
+
+    _setup_session("atk-unsafe", "client-A")
+    registry = ClientSessionRegistry()
+
+    for bad_key in ("..", ".", "a:b:..", "CON", "nul", "com1", "LPT9",
+                    "CON.txt", "nul.json", "COM1.log", "LPT9.md"):
+        with pytest.raises(AppServerError) as exc_info:
+            await files_write_handler(
+                "req-unsafe",
+                {"path": "x.md", "content": "x", "session_key": bad_key},
+                "client-A", None, registry,
+            )
+        assert exc_info.value.code == "INVALID_PARAMS", bad_key
+
+
+@pytest.mark.asyncio
+async def test_files_reject_reserved_roots_beyond_sessions(
+    fake_config, fake_provider, tmp_path,
+):
+    """#1051 review: every reserved runtime root is off-limits, not just sessions/.
+
+    ``_RESERVED_ROOT_DIRS`` declares the per-session subtrees; enforcing only
+    ``sessions/`` left ``_legacy_sessions/`` reachable, which is the same
+    missing-authorization class if that layout is ever used on disk.
+    """
+    from miqi.runtime.app_server import AppServerError, ClientSessionRegistry
+    from miqi.runtime.file_handlers import files_read_handler, files_write_handler
+
+    _, ws = _setup_session("atk-legacy", "client-A")
+    legacy = ws / "_legacy_sessions"
+    legacy.mkdir(parents=True, exist_ok=True)
+    victim = legacy / "desktop_victim.jsonl"
+    victim.write_text('{"_type":"metadata","owner_client_id":"client-B"}', encoding="utf-8")
+
+    registry = ClientSessionRegistry()
+    for session_key in (None, "atk-legacy"):
+        with pytest.raises(AppServerError) as read_exc:
+            await files_read_handler(
+                "req-legacy-r",
+                {"path": "_legacy_sessions/desktop_victim.jsonl", "session_key": session_key},
+                "client-A", None, registry,
+            )
+        assert read_exc.value.code == "INVALID_PARAMS", session_key
+
+        with pytest.raises(AppServerError) as write_exc:
+            await files_write_handler(
+                "req-legacy-w",
+                {
+                    "path": "_legacy_sessions/desktop_victim.jsonl",
+                    "content": "PWNED",
+                    "session_key": session_key,
+                },
+                "client-A", None, registry,
+            )
+        assert write_exc.value.code == "INVALID_PARAMS", session_key
+
+    assert "client-B" in victim.read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_files_tree_skips_links_into_reserved_roots(
+    fake_config, fake_provider, tmp_path,
+):
+    """#1051 review: a link into sessions/ must not be enumerated.
+
+    The name-based skip only catches a child literally named ``sessions``; a
+    link with an innocuous name (``link -> sessions``) would otherwise be
+    recursed into and disclose every session's directory and file names.
+    Directory junctions count too — ``Path.is_symlink()`` does not report them.
+    """
+    import os
+
+    from miqi.runtime.app_server import ClientSessionRegistry
+    from miqi.runtime.file_handlers import files_tree_handler
+
+    _, ws = _setup_session("atk-link", "client-A")
+    _setup_session("vic-link", "client-B")
+    link = ws / "innocent-link"
+    try:
+        os.symlink(ws / "sessions", link, target_is_directory=True)
+    except (OSError, NotImplementedError) as exc:  # pragma: no cover - platform dependent
+        pytest.skip(f"cannot create a directory link here: {exc}")
+
+    registry = ClientSessionRegistry()
+    result = await files_tree_handler("req-link", {}, "client-A", None, registry)
+    names = [child["name"] for child in result["result"]["root"]["children"]]
+    assert "sessions" not in names
+    assert "innocent-link" not in names

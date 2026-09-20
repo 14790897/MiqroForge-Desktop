@@ -80,7 +80,7 @@ class _FakeSearch:
     def __init__(self, blocks: list[str]):
         self._blocks = blocks
 
-    async def _parallel_search(self, query: str, n_queries: int, n: int) -> list[str]:
+    async def _parallel_search(self, query: str, n_queries: int, n: int, **kwargs) -> list[str]:
         return self._blocks[:n_queries]
 
 

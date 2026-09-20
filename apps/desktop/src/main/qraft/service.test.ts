@@ -14,7 +14,7 @@ import { join } from 'path';
 import { QraftService, resolveConfig, defaultRedirectUri } from './service';
 import { QraftStore } from './store';
 import { QraftError, type QraftClient, type QraftLogger } from './client';
-import type { QraftStoredState, QraftTokens } from './types';
+import { PROD_REDIRECT_URI, type QraftStoredState, type QraftTokens } from './types';
 
 const noopLog = (() => undefined) as unknown as QraftLogger;
 
@@ -90,26 +90,26 @@ function makeService(clientStub: ClientStub): QraftService {
 }
 
 describe('resolveConfig', () => {
-  it('未提供任何参数时使用测试环境默认值 + 生成 loopback 回调', () => {
+  it('未提供任何参数时默认生产环境 + 使用平台注册的 redirect_uri', () => {
     const config = resolveConfig({}, null, () => 'http://localhost:39999/callback');
-    expect(config.baseUrl).toBe('https://test.forge.miqroera.com/api');
+    expect(config.baseUrl).toBe('https://www.miqroforge.com/api');
     expect(config.clientId).toBe('miqi');
-    // QRAFT_TEST_CLIENT_SECRET 环境变量优先（beforeEach 注入）
-    expect(config.clientSecret).toBe('test-env-secret');
-    expect(config.redirectUri).toBe('http://localhost:39999/callback');
+    // 生产 client_secret 默认值（QRAFT_PROD_CLIENT_SECRET 未注入）
+    expect(config.clientSecret).toBe('miqi123456');
+    expect(config.redirectUri).toBe(PROD_REDIRECT_URI);
   });
 
   it('未注入环境变量时测试环境 client_secret 使用硬编码默认值（测试阶段开箱即用）', () => {
     delete process.env.QRAFT_TEST_CLIENT_SECRET;
-    const config = resolveConfig({}, null, () => 'http://localhost:39999/callback');
+    const config = resolveConfig({ env: 'test' }, null, () => 'http://localhost:39999/callback');
     expect(config.clientSecret).toBe('miqi123456');
   });
 
-  it('生产环境默认 client_secret 使用硬编码默认值（测试阶段开箱即用）、不自动生成 redirect_uri', () => {
+  it('生产环境默认 client_secret 使用硬编码默认值（测试阶段开箱即用）、redirect_uri 用平台注册值', () => {
     const config = resolveConfig({ env: 'prod' }, null, () => 'http://localhost:1/callback');
-    expect(config.baseUrl).toBe('https://forge.miqroera.com/api');
+    expect(config.baseUrl).toBe('https://www.miqroforge.com/api');
     expect(config.clientSecret).toBe('miqi123456');
-    expect(config.redirectUri).toBe('');
+    expect(config.redirectUri).toBe(PROD_REDIRECT_URI);
   });
 
   it('QRAFT_PROD_CLIENT_SECRET 环境变量可覆盖生产默认值', () => {
@@ -148,9 +148,9 @@ describe('resolveConfig', () => {
       redirectUri: 'http://localhost:38000/callback',
     });
     const config = resolveConfig({ env: 'prod' }, stored, () => 'http://localhost:9/callback');
-    expect(config.baseUrl).toBe('https://forge.miqroera.com/api');
+    expect(config.baseUrl).toBe('https://www.miqroforge.com/api');
     expect(config.clientSecret).toBe('miqi123456'); // 生产默认值，非测试环境存储值
-    expect(config.redirectUri).toBe('');
+    expect(config.redirectUri).toBe(PROD_REDIRECT_URI);
   });
 });
 
@@ -213,12 +213,36 @@ describe('QraftService.login', () => {
     expect(result.account?.nickname).toBe('登录昵称');
   });
 
-  it('生产环境未填注册 redirect_uri 报 INVALID_CONFIG（不自动生成 loopback）', async () => {
+  it('生产环境缺省 redirect_uri 时用平台注册值登录', async () => {
+    const stub = makeClientStub();
+    stub.platformLogin.mockResolvedValue({ sub: '19', username: 'U', nickname: '登录昵称' });
+    stub.authorizeFlow.mockResolvedValue(makeTokens());
+    stub.getUserInfo.mockResolvedValue({ sub: '19', username: 'U', nickname: '登录昵称' });
+    const service = makeService(stub);
+
+    const result = await service.login('18500000000', 'p', {
+      env: 'prod',
+      clientSecret: 'prod-secret',
+    });
+    expect(result.ok).toBe(true);
+    expect(stub.platformLogin).toHaveBeenCalledWith(
+      expect.objectContaining({
+        baseUrl: 'https://www.miqroforge.com/api',
+        redirectUri: PROD_REDIRECT_URI,
+      }),
+      '18500000000',
+      'p',
+      expect.anything()
+    );
+  });
+
+  it('生产环境显式传空 redirect_uri 仍报 INVALID_CONFIG（注册值要求不放松）', async () => {
     const stub = makeClientStub();
     const service = makeService(stub);
     const result = await service.login('18500000000', 'p', {
       env: 'prod',
       clientSecret: 'prod-secret',
+      redirectUri: '',
     });
     expect(result.ok).toBe(false);
     expect(result.code).toBe('INVALID_CONFIG');
@@ -315,25 +339,60 @@ describe('QraftService 自动刷新', () => {
     expect(service.status().refreshScheduledAt).toBeGreaterThan(Date.now());
   });
 
-  it('自动刷新失败标记 requiresRelogin，30 分钟后重试', async () => {
+  it('自动刷新瞬时失败不置 requiresRelogin，指数退避静默重试并自动恢复（#1087）', async () => {
     vi.useFakeTimers();
     const stub = makeClientStub();
     stub.platformLogin.mockResolvedValue({ sub: '1', username: 'u', nickname: 'n' });
     stub.authorizeFlow.mockResolvedValue(makeTokens());
     stub.getUserInfo.mockResolvedValue({ sub: '1', username: 'u', nickname: 'n' });
-    stub.refreshTokens.mockRejectedValue(new QraftError('REFRESH_FAILED', 'refresh_token 无效'));
+    stub.refreshTokens
+      .mockRejectedValueOnce(new QraftError('NETWORK_UNREACHABLE', '断网'))
+      .mockRejectedValueOnce(new QraftError('NETWORK_UNREACHABLE', '断网'))
+      .mockImplementation(async () =>
+        makeTokens({ accessToken: 'ACCESS-RECOVERED', expiresAt: Date.now() + 7_199_000 })
+      );
     const service = makeService(stub);
     await service.login('18500000000', 'p');
 
     const delay = 7_199_000 - 15 * 60_000;
     await vi.advanceTimersByTimeAsync(delay + 100);
     expect(stub.refreshTokens).toHaveBeenCalledTimes(1);
-    expect(service.status().refreshError).toBe('REFRESH_FAILED');
-    expect(service.status().requiresRelogin).toBe(true);
+    // 瞬时失败：记录错误码，但不置 requiresRelogin（不弹横幅/不拦截发送）
+    expect(service.status().refreshError).toBe('NETWORK_UNREACHABLE');
+    expect(service.status().requiresRelogin).toBe(false);
 
-    // 30 分钟后自动重试一次
-    await vi.advanceTimersByTimeAsync(30 * 60_000 + 100);
+    // 第一次退避 1 分钟后重试，仍失败 → 仍不置 requiresRelogin
+    await vi.advanceTimersByTimeAsync(60_000 + 100);
     expect(stub.refreshTokens).toHaveBeenCalledTimes(2);
+    expect(service.status().requiresRelogin).toBe(false);
+
+    // 第二次退避翻倍为 2 分钟，重试成功 → 错误清除、token 更新、重新调度
+    await vi.advanceTimersByTimeAsync(120_000 + 100);
+    expect(stub.refreshTokens).toHaveBeenCalledTimes(3);
+    expect(service.status().refreshError).toBeUndefined();
+    expect(service.status().requiresRelogin).toBe(false);
+    expect(store.current?.tokens.accessToken).toBe('ACCESS-RECOVERED');
+    expect(service.status().refreshScheduledAt).toBeGreaterThan(Date.now());
+  });
+
+  it('瞬时刷新失败后 access_token 过期：仍不置 requiresRelogin（静默重试中，#1087）', async () => {
+    vi.useFakeTimers();
+    const stub = makeClientStub();
+    stub.platformLogin.mockResolvedValue({ sub: '1', username: 'u', nickname: 'n' });
+    stub.authorizeFlow.mockResolvedValue(makeTokens());
+    stub.getUserInfo.mockResolvedValue({ sub: '1', username: 'u', nickname: 'n' });
+    stub.refreshTokens.mockRejectedValue(new QraftError('REFRESH_FAILED', '平台 5xx'));
+    const service = makeService(stub);
+    await service.login('18500000000', 'p');
+
+    const delay = 7_199_000 - 15 * 60_000;
+    await vi.advanceTimersByTimeAsync(delay + 100);
+    expect(service.status().refreshError).toBe('REFRESH_FAILED');
+    expect(service.status().requiresRelogin).toBe(false);
+
+    // 越过原 access_token 过期点：瞬时失败仍在退避重试，不算登录失效
+    await vi.advanceTimersByTimeAsync(16 * 60_000);
+    expect(service.status().requiresRelogin).toBe(false);
   });
 
   it('refresh_token 已失效（永久错误）不再自动重试，标记需重新登录', async () => {
@@ -382,15 +441,27 @@ describe('QraftService 手动刷新与退出', () => {
     expect(store.current?.tokens.accessToken).toBe('NEW');
   });
 
-  it('refreshNow 失败返回错误并标记需重新登录', async () => {
+  it('refreshNow 瞬时失败不标记需重新登录，排退避重试后自动恢复（#1087）', async () => {
+    vi.useFakeTimers();
     const stub = makeClientStub();
-    stub.refreshTokens.mockRejectedValue(new QraftError('REFRESH_FAILED', '无效'));
+    stub.refreshTokens
+      .mockRejectedValueOnce(new QraftError('REFRESH_FAILED', '平台 5xx'))
+      .mockResolvedValue(makeTokens({ accessToken: 'NEW' }));
     store.save(makeStoredState());
     const service = makeService(stub);
     const result = await service.refreshNow();
     expect(result.ok).toBe(false);
     expect(result.code).toBe('REFRESH_FAILED');
-    expect(service.status().requiresRelogin).toBe(true);
+    // 瞬时失败：不弹横幅/不拦截发送，仅排退避重试
+    expect(service.status().requiresRelogin).toBe(false);
+    expect(service.status().refreshScheduledAt).toBeGreaterThan(Date.now());
+
+    // 1 分钟后退避重试成功 → 错误清除、token 更新
+    await vi.advanceTimersByTimeAsync(60_000 + 100);
+    expect(stub.refreshTokens).toHaveBeenCalledTimes(2);
+    expect(service.status().refreshError).toBeUndefined();
+    expect(service.status().requiresRelogin).toBe(false);
+    expect(store.current?.tokens.accessToken).toBe('NEW');
   });
 
   it('refreshNow 永久失败（REFRESH_TOKEN_INVALID）撤销自动刷新定时器', async () => {
@@ -435,6 +506,40 @@ describe('QraftService 手动刷新与退出', () => {
     expect(r1.ok).toBe(true);
     expect(r2.ok).toBe(true);
     expect(store.current?.tokens.accessToken).toBe('DEDUPED');
+  });
+
+  it('并发刷新失败去重：同一在途刷新只调度一次退避重试（CodeRabbit #1114）', async () => {
+    vi.useFakeTimers();
+    let rejectFirst!: (e: QraftError) => void;
+    const stub = makeClientStub();
+    stub.refreshTokens
+      .mockImplementationOnce(() => new Promise<QraftTokens>((_, reject) => (rejectFirst = reject)))
+      .mockImplementation(async () =>
+        makeTokens({ accessToken: 'RECOVERED', expiresAt: Date.now() + 7_199_000 })
+      );
+    store.save(makeStoredState());
+    const service = makeService(stub);
+
+    // 手动与自动并发：手动立即发起，自动在到期前 15 分钟触发
+    const manual = service.refreshNow();
+    const delay = 7_199_000 - 15 * 60_000;
+    await vi.advanceTimersByTimeAsync(delay + 100);
+    // 两条路径共享同一次 refreshTokens（inFlightRefresh 去重）
+    expect(stub.refreshTokens).toHaveBeenCalledTimes(1);
+
+    rejectFirst(new QraftError('REFRESH_FAILED', '平台 5xx'));
+    const result = await manual;
+    expect(result.ok).toBe(false);
+    expect(service.status().refreshError).toBe('REFRESH_FAILED');
+    expect(service.status().requiresRelogin).toBe(false);
+    // 失败只处理一次：退避代数只递增一次，首次重试仍按 1 分钟排
+    expect((service.status().refreshScheduledAt ?? 0) - Date.now()).toBe(60_000);
+
+    // 1 分钟后唯一的一次重试成功 → 错误清除、token 恢复
+    await vi.advanceTimersByTimeAsync(60_000 + 100);
+    expect(stub.refreshTokens).toHaveBeenCalledTimes(2);
+    expect(service.status().refreshError).toBeUndefined();
+    expect(store.current?.tokens.accessToken).toBe('RECOVERED');
   });
 
   it('logout 清除 cookie 与 token，推送未登录状态', async () => {
@@ -1149,7 +1254,8 @@ describe('QraftService 反馈平台通道（issue #1054）', () => {
 
     expect(result).toMatchObject({ ok: false, code: 'REFRESH_FAILED' });
     expect(client.submitFeedback).toHaveBeenCalledTimes(1);
-    expect(svc.status().requiresRelogin).toBe(true);
+    // 瞬时刷新失败不置 requiresRelogin（不弹横幅/不拦截发送，#1087），仅排退避重试
+    expect(svc.status().requiresRelogin).toBe(false);
   });
 
   it('平台 400 参数校验失败：透出服务端 message（不触发重登）', async () => {

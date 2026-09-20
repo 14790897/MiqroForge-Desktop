@@ -960,3 +960,79 @@ tbody tr:nth-child(even) td {
 .animate-banner-out {
   animation: banner-out 0.5s ease both;
 }
+
+/* issue #962 起点任务：切换模式 / 切换子项目时，chips 行整排淡入。
+   对齐 WorkBuddy 的过渡——旧内容先淡出、新内容再淡入，只做 opacity + 3px 位移，
+   不做横向滑动（横滑会和 chips 自己的横向滚动打架）。
+   用法：给容器加 key={welcomeMode}，React 重挂载即重放动画。 */
+@keyframes welcome-chips-in {
+  from {
+    opacity: 0;
+    transform: translateY(3px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* issue #962 起点任务：L2 chips / L3 卡片 / 输入框里的已选胶囊改用「浮起」表达层次
+   （#962 反馈：底色改阴影、高端一点）。
+   原来的做法是实线描边 + 灰底填充，读起来像表单控件；现在改成
+   ① 实心描边 → 1px 的 ring（box-shadow 画的，不占布局，比 border 淡一档）；
+   ② 灰底填充 → 表面色填充 + 两层柔和投影，层次全靠光影；
+   ③ hover 抬升；选中/展开也是灰的——ring 与投影各加深一档、底色压成浅灰，
+      不掺品牌色（#962 反馈：L2、L3 所有阴影都要灰的）。
+   暗色主题下投影本身几乎看不见，改用更亮的表面色 + 顶部 1px 内高光补层次。 */
+:root {
+  --starter-fill: var(--surface-elevated);
+  --starter-ring: 0 0 0 1px rgb(24 26 31 / 6%);
+  --starter-shadow: 0 1px 2px rgb(24 26 31 / 5%), 0 5px 14px -2px rgb(24 26 31 / 7%);
+  --starter-shadow-hover: 0 2px 6px rgb(24 26 31 / 6%), 0 12px 26px -6px rgb(24 26 31 / 9%);
+  --starter-ring-active: 0 0 0 1px rgb(24 26 31 / 10%);
+  --starter-shadow-active: 0 2px 6px rgb(24 26 31 / 7%), 0 14px 30px -8px rgb(24 26 31 / 11%);
+  --starter-fill-active: color-mix(in srgb, var(--surface-elevated) 96%, rgb(24 26 31));
+}
+
+.dark {
+  --starter-fill: var(--surface-elevated);
+  --starter-ring: 0 0 0 1px rgb(255 255 255 / 6%);
+  --starter-shadow:
+    0 1px 2px rgb(0 0 0 / 50%), 0 3px 10px -2px rgb(0 0 0 / 45%),
+    inset 0 1px 0 rgb(255 255 255 / 3.5%);
+  --starter-shadow-hover:
+    0 2px 5px rgb(0 0 0 / 50%), 0 10px 24px -6px rgb(0 0 0 / 55%),
+    inset 0 1px 0 rgb(255 255 255 / 5%);
+  --starter-ring-active: 0 0 0 1px rgb(255 255 255 / 11%);
+  --starter-shadow-active:
+    0 3px 8px rgb(0 0 0 / 50%), 0 18px 38px -10px rgb(0 0 0 / 55%),
+    inset 0 1px 0 rgb(255 255 255 / 7%);
+  --starter-fill-active: color-mix(in srgb, var(--surface-elevated) 95%, rgb(255 255 255));
+}
+
+.starter-chip,
+.starter-card {
+  background: var(--starter-fill);
+  box-shadow: var(--starter-ring), var(--starter-shadow);
+  transition:
+    box-shadow 180ms ease,
+    background-color 180ms ease,
+    color 180ms ease;
+}
+
+.starter-chip:hover,
+.starter-card:hover {
+  box-shadow: var(--starter-ring), var(--starter-shadow-hover);
+}
+
+.starter-chip[aria-pressed='true'],
+.starter-card[data-open] {
+  background: var(--starter-fill-active);
+  box-shadow: var(--starter-ring-active), var(--starter-shadow-active);
+}
+
+.starter-chip:focus-visible,
+.starter-card:focus-visible {
+  outline: none;
+  box-shadow: var(--starter-ring-active), var(--starter-shadow-hover);
+}

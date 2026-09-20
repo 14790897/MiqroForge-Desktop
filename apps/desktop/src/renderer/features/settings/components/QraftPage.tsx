@@ -91,8 +91,7 @@ export function QraftPage() {
     setBrowserNotice(null);
     try {
       // 不传 env：主进程 resolveConfig 回退到上次登录存储的环境
-      //（stored.env ?? 'test'），硬编码 'test' 会覆盖存量生产环境登录
-      //（CodeRabbit #1010）。
+      //（stored.env ?? 'prod'），硬编码环境会覆盖存量登录（CodeRabbit #1010）。
       const result = await window.miqi.qraft.browserLogin({});
       if (result.ok) {
         setStatus(await window.miqi.qraft.status());

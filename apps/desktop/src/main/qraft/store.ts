@@ -10,7 +10,7 @@
 
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
 import { dirname } from 'path';
-import type { QraftStoredState } from './types';
+import { migrateStoredState, type QraftStoredState } from './types';
 import type { QraftLogger } from './client';
 
 /** Electron safeStorage 的最小注入接口（便于测试与降级）。 */
@@ -67,6 +67,9 @@ export class QraftStore {
         return null;
       }
       this.state = JSON.parse(plain) as QraftStoredState;
+      // 域名/环境迁移（历史默认地址、测试环境并入生产）：在存储入口统一
+      // 迁移，status/刷新/计费/token 文件等所有消费方都读到新值。
+      this.state = migrateStoredState(this.state);
       return this.state;
     } catch (err) {
       this.log(

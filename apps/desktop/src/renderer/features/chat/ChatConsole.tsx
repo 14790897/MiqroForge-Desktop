@@ -39,6 +39,15 @@ import { type ExecutionPolicy } from '../../components/ExecutionPolicySelector';
 import { type ReasoningMode } from './components/ReasoningModeSwitch';
 import { clampPanelWidth, createPanelWindowSync } from './panelWindowSync';
 import {
+  MODE_SCENES,
+  SKILL_ORDER,
+  SKILL_SCENE_ICON,
+  SKILL_SCENE_TITLE,
+  SKILL_STARTERS,
+  type StarterTask,
+  type WelcomeMode,
+} from './welcomeScenes';
+import {
   Send,
   Loader2,
   Copy,
@@ -53,7 +62,9 @@ import {
   Eye,
   GitMerge,
   ChevronDown,
+  ChevronLeft,
   ChevronRight,
+  ChevronUp,
   ArrowDown,
   Pencil,
   BookOpen,
@@ -87,7 +98,12 @@ import type {
 } from '../../../shared/ipc';
 import { extractProgressMessage, type ProgressPayload } from './progressUtils';
 import { sanitizeUiMessage } from '../../lib/sanitizeUiMessage';
-import { classifyTrackedFiles } from '../../lib/taskAssetClassification';
+import {
+  classifyTrackedFiles,
+  dirLabel,
+  groupTrackedByDir,
+} from '../../lib/taskAssetClassification';
+import { sameTrackedFile } from '../../lib/tracked-path';
 import { SpreadsheetPreview } from './components/SpreadsheetPreview';
 import { DocxPreview } from './components/DocxPreview';
 import PaperSearchResult, {
@@ -207,6 +223,25 @@ function formatFileSize(bytes: number): string {
 }
 
 /**
+ * Mirror the bridge's `session_files_dir_key` (miqi/session/session_keys.py):
+ * fold separators, and for namespaced 3+ segment keys drop the leading client
+ * segment.  A local `replace(/[:\\/]/g, '_')` disagrees with the backend for
+ * `miqi-desktop:desktop:<ts>` — it keeps the client prefix and yields
+ * `miqi-desktop_desktop_<ts>` while the canonical directory is
+ * `desktop_<ts>` — so session-scoped reads built from it miss the real
+ * directory (#1051 review).
+ */
+function sessionFilesDirKey(sessionKey: string | null | undefined): string {
+  if (!sessionKey) return '';
+  const parts = sessionKey.split(':');
+  const kept = parts.length >= 3 ? parts.slice(1) : parts;
+  return kept
+    .join('_')
+    .replace(/[<>:"\/\\|?*]/g, '_')
+    .trim();
+}
+
+/**
  * Parse embedded document content from message body so the UI shows
  * coloured chips instead of raw injection text.  Handles three formats:
  *   1. Client-side preview:  [File: name]\n```\n...\n```
@@ -283,6 +318,8 @@ interface Message {
   toolName?: string;
   /** Parsed tool data for card rendering */
   toolData?: unknown;
+  /** Structured web sources (title/url/snippet) from web_search/web_fetch (#879) */
+  webSources?: MessageSource[];
   /** Original tool-call arguments (e.g. web_fetch's url) — real references */
   toolArgs?: unknown;
   action?: 'open-provider-settings' | 'retry-load' | 'login';
@@ -321,12 +358,24 @@ interface Message {
 interface MessageSource {
   tool: string;
   url: string;
+  /** Structured title from web_search/web_fetch sources (#879) */
+  title?: string;
+  /** Structured snippet from web_search/web_fetch sources (#879) */
+  snippet?: string;
 }
 
 // Stable empty array for messages without sources — keeps the `sources` prop
 // referentially equal so MessageBubble's memo isn't defeated by a fresh `[]`
 // on every keystroke (#1021).
 const EMPTY_SOURCES: MessageSource[] = [];
+
+/** sourcesByMsg 的键。progress 行用 toolCallId（后端每工具调用唯一），其余用
+ *  timestamp。此前直接拿 Date.now() 的 timestamp 当键：同毫秒创建的两个
+ *  progress 行会互相覆盖来源（先一行显示后一行的来源，#879 ③ CodeRabbit）。
+ *  加 role 前缀 + toolCallId 去碰撞。 */
+function sourcesKey(m: Message): string {
+  return m.role === 'progress' ? `p:${m.toolCallId ?? m.timestamp}` : `a:${m.timestamp}`;
+}
 
 const TOOL_LABELS: Record<string, string> = {
   web_fetch: '网页抓取',
@@ -365,7 +414,12 @@ function hostOf(url: string): string {
 /** Extract reference URLs from a tool/progress message.
  *  Priority: the URL the tool actually touched (toolArgs) > structured
  *  paper_search cards > links found in result text (fallback). */
-function extractMessageSources(msg: Message): MessageSource[] {
+export function extractMessageSources(msg: Message): MessageSource[] {
+  // Structured web sources (#879): web_search/web_fetch emit title/url/snippet
+  // directly — use them verbatim instead of heuristically re-parsing text.
+  if (msg.webSources && msg.webSources.length > 0) {
+    return msg.webSources;
+  }
   const sources: MessageSource[] = [];
   const skip = [
     'api.semanticscholar.org',
@@ -455,11 +509,12 @@ interface WebSearchItem {
 
 function parseWebSearchResults(content: string): WebSearchItem[] {
   const items: WebSearchItem[] = [];
-  const entryRe = /^\d+\.\s+(.+)$/gm;
+  // 兼容两种输出格式：think 模式 `1. title` / FAST fan-out 兜底 `- title`（#879）
+  const entryRe = /^(?:\d+\.|-)\s+(.+)$/gm;
   let m: RegExpExecArray | null;
   while ((m = entryRe.exec(content)) !== null) {
     const title = m[1].trim();
-    const rest = content.slice(m.index + m[0].length).split(/\n(?=\d+\.\s)/)[0];
+    const rest = content.slice(m.index + m[0].length).split(/\n(?=(?:\d+\.|-)\s)/)[0];
     const lines = rest
       .split('\n')
       .map((l) => l.trim())
@@ -560,6 +615,12 @@ interface TrackedFile {
   lastSeen: number;
   /** path was truncated in the progress message (ends with ...) */
   truncated?: boolean;
+  /** 产出该文件的工具名（如 create_docx / graph_render / write_file），#879 ③ 追溯 */
+  sourceTool?: string;
+  /** 产出该文件的回合序号（第几个 user 回合，从 0 起），#879 ③ 追溯 */
+  turnId?: number;
+  /** #1104: agent 通过 declare_result_files 显式声明为结果文件 */
+  result?: boolean;
 }
 
 const OFFICE_FILE_RE = /\.(docx|xlsx|pptx|ppt|xls|doc|odt|odp|ods)$/i;
@@ -951,6 +1012,41 @@ function basename(path: string): string {
   return path.replace(/\\/g, '/').split('/').pop() ?? path;
 }
 
+/** #1104: collapsible row standing in for a bulk directory's files. */
+function AssetDirGroupRow({
+  dir,
+  files,
+  renderFile,
+}: {
+  dir: string;
+  files: TrackedFile[];
+  renderFile: (file: TrackedFile) => React.ReactNode;
+}) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div data-testid="asset-dir-group">
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        className="w-full flex items-center gap-1.5 rounded-lg px-2.5 py-2 transition-colors hover:opacity-90"
+        style={{
+          background: 'var(--surface-muted)',
+          border: '1px solid var(--border-subtle)',
+        }}
+        title={dir}
+      >
+        {open ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
+        <Folder size={12} className="shrink-0" style={{ color: 'var(--text-faint)' }} />
+        <span className="text-[11px] font-medium truncate flex-1 text-left text-text">
+          {dirLabel(dir)}
+        </span>
+        <span className="text-[10px] shrink-0 text-text-faint">{files.length} 个文件</span>
+      </button>
+      {open && <div className="flex flex-col gap-2 mt-2">{files.map(renderFile)}</div>}
+    </div>
+  );
+}
+
 /** Normalise a tracked path: backslashes→slashes, strip an absolute workspace
  *  prefix so `C:/…/workspace/sessions/<k>/files/x.html` and
  *  `sessions/<k>/files/x.html` collapse to the same string. */
@@ -976,10 +1072,24 @@ async function fileExists(path: string, sessionKey: string | null | undefined): 
 
 /** Merge tracked files, collapsing entries that point at the same file:
  *  bare filename vs full session path, or absolute vs relative workspace path.
- *  Same-named files in different directories stay distinct. */
+ *  Same-named files in different directories stay distinct.
+ *
+ *  `workspaceRoot` is the session's own workspace — needed to tell "the
+ *  absolute form of this relative key" from "another file with the same tail"
+ *  (#1104 review).  Display-only: it never feeds a containment check. */
 function mergeTrackedFiles(
   existing: TrackedFile[],
-  incoming: Array<{ path: string; name?: string; op?: TrackedFile['op']; lastSeen?: number }>
+  incoming: Array<{
+    path: string;
+    name?: string;
+    op?: TrackedFile['op'];
+    lastSeen?: number;
+    sourceTool?: string;
+    turnId?: number;
+    /** #1104: agent 显式声明的结果文件标记——合并时 sticky，不被后续流式更新抹掉 */
+    result?: boolean;
+  }>,
+  workspaceRoot?: string | null
 ): TrackedFile[] {
   const out = [...existing];
   for (const f of incoming) {
@@ -990,15 +1100,28 @@ function mergeTrackedFiles(
       name: f.name ?? basename(np),
       op: f.op ?? 'read',
       lastSeen: f.lastSeen ?? Date.now(),
+      sourceTool: f.sourceTool,
+      turnId: f.turnId,
     };
     const existingIdx = out.findIndex((p) => {
       const np2 = normalizeTrackedPath(p.path);
-      if (np2 === np) return true;
+      if (sameTrackedFile(np2, np, workspaceRoot)) return true;
       const oneIsBare = !np2.includes('/') || !np.includes('/');
       return oneIsBare && basename(np2) === basename(np);
     });
-    if (existingIdx >= 0) out[existingIdx] = entry;
-    else out.push(entry);
+    // #1104：声明过的结果标记在覆盖合并时必须保留（ledger 加载先于流式更新）
+    if (f.result === true || (existingIdx >= 0 && out[existingIdx].result === true)) {
+      entry.result = true;
+    }
+    if (existingIdx >= 0) {
+      // 后端下发（backend）不含 sourceTool/turnId 时，保留消息提取（existing）的字段，
+      // 否则文件卡片的「相关引用」会在会话加载/最终刷新时被清空（#879 ③ CodeRabbit）。
+      out[existingIdx] = {
+        ...entry,
+        sourceTool: entry.sourceTool ?? out[existingIdx].sourceTool,
+        turnId: entry.turnId ?? out[existingIdx].turnId,
+      };
+    } else out.push(entry);
   }
   return out;
 }
@@ -2186,31 +2309,45 @@ function _extractPathFromArgs(argsStr: string): string | null {
  *  2. tool_calls array on assistant messages (raw provider format)
  *  3. name field on tool result messages (raw provider format)
  */
-function extractTrackedFilesFromMessages(rawMsgs: any[]): TrackedFile[] {
+export function extractTrackedFilesFromMessages(rawMsgs: any[]): TrackedFile[] {
   const fileMap = new Map<string, TrackedFile>();
   const rank: Record<TrackedFile['op'], number> = { read: 0, edit: 1, write: 2, delete: 3 };
+  let turnSeq = -1; // 当前回合序号（第几个 user 回合，从 0 起）
 
-  const upsert = (path: string, op: TrackedFile['op'], timestamp?: string) => {
+  const upsert = (
+    path: string,
+    op: TrackedFile['op'],
+    timestamp?: string,
+    tool?: string,
+    turnId?: number
+  ) => {
     const key = normalizeSandboxPath(path).replace(/\\/g, '/');
     const existing = fileMap.get(key);
-    if (!existing || rank[op] > rank[existing.op]) {
+    // `>=`（而非 `>`）：write_file/edit_file 都映射成 op='write'，同一路径的
+    // 后一次等 rank 操作此前被忽略，导致 sourceTool/turnId 停留在更早消息上、
+    // 文件卡片用旧 turnId 取错引用（#879 ③ CodeRabbit）。等 rank 时刷新，
+    // 同时保留新事件未提供的元数据（如 _tool_hint 无 tool 名）。
+    if (!existing || rank[op] >= rank[existing.op]) {
       fileMap.set(key, {
         path: key,
         name: basename(key),
         op,
         lastSeen: timestamp ? new Date(timestamp).getTime() : Date.now(),
         truncated: false,
+        sourceTool: tool ?? existing?.sourceTool,
+        turnId: turnId ?? existing?.turnId,
       });
     }
   };
 
   for (const msg of rawMsgs) {
+    if (msg?.role === 'user') turnSeq += 1;
     // Format 1: _tool_hint metadata (persisted progress events)
     const hintText = msg._tool_hint_text || msg.content;
     if (msg._tool_hint && hintText) {
       const parsed = parseToolHint(hintText);
       if (parsed) {
-        upsert(parsed.path, parsed.op, msg.timestamp);
+        upsert(parsed.path, parsed.op, msg.timestamp, undefined, turnSeq);
       }
     }
 
@@ -2224,9 +2361,15 @@ function extractTrackedFilesFromMessages(rawMsgs: any[]): TrackedFile[] {
         const filePath = _extractPathFromArgs(argsStr);
         if (!filePath) continue;
         if (_FILE_WRITE_TOOLS.includes(toolName)) {
-          upsert(filePath, toolName === 'delete_file' ? 'delete' : 'write', msg.timestamp);
+          upsert(
+            filePath,
+            toolName === 'delete_file' ? 'delete' : 'write',
+            msg.timestamp,
+            toolName,
+            turnSeq
+          );
         } else if (_FILE_READ_TOOLS.includes(toolName)) {
-          upsert(filePath, 'read', msg.timestamp);
+          upsert(filePath, 'read', msg.timestamp, toolName, turnSeq);
         }
       }
     }
@@ -2237,7 +2380,7 @@ function extractTrackedFilesFromMessages(rawMsgs: any[]): TrackedFile[] {
       // Try to extract path from content (often contains the file path)
       const contentPath = parseToolHint(String(msg.content || ''));
       if (contentPath) {
-        upsert(contentPath.path, contentPath.op, msg.timestamp);
+        upsert(contentPath.path, contentPath.op, msg.timestamp, toolName, turnSeq);
       } else if (_FILE_WRITE_TOOLS.includes(toolName)) {
         // Tool result without parsable content — try to infer from tool name
         // (best-effort; actual path is in the paired assistant tool_calls message)
@@ -2245,6 +2388,54 @@ function extractTrackedFilesFromMessages(rawMsgs: any[]): TrackedFile[] {
     }
   }
   return Array.from(fileMap.values());
+}
+
+/** 从消息推导「回合序号 → 该回合的结构化来源」（#879 ③ 冷启动恢复）。
+ *  web_sources 实时通过事件下发、不持久化，冷启动后从 web_search / web_fetch
+ *  的结果文本重新解析，按回合（user 消息分隔）累积，供文件卡片显示相关引用。 */
+export function extractTurnSourcesFromMessages(rawMsgs: any[]): Map<number, MessageSource[]> {
+  const map = new Map<number, MessageSource[]>();
+  let turnSeq = -1;
+  for (const msg of rawMsgs) {
+    if (msg?.role === 'user') turnSeq += 1;
+    if (msg?.role !== 'tool' || !msg?.name) continue;
+    const content = String(msg.content ?? '');
+    if (msg.name === 'web_search') {
+      const items = parseWebSearchResults(content);
+      if (items.length === 0) continue;
+      const acc = map.get(turnSeq) ?? [];
+      const seen = new Set(acc.map((s) => s.url));
+      for (const it of items) {
+        if (it.url && !seen.has(it.url)) {
+          seen.add(it.url);
+          acc.push({ tool: 'web_search', url: it.url, title: it.title, snippet: it.snippet });
+        }
+      }
+      map.set(turnSeq, acc);
+    } else if (msg.name === 'web_fetch') {
+      try {
+        const payload = JSON.parse(content);
+        const url = (payload?.finalUrl as string) || (payload?.url as string);
+        if (url) {
+          const acc = map.get(turnSeq) ?? [];
+          const seen = new Set(acc.map((s) => s.url));
+          if (!seen.has(url)) {
+            seen.add(url);
+            acc.push({
+              tool: 'web_fetch',
+              url,
+              title: (payload?.title as string) || url,
+              snippet: '',
+            });
+          }
+          map.set(turnSeq, acc);
+        }
+      } catch {
+        /* not JSON, ignore */
+      }
+    }
+  }
+  return map;
 }
 
 // ── Cross-session in-flight event cache (#378) ──────────────────
@@ -2507,6 +2698,32 @@ const TURN_TERMINAL_GRACE_MS = 500;
 // 常驻免责声明文案（#836）—— 法务/产品最终确认后替换；后续接入 i18n 时可迁移
 const CHAT_DISCLAIMER_ZH = 'AI 生成内容仅供参考，可能存在错误，请自行核实关键信息';
 
+// issue #962：三张模式卡映射到两档推理模式（日常任务与代码任务都走 think）。反向回写时
+// think 一律落到中间那张卡，与旧行为一致（原来中间那张是「深度研究」）。
+const WELCOME_MODE_REASONING: Record<WelcomeMode, ReasoningMode> = {
+  fast: 'fast',
+  daily: 'think',
+  code: 'think',
+};
+const reasoningModeToWelcome = (m: ReasoningMode): WelcomeMode =>
+  m === 'think' ? 'daily' : 'fast';
+/**
+ * 从 reasoningMode 反推选中卡时要防一个歧义：日常任务与代码任务都映射 think，光看
+ * reasoningMode 分不出用户想要哪张卡。已经停在「代码任务」时就别把它顶掉——否则在
+ * 输入条切一次「深度研究」，代码卡会悄悄变成日常任务，代码模式独有的「内置技能」
+ * 入口也跟着消失（#962 CodeRabbit）。
+ * 原来那条「切到 fast 却还高亮代码卡」的问题不受影响：m === 'fast' 时照样落到 fast。
+ *
+ * **只用于「同一会话内切 reasoningMode」这条路径。** 会话边界（sessionKey 变化）不能
+ * 用它：那里的语义正好相反——reasoningMode 只有 fast/think 两态，而选中卡有三态，
+ * daily ─┐
+ *        ├─→ think   // 不可逆，反推不出来
+ * code  ─┘
+ * 带上 prev 只会把上个会话的 code 泄漏进新的空会话（#962 评审 P1）。
+ */
+const resolveWelcomeMode = (prev: WelcomeMode, m: ReasoningMode): WelcomeMode =>
+  m === 'think' && prev === 'code' ? 'code' : reasoningModeToWelcome(m);
+
 export function ChatConsole({
   sessionKey = DEFAULT_SESSION,
   loadTrigger,
@@ -2579,7 +2796,7 @@ export function ChatConsole({
   }, [messages]);
   // sourcesByMsg cache: keyed by a tool-only signature so the map object is
   // stable across typewriter frames (see sourcesByMsg below).
-  const sourcesCacheRef = useRef<{ sig: string; map: Map<Message, MessageSource[]> } | null>(null);
+  const sourcesCacheRef = useRef<{ sig: string; map: Map<string, MessageSource[]> } | null>(null);
   // Tracks the latest messages for the session-switch snapshot.  Kept in
   // sync below; the switch effect snapshots the session we're leaving into
   // moduleMessagesSnapshot so switching back restores it instantly.
@@ -2615,16 +2832,150 @@ export function ChatConsole({
       // ignore
     }
   }, [reasoningMode]);
-  // EB-1 欢迎页模式卡选中态：独立于 reasoningMode（深度研究与代码任务都映射 think，
+  // EB-1 欢迎页模式卡选中态：独立于 reasoningMode（日常任务与代码任务都映射 think，
   // 若用 reasoningMode 推导会同时高亮两张卡）。welcomeMode 是组件级 state，跨会话
   // 不随欢迎页重挂而重置（ChatConsole 常驻），见下方 sessionKey effect。
-  const [welcomeMode, setWelcomeMode] = useState<'fast' | 'think' | 'code'>(
-    reasoningMode === 'think' ? 'think' : 'fast'
+  const [welcomeMode, setWelcomeMode] = useState<WelcomeMode>(
+    reasoningMode === 'think' ? 'daily' : 'fast'
   );
-  const selectWelcomeMode = (k: 'fast' | 'think' | 'code') => {
+  const selectWelcomeMode = (k: WelcomeMode) => {
     setWelcomeMode(k);
-    setReasoningMode(k === 'code' ? 'think' : k);
+    setReasoningMode(WELCOME_MODE_REASONING[k]);
   };
+  // issue #962 起点任务：三层渐进选择（模式 → 子项目 → 子子项目）。未选时是 null，
+  // 这样"点了子项目才冒出子子项目行、点了子子项目才显示详细内容"的渐进流程才成立。
+  //
+  // 存的是「身份」（title）而不是下标：「内置技能」是 skills.list() 回来之后才插到
+  // welcomeScenes 最前面的，用下标的话整个列表被挤位一格，用户先选好的场景/任务会
+  // 悄悄指到隔壁去（#962 评审 P1：异步 prepend + index state 的状态不一致）。
+  // title 在数据里唯一，welcomeScenes.test.ts 守着这条约束，所以当身份用是稳的；
+  // 将来数据动态化/本地化时，把它换成显式 id 即可（见该文件头部说明）。
+  const [pickedSceneTitle, setPickedSceneTitle] = useState<string | null>(null);
+  const [pickedTaskTitle, setPickedTaskTitle] = useState<string | null>(null);
+  // issue #962：代码任务的子项目里额外挂一项「内置技能」，内容来自 skills.list()，
+  // 但只上架 SKILL_ORDER 白名单里的几个（首屏不铺开全部内置技能），拿不到就整项不显示。
+  const [builtinSkillTasks, setBuiltinSkillTasks] = useState<readonly StarterTask[]>([]);
+  useEffect(() => {
+    let cancelled = false;
+    const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+    void (async () => {
+      // 两种失败都退避重试：
+      //   ① 直接抛（桥还没起来）；
+      //   ② **回了个空清单**（桥起来了、但技能索引还没建好）—— 这个尤其阴：不抛错，
+      //      看起来就像"这台机器没装技能"，而 effect 只在挂载 / loadTrigger 变化时跑，
+      //      一旦静默失败，「内置技能」这一项就整场会话都不出现。
+      //      e2e 并行起多个 app 时能稳定复现这种空清单。
+      const LAST = 9;
+      for (let attempt = 0; attempt <= LAST; attempt++) {
+        try {
+          const res = await window.miqi.skills.list();
+          if (cancelled) return;
+          const byName = new Map(
+            (res?.skills ?? [])
+              // 这里是纯字符串匹配，而 Windows 上 skills.list() 回的是反斜杠路径
+              // （Python 侧 str(Path)），只写 '/kwp/' 在 Windows 上一条都匹配不上。
+              .filter(
+                (s) => s.source === 'builtin' && !s.path.replace(/\\/g, '/').includes('/kwp/')
+              )
+              .map((s) => [s.name, s] as const)
+          );
+          // 顺序与上架范围都以 SKILL_ORDER 为准：技能清单本身来自文件系统，顺序不稳定，
+          // 而且没装的技能不该在首屏留空位。
+          const tasks = SKILL_ORDER.map((name) =>
+            byName.has(name) ? (SKILL_STARTERS[name] ?? null) : null
+          ).filter((t): t is StarterTask => t !== null);
+
+          if (tasks.length > 0) {
+            setBuiltinSkillTasks(tasks);
+            return;
+          }
+          // 空清单：本轮先不上架，退避后再试；最后一次仍为空才认（可能真的没装）
+          if (attempt === LAST) return;
+        } catch (e) {
+          if (cancelled) return;
+          if (attempt === LAST) {
+            console.warn('[MiQroForge] skills.list() 连续失败，「内置技能」入口本次会话不显示', e);
+            return;
+          }
+        }
+        await sleep(400 * (attempt + 1));
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // 依赖 loadTrigger：App 在 bridge 变成 running 时会把 runtimeReadyKey +1（并顺手
+    // 预热技能索引），那一刻才是清单真正可用的时刻，重跑一次比在挂载时死磕更对症。
+    // 保留退避重试是因为「running」之后索引仍可能在建，会先回一个空清单。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loadTrigger]);
+  const welcomeScenes = useMemo(() => {
+    const base = MODE_SCENES[welcomeMode];
+    if (welcomeMode !== 'code' || builtinSkillTasks.length === 0) return base;
+    return [
+      // 内置技能排在最前（产品要求）：它是"开箱即用"的入口，优先级高于场景模板
+      { title: SKILL_SCENE_TITLE, icon: SKILL_SCENE_ICON, tasks: builtinSkillTasks },
+      ...base,
+    ];
+  }, [welcomeMode, builtinSkillTasks]);
+  // 空态欢迎页（起点任务只在这里出现，有消息后胶囊与详细内容都应消失）
+  const isWelcomeEmpty = messages.length === 0;
+  // 子项目 chips 行的横向翻页（两侧箭头）
+  const sceneChipsRef = useRef<HTMLDivElement>(null);
+  // 到边就把箭头置灰（#962 评审 P3）：能滚多远取决于内容宽度，只能实时量。
+  const [chipScroll, setChipScroll] = useState({ left: false, right: false });
+  const syncChipScroll = useCallback(() => {
+    const el = sceneChipsRef.current;
+    if (!el) return;
+    setChipScroll({
+      left: el.scrollLeft > 1,
+      right: el.scrollLeft < el.scrollWidth - el.clientWidth - 1,
+    });
+  }, []);
+  // 换模式 / 技能清单回来会换掉整排 chips，容器宽度跟着变，重挂载后要重新量一次。
+  // 窗口缩放、资产面板开合同样会改宽度，但那两件事既不改 welcomeScenes 也不触发
+  // scroll——少了这一层，列变窄、chips 变得可滚了，右箭头却还停在 disabled 上，
+  // 后面的场景就点不到了（#962 CodeRabbit）。
+  useEffect(() => {
+    const el = sceneChipsRef.current;
+    syncChipScroll();
+    if (!el || typeof ResizeObserver === 'undefined') return;
+    const ro = new ResizeObserver(() => syncChipScroll());
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [welcomeScenes, syncChipScroll]);
+  const pickedScene =
+    pickedSceneTitle === null
+      ? null
+      : (welcomeScenes.find((s) => s.title === pickedSceneTitle) ?? null);
+  const pickedTask =
+    pickedScene && pickedTaskTitle !== null
+      ? (pickedScene.tasks.find((t) => t.title === pickedTaskTitle) ?? null)
+      : null;
+  // 传给 Composer 的清空回调必须引用稳定（Composer 是 memo 的，#1042），否则
+  // 每次 ChatConsole 渲染都会把 memo 打穿。
+  const clearStarterScene = useCallback(() => setPickedSceneTitle(null), []);
+  const clearStarterTask = useCallback(() => setPickedTaskTitle(null), []);
+  // 换模式 → 两层都清空；换子项目 → 只清子子项目。
+  useEffect(() => {
+    setPickedSceneTitle(null);
+    setPickedTaskTitle(null);
+  }, [welcomeMode]);
+  useEffect(() => {
+    setPickedTaskTitle(null);
+  }, [pickedSceneTitle]);
+  // 记下"这条任务的提示词是我填进去的"。撤销任务时（胶囊 ×、换 L2、换模式、换会话
+  // 都会走到）如果输入框里还是这段原文就一并清掉——否则 UI 显示「没选任务」、输入框
+  // 却留着整段 prompt，看着像 × 没生效（#962 评审 P2）。用户手动改过就不动，别误删。
+  const appliedTaskAskRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (pickedTask) return;
+    const ask = appliedTaskAskRef.current;
+    appliedTaskAskRef.current = null;
+    if (ask && composerRef.current?.getText().trim() === ask.trim()) {
+      composerRef.current.setText('');
+    }
+  }, [pickedTask]);
   // Composer 侧的推理模式切换(ReasoningModeSwitch / 建议提示)同样要同步 welcome
   // 卡高亮——否则空态下先选了「代码任务」再从输入条切 fast,welcomeMode 停在 code、
   // 发送却用 fast,高亮与真实模式不一致(CodeRabbit)。会话已有消息后 welcome 卡不
@@ -2636,7 +2987,7 @@ export function ChatConsole({
   const changeReasoningMode = useCallback(
     (m: ReasoningMode) => {
       setReasoningMode(m);
-      if (messages.length === 0) setWelcomeMode(m);
+      if (messages.length === 0) setWelcomeMode((prev) => resolveWelcomeMode(prev, m));
     },
     [messages.length]
   );
@@ -2647,8 +2998,20 @@ export function ChatConsole({
   // 却因中途切到 fast 而高亮与发送模式不一致（CodeRabbit）。仅随 sessionKey 触发，
   // 不在同一会话内用 reasoningMode 变化覆盖用户手动选卡。
   useEffect(() => {
-    setWelcomeMode(reasoningMode === 'think' ? 'think' : 'fast');
+    // 这里**必须**直接派生，不能走 resolveWelcomeMode —— 那个 prev 守卫只对
+    // 「同一会话内切 reasoningMode」成立，放到会话边界上就反了：daily 与 code 都映射
+    // think，带着 prev 走会把 A 会话的 code 泄漏进新的空会话（欢迎页仍高亮「代码任务」、
+    // 「内置技能」也跟着出现，而用户在新会话里可能想干的是日常任务）。这个 effect 的
+    // 本意就是「不沿用上个会话的 code 选择」，与守卫的方向正好相反（#962 评审 P1）。
+    setWelcomeMode(reasoningModeToWelcome(reasoningMode));
+    // develop 的会话代际：切会话时 +1，异步附件（FileReader / 剪贴板）提交前校验，
+    // 避免旧会话的附件落到新会话。
     sessionGenRef.current += 1;
+    // 会话换了就把起点任务的两层选择一起清掉。ChatConsole 是常驻组件，而上面那个
+    // [welcomeMode] 的清理只在模式真的变了时才跑——新会话如果还是 code，上个会话
+    // 的选中态和输入框胶囊就会跟着显示出来（#962 CodeRabbit）。
+    setPickedSceneTitle(null);
+    setPickedTaskTitle(null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionKey]);
   const [streaming, setStreaming] = useState(false);
@@ -2741,6 +3104,21 @@ export function ChatConsole({
   const [downloadToast, setDownloadToast] = useState<{ filename: string; savePath: string } | null>(
     null
   );
+  /** #1062：结果/过程文件的「定位」「预览」失败时给出可见提示（此前静默无反应）。 */
+  const [assetError, setAssetError] = useState<string | null>(null);
+  // 用 `number`：这里配的是 window.setTimeout（DOM 返回 number），而
+  // `ReturnType<typeof setTimeout>` 在本工程的 node 类型下解析成 Timeout，赋不进去。
+  const assetErrorTimerRef = useRef<number | null>(null);
+  const notifyAssetError = useCallback((msg: string) => {
+    // 先取消上一条的定时器：否则它会在自己的 4 秒到点时把后设的、仍然相关的
+    // 消息提前清掉 —— 那会削弱本 PR 要给的保证（失败一定看得见）。
+    if (assetErrorTimerRef.current) window.clearTimeout(assetErrorTimerRef.current);
+    setAssetError(msg);
+    assetErrorTimerRef.current = window.setTimeout(() => {
+      assetErrorTimerRef.current = null;
+      setAssetError(null);
+    }, 4000);
+  }, []);
   const [toastVisible, setToastVisible] = useState(false);
 
   // Lazily re-read image attachments after session load: the sender embeds
@@ -3005,6 +3383,8 @@ export function ChatConsole({
   );
   /** files touched by the agent during this session */
   const [trackedFiles, setTrackedFiles] = useState<TrackedFile[]>([]);
+  /** 回合序号 → 该回合累积的结构化来源（#879 ③ 文件 → 相关引用）。 */
+  const [turnSourcesMap, setTurnSourcesMap] = useState<Map<number, MessageSource[]>>(new Map());
   /** preview modal */
   const [previewFile, setPreviewFile] = useState<{
     path: string;
@@ -3275,7 +3655,12 @@ export function ChatConsole({
   const lifecycleRef = useRef<{ id: number; promise: Promise<void>; sessionKey: string } | null>(
     null
   );
-  // Monotonic id for lifecycleRef identity checks.
+  // Monotonic id for lifecycleRef identity checks — never reset, so a session
+  // switch cannot reuse an old turn's id and collide with a still-in-flight
+  // lifecycle (would let an old settle clear the NEW lifecycle) (#879 ③ CodeRabbit).
+  const lifecycleSeqRef = useRef(0);
+  // 回合序号（第几个 user 回合，从 0 起）——source 回合索引（turnSourcesMap /
+  // 文件卡片「相关引用」）。会话加载时重置；与 lifecycleSeqRef 分离。
   const turnSeqRef = useRef(0);
   const liveReasoningTsRef = useRef<number | null>(null);
   // Anchor of the first reasoning delta of the current turn — thinking
@@ -3383,69 +3768,96 @@ export function ChatConsole({
   }, []);
 
   /** Upsert a file into trackedFiles */
-  const trackFile = useCallback((path: string, op: TrackedFile['op'], truncated = false) => {
-    // Normalise sandbox-internal paths before storing so Preview works
-    const normPath = normalizeSandboxPath(path);
-    // Strip surrounding quotes, trailing ellipsis, and leading ./ for dedup
-    const clean = normPath
-      .replace(/^["']|["']$/g, '')
-      .replace(/\.{3,}$/, '')
-      .replace(/[…]$/, '')
-      .replace(/^\.\//, '')
-      .trim();
-    setTrackedFiles((prev) => {
-      // Fuzzy match: compare cleaned base name, then exact path
-      const existing = prev.find((f) => {
-        const fc = f.path
-          .replace(/^["']|["']$/g, '')
-          .replace(/\.{3,}$/, '')
-          .replace(/[…]$/, '')
-          .replace(/^\.\//, '')
-          .trim();
-        // Basename-only matching should only kick in when one side is a bare
-        // filename (no directory), e.g. a tool hint reporting just "foo.pdf"
-        // that needs to match an existing "papers/foo.pdf" entry. Two paths
-        // that both carry (different) directories must not be merged just
-        // because they share a filename.
-        const eitherIsBareFilename = !clean.includes('/') || !fc.includes('/');
-        return (
-          f.path === normPath ||
-          fc === clean ||
-          (eitherIsBareFilename && basename(f.path) === basename(clean))
-        );
-      });
-      if (existing) {
-        // Upgrade: read < edit < write
-        const rank: Record<TrackedFile['op'], number> = { read: 0, edit: 1, write: 2, delete: 3 };
-        const nextOp = rank[op] > rank[existing.op] ? op : existing.op;
-        return prev.map((f) =>
-          f.path === existing.path
-            ? { ...f, op: nextOp, lastSeen: Date.now(), truncated: f.truncated && truncated }
-            : f
-        );
-      }
-      return prev; // new entries are verified for existence async below
-    });
-    // New entries: only surface a file that actually exists — tool hints can
-    // report a filename that was referenced (e.g. an image inside an HTML page)
-    // but never saved. Checked after the write usually lands.
-    fileExists(normPath, currentSessionRef.current).then((exists) => {
-      if (!exists) return;
+  const trackFile = useCallback(
+    (
+      path: string,
+      op: TrackedFile['op'],
+      truncated = false,
+      turnId?: number,
+      sourceTool?: string
+    ) => {
+      // Normalise sandbox-internal paths before storing so Preview works
+      const normPath = normalizeSandboxPath(path);
+      // Strip surrounding quotes, trailing ellipsis, and leading ./ for dedup
+      const clean = normPath
+        .replace(/^["']|["']$/g, '')
+        .replace(/\.{3,}$/, '')
+        .replace(/[…]$/, '')
+        .replace(/^\.\//, '')
+        .trim();
       setTrackedFiles((prev) => {
-        const dup = prev.some(
-          (f) =>
+        // Fuzzy match: compare cleaned base name, then exact path
+        const existing = prev.find((f) => {
+          const fc = f.path
+            .replace(/^["']|["']$/g, '')
+            .replace(/\.{3,}$/, '')
+            .replace(/[…]$/, '')
+            .replace(/^\.\//, '')
+            .trim();
+          // Basename-only matching should only kick in when one side is a bare
+          // filename (no directory), e.g. a tool hint reporting just "foo.pdf"
+          // that needs to match an existing "papers/foo.pdf" entry. Two paths
+          // that both carry (different) directories must not be merged just
+          // because they share a filename.
+          const eitherIsBareFilename = !clean.includes('/') || !fc.includes('/');
+          return (
             f.path === normPath ||
-            (basename(f.path) === basename(normPath) &&
-              (!f.path.includes('/') || !normPath.includes('/')))
-        );
-        if (dup) return prev;
-        return [
-          ...prev,
-          { path: normPath, name: basename(normPath), op, lastSeen: Date.now(), truncated },
-        ];
+            fc === clean ||
+            sameTrackedFile(f.path, normPath, workspace) ||
+            sameTrackedFile(fc, clean, workspace) ||
+            (eitherIsBareFilename && basename(f.path) === basename(clean))
+          );
+        });
+        if (existing) {
+          // Upgrade: read < edit < write
+          const rank: Record<TrackedFile['op'], number> = { read: 0, edit: 1, write: 2, delete: 3 };
+          const nextOp = rank[op] > rank[existing.op] ? op : existing.op;
+          return prev.map((f) =>
+            f.path === existing.path
+              ? {
+                  ...f,
+                  op: nextOp,
+                  lastSeen: Date.now(),
+                  truncated: f.truncated && truncated,
+                  turnId: turnId ?? f.turnId,
+                  sourceTool: sourceTool ?? f.sourceTool,
+                }
+              : f
+          );
+        }
+        return prev; // new entries are verified for existence async below
       });
-    });
-  }, []);
+      // New entries: only surface a file that actually exists — tool hints can
+      // report a filename that was referenced (e.g. an image inside an HTML page)
+      // but never saved. Checked after the write usually lands.
+      fileExists(normPath, currentSessionRef.current).then((exists) => {
+        if (!exists) return;
+        setTrackedFiles((prev) => {
+          const dup = prev.some(
+            (f) =>
+              f.path === normPath ||
+              sameTrackedFile(f.path, normPath, workspace) ||
+              (basename(f.path) === basename(normPath) &&
+                (!f.path.includes('/') || !normPath.includes('/')))
+          );
+          if (dup) return prev;
+          return [
+            ...prev,
+            {
+              path: normPath,
+              name: basename(normPath),
+              op,
+              lastSeen: Date.now(),
+              truncated,
+              turnId,
+              sourceTool,
+            },
+          ];
+        });
+      });
+    },
+    []
+  );
 
   useEffect(() => {
     // True only on an actual sessionKey change.  loadTrigger can bump alone
@@ -4085,8 +4497,19 @@ export function ChatConsole({
           name: f.name,
           op: f.op,
           lastSeen: f.lastSeen ?? Date.now(),
+          // #1104: declare_result_files 写入的显式结果标记
+          result: f.result === true,
         }));
-        setTrackedFiles(mergeTrackedFiles(existingFromMessages, backendMapped));
+        setTrackedFiles(mergeTrackedFiles(existingFromMessages, backendMapped, workspace));
+        // #879 ③ 冷启动恢复：从消息重新推导「回合 → 来源」，供文件卡片显示相关引用。
+        setTurnSourcesMap(extractTurnSourcesFromMessages(rawMsgs));
+        // 回合序号与会话内 user 消息数对齐（turnSeqRef 跨会话累计，需重置），
+        // 否则实时追踪的 turnId 与恢复推导的序号错位。持久化 rawMsgs 可能不含
+        // 尚在乐观阶段的 user 消息——取「持久化数 / 可见数」较大者，避免覆盖
+        // 活跃 turn 已递增的序号（CodeRabbit）。
+        const persistedTurns = (rawMsgs ?? []).filter((m) => m?.role === 'user').length;
+        const visibleTurns = messagesRef.current.filter((m) => m.role === 'user').length;
+        turnSeqRef.current = Math.max(persistedTurns, visibleTurns) - 1;
 
         // ── Issue #490: resume this session's most-recent active thread ──
         // currentThreadIdRef is reset to null on every sessionKey/remount
@@ -4148,10 +4571,28 @@ export function ChatConsole({
 
   // Scroll to bottom: (a) unconditionally after opening a session,
   // (b) during streaming only if the user hasn't manually scrolled up.
+  // 空态（欢迎页）例外：它比可视区高，粘底会把品牌区顶出屏幕（issue #962 实测
+  // scrollTop 落在最大值，logo 与标题看不见）。进入空态时会有一整块 DOM 替换
+  // （「正在连接…」→ 欢迎页），浏览器的滚动锚定会把位置挪走且时机不定，所以这里
+  // 在随后两帧再钉一次顶部；之后不再干预，用户自己滚下去读「场景方案」不受影响。
+  // justOpened 不消费，留给第一条消息再触发一次粘底。
   useEffect(() => {
     if (!historyLoaded) return;
     const el = scrollRef.current;
     if (!el) return;
+    if (messages.length === 0) {
+      el.scrollTop = 0;
+      userScrolledUp.current = false;
+      const pin = () => {
+        if (scrollRef.current) scrollRef.current.scrollTop = 0;
+      };
+      const raf = requestAnimationFrame(pin);
+      const timer = window.setTimeout(pin, 250);
+      return () => {
+        cancelAnimationFrame(raf);
+        window.clearTimeout(timer);
+      };
+    }
     if (justOpened.current) {
       justOpened.current = false;
       el.scrollTop = el.scrollHeight + el.clientHeight; // clamped to max
@@ -5141,7 +5582,10 @@ export function ChatConsole({
     // This turn's lifecycle — registered BEFORE any await (threads.start,
     // chat.send) so a subsequent interrupt-and-resend can always serialize
     // against it, even mid thread-init.
-    const turnId = ++turnSeqRef.current;
+    const turnId = ++lifecycleSeqRef.current;
+    // source 回合索引随每次发送前进（会话加载时已对齐 user 消息数），与上面
+    // 的 lifecycle 身份分账——见 lifecycleSeqRef 注释。
+    turnSeqRef.current += 1;
     let resolveLifecycle: () => void = () => {};
     const lifecyclePromise = new Promise<void>((resolve) => {
       resolveLifecycle = resolve;
@@ -5658,6 +6102,58 @@ export function ChatConsole({
         return;
       }
 
+      // #879: web_sources structured sources from WebSearchTool/WebFetchTool.
+      // Arrives as a progress delta ({delta, tool_call_id, tool_hint}) which
+      // extractProgressMessage() returns null for — handle it before that gate.
+      if (data.delta && typeof data.delta === 'string' && data.tool_call_id) {
+        try {
+          const inner = JSON.parse(data.delta);
+          if (
+            inner?.type === 'web_sources' &&
+            Array.isArray(inner.payload?.sources) &&
+            inner.payload.sources.length
+          ) {
+            const structured: MessageSource[] = inner.payload.sources.map(
+              (s: { title?: string; url?: string; snippet?: string; tool?: string }) => ({
+                tool: s.tool || 'web_search',
+                url: s.url || '',
+                title: s.title,
+                snippet: s.snippet,
+              })
+            );
+            const webToolName = structured[0]?.tool || 'web_search';
+            // #879 ③：按回合累积 sources，供文件卡片显示「相关引用」。
+            const turnSeq = turnSeqRef.current;
+            setTurnSourcesMap((prev) => {
+              const next = new Map(prev);
+              const acc = next.get(turnSeq) ?? [];
+              const seen = new Set(acc.map((s) => s.url));
+              for (const s of structured) {
+                if (s.url && !seen.has(s.url)) {
+                  seen.add(s.url);
+                  acc.push(s);
+                }
+              }
+              next.set(turnSeq, acc);
+              return next;
+            });
+            setMessages((prev) => {
+              for (let i = prev.length - 1; i >= 0; i -= 1) {
+                const m = prev[i];
+                if (m.role === 'progress' && m.toolHint && m.toolCallId === data.tool_call_id) {
+                  const next = [...prev];
+                  next[i] = { ...m, webSources: structured, toolName: webToolName };
+                  return next;
+                }
+              }
+              return prev;
+            });
+          }
+        } catch {
+          /* not JSON, ignore */
+        }
+      }
+
       // Try structured extraction first, then fall back to raw text
       const extracted = extractProgressMessage(data as ProgressPayload);
 
@@ -5748,7 +6244,7 @@ export function ChatConsole({
       // Parse file operations from tool hints
       if (data.tool_hint && data.text) {
         const parsed = parseToolHint(data.text);
-        if (parsed) trackFile(parsed.path, parsed.op, parsed.truncated);
+        if (parsed) trackFile(parsed.path, parsed.op, parsed.truncated, turnSeqRef.current);
       }
     });
 
@@ -5904,9 +6400,9 @@ export function ChatConsole({
           const filePath: string = _extractPathFromArgs(fn?.arguments || '{}') || '';
           if (!filePath) continue;
           if (_FILE_WRITE_TOOLS.includes(toolName)) {
-            trackFile(filePath, 'write', false);
+            trackFile(filePath, 'write', false, turnSeqRef.current, toolName);
           } else if (_FILE_READ_TOOLS.includes(toolName)) {
-            trackFile(filePath, 'read', false);
+            trackFile(filePath, 'read', false, turnSeqRef.current, toolName);
           }
         }
 
@@ -5924,8 +6420,11 @@ export function ChatConsole({
                   name: f.name,
                   op: f.op,
                   lastSeen: f.lastSeen ?? Date.now(),
+                  // #1104: declare_result_files 写入的显式结果标记（回合结束刷新
+                  // 必须带上，否则标记只活到下一次刷新）
+                  result: f.result === true,
                 }));
-                return mergeTrackedFiles(prev, mapped);
+                return mergeTrackedFiles(prev, mapped, workspace);
               });
             }
           },
@@ -6429,17 +6928,21 @@ export function ChatConsole({
     // The old openExternal fallback cannot find session-isolated files at all.
     if (/\.html?$/i.test(path)) {
       const bare = path.split(/[\\/]/).pop()!;
-      // Session-isolated files live under sessions/<safe-key>/files/. The full
-      // session-relative path is the ONLY form the bridge reliably reads for
-      // bare tracked names (verified: bare-name reads return null at the
-      // bridge); bare + session_key is also rejected. Build the full path from
-      // the active session key and read it workspace-scoped.
-      const safeKey = String(currentSessionRef.current ?? '').replace(/[:\\/]/g, '_');
+      // Session-isolated files live under sessions/<safe-key>/files/. Build the
+      // full workspace-relative path from the active session key and read it
+      // WITH the session key: the bridge resolves a workspace-relative path
+      // that lands inside the caller's own session directory (issue #1051),
+      // and session-scoped reads are the only ones allowed to touch
+      // sessions/ — a session-less read of that subtree is now rejected.
+      const safeKey = sessionFilesDirKey(currentSessionRef.current);
       const fullRel = safeKey ? `sessions/${safeKey}/files/${bare}` : '';
       const reads: Array<Promise<{ content?: string }>> = [];
-      if (fullRel && fullRel !== path) reads.push(window.miqi.files.read(fullRel));
+      if (fullRel && fullRel !== path)
+        reads.push(window.miqi.files.read(fullRel, currentSessionRef.current ?? undefined));
+      // Session-scoped read before the session-less one: the tracked path may
+      // be a bare name, which only resolves with the session key.
+      reads.push(window.miqi.files.read(path, currentSessionRef.current ?? undefined));
       reads.push(window.miqi.files.read(path));
-      if (bare !== path) reads.push(window.miqi.files.read(path, currentSessionRef.current));
       for (const attempt of reads) {
         try {
           const readResult = await attempt;
@@ -6470,20 +6973,17 @@ export function ChatConsole({
       const candidates: Array<{ p: string; withSession: boolean }> = [
         { p: path, withSession: true },
       ];
-      // path 本身已是 sessions/<safe>/files/<name> 全路径时,再带 session_key
-      // 会被 files.read 二次拼接会话目录而读不到(桥接对全路径+session_key
-      // 返回 null),补一个 workspace-scoped 候选并优先尝试(CodeRabbit #889)。
-      if (/^sessions\/[^/]+\/files\//.test(path.replace(/\\/g, '/'))) {
-        candidates.unshift({ p: path, withSession: false });
-      }
+      // #1051: a full session-relative path (sessions/<safe>/files/<name>) is
+      // resolved against the caller's own session directory by the bridge, so
+      // it is read WITH the session key like any other candidate.
       const nameOnly = path.replace(/\\/g, '/').split('/').pop()!;
       if (nameOnly !== path) candidates.push({ p: nameOnly, withSession: true });
       if (!path.startsWith('papers/'))
         candidates.push({ p: `papers/${nameOnly}`, withSession: true });
       if (nameOnly === path) {
-        const safeKey = String(currentSessionRef.current ?? '').replace(/[:\\/]/g, '_');
+        const safeKey = sessionFilesDirKey(currentSessionRef.current);
         if (safeKey) {
-          candidates.push({ p: `sessions/${safeKey}/files/${nameOnly}`, withSession: false });
+          candidates.push({ p: `sessions/${safeKey}/files/${nameOnly}`, withSession: true });
         }
       }
 
@@ -6502,6 +7002,11 @@ export function ChatConsole({
                 path: candidate.p,
                 kind: 'pdf',
                 pdfUrl: base64ToBlobUrl(res.data_base64, res.mime_type || 'application/pdf'),
+                // Keep the bytes alongside the blob URL: 「系统应用打开」 only
+                // takes the reliable openBytes path when they are present, and
+                // otherwise falls back to openExternal(candidate.p) — which
+                // cannot resolve a bare name for a session-scoped file (#1131).
+                dataBase64: res.data_base64,
               });
               return;
             }
@@ -6556,9 +7061,22 @@ export function ChatConsole({
       }
     }
     // Open with system default application as fallback
-    const result = await window.miqi.files.openExternal(path);
+    // #1062: 带上会话 key——文件夹绑定会话的产物在会话自己的工作区里，不带 key
+    // 主进程只按全局工作区做包含性校验，会把它们判成「工作区之外」。
+    let result: { opened?: boolean; error?: string } | null = null;
+    try {
+      result = (await window.miqi.files.openExternal(path, currentSessionRef.current)) ?? null;
+    } catch (e: any) {
+      result = { opened: false, error: e?.message ?? String(e) };
+    }
     if (!result?.opened) {
-      setPreviewFile({ path, content: `(Could not open file: ${path})` });
+      const outside = /outside workspace/i.test(String(result?.error ?? ''));
+      setPreviewFile({
+        path,
+        content: outside
+          ? `(无法预览：该文件在会话工作区之外，应用无权读取)\n\n${path}`
+          : `(Could not open file: ${path})`,
+      });
     }
   }, []);
 
@@ -6696,22 +7214,22 @@ export function ChatConsole({
     () =>
       messages
         .map((m) =>
-          m.role === 'progress' ? `${m.toolCallId ?? ''}:${m.content?.length ?? 0}` : m.role
+          m.role === 'progress'
+            ? `${m.toolCallId ?? ''}:${m.content?.length ?? 0}:${m.webSources?.length ?? 0}`
+            : m.role
         )
         .join('|'),
     [messages]
   );
   const sourcesByMsg = useMemo(() => {
     if (sourcesCacheRef.current?.sig === sourcesSig) return sourcesCacheRef.current.map;
-    const map = new Map<Message, MessageSource[]>();
+    const map = new Map<string, MessageSource[]>();
     let pending: MessageSource[] = [];
     let seen = new Set<string>();
     const merge = (next: MessageSource[]) => {
-      for (const s of next) {
-        if (seen.has(s.url)) continue;
-        seen.add(s.url);
-        pending.push(s);
-      }
+      // own 已经过上面的 filter 去重（跨工具行），这里直接累积即可；
+      // 若再走 seen 去重会与 filter 共享 seen、全部跳过，导致 pending 恒空。
+      pending.push(...next);
     };
     for (const m of messages) {
       if (m.role === 'progress') {
@@ -6723,7 +7241,7 @@ export function ChatConsole({
           seen.add(s.url);
           return true;
         });
-        if (own.length > 0) map.set(m, own);
+        if (own.length > 0) map.set(sourcesKey(m), own);
         merge(own);
       } else if (m.role === 'user') {
         pending = [];
@@ -6734,7 +7252,7 @@ export function ChatConsole({
         // answer all reference the same tool results (#678 用户反馈: 中间
         // "搜索异常改用…" 消息点查看来源竟是空的). Reset happens at the
         // next user message.
-        map.set(m, pending);
+        map.set(sourcesKey(m), pending);
       }
     }
     return map;
@@ -6953,6 +7471,13 @@ export function ChatConsole({
     () => classifyTrackedFiles(trackedFiles),
     [trackedFiles]
   );
+  // #1104：过程文件里的批量目录（如 bvse_sites/ 20 个 cif）折成目录行；
+  // 祖先判定用全量追踪路径（结果是交付根顶层产物时也要能撑起折叠）
+  const allTrackedPaths = useMemo(() => trackedFiles.map((f) => f.path), [trackedFiles]);
+  const { loose: processLoose, groups: processGroups } = useMemo(
+    () => groupTrackedByDir(processFiles, allTrackedPaths),
+    [processFiles, allTrackedPaths]
+  );
   // 「修改建议」区只关心本次会话 write/edit 过的文件；按分类拆成两组
   // （用户反馈 2026-08-13：合并前结果/过程混排，合并（op→read）后才分类）。
   const writeEditFiles = useMemo(
@@ -6966,6 +7491,11 @@ export function ChatConsole({
   const processWriteEdit = useMemo(
     () => writeEditFiles.filter((f) => !resultFiles.some((r) => r.path === f.path)),
     [writeEditFiles, resultFiles]
+  );
+  // #1104：修改建议里的批量目录同样折行（祖先判定同样用全量路径）
+  const { loose: processWriteEditLoose, groups: processWriteEditGroups } = useMemo(
+    () => groupTrackedByDir(processWriteEdit, allTrackedPaths),
+    [processWriteEdit, allTrackedPaths]
   );
   // 分享/导出默认只包含结果文件；无结果文件时回退为全部文件
   const shareFiles = resultFiles.length > 0 ? resultFiles : trackedFiles;
@@ -7458,6 +7988,8 @@ export function ChatConsole({
                         'radial-gradient(closest-side, var(--accent-soft), transparent 72%)',
                     }}
                   />
+                  {/* 品牌区维持原来的两层竖排（56px 方块 + 30px 标题）。此前为压缩空态高度
+                      改成过一行 lockup，按产品意见改回——代价是空态内容高约 +86px。 */}
                   <div
                     className="relative w-14 h-14 rounded-2xl flex items-center justify-center shadow-sm"
                     style={{
@@ -7488,11 +8020,11 @@ export function ChatConsole({
                         desc: '即时回答问题、改少量代码，低延迟优先。',
                       },
                       {
-                        key: 'think' as const,
-                        icon: '🧠',
-                        tag: '深度研究',
-                        tagline: '面向复杂任务',
-                        desc: '长链路检索、推理与方案推演，先想后答。',
+                        key: 'daily' as const,
+                        icon: '📋',
+                        tag: '日常任务',
+                        tagline: '面向日常办公',
+                        desc: '文档、表格、邮件、幻灯片等日常事务，说清需求就交付。',
                       },
                       {
                         key: 'code' as const,
@@ -7508,13 +8040,18 @@ export function ChatConsole({
                           key={m.key}
                           type="button"
                           onClick={() => selectWelcomeMode(m.key)}
-                          className={`flex-1 flex flex-col items-center gap-[5px] rounded-xl px-3 py-3 cursor-pointer transition-colors duration-200 border min-h-[132px] ${
+                          className={`flex-1 flex flex-col items-center gap-[5px] rounded-xl px-3 py-3 cursor-pointer transition-colors duration-200 border min-h-[108px] ${
                             active ? 'border-[var(--accent)]' : 'border-[var(--border-subtle)]'
                           } hover:border-[var(--accent)]`}
                           style={{
+                            // 选中卡：底色自上而下由浅入深（底部更浓），配合描边与淡投影
+                            // 让"已选中"在余光里也能看出来。
                             background: active
-                              ? 'color-mix(in srgb, var(--surface) 92%, var(--accent-soft))'
+                              ? 'linear-gradient(to bottom, color-mix(in srgb, var(--surface) 84%, var(--accent-soft)), color-mix(in srgb, var(--surface) 60%, var(--accent-soft)))'
                               : 'var(--surface)',
+                            boxShadow: active
+                              ? '0 2px 10px color-mix(in srgb, var(--accent) 16%, transparent)'
+                              : undefined,
                           }}
                         >
                           <span
@@ -7524,22 +8061,188 @@ export function ChatConsole({
                             <span className="text-[15px]">{m.icon}</span>
                             {m.tag}
                           </span>
-                          <span className="text-[11px] text-text-faint">{m.tagline}</span>
+                          {/* ✓ 仅 active 渲染:opacity 隐藏会让文本留在 DOM,
+                              toContainText 断言不了"取消选中"。并进 tagline 这一行而不是
+                              单独占一行（未选中的卡原本也要为它预留 18px 占位高度，
+                              实测卡片 132 → 108px）；选中态另靠更重的底纹 + 描边 + 淡投影。 */}
+                          <span className="flex items-center gap-1.5 text-[11px] text-text-faint">
+                            <span>{m.tagline}</span>
+                            {active && (
+                              <span className="font-bold" style={{ color: 'var(--accent)' }}>
+                                ✓ 已选择
+                              </span>
+                            )}
+                          </span>
                           <span className="text-[11.5px] text-text-muted leading-snug">
                             {m.desc}
                           </span>
-                          {/* ✓ 仅 active 渲染:opacity 隐藏会让文本留在 DOM,
-                              toContainText 断言不了"取消选中"。占位 div 保持底部对齐。 */}
-                          <div
-                            className="mt-auto flex items-center justify-center"
-                            style={{ minHeight: 16, color: 'var(--accent)' }}
-                          >
-                            {active && <span className="text-[11px] font-bold">✓ 已选择</span>}
-                          </div>
                         </button>
                       );
                     })}
                   </div>
+                  {/* issue #962 起点任务：两级子选项——左栏场景（L2，上下滚动），右栏
+                      该场景下的任务（L3，每条带一句详情）。点任务填入输入框并聚焦。 */}
+                  {/* 起点任务（对齐 WorkBuddy）：子选项从 148px 左栏压成一行横向 chips，
+                      贴在输入框上方；任务列表与「场景方案」移到它上面。原来的双栏面板
+                      固定 268~320px，是空态首屏溢出的最大来源。 */}
+                  {/* issue #962 起点任务（三层渐进，按产品描述）：
+                      ① 点三大项 → 子项目横排一行，右侧箭头翻页；
+                      ② 点子项目 → 它变成输入框里的可移除胶囊，同时冒出它的子子项目行；
+                      ③ 点子子项目 → 详细内容显示在输入框里。
+                      原来的 268px 双栏面板被这两行 chips 取代——它正是空态溢出的最大来源。 */}
+                  <div
+                    data-testid="welcome-starters"
+                    aria-label="起点任务"
+                    className="relative w-full max-w-[560px] flex items-center gap-1.5"
+                  >
+                    <button
+                      type="button"
+                      aria-label="上一组子项目"
+                      disabled={!chipScroll.left}
+                      onClick={() =>
+                        sceneChipsRef.current?.scrollBy({ left: -170, behavior: 'smooth' })
+                      }
+                      className="starter-chip shrink-0 w-7 h-7 flex items-center justify-center rounded-full cursor-pointer text-text-faint hover:text-[var(--text)] disabled:opacity-35 disabled:cursor-default disabled:pointer-events-none"
+                      style={{ border: '1px solid transparent' }}
+                    >
+                      <ChevronLeft size={13} />
+                    </button>
+                    <div
+                      key={welcomeMode}
+                      ref={sceneChipsRef}
+                      // 藏掉横向滚动条（两侧箭头就是它的替代物）：webkit 伪元素 + 标准属性各写一份。
+                      // py-3/-my-3 是给阴影留的余地：overflow-x 一旦不是 visible，overflow-y 会被
+                      // 算成 auto，chips 的 ring 与投影上下都会被这个滚动容器直接裁掉（#962 反馈
+                      // 「上下框子看不见」）；拿负 margin 把多出来的 24px 抵回去，布局高度不变。
+                      className="flex-1 min-w-0 flex items-center gap-1.5 overflow-x-auto scroll-smooth py-3 -my-3 [&::-webkit-scrollbar]:hidden"
+                      onScroll={syncChipScroll}
+                      style={{
+                        animation: 'welcome-chips-in 220ms ease-out',
+                        scrollbarWidth: 'none',
+                      }}
+                    >
+                      {welcomeScenes.map((s) => {
+                        const on = s.title === pickedSceneTitle;
+                        return (
+                          <button
+                            key={s.title}
+                            type="button"
+                            onClick={() => setPickedSceneTitle(on ? null : s.title)}
+                            aria-pressed={on}
+                            className={cn(
+                              'starter-chip flex items-center gap-2 shrink-0 rounded-full px-4 py-2 text-[13px] cursor-pointer',
+                              on ? 'font-semibold' : 'text-text-muted hover:text-[var(--text)]'
+                            )}
+                            style={{
+                              // 底色与描边都交给 .starter-chip（表面色 + ring + 投影），
+                              // 这里只留 1px 透明边占住原来 border 的布局宽度，选中时不跳尺寸。
+                              border: '1px solid transparent',
+                              color: on ? 'var(--text)' : undefined,
+                            }}
+                          >
+                            <span
+                              className="shrink-0 text-[12px] leading-none"
+                              style={on ? undefined : { opacity: 0.55, filter: 'saturate(0.45)' }}
+                            >
+                              {s.icon}
+                            </span>
+                            {s.title}
+                          </button>
+                        );
+                      })}
+                    </div>
+                    <button
+                      type="button"
+                      aria-label="下一组子项目"
+                      disabled={!chipScroll.right}
+                      onClick={() =>
+                        sceneChipsRef.current?.scrollBy({ left: 170, behavior: 'smooth' })
+                      }
+                      className="starter-chip shrink-0 w-7 h-7 flex items-center justify-center rounded-full cursor-pointer text-text-faint hover:text-[var(--text)] disabled:opacity-35 disabled:cursor-default disabled:pointer-events-none"
+                      style={{ border: '1px solid transparent' }}
+                    >
+                      <ChevronRight size={13} />
+                    </button>
+                  </div>
+
+                  {/* 子子项目：换成**可展开的卡片**（#962 反馈：只靠大小区分不够）。
+                      层级感来自"控件类型变了"——L2 是横排 chips，L3 是纵列的带 ⌄ 卡片，
+                      对齐 WorkBuddy 第三层的做法；展开后直接看到提示词与任务详情。 */}
+                  {pickedScene && (
+                    <div
+                      key={`${welcomeMode}-${pickedSceneTitle}`}
+                      className="relative w-full max-w-[560px] flex flex-col gap-1.5 pl-4"
+                      style={{
+                        animation: 'welcome-chips-in 220ms ease-out',
+                        // 这条竖线只是把 L3 归到选中的 L2 名下，跟卡片一样走中性灰（#962：所有都灰）
+                        borderLeft: '2px solid color-mix(in srgb, var(--text) 14%, transparent)',
+                      }}
+                    >
+                      {pickedScene.tasks.map((t) => {
+                        const open = t.title === pickedTaskTitle;
+                        return (
+                          <div
+                            key={t.title}
+                            data-open={open ? '' : undefined}
+                            className="starter-card rounded-lg overflow-hidden text-left"
+                            style={{ border: '1px solid transparent' }}
+                          >
+                            <button
+                              type="button"
+                              onClick={() => {
+                                if (open) {
+                                  setPickedTaskTitle(null);
+                                  return;
+                                }
+                                setPickedTaskTitle(t.title);
+                                // 展开的同时把提示词放进输入框（#962 反馈：详细的提示信息
+                                // 得在对话框里）。用替换而不是追加，连点不会堆成一长串。
+                                // #1021/#1042 之后 input state 住在 Composer 里，只能走 ref 写。
+                                appliedTaskAskRef.current = t.ask;
+                                composerRef.current?.setText(t.ask);
+                                composerRef.current?.focus();
+                              }}
+                              aria-expanded={open}
+                              className="w-full flex items-center gap-2 px-3 py-2 text-left text-[12.5px] leading-snug cursor-pointer transition-colors duration-150"
+                              style={{
+                                color: open ? 'var(--text)' : 'var(--text-muted)',
+                                fontWeight: open ? 600 : 400,
+                              }}
+                            >
+                              <span className="shrink-0 text-[12px] leading-none">{t.icon}</span>
+                              <span className="flex-1 truncate">{t.title}</span>
+                              <span className="shrink-0" style={{ color: 'var(--text-faint)' }}>
+                                {open ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
+                              </span>
+                            </button>
+                            {open && (
+                              <div
+                                className="px-3 pb-3 flex flex-col gap-2.5"
+                                style={{ borderTop: '1px solid var(--border-subtle)' }}
+                              >
+                                {(
+                                  [
+                                    ['适用场景', t.scenario],
+                                    ['你会得到', t.deliverable],
+                                    ['需要你提供', t.needs],
+                                  ] as const
+                                ).map(([label, value]) => (
+                                  <div key={label} className="flex flex-col gap-0.5">
+                                    <span className="text-[10.5px] font-semibold tracking-wide text-text-faint">
+                                      {label}
+                                    </span>
+                                    <span className="text-[12px] leading-[1.7] text-text-muted">
+                                      {value}
+                                    </span>
+                                  </div>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
                 </div>
               ) : (
                 chatGroups.map((group, i) =>
@@ -7583,7 +8286,7 @@ export function ChatConsole({
                         onEdit={handleEdit}
                         execOutputs={execOutputs}
                         inlineExecOutput={inlineExecOutput}
-                        sources={sourcesByMsg.get(group.msg) ?? EMPTY_SOURCES}
+                        sources={sourcesByMsg.get(sourcesKey(group.msg)) ?? EMPTY_SOURCES}
                         toolStepIndex={toolStepByMsg.get(group.msg)}
                         isLast={i === chatGroups.length - 1}
                         streaming={streaming && i === lastAssistantIdx && assistantTailActive}
@@ -7936,6 +8639,12 @@ export function ChatConsole({
                 onAttachClick={handleAttachClick}
                 onSubmit={handleComposerSubmit}
                 onAbort={handleAbort}
+                // #962 起点任务胶囊：只在空态显示；过条件而不是传 isWelcomeEmpty，
+                // 是因为 Composer 只需要「画不画这颗胶囊」，不需要知道消息数量。
+                starterScene={isWelcomeEmpty ? pickedScene : null}
+                starterTask={isWelcomeEmpty ? pickedTask : null}
+                onClearStarterScene={clearStarterScene}
+                onClearStarterTask={clearStarterTask}
                 onPasteClipboard={pasteClipboardFiles}
                 attachmentSlotRef={setAttachmentSlot}
               />
@@ -8038,8 +8747,11 @@ export function ChatConsole({
             ) : (
               <>
                 {/* issue #607: 结果资产（默认展开、星标强调） + 过程资产（默认折叠） */}
+                {/* #1104: 稳定 key——结果区随 resultFiles 出现/消失时不得让过程区
+                    按位置重挂载（否则用户手动展开的状态被重置回默认折叠） */}
                 {resultFiles.length > 0 && (
                   <AssetSection
+                    key="asset-section-result"
                     label="结果文件"
                     testKey="result"
                     count={resultFiles.length}
@@ -8051,11 +8763,47 @@ export function ChatConsole({
                         key={f.path}
                         file={f}
                         isResult
+                        citations={turnSourcesMap.get(f.turnId ?? -1) ?? []}
                         onPreview={() => handlePreview(f.path)}
                         onDiff={() => handleShowDiff(f.path)}
-                        onReveal={() =>
-                          window.miqi.files.openContainingFolder(normalizePath(f.path))
-                        }
+                        onReveal={async () => {
+                          // #1062：过去对工作区外文件这里会 reject 被丢弃 → 点了没反应；
+                          // 现在统一收结构化结果，失败时给出可见提示。
+                          // #1131：`sessions.workspace` 对**非文件夹绑定**的默认工作区
+                          // 会话返回 null，主进程于是把相对路径锚到全局工作区根；而会话
+                          // 隔离的产物实际在 `sessions/<key>/files/` 下，台账里存的又是
+                          // 裸文件名（create_pdf 等文档工具相对会话 files 根记账）→ 一律
+                          // File not found。与预览/下载保持一致，补一个会话相对候选。
+                          // 路径由本会话 key 推出，主进程的包含性校验不变，渲染层没被放宽。
+                          const raw = normalizePath(f.path);
+                          const nameOnly = raw.replace(/\\/g, '/').split('/').pop()!;
+                          const safeKey = sessionFilesDirKey(currentSessionRef.current);
+                          const candidates = [raw];
+                          if (safeKey && nameOnly === raw) {
+                            candidates.push(`sessions/${safeKey}/files/${nameOnly}`);
+                          }
+                          let lastError = '';
+                          for (const candidate of candidates) {
+                            try {
+                              const res = await window.miqi.files.openContainingFolder(
+                                candidate,
+                                // #1062: 带上会话 key，主进程才能把文件夹绑定会话的
+                                // 工作区算进允许根；传的是会话而非根，渲染层无法放宽校验。
+                                currentSessionRef.current
+                              );
+                              if (res?.revealed) return;
+                              lastError = String(res?.error ?? '');
+                            } catch (e: any) {
+                              lastError = String(e?.message ?? e);
+                            }
+                          }
+                          const outside = /outside workspace/i.test(lastError);
+                          notifyAssetError(
+                            outside
+                              ? '无法定位：该文件在会话工作区之外'
+                              : `定位失败：${lastError || '未知原因'}`
+                          );
+                        }}
                       />
                     ))}
                   </AssetSection>
@@ -8063,17 +8811,36 @@ export function ChatConsole({
 
                 {processFiles.length > 0 && (
                   <AssetSection
+                    key="asset-section-process"
                     label="过程文件"
                     testKey="process"
                     count={processFiles.length}
                     defaultOpen={resultFiles.length === 0}
                   >
-                    {processFiles.map((f) => (
+                    {/* #1104：目录级聚合——bvse_sites/ 这类批量目录折成一行，
+                        不再逐个铺开几十张卡片（用户反馈 2026-09-16） */}
+                    {processLoose.map((f) => (
                       <TrackedFileCard
                         key={f.path}
                         file={f}
+                        citations={turnSourcesMap.get(f.turnId ?? -1) ?? []}
                         onPreview={() => handlePreview(f.path)}
                         onDiff={() => handleShowDiff(f.path)}
+                      />
+                    ))}
+                    {processGroups.map((g) => (
+                      <AssetDirGroupRow
+                        key={g.dir}
+                        dir={g.dir}
+                        files={g.files}
+                        renderFile={(f) => (
+                          <TrackedFileCard
+                            key={f.path}
+                            file={f}
+                            onPreview={() => handlePreview(f.path)}
+                            onDiff={() => handleShowDiff(f.path)}
+                          />
+                        )}
                       />
                     ))}
                   </AssetSection>
@@ -8086,6 +8853,7 @@ export function ChatConsole({
             <div className="flex-1" />
             {writeEditFiles.length > 0 && (
               <div
+                data-testid="task-assets-changes"
                 className="border-t mx-3 mt-2 pt-3 pb-3"
                 style={{ borderColor: 'var(--panel-border)' }}
               >
@@ -8103,9 +8871,11 @@ export function ChatConsole({
                 </div>
                 {resultWriteEdit.length > 0 && (
                   <div className="mb-2">
-                    <div className="text-[10px] font-medium text-text-faint mb-1">结果文件</div>
+                    <div className="text-[10px] font-medium text-text-faint mb-1">
+                      结果文件 ({resultWriteEdit.length})
+                    </div>
                     <div className="flex flex-col gap-1.5">
-                      {resultWriteEdit.slice(0, 3).map((f) => (
+                      {resultWriteEdit.map((f) => (
                         <div
                           key={f.path}
                           className="flex items-center gap-1.5 rounded-lg px-2.5 py-2"
@@ -8146,9 +8916,11 @@ export function ChatConsole({
                 )}
                 {processWriteEdit.length > 0 && (
                   <div>
-                    <div className="text-[10px] font-medium text-text-faint mb-1">过程文件</div>
+                    <div className="text-[10px] font-medium text-text-faint mb-1">
+                      过程文件 ({processWriteEdit.length})
+                    </div>
                     <div className="flex flex-col gap-1.5">
-                      {processWriteEdit.slice(0, 3).map((f) => (
+                      {processWriteEditLoose.map((f) => (
                         <div
                           key={f.path}
                           className="flex items-center gap-1.5 rounded-lg px-2.5 py-2"
@@ -8183,6 +8955,54 @@ export function ChatConsole({
                             <GitCompare size={11} />
                           </button>
                         </div>
+                      ))}
+                      {/* #1104：批量目录折行，避免修改建议被几十个批次文件淹没 */}
+                      {processWriteEditGroups.map((g) => (
+                        <AssetDirGroupRow
+                          key={g.dir}
+                          dir={g.dir}
+                          files={g.files}
+                          renderFile={(f) => (
+                            <div
+                              key={f.path}
+                              className="flex items-center gap-1.5 rounded-lg px-2.5 py-2"
+                              style={{
+                                background: 'var(--surface-muted)',
+                                border: '1px solid var(--border-subtle)',
+                              }}
+                            >
+                              <FileText
+                                size={11}
+                                style={{ color: 'var(--info)' }}
+                                className="shrink-0"
+                              />
+                              <span
+                                className="text-[11px] truncate flex-1 text-text"
+                                title={f.path}
+                              >
+                                {f.name}
+                              </span>
+                              {/* 与散列行同款控件：操作徽标 + 直接看差异（CodeRabbit 复审） */}
+                              <span
+                                className="text-[9px] px-1.5 py-0.5 rounded font-medium shrink-0"
+                                style={{
+                                  background:
+                                    f.op === 'write' ? 'var(--accent)' : 'rgba(234,179,8,0.15)',
+                                  color: f.op === 'write' ? 'var(--accent-text)' : 'var(--warning)',
+                                }}
+                              >
+                                {f.op.toUpperCase()}
+                              </span>
+                              <button
+                                onClick={() => handleShowDiff(f.path)}
+                                className="p-1 rounded transition-colors shrink-0 text-text-faint"
+                                title="Compare diff"
+                              >
+                                <GitCompare size={11} />
+                              </button>
+                            </div>
+                          )}
+                        />
                       ))}
                     </div>
                   </div>
@@ -8233,6 +9053,7 @@ export function ChatConsole({
           className="max-w-[980px] p-0 bg-transparent border-0 shadow-none"
         >
           <div
+            data-testid="file-preview-modal"
             className="flex flex-col rounded-xl shadow-2xl overflow-hidden"
             style={{
               width: '100%',
@@ -8292,16 +9113,16 @@ export function ChatConsole({
                     let base64 = previewFile.dataBase64;
                     if (!base64) {
                       const nameOnly = previewFile.path.replace(/\\/g, '/').split('/').pop()!;
-                      const safeKey = String(currentSessionRef.current ?? '').replace(
-                        /[:\\/]/g,
-                        '_'
-                      );
+                      const safeKey = sessionFilesDirKey(currentSessionRef.current);
                       const reads: Array<{ p: string; session?: string }> = [
                         { p: previewFile.path, session: currentSessionRef.current },
                         { p: previewFile.path },
                       ];
                       if (safeKey && nameOnly === previewFile.path) {
-                        reads.push({ p: `sessions/${safeKey}/files/${nameOnly}` });
+                        reads.push({
+                          p: `sessions/${safeKey}/files/${nameOnly}`,
+                          session: currentSessionRef.current,
+                        });
                       }
                       for (const read of reads) {
                         try {
@@ -8339,15 +9160,28 @@ export function ChatConsole({
                       try {
                         const res = await window.miqi.files.openBytes(name, previewFile.dataBase64);
                         if (res?.opened) return;
-                        if (res?.error) return;
+                        // 被拒也要说话：静默 return 正是 #1062 要消灭的那种失败。
+                        if (res?.error) {
+                          notifyAssetError(`打开失败：${res.error}`);
+                          return;
+                        }
                       } catch {
                         /* fall through to path */
                       }
                     }
                     try {
-                      await window.miqi.files.openExternal(previewFile.path);
-                    } catch {
-                      /* ignore */
+                      // #1062：必须带会话 key。不带的话主进程只按全局工作区校验，
+                      // 绑定文件夹会话里的合法文件也会被判「工作区之外」——而空
+                      // catch 会把这次失败整个吞掉，点了没反应。
+                      const res = await window.miqi.files.openExternal(
+                        previewFile.path,
+                        currentSessionRef.current
+                      );
+                      if (!res?.opened) {
+                        notifyAssetError(`打开失败：${res?.error ?? '未知原因'}`);
+                      }
+                    } catch (e: any) {
+                      notifyAssetError(`打开失败：${e?.message ?? String(e)}`);
                     }
                   }}
                   className="flex items-center gap-1 px-2 py-1 rounded text-[11px] text-[var(--accent)] hover:bg-[var(--accent-soft)] transition-colors"
@@ -8577,6 +9411,33 @@ export function ChatConsole({
           }}
         />
       )}
+      {/* #1062：结果/过程文件「定位 / 预览」失败提示（此前静默无反应） */}
+      {assetError && (
+        <div
+          className="fixed inset-0 z-[100] flex items-end justify-center pb-24 pointer-events-none"
+          style={{ animation: 'msgIn .25s cubic-bezier(.22,.8,.32,1)' }}
+          data-testid="asset-error-toast"
+        >
+          <div
+            className="flex items-center gap-3 rounded-xl px-5 py-3 shadow-lg pointer-events-auto"
+            style={{
+              background: 'var(--surface)',
+              border: '1px solid var(--danger)',
+              boxShadow: '0 12px 40px rgba(0,0,0,.15)',
+            }}
+          >
+            <span
+              className="w-6 h-6 rounded-full flex items-center justify-center text-sm shrink-0"
+              style={{ background: 'var(--danger-bg)', color: 'var(--danger)' }}
+            >
+              !
+            </span>
+            <div className="text-[13px] max-w-[420px]" style={{ color: 'var(--text)' }}>
+              {assetError}
+            </div>
+          </div>
+        </div>
+      )}
       {/* #696 补：下载完成 toast（屏幕居中 + 淡入淡出 + 2s 停留） */}
       {downloadToast && (
         <div
@@ -8688,7 +9549,7 @@ function ToolChainGroup({
 }: {
   rows: Message[];
   done: boolean;
-  sourcesByMsg: Map<Message, MessageSource[]>;
+  sourcesByMsg: Map<string, MessageSource[]>;
   searchResultsByCallId: Record<string, string>;
 } & Omit<
   ComponentProps<typeof MessageBubble>,
@@ -8736,7 +9597,7 @@ function ToolChainGroup({
               <MessageBubble
                 key={`${row.timestamp}-${i}`}
                 msg={row}
-                sources={sourcesByMsg.get(row) ?? EMPTY_SOURCES}
+                sources={sourcesByMsg.get(sourcesKey(row)) ?? EMPTY_SOURCES}
                 toolStepIndex={i + 1}
                 isLastToolRow={i === rows.length - 1}
                 isLast={false}
@@ -9718,7 +10579,11 @@ const MessageBubble = memo(function MessageBubble({
                             CodeRabbit 修订：改用真实生成信号 streaming（2722/2724 由
                             turn 生命周期驱动），不再用乐观 sending 时间戳 ——
                             sending 是用户回合信号，assistant 回复期间可能已为 null。 */}
-                        <MarkdownContent content={msg.content} streaming={streaming} />
+                        <MarkdownContent
+                          content={msg.content}
+                          streaming={streaming}
+                          sources={sources}
+                        />
                       </>
                     ) : (
                       renderContent((msg as any).__cleanContent ?? msg.content)
@@ -9874,12 +10739,20 @@ const MessageBubble = memo(function MessageBubble({
               href={s.url}
               target="_blank"
               rel="noreferrer"
-              className="flex items-center gap-2 rounded-lg px-2.5 py-2 text-xs hover:bg-[var(--surface-muted)] transition-colors"
+              className="flex items-start gap-2 rounded-lg px-2.5 py-2 text-xs hover:bg-[var(--surface-muted)] transition-colors"
             >
-              <ExternalLink size={12} className="shrink-0" />
-              <span className="truncate">
-                {s.tool ? `${s.tool} · ` : ''}
-                {s.url}
+              <ExternalLink size={12} className="shrink-0 mt-0.5" />
+              <span className="min-w-0 flex-1">
+                <span className="block truncate">
+                  {s.tool ? `${s.tool} · ` : ''}
+                  {s.title || s.url}
+                </span>
+                {s.title && s.title !== s.url && (
+                  <span className="block truncate text-[var(--text-muted)]">{s.url}</span>
+                )}
+                {s.snippet && (
+                  <span className="block truncate text-[var(--text-muted)]">{s.snippet}</span>
+                )}
               </span>
             </a>
           ))}

@@ -118,3 +118,27 @@ describe('MarkdownContent compare table (issue #878)', () => {
     expect(markup).not.toContain('浅色底纹');
   });
 });
+
+describe('MarkdownContent citation footnotes (#879)', () => {
+  it('renders [n] as a clickable citation when a reference list exists', () => {
+    const md = [
+      '关键数据 [1] 与 [2]。',
+      '',
+      '## 参考文献',
+      '[1] 张三；MOF 造粒工艺综述；材料学报；2023；https://doi.org/10.1016/j.matt.2023.01.001',
+      '[2] 王五；介孔氧化铝研究；化工进展；2020；https://example.com/x',
+    ].join('\n');
+    const markup = renderToStaticMarkup(createElement(MarkdownContent, { content: md }));
+    expect(markup).toContain('data-testid="citation-ref-1"');
+    expect(markup).toContain('data-testid="citation-ref-2"');
+    expect(markup).toContain('查看参考文献 1');
+  });
+
+  it('leaves [n] as plain text when there is no matching reference', () => {
+    const markup = renderToStaticMarkup(
+      createElement(MarkdownContent, { content: '没有参考文献的 [1] 脚注。' })
+    );
+    expect(markup).not.toContain('citation-ref');
+    expect(markup).toContain('[1]');
+  });
+});

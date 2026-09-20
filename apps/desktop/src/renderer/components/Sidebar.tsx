@@ -480,8 +480,10 @@ export function Sidebar({
                                   {
                                     label: '在文件管理器中打开',
                                     icon: <FolderOpen size={13} />,
+                                    // #1062：带上会话 key。绑定文件夹会话的工作区不是全局
+                                    // 工作区，不带 key 时主进程只按全局校验 → 被拒且无提示。
                                     onSelect: () =>
-                                      window.miqi.files.openContainingFolder(s.workspace!),
+                                      window.miqi.files.openContainingFolder(s.workspace!, s.key),
                                   },
                                 ]
                               : []),

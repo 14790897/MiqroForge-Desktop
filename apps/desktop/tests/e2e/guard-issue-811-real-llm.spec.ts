@@ -33,6 +33,13 @@
  * 沙箱创建之前执行，与沙箱无关；exec 在主机直执行（Windows Git Bash /
  * Linux bash）。
  *
+ * 轮询预算（desktop-ci run 35064775546 复现）：RUN_CAP 曾与测试超时同为
+ * 480s，回合一旦拖长，Playwright 先在 `waitForTimeout` 里把测试杀掉，
+ * 后面的 expect 与 precondition 跳过都执行不到，日志只剩「Test timeout
+ * of 480000ms exceeded」。现在 RUN_CAP=6.5min 严格小于 8min 超时，退出循环
+ * 后一定会走到断言或跳过；同时按「去掉 已深度思考 · N 秒 计数器后的文本」
+ * 判空闲，live timer 不再无限推迟空闲判定。
+ *
  * Run: cd apps/desktop && npx playwright test \
  *      --config=playwright.config.ts --project=electron -g "real LLM"
  */
@@ -100,24 +107,75 @@ test.describe('Issue #811 护栏误拦截复现 (real LLM)', () => {
    *  往返 + 每次 exec 25-30s spawn。模型安全对齐可能对「危险命令」抢跑拒答，
    *  但 tool_host 的 collab gate（非 ask_user_confirm_card）会弹确认卡，这里
    *  点掉 primary 按钮让回合继续，直到护栏结构化文本落地。 */
+  /**
+   * 模型「按自身安全对齐抢跑拒答」时的常见措辞。命中它意味着模型压根没去调 exec，
+   * 沙箱护栏因此没被触发——那是前提未满足，不是护栏回归。
+   */
+  const SELF_REFUSAL = /我不能执行|不会执行|无法执行|拒绝执行|不能帮你执行/;
+
   async function driveExecAndAssert(
     prompt: string,
     expectPattern: RegExp | string,
     rejectKeyword?: string
   ): Promise<string> {
+    // exec 是否被调用要按「本回合的增量」判断，不能全页 count() > 0：整个 describe
+    // 共用一个 page，历史消息里的工具调用块会留在 DOM 里，全页查询会把上一轮的 exec
+    // 算成这一轮的——那样当前回合即便压根没调 exec 也进不了 skip 分支，反而把环境
+    // 问题误报成护栏失败。发送前先记基线，只认之后新增的。
+    // （更稳的做法是给工具调用行挂当前 turn 的唯一标识，但那要动渲染层，先用增量。）
+    const execCountBefore = await page.locator('[data-testid="tool-command-copy"]').count();
+    // 同理，SELF_REFUSAL 只能看**本回合新产出的那条助手回复**：main.textContent()
+    // 含整段会话，上一回合要是也出现过自拒措辞，本回合还没输出时就能满足条件，把测试
+    // 错误地跳过（假绿）。记下助手的消息条数做基线，只认之后新增的那条。
+    const assistantCountBefore = await page
+      .locator('[data-testid="chat-message-assistant"]')
+      .count();
+
     await sendMessage(page, prompt);
 
-    const RUN_CAP = 8 * 60_000; // hard cap from test start
+    // RUN_CAP must stay strictly below the test timeout (8 min): if the loop
+    // can outlive the test, Playwright kills the run mid-poll and the failure
+    // reads "Test timeout of 480000ms exceeded" at `page.waitForTimeout` —
+    // exactly what desktop-ci run 35064775546 reported for case D, with the
+    // assertion and the precondition-skip below never getting a chance to run.
+    const RUN_CAP = 6.5 * 60_000; // hard cap from turn start
     const IDLE_DEADLINE = 3 * 60_000; // slow CI LLM stretches
+    // The "已深度思考 · N 秒" live counter rewrites a few characters every
+    // second for as long as the turn runs, so any raw text diff reads as
+    // "still streaming" and pushes the idle deadline out forever.  Compare a
+    // signature with those counters scrubbed: the loop then idles out on real
+    // content changes only, and a settled-but-unmatched turn is reported as
+    // an assertion failure with the model's own text instead of a timeout.
+    const scrubLiveCounters = (t: string) => t.replace(/\d+\s*秒/g, 'N 秒');
     const runStart = Date.now();
     let idleDeadline = runStart + IDLE_DEADLINE;
     let text = '';
-    let lastText = '';
+    let lastSignature = '';
     let lastLen = -1;
     let stable = 0;
+    // exec 真的被调用过的硬信号：ToolCommandBlock 只在工具调用行渲染出 exec 命令时
+    // 出现。判断「护栏没被触发」必须靠它，不能靠回复的语气——模型完全可能先调了
+    // exec、再在最终回复里说一句泛泛的拒绝，光看文字会把真回归当成前提未满足跳过。
+    let sawExecCommand = false;
 
     const matches = (t: string) =>
       expectPattern instanceof RegExp ? expectPattern.test(t) : t.includes(expectPattern);
+
+    /**
+     * 本回合**助手回复**的文本；本回合还没产生回复时返回空串。
+     *
+     * 四个判据——exec 信号、SELF_REFUSAL、expectPattern、rejectKeyword——必须全部
+     * 限定在这一条上。整个 describe 共用一个 page，`main.textContent()` 含历史回合：
+     * 拿它判的话，上一轮留下的「护栏拦截」就能满足本轮的 expectPattern，循环提前
+     * break、最终断言也被历史文本满足——于是在「护栏压根没跑」的情况下报通过。
+     * 这个测试守的是沙箱护栏，**假绿比假红危险得多**。
+     * 取不到时返回空串是刻意选的安全方向：最坏照旧走断言、报一次真红。
+     */
+    const currentAssistantText = async (): Promise<string> => {
+      const nodes = page.locator('[data-testid="chat-message-assistant"]');
+      if ((await nodes.count()) <= assistantCountBefore) return '';
+      return (await nodes.last().textContent()) ?? '';
+    };
 
     // 单次 exec spawn 慢（25-30s）。先走一个短的稳定等待——模型回合一旦
     // 结束，textContent 不再增长（容一个小 live-timer 增量）；稳定 ≥3 次
@@ -132,30 +190,63 @@ test.describe('Issue #811 护栏误拦截复现 (real LLM)', () => {
       }
       text = (await page.locator('main').textContent()) ?? '';
       const len = text.length;
+      // 先更新 exec 信号再判稳定，让下面的提前收手用的是本回合的最新状态
+      if (!sawExecCommand) {
+        sawExecCommand =
+          (await page.locator('[data-testid="tool-command-copy"]').count()) > execCountBefore;
+      }
       if (len > 0) {
         if (lastLen !== -1 && Math.abs(len - lastLen) < 10) {
           stable += 1;
-          if (stable >= 3 && matches(text)) break;
-          if (stable >= 3 && rejectKeyword && text.includes(rejectKeyword)) break;
+          const currentText = await currentAssistantText();
+          if (stable >= 3 && matches(currentText)) break;
+          if (stable >= 3 && rejectKeyword && currentText.includes(rejectKeyword)) break;
+          // 模型自行拒答、且本回合压根没出现过 exec 命令块 → 护栏没被触发。这里**必须
+          // 提前收手**：RUN_CAP 一旦逼近测试超时，让循环自然跑完的话测试会先超时，
+          // 下面那个 precondition 判定根本执行不到（这就是上一版没生效的原因）。
+          if (stable >= 3 && !sawExecCommand && SELF_REFUSAL.test(currentText)) break;
         } else {
           stable = 0;
         }
       }
       lastLen = len;
-      if (text !== lastText) {
-        lastText = text;
+      const signature = scrubLiveCounters(text);
+      if (signature !== lastSignature) {
+        lastSignature = signature;
         idleDeadline = Date.now() + IDLE_DEADLINE;
       }
       await page.waitForTimeout(1000);
     }
 
+    // 断言同样只看本回合的助手回复，不看整页历史文本
+    const finalText = await currentAssistantText();
+    // 轮询退出时打点：无论后面是断言失败还是 precondition 跳过，CI 日志里
+    // 都要能看出「跑了多久 / exec 到底有没有被调用 / 模型最后说了什么」。
+    console.log(
+      `[test] poll loop exited after ${Math.round((Date.now() - runStart) / 1000)}s ` +
+        `(exec invoked: ${sawExecCommand}) — reply: "${finalText.slice(0, 200)}"`
+    );
     if (expectPattern instanceof RegExp) {
-      expect(text).toMatch(expectPattern);
-    } else if (!rejectKeyword || !text.includes(rejectKeyword)) {
-      expect(text).toContain(expectPattern);
+      // 「模型压根没调 exec、直接按自身安全对齐拒答」是这个 spec 顶部注释就记过的
+      // 失败模式，CI 上会复现。这时沙箱护栏根本没被触发，断言「护栏拦截」必然落空
+      // ——那是前提没满足，不是护栏回归，跳过并打点，别烧满 8 分钟再报假红。
+      //
+      // 两个条件缺一不可：① 全程没出现过 exec 命令块（硬信号，见上）；
+      // ② 回复里是明确的自拒口吻。少任何一个都照常断言——如果护栏真坏了、模型又调了
+      // exec，①为假，走下面的 expect，失败照报。
+      if (!sawExecCommand && !matches(finalText) && SELF_REFUSAL.test(finalText)) {
+        console.log(
+          '[test] ⚠️ 全程无 exec 命令块且模型自行拒答，沙箱护栏未被触发 — 跳过（precondition 未满足）'
+        );
+        test.skip(true, 'model self-refused without invoking exec; guardrail not exercised');
+        return finalText;
+      }
+      expect(finalText).toMatch(expectPattern);
+    } else if (!rejectKeyword || !finalText.includes(rejectKeyword)) {
+      expect(finalText).toContain(expectPattern);
     }
     await waitForResponseComplete(page, LLM_TIMEOUT);
-    return text;
+    return finalText;
   }
 
   test(

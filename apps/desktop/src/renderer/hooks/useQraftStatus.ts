@@ -15,7 +15,16 @@ import type { QraftStatus } from '../../shared/ipc';
  *  - aiGatewayKnown：登录且平台明确返回了 aiGateway（用于区分"未下发"与"非 active"）。
  */
 export function useQraftStatus() {
-  const [status, setStatus] = useState<QraftStatus | null>(null);
+  // #1095：首帧登录态由 preload 在页面脚本前同步取好（登录门要在首帧
+  // 就判定「未登录 → 停在登录页」；异步取会让已登录用户先闪一帧登录页）。
+  const [status, setStatus] = useState<QraftStatus | null>(() => {
+    try {
+      return window.miqi?.qraft?.initialStatus ?? null;
+    } catch {
+      /* 旧版 preload（如 smoke mock）可能没有该字段 */
+      return null;
+    }
+  });
 
   useEffect(() => {
     let alive = true;

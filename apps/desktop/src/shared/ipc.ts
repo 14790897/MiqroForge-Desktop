@@ -167,6 +167,9 @@ export const IPC = {
   QRAFT_LOGIN: 'qraft:login',
   QRAFT_BROWSER_LOGIN: 'qraft:browserLogin',
   QRAFT_STATUS: 'qraft:status',
+  // 同步读取（#1095）：登录门要在首帧就知道登录态，异步取会先闪一帧
+  // 登录页/加载页。preload 在页面脚本前 sendSync 一次。
+  QRAFT_STATUS_SYNC: 'qraft:statusSync',
   QRAFT_REFRESH: 'qraft:refresh',
   QRAFT_LOGOUT: 'qraft:logout',
   QRAFT_POINTS_BALANCE: 'qraft:pointsBalance',
@@ -845,6 +848,18 @@ export const FilesReadInput = z.object({
   session_key: z.string().optional(),
   /** #877: read raw bytes (Office files etc.) for「下载/另存为」 */
   as_binary: z.boolean().optional(),
+});
+
+/**
+ * `files.openExternal` / `files.openContainingFolder` (#1062).
+ *
+ * `session_key` only names which session is asking; the workspace that path is
+ * checked against is derived from it server-side.  The renderer never supplies
+ * a root — one it could supply would defeat the containment check (#955).
+ */
+export const FilesOpenInput = z.object({
+  path: z.string().min(1),
+  session_key: z.string().optional(),
 });
 
 export const FilesSaveAsInput = z.object({

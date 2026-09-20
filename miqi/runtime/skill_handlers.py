@@ -101,10 +101,9 @@ async def skills_list_handler(
     all_skills = loader.list_skills(filter_unavailable=False)
     result = []
     for s in all_skills:
-        meta = loader._get_skill_meta(s["name"])
         desc = loader._get_skill_description(s["name"])
-        available = loader._check_requirements(meta)
-        missing = loader._get_missing_requirements(meta) if not available else None
+        available = loader._check_requirements(s["name"])
+        missing = loader._get_missing_requirements(s["name"]) if not available else None
         result.append({
             "name": s["name"],
             "source": s["source"],
@@ -140,9 +139,8 @@ async def skills_get_handler(
             skill_info = s
             break
 
-    meta = loader._get_skill_meta(name)
-    available = loader._check_requirements(meta)
-    missing = loader._get_missing_requirements(meta) if not available else None
+    available = loader._check_requirements(name)
+    missing = loader._get_missing_requirements(name) if not available else None
     metadata = loader.get_skill_metadata(name)
 
     return {"result": {

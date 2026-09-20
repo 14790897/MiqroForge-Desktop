@@ -65,7 +65,7 @@ class RoundRobinModel(FakeModelClient):
         # Round 1: 工具结果已回传，模型确认并继续
         last_user = request.history[-1] if request.history else None
         print(f"  [模型] 收到工具结果: {_preview(last_user)}")
-        for text in ["好的，已确认上传。WorkflowDefinition 已发布到 MiQroForge，项目入口：forge.miqroera.com/projects/mof-price-report。"]:
+        for text in ["好的，已确认上传。WorkflowDefinition 已发布到 MiQroForge，项目入口：www.miqroforge.com/projects/mof-price-report。"]:
             yield await _chunk("assistant_text_delta", {"text": text})
         yield await _chunk("completed", {"stopReason": "stop"})
 
