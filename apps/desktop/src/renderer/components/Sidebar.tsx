@@ -249,7 +249,12 @@ export function Sidebar({
         </span>
         <div className="ml-auto flex items-center gap-0.5">
           <button
-            onClick={() => setSearchOpen((v) => !v)}
+            onClick={() => {
+              // 关闭搜索时必须同时清 query：否则输入框藏起来了，列表却仍停在被
+              // 过滤的状态，用户看到残缺/空白的结果却找不到原因（Esc 本来就清两者）。
+              if (searchOpen) setQuery('');
+              setSearchOpen((v) => !v);
+            }}
             className="w-6 h-6 rounded flex items-center justify-center transition-colors hover:bg-[var(--surface-muted)]"
             title={searchOpen ? '关闭搜索' : '搜索会话'}
             aria-expanded={searchOpen}
