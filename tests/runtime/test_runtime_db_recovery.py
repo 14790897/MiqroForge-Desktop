@@ -165,14 +165,97 @@ def test_lock_classification_does_not_mask_real_contention():
     An ordinary write-lock conflict waits for the busy timeout and then
     propagates; treating it as a stale snapshot would hide real contention.
     """
+    # No extended code available (mocked/older interpreters): fall back to timing.
     busy = sqlite3.OperationalError("database is locked")
-    # Failed almost immediately -> the busy handler cannot have run.
     assert is_stale_snapshot_error(busy, 0.001) is True
-    # Failed after waiting out the timeout -> ordinary contention.
     assert is_stale_snapshot_error(busy, 29.0) is False
 
     # Non-lock failures are never reclassified.
     assert is_stale_snapshot_error(sqlite3.OperationalError("no such table: t"), 0.001) is False
+
+    # When SQLite reports a code, it is authoritative — a plain SQLITE_BUSY that
+    # returns fast is still ordinary contention, not a stale snapshot.
+    class BusyError(sqlite3.OperationalError):
+        sqlite_errorcode = 5
+        sqlite_errorname = "SQLITE_BUSY"
+
+    assert is_stale_snapshot_error(BusyError("database is locked"), 0.001) is False
+
+    class SnapshotError(sqlite3.OperationalError):
+        sqlite_errorcode = 517
+        sqlite_errorname = "SQLITE_BUSY_SNAPSHOT"
+
+    assert is_stale_snapshot_error(SnapshotError("database is locked"), 29.0) is True
+
+
+async def test_concurrent_opens_share_a_single_connection(tmp_path):
+    """Concurrent open() calls must not each create their own connection."""
+    opened: list[object] = []
+
+    async def counting_prepare(conn) -> None:
+        opened.append(conn)
+
+    db = RuntimeDb(tmp_path / "runtime.db", name="test", prepare=counting_prepare)
+    await asyncio.gather(db.open(), db.open(), db.open())
+    try:
+        assert len(opened) == 1
+        assert db.conn is opened[0]
+    finally:
+        await db.close()
+
+
+async def test_close_waits_for_an_in_flight_open(tmp_path):
+    """A cancelled initialize() must not leak the connection open() publishes.
+
+    Without the recorded opening task, close() sees no connection, returns, and
+    the still-running open() then publishes a connection (and its worker thread)
+    that nobody owns.
+    """
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def slow_prepare(conn) -> None:
+        started.set()
+        await release.wait()
+
+    db = RuntimeDb(tmp_path / "runtime.db", name="test", prepare=slow_prepare)
+    opener = asyncio.create_task(db.open())
+    await asyncio.wait_for(started.wait(), timeout=5)
+    opener.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await opener
+
+    closer = asyncio.create_task(db.close())
+    await asyncio.sleep(0)
+    # close() must not have returned while the open is still in flight.
+    assert not closer.done()
+
+    release.set()
+    await asyncio.wait_for(closer, timeout=5)
+    assert db.is_open is False
+
+
+async def test_wal_transition_retries_lock_contention(tmp_path, monkeypatch):
+    """A concurrent opener can make the WAL transition fail once; retry it."""
+    real_execute = aiosqlite.core.Connection.execute
+    calls = {"n": 0}
+
+    async def flaky_execute(self, sql, parameters=None):
+        if "journal_mode" in sql:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise sqlite3.OperationalError("database is locked")
+        return await real_execute(self, sql, parameters)
+
+    monkeypatch.setattr(aiosqlite.core.Connection, "execute", flaky_execute)
+    db = RuntimeDb(tmp_path / "runtime.db", name="test")
+    await db.open()
+    try:
+        assert calls["n"] == 2
+        assert db.wal_mode is True
+        assert db.health()["wal_mode"] is True
+    finally:
+        await db.close()
 
 
 def test_sqlite_errors_are_reported_with_their_extended_code():

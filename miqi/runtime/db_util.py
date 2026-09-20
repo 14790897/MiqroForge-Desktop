@@ -63,8 +63,14 @@ BUSY_TIMEOUT_S = 30.0
 # A lock error that comes back much faster than the busy timeout cannot have
 # come from the busy handler — the handler always waits the full timeout before
 # giving up.  A fast failure therefore means SQLite refused the write outright,
-# which in WAL mode points at a stale read snapshot.
+# which in WAL mode points at a stale read snapshot.  Only used when SQLite did
+# not report an extended result code.
 _FAST_FAIL_FRACTION = 0.5
+
+# ``PRAGMA journal_mode=WAL`` briefly needs exclusive access, so a concurrent
+# opener on the same file can make the first attempt fail with a lock error.
+_WAL_RETRY_ATTEMPTS = 3
+_WAL_RETRY_DELAY_S = 0.05
 
 DbOperation = Callable[[aiosqlite.Connection], Awaitable[Any]]
 
@@ -101,13 +107,21 @@ def is_stale_snapshot_error(
 ) -> bool:
     """Classify a lock error as a stranded WAL read snapshot.
 
-    Prefers the extended result code (``SQLITE_BUSY_SNAPSHOT``); falls back to
-    "failed far faster than the busy timeout could have elapsed".
+    When SQLite reports an extended result code it is authoritative: only
+    ``SQLITE_BUSY_SNAPSHOT`` qualifies.  A plain ``SQLITE_BUSY`` (5) can also
+    come back *without* the busy handler waiting, so reclassifying it by timing
+    would recycle the connection and replay genuine contention.
+
+    The elapsed-time heuristic is the fallback for when no code is available
+    (interpreters without ``sqlite_errorcode``, or mocked errors): a lock error
+    that returns far faster than the busy timeout cannot have come from the
+    busy handler, which always waits the full timeout before giving up.
     """
     if not is_lock_error(exc):
         return False
-    if sqlite_error_code(exc) == SQLITE_BUSY_SNAPSHOT:
-        return True
+    code = sqlite_error_code(exc)
+    if code is not None:
+        return code == SQLITE_BUSY_SNAPSHOT
     return elapsed_s < timeout_s * _FAST_FAIL_FRACTION
 
 
@@ -197,6 +211,9 @@ class RuntimeDb:
         self._db: Optional[aiosqlite.Connection] = None
         self._lock = asyncio.Lock()
         self._dirty = False
+        self._opening: Optional["asyncio.Task[None]"] = None
+        # None until the first open resolved the journal mode.
+        self.wal_mode: Optional[bool] = None
         # Observability (#1012): a non-zero recycle/orphan count means the
         # safety net fired, which points at a caller issuing statements
         # outside ``run``.
@@ -207,15 +224,28 @@ class RuntimeDb:
     # ── lifecycle ─────────────────────────────────────────────────────
 
     async def open(self) -> None:
+        """Open the connection, sharing a single attempt between callers.
+
+        The opening task is recorded so :meth:`close` can wait for it.  Without
+        that, an ``initialize()`` cancelled mid-open would leave ``_open``
+        running; a later ``close`` would see no connection and return, and the
+        connection (plus its worker thread) published afterwards would leak.
+
+        This deliberately does not take ``_lock``: :meth:`_recycle` calls
+        ``open`` while ``_run_locked`` already holds it.
+        """
         if self._db is not None:
             return
-        job = asyncio.ensure_future(self._open())
+        opening = self._opening
+        if opening is None or opening.done():
+            opening = asyncio.ensure_future(self._open())
+            self._opening = opening
         try:
-            await asyncio.shield(job)
+            await asyncio.shield(opening)
         except asyncio.CancelledError:
-            if not job.done():
+            if not opening.done():
                 self.orphaned_ops += 1
-                job.add_done_callback(self._report_orphan)
+                opening.add_done_callback(self._report_orphan)
             raise
 
     async def _open(self) -> None:
@@ -224,17 +254,16 @@ class RuntimeDb:
             str(self.db_path), timeout=BUSY_TIMEOUT_S, isolation_level=None
         )
         try:
-            cursor = await db.execute("PRAGMA journal_mode=WAL")
-            try:
-                row = await cursor.fetchone()
-            finally:
-                await _close_quietly(cursor)
-            mode = str(row[0]).lower() if row else ""
-            if mode != "wal":
-                # Silently staying in rollback-journal mode would make readers
-                # block writers, so surface it instead of assuming WAL stuck.
+            mode = await self._ensure_wal(db)
+            self.wal_mode = mode == "wal"
+            if not self.wal_mode:
+                # Refusing to start would break workspaces on filesystems where
+                # SQLite cannot use WAL at all (network shares), so surface the
+                # degraded mode — on this store and in ``health()`` — instead of
+                # failing or silently assuming the transition happened.
                 _db_logger.warning(
-                    "RuntimeDb({}): journal_mode is {!r}, expected 'wal'",
+                    "RuntimeDb({}): journal_mode is {!r}, expected 'wal'; "
+                    "continuing in rollback-journal mode",
                     self.name,
                     mode or "<unknown>",
                 )
@@ -245,8 +274,53 @@ class RuntimeDb:
             raise
         self._db = db
 
+    async def _ensure_wal(self, db: aiosqlite.Connection) -> str:
+        """Switch the database to WAL, retrying transient lock contention.
+
+        A concurrent opener on the same file can make the transition fail with a
+        lock error; that case is retried a bounded number of times.  Any other
+        failure propagates, and a transition that completes without the mode
+        changing is not retried — retrying cannot help there.
+        """
+        mode = ""
+        for attempt in range(_WAL_RETRY_ATTEMPTS):
+            try:
+                cursor = await db.execute("PRAGMA journal_mode=WAL")
+                try:
+                    row = await cursor.fetchone()
+                finally:
+                    await _close_quietly(cursor)
+            except sqlite3.OperationalError as exc:
+                if not is_lock_error(exc) or attempt + 1 >= _WAL_RETRY_ATTEMPTS:
+                    raise
+                _db_logger.debug(
+                    "RuntimeDb({}): journal_mode=WAL contended ({}); retrying",
+                    self.name,
+                    format_sqlite_error(exc),
+                )
+                await asyncio.sleep(_WAL_RETRY_DELAY_S * (attempt + 1))
+                continue
+            mode = str(row[0]).lower() if row else ""
+            if mode == "wal":
+                return mode
+            break
+        return mode
+
     async def close(self) -> None:
-        """Close the connection once queued operations have drained."""
+        """Close the connection once in-flight work has drained."""
+        opening = self._opening
+        if opening is not None and not opening.done():
+            try:
+                await asyncio.shield(opening)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                _db_logger.warning(
+                    "RuntimeDb({}): the in-flight open failed while closing: {}",
+                    self.name,
+                    exc,
+                )
+        self._opening = None
         async with self._lock:
             db, self._db = self._db, None
         if db is not None:
@@ -361,6 +435,7 @@ class RuntimeDb:
         return {
             "name": self.name,
             "open": self.is_open,
+            "wal_mode": self.wal_mode,
             "recycle_count": self.recycle_count,
             "orphaned_ops": self.orphaned_ops,
             "last_recycle_reason": self.last_recycle_reason,
