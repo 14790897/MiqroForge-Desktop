@@ -126,8 +126,9 @@ jobs:
                 # 冲突期间取消「请求本人评审」的待评审请求：PR 有冲突时评审前提不成立，
                 # 先把请求撤掉，冲突解决后可再重新请求；不触碰任何已提交的评审
                 if ! requested=$(gh api "repos/$REPO/pulls/$n/requested_reviewers" --jq '.users[].login'); then
-                  echo "::warning::PR #$n 读取待评审人失败，跳过"
-                  continue
+                  # 取消请求是附加动作，读取失败只告警，不阻断下面的冲突标记
+                  echo "::warning::PR #$n 读取待评审人失败，跳过取消请求（仍会继续冲突标记）"
+                  requested=''
                 fi
                 if printf '%s\n' "$requested" | grep -Fqx "$CANCEL_REVIEW_REQUEST_FOR"; then
                   if printf '{"reviewers":["%s"]}' "$CANCEL_REVIEW_REQUEST_FOR" \
