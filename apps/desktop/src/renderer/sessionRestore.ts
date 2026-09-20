@@ -23,6 +23,14 @@
  * 轮的回退判定本身没被打穿；但顺序仍然是错的——`get(workspace=…)` 那种形状确实
  * 会落盘，让「先加载、后判定」依赖后端当前恰好是「空会话临时态」。两阶段把顺序
  * 钉死。
+ *
+ * #1118 第九轮（#1035 同步，CR 2026-09-19T16:21）：第八轮只钉住了「有结论才挂载」，
+ * 没钉住**结论本身必须是有效的**。两条兜底路径（桥 10s 未就绪、`sessions.list`
+ * 抛错）当时都是「开闸但保留原 key」——门是开了，挂载的却是一个**从没验证过**的
+ * key，等于把第八轮要掐掉的「get-or-create 先摸一遍幽灵」又放回来了。现在统一成：
+ * 验证拿不到结论时**显式回退到默认哨兵**再放行（`verifyRestoredSession` →
+ * `unverified`，见 `resolveUnverifiedRestoreKey`）。用户的会话仍在侧边栏可选，
+ * 代价只是停在欢迎页而不是幽灵会话里。
  */
 
 /** 空态哨兵会话 key（与 App.tsx 初值 / ChatConsole 的 DEFAULT_SESSION 同字面量）。 */
@@ -63,4 +71,81 @@ export function shouldFallbackToDefaultSession(
   if (!restoredKey) return false;
   if (restoredKey === defaultKey) return false;
   return !knownKeys.includes(restoredKey);
+}
+
+/**
+ * 启动恢复校验的结论（三态，缺一不可）。
+ *
+ * - `keep`：验证成功——恢复的 key 确实存在，放行时就用它（默认哨兵/空值也走这里，
+ *   它们本来就不需要验证）。
+ * - `fallback`：**明确查无此 key**（幽灵）——回退默认哨兵。
+ * - `unverified`：**没能拿到结论**（list/listArchived 执行失败、重试耗尽）。
+ *   与 `fallback` 区别在于原因不同、日志不同；处置相同——**一律回退默认哨兵**。
+ *   第九轮的缺陷就是把它当成「按 keep 处理」。
+ */
+export type RestoreVerdict = 'keep' | 'fallback' | 'unverified';
+
+/** 校验执行失败时的重试次数（含首次）。桥刚起时 list 可能瞬时失败，重试能救回来。 */
+export const RESTORE_VERIFY_ATTEMPTS = 3;
+/** 重试退避基数：第 n 次重试前等 `n × 该值`（250ms / 500ms）。 */
+export const RESTORE_VERIFY_BACKOFF_MS = 250;
+
+/**
+ * 校验启动恢复出来的 key 是否还在，带**有界重试**。
+ *
+ * `loadKnownKeys` 抛错（bridge 还没起好、IPC 通道瞬时失败、返回体形状不对）时按
+ * 退避重试，重试耗尽返回 `unverified`——调用方据此显式回退默认哨兵，**不得**
+ * 带着这个没验证过的 key 放行。
+ *
+ * 不变量：本函数**不抛**（错误在内部收敛成 `unverified`），且对默认哨兵/空值
+ * 直接返回 `keep` 而**不调用** `loadKnownKeys`（省一次 IPC，与
+ * `shouldVerifyRestoredSession` 同一口径）。
+ */
+export async function verifyRestoredSession(
+  restoredKey: string | null | undefined,
+  loadKnownKeys: () => Promise<readonly string[]>,
+  opts: {
+    attempts?: number;
+    backoffMs?: number;
+    sleep?: (ms: number) => Promise<void>;
+  } = {}
+): Promise<RestoreVerdict> {
+  if (!shouldVerifyRestoredSession(restoredKey)) return 'keep';
+  const key = restoredKey as string;
+  const attempts = Math.max(1, opts.attempts ?? RESTORE_VERIFY_ATTEMPTS);
+  const backoffMs = Math.max(0, opts.backoffMs ?? RESTORE_VERIFY_BACKOFF_MS);
+  const sleep =
+    opts.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      const knownKeys = await loadKnownKeys();
+      return shouldFallbackToDefaultSession(key, knownKeys) ? 'fallback' : 'keep';
+    } catch {
+      // 失败=没有结论，不是「不存在」：重试到上限再交回调用方处置。
+      if (attempt === attempts) return 'unverified';
+      await sleep(backoffMs * attempt);
+    }
+  }
+  return 'unverified'; // 循环必在内部 return，这里只为类型收敛
+}
+
+/**
+ * 「没能验证」时该挂载哪个会话 key（门兜底语义的唯一出口）。
+ *
+ * 返回 `currentKey` 只有一种情况：**用户已经切走**（当前 key 不是启动时恢复的那
+ * 一个）——那是用户自己的选择，交棒，不动。
+ *
+ * 否则一律返回 `defaultKey`：**绝不返回那个没验证过的 key**。这是第九轮 CR 要求
+ * 的核心不变量——放行一个未验证的非默认 key，等于让 ChatConsole 的
+ * get-or-create `sessions.get` 先把它当正常会话摸一遍（切走时还会被空会话 GC
+ * 当成「上一个会话」删掉），正是第八轮两阶段启动要掐掉的形状。
+ */
+export function resolveUnverifiedRestoreKey(
+  restoredKey: string | null | undefined,
+  currentKey: string,
+  defaultKey: string = DEFAULT_SESSION_KEY
+): string {
+  if (currentKey !== restoredKey) return currentKey; // 用户已切走
+  return defaultKey;
 }
