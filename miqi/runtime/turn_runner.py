@@ -14,6 +14,7 @@ import asyncio
 import json
 import time
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 from typing import Any, Callable
 
 from loguru import logger
@@ -580,6 +581,16 @@ class TurnRunner:
                 turn_level_reasoning_parts.append(reasoning_content)
 
             if not response.has_tool_calls:
+                # #1094（审计 F3）：纯文本被 length 截断时无工具调用可拒执，
+                # 此前零留痕。只记日志、不动控制流，让"回答其实不完整"可审计。
+                if getattr(response, "finish_reason", None) == "length":
+                    logger.warning(
+                        "turn_runner: 输出被 max_tokens 截断（纯文本，无工具调用），"
+                        "内容不完整 (max_tokens={}) turn={}",
+                        turn.max_tokens,
+                        turn.turn_id,
+                    )
+
                 # Phase 41: drain steering messages before completing
                 steers = await _drain_steer_messages()
                 if steers:
@@ -871,13 +882,42 @@ class TurnRunner:
 
             from miqi.protocol.events import ToolCallBeginEvent, ToolCallEndEvent
 
+            # #1094：参数被输出上限截断的调用拒绝执行（provider 已标记 truncated）
+            # 塞一条合成结果让模型看到"为什么没执行"并自纠。
+            # 本门**必须先于**下面的 #680 FAST 预算门跑：截断调用若先被判成"预算跳过"，
+            # 拿到的是 SUCCESS + "[跳过]"、且不进 _echo_calls（预算跳过不走回注）→ 这条
+            # tool_result 成孤儿被 presend 剪掉，模型既学不到"参数被截断"也不知该重发。
+            # 截断是硬拒绝（TOOL_ERROR），对调用的处置优先级高于预算让路。
+            _truncated_ctx: list[tuple[Any, Any]] = []
+            _kept_calls: list[Any] = []
+            for tc in response.tool_calls:
+                if getattr(tc, "truncated", False):
+                    _truncated_ctx.append((tc, SimpleNamespace(
+                        result=(
+                            f"⚠️ 该工具调用未执行：模型单次输出达到上限（max_tokens={turn.max_tokens}）被截断，"
+                            "参数不完整；执行残缺参数可能造成错误动作。请减小单次参数体积后重试"
+                            "（例如分片写入、或先写文件再传路径）。"
+                        ),
+                        status=OrchestrationResult.TOOL_ERROR,
+                        duration_ms=0,
+                    )))
+                else:
+                    _kept_calls.append(tc)
+            if _truncated_ctx:
+                logger.warning(
+                    "turn_runner: refused {} truncated tool call(s) (max_tokens={}) turn={}",
+                    len(_truncated_ctx), turn.max_tokens, turn.turn_id,
+                )
+            response.tool_calls = _kept_calls
+
             # #680 desktop FAST budget — refuse budgeted-out tool calls
             # (方案 4 search phase + finalizing gate): skipped calls get a
             # synthetic "跳过" result so the model sees WHY and pivots to
             # answering from what it has.
+            # 只看**截断门剩下的完好调用**：被拒执的截断调用本就没执行，不该消耗
+            # web_search 的相位预算计数。
             _skipped_ctx: list[tuple[Any, Any]] = []
             if _rmode == "fast":
-                from types import SimpleNamespace
                 _kept: list[Any] = []
                 for tc in response.tool_calls:
                     reason = _budget_skip_reason(tc.name)
@@ -1035,10 +1075,37 @@ class TurnRunner:
                         },
                     )
 
+            # CR #1100：被拒执（参数截断）的调用同样要落终态。上面已为**所有**本轮
+            # 调用写过 `tool_call_started`，这里若不补 `tool_call_completed`，Replay
+            # 重建时会把它们永远显示为 pending。payload 与上面的已执行调用**同形**
+            # （不新造 item 类型），错误语义沿用既有的 TOOL_ERROR 表达：`result` 就是
+            # 拒执说明，其余字段取"未执行"的中性值。
+            if self._ledger is not None:
+                for tc, ctx in _truncated_ctx:
+                    await self._ledger.append_item(
+                        thread_id=turn.thread_id,
+                        turn_id=turn.turn_id,
+                        item_type="tool_call_completed",
+                        payload={
+                            "tool_call_id": tc.id,
+                            "result": ctx.result,
+                            "duration_ms": getattr(ctx, "duration_ms", 0),
+                            "retry_count": 0,
+                            "permission_verdict": None,
+                            "sandbox_type": None,
+                        },
+                    )
+
             # 1. Build assistant tool-call entries (no message mutation yet)
+            # #1094: refused truncation calls are echoed here too — otherwise their
+            # refusal tool_result would be an orphan (pre-send guard prunes it and
+            # the model would never learn why the call was refused).
+            _echo_calls = list(response.tool_calls) + [tc for tc, _ in _truncated_ctx]
+            _refused_ids = {tc.id for tc, _ in _truncated_ctx}
             assistant_tool_calls: list[dict[str, Any]] = []
-            for tool_call in response.tool_calls:
-                tools_used.append(tool_call.name)
+            for tool_call in _echo_calls:
+                if tool_call.id not in _refused_ids:
+                    tools_used.append(tool_call.name)
                 assistant_tool_calls.append({
                     "id": tool_call.id,
                     "type": "function",
@@ -1084,7 +1151,7 @@ class TurnRunner:
             # 3. Append tool results in order (assistant → tool → tool → …)
             # Budget-skipped calls (fast) get their synthetic skip results here
             # so the model sees the reason and pivots to answering.
-            _all_pairs = list(zip(response.tool_calls, contexts)) + _skipped_ctx
+            _all_pairs = list(zip(response.tool_calls, contexts)) + _skipped_ctx + _truncated_ctx
             for tool_call, ctx in _all_pairs:
                 messages = self._context.add_tool_result(
                     messages=messages,

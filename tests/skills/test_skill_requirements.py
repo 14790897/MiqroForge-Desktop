@@ -189,3 +189,39 @@ def test_requirements_cache_invalidated_on_index_change(tmp_path):
 
     invalidate_skill_index(workspace)
     assert loader._check_requirements("evolving") is False
+
+
+def test_provisioned_dep_is_not_reported_missing(tmp_path):
+    """A dep recorded as provisioned is no longer reported missing."""
+    from miqi.skills.provision import record_provision
+
+    loader, workspace = _loader(tmp_path)
+    _make_skill(
+        workspace / "skills",
+        "provisioned-skill",
+        "Provisioned",
+        requirements=f"{_MISSING_DIST}\n",
+    )
+    assert loader._check_requirements("provisioned-skill") is False
+
+    record_provision("provisioned-skill", [_MISSING_DIST], has_venv=True)
+    assert loader._missing_python_deps("provisioned-skill") == []
+    assert loader._check_requirements("provisioned-skill") is True
+
+
+def test_provisioned_version_specifier_is_not_reported_missing(tmp_path):
+    """A provisioned version specifier (pydantic>=999) is no longer missing."""
+    from miqi.skills.provision import record_provision
+
+    loader, workspace = _loader(tmp_path)
+    _make_skill(
+        workspace / "skills",
+        "provisioned-pydantic",
+        "Provisioned pydantic",
+        requirements="pydantic>=999\n",
+    )
+    assert loader._check_requirements("provisioned-pydantic") is False
+
+    record_provision("provisioned-pydantic", ["pydantic>=999"], has_venv=True)
+    assert loader._missing_python_deps("provisioned-pydantic") == []
+    assert loader._check_requirements("provisioned-pydantic") is True

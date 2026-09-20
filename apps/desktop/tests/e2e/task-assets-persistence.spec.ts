@@ -16,6 +16,7 @@ import type { ElectronApplication, Page } from '@playwright/test';
 import {
   LLM_TIMEOUT,
   waitForInputReady,
+  waitForResponseComplete,
   launchElectronApp,
   closeElectronApp,
   switchToSessionWithMarker,
@@ -38,15 +39,6 @@ async function sendMessage(page: Page, text: string) {
   await expect(userBubbles).toHaveCount(before + 1, { timeout: 10_000 });
   await expect(userBubbles.last()).toBeVisible({ timeout: 10_000 });
   await expect(page.locator('[data-testid="chat-input-container"] textarea')).toHaveValue('');
-}
-
-async function waitForResponseComplete(page: Page, timeout = 240_000) {
-  await expect(page.getByText('Thinking…')).toBeHidden({ timeout });
-  try {
-    await expect(page.locator('.tag-inprogress')).toBeHidden({ timeout: 15_000 });
-  } catch {
-    /* fast responses may never show IN PROGRESS */
-  }
 }
 
 /** Wait for a file card with the given filename to appear in Task Assets.

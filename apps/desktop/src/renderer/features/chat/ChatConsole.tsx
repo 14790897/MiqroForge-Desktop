@@ -224,6 +224,25 @@ function formatFileSize(bytes: number): string {
 }
 
 /**
+ * Mirror the bridge's `session_files_dir_key` (miqi/session/session_keys.py):
+ * fold separators, and for namespaced 3+ segment keys drop the leading client
+ * segment.  A local `replace(/[:\\/]/g, '_')` disagrees with the backend for
+ * `miqi-desktop:desktop:<ts>` — it keeps the client prefix and yields
+ * `miqi-desktop_desktop_<ts>` while the canonical directory is
+ * `desktop_<ts>` — so session-scoped reads built from it miss the real
+ * directory (#1051 review).
+ */
+function sessionFilesDirKey(sessionKey: string | null | undefined): string {
+  if (!sessionKey) return '';
+  const parts = sessionKey.split(':');
+  const kept = parts.length >= 3 ? parts.slice(1) : parts;
+  return kept
+    .join('_')
+    .replace(/[<>:"\/\\|?*]/g, '_')
+    .trim();
+}
+
+/**
  * Parse embedded document content from message body so the UI shows
  * coloured chips instead of raw injection text.  Handles three formats:
  *   1. Client-side preview:  [File: name]\n```\n...\n```
@@ -3061,6 +3080,21 @@ export function ChatConsole({
   const [downloadToast, setDownloadToast] = useState<{ filename: string; savePath: string } | null>(
     null
   );
+  /** #1062：结果/过程文件的「定位」「预览」失败时给出可见提示（此前静默无反应）。 */
+  const [assetError, setAssetError] = useState<string | null>(null);
+  // 用 `number`：这里配的是 window.setTimeout（DOM 返回 number），而
+  // `ReturnType<typeof setTimeout>` 在本工程的 node 类型下解析成 Timeout，赋不进去。
+  const assetErrorTimerRef = useRef<number | null>(null);
+  const notifyAssetError = useCallback((msg: string) => {
+    // 先取消上一条的定时器：否则它会在自己的 4 秒到点时把后设的、仍然相关的
+    // 消息提前清掉 —— 那会削弱本 PR 要给的保证（失败一定看得见）。
+    if (assetErrorTimerRef.current) window.clearTimeout(assetErrorTimerRef.current);
+    setAssetError(msg);
+    assetErrorTimerRef.current = window.setTimeout(() => {
+      assetErrorTimerRef.current = null;
+      setAssetError(null);
+    }, 4000);
+  }, []);
   const [toastVisible, setToastVisible] = useState(false);
 
   // Lazily re-read image attachments after session load: the sender embeds
@@ -6791,17 +6825,21 @@ export function ChatConsole({
     // The old openExternal fallback cannot find session-isolated files at all.
     if (/\.html?$/i.test(path)) {
       const bare = path.split(/[\\/]/).pop()!;
-      // Session-isolated files live under sessions/<safe-key>/files/. The full
-      // session-relative path is the ONLY form the bridge reliably reads for
-      // bare tracked names (verified: bare-name reads return null at the
-      // bridge); bare + session_key is also rejected. Build the full path from
-      // the active session key and read it workspace-scoped.
-      const safeKey = String(currentSessionRef.current ?? '').replace(/[:\\/]/g, '_');
+      // Session-isolated files live under sessions/<safe-key>/files/. Build the
+      // full workspace-relative path from the active session key and read it
+      // WITH the session key: the bridge resolves a workspace-relative path
+      // that lands inside the caller's own session directory (issue #1051),
+      // and session-scoped reads are the only ones allowed to touch
+      // sessions/ — a session-less read of that subtree is now rejected.
+      const safeKey = sessionFilesDirKey(currentSessionRef.current);
       const fullRel = safeKey ? `sessions/${safeKey}/files/${bare}` : '';
       const reads: Array<Promise<{ content?: string }>> = [];
-      if (fullRel && fullRel !== path) reads.push(window.miqi.files.read(fullRel));
+      if (fullRel && fullRel !== path)
+        reads.push(window.miqi.files.read(fullRel, currentSessionRef.current ?? undefined));
+      // Session-scoped read before the session-less one: the tracked path may
+      // be a bare name, which only resolves with the session key.
+      reads.push(window.miqi.files.read(path, currentSessionRef.current ?? undefined));
       reads.push(window.miqi.files.read(path));
-      if (bare !== path) reads.push(window.miqi.files.read(path, currentSessionRef.current));
       for (const attempt of reads) {
         try {
           const readResult = await attempt;
@@ -6832,20 +6870,17 @@ export function ChatConsole({
       const candidates: Array<{ p: string; withSession: boolean }> = [
         { p: path, withSession: true },
       ];
-      // path 本身已是 sessions/<safe>/files/<name> 全路径时,再带 session_key
-      // 会被 files.read 二次拼接会话目录而读不到(桥接对全路径+session_key
-      // 返回 null),补一个 workspace-scoped 候选并优先尝试(CodeRabbit #889)。
-      if (/^sessions\/[^/]+\/files\//.test(path.replace(/\\/g, '/'))) {
-        candidates.unshift({ p: path, withSession: false });
-      }
+      // #1051: a full session-relative path (sessions/<safe>/files/<name>) is
+      // resolved against the caller's own session directory by the bridge, so
+      // it is read WITH the session key like any other candidate.
       const nameOnly = path.replace(/\\/g, '/').split('/').pop()!;
       if (nameOnly !== path) candidates.push({ p: nameOnly, withSession: true });
       if (!path.startsWith('papers/'))
         candidates.push({ p: `papers/${nameOnly}`, withSession: true });
       if (nameOnly === path) {
-        const safeKey = String(currentSessionRef.current ?? '').replace(/[:\\/]/g, '_');
+        const safeKey = sessionFilesDirKey(currentSessionRef.current);
         if (safeKey) {
-          candidates.push({ p: `sessions/${safeKey}/files/${nameOnly}`, withSession: false });
+          candidates.push({ p: `sessions/${safeKey}/files/${nameOnly}`, withSession: true });
         }
       }
 
@@ -6864,6 +6899,11 @@ export function ChatConsole({
                 path: candidate.p,
                 kind: 'pdf',
                 pdfUrl: base64ToBlobUrl(res.data_base64, res.mime_type || 'application/pdf'),
+                // Keep the bytes alongside the blob URL: 「系统应用打开」 only
+                // takes the reliable openBytes path when they are present, and
+                // otherwise falls back to openExternal(candidate.p) — which
+                // cannot resolve a bare name for a session-scoped file (#1131).
+                dataBase64: res.data_base64,
               });
               return;
             }
@@ -6918,9 +6958,22 @@ export function ChatConsole({
       }
     }
     // Open with system default application as fallback
-    const result = await window.miqi.files.openExternal(path);
+    // #1062: 带上会话 key——文件夹绑定会话的产物在会话自己的工作区里，不带 key
+    // 主进程只按全局工作区做包含性校验，会把它们判成「工作区之外」。
+    let result: { opened?: boolean; error?: string } | null = null;
+    try {
+      result = (await window.miqi.files.openExternal(path, currentSessionRef.current)) ?? null;
+    } catch (e: any) {
+      result = { opened: false, error: e?.message ?? String(e) };
+    }
     if (!result?.opened) {
-      setPreviewFile({ path, content: `(Could not open file: ${path})` });
+      const outside = /outside workspace/i.test(String(result?.error ?? ''));
+      setPreviewFile({
+        path,
+        content: outside
+          ? `(无法预览：该文件在会话工作区之外，应用无权读取)\n\n${path}`
+          : `(Could not open file: ${path})`,
+      });
     }
   }, []);
 
@@ -8647,9 +8700,44 @@ export function ChatConsole({
                         isResult
                         onPreview={() => handlePreview(f.path)}
                         onDiff={() => handleShowDiff(f.path)}
-                        onReveal={() =>
-                          window.miqi.files.openContainingFolder(normalizePath(f.path))
-                        }
+                        onReveal={async () => {
+                          // #1062：过去对工作区外文件这里会 reject 被丢弃 → 点了没反应；
+                          // 现在统一收结构化结果，失败时给出可见提示。
+                          // #1131：`sessions.workspace` 对**非文件夹绑定**的默认工作区
+                          // 会话返回 null，主进程于是把相对路径锚到全局工作区根；而会话
+                          // 隔离的产物实际在 `sessions/<key>/files/` 下，台账里存的又是
+                          // 裸文件名（create_pdf 等文档工具相对会话 files 根记账）→ 一律
+                          // File not found。与预览/下载保持一致，补一个会话相对候选。
+                          // 路径由本会话 key 推出，主进程的包含性校验不变，渲染层没被放宽。
+                          const raw = normalizePath(f.path);
+                          const nameOnly = raw.replace(/\\/g, '/').split('/').pop()!;
+                          const safeKey = sessionFilesDirKey(currentSessionRef.current);
+                          const candidates = [raw];
+                          if (safeKey && nameOnly === raw) {
+                            candidates.push(`sessions/${safeKey}/files/${nameOnly}`);
+                          }
+                          let lastError = '';
+                          for (const candidate of candidates) {
+                            try {
+                              const res = await window.miqi.files.openContainingFolder(
+                                candidate,
+                                // #1062: 带上会话 key，主进程才能把文件夹绑定会话的
+                                // 工作区算进允许根；传的是会话而非根，渲染层无法放宽校验。
+                                currentSessionRef.current
+                              );
+                              if (res?.revealed) return;
+                              lastError = String(res?.error ?? '');
+                            } catch (e: any) {
+                              lastError = String(e?.message ?? e);
+                            }
+                          }
+                          const outside = /outside workspace/i.test(lastError);
+                          notifyAssetError(
+                            outside
+                              ? '无法定位：该文件在会话工作区之外'
+                              : `定位失败：${lastError || '未知原因'}`
+                          );
+                        }}
                       />
                     ))}
                   </AssetSection>
@@ -8898,6 +8986,7 @@ export function ChatConsole({
           className="max-w-[980px] p-0 bg-transparent border-0 shadow-none"
         >
           <div
+            data-testid="file-preview-modal"
             className="flex flex-col rounded-xl shadow-2xl overflow-hidden"
             style={{
               width: '100%',
@@ -8957,16 +9046,16 @@ export function ChatConsole({
                     let base64 = previewFile.dataBase64;
                     if (!base64) {
                       const nameOnly = previewFile.path.replace(/\\/g, '/').split('/').pop()!;
-                      const safeKey = String(currentSessionRef.current ?? '').replace(
-                        /[:\\/]/g,
-                        '_'
-                      );
+                      const safeKey = sessionFilesDirKey(currentSessionRef.current);
                       const reads: Array<{ p: string; session?: string }> = [
                         { p: previewFile.path, session: currentSessionRef.current },
                         { p: previewFile.path },
                       ];
                       if (safeKey && nameOnly === previewFile.path) {
-                        reads.push({ p: `sessions/${safeKey}/files/${nameOnly}` });
+                        reads.push({
+                          p: `sessions/${safeKey}/files/${nameOnly}`,
+                          session: currentSessionRef.current,
+                        });
                       }
                       for (const read of reads) {
                         try {
@@ -9004,15 +9093,28 @@ export function ChatConsole({
                       try {
                         const res = await window.miqi.files.openBytes(name, previewFile.dataBase64);
                         if (res?.opened) return;
-                        if (res?.error) return;
+                        // 被拒也要说话：静默 return 正是 #1062 要消灭的那种失败。
+                        if (res?.error) {
+                          notifyAssetError(`打开失败：${res.error}`);
+                          return;
+                        }
                       } catch {
                         /* fall through to path */
                       }
                     }
                     try {
-                      await window.miqi.files.openExternal(previewFile.path);
-                    } catch {
-                      /* ignore */
+                      // #1062：必须带会话 key。不带的话主进程只按全局工作区校验，
+                      // 绑定文件夹会话里的合法文件也会被判「工作区之外」——而空
+                      // catch 会把这次失败整个吞掉，点了没反应。
+                      const res = await window.miqi.files.openExternal(
+                        previewFile.path,
+                        currentSessionRef.current
+                      );
+                      if (!res?.opened) {
+                        notifyAssetError(`打开失败：${res?.error ?? '未知原因'}`);
+                      }
+                    } catch (e: any) {
+                      notifyAssetError(`打开失败：${e?.message ?? String(e)}`);
                     }
                   }}
                   className="flex items-center gap-1 px-2 py-1 rounded text-[11px] text-[var(--accent)] hover:bg-[var(--accent-soft)] transition-colors"
@@ -9241,6 +9343,33 @@ export function ChatConsole({
             }
           }}
         />
+      )}
+      {/* #1062：结果/过程文件「定位 / 预览」失败提示（此前静默无反应） */}
+      {assetError && (
+        <div
+          className="fixed inset-0 z-[100] flex items-end justify-center pb-24 pointer-events-none"
+          style={{ animation: 'msgIn .25s cubic-bezier(.22,.8,.32,1)' }}
+          data-testid="asset-error-toast"
+        >
+          <div
+            className="flex items-center gap-3 rounded-xl px-5 py-3 shadow-lg pointer-events-auto"
+            style={{
+              background: 'var(--surface)',
+              border: '1px solid var(--danger)',
+              boxShadow: '0 12px 40px rgba(0,0,0,.15)',
+            }}
+          >
+            <span
+              className="w-6 h-6 rounded-full flex items-center justify-center text-sm shrink-0"
+              style={{ background: 'var(--danger-bg)', color: 'var(--danger)' }}
+            >
+              !
+            </span>
+            <div className="text-[13px] max-w-[420px]" style={{ color: 'var(--text)' }}>
+              {assetError}
+            </div>
+          </div>
+        </div>
       )}
       {/* #696 补：下载完成 toast（屏幕居中 + 淡入淡出 + 2s 停留） */}
       {downloadToast && (

@@ -218,7 +218,7 @@ test.describe('Confirm Card (ask_user_confirm_card)', () => {
       // ── 回合完成：最终回复渲染 ──
       await waitForResponseComplete(page, LLM_TIMEOUT);
       await expect(page.locator('main')).toContainText(
-        '项目入口：forge.miqroera.com/projects/mof-price-report',
+        '项目入口：www.miqroforge.com/projects/mof-price-report',
         { timeout: 30_000 }
       );
       await expect(page.locator('main')).toContainText('mof-price-report.workflow.json');

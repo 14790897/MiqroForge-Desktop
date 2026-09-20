@@ -32,6 +32,7 @@ import {
   launchElectronApp,
   closeElectronApp,
   ensurePersistedSession,
+  stopMockServer,
   APPS_DESKTOP,
 } from './helpers/electron-setup';
 
@@ -89,6 +90,21 @@ function findSessionDirWithFile(sessionsDir: string, filename: string): string |
   return null;
 }
 
+/**
+ * Mirror of `miqi.session.session_keys.session_files_dir_key` (#1014): strip
+ * the client_id prefix for fully namespaced keys, then fold `:`/unsafe chars
+ * to `_`.  Kept local instead of imported so the Playwright process never
+ * has to load main-process modules.
+ */
+function sessionFilesDirKey(sessionKey: string): string {
+  const parts = sessionKey.split(':');
+  const kept = parts.length >= 3 ? parts.slice(1) : parts;
+  return kept
+    .join('_')
+    .replace(/[<>:"/\\|?*]/g, '_')
+    .trim();
+}
+
 test.describe('Issue #1104 — declare_result_files 显式声明结果文件', () => {
   // Same localhost restriction as issue-983: macOS CI cannot reach 127.0.0.1.
   test.skip(
@@ -124,8 +140,14 @@ test.describe('Issue #1104 — declare_result_files 显式声明结果文件', (
   }, 180_000);
 
   test.afterAll(async () => {
-    await closeElectronApp(electronApp, miqiHome);
-    mock?.kill();
+    try {
+      await closeElectronApp(electronApp, miqiHome);
+    } finally {
+      // Always reap the mock: a child left running keeps this Playwright
+      // worker's event loop alive, and the resulting `worker-N process did
+      // not exit` force-kill fails the job even when every test passed.
+      await stopMockServer(mock, 'declare_result mock');
+    }
   });
 
   test(
@@ -136,11 +158,34 @@ test.describe('Issue #1104 — declare_result_files 显式声明结果文件', (
       const report = `${tag}_report.md`;
       const companions = COMPANION_SUFFIXES.map((s) => `${tag}${s}`);
 
-      await sendMessage(page, `Write the five files ${tag} and declare the report.`);
+      // #1131: the real agent declared the **workspace-base-relative** form
+      // (`sessions/<key>/files/<name>`) — the agent writes relative to the
+      // workspace base while session-scoped tools are handed the session
+      // files root.  Driving that form (via the mock's DECLARE_AS directive)
+      // is what makes this spec able to catch the doubled-prefix regression;
+      // a bare-name declaration resolved correctly either way.
+      const sessionKey = await ensurePersistedSession(page);
+      const declaredAs = `sessions/${sessionFilesDirKey(sessionKey)}/files/${report}`;
+
+      // Each `write_file` needs an approval round-trip (~11s each locally) —
+      // without a standing grant the turn only ever gets ONE of the five
+      // writes through, so the panel settles at "1 个结果 / 0 个过程" and the
+      // spec fails on unmodified code too (see the #1131 investigation).
+      // Pre-approve before the turn starts so the writes are not gated.
+      await page.evaluate(async () => {
+        await (window as any).miqi.approvals.addPermanent('*:*');
+      });
+
+      await sendMessage(
+        page,
+        `Write the five files ${tag} and declare the report. DECLARE_AS=${declaredAs}`
+      );
       // #646-v2 计划闸门：edit 模式下这批 write_file 触发了 produces_artifact
       // 计划卡，卡不点掉回合就停在「等待你的确认…」，mock 的第 3 轮文本永远不
       // 会出现（实测 240s 超时 ×3）。与 task-assets / subagent-spawn 等 spec
       // 同一处理方式——后台轮询，卡出现即「按当前方案执行」，没卡则静默超时退出。
+      // 与上面的 approvals.addPermanent('*:*') 不重叠：那只放行**权限层**，而
+      // 计划卡是 user-input 卡，不走 permission_engine。
       void approvePlanCardIfAny(page);
 
       // Turn end: wait for the mock's final text (unique per turn).
@@ -205,6 +250,12 @@ test.describe('Issue #1104 — declare_result_files 显式声明结果文件', (
         `report entry missing: ${JSON.stringify(Object.keys(tracked.files))}`
       ).toBeDefined();
       expect(reportEntry![1].result).toBe(true);
+      // #1131: no entry may carry a doubled session prefix — that is the
+      // exact shape whose 「定位」/「系统应用打开」/ diff all failed.
+      const doubled = Object.keys(tracked.files ?? {}).filter((k) =>
+        /sessions\/[^/]+\/files\/sessions\/[^/]+\/files\//.test(k)
+      );
+      expect(doubled, `重复前缀台账条目：${JSON.stringify(doubled)}`).toEqual([]);
       for (const name of companions) {
         const e = entries.find(([k]) => k === name || k.endsWith(`/${name}`));
         expect(e, `companion entry missing: ${name}`).toBeDefined();
@@ -222,7 +273,6 @@ test.describe('Issue #1104 — declare_result_files 显式声明结果文件', (
           { timeout: 60_000 }
         )
         .toBeGreaterThan(0);
-      const sessionKey = await ensurePersistedSession(page);
       const tf: any = await page.evaluate(
         (k) => (window as any).miqi.sessions.getTrackedFiles(k),
         sessionKey

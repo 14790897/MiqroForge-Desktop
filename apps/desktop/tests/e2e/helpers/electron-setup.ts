@@ -11,7 +11,7 @@ import type { ElectronApplication, Page } from '@playwright/test';
 import { resolve } from 'node:path';
 import { tmpdir, homedir } from 'node:os';
 import { join } from 'node:path';
-import { spawnSync } from 'node:child_process';
+import { spawnSync, type ChildProcess } from 'node:child_process';
 import {
   existsSync,
   mkdtempSync,
@@ -29,6 +29,30 @@ export const APPS_DESKTOP = resolve(__dirname, '../../..');
 
 /** Default timeout for real LLM calls */
 export const LLM_TIMEOUT = 240_000; // 4 min — gives LLM more time in CI
+
+// ─── Window visibility ───────────────────────────────────────────────
+
+/**
+ * E2E 启动的应用默认不出现在桌面上：本机跑用例时应用窗口（并行 worker 一次
+ * 开好几个）会弹出、遮挡用户操作并抢走焦点。主进程据此把窗口停在显示器
+ * 之外、且不激活（见 src/main/index.ts shouldStartOffscreen）。
+ *
+ * - 本机默认开：不想被窗口打扰。
+ * - CI 默认关：无人看桌面，保持原来的可见窗口行为（出问题时看截图/录屏更直观）。
+ * - `MIQI_E2E_SHOW_WINDOW=1` 或 spec 传 `{ showWindow: true }` 强制窗口出现在
+ *   屏幕上（录屏、需要真实窗口画面的用例）。
+ * - `MIQI_E2E_OFFSCREEN=1|0` 显式覆盖（优先级最高）。
+ */
+export function applyWindowVisibilityEnv(
+  env: Record<string, string | undefined>,
+  showWindow?: boolean
+): void {
+  if (showWindow || process.env.MIQI_E2E_SHOW_WINDOW === '1') {
+    env.MIQI_E2E_OFFSCREEN = '0';
+    return;
+  }
+  env.MIQI_E2E_OFFSCREEN = process.env.MIQI_E2E_OFFSCREEN ?? (process.env.CI ? '0' : '1');
+}
 
 // ─── Session path helpers ────────────────────────────────────────────
 
@@ -201,47 +225,108 @@ export async function ensurePersistedSession(
   throw new Error(`ensurePersistedSession: no session after seeding "${seedText}"`);
 }
 
-/** Wait for streaming to finish (no "Thinking…" indicator) */
+/** Character count of the main pane — the E2E proxy for "how much reply has
+ *  streamed in". */
+function mainTextLength(page: Page): Promise<number> {
+  return page.evaluate(() => (document.querySelector('main')?.textContent ?? '').length);
+}
+
+/**
+ * Stop a mock server and wait until it is really gone.
+ *
+ * `proc.kill()` alone is fire-and-forget: `afterAll` returns while the child
+ * may still be running, and a live child keeps the Playwright worker's event
+ * loop alive.  A worker that never exits is reported as
+ * `worker-N process did not exit within 300000ms after stop, force-killed it`,
+ * which fails the whole job even when every single test passed.  Escalate to
+ * SIGKILL if the child ignores SIGTERM, and log the outcome so a leaked child
+ * is attributable instead of silent.  Same bounded-shutdown treatment
+ * `closeElectronApp` already gives the Electron process.
+ *
+ * The deadline timers are `unref`'d: `Promise.race` does not cancel the loser,
+ * so in the common case (the child exits promptly) a full `graceMs` timer would
+ * otherwise stay pending in the worker — the very kind of stray handle this
+ * function exists to remove.
+ */
+export async function stopMockServer(
+  proc: ChildProcess | undefined,
+  label: string,
+  graceMs = 10_000
+): Promise<void> {
+  if (!proc || proc.exitCode !== null || proc.signalCode !== null) return;
+  const exited = new Promise<void>((resolve) => proc.once('exit', () => resolve()));
+  proc.kill('SIGTERM');
+  const timer = new Promise<'timeout'>((resolve) => {
+    setTimeout(() => resolve('timeout'), graceMs).unref();
+  });
+  if ((await Promise.race([exited.then(() => 'exit' as const), timer])) === 'timeout') {
+    console.log(`[test] ${label} still alive after ${graceMs}ms — SIGKILL`);
+    proc.kill('SIGKILL');
+    await Promise.race([
+      exited,
+      new Promise((resolve) => {
+        setTimeout(resolve, 5_000).unref();
+      }),
+    ]);
+  }
+  console.log(`[test] ${label} stopped (code=${proc.exitCode} signal=${proc.signalCode})`);
+}
+
+/**
+ * Wait for the reply of a just-sent message to finish streaming.
+ *
+ * `.tag-inprogress` is the DOM projection of the renderer's per-session
+ * `streaming` flag, which ChatConsole documents as the authoritative
+ * "is this session still generating?" signal (set in handleSend, cleared on
+ * final / error / aborted).  Main-text stability is the fallback for a turn
+ * whose tag was never observed — a mocked provider can reply before the
+ * caller looks.
+ *
+ * Both signals are sampled on an explicit 200 ms interval rather than through
+ * `page.waitForFunction`, whose second parameter is the pageFunction's
+ * *argument*, not its options: passing `{ timeout, polling }` there silently
+ * drops both, leaving rAF polling (≈17 ms/frame) and the default timeout.
+ * Two rAF frames then satisfy any "stable for N samples" rule in ≈33 ms, so a
+ * still-reasoning turn reads as finished and the caller asserts against a
+ * panel that has not been updated yet.
+ */
 export async function waitForResponseComplete(page: Page, timeout = 120_000) {
-  // Phase 1: if the AI used tools, "IN PROGRESS" stays visible while
-  // the tool runs.  Wait for it to hide (tool result rendered).
-  try {
-    await expect(page.locator('.tag-inprogress')).toBeHidden({ timeout: 15_000 });
-  } catch {
-    // Fast responses may never show IN PROGRESS.
+  const deadline = Date.now() + timeout;
+  const inProgress = page.locator('.tag-inprogress');
+
+  let anchor = await mainTextLength(page);
+  let stable = 0;
+  let sawRunning = false;
+
+  while (Date.now() < deadline) {
+    if ((await inProgress.count()) > 0) {
+      sawRunning = true;
+      stable = 0;
+      anchor = await mainTextLength(page);
+    } else {
+      const len = await mainTextLength(page);
+      // Only a jump of ≥10 characters counts as progress: the live
+      // 「已深度思考 · N 秒」 timer adds a character or two per second and
+      // would otherwise keep resetting the stability counter forever.
+      if (len - anchor >= 10) {
+        anchor = len;
+        stable = 0;
+      } else if (len > 0) {
+        stable += 1;
+      }
+      // Having seen the tag, its disappearance *is* the end of the turn — a
+      // short confirmation is enough.  Never having seen it, the text is all
+      // we have, so require a wider window: a real model can pause for more
+      // than a second between tool calls with nothing on screen.
+      if (stable >= (sawRunning ? 3 : 12)) return;
+    }
+    await page.waitForTimeout(200);
   }
 
-  // Phase 2: wait for main textContent to stop changing (streaming done).
-  // Tolerate small growth (a "已深度思考 · N 秒" live timer adds a few chars
-  // per second); a large jump means the reply is still streaming.
-  await page.evaluate(() => {
-    const main = document.querySelector('main');
-    (window as any).__miqi_stream_state = { base: (main?.textContent || '').length, stable: 0 };
-  });
-
-  await page.waitForFunction(
-    () => {
-      const main = document.querySelector('main');
-      if (!main) return false;
-      const text = main.textContent || '';
-      const s = (window as any).__miqi_stream_state;
-      if (!s) {
-        (window as any).__miqi_stream_state = { base: text.length, stable: 0 };
-        return false;
-      }
-      if (text.length - s.base >= 10) {
-        s.base = text.length;
-        s.stable = 0;
-        return false;
-      }
-      s.stable++;
-      return s.stable >= 2;
-      // Respect the caller's timeout: CI LLM providers have been slow enough
-      // that PR-Agent's ai_timeout was raised to 600s (#707).  The old
-      // Math.min(timeout, 90_000) cap made 240s callers time out at 90s and
-      // deterministically fail LLM-dependent tests like regression-480.
-    },
-    { timeout, polling: 200 }
+  throw new Error(
+    `waitForResponseComplete: 回合在 ${timeout}ms 内没有结束（` +
+      (sawRunning ? '「进行中」标签一直没消失' : '未出现「进行中」标签，且主区文本仍在变化') +
+      '）'
   );
 }
 
@@ -642,7 +727,13 @@ export async function browserLogin(
  */
 export async function launchElectronApp(
   patchConfig?: (config: any) => any,
-  opts?: { bypassAll?: boolean; noConsentBypass?: boolean; noLoginBypass?: boolean }
+  opts?: {
+    bypassAll?: boolean;
+    noConsentBypass?: boolean;
+    noLoginBypass?: boolean;
+    /** 强制窗口显示在屏幕上（默认本机启动时停在屏幕外，见 applyWindowVisibilityEnv） */
+    showWindow?: boolean;
+  }
 ): Promise<ElectronFixture> {
   // Create unique temporary home per test worker for full isolation.
   // Parallel workers each get their own MIQI_HOME → no race on sessions/.
@@ -735,6 +826,8 @@ export async function launchElectronApp(
   } else {
     env.MIQI_LOGIN_BYPASS = '1';
   }
+
+  applyWindowVisibilityEnv(env, opts?.showWindow);
 
   // The bridge is spawned per E2E run (cold start).  If MIQI_PYTHON_PATH
   // points at a python that cannot even run (e.g. a stale uv-managed
@@ -856,7 +949,7 @@ export async function launchElectronApp(
  *  run doesn't hang on dialogs or hit real feedback channels. */
 export async function relaunchElectronApp(
   miqiHome: string,
-  opts?: { noConsentBypass?: boolean; noLoginBypass?: boolean }
+  opts?: { noConsentBypass?: boolean; noLoginBypass?: boolean; showWindow?: boolean }
 ): Promise<ElectronFixture> {
   const miqiSessionsDir = getMiqiSessionsDir(miqiHome);
 
@@ -896,6 +989,9 @@ export async function relaunchElectronApp(
   } else {
     env.MIQI_LOGIN_BYPASS = '1';
   }
+
+  // Same E2E off-screen default as launchElectronApp (see above).
+  applyWindowVisibilityEnv(env, opts?.showWindow);
   // Same broken-MIQI_PYTHON_PATH fallback as launchElectronApp (see above).
   if (env.MIQI_PYTHON_PATH) {
     const relaunchProbe = require('node:child_process').spawnSync(
@@ -923,6 +1019,7 @@ export async function relaunchElectronApp(
     chromiumSandbox: false,
   });
 
+  // Same title/size main-window pick as launchElectronApp (see above).
   let page;
   for (let i = 0; i < 100; i++) {
     const windows = electronApp.windows();
@@ -1010,10 +1107,18 @@ export async function closeElectronApp(
     // a stuck `app.close()` would burn the whole CI afterAll timeout (600s)
     // and then the worker force-kill (300s).  Race the close against a
     // 15s deadline and force-kill the Electron process if it overruns.
+    //
+    // The overrun is logged: a force-kill is invisible in the output
+    // otherwise, and 「哪些 spec 关不干净」is exactly what has to be
+    // attributable when a whole job dies on
+    // `worker-N process did not exit within 300000ms`.
+    const closeStartedAt = Date.now();
+    let forced = false;
     await Promise.race([
       app.close().catch(() => {}),
       (async () => {
         await new Promise((r) => setTimeout(r, 15_000));
+        forced = true;
         try {
           if (process.platform === 'win32') {
             // #959: Playwright launches Electron through a cmd.exe shell
@@ -1035,6 +1140,18 @@ export async function closeElectronApp(
         }
       })(),
     ]);
+    const closeMs = Date.now() - closeStartedAt;
+    if (forced) {
+      let who = '';
+      try {
+        who = ` (${test.info().titlePath().slice(1).join(' › ')})`;
+      } catch {
+        /* not inside a test scope */
+      }
+      console.log(
+        `[test] app.close() did not settle in ${closeMs}ms — force-killed the tree${who}`
+      );
+    }
   }
   if (miqiHome && !keepHome && existsSync(miqiHome)) {
     // The bridge may still be tearing down children (exec bash/curl) whose

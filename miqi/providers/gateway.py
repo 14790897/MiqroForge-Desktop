@@ -26,7 +26,7 @@ from loguru import logger
 # 网关地址经环境变量注入。生产必须为 https 域名：encryptedApiKey 实为
 # 明文腾讯云密钥（#923 实测），明文通道禁止承载密钥与聊天内容。
 # 默认值仅为 test env 实测 IP（#923：平台尚未提供带证书的真实网关域名，
-# https 裸 IP 证书不可用；生产域名 forge.miqroera.com 公网 NXDOMAIN）。
+# https 裸 IP 证书不可用；平台域名 www.miqroforge.com 实测未代理网关路径）。
 # 生产上线后平台经 QRAFT_GATEWAY_BASE 下发 https 域名，勿再回退 http。
 _DEFAULT_TEST_ORIGIN = "http://118.25.115.164"
 GATEWAY_PREFIX = os.environ.get("QRAFT_GATEWAY_PREFIX", "/miqroera-deepseek")

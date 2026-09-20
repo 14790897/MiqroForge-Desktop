@@ -7,12 +7,12 @@ the codebase can always speak OpenAI-format messages.
 from __future__ import annotations
 
 import json
-import logging
 import time
 from typing import Any
 
 import anthropic
 import json_repair
+from loguru import logger
 
 import miqi.providers.resilience as resilience
 from miqi.providers.base import LLMProvider, LLMResponse, ToolCallRequest
@@ -20,8 +20,6 @@ from miqi.providers.registry import find_by_model, find_by_name
 from miqi.providers.resilience import ErrorKind
 
 DEFAULT_REQUEST_TIMEOUT = 600.0
-
-logger = logging.getLogger(__name__)
 
 
 class AnthropicProvider(LLMProvider):
@@ -312,11 +310,42 @@ class AnthropicProvider(LLMProvider):
                 error_kind=kind.value,
             )
 
+    @staticmethod
+    def _args_strict_ok(raw: Any) -> bool:
+        """「可验证完整」判据（#1094；CR #1100 统一口径）：只有**非空字符串**且严格
+        `json.loads` 通过才算数，空串 / `None` / dict 一律 `False`。
+
+        口径与 openai_provider._args_strict_ok 逐字一致。非流式 SDK 下 dict 形态
+        **无法证明完整性**——Anthropic 文档明确 `stop_reason=max_tokens` 可能留下
+        未完成的 `tool_use`，而 SDK 已把 `input` 解析成 dict，原始串是否被砍在这里
+        已经看不出来；空串同理（模型刚吐出 tool_use 头就被砍）。因此
+        `finish_reason == "length"` 下这三者一律按截断处理。未来若改真流式，可用
+        `input_json_delta` 的原始累积串再精确判定。`json_repair` 行为不受影响。
+        """
+        if not isinstance(raw, str) or not raw:
+            return False
+        try:
+            json.loads(raw)
+            return True
+        except (json.JSONDecodeError, ValueError):
+            return False
+
     def _parse_response(self, response: Any) -> LLMResponse:
         """Convert an Anthropic Messages response to LLMResponse."""
         tool_calls: list[ToolCallRequest] = []
         text_parts: list[str] = []
         reasoning_parts: list[str] = []
+
+        # Map Anthropic stop reasons to OpenAI-style finish_reason.
+        # #1094: resolved *before* the block loop — tool_use blocks need it to
+        # tell "cut off by max_tokens" from a complete tool call.
+        stop_map = {
+            "end_turn": "stop",
+            "tool_use": "tool_calls",
+            "max_tokens": "length",
+            "stop_sequence": "stop",
+        }
+        finish_reason = stop_map.get(response.stop_reason or "", "stop")
 
         for block in response.content:
             if block.type == "text":
@@ -333,6 +362,7 @@ class AnthropicProvider(LLMProvider):
                     reasoning_parts.append(str(thinking))
             elif block.type == "tool_use":
                 input_data = block.input
+                _strict_ok = self._args_strict_ok(input_data)
                 if isinstance(input_data, str):
                     try:
                         input_data = json.loads(input_data)
@@ -342,23 +372,31 @@ class AnthropicProvider(LLMProvider):
                 if not isinstance(input_data, dict):
                     input_data = {}
 
+                # #1094 / CR #1100: cut off by max_tokens → arguments is repair
+                # salvage. 判据「不可验证完整即截断」。
+                truncated = finish_reason == "length" and not _strict_ok
+                if truncated:
+                    # CWE-532：参数串可能有文件正文 / 路径 / 密钥，只记工具名、
+                    # 调用 ID、参数类型与长度（非字符串时长度为 -1），
+                    # 不落任何原始参数。
+                    logger.warning(
+                        "tool args truncated by output cap (stop_reason=max_tokens): "
+                        "'{}' id={} args_type={} args_len={}",
+                        block.name,
+                        block.id,
+                        type(block.input).__name__,
+                        len(block.input) if isinstance(block.input, str) else -1,
+                    )
+
                 tool_calls.append(ToolCallRequest(
                     id=block.id,
                     name=block.name,
                     arguments=input_data,
+                    truncated=truncated,
                 ))
 
         content = "\n".join(text_parts) if text_parts else None
         reasoning_content = "\n".join(reasoning_parts) if reasoning_parts else None
-
-        # Map Anthropic stop reasons to OpenAI-style finish_reason
-        stop_map = {
-            "end_turn": "stop",
-            "tool_use": "tool_calls",
-            "max_tokens": "length",
-            "stop_sequence": "stop",
-        }
-        finish_reason = stop_map.get(response.stop_reason or "", "stop")
 
         usage: dict[str, int] = {}
         if hasattr(response, "usage") and response.usage:
@@ -463,8 +501,8 @@ class AnthropicProvider(LLMProvider):
                 # 中途失败：屏幕上已有半截输出，重试会重复内容——照 chat() 的
                 # 契约把错误当成一次"错误回复"交回去，让上层照常处理。
                 logger.warning(
-                    "stream_chat: mid-stream failure (%s) after %d content / %d "
-                    "reasoning chunks: %s",
+                    "stream_chat: mid-stream failure ({}) after {} content / {} "
+                    "reasoning chunks: {}",
                     kind.value,
                     content_chunks,
                     reasoning_chunks,
@@ -481,7 +519,7 @@ class AnthropicProvider(LLMProvider):
                 return
             # 还没吐出任何东西：退回带重试的整段调用（即旧实现的行为），
             # 一次网络抖动不至于丢掉整轮。
-            logger.warning("stream_chat: falling back to chat(): %s", e)
+            logger.warning("stream_chat: falling back to chat(): {}", e)
             response = await self.chat(
                 messages=messages,
                 tools=tools,
@@ -496,9 +534,9 @@ class AnthropicProvider(LLMProvider):
         if first_reasoning_elapsed is not None:
             response.reasoning_elapsed_s = first_reasoning_elapsed
         if reasoning_chunks:
-            # stdlib logging 用 %-style 占位符（CR #1071 review）。
+            # loguru 用 {}-style 占位符（本模块 logger 来自 loguru，与全仓一致）。
             logger.info(
-                "stream_chat: reasoning complete chunks=%s chars=%s for model=%s",
+                "stream_chat: reasoning complete chunks={} chars={} for model={}",
                 reasoning_chunks,
                 len(response.reasoning_content or ""),
                 resolved,
