@@ -138,6 +138,74 @@ async def test_declare_matches_same_file_in_another_path_form():
 
 
 @pytest.mark.asyncio
+async def test_declare_normalizes_workspace_base_prefixed_path():
+    """#1131 复现：`sessions/<key>/files/<name>` 不得在会话 files 根下再叠一层。
+
+    agent 常按**工作区基准**写路径，而会话工具的 workspace 已经是会话 files
+    根；朴素拼接会得到 ``<files>/sessions/<key>/files/<name>`` —— 磁盘上不
+    存在。后果：「定位」报 File not found，且台账里多出一条重复前缀的条目
+    （与既有裸文件名条目 canonical 形态不同，去重匹配不上），永不自动清理。
+    """
+    from miqi.session.manager import SessionManager
+
+    ws = _default_ws()
+    key = "desktop:1131prefix"
+    files_dir = _session_files_dir(ws, key)
+    report = files_dir / "MiQroForge_文件生成演示.pdf"
+    report.write_text("x", encoding="utf-8")
+
+    # 预置：文档工具口径的裸文件名条目
+    sm = SessionManager(ws)
+    sm.save_tracked_file(key, report.name, op="write")
+
+    declared = f"sessions/{_session_files_dir_key(key)}/files/{report.name}"
+    payload = json.loads(
+        await _tool(ws, files_dir).execute(paths=[declared], _session_key=key)
+    )
+
+    assert payload["ok"] is True
+    assert "missing" not in payload, (
+        f"前缀被重复拼接，解析到磁盘上不存在的路径：{payload.get('missing')}"
+    )
+    tracked = _read_tracked(_store_path(ws, key))
+    assert set(tracked) == {report.name}, f"出现重复条目：{sorted(tracked)}"
+    assert tracked[report.name]["result"] is True
+
+
+@pytest.mark.asyncio
+async def test_declare_normalizes_backslash_prefixed_path():
+    """Windows 分隔符形态的 `sessions\\<key>\\files\\<name>` 也要认得出来。
+
+    反斜杠在 POSIX 上是普通文件名字符，`Path("sessions\\<key>\\files\\x")`
+    在那里只有**一个**组件。判定会话前缀之前不做分隔符归一，规则就看不到
+    这个前缀、退回朴素拼接，文件被解析到一个带字面反斜杠的假路径上 ——
+    同一个 #1131 缺陷的另一副面孔：收敛了规则、却漏了规则的入参归一。
+    """
+    from miqi.session.manager import SessionManager
+
+    ws = _default_ws()
+    key = "desktop:1131backslash"
+    files_dir = _session_files_dir(ws, key)
+    report = files_dir / "报告.pdf"
+    report.write_text("x", encoding="utf-8")
+
+    sm = SessionManager(ws)
+    sm.save_tracked_file(key, report.name, op="write")
+
+    declared = f"sessions\\{_session_files_dir_key(key)}\\files\\{report.name}"
+    payload = json.loads(
+        await _tool(ws, files_dir).execute(paths=[declared], _session_key=key)
+    )
+
+    assert payload["ok"] is True
+    assert "missing" not in payload, (
+        f"反斜杠路径被当成单个文件名，解析到不存在的路径：{payload.get('missing')}"
+    )
+    tracked = _read_tracked(_store_path(ws, key))
+    assert set(tracked) == {report.name}, f"出现重复条目：{sorted(tracked)}"
+
+
+@pytest.mark.asyncio
 async def test_declare_dedupes_same_file_across_path_forms():
     """同一次调用里同一文件的两种形态（`run/r.md` 与 `run/../run/r.md`）只登记一条。"""
     ws = _default_ws()

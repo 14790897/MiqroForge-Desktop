@@ -6804,6 +6804,11 @@ export function ChatConsole({
                 path: candidate.p,
                 kind: 'pdf',
                 pdfUrl: base64ToBlobUrl(res.data_base64, res.mime_type || 'application/pdf'),
+                // Keep the bytes alongside the blob URL: 「系统应用打开」 only
+                // takes the reliable openBytes path when they are present, and
+                // otherwise falls back to openExternal(candidate.p) — which
+                // cannot resolve a bare name for a session-scoped file (#1131).
+                dataBase64: res.data_base64,
               });
               return;
             }
@@ -8565,24 +8570,40 @@ export function ChatConsole({
                         onReveal={async () => {
                           // #1062：过去对工作区外文件这里会 reject 被丢弃 → 点了没反应；
                           // 现在统一收结构化结果，失败时给出可见提示。
-                          try {
-                            const res = await window.miqi.files.openContainingFolder(
-                              normalizePath(f.path),
-                              // #1062: 带上会话 key，主进程才能把文件夹绑定会话的
-                              // 工作区算进允许根；传的是会话而非根，渲染层无法放宽校验。
-                              currentSessionRef.current
-                            );
-                            if (!res?.revealed) {
-                              const outside = /outside workspace/i.test(String(res?.error ?? ''));
-                              notifyAssetError(
-                                outside
-                                  ? '无法定位：该文件在会话工作区之外'
-                                  : `定位失败：${res?.error ?? '未知原因'}`
-                              );
-                            }
-                          } catch (e: any) {
-                            notifyAssetError(`定位失败：${e?.message ?? String(e)}`);
+                          // #1131：`sessions.workspace` 对**非文件夹绑定**的默认工作区
+                          // 会话返回 null，主进程于是把相对路径锚到全局工作区根；而会话
+                          // 隔离的产物实际在 `sessions/<key>/files/` 下，台账里存的又是
+                          // 裸文件名（create_pdf 等文档工具相对会话 files 根记账）→ 一律
+                          // File not found。与预览/下载保持一致，补一个会话相对候选。
+                          // 路径由本会话 key 推出，主进程的包含性校验不变，渲染层没被放宽。
+                          const raw = normalizePath(f.path);
+                          const nameOnly = raw.replace(/\\/g, '/').split('/').pop()!;
+                          const safeKey = sessionFilesDirKey(currentSessionRef.current);
+                          const candidates = [raw];
+                          if (safeKey && nameOnly === raw) {
+                            candidates.push(`sessions/${safeKey}/files/${nameOnly}`);
                           }
+                          let lastError = '';
+                          for (const candidate of candidates) {
+                            try {
+                              const res = await window.miqi.files.openContainingFolder(
+                                candidate,
+                                // #1062: 带上会话 key，主进程才能把文件夹绑定会话的
+                                // 工作区算进允许根；传的是会话而非根，渲染层无法放宽校验。
+                                currentSessionRef.current
+                              );
+                              if (res?.revealed) return;
+                              lastError = String(res?.error ?? '');
+                            } catch (e: any) {
+                              lastError = String(e?.message ?? e);
+                            }
+                          }
+                          const outside = /outside workspace/i.test(lastError);
+                          notifyAssetError(
+                            outside
+                              ? '无法定位：该文件在会话工作区之外'
+                              : `定位失败：${lastError || '未知原因'}`
+                          );
                         }}
                       />
                     ))}
