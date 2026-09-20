@@ -31,6 +31,7 @@ import { QraftClient, QraftError, type QraftLogger, type ResolvedQraftConfig } f
 import { maskSecret } from './rsa';
 import { QraftStore } from './store';
 import {
+  PROD_REDIRECT_URI,
   QRAFT_ENV_DEFAULTS,
   prodEnvClientSecret,
   testEnvClientSecret,
@@ -102,8 +103,8 @@ export interface QraftServiceOptions {
 }
 
 export function defaultRedirectUri(): string {
-  // 1024–65535 随机端口；测试环境不校验注册值，生产环境需与注册值一致
-  //（可在设置页"高级设置"中覆盖）。
+  // 1024–65535 随机端口（仅测试环境用；生产环境走平台注册值
+  // PROD_REDIRECT_URI，可在设置页"高级设置"中覆盖）。
   const port = 1024 + Math.floor(Math.random() * (65535 - 1024));
   return `http://localhost:${port}/callback`;
 }
@@ -118,7 +119,7 @@ export function resolveConfig(
   stored: QraftStoredState | null,
   makeRedirectUri: () => string
 ): ResolvedQraftConfig {
-  const env: QraftEnv = opts.env ?? stored?.env ?? 'test';
+  const env: QraftEnv = opts.env ?? stored?.env ?? 'prod';
   const defaults = QRAFT_ENV_DEFAULTS[env];
   const storedMatches = stored && stored.env === env ? stored : null;
   return {
@@ -131,9 +132,9 @@ export function resolveConfig(
     redirectUri:
       opts.redirectUri ??
       storedMatches?.redirectUri ??
-      // 测试环境不校验注册值，可自动生成 loopback 地址；
-      // 生产环境必须使用注册值，缺失时由 validateConfig 拒绝。
-      (env === 'test' ? makeRedirectUri() : ''),
+      // 生产环境用平台注册值（随机端口未注册，平台会拒）；测试环境不校验
+      // 注册值，可用随机 loopback 便于隔离。
+      (env === 'prod' ? PROD_REDIRECT_URI : makeRedirectUri()),
   };
 }
 
@@ -224,7 +225,7 @@ export class QraftService {
   ): Promise<QraftLoginResult> {
     try {
       const stored = this.options.store.current;
-      const env: QraftEnv = opts.env ?? stored?.env ?? 'test';
+      const env: QraftEnv = opts.env ?? stored?.env ?? 'prod';
       const config = resolveConfig(
         opts,
         stored,
@@ -293,7 +294,7 @@ export class QraftService {
   async loginWithCode(code: string, opts: QraftLoginOptions = {}): Promise<QraftLoginResult> {
     try {
       const stored = this.options.store.current;
-      const env: QraftEnv = opts.env ?? stored?.env ?? 'test';
+      const env: QraftEnv = opts.env ?? stored?.env ?? 'prod';
       const config = resolveConfig(
         opts,
         stored,
@@ -352,7 +353,7 @@ export class QraftService {
    */
   resolveLoginConfig(opts: QraftLoginOptions): ResolvedQraftConfig {
     const stored = this.options.store.current;
-    const env: QraftEnv = opts.env ?? stored?.env ?? 'test';
+    const env: QraftEnv = opts.env ?? stored?.env ?? 'prod';
     const config = resolveConfig(opts, stored, this.options.makeRedirectUri ?? defaultRedirectUri);
     validateConfig(config, env);
     return config;
