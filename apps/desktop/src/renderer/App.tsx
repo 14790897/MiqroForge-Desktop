@@ -418,6 +418,7 @@ function AppShell() {
               <div className="flex flex-1 overflow-hidden">
                 <Sidebar
                   currentSession={sessionKey}
+                  currentNav={activeNav}
                   onSessionSelect={(key) => {
                     setWorkspace(null);
                     setSessionKey(key);
