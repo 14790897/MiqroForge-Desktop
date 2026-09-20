@@ -3,6 +3,11 @@ name: Conflict Watchdog
 # PR 与基分支产生合并冲突时，自动以 github-actions[bot] 身份提交 changes requested；
 # 冲突解决后自动 dismiss 该 review 解除标记。
 #
+# 冲突期间（且非 draft）还会自动取消其他 reviewer 仍生效的 changes requested：
+# 冲突解决必然改动代码，冲突前的 blocking 评审继续挂着只会阻碍合并、并与解决后的
+# 重新评审重复。只动 CHANGES_REQUESTED，不影响 approve/comment，draft 与已解决
+# （mergeable）状态下不碰他人的评审。
+#
 # 背景：GitHub 没有「冲突」事件（webhook / Actions 都没有 merge_conflict），冲突也不会
 # 自动改 review 状态或通知任何人，只能主动扫描 PR 的 mergeable 字段来判断。
 #
@@ -74,6 +79,12 @@ jobs:
               | tail -1
           }
 
+          # 该 PR 上除本 bot 外、仍生效（CHANGES_REQUESTED）的评审 id 列表
+          other_active_review_ids() {
+            gh api --paginate "repos/$REPO/pulls/$1/reviews?per_page=100" \
+              --jq '.[] | select(.user.login != "github-actions[bot]" and .state == "CHANGES_REQUESTED") | .id'
+          }
+
           # mergeable 是懒计算字段，首次查询可能返回 UNKNOWN，轮询几次触发重算
           mergeable_state() {
             local m
@@ -109,16 +120,31 @@ jobs:
             fi
             case "$state" in
               CONFLICTING)
-                if [ -n "$rid" ]; then
-                  echo "::notice::PR #$n 有冲突，已标记过 changes requested，跳过"
-                  continue
-                fi
                 if ! draft=$(gh pr view "$n" --json isDraft --jq '.isDraft'); then
                   echo "::warning::PR #$n 读取 isDraft 失败，跳过"
                   continue
                 fi
                 if [ "$draft" = "true" ]; then
                   echo "::notice::PR #$n 有冲突但是 draft，跳过"
+                  continue
+                fi
+                # 冲突期间取消其他 reviewer 仍生效的 changes requested：冲突解决必然
+                # 改动代码，旧评审继续挂着只会阻碍合并、并与解决后的重新评审重复
+                if ! others=$(other_active_review_ids "$n"); then
+                  echo "::warning::PR #$n 读取他人 reviews 失败，跳过"
+                  continue
+                fi
+                for oid in $others; do
+                  if gh api -X PUT "repos/$REPO/pulls/$n/reviews/$oid/dismissals" \
+                       -f message="检测到本 PR 与基分支存在合并冲突：冲突解决会改动代码，冲突前提交的 changes requested 已由冲突看门狗自动取消，解决冲突并推送后将重新评审。" \
+                       -f event=DISMISS >/dev/null; then
+                    echo "::notice::PR #$n 已取消他人评审 $oid 的 changes requested"
+                  else
+                    echo "::warning::PR #$n 取消他人评审 $oid 失败，请手动确认"
+                  fi
+                done
+                if [ -n "$rid" ]; then
+                  echo "::notice::PR #$n 有冲突，已标记过 changes requested，跳过"
                   continue
                 fi
                 if ! base=$(gh pr view "$n" --json baseRefName --jq '.baseRefName'); then
