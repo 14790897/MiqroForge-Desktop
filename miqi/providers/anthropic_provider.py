@@ -7,6 +7,7 @@ the codebase can always speak OpenAI-format messages.
 from __future__ import annotations
 
 import json
+import time
 from typing import Any
 
 import anthropic
@@ -333,6 +334,7 @@ class AnthropicProvider(LLMProvider):
         """Convert an Anthropic Messages response to LLMResponse."""
         tool_calls: list[ToolCallRequest] = []
         text_parts: list[str] = []
+        reasoning_parts: list[str] = []
 
         # Map Anthropic stop reasons to OpenAI-style finish_reason.
         # #1094: resolved *before* the block loop — tool_use blocks need it to
@@ -348,6 +350,16 @@ class AnthropicProvider(LLMProvider):
         for block in response.content:
             if block.type == "text":
                 text_parts.append(block.text)
+            elif block.type == "thinking":
+                # 扩展思考（Claude / 平台网关的 Anthropic 兼容通道）：thinking
+                # 块承载模型的 CoT。取文本进 reasoning_content——口径与 Hermes
+                # 一致（agent/chat_completion_helpers.py：thinking_delta →
+                # fire_reasoning_delta）。此前这里只认 text/tool_use，thinking
+                # 被整块丢弃 → 前端 ThinkBlock 拿到空文本整体不渲染（思考过程
+                # 不显示）。redacted_thinking 无文本，忽略。
+                thinking = getattr(block, "thinking", None)
+                if thinking:
+                    reasoning_parts.append(str(thinking))
             elif block.type == "tool_use":
                 input_data = block.input
                 _strict_ok = self._args_strict_ok(input_data)
@@ -384,6 +396,7 @@ class AnthropicProvider(LLMProvider):
                 ))
 
         content = "\n".join(text_parts) if text_parts else None
+        reasoning_content = "\n".join(reasoning_parts) if reasoning_parts else None
 
         usage: dict[str, int] = {}
         if hasattr(response, "usage") and response.usage:
@@ -400,6 +413,7 @@ class AnthropicProvider(LLMProvider):
             tool_calls=tool_calls,
             finish_reason=finish_reason,
             usage=usage,
+            reasoning_content=reasoning_content,
         )
 
     async def stream_chat(
@@ -410,10 +424,102 @@ class AnthropicProvider(LLMProvider):
         max_tokens: int = 4096,
         temperature: float = 0.7,
     ):
-        """Streaming chat via Anthropic SDK native streaming."""
+        """真正的流式 Anthropic Messages 调用（SSE）。
+
+        旧实现只是个桩：把整段 ``chat()`` 包成一个 ``completed`` 事件，于是前端
+        只能在整轮结束后一次性拿到思考文本——"思考过程"不是边想边显。这里改为
+        订阅 SDK 的原始事件流：``thinking_delta`` → ``reasoning_delta``（口径与
+        Hermes 一致：``chat_completion_helpers.py`` 的 thinking_delta →
+        fire_reasoning_delta）、``text_delta`` → ``content_delta``，最后用一个
+        ``completed`` 事件交付装配好的 LLMResponse（含 reasoning_content 与工具
+        调用）。
+        """
+        original_model = model or self.default_model
+        resolved = self._resolve_model(original_model)
+        max_tokens = max(1, max_tokens)
+
+        spec = self._selected_spec or find_by_model(original_model)
+        use_cache = bool(spec and spec.supports_prompt_caching)
+
+        clean_messages = self._sanitize_empty_content(messages)
+        system, anthropic_messages = self._extract_system_and_messages(
+            clean_messages, use_cache_control=use_cache
+        )
+
+        kwargs: dict[str, Any] = {
+            "model": resolved,
+            "messages": anthropic_messages,
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+        }
+        if system:
+            kwargs["system"] = system
+        if tools:
+            kwargs["tools"] = self._convert_tools(tools, use_cache_control=use_cache)
+            kwargs["tool_choice"] = {"type": "auto"}
+
         from miqi.providers.base import LLMStreamEvent
 
+        request_started = time.perf_counter()
+        # request→首个 thinking delta 的耗时；#834 契约：每个模型调用重新计时，
+        # 由 completed 事件里的 reasoning_elapsed_s 报给上层。
+        first_reasoning_elapsed: float | None = None
+        reasoning_chunks = 0
+        content_chunks = 0
+        # 是否已把增量交给调用方——决定出错时还能不能安全地整段重试。
+        saw_output = False
+
         try:
+            async with self._client.messages.stream(**kwargs) as stream:
+                async for event in stream:
+                    if getattr(event, "type", None) != "content_block_delta":
+                        continue
+                    delta = getattr(event, "delta", None)
+                    delta_type = getattr(delta, "type", None)
+                    if delta_type == "thinking_delta":
+                        text = getattr(delta, "thinking", "") or ""
+                        if not text:
+                            continue
+                        if first_reasoning_elapsed is None:
+                            first_reasoning_elapsed = (
+                                time.perf_counter() - request_started
+                            )
+                        reasoning_chunks += 1
+                        saw_output = True
+                        yield LLMStreamEvent(kind="reasoning_delta", delta=text)
+                    elif delta_type == "text_delta":
+                        text = getattr(delta, "text", "") or ""
+                        if not text:
+                            continue
+                        content_chunks += 1
+                        saw_output = True
+                        yield LLMStreamEvent(kind="content_delta", delta=text)
+                final_message = await stream.get_final_message()
+        except Exception as e:  # noqa: BLE001 — 与 chat() 一样不向上抛
+            kind = resilience.classify_error(e)
+            if saw_output:
+                # 中途失败：屏幕上已有半截输出，重试会重复内容——照 chat() 的
+                # 契约把错误当成一次"错误回复"交回去，让上层照常处理。
+                logger.warning(
+                    "stream_chat: mid-stream failure ({}) after {} content / {} "
+                    "reasoning chunks: {}",
+                    kind.value,
+                    content_chunks,
+                    reasoning_chunks,
+                    e,
+                )
+                yield LLMStreamEvent(
+                    kind="completed",
+                    response=LLMResponse(
+                        content=f"Error calling LLM: {e}",
+                        finish_reason="error",
+                        error_kind=kind.value,
+                    ),
+                )
+                return
+            # 还没吐出任何东西：退回带重试的整段调用（即旧实现的行为），
+            # 一次网络抖动不至于丢掉整轮。
+            logger.warning("stream_chat: falling back to chat(): {}", e)
             response = await self.chat(
                 messages=messages,
                 tools=tools,
@@ -422,8 +528,20 @@ class AnthropicProvider(LLMProvider):
                 temperature=temperature,
             )
             yield LLMStreamEvent(kind="completed", response=response)
-        except Exception:
-            raise
+            return
+
+        response = self._parse_response(final_message)
+        if first_reasoning_elapsed is not None:
+            response.reasoning_elapsed_s = first_reasoning_elapsed
+        if reasoning_chunks:
+            # loguru 用 {}-style 占位符（本模块 logger 来自 loguru，与全仓一致）。
+            logger.info(
+                "stream_chat: reasoning complete chunks={} chars={} for model={}",
+                reasoning_chunks,
+                len(response.reasoning_content or ""),
+                resolved,
+            )
+        yield LLMStreamEvent(kind="completed", response=response)
 
     def get_default_model(self) -> str:
         return self.default_model

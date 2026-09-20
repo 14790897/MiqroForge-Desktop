@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import sqlite3
 import time
 from pathlib import Path
 
@@ -128,3 +129,57 @@ def test_lesson_migration(store: TraceStore, tmp_path: Path):
     assert trace.outcome == "success"
     assert trace.outcome_notes == "answer concisely"
     assert trace.metadata["source"] == "legacy_lesson"
+
+
+# ── CR #1071（2026-09-16）：写锁重试总预算 ──────────────────────────────
+# 连接 timeout=10.0 是**每次尝试**的上限，15 次重试叠加最坏 ~150s。下面锁定
+# 「总预算封顶」既不破坏成功路径与 lock 抖动容忍，也确实封住了上界。
+
+
+def test_execute_write_retries_through_transient_lock(store: TraceStore):
+    """成功路径与抖动容忍不变：前两次 lock，第三次成功。"""
+    calls = {"n": 0}
+
+    def fn(_conn):
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise sqlite3.OperationalError("database is locked")
+        return "ok"
+
+    assert store._execute_write(fn) == "ok"
+    assert calls["n"] == 3
+
+
+def test_execute_write_gives_up_at_total_budget(
+    store: TraceStore, monkeypatch: pytest.MonkeyPatch
+):
+    """总预算封顶：重试次数再多（模拟 15×timeout）也在预算内放弃。"""
+    monkeypatch.setattr(store, "_WRITE_MAX_RETRIES", 1000)
+    monkeypatch.setattr(store, "_WRITE_TOTAL_BUDGET_S", 0.4)
+    calls = {"n": 0}
+
+    def fn(_conn):
+        calls["n"] += 1
+        raise sqlite3.OperationalError("database is locked")
+
+    start = time.monotonic()
+    with pytest.raises(sqlite3.OperationalError):
+        store._execute_write(fn)
+    elapsed = time.monotonic() - start
+
+    # 预算 0.4s + 最多一次抖动 sleep(≤0.15s) 的余量，远小于 1000 次重试
+    assert elapsed < 1.5, f"写锁重试耗时 {elapsed:.2f}s，未受总预算约束"
+    assert calls["n"] < 1000
+
+
+def test_execute_write_propagates_non_lock_error_immediately(store: TraceStore):
+    """非 lock 的 OperationalError 不重试，立即抛出（原有分支语义）。"""
+    calls = {"n": 0}
+
+    def fn(_conn):
+        calls["n"] += 1
+        raise sqlite3.OperationalError("no such table: nope")
+
+    with pytest.raises(sqlite3.OperationalError):
+        store._execute_write(fn)
+    assert calls["n"] == 1
