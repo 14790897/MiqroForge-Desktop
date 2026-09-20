@@ -394,6 +394,31 @@ class HistoryRuntime:
         await db.commit()
         return int(cursor.rowcount or 0)
 
+    async def list_turn_ids(self, thread_id: str) -> list[str]:
+        """Return turn ids in history-insertion order (deduplicated).
+
+        Mirrors the model-context view (load_items orders by created_at ASC,
+        rowid ASC), so the first occurrence of a turn_id is its true position.
+        """
+        seen: list[str] = []
+        for item in await self.load_items(thread_id):
+            if item.turn_id and item.turn_id not in seen:
+                seen.append(item.turn_id)
+        return seen
+
+    async def truncate_from_turn(self, thread_id: str, from_turn_id: str) -> list[str]:
+        """Delete history items for ``from_turn_id`` and every later turn.
+
+        Returns the removed turn ids. Idempotent: an unknown ``from_turn_id``
+        (already compacted away, or a race) returns ``[]`` and changes nothing.
+        """
+        turn_ids = await self.list_turn_ids(thread_id)
+        if from_turn_id not in turn_ids:
+            return []
+        removed = turn_ids[turn_ids.index(from_turn_id):]
+        await self.delete_turn_items(thread_id, removed)
+        return removed
+
     async def copy_thread_items(self, source_thread_id: str, dest_thread_id: str) -> int:
         """Copy all history items from source to destination thread.
 

@@ -27,6 +27,9 @@ class UserMessage:
     # #680: reasoning mode (fast/think) from the frontend mode switch —
     # consumed by the turn executor to apply generation budget + prompts.
     reasoning_mode: str | None = None
+    # #1146: edit/regenerate/retry truncate the model context — drop the
+    # turn identified by this id (and every later turn) before building history.
+    drop_from_turn_id: str | None = None
 
 
 @dataclass

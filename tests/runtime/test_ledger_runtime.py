@@ -199,3 +199,43 @@ async def test_ledger_rollback_marker_hides_last_turn(tmp_path):
         assert [item.turn_id for item in visible if item.turn_id] == ["turn-1"]
     finally:
         await ledger.close()
+
+
+@pytest.mark.asyncio
+async def test_ledger_rollback_marker_drop_from_turn_id(tmp_path):
+    """#1146: drop_from_turn_id 截断该 turn 及之后所有 turn（非仅末尾）。"""
+    from miqi.runtime.ledger_runtime import LedgerRuntime
+
+    ledger = LedgerRuntime(tmp_path / "runtime.db", session_id="s1")
+    await ledger.initialize()
+    try:
+        await ledger.append_item(thread_id="t1", turn_id="turn-1", item_type="message", role="user", content="one")
+        await ledger.append_item(thread_id="t1", turn_id="turn-2", item_type="message", role="user", content="two")
+        await ledger.append_item(thread_id="t1", turn_id="turn-3", item_type="message", role="user", content="three")
+
+        marker = await ledger.append_rollback_marker("t1", drop_from_turn_id="turn-2")
+
+        assert marker.payload["removed_turn_ids"] == ["turn-2", "turn-3"]
+        visible = await ledger.load_effective_items("t1")
+        assert [item.turn_id for item in visible if item.turn_id] == ["turn-1"]
+    finally:
+        await ledger.close()
+
+
+@pytest.mark.asyncio
+async def test_ledger_rollback_marker_unknown_drop_from_turn_id_is_noop(tmp_path):
+    """from_turn_id 不在 ledger 中时 removed 为空，不隐藏任何 turn。"""
+    from miqi.runtime.ledger_runtime import LedgerRuntime
+
+    ledger = LedgerRuntime(tmp_path / "runtime.db", session_id="s1")
+    await ledger.initialize()
+    try:
+        await ledger.append_item(thread_id="t1", turn_id="turn-1", item_type="message", role="user", content="one")
+
+        marker = await ledger.append_rollback_marker("t1", drop_from_turn_id="nope")
+
+        assert marker.payload["removed_turn_ids"] == []
+        visible = await ledger.load_effective_items("t1")
+        assert [item.turn_id for item in visible if item.turn_id] == ["turn-1"]
+    finally:
+        await ledger.close()
