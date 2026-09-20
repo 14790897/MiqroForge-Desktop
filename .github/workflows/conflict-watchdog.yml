@@ -121,6 +121,8 @@ jobs:
                   else
                     echo "::warning::PR #$n dismiss review $rid 失败，请手动解除"
                   fi
+                else
+                  echo "::notice::PR #$n 无冲突且无生效标记，跳过"
                 fi
                 ;;
               *)
