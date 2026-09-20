@@ -24,8 +24,12 @@ permissions:
   contents: read
   pull-requests: write
 
+# 分组按 ref 区分：pull_request 的 ref 是 refs/pull/<N>/merge（按 PR 唯一），
+# 单 PR 扫描只会取消同一个 PR 的旧 run；push/schedule/dispatch 的 ref 是分支，
+# 同分支的旧 run 会被新 run 取代（新 run 做的是同一份完整扫描，覆盖不受影响）。
+# 因此单 PR 扫描永远不会取消正在进行的全量扫描。
 concurrency:
-  group: conflict-watchdog
+  group: conflict-watchdog-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -63,8 +67,11 @@ jobs:
           # 被 dismiss 的 review state 会变成 DISMISSED，不会再命中；仓库里的
           # CodeRabbit 等其它 reviewer 的 review 不受影响。
           active_review_id() {
-            gh api "repos/$REPO/pulls/$1/reviews?per_page=100" \
-              --jq '[.[] | select(.user.login == "github-actions[bot]" and .state == "CHANGES_REQUESTED")] | last | .id // empty'
+            # 分页取全部 reviews（输出按时间序），tail -1 即最新一条生效标记；
+            # 脚本已 set -o pipefail，gh 失败时函数返回非零、由调用方处理
+            gh api --paginate "repos/$REPO/pulls/$1/reviews?per_page=100" \
+              --jq '.[] | select(.user.login == "github-actions[bot]" and .state == "CHANGES_REQUESTED") | .id' \
+              | tail -1
           }
 
           # mergeable 是懒计算字段，首次查询可能返回 UNKNOWN，轮询几次触发重算
@@ -85,23 +92,37 @@ jobs:
           if [ "$EVENT_NAME" = "pull_request" ]; then
             numbers="$PR_NUMBER"
           else
-            numbers=$(gh pr list --state open --limit 100 --json number --jq '.[].number')
+            if ! numbers=$(gh pr list --state open --limit 1000 --json number --jq '.[].number'); then
+              echo "::warning::拉取 open PR 列表失败，本轮扫描结束（下一轮重试）"
+              exit 0
+            fi
           fi
 
           while IFS= read -r n; do
             [ -n "$n" ] || continue
             state=$(mergeable_state "$n")
+            if ! rid=$(active_review_id "$n"); then
+              echo "::warning::PR #$n 读取已有 reviews 失败，跳过"
+              continue
+            fi
             case "$state" in
               CONFLICTING)
-                if [ -n "$(active_review_id "$n")" ]; then
+                if [ -n "$rid" ]; then
                   echo "::notice::PR #$n 有冲突，已标记过 changes requested，跳过"
                   continue
                 fi
-                if [ "$(gh pr view "$n" --json isDraft --jq '.isDraft')" = "true" ]; then
+                if ! draft=$(gh pr view "$n" --json isDraft --jq '.isDraft'); then
+                  echo "::warning::PR #$n 读取 isDraft 失败，跳过"
+                  continue
+                fi
+                if [ "$draft" = "true" ]; then
                   echo "::notice::PR #$n 有冲突但是 draft，跳过"
                   continue
                 fi
-                base=$(gh pr view "$n" --json baseRefName --jq '.baseRefName')
+                if ! base=$(gh pr view "$n" --json baseRefName --jq '.baseRefName'); then
+                  echo "::warning::PR #$n 读取 baseRefName 失败，跳过"
+                  continue
+                fi
                 if gh api -X POST "repos/$REPO/pulls/$n/reviews" \
                      -f event=REQUEST_CHANGES -f body="$(review_body "$base")" >/dev/null; then
                   echo "::notice::PR #$n 与 $base 冲突，已自动提交 changes requested"
@@ -113,7 +134,6 @@ jobs:
                 fi
                 ;;
               MERGEABLE)
-                rid=$(active_review_id "$n")
                 if [ -n "$rid" ]; then
                   if gh api -X PUT "repos/$REPO/pulls/$n/reviews/$rid/dismissals" \
                        -f message="合并冲突已解决，自动解除 changes requested。" -f event=DISMISS >/dev/null; then
