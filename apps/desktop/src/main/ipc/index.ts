@@ -2005,6 +2005,23 @@ for m in ("pydantic", "httpx", "loguru"):
     }
   }
 
+  /**
+   * E2E runs on headless CI runners — there is no file manager and no default
+   * application for a PDF, so handing a path to the OS cannot succeed there and
+   * can instead wedge the app: `shell.openPath` resolves only once the handler
+   * it spawned exits, and the runner has nothing that will ever exit.  The app
+   * then cannot close cleanly (measured: `app.close()` never settles, the E2E
+   * harness force-kills at 15s) and the stray child keeps the Playwright worker
+   * from exiting, which fails the whole CI job on
+   * `worker-N process did not exit within 300000ms` even when every test passed.
+   *
+   * What the E2E specs actually assert on these paths is the resolution *before*
+   * the handoff — workspace containment, the session-relative candidate
+   * fallback, and the bytes `openBytes` writes to its temp file.  All of that
+   * still runs; only the OS handoff is skipped.
+   */
+  const skipOsLaunchForE2E = () => process.env.MIQI_E2E === '1';
+
   // -- Open file with system default application -------------------------
   ipcMain.handle(IPC.FILES_OPEN_EXTERNAL, async (_event, payload: unknown) => {
     const parsed = FilesOpenInput.safeParse(payload);
@@ -2084,7 +2101,7 @@ for m in ("pydantic", "httpx", "loguru"):
         if (!isWslUnc && !isWithinCanonicalWorkspace(candidate, getWorkspacePath(), extraRoots)) {
           continue;
         }
-        const error = await shell.openPath(candidate);
+        const error = skipOsLaunchForE2E() ? '' : await shell.openPath(candidate);
         if (!error) {
           opened = true;
           break;
@@ -2175,7 +2192,7 @@ for m in ("pydantic", "httpx", "loguru"):
     } catch (e: any) {
       return { opened: false, path: tmpPath, error: e?.message ?? String(e) };
     }
-    const error = await shell.openPath(tmpPath);
+    const error = skipOsLaunchForE2E() ? '' : await shell.openPath(tmpPath);
     // 外部应用可能稍后异步读取，延迟清理而不是立刻删除
     setTimeout(() => {
       try {
@@ -2291,7 +2308,7 @@ for m in ("pydantic", "httpx", "loguru"):
     const tmpPath = join(tmpdir(), `miqi-preview-${randomUUID()}.html`);
     try {
       writeFileSync(tmpPath, html, { encoding: 'utf8', mode: 0o600 });
-      const error = await shell.openPath(tmpPath);
+      const error = skipOsLaunchForE2E() ? '' : await shell.openPath(tmpPath);
       setTimeout(() => {
         try {
           unlinkSync(tmpPath);
@@ -2341,7 +2358,7 @@ for m in ("pydantic", "httpx", "loguru"):
       if (!isWithinCanonicalWorkspace(absolutePath, getWorkspacePath(), extraRoots)) {
         return { revealed: false, path: raw, error: `Path outside workspace: ${raw}` };
       }
-      shell.showItemInFolder(absolutePath);
+      if (!skipOsLaunchForE2E()) shell.showItemInFolder(absolutePath);
       return { revealed: true, path: raw };
     } catch (e: any) {
       return { revealed: false, path: raw, error: e?.message ?? String(e) };

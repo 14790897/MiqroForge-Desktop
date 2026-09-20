@@ -372,7 +372,7 @@ test.describe('Native Electron E2E', () => {
     await closeElectronApp(electronApp);
     await new Promise((r) => setTimeout(r, 3000));
 
-    // ── Restart on the SAME profile (#1035 复审 P2b / 上轮镜像遗留项）─────────
+    // ── Restart on the SAME profile（#1118 收口，镜像 4df37e27 / #1035 复审 P2b）──
     // 这里原本是手写的 `electron.launch({ env: { ...process.env, MIQI_HOME } })`，
     // 只钉住了 MIQI_HOME（sqlite 会话存储）。profile 相关 env 一个都没带——而且
     // 带不了：launchElectronApp 只改自己那份 env 副本，process.env 里从没有过

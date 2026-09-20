@@ -19,6 +19,7 @@ from miqi.agent.tools.write_grants import (
     get_write_grants,
     norm_session_key,
 )
+from miqi.paths import normalize_session_prefixed
 
 # The canonical session-dir derivation moved to the session layer (#1014) so
 # that every writer and reader shares one implementation.  This alias keeps
@@ -1241,7 +1242,16 @@ def _resolve_path(
     """
     p = Path(path).expanduser()
     if not p.is_absolute() and workspace:
-        p = workspace / p
+        # Agents often write paths relative to the workspace BASE
+        # (`sessions/<key>/files/...`), while session-scoped tools are handed
+        # the session files root as their *workspace*.  Appending would nest
+        # the prefix a second time (#1131), yielding
+        # `<files>/sessions/<key>/files/...` — a path that never exists, so
+        # the file could not be located, diffed, read, or opened.  Normalize
+        # through the shared rule; None means "not session-structured" and
+        # keeps the plain join.
+        session_scoped = normalize_session_prefixed(p, workspace)
+        p = session_scoped if session_scoped is not None else workspace / p
 
     # If sandbox is active, redirect path into sandbox workspace
     sandbox = _get_active_sandbox(sandbox_manager)

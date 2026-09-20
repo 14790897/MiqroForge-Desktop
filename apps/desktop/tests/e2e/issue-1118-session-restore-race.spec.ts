@@ -1,5 +1,5 @@
 /**
- * #1118 第八轮 P1（#1035 移植）— 启动恢复竞态：幽灵 lastSession 不得先落到 ChatConsole。
+ * #1118 第八轮 P1 — 启动恢复竞态：幽灵 lastSession 不得先落到 ChatConsole。
  *
  * ## 被锁的缺陷
  * `App.tsx` 的启动恢复校验是**异步** effect（`sessions.list()` ∪
@@ -7,17 +7,16 @@
  * 次 render 就挂载了：ChatConsole 的加载 effect 立刻对恢复出来的 key 调
  * `sessions.get(key)`。bridge 的 `sessions.get` 对未知 key 走
  * `SessionManager.get_or_create`（get-or-create，不报错、返回空会话），于是
- * 「App 要丢弃的幽灵 key」先被 ChatConsole 当成正常会话加载了一遍，切走时还会被
- * 空会话 GC 当成「上一个会话」删一次。顺序错了：挂载不该发生在「这个 key 还存在
- * 吗」有结论之前。
+ * 「App 要丢弃的幽灵 key」先被 ChatConsole 当成正常会话加载了一遍。
  *
- * 实测（第八轮的独立探针直接打真实的 sessions_get_handler / sessions_list_handler）：
+ * 本轮实测（独立探针直接打真实的 sessions_get_handler / sessions_list_handler）确认：
  * **裸 get 不会把幽灵落盘、也不会让它进 `sessions.list`**（空会话 `exclude_empty=True`
- * 被排除），所以第七轮的回退判定本身没被这拍 get 打穿；但顺序仍然是错的：
- * `sessions.get(workspace=…)` 那种形状**确实会落盘**（探针实测写出一条
+ * 被排除），所以 App 第七轮的回退判定本身没有被这拍 get 打穿。但顺序仍然是错的：
+ * ChatConsole 的 get/delete 在「这个 key 是否还存在」有结论之前就发出去了，而
+ * `sessions.get(workspace=…)` 这种形状**确实会落盘**（探针实测写出一条
  * `conversation.jsonl`）——挂载顺序不该依赖后端当前恰好是「空会话临时态」。
  *
- * ## 本文件的三个用例
+ * ## 本文件的四个用例
  * 1. `幽灵 lastSession → 一次都不碰`：reload 之后主进程侧**没有任何**
  *    `sessions:get` / `sessions:delete` 带着幽灵 key；反假绿是「记录器确实收到过
  *    `desktop:default` 的 get」+「lastSession 收敛回哨兵」。
@@ -25,11 +24,16 @@
  *    （用户消息立即落盘 → 会话进 sessions.list），把 lastSession 指向它后 reload。
  *    断言 ChatConsole 加载的就是这个 key、没有被回退到默认哨兵、首个请求就是它。
  *    这条守的是两阶段启动**不是**变成「过度回退」——校验失败/判定错都会在这里红。
- * 3. `校验执行失败（list 抛错）→ 显式回退默认`（第九轮新增，#1118 同步）：让
+ * 3. `校验执行失败（list 抛错）→ 显式回退默认`（第九轮新增）：让
  *    `sessions:list` / `sessions:list_archived` 在主进程侧**抛错**（不是返回空
  *    列表——那是「明确查无此 key」，走的是另一条分支），reload 后断言 lastSession
  *    收敛回哨兵、默认会话被加载过、且幽灵 key 一次都没被请求。守的是第九轮 CR
- *    那条：**验证拿不到结论时不得用未验证的非默认 key 挂载**。
+ *    那条：**验证拿不到结论时不得用未验证的非默认 key 挂载**。变异验证见用例内
+ *    注释（把兜底改回「保留未验证 key」→ 必须红）。
+ * 4. `同意页停留超过兜底预算`（第十轮新增，走**真同意门**）：桥的启动被同意门挡在
+ *    后面（consent-first），同意前武装兜底计时器 = 拿用户在门页上的停留时间当
+ *    「等桥」预算，超时就抢在存在性校验开始前把恢复 key 判负。见文件末尾的
+ *    describe。
  *
  * ## 观测手段
  * contextBridge 会把 `window.miqi.*` 冻结（见 repro-570-silent-send.spec.ts 的
@@ -46,23 +50,9 @@
  * 根本没有那个会话）。对 App 的存在性校验来说，「从没存在过」与「已被删除」
  * 不可区分（两者都不在 list ∪ listArchived 里）。
  *
- * ## 变异验证（两阶段门的回归护栏怎么用）
- * 把 App.tsx 的 `restorePending` 初值改成 `false`（= 恢复成第八轮之前的旧顺序：
- * 校验还没结论就挂载 ChatConsole），本文件用例 1 必须**重新变红**并抓到幽灵 key
- * 的 get/delete；改回即绿。第八轮的实测数字：修复前 4 × get(幽灵) + 1 ×
- * delete(幽灵)，修复后 0 次、只剩 `desktop:default`。
- * 第九轮的兜底语义同理：把 `resolveUnverifiedRestoreKey` 的兜底从 `return
- * defaultKey` 改回 `return currentKey`（= 旧的「保留未验证 key」），用例 3 必须红
- * ——主断言是 lastSession 不收敛（停在幽灵 key 上），失败现场快照里 ChatConsole
- * 已挂载、输入框可见，正是「挂着幽灵身份进了界面」。#1034 上实测：单测 2 例红 +
- * E2E 用例红（`Expected: "desktop:default" / Received: "desktop:<ms>"`）；改回即绿。
- *
  * 前置：`npm run build`，再
  *   npx playwright test --config=playwright.config.ts --project=electron \
- *     -g "1035"        # 本文件三个 describe 标题都带 #1035（回归组）
- *   # 只跑本文件时：
- *   npx playwright test --config=playwright.config.ts --project=electron \
- *     --workers=1 issue-1118-session-restore-race.spec.ts
+ *     -g "1118 启动恢复竞态"
  */
 
 import { test, expect } from '@playwright/test';
@@ -133,6 +123,76 @@ async function recordedCalls(app: ElectronApplication): Promise<RecordedCall[]> 
   return (await app.evaluate(() => (globalThis as any).__miqiSessionCalls ?? [])) as RecordedCall[];
 }
 
+/** 本 spec 注入的 list 失败处理器被调用的次数（按 channel 计）。
+ *
+ *  反假绿用：`sessions:list_archived` 在可见 UI 里**只有恢复校验**会调
+ *  （App.tsx 的 listKnownSessionKeys；SettingsPage 只在打开归档页时调，本用例
+ *  到不了那里），所以它 >0 就是「存在性校验真的跑到了、真的撞上了注入的失败」
+ *  的指纹——而这条正是用例想锁的 `unverified` 分支。计数为 0 说明回退是兜底
+ *  计时器给的（桥没起来 / 校验根本没跑），断言必须红。 */
+async function listFailureCalls(app: ElectronApplication): Promise<Record<string, number>> {
+  return (await app.evaluate(() => (globalThis as any).__miqiListFailureCalls ?? {})) as Record<
+    string,
+    number
+  >;
+}
+
+/** 硬断言桥已经到本 spec 需要的状态（`state === 'running'`）。
+ *
+ *  `waitForBridgeInitialized`（helpers/electron-setup.ts）轮询到超时**不抛**，
+ *  只留一行日志——本 spec 三条用例都是「注入改掉桥的行为，再看 App 怎么反应」，
+ *  桥没起来时注入全部落空，而「10s 兜底回退默认」这条与注入无关的路径照样会让
+ *  「幽灵 key 没被请求过」的断言变绿（假绿）。所以等完之后**显式复核**一次；
+ *  不放在共享 helper 里改是因为它有 ~50 个调用点，改签名/行为会波及全库 E2E
+ *  （本轮 CR 的备选方案，默认不做）。
+ *
+ *  **为什么只看 `state`、不看 helper 里那个 `initialized`**：`RuntimeStatus`
+ *  （src/shared/ipc.ts）只有 `{state, configured, python_version?,
+ *  sandbox_available?, error?}`——**没有 `initialized` 字段**，`runtime.status()`
+ *  永远返回 undefined，helper 的 `s?.state === 'running' && s?.initialized`
+ *  因此**恒为假**（每个调用点都白等满 30s 才继续，正是本轮 CR 说的「超时不抛」
+ *  的最坏形态）。而 `state === 'running'` 恰好就是等价且可用的信号：
+ *  bridge.ts 的注释与代码表明主进程只在 `initialize` 握手**之后**才把
+ *  state 置成 `running`（`await this.initializeConnection(); ... this.state =
+ *  'running'`）——即「renderer 看得见 running」蕴含「已握手」。
+ *
+ *  备注：本断言把「桥 30s 没起来」从静默继续变成显式失败——那种情况下用例本来
+ *  就是空跑的，失败才是正确结果（而不是被放宽断言掩盖）。 */
+async function expectBridgeRunning(page: Page): Promise<void> {
+  const status = await page.evaluate(async () => {
+    try {
+      return await (window as any).miqi.runtime.status();
+    } catch (e) {
+      return { error: String(e) };
+    }
+  });
+  expect(
+    status?.state,
+    `用例的注入只对运行中的桥生效：runtime.status().state 必须是 running（实际 ${JSON.stringify(status)}）`
+  ).toBe('running');
+}
+
+/** 收集渲染层 console 警告。
+ *
+ *  App 的两条回退路径各打一条 warn（App.tsx `openGateUnverified` / 校验 effect）：
+ *  - 「... no longer exists — falling back to desktop:default」= list 成功、判定幽灵；
+ *  - 「... (bridge not running within 10000ms) ...」= **兜底计时器**判的负。
+ *  「幽灵 key 没被请求过」在两条路径下都绿，只有日志能证明回退到底是谁给的结论。 */
+function collectAppWarnings(page: Page, sink: string[]): void {
+  page.on('console', (msg) => {
+    if (msg.type() === 'warning' || msg.type() === 'error') sink.push(msg.text());
+  });
+}
+
+/** 断言回退**不是**兜底计时器给的结论（计时器路径会把「还没验证」当成「验证失败」）。 */
+function expectNoTimeoutFallback(warnings: readonly string[]): void {
+  const timeoutWarns = warnings.filter((w) => w.includes('bridge not running within'));
+  expect(
+    timeoutWarns,
+    `回退必须是存在性校验给出的结论，不能是兜底计时器（实际抓到 ${JSON.stringify(timeoutWarns)}）`
+  ).toEqual([]);
+}
+
 /** 让 `sessions.list` / `sessions.listArchived` 在**执行层抛错**。
  *
  *  与「返回空列表」是两条不同分支：空列表 = 明确查无此 key（`fallback`），抛错 =
@@ -143,21 +203,21 @@ async function recordedCalls(app: ElectronApplication): Promise<RecordedCall[]> 
 async function installListFailure(app: ElectronApplication): Promise<void> {
   await app.evaluate(
     async ({ ipcMain: ipc }, channels: { list: string; archived: string }) => {
-      const boom = () => {
+      const counts: Record<string, number> = ((globalThis as any).__miqiListFailureCalls = {});
+      const boom = (channel: string) => {
+        counts[channel] = (counts[channel] ?? 0) + 1;
         throw new Error('e2e: sessions list unavailable');
       };
       for (const channel of [channels.list, channels.archived]) {
         ipc.removeHandler(channel);
-        ipc.handle(channel, async () => boom());
+        ipc.handle(channel, async () => boom(channel));
       }
     },
     { list: SESSIONS_LIST, archived: SESSIONS_LIST_ARCHIVED }
   );
 }
 
-/** Point every configured provider at *mockUrl* and pin the default model
- *  to deepseek so the patched provider is always exercised — no real API
- *  call may ever leave the specs. */
+/** 把所有 provider 指向 mock（同 issue-1118-cross-session-replay.spec.ts）。 */
 function patchProvidersToMock(config: any, mockUrl: string): void {
   const providers = config.providers ?? {};
   for (const [, p] of Object.entries(providers)) {
@@ -177,26 +237,27 @@ function patchProvidersToMock(config: any, mockUrl: string): void {
 }
 
 test.describe('Issue #1035 — 启动恢复竞态：幽灵 lastSession 不得先落到 ChatConsole（#1118 移植）', () => {
-  test.describe.configure({ mode: 'serial', timeout: 300_000 });
-
   let electronApp: ElectronApplication;
   let page: Page;
+  // 第九轮：必须把临时 MIQI_HOME 留给 afterAll，否则 closeElectronApp 拿不到它，
+  // 每跑一次就在 tmpdir 里留一个 `miqi-e2e-*`（连同其中的 Chromium profile）。
   let miqiHome: string;
 
   test.afterAll(async () => {
     await closeElectronApp(electronApp, miqiHome).catch(() => {});
   });
 
-  test('ghost lastSession 一次都不被 ChatConsole 碰（reload 整个 App）', async () => {
+  test('ghost lastSession is never loaded/deleted by ChatConsole before App validation', async () => {
     const fixture = await launchElectronApp();
     electronApp = fixture.electronApp;
     page = fixture.page;
     miqiHome = fixture.miqiHome;
+    const warnings: string[] = [];
+    collectAppWarnings(page, warnings);
     await waitForBridgeInitialized(page);
+    await expectBridgeRunning(page); // 本用例要的是「桥在跑，校验给出了幽灵结论」
 
     // ── 前置：本轮 run 的 lastSession 必须是初始哨兵（profile 隔离自证）──
-    // 这条不成立就说明 Chromium profile 跨 run 共享（#1034 第七轮的实测坑），
-    // 后面的「幽灵 key」会退化成上一轮的真实会话，整个用例的前提就没了。
     const initial = await page.evaluate(() => localStorage.getItem('miqi:lastSession'));
     expect(initial, '本轮 run 的 Chromium profile 应是从未写过 lastSession 的新 profile').toBe(
       DEFAULT_SESSION
@@ -244,12 +305,19 @@ test.describe('Issue #1035 — 启动恢复竞态：幽灵 lastSession 不得先
     ).toEqual([]);
     // 附带断言：首次请求就该是回退后的 key，而不是「先幽灵后默认」
     expect(calls[0]?.sessionKey).toBe(DEFAULT_SESSION);
+    // ── 断言 4（回退来源自证）：结论必须来自存在性校验（list 说「查无此 key」），
+    // 不能来自兜底计时器——计时器路径同样会把 lastSession 写成默认哨兵，
+    // 上面三条断言在桥没起来时全会绿。这里直接锁「哪条路径给的结论」。──
+    console.log(`[e2e] 回退来源日志：${JSON.stringify(warnings)}`);
+    expect(
+      warnings.some((w) => w.includes(`restored session ${ghostKey} no longer exists`)),
+      `回退结论应来自存在性校验（应出现 "restored session ${ghostKey} no longer exists"，实际 ${JSON.stringify(warnings)}）`
+    ).toBe(true);
+    expectNoTimeoutFallback(warnings);
   });
 });
 
 test.describe('Issue #1035 — 校验执行失败时显式回退（#1118 第九轮同步）', () => {
-  test.describe.configure({ mode: 'serial', timeout: 300_000 });
-
   let electronApp: ElectronApplication;
   let page: Page;
   let miqiHome: string;
@@ -263,7 +331,13 @@ test.describe('Issue #1035 — 校验执行失败时显式回退（#1118 第九�
     electronApp = fixture.electronApp;
     page = fixture.page;
     miqiHome = fixture.miqiHome;
+    const warnings: string[] = [];
+    collectAppWarnings(page, warnings);
     await waitForBridgeInitialized(page);
+    // 本用例的核心是「注入的 list 失败 → unverified → 回退默认」。桥没起来时
+    // 注入永远不生效，而 10s 兜底同样把 lastSession 写成默认哨兵 + 让 ChatConsole
+    // 加载默认会话——下面三条断言会**全部为真**却没有验证任何东西（假绿）。
+    await expectBridgeRunning(page);
 
     // ── 前置：本轮 run 的 lastSession 必须是初始哨兵（profile 隔离自证）──
     const initial = await page.evaluate(() => localStorage.getItem('miqi:lastSession'));
@@ -313,12 +387,32 @@ test.describe('Issue #1035 — 校验执行失败时显式回退（#1118 第九�
       `幽灵 key ${ghostKey} 在未能验证时不应被 ChatConsole 加载或删除（实际抓到 ${JSON.stringify(ghostCalls)}）`
     ).toEqual([]);
     expect(calls[0]?.sessionKey).toBe(DEFAULT_SESSION);
+
+    // ── 断言 4（注入真的生效了）：恢复校验必须**真的调过** sessions.list_archived
+    // 并撞上注入的失败。list_archived 在可见 UI 里只有恢复校验会调，所以这条计数
+    // 就是「unverified 分支被走到」的指纹；计数为 0 = 回退其实是兜底计时器给的，
+    // 上面三条断言全是空跑。──
+    const injected = await listFailureCalls(electronApp);
+    console.log(`[e2e] 注入的 list 失败处理器调用次数：${JSON.stringify(injected)}`);
+    expect(
+      injected[SESSIONS_LIST_ARCHIVED] ?? 0,
+      `恢复校验应撞上注入的 sessions.list_archived 失败（实际调用计数 ${JSON.stringify(injected)}）——为 0 说明回退不是注入这条路径给的`
+    ).toBeGreaterThan(0);
+
+    // ── 断言 5（回退来源自证）：结论来自校验（unverified），不是兜底计时器 ──
+    console.log(`[e2e] 回退来源日志：${JSON.stringify(warnings)}`);
+    expect(
+      warnings.some(
+        (w) =>
+          w.includes('could not verify restored session') && w.includes('sessions list unavailable')
+      ),
+      `回退结论应来自由注入失败触发的 unverified 分支（实际 ${JSON.stringify(warnings)}）`
+    ).toBe(true);
+    expectNoTimeoutFallback(warnings);
   });
 });
 
 test.describe('Issue #1035 — 恢复校验不误伤仍存在的会话（#1118 移植）', () => {
-  test.describe.configure({ mode: 'serial', timeout: 300_000 });
-
   let electronApp: ElectronApplication;
   let page: Page;
   let miqiHome: string;
@@ -329,19 +423,21 @@ test.describe('Issue #1035 — 恢复校验不误伤仍存在的会话（#1118 �
     await closeElectronApp(electronApp, miqiHome).catch(() => {});
   });
 
-  test('restored lastSession 仍存在时原样加载（不回退、不被门挂住）', async () => {
-    // 起一个永不响应的 mock provider，让真实回合一直存活（会话落盘但不结束）。
+  test('restored lastSession that still exists is loaded as-is (no fallback, no hold-up)', async () => {
+    test.setTimeout(300_000);
     const mock = await startMockServer('mock_hang.py');
     mockServer = mock.proc;
     const fixture = await launchElectronApp((config: any) => {
       patchProvidersToMock(config, mock.mockUrl);
-      // No sandbox needed — 这里验的是启动恢复的挂载顺序。
       config.tools = { ...config.tools, sandbox: { ...config.tools?.sandbox, enabled: false } };
     });
     electronApp = fixture.electronApp;
     page = fixture.page;
     miqiHome = fixture.miqiHome;
     await waitForBridgeInitialized(page);
+    // 造会话 / 发消息 / 落盘都要求桥真的在跑（超时不抛的 helper 会把「桥没起来」
+    // 一路带到后面，报错点变成会话造不出来，掩盖真正的原因）。
+    await expectBridgeRunning(page);
 
     // ── 造一个真会话 ──
     // 第一次「+」会复用当前的空会话（#615 的 reuse-empty 语义，所以它还是
@@ -350,9 +446,9 @@ test.describe('Issue #1035 — 恢复校验不误伤仍存在的会话（#1118 �
     // 消息才会落盘进 sessions.list，否则存在性校验会把它当幽灵（空会话不进列表）。
     // 挂起的 mock 让回合一直不结束，但用户消息立即落盘。
     await createNewConversation(page);
-    await sendMessage(page, `#1035 restore-normal warmup ${Date.now()}`);
+    await sendMessage(page, `#1118 restore-normal warmup ${Date.now()}`);
     await createNewConversation(page);
-    await sendMessage(page, `#1035 restore-normal ${Date.now()}`);
+    await sendMessage(page, `#1118 restore-normal ${Date.now()}`);
     await expect
       .poll(() => page.evaluate(() => localStorage.getItem('miqi:lastSession')), {
         timeout: 60_000,
@@ -397,5 +493,96 @@ test.describe('Issue #1035 — 恢复校验不误伤仍存在的会话（#1118 �
     console.log(`[e2e] 正常恢复路径的会话请求：${JSON.stringify(calls)}（会话 key=${realKey}）`);
     expect(calls[0]?.sessionKey).toBe(realKey);
     expect(calls.some((c) => c.sessionKey === DEFAULT_SESSION)).toBe(false);
+  });
+});
+
+/** 恢复门兜底计时器的预算（App.tsx 的 `RESTORE_GATE_MAX_MS`；改那边时这里同步）。 */
+const RESTORE_GATE_MAX_MS = 10_000;
+
+/**
+ * #1118 第十轮 CR（Finding 1）——兜底计时器只在**同意门开启后**武装。
+ *
+ * ## 时序（consent-first）
+ * 桥的启动被隐私同意门挡在后面（App.tsx：`if (!consentOk) return;` 时不调
+ * `runtime.start()`），所以门还挡着的时候 `status.state` 恒不为 `running`、
+ * 存在性校验根本不跑。此时武装兜底计时器 = 拿用户在门页上读协议的时间去消耗
+ * 「等桥」的预算：停留超过 RESTORE_GATE_MAX_MS，`openGateUnverified` 就把恢复
+ * 出来的 key 降级成 `desktop:default`（顺带把 `restoredSessionCheckedRef` 置真，
+ * 用户点了同意之后校验再也不会跑）——**校验还没开始就被判负**。
+ *
+ * ## 本用例断言什么
+ * 门页上停留超过兜底预算（13s > 10s）后，`miqi:lastSession` 必须原样是恢复出来
+ * 的那个 key，且门仍然挡着（从没离开过同意页）。变异验证：把 App.tsx 的武装条件
+ * 改回只看 `restorePending`（或让 `shouldArmRestoreTimeout` 返回 `restorePending`）
+ * ——本用例在 10s 处立刻变红。
+ *
+ * ## key 为什么是「有效性未知」的那个形状
+ * 这恰恰是被修的行为本身：App 在门开之前**无法**知道这个 key 是真会话还是幽灵
+ * （校验要等桥起来），所以它不得在门页上被降级。用 `desktop:<ms>` 这种「本轮
+ * store 里不存在」的 key，与第七轮实测到的真实 flake 形状一致（见文件头）。
+ *
+ * ## 为什么不断言「点同意之后 key 还在」
+ * 那是**另一条**时间线：同意之后桥才开始冷启动，仍然只有 10s 预算（第十轮的修复
+ * 就是把这段完整的 10s 还回来）。断言「同意后 key 不被降级」等于断言「CI runner
+ * 的桥冷启动必须 < 10s」——那是 runner 速度、不是本修复的性质，写进用例就是
+ * 为了绿灯放宽断言的反面（假红 / flaky）。门页停留这一段是**确定性**的：桥在
+ * 门开着时压根没启动，与 runner 快慢无关。
+ */
+test.describe('#1118 同意页停留超过兜底预算', () => {
+  let electronApp: ElectronApplication;
+  let page: Page;
+  let miqiHome: string;
+
+  test.afterAll(async () => {
+    await closeElectronApp(electronApp, miqiHome).catch(() => {});
+  });
+
+  test('dwelling on the consent gate past the fallback budget must not downgrade the restore key', async () => {
+    test.setTimeout(240_000);
+    // 不绕过同意门（consent=real，同 privacy-consent.spec）：profile 与同意记录
+    // 都被 electron-setup 钉在本次 run 的临时 MIQI_USER_DATA_DIR 上，全新目录 ⇒
+    // 门必然出现（若没出现，下面的可见性断言会显式失败，而不是静默降级成别的
+    // 场景）。
+    const fixture = await launchElectronApp(undefined, { noConsentBypass: true });
+    electronApp = fixture.electronApp;
+    page = fixture.page;
+    miqiHome = fixture.miqiHome;
+
+    await expect(page.getByTestId('privacy-consent-gate')).toBeVisible({ timeout: 60_000 });
+
+    // ── 前置自证：桥在同意前**没有**启动（否则「门页停留」不消耗等桥预算，
+    //    本用例要复现的时序不成立）。runtime.start() 只由渲染层的 start effect
+    //    在 consentOk 之后调用，主进程不会自己起桥。──
+    const before = await page.evaluate(async () => {
+      try {
+        return await (window as any).miqi.runtime.status();
+      } catch (e) {
+        return { error: String(e) };
+      }
+    });
+    expect(
+      before?.state,
+      `同意门挡着时桥不得处于 running（实际 ${JSON.stringify(before)}）`
+    ).not.toBe('running');
+
+    // ── 触发：把 lastSession 指向一个「有效性未知」的 key，然后在门页上停留
+    //    超过兜底预算 ──
+    const restoreKey = `desktop:${Date.now()}`;
+    await page.evaluate((k) => localStorage.setItem('miqi:lastSession', k), restoreKey);
+    await page.waitForTimeout(RESTORE_GATE_MAX_MS + 3_000);
+
+    // ── 主断言：key 原样还在（修复前 10s 处被降级成 desktop:default）──
+    const stored = await page.evaluate(() => localStorage.getItem('miqi:lastSession'));
+    console.log(
+      `[e2e] 门页停留 ${(RESTORE_GATE_MAX_MS + 3_000) / 1000}s 后的 lastSession=${stored}（恢复 key=${restoreKey}）`
+    );
+    expect(
+      stored,
+      `同意门开启前不得武装兜底计时器：lastSession 应仍是 ${restoreKey}（实际 ${stored}）`
+    ).toBe(restoreKey);
+
+    // ── 附带断言：门始终挡着（上面那 13s 确实停在同意页上，没有别的路径替我们
+    //    把应用推过门）──
+    await expect(page.getByTestId('privacy-consent-gate')).toBeVisible();
   });
 });

@@ -5,7 +5,14 @@ call is in the request history yet: answer with a single ``create_pdf``
 tool_call for that filename (the filename travels in the user message, so the
 spec never has to tell the mock anything out of band).
 
-Every other request (no ``*.pdf`` in the latest user message, or the call
+Round 2 — only when the latest user message carries a ``DECLARE_AS=<path>``
+directive and create_pdf already happened: answer with one
+``declare_result_files`` call for that path.  This mirrors the real agent in
+#1131, which declared the **workspace-base-relative** form
+(``sessions/<key>/files/<name>``).  Without the directive this round is
+skipped entirely, so the #983 spec's flow is unchanged.
+
+Every other request (no ``*.pdf`` in the latest user message, or the calls
 already happened) answers with plain text ``created <file> (mock complete).``.
 
 ASCII-only on purpose: the spec asserts on this string, and CI runners may
@@ -33,7 +40,11 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 # resolves to its last segment — fine, the spec owns the filename.
 _PDF_RE = re.compile(r"[\w-]{1,64}\.pdf")
 
+_DECLARE_AS_RE = re.compile(r"DECLARE_AS=(\S+)")
+
 _TOOL_NAME = "create_pdf"
+
+_DECLARE_TOOL_NAME = "declare_result_files"
 
 
 def _last_user(messages):
@@ -43,54 +54,51 @@ def _last_user(messages):
     )
 
 
-def _already_called(messages):
-    """True when the conversation already carries a create_pdf tool_call."""
+def _already_called(messages, name):
+    """True when the conversation already carries a tool_call named *name*."""
     for m in messages:
         if m.get("role") != "assistant":
             continue
         for tc in m.get("tool_calls") or []:
-            if ((tc.get("function") or {}).get("name") or "") in (_TOOL_NAME, "pdf_write"):
+            if ((tc.get("function") or {}).get("name") or "") == name:
                 return True
     return False
 
 
+def _already_created_pdf(messages):
+    """create_pdf under either its current or its historical tool name."""
+    return _already_called(messages, _TOOL_NAME) or _already_called(
+        messages, "pdf_write"
+    )
+
+
 def _reply(messages):
     """Pick the response for this request: tool_call or plain text."""
+    user = _last_user(messages)
     filename = None
-    m = _PDF_RE.search(_last_user(messages))
+    m = _PDF_RE.search(user)
     if m:
-        # Must be set BEFORE the tool-call branch: round 2 (tool already in
-        # history) takes the text branch and reports the same filename back.
+        # Must be set BEFORE the tool-call branch: later rounds take the text
+        # branch and report the same filename back.
         filename = m.group(0)
-    if m and not _already_called(messages):
+    if m and not _already_created_pdf(messages):
         args = {
             "filename": filename,
             "title": "#983 panel e2e",
             "content": [{"type": "paragraph", "text": "created by create_pdf_mock.py"}],
         }
-        return {
-            "id": "chatcmpl-mock-tool",
-            "object": "chat.completion",
-            "created": 0,
-            "model": "mock",
-            "choices": [{
-                "index": 0,
-                "message": {
-                    "role": "assistant",
-                    "content": None,
-                    "tool_calls": [{
-                        "id": "call_create_pdf",
-                        "type": "function",
-                        "function": {
-                            "name": _TOOL_NAME,
-                            "arguments": json.dumps(args, ensure_ascii=False),
-                        },
-                    }],
-                },
-                "finish_reason": "tool_calls",
-            }],
-            "usage": {"prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20},
-        }
+        return _tool_call_response(
+            "call_create_pdf", _TOOL_NAME, args,
+        )
+    declare_as = _DECLARE_AS_RE.search(user)
+    if (
+        declare_as
+        and filename
+        and not _already_called(messages, _DECLARE_TOOL_NAME)
+    ):
+        return _tool_call_response(
+            "call_declare", _DECLARE_TOOL_NAME, {"paths": [declare_as.group(1)]},
+        )
     text = f"created {filename} (mock complete)." if filename else "ok."
     return {
         "id": "chatcmpl-mock-final",
@@ -103,6 +111,32 @@ def _reply(messages):
             "finish_reason": "stop",
         }],
         "usage": {"prompt_tokens": 20, "completion_tokens": 10, "total_tokens": 30},
+    }
+
+
+def _tool_call_response(call_id, name, args):
+    return {
+        "id": "chatcmpl-mock-tool",
+        "object": "chat.completion",
+        "created": 0,
+        "model": "mock",
+        "choices": [{
+            "index": 0,
+            "message": {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [{
+                    "id": call_id,
+                    "type": "function",
+                    "function": {
+                        "name": name,
+                        "arguments": json.dumps(args, ensure_ascii=False),
+                    },
+                }],
+            },
+            "finish_reason": "tool_calls",
+        }],
+        "usage": {"prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20},
     }
 
 

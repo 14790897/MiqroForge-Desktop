@@ -41,6 +41,7 @@ import { useQraftStatus } from './hooks/useQraftStatus';
 import {
   DEFAULT_SESSION_KEY,
   resolveUnverifiedRestoreKey,
+  shouldArmRestoreTimeout,
   shouldVerifyRestoredSession,
   verifyRestoredSession,
 } from './sessionRestore';
@@ -274,14 +275,19 @@ function AppShell() {
   }, []);
   // 兜底：桥迟迟不到 running 时不得把启动挂在等待上，超时即**显式回退默认**
   // 后放行（不是带着未验证的 key 放行，见上）。
+  // #1118 第十轮：计时器只在**同意门开启后**才武装——桥的启动本身就被同意门
+  // 挡着（consent-first，见下面 start 那个 effect），同意前武装等于拿用户在
+  // 同意页上的停留时间消耗「等桥」的预算，超时就抢在存在性校验**开始之前**
+  // 把恢复出来的 key 判负（判定见 shouldArmRestoreTimeout）。同意门打开会让
+  // 本 effect 重跑（consentOk 在依赖里），预算从那一刻重新起算。
   useEffect(() => {
-    if (!restorePending) return;
+    if (!shouldArmRestoreTimeout(restorePending, consentOk)) return;
     const timer = window.setTimeout(
       () => openGateUnverified(`bridge not running within ${RESTORE_GATE_MAX_MS}ms`),
       RESTORE_GATE_MAX_MS
     );
     return () => window.clearTimeout(timer);
-  }, [restorePending, openGateUnverified]);
+  }, [restorePending, consentOk, openGateUnverified]);
   useEffect(() => {
     if (restoredSessionCheckedRef.current) return;
     if (!PRELOAD_OK || status.state !== 'running') return;

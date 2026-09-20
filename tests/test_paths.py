@@ -1,6 +1,8 @@
 """Contract and integration tests for miqi.paths path resolution."""
 
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+
+import pytest
 
 from miqi.config.loader import load_config, save_config
 from miqi.config.schema import Config
@@ -9,8 +11,50 @@ from miqi.paths import (
     get_legacy_config_path,
     get_legacy_data_dir,
     get_miqi_home,
+    normalize_declared_separators,
+    normalize_session_prefixed,
 )
 from miqi.utils.helpers import get_data_path, get_workspace_path
+
+
+def test_windows_separator_path_is_a_single_component_on_posix():
+    """为什么分隔符归一必须发生在判定会话前缀**之前**。
+
+    反斜杠在 POSIX 上只是普通文件名字符，`sessions\\k\\files\\a.pdf` 在那里
+    是**一个**组件，前缀规则根本看不见它 —— 于是退回朴素拼接，文件被解析到
+    一个带字面反斜杠的假路径上（#1131 的另一副面孔）。用 PurePosixPath 断言，
+    使这条在任何平台上都判别同一件事。
+    """
+    assert len(PurePosixPath(r"sessions\k\files\a.pdf").parts) == 1
+    assert len(PurePosixPath(normalize_declared_separators(r"sessions\k\files\a.pdf")).parts) == 4
+
+
+def test_normalize_declared_separators_rewrites_only_windows_forms():
+    assert normalize_declared_separators(r"sessions\k\files\a.pdf") == "sessions/k/files/a.pdf"
+    # Windows 根相对 `\sessions\...`：只去掉那个来自反斜杠的前导分隔符。
+    assert normalize_declared_separators(r"\sessions\k\files\a.pdf") == "sessions/k/files/a.pdf"
+    # 真正的 POSIX 绝对路径与 UNC 路径必须原样保留。
+    assert normalize_declared_separators("/home/u/a.pdf") == "/home/u/a.pdf"
+    assert normalize_declared_separators("//server/share/a.pdf") == "//server/share/a.pdf"
+    # 反斜杠形态的 UNC 同样要保留**两个**前导分隔符：少一个就变成 POSIX 根路径
+    # `/server/share/a.pdf`，那是另一个位置，边界检查也会锚错根。
+    assert normalize_declared_separators(r"\\server\share\a.pdf") == "//server/share/a.pdf"
+
+
+def test_normalize_session_prefixed_accepts_windows_separators(tmp_path):
+    """会话前缀规则自己做入参归一，不指望每个调用方都记得（#1131）。"""
+    base = tmp_path / "ws"
+    files = base / "sessions" / "desktop_k" / "files"
+    files.mkdir(parents=True)
+
+    for declared in (r"sessions\desktop_k\files\a.pdf", "sessions/desktop_k/files/a.pdf"):
+        got = normalize_session_prefixed(declared, files)
+        assert got is not None, f"未识别出会话前缀：{declared}"
+        assert got.resolve() == (files / "a.pdf").resolve()
+
+    # 归一之后，「指向别的会话」才能被正确地拒绝，而不是变成一个怪文件名。
+    with pytest.raises(PermissionError):
+        normalize_session_prefixed(r"sessions\other\files\a.pdf", files)
 
 
 def test_miqi_home_defaults_to_dot_miqi(monkeypatch, tmp_path):

@@ -478,10 +478,6 @@ export function Sidebar({
                           {wsPath}
                         </p>
                       )}
-                      {/* Description — small gray, multi-line */}
-                      <p className="text-xs leading-relaxed text-text-muted">
-                        {s.message_count != null ? `${s.message_count} 条消息` : '暂无描述'}
-                      </p>
                     </button>
                   )}
                 </ContextMenu>

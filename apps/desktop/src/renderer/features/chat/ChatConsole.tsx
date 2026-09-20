@@ -332,6 +332,8 @@ interface Message {
   toolName?: string;
   /** Parsed tool data for card rendering */
   toolData?: unknown;
+  /** Structured web sources (title/url/snippet) from web_search/web_fetch (#879) */
+  webSources?: MessageSource[];
   /** Original tool-call arguments (e.g. web_fetch's url) — real references */
   toolArgs?: unknown;
   action?: 'open-provider-settings' | 'retry-load' | 'login';
@@ -345,8 +347,23 @@ interface Message {
    *  expandable box instead of activity parsing. */
   toolOutput?: boolean;
   /** Model chain-of-thought (DeepSeek-R1 / Kimi thinking models). Rendered as
-   *  a collapsible thinking block above the message content. Issue #539. */
+   *  a collapsible thinking block above the message content. Issue #539.
+   *  While streaming this is the BOUNDED tail window (#1034) — see
+   *  `liveReasoningTail` / `reasoningOmitted` — and is replaced by the
+   *  backend's full text when the turn finishes. */
   reasoning?: string;
+  /** (#1034) The tail window actually retained for a live reasoning block:
+   *  at most `MAX_LIVE_REASONING_CHARS` characters.  `content`/`reasoning`
+   *  are this window prefixed by `liveReasoningPlaceholder(reasoningOmitted)`
+   *  when the head was dropped.  Kept as its own field so each flush appends
+   *  to a bounded string instead of copying the whole accumulated text
+   *  (the measured OOM amplifier). */
+  liveReasoningTail?: string;
+  /** (#1034) How many characters were dropped from the head of the live
+   *  reasoning text (0 = nothing omitted).  Exposed to the user as
+   *  「…已省略 X 字」.  The full text is never lost — it is persisted
+   *  server-side (reasoning_content) and re-delivered on the final event. */
+  reasoningOmitted?: number;
   /** Marks the live reasoning bubble during streaming so it can be replaced
    *  by the final assistant message once the turn completes. Issue #539. */
   isLiveReasoning?: boolean;
@@ -370,12 +387,24 @@ interface Message {
 interface MessageSource {
   tool: string;
   url: string;
+  /** Structured title from web_search/web_fetch sources (#879) */
+  title?: string;
+  /** Structured snippet from web_search/web_fetch sources (#879) */
+  snippet?: string;
 }
 
 // Stable empty array for messages without sources — keeps the `sources` prop
 // referentially equal so MessageBubble's memo isn't defeated by a fresh `[]`
 // on every keystroke (#1021).
 const EMPTY_SOURCES: MessageSource[] = [];
+
+/** sourcesByMsg 的键。progress 行用 toolCallId（后端每工具调用唯一），其余用
+ *  timestamp。此前直接拿 Date.now() 的 timestamp 当键：同毫秒创建的两个
+ *  progress 行会互相覆盖来源（先一行显示后一行的来源，#879 ③ CodeRabbit）。
+ *  加 role 前缀 + toolCallId 去碰撞。 */
+function sourcesKey(m: Message): string {
+  return m.role === 'progress' ? `p:${m.toolCallId ?? m.timestamp}` : `a:${m.timestamp}`;
+}
 
 const TOOL_LABELS: Record<string, string> = {
   web_fetch: '网页抓取',
@@ -414,7 +443,12 @@ function hostOf(url: string): string {
 /** Extract reference URLs from a tool/progress message.
  *  Priority: the URL the tool actually touched (toolArgs) > structured
  *  paper_search cards > links found in result text (fallback). */
-function extractMessageSources(msg: Message): MessageSource[] {
+export function extractMessageSources(msg: Message): MessageSource[] {
+  // Structured web sources (#879): web_search/web_fetch emit title/url/snippet
+  // directly — use them verbatim instead of heuristically re-parsing text.
+  if (msg.webSources && msg.webSources.length > 0) {
+    return msg.webSources;
+  }
   const sources: MessageSource[] = [];
   const skip = [
     'api.semanticscholar.org',
@@ -504,11 +538,12 @@ interface WebSearchItem {
 
 function parseWebSearchResults(content: string): WebSearchItem[] {
   const items: WebSearchItem[] = [];
-  const entryRe = /^\d+\.\s+(.+)$/gm;
+  // 兼容两种输出格式：think 模式 `1. title` / FAST fan-out 兜底 `- title`（#879）
+  const entryRe = /^(?:\d+\.|-)\s+(.+)$/gm;
   let m: RegExpExecArray | null;
   while ((m = entryRe.exec(content)) !== null) {
     const title = m[1].trim();
-    const rest = content.slice(m.index + m[0].length).split(/\n(?=\d+\.\s)/)[0];
+    const rest = content.slice(m.index + m[0].length).split(/\n(?=(?:\d+\.|-)\s)/)[0];
     const lines = rest
       .split('\n')
       .map((l) => l.trim())
@@ -609,6 +644,10 @@ interface TrackedFile {
   lastSeen: number;
   /** path was truncated in the progress message (ends with ...) */
   truncated?: boolean;
+  /** 产出该文件的工具名（如 create_docx / graph_render / write_file），#879 ③ 追溯 */
+  sourceTool?: string;
+  /** 产出该文件的回合序号（第几个 user 回合，从 0 起），#879 ③ 追溯 */
+  turnId?: number;
   /** #1104: agent 通过 declare_result_files 显式声明为结果文件 */
   result?: boolean;
 }
@@ -1074,6 +1113,8 @@ function mergeTrackedFiles(
     name?: string;
     op?: TrackedFile['op'];
     lastSeen?: number;
+    sourceTool?: string;
+    turnId?: number;
     /** #1104: agent 显式声明的结果文件标记——合并时 sticky，不被后续流式更新抹掉 */
     result?: boolean;
   }>,
@@ -1088,6 +1129,8 @@ function mergeTrackedFiles(
       name: f.name ?? basename(np),
       op: f.op ?? 'read',
       lastSeen: f.lastSeen ?? Date.now(),
+      sourceTool: f.sourceTool,
+      turnId: f.turnId,
     };
     const existingIdx = out.findIndex((p) => {
       const np2 = normalizeTrackedPath(p.path);
@@ -1099,8 +1142,15 @@ function mergeTrackedFiles(
     if (f.result === true || (existingIdx >= 0 && out[existingIdx].result === true)) {
       entry.result = true;
     }
-    if (existingIdx >= 0) out[existingIdx] = entry;
-    else out.push(entry);
+    if (existingIdx >= 0) {
+      // 后端下发（backend）不含 sourceTool/turnId 时，保留消息提取（existing）的字段，
+      // 否则文件卡片的「相关引用」会在会话加载/最终刷新时被清空（#879 ③ CodeRabbit）。
+      out[existingIdx] = {
+        ...entry,
+        sourceTool: entry.sourceTool ?? out[existingIdx].sourceTool,
+        turnId: entry.turnId ?? out[existingIdx].turnId,
+      };
+    } else out.push(entry);
   }
   return out;
 }
@@ -2083,14 +2133,34 @@ function groupChatMessages(messages: Message[]): ChatGroup[] {
 }
 
 /** Merge adjacent thinking blocks so a turn can never show duplicate headers. */
-function dedupeReasoningBlocks(messages: Message[]): Message[] {
+export function dedupeReasoningBlocks(messages: Message[]): Message[] {
   const out: Message[] = [];
   let pending: Message | null = null;
   for (const m of messages) {
     if (m.role === 'progress' && m.reasoning) {
       if (pending) {
-        pending.content = `${pending.content}\n${m.content}`;
-        pending.reasoning = pending.content;
+        // (#1034 复审 P2) 任一侧带尾窗记账（正在流式，或已经折叠出占位符）时
+        // 不能按渲染文本拼接：右侧的「…已省略 N 字」会被当成正文吞进中间，
+        // 它自己的省略计数也会丢（只留左边那个）。走 mergeReasoningBlocks
+        // 把两个 tail 重新开窗，省略计数相加，守恒关系
+        // （省略 + 保留 == 逻辑总字符数）对两个都已裁剪的块同样成立；
+        // liveReasoningTail 也随之重新基线化，下一次 flush 不会丢掉刚并进来
+        // 的这段文本。
+        //
+        // 两侧都没有尾窗（例如整段来自持久化历史）时保持原来的整段拼接：
+        // 上界只作用于流式期间的内存副本（见 MAX_LIVE_REASONING_CHARS），
+        // 已落盘的完整文本不该在合并时被折叠。
+        const windowed = hasReasoningWindow(pending) || hasReasoningWindow(m);
+        if (windowed) {
+          const merged = mergeReasoningBlocks(pending, m);
+          pending.content = merged.text;
+          pending.reasoning = merged.text;
+          pending.liveReasoningTail = merged.tail;
+          pending.reasoningOmitted = merged.omitted;
+        } else {
+          pending.content = `${pending.content}\n${m.content}`;
+          pending.reasoning = pending.content;
+        }
         pending.reasoningElapsedS = m.reasoningElapsedS ?? pending.reasoningElapsedS;
         pending.timestamp = m.timestamp;
         pending.isLiveReasoning = pending.isLiveReasoning || m.isLiveReasoning;
@@ -2166,7 +2236,675 @@ export function insertStandaloneReasoning(
   return [...messages.slice(0, insertAt), block, ...messages.slice(insertAt)];
 }
 
-/** Append a streaming reasoning chunk to the last live thinking bubble. */
+/**
+ * (#1034) Hard upper bound, in characters, on the live reasoning text kept in
+ * the in-memory/rendered thinking block.
+ *
+ * The value 8000 is a bounded operational window chosen from local profiling,
+ * not a claim about reading behaviour: it is the point where the markdown
+ * re-parse of the tail stays sub-millisecond, so a 60 ms flush never pays a
+ * cost that grows with the accumulated length (measured amplifier: ≈458 B of
+ * retained memory per 1 B of text, 300 MB peak — see the #1034 measurement
+ * report).  Nothing is *lost* by the bound: the block only ever shows
+ * transient thinking, and the backend's full text replaces it after the turn
+ * (see `_closeLiveReasoning` in the final handler; the durable copy lives in
+ * `reasoning_content`: miqi/runtime/turn_runner.py:687 writes the assistant
+ * message, miqi/runtime/history_runtime.py:148 keeps it in
+ * execution_snapshots, miqi/bridge/loop.py:1361 re-sends it on the final
+ * event).
+ */
+export const MAX_LIVE_REASONING_CHARS = 8000;
+/**
+ * (#1034) When the cap is exceeded the window is trimmed down to this length
+ * (hysteresis) instead of to exactly the cap.  Like the cap itself, 6000 is a
+ * bounded operational window chosen from local profiling (the 2000-character
+ * gap is what amortises the head rewrite), not a claim about how much text a
+ * reader takes in.  Trimming on *every* flush would rewrite the head
+ * paragraph every 60ms, defeating the per-segment memoization in ThinkBlock;
+ * this way head drops happen only once per ~2000 new characters, and every
+ * flush in between is an append-only write to the last segment.
+ */
+export const LIVE_REASONING_KEEP_CHARS = 6000;
+
+/** (#1034) Head-collapse placeholder for a live reasoning block, e.g.
+ *  「…已省略 1234 字」.  A trailing blank line keeps it its own markdown
+ *  paragraph so it renders as a separate line, not glued to the tail.
+ *
+ *  `LIVE_REASONING_PLACEHOLDER_PREFIX` / `_SUFFIX` are shared with
+ *  `parseLiveReasoningOmitted` so the marker can never be written one way and
+ *  read back another. */
+const LIVE_REASONING_PLACEHOLDER_PREFIX = '…已省略 ';
+const LIVE_REASONING_PLACEHOLDER_SUFFIX = ' 字\n\n';
+
+export function liveReasoningPlaceholder(omittedChars: number): string {
+  return `${LIVE_REASONING_PLACEHOLDER_PREFIX}${omittedChars}${LIVE_REASONING_PLACEHOLDER_SUFFIX}`;
+}
+
+/** (#1034 复审 P2) Read a rendered 「…已省略 N 字」 marker back into its count,
+ *  or `null` when `text` has no marker.
+ *
+ *  Needed because a reasoning block that is no longer live has only its
+ *  rendered text: the final handler replaces `content` with the backend's own
+ *  (re-capped) text while a block's `reasoningOmitted` keeps counting the
+ *  *streaming* window.  Merging must start from what is actually on screen, so
+ *  the count is taken from the marker that produced that text, by *shape*
+ *  rather than by equality — the same rule `isStrippedTerminal` uses. */
+function parseLiveReasoningOmitted(text: string): number | null {
+  if (!text.startsWith(LIVE_REASONING_PLACEHOLDER_PREFIX)) return null;
+  const start = LIVE_REASONING_PLACEHOLDER_PREFIX.length;
+  const end = text.indexOf(LIVE_REASONING_PLACEHOLDER_SUFFIX, start);
+  if (end < 0) return null;
+  const digits = text.slice(start, end);
+  return /^\d+$/.test(digits) ? Number(digits) : null;
+}
+
+/** Keep a surrogate pair intact when cutting the window at `index`. */
+function alignCodePoint(text: string, index: number): number {
+  if (index <= 0 || index >= text.length) return index;
+  const code = text.charCodeAt(index);
+  // A low surrogate at the cut means the pair started one char earlier.
+  return code >= 0xdc00 && code <= 0xdfff ? index + 1 : index;
+}
+
+/** (#1034) Append `delta` to a bounded tail window, reporting what was
+ *  dropped and what the message's visible text should be.
+ *
+ *  A single delta can itself be multi-MB (a provider that buffers a whole
+ *  thinking block and emits it in one chunk).  Clipping it *before* the
+ *  concatenation keeps the temporary allocation bounded: `prevTail + delta`
+ *  would otherwise build the full multi-MB string only to slice all but the
+ *  last LIVE_REASONING_KEEP_CHARS away.  Everything dropped here is accounted
+ *  for in `omitted`, so the placeholder stays exact. */
+function accumulateLiveReasoning(
+  prevTail: string,
+  prevOmitted: number,
+  delta: string
+): { tail: string; omitted: number; text: string } {
+  let omitted = prevOmitted;
+  let boundedDelta = delta;
+  if (boundedDelta.length > MAX_LIVE_REASONING_CHARS) {
+    const cut = alignCodePoint(boundedDelta, boundedDelta.length - MAX_LIVE_REASONING_CHARS);
+    omitted += cut;
+    boundedDelta = boundedDelta.slice(cut);
+  }
+  let tail = prevTail + boundedDelta;
+  if (tail.length > MAX_LIVE_REASONING_CHARS) {
+    const cut = alignCodePoint(tail, tail.length - LIVE_REASONING_KEEP_CHARS);
+    omitted += cut;
+    tail = tail.slice(cut);
+  }
+  return { tail, omitted, text: omitted > 0 ? liveReasoningPlaceholder(omitted) + tail : tail };
+}
+
+/** (#1034 复审 P2) A reasoning block's *own* window, as merging should see it:
+ *  the text the reader still has, and how many characters its head marker (or
+ *  the live bookkeeping) already accounts for.
+ *
+ *  `liveReasoningTail` must always be the tail of `content`, otherwise the next
+ *  flush renders `tail + delta` and silently drops the characters in between
+ *  (visible as thinking text disappearing mid-stream).  `appendReasoningDelta`
+ *  maintains that by construction, so a live block is read straight from the
+ *  bookkeeping.  Any other block is read back from its rendered text: a headed
+ *  block carries the exact count in its marker, and a block with no marker was
+ *  never windowed.  Either way `omitted + tail.length` is that block's full
+ *  logical length — the property `mergeReasoningBlocks` has to preserve. */
+function reasoningWindow(msg: Message): { tail: string; omitted: number } {
+  const text = msg.content ?? msg.reasoning ?? '';
+  if (msg.isLiveReasoning && typeof msg.liveReasoningTail === 'string') {
+    return { tail: msg.liveReasoningTail, omitted: msg.reasoningOmitted ?? 0 };
+  }
+  const omitted = parseLiveReasoningOmitted(text);
+  return omitted === null
+    ? { tail: text, omitted: 0 }
+    : { tail: text.slice(liveReasoningPlaceholder(omitted).length), omitted };
+}
+
+/** (#1034 复审 P2) Does this block carry the bounded window's bookkeeping —
+ *  still streaming, or already collapsed into a head marker?  Plain text (a
+ *  turn restored from persisted history) carries neither, and merging it must
+ *  not start folding it: the bound is a *streaming* bound (see
+ *  MAX_LIVE_REASONING_CHARS). */
+function hasReasoningWindow(msg: Message): boolean {
+  return msg.isLiveReasoning === true || parseLiveReasoningOmitted(msg.content ?? '') !== null;
+}
+
+/** (#1034 复审 P2) Merge two adjacent thinking blocks with exact omission
+ *  accounting.
+ *
+ *  Concatenating the rendered texts (what this used to do) splices the right
+ *  block's 「…已省略 N 字」 marker into the middle of the merged text and drops
+ *  its omission count — the merged block kept only the left one's, so
+ *  `omitted + retained tail` no longer equalled the reasoning that was
+ *  received.  Re-window the two *tails* through `accumulateLiveReasoning`
+ *  instead, with the omission counts summed up front: what the new, longer
+ *  window drops on top is then added by the accumulator itself, and the
+ *  invariant holds by construction. */
+function mergeReasoningBlocks(
+  left: Message,
+  right: Message
+): { tail: string; omitted: number; text: string } {
+  const leftWindow = reasoningWindow(left);
+  const rightWindow = reasoningWindow(right);
+  return accumulateLiveReasoning(
+    `${leftWindow.tail}\n`,
+    leftWindow.omitted + rightWindow.omitted,
+    rightWindow.tail
+  );
+}
+
+/** (#1034 复审 P1-a / P2) The newest terminal and the last `final` are never
+ *  evicted — the replay needs them to settle the session (#1118, see
+ *  `evictableTerminalIndex`) — so an unbounded `reasoning` inside one final
+ *  would blow IN_FLIGHT_MAX_BYTES by construction.  The live stream already
+ *  keeps reasoning as a bounded tail
+ *  window (MAX_LIVE_REASONING_CHARS / LIVE_REASONING_KEEP_CHARS); apply the
+ *  same window to a terminal's reasoning so the byte budget stays a real
+ *  budget:
+ *   - at ingest, before the event enters the in-flight cache; and
+ *   - at landing, so the renderer never swallows a multi-MB string in one
+ *     write when a turn closes (the full text is still in the session's
+ *     persisted history).
+ *
+ *  Shorter-than-cap text passes through untouched. */
+export function capTerminalReasoning(reasoning: string | undefined): string | undefined {
+  if (!reasoning || reasoning.length <= MAX_LIVE_REASONING_CHARS) return reasoning;
+  const cut = alignCodePoint(reasoning, reasoning.length - LIVE_REASONING_KEEP_CHARS);
+  return liveReasoningPlaceholder(cut) + reasoning.slice(cut);
+}
+
+/** (#1034 复审 P1) Hard byte cap over an entire terminal payload before it is
+ *  pushed into the in-flight cache.  Terminals are the events eviction is most
+ *  reluctant to touch — the newest terminal and the last `final` are never
+ *  dropped at all (#1118, see `evictableTerminalIndex`) — so a single multi-MB
+ *  `content`, `message`, or `tool_calls` payload would otherwise defeat
+ *  IN_FLIGHT_MAX_BYTES by construction.
+ *
+ *  The cap is applied in order of least semantic damage:
+ *   1. `reasoning` uses the same tail window as the live stream.
+ *   2. `tool_calls` *stays an array*: every kept call keeps its
+ *      `id`/`type`/`function.name` while `function.arguments` is truncated, and
+ *      only a prefix of the list survives if that is still over budget (the
+ *      last kept element is marked `_truncated`).
+ *   3. `content` and `message` are truncated with an ellipsis marker.
+ *   4. Every remaining string *anywhere in the tree* — nested objects and
+ *      array elements included — is trimmed longest-first until the budget
+ *      holds.
+ *   5. A payload still over budget (bytes hidden in object keys, or sheer
+ *      field count) degrades to a bounded type/size summary.
+ *
+ *  Post-conditions, for any JSON-like input:
+ *   - `payloadBytes(result) <= TERMINAL_PAYLOAD_MAX_BYTES`: what lets
+ *     `evictInFlightOverflow` keep the snapshot under IN_FLIGHT_MAX_BYTES even
+ *     though terminals may not be evicted outright.  (`tool_calls` may end up
+ *     empty when even one call cannot fit — see step 2 — in which case the
+ *     remaining `content` still carries the reply.)
+ *   - `Array.isArray(result.tool_calls)` whenever the input's was an array, for
+ *     every step above (the summary keeps the shape too, emptying the array
+ *     rather than turning it into a descriptor).  The single exception is the
+ *     final `{ _truncated: true, type: 'object' }` fallback, which drops *all*
+ *     fields — including `tool_calls` — rather than reshaping one of them.
+ *
+ *  Identity is preserved when the payload already fits (no copy is made). */
+export function capTerminalEventData<T extends object>(data: T): T {
+  const budget = TERMINAL_PAYLOAD_MAX_BYTES;
+  if (payloadBytes(data) <= budget) return data;
+
+  // `T extends object` is not assignable to an index signature, so the cast
+  // is what lets the rest of this function work on a plain record.
+  let capped: Record<string, unknown> = { ...(data as Record<string, unknown>) };
+
+  // 1. Reasoning tail window (same as live stream).
+  const reasoning = (data as { reasoning?: string }).reasoning;
+  if (typeof reasoning === 'string') {
+    const shrunk = capTerminalReasoning(reasoning);
+    if (shrunk !== reasoning) capped = { ...capped, reasoning: shrunk };
+  }
+  if (payloadBytes(capped) <= budget) return capped as T;
+
+  // 2. tool_calls: cap each `function.arguments`, then — and only then — drop
+  //    trailing calls.  The value stays an ARRAY throughout: the renderer
+  //    branches on `Array.isArray(msg.tool_calls)` (`isAssistantWithToolCalls`)
+  //    and iterates `for (const tc of msg.tool_calls)` when rebuilding Task
+  //    Assets, so replacing it with a `{ _truncated, count, names }` descriptor
+  //    broke the protocol (复审 P1).
+  const toolCalls = (capped as { tool_calls?: unknown }).tool_calls;
+  if (Array.isArray(toolCalls)) {
+    const bounded = toolCalls.map((tc) => {
+      const fn = (tc as { function?: { name?: string; arguments?: unknown } }).function;
+      if (!fn || typeof fn !== 'object') return tc;
+      const args = fn.arguments;
+      const truncatedArgs =
+        typeof args === 'string' && args.length > MAX_TOOL_ARGUMENT_CHARS
+          ? `${args.slice(0, MAX_TOOL_ARGUMENT_CHARS)}…`
+          : args;
+      return { ...tc, function: { ...fn, arguments: truncatedArgs } };
+    });
+    capped = { ...capped, tool_calls: bounded };
+    if (payloadBytes(capped) <= budget) return capped as T;
+
+    // Hundreds of calls × a bounded `arguments` each still add up.  Keep the
+    // longest prefix that fits, with its cut marked on the last kept element
+    // (`_truncated` on an element, not on the array: an array property would be
+    // dropped by any JSON / structured-clone round trip this payload may still
+    // take).  Every kept element keeps its `id` / `type` / `function.name`, so
+    // the readers of `tc.function.name` and `tc.id` are unaffected.
+    capped = { ...capped, tool_calls: cutToolCallList(bounded, budget, capped) };
+  }
+  if (payloadBytes(capped) <= budget) return capped as T;
+
+  // 3. `content` / `message`: truncate with ellipsis.
+  if (typeof capped.content === 'string') {
+    capped = {
+      ...capped,
+      content: truncateTerminalString(capped.content, MAX_TERMINAL_STRING_CHARS),
+    };
+  }
+  if (payloadBytes(capped) <= budget) return capped as T;
+
+  if (typeof capped.message === 'string') {
+    capped = {
+      ...capped,
+      message: truncateTerminalString(capped.message, MAX_TERMINAL_STRING_CHARS),
+    };
+  }
+  if (payloadBytes(capped) <= budget) return capped as T;
+
+  // 4. Fallback: recursively trim the longest string anywhere in the tree.
+  //    Only looking at top-level fields (as this used to) let a nested
+  //    `{ metadata: { details: { hugeText: 2 MiB } } }` sail past the budget
+  //    untouched — the 复审 P1 hole.
+  //
+  //    The walk descends once per nesting level, so a tree deeper than the
+  //    engine's stack (already too deep for JSON.stringify, and therefore for
+  //    `payloadBytes` too) overflows: swallow that and take the summary below,
+  //    rather than letting a RangeError escape into the ingest path.
+  let trimmed = capped;
+  try {
+    trimmed = truncateLargestStrings(capped, budget);
+  } catch {
+    // fall through to the bounded summary
+  }
+  if (payloadBytes(trimmed) <= budget) return trimmed as T;
+
+  // 5. Bytes still unaccounted for (object keys, thousands of small fields, or
+  //    a tree too deep to walk): degrade to a summary that is under budget by
+  //    construction.
+  return boundedTerminalSummary(trimmed, budget) as T;
+}
+
+/** Truncate a terminal string to at most `maxChars`, adding an ellipsis marker. */
+function truncateTerminalString(text: string, maxChars: number): string {
+  if (text.length <= maxChars) return text;
+  return `${text.slice(0, maxChars)}…`;
+}
+
+/** (#1034 复审 P1) Longest prefix of `calls` that keeps `shell` within
+ *  `budget` once the cut is marked, or `[]` when not even the first call fits.
+ *
+ *  Exact rather than estimated: every candidate is measured with `payloadBytes`,
+ *  so the other fields of `shell` are priced in, and the marker itself is part
+ *  of the measured candidate (adding it after the search could land a payload
+ *  that was exactly at the budget just over it).  Binary search is valid because
+ *  the size is monotone in the prefix length, and it keeps this to ~log2(n)
+ *  stringify passes instead of one per possible cut. */
+function cutToolCallList(
+  calls: unknown[],
+  budget: number,
+  shell: Record<string, unknown>
+): unknown[] {
+  const marked = (count: number): unknown[] => {
+    const prefix = calls.slice(0, count);
+    const last = count > 0 ? prefix[count - 1] : undefined;
+    if (last && typeof last === 'object') {
+      prefix[count - 1] = { ...(last as Record<string, unknown>), _truncated: true };
+    }
+    return prefix;
+  };
+  let lo = 0;
+  let hi = calls.length;
+  while (lo < hi) {
+    const mid = Math.ceil((lo + hi) / 2);
+    if (payloadBytes({ ...shell, tool_calls: marked(mid) }) <= budget) lo = mid;
+    else hi = mid - 1;
+  }
+  return marked(lo);
+}
+
+/** (#1034 复审 P1) A string reachable from the payload root: the key/index
+ *  path that leads to it, plus its current character count. */
+interface StringSlot {
+  path: (string | number)[];
+  chars: number;
+}
+
+/** Collect every string in a JSON-like tree, nested objects and array elements
+ *  included.  `seen` guards against cycles so the walk always terminates
+ *  (IPC payloads are acyclic, but this runs on the ingest hot path).
+ *
+ *  `skipTopLevel` names top-level keys whose own string value is never
+ *  collected — the progress sanitizer protects its routing fields (`stream`,
+ *  `tool_call_id`, …) with it.  Only that scalar is protected: a string nested
+ *  *inside* such a key, or in a sibling field, is still collectable. */
+function collectStringSlots(
+  value: unknown,
+  path: (string | number)[],
+  out: StringSlot[],
+  seen: WeakSet<object>,
+  skipTopLevel?: ReadonlySet<string>
+): void {
+  if (typeof value === 'string') {
+    const key = path.length === 1 ? path[0] : undefined;
+    if (typeof key !== 'string' || !skipTopLevel?.has(key)) {
+      out.push({ path, chars: value.length });
+    }
+    return;
+  }
+  if (value === null || typeof value !== 'object') return;
+  if (seen.has(value)) return;
+  seen.add(value);
+  if (Array.isArray(value)) {
+    // Indexed loop, not `.map`: a sparse array must not be visited through its
+    // holes (JSON never produces one, but a throw here would reach ingest).
+    for (let i = 0; i < value.length; i += 1) {
+      collectStringSlots(value[i], [...path, i], out, seen, skipTopLevel);
+    }
+    return;
+  }
+  for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+    collectStringSlots(child, [...path, key], out, seen, skipTopLevel);
+  }
+}
+
+/** Read a value by key path. */
+function readPath(root: unknown, path: (string | number)[]): unknown {
+  let node: unknown = root;
+  for (const key of path) node = (node as Record<string | number, unknown>)[key];
+  return node;
+}
+
+/** Copy-on-write write by key path: every container along the way is rebuilt,
+ *  so the caller's payload is never mutated (the shallow spread at the top of
+ *  `capTerminalEventData` shares nested objects with it).
+ *
+ *  `copies` memoizes the rebuilt containers for one round, and callers always
+ *  walk from that round's *starting* tree.  Without that, each of a thousand
+ *  strings living in the same object would rebuild — and then discard — the
+ *  whole object again: quadratic work on exactly the payloads this fallback
+ *  exists to tame. */
+function replacePath(
+  root: unknown,
+  path: (string | number)[],
+  next: unknown,
+  copies: Map<object, Record<string | number, unknown>>
+): unknown {
+  if (path.length === 0) return next;
+  const [head, ...rest] = path;
+  const container = root as Record<string | number, unknown>;
+  const childNext = replacePath(container[head], rest, next, copies);
+
+  let copy = copies.get(root as object);
+  if (!copy) {
+    copy = (
+      Array.isArray(root) ? (root as unknown[]).slice() : { ...(root as Record<string, unknown>) }
+    ) as Record<string | number, unknown>;
+    copies.set(root as object, copy);
+  }
+  copy[head] = childNext;
+  return copy;
+}
+
+/** (#1034 复审 P1) Trim the longest strings anywhere in the tree — nested and
+ *  array-nested strings included — until the payload fits.
+ *
+ *  Each round first measures the deficit, then walks the strings longest-first
+ *  taking at most half of each (and only as much as the remaining deficit
+ *  needs).  Measuring matters: trimming a single string per round cannot
+ *  converge on a payload made of many medium strings — it would spend 64
+ *  stringify passes shrinking a 6 MiB tree by 80 KiB a round — whereas taking
+ *  a proportional bite out of every large string fits such a payload in one or
+ *  two rounds.  Strings small enough to be harmless are never reached (the
+ *  walk stops once the deficit is covered), so short fields pass through.
+ *
+ *  The round cap bounds the work on shapes this cannot fix at all: bytes spent
+ *  on object *keys* or on sheer field count make no progress, and the caller
+ *  degrades to a bounded summary instead.
+ *
+ *  `skipTopLevel` is forwarded to the collector (see `collectStringSlots`):
+ *  the walker then holds those top-level strings at their current size, which
+ *  is what lets the progress sanitizer keep routing fields readable.  A
+ *  payload whose bytes sit *only* in such fields makes no progress and falls
+ *  through to the caller's bounded summary. */
+function truncateLargestStrings<T>(
+  payload: T,
+  budget: number,
+  maxRounds = 16,
+  skipTopLevel?: ReadonlySet<string>
+): T {
+  let current = payload;
+  for (let round = 0; round < maxRounds; round += 1) {
+    const bytes = payloadBytes(current);
+    if (bytes <= budget) break;
+
+    const slots: StringSlot[] = [];
+    collectStringSlots(current, [], slots, new WeakSet(), skipTopLevel);
+    slots.sort((a, b) => b.chars - a.chars);
+
+    // Characters that have to go (2 bytes each), plus one for each ellipsis
+    // marker this round may add.  Bytes are counted by JSON.stringify, so a
+    // string full of escapable characters shrinks faster than this estimates —
+    // erring high only means dropping a little more text.
+    let deficit = Math.ceil((bytes - budget) / 2) + slots.length;
+    // Every patch is applied to the round's starting tree (see `replacePath`),
+    // so the copies they share are created once.
+    const base = current;
+    const copies = new Map<object, Record<string | number, unknown>>();
+    let trimmed = 0;
+    for (const slot of slots) {
+      if (deficit <= 0) break;
+      const text = readPath(base, slot.path) as string;
+      // Fields already this small cannot matter to a >=1 MiB budget, and
+      // chipping at them would eat visible text to close an approximation.
+      if (text.length <= MIN_TRIMMABLE_STRING_CHARS) continue;
+      // Never more than half: a string smaller than the deficit cannot close
+      // it alone, and gutting it would cost detail for nothing.
+      const take = Math.min(Math.floor(text.length / 2), deficit);
+      if (take <= 0) continue;
+      // Align the cut so a surrogate pair is never split — the lone half would
+      // render as U+FFFD right before the ellipsis (same rule as the live
+      // reasoning window's).  Aligning can land the cut one unit later, and
+      // when that is the whole of `take` the round would shorten nothing (a
+      // surrogate-heavy string would then spin out its rounds and drop to the
+      // summary): step one more character, aligned the same way, so every
+      // round makes progress.
+      let cut = alignCodePoint(text, text.length - take);
+      if (text.length - cut < 2) cut = alignCodePoint(text, Math.max(0, text.length - take - 2));
+      current = replacePath(base, slot.path, `${text.slice(0, cut)}…`, copies) as T;
+      deficit -= take;
+      trimmed += 1;
+    }
+    // Only short strings, keys and structure left: this walker cannot shrink
+    // those.
+    if (trimmed === 0) break;
+  }
+  return current;
+}
+
+/** (#1034 复审 P1) Last resort for a payload this module cannot trim any
+ *  further.  Keeps the top-level shape and, crucially, the *types* replay
+ *  depends on: a string field stays a string (its head), so a `content` /
+ *  `message` / `type` / `code` that lands here is still readable rather than
+ *  replaced by a descriptor.  Objects and arrays collapse to a type+size
+ *  descriptor.  Bounded in field count, key length and per-field size, so the
+ *  result fits the budget by construction; the final `payloadBytes` check is
+ *  belt-and-braces for pathological key sets. */
+const MAX_SUMMARY_FIELDS = 64;
+const MAX_SUMMARY_KEY_CHARS = 64;
+const MAX_SUMMARY_VALUE_CHARS = 64;
+
+function summarizeTerminalValue(value: unknown): unknown {
+  if (value === null) return null;
+  const kind = typeof value;
+  if (kind === 'number' || kind === 'boolean' || kind === 'undefined') return value;
+  if (kind === 'string') {
+    const text = value as string;
+    return text.length <= MAX_SUMMARY_VALUE_CHARS
+      ? text
+      : `${text.slice(0, MAX_SUMMARY_VALUE_CHARS)}…`;
+  }
+  // (#1034 复审 P1) An array stays an array even here: consumers branch on
+  // `Array.isArray(msg.tool_calls)`, so a `{ type: 'array', size }` descriptor
+  // would flip that branch on exactly the payloads this fallback exists for.
+  // Emptied rather than summary-shaped — nothing in a payload that had to reach
+  // the summary is usable anyway, and the summary's own `size` field records
+  // how much was dropped.
+  if (Array.isArray(value)) return [];
+  return { type: 'object', size: payloadBytes(value) };
+}
+
+function boundedTerminalSummary(
+  payload: Record<string, unknown>,
+  budget: number
+): Record<string, unknown> {
+  const summary: Record<string, unknown> = { _truncated: true, size: payloadBytes(payload) };
+  let kept = 0;
+  for (const [key, value] of Object.entries(payload)) {
+    if (kept >= MAX_SUMMARY_FIELDS) break;
+    const label =
+      key.length > MAX_SUMMARY_KEY_CHARS ? `${key.slice(0, MAX_SUMMARY_KEY_CHARS)}…` : key;
+    summary[label] = summarizeTerminalValue(value);
+    kept += 1;
+  }
+  // A single short record is the floor: it cannot exceed any sane budget.
+  return payloadBytes(summary) <= budget ? summary : { _truncated: true, type: 'object' };
+}
+
+/** (#1034 复审 P1) Last resort for a progress payload this module cannot trim
+ *  any further: a bounded summary that keeps the protocol fields whatever the
+ *  rest of the shape looks like.  They are written first so a payload with
+ *  thousands of keys (each too short to trim) cannot push them out of the
+ *  field budget, and each value goes through `summarizeTerminalValue`, so the
+ *  result is under any sane `budget` by construction — the final
+ *  `payloadBytes` check only covers a pathological key set, mirroring the
+ *  terminal summary's belt-and-braces fallback. */
+function boundedProgressSummary(payload: unknown, budget: number): Record<string, unknown> {
+  // A non-record payload (array, string, primitive) has no fields to keep; the
+  // summary then says so via `type` rather than pretending to be the value.
+  const isRecord = payload !== null && typeof payload === 'object' && !Array.isArray(payload);
+  const record = isRecord ? (payload as Record<string, unknown>) : {};
+  const summary: Record<string, unknown> = {
+    _truncated: true,
+    type: isRecord ? 'object' : Array.isArray(payload) ? 'array' : typeof payload,
+    size: payloadBytes(payload),
+  };
+  for (const key of PROGRESS_PROTOCOL_FIELDS) {
+    if (Object.prototype.hasOwnProperty.call(record, key)) {
+      summary[key] = summarizeTerminalValue(record[key]);
+    }
+  }
+  let kept = 0;
+  for (const [key, value] of Object.entries(record)) {
+    if (kept >= MAX_SUMMARY_FIELDS) break;
+    const label =
+      key.length > MAX_SUMMARY_KEY_CHARS ? `${key.slice(0, MAX_SUMMARY_KEY_CHARS)}…` : key;
+    if (Object.prototype.hasOwnProperty.call(summary, label)) continue;
+    summary[label] = summarizeTerminalValue(value);
+    kept += 1;
+  }
+  if (payloadBytes(summary) <= budget) return summary;
+
+  // Even the clamped field list does not fit (pathological keys): the protocol
+  // fields alone are the floor, and they are a handful of short strings.
+  const floor: Record<string, unknown> = { _truncated: true };
+  for (const key of PROGRESS_PROTOCOL_FIELDS) {
+    if (Object.prototype.hasOwnProperty.call(record, key)) {
+      floor[key] = summarizeTerminalValue(record[key]);
+    }
+  }
+  return payloadBytes(floor) <= budget ? floor : { _truncated: true };
+}
+
+/** (#1034 复审 P1) Bound an *entire* progress payload, whatever shape the bytes
+ *  are hiding in.  `splitProgressEventByBytes` is the lossless first choice and
+ *  the caller runs it first; what reaches here is what it could not fix — bytes
+ *  sitting outside `delta` (a `tool_output`, a nested `data.meta.details.huge`),
+ *  an event with no `delta` at all, or a `delta` too small to matter next to
+ *  its siblings.
+ *
+ *  The cap is applied in order of least semantic damage:
+ *   1. `PROGRESS_BULK_FIELDS` are cut to MAX_PROGRESS_FIELD_CHARS, head kept.
+ *   2. `PROGRESS_PROTOCOL_FIELDS` are cut to MAX_PROGRESS_PROTOCOL_CHARS and
+ *      then protected from step 3, so replay keeps its routing keys.
+ *   3. Every remaining string anywhere in the tree — nested objects and array
+ *      elements included — is trimmed longest-first until the budget holds.
+ *   4. A payload still over budget (bytes hidden in object keys, thousands of
+ *      small fields, or a tree too deep to walk) degrades to a summary that
+ *      keeps the protocol fields and marks itself `_truncated`.
+ *
+ *  Post-condition, for any input: `payloadBytes(result) <=
+ *  PROGRESS_PAYLOAD_MAX_BYTES`, hence `inFlightEventBytes` of the event
+ *  carrying it is at most IN_FLIGHT_MAX_EVENT_BYTES.  That is the invariant
+ *  `pushInFlightEvent` needs: with every progress event under the per-event
+ *  cap, eviction always has something to reclaim, so the snapshot's own
+ *  IN_FLIGHT_MAX_BYTES cap closes too.
+ *
+ *  Unlike the delta splitter, steps 1–3 are lossy, deliberately: a truncated
+ *  `tool_output` drops the tail of a search-result list and a truncated `text`
+ *  the tail of a progress line.  The alternative is an event that can never be
+ *  evicted (the newest one) pinning multi-MB in the cache.  Nothing is lost
+ *  that the user cannot get back: this cache only feeds the switch-back replay,
+ *  the head it renders is intact, and the full payload is in the session's
+ *  persisted history once the turn settles.
+ *
+ *  Identity is preserved when the payload already fits (no copy is made). */
+export function sanitizeProgressEventData(data: unknown): unknown {
+  const budget = PROGRESS_PAYLOAD_MAX_BYTES;
+  if (payloadBytes(data) <= budget) return data;
+
+  // 1.+2. Field-level cuts, copy-on-write: the caller's payload object is never
+  //       mutated (the bridge hands the same object to the live handlers).
+  let capped: unknown = data;
+  if (data !== null && typeof data === 'object' && !Array.isArray(data)) {
+    let record = { ...(data as Record<string, unknown>) };
+    // `null` = the field is absent or already short enough: skip the copy.
+    const cutTo = (value: unknown, maxChars: number): string | null =>
+      typeof value === 'string' && value.length > maxChars
+        ? `${value.slice(0, alignCodePoint(value, maxChars))}…`
+        : null;
+    for (const key of PROGRESS_BULK_FIELDS) {
+      const shorter = cutTo(record[key], MAX_PROGRESS_FIELD_CHARS);
+      if (shorter !== null) record = { ...record, [key]: shorter };
+    }
+    for (const key of PROGRESS_PROTOCOL_FIELDS) {
+      const shorter = cutTo(record[key], MAX_PROGRESS_PROTOCOL_CHARS);
+      if (shorter !== null) record = { ...record, [key]: shorter };
+    }
+    capped = record;
+    if (payloadBytes(capped) <= budget) return capped;
+  }
+
+  // 3. Recursive longest-first trim.  The walk descends once per nesting level,
+  //    so a tree deeper than the engine's stack overflows — swallow that and
+  //    take the summary below, rather than letting a RangeError escape into the
+  //    ingest path (same rule as `capTerminalEventData`).
+  let trimmed = capped;
+  try {
+    trimmed = truncateLargestStrings(capped, budget, 16, PROGRESS_PROTOCOL_KEY_SET);
+  } catch {
+    // fall through to the bounded summary
+  }
+  if (payloadBytes(trimmed) <= budget) return trimmed;
+
+  // 4. Bytes still unaccounted for: a summary that is bounded by construction.
+  return boundedProgressSummary(trimmed, budget);
+}
+
+/** Append a streaming reasoning chunk to the last live thinking bubble.
+ *
+ *  (#1034) The accumulated text is a BOUNDED tail window, not the whole
+ *  stream: every flush copies at most `MAX_LIVE_REASONING_CHARS + delta`
+ *  characters, so a single flush no longer costs O(total text length).  The
+ *  dropped head is reported to the user as 「…已省略 X 字」 and is still
+ *  available in full from the backend once the turn ends. */
 export function appendReasoningDelta(
   messages: Message[],
   delta: string,
@@ -2181,22 +2919,32 @@ export function appendReasoningDelta(
     }
   }
   if (idx >= 0) {
-    const next = [...messages];
-    const appended = next[idx].content + delta;
-    next[idx] = {
-      ...next[idx],
-      content: appended,
-      reasoning: appended,
-      reasoningMode: next[idx].reasoningMode ?? mode,
+    const prev = messages[idx];
+    const next = accumulateLiveReasoning(
+      prev.liveReasoningTail ?? prev.reasoning ?? '',
+      prev.reasoningOmitted ?? 0,
+      delta
+    );
+    const out = [...messages];
+    out[idx] = {
+      ...prev,
+      content: next.text,
+      reasoning: next.text,
+      liveReasoningTail: next.tail,
+      reasoningOmitted: next.omitted,
+      reasoningMode: prev.reasoningMode ?? mode,
     };
-    return next;
+    return out;
   }
+  const created = accumulateLiveReasoning('', 0, delta);
   return [
     ...messages,
     {
       role: 'progress',
-      content: delta,
-      reasoning: delta,
+      content: created.text,
+      reasoning: created.text,
+      liveReasoningTail: created.tail,
+      reasoningOmitted: created.omitted,
       reasoningMode: mode,
       isLiveReasoning: true,
       timestamp: ts,
@@ -2288,31 +3036,45 @@ function _extractPathFromArgs(argsStr: string): string | null {
  *  2. tool_calls array on assistant messages (raw provider format)
  *  3. name field on tool result messages (raw provider format)
  */
-function extractTrackedFilesFromMessages(rawMsgs: any[]): TrackedFile[] {
+export function extractTrackedFilesFromMessages(rawMsgs: any[]): TrackedFile[] {
   const fileMap = new Map<string, TrackedFile>();
   const rank: Record<TrackedFile['op'], number> = { read: 0, edit: 1, write: 2, delete: 3 };
+  let turnSeq = -1; // 当前回合序号（第几个 user 回合，从 0 起）
 
-  const upsert = (path: string, op: TrackedFile['op'], timestamp?: string) => {
+  const upsert = (
+    path: string,
+    op: TrackedFile['op'],
+    timestamp?: string,
+    tool?: string,
+    turnId?: number
+  ) => {
     const key = normalizeSandboxPath(path).replace(/\\/g, '/');
     const existing = fileMap.get(key);
-    if (!existing || rank[op] > rank[existing.op]) {
+    // `>=`（而非 `>`）：write_file/edit_file 都映射成 op='write'，同一路径的
+    // 后一次等 rank 操作此前被忽略，导致 sourceTool/turnId 停留在更早消息上、
+    // 文件卡片用旧 turnId 取错引用（#879 ③ CodeRabbit）。等 rank 时刷新，
+    // 同时保留新事件未提供的元数据（如 _tool_hint 无 tool 名）。
+    if (!existing || rank[op] >= rank[existing.op]) {
       fileMap.set(key, {
         path: key,
         name: basename(key),
         op,
         lastSeen: timestamp ? new Date(timestamp).getTime() : Date.now(),
         truncated: false,
+        sourceTool: tool ?? existing?.sourceTool,
+        turnId: turnId ?? existing?.turnId,
       });
     }
   };
 
   for (const msg of rawMsgs) {
+    if (msg?.role === 'user') turnSeq += 1;
     // Format 1: _tool_hint metadata (persisted progress events)
     const hintText = msg._tool_hint_text || msg.content;
     if (msg._tool_hint && hintText) {
       const parsed = parseToolHint(hintText);
       if (parsed) {
-        upsert(parsed.path, parsed.op, msg.timestamp);
+        upsert(parsed.path, parsed.op, msg.timestamp, undefined, turnSeq);
       }
     }
 
@@ -2326,9 +3088,15 @@ function extractTrackedFilesFromMessages(rawMsgs: any[]): TrackedFile[] {
         const filePath = _extractPathFromArgs(argsStr);
         if (!filePath) continue;
         if (_FILE_WRITE_TOOLS.includes(toolName)) {
-          upsert(filePath, toolName === 'delete_file' ? 'delete' : 'write', msg.timestamp);
+          upsert(
+            filePath,
+            toolName === 'delete_file' ? 'delete' : 'write',
+            msg.timestamp,
+            toolName,
+            turnSeq
+          );
         } else if (_FILE_READ_TOOLS.includes(toolName)) {
-          upsert(filePath, 'read', msg.timestamp);
+          upsert(filePath, 'read', msg.timestamp, toolName, turnSeq);
         }
       }
     }
@@ -2339,7 +3107,7 @@ function extractTrackedFilesFromMessages(rawMsgs: any[]): TrackedFile[] {
       // Try to extract path from content (often contains the file path)
       const contentPath = parseToolHint(String(msg.content || ''));
       if (contentPath) {
-        upsert(contentPath.path, contentPath.op, msg.timestamp);
+        upsert(contentPath.path, contentPath.op, msg.timestamp, toolName, turnSeq);
       } else if (_FILE_WRITE_TOOLS.includes(toolName)) {
         // Tool result without parsable content — try to infer from tool name
         // (best-effort; actual path is in the paired assistant tool_calls message)
@@ -2347,6 +3115,54 @@ function extractTrackedFilesFromMessages(rawMsgs: any[]): TrackedFile[] {
     }
   }
   return Array.from(fileMap.values());
+}
+
+/** 从消息推导「回合序号 → 该回合的结构化来源」（#879 ③ 冷启动恢复）。
+ *  web_sources 实时通过事件下发、不持久化，冷启动后从 web_search / web_fetch
+ *  的结果文本重新解析，按回合（user 消息分隔）累积，供文件卡片显示相关引用。 */
+export function extractTurnSourcesFromMessages(rawMsgs: any[]): Map<number, MessageSource[]> {
+  const map = new Map<number, MessageSource[]>();
+  let turnSeq = -1;
+  for (const msg of rawMsgs) {
+    if (msg?.role === 'user') turnSeq += 1;
+    if (msg?.role !== 'tool' || !msg?.name) continue;
+    const content = String(msg.content ?? '');
+    if (msg.name === 'web_search') {
+      const items = parseWebSearchResults(content);
+      if (items.length === 0) continue;
+      const acc = map.get(turnSeq) ?? [];
+      const seen = new Set(acc.map((s) => s.url));
+      for (const it of items) {
+        if (it.url && !seen.has(it.url)) {
+          seen.add(it.url);
+          acc.push({ tool: 'web_search', url: it.url, title: it.title, snippet: it.snippet });
+        }
+      }
+      map.set(turnSeq, acc);
+    } else if (msg.name === 'web_fetch') {
+      try {
+        const payload = JSON.parse(content);
+        const url = (payload?.finalUrl as string) || (payload?.url as string);
+        if (url) {
+          const acc = map.get(turnSeq) ?? [];
+          const seen = new Set(acc.map((s) => s.url));
+          if (!seen.has(url)) {
+            seen.add(url);
+            acc.push({
+              tool: 'web_fetch',
+              url,
+              title: (payload?.title as string) || url,
+              snippet: '',
+            });
+          }
+          map.set(turnSeq, acc);
+        }
+      } catch {
+        /* not JSON, ignore */
+      }
+    }
+  }
+  return map;
 }
 
 // ── Cross-session in-flight event cache (#378) ──────────────────
@@ -2370,6 +3186,629 @@ interface InFlightEvent {
 interface InFlightSnapshot {
   events: InFlightEvent[];
   userMsgTimestamp: number;
+  /** (#1034) Running sum of `inFlightEventBytes(e)` over `events`, maintained
+   *  incrementally so the byte cap can be enforced without re-walking the
+   *  whole buffer on every push. */
+  bytes: number;
+}
+/**
+ * (#1034) Caps for the off-session in-flight buffer.
+ *
+ * Before this, `buf.events.push(...)` was unbounded: a long thinking/exec turn
+ * on a session the user switched away from accumulated one object per bridge
+ * event (10^5-scale for a 18-minute stream) — and up to
+ * MODULE_CACHE_MAX_SESSIONS buffers of them.
+ *
+ * 2000 events is far more than any replay needs: consecutive same-stream
+ * deltas are coalesced first (see `pushInFlightEvent`), so what remains is
+ * mostly tool/lifecycle events.  1 MiB of UTF-16 payload is ~500k characters
+ * of text — the same order as the live reasoning window, and small enough that
+ * 20 sessions cannot pin a meaningful amount of memory.
+ */
+export const IN_FLIGHT_MAX_EVENTS = 2000;
+export const IN_FLIGHT_MAX_BYTES = 1024 * 1024;
+/** (#1034 复审 P1) Hard ceiling for a single *progress* event.
+ *
+ *  IN_FLIGHT_MAX_BYTES on its own was only a soft bound: one provider chunk
+ *  carrying a multi-MB `delta` — or two legal deltas that merge into one — sat
+ *  in the buffer as a single oversized event, and the newest event is never
+ *  evicted.  `pushInFlightEvent` now cuts such a delta into consecutive chunks
+ *  of at most this size (replay appends `delta` in order, so the text is
+ *  unchanged), refuses a merge that would exceed it, and — for bytes the split
+ *  cannot reach, i.e. everything outside `delta` — recursively bounds the rest
+ *  of the payload (`sanitizeProgressEventData`).  That makes
+ *  `every progress event <= 64 KiB` an invariant of construction rather than
+ *  of luck, which is what lets eviction close a progress-driven breach of
+ *  IN_FLIGHT_MAX_BYTES: the newest event — the one eviction may not drop — can
+ *  no longer be the multi-megabyte resident nothing could reclaim.
+ *
+ *  Terminals are bounded separately by TERMINAL_PAYLOAD_MAX_BYTES: a `final`'s
+ *  content is the answer itself and cannot be rejoined from pieces the way a
+ *  stream delta can. */
+export const IN_FLIGHT_MAX_EVENT_BYTES = 64 * 1024;
+/** Rough per-event bookkeeping cost (object + array slot + timestamp). */
+export const IN_FLIGHT_EVENT_OVERHEAD_BYTES = 128;
+/** (#1034 复审 P1) Hard ceiling `capTerminalEventData` guarantees for a single
+ *  terminal event's payload: the snapshot budget minus that event's own
+ *  overhead, minus a 256-byte margin for whatever the capping itself adds
+ *  (rolled-up `_truncated` markers, spread keys, the ellipsis).  Keeping one
+ *  terminal under this is what makes the snapshot recoverable once eviction
+ *  is allowed to strip older terminals down to their type. */
+export const TERMINAL_PAYLOAD_MAX_BYTES =
+  IN_FLIGHT_MAX_BYTES - IN_FLIGHT_EVENT_OVERHEAD_BYTES - 256;
+/** (#1034 复审 P1) Truncation width for a terminal's `content` / `message`
+ *  (step 3 of `capTerminalEventData`). */
+const MAX_TERMINAL_STRING_CHARS = 20000;
+/** (#1034 复审 P1) Truncation width for one tool call's `function.arguments`
+ *  (step 2 of `capTerminalEventData`).  Arguments are re-parsed by
+ *  `_extractPathFromArgs` for Task Assets, so the head has to stay valid JSON
+ *  often enough to be worth keeping — a 4 KiB head still parses for the usual
+ *  `{"path": "…"}` shape. */
+const MAX_TOOL_ARGUMENT_CHARS = 4096;
+/** (#1034 复审 P1) Strings at or below this length are left alone by the
+ *  recursive fallback: at 2 bytes per char they cannot meaningfully offset a
+ *  `TERMINAL_PAYLOAD_MAX_BYTES`-sized budget, so trimming them would only cost
+ *  visible text. */
+const MIN_TRIMMABLE_STRING_CHARS = 64;
+
+/** (#1034 复审 P1) Byte budget for a single *progress* payload: the single-event
+ *  cap minus that event's own bookkeeping.  Written in the same units as
+ *  `inFlightEventBytes` so the post-condition of `sanitizeProgressEventData`
+ *  is directly the invariant `inFlightEventBytes(event) <=
+ *  IN_FLIGHT_MAX_EVENT_BYTES`, with no off-by-overhead left to reason about. */
+const PROGRESS_PAYLOAD_MAX_BYTES = IN_FLIGHT_MAX_EVENT_BYTES - IN_FLIGHT_EVENT_OVERHEAD_BYTES;
+
+/** (#1034 复审 P1) Fields that carry the *bulk* of a progress payload, and are
+ *  therefore cut by width first by `sanitizeProgressEventData`.
+ *
+ *  These are exactly the bytes the delta splitter cannot reach: it only ever
+ *  cuts `delta`, and by the time the sanitizer runs it has already declined
+ *  (the event's non-delta bytes alone are over the cap).  `delta` is on the
+ *  list for the same reason — a multi-MB delta that got here cannot be kept
+ *  whole however it is split, so its head is kept instead, matching what the
+ *  terminal cap does to `content`. */
+const PROGRESS_BULK_FIELDS = [
+  'delta',
+  'tool_output',
+  'tool_args',
+  'text',
+  'message',
+  'content',
+  'output',
+  'stdout',
+  'stderr',
+  'reasoning',
+] as const;
+
+/** Width a bulk field is cut to on that first pass.  The recursive pass takes
+ *  over when a payload holds many such fields — this pass exists to give the
+ *  named content fields a deterministic head, not to close the budget alone. */
+const MAX_PROGRESS_FIELD_CHARS = 4096;
+
+/** (#1034 复审 P1) Fields replay needs to *route* the event, so they are cut
+ *  last and far more gently than content.  Every one of them is consumed by
+ *  `cachedEventsToMessages` / `splitCachedMessages` / the exec-output replay:
+ *  `stream` + `tool_call_id` pick the exec line a `delta` is appended to,
+ *  `type: 'doc_progress'` + `file` the attachment row, `session_key` the
+ *  turn's owner, and `points_cost` / `balance` the billing line. */
+const PROGRESS_PROTOCOL_FIELDS = [
+  'stream',
+  'tool_call_id',
+  'type',
+  'session_key',
+  'turn_id',
+  'tool_hint',
+  'file',
+  'stage',
+  'points_cost',
+  'balance',
+] as const;
+
+/** Set form of `PROGRESS_PROTOCOL_FIELDS`, for the collector's skip test. */
+const PROGRESS_PROTOCOL_KEY_SET: ReadonlySet<string> = new Set(PROGRESS_PROTOCOL_FIELDS);
+
+/** Width a protocol field is cut to when the *whole* payload has to fit.  Real
+ *  values (uuid-ish session keys, `call_ab12…` ids, file names) are far shorter
+ *  than this, so they pass through untouched; the cut only bites a payload that
+ *  tries to bury its bytes in a field replay cannot do without — which is why
+ *  it happens here rather than being left to the summary. */
+const MAX_PROGRESS_PROTOCOL_CHARS = 256;
+
+/** (#1034) UTF-16 byte size of an event's payload: 2 bytes per char plus a
+ *  fixed overhead.
+ *
+ *  (#1034 复审 P1-b) JSON.stringify-based: the previous bounded-depth walker
+ *  stopped accumulating at depth 2, so anything deeper than
+ *  `data.tool_calls[].function` — e.g. the `arguments` string or a nested
+ *  `input` object — was accounted as 0, and a multi-MB value could hide
+ *  behind a "tiny" number, silently defeating the byte cap.  Stringify
+ *  covers the whole tree and deliberately counts structure bytes too:
+ *  over-counting evicts slightly early, while under-counting breaks the
+ *  hard cap.
+ *
+ *  Cycles cannot come from IPC-shaped JSON; if a value still makes
+ *  stringify throw (a cycle, or nesting deeper than the engine's stack),
+ *  fall back to walking the tree instead of throwing from inside the hot
+ *  path. */
+function payloadBytes(value: unknown): number {
+  if (typeof value === 'string') return value.length * 2;
+  if (value === null || typeof value !== 'object') return 0;
+  try {
+    return JSON.stringify(value).length * 2;
+  } catch {
+    return walkPayloadBytes(value);
+  }
+}
+
+/** (#1034 复审 P1) Full-depth fallback for values `JSON.stringify` cannot
+ *  take.  It counts every string in the tree, at any depth: an earlier
+ *  depth-2 bound here under-reported a deeply nested multi-MB string as 0, so
+ *  `capTerminalEventData` saw a "small" payload and returned it untouched —
+ *  the exact payload the cap exists to catch.  The explicit stack (rather than
+ *  recursion) is what lets it survive the nesting that overflowed stringify,
+ *  and `seen` keeps a cyclic payload terminating.
+ *
+ *  (#1034 复审四轮) Object *keys* are counted too.  They are the one part of a
+ *  payload no string walk can reach — `collectStringSlots` collects values,
+ *  `truncateLargestStrings` replaces values — so a value stringify chokes on
+ *  (a cycle, a `Map`, a `BigInt`, extreme nesting) plus bytes parked in long
+ *  key names used to measure as a few hundred bytes and be returned identity-
+ *  preserved by `sanitizeProgressEventData`: the cap saw a small number while
+ *  the buffer held megabytes.  With keys counted, such a payload measures over
+ *  budget and degrades to `boundedProgressSummary`, which keeps 64 fields
+ *  instead of thousands.  Keys are priced exactly as JSON writes them (two
+ *  bytes per character plus `"`/`:`), and array indices are skipped because
+ *  JSON does not serialize them. */
+function walkPayloadBytes(value: unknown): number {
+  const seen = new WeakSet<object>();
+  const stack: unknown[] = [value];
+  let total = 0;
+  while (stack.length > 0) {
+    const node = stack.pop();
+    if (typeof node === 'string') {
+      total += node.length * 2;
+      continue;
+    }
+    if (node === null || typeof node !== 'object') continue;
+    if (seen.has(node)) continue;
+    seen.add(node);
+    const isArray = Array.isArray(node);
+    for (const [key, child] of Object.entries(node as Record<string, unknown>)) {
+      if (!isArray) total += key.length * 2 + 3;
+      stack.push(child);
+    }
+  }
+  return total;
+}
+
+/** (#1034) Accounted size of one cached event.  Exported so tests can assert
+ *  the snapshot's running total stays exactly consistent with its contents. */
+export function inFlightEventBytes(event: InFlightEvent): number {
+  return IN_FLIGHT_EVENT_OVERHEAD_BYTES + payloadBytes(event.data);
+}
+
+/** (#1034) Empty off-session buffer.  Use instead of the old inline
+ *  `{ events: [], userMsgTimestamp: 0 }` literal so the byte ledger starts
+ *  at zero. */
+export function createInFlightSnapshot(userMsgTimestamp = 0): InFlightSnapshot {
+  return { events: [], userMsgTimestamp, bytes: 0 };
+}
+
+/** (#1034) Get (creating if needed) the off-session buffer for `key`. */
+function getInFlightSnapshot(cache: Map<string, InFlightSnapshot>, key: string): InFlightSnapshot {
+  let snapshot = cache.get(key);
+  if (!snapshot) {
+    snapshot = createInFlightSnapshot();
+    cache.set(key, snapshot);
+  }
+  return snapshot;
+}
+
+/** (#1034) Both events are same-stream deltas of the same tool call → the
+ *  concatenation replays identically (ChatConsole's exec-output replay
+ *  appends `delta` in order; the thinking/reply materializers skip any event
+ *  carrying `stream`).  Anything else (lifecycle, doc_progress, terminal,
+ *  changed tool call) keeps its own slot: order is the semantics. */
+function mergeableDelta(prev: InFlightEvent, next: InFlightEvent): string | null {
+  if (prev.type !== 'progress' || next.type !== 'progress') return null;
+  const a = prev.data as ChatProgress | null;
+  const b = next.data as ChatProgress | null;
+  if (!a || !b || typeof a.delta !== 'string' || typeof b.delta !== 'string') return null;
+  if (!a.stream || a.stream !== b.stream) return null;
+  if ((a.tool_call_id ?? null) !== (b.tool_call_id ?? null)) return null;
+  return b.delta;
+}
+
+/** (#1034 复审 P2) Marker left as a stripped terminal's payload.  Named apart
+ *  from `capTerminalEventData`'s `_truncated` so the two cannot be confused. */
+const TERMINAL_STRIPPED_DATA = { _evicted: true } as const;
+
+/** Head kept of an error's `message` when the payload is stripped. */
+const MAX_STRIPPED_MESSAGE_CHARS = 200;
+
+/** (#1034 复审 P2) Payload of a terminal that was emptied to free bytes:
+ *  `type` and `timestamp` survive, so replay still sees a settled turn.
+ *
+ *  An error additionally keeps a short head of its `message` — replay renders
+ *  that as an error bubble, and an emptied one would read 「Unknown error」.
+ *  A final deliberately keeps nothing: replay would render the truncated text
+ *  as the answer and fail the "already persisted" dedupe against the full
+ *  one, so the answer is better left to the persisted history. */
+function stripTerminalPayload(event: InFlightEvent): InFlightEvent {
+  const message = (event.data as { message?: unknown } | null | undefined)?.message;
+  const head =
+    typeof message === 'string' ? message.slice(0, MAX_STRIPPED_MESSAGE_CHARS) : undefined;
+  return {
+    type: event.type,
+    data: head === undefined ? TERMINAL_STRIPPED_DATA : { _evicted: true, message: head },
+    timestamp: event.timestamp,
+  };
+}
+
+/** True only for a payload this module emptied itself.  Matching the marker
+ *  *shape* rather than just the flag keeps a backend field that happens to be
+ *  named `_evicted` from making a real payload look un-strippable (which would
+ *  leave the buffer over budget with nothing to reclaim). */
+function isStrippedTerminal(event: InFlightEvent): boolean {
+  if (event.type === 'progress') return false;
+  const data = event.data as Record<string, unknown> | null | undefined;
+  if (!data || data._evicted !== true) return false;
+  const keys = Object.keys(data);
+  if (keys.length === 1) return true;
+  return (
+    keys.length === 2 &&
+    typeof data.message === 'string' &&
+    data.message.length <= MAX_STRIPPED_MESSAGE_CHARS
+  );
+}
+
+/** (#1118) Index of a terminal that eviction may drop outright, or -1 when
+ *  every remaining terminal is load-bearing.
+ *
+ *  What has to survive replay, and why — the answer decided the whole rule
+ *  (this is the requirement-4 note of the #1118 review):
+ *   - the NEWEST terminal stays because it is the terminal of the turn the
+ *     user is looking at — the row that turn is closed with in the replay (its
+ *     `data` renders as the reply when the turn ended on a `final`, and as the
+ *     closing thinking row when it ended on an `error`/`aborted`); and
+ *   - the LAST `final` stays because it is the reply `splitCachedMessages`
+ *     renders (`finalReply`) *and* because the replay's "is this turn over?"
+ *     test is `cached.events.some((e) => e.type === 'final')` — literally,
+ *     twice: the `turnDone` flag that closes a stale live thinking block
+ *     (Audit #1, the permanently-stuck 「思考中…」 guard, ChatConsole load())
+ *     and the `finalHandledSessions` mark that stops a live `onFinal` from
+ *     appending a duplicate.  The test keys on `final`, not on "any terminal",
+ *     so a turn that emits `final` + a trailing `error`/`aborted` would lose
+ *     `turnDone` if eviction kept only the newest (trailing) terminal.  Keeping
+ *     the newest `final` is enough: that is the turn being replayed.
+ *
+ *  Everything else is a candidate, oldest first.  An already-stripped
+ *  placeholder is preferred: its content is gone already, so dropping it costs
+ *  a settled-turn marker — plus, for a stripped error, the 200-character head
+ *  replay renders instead of 「Unknown error」 — rather than a live payload.  A
+ *  terminal that still carries its payload is a candidate only when the *count*
+ *  cap is breached — there the removal is mandatory (stripping cannot lower the
+ *  count), so evicting it outright beats stripping it first and dropping it
+ *  after, which would destroy the content for nothing.
+ *
+ *  The newest *event* is never a candidate, even when it is a terminal: the
+ *  watchdog reads its timestamp to decide the backend is still alive. */
+function evictableTerminalIndex(snapshot: InFlightSnapshot): number {
+  const { events } = snapshot;
+  let newestTerminal = -1;
+  let lastFinal = -1;
+  for (let i = events.length - 1; i >= 0; i -= 1) {
+    if (events[i].type === 'progress') continue;
+    if (newestTerminal < 0) newestTerminal = i;
+    if (lastFinal < 0 && events[i].type === 'final') lastFinal = i;
+    if (newestTerminal >= 0 && lastFinal >= 0) break;
+  }
+  const loadBearing = (i: number): boolean => i === newestTerminal || i === lastFinal;
+  // Never index `events.length - 1`: that is the newest event, whose timestamp
+  // the watchdog reads.
+  for (let i = 0; i < events.length - 1; i += 1) {
+    if (!loadBearing(i) && isStrippedTerminal(events[i])) return i;
+  }
+  if (events.length <= IN_FLIGHT_MAX_EVENTS) return -1;
+  for (let i = 0; i < events.length - 1; i += 1) {
+    if (!loadBearing(i)) return i;
+  }
+  return -1;
+}
+
+/** (#1034) Drop the oldest evictable events until both caps hold, in order of
+ *  damage:
+ *   1. progress events — re-derivable from the live stream;
+ *   2. — (#1034 复审 P2) only while the BYTE cap is breached — the *payload* of
+ *      a terminal older than the newest one, which keeps the event (replay
+ *      still reads the turn as settled) and takes content the session's
+ *      persisted history can still supply (a stripped error keeps a
+ *      200-character head for exactly that reason).  (#1118 第八轮) Reserved
+ *      for strips that actually shrink the event: a short payload wrapped in
+ *      the placeholder can measure *larger*, and a strip that buys no bytes
+ *      only destroys content — such a terminal goes to step 3 instead;
+ *   3. — (#1118) an older terminal dropped outright (`evictableTerminalIndex`);
+ *   4. — (#1118) and only when there is nothing left to drop — the newest
+ *      terminal's payload.
+ *
+ *  Why step 2 takes the payload but keeps the event: a turn that emits both a
+ *  `final` and a trailing `error` (or `aborted`) keeps two hard-capped payloads
+ *  resident, and two payloads that individually sit just under
+ *  TERMINAL_PAYLOAD_MAX_BYTES add up to more than IN_FLIGHT_MAX_BYTES.  The
+ *  byte cap has to win, but replay does not merely need "some terminal" — see
+ *  `evictableTerminalIndex` for the `final`-presence test it runs.  Removing
+ *  the event would bring the stuck-thinking bug back, so the event is reduced
+ *  to its type + timestamp instead: the turn still reads as settled and the
+ *  content is still in the session's persisted history.
+ *
+ *  Why step 3 exists (#1118): a stripped terminal is not free — it keeps its
+ *  type and timestamp (~160 bytes) and, for an error, a 200-character message
+ *  head (~590 bytes).  Volume alone therefore used to breach
+ *  the cap: terminals were never evicted, so a buffer that accumulated
+ *  thousands of settled turns carried more placeholder bytes than the whole
+ *  budget, there was nothing left to strip, and the *count* cap was vacuous
+ *  once only terminals remained.  Terminal payloads are bounded at ingest
+ *  (`capTerminalEventData`), so placeholder volume is the only unbounded part
+ *  left — and the part replay can most afford to lose.  Step 3 drops those
+ *  placeholders (keeping the two load-bearing terminals), which turns the old
+ *  "leave the buffer over budget and stop" exit into a reclaim.
+ *
+ *  Why step 4 is *last*, after step 3 (#1118 review): a terminal older than the
+ *  newest one is content replay can rebuild from the persisted history, which
+ *  is why its payload may go first.  The newest terminal is the opposite case —
+ *  it is the row the turn that has just settled is closed with (the reply
+ *  itself when that turn ended on a `final`), and the history may not have
+ *  caught up with it yet (that race is what `finalHandledSessions` /
+ *  `_alreadyPersisted` exist for).  So its payload is only taken once there is
+ *  no placeholder left to drop instead: with thousands of ~160-byte
+ *  placeholders resident, dropping them reaches the byte target while keeping
+ *  that row's text, whereas stripping the newest terminal first would destroy
+ *  the one piece of text in the buffer the user is actually waiting to read.
+ *
+ *  The newest event is never removed and its timestamp is never touched (the
+ *  watchdog reads it to decide the backend is alive).  Every event the ingest
+ *  path lets into the buffer is under its own cap by construction — a terminal
+ *  at TERMINAL_PAYLOAD_MAX_BYTES (`capTerminalEventData`), a progress at
+ *  IN_FLIGHT_MAX_EVENT_BYTES (see `boundInFlightEvent`) — so every breach of an
+ *  ingest-built buffer is reclaimable: the loop exits only when both caps hold,
+ *  or when nothing but the load-bearing terminals is left (two placeholders,
+ *  under 1.2 KiB).  A buffer holding a single event that exceeds the whole
+ *  budget can stay over budget — the newest event is never dropped, so there is
+ *  nothing left to reclaim — but the two caps make that unreachable through
+ *  `pushInFlightEvent`; it takes a payload pushed straight into a snapshot
+ *  without going through the ingest caps.
+ *
+ *  Post-conditions after `pushInFlightEvent` on an ingest-built buffer, for any
+ *  number of terminals in it: `events.length <= IN_FLIGHT_MAX_EVENTS`,
+ *  `bytes <= IN_FLIGHT_MAX_BYTES`, the newest terminal present, and the last
+ *  `final` present. */
+function evictInFlightOverflow(snapshot: InFlightSnapshot): void {
+  while (
+    snapshot.events.length > 1 &&
+    (snapshot.events.length > IN_FLIGHT_MAX_EVENTS || snapshot.bytes > IN_FLIGHT_MAX_BYTES)
+  ) {
+    let victim = -1;
+    for (let i = 0; i < snapshot.events.length - 1; i += 1) {
+      if (snapshot.events[i].type === 'progress') {
+        victim = i;
+        break;
+      }
+    }
+
+    if (victim >= 0) {
+      snapshot.bytes -= inFlightEventBytes(snapshot.events[victim]);
+      snapshot.events.splice(victim, 1);
+      continue;
+    }
+
+    // Only terminals left.
+    let newestTerminal = -1;
+    for (let i = snapshot.events.length - 1; i >= 0; i -= 1) {
+      if (snapshot.events[i].type !== 'progress') {
+        newestTerminal = i;
+        break;
+      }
+    }
+
+    // Step 2: strip an older terminal's payload.  Only while the byte cap is
+    // breached — a bare count breach is paid for by step 3, which drops whole
+    // events instead of shrinking the ones that stay — and never the newest
+    // terminal: its payload is step 4, the last resort.
+    if (snapshot.bytes > IN_FLIGHT_MAX_BYTES) {
+      for (let i = 0; i < snapshot.events.length - 1; i += 1) {
+        if (i !== newestTerminal && !isStrippedTerminal(snapshot.events[i])) {
+          victim = i;
+          break;
+        }
+      }
+      if (victim >= 0) {
+        const before = inFlightEventBytes(snapshot.events[victim]);
+        const stripped = stripTerminalPayload(snapshot.events[victim]);
+        const after = inFlightEventBytes(stripped);
+        // (#1118 第八轮 P2) 只有**真的换到空间**才替换：占位不是免费的——一条
+        // 正文很短的 error（`{message:'x'}`）换成 `{_evicted:true,message:'x'}`
+        // 反而更大。不降反增时替换等于白丢正文却一字节都没买回来，而这条终态
+        // 紧接着还会被 Step 3 当"已掏空占位"优先驱逐（见 evictableTerminalIndex
+        // 的偏好）——正文丢了两次。所以不划算就不替换，落到 Step 3 按整条驱逐
+        // 处理；那时回收的字节由别的终态（Step 4 的最后手段）或条数上限来出。
+        if (after < before) {
+          snapshot.bytes += after - before;
+          snapshot.events[victim] = stripped;
+          continue;
+        }
+      }
+    }
+
+    // Step 3: an older stripped placeholder — or, when the count cap is what is
+    // breached, the oldest terminal the replay can spare — goes for good.
+    victim = evictableTerminalIndex(snapshot);
+    if (victim >= 0) {
+      snapshot.bytes -= inFlightEventBytes(snapshot.events[victim]);
+      snapshot.events.splice(victim, 1);
+      continue;
+    }
+
+    // Step 4: nothing left to drop, so the newest terminal's payload goes.  It
+    // stays in the buffer — so `turnDone` still reads true — and only its bytes
+    // go.  This is the case where the newest *event* is a progress payload (it
+    // can never be dropped, the watchdog reads its timestamp, and it is capped
+    // at 1/16th of this budget) or where the only terminals left are the two
+    // load-bearing ones; the alternative is leaving the buffer over budget,
+    // which is the failure this module exists to prevent.
+    if (
+      snapshot.bytes > IN_FLIGHT_MAX_BYTES &&
+      newestTerminal >= 0 &&
+      !isStrippedTerminal(snapshot.events[newestTerminal])
+    ) {
+      snapshot.bytes -= inFlightEventBytes(snapshot.events[newestTerminal]);
+      snapshot.events[newestTerminal] = stripTerminalPayload(snapshot.events[newestTerminal]);
+      snapshot.bytes += inFlightEventBytes(snapshot.events[newestTerminal]);
+      continue;
+    }
+
+    // Nothing left to give: step 3 found no candidate (every remaining terminal
+    // is load-bearing) and the newest one is either already stripped or the
+    // byte cap is not breached any more.
+    return;
+  }
+}
+
+/** (#1034 复审 P1) Cut an over-cap `progress` event into consecutive chunks
+ *  that each fit `maxBytes`.  Returns `[event]` unchanged when the event needs
+ *  no cut, or when no cut can help.
+ *
+ *  The cut length is found by binary search over `inFlightEventBytes`, not by
+ *  guessing a character budget: that measurement runs through
+ *  `JSON.stringify`, so escaping, the other fields of `data` and the fixed
+ *  event overhead are all priced in.  The search assumes the measurement grows
+ *  with the prefix length, which holds for well-formed text — the one
+ *  exception is UTF-16 escaping, where an unpaired surrogate costs 6 characters
+ *  and completing the pair costs 2, so a longer prefix can measure *smaller*
+ *  (measured on a `{stream, delta, tool_call_id}` event: `'\uD83D'` 240 bytes,
+ *  `'😀'` 232).  That only makes the
+ *  search conservative (it never picks a prefix it has not measured as
+ *  fitting), and the one fallback that could land a chunk a few bytes over —
+ *  `cut = lo - 1` below — is re-bounded by `boundInFlightEvent` on the way in.
+ *
+ *  Replay is unaffected: exec output appends `delta` in order and every other
+ *  materializer skips events carrying `stream`, so `chunk1 + chunk2 + …` spells
+ *  out exactly the original delta.
+ *
+ *  Cutting cannot help when the bytes are outside `delta` (an empty delta
+ *  already exceeds the cap) or when not even one character fits.  The caller
+ *  then falls back to `sanitizeProgressEventData`, which bounds the whole
+ *  payload recursively: lossy where this splitter is not, but it keeps the
+ *  per-event cap an invariant of construction rather than of luck. */
+function splitProgressEventByBytes(event: InFlightEvent, maxBytes: number): InFlightEvent[] {
+  const data = event.data as ChatProgress | null | undefined;
+  if (!data || typeof data.delta !== 'string') return [event];
+  if (inFlightEventBytes(event) <= maxBytes) return [event];
+
+  const chunk = (text: string): InFlightEvent => ({ ...event, data: { ...data, delta: text } });
+  const fits = (text: string): boolean => inFlightEventBytes(chunk(text)) <= maxBytes;
+  // Bytes outside `delta` are over budget on their own: splitting `delta`
+  // cannot bring this event under the cap.
+  if (!fits('')) return [event];
+
+  const parts: InFlightEvent[] = [];
+  let rest = data.delta;
+  while (rest.length > 0) {
+    // A fitting cut is at most `maxBytes` characters long (each character is at
+    // least one byte of payload), so this bound never excludes the answer.
+    let lo = 0;
+    let hi = Math.min(rest.length, maxBytes);
+    while (lo < hi) {
+      const mid = Math.ceil((lo + hi) / 2);
+      if (fits(rest.slice(0, mid))) lo = mid;
+      else hi = mid - 1;
+    }
+    if (lo >= rest.length) {
+      parts.push(chunk(rest));
+      break;
+    }
+    // Never leave half a surrogate pair at the end of a chunk: `alignCodePoint`
+    // moves such a cut past the low surrogate, completing the pair.  That can
+    // push the chunk one character over budget, in which case the pair is left
+    // whole on the *next* chunk instead (the search already proved the shorter
+    // cut fits).
+    let cut = alignCodePoint(rest, lo);
+    if (cut !== lo && !fits(rest.slice(0, cut))) cut = lo - 1;
+    if (cut <= 0) return [event]; // cannot make progress — leave it whole
+    parts.push(chunk(rest.slice(0, cut)));
+    rest = rest.slice(cut);
+  }
+  return parts;
+}
+
+/** (#1034) Append an off-session event, coalescing consecutive same-stream
+ *  deltas first and evicting the oldest progress events when the count/byte
+ *  caps are exceeded.  Replaces the unbounded `buf.events.push(...)`. */
+export function pushInFlightEvent(snapshot: InFlightSnapshot, event: InFlightEvent): void {
+  // The per-event cap is enforced *before* anything else, so no single event
+  // can exceed IN_FLIGHT_MAX_EVENT_BYTES and eviction is always offered
+  // something to reclaim.  Each resulting chunk then goes through the ordinary
+  // path below — consecutive same-stream chunks still coalesce while they fit,
+  // and eviction runs as the chunks land.
+  const bounded = boundInFlightEvent(event);
+  if (bounded.length > 1) {
+    for (const chunk of bounded) pushInFlightEvent(snapshot, chunk);
+    return;
+  }
+  const next = bounded[0];
+  const last = snapshot.events[snapshot.events.length - 1];
+  if (last) {
+    const delta = mergeableDelta(last, next);
+    if (delta !== null) {
+      const merged: InFlightEvent = {
+        type: 'progress',
+        data: { ...(last.data as ChatProgress), delta: (last.data as ChatProgress).delta! + delta },
+        // Keep the NEWEST timestamp: the watchdog reads the last event's
+        // timestamp to decide whether the backend is still alive.
+        timestamp: next.timestamp,
+      };
+      const mergedBytes = inFlightEventBytes(merged);
+      // A merge that would breach the SINGLE-EVENT cap is refused rather than
+      // producing one giant event (the merge is lossless, but two legal events
+      // adding up past the per-event bound is exactly how a "bounded" buffer
+      // used to end up with 1 MiB residents).  The incoming delta gets its own
+      // slot instead; the ordinary eviction below keeps the total bounded.
+      if (mergedBytes <= IN_FLIGHT_MAX_EVENT_BYTES) {
+        snapshot.bytes += mergedBytes - inFlightEventBytes(last);
+        snapshot.events[snapshot.events.length - 1] = merged;
+        // 长单流 turn 每次都在最后一条上合并，若这里直接 return，回收检查
+        // 在整段流期间永远不会跑（CR 复审 finding）：合并纳入后同样要跑。
+        evictInFlightOverflow(snapshot);
+        return;
+      }
+    }
+  }
+  snapshot.events.push(next);
+  snapshot.bytes += inFlightEventBytes(next);
+  evictInFlightOverflow(snapshot);
+}
+
+/** (#1034 复审 P1) Force one event under the single-event cap, returning the
+ *  events to push (an over-cap delta becomes several).
+ *
+ *  Order is by damage: the delta splitter is lossless, so it goes first, and
+ *  sanitizing the whole payload — which can cut `tool_output` or a nested
+ *  string — only runs when splitting cannot help.  Terminals are returned
+ *  untouched: they are capped at ingest by `capTerminalEventData`, whose
+ *  budget is deliberately larger (a `final`'s content is the answer itself and
+ *  cannot be rejoined from pieces the way a stream delta can).
+ *
+ *  The returned events satisfy IN_FLIGHT_MAX_EVENT_BYTES by construction, so
+ *  every path in `pushInFlightEvent` (plain push, coalescing merge, eviction)
+ *  inherits the invariant. */
+function boundInFlightEvent(event: InFlightEvent): InFlightEvent[] {
+  if (event.type !== 'progress') return [event];
+  if (inFlightEventBytes(event) <= IN_FLIGHT_MAX_EVENT_BYTES) return [event];
+  const chunks = splitProgressEventByBytes(event, IN_FLIGHT_MAX_EVENT_BYTES);
+  if (chunks.length > 1) return chunks;
+  // Splitting could not help: the bytes are outside `delta`, or there is no
+  // `delta` to cut.  Bound the whole payload instead.
+  const base = chunks[0];
+  return [{ ...base, data: sanitizeProgressEventData(base.data) }];
 }
 /** Map that drops the oldest key once it exceeds `maxSize` entries. */
 function boundedMap<K, V>(maxSize: number): Map<K, V> {
@@ -2505,8 +3944,12 @@ function cachedEventsToMessages(events: InFlightEvent[], mode?: ReasoningMode): 
 
 /** Split cached events into thinking (progress/error/subagent) vs the final
  *  reply.  Used by load() to merge with history in the correct visual order
- *  (thinking ABOVE the reply). */
-function splitCachedMessages(events: InFlightEvent[]): {
+ *  (thinking ABOVE the reply).
+ *
+ *  (#1118 复审) Exported for the "cache ≠ source of truth" regression test: the
+ *  cache is a gap-filler, so what this returns for an eviction-emptied terminal
+ *  is a contract (`inFlightReplaySource.test.ts`). */
+export function splitCachedMessages(events: InFlightEvent[]): {
   thinking: Message[];
   finalReply: string | null;
   /** #834: server-measured thinking proxy, preserved across the off-session
@@ -2707,7 +4150,7 @@ export function ChatConsole({
   }, [messages]);
   // sourcesByMsg cache: keyed by a tool-only signature so the map object is
   // stable across typewriter frames (see sourcesByMsg below).
-  const sourcesCacheRef = useRef<{ sig: string; map: Map<Message, MessageSource[]> } | null>(null);
+  const sourcesCacheRef = useRef<{ sig: string; map: Map<string, MessageSource[]> } | null>(null);
   // Tracks the latest messages for the session-switch snapshot.  Kept in
   // sync below; the switch effect snapshots the session we're leaving into
   // moduleMessagesSnapshot so switching back restores it instantly.
@@ -3294,6 +4737,8 @@ export function ChatConsole({
   );
   /** files touched by the agent during this session */
   const [trackedFiles, setTrackedFiles] = useState<TrackedFile[]>([]);
+  /** 回合序号 → 该回合累积的结构化来源（#879 ③ 文件 → 相关引用）。 */
+  const [turnSourcesMap, setTurnSourcesMap] = useState<Map<number, MessageSource[]>>(new Map());
   /** preview modal */
   const [previewFile, setPreviewFile] = useState<{
     path: string;
@@ -3564,7 +5009,12 @@ export function ChatConsole({
   const lifecycleRef = useRef<{ id: number; promise: Promise<void>; sessionKey: string } | null>(
     null
   );
-  // Monotonic id for lifecycleRef identity checks.
+  // Monotonic id for lifecycleRef identity checks — never reset, so a session
+  // switch cannot reuse an old turn's id and collide with a still-in-flight
+  // lifecycle (would let an old settle clear the NEW lifecycle) (#879 ③ CodeRabbit).
+  const lifecycleSeqRef = useRef(0);
+  // 回合序号（第几个 user 回合，从 0 起）——source 回合索引（turnSourcesMap /
+  // 文件卡片「相关引用」）。会话加载时重置；与 lifecycleSeqRef 分离。
   const turnSeqRef = useRef(0);
   // Crash-recovery turn id (#1035): latched by the mount-time listeners from
   // the first turn-tagged event after a renderer reload, so that turn's
@@ -3728,72 +5178,96 @@ export function ChatConsole({
   }, []);
 
   /** Upsert a file into trackedFiles */
-  const trackFile = useCallback((path: string, op: TrackedFile['op'], truncated = false) => {
-    // Normalise sandbox-internal paths before storing so Preview works
-    const normPath = normalizeSandboxPath(path);
-    // Strip surrounding quotes, trailing ellipsis, and leading ./ for dedup
-    const clean = normPath
-      .replace(/^["']|["']$/g, '')
-      .replace(/\.{3,}$/, '')
-      .replace(/[…]$/, '')
-      .replace(/^\.\//, '')
-      .trim();
-    setTrackedFiles((prev) => {
-      // Fuzzy match: compare cleaned base name, then exact path
-      const existing = prev.find((f) => {
-        const fc = f.path
-          .replace(/^["']|["']$/g, '')
-          .replace(/\.{3,}$/, '')
-          .replace(/[…]$/, '')
-          .replace(/^\.\//, '')
-          .trim();
-        // Basename-only matching should only kick in when one side is a bare
-        // filename (no directory), e.g. a tool hint reporting just "foo.pdf"
-        // that needs to match an existing "papers/foo.pdf" entry. Two paths
-        // that both carry (different) directories must not be merged just
-        // because they share a filename.
-        const eitherIsBareFilename = !clean.includes('/') || !fc.includes('/');
-        return (
-          f.path === normPath ||
-          fc === clean ||
-          sameTrackedFile(f.path, normPath, workspace) ||
-          sameTrackedFile(fc, clean, workspace) ||
-          (eitherIsBareFilename && basename(f.path) === basename(clean))
-        );
-      });
-      if (existing) {
-        // Upgrade: read < edit < write
-        const rank: Record<TrackedFile['op'], number> = { read: 0, edit: 1, write: 2, delete: 3 };
-        const nextOp = rank[op] > rank[existing.op] ? op : existing.op;
-        return prev.map((f) =>
-          f.path === existing.path
-            ? { ...f, op: nextOp, lastSeen: Date.now(), truncated: f.truncated && truncated }
-            : f
-        );
-      }
-      return prev; // new entries are verified for existence async below
-    });
-    // New entries: only surface a file that actually exists — tool hints can
-    // report a filename that was referenced (e.g. an image inside an HTML page)
-    // but never saved. Checked after the write usually lands.
-    fileExists(normPath, currentSessionRef.current).then((exists) => {
-      if (!exists) return;
+  const trackFile = useCallback(
+    (
+      path: string,
+      op: TrackedFile['op'],
+      truncated = false,
+      turnId?: number,
+      sourceTool?: string
+    ) => {
+      // Normalise sandbox-internal paths before storing so Preview works
+      const normPath = normalizeSandboxPath(path);
+      // Strip surrounding quotes, trailing ellipsis, and leading ./ for dedup
+      const clean = normPath
+        .replace(/^["']|["']$/g, '')
+        .replace(/\.{3,}$/, '')
+        .replace(/[…]$/, '')
+        .replace(/^\.\//, '')
+        .trim();
       setTrackedFiles((prev) => {
-        const dup = prev.some(
-          (f) =>
+        // Fuzzy match: compare cleaned base name, then exact path
+        const existing = prev.find((f) => {
+          const fc = f.path
+            .replace(/^["']|["']$/g, '')
+            .replace(/\.{3,}$/, '')
+            .replace(/[…]$/, '')
+            .replace(/^\.\//, '')
+            .trim();
+          // Basename-only matching should only kick in when one side is a bare
+          // filename (no directory), e.g. a tool hint reporting just "foo.pdf"
+          // that needs to match an existing "papers/foo.pdf" entry. Two paths
+          // that both carry (different) directories must not be merged just
+          // because they share a filename.
+          const eitherIsBareFilename = !clean.includes('/') || !fc.includes('/');
+          return (
             f.path === normPath ||
+            fc === clean ||
             sameTrackedFile(f.path, normPath, workspace) ||
-            (basename(f.path) === basename(normPath) &&
-              (!f.path.includes('/') || !normPath.includes('/')))
-        );
-        if (dup) return prev;
-        return [
-          ...prev,
-          { path: normPath, name: basename(normPath), op, lastSeen: Date.now(), truncated },
-        ];
+            sameTrackedFile(fc, clean, workspace) ||
+            (eitherIsBareFilename && basename(f.path) === basename(clean))
+          );
+        });
+        if (existing) {
+          // Upgrade: read < edit < write
+          const rank: Record<TrackedFile['op'], number> = { read: 0, edit: 1, write: 2, delete: 3 };
+          const nextOp = rank[op] > rank[existing.op] ? op : existing.op;
+          return prev.map((f) =>
+            f.path === existing.path
+              ? {
+                  ...f,
+                  op: nextOp,
+                  lastSeen: Date.now(),
+                  truncated: f.truncated && truncated,
+                  turnId: turnId ?? f.turnId,
+                  sourceTool: sourceTool ?? f.sourceTool,
+                }
+              : f
+          );
+        }
+        return prev; // new entries are verified for existence async below
       });
-    });
-  }, []);
+      // New entries: only surface a file that actually exists — tool hints can
+      // report a filename that was referenced (e.g. an image inside an HTML page)
+      // but never saved. Checked after the write usually lands.
+      fileExists(normPath, currentSessionRef.current).then((exists) => {
+        if (!exists) return;
+        setTrackedFiles((prev) => {
+          const dup = prev.some(
+            (f) =>
+              f.path === normPath ||
+              sameTrackedFile(f.path, normPath, workspace) ||
+              (basename(f.path) === basename(normPath) &&
+                (!f.path.includes('/') || !normPath.includes('/')))
+          );
+          if (dup) return prev;
+          return [
+            ...prev,
+            {
+              path: normPath,
+              name: basename(normPath),
+              op,
+              lastSeen: Date.now(),
+              truncated,
+              turnId,
+              sourceTool,
+            },
+          ];
+        });
+      });
+    },
+    []
+  );
   // Ref mirror so crash-recovery listeners (registered once on mount) always
   // call the latest trackFile closure (#1035).
   const trackFileRef = useRef(trackFile);
@@ -3922,10 +5396,11 @@ export function ChatConsole({
       // messagesRef 再交给 setMessages。messagesRef 是渲染期赋值（见
       // `messagesRef.current = messages`），而下面 load() 的 sessions.get() 是
       // 异步的：切会话（含切 thread tab 后的重新 load）这一拍如果渲染还没提交
-      // （列表越大越慢），load() 完成时读到的 messagesRef 仍是**上一个会话**的
-      // 消息，于是 #872 的 in-flight 保留分支会把上一个会话的用户气泡/思考块
-      // append 进新会话的 merged 里（实测症状：切回 A 后 A 的列表末尾多出 B 的
-      // 提问气泡；切到 B 后 B 的界面里还留着 A 的思考块）。
+      // （列表越大越慢——本用例的 ~6MB reasoning 正是最慢的那档），load() 完成时
+      // 读到的 messagesRef 仍是**上一个会话**的消息，于是 #872 的 in-flight 保留
+      // 分支会把上一个会话的用户气泡/思考块 append 进新会话的 merged 里。实测症状
+      // 就是「切回 A 后 A 的消息列表末尾多了 B 的提问气泡」与「切到 B 后 B 的界面里
+      // 还留着 A 的思考块」。
       let _initialMessages: Message[];
       if (_snapshot && _snapshot.length > 0) {
         // Exact last-rendered view — best fidelity.
@@ -4476,6 +5951,15 @@ export function ChatConsole({
           result: f.result === true,
         }));
         setTrackedFiles(mergeTrackedFiles(existingFromMessages, backendMapped, workspace));
+        // #879 ③ 冷启动恢复：从消息重新推导「回合 → 来源」，供文件卡片显示相关引用。
+        setTurnSourcesMap(extractTurnSourcesFromMessages(rawMsgs));
+        // 回合序号与会话内 user 消息数对齐（turnSeqRef 跨会话累计，需重置），
+        // 否则实时追踪的 turnId 与恢复推导的序号错位。持久化 rawMsgs 可能不含
+        // 尚在乐观阶段的 user 消息——取「持久化数 / 可见数」较大者，避免覆盖
+        // 活跃 turn 已递增的序号（CodeRabbit）。
+        const persistedTurns = (rawMsgs ?? []).filter((m) => m?.role === 'user').length;
+        const visibleTurns = messagesRef.current.filter((m) => m.role === 'user').length;
+        turnSeqRef.current = Math.max(persistedTurns, visibleTurns) - 1;
 
         // ── Issue #490: resume this session's most-recent active thread ──
         // currentThreadIdRef is reset to null on every sessionKey/remount
@@ -5996,7 +7480,10 @@ export function ChatConsole({
     // This turn's lifecycle — registered BEFORE any await (threads.start,
     // chat.send) so a subsequent interrupt-and-resend can always serialize
     // against it, even mid thread-init.
-    const turnId = ++turnSeqRef.current;
+    const turnId = ++lifecycleSeqRef.current;
+    // source 回合索引随每次发送前进（会话加载时已对齐 user 消息数），与上面
+    // 的 lifecycle 身份分账——见 lifecycleSeqRef 注释。
+    turnSeqRef.current += 1;
     let resolveLifecycle: () => void = () => {};
     const lifecyclePromise = new Promise<void>((resolve) => {
       resolveLifecycle = resolve;
@@ -6385,12 +7872,12 @@ export function ChatConsole({
       // load() never looks up, silently dropping the stream on switch-back.
       const _owner = sendSessionKey;
       if (_owner !== currentSessionRef.current) {
-        var buf = inFlightCacheRef.current.get(_owner);
-        if (!buf) {
-          buf = { events: [], userMsgTimestamp: 0 };
-          inFlightCacheRef.current.set(_owner, buf);
-        }
-        buf.events.push({ type: 'progress', data, timestamp: Date.now() });
+        // #1034: capped + coalescing push (was an unbounded events.push).
+        pushInFlightEvent(getInFlightSnapshot(inFlightCacheRef.current, _owner), {
+          type: 'progress',
+          data,
+          timestamp: Date.now(),
+        });
         return;
       }
       lastEventAt = Date.now();
@@ -6516,6 +8003,58 @@ export function ChatConsole({
         return;
       }
 
+      // #879: web_sources structured sources from WebSearchTool/WebFetchTool.
+      // Arrives as a progress delta ({delta, tool_call_id, tool_hint}) which
+      // extractProgressMessage() returns null for — handle it before that gate.
+      if (data.delta && typeof data.delta === 'string' && data.tool_call_id) {
+        try {
+          const inner = JSON.parse(data.delta);
+          if (
+            inner?.type === 'web_sources' &&
+            Array.isArray(inner.payload?.sources) &&
+            inner.payload.sources.length
+          ) {
+            const structured: MessageSource[] = inner.payload.sources.map(
+              (s: { title?: string; url?: string; snippet?: string; tool?: string }) => ({
+                tool: s.tool || 'web_search',
+                url: s.url || '',
+                title: s.title,
+                snippet: s.snippet,
+              })
+            );
+            const webToolName = structured[0]?.tool || 'web_search';
+            // #879 ③：按回合累积 sources，供文件卡片显示「相关引用」。
+            const turnSeq = turnSeqRef.current;
+            setTurnSourcesMap((prev) => {
+              const next = new Map(prev);
+              const acc = next.get(turnSeq) ?? [];
+              const seen = new Set(acc.map((s) => s.url));
+              for (const s of structured) {
+                if (s.url && !seen.has(s.url)) {
+                  seen.add(s.url);
+                  acc.push(s);
+                }
+              }
+              next.set(turnSeq, acc);
+              return next;
+            });
+            setMessages((prev) => {
+              for (let i = prev.length - 1; i >= 0; i -= 1) {
+                const m = prev[i];
+                if (m.role === 'progress' && m.toolHint && m.toolCallId === data.tool_call_id) {
+                  const next = [...prev];
+                  next[i] = { ...m, webSources: structured, toolName: webToolName };
+                  return next;
+                }
+              }
+              return prev;
+            });
+          }
+        } catch {
+          /* not JSON, ignore */
+        }
+      }
+
       // Try structured extraction first, then fall back to raw text
       const extracted = extractProgressMessage(data as ProgressPayload);
 
@@ -6606,7 +8145,7 @@ export function ChatConsole({
       // Parse file operations from tool hints
       if (data.tool_hint && data.text) {
         const parsed = parseToolHint(data.text);
-        if (parsed) trackFile(parsed.path, parsed.op, parsed.truncated);
+        if (parsed) trackFile(parsed.path, parsed.op, parsed.truncated, turnSeqRef.current);
       }
     });
 
@@ -6617,12 +8156,11 @@ export function ChatConsole({
       // Route under the UI session owner — see the progress listener.
       const _owner = sendSessionKey;
       if (_owner !== currentSessionRef.current) {
-        var buf = inFlightCacheRef.current.get(_owner);
-        if (!buf) {
-          buf = { events: [], userMsgTimestamp: 0 };
-          inFlightCacheRef.current.set(_owner, buf);
-        }
-        buf.events.push({ type: 'final', data, timestamp: Date.now() });
+        pushInFlightEvent(getInFlightSnapshot(inFlightCacheRef.current, _owner), {
+          type: 'final',
+          data: capTerminalEventData(data),
+          timestamp: Date.now(),
+        });
         return;
       }
       // Final from a superseded turn (e.g. a pre-abort final racing a quick
@@ -6640,12 +8178,29 @@ export function ChatConsole({
       if (data.turn_id && data.turn_id !== myTurnId) {
         return;
       }
+      // (#1034 复审 P2 → P1) 终态 payload 统一按 terminal 预算封顶，active
+      // 路径与在途缓存回放走同一套（此前只有缓存路径 cap 过，active 路径只
+      // cap 了 reasoning，于是 content / message / tool_calls 仍可把整个原始
+      // payload 挂进 renderer state）。
+      //
+      // 拆成两份用（见 capTerminalEventData 注释）：
+      //   rawData  —— 只做一次性 metadata 提取（Task Assets / tool_call_id /
+      //               文件路径解析），提取结果本身是有界的小对象；
+      //   safeData —— 一切进入 React state / 缓存 / UI 的字段都取自它。
+      // 顺序很重要：先提取再丢弃，原始 payload 不会被长期挂住。
+      const rawData = data;
+      const safeData = capTerminalEventData(data);
+      // reasoning 仍单独走一次尾窗：capTerminalEventData 只在**整个 payload
+      // 超预算**时才裁 reasoning，而 8000 字符的 reasoning 远在 1 MiB 预算
+      // 之下，所以只靠它会让 8k–500k 字之间的 reasoning 原样进入渲染器。
+      // 与 safeData.reasoning 幂等（裁过的再裁一次不变）。
+      const cappedReasoning = capTerminalReasoning(safeData.reasoning);
       clearFinalCleanupTimer();
       if (animId !== null) {
         cancelAnimationFrame(animId);
         animId = null;
       }
-      fullContent = data.content;
+      fullContent = safeData.content;
       displayed = '';
       finalDone = true;
       persistReveal();
@@ -6679,9 +8234,9 @@ export function ChatConsole({
       const finalReasoningElapsedS =
         // CR #856-7: normalize the server value the same way as the cache /
         // snapshot paths (≥1s, rounded) so live and restored views agree.
-        data.reasoning_elapsed_s != null
-          ? Math.max(1, Math.round(data.reasoning_elapsed_s))
-          : data.reasoning || hadLiveReasoning
+        safeData.reasoning_elapsed_s != null
+          ? Math.max(1, Math.round(safeData.reasoning_elapsed_s))
+          : safeData.reasoning || hadLiveReasoning
             ? // Pure thinking span: first→last reasoning delta. Falls back to the
               // final-event time when no live reasoning was seen. Never 0s.
               // (#834) Server-measured value arrives as reasoning_elapsed_s and
@@ -6710,14 +8265,14 @@ export function ChatConsole({
                 ? {
                     ...m,
                     isLiveReasoning: false,
-                    content: data.reasoning || m.content,
-                    reasoning: data.reasoning || m.content,
+                    content: cappedReasoning || m.content,
+                    reasoning: cappedReasoning || m.content,
                     reasoningElapsedS: finalReasoningElapsedS,
                   }
                 : m
             )
           : prev;
-      if (hadLiveReasoning || data.reasoning) {
+      if (hadLiveReasoning || safeData.reasoning) {
         // Order matters (audit P0-3): FLUSH the buffered reasoning deltas
         // FIRST (they append to the still-live block), THEN close the live
         // block.  The old order (close-then-flush) made appendReasoningDelta
@@ -6729,23 +8284,27 @@ export function ChatConsole({
           if (hadLiveReasoning) return cleaned;
           // data.reasoning present without a live block → insert standalone.
           if (
-            data.reasoning &&
+            cappedReasoning &&
             !cleaned.some(
-              (m) => m.role === 'progress' && m.reasoning && m.reasoning === data.reasoning
+              (m) => m.role === 'progress' && m.reasoning && m.reasoning === cappedReasoning
             )
           ) {
-            return insertStandaloneReasoning(cleaned, data.reasoning, finalReasoningElapsedS);
+            return insertStandaloneReasoning(cleaned, cappedReasoning, finalReasoningElapsedS);
           }
           return cleaned;
         });
         liveReasoningTsRef.current = null;
       }
-      if (data.tool_calls?.length) {
+      // Metadata extraction runs on the RAW payload (see rawData above): the cap
+      // may drop trailing calls or shorten `arguments`, and a lost path here
+      // would silently drop a Task Assets row.  Nothing from this loop is kept
+      // as-is — only the extracted paths / parsed args, both small.
+      if (rawData.tool_calls?.length) {
         // Track file operations from tool_calls for Task Assets panel.
         // Office tools (create_docx, etc.) don't always produce progress
         // hints that match parseToolHint patterns, so we extract file
         // paths directly from the final tool call list.
-        for (const tc of (data.tool_calls ?? []) as any[]) {
+        for (const tc of (rawData.tool_calls ?? []) as any[]) {
           const fn = tc?.function || tc?.tool?.function || {};
           const toolName: string = fn?.name || '';
           if (!toolName) continue;
@@ -6762,9 +8321,9 @@ export function ChatConsole({
           const filePath: string = _extractPathFromArgs(fn?.arguments || '{}') || '';
           if (!filePath) continue;
           if (_FILE_WRITE_TOOLS.includes(toolName)) {
-            trackFile(filePath, 'write', false);
+            trackFile(filePath, 'write', false, turnSeqRef.current, toolName);
           } else if (_FILE_READ_TOOLS.includes(toolName)) {
-            trackFile(filePath, 'read', false);
+            trackFile(filePath, 'read', false, turnSeqRef.current, toolName);
           }
         }
 
@@ -6805,7 +8364,9 @@ export function ChatConsole({
             {
               role: 'assistant',
               content: '',
-              tool_calls: data.tool_calls,
+              // 进入 React state 的那份走 cap 后的副本（仍是数组，见
+              // capTerminalEventData 第 2 步）。
+              tool_calls: safeData.tool_calls,
               timestamp: new Date().toISOString(),
             },
           ]);
@@ -6845,12 +8406,11 @@ export function ChatConsole({
       // Route under the UI session owner — see the progress listener.
       const _owner = sendSessionKey;
       if (_owner !== currentSessionRef.current) {
-        var buf = inFlightCacheRef.current.get(_owner);
-        if (!buf) {
-          buf = { events: [], userMsgTimestamp: 0 };
-          inFlightCacheRef.current.set(_owner, buf);
-        }
-        buf.events.push({ type: 'error', data, timestamp: Date.now() });
+        pushInFlightEvent(getInFlightSnapshot(inFlightCacheRef.current, _owner), {
+          type: 'error',
+          data: capTerminalEventData(data),
+          timestamp: Date.now(),
+        });
         return;
       }
       // Error from a superseded turn (e.g. an abort-induced error racing a
@@ -6861,7 +8421,10 @@ export function ChatConsole({
       }
       streamErrorHandled = true;
       if (animId !== null) cancelAnimationFrame(animId);
-      const message = sanitizeUiMessage(data.message);
+      // (#1034 复审 P1) active 路径与缓存回放同一套 payload cap：`message`
+      // 是唯一进入 state 的载荷字段，取 cap 后的副本（2 MiB 的报错正文不再
+      // 一次性挂进 renderer）。`code` 是短字符串标量，原样用。
+      const message = sanitizeUiMessage(capTerminalEventData(data).message);
       flushReasoningRef.current?.(Date.now());
       liveReasoningTsRef.current = null;
       setMessages((prev) => [
@@ -6896,12 +8459,11 @@ export function ChatConsole({
       // Route under the UI session owner — see the progress listener.
       const _owner = sendSessionKey;
       if (_owner !== currentSessionRef.current) {
-        var buf = inFlightCacheRef.current.get(_owner);
-        if (!buf) {
-          buf = { events: [], userMsgTimestamp: 0 };
-          inFlightCacheRef.current.set(_owner, buf);
-        }
-        buf.events.push({ type: 'aborted', data: _data, timestamp: Date.now() });
+        pushInFlightEvent(getInFlightSnapshot(inFlightCacheRef.current, _owner), {
+          type: 'aborted',
+          data: capTerminalEventData(_data),
+          timestamp: Date.now(),
+        });
         return;
       }
       // Stale terminal event from a superseded turn: stop-then-quick-send
@@ -6920,6 +8482,9 @@ export function ChatConsole({
         return;
       }
       if (animId !== null) cancelAnimationFrame(animId);
+      // (#1034 复审 P1) 这条 active 路径不带任何载荷进入 state（下面那行是
+      // 字面量）——aborted 事件本身没有需要 cap 的字段，所以这里不需要
+      // safeData，与缓存路径同样没有无界 renderer state。
       setStreaming(false);
       setSendingFor(sendSessionKey, null);
       streamingBySession.delete(sendSessionKey);
@@ -7364,6 +8929,11 @@ export function ChatConsole({
                 path: candidate.p,
                 kind: 'pdf',
                 pdfUrl: base64ToBlobUrl(res.data_base64, res.mime_type || 'application/pdf'),
+                // Keep the bytes alongside the blob URL: 「系统应用打开」 only
+                // takes the reliable openBytes path when they are present, and
+                // otherwise falls back to openExternal(candidate.p) — which
+                // cannot resolve a bare name for a session-scoped file (#1131).
+                dataBase64: res.data_base64,
               });
               return;
             }
@@ -7571,22 +9141,22 @@ export function ChatConsole({
     () =>
       messages
         .map((m) =>
-          m.role === 'progress' ? `${m.toolCallId ?? ''}:${m.content?.length ?? 0}` : m.role
+          m.role === 'progress'
+            ? `${m.toolCallId ?? ''}:${m.content?.length ?? 0}:${m.webSources?.length ?? 0}`
+            : m.role
         )
         .join('|'),
     [messages]
   );
   const sourcesByMsg = useMemo(() => {
     if (sourcesCacheRef.current?.sig === sourcesSig) return sourcesCacheRef.current.map;
-    const map = new Map<Message, MessageSource[]>();
+    const map = new Map<string, MessageSource[]>();
     let pending: MessageSource[] = [];
     let seen = new Set<string>();
     const merge = (next: MessageSource[]) => {
-      for (const s of next) {
-        if (seen.has(s.url)) continue;
-        seen.add(s.url);
-        pending.push(s);
-      }
+      // own 已经过上面的 filter 去重（跨工具行），这里直接累积即可；
+      // 若再走 seen 去重会与 filter 共享 seen、全部跳过，导致 pending 恒空。
+      pending.push(...next);
     };
     for (const m of messages) {
       if (m.role === 'progress') {
@@ -7598,7 +9168,7 @@ export function ChatConsole({
           seen.add(s.url);
           return true;
         });
-        if (own.length > 0) map.set(m, own);
+        if (own.length > 0) map.set(sourcesKey(m), own);
         merge(own);
       } else if (m.role === 'user') {
         pending = [];
@@ -7609,7 +9179,7 @@ export function ChatConsole({
         // answer all reference the same tool results (#678 用户反馈: 中间
         // "搜索异常改用…" 消息点查看来源竟是空的). Reset happens at the
         // next user message.
-        map.set(m, pending);
+        map.set(sourcesKey(m), pending);
       }
     }
     return map;
@@ -8645,7 +10215,7 @@ export function ChatConsole({
                         onEdit={handleEdit}
                         execOutputs={execOutputs}
                         inlineExecOutput={inlineExecOutput}
-                        sources={sourcesByMsg.get(group.msg) ?? EMPTY_SOURCES}
+                        sources={sourcesByMsg.get(sourcesKey(group.msg)) ?? EMPTY_SOURCES}
                         toolStepIndex={toolStepByMsg.get(group.msg)}
                         isLast={i === chatGroups.length - 1}
                         streaming={streaming && i === lastAssistantIdx && assistantTailActive}
@@ -9122,29 +10692,46 @@ export function ChatConsole({
                         key={f.path}
                         file={f}
                         isResult
+                        citations={turnSourcesMap.get(f.turnId ?? -1) ?? []}
                         onPreview={() => handlePreview(f.path)}
                         onDiff={() => handleShowDiff(f.path)}
                         onReveal={async () => {
                           // #1062：过去对工作区外文件这里会 reject 被丢弃 → 点了没反应；
                           // 现在统一收结构化结果，失败时给出可见提示。
-                          try {
-                            const res = await window.miqi.files.openContainingFolder(
-                              normalizePath(f.path),
-                              // #1062: 带上会话 key，主进程才能把文件夹绑定会话的
-                              // 工作区算进允许根；传的是会话而非根，渲染层无法放宽校验。
-                              currentSessionRef.current
-                            );
-                            if (!res?.revealed) {
-                              const outside = /outside workspace/i.test(String(res?.error ?? ''));
-                              notifyAssetError(
-                                outside
-                                  ? '无法定位：该文件在会话工作区之外'
-                                  : `定位失败：${res?.error ?? '未知原因'}`
-                              );
-                            }
-                          } catch (e: any) {
-                            notifyAssetError(`定位失败：${e?.message ?? String(e)}`);
+                          // #1131：`sessions.workspace` 对**非文件夹绑定**的默认工作区
+                          // 会话返回 null，主进程于是把相对路径锚到全局工作区根；而会话
+                          // 隔离的产物实际在 `sessions/<key>/files/` 下，台账里存的又是
+                          // 裸文件名（create_pdf 等文档工具相对会话 files 根记账）→ 一律
+                          // File not found。与预览/下载保持一致，补一个会话相对候选。
+                          // 路径由本会话 key 推出，主进程的包含性校验不变，渲染层没被放宽。
+                          const raw = normalizePath(f.path);
+                          const nameOnly = raw.replace(/\\/g, '/').split('/').pop()!;
+                          const safeKey = sessionFilesDirKey(currentSessionRef.current);
+                          const candidates = [raw];
+                          if (safeKey && nameOnly === raw) {
+                            candidates.push(`sessions/${safeKey}/files/${nameOnly}`);
                           }
+                          let lastError = '';
+                          for (const candidate of candidates) {
+                            try {
+                              const res = await window.miqi.files.openContainingFolder(
+                                candidate,
+                                // #1062: 带上会话 key，主进程才能把文件夹绑定会话的
+                                // 工作区算进允许根；传的是会话而非根，渲染层无法放宽校验。
+                                currentSessionRef.current
+                              );
+                              if (res?.revealed) return;
+                              lastError = String(res?.error ?? '');
+                            } catch (e: any) {
+                              lastError = String(e?.message ?? e);
+                            }
+                          }
+                          const outside = /outside workspace/i.test(lastError);
+                          notifyAssetError(
+                            outside
+                              ? '无法定位：该文件在会话工作区之外'
+                              : `定位失败：${lastError || '未知原因'}`
+                          );
                         }}
                       />
                     ))}
@@ -9165,6 +10752,7 @@ export function ChatConsole({
                       <TrackedFileCard
                         key={f.path}
                         file={f}
+                        citations={turnSourcesMap.get(f.turnId ?? -1) ?? []}
                         onPreview={() => handlePreview(f.path)}
                         onDiff={() => handleShowDiff(f.path)}
                       />
@@ -9890,7 +11478,7 @@ function ToolChainGroup({
 }: {
   rows: Message[];
   done: boolean;
-  sourcesByMsg: Map<Message, MessageSource[]>;
+  sourcesByMsg: Map<string, MessageSource[]>;
   searchResultsByCallId: Record<string, string>;
 } & Omit<
   ComponentProps<typeof MessageBubble>,
@@ -9938,7 +11526,7 @@ function ToolChainGroup({
               <MessageBubble
                 key={`${row.timestamp}-${i}`}
                 msg={row}
-                sources={sourcesByMsg.get(row) ?? EMPTY_SOURCES}
+                sources={sourcesByMsg.get(sourcesKey(row)) ?? EMPTY_SOURCES}
                 toolStepIndex={i + 1}
                 isLastToolRow={i === rows.length - 1}
                 isLast={false}
@@ -10940,7 +12528,11 @@ const MessageBubble = memo(function MessageBubble({
                             CodeRabbit 修订：改用真实生成信号 streaming（2722/2724 由
                             turn 生命周期驱动），不再用乐观 sending 时间戳 ——
                             sending 是用户回合信号，assistant 回复期间可能已为 null。 */}
-                        <MarkdownContent content={msg.content} streaming={streaming} />
+                        <MarkdownContent
+                          content={msg.content}
+                          streaming={streaming}
+                          sources={sources}
+                        />
                       </>
                     ) : (
                       renderContent((msg as any).__cleanContent ?? msg.content)
@@ -11094,12 +12686,20 @@ const MessageBubble = memo(function MessageBubble({
               href={s.url}
               target="_blank"
               rel="noreferrer"
-              className="flex items-center gap-2 rounded-lg px-2.5 py-2 text-xs hover:bg-[var(--surface-muted)] transition-colors"
+              className="flex items-start gap-2 rounded-lg px-2.5 py-2 text-xs hover:bg-[var(--surface-muted)] transition-colors"
             >
-              <ExternalLink size={12} className="shrink-0" />
-              <span className="truncate">
-                {s.tool ? `${s.tool} · ` : ''}
-                {s.url}
+              <ExternalLink size={12} className="shrink-0 mt-0.5" />
+              <span className="min-w-0 flex-1">
+                <span className="block truncate">
+                  {s.tool ? `${s.tool} · ` : ''}
+                  {s.title || s.url}
+                </span>
+                {s.title && s.title !== s.url && (
+                  <span className="block truncate text-[var(--text-muted)]">{s.url}</span>
+                )}
+                {s.snippet && (
+                  <span className="block truncate text-[var(--text-muted)]">{s.snippet}</span>
+                )}
               </span>
             </a>
           ))}

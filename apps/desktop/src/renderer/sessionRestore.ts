@@ -1,5 +1,5 @@
 /**
- * #1118（#1035 移植）：启动时从 `localStorage['miqi:lastSession']` 恢复「上次会话」的校验。
+ * #1118：启动时从 `localStorage['miqi:lastSession']` 恢复「上次会话」的校验。
  *
  * 为什么需要校验：bridge 的 `sessions.get(key)` 对未知 key 走
  * `SessionManager.get_or_create`（miqi/runtime/session_handlers.py），**不报错、
@@ -8,29 +8,34 @@
  * 之后的新建/发送都落在那个幽灵 key 上，等于用被删会话的身份开新会话。
  *
  * 真实用户可达：删除当前会话的入口不止一处（SessionExplorer / 设置页的永久删除
- * 都不通知 App），会话也可能在另一个实例或另一个工作区里被删掉；重启后
- * lastSession 就指向一个不存在的 key。
+ * 都不通知 App，见 #1118 第七轮复核），会话也可能在另一个实例或另一个工作区里
+ * 被删掉；重启后 lastSession 就指向一个不存在的 key。
  *
  * 判定收拢成单点并导出，让回归测试直接锁定（同 ChatConsole 的
  * `shouldRenderReplyHeadThinking` 约定）。`sessions.list` 只列**已落盘**的会话
  * （空会话是临时的，不进列表），所以「上次会话是个从没落盘的空会话」也会判成
  * 幽灵——回退到默认态对用户无差别（两者渲染的都是欢迎页 + 首次发送即落盘）。
  *
- * #1118 第八轮（#1035 移植）：校验本身要**先于** ChatConsole 挂载（两阶段启动，
- * 见 App.tsx）。校验是异步的，而 ChatConsole 的加载 effect 会对 `sessionKey`
- * 直接调 `sessions.get`（get-or-create）。第八轮实测确认裸 get 不会把幽灵落盘、
- * 也不会让它进 `sessions.list`（空会话 `exclude_empty=True` 被排除），所以第七
- * 轮的回退判定本身没被打穿；但顺序仍然是错的——`get(workspace=…)` 那种形状确实
- * 会落盘，让「先加载、后判定」依赖后端当前恰好是「空会话临时态」。两阶段把顺序
- * 钉死。
+ * #1118 第八轮：校验本身要**先于** ChatConsole 挂载（两阶段启动，见 App.tsx）。
+ * 校验是异步的，而 ChatConsole 的加载 effect 会对 `sessionKey` 直接调
+ * `sessions.get`（get-or-create）。第八轮实测确认裸 get 不会把幽灵落盘、也不会
+ * 让它进 `sessions.list`（空会话 `exclude_empty=True` 被排除），所以第七轮的回退
+ * 判定本身没被打穿；但顺序仍然是错的——`get(workspace=…)` 那种形状确实会落盘，
+ * 让「先加载、后判定」依赖后端当前恰好是「空会话临时态」。两阶段把顺序钉死。
  *
- * #1118 第九轮（#1035 同步，CR 2026-09-19T16:21）：第八轮只钉住了「有结论才挂载」，
- * 没钉住**结论本身必须是有效的**。两条兜底路径（桥 10s 未就绪、`sessions.list`
- * 抛错）当时都是「开闸但保留原 key」——门是开了，挂载的却是一个**从没验证过**的
- * key，等于把第八轮要掐掉的「get-or-create 先摸一遍幽灵」又放回来了。现在统一成：
- * 验证拿不到结论时**显式回退到默认哨兵**再放行（`verifyRestoredSession` →
- * `unverified`，见 `resolveUnverifiedRestoreKey`）。用户的会话仍在侧边栏可选，
- * 代价只是停在欢迎页而不是幽灵会话里。
+ * #1118 第九轮（门兜底语义）：第八轮只钉住了「有结论才挂载」，没钉住**结论本身
+ * 必须是有效的**。两条兜底路径（桥 10s 未就绪、`sessions.list` 抛错）当时都是
+ * 「开闸但保留原 key」——门是开了，挂载的却是一个**从没验证过**的 key，等于把
+ * 第八轮要掐掉的「get-or-create 先摸一遍幽灵」又放回来了。现在统一成：验证拿不到
+ * 结论时**显式回退到默认哨兵**再放行（`verifyRestoredSession` → `unverified`，
+ * 见 `resolveUnverifiedRestoreKey`）。用户的会话仍在侧边栏可选，代价只是停在
+ * 欢迎页而不是幽灵会话里。
+ *
+ * #1118 第十轮（计时器起点）：第九轮把「没能验证」统一成回退默认，但如果这个
+ * 结论是**计时器**在同意门还挡着的时候下的，回退的就不是「没能验证的 key」而是
+ * 「还没开始验证的 key」——同意页上多读一会儿协议，上次的会话就没了。兜底计时器
+ * 的武装条件因此收紧成「校验挂着 **且** 同意门已开」（`shouldArmRestoreTimeout`），
+ * 预算从桥真正开始启动的那一刻起算。
  */
 
 /** 空态哨兵会话 key（与 App.tsx 初值 / ChatConsole 的 DEFAULT_SESSION 同字面量）。 */
@@ -50,6 +55,28 @@ export function shouldVerifyRestoredSession(
 ): boolean {
   if (!restoredKey) return false;
   return restoredKey !== defaultKey;
+}
+
+/**
+ * 恢复门的**兜底计时器**该不该武装（#1118 第十轮 CR）。
+ *
+ * 计时器的语义是「等桥起来，等不到就回退默认」——它的预算必须从**桥开始启动**
+ * 的那一刻起算。而桥的启动被隐私同意门挡在后面（App.tsx 的 consent-first：
+ * `if (!consentOk) return;` 时不调 `runtime.start()`），所以同意前 `status.state`
+ * 恒不为 `running`、存在性校验根本不跑；此时武装计时器，等于让用户在同意页上
+ * 读协议的时间去消耗「等桥」的预算——停留超过 RESTORE_GATE_MAX_MS 就在校验
+ * **开始之前**把恢复出来的 key 判负、降级成默认哨兵（`openGateUnverified` 还会
+ * 顺手把 `restoredSessionCheckedRef` 置真，同意之后校验再也不会跑）。用户点了
+ * 同意也回不到上次的会话。
+ *
+ * 因此：只有「恢复校验还挂着」**且**「同意门已开」两个条件同时成立才武装。
+ * 同意门打开会让 effect 重跑（consentOk 在依赖里），届时预算从头算起。
+ *
+ * @param restorePending 恢复校验尚未出结论（默认哨兵/读不到 lastSession 时为 false）。
+ * @param consentOk      隐私同意门已通过（或 E2E 绕过）。
+ */
+export function shouldArmRestoreTimeout(restorePending: boolean, consentOk: boolean): boolean {
+  return restorePending && consentOk;
 }
 
 /**

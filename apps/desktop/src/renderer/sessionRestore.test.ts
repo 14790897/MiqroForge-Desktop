@@ -1,5 +1,5 @@
 /**
- * #1118（#1035 移植）：启动恢复 lastSession 的幽灵会话判定。
+ * #1118：启动恢复 lastSession 的幽灵会话判定。
  *
  * 这个判定的价值在于「用户看到的是欢迎页，但当前会话 key 其实不存在」这种
  * 静默状态：bridge 的 sessions.get 对未知 key 是 get_or_create，不会报错，
@@ -10,6 +10,7 @@ import {
   DEFAULT_SESSION_KEY,
   resolveUnverifiedRestoreKey,
   RESTORE_VERIFY_ATTEMPTS,
+  shouldArmRestoreTimeout,
   shouldFallbackToDefaultSession,
   shouldVerifyRestoredSession,
   verifyRestoredSession,
@@ -30,7 +31,7 @@ describe('shouldFallbackToDefaultSession', () => {
   });
 
   it('store 为空（全新 profile + 幽灵 key）→ 回退', () => {
-    // 这是 flake 的形状：共享 profile 残留上一轮的 lastSession，
+    // 这是 #1118 第七轮 flake 的形状：共享 profile 残留上一轮的 lastSession，
     // 本轮 store 里根本没有那个会话。
     expect(shouldFallbackToDefaultSession('desktop:1789704154596', [])).toBe(true);
   });
@@ -56,8 +57,8 @@ describe('shouldFallbackToDefaultSession', () => {
 
 /**
  * 第八轮两阶段启动的门：非默认哨兵的恢复 key 必须先校验存在性，ChatConsole 才能
- * 挂载（否则它会用 get-or-create 的 sessions.get 先把幽灵 key 摸一遍——E2E 实测
- * 抓到 4 次 ghost get + 1 次 ghost delete）。
+ * 挂载（否则它会用 get-or-create 的 sessions.get 先把幽灵 key 摸一遍——第七轮
+ * E2E 实测抓到 4 次 ghost get + 1 次 ghost delete）。
  */
 describe('shouldVerifyRestoredSession', () => {
   it('恢复出来的是普通会话 key → 必须先校验', () => {
@@ -82,8 +83,35 @@ describe('shouldVerifyRestoredSession', () => {
 });
 
 /**
- * 第九轮 CR：「验证失败 / 超时 → 绝不带着未验证的 key 挂载」的状态机（#1035 同步）。
- * 用例与 #1034 同构——两分支的门实现保持同构，护栏也应该同构。
+ * 第十轮 CR：兜底计时器只在**同意门开启后**武装。
+ *
+ * 为什么这是个真值表而不是「一行 &&」的仪式：计时器的语义是「等桥起不来就回退
+ * 默认」，而桥的启动被同意门挡在后面（consent-first）。同意前武装 = 用户在同意页
+ * 上读协议的时间会消耗「等桥」的预算，停留超过 RESTORE_GATE_MAX_MS 就在存在性
+ * 校验**开始之前**把恢复出来的 key 判负（`openGateUnverified` 还会把
+ * `restoredSessionCheckedRef` 置真 → 同意之后校验再也不跑）。
+ *
+ * 变异验证：把 App.tsx 的武装条件改回只看 `restorePending`（或把本函数实现改成
+ * `return restorePending`）——第一例立刻变红。E2E 侧见
+ * issue-1118-session-restore-race.spec.ts 的「同意页停留超过兜底预算」用例。
+ */
+describe('shouldArmRestoreTimeout（同意门开启前不武装兜底计时器）', () => {
+  it('校验还挂着 + 同意门未过 → 不武装（核心：别拿同意页的停留时间当等桥预算）', () => {
+    expect(shouldArmRestoreTimeout(true, false)).toBe(false);
+  });
+
+  it('校验还挂着 + 同意门已过 → 武装（同意后才从零开始计预算）', () => {
+    expect(shouldArmRestoreTimeout(true, true)).toBe(true);
+  });
+
+  it('已有结论（哨兵/读不到 lastSession）→ 不武装，无论同意与否', () => {
+    expect(shouldArmRestoreTimeout(false, true)).toBe(false);
+    expect(shouldArmRestoreTimeout(false, false)).toBe(false);
+  });
+});
+
+/**
+ * 第九轮 CR：「验证失败 / 超时 → 绝不带着未验证的 key 挂载」的状态机。
  *
  * 快速路径（sleep 注入成 noop）保证单测不真的等退避。
  */
