@@ -1,0 +1,130 @@
+name: Conflict Watchdog
+
+# PR 与基分支产生合并冲突时，自动以 github-actions[bot] 身份提交 changes requested；
+# 冲突解决后自动 dismiss 该 review 解除标记。
+#
+# 背景：GitHub 没有「冲突」事件（webhook / Actions 都没有 merge_conflict），冲突也不会
+# 自动改 review 状态或通知任何人，只能主动扫描 PR 的 mergeable 字段来判断。
+#
+# 触发分工：
+# - pull_request：PR 新建/推新提交/转为 ready 时只查这一个 PR
+# - push 到 develop/main：基分支移动是冲突的主要来源，全量扫描所有 open PR
+# - schedule：兜底全量扫描（默认分支即 develop，本文件合入即生效）
+# - workflow_dispatch：手动全量扫描
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, ready_for_review]
+  push:
+    branches: [develop, main]
+  schedule:
+    - cron: '23 2 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: conflict-watchdog
+  cancel-in-progress: true
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Flag conflicted PRs, clear flags on resolved PRs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          REPO: ${{ github.repository }}
+          EVENT_NAME: ${{ github.event_name }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+
+          review_body() {
+            printf '%s\n' \
+              "检测到本 PR 与 \`$1\` 分支存在合并冲突，无法合并，已自动标记为 changes requested。" \
+              "" \
+              "请先解决冲突（本仓库约定用 merge，不用 rebase）：" \
+              "" \
+              '```bash' \
+              "git fetch origin" \
+              "git merge origin/$1" \
+              "# 解决冲突并提交后" \
+              "git push" \
+              '```' \
+              "" \
+              "冲突解决并推送后，本标记会被自动解除（dismiss），无需手动操作。"
+          }
+
+          # 本 bot 在该 PR 上仍生效的 changes requested review id。
+          # 被 dismiss 的 review state 会变成 DISMISSED，不会再命中；仓库里的
+          # CodeRabbit 等其它 reviewer 的 review 不受影响。
+          active_review_id() {
+            gh api "repos/$REPO/pulls/$1/reviews?per_page=100" \
+              --jq '[.[] | select(.user.login == "github-actions[bot]" and .state == "CHANGES_REQUESTED")] | last | .id // empty'
+          }
+
+          # mergeable 是懒计算字段，首次查询可能返回 UNKNOWN，轮询几次触发重算
+          mergeable_state() {
+            local m
+            for _ in 1 2 3 4 5; do
+              if ! m=$(gh pr view "$1" --json mergeable --jq '.mergeable' 2>/dev/null); then
+                printf 'ERROR'; return 0
+              fi
+              if [ "$m" != "UNKNOWN" ]; then
+                printf '%s' "$m"; return 0
+              fi
+              sleep 3
+            done
+            printf 'UNKNOWN'
+          }
+
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            numbers="$PR_NUMBER"
+          else
+            numbers=$(gh pr list --state open --limit 100 --json number --jq '.[].number')
+          fi
+
+          while IFS= read -r n; do
+            [ -n "$n" ] || continue
+            state=$(mergeable_state "$n")
+            case "$state" in
+              CONFLICTING)
+                if [ -n "$(active_review_id "$n")" ]; then
+                  echo "::notice::PR #$n 有冲突，已标记过 changes requested，跳过"
+                  continue
+                fi
+                if [ "$(gh pr view "$n" --json isDraft --jq '.isDraft')" = "true" ]; then
+                  echo "::notice::PR #$n 有冲突但是 draft，跳过"
+                  continue
+                fi
+                base=$(gh pr view "$n" --json baseRefName --jq '.baseRefName')
+                if gh api -X POST "repos/$REPO/pulls/$n/reviews" \
+                     -f event=REQUEST_CHANGES -f body="$(review_body "$base")" >/dev/null; then
+                  echo "::notice::PR #$n 与 $base 冲突，已自动提交 changes requested"
+                else
+                  # 典型失败：fork PR 在 pull_request 触发下 token 只读；PR 作者本身是
+                  # github-actions[bot] 时不能自我 request changes。
+                  # push/schedule 触发的 run 用写权限 token，下一轮会兜底重试。
+                  echo "::warning::PR #$n 提交 changes requested 失败（token 只读或 bot 自己的 PR），等待下一轮扫描重试"
+                fi
+                ;;
+              MERGEABLE)
+                rid=$(active_review_id "$n")
+                if [ -n "$rid" ]; then
+                  if gh api -X PUT "repos/$REPO/pulls/$n/reviews/$rid/dismissals" \
+                       -f message="合并冲突已解决，自动解除 changes requested。" -f event=DISMISS >/dev/null; then
+                    echo "::notice::PR #$n 冲突已解决，已 dismiss review $rid"
+                  else
+                    echo "::warning::PR #$n dismiss review $rid 失败，请手动解除"
+                  fi
+                fi
+                ;;
+              *)
+                echo "::notice::PR #$n mergeable=$state，本轮跳过"
+                ;;
+            esac
+          done <<< "$numbers"
