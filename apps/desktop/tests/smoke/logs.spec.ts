@@ -40,6 +40,35 @@ async function clickRefreshButton(page: import('@playwright/test').Page) {
   await page.getByTestId('refresh-logs').click();
 }
 
+/**
+ * Turn auto-refresh off before interacting with rows.
+ *
+ * The Logs tab polls every 3s and `refreshLogs()` rebuilds every entry with a
+ * fresh id (`id: _nextLogId++`), so a row expanded just before the tick loses
+ * the id the test expanded. These tests cover row interaction, not
+ * auto-refresh, so stop the churn first.
+ */
+async function disableAutoRefresh(page: import('@playwright/test').Page) {
+  const checkbox = page.locator('input[type="checkbox"]').first();
+  await expect(checkbox).toBeChecked();
+  await checkbox.click();
+  await expect(checkbox).not.toBeChecked();
+}
+
+/**
+ * Address a row by its message instead of by position.
+ *
+ * The table is not static: RuntimeContext appends live renderer logs, and the
+ * 首屏渲染指标 perf line lands ~1s after load — later than the mock entries but
+ * sorted above them (descending timestamp). `.first()` therefore resolves to a
+ * different row from one poll to the next within a single assertion.
+ */
+const SANDBOX_ROW = 'Sandbox timeout after 30s';
+
+function logRow(page: import('@playwright/test').Page, message: string) {
+  return page.locator('table tbody tr').filter({ hasText: message });
+}
+
 // ---------------------------------------------------------------------------
 // Suite 1: Logs Tab Navigation
 // ---------------------------------------------------------------------------
@@ -389,25 +418,24 @@ test.describe('Logs Tab — Row Interaction', () => {
   test('clicking a row toggles message expansion (removes line-clamp)', async ({ page }) => {
     await injectMockAndGoto(page);
     await navigateToLogsTab(page);
+    await disableAutoRefresh(page);
 
     await clickRefreshButton(page);
-    await expect(page.locator('table tbody tr')).toHaveCount(5, { timeout: 5000 });
-
-    // Click the first row
-    const firstRow = page.locator('table tbody tr').first();
-    const messageCell = firstRow.locator('td').last();
+    const row = logRow(page, SANDBOX_ROW);
+    await expect(row).toBeVisible({ timeout: 5000 });
+    const messageCell = row.locator('td').last();
 
     // Before click: message span should have line-clamp-1 class
     await expect(messageCell.locator('span').first()).toHaveClass(/line-clamp-1/);
 
     // Click to expand
-    await firstRow.click();
+    await row.click();
 
     // After click: line-clamp-1 should be removed
     await expect(messageCell.locator('span').first()).not.toHaveClass(/line-clamp-1/);
 
     // Click again to collapse
-    await firstRow.click();
+    await row.click();
 
     // line-clamp-1 should be restored
     await expect(messageCell.locator('span').first()).toHaveClass(/line-clamp-1/);
@@ -416,15 +444,15 @@ test.describe('Logs Tab — Row Interaction', () => {
   test('filter change resets expanded rows', async ({ page }) => {
     await injectMockAndGoto(page);
     await navigateToLogsTab(page);
+    await disableAutoRefresh(page);
 
     await clickRefreshButton(page);
-    await expect(page.locator('table tbody tr')).toHaveCount(5, { timeout: 5000 });
+    const row = logRow(page, SANDBOX_ROW);
+    await expect(row).toBeVisible({ timeout: 5000 });
 
-    // Expand first row
-    const firstRow = page.locator('table tbody tr').first();
-    await firstRow.click();
-    const messageCell = firstRow.locator('td').last();
-    await expect(messageCell.locator('span').first()).not.toHaveClass(/line-clamp-1/);
+    // Expand that row
+    await row.click();
+    await expect(row.locator('td').last().locator('span').first()).not.toHaveClass(/line-clamp-1/);
 
     // Change a filter (should reset expanded state)
     await page.locator('select').filter({ hasText: '全部级别' }).selectOption('INFO');

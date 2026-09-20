@@ -27,6 +27,7 @@ import {
   waitForBridgeInitialized,
   launchElectronApp,
   closeElectronApp,
+  applyWindowVisibilityEnv,
 } from './helpers/electron-setup';
 
 // ─── Test Suite ───────────────────────────────────────────────────
@@ -374,6 +375,8 @@ test.describe('Native Electron E2E', () => {
     const env: Record<string, string | undefined> = { ...process.env };
     env.MIQI_HOME = miqiHome;
     delete env.ELECTRON_RUN_AS_NODE;
+    // 裸 electron.launch 绕过了 helper：同 helper 默认，本机不开可见窗口
+    applyWindowVisibilityEnv(env);
     const app2 = await electron.launch({
       args: [APPS_DESKTOP],
       executablePath: require('electron') as string,

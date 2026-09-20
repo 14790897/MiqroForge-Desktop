@@ -46,8 +46,11 @@ class SessionKeyParams(_Params):
             raise ValueError("session_key must be a string")
         if "/" in value or "\\" in value:
             raise ValueError("session_key must not contain path separators")
-        if ".." in value:
-            raise ValueError("session_key must not contain ..")
+        # 只拒绝**恰好是** `.` / `..` 的冒号分段，而不是含点的 key：Slack 会话是
+        # `slack:{chat_id}:{thread_ts}`，thread_ts 形如 `1789628394.123456`，
+        # 一刀切会把合法 Slack 会话判成非法（#1103 review）。
+        if any(segment in (".", "..") for segment in value.split(":")):
+            raise ValueError("session_key must not contain . or .. segments")
         return value
 
 

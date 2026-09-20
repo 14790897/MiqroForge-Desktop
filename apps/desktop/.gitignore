@@ -12,3 +12,6 @@ test-results/
 ocr.js
 ocr2.js
 dev/
+
+# 隔离测试的临时备份目录（进程被强杀时才可能留下）
+.test-reports-backup-*

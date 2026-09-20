@@ -1,0 +1,200 @@
+"""#1094 S3：anthropic（网关）路径识别被输出上限截断的工具参数。
+
+桌面生产链路是 网关 → AnthropicProvider，故该路径必须与 openai_provider S1
+同口径打标。统一判据（CR #1100）为「**不可验证完整即截断**」：
+
+    truncated = finish_reason == "length" and not _args_strict_ok(raw)
+
+即只有「非空字符串 + 严格 json.loads 通过」才算可验证完整；空串 / dict / None /
+解析失败在 length 下一律标截断（arguments 仍只是 json_repair 的残片打捞，行为不动）。
+"""
+
+from types import SimpleNamespace
+
+from miqi.providers.anthropic_provider import AnthropicProvider
+
+# 非空、且严格 json.loads 必然失败的残片（模型在 content 中途被 max_tokens 砍断）
+TRUNCATED_ARGS = '{"path": "/tmp/a.txt", "content": "hello wor'
+VALID_ARGS = '{"path": "/tmp/a.txt", "content": "hello world"}'
+
+
+def _provider() -> AnthropicProvider:
+    """_parse_response 只用静态方法，无需走 __init__（避免真实凭证/客户端）。"""
+    return AnthropicProvider.__new__(AnthropicProvider)
+
+
+def _text_block(text: str = "先说明一下") -> SimpleNamespace:
+    return SimpleNamespace(type="text", text=text)
+
+
+def _tool_use_block(
+    input_: object,
+    name: str = "write_file",
+    id_: str = "toolu_1",
+) -> SimpleNamespace:
+    return SimpleNamespace(type="tool_use", id=id_, name=name, input=input_)
+
+
+def _response(blocks: list, stop_reason: str) -> SimpleNamespace:
+    return SimpleNamespace(content=blocks, stop_reason=stop_reason)
+
+
+def test_max_tokens_with_broken_json_string_is_flagged() -> None:
+    """① max_tokens + 残缺 JSON 串 → truncated=True，且 json_repair 打捞照旧。"""
+    resp = _response([_tool_use_block(TRUNCATED_ARGS)], "max_tokens")
+
+    out = _provider()._parse_response(resp)
+
+    assert out.finish_reason == "length"
+    assert len(out.tool_calls) == 1
+    call = out.tool_calls[0]
+    assert call.truncated is True
+    # json_repair 行为原样保留：残片仍被打捞成 dict 供上层展示/拒执说明
+    assert isinstance(call.arguments, dict)
+
+
+def test_max_tokens_with_valid_json_string_is_not_flagged() -> None:
+    """② max_tokens 但参数是合法 JSON 串 → 未截断（模型只是恰好用完预算）。"""
+    resp = _response([_tool_use_block(VALID_ARGS)], "max_tokens")
+
+    out = _provider()._parse_response(resp)
+
+    assert out.finish_reason == "length"
+    assert out.tool_calls[0].truncated is False
+    assert out.tool_calls[0].arguments == {
+        "path": "/tmp/a.txt",
+        "content": "hello world",
+    }
+
+
+def test_tool_use_stop_reason_with_broken_json_string_is_not_flagged() -> None:
+    """③ stop_reason=tool_use + 残缺串 → 非 length，不能误标。"""
+    resp = _response([_tool_use_block(TRUNCATED_ARGS)], "tool_use")
+
+    out = _provider()._parse_response(resp)
+
+    assert out.finish_reason == "tool_calls"
+    assert out.tool_calls[0].truncated is False
+
+
+def test_dict_input_under_max_tokens_is_flagged() -> None:
+    """④ CR #1100：input 已是 dict + stop_reason=max_tokens → 标截断。
+
+    非流式 SDK 下 dict **无法证明完整性**：Anthropic 文档明确
+    `stop_reason=max_tokens` 可能留下未完成的 `tool_use`，而 SDK 已把 input 解析成
+    dict，原始串是否被砍在这里无从判断。未来真流式可用 `input_json_delta` 原始串再精确。
+    """
+    resp = _response(
+        [_tool_use_block({"path": "/tmp/a.txt", "content": "hi"})],
+        "max_tokens",
+    )
+
+    out = _provider()._parse_response(resp)
+
+    assert out.finish_reason == "length"
+    assert out.tool_calls[0].truncated is True
+
+
+def test_dict_input_under_tool_use_stop_is_not_flagged() -> None:
+    """dict + stop_reason=tool_use（正常收尾）→ 不标。"""
+    resp = _response(
+        [_tool_use_block({"path": "/tmp/a.txt", "content": "hi"})],
+        "tool_use",
+    )
+
+    out = _provider()._parse_response(resp)
+
+    assert out.finish_reason == "tool_calls"
+    assert out.tool_calls[0].truncated is False
+
+
+def test_dict_input_under_end_turn_stop_is_not_flagged() -> None:
+    """dict + stop_reason=end_turn（正常收尾）→ 不标。"""
+    resp = _response(
+        [_tool_use_block({"path": "/tmp/a.txt", "content": "hi"})],
+        "end_turn",
+    )
+
+    out = _provider()._parse_response(resp)
+
+    assert out.finish_reason == "stop"
+    assert out.tool_calls[0].truncated is False
+
+
+def test_empty_string_input_under_max_tokens_is_flagged() -> None:
+    """CR #1100：空串参数 + max_tokens → 截断（工具刚开头就被砍）。
+
+    `arguments` 仍按既有语义落成 `{}`，但拒执判定不再漏放。
+    """
+    resp = _response([_tool_use_block("")], "max_tokens")
+
+    out = _provider()._parse_response(resp)
+
+    assert out.finish_reason == "length"
+    assert out.tool_calls[0].truncated is True
+    assert out.tool_calls[0].arguments == {}
+
+
+def test_empty_string_input_under_end_turn_is_not_flagged() -> None:
+    """对照组：正常收尾（end_turn）的空串 → 不标（模型确实发了无参调用）。"""
+    resp = _response([_tool_use_block("")], "end_turn")
+
+    out = _provider()._parse_response(resp)
+
+    assert out.finish_reason == "stop"
+    assert out.tool_calls[0].truncated is False
+    assert out.tool_calls[0].arguments == {}
+
+
+def test_truncation_warning_does_not_leak_raw_args() -> None:
+    """CR #1100（CWE-532）：告警只记工具名 / 调用 ID / 参数长度，不落原始参数。"""
+    from loguru import logger as loguru_logger
+
+    secret = '{"path": "/tmp/a.txt", "content": "TOP-SECRET-BODY'
+    messages: list[str] = []
+    # 收集**格式化后**的文本（record["message"] 只是模板，不是真正落盘的内容）
+    handler_id = loguru_logger.add(
+        lambda m: messages.append(str(m)), level="WARNING",
+    )
+    try:
+        out = _provider()._parse_response(
+            _response([_tool_use_block(secret, id_="toolu_leak")], "max_tokens")
+        )
+    finally:
+        loguru_logger.remove(handler_id)
+
+    assert out.tool_calls[0].truncated is True
+    warns = [m for m in messages if "truncated by output cap" in m]
+    assert warns, messages
+    line = warns[0]
+    assert "write_file" in line and "toolu_leak" in line
+    assert "TOP-SECRET-BODY" not in line, line
+    assert "/tmp/a.txt" not in line, line
+
+
+def test_text_block_mixed_in_does_not_interfere() -> None:
+    """text block 混排：正文照旧拼接，只有被截断的那个 tool_use 被标记。"""
+    resp = _response(
+        [
+            _text_block("我先写文件"),
+            _tool_use_block(TRUNCATED_ARGS, id_="toolu_trunc"),
+            _tool_use_block(VALID_ARGS, name="read_file", id_="toolu_ok"),
+        ],
+        "max_tokens",
+    )
+
+    out = _provider()._parse_response(resp)
+
+    assert out.content == "我先写文件"
+    flags = {(tc.id, tc.truncated) for tc in out.tool_calls}
+    assert flags == {("toolu_trunc", True), ("toolu_ok", False)}
+
+
+def test_end_turn_with_broken_json_string_is_not_flagged() -> None:
+    """stop_reason=end_turn + 残缺串 → finish_reason=stop，同样不该误标。"""
+    resp = _response([_tool_use_block(TRUNCATED_ARGS)], "end_turn")
+
+    out = _provider()._parse_response(resp)
+
+    assert out.finish_reason == "stop"
+    assert out.tool_calls[0].truncated is False

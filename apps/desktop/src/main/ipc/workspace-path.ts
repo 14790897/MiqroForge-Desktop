@@ -1,6 +1,6 @@
 import { existsSync, readFileSync, realpathSync } from 'fs';
 import { homedir } from 'os';
-import { isAbsolute, join, resolve } from 'path';
+import { basename, dirname, isAbsolute, join, resolve } from 'path';
 
 /** Directory holding the local config file (`~/.miqi` by default, overridable via MIQI_HOME). */
 export function getConfigDir(): string {
@@ -47,6 +47,81 @@ export function getWorkspacePath(): string {
   return raw;
 }
 
+/** Slash-normalised, case-folded form used for prefix containment comparison. */
+function normForCompare(p: string): string {
+  const rel = p.replace(/\\/g, '/');
+  return process.platform === 'win32' ? rel.toLowerCase() : rel;
+}
+
+/** Whether `candidate` is `root` itself or lives underneath it. */
+function isUnder(candidate: string, root: string): boolean {
+  const relCmp = normForCompare(candidate);
+  const rootCmp = normForCompare(root);
+  return relCmp === rootCmp || relCmp.startsWith(rootCmp + '/');
+}
+
+/**
+ * Canonical form of `p` even when `p` does not exist yet: the longest existing
+ * prefix is realpath'd and the missing tail is appended unchanged.
+ *
+ * `realpathSync` alone is not enough here.  A folder-bound session's root comes
+ * back canonical from the runtime — on macOS `mkdtemp` hands out `/var/…` while
+ * the real directory is `/private/var/…` — so a candidate spelled the
+ * unresolved way would never compare equal to its own root, and a perfectly
+ * legitimate file was refused as "outside workspace" (#1062).  Resolving the
+ * existing prefix fixes that without requiring the file to exist: containment
+ * is still decided on the real location, so a symlink that leads outside the
+ * workspace is still rejected.
+ */
+function canonicalWithMissingTail(p: string): string {
+  let head = p;
+  const tail: string[] = [];
+  for (;;) {
+    try {
+      const real = realpathSync.native(head);
+      return tail.length ? join(real, ...tail.reverse()) : real;
+    } catch {
+      const parent = dirname(head);
+      if (parent === head) return p; // hit the root without an existing prefix
+      tail.push(basename(head));
+      head = parent;
+    }
+  }
+}
+
+/**
+ * Absolute roots a path is allowed to land in (#1062).
+ *
+ * `extraRoots` carries a folder-bound session's own workspace.  It is derived
+ * server-side from the session key — never sent by the renderer — because a
+ * root the renderer could name would make this containment check meaningless
+ * (#955).  Entries that are empty or not absolute are dropped rather than
+ * trusted.
+ */
+function allowedRoots(wsRoot: string, extraRoots?: Array<string | null | undefined>): string[] {
+  const roots = [wsRoot];
+  for (const extra of extraRoots ?? []) {
+    if (!extra || !isAbsolute(extra)) continue;
+    roots.push(resolve(extra));
+  }
+  return roots;
+}
+
+/**
+ * Root a relative path is joined with (#1062).
+ *
+ * A folder-bound session's ledger stores its paths relative to the session's own
+ * workspace, and the Python side resolves them the same way.  Anchoring such a
+ * path on the global workspace would look in the wrong place and report a file
+ * that exists as "not found" — which is what made 定位 fail before.
+ */
+function anchorRoot(wsRoot: string, extraRoots?: Array<string | null | undefined>): string {
+  for (const extra of extraRoots ?? []) {
+    if (extra && isAbsolute(extra)) return resolve(extra);
+  }
+  return resolve(wsRoot);
+}
+
 /** Strip sandbox prefix and resolve against the host workspace.
  *
  *  The bwrap sandbox mounts at /home/miqi/workspace/.  Paths reported
@@ -54,7 +129,10 @@ export function getWorkspacePath(): string {
  *  to workspace-relative form and then joined with the host workspace
  *  root.  Absolute paths outside the workspace are rejected.
  */
-export function resolveWorkspacePath(raw: string): string {
+export function resolveWorkspacePath(
+  raw: string,
+  extraRoots?: Array<string | null | undefined>
+): string {
   // Convert WSL /mnt/<drive>/ paths to Windows <drive>:\ paths
   // (e.g. /mnt/c/Users/... -> C:\Users\...).  Fold the result into
   // `normalised` instead of returning early, so the workspace-containment
@@ -84,18 +162,26 @@ export function resolveWorkspacePath(raw: string): string {
   if (isAbsolute(normalised)) {
     resolved = resolve(normalised);
   } else {
-    resolved = resolve(wsRoot, normalised);
+    resolved = resolve(anchorRoot(wsRoot, extraRoots), normalised);
   }
 
-  // Enforce workspace containment — prevent escape via .. or absolute
-  // paths that land outside the workspace root.  Case-fold on Windows
-  // (its filesystem is case-insensitive) so a workspace configured with a
-  // lowercase drive letter still matches a /mnt/<DRIVE>/ path.
-  const rel = resolved.replace(/\\/g, '/');
-  const wsNorm = wsRoot.replace(/\\/g, '/');
-  const relCmp = process.platform === 'win32' ? rel.toLowerCase() : rel;
-  const wsCmp = process.platform === 'win32' ? wsNorm.toLowerCase() : wsNorm;
-  if (!(relCmp + '/').startsWith(wsCmp + '/') && relCmp !== wsCmp) {
+  // Enforce root containment — prevent escape via .., absolute paths that land
+  // outside every allowed root, and symlinks that lead out of one.  Case-folding
+  // happens in isUnder so a workspace configured with a lowercase drive letter
+  // still matches a /mnt/<DRIVE>/ path.
+  //
+  // The comparison is canonical on **both** sides, and canonical only.  A
+  // lexical check accepts `link/secret` when `link` points outside the root, and
+  // OR-ing it with the canonical verdict let that lexical answer short-circuit
+  // past the canonical one (#1103 review).  `canonicalWithMissingTail` is what
+  // keeps paths that do not exist yet working, including the folder-bound case
+  // where the runtime's root is canonical and the caller's path is not
+  // (macOS /var → /private/var).
+  const canonicalResolved = canonicalWithMissingTail(resolved);
+  const contained = allowedRoots(wsRoot, extraRoots).some((root) =>
+    isUnder(canonicalResolved, canonicalWithMissingTail(root))
+  );
+  if (!contained) {
     throw new Error(`Path outside workspace: ${raw}`);
   }
 
@@ -104,20 +190,119 @@ export function resolveWorkspacePath(raw: string): string {
 
 /**
  * Whether an existing host path resolves (symlinks/junctions followed) to a
- * location inside the workspace root.  Returns true when the path cannot be
- * resolved (e.g. it does not exist) — those are already covered by the lexical
- * containment check in resolveWorkspacePath.
+ * location inside one of the allowed roots.
+ *
+ * Only the *candidate* failing to resolve is fail-open (returns true): a path
+ * that does not exist yet is already covered by the lexical containment check
+ * in resolveWorkspacePath.  A *root* that cannot be canonicalised is not
+ * evidence of containment — treating it as "allowed" would let one unreadable
+ * root short-circuit the whole `.some()` into accepting a candidate that lives
+ * under none of them, and adding roots (#1062) widens that.  Such a root is
+ * skipped instead.
  */
-export function isWithinCanonicalWorkspace(candidate: string, wsRoot: string): boolean {
+export function isWithinCanonicalWorkspace(
+  candidate: string,
+  wsRoot: string,
+  extraRoots?: Array<string | null | undefined>
+): boolean {
+  let canonicalCandidate: string;
   try {
-    const realCandidate = realpathSync.native(candidate);
-    const realRoot = realpathSync.native(wsRoot);
-    const rel = realCandidate.replace(/\\/g, '/');
-    const root = realRoot.replace(/\\/g, '/');
-    const relCmp = process.platform === 'win32' ? rel.toLowerCase() : rel;
-    const rootCmp = process.platform === 'win32' ? root.toLowerCase() : root;
-    return relCmp === rootCmp || relCmp.startsWith(rootCmp + '/');
+    canonicalCandidate = realpathSync.native(candidate);
   } catch {
     return true;
   }
+  return allowedRoots(wsRoot, extraRoots).some((root) => {
+    try {
+      return isUnder(canonicalCandidate, realpathSync.native(root));
+    } catch {
+      return false;
+    }
+  });
+}
+
+/**
+ * Derive the on-disk per-session directory key from a session key.
+ *
+ * This mirrors `miqi.session.session_keys.session_files_dir_key`: a
+ * fully-namespaced key such as `miqi-desktop:desktop:1786...` drops the
+ * client_id prefix and becomes `desktop_1786...`; two-segment keys such as
+ * `desktop:1786...` keep the whole key (`desktop_1786...`).
+ *
+ * The WSL search script must use this key for `sessions/<key>/files`, not the
+ * sandbox key, otherwise it searches a directory no writer ever creates
+ * (#1103 review).
+ */
+export function sessionFilesDirKey(sessionKey: string): string {
+  const parts = sessionKey.split(':');
+  if (parts.length >= 3) parts.shift();
+  return parts.join('_').replace(/[^A-Za-z0-9._-]/g, '_');
+}
+
+/**
+ * Sanitize a session key so it can safely be embedded in a shell path segment.
+ *
+ * Only alphanumerics, dots, underscores and hyphens survive; every other
+ * character is replaced with an underscore.  This prevents command substitution
+ * and shell metacharacters from leaking into WSL search scripts that build
+ * paths from the key (#1103 review).
+ */
+export function sanitizeSessionKeyForPath(sessionKey: string): string {
+  return sessionKey.replace(/[^A-Za-z0-9._-]/g, '_');
+}
+
+/** Escape a string for safe embedding in a single-quoted bash argument. */
+export function shellEscape(s: string): string {
+  return s.replace(/'/g, "'\\''");
+}
+
+/**
+ * Build the bash script used to locate a workspace-relative file inside WSL.
+ *
+ * The script searches the session sandbox and the session-private files
+ * directory — plus, unless `allowGlobalWorkspace` is false, the global WSL
+ * workspace and the global session files directory.  A folder-bound session
+ * passes false: its relative paths resolve against the bound folder, so a miss
+ * there must not be answered from the global root — the hit would be copied
+ * into the bound folder and opened, i.e. another root's file (#1103 review).
+ *
+ * When a file is found the script canonicalizes both the candidate and its
+ * authorization root and rejects the result if the canonical candidate lives
+ * outside the root, closing a symlink-escape path (#1103 review).
+ *
+ * The sandbox path uses the full sanitized session key, while the
+ * session-private files directory uses `sessionFilesDirKey` so it matches the
+ * canonical on-disk layout used by the Python side.
+ */
+export function buildWslSearchScript(
+  relPath: string,
+  sessionKey: string,
+  opts: { allowGlobalWorkspace?: boolean } = {}
+): string {
+  const escapedRelPath = shellEscape(relPath);
+  const sandboxKey = sanitizeSessionKeyForPath(sessionKey);
+  const sessionFilesKey = sessionFilesDirKey(sessionKey);
+  const allowGlobal = opts.allowGlobalWorkspace ?? true;
+  return (
+    `RP=$'${escapedRelPath}'\n` +
+    `W="/tmp/miqi-sandboxes/${sandboxKey}/home/miqi/workspace"\n` +
+    `S="$W/sessions/${sessionFilesKey}/files"\n` +
+    (allowGlobal
+      ? `ws="$HOME/.miqi/workspace"\n` + `s="$ws/sessions/${sessionFilesKey}/files"\n`
+      : '') +
+    `found=""\n` +
+    `root=""\n` +
+    `if [ -f "$W/$RP" ]; then found="$W/$RP"; root="$W"; fi\n` +
+    `if [ -z "$found" ] && [ -f "$S/$RP" ]; then found="$S/$RP"; root="$W"; fi\n` +
+    (allowGlobal
+      ? `if [ -z "$found" ] && [ -f "$ws/$RP" ]; then found="$ws/$RP"; root="$ws"; fi\n` +
+        `if [ -z "$found" ] && [ -f "$s/$RP" ]; then found="$s/$RP"; root="$ws"; fi\n`
+      : '') +
+    `if [ -z "$found" ]; then exit 1; fi\n` +
+    `canon=$(readlink -f "$found") || exit 1\n` +
+    `root_canon=$(readlink -f "$root") || exit 1\n` +
+    `case "$canon" in\n` +
+    `  "$root_canon"|"$root_canon"/*) echo "$found"; exit 0 ;;\n` +
+    `  *) exit 1 ;;\n` +
+    `esac\n`
+  );
 }

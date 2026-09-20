@@ -24,6 +24,7 @@ from typing import Any
 
 from loguru import logger
 
+from miqi.agent.tools.write_grants import get_write_grants
 from miqi.execution.hook_runtime import HookPoint, HookRuntime
 from miqi.execution.permission_engine import (
     PermissionDecision,
@@ -63,6 +64,8 @@ _FILE_MUTATION_TOOLS = frozenset({
     # graph_render 写 svg/html 产物 + 读源 JSON——需 _session_key
     # 注入否则资产栏追踪永不生效（CodeRabbit #761）
     "graph_render",
+    # #1104: 交付物登记写会话 tracked_files.json——同需 _session_key
+    "declare_result_files",
     # #984: spawn 是子 agent 的授权根继承入口——父 turn 的 _user_roots 经此
     # 传到 AgentControl.spawn，否则子 agent 的 exec/文件工具拿不到任何根。
     "spawn",
@@ -968,7 +971,19 @@ class ToolOrchestrator:
             # #821: auto-sensed user-mentioned output dirs — mirrors the KUN
             # tool host injection so file tools accept the user's explicitly
             # requested output location (e.g. Desktop/test_result).
-            kwargs["_user_roots"] = list(ctx.user_mentioned_roots or [])
+            #
+            # #1013: plus this SESSION's write-card grants ("本目录不再询问" /
+            # approval-bypass), which the file tools publish to the shared
+            # store.  ``_user_roots`` is exec's only authorization channel
+            # (``_exec_rw_binds`` / ``_guard_write_roots``), so without them
+            # exec kept refusing a directory the user had just authorized in
+            # the same session.  Sorted → deterministic list and bind order;
+            # empty when nothing was granted (fail-closed, unchanged from
+            # before #1013).
+            kwargs["_user_roots"] = [
+                *(ctx.user_mentioned_roots or []),
+                *sorted(get_write_grants().get(ctx.session_id)),
+            ]
         elif ctx.tool_name.startswith("mcp_"):
             # MCP 工具（issue #927）：注入会话上下文供 slurm 计费握手使用
             #（MCPToolWrapper 会 pop 掉，不传给 MCP 服务端）。

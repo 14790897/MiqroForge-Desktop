@@ -10,6 +10,8 @@ export interface TrackedFile {
   sourceTool?: string;
   /** 产出该文件的回合序号（第几个 user 回合，从 0 起），#879 ③ 追溯 */
   turnId?: number;
+  /** #1104: agent 通过 declare_result_files 显式声明为结果文件 */
+  result?: boolean;
 }
 
 export const OFFICE_FILE_RE_LEGACY = /\.(docx|xlsx|pptx|ppt)$/i;
@@ -72,6 +74,7 @@ export function TrackedFileCard({
 
   return (
     <div
+      data-testid="tracked-file-card"
       className="rounded-lg p-2.5"
       style={{
         border: isResult

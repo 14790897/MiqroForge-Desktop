@@ -28,7 +28,22 @@ function getIconPath(): string {
   return join(__dirname, '../../src/renderer/assets', iconName);
 }
 
+/**
+ * E2E（MIQI_E2E_OFFSCREEN=1）：应用窗口不出现在用户桌面上——跑自动化时窗口
+ * 弹出会遮挡操作并抢走焦点（并行 worker 一次开好几个实例，尤其明显）。
+ *
+ * 做法是「停到显示器之外 + showInactive（不激活）」而不是真·最小化：最小化
+ * 会让 Chromium 停止为窗口出帧，playwright 的 fullPage 截图（25 个 spec 在用）
+ * 会一直等不到新帧而超时；停屏幕外的窗口照常合成，截图/动画语义与普通可见
+ * 窗口一致。仅未打包生效，打包产物不受外部注入该变量影响。
+ */
+function shouldStartOffscreen(): boolean {
+  return !app.isPackaged && process.env['MIQI_E2E_OFFSCREEN'] === '1';
+}
+
 function createWindow(): void {
+  const startOffscreen = shouldStartOffscreen();
+
   mainWindow = new BrowserWindow({
     width: 1280,
     height: 860,
@@ -36,6 +51,10 @@ function createWindow(): void {
     minHeight: 760,
     title: 'MiQroForge Desktop',
     icon: getIconPath(),
+    // 先不显示：等首次绘制完成再挪到屏幕外并 showInactive，否则窗口会先在
+    // 用户桌面上弹一下。
+    show: !startOffscreen,
+    skipTaskbar: startOffscreen,
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
@@ -44,12 +63,30 @@ function createWindow(): void {
       // E2E 专用标记：helper 设 MIQI_E2E=1 时随 argv 下发到 sandbox preload，
       // 渲染层据此跳过隐私协议确认门（#837），避免 E2E 被全屏确认页阻断。
       // 仅限未打包环境——打包产物被外部注入 MIQI_E2E=1 不得绕过确认门。
-      additionalArguments: !app.isPackaged && process.env['MIQI_E2E'] === '1' ? ['--miqi-e2e'] : [],
+      // 登录门（#1095）默认同样绕过（几乎全部用例要未登录的主界面），
+      // 只有专门验证登录门的用例经 helper 去掉 MIQI_LOGIN_BYPASS。
+      additionalArguments: !app.isPackaged
+        ? [
+            ...(process.env['MIQI_E2E'] === '1' ? ['--miqi-e2e'] : []),
+            ...(process.env['MIQI_LOGIN_BYPASS'] === '1' ? ['--miqi-login-bypass'] : []),
+          ]
+        : [],
     },
   });
 
   // Remove native menu bar — app has its own navigation
   mainWindow.removeMenu();
+
+  if (startOffscreen) {
+    const win = mainWindow;
+    win.once('ready-to-show', () => {
+      if (win.isDestroyed()) return;
+      // -30000 远离所有显示器坐标（Windows 虚拟桌面不会延伸到那儿）。
+      const { x, y } = win.getBounds();
+      win.setBounds({ x: x - 30000, y });
+      win.showInactive();
+    });
+  }
 
   mainWindow.webContents.setWindowOpenHandler((details) => {
     shell.openExternal(details.url);
@@ -192,9 +229,12 @@ export function main(): void {
     bridgeManager.on('state', onState);
     bridgeManager.on('log', onLog);
 
-    createSplash(() => {
-      closeSplash();
-    });
+    // E2E 屏幕外模式下不建 splash（它 alwaysOnTop，会浮在用户桌面最上层）
+    if (!shouldStartOffscreen()) {
+      createSplash(() => {
+        closeSplash();
+      });
+    }
     createWindow();
 
     app.on('activate', () => {
