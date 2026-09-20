@@ -514,7 +514,10 @@ test.describe('Issue #1035 — 渲染进程崩溃后自动重载与恢复提示'
   // 两条用例共享同一个 app 实例、同一份崩溃预算，必须按序执行。
   // 超时走 describe.configure（Playwright 1.62 的 `test(title, {timeout}, fn)`
   // 里 TestDetails 只有 tag/annotation，传 timeout 既不生效也不通过类型检查）。
-  test.describe.configure({ mode: 'serial', timeout: 180_000 });
+  // 240s（#1116 复审）：最坏串行预算 147.5s + 90s 余量 = 237.5s，向上取整。
+  // 预算 = expectFreshProfile 5 + crashRenderer 2×10 + waitForReloadLine 60 +
+  // waitForUiReady 60 + 静置复查 2.5（两条用例取较长者；另一条 142.5s）。
+  test.describe.configure({ mode: 'serial', timeout: 240_000 });
 
   let electronApp: ElectronApplication;
   let page: Page;
@@ -706,8 +709,10 @@ async function startRecoveryMock(): Promise<RecoveryMockStream> {
 }
 
 test.describe('Issue #1035 — 崩溃重载后继续接收后台 turn 输出', () => {
-  // 300s：含 STREAM_WARMUP_TIMEOUT_MS 的冷启动预算 + 崩溃重载 + 收尾等待。
-  test.describe.configure({ mode: 'serial', timeout: 300_000 });
+  // 510s（#1116 复审）：最坏串行预算 415s + 90s 余量 = 505s，向上取整。
+  // 预算 = expectFreshProfile 5 + STREAM_WARMUP_TIMEOUT_MS 150 + crashRenderer 2×10 +
+  // waitForReloadLine 60 + waitForUiReady 60 + streaming 轮询 60 + final 轮询 60。
+  test.describe.configure({ mode: 'serial', timeout: 510_000 });
 
   let electronApp: ElectronApplication;
   let page: Page;
@@ -940,8 +945,11 @@ async function spawnThreadTab(
 }
 
 test.describe('Issue #1035 — thread-scoped turn 崩溃重载后可恢复', () => {
-  // 300s：含 STREAM_WARMUP_TIMEOUT_MS 的冷启动预算 + 崩溃重载 + 收尾等待。
-  test.describe.configure({ mode: 'serial', timeout: 300_000 });
+  // 520s（#1116 复审）：最坏串行预算 430s + 90s 余量 = 520s。
+  // 预算 = expectFreshProfile 5 + 子线程 tab 可见 10 + tab 选中态 5（expect 默认）+
+  // STREAM_WARMUP_TIMEOUT_MS 150 + crashRenderer 2×10 + waitForReloadLine 60 +
+  // waitForUiReady 60 + streaming 轮询 60 + final 轮询 60。
+  test.describe.configure({ mode: 'serial', timeout: 520_000 });
 
   const THREAD_ID = 'e2e-thread-recovery';
   const THREAD_LABEL = 'E2E 子线程';
@@ -1220,9 +1228,13 @@ async function waitForStreamingFlag(
 }
 
 test.describe('Issue #1035 — 并发 turn：reload 后只恢复当前 tab 的那条', () => {
-  // 300s：含 STREAM_WARMUP_TIMEOUT_MS 的冷启动预算 + 崩溃重载 + 注入窗口 +
-  // 切 tab 观察 + 收尾等待，180s 会被冷启动挤爆。
-  test.describe.configure({ mode: 'serial', timeout: 300_000 });
+  // 490s（#1116 复审）：最坏串行预算 398.5s + 90s 余量 = 488.5s，向上取整
+  // （含 STREAM_WARMUP_TIMEOUT_MS 的冷启动预算 + 崩溃重载 + 注入窗口 + 切 tab
+  // 观察 + 收尾等待；180s 会被冷启动挤爆）。
+  // 预算 = expectFreshProfile 5 + 子线程 tab 可见 10 + tab 选中态 5（expect 默认）+
+  // STREAM_WARMUP_TIMEOUT_MS 150 + crashRenderer 2×10 + waitForReloadLine 60 +
+  // waitForUiReady 60 + 注入窗 12 + 切走 5 + 5 + 静置 1.5 + 切回 5 + final 轮询 60。
+  test.describe.configure({ mode: 'serial', timeout: 490_000 });
 
   const THREAD_ID = 'e2e-thread-concurrent';
   const THREAD_LABEL = 'E2E 并发子线程';
@@ -1596,7 +1608,9 @@ async function readLatchWitness(electronApp: ElectronApplication): Promise<Latch
 }
 
 test.describe('Issue #1035 复审 P1 — 恢复 turn 收尾后晚到的 points 不得再渲染', () => {
-  // 300s：一次 Electron 冷启动 + 注入里几段条件等待（各 15s 预算，正常毫秒级）。
+  // 300s（#1116 复审核对后维持不动）：最坏串行预算 130.9s + 90s 余量 = 220.9s < 300s。
+  // 预算 = expectFreshProfile 5 + baseKey 轮询 5 + 注入脚本 4×15 + 3×0.3（各段条件
+  // 等待正常毫秒级）+ 标记采样 60；Electron 冷启动在 beforeAll（hook 不受本超时约束）。
   test.describe.configure({ mode: 'serial', timeout: 300_000 });
 
   let electronApp: ElectronApplication;
