@@ -82,6 +82,29 @@ def test_truncate_turns_non_positive_is_noop():
     assert len(s.messages) == 1
 
 
+def test_truncate_turns_clamps_last_consolidated():
+    s = Session(key="k")
+    for i in range(3):
+        s.add_message("user", f"Q{i}")
+        s.add_message("assistant", f"A{i}")
+    s.last_consolidated = 6  # 全部已归档
+
+    removed = s.truncate_turns(2)  # 留 2 条(Q0/A0)
+    assert removed == 4
+    assert s.last_consolidated == 2  # 游标不能超过新长度
+
+
+def test_truncate_turns_resets_last_consolidated_when_cleared():
+    s = Session(key="k")
+    s.add_message("user", "Q0")
+    s.add_message("assistant", "A0")
+    s.last_consolidated = 2
+
+    assert s.truncate_turns(1) == 2
+    assert s.messages == []
+    assert s.last_consolidated == 0
+
+
 def test_truncate_persists_across_reload(tmp_path):
     sm = _make_manager(tmp_path)
     key = "desktop:test1"

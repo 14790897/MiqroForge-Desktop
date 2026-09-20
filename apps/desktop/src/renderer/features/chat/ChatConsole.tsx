@@ -7310,12 +7310,15 @@ export function ChatConsole({
       const idx = msgs.indexOf(msg);
       if (idx >= 0 && !wasTurnStopped(msgs, idx)) {
         // #1020: 先删后端(SessionManager)成功再截断渲染层，失败不动 UI。
+        const sendSessionKey = currentSessionRef.current;
         const drop = computeDropLastTurns(msgs, idx);
         try {
-          await window.miqi.sessions.truncate(currentSessionRef.current, drop);
+          await window.miqi.sessions.truncate(sendSessionKey, drop);
         } catch {
           return;
         }
+        // await 期间侧栏可能切走会话——回查 key，切走则不动新会话状态。
+        if (currentSessionRef.current !== sendSessionKey) return;
         // #886: a stopped round keeps its interrupted half-reply in the
         // timeline — the retried attempt appends after it instead of
         // rewinding and dropping the "已停止" context.
@@ -7330,6 +7333,7 @@ export function ChatConsole({
   const handleRegenerate = useCallback(
     async (assistantMsg: Message) => {
       if (streaming) return;
+      const sendSessionKey = currentSessionRef.current;
       const msgs = messagesRef.current;
       const idx = msgs.indexOf(assistantMsg);
       if (idx < 0) return;
@@ -7349,10 +7353,12 @@ export function ChatConsole({
         // #1020: 先删后端(SessionManager)成功再截断渲染层，失败不动 UI。
         const drop = computeDropLastTurns(msgs, userIdx);
         try {
-          await window.miqi.sessions.truncate(currentSessionRef.current, drop);
+          await window.miqi.sessions.truncate(sendSessionKey, drop);
         } catch {
           return;
         }
+        // await 期间侧栏可能切走会话——回查 key，切走则不动新会话状态。
+        if (currentSessionRef.current !== sendSessionKey) return;
         setMessages((prev) => prev.slice(0, userIdx));
       }
       retryPayloadRef.current = {
@@ -7362,7 +7368,14 @@ export function ChatConsole({
       };
       composerRef.current?.setText(userMsg.content);
       setAttachments(userMsg.attachments ?? []);
-      requestAnimationFrame(() => handleSendRef.current());
+      requestAnimationFrame(() => {
+        // RAF 触发时再查一次：期间切走会话则不发送、清掉 payload。
+        if (currentSessionRef.current !== sendSessionKey) {
+          retryPayloadRef.current = null;
+          return;
+        }
+        handleSendRef.current();
+      });
     },
     [streaming]
   );
@@ -7379,6 +7392,7 @@ export function ChatConsole({
       const text = newText;
       // 仅用 trim 判空,不改变实际 payload(保留用户刻意换行/空格)
       if (!text.trim()) return;
+      const sendSessionKey = currentSessionRef.current;
       const msgs = messagesRef.current;
       const idx = msgs.indexOf(original);
       if (idx < 0) return;
@@ -7386,10 +7400,12 @@ export function ChatConsole({
       // #1020: 先删后端(SessionManager)成功再截断渲染层，失败不动 UI。
       const drop = computeDropLastTurns(msgs, idx);
       try {
-        await window.miqi.sessions.truncate(currentSessionRef.current, drop);
+        await window.miqi.sessions.truncate(sendSessionKey, drop);
       } catch {
         return;
       }
+      // await 期间侧栏可能切走会话——回查 key，切走则不动新会话状态。
+      if (currentSessionRef.current !== sendSessionKey) return;
       retryPayloadRef.current = {
         text,
         attachments: original.attachments ?? [],

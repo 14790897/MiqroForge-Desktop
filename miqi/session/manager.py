@@ -134,10 +134,12 @@ class Session:
         if len(user_idx) <= drop_last_turns:
             removed = len(self.messages)
             self.messages = []
+            self.last_consolidated = 0
         else:
             boundary = user_idx[-drop_last_turns]
             removed = len(self.messages) - boundary
             self.messages = self.messages[:boundary]
+            self.last_consolidated = min(self.last_consolidated, boundary)
         self.updated_at = datetime.now()
         return removed
 

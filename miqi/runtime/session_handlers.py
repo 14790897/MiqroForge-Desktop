@@ -1126,16 +1126,16 @@ async def sessions_truncate_handler(
 
     sm = _get_session_manager()
     try:
-        removed = sm.truncate(session_key, drop_last_turns, client_id=client_id)
+        # 先截断权威的 folder 副本：truncate 自带归属校验，未归属的 legacy
+        # folder 副本会抛 REQUIRES_CLAIM 并在动 app-home stub 之前中止——否则
+        # 只截 stub、吞掉 folder 错误，sessions.get 重载仍读未变的 folder 副本，
+        # 旧回合照样复活(#1020 review)。
         folder_sm = _folder_session_manager(sm, session_key, client_id)
+        removed = 0
         if folder_sm is not None:
-            try:
-                folder_sm.truncate(session_key, drop_last_turns, client_id=client_id)
-            except OwnershipError as exc:
-                logger.debug(
-                    "sessions.truncate: folder copy {} not truncated: {}",
-                    session_key, exc,
-                )
+            removed = folder_sm.truncate(session_key, drop_last_turns, client_id=client_id)
+        app_home_removed = sm.truncate(session_key, drop_last_turns, client_id=client_id)
+        removed = app_home_removed or removed
     except OwnershipError as exc:
         raise AppServerError(exc.args[0], code=exc.code) from exc
 
