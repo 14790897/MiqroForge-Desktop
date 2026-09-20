@@ -86,10 +86,9 @@ test.describe.serial('编辑重答上下文截断(#1146)', () => {
   test('编辑第 2 回合重答:模型上下文只保留第 1 回合', { timeout: 180_000 }, async () => {
     // 第 1 回合
     await sendMessage(page, 'MOCK_REPLY:第一回合答案');
-    await expect(page.getByTestId('chat-message-assistant').first()).toContainText(
-      '第一回合答案',
-      { timeout: 90_000 }
-    );
+    await expect(page.getByTestId('chat-message-assistant').first()).toContainText('第一回合答案', {
+      timeout: 90_000,
+    });
     await expect(page.getByRole('button', { name: '停止生成' })).toHaveCount(0, {
       timeout: 90_000,
     });
@@ -97,10 +96,9 @@ test.describe.serial('编辑重答上下文截断(#1146)', () => {
 
     // 第 2 回合
     await sendMessage(page, 'MOCK_REPLY:第二回合答案');
-    await expect(page.getByTestId('chat-message-assistant').last()).toContainText(
-      '第二回合答案',
-      { timeout: 90_000 }
-    );
+    await expect(page.getByTestId('chat-message-assistant').last()).toContainText('第二回合答案', {
+      timeout: 90_000,
+    });
     await expect(page.getByRole('button', { name: '停止生成' })).toHaveCount(0, {
       timeout: 90_000,
     });
