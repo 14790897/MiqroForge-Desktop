@@ -312,6 +312,17 @@ class Handler(BaseHTTPRequestHandler):
         if os.environ.get("MIQI_MOCK_TEXT_REPLY") == "1" and "MOCK_500:" in last_user:
             self._send(500, {"error": {"message": "mock server error (e2e failure mode)"}})
             return
+        # ── 编辑/重答上下文截断 e2e(#1146):回显本请求 messages 摘要 ──
+        # 前缀 MOCK_ECHO_CTX: → 返回 "CTX:<role>:<content> | ..."，用于断言
+        # 新回合上下文里被替换的旧回合是否已截掉。
+        if os.environ.get("MIQI_MOCK_TEXT_REPLY") == "1" and "MOCK_ECHO_CTX:" in last_user:
+            parts = []
+            for m in messages:
+                if m.get("role") in ("system", "user", "assistant"):
+                    c = str(m.get("content") or "").replace("\n", " ")[:80]
+                    parts.append(f"{m['role']}:{c}")
+            self._respond(text("CTX:" + " | ".join(parts)))
+            return
         if "写授权" in last_user:
             if n_write > 0:
                 self._respond(text("写授权流程结束。"))
