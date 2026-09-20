@@ -27,6 +27,7 @@ import {
   SessionDeleteInput,
   SessionClaimLegacyInput,
   SessionRenameInput,
+  SessionTruncateInput,
   ConfigUpdateInput,
   ProviderTestInput,
   ProviderUpdateInput,
@@ -600,6 +601,14 @@ export function registerIpcHandlers(bridge: BridgeManager): void {
     return bridge.send('sessions.rename', {
       session_key: input.session_key,
       title: input.title,
+    });
+  });
+
+  ipcMain.handle(IPC.SESSIONS_TRUNCATE, async (_event, payload: unknown) => {
+    const input = SessionTruncateInput.parse(payload);
+    return bridge.send('sessions.truncate', {
+      session_key: input.session_key,
+      drop_last_turns: input.drop_last_turns,
     });
   });
 

@@ -1563,6 +1563,17 @@ export function wasTurnStopped(messages: Message[], userIdx: number): boolean {
   return false;
 }
 
+/** #1020: number of user turns from `fromUserIdx` (inclusive) to the end —
+ *  i.e. how many turns to drop when rewinding to before the user message at
+ *  `fromUserIdx`.  Mirrors SessionManager.truncate_turns' "last N user turns". */
+export function computeDropLastTurns(messages: Message[], fromUserIdx: number): number {
+  let n = 0;
+  for (let i = fromUserIdx; i < messages.length; i += 1) {
+    if (messages[i].role === 'user') n += 1;
+  }
+  return n;
+}
+
 /** #886: convert backend interrupted-turn snapshots into resumable cards and
  *  insert each at its chronological position (right after its own user
  *  message, before the later successful turns) instead of appending at the
@@ -8802,19 +8813,27 @@ export function ChatConsole({
     async (msg: Message) => {
       if (streaming) return;
       cleanupListeners();
-      const idx = messagesRef.current.indexOf(msg);
-      if (idx >= 0) {
+      const msgs = messagesRef.current;
+      const idx = msgs.indexOf(msg);
+      if (idx >= 0 && !wasTurnStopped(msgs, idx)) {
+        // #1020: 先删后端(SessionManager)成功再截断渲染层，失败不动 UI。
+        const sendSessionKey = currentSessionRef.current;
+        const drop = computeDropLastTurns(msgs, idx);
+        try {
+          await window.miqi.sessions.truncate(sendSessionKey, drop);
+        } catch {
+          return;
+        }
+        // await 期间侧栏可能切走会话——回查 key，切走则不动新会话状态。
+        if (currentSessionRef.current !== sendSessionKey) return;
         // #886: a stopped round keeps its interrupted half-reply in the
         // timeline — the retried attempt appends after it instead of
         // rewinding and dropping the "已停止" context.
-        const stopped = wasTurnStopped(messagesRef.current, idx);
-        setMessages((prev) => (stopped ? prev : prev.slice(0, idx)));
-        // #1146: 重试回退后，新回合的模型上下文截断到该回合之前。
-        dropFromTurnIdRef.current = stopped
-          ? null
-          : msg.turnId
-            ? { turnId: msg.turnId, sessionKey: currentSessionRef.current }
-            : null;
+        // #1146: 重试回退后，新回合的模型上下文(SQLite)截断到该回合之前。
+        dropFromTurnIdRef.current = msg.turnId
+          ? { turnId: msg.turnId, sessionKey: currentSessionRef.current }
+          : null;
+        setMessages((prev) => prev.slice(0, idx));
       }
       composerRef.current?.setText(msg.content);
       setAttachments(msg.attachments ?? []);
@@ -8825,6 +8844,7 @@ export function ChatConsole({
   const handleRegenerate = useCallback(
     async (assistantMsg: Message) => {
       if (streaming) return;
+      const sendSessionKey = currentSessionRef.current;
       const msgs = messagesRef.current;
       const idx = msgs.indexOf(assistantMsg);
       if (idx < 0) return;
@@ -8837,25 +8857,40 @@ export function ChatConsole({
       }
       if (userIdx < 0) return;
       const userMsg = msgs[userIdx];
-      const stopped = wasTurnStopped(msgs, userIdx);
+      // #886: regenerating a manually-stopped turn must not rewind and drop
+      // the interrupted round — keep it and let handleSend append the new
+      // attempt after it.  Only a completed answer is replaced in place.
+      if (!wasTurnStopped(msgs, userIdx)) {
+        // #1020: 先删后端(SessionManager)成功再截断渲染层，失败不动 UI。
+        const drop = computeDropLastTurns(msgs, userIdx);
+        try {
+          await window.miqi.sessions.truncate(sendSessionKey, drop);
+        } catch {
+          return;
+        }
+        // await 期间侧栏可能切走会话——回查 key，切走则不动新会话状态。
+        if (currentSessionRef.current !== sendSessionKey) return;
+        // #1146: 重答回退后，新回合的模型上下文(SQLite)截断到该 user 回合之前。
+        dropFromTurnIdRef.current = userMsg.turnId
+          ? { turnId: userMsg.turnId, sessionKey: currentSessionRef.current }
+          : null;
+        setMessages((prev) => prev.slice(0, userIdx));
+      }
       retryPayloadRef.current = {
         text: userMsg.content,
         attachments: userMsg.attachments ?? [],
         retry: true,
       };
-      // #1146: 重答回退后，新回合的模型上下文截断到该 user 回合之前。
-      dropFromTurnIdRef.current = stopped
-        ? null
-        : userMsg.turnId
-          ? { turnId: userMsg.turnId, sessionKey: currentSessionRef.current }
-          : null;
-      // #886: regenerating a manually-stopped turn must not rewind and drop
-      // the interrupted round — keep it and let handleSend append the new
-      // attempt after it.  Only a completed answer is replaced in place.
-      setMessages((prev) => (stopped ? prev : prev.slice(0, userIdx)));
       composerRef.current?.setText(userMsg.content);
       setAttachments(userMsg.attachments ?? []);
-      requestAnimationFrame(() => handleSendRef.current());
+      requestAnimationFrame(() => {
+        // RAF 触发时再查一次：期间切走会话则不发送、清掉 payload。
+        if (currentSessionRef.current !== sendSessionKey) {
+          retryPayloadRef.current = null;
+          return;
+        }
+        handleSendRef.current();
+      });
     },
     [streaming]
   );
@@ -8872,10 +8907,20 @@ export function ChatConsole({
       const text = newText;
       // 仅用 trim 判空,不改变实际 payload(保留用户刻意换行/空格)
       if (!text.trim()) return;
+      const sendSessionKey = currentSessionRef.current;
       const msgs = messagesRef.current;
       const idx = msgs.indexOf(original);
       if (idx < 0) return;
       const snapshot = msgs;
+      // #1020: 先删后端(SessionManager)成功再截断渲染层，失败不动 UI。
+      const drop = computeDropLastTurns(msgs, idx);
+      try {
+        await window.miqi.sessions.truncate(sendSessionKey, drop);
+      } catch {
+        return;
+      }
+      // await 期间侧栏可能切走会话——回查 key，切走则不动新会话状态。
+      if (currentSessionRef.current !== sendSessionKey) return;
       retryPayloadRef.current = {
         text,
         attachments: original.attachments ?? [],

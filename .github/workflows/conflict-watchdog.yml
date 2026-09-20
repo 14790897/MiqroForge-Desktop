@@ -3,6 +3,10 @@ name: Conflict Watchdog
 # PR 与基分支产生合并冲突时，自动以 github-actions[bot] 身份提交 changes requested；
 # 冲突解决后自动 dismiss 该 review 解除标记。
 #
+# 冲突期间（且非 draft）还会取消「请求本人评审」的待评审请求：PR 有冲突时评审前提
+# 不成立（冲突解决必然改动代码），先把请求撤掉，冲突解决后可再重新请求。
+# 不触碰任何已提交的评审（他人的 changes requested / approve / comment 一律不动）。
+#
 # 背景：GitHub 没有「冲突」事件（webhook / Actions 都没有 merge_conflict），冲突也不会
 # 自动改 review 状态或通知任何人，只能主动扫描 PR 的 mergeable 字段来判断。
 #
@@ -44,6 +48,8 @@ jobs:
           REPO: ${{ github.repository }}
           EVENT_NAME: ${{ github.event_name }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
+          # 冲突期间取消「请求该账号评审」的待评审请求（仓库所有者本人）
+          CANCEL_REVIEW_REQUEST_FOR: "14790897"
         run: |
           set -euo pipefail
 
@@ -109,16 +115,31 @@ jobs:
             fi
             case "$state" in
               CONFLICTING)
-                if [ -n "$rid" ]; then
-                  echo "::notice::PR #$n 有冲突，已标记过 changes requested，跳过"
-                  continue
-                fi
                 if ! draft=$(gh pr view "$n" --json isDraft --jq '.isDraft'); then
                   echo "::warning::PR #$n 读取 isDraft 失败，跳过"
                   continue
                 fi
                 if [ "$draft" = "true" ]; then
                   echo "::notice::PR #$n 有冲突但是 draft，跳过"
+                  continue
+                fi
+                # 冲突期间取消「请求本人评审」的待评审请求：PR 有冲突时评审前提不成立，
+                # 先把请求撤掉，冲突解决后可再重新请求；不触碰任何已提交的评审
+                if ! requested=$(gh api "repos/$REPO/pulls/$n/requested_reviewers" --jq '.users[].login'); then
+                  # 取消请求是附加动作，读取失败只告警，不阻断下面的冲突标记
+                  echo "::warning::PR #$n 读取待评审人失败，跳过取消请求（仍会继续冲突标记）"
+                  requested=''
+                fi
+                if printf '%s\n' "$requested" | grep -Fqx "$CANCEL_REVIEW_REQUEST_FOR"; then
+                  if printf '{"reviewers":["%s"]}' "$CANCEL_REVIEW_REQUEST_FOR" \
+                       | gh api -X DELETE "repos/$REPO/pulls/$n/requested_reviewers" --input - >/dev/null; then
+                    echo "::notice::PR #$n 有冲突，已取消对 $CANCEL_REVIEW_REQUEST_FOR 的评审请求"
+                  else
+                    echo "::warning::PR #$n 取消对 $CANCEL_REVIEW_REQUEST_FOR 的评审请求失败，请手动确认"
+                  fi
+                fi
+                if [ -n "$rid" ]; then
+                  echo "::notice::PR #$n 有冲突，已标记过 changes requested，跳过"
                   continue
                 fi
                 if ! base=$(gh pr view "$n" --json baseRefName --jq '.baseRefName'); then

@@ -244,8 +244,12 @@ async def test_recoverable_error_does_not_terminate_drain(tmp_path, fake_config)
         recoverable=True,
     ))
 
-    # Wait for drain to finish
-    for _ in range(100):
+    # Wait for drain to finish.  Poll until the turn completes instead of
+    # racing a fixed number of short sleeps: the previous 100 x 0.01s budget
+    # was only ~0.4s of real time, within a few tens of milliseconds of this
+    # turn's own duration (the provider sleeps 0.3s between deltas), which is
+    # why the assertion below could fail on a loaded runner.
+    for _ in range(500):
         if any(e["event"] == "turn/completed" for e in captured):
             break
         await _asyncio.sleep(0.01)

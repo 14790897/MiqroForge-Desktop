@@ -71,6 +71,25 @@ class SessionRenameParams(SessionKeyParams):
         return self
 
 
+class SessionsTruncateParams(SessionKeyParams):
+    """sessions.truncate — drop the last N user turns from a session (#1020).
+
+    ``drop_last_turns`` is a positive integer; the wire name ``dropLastTurns``
+    is also accepted (populate_by_name).
+    """
+
+    drop_last_turns: int = Field(validation_alias="dropLastTurns")
+
+    @field_validator("drop_last_turns", mode="before")
+    @classmethod
+    def _validate_drop(cls, value: Any) -> int:
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError("drop_last_turns must be an integer")
+        if value < 1:
+            raise ValueError("drop_last_turns must be >= 1")
+        return value
+
+
 SESSION_METHOD_PARAM_MODELS: dict[str, type[BaseModel]] = {
     "sessions.list": SessionsListParams,
     "sessions.get": SessionKeyParams,
@@ -82,6 +101,7 @@ SESSION_METHOD_PARAM_MODELS: dict[str, type[BaseModel]] = {
     "sessions.clear_tracked_files": SessionKeyParams,
     "sessions.claim_legacy": SessionKeyParams,
     "sessions.rename": SessionRenameParams,
+    "sessions.truncate": SessionsTruncateParams,
 }
 
 

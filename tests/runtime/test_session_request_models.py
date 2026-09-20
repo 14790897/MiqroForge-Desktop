@@ -12,7 +12,7 @@ from miqi.runtime.session_request_models import (
 
 
 class TestAllMethodsExist:
-    def test_all_10_methods_in_param_map(self):
+    def test_all_11_methods_in_param_map(self):
         expected = {
             "sessions.list",
             "sessions.get",
@@ -24,6 +24,7 @@ class TestAllMethodsExist:
             "sessions.clear_tracked_files",
             "sessions.claim_legacy",
             "sessions.rename",
+            "sessions.truncate",
         }
         assert set(SESSION_METHOD_PARAM_MODELS) == expected
 

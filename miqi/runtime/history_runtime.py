@@ -15,7 +15,6 @@ when the event loop shuts down.
 
 from __future__ import annotations
 
-import asyncio
 import json
 import time
 import uuid
@@ -25,6 +24,14 @@ from typing import Any
 
 import aiosqlite
 from loguru import logger
+
+from miqi.runtime.db_util import (
+    RuntimeDb,
+    execute_dml,
+    fetchall,
+    fetchone,
+    run_script,
+)
 
 VALID_HISTORY_ROLES = frozenset({
     "system",
@@ -38,6 +45,30 @@ MAX_HISTORY_CONTENT_CHARS = 1_000_000
 MAX_HISTORY_PAYLOAD_JSON_CHARS = 1_000_000
 _TRUNCATED_SUFFIX = "<truncated>"
 _HISTORY_CREATED_AT_STEP = 1e-6
+
+_TURNS_INSERT_SQL = """INSERT OR REPLACE INTO runtime_turns
+    (turn_id, thread_id, session_id, status, started_at,
+     completed_at, tools_used_json, token_usage_json)
+    VALUES (?, ?, ?, ?, ?, NULL, ?, ?)"""
+
+_TURNS_COMPLETE_SQL = """UPDATE runtime_turns
+    SET status = ?, completed_at = ?, tools_used_json = ?,
+        token_usage_json = ?
+    WHERE turn_id = ? AND session_id = ?"""
+
+_HISTORY_INSERT_SQL = """INSERT INTO runtime_history_items
+    (item_id, thread_id, session_id, turn_id, role, content,
+     payload_json, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)"""
+
+_HISTORY_SELECT_SQL = """SELECT * FROM runtime_history_items
+    WHERE thread_id = ? AND session_id = ?
+    ORDER BY created_at ASC, rowid ASC"""
+
+
+async def _snapshot_columns(db: aiosqlite.Connection) -> set[str]:
+    """Column names of execution_snapshots (used by the schema migration)."""
+    return {row[1] for row in await fetchall(db, "PRAGMA table_info(execution_snapshots)")}
 
 
 @dataclass(frozen=True)
@@ -81,23 +112,22 @@ class HistoryRuntime:
     def __init__(self, db_path: Path, *, session_id: str):
         self.db_path = db_path
         self.session_id = session_id
-        self._db: aiosqlite.Connection | None = None
+        self._dbx: RuntimeDb | None = None
         self._last_history_created_at = 0.0
 
     # ── lifecycle ──────────────────────────────────────────────────────
 
     async def initialize(self) -> None:
-        """Open persistent connection and create tables."""
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        # isolation_level=None (autocommit): see LedgerRuntime.initialize for
-        # the stranded-lock rationale — a cancelled turn task must never leave
-        # an open write transaction holding the shared DB file lock.
-        self._db = await aiosqlite.connect(
-            str(self.db_path), timeout=30, isolation_level=None
-        )
-        await self._db.execute("PRAGMA journal_mode=WAL")
-        self._db.row_factory = aiosqlite.Row
-        await self._db.execute("""
+        """Open the store and create tables."""
+        # All statements go through RuntimeDb (#1012): see its module docstring
+        # for why every operation runs in a shielded task.
+        self._dbx = RuntimeDb(self.db_path, name="history", prepare=self._prepare)
+        await self._dbx.open()
+
+    @staticmethod
+    async def _prepare(db: aiosqlite.Connection) -> None:
+        db.row_factory = aiosqlite.Row
+        await run_script(db, """
             CREATE TABLE IF NOT EXISTS runtime_turns (
                 turn_id TEXT PRIMARY KEY,
                 thread_id TEXT NOT NULL,
@@ -109,7 +139,7 @@ class HistoryRuntime:
                 token_usage_json TEXT NOT NULL
             )
         """)
-        await self._db.execute("""
+        await run_script(db, """
             CREATE TABLE IF NOT EXISTS runtime_history_items (
                 item_id TEXT PRIMARY KEY,
                 thread_id TEXT NOT NULL,
@@ -121,7 +151,7 @@ class HistoryRuntime:
                 created_at REAL NOT NULL
             )
         """)
-        await self._db.execute("""
+        await run_script(db, """
             CREATE TABLE IF NOT EXISTS runtime_compactions (
                 compaction_id TEXT PRIMARY KEY,
                 thread_id TEXT NOT NULL,
@@ -138,7 +168,7 @@ class HistoryRuntime:
         # interrupted turn (process exit / abort) can be resumed later.
         # Deleted when the turn completes normally (content is then persisted
         # as real messages); kept when interrupted (status=running/interrupted).
-        await self._db.execute("""
+        await run_script(db, """
             CREATE TABLE IF NOT EXISTS execution_snapshots (
                 turn_id TEXT PRIMARY KEY,
                 thread_id TEXT NOT NULL,
@@ -160,31 +190,23 @@ class HistoryRuntime:
         # Check-then-act is racy across concurrent connections, so the ALTER
         # itself is guarded (CR #856-4).  #905 review extends the same pattern
         # for reasoning_mode (fast/think label on restored interrupted cards).
-        async with self._db.execute("PRAGMA table_info(execution_snapshots)") as cursor:
-            cols = {row[1] for row in await cursor.fetchall()}
-        if "reasoning_elapsed_s" not in cols:
+        cols = await _snapshot_columns(db)
+        for column, ddl in (
+            ("reasoning_elapsed_s", "REAL"),
+            ("reasoning_mode", "TEXT"),
+        ):
+            if column in cols:
+                continue
             try:
-                await self._db.execute(
-                    "ALTER TABLE execution_snapshots ADD COLUMN reasoning_elapsed_s REAL"
+                await db.execute(
+                    f"ALTER TABLE execution_snapshots ADD COLUMN {column} {ddl}"
                 )
             except Exception:
                 # Concurrent initializer may have won the race — verify the
                 # column now exists before treating anything as an error.
-                async with self._db.execute("PRAGMA table_info(execution_snapshots)") as cursor:
-                    cols2 = {row[1] for row in await cursor.fetchall()}
-                if "reasoning_elapsed_s" not in cols2:
+                if column not in await _snapshot_columns(db):
                     raise
-        if "reasoning_mode" not in cols:
-            try:
-                await self._db.execute(
-                    "ALTER TABLE execution_snapshots ADD COLUMN reasoning_mode TEXT"
-                )
-            except Exception:
-                async with self._db.execute("PRAGMA table_info(execution_snapshots)") as cursor:
-                    cols2 = {row[1] for row in await cursor.fetchall()}
-                if "reasoning_mode" not in cols2:
-                    raise
-        await self._db.commit()
+        await db.commit()
 
     async def close(self) -> None:
         """Close the persistent database connection.
@@ -192,28 +214,42 @@ class HistoryRuntime:
         Safe to call multiple times; no-op if already closed or never
         initialized.
         """
-        if self._db is not None:
-            await self._db.close()
-            self._db = None
+        if self._dbx is not None:
+            await self._dbx.close()
+            self._dbx = None
+
+    @property
+    def _db(self) -> aiosqlite.Connection | None:
+        """The live connection, or None once closed (diagnostics/tests)."""
+        if self._dbx is None or not self._dbx.is_open:
+            return None
+        return self._dbx.conn
 
     @property
     def _conn(self) -> aiosqlite.Connection:
         """Return the persistent connection, raising if not initialized."""
-        if self._db is None:
+        return self._require_db().conn
+
+    def _require_db(self) -> RuntimeDb:
+        if self._dbx is None:
             raise RuntimeError(
                 "HistoryRuntime.initialize() must be called before use"
             )
-        return self._db
+        return self._dbx
 
     # ── turns ──────────────────────────────────────────────────────────
 
     async def start_turn(self, turn_id: str, *, thread_id: str) -> None:
-        db = self._conn
-        await db.execute(
-            """INSERT OR REPLACE INTO runtime_turns
-               (turn_id, thread_id, session_id, status, started_at,
-                completed_at, tools_used_json, token_usage_json)
-               VALUES (?, ?, ?, ?, ?, NULL, ?, ?)""",
+        await self._require_db().run(
+            lambda db: self._start_turn(db, turn_id, thread_id)
+        )
+
+    async def _start_turn(
+        self, db: aiosqlite.Connection, turn_id: str, thread_id: str
+    ) -> None:
+        await execute_dml(
+            db,
+            _TURNS_INSERT_SQL,
             (
                 turn_id, thread_id, self.session_id, "running",
                 time.time(), "[]", "{}",
@@ -229,12 +265,23 @@ class HistoryRuntime:
         tools_used: list[str],
         token_usage: dict[str, int],
     ) -> None:
-        db = self._conn
-        await db.execute(
-            """UPDATE runtime_turns
-               SET status = ?, completed_at = ?, tools_used_json = ?,
-                   token_usage_json = ?
-               WHERE turn_id = ? AND session_id = ?""",
+        await self._require_db().run(
+            lambda db: self._complete_turn(
+                db, turn_id, status, tools_used, token_usage
+            )
+        )
+
+    async def _complete_turn(
+        self,
+        db: aiosqlite.Connection,
+        turn_id: str,
+        status: str,
+        tools_used: list[str],
+        token_usage: dict[str, int],
+    ) -> None:
+        await execute_dml(
+            db,
+            _TURNS_COMPLETE_SQL,
             (
                 status,
                 time.time(),
@@ -247,12 +294,13 @@ class HistoryRuntime:
         await db.commit()
 
     async def get_turn(self, turn_id: str) -> TurnRecord | None:
-        db = self._conn
-        cursor = await db.execute(
-            "SELECT * FROM runtime_turns WHERE turn_id = ? AND session_id = ?",
-            (turn_id, self.session_id),
+        row = await self._require_db().run(
+            lambda db: fetchone(
+                db,
+                "SELECT * FROM runtime_turns WHERE turn_id = ? AND session_id = ?",
+                (turn_id, self.session_id),
+            )
         )
-        row = await cursor.fetchone()
         if row is None:
             return None
         # Issue #84: degrade on corrupted JSON columns instead of crashing
@@ -292,27 +340,28 @@ class HistoryRuntime:
     # ── history items ──────────────────────────────────────────────────
 
     async def append_item(self, item: HistoryItem) -> None:
-        db = self._conn
         role = _validate_role(item.role)
         content = _sanitize_content(item.content)
         payload_json = _sanitize_payload(item.payload)
-        await db.execute(
-            """INSERT INTO runtime_history_items
-               (item_id, thread_id, session_id, turn_id, role, content,
-                payload_json, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-            (
-                item.item_id,
-                item.thread_id,
-                self.session_id,
-                item.turn_id,
-                role,
-                content,
-                payload_json,
-                self._next_history_created_at(item.created_at),
-            ),
+        params = (
+            item.item_id,
+            item.thread_id,
+            self.session_id,
+            item.turn_id,
+            role,
+            content,
+            payload_json,
+            self._next_history_created_at(item.created_at),
         )
-        await db.commit()
+
+        async def _append(db: aiosqlite.Connection) -> None:
+            await execute_dml(db, _HISTORY_INSERT_SQL, params)
+            await db.commit()
+
+        # Deliberately a leaf operation: ``append_message`` calls into it and
+        # must not hold the connection lock around this call (the lock is not
+        # re-entrant).
+        await self._require_db().run(_append)
 
     async def append_message(
         self,
@@ -335,14 +384,11 @@ class HistoryRuntime:
         return item
 
     async def load_items(self, thread_id: str) -> list[HistoryItem]:
-        db = self._conn
-        cursor = await db.execute(
-            """SELECT * FROM runtime_history_items
-               WHERE thread_id = ? AND session_id = ?
-               ORDER BY created_at ASC, rowid ASC""",
-            (thread_id, self.session_id),
+        rows = await self._require_db().run(
+            lambda db: fetchall(
+                db, _HISTORY_SELECT_SQL, (thread_id, self.session_id)
+            )
         )
-        rows = await cursor.fetchall()
         results = []
         for row in rows:
             try:
@@ -384,15 +430,19 @@ class HistoryRuntime:
         if not turn_ids:
             return 0
         placeholders = ",".join("?" for _ in turn_ids)
-        db = self._conn
-        cursor = await db.execute(
-            f"""DELETE FROM runtime_history_items
-                WHERE session_id = ? AND thread_id = ?
-                AND turn_id IN ({placeholders})""",
-            (self.session_id, thread_id, *turn_ids),
-        )
-        await db.commit()
-        return int(cursor.rowcount or 0)
+
+        async def _delete(db: aiosqlite.Connection) -> int:
+            rowcount = await execute_dml(
+                db,
+                f"""DELETE FROM runtime_history_items
+                    WHERE session_id = ? AND thread_id = ?
+                    AND turn_id IN ({placeholders})""",
+                (self.session_id, thread_id, *turn_ids),
+            )
+            await db.commit()
+            return rowcount
+
+        return await self._require_db().run(_delete)
 
     async def list_turn_ids(self, thread_id: str) -> list[str]:
         """Return turn ids in history-insertion order (deduplicated).
@@ -459,39 +509,45 @@ class HistoryRuntime:
         Called by the turn loop on a throttle (time/bytes threshold), on
         interruption, and on completion (before the snapshot is deleted).
         """
-        db = self._conn
-        await db.execute(
-            """INSERT INTO execution_snapshots
-               (turn_id, thread_id, session_id, status, assistant_content,
-                reasoning_content, tool_state_json, version, updated_at,
-                reasoning_elapsed_s, reasoning_mode)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-               ON CONFLICT(turn_id) DO UPDATE SET
-                status = excluded.status,
-                assistant_content = excluded.assistant_content,
-                reasoning_content = excluded.reasoning_content,
-                tool_state_json = excluded.tool_state_json,
-                version = excluded.version,
-                updated_at = excluded.updated_at,
-                reasoning_elapsed_s = excluded.reasoning_elapsed_s,
-                reasoning_mode = excluded.reasoning_mode""",
-            (
-                turn_id, thread_id, self.session_id, status,
-                assistant_content, reasoning_content,
-                json.dumps(tool_state or [], ensure_ascii=False),
-                version, time.time(), reasoning_elapsed_s, reasoning_mode,
-            ),
+        params = (
+            turn_id, thread_id, self.session_id, status,
+            assistant_content, reasoning_content,
+            json.dumps(tool_state or [], ensure_ascii=False),
+            version, time.time(), reasoning_elapsed_s, reasoning_mode,
         )
-        await db.commit()
+
+        async def _upsert(db: aiosqlite.Connection) -> None:
+            await execute_dml(
+                db,
+                """INSERT INTO execution_snapshots
+                   (turn_id, thread_id, session_id, status, assistant_content,
+                    reasoning_content, tool_state_json, version, updated_at,
+                    reasoning_elapsed_s, reasoning_mode)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(turn_id) DO UPDATE SET
+                    status = excluded.status,
+                    assistant_content = excluded.assistant_content,
+                    reasoning_content = excluded.reasoning_content,
+                    tool_state_json = excluded.tool_state_json,
+                    version = excluded.version,
+                    updated_at = excluded.updated_at,
+                    reasoning_elapsed_s = excluded.reasoning_elapsed_s,
+                    reasoning_mode = excluded.reasoning_mode""",
+                params,
+            )
+            await db.commit()
+
+        await self._require_db().run(_upsert)
 
     async def get_snapshot(self, turn_id: str) -> dict[str, Any] | None:
         """Return the snapshot for a turn (scoped to this session), or None."""
-        db = self._conn
-        async with db.execute(
-            "SELECT * FROM execution_snapshots WHERE turn_id = ? AND session_id = ?",
-            (turn_id, self.session_id),
-        ) as cursor:
-            row = await cursor.fetchone()
+        row = await self._require_db().run(
+            lambda db: fetchone(
+                db,
+                "SELECT * FROM execution_snapshots WHERE turn_id = ? AND session_id = ?",
+                (turn_id, self.session_id),
+            )
+        )
         if row is None:
             return None
         return self._snapshot_row_to_dict(row)
@@ -505,34 +561,43 @@ class HistoryRuntime:
         Used by the session-load path to render "任务被中断" cards with the
         half-generated content the user saw before the interruption.
         """
-        db = self._conn
-        async with db.execute(
-            """SELECT * FROM execution_snapshots
-               WHERE session_id = ? AND status IN ('running', 'interrupted')
-               ORDER BY updated_at DESC""",
-            (self.session_id,),
-        ) as cursor:
-            rows = await cursor.fetchall()
+        rows = await self._require_db().run(
+            lambda db: fetchall(
+                db,
+                """SELECT * FROM execution_snapshots
+                   WHERE session_id = ? AND status IN ('running', 'interrupted')
+                   ORDER BY updated_at DESC""",
+                (self.session_id,),
+            )
+        )
         return [self._snapshot_row_to_dict(r) for r in rows]
 
     async def delete_snapshot(self, turn_id: str) -> None:
         """Remove a turn's snapshot (scoped to this session)."""
-        db = self._conn
-        await db.execute(
-            "DELETE FROM execution_snapshots WHERE turn_id = ? AND session_id = ?",
-            (turn_id, self.session_id),
-        )
-        await db.commit()
+
+        async def _delete(db: aiosqlite.Connection) -> None:
+            await execute_dml(
+                db,
+                "DELETE FROM execution_snapshots WHERE turn_id = ? AND session_id = ?",
+                (turn_id, self.session_id),
+            )
+            await db.commit()
+
+        await self._require_db().run(_delete)
 
     async def clear_snapshots(self, thread_id: str) -> int:
         """Remove all snapshots for a thread (session deleted/archived)."""
-        db = self._conn
-        async with db.execute(
-            "DELETE FROM execution_snapshots WHERE thread_id = ?",
-            (thread_id,),
-        ) as cursor:
+
+        async def _clear(db: aiosqlite.Connection) -> int:
+            rowcount = await execute_dml(
+                db,
+                "DELETE FROM execution_snapshots WHERE thread_id = ?",
+                (thread_id,),
+            )
             await db.commit()
-            return int(cursor.rowcount or 0)
+            return rowcount
+
+        return await self._require_db().run(_clear)
 
     @staticmethod
     def _snapshot_row_to_dict(row: Any) -> dict[str, Any]:
@@ -568,74 +633,85 @@ class HistoryRuntime:
         replacement messages, and records a compaction row with full
         audit metadata.
         """
-        db = self._conn
         compaction_id = str(uuid.uuid4())
-        # Wrap in transaction so DELETE+INSERT+compaction record are atomic.
-        # If the process crashes between DELETE and commit, the transaction
-        # is rolled back and no history is lost.
-        await db.execute("BEGIN")
-        try:
-            # Delete existing items for this thread (session-scoped)
-            await db.execute(
-                "DELETE FROM runtime_history_items WHERE thread_id = ? AND session_id = ?",
-                (thread_id, self.session_id),
-            )
-            # Insert replacement messages
-            for msg in replacement_messages:
-                await db.execute(
-                    """INSERT INTO runtime_history_items
-                       (item_id, thread_id, session_id, turn_id, role, content,
-                        payload_json, created_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+
+        async def _replace(db: aiosqlite.Connection) -> None:
+            # Wrap in transaction so DELETE+INSERT+compaction record are atomic.
+            # If the process crashes between DELETE and commit, the transaction
+            # is rolled back and no history is lost.
+            #
+            # The whole method runs inside RuntimeDb.run, which shields it from
+            # the caller's cancellation: a cancelled turn task can no longer
+            # interrupt the transaction between BEGIN and COMMIT and leave the
+            # rollback to a task that is already being torn down.
+            await db.execute("BEGIN")
+            try:
+                # Delete existing items for this thread (session-scoped)
+                await execute_dml(
+                    db,
+                    "DELETE FROM runtime_history_items"
+                    " WHERE thread_id = ? AND session_id = ?",
+                    (thread_id, self.session_id),
+                )
+                # Insert replacement messages
+                for msg in replacement_messages:
+                    await execute_dml(
+                        db,
+                        """INSERT INTO runtime_history_items
+                           (item_id, thread_id, session_id, turn_id, role, content,
+                            payload_json, created_at)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                        (
+                            str(uuid.uuid4()),
+                            thread_id,
+                            self.session_id,
+                            turn_id,
+                            msg.get("role", "unknown"),
+                            msg.get("content") or "",
+                            json.dumps(
+                                {
+                                    "message_fields": {
+                                        k: v
+                                        for k, v in msg.items()
+                                        if k not in {"role", "content"}
+                                    },
+                                },
+                            ),
+                            self._next_history_created_at(time.time()),
+                        ),
+                    )
+                # Record the compaction with full audit metadata
+                await execute_dml(
+                    db,
+                    """INSERT INTO runtime_compactions
+                       (compaction_id, thread_id, session_id, turn_id,
+                        messages_before, messages_after, tokens_saved,
+                        replacement_json, created_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
-                        str(uuid.uuid4()),
+                        compaction_id,
                         thread_id,
                         self.session_id,
                         turn_id,
-                        msg.get("role", "unknown"),
-                        msg.get("content") or "",
-                        json.dumps(
-                            {
-                                "message_fields": {
-                                    k: v
-                                    for k, v in msg.items()
-                                    if k not in {"role", "content"}
-                                },
-                            },
-                        ),
-                        self._next_history_created_at(time.time()),
+                        messages_before,
+                        messages_after,
+                        tokens_saved,
+                        json.dumps(replacement_messages),
+                        time.time(),
                     ),
                 )
-            # Record the compaction with full audit metadata
-            await db.execute(
-                """INSERT INTO runtime_compactions
-                   (compaction_id, thread_id, session_id, turn_id,
-                    messages_before, messages_after, tokens_saved,
-                    replacement_json, created_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (
-                    compaction_id,
-                    thread_id,
-                    self.session_id,
-                    turn_id,
-                    messages_before,
-                    messages_after,
-                    tokens_saved,
-                    json.dumps(replacement_messages),
-                    time.time(),
-                ),
-            )
-            await db.commit()
-        except asyncio.CancelledError:
-            # CancelledError 不是 Exception 子类，只接 except Exception 会漏掉
-            # 它：回合任务取消落在事务中途时，不回滚会把本连接的写锁一直
-            # 滞留（与 test_issue_886 database is locked 同源）。ROLLBACK 用
-            # shield——任务已处于取消态，普通 await 会被立即再次取消。
-            await asyncio.shield(db.execute("ROLLBACK"))
-            raise
-        except Exception:
-            await db.execute("ROLLBACK")
-            raise
+                await db.commit()
+            except BaseException:
+                try:
+                    await db.execute("ROLLBACK")
+                except Exception as rollback_exc:  # pragma: no cover - defensive
+                    logger.warning(
+                        "HistoryRuntime: rolling back a failed compaction failed: {}",
+                        rollback_exc,
+                    )
+                raise
+
+        await self._require_db().run(_replace)
 
     def _next_history_created_at(self, preferred: float | None = None) -> float:
         created_at = time.time() if preferred is None else preferred

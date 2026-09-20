@@ -1104,6 +1104,44 @@ async def sessions_rename_handler(
     return {"result": {"renamed": True, "key": session_key, "title": effective_title}}
 
 
+# ── sessions.truncate ──────────────────────────────────────────────────────
+
+
+async def sessions_truncate_handler(
+    request_id: str,
+    params: dict[str, Any],
+    client_id: str,
+    session_id: str | None,
+    registry: Any,
+) -> dict[str, Any]:
+    """Drop the last N user turns from a session (#1020).
+
+    Truncates the SessionManager (JSONL) copy — the store ``sessions.get``
+    reads on reload — so editing/regenerating a message no longer resurrects
+    the replaced turns after a reload.
+    """
+    typed = validate_session_params("sessions.truncate", params)
+    session_key = typed.session_key
+    drop_last_turns = typed.drop_last_turns
+
+    sm = _get_session_manager()
+    try:
+        # 先截断权威的 folder 副本：truncate 自带归属校验，未归属的 legacy
+        # folder 副本会抛 REQUIRES_CLAIM 并在动 app-home stub 之前中止——否则
+        # 只截 stub、吞掉 folder 错误，sessions.get 重载仍读未变的 folder 副本，
+        # 旧回合照样复活(#1020 review)。
+        folder_sm = _folder_session_manager(sm, session_key, client_id)
+        removed = 0
+        if folder_sm is not None:
+            removed = folder_sm.truncate(session_key, drop_last_turns, client_id=client_id)
+        app_home_removed = sm.truncate(session_key, drop_last_turns, client_id=client_id)
+        removed = app_home_removed or removed
+    except OwnershipError as exc:
+        raise AppServerError(exc.args[0], code=exc.code) from exc
+
+    return {"result": {"truncated": True, "removed_messages": removed}}
+
+
 # ── sessions.claim_legacy ──────────────────────────────────────────────────
 
 

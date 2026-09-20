@@ -72,6 +72,12 @@ class SessionsRenameResult(_Result):
     title: str | None = None
 
 
+class SessionsTruncateResult(_Result):
+    """sessions.truncate — truncation confirmation (#1020)."""
+    truncated: bool = True
+    removed_messages: int = 0
+
+
 SESSION_METHOD_RESULT_MODELS: dict[str, type[BaseModel]] = {
     "sessions.list": SessionsListResult,
     "sessions.get": SessionsGetResult,
@@ -83,4 +89,5 @@ SESSION_METHOD_RESULT_MODELS: dict[str, type[BaseModel]] = {
     "sessions.clear_tracked_files": SessionsClearTrackedFilesResult,
     "sessions.claim_legacy": SessionsClaimLegacyResult,
     "sessions.rename": SessionsRenameResult,
+    "sessions.truncate": SessionsTruncateResult,
 }
