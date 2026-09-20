@@ -155,7 +155,7 @@ jobs:
               "defaults": {
                 "model": "deepseek-v4-pro",
                 "maxTokens": 8000,
-                "temperature": 0.1,
+                "temperature": 1,
                 "maxToolIterations": 10,
                 "runtime": "app_server"
               },
@@ -313,7 +313,7 @@ jobs:
               "defaults": {
                 "model": "deepseek-v4-pro",
                 "maxTokens": 8000,
-                "temperature": 0.1,
+                "temperature": 1,
                 "maxToolIterations": 10,
                 "runtime": "app_server"
               },
