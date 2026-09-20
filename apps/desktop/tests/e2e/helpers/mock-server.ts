@@ -173,6 +173,20 @@ export function resolveMockPython(): ResolvedMockPython {
   return cached;
 }
 
+/** mock 启动行里的地址（各 mock 脚本统一打 `... http://127.0.0.1:<port>/v1`）。 */
+const READY_URL_RE = /http:\/\/127\.0\.0\.1:(\d+)\/v1/;
+
+/**
+ * 从**累计的** stdout 文本里解析 mock 的 ready URL，没有则返回 null。
+ *
+ * 单独抽出来是为了能直接单测分块场景（见 `mock-server.test.ts`）：调用方负责
+ * 拼接，本函数只看「迄今为止的全部输出」，所以一行被切成几段都不影响结果。
+ */
+export function matchReadyUrl(accumulatedStdout: string): string | null {
+  const m = accumulatedStdout.match(READY_URL_RE);
+  return m ? `http://127.0.0.1:${m[1]}/v1` : null;
+}
+
 /**
  * 起一个 mock provider（`scripts/` 下的脚本），等它打出启动行。
  *
@@ -200,10 +214,16 @@ export async function startMockServer(
   const spawnErrors: Error[] = [];
   proc.on('error', (err) => spawnErrors.push(err));
   proc.stdout?.on('data', (d) => {
-    const t = String(d);
-    stdoutTail = (stdoutTail + t).slice(-OUTPUT_TAIL_LIMIT);
-    const m = t.match(/http:\/\/127\.0\.0\.1:(\d+)\/v1/);
-    if (m) readyUrl = `http://127.0.0.1:${m[1]}/v1`;
+    stdoutTail = (stdoutTail + String(d)).slice(-OUTPUT_TAIL_LIMIT);
+    // 匹配**累计的** stdout 尾巴，不是这一个 chunk（#1118 第九轮）：
+    // Node 的 pipe 会把一次 write 切成任意多个 'data' 事件，`...write(banner)`
+    // 完全可能在 URL 中间断开——只在单 chunk 上 match 就会永远等不到 ready 行，
+    // 一直空转到 30s 超时（症状与「mock 起得慢」一模一样，白烧整个 beforeAll）。
+    // 每来一段就重试一次，行一旦拼齐即命中；`readyUrl` 已定就不再重复匹配。
+    if (!readyUrl) {
+      const matched = matchReadyUrl(stdoutTail);
+      if (matched) readyUrl = matched;
+    }
   });
   proc.stderr?.on('data', (d) => {
     stderrTail = (stderrTail + String(d)).slice(-OUTPUT_TAIL_LIMIT);
