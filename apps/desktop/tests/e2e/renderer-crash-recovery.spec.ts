@@ -674,8 +674,9 @@ async function startRecoveryMock(): Promise<RecoveryMockStream> {
         // 复审 P2a).  The old 600 (≈30 s) fuse made "when does the turn end"
         // a matter of wall-clock instead of an observed condition — a test that
         // only ever saw the turn time out never exercised the post-final path.
-        // Kept above every describe's own timeout (300 s) so a hung stream
-        // cannot be the thing that ends a test.
+        // Kept above the largest describe timeout (520 s, the thread-scoped
+        // turn suite below) so a hung stream cannot be the thing that ends a
+        // test: raise this fuse whenever a describe budget is raised past it.
         if (releasing || i > 12000) {
           clearInterval(timer);
           res.write(chunk({ content: ' recovery-final' }, 'stop'));
