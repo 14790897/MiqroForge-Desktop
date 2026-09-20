@@ -14,7 +14,7 @@ import { join } from 'path';
 import { QraftService, resolveConfig, defaultRedirectUri } from './service';
 import { QraftStore } from './store';
 import { QraftError, type QraftClient, type QraftLogger } from './client';
-import type { QraftStoredState, QraftTokens } from './types';
+import { PROD_REDIRECT_URI, type QraftStoredState, type QraftTokens } from './types';
 
 const noopLog = (() => undefined) as unknown as QraftLogger;
 
@@ -90,26 +90,26 @@ function makeService(clientStub: ClientStub): QraftService {
 }
 
 describe('resolveConfig', () => {
-  it('未提供任何参数时使用测试环境默认值 + 生成 loopback 回调', () => {
+  it('未提供任何参数时默认生产环境 + 使用平台注册的 redirect_uri', () => {
     const config = resolveConfig({}, null, () => 'http://localhost:39999/callback');
-    expect(config.baseUrl).toBe('https://test.forge.miqroera.com/api');
+    expect(config.baseUrl).toBe('https://www.miqroforge.com/api');
     expect(config.clientId).toBe('miqi');
-    // QRAFT_TEST_CLIENT_SECRET 环境变量优先（beforeEach 注入）
-    expect(config.clientSecret).toBe('test-env-secret');
-    expect(config.redirectUri).toBe('http://localhost:39999/callback');
+    // 生产 client_secret 默认值（QRAFT_PROD_CLIENT_SECRET 未注入）
+    expect(config.clientSecret).toBe('miqi123456');
+    expect(config.redirectUri).toBe(PROD_REDIRECT_URI);
   });
 
   it('未注入环境变量时测试环境 client_secret 使用硬编码默认值（测试阶段开箱即用）', () => {
     delete process.env.QRAFT_TEST_CLIENT_SECRET;
-    const config = resolveConfig({}, null, () => 'http://localhost:39999/callback');
+    const config = resolveConfig({ env: 'test' }, null, () => 'http://localhost:39999/callback');
     expect(config.clientSecret).toBe('miqi123456');
   });
 
-  it('生产环境默认 client_secret 使用硬编码默认值（测试阶段开箱即用）、不自动生成 redirect_uri', () => {
+  it('生产环境默认 client_secret 使用硬编码默认值（测试阶段开箱即用）、redirect_uri 用平台注册值', () => {
     const config = resolveConfig({ env: 'prod' }, null, () => 'http://localhost:1/callback');
     expect(config.baseUrl).toBe('https://www.miqroforge.com/api');
     expect(config.clientSecret).toBe('miqi123456');
-    expect(config.redirectUri).toBe('');
+    expect(config.redirectUri).toBe(PROD_REDIRECT_URI);
   });
 
   it('QRAFT_PROD_CLIENT_SECRET 环境变量可覆盖生产默认值', () => {
@@ -150,7 +150,7 @@ describe('resolveConfig', () => {
     const config = resolveConfig({ env: 'prod' }, stored, () => 'http://localhost:9/callback');
     expect(config.baseUrl).toBe('https://www.miqroforge.com/api');
     expect(config.clientSecret).toBe('miqi123456'); // 生产默认值，非测试环境存储值
-    expect(config.redirectUri).toBe('');
+    expect(config.redirectUri).toBe(PROD_REDIRECT_URI);
   });
 });
 
@@ -213,12 +213,36 @@ describe('QraftService.login', () => {
     expect(result.account?.nickname).toBe('登录昵称');
   });
 
-  it('生产环境未填注册 redirect_uri 报 INVALID_CONFIG（不自动生成 loopback）', async () => {
+  it('生产环境缺省 redirect_uri 时用平台注册值登录', async () => {
+    const stub = makeClientStub();
+    stub.platformLogin.mockResolvedValue({ sub: '19', username: 'U', nickname: '登录昵称' });
+    stub.authorizeFlow.mockResolvedValue(makeTokens());
+    stub.getUserInfo.mockResolvedValue({ sub: '19', username: 'U', nickname: '登录昵称' });
+    const service = makeService(stub);
+
+    const result = await service.login('18500000000', 'p', {
+      env: 'prod',
+      clientSecret: 'prod-secret',
+    });
+    expect(result.ok).toBe(true);
+    expect(stub.platformLogin).toHaveBeenCalledWith(
+      expect.objectContaining({
+        baseUrl: 'https://www.miqroforge.com/api',
+        redirectUri: PROD_REDIRECT_URI,
+      }),
+      '18500000000',
+      'p',
+      expect.anything()
+    );
+  });
+
+  it('生产环境显式传空 redirect_uri 仍报 INVALID_CONFIG（注册值要求不放松）', async () => {
     const stub = makeClientStub();
     const service = makeService(stub);
     const result = await service.login('18500000000', 'p', {
       env: 'prod',
       clientSecret: 'prod-secret',
+      redirectUri: '',
     });
     expect(result.ok).toBe(false);
     expect(result.code).toBe('INVALID_CONFIG');
