@@ -13,6 +13,7 @@ Run: python scripts/mock_openai_error.py [port]
 from __future__ import annotations
 
 import json
+import socketserver
 import sys
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
@@ -45,9 +46,21 @@ class Handler(BaseHTTPRequestHandler):
         self._send(500, {"error": {"message": ERROR_MESSAGE}})
 
 
+class FastBindHTTPServer(HTTPServer):
+    """HTTPServer.server_bind() 会用 socket.getfqdn(host) 反查 DNS；
+    某些 CI runner（macOS）上该反查会卡住，导致 ready 行永远不打印、
+    serve_forever 永不执行。这里跳过反查：server_name 直接用 host。"""
+
+    def server_bind(self):
+        socketserver.TCPServer.server_bind(self)
+        host, port = self.server_address[:2]
+        self.server_name = host
+        self.server_port = port
+
+
 if __name__ == "__main__":
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 8899
-    server = HTTPServer(("127.0.0.1", port), Handler)
+    server = FastBindHTTPServer(("127.0.0.1", port), Handler)
     # Print the ACTUAL bound port — with port 0 it differs from argv.
     print(f"Mock OpenAI error server on http://127.0.0.1:{server.server_address[1]}/v1", flush=True)
     server.serve_forever()

@@ -80,6 +80,12 @@ class TraceStore:
     _WRITE_MAX_RETRIES = 15
     _WRITE_RETRY_MIN_S = 0.020
     _WRITE_RETRY_MAX_S = 0.150
+    # CR #1071（2026-09-16）：连接 timeout=10.0 是**每次尝试**的上限，15 次重试
+    # 叠加后最坏可阻塞约 150s。改为**总时长预算**——从进入重试循环起记单调时钟，
+    # 超预算即不再重试、抛出最后一次 lock 错误。既保住原本「CI flake:
+    # database is locked 要能等过抖动」的容忍度（仍可等满约 10s），
+    # 又给这条追踪写入路径封了顶（最坏 ≈ max(单次 timeout, 预算) + 一次抖动 sleep）。
+    _WRITE_TOTAL_BUDGET_S = 10.0
     _CHECKPOINT_EVERY_N_WRITES = 50
 
     def __init__(
@@ -100,7 +106,10 @@ class TraceStore:
         self._conn = sqlite3.connect(
             str(self.db_path),
             check_same_thread=False,
-            timeout=1.0,
+            # CI 实测（ubuntu 并行负载）：1.0s 超时会在短暂写锁竞争下直接抛
+            # sqlite3.OperationalError: database is locked（打断 886 中断重试
+            # 流程）。放宽到 10s：等得过抖动，又不至于让追踪写入长时间阻塞。
+            timeout=10.0,
             isolation_level=None,
         )
         self._conn.row_factory = sqlite3.Row
@@ -394,6 +403,8 @@ class TraceStore:
 
     def _execute_write(self, fn: Callable[[sqlite3.Connection], T]) -> T:
         last_err: Optional[Exception] = None
+        # CR #1071：总预算按单调时钟计，超出即停止重试（不再累加 15 × timeout）
+        deadline = time.monotonic() + self._WRITE_TOTAL_BUDGET_S
         for attempt in range(self._WRITE_MAX_RETRIES):
             try:
                 with self._lock:
@@ -415,7 +426,7 @@ class TraceStore:
                 err_msg = str(exc).lower()
                 if "locked" in err_msg or "busy" in err_msg:
                     last_err = exc
-                    if attempt < self._WRITE_MAX_RETRIES - 1:
+                    if attempt < self._WRITE_MAX_RETRIES - 1 and time.monotonic() < deadline:
                         time.sleep(random.uniform(self._WRITE_RETRY_MIN_S, self._WRITE_RETRY_MAX_S))
                         continue
                 raise

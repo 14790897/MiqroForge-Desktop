@@ -20,6 +20,7 @@ formats (``stream: true`` → SSE).  Prints its bound URL as
 """
 import json
 import re
+import socketserver
 import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -198,9 +199,21 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
 
+class FastBindHTTPServer(ThreadingHTTPServer):
+    """HTTPServer.server_bind() 会用 socket.getfqdn(host) 反查 DNS；
+    某些 CI runner（macOS）上该反查会卡住，导致 ready 行永远不打印、
+    serve_forever 永不执行。这里跳过反查：server_name 直接用 host。"""
+
+    def server_bind(self):
+        socketserver.TCPServer.server_bind(self)
+        host, port = self.server_address[:2]
+        self.server_name = host
+        self.server_port = port
+
+
 def main():
     port = int(sys.argv[1])
-    srv = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    srv = FastBindHTTPServer(("127.0.0.1", port), Handler)
     print(f"http://127.0.0.1:{port}/v1", flush=True)
     srv.serve_forever()
 

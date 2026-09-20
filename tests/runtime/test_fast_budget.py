@@ -95,6 +95,7 @@ class FakeTools:
         for tc in tool_calls:
             self.executed.append(tc.name)
             out.append(SimpleNamespace(
+                tool_call_id=tc.id,
                 result=f"{tc.name} 结果",
                 status="success",
                 duration_ms=10,

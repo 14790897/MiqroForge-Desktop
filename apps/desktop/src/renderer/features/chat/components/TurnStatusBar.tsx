@@ -14,19 +14,15 @@ export function TurnStatusBar() {
 
   return (
     <div
-      className="inline-flex items-center gap-2 rounded-full px-3 py-1 text-[11.5px] font-semibold"
-      style={{
-        border: '1px solid var(--accent)',
-        color: 'var(--accent-hover)',
-        background: 'var(--accent-soft)',
-      }}
+      className="inline-flex items-center gap-2 text-[12px] font-medium"
       data-testid="turn-status-waiting"
     >
+      {/* CodeRabbit（9-11）：硬编码色 → 主题 token（跟随主题切换） */}
       <span
         className="w-[7px] h-[7px] rounded-full"
-        style={{ background: 'var(--accent)', animation: 'turn-pulse 1.1s ease-in-out infinite' }}
+        style={{ background: 'var(--accent, #2a7de1)', opacity: 0.6 }}
       />
-      等待你的确认
+      <span style={{ color: 'var(--text-muted, #6b7280)' }}>等待你的确认</span>
     </div>
   );
 }

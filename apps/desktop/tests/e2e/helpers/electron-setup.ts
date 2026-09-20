@@ -135,18 +135,40 @@ export async function sendUntilDoneOrProviderDown(
 ): Promise<boolean> {
   const { maxAttempts = 2, perAttemptWaitMs = 150_000, silenceExtendMs = 150_000 } = opts;
   const errLocator = page.getByText(PROVIDER_UNAVAILABLE_TEXT);
+  // 门禁（#1000/#1025）：未登录/无可用模型时发送被 fail-fast 拦下，
+  // 消息被替换成登录引导气泡——这不是 provider 错误，也不是回归。
+  const gateLocator = page.getByText('尚未登录平台账号');
+  if ((await gateLocator.count()) > 0) return false;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     // Snapshot BEFORE the send: an error that surfaces during sendMessage
     // itself must count as this attempt's error. Error bubbles from earlier
     // attempts stay in the message list, so match by count delta — only an
     // error that appeared after this snapshot counts.
     const errCountBefore = await errLocator.count();
-    await sendMessage(page, text);
+    // 发送被拦（未配置/不可用的 provider → 门禁 fail-fast，user 气泡根本
+    // 不会挂载）时，sendMessage 内部的计数断言会抛错——按「provider 不可用」
+    // 处理，返回 false 让调用方 skip，而不是把环境问题当成回归 fail。
+    try {
+      await sendMessage(page, text);
+    } catch (err) {
+      // 只有两种可判明的「环境不可用 / 门禁拦截」情形才降级为 skip：
+      //  1) 发送后门禁引导气泡已出现（未登录/无可用模型 → fail-fast 拦下，
+      //     user 气泡根本没挂载，sendMessage 内部的计数断言因此抛错）；
+      //  2) 发送后出现了新的 provider 错误气泡（相对发送前快照 errCountBefore
+      //     的增量，即这次发送招来的错误）。
+      // 其它异常（断言失败、选择器超时、真实功能回归等）一律原样重抛——
+      // 早先无条件 return false 会把真实回归吞成 skip，掩盖缺陷。
+      if ((await gateLocator.count()) > 0) return false;
+      if ((await errLocator.count()) > errCountBefore) return false;
+      throw err;
+    }
     let sawError = false;
 
     let deadline = Date.now() + perAttemptWaitMs;
     while (Date.now() < deadline) {
       if (await isDone()) return true;
+      // 门禁引导气泡（发送后出现）——立即判定为不可用
+      if ((await gateLocator.count()) > 0) return false;
       if ((await errLocator.count()) > errCountBefore) {
         sawError = true;
         break;
@@ -161,6 +183,7 @@ export async function sendUntilDoneOrProviderDown(
       deadline = Date.now() + silenceExtendMs;
       while (Date.now() < deadline) {
         if (await isDone()) return true;
+        if ((await gateLocator.count()) > 0) return false;
         if ((await errLocator.count()) > errCountBefore) {
           sawError = true;
           break;
@@ -309,6 +332,46 @@ export async function waitForResponseComplete(page: Page, timeout = 120_000) {
 
 /** Poll for approval dialogs and click "永久允许" until the AI stops
  *  thinking.  Used by sandbox and session-isolation tests. */
+/**
+ * Auto-approve the harness PlanCard ("开始执行") if it appears.
+ *
+ * #646-v2 plan 常态（edit 模式任何 produces_artifact 工具 → 计划卡）让既有
+ * E2E（exec/write_file/spawn 类真实对话）被计划卡挡住——工具不执行、spec
+ * retry 死循环（CI electron-e2e 30min 超时）。调用方在 sendMessage 后启动
+ * 后台轮询（像 autoApprove 一样），计划卡出现即点"开始执行"。
+ */
+export async function approvePlanCardIfAny(page: Page, timeoutMs = 90_000) {
+  const deadline = Date.now() + timeoutMs;
+  let checked = 0;
+  while (Date.now() < deadline) {
+    try {
+      // CodeRabbit（9-11）：按 testid 定位等待态计划卡的确认钮（plan-confirm
+      // 仅在 waiting && !editing 渲染——天然排除历史已处理卡）；按钮可访问名
+      // 为「按当前方案执行」（PlanCard 重写后），旧 name:'开始执行' 匹配不到。
+      const btn = page.getByTestId('plan-confirm').first();
+      if (await btn.isVisible({ timeout: 400 }).catch(() => false)) {
+        await btn.click({ force: true, timeout: 5_000 });
+        console.log('[test] 自动批准计划卡（按当前方案执行）');
+        return;
+      }
+      checked += 1;
+      if (checked % 20 === 1) {
+        console.log(
+          `[test] approvePlanCardIfAny: 检查 ${checked} 次，计划卡未出现（${Date.now() < deadline ? '继续等' : '超时'}）`
+        );
+      }
+    } catch {
+      // 页面已关闭（测试结束）——静默退出
+      return;
+    }
+    try {
+      await page.waitForTimeout(500);
+    } catch {
+      return; // 页面已关闭
+    }
+  }
+}
+
 export async function approveLoop(page: Page, timeout = 180_000) {
   // The thinking indicator was removed, so completion can't be detected via
   // [data-testid="thinking-indicator"].  Keep auto-approving any dialogs, and
@@ -324,6 +387,13 @@ export async function approveLoop(page: Page, timeout = 180_000) {
     if (await btn.isVisible({ timeout: 1000 }).catch(() => false)) {
       await btn.click();
       console.log('[test] Auto-approved tool');
+    }
+    // #646-v2 plan 常态：edit 模式 produces_artifact 工具 → 计划卡——自动点"开始执行"
+    // CodeRabbit（9-11）：同上——testid 定位等待态确认钮
+    const go = page.getByTestId('plan-confirm').first();
+    if (await go.isVisible({ timeout: 1000 }).catch(() => false)) {
+      await go.click({ force: true, timeout: 5_000 });
+      console.log('[test] Auto-approved plan card (按当前方案执行)');
     }
     const text = await page
       .locator('main')
@@ -666,7 +736,17 @@ export async function launchElectronApp(
   }
 ): Promise<ElectronFixture> {
   // Create unique temporary home per test worker for full isolation.
-  // Parallel workers each get their own MIQI_HOME → no race on sessions/.
+  //
+  // ⚠️ 每轮 run 独立的 MIQI_HOME 只隔离了 sqlite 会话存储
+  // （$MIQI_HOME/workspace/sessions）。Chromium 侧的 profile（Local Storage /
+  // Cache / Cookies）**不在** MIQI_HOME 下：dev 模式下 main 用
+  // `app.setPath('userData', %APPDATA%/miqi-desktop-dev/ws-<sha256(repoRoot)>)`
+  // 覆盖 Electron 的 `--user-data-dir`（见 src/main/index.ts 的 dev-mode
+  // 缓存隔离块），hash 只跟 checkout 路径有关——于是同一个 checkout 的
+  // 所有 run（串行 + 并行 worker）共用一份 Local Storage，上一轮 run 写下的
+  // `miqi:lastSession` 会被下一轮当成当前会话恢复（#1118 第七轮实锤：
+  // 幽灵会话 + 首条 send 落错 key + 并行 worker 踩踏同一份 leveldb）。
+  // 因此这里额外设 MIQI_USER_DATA_DIR 把 profile 也钉到本轮临时 home。
   const miqiHome = mkdtempSync(join(tmpdir(), 'miqi-e2e-'));
   const miqiSessionsDir = getMiqiSessionsDir(miqiHome);
   console.log(`[test] MIQI_HOME=${miqiHome}`);
@@ -741,6 +821,14 @@ export async function launchElectronApp(
   if (!env.MIQI_QRAFT_BILLING_DIR) {
     env.MIQI_QRAFT_BILLING_DIR = join(miqiHome, 'billing');
   }
+  // Chromium profile isolation (see the MIQI_HOME comment above): redirect the
+  // dev-mode `app.setPath('userData', …)` to this run's temp home so Local
+  // Storage / Cache / Cookies stop being shared across runs and parallel
+  // workers.  Specs may preset their own path to test cross-restart profile
+  // persistence.
+  if (!env.MIQI_USER_DATA_DIR) {
+    env.MIQI_USER_DATA_DIR = join(miqiHome, 'userdata');
+  }
   // E2E default: set MIQI_E2E so the main process skips the #837 privacy-consent
   // gate (fresh userData has no stored consent). The privacy-consent spec opts
   // out via noConsentBypass to exercise the gate itself.
@@ -779,9 +867,9 @@ export async function launchElectronApp(
     }
   }
 
-  // Isolated Electron userData per launch: without it every test instance
-  // (and the dev app) shares the default profile, so sessions/UI state leak
-  // between runs and tests "continue" a previous conversation (#721 实测).
+  // Per-run Chromium profile (MIQI_USER_DATA_DIR above is what actually takes
+  // effect — dev mode's app.setPath overrides this CLI switch).  Both point at
+  // the same dir so the intent is unambiguous no matter which one wins.
   const userDataDir = join(miqiHome, 'userdata');
 
   const electronApp = await electron.launch({
@@ -907,6 +995,13 @@ export async function relaunchElectronApp(
   if (!env.MIQI_QRAFT_BILLING_DIR) {
     env.MIQI_QRAFT_BILLING_DIR = join(miqiHome, 'billing');
   }
+  // Same Chromium-profile isolation as launchElectronApp (see above).  Keyed
+  // on the SAME miqiHome, so a relaunch keeps the profile the first launch
+  // wrote — restart-recovery specs (#490 / session-context-recall) depend on
+  // that surviving, they only need the leak ACROSS runs to be gone.
+  if (!env.MIQI_USER_DATA_DIR) {
+    env.MIQI_USER_DATA_DIR = join(miqiHome, 'userdata');
+  }
   // Same #837 consent-gate bypass logic as launchElectronApp (see above).
   if (opts?.noConsentBypass) {
     delete env.MIQI_E2E;
@@ -937,9 +1032,9 @@ export async function relaunchElectronApp(
     }
   }
 
-  // Isolated Electron userData per launch: without it every test instance
-  // (and the dev app) shares the default profile, so sessions/UI state leak
-  // between runs and tests "continue" a previous conversation (#721 实测).
+  // Per-run Chromium profile (MIQI_USER_DATA_DIR above is what actually takes
+  // effect — dev mode's app.setPath overrides this CLI switch).  Both point at
+  // the same dir so the intent is unambiguous no matter which one wins.
   const userDataDir = join(miqiHome, 'userdata');
 
   const electronApp = await electron.launch({
