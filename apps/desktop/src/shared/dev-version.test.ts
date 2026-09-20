@@ -18,4 +18,13 @@ describe('formatDevVersion', () => {
     expect(formatDevVersion('0.25.0', null)).toBe('0.25.0-dev');
     expect(formatDevVersion('0.25.0', {})).toBe('0.25.0-dev');
   });
+
+  it('does not stack -dev when the base already carries it (package.json 就是 0.32.0-dev)', () => {
+    expect(formatDevVersion('0.32.0-dev', { shortHash: 'abc1234', dirty: false })).toBe(
+      '0.32.0-dev+abc1234'
+    );
+    expect(formatDevVersion('0.32.0-dev', { shortHash: 'abc1234', dirty: true })).toBe(
+      '0.32.0-dev+abc1234.dirty'
+    );
+  });
 });

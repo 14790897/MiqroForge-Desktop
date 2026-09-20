@@ -13,20 +13,25 @@ import {
   Trash2,
   FolderOpen,
   Pencil,
-  ChevronDown,
   Search,
   ArrowLeft,
 } from 'lucide-react';
+import type { LucideIcon } from 'lucide-react';
 import { MiQroForgeLogo } from './MiQroForgeLogo';
 import { ContextMenu } from './ContextMenu';
 import { InputDialog } from './shared/InputDialog';
-import { useSessionStatus } from '../hooks/useSessionStatus';
+import { useSessionStatus, type SessionStatus } from '../hooks/useSessionStatus';
 import type { SessionInfo } from '../../shared/ipc';
 
 type FilterTab = 'ALL' | 'PENDING' | 'IN-PROGRESS' | 'REVIEW' | 'COMPLETED';
 
 const MIN_WIDTH = 180;
 const MAX_WIDTH = 480;
+
+/** 底部展示的版本串。dev 模式(#1055)会带 commit hash，可能长到 30+ 字符。 */
+const APP_VERSION_LABEL = `PRO v${
+  typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : 'dev'
+}`;
 
 import { usePanelResize } from '../hooks/usePanelResize';
 
@@ -50,13 +55,27 @@ interface SidebarProps {
   onSessionDeleted?: (key: string) => void;
 }
 
-/** 分组头只显示目录名（最后一段），完整路径留在 title 里。 */
-function workspaceLabel(workspace?: string): string {
-  if (!workspace) return '未指定目录';
-  const trimmed = workspace.replace(/[\\/]+$/, '');
-  const parts = trimmed.split(/[\\/]/);
-  return parts[parts.length - 1] || trimmed;
+/** 卡片上的工作目录：home 缩成 ~，过长时保留尾部。 */
+function formatWorkspace(workspace?: string): string | null {
+  if (!workspace) return null;
+  const home = (typeof process !== 'undefined' ? process.env?.HOME : null) ?? '';
+  let display = workspace;
+  if (home && workspace.startsWith(home)) {
+    display = '~' + workspace.slice(home.length);
+  }
+  if (display.length > 28) {
+    display = '...' + display.slice(display.length - 25);
+  }
+  return display;
 }
+
+const STATUS_ICONS: Record<SessionStatus, LucideIcon> = {
+  'IN-PROGRESS': Play,
+  PENDING: Clock,
+  REVIEW: Eye,
+  COMPLETED: CheckCircle2,
+  CC: Eye,
+};
 
 export function Sidebar({
   currentSession,
@@ -97,16 +116,6 @@ export function Sidebar({
   useEffect(() => {
     setDisplayCount(PER_PAGE);
   }, [sessions, filter, query]);
-
-  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
-  const toggleGroup = useCallback((key: string) => {
-    setCollapsedGroups((prev) => {
-      const next = new Set(prev);
-      if (next.has(key)) next.delete(key);
-      else next.add(key);
-      return next;
-    });
-  }, []);
 
   const loadSessions = useCallback(async () => {
     try {
@@ -187,28 +196,6 @@ export function Sidebar({
     }
     return { filterCounts: counts, filteredSessions: filtered };
   }, [sessions, filter, getStatus, query]);
-
-  // 先分页再分组：懒加载的语义保持「按过滤后的顺序取前 N 条」。
-  // 空 workspace 归到同一个「未指定目录」组，组的先后按会话首次出现顺序。
-  const groupedSessions = useMemo(() => {
-    const groups = new Map<string, SessionInfo[]>();
-    for (const s of filteredSessions.slice(0, displayCount)) {
-      const key = s.workspace ?? '';
-      const bucket = groups.get(key);
-      if (bucket) bucket.push(s);
-      else groups.set(key, [s]);
-    }
-    // 组内把「已完成」排到末尾：分组维度不变，只调组内顺序，也不做任何淡化。
-    // 否则昨天标记已完成的会话会压住三天前标记待处理的——越需要处理的越靠下。
-    // Array#sort 是稳定的，同一档内保持后端给的 updated_at 降序。
-    for (const bucket of groups.values()) {
-      bucket.sort(
-        (a, b) =>
-          Number(getStatus(a.key) === 'COMPLETED') - Number(getStatus(b.key) === 'COMPLETED')
-      );
-    }
-    return [...groups.entries()];
-  }, [filteredSessions, displayCount, getStatus]);
 
   // IntersectionObserver: load next page when sentinel enters viewport
   useEffect(() => {
@@ -400,8 +387,8 @@ export function Sidebar({
         </div>
       </div>
 
-      {/* Session list — 按工作目录分组，卡片压成单行 */}
-      <div ref={listContainerRef} className="flex-1 overflow-y-auto px-2 pt-1 pb-2">
+      {/* Session list — 平铺（分组已回退，见底部栏注释处的说明） */}
+      <div ref={listContainerRef} className="flex-1 overflow-y-auto px-3 pt-1 pb-2">
         {initialLoading && sessions.length === 0 ? (
           <div className="flex items-center justify-center py-6">
             <div className="w-4 h-4 border-2 border-[var(--border)] border-t-[var(--accent)] rounded-full animate-spin" />
@@ -421,170 +408,150 @@ export function Sidebar({
             </p>
           </div>
         ) : (
-          <div className="pb-1">
-            {groupedSessions.map(([groupKey, groupSessions]) => {
-              const isCollapsed = collapsedGroups.has(groupKey);
+          <div className="space-y-2">
+            {filteredSessions.slice(0, displayCount).map((s) => {
+              const isActive = currentSession === s.key;
+              const displayName = s.title || formatShortDateTime(parseInt(s.key, 10));
+              const wsPath = formatWorkspace(s.workspace);
+              const sessionStatus = getStatus(s.key);
+              const status = getStatusDisplay(sessionStatus);
+              const StatusIcon = STATUS_ICONS[sessionStatus];
               return (
-                <div key={groupKey || '__no_workspace__'}>
-                  <button
-                    onClick={() => toggleGroup(groupKey)}
-                    title={groupKey || undefined}
-                    aria-expanded={!isCollapsed}
-                    className="sidebar-sticky-head sticky top-0 z-10 w-full flex items-center gap-1.5 px-1.5 pt-2 pb-1 text-left bg-[var(--sidebar-bg)] text-text-faint hover:text-text-muted transition-colors"
-                  >
-                    <ChevronDown
-                      size={11}
-                      strokeWidth={2.5}
-                      className={cn('shrink-0 transition-transform', isCollapsed && '-rotate-90')}
-                    />
-                    <span className="text-size-2xs font-semibold truncate">
-                      {workspaceLabel(groupKey || undefined)}
-                    </span>
-                    <span className="ml-auto shrink-0 text-size-2xs tabular-nums opacity-70">
-                      {groupSessions.length}
-                    </span>
-                  </button>
-                  {!isCollapsed &&
-                    groupSessions.map((s) => {
-                      const isActive = currentSession === s.key;
-                      const displayName = s.title || formatShortDateTime(parseInt(s.key, 10));
-                      const sessionStatus = getStatus(s.key);
-                      const status = getStatusDisplay(sessionStatus);
-                      return (
-                        <ContextMenu
-                          key={s.key}
-                          items={[
-                            {
-                              label: '标记为进行中',
-                              icon: <Play size={13} />,
-                              onSelect: () => setStatus(s.key, 'IN-PROGRESS'),
-                            },
-                            {
-                              label: '标记为待处理',
-                              icon: <Clock size={13} />,
-                              onSelect: () => setStatus(s.key, 'PENDING'),
-                            },
-                            {
-                              label: '标记为待审阅',
-                              icon: <Eye size={13} />,
-                              onSelect: () => setStatus(s.key, 'REVIEW'),
-                            },
-                            {
-                              label: '标记为已完成',
-                              icon: <CheckCircle2 size={13} />,
-                              divider: true,
-                              onSelect: () => setStatus(s.key, 'COMPLETED'),
-                            },
-                            ...(s.workspace
-                              ? [
-                                  {
-                                    label: '在文件管理器中打开',
-                                    icon: <FolderOpen size={13} />,
-                                    // #1062：带上会话 key。绑定文件夹会话的工作区不是全局
-                                    // 工作区，不带 key 时主进程只按全局校验 → 被拒且无提示。
-                                    onSelect: () =>
-                                      window.miqi.files.openContainingFolder(s.workspace!, s.key),
-                                  },
-                                ]
-                              : []),
-                            {
-                              label: '重命名',
-                              icon: <Pencil size={13} />,
-                              onSelect: () => setRenameTarget(s),
-                            },
-                            {
-                              label: '重置状态',
-                              icon: <RotateCcw size={13} />,
-                              danger: true,
-                              onSelect: () => clearStatus(s.key),
-                            },
-                            {
-                              label: '归档',
-                              icon: <Archive size={13} />,
-                              divider: true,
-                              onSelect: async () => {
-                                try {
-                                  await window.miqi.sessions.archive(s.key);
-                                  loadSessions();
-                                } catch {
-                                  /* ignore */
-                                }
-                              },
-                            },
-                            {
-                              label: '删除对话',
-                              icon: <Trash2 size={13} />,
-                              danger: true,
-                              onSelect: async () => {
-                                if (
-                                  !window.confirm(
-                                    `删除对话「${s.title || s.key}」？此操作不可撤销。`
-                                  )
-                                )
-                                  return;
-                                window.dispatchEvent(new Event('miqi:chat-focus-regrant'));
-                                try {
-                                  await window.miqi.sessions.delete(s.key);
-                                  // Deleting the OPEN session must reset the active chat —
-                                  // otherwise ChatConsole keeps rendering its messages.
-                                  if (s.key === currentSession) onSessionDeleted?.(s.key);
-                                  loadSessions();
-                                } catch {
-                                  /* ignore */
-                                }
-                              },
-                            },
-                          ]}
+                <ContextMenu
+                  key={s.key}
+                  items={[
+                    {
+                      label: '标记为进行中',
+                      icon: <Play size={13} />,
+                      onSelect: () => setStatus(s.key, 'IN-PROGRESS'),
+                    },
+                    {
+                      label: '标记为待处理',
+                      icon: <Clock size={13} />,
+                      onSelect: () => setStatus(s.key, 'PENDING'),
+                    },
+                    {
+                      label: '标记为待审阅',
+                      icon: <Eye size={13} />,
+                      onSelect: () => setStatus(s.key, 'REVIEW'),
+                    },
+                    {
+                      label: '标记为已完成',
+                      icon: <CheckCircle2 size={13} />,
+                      divider: true,
+                      onSelect: () => setStatus(s.key, 'COMPLETED'),
+                    },
+                    ...(s.workspace
+                      ? [
+                          {
+                            label: '在文件管理器中打开',
+                            icon: <FolderOpen size={13} />,
+                            // #1062：带上会话 key。绑定文件夹会话的工作区不是全局
+                            // 工作区，不带 key 时主进程只按全局校验 → 被拒且无提示。
+                            onSelect: () =>
+                              window.miqi.files.openContainingFolder(s.workspace!, s.key),
+                          },
+                        ]
+                      : []),
+                    {
+                      label: '重命名',
+                      icon: <Pencil size={13} />,
+                      onSelect: () => setRenameTarget(s),
+                    },
+                    {
+                      label: '重置状态',
+                      icon: <RotateCcw size={13} />,
+                      danger: true,
+                      onSelect: () => clearStatus(s.key),
+                    },
+                    {
+                      label: '归档',
+                      icon: <Archive size={13} />,
+                      divider: true,
+                      onSelect: async () => {
+                        try {
+                          await window.miqi.sessions.archive(s.key);
+                          loadSessions();
+                        } catch {
+                          /* ignore */
+                        }
+                      },
+                    },
+                    {
+                      label: '删除对话',
+                      icon: <Trash2 size={13} />,
+                      danger: true,
+                      onSelect: async () => {
+                        if (!window.confirm(`删除对话「${s.title || s.key}」？此操作不可撤销。`))
+                          return;
+                        window.dispatchEvent(new Event('miqi:chat-focus-regrant'));
+                        try {
+                          await window.miqi.sessions.delete(s.key);
+                          // Deleting the OPEN session must reset the active chat —
+                          // otherwise ChatConsole keeps rendering its messages.
+                          if (s.key === currentSession) onSessionDeleted?.(s.key);
+                          loadSessions();
+                        } catch {
+                          /* ignore */
+                        }
+                      },
+                    },
+                  ]}
+                >
+                  {({ onContextMenu }) => (
+                    <button
+                      onClick={() => onSessionSelect?.(s.key)}
+                      onContextMenu={onContextMenu}
+                      data-testid="session-item"
+                      className={cn(
+                        'w-full text-left rounded-xl px-3 py-3 transition-transform duration-150',
+                        isActive && 'shadow-[0_2px_16px_rgba(0,0,0,0.14)]',
+                        !isActive &&
+                          'hover:shadow-[0_4px_12px_rgba(0,0,0,0.1)] hover:-translate-y-px'
+                      )}
+                      style={{
+                        background: status.cardBg,
+                        border: `1px solid ${isActive ? (sessionStatus === 'IN-PROGRESS' ? status.bg : status.color) : status.cardBorder}`,
+                      }}
+                    >
+                      {/* Top row: status icon + label left · time right */}
+                      <div className="flex items-center justify-between mb-2">
+                        <div className="flex items-center gap-1.5">
+                          <span
+                            className="shrink-0 flex items-center justify-center w-[18px] h-[18px] rounded"
+                            style={{ background: status.bg, color: status.color }}
+                          >
+                            <StatusIcon size={11} strokeWidth={2.5} />
+                          </span>
+                          <span
+                            className="text-size-2xs font-medium"
+                            style={{
+                              color: sessionStatus === 'IN-PROGRESS' ? status.bg : status.color,
+                            }}
+                          >
+                            {status.label}
+                          </span>
+                        </div>
+                        <span className="text-size-2xs text-text-faint">
+                          {formatRelativeTime(s.updated_at)}
+                        </span>
+                      </div>
+                      {/* Title — large bold, one line */}
+                      <p className="text-sm font-bold truncate mb-1 text-text" title={displayName}>
+                        {displayName}
+                      </p>
+                      {/* Workspace — small muted path */}
+                      {wsPath && (
+                        <p
+                          className="text-[10px] truncate mb-1 text-text-faint"
+                          title={s.workspace}
                         >
-                          {({ onContextMenu }) => (
-                            <button
-                              onClick={() => onSessionSelect?.(s.key)}
-                              onContextMenu={onContextMenu}
-                              title={`${displayName} · ${status.label}`}
-                              data-testid="session-item"
-                              className={cn(
-                                'relative w-full flex items-center gap-2 pl-2.5 pr-2 py-1.5 rounded-lg text-left transition-colors',
-                                isActive
-                                  ? 'bg-[var(--surface)] shadow-[0_1px_2px_rgba(0,0,0,0.07)]'
-                                  : 'hover:bg-[var(--surface-hover)]'
-                              )}
-                            >
-                              {/* 当前会话指示 */}
-                              {isActive && (
-                                <span className="absolute left-0 top-2 bottom-2 w-[3px] rounded-full bg-[var(--accent)]" />
-                              )}
-                              {/* 状态点：进行中带脉冲，待处理半透明 */}
-                              <span
-                                className="relative shrink-0 w-2 h-2 rounded-full"
-                                style={{
-                                  background: status.dot,
-                                  opacity: sessionStatus === 'PENDING' ? 0.45 : 1,
-                                }}
-                              >
-                                {sessionStatus === 'IN-PROGRESS' && (
-                                  <span
-                                    className="absolute -inset-[3px] rounded-full animate-ping"
-                                    style={{ background: status.dot, opacity: 0.3 }}
-                                  />
-                                )}
-                              </span>
-                              <span
-                                className={cn(
-                                  'flex-1 min-w-0 truncate text-sm text-text',
-                                  isActive ? 'font-semibold' : 'font-medium'
-                                )}
-                              >
-                                {displayName}
-                              </span>
-                              <span className="shrink-0 text-size-2xs text-text-faint tabular-nums">
-                                {formatRelativeTime(s.updated_at)}
-                              </span>
-                            </button>
-                          )}
-                        </ContextMenu>
-                      );
-                    })}
-                </div>
+                          {wsPath}
+                        </p>
+                      )}
+                    </button>
+                  )}
+                </ContextMenu>
               );
             })}
             {/* Sentinel element for lazy-load intersection detection */}
@@ -593,13 +560,15 @@ export function Sidebar({
         )}
       </div>
 
-      {/* Bottom bar */}
+      {/* Bottom bar。两个元素都必须禁止折行：窄侧栏(最小 180px)下它们是可压缩
+          的 flex 子项,「系统设置」和版本号会各自折成两行,把底部栏从 34px 撑到
+          50px。版本号改用 truncate,空间不够时省略号收尾而不是换行。 */}
       <div
         className="shrink-0 px-4 py-2.5 border-t flex items-center justify-between"
         style={{ borderColor: 'var(--sidebar-border)' }}
       >
         <button
-          className="flex items-center gap-1.5 text-size-2xs cursor-pointer transition duration-150 hover:scale-110 hover:text-[var(--text)] origin-left text-text-faint"
+          className="shrink-0 whitespace-nowrap flex items-center gap-1.5 text-size-2xs cursor-pointer transition duration-150 hover:scale-110 hover:text-[var(--text)] origin-left text-text-faint"
           onClick={() => onNavChange?.('settings')}
           data-testid="nav-system-settings"
         >
@@ -607,15 +576,21 @@ export function Sidebar({
           <span>系统设置</span>
         </button>
         {currentNav === 'chat' ? (
-          <span className="text-size-2xs font-mono text-text-faint">
-            PRO v{typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : 'dev'}
+          // dev 模式(#1055)下版本号会带 commit hash(形如 0.32.0-dev-dev+2a270f53.dirty,
+          // 30+ 字符),260px 默认宽度都放不下。truncate 让它省略号收尾而不是折行,
+          // title 保证完整字符串仍可读到——否则 #1055 的可追溯性就没了。
+          <span
+            className="min-w-0 truncate text-size-2xs font-mono text-text-faint"
+            title={APP_VERSION_LABEL}
+          >
+            {APP_VERSION_LABEL}
           </span>
         ) : (
           // 离开聊天后唯一的回程入口：上面的「系统设置」只会往设置页走，
           // 不点某个会话就回不来（会话列表为空时更是死路）。版本号让位给它。
           // 不用 hover:scale（旁边那个用了），180px 最小宽度下两个按钮会互相压到。
           <button
-            className="flex items-center gap-1.5 text-size-2xs cursor-pointer transition duration-150 hover:opacity-80"
+            className="shrink-0 whitespace-nowrap flex items-center gap-1.5 text-size-2xs cursor-pointer transition duration-150 hover:opacity-80"
             style={{ color: 'var(--accent)' }}
             onClick={() => onNavChange?.('chat')}
             data-testid="nav-back-to-tasks"

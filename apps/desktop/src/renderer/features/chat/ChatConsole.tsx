@@ -10595,7 +10595,7 @@ const MessageBubble = memo(function MessageBubble({
               {/* 用户消息操作 — 复制 / 编辑(仅鼠标靠近/hover 消息时显示,#828;
                   编辑态下隐藏,避免与编辑框叠在一起)。
                   绝对定位在气泡正下方、右对齐：脱离文档流所以不吃「提问→回复」
-                  的间距(否则不可见也常驻 26px)。按钮 21px,和头像行同一视觉量级。 */}
+                  的间距(否则不可见也常驻 26px)。按钮更小，和头像行同一视觉量级。 */}
               {isUser && msg.content !== '' && !editing && (
                 <div className="absolute right-0 top-full mt-1 flex items-center gap-1 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 transition-opacity">
                   <button
