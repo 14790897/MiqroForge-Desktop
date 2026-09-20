@@ -23,11 +23,18 @@ import pytest
 
 from miqi.runtime.db_util import (
     RuntimeDb,
+    execute_dml,
+    fetchall,
     fetchone,
     format_sqlite_error,
     is_stale_snapshot_error,
 )
 from miqi.runtime.ledger_runtime import LedgerRuntime
+
+
+async def _prepare_items(conn: aiosqlite.Connection) -> None:
+    await execute_dml(conn, "CREATE TABLE IF NOT EXISTS t (v TEXT)")
+    await conn.commit()
 
 
 async def _poison_connection(db: aiosqlite.Connection, db_path):
@@ -271,3 +278,141 @@ def test_sqlite_errors_are_reported_with_their_extended_code():
     rendered = format_sqlite_error(CodedError("database is locked"))
     assert "SQLITE_BUSY_SNAPSHOT" in rendered
     assert "517" in rendered
+
+
+class _SnapshotError(sqlite3.OperationalError):
+    """A stale-snapshot failure, as SQLite reports it."""
+
+    sqlite_errorcode = 517
+    sqlite_errorname = "SQLITE_BUSY_SNAPSHOT"
+
+
+async def test_close_does_not_pull_the_connection_from_a_shielded_task(tmp_path):
+    """cancel -> close -> let the background operation finish.
+
+    The operation outlives its cancelled caller, so ``close()`` must wait for it
+    rather than detaching the connection underneath it: otherwise the fix for
+    ``database is locked`` would just trade it for a use-after-close race.
+    """
+    db = RuntimeDb(tmp_path / "runtime.db", name="test", prepare=_prepare_items)
+    await db.open()
+    started = asyncio.Event()
+    release = asyncio.Event()
+    outcome: dict[str, object] = {}
+
+    async def operation(conn: aiosqlite.Connection) -> str:
+        started.set()
+        await release.wait()
+        # close() must not have taken this connection away in the meantime.
+        await execute_dml(conn, "INSERT INTO t (v) VALUES ('late')")
+        await conn.commit()
+        outcome["wrote"] = True
+        return "done"
+
+    try:
+        task = asyncio.create_task(db.run(operation))
+        await asyncio.wait_for(started.wait(), timeout=5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        closer = asyncio.create_task(db.close())
+        await asyncio.sleep(0)
+        # The operation still holds the store lock, so close() cannot be done.
+        assert not closer.done()
+
+        release.set()
+        await asyncio.wait_for(closer, timeout=5)
+
+        assert outcome.get("wrote") is True, "the in-flight operation was cut off"
+        assert db.is_open is False
+        assert db.orphaned_ops == 1
+        # No background task left running.
+        pending = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+        assert pending == []
+    finally:
+        if db.is_open:
+            await db.close()
+
+
+async def test_total_changes_counts_writes_a_rollback_undid(tmp_path):
+    """The replay guard's core assumption, asserted directly.
+
+    ``_run_locked`` only replays when the connection modified nothing.  That is
+    sound only if ``total_changes`` also counts writes that a later ROLLBACK
+    undid — otherwise a partially applied transaction would look untouched.
+    """
+    db = RuntimeDb(tmp_path / "runtime.db", name="test", prepare=_prepare_items)
+    await db.open()
+    try:
+        await db.run(lambda conn: execute_dml(conn, "INSERT INTO t (v) VALUES ('kept')"))
+        before = db.conn.total_changes
+
+        async def rolled_back(conn: aiosqlite.Connection) -> None:
+            await conn.execute("BEGIN")
+            await execute_dml(conn, "INSERT INTO t (v) VALUES ('undone')")
+            await conn.execute("ROLLBACK")
+
+        await db.run(rolled_back)
+
+        assert db.conn.total_changes > before
+        rows = await db.run(lambda conn: fetchall(conn, "SELECT v FROM t"))
+        assert [r[0] for r in rows] == ["kept"]
+    finally:
+        await db.close()
+
+
+async def test_partially_written_operation_is_not_replayed(tmp_path):
+    """A stale snapshot must not replay an operation that already wrote rows.
+
+    ``total_changes`` cannot prove a multi-statement operation is safe to
+    replay once part of it landed, so the guard refuses instead of risking
+    duplicate writes — the retry boundary is the whole operation, and it stays
+    transaction-atomic by only ever replaying untouched ones.
+    """
+    db = RuntimeDb(tmp_path / "runtime.db", name="test", prepare=_prepare_items)
+    await db.open()
+    attempts: list[int] = []
+
+    async def partially_written(conn: aiosqlite.Connection) -> None:
+        attempts.append(1)
+        await execute_dml(conn, "INSERT INTO t (v) VALUES ('first')")
+        # Fail after a write has already been applied.
+        raise _SnapshotError("database is locked")
+
+    try:
+        with pytest.raises(sqlite3.OperationalError):
+            await db.run(partially_written)
+
+        # Recycled so later operations are healthy, but not replayed.
+        assert len(attempts) == 1
+        assert db.recycle_count == 1
+
+        rows = await db.run(lambda conn: fetchall(conn, "SELECT v FROM t"))
+        assert [r[0] for r in rows] == ["first"], "the operation was replayed"
+    finally:
+        await db.close()
+
+
+async def test_non_wal_fallback_still_reads_and_writes(tmp_path, monkeypatch):
+    """A database that cannot use WAL keeps working as a degraded mode.
+
+    ``SQLITE_BUSY_SNAPSHOT`` is a WAL concept, so the snapshot recovery path
+    does not apply here; the store must still serve reads and writes rather
+    than failing to start.
+    """
+    async def refuse_wal(self, db: aiosqlite.Connection) -> str:
+        return "delete"
+
+    monkeypatch.setattr(RuntimeDb, "_ensure_wal", refuse_wal)
+    db = RuntimeDb(tmp_path / "runtime.db", name="test", prepare=_prepare_items)
+    await db.open()
+    try:
+        assert db.wal_mode is False
+        assert db.health()["wal_mode"] is False
+
+        await db.run(lambda conn: execute_dml(conn, "INSERT INTO t (v) VALUES ('x')"))
+        rows = await db.run(lambda conn: fetchall(conn, "SELECT v FROM t"))
+        assert [r[0] for r in rows] == ["x"]
+    finally:
+        await db.close()

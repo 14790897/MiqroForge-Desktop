@@ -36,6 +36,28 @@ Two defences live here:
 
 Ordinary write-lock contention is *not* retried and *not* masked: it waits for
 the busy timeout as before and then propagates.
+
+Invariants worth relying on (#1012 review)
+------------------------------------------
+* **No use-after-close.** An operation holds ``_lock`` for its whole duration
+  and :meth:`RuntimeDb.close` takes the same lock before detaching the
+  connection, so an operation that outlived a cancelled caller always finishes
+  against a live connection. An operation that has not started yet when
+  ``close`` runs sees ``_db is None`` and fails loudly instead.
+* **Replay is transaction-atomic.** A stale-snapshot failure is only replayed
+  when the connection modified nothing, and ``total_changes`` counts writes
+  that a later ``ROLLBACK`` undid — so a partially applied transaction can
+  never look untouched and get replayed.
+
+Journal mode
+------------
+``journal_mode=WAL`` is attempted on every (re)open and retried briefly, but a
+database that cannot use WAL (some network filesystems) is not fatal: the
+store continues in rollback-journal mode, which :attr:`RuntimeDb.health`
+reports as ``wal_mode: false``.  That is a *degraded compatibility mode* —
+``SQLITE_BUSY_SNAPSHOT`` is a WAL concept, so the stale-snapshot recovery path
+cannot apply there.  Stranding is still prevented, because that comes from
+shielding the operation, not from the journal mode.
 """
 
 from __future__ import annotations
@@ -307,7 +329,15 @@ class RuntimeDb:
         return mode
 
     async def close(self) -> None:
-        """Close the connection once in-flight work has drained."""
+        """Close the connection once in-flight work has drained.
+
+        Ordering matters here: an operation that outlived a cancelled caller is
+        still holding ``_lock``, so taking the lock below is what keeps this
+        from pulling the connection out from under it.  An operation that has
+        not started yet will fail loudly instead of touching a closed
+        connection, because :meth:`_run_locked` re-checks ``_db`` once it has
+        the lock.
+        """
         opening = self._opening
         if opening is not None and not opening.done():
             try:
