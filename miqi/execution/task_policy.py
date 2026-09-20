@@ -203,7 +203,45 @@ ACTION_FAMILY: dict[str, str] = {
 }
 
 
-def action_family(tool_name: str) -> str | None:
+# exec/shell 族工具：对外副作用藏在命令串里，分类必须「工具名 + 命令内容」联合判定
+# （#1101）。真实上传走 exec 执行 upload_run.py，只按工具名会被归成 EXEC(5) 而漏过
+# Action Guard —— 这里的签名表把命中命令抬升为 EXTERNAL(10)。
+EXEC_FAMILY_TOOLS: frozenset[str] = frozenset({
+    "exec", "run_script", "python", "bash", "shell", "run_command", "execute",
+})
+
+# 命令签名 → action family（值域与 ACTION_FAMILY 一致，命中进 upload 家族）。
+# 预留扩展位：send_message / payment 的脚本签名后续加这里。
+_EXEC_EXTERNAL_SIGNATURES: tuple[tuple[str, str], ...] = (
+    ("upload_run.py", "upload"),
+    ("dataupload", "upload"),
+)
+
+
+def exec_command(arguments: dict | None) -> str | None:
+    """从 exec 族工具参数里取出命令串（兼容 command / cmd 两个键）。"""
+    if not isinstance(arguments, dict):
+        return None
+    cmd = arguments.get("command") or arguments.get("cmd")
+    return str(cmd) if cmd else None
+
+
+def external_effect_of_command(command: str | None) -> str | None:
+    """在命令串里识别对外副作用，返回 action family（如 "upload"）或 None。"""
+    if not command:
+        return None
+    low = command.lower()
+    for signature, family in _EXEC_EXTERNAL_SIGNATURES:
+        if signature.lower() in low:
+            return family
+    return None
+
+
+def action_family(tool_name: str, arguments: dict | None = None) -> str | None:
+    if tool_name in EXEC_FAMILY_TOOLS:
+        effect = external_effect_of_command(exec_command(arguments))
+        if effect is not None:
+            return effect
     return ACTION_FAMILY.get(tool_name)
 
 
@@ -214,6 +252,9 @@ def action_risk_score(tool_names: list[str]) -> int:
 
 
 def should_confirm_action(tool_name: str, arguments: dict | None = None) -> bool:
+    # exec 族工具：对外副作用藏在命令串里，只能命令级识别（#1101）。
+    if tool_name in EXEC_FAMILY_TOOLS and external_effect_of_command(exec_command(arguments)) is not None:
+        return True
     risk = tool_risk(tool_name)
     if risk < ACTION_CONFIRM_THRESHOLD:
         return False

@@ -3,9 +3,12 @@
 from miqi.execution.task_policy import (
     ACTION_CONFIRM_THRESHOLD,
     ACTION_FAMILY,
+    EXEC_FAMILY_TOOLS,
     TOOL_RISK,
     action_family,
     complexity_score,
+    exec_command,
+    external_effect_of_command,
     is_mutation_tool,
     phase_for_tool,
     should_confirm_action,
@@ -147,3 +150,54 @@ def test_action_family_covers_exactly_the_guard_high_risk_set():
     assert set(ACTION_FAMILY) == high_risk
     for tool in sorted(ACTION_FAMILY):
         assert should_confirm_action(tool, {"path": "/repo/.git/config"}) is True
+
+
+# ── #1101：exec 族命令级外部副作用识别（上传经 exec 执行也必须进 guard）────────
+
+def test_external_effect_of_command_detects_upload():
+    """命中 upload_run.py / dataUpload 签名 → 识别为 upload 家族；本地脚本不误伤。"""
+    assert (
+        external_effect_of_command("python /skills/qraft/scripts/upload_run.py x.json --json")
+        == "upload"
+    )
+    assert external_effect_of_command("python3 scripts/upload_run.py --json out.json") == "upload"
+    assert external_effect_of_command("curl -X POST https://api/dataUpload") == "upload"
+    # 同技能目录里的校验脚本是本地动作，不能误判为上传
+    assert external_effect_of_command("python scripts/validate_run.py x.json") is None
+    assert external_effect_of_command("python train.py") is None
+    assert external_effect_of_command(None) is None
+    assert external_effect_of_command("") is None
+
+
+def test_exec_command_extraction():
+    """兼容 command / cmd 两个键；非 dict 或空值返回 None。"""
+    assert exec_command({"command": "python x.py"}) == "python x.py"
+    assert exec_command({"cmd": "ls"}) == "ls"
+    assert exec_command({"command": ""}) is None
+    assert exec_command({}) is None
+    assert exec_command("not-a-dict") is None
+
+
+def test_should_confirm_action_raises_exec_upload():
+    """exec 命中上传签名 → 按 EXTERNAL(10) 强制确认；普通 exec 仍按 EXEC(5) 不进 guard。"""
+    assert (
+        should_confirm_action("exec", {"command": "python scripts/upload_run.py x.json --json"})
+        is True
+    )
+    assert (
+        should_confirm_action("run_script", {"command": "python upload_run.py --json"})
+        is True
+    )
+    assert should_confirm_action("exec", {"command": "python validate_run.py x.json"}) is False
+    assert should_confirm_action("exec", {"command": "echo hi"}) is False
+
+
+def test_action_family_raises_exec_upload():
+    """exec 命中上传签名 → family 归 upload，同族去重/模型侧确认都按 upload 生效。"""
+    assert action_family("exec", {"command": "python upload_run.py x.json"}) == "upload"
+    assert action_family("exec", {"command": "python train.py"}) is None
+    # 无参数调用保持原语义（非 exec 族照常查 ACTION_FAMILY）
+    assert action_family("upload") == "upload"
+    assert EXEC_FAMILY_TOOLS == {
+        "exec", "run_script", "python", "bash", "shell", "run_command", "execute",
+    }

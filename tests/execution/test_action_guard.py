@@ -370,3 +370,40 @@ def test_guard_headless_still_requires_approval_when_family_confirmed():
     ):
         decision = asyncio.run(engine.check(_ctx(tool, args, families={family})))
         assert decision.verdict == PermissionVerdict.APPROVAL_REQUIRED
+
+
+# ── #1101：exec 触发 upload_run.py 也必须进 Action Guard ─────────────────────
+
+def test_guard_catches_exec_upload_headless():
+    """exec 执行 upload_run.py → 必须 APPROVAL_REQUIRED（不能按 exec=5 静默放行）。"""
+    engine = PermissionEngine()
+    decision = asyncio.run(
+        engine.check(_ctx("exec", {"command": "python scripts/upload_run.py x.json --json"}))
+    )
+    assert decision.verdict == PermissionVerdict.APPROVAL_REQUIRED
+    assert "Action Guard" in (decision.reason or "")
+
+
+def test_guard_catches_exec_upload_with_resolver():
+    """exec 执行 upload_run.py → 弹卡；拒绝 → DENY；卡面显示「上传到外部平台」而非 exec。"""
+    seen = []
+
+    async def resolver(payload):
+        seen.append(payload)
+        return {"status": "submitted", "answers": {"choice_id": "cancel"}}
+
+    engine = PermissionEngine(action_guard_resolver=resolver)
+    decision = asyncio.run(
+        engine.check(_ctx("exec", {"command": "python scripts/upload_run.py x.json --json"}))
+    )
+    assert decision.verdict == PermissionVerdict.DENY
+    assert len(seen) == 1
+    assert "上传到外部平台" in seen[0]["message"]
+
+
+def test_guard_ignores_plain_exec():
+    """普通 exec（无上传签名）不进 guard —— 保持 EXEC=5 的既有行为。"""
+    engine = PermissionEngine()
+    for cmd in ("echo hi", "python validate_run.py x.json", "rm -rf build"):
+        decision = asyncio.run(engine.check(_ctx("exec", {"command": cmd})))
+        assert "Action Guard" not in (decision.reason or ""), cmd

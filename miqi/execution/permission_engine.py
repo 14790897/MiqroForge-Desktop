@@ -211,18 +211,26 @@ class PermissionEngine:
             # 主路径上畸形参数会先被 orchestrator 的 schema 校验挡掉，判定表本身
             # 不可用则属于安装损坏，因此这个分支的爆炸半径只在真正的故障态。
             return self._guard_indeterminate(ctx, "判定不可用")
-        key = f"{getattr(ctx, 'thread_id', '')}:{ctx.tool_name}"
-        if key in self._action_guard_confirmed:
-            return None
         # 模型侧 ActionCard 已在本 turn 对同类动作取得用户确认 → 不重复弹卡。
         # family 级（而非 turn 级）：确认一次 upload 不会顺带放行 spawn/删目录。
+        # #1101：exec 命中上传签名时 family 判为 upload，卡面与去重都按 upload 走。
         try:
-            from miqi.execution.task_policy import action_family
+            from miqi.execution.task_policy import EXEC_FAMILY_TOOLS, action_family
 
-            _fam = action_family(ctx.tool_name)
+            _fam = action_family(ctx.tool_name, arguments)
+            _exec_effect = ctx.tool_name in EXEC_FAMILY_TOOLS and _fam == "upload"
         except Exception:  # noqa: BLE001
             _fam = None
+            _exec_effect = False
+        _display = "上传到外部平台" if _exec_effect else ctx.tool_name
         if _fam and _fam in (getattr(ctx, "action_confirmed_families", None) or frozenset()):
+            return None
+        # exec 命中外部副作用时把 family 并入会话缓存键——否则「确认一次 exec 上传」
+        # 会把整个 "exec" 缓存住，将来新增 exec 族其他外部签名会被误抑制。
+        key = f"{getattr(ctx, 'thread_id', '')}:{ctx.tool_name}"
+        if _exec_effect and _fam:
+            key = f"{key}:{_fam}"
+        if key in self._action_guard_confirmed:
             return None
         if self.action_guard_resolver is None:
             # headless/CLI：无弹卡通道——不静默放行，交给常规审批流显式要求。
@@ -230,7 +238,7 @@ class PermissionEngine:
                 verdict=PermissionVerdict.APPROVAL_REQUIRED,
                 category="run",
                 reason="危险动作需要确认（Action Guard）",
-                description=f"危险动作确认 · {ctx.tool_name}",
+                description=f"危险动作确认 · {_display}",
                 allow_permanent=False,
             )
         # P2-b（#1071 评审）：附上安全相关参数，避免用户「闭眼确认」；取不到则退回原口径。
@@ -240,7 +248,7 @@ class PermissionEngine:
                 {
                     "title": "危险动作确认",
                     "message": (
-                        f"模型请求执行高危动作：{ctx.tool_name}"
+                        f"模型请求执行高危动作：{_display}"
                         + (f"（{_hint}）" if _hint else "")
                         + "。确认后才真正执行。（确认后本对话内同类动作将不再逐一询问）"
                     ),

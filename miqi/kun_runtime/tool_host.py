@@ -264,12 +264,19 @@ class MiQiToolHost:
         )
 
         if tool_name != ASK_USER_CONFIRM_TOOL:
+            # exec 族工具的对外副作用（如 upload_run.py/dataUpload）藏在命令串里，
+            # 把命令传给 collab 判定，才能把「exec 上传」抬升为 EXTERNAL 强制确认（#1101）。
+            collab_command = _exec_command(args)
             try:
-                collab_verdict = collab_evaluate(tool_name, AutonomyMode(context.autonomy_mode))
+                collab_verdict = collab_evaluate(
+                    tool_name, AutonomyMode(context.autonomy_mode), command=collab_command
+                )
             except (ValueError, KeyError):
                 # Unparsable mode → evaluate under the most conservative mode
                 # instead of defaulting to ALLOW (CodeRabbit #711).
-                collab_verdict = collab_evaluate(tool_name, AutonomyMode.MANUAL)
+                collab_verdict = collab_evaluate(
+                    tool_name, AutonomyMode.MANUAL, command=collab_command
+                )
             if collab_verdict == CollabVerdict.DENY:
                 # DENY blocks in every context — including headless runs with
                 # no user-input channel (CodeRabbit #711).
@@ -559,6 +566,17 @@ class FakeToolHost:
 # ═══════════════════════════════════════════════════════════════════════════════
 # Helpers
 # ═══════════════════════════════════════════════════════════════════════════════
+
+
+def _exec_command(args: dict[str, Any]) -> str | None:
+    """从 exec 族工具参数里取命令串（兼容 command / cmd 两个键）。
+
+    供 collab gate 做命令级风险判定（#1101：exec 触发 upload_run.py 视为 EXTERNAL）。
+    """
+    if not isinstance(args, dict):
+        return None
+    cmd = args.get("command") or args.get("cmd")
+    return str(cmd) if cmd else None
 
 
 def _classify_tool_kind(name: str) -> str:

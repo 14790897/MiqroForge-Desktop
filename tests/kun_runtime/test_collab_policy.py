@@ -81,6 +81,43 @@ class TestModeMatrix:
                 assert evaluate("purchase", mode) == CollabVerdict.CONFIRM
 
 
+class TestExecCommandExternalEffect:
+    """#1101：exec 族工具的命令串命中上传签名 → 抬升为 EXTERNAL。"""
+
+    def test_risk_of_raises_exec_upload_to_external(self):
+        assert (
+            risk_of("exec", "python scripts/upload_run.py x.json --json")
+            == RiskLevel.EXTERNAL
+        )
+        assert (
+            risk_of("exec", "curl -X POST https://api/dataUpload")
+            == RiskLevel.EXTERNAL
+        )
+        assert risk_of("bash", "python upload_run.py x.json") == RiskLevel.EXTERNAL
+        # 普通 exec / 无命令仍按 EXEC 分类
+        assert risk_of("exec", "python train.py") == RiskLevel.EXEC
+        assert risk_of("exec", None) == RiskLevel.EXEC
+
+    def test_evaluate_confirms_exec_upload_in_autonomous(self):
+        # 自治模式 exec 本身不确认，但 exec 上传必须确认（EXTERNAL 在 AUTONOMOUS 恒 CONFIRM）
+        assert (
+            evaluate("exec", AutonomyMode.AUTONOMOUS, "python upload_run.py x.json")
+            == CollabVerdict.CONFIRM
+        )
+        assert (
+            evaluate("exec", AutonomyMode.AUTONOMOUS, "python train.py")
+            == CollabVerdict.ALLOW
+        )
+        assert (
+            evaluate("exec", AutonomyMode.SUPERVISED, "python upload_run.py x.json")
+            == CollabVerdict.CONFIRM
+        )
+        assert (
+            evaluate("exec", AutonomyMode.PLAN, "python upload_run.py x.json")
+            == CollabVerdict.DENY
+        )
+
+
 class TestToolHostCollabGate:
     """tool_host 集成：collab gate 在工具执行前强制弹确认卡。"""
 
@@ -158,3 +195,25 @@ class TestToolHostCollabGate:
         # 无通道 → 不弹卡直接执行（读文件不存在 → 返回错误而非 gate 拦截）。
         # 不断言具体错误文案：平台间 not found 措辞不同（CodeRabbit #711）。
         assert result.item["status"] == "failed"
+
+    def test_exec_upload_confirms_in_autonomous(self):
+        """#1101：exec 执行 upload_run.py 在 autonomous 模式也必须先弹确认卡。"""
+        from miqi.kun_runtime.tool_host import ToolCallLike
+
+        gate_calls = []
+
+        async def await_user_input(payload):
+            gate_calls.append(payload)
+            return {"status": "submitted", "answers": {"choice_id": "cancel", "choice_label": "取消"}}
+
+        host = self._host()
+        call = ToolCallLike(
+            call_id="c1",
+            tool_name="exec",
+            arguments={"command": "python scripts/upload_run.py x.json --json"},
+        )
+        result = asyncio.run(
+            host.execute(call, self._ctx(mode="autonomous", await_user_input=await_user_input))
+        )
+        assert len(gate_calls) == 1, "exec 上传在 autonomous 模式必须先经过确认卡"
+        assert result.item["status"] == "cancelled"

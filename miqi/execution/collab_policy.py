@@ -100,8 +100,19 @@ _CONFIRM_MATRIX: dict[tuple[AutonomyMode, RiskLevel], CollabVerdict] = {
 }
 
 
-def risk_of(tool_name: str) -> RiskLevel:
-    """Classify a tool name into a risk level (unknown → UNKNOWN)."""
+def risk_of(tool_name: str, command: str | None = None) -> RiskLevel:
+    """Classify a tool name into a risk level (unknown → UNKNOWN).
+
+    ``command`` is the exec-family command string; when present and it carries an
+    external side effect (e.g. ``upload_run.py`` / ``dataUpload``), the call is
+    reclassified EXTERNAL rather than EXEC — the upload dispatched via ``exec``
+    must confirm in every autonomy mode (#1101).
+    """
+    if tool_name in EXEC_TOOLS and command:
+        from miqi.execution.task_policy import external_effect_of_command
+
+        if external_effect_of_command(command) is not None:
+            return RiskLevel.EXTERNAL
     if tool_name in PAYMENT_TOOLS:
         return RiskLevel.PAYMENT
     if tool_name in EXTERNAL_TOOLS:
@@ -115,13 +126,13 @@ def risk_of(tool_name: str) -> RiskLevel:
     return RiskLevel.UNKNOWN
 
 
-def evaluate(tool_name: str, mode: AutonomyMode) -> CollabVerdict:
+def evaluate(tool_name: str, mode: AutonomyMode, command: str | None = None) -> CollabVerdict:
     """Decide whether a tool call needs the confirm card.
 
     Independent of approval bypass: EXTERNAL/PAYMENT always confirm in every
     execution mode — the collaboration gate is not a safety toggle.
     """
-    risk = risk_of(tool_name)
+    risk = risk_of(tool_name, command)
     verdict = _CONFIRM_MATRIX.get((mode, risk))
     if verdict is not None:
         return verdict
