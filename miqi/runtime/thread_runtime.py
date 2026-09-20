@@ -18,6 +18,14 @@ from pathlib import Path
 
 import aiosqlite
 
+from miqi.runtime.db_util import (
+    RuntimeDb,
+    execute_dml,
+    fetchall,
+    fetchone,
+    run_script,
+)
+
 
 @dataclass(frozen=True)
 class RuntimeThread:
@@ -51,23 +59,21 @@ class ThreadRuntime:
     def __init__(self, db_path: Path, *, session_id: str):
         self.db_path = db_path
         self.session_id = session_id
-        self._db: aiosqlite.Connection | None = None
+        self._dbx: RuntimeDb | None = None
 
     # ── lifecycle ──────────────────────────────────────────────────────
 
     async def initialize(self) -> None:
-        """Open persistent connection and create tables."""
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        # Same busy timeout as HistoryRuntime/StoredRuntime — see
-        # LedgerRuntime.initialize for the cross-connection contention note.
-        # isolation_level=None (autocommit) also prevents a cancelled turn
-        # task from stranding an open write transaction on the shared DB.
-        self._db = await aiosqlite.connect(
-            str(self.db_path), timeout=30, isolation_level=None
-        )
-        await self._db.execute("PRAGMA journal_mode=WAL")
-        self._db.row_factory = aiosqlite.Row
-        await self._db.execute("""
+        """Open the store and create tables."""
+        # All statements go through RuntimeDb (#1012): see its module docstring
+        # for why every operation runs in a shielded task.
+        self._dbx = RuntimeDb(self.db_path, name="thread", prepare=self._prepare)
+        await self._dbx.open()
+
+    @staticmethod
+    async def _prepare(db: aiosqlite.Connection) -> None:
+        db.row_factory = aiosqlite.Row
+        await run_script(db, """
             CREATE TABLE IF NOT EXISTS runtime_threads (
                 thread_id TEXT NOT NULL,
                 session_id TEXT NOT NULL,
@@ -91,11 +97,11 @@ class ThreadRuntime:
             "ALTER TABLE runtime_threads ADD COLUMN metadata_json TEXT NOT NULL DEFAULT '{}'",
         ]:
             try:
-                await self._db.execute(statement)
+                await db.execute(statement)
             except aiosqlite.OperationalError as exc:
                 if "duplicate column name" not in str(exc).lower():
                     raise
-        await self._db.commit()
+        await db.commit()
 
     async def close(self) -> None:
         """Close the persistent database connection.
@@ -103,18 +109,28 @@ class ThreadRuntime:
         Safe to call multiple times; no-op if already closed or never
         initialized.
         """
-        if self._db is not None:
-            await self._db.close()
-            self._db = None
+        if self._dbx is not None:
+            await self._dbx.close()
+            self._dbx = None
+
+    @property
+    def _db(self) -> aiosqlite.Connection | None:
+        """The live connection, or None once closed (diagnostics/tests)."""
+        if self._dbx is None or not self._dbx.is_open:
+            return None
+        return self._dbx.conn
 
     @property
     def _conn(self) -> aiosqlite.Connection:
         """Return the persistent connection, raising if not initialized."""
-        if self._db is None:
+        return self._require_db().conn
+
+    def _require_db(self) -> RuntimeDb:
+        if self._dbx is None:
             raise RuntimeError(
                 "ThreadRuntime.initialize() must be called before use"
             )
-        return self._db
+        return self._dbx
 
     # ── thread CRUD ────────────────────────────────────────────────────
 
@@ -133,29 +149,34 @@ class ThreadRuntime:
         now = time.time()
         tid = thread_id or f"thread-{str(uuid.uuid4())[:12]}"
         metadata_json = json.dumps(metadata or {})
-        db = self._conn
-        await db.execute(
-            """INSERT INTO runtime_threads
-               (thread_id, session_id, title, status, parent_thread_id,
-                created_at, updated_at,
-                forked_from_id, ephemeral, cwd, metadata_json)
-               VALUES (?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?)""",
-            (tid, self.session_id, title, parent_thread_id, now, now,
-             forked_from_id, int(ephemeral), cwd, metadata_json),
-        )
-        await db.commit()
+
+        async def _create(db: aiosqlite.Connection) -> None:
+            await execute_dml(
+                db,
+                """INSERT INTO runtime_threads
+                   (thread_id, session_id, title, status, parent_thread_id,
+                    created_at, updated_at,
+                    forked_from_id, ephemeral, cwd, metadata_json)
+                   VALUES (?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?)""",
+                (tid, self.session_id, title, parent_thread_id, now, now,
+                 forked_from_id, int(ephemeral), cwd, metadata_json),
+            )
+            await db.commit()
+
+        await self._require_db().run(_create)
         thread = await self.get_thread(tid)
         assert thread is not None
         return thread
 
     async def get_thread(self, thread_id: str) -> RuntimeThread | None:
-        db = self._conn
-        cursor = await db.execute(
-            """SELECT * FROM runtime_threads
-               WHERE thread_id = ? AND session_id = ?""",
-            (thread_id, self.session_id),
+        row = await self._require_db().run(
+            lambda db: fetchone(
+                db,
+                """SELECT * FROM runtime_threads
+                   WHERE thread_id = ? AND session_id = ?""",
+                (thread_id, self.session_id),
+            )
         )
-        row = await cursor.fetchone()
         if row is None:
             return None
         metadata = {}
@@ -192,13 +213,16 @@ class ThreadRuntime:
         return thread
 
     async def delete_thread(self, thread_id: str) -> None:
-        db = self._conn
-        await db.execute(
-            """DELETE FROM runtime_threads
-               WHERE thread_id = ? AND session_id = ?""",
-            (thread_id, self.session_id),
-        )
-        await db.commit()
+        async def _delete(db: aiosqlite.Connection) -> None:
+            await execute_dml(
+                db,
+                """DELETE FROM runtime_threads
+                   WHERE thread_id = ? AND session_id = ?""",
+                (thread_id, self.session_id),
+            )
+            await db.commit()
+
+        await self._require_db().run(_delete)
 
     async def fork_thread(
         self, parent_thread_id: str, *, title: str
@@ -222,9 +246,9 @@ class ThreadRuntime:
         if not include_archived:
             query += " AND status = 'active'"
         query += " ORDER BY updated_at DESC"
-        db = self._conn
-        cursor = await db.execute(query, params)
-        rows = await cursor.fetchall()
+        rows = await self._require_db().run(
+            lambda db: fetchall(db, query, params)
+        )
         return [
             RuntimeThread(
                 thread_id=row["thread_id"],
@@ -261,14 +285,18 @@ class ThreadRuntime:
             raise KeyError(thread_id)
         next_title = title if title is not None else thread.title
         next_status = status if status is not None else thread.status
-        db = self._conn
-        await db.execute(
-            """UPDATE runtime_threads
-               SET title = ?, status = ?, updated_at = ?
-               WHERE thread_id = ? AND session_id = ?""",
-            (next_title, next_status, time.time(), thread_id, self.session_id),
-        )
-        await db.commit()
+
+        async def _update(db: aiosqlite.Connection) -> None:
+            await execute_dml(
+                db,
+                """UPDATE runtime_threads
+                   SET title = ?, status = ?, updated_at = ?
+                   WHERE thread_id = ? AND session_id = ?""",
+                (next_title, next_status, time.time(), thread_id, self.session_id),
+            )
+            await db.commit()
+
+        await self._require_db().run(_update)
 
     async def update_metadata(
         self, thread_id: str, metadata: dict[str, object],
@@ -284,14 +312,19 @@ class ThreadRuntime:
             raise KeyError(thread_id)
         merged = dict(thread.metadata)
         merged.update(metadata)
-        db = self._conn
-        await db.execute(
-            """UPDATE runtime_threads
-               SET metadata_json = ?, updated_at = ?
-               WHERE thread_id = ? AND session_id = ?""",
-            (json.dumps(merged, ensure_ascii=False), time.time(), thread_id, self.session_id),
-        )
-        await db.commit()
+
+        async def _write_metadata(db: aiosqlite.Connection) -> None:
+            await execute_dml(
+                db,
+                """UPDATE runtime_threads
+                   SET metadata_json = ?, updated_at = ?
+                   WHERE thread_id = ? AND session_id = ?""",
+                (json.dumps(merged, ensure_ascii=False), time.time(),
+                 thread_id, self.session_id),
+            )
+            await db.commit()
+
+        await self._require_db().run(_write_metadata)
         return RuntimeThread(
             thread_id=thread.thread_id,
             session_id=thread.session_id,
