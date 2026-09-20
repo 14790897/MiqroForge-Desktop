@@ -121,7 +121,7 @@ class TestExecCommandExternalEffect:
 class TestToolHostCollabGate:
     """tool_host 集成：collab gate 在工具执行前强制弹确认卡。"""
 
-    def _ctx(self, mode="supervised", await_user_input=None):
+    def _ctx(self, mode="supervised", await_user_input=None, ctx_mode=None):
         from miqi.kun_runtime.tool_host import ToolHostContext
 
         return ToolHostContext(
@@ -130,6 +130,7 @@ class TestToolHostCollabGate:
             workspace="/tmp/ws",
             autonomy_mode=mode,
             await_user_input=await_user_input,
+            mode=ctx_mode,
         )
 
     def _host(self):
@@ -217,3 +218,52 @@ class TestToolHostCollabGate:
         )
         assert len(gate_calls) == 1, "exec 上传在 autonomous 模式必须先经过确认卡"
         assert result.item["status"] == "cancelled"
+
+    def test_exec_upload_confirms_even_in_fast_mode(self):
+        """#1101：fast 模式不豁免对外上传——exec 执行 upload_run.py 仍弹卡，取消即停止。"""
+        from miqi.kun_runtime.tool_host import ToolCallLike
+
+        gate_calls = []
+
+        async def await_user_input(payload):
+            gate_calls.append(payload)
+            return {"status": "submitted", "answers": {"choice_id": "cancel", "choice_label": "取消"}}
+
+        host = self._host()
+        call = ToolCallLike(
+            call_id="c1",
+            tool_name="exec",
+            arguments={"command": "python scripts/upload_run.py x.json --json"},
+        )
+        result = asyncio.run(
+            host.execute(
+                call,
+                self._ctx(mode="autonomous", await_user_input=await_user_input, ctx_mode="fast"),
+            )
+        )
+        assert len(gate_calls) == 1, "fast 模式也不能豁免 exec 上传确认"
+        assert result.item["status"] == "cancelled"
+
+    def test_fast_mode_still_skips_non_external_confirm(self):
+        """#1101 回归：fast 模式对非对外动作（写文件）仍保持免确认。"""
+        from miqi.kun_runtime.tool_host import ToolCallLike
+
+        gate_calls = []
+
+        async def await_user_input(payload):
+            gate_calls.append(payload)
+            return {"status": "submitted", "answers": {"choice_id": "confirm"}}
+
+        host = self._host()
+        call = ToolCallLike(
+            call_id="c1",
+            tool_name="write_file",
+            arguments={"path": "/tmp/ws/a.txt", "content": "hi"},
+        )
+        asyncio.run(
+            host.execute(
+                call,
+                self._ctx(mode="manual", await_user_input=await_user_input, ctx_mode="fast"),
+            )
+        )
+        assert gate_calls == [], "fast 模式对非对外动作应保持免确认"

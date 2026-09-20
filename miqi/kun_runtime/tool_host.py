@@ -258,15 +258,22 @@ class MiQiToolHost:
         from miqi.execution.collab_policy import (
             AutonomyMode,
             CollabVerdict,
+            RiskLevel,
         )
         from miqi.execution.collab_policy import (
             evaluate as collab_evaluate,
+        )
+        from miqi.execution.collab_policy import (
+            risk_of as collab_risk_of,
         )
 
         if tool_name != ASK_USER_CONFIRM_TOOL:
             # exec 族工具的对外副作用（如 upload_run.py/dataUpload）藏在命令串里，
             # 把命令传给 collab 判定，才能把「exec 上传」抬升为 EXTERNAL 强制确认（#1101）。
             collab_command = _exec_command(args)
+            # #1101：fast 模式只豁免「非对外」动作——上传/支付等 EXTERNAL/PAYMENT
+            # 在任何模式（含 fast）都必须确认，否则 fast 会绕过执行层上传兜底。
+            collab_risk = collab_risk_of(tool_name, collab_command)
             try:
                 collab_verdict = collab_evaluate(
                     tool_name, AutonomyMode(context.autonomy_mode), command=collab_command
@@ -300,8 +307,12 @@ class MiQiToolHost:
                 and context.await_user_input is not None
                 # Reasoning mode (issue #680): fast = 信息型操作直接执行，
                 # 不弹确认卡（用户：极速模式完全不可能快）。权限型仍由
-                # ExecutionPolicy/approval 门控制。
-                and context.mode != "fast"
+                # ExecutionPolicy/approval 门控制。对外动作（EXTERNAL/PAYMENT）
+                # 例外：fast 也不豁免，否则执行层上传兜底会被 fast 绕过（#1101）。
+                and (
+                    context.mode != "fast"
+                    or collab_risk in (RiskLevel.EXTERNAL, RiskLevel.PAYMENT)
+                )
             ):
                 gate_result = await context.await_user_input({
                     "threadId": context.thread_id,
