@@ -7433,7 +7433,7 @@ export function ChatConsole({
             style={{ background: 'var(--background)' }}
           >
             <div
-              className={`max-w-[760px] mx-auto px-4 pt-5 flex flex-col gap-3 ${
+              className={`max-w-[760px] mx-auto px-4 pt-5 flex flex-col gap-2 ${
                 historyLoaded && messages.length === 0 ? 'min-h-full' : ''
               }`}
               style={{ paddingBottom: '20vh' }}
@@ -9423,7 +9423,7 @@ const MessageBubble = memo(function MessageBubble({
             data-testid={isUser ? 'chat-message-user' : 'chat-message-assistant'}
           >
             {!isUser && !hideHeader && (
-              <div className="flex items-center gap-2 mb-3 pl-2">
+              <div className="flex items-center gap-2 mb-1.5 pl-2">
                 <AgentAvatar />
                 <span
                   className="text-[16px] font-semibold shrink-0 whitespace-nowrap"
@@ -9446,7 +9446,8 @@ const MessageBubble = memo(function MessageBubble({
             <div
               className={cn(
                 'group flex min-w-0 flex-col gap-1.5',
-                isUser ? 'items-end max-w-[calc(100%-48px)]' : 'w-full'
+                // 用户列要 relative：下面那行悬停操作栏改成绝对定位了，见其注释
+                isUser ? 'relative items-end max-w-[calc(100%-48px)]' : 'w-full'
               )}
             >
               {/* image attachments */}
@@ -9727,9 +9728,11 @@ const MessageBubble = memo(function MessageBubble({
               </div>
 
               {/* 用户消息操作 — 复制 / 编辑(仅鼠标靠近/hover 消息时显示,#828;
-                  编辑态下隐藏,避免与编辑框叠在一起) */}
+                  编辑态下隐藏,避免与编辑框叠在一起)。
+                  绝对定位在气泡正下方、右对齐：脱离文档流所以不吃「提问→回复」
+                  的间距(否则不可见也常驻 26px)。按钮 21px,和头像行同一视觉量级。 */}
               {isUser && msg.content !== '' && !editing && (
-                <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 transition-opacity mt-1">
+                <div className="absolute right-0 top-full mt-1 flex items-center gap-1 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 transition-opacity">
                   <button
                     onClick={() =>
                       // 复制与编辑同一套 cleanContent 语义(review):
@@ -9738,12 +9741,12 @@ const MessageBubble = memo(function MessageBubble({
                     }
                     title="复制"
                     aria-label="复制"
-                    className="flex items-center justify-center w-8 h-8 rounded-lg bg-[var(--surface-muted)]/70 text-[var(--text-muted)] hover:bg-[var(--surface-muted)] hover:text-[var(--text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)] transition-colors"
+                    className="flex items-center justify-center w-7 h-7 rounded-lg bg-[var(--surface-muted)]/70 text-[var(--text-muted)] hover:bg-[var(--surface-muted)] hover:text-[var(--text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)] transition-colors"
                   >
                     {isCopied ? (
-                      <Check size={14} style={{ color: 'var(--success)' }} />
+                      <Check size={13} style={{ color: 'var(--success)' }} />
                     ) : (
-                      <Copy size={14} />
+                      <Copy size={13} />
                     )}
                   </button>
                   {onEdit && (
@@ -9758,9 +9761,9 @@ const MessageBubble = memo(function MessageBubble({
                       title={streaming ? '生成中,暂不可编辑' : '编辑并重新回答'}
                       aria-label="编辑并重新回答"
                       data-testid="edit-message-btn"
-                      className="flex items-center justify-center w-8 h-8 rounded-lg bg-[var(--surface-muted)]/70 text-[var(--text-muted)] hover:bg-[var(--surface-muted)] hover:text-[var(--text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)] transition-colors disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-[var(--surface-muted)]/70"
+                      className="flex items-center justify-center w-7 h-7 rounded-lg bg-[var(--surface-muted)]/70 text-[var(--text-muted)] hover:bg-[var(--surface-muted)] hover:text-[var(--text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)] transition-colors disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-[var(--surface-muted)]/70"
                     >
-                      <Pencil size={14} />
+                      <Pencil size={13} />
                     </button>
                   )}
                 </div>
