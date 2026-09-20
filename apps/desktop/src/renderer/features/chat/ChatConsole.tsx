@@ -1544,6 +1544,17 @@ export function wasTurnStopped(messages: Message[], userIdx: number): boolean {
   return false;
 }
 
+/** #1020: number of user turns from `fromUserIdx` (inclusive) to the end —
+ *  i.e. how many turns to drop when rewinding to before the user message at
+ *  `fromUserIdx`.  Mirrors SessionManager.truncate_turns' "last N user turns". */
+export function computeDropLastTurns(messages: Message[], fromUserIdx: number): number {
+  let n = 0;
+  for (let i = fromUserIdx; i < messages.length; i += 1) {
+    if (messages[i].role === 'user') n += 1;
+  }
+  return n;
+}
+
 /** #886: convert backend interrupted-turn snapshots into resumable cards and
  *  insert each at its chronological position (right after its own user
  *  message, before the later successful turns) instead of appending at the
@@ -7295,12 +7306,20 @@ export function ChatConsole({
     async (msg: Message) => {
       if (streaming) return;
       cleanupListeners();
-      const idx = messagesRef.current.indexOf(msg);
-      if (idx >= 0) {
+      const msgs = messagesRef.current;
+      const idx = msgs.indexOf(msg);
+      if (idx >= 0 && !wasTurnStopped(msgs, idx)) {
+        // #1020: 先删后端(SessionManager)成功再截断渲染层，失败不动 UI。
+        const drop = computeDropLastTurns(msgs, idx);
+        try {
+          await window.miqi.sessions.truncate(currentSessionRef.current, drop);
+        } catch {
+          return;
+        }
         // #886: a stopped round keeps its interrupted half-reply in the
         // timeline — the retried attempt appends after it instead of
         // rewinding and dropping the "已停止" context.
-        setMessages((prev) => (wasTurnStopped(prev, idx) ? prev : prev.slice(0, idx)));
+        setMessages((prev) => prev.slice(0, idx));
       }
       composerRef.current?.setText(msg.content);
       setAttachments(msg.attachments ?? []);
@@ -7323,15 +7342,24 @@ export function ChatConsole({
       }
       if (userIdx < 0) return;
       const userMsg = msgs[userIdx];
+      // #886: regenerating a manually-stopped turn must not rewind and drop
+      // the interrupted round — keep it and let handleSend append the new
+      // attempt after it.  Only a completed answer is replaced in place.
+      if (!wasTurnStopped(msgs, userIdx)) {
+        // #1020: 先删后端(SessionManager)成功再截断渲染层，失败不动 UI。
+        const drop = computeDropLastTurns(msgs, userIdx);
+        try {
+          await window.miqi.sessions.truncate(currentSessionRef.current, drop);
+        } catch {
+          return;
+        }
+        setMessages((prev) => prev.slice(0, userIdx));
+      }
       retryPayloadRef.current = {
         text: userMsg.content,
         attachments: userMsg.attachments ?? [],
         retry: true,
       };
-      // #886: regenerating a manually-stopped turn must not rewind and drop
-      // the interrupted round — keep it and let handleSend append the new
-      // attempt after it.  Only a completed answer is replaced in place.
-      setMessages((prev) => (wasTurnStopped(prev, userIdx) ? prev : prev.slice(0, userIdx)));
       composerRef.current?.setText(userMsg.content);
       setAttachments(userMsg.attachments ?? []);
       requestAnimationFrame(() => handleSendRef.current());
@@ -7355,6 +7383,13 @@ export function ChatConsole({
       const idx = msgs.indexOf(original);
       if (idx < 0) return;
       const snapshot = msgs;
+      // #1020: 先删后端(SessionManager)成功再截断渲染层，失败不动 UI。
+      const drop = computeDropLastTurns(msgs, idx);
+      try {
+        await window.miqi.sessions.truncate(currentSessionRef.current, drop);
+      } catch {
+        return;
+      }
       retryPayloadRef.current = {
         text,
         attachments: original.attachments ?? [],

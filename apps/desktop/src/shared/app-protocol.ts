@@ -269,6 +269,12 @@ export interface SessionsRenameParams {
   workspace?: null | string;
 }
 
+export interface SessionsTruncateParams {
+  dropLastTurns: number;
+  sessionKey?: string;
+  workspace?: null | string;
+}
+
 export interface SessionsUnarchiveParams {
   sessionKey?: string;
   workspace?: null | string;
@@ -640,6 +646,11 @@ export interface SessionsRenameResult {
   title?: null | string;
 }
 
+export interface SessionsTruncateResult {
+  removed_messages?: number;
+  truncated?: boolean;
+}
+
 export interface SessionsUnarchiveResult {
   unarchived: boolean;
 }
@@ -822,6 +833,7 @@ export const APP_METHODS = [
   'sessions.list',
   'sessions.list_archived',
   'sessions.rename',
+  'sessions.truncate',
   'sessions.unarchive',
   'skills/extraRoots/set',
   'skills/list',
@@ -905,6 +917,7 @@ export interface AppMethodParams {
   'sessions.list': SessionsListParams;
   'sessions.list_archived': SessionsListArchivedParams;
   'sessions.rename': SessionsRenameParams;
+  'sessions.truncate': SessionsTruncateParams;
   'sessions.unarchive': SessionsUnarchiveParams;
   'skills/extraRoots/set': SkillsExtraRootsSetParams;
   'skills/list': SkillsListParams;
@@ -987,6 +1000,7 @@ export interface AppMethodResult {
   'sessions.list': SessionsListResult;
   'sessions.list_archived': SessionsListArchivedResult;
   'sessions.rename': SessionsRenameResult;
+  'sessions.truncate': SessionsTruncateResult;
   'sessions.unarchive': SessionsUnarchiveResult;
   'skills/extraRoots/set': SkillsExtraRootsSetResult;
   'skills/list': SkillsListResult;
@@ -1069,6 +1083,7 @@ export interface AppMethodEvents {
   'sessions.list': never;
   'sessions.list_archived': never;
   'sessions.rename': never;
+  'sessions.truncate': never;
   'sessions.unarchive': never;
   'skills/extraRoots/set': 'skills/changed';
   'skills/list': never;

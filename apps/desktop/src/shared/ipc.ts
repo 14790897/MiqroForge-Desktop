@@ -39,6 +39,7 @@ export const IPC = {
   SESSIONS_CLEAR_TRACKED_FILES: 'sessions:clear_tracked_files',
   SESSIONS_CLAIM_LEGACY: 'sessions:claim_legacy',
   SESSIONS_RENAME: 'sessions:rename',
+  SESSIONS_TRUNCATE: 'sessions:truncate',
 
   // Config
   CONFIG_GET: 'config:get',
@@ -267,6 +268,11 @@ export const SessionClaimLegacyInput = z.object({
 export const SessionRenameInput = z.object({
   session_key: z.string().min(1),
   title: z.string().min(1).max(100),
+});
+
+export const SessionTruncateInput = z.object({
+  session_key: z.string().min(1),
+  drop_last_turns: z.number().int().min(1),
 });
 
 export interface SessionClaimLegacyResult {

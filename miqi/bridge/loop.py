@@ -473,6 +473,7 @@ class BridgeRuntimeLoop:
             sessions_list_handler,
             sessions_list_recent_workspaces_handler,
             sessions_rename_handler,
+            sessions_truncate_handler,
             sessions_unarchive_handler,
             sessions_workspace_handler,
         )
@@ -490,6 +491,7 @@ class BridgeRuntimeLoop:
         # 不对外暴露协议面（无 TS 导出、无 request/response model）。
         self._app_server.register_method("sessions.workspace", sessions_workspace_handler)
         self._app_server.register_method("sessions.rename", sessions_rename_handler, spec=protocol_specs.SESSIONS_RENAME)
+        self._app_server.register_method("sessions.truncate", sessions_truncate_handler, spec=protocol_specs.SESSIONS_TRUNCATE)
 
         # Register Phase 30: files.* handlers (client-scoped ownership)
         from miqi.runtime.file_handlers import (

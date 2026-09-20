@@ -118,6 +118,29 @@ class Session:
         self.updated_at = datetime.now()
         # Keep saved_count so save() can detect history shrink and rewrite safely.
 
+    def truncate_turns(self, drop_last_turns: int) -> int:
+        """Delete the last N user turns (and their trailing rows).
+
+        A "turn" is delimited by a ``user`` message.  Dropping the last N turns
+        keeps everything before the (N+1)-th user message from the end and
+        removes that user message plus everything after it.  Returns the number
+        of removed messages.
+        """
+        if drop_last_turns <= 0:
+            return 0
+        user_idx = [i for i, m in enumerate(self.messages) if m.get("role") == "user"]
+        if not user_idx:
+            return 0
+        if len(user_idx) <= drop_last_turns:
+            removed = len(self.messages)
+            self.messages = []
+        else:
+            boundary = user_idx[-drop_last_turns]
+            removed = len(self.messages) - boundary
+            self.messages = self.messages[:boundary]
+        self.updated_at = datetime.now()
+        return removed
+
 
 class OwnershipError(Exception):
     """Raised when a client attempts to access a session it does not own.
@@ -912,6 +935,22 @@ class SessionManager:
                 path.chmod(0o600)
             self._cache[key] = session
             return session.metadata["title"]
+
+    def truncate(self, key: str, drop_last_turns: int, *, client_id: str | None = None) -> int:
+        """Drop the last N user turns from a session, persisted to disk (#1020).
+
+        Returns the number of removed messages.  When ``client_id`` is provided,
+        ownership is verified first (unowned → REQUIRES_CLAIM, other client →
+        UNAUTHORIZED).
+        """
+        with self._get_session_lock(key):
+            if client_id is not None:
+                self._verify_ownership_for_mutation(key, client_id)
+            session = self.get_or_create(key, client_id=client_id)
+            removed = session.truncate_turns(drop_last_turns)
+            if removed:
+                self.save(session)
+            return removed
 
     @staticmethod
     def _extract_title(path: Path) -> str:

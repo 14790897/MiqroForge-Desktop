@@ -1104,6 +1104,44 @@ async def sessions_rename_handler(
     return {"result": {"renamed": True, "key": session_key, "title": effective_title}}
 
 
+# ── sessions.truncate ──────────────────────────────────────────────────────
+
+
+async def sessions_truncate_handler(
+    request_id: str,
+    params: dict[str, Any],
+    client_id: str,
+    session_id: str | None,
+    registry: Any,
+) -> dict[str, Any]:
+    """Drop the last N user turns from a session (#1020).
+
+    Truncates the SessionManager (JSONL) copy — the store ``sessions.get``
+    reads on reload — so editing/regenerating a message no longer resurrects
+    the replaced turns after a reload.
+    """
+    typed = validate_session_params("sessions.truncate", params)
+    session_key = typed.session_key
+    drop_last_turns = typed.drop_last_turns
+
+    sm = _get_session_manager()
+    try:
+        removed = sm.truncate(session_key, drop_last_turns, client_id=client_id)
+        folder_sm = _folder_session_manager(sm, session_key, client_id)
+        if folder_sm is not None:
+            try:
+                folder_sm.truncate(session_key, drop_last_turns, client_id=client_id)
+            except OwnershipError as exc:
+                logger.debug(
+                    "sessions.truncate: folder copy {} not truncated: {}",
+                    session_key, exc,
+                )
+    except OwnershipError as exc:
+        raise AppServerError(exc.args[0], code=exc.code) from exc
+
+    return {"result": {"truncated": True, "removed_messages": removed}}
+
+
 # ── sessions.claim_legacy ──────────────────────────────────────────────────
 
 

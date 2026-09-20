@@ -471,7 +471,7 @@ class AppServer:
             "sessions.get_tracked_files",
             "sessions.workspace",
             "sessions.delete", "sessions.archive", "sessions.unarchive",
-            "sessions.rename",
+            "sessions.rename", "sessions.truncate",
         ):
             session = await self.registry.get_session(client_id, session_id)
             if session is None:
