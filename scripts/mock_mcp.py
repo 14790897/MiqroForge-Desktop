@@ -19,6 +19,7 @@ Run:  PYTHONPATH=. .venv/Scripts/python.exe scripts/mock_mcp.py
 from __future__ import annotations
 
 import json
+import socketserver
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 MCP_TOOL_NAME = "mcp_e2emcp_e2e_echo"
@@ -172,11 +173,23 @@ class Handler(BaseHTTPRequestHandler):
             self._respond(text(f"MCP-E2E-FAIL：未收到预期工具返回。实际：{preview}"))
 
 
+class FastBindHTTPServer(HTTPServer):
+    """HTTPServer.server_bind() 会用 socket.getfqdn(host) 反查 DNS；
+    某些 CI runner（macOS）上该反查会卡住，导致 ready 行永远不打印、
+    serve_forever 永不执行。这里跳过反查：server_name 直接用 host。"""
+
+    def server_bind(self):
+        socketserver.TCPServer.server_bind(self)
+        host, port = self.server_address[:2]
+        self.server_name = host
+        self.server_port = port
+
+
 if __name__ == "__main__":
     import sys
 
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 8899
-    server = HTTPServer(("127.0.0.1", port), Handler)
+    server = FastBindHTTPServer(("127.0.0.1", port), Handler)
     actual_port = server.server_address[1]
     print(f"Mock OpenAI server on http://127.0.0.1:{actual_port}/v1", flush=True)
     server.serve_forever()
