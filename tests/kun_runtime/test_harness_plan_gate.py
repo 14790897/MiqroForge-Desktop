@@ -34,6 +34,11 @@ def _tc(name: str, args: dict | None = None):
     tc.name = name
     tc.id = f"call_{name}_{_tc_counter}"
     tc.arguments = args or {}
+    # truncated 必须显式给：真实对象是 ToolCallRequest dataclass（默认 False），
+    # 而 MagicMock 的任意属性都是真值 Mock —— turn_runner 的 #1094 守卫
+    # （getattr(tc, "truncated", False)）会把缺这个字段的 mock 全判成「参数被
+    # 输出上限截断」而拒绝执行，回合直接空转报错。
+    tc.truncated = False
     return tc
 
 
