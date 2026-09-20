@@ -92,7 +92,9 @@ jobs:
           if [ "$EVENT_NAME" = "pull_request" ]; then
             numbers="$PR_NUMBER"
           else
-            if ! numbers=$(gh pr list --state open --limit 1000 --json number --jq '.[].number'); then
+            # 用 REST 分页取全部 open PR（--paginate 自动翻页，无总数上限；
+            # gh pr list 的 --limit 无论多大都仍是截断）
+            if ! numbers=$(gh api --paginate "repos/$REPO/pulls?state=open&per_page=100" --jq '.[].number'); then
               echo "::warning::拉取 open PR 列表失败，本轮扫描结束（下一轮重试）"
               exit 0
             fi
