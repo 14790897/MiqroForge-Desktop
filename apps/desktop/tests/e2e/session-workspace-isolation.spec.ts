@@ -34,6 +34,7 @@ import {
   launchElectronApp,
   closeElectronApp,
   createNewConversation,
+  approvePlanCardIfAny,
 } from './helpers/electron-setup';
 
 // ─── Helpers ──────────────────────────────────────────────────────────
@@ -87,6 +88,7 @@ async function dismissOverlays(page: Page) {
 /** sendMessage with one retry — the first Enter of a cold app can race the
  *  optimistic-UI bubble mount (same class as workspace-selection flakes). */
 async function sendMessageWithRetry(page: Page, text: string) {
+  void approvePlanCardIfAny(page);
   await dismissOverlays(page);
   for (let attempt = 0; ; attempt++) {
     try {
