@@ -198,7 +198,8 @@ const api = {
       attachments?: Array<{ name: string; data_base64?: string; mime_type?: string }>,
       workspace?: string,
       reasoningMode?: string,
-      resumeTurnId?: string
+      resumeTurnId?: string,
+      dropFromTurnId?: string
     ): Promise<unknown> =>
       ipcRenderer.invoke(IPC.CHAT_SEND, {
         content,
@@ -209,6 +210,7 @@ const api = {
         workspace,
         reasoning_mode: reasoningMode,
         resume_turn_id: resumeTurnId,
+        drop_from_turn_id: dropFromTurnId,
       }),
     abort: (sessionKey?: string, threadId?: string): Promise<unknown> =>
       ipcRenderer.invoke(IPC.CHAT_ABORT, { session_key: sessionKey, thread_id: threadId }),

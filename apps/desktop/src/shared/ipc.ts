@@ -240,6 +240,7 @@ export const ChatSendInput = z.object({
   mode: z.enum(['plan', 'manual', 'edit', 'auto']).optional(),
   workspace: z.string().optional(),
   resume_turn_id: z.string().optional(),
+  drop_from_turn_id: z.string().optional(),
   attachments: z
     .array(
       z.object({

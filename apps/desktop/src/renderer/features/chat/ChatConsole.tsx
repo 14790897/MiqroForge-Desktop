@@ -6533,6 +6533,10 @@ export function ChatConsole({
     attachments: Attachment[];
     retry?: boolean;
   } | null>(null);
+  /** #1146: 编辑/重答/重试的截断边界 turn_id，handleSend 消费后清除。
+   *  retry 不自动发送（预填输入框等用户手动发），故独立于 retryPayloadRef
+   *  存续，并按 sessionKey 存以避免跨 session 泄漏。 */
+  const dropFromTurnIdRef = useRef<{ turnId: string; sessionKey: string } | null>(null);
   const handleSendRef = useRef<() => void>(() => {});
   /** 发送文本经此 ref 显式传入 handleSend 并一次性消费：既承载程序化发送
    *  （论文下载 fallback 等），也承载 Composer 的用户输入（#1021 下沉后
@@ -6616,6 +6620,11 @@ export function ChatConsole({
     const _resumeId = resumeTurnIdRef.current;
     resumeTurnIdRef.current = null;
     const payload = retryPayloadRef.current;
+    // #1146: 消费编辑/重答/重试的截断边界（按 session 匹配，防跨 session 泄漏）
+    const drop = dropFromTurnIdRef.current;
+    dropFromTurnIdRef.current = null;
+    const dropFromTurnId =
+      drop && drop.sessionKey === currentSessionRef.current ? drop.turnId : null;
     // 发送文本经 ref 显式传入（程序化发送 + Composer 用户输入）：不依赖
     // state 更新后的渲染 flush（旧闭包读到的 input state 是旧值）。
     const programmaticText = programmaticTextRef.current;
@@ -7481,6 +7490,17 @@ export function ChatConsole({
       if (data.stream === 'turn' && typeof data.turn_id === 'string') {
         myTurnId = data.turn_id;
         activeTurnIdRef.current = data.turn_id;
+        // #1146: 给本轮乐观 user 气泡回填 backend turn_id，供编辑/重试取截断边界。
+        setMessages((prev) => {
+          for (let i = prev.length - 1; i >= 0; i--) {
+            if (prev[i].role === 'user' && !prev[i].turnId) {
+              const next = prev.slice();
+              next[i] = { ...next[i], turnId: data.turn_id };
+              return next;
+            }
+          }
+          return prev;
+        });
         return;
       }
 
@@ -8139,7 +8159,8 @@ export function ChatConsole({
           chatAttachments.length > 0 ? chatAttachments : undefined,
           workspace ?? undefined,
           reasoningModeRef.current,
-          _resumeId ?? undefined
+          _resumeId ?? undefined,
+          dropFromTurnId ?? undefined
         );
         turnDispatched = true;
       } catch (syncSendError) {
@@ -8786,7 +8807,14 @@ export function ChatConsole({
         // #886: a stopped round keeps its interrupted half-reply in the
         // timeline — the retried attempt appends after it instead of
         // rewinding and dropping the "已停止" context.
-        setMessages((prev) => (wasTurnStopped(prev, idx) ? prev : prev.slice(0, idx)));
+        const stopped = wasTurnStopped(messagesRef.current, idx);
+        setMessages((prev) => (stopped ? prev : prev.slice(0, idx)));
+        // #1146: 重试回退后，新回合的模型上下文截断到该回合之前。
+        dropFromTurnIdRef.current = stopped
+          ? null
+          : msg.turnId
+            ? { turnId: msg.turnId, sessionKey: currentSessionRef.current }
+            : null;
       }
       composerRef.current?.setText(msg.content);
       setAttachments(msg.attachments ?? []);
@@ -8809,15 +8837,22 @@ export function ChatConsole({
       }
       if (userIdx < 0) return;
       const userMsg = msgs[userIdx];
+      const stopped = wasTurnStopped(msgs, userIdx);
       retryPayloadRef.current = {
         text: userMsg.content,
         attachments: userMsg.attachments ?? [],
         retry: true,
       };
+      // #1146: 重答回退后，新回合的模型上下文截断到该 user 回合之前。
+      dropFromTurnIdRef.current = stopped
+        ? null
+        : userMsg.turnId
+          ? { turnId: userMsg.turnId, sessionKey: currentSessionRef.current }
+          : null;
       // #886: regenerating a manually-stopped turn must not rewind and drop
       // the interrupted round — keep it and let handleSend append the new
       // attempt after it.  Only a completed answer is replaced in place.
-      setMessages((prev) => (wasTurnStopped(prev, userIdx) ? prev : prev.slice(0, userIdx)));
+      setMessages((prev) => (stopped ? prev : prev.slice(0, userIdx)));
       composerRef.current?.setText(userMsg.content);
       setAttachments(userMsg.attachments ?? []);
       requestAnimationFrame(() => handleSendRef.current());
@@ -8847,6 +8882,10 @@ export function ChatConsole({
         // 编辑是"修改后重新提问",不是重试 — 不带"换角度重新回答"提示词
         retry: false,
       };
+      // #1146: 编辑重答后，新回合的模型上下文截断到被编辑回合之前。
+      dropFromTurnIdRef.current = original.turnId
+        ? { turnId: original.turnId, sessionKey: currentSessionRef.current }
+        : null;
       setMessages((prev) => prev.slice(0, idx));
       // 记录回滚点:异步预派发失败时恢复(见 handleSend 的 provider/网关检查)
       editPendingRollbackRef.current = { snapshot, sessionKey: currentSessionRef.current };

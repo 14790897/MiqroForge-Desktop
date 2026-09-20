@@ -343,6 +343,7 @@ export function registerIpcHandlers(bridge: BridgeManager): void {
         attachments: input.attachments,
         workspace: input.workspace,
         resume_turn_id: (input as any).resume_turn_id ?? undefined,
+        drop_from_turn_id: (input as any).drop_from_turn_id ?? undefined,
       },
       (type: string, data: unknown) => {
         if (type === 'progress') {
