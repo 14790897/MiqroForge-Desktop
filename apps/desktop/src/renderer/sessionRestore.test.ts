@@ -5,11 +5,14 @@
  * 静默状态：bridge 的 sessions.get 对未知 key 是 get_or_create，不会报错，
  * 所以只有启动时拿 sessions.list 对照才能发现。
  */
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   DEFAULT_SESSION_KEY,
+  resolveUnverifiedRestoreKey,
+  RESTORE_VERIFY_ATTEMPTS,
   shouldFallbackToDefaultSession,
   shouldVerifyRestoredSession,
+  verifyRestoredSession,
 } from './sessionRestore';
 
 describe('shouldFallbackToDefaultSession', () => {
@@ -75,5 +78,126 @@ describe('shouldVerifyRestoredSession', () => {
   it('自定义默认 key 时同样成立', () => {
     expect(shouldVerifyRestoredSession('desktop:9', 'desktop:my-default')).toBe(true);
     expect(shouldVerifyRestoredSession('desktop:my-default', 'desktop:my-default')).toBe(false);
+  });
+});
+
+/**
+ * 第九轮 CR：「验证失败 / 超时 → 绝不带着未验证的 key 挂载」的状态机。
+ *
+ * 快速路径（sleep 注入成 noop）保证单测不真的等退避。
+ */
+const noSleep = async () => {};
+
+describe('verifyRestoredSession（有界重试后给结论）', () => {
+  it('key 存在 → keep', async () => {
+    const load = vi.fn(async () => ['desktop:1', 'desktop:9']);
+    await expect(verifyRestoredSession('desktop:9', load, { sleep: noSleep })).resolves.toBe(
+      'keep'
+    );
+    expect(load).toHaveBeenCalledTimes(1);
+  });
+
+  it('明确查无此 key → fallback（幽灵）', async () => {
+    const load = vi.fn(async () => ['desktop:1']);
+    await expect(verifyRestoredSession('desktop:9', load, { sleep: noSleep })).resolves.toBe(
+      'fallback'
+    );
+  });
+
+  it('执行失败 → 重试到上限后返回 unverified（不是 fallback、更不是 keep）', async () => {
+    const load = vi.fn(async () => {
+      throw new Error('bridge not ready');
+    });
+    await expect(verifyRestoredSession('desktop:9', load, { sleep: noSleep })).resolves.toBe(
+      'unverified'
+    );
+    expect(load).toHaveBeenCalledTimes(RESTORE_VERIFY_ATTEMPTS);
+  });
+
+  it('先失败后成功 → 立刻采信成功的那次（不把瞬时失败当结论）', async () => {
+    let n = 0;
+    const load = async () => {
+      n += 1;
+      if (n === 1) throw new Error('transient');
+      return ['desktop:9'];
+    };
+    await expect(verifyRestoredSession('desktop:9', load, { sleep: noSleep })).resolves.toBe(
+      'keep'
+    );
+    expect(n).toBe(2);
+  });
+
+  it('重试按 attempts 收敛（可覆盖），且退避被等待', async () => {
+    const sleeps: number[] = [];
+    const sleep = async (ms: number) => {
+      sleeps.push(ms);
+    };
+    const load = vi.fn(async () => {
+      throw new Error('down');
+    });
+    await expect(
+      verifyRestoredSession('desktop:9', load, { attempts: 3, backoffMs: 250, sleep })
+    ).resolves.toBe('unverified');
+    expect(load).toHaveBeenCalledTimes(3);
+    expect(sleeps).toEqual([250, 500]); // 次数-1 次退避
+  });
+
+  it('任何失败都不外抛（调用方不必再包 try/catch）', async () => {
+    const load = async () => {
+      throw new Error('boom');
+    };
+    await expect(
+      verifyRestoredSession('desktop:9', load, { attempts: 1, sleep: noSleep })
+    ).resolves.toBe('unverified');
+  });
+
+  it('默认哨兵 / 空值不校验：一次 IPC 都不发、直接 keep', async () => {
+    const load = vi.fn(async () => []);
+    for (const key of [DEFAULT_SESSION_KEY, null, undefined, '']) {
+      await expect(verifyRestoredSession(key, load, { sleep: noSleep })).resolves.toBe('keep');
+    }
+    expect(load).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * 第九轮的**核心不变量**：没能验证时，绝不放行那个未验证的非默认 key。
+ *
+ * 变异验证：把 `resolveUnverifiedRestoreKey` 的兜底从 `return defaultKey` 改回
+ * 「保持现状」（`return currentKey`）——本组第一个用例立刻变红（返回的正是那个
+ * 未验证的幽灵 key），E2E `-g "1118"` 的 list 失败用例同时变红（ChatConsole 带着
+ * 幽灵 key 挂载 → 记录器抓到幽灵 get）。改回即绿。
+ */
+describe('resolveUnverifiedRestoreKey（没能验证 → 显式回退默认）', () => {
+  it('未验证的非默认 key → 回退默认哨兵（绝不返回它）', () => {
+    const ghost = 'desktop:1789704154596';
+    const next = resolveUnverifiedRestoreKey(ghost, ghost);
+    expect(next).toBe(DEFAULT_SESSION_KEY);
+    expect(next).not.toBe(ghost);
+  });
+
+  it('用户已经切走 → 交棒：保持用户当前的会话，不覆盖他的选择', () => {
+    expect(resolveUnverifiedRestoreKey('desktop:1789704154596', 'desktop:user-picked')).toBe(
+      'desktop:user-picked'
+    );
+  });
+
+  it('当前已经是默认哨兵（如超时前已回退过）→ 仍是默认哨兵', () => {
+    expect(resolveUnverifiedRestoreKey('desktop:1789704154596', DEFAULT_SESSION_KEY)).toBe(
+      DEFAULT_SESSION_KEY
+    );
+  });
+
+  it('恢复出来的本来就是默认哨兵 / 空值 → 不动', () => {
+    expect(resolveUnverifiedRestoreKey(DEFAULT_SESSION_KEY, DEFAULT_SESSION_KEY)).toBe(
+      DEFAULT_SESSION_KEY
+    );
+    expect(resolveUnverifiedRestoreKey(null, DEFAULT_SESSION_KEY)).toBe(DEFAULT_SESSION_KEY);
+  });
+
+  it('自定义默认 key 时同样成立', () => {
+    expect(resolveUnverifiedRestoreKey('desktop:9', 'desktop:9', 'desktop:my-default')).toBe(
+      'desktop:my-default'
+    );
   });
 });

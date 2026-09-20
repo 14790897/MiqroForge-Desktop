@@ -40,8 +40,9 @@ import {
 import { useQraftStatus } from './hooks/useQraftStatus';
 import {
   DEFAULT_SESSION_KEY,
-  shouldFallbackToDefaultSession,
+  resolveUnverifiedRestoreKey,
   shouldVerifyRestoredSession,
+  verifyRestoredSession,
 } from './sessionRestore';
 
 type NavId =
@@ -127,10 +128,26 @@ function SessionRestorePlaceholder() {
 
 /**
  * 恢复校验的兜底时限：桥一直起不来（或反复报错）时不能把启动挂在等待上——
- * 超时即放行，让 ChatConsole 走它自己的 10× 重试 +「正在连接…」路径，与旧行为
- * 一致。桥正常时这条路径不会走到（校验在 running 后立刻完成）。
+ * 超时即放行，让 ChatConsole 走它自己的 10× 重试 +「正在连接…」路径。
+ * 放行前**显式回退到默认哨兵**（#1118 第九轮）：超时意味着恢复出来的 key 从没
+ * 被验证过，而它此刻往往正是一个幽灵（桥连不上，list 自然也答不了）——直接放行
+ * 等于把幽灵 key 交给 get-or-create。桥正常时这条路径不会走到（校验在 running
+ * 后立刻完成）。
  */
 const RESTORE_GATE_MAX_MS = 10_000;
+
+/**
+ * 已知存在的会话 key：`sessions.list()` ∪ `sessions.listArchived()`。
+ * 归档列表也要算「存在」——归档只是收起来，会话并没有消失，不该因为用户归档过
+ * 就把他从上次会话里踢回默认态。
+ */
+async function listKnownSessionKeys(): Promise<string[]> {
+  const [list, archived] = await Promise.all([
+    window.miqi.sessions.list(),
+    window.miqi.sessions.listArchived(),
+  ]);
+  return [...(list?.sessions ?? []), ...(archived?.sessions ?? [])].map((s) => s.key);
+}
 
 function AppShell() {
   const { status } = useRuntime();
@@ -217,9 +234,16 @@ function AppShell() {
   // 存在）。bridge 的 sessions.get 对未知 key 走 get_or_create——不报错、返回空
   // 会话，所以渲染层分不出「已删除」和「空会话」：界面照常显示欢迎页，之后的新建
   // 和发送都落在这个幽灵 key 上（等于用被删会话的身份开新会话）。
-  // 校验只针对**启动时恢复的那一个 key**、只做一次，且仅当 sessions.list 明确
-  // 查无此 key 才回退；用户已经切走（或列表查询失败）就保持现状——宁可不动，
-  // 也不误切用户正在用的会话。判定逻辑见 sessionRestore.ts。
+  // 校验只针对**启动时恢复的那一个 key**、只做一次；用户已经切走就交棒。
+  // 判定逻辑见 sessionRestore.ts。三种结论的处置（#1118 第九轮 CR 定的语义）：
+  //   - 存在     → 用恢复出来的 key 挂载；
+  //   - 不存在   → 回退默认哨兵；
+  //   - 没能验证 → **同样显式回退默认哨兵**（有界重试后仍失败 / 桥超时未就绪）。
+  // 最后一条是第九轮修的缺陷：旧的兜底只清 `restorePending`、保留原 key，于是
+  // ChatConsole 会带着一个**从没验证过**的 key 挂载——get-or-create 的
+  // `sessions.get` 又把它当正常会话摸一遍（切走时还会被空会话 GC 删一次），正是
+  // 下面两阶段启动要掐掉的形状。默认哨兵没有这个风险（它就是要回退到的目标），
+  // 用户的会话在侧边栏仍然可选，所以「回退」是离线/失败路径上唯一安全的放行键。
   //
   // 第八轮（两阶段启动）：校验是**异步**的，而 ChatConsole 在同一次 render 就
   // 挂载、加载 effect 立刻对 sessionKey 调 `sessions.get`（get-or-create）——
@@ -230,47 +254,61 @@ function AppShell() {
   const [restorePending, setRestorePending] = useState(
     () => PRELOAD_OK && shouldVerifyRestoredSession(restoredSessionKeyRef.current)
   );
-  // 兜底：桥迟迟不到 running 时不得把启动挂在等待上，超时即放行（见常量注释）。
+  /**
+   * 「没能验证」时的唯一出口：回退默认哨兵（用户已切走则交棒）后再开门。
+   * 超时和校验失败两条路径共用，保证「放行时用的是哪个 key」只有一处实现。
+   */
+  const openGateUnverified = useCallback((reason: string) => {
+    const restoredKey = restoredSessionKeyRef.current;
+    const currentKey = sessionKeyRef.current;
+    const nextKey = resolveUnverifiedRestoreKey(restoredKey, currentKey);
+    if (nextKey !== currentKey) {
+      console.warn(
+        `[miqi] could not verify restored session ${restoredKey} (${reason}) — ` +
+          `falling back to ${nextKey} instead of mounting an unverified session`
+      );
+      setSessionKey(nextKey);
+    }
+    restoredSessionCheckedRef.current = true; // 「没能验证」也是结论：不再重复校验
+    setRestorePending(false);
+  }, []);
+  // 兜底：桥迟迟不到 running 时不得把启动挂在等待上，超时即**显式回退默认**
+  // 后放行（不是带着未验证的 key 放行，见上）。
   useEffect(() => {
     if (!restorePending) return;
-    const timer = window.setTimeout(() => setRestorePending(false), RESTORE_GATE_MAX_MS);
+    const timer = window.setTimeout(
+      () => openGateUnverified(`bridge not running within ${RESTORE_GATE_MAX_MS}ms`),
+      RESTORE_GATE_MAX_MS
+    );
     return () => window.clearTimeout(timer);
-  }, [restorePending]);
+  }, [restorePending, openGateUnverified]);
   useEffect(() => {
     if (restoredSessionCheckedRef.current) return;
     if (!PRELOAD_OK || status.state !== 'running') return;
     const restoredKey = restoredSessionKeyRef.current;
     restoredSessionCheckedRef.current = true;
-    if (restoredKey === DEFAULT_SESSION_KEY) {
-      setRestorePending(false); // 哨兵不用校验，直接交棒
+    if (!shouldVerifyRestoredSession(restoredKey)) {
+      setRestorePending(false); // 哨兵（或空值）不用校验，直接交棒
       return;
     }
     void (async () => {
-      try {
-        // 归档列表也要算「存在」：归档只是收起来，会话并没有消失，不该因为
-        // 用户归档过就把他从上次会话里踢回默认态。
-        const [list, archived] = await Promise.all([
-          window.miqi.sessions.list(),
-          window.miqi.sessions.listArchived(),
-        ]);
-        const knownKeys = [...(list?.sessions ?? []), ...(archived?.sessions ?? [])].map(
-          (s) => s.key
-        );
-        if (sessionKeyRef.current !== restoredKey) return; // 用户已切走
-        if (shouldFallbackToDefaultSession(restoredKey, knownKeys)) {
+      const verdict = await verifyRestoredSession(restoredKey, listKnownSessionKeys);
+      // 用户已经切走 → 交棒：只校验启动时恢复的那一个 key，不动他现在的选择。
+      if (sessionKeyRef.current === restoredKey) {
+        if (verdict === 'fallback') {
           console.warn(
             `[miqi] restored session ${restoredKey} no longer exists — falling back to ${DEFAULT_SESSION_KEY}`
           );
           setSessionKey(DEFAULT_SESSION_KEY);
+        } else if (verdict === 'unverified') {
+          // 列表拿不到（重试也失败）→ 显式回退默认，绝不带着未验证的 key 放行。
+          openGateUnverified('sessions list unavailable');
+          return; // openGateUnverified 已经开门
         }
-      } catch {
-        /* 列表拿不到（bridge 刚起 / 瞬时错误）→ 保持现状，不误切 */
-      } finally {
-        // 无论结论如何，门都必须开：失败=保持现状放行，与旧行为一致。
-        setRestorePending(false);
       }
+      setRestorePending(false); // 有结论（存在 / 不存在 / 已交棒）→ 开门
     })();
-  }, [status.state]);
+  }, [status.state, openGateUnverified]);
   // 用户已经切走（侧边栏点了别的会话）就立即交棒：校验只针对启动时恢复的那一个
   // key，用户的选择优先。
   const restoringSession = restorePending && sessionKey === restoredSessionKeyRef.current;

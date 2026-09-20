@@ -16,7 +16,7 @@
  * `sessions.get(workspace=…)` 这种形状**确实会落盘**（探针实测写出一条
  * `conversation.jsonl`）——挂载顺序不该依赖后端当前恰好是「空会话临时态」。
  *
- * ## 本文件的两个用例
+ * ## 本文件的三个用例
  * 1. `幽灵 lastSession → 一次都不碰`：reload 之后主进程侧**没有任何**
  *    `sessions:get` / `sessions:delete` 带着幽灵 key；反假绿是「记录器确实收到过
  *    `desktop:default` 的 get」+「lastSession 收敛回哨兵」。
@@ -24,6 +24,12 @@
  *    （用户消息立即落盘 → 会话进 sessions.list），把 lastSession 指向它后 reload。
  *    断言 ChatConsole 加载的就是这个 key、没有被回退到默认哨兵、首个请求就是它。
  *    这条守的是两阶段启动**不是**变成「过度回退」——校验失败/判定错都会在这里红。
+ * 3. `校验执行失败（list 抛错）→ 显式回退默认`（第九轮新增）：让
+ *    `sessions:list` / `sessions:list_archived` 在主进程侧**抛错**（不是返回空
+ *    列表——那是「明确查无此 key」，走的是另一条分支），reload 后断言 lastSession
+ *    收敛回哨兵、默认会话被加载过、且幽灵 key 一次都没被请求。守的是第九轮 CR
+ *    那条：**验证拿不到结论时不得用未验证的非默认 key 挂载**。变异验证见用例内
+ *    注释（把兜底改回「保留未验证 key」→ 必须红）。
  *
  * ## 观测手段
  * contextBridge 会把 `window.miqi.*` 冻结（见 repro-570-silent-send.spec.ts 的
@@ -59,6 +65,8 @@ import { startMockServer } from './helpers/mock-server';
 
 const SESSIONS_GET = 'sessions:get';
 const SESSIONS_DELETE = 'sessions:delete';
+const SESSIONS_LIST = 'sessions:list';
+const SESSIONS_LIST_ARCHIVED = 'sessions:list_archived';
 const DEFAULT_SESSION = 'desktop:default';
 
 interface RecordedCall {
@@ -111,6 +119,28 @@ async function recordedCalls(app: ElectronApplication): Promise<RecordedCall[]> 
   return (await app.evaluate(() => (globalThis as any).__miqiSessionCalls ?? [])) as RecordedCall[];
 }
 
+/** 让 `sessions.list` / `sessions.listArchived` 在**执行层抛错**。
+ *
+ *  与「返回空列表」是两条不同分支：空列表 = 明确查无此 key（`fallback`），抛错 =
+ *  **拿不到结论**（`unverified`）。第九轮 CR 指的就是后者：旧兜底把「没结论」当
+ *  「保持现状」，于是门一开，ChatConsole 就带着一个从没验证过的 key 挂载了。
+ *  Sidebar 自己的 `sessions.list()` 已经有 try/catch（Bridge not available），
+ *  所以这里不会顺带把整个 UI 打挂——只是列表空着。 */
+async function installListFailure(app: ElectronApplication): Promise<void> {
+  await app.evaluate(
+    async ({ ipcMain: ipc }, channels: { list: string; archived: string }) => {
+      const boom = () => {
+        throw new Error('e2e: sessions list unavailable');
+      };
+      for (const channel of [channels.list, channels.archived]) {
+        ipc.removeHandler(channel);
+        ipc.handle(channel, async () => boom());
+      }
+    },
+    { list: SESSIONS_LIST, archived: SESSIONS_LIST_ARCHIVED }
+  );
+}
+
 /** 把所有 provider 指向 mock（同 issue-1118-cross-session-replay.spec.ts）。 */
 function patchProvidersToMock(config: any, mockUrl: string): void {
   const providers = config.providers ?? {};
@@ -133,15 +163,19 @@ function patchProvidersToMock(config: any, mockUrl: string): void {
 test.describe('#1118 启动恢复竞态', () => {
   let electronApp: ElectronApplication;
   let page: Page;
+  // 第九轮：必须把临时 MIQI_HOME 留给 afterAll，否则 closeElectronApp 拿不到它，
+  // 每跑一次就在 tmpdir 里留一个 `miqi-e2e-*`（连同其中的 Chromium profile）。
+  let miqiHome: string;
 
   test.afterAll(async () => {
-    await closeElectronApp(electronApp).catch(() => {});
+    await closeElectronApp(electronApp, miqiHome).catch(() => {});
   });
 
   test('ghost lastSession is never loaded/deleted by ChatConsole before App validation', async () => {
     const fixture = await launchElectronApp();
     electronApp = fixture.electronApp;
     page = fixture.page;
+    miqiHome = fixture.miqiHome;
     await waitForBridgeInitialized(page);
 
     // ── 前置：本轮 run 的 lastSession 必须是初始哨兵（profile 隔离自证）──
@@ -191,6 +225,73 @@ test.describe('#1118 启动恢复竞态', () => {
       `幽灵 key ${ghostKey} 不应被 ChatConsole 加载或删除（实际抓到 ${JSON.stringify(ghostCalls)}）`
     ).toEqual([]);
     // 附带断言：首次请求就该是回退后的 key，而不是「先幽灵后默认」
+    expect(calls[0]?.sessionKey).toBe(DEFAULT_SESSION);
+  });
+});
+
+test.describe('#1118 校验执行失败时显式回退', () => {
+  let electronApp: ElectronApplication;
+  let page: Page;
+  let miqiHome: string;
+
+  test.afterAll(async () => {
+    await closeElectronApp(electronApp, miqiHome).catch(() => {});
+  });
+
+  test('sessions.list throws → fall back to default, never mount an unverified key', async () => {
+    const fixture = await launchElectronApp();
+    electronApp = fixture.electronApp;
+    page = fixture.page;
+    miqiHome = fixture.miqiHome;
+    await waitForBridgeInitialized(page);
+
+    // ── 前置：本轮 run 的 lastSession 必须是初始哨兵（profile 隔离自证）──
+    const initial = await page.evaluate(() => localStorage.getItem('miqi:lastSession'));
+    expect(initial, '本轮 run 的 Chromium profile 应是从未写过 lastSession 的新 profile').toBe(
+      DEFAULT_SESSION
+    );
+
+    await installSessionRecorder(electronApp);
+    await installListFailure(electronApp); // 校验拿不到结论（不是「查无此 key」）
+
+    const ghostKey = `desktop:${Date.now()}`;
+    await page.evaluate((k) => localStorage.setItem('miqi:lastSession', k), ghostKey);
+    await page.reload();
+    await page.waitForLoadState('domcontentloaded');
+
+    // ── 断言 1（主）：显式回退落地 ──
+    // 旧兜底（只清 restorePending、保留原 key）在这里就红了：lastSession 会一直
+    // 停在 ghostKey 上，ChatConsole 随即带着它挂载。
+    await expect
+      .poll(() => page.evaluate(() => localStorage.getItem('miqi:lastSession')), {
+        timeout: 30_000,
+        message: '校验执行失败时必须显式回退到默认哨兵（保留未验证的 key 正是第九轮修的缺陷）',
+      })
+      .toBe(DEFAULT_SESSION);
+
+    // ── 断言 2（反假绿）：默认会话确实被 ChatConsole 加载过 ──
+    await expect
+      .poll(
+        async () =>
+          (await recordedCalls(electronApp)).some((c) => c.sessionKey === DEFAULT_SESSION),
+        {
+          timeout: 30_000,
+          message:
+            'ChatConsole 应加载回退后的默认会话（记录器自证：否则「没有幽灵 key」只是没发生任何事）',
+        }
+      )
+      .toBe(true);
+
+    // ── 断言 3：幽灵 key 一次都没被请求（未验证的 key 绝不放行）──
+    const calls = await recordedCalls(electronApp);
+    console.log(
+      `[e2e] list 抛错后主进程记录到的会话请求：${JSON.stringify(calls)}（幽灵 key=${ghostKey}）`
+    );
+    const ghostCalls = calls.filter((c) => c.sessionKey === ghostKey);
+    expect(
+      ghostCalls,
+      `幽灵 key ${ghostKey} 在未能验证时不应被 ChatConsole 加载或删除（实际抓到 ${JSON.stringify(ghostCalls)}）`
+    ).toEqual([]);
     expect(calls[0]?.sessionKey).toBe(DEFAULT_SESSION);
   });
 });
