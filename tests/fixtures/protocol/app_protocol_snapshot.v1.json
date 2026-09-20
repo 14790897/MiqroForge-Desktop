@@ -4027,6 +4027,58 @@
         "description": null,
         "emits": [],
         "eventSchemas": {},
+        "method": "sessions.truncate",
+        "paramsSchema": {
+          "additionalProperties": true,
+          "description": "sessions.truncate — drop the last N user turns from a session (#1020).\n\n``drop_last_turns`` is a positive integer; the wire name ``dropLastTurns``\nis also accepted (populate_by_name).",
+          "properties": {
+            "dropLastTurns": {
+              "type": "integer"
+            },
+            "sessionKey": {
+              "default": "",
+              "type": "string"
+            },
+            "workspace": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            }
+          },
+          "required": [
+            "dropLastTurns"
+          ],
+          "type": "object"
+        },
+        "resultSchema": {
+          "additionalProperties": false,
+          "description": "sessions.truncate — truncation confirmation (#1020).",
+          "properties": {
+            "removed_messages": {
+              "default": 0,
+              "type": "integer"
+            },
+            "truncated": {
+              "default": true,
+              "type": "boolean"
+            }
+          },
+          "type": "object"
+        },
+        "scope": "session",
+        "stability": "stable"
+      },
+      {
+        "deprecatedBy": null,
+        "description": null,
+        "emits": [],
+        "eventSchemas": {},
         "method": "sessions.unarchive",
         "paramsSchema": {
           "additionalProperties": true,
@@ -5619,13 +5671,13 @@
   "catalogVersion": 1,
   "generatedTypes": {
     "outputPath": "apps/desktop/src/shared/app-protocol.ts",
-    "sha256": "b6d0d8780463370d4ed07b5638b72acdd18b6f856d86dc3598c7034457a4a25e",
+    "sha256": "20f277fb51a6051750be49ca9233585211ef3044bb247af2d71402eabbe0f1bc",
     "source": "miqi.runtime.export_app_protocol_ts.render_typescript_contract"
   },
   "methodCounts": {
     "legacy": 81,
-    "total": 165,
-    "typed": 84
+    "total": 166,
+    "typed": 85
   },
   "schemaVersion": 1
 }

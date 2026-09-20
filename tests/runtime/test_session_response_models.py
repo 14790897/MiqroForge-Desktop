@@ -7,7 +7,7 @@ from miqi.runtime.session_response_models import SESSION_METHOD_RESULT_MODELS
 
 
 class TestAllMethodsExist:
-    def test_all_10_methods_in_result_map(self):
+    def test_all_11_methods_in_result_map(self):
         expected = {
             "sessions.list",
             "sessions.get",
@@ -19,6 +19,7 @@ class TestAllMethodsExist:
             "sessions.clear_tracked_files",
             "sessions.claim_legacy",
             "sessions.rename",
+            "sessions.truncate",
         }
         assert set(SESSION_METHOD_RESULT_MODELS) == expected
 
