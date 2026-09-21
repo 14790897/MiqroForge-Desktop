@@ -100,6 +100,13 @@ const PHASE_INDEX: Record<string, number> = {
 /** Persisted phases that mean "waiting for a reboot to continue". */
 const RESUMABLE_PHASES = ['features_enabled', 'kernel_installed', 'platform_repair_pending'];
 
+/**
+ * Auto-resume is for the reboot hand-off, which takes minutes — not for
+ * resurrecting a months-old leftover: an install that was abandoned a day ago
+ * should not silently start an elevated repair the next time the page opens.
+ */
+const RESUME_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+
 export default function WslStatusPage() {
   const [stats, setStats] = useState<WslStatsResult | null>(null);
   const [fetching, setFetching] = useState(false);
@@ -255,6 +262,7 @@ export default function WslStatusPage() {
     (async () => {
       const r = await window.miqi.wsl.check();
       if (!r?.pendingInstall || !RESUMABLE_PHASES.includes(r.pendingInstall.phase)) return;
+      if (Date.now() - r.pendingInstall.at > RESUME_MAX_AGE_MS) return;
       if ((r.distros?.length ?? 0) > 0) return;
       await handleInstall({ resuming: true });
     })().catch(() => {

@@ -71,6 +71,7 @@ import { readConsentVersion, writeConsentVersion } from '../privacy-consent';
 import {
   buildPlatformRepairScript,
   classifyKernelInstall,
+  classifyPlatformRepair,
   classifyWslFeatureState,
   decodeWslOutput,
   findPlatformProblem,
@@ -1256,37 +1257,18 @@ for m in ("pydantic", "httpx", "loguru"):
         // transaction and `vmcompute` came up) — then no reboot is needed and
         // the flow continues with the distro install.
         check = runWslCheckInternal();
-        if (!check.platformIssue) {
+        const outcome = classifyPlatformRepair({
+          repair,
+          platformIssueAfter: check.platformIssue ?? null,
+          staleAfter: readStaleOobeState(),
+        });
+
+        if (outcome.status === 'continue') {
           safeSend(IPC_EVENTS.WSL_INSTALL_PROGRESS, {
             phase: 'enabling_features',
             message: '系统组件已安装完成，继续安装发行版...',
           } satisfies WslInstallProgress);
-        } else {
-          // Still unusable: either the clear worked and the queued feature needs
-          // a boot to land, or the repair did not take — say which one it is.
-          const staleAfter = readStaleOobeState();
-          if (repair.kind !== 'ok' || !staleAfter.ok || staleAfter.stale) {
-            const detail =
-              repair.kind !== 'ok'
-                ? summarizeElevated(repair)
-                : staleAfter.stale
-                  ? '修复后仍检测到被推迟的更新'
-                  : '修复后无法确认标记已清除';
-            safeSend(IPC_EVENTS.WSL_INSTALL_PROGRESS, {
-              phase: 'error',
-              message: `WSL2 平台修复失败: ${detail}`,
-              error: detail,
-            } satisfies WslInstallProgress);
-            return {
-              success: false,
-              phase: 'error',
-              errorCode: 'PLATFORM_REPAIR_FAILED',
-              error: `WSL2 平台修复失败: ${detail}`,
-              nextStep:
-                '请以管理员身份运行: DISM /Online /Enable-Feature /FeatureName:VirtualMachinePlatform /All，然后重启；仍不行请在「设置 → Windows 更新」安装全部更新后重试',
-            } satisfies WslInstallAndProvisionResult;
-          }
-
+        } else if (outcome.status === 'reboot-required') {
           writeWslInstallState('platform_repair_pending');
 
           safeSend(IPC_EVENTS.WSL_INSTALL_PROGRESS, {
@@ -1301,6 +1283,22 @@ for m in ("pydantic", "httpx", "loguru"):
             rebootRequired: true,
             nextStep:
               '请重启系统（关机后再开机更稳妥）；重启后进入「WSL 状态监控」，安装会自动继续',
+          } satisfies WslInstallAndProvisionResult;
+        } else {
+          // Nothing verifiable happened and the platform is still unusable:
+          // stop here rather than install a distro that cannot register.
+          safeSend(IPC_EVENTS.WSL_INSTALL_PROGRESS, {
+            phase: 'error',
+            message: `WSL2 平台修复失败: ${outcome.detail}`,
+            error: outcome.detail,
+          } satisfies WslInstallProgress);
+          return {
+            success: false,
+            phase: 'error',
+            errorCode: 'PLATFORM_REPAIR_FAILED',
+            error: `WSL2 平台修复失败: ${outcome.detail}`,
+            nextStep:
+              '请以管理员身份运行: DISM /Online /Enable-Feature /FeatureName:VirtualMachinePlatform /All，然后重启；仍不行请在「设置 → Windows 更新」安装全部更新后重试',
           } satisfies WslInstallAndProvisionResult;
         }
       }

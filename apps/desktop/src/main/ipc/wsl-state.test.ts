@@ -6,11 +6,13 @@
 import { describe, expect, it } from 'vitest';
 import {
   buildPlatformRepairScript,
+  classifyPlatformRepair,
   decodeWslOutput,
   findPlatformProblem,
   parseStaleOobeFlags,
   STALE_OOBE_VALUES,
 } from './wsl-state';
+import type { ElevatedRunResult } from './wsl-state';
 
 // `wsl --status` on a Chinese Windows whose virtualization platform never
 // landed.  Only the "WSL2 无法启动" line may be reported as the problem.
@@ -41,6 +43,17 @@ describe('findPlatformProblem', () => {
     );
     expect(findPlatformProblem(EN_BROKEN_STATUS)).toBe(
       'WSL2 cannot start because virtualization is not enabled.'
+    );
+  });
+
+  it('matches other phrasings of the same failure', () => {
+    // The symptom is matched as a family, so a wording change still lands as
+    // long as the line carries both the subject and one of the phrasings.
+    expect(findPlatformProblem('Virtualization is not enabled, so WSL2 fails to start.')).toBe(
+      'Virtualization is not enabled, so WSL2 fails to start.'
+    );
+    expect(findPlatformProblem('WSL2 无法启动：当前系统未启用虚拟化支持')).toBe(
+      'WSL2 无法启动：当前系统未启用虚拟化支持'
     );
   });
 
@@ -123,5 +136,68 @@ describe('decodeWslOutput', () => {
   it('handles empty input', () => {
     expect(decodeWslOutput(null)).toBe('');
     expect(decodeWslOutput(Buffer.alloc(0))).toBe('');
+  });
+});
+
+describe('classifyPlatformRepair', () => {
+  const STILL_BROKEN = 'WSL2 无法启动，因为此计算机上未启用虚拟化。';
+  const repairOk: ElevatedRunResult = { kind: 'ok', exitCode: 0, output: '' };
+  const repairFailed: ElevatedRunResult = {
+    kind: 'failed',
+    exitCode: 1,
+    output: 'DISM 失败：拒绝访问',
+  };
+
+  it('continues the install once the platform recovered, whatever the run reported', () => {
+    // Exactly what the #1171 machine did: the payload landed while the markers
+    // were being rewritten, so both the exit code and the markers mislead.
+    expect(
+      classifyPlatformRepair({
+        repair: repairFailed,
+        platformIssueAfter: null,
+        staleAfter: { ok: false, stale: true },
+      })
+    ).toEqual({ status: 'continue' });
+  });
+
+  it('does not let a failed repair reach the distro install', () => {
+    const outcome = classifyPlatformRepair({
+      repair: repairFailed,
+      platformIssueAfter: STILL_BROKEN,
+      staleAfter: { ok: true, stale: false },
+    });
+
+    expect(outcome.status).toBe('failed');
+    expect(outcome).toMatchObject({ detail: expect.stringContaining('DISM 失败') });
+  });
+
+  it('fails when the post-repair marker state cannot be read', () => {
+    expect(
+      classifyPlatformRepair({
+        repair: repairOk,
+        platformIssueAfter: STILL_BROKEN,
+        staleAfter: { ok: false, stale: false },
+      })
+    ).toEqual({ status: 'failed', detail: '修复后无法确认标记已清除' });
+  });
+
+  it('fails while the markers are still set', () => {
+    expect(
+      classifyPlatformRepair({
+        repair: repairOk,
+        platformIssueAfter: STILL_BROKEN,
+        staleAfter: { ok: true, stale: true },
+      })
+    ).toEqual({ status: 'failed', detail: '修复后仍检测到被推迟的更新' });
+  });
+
+  it('asks for the reboot that applies the queued features', () => {
+    expect(
+      classifyPlatformRepair({
+        repair: repairOk,
+        platformIssueAfter: STILL_BROKEN,
+        staleAfter: { ok: true, stale: false },
+      })
+    ).toEqual({ status: 'reboot-required' });
   });
 });

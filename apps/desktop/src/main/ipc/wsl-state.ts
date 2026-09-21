@@ -212,6 +212,7 @@ export function summarizeElevated(r: ElevatedRunResult, maxLen = 300): string {
  * code and output.  Blocks until the elevated process exits.
  */
 interface ElevatorPaths {
+  /** Temp directory holding the trampoline's result files. */
   dir: string;
   outPath: string;
   errPath: string;
@@ -246,6 +247,7 @@ function prepareElevator(payload: ElevatedPayload): { paths: ElevatorPaths; tram
   return { paths, trampoline };
 }
 
+/** Drop an elevator's temp directory; failures here must never mask a result. */
 function removeElevatorDir(dir: string | null): void {
   if (!dir) return;
   try {
@@ -254,7 +256,6 @@ function removeElevatorDir(dir: string | null): void {
     /* best-effort */
   }
 }
-
 /** Build the result of an elevated run from its trampoline files. */
 function collectElevatedResult(
   paths: ElevatorPaths,
@@ -624,4 +625,41 @@ export function findPlatformProblem(statusText: string): string | null {
     if (VIRTUALIZATION_SUBJECT.test(line) && PLATFORM_PROBLEM_SYMPTOM.test(line)) return line;
   }
   return null;
+}
+
+export type PlatformRepairOutcome =
+  /** Platform is usable again — install the distro in the same click. */
+  | { status: 'continue' }
+  /** Features were submitted and a boot is what applies them. */
+  | { status: 'reboot-required' }
+  /** Nothing verifiable happened: do not pretend a reboot will help. */
+  | { status: 'failed'; detail: string };
+
+/**
+ * Decide what the installer does after the elevated platform repair.
+ *
+ * The machine's state decides, not the script's exit code: on the #1171 machine
+ * DISM applied the queued payload outright (vmcompute came up, pending.xml was
+ * consumed) while the markers were rewritten mid-run, so judging by the exit
+ * code or the markers alone would have reported a failure that had not
+ * happened — and asking for a reboot that was not needed.
+ *
+ * A failed or unreadable run still wins whenever the platform did *not*
+ * recover: then nothing may fall through to the distro install.
+ */
+export function classifyPlatformRepair(opts: {
+  /** Result of the elevated repair run. */
+  repair: ElevatedRunResult;
+  /** `wsl --status` still reports a platform problem, or null when it does not. */
+  platformIssueAfter: string | null;
+  /** Stale-marker state read after the repair; `ok: false` means unreadable. */
+  staleAfter: { ok: boolean; stale: boolean };
+}): PlatformRepairOutcome {
+  if (!opts.platformIssueAfter) return { status: 'continue' };
+  if (opts.repair.kind !== 'ok') {
+    return { status: 'failed', detail: summarizeElevated(opts.repair) };
+  }
+  if (!opts.staleAfter.ok) return { status: 'failed', detail: '修复后无法确认标记已清除' };
+  if (opts.staleAfter.stale) return { status: 'failed', detail: '修复后仍检测到被推迟的更新' };
+  return { status: 'reboot-required' };
 }
