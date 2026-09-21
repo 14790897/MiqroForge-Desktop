@@ -63,6 +63,25 @@ def _strip_leak_notice(text: str) -> str:
     return text.replace(LEAK_NOTICE, "").strip() if LEAK_NOTICE in text else text
 
 
+def _build_step_tracker(arguments: Any) -> Any:
+    """从 `ask_user_plan_confirm` 的参数里取 steps，建步骤进度跟踪器（#1078）。"""
+    from miqi.plan.step_progress import StepProgressTracker
+
+    try:
+        args = arguments if isinstance(arguments, dict) else json.loads(arguments or "{}")
+    except (TypeError, ValueError):
+        logger.warning("turn_runner: ask_user_plan_confirm 参数无法解析，步骤进度不可用")
+        return None
+    raw_steps = args.get("steps") or []
+    if not raw_steps:
+        return None
+    try:
+        return StepProgressTracker(raw_steps)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("turn_runner: 建立步骤进度跟踪器失败: {}", exc)
+        return None
+
+
 @dataclass
 class TurnResult:
     """Result of a completed turn."""
@@ -328,6 +347,11 @@ class TurnRunner:
         # Accumulate reasoning across all tool-call cycles within the turn so
         # the frontend can show a single merged ThinkBlock. #539
         turn_level_reasoning_parts: list[str] = []
+
+        # ── #1078 计划步骤进度 ──────────────────────────────────────────
+        # 计划卡确认后，按 steps[].tools 把本轮后续的工具事件归到步骤上，
+        # 随工具事件推给前端（PlanCard 读 step_status 渲染勾选与「执行中 N/M」）。
+        _step_tracker: Any = None
 
         # ── #680 desktop FAST budget (方案 1 + 4, desktop-fast-budget-design.md) ──
         # Time fuse: enter finalization at (budget - grace), hard stop at
@@ -932,6 +956,10 @@ class TurnRunner:
                 response.tool_calls = _kept
 
             for tc in response.tool_calls:
+                # #1078：计划卡调用出现后，用它携带的 steps 建立步骤进度跟踪，
+                # 本回合后续的工具事件都按 steps[].tools 归到对应步骤上。
+                if tc.name == "ask_user_plan_confirm" and _step_tracker is None:
+                    _step_tracker = _build_step_tracker(tc.arguments)
                 await self._events.emit(ToolCallBeginEvent(
                     turn_id=turn.turn_id,
                     tool_call_id=tc.id,
@@ -939,6 +967,8 @@ class TurnRunner:
                     tool_display=self._format_tool_hint(tc.name, tc.arguments),
                     arguments=tc.arguments,
                 ))
+                if _step_tracker is not None and _step_tracker.on_tool_begin(tc.name) is not None:
+                    await self._emit_plan_step_status(turn, _step_tracker)
                 # v3.3 Step 5：ToolEvent → TodoState（observed 单源——模型没调
                 # todo_write 时 harness 写兜底进度；Timeline 只读 TodoState）
                 _run_ctx = getattr(turn, "_run_ctx", None)
@@ -1029,6 +1059,10 @@ class TurnRunner:
                     output_size=len(result_text),
                     duration_ms=getattr(ctx, "duration_ms", 0),
                 ))
+                if _step_tracker is not None and _step_tracker.on_tool_end(
+                    tc.name, ctx.status == OrchestrationResult.SUCCESS
+                ) is not None:
+                    await self._emit_plan_step_status(turn, _step_tracker)
                 # v3.3 Step 5（续）：observed 条目完成/失败状态
                 _run_ctx = getattr(turn, "_run_ctx", None)
                 if _run_ctx is not None and tc.name != "todo_write":
@@ -1380,6 +1414,32 @@ class TurnRunner:
                     {"id": it.id, "title": it.content, "status": it.status}
                     for it in ts.items
                 ],
+            })
+        except Exception:  # pragma: no cover - 事件推送失败不阻断执行
+            pass
+
+    async def _emit_plan_step_status(self, turn: Any, tracker: Any) -> None:
+        """#1078：计划步骤进度推前端（display=plan_step_status）。
+
+        与 `_emit_todo_state` 走同一个用户输入通道；前端按 `display` 分支把
+        状态并进对应的计划卡（键=步骤名），不新建卡片。
+        """
+        from miqi.agent.user_input_resolver import (
+            session_for_thread,
+            user_input_emitter_for,
+        )
+
+        thread_id = str(getattr(turn, "thread_id", "") or "")
+        session_key = session_for_thread(thread_id) or thread_id
+        emitter = user_input_emitter_for(session_key)
+        if emitter is None:
+            return
+        try:
+            await emitter({
+                "display": "plan_step_status",
+                "turn_id": turn.turn_id,
+                "step_status": tracker.step_status(),
+                "steps_status": tracker.steps_status(),
             })
         except Exception:  # pragma: no cover - 事件推送失败不阻断执行
             pass
