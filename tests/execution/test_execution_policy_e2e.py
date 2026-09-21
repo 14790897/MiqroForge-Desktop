@@ -222,3 +222,63 @@ class TestApprovalModeCoexistence:
         decision = asyncio.run(engine.check(ctx))
         assert decision.verdict == PermissionVerdict.ALLOW, \
             "Bypass must win over force — it's checked first"
+
+
+class TestFullPipelineAutoHighRisk:
+    """#1102: auto 模式（bypass_approval=True）不得短路 Action Guard。
+
+    check() 顺序：deny_patterns → INTERACTIVE_CONFIRM_TOOLS → _action_guard
+    → bypass_approval → force_approval。guard 在 force_approval 置位时整体跳过
+    （manual 里每个动作本来就要确认，不叠加专用卡；bypass 仍先于 force）。
+    auto 只免掉普通动作的分类审批；高危动作（risk>=10，真实注册工具里目前只有
+    spawn）仍走确认兜底。
+    """
+
+    @staticmethod
+    def _ctx(tool, args, **flags):
+        return ToolExecutionContext(
+            tool_name=tool,
+            tool_call_id="call-1",
+            arguments=args,
+            turn_id="t1",
+            thread_id="th1",
+            agent_type="main",
+            **flags,
+        )
+
+    def test_auto_high_risk_requires_approval_headless(self):
+        """auto + 高危动作 → headless 无弹卡通道时 REQUIRED，不静默放行。"""
+        engine = PermissionEngine()
+        decision = asyncio.run(
+            engine.check(self._ctx("spawn", {"task": "x"}, bypass_approval=True))
+        )
+        assert decision.verdict == PermissionVerdict.APPROVAL_REQUIRED, \
+            f"auto must not bypass the Action Guard, got {decision.verdict}"
+        assert "Action Guard" in (decision.reason or "")
+
+    def test_auto_high_risk_denied_when_user_cancels(self):
+        """auto + 高危动作 + 用户拒绝 → DENY（真实动作绝不执行）。"""
+
+        async def resolver(payload):
+            assert payload["tool_name"] == "spawn"
+            return {"status": "submitted", "answers": {"choice_id": "cancel"}}
+
+        engine = PermissionEngine(action_guard_resolver=resolver)
+        decision = asyncio.run(
+            engine.check(self._ctx("spawn", {"task": "x"}, bypass_approval=True))
+        )
+        assert decision.verdict == PermissionVerdict.DENY
+
+    def test_auto_normal_actions_stay_unattended(self):
+        """auto + 普通动作 → 仍免打扰（别把 auto 修成 manual）。"""
+        engine = PermissionEngine()
+        for tool, args in (
+            ("read_file", {"path": "a.txt"}),
+            ("write_file", {"path": "a.txt"}),
+            ("exec", {"command": "rm -rf /tmp/build"}),
+            ("web_fetch", {"url": "https://example.com"}),
+        ):
+            decision = asyncio.run(
+                engine.check(self._ctx(tool, args, bypass_approval=True))
+            )
+            assert decision.verdict == PermissionVerdict.ALLOW, tool

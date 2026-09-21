@@ -445,10 +445,12 @@ class BridgeRuntimeLoop:
             choice_id = params.get("choice_id", "")
             choice_label = params.get("choice_label", "")
             remember = bool(params.get("remember", False))
+            # Hermes 式：always 跨会话持久
+            remember_mode = str(params.get("remember_mode") or "session")
             answers = {}
             if choice_id:
                 answers = {"choice_id": choice_id, "choice_label": choice_label}
-            resolved = resolve_user_input(input_id, answers, remember=remember)
+            resolved = resolve_user_input(input_id, answers, remember=remember, remember_mode=remember_mode)
             return {"result": {"resolved": resolved}}
 
         self._app_server.register_method("userInput.resolve", _user_input_resolve_handler)
@@ -473,6 +475,7 @@ class BridgeRuntimeLoop:
             sessions_list_handler,
             sessions_list_recent_workspaces_handler,
             sessions_rename_handler,
+            sessions_truncate_handler,
             sessions_unarchive_handler,
             sessions_workspace_handler,
         )
@@ -490,6 +493,7 @@ class BridgeRuntimeLoop:
         # 不对外暴露协议面（无 TS 导出、无 request/response model）。
         self._app_server.register_method("sessions.workspace", sessions_workspace_handler)
         self._app_server.register_method("sessions.rename", sessions_rename_handler, spec=protocol_specs.SESSIONS_RENAME)
+        self._app_server.register_method("sessions.truncate", sessions_truncate_handler, spec=protocol_specs.SESSIONS_TRUNCATE)
 
         # Register Phase 30: files.* handlers (client-scoped ownership)
         from miqi.runtime.file_handlers import (
@@ -1096,6 +1100,9 @@ class BridgeRuntimeLoop:
             # #680: pass the reasoning mode into the turn executor so the
             # desktop chain can apply the generation budget/prompts.
             reasoning_mode=mode_param if mode_param in ("fast", "think") else None,
+            # #1146: edit/regenerate/retry pass the turn boundary to truncate
+            # the model context to before the edited turn.
+            drop_from_turn_id=params.get("drop_from_turn_id"),
         ))
 
         # Subscribe client to session events so emit_event delivers to the sink.

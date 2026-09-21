@@ -13,6 +13,8 @@ import {
   Trash2,
   FolderOpen,
   Pencil,
+  Search,
+  ArrowLeft,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import { MiQroForgeLogo } from './MiQroForgeLogo';
@@ -21,10 +23,15 @@ import { InputDialog } from './shared/InputDialog';
 import { useSessionStatus, type SessionStatus } from '../hooks/useSessionStatus';
 import type { SessionInfo } from '../../shared/ipc';
 
-type FilterTab = 'ALL' | 'IN-PROGRESS' | 'REVIEW' | 'COMPLETED';
+type FilterTab = 'ALL' | 'PENDING' | 'IN-PROGRESS' | 'REVIEW' | 'COMPLETED';
 
 const MIN_WIDTH = 180;
 const MAX_WIDTH = 480;
+
+/** 底部展示的版本串。dev 模式(#1055)会带 commit hash，可能长到 30+ 字符。 */
+const APP_VERSION_LABEL = `PRO v${
+  typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : 'dev'
+}`;
 
 import { usePanelResize } from '../hooks/usePanelResize';
 
@@ -34,6 +41,9 @@ interface SidebarProps {
   currentSession?: string;
   onSessionSelect?: (key: string) => void;
   onNavChange?: (id: string) => void;
+  /** 当前的顶层导航（App 的 activeNav）。离开 chat 时底部要让出「返回任务」，
+   *  否则用户只能靠点某个会话回到聊天——会话列表为空时完全回不去。 */
+  currentNav?: string;
   refreshKey?: number;
   onNewSession?: () => void;
   /** Called after a successful rename so the parent can refresh the active
@@ -45,14 +55,7 @@ interface SidebarProps {
   onSessionDeleted?: (key: string) => void;
 }
 
-const STATUS_ICONS: Record<SessionStatus, LucideIcon> = {
-  'IN-PROGRESS': Play,
-  PENDING: Clock,
-  REVIEW: Eye,
-  COMPLETED: CheckCircle2,
-  CC: Eye,
-};
-
+/** 卡片上的工作目录：home 缩成 ~，过长时保留尾部。 */
 function formatWorkspace(workspace?: string): string | null {
   if (!workspace) return null;
   const home = (typeof process !== 'undefined' ? process.env?.HOME : null) ?? '';
@@ -66,10 +69,19 @@ function formatWorkspace(workspace?: string): string | null {
   return display;
 }
 
+const STATUS_ICONS: Record<SessionStatus, LucideIcon> = {
+  'IN-PROGRESS': Play,
+  PENDING: Clock,
+  REVIEW: Eye,
+  COMPLETED: CheckCircle2,
+  CC: Eye,
+};
+
 export function Sidebar({
   currentSession,
   onSessionSelect,
   onNavChange,
+  currentNav = 'chat',
   refreshKey,
   onNewSession,
   onRenamed,
@@ -78,6 +90,8 @@ export function Sidebar({
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
   const [initialLoading, setInitialLoading] = useState(true);
   const [filter, setFilter] = useState<FilterTab>('ALL');
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [query, setQuery] = useState('');
   const [renameTarget, setRenameTarget] = useState<SessionInfo | null>(null);
   const {
     width: sidebarWidth,
@@ -98,10 +112,10 @@ export function Sidebar({
   const sentinelRef = useRef<HTMLDivElement>(null);
   const listContainerRef = useRef<HTMLDivElement>(null);
 
-  // Reset display count when sessions list or filter changes
+  // Reset display count when sessions list, filter or search changes
   useEffect(() => {
     setDisplayCount(PER_PAGE);
-  }, [sessions, filter]);
+  }, [sessions, filter, query]);
 
   const loadSessions = useCallback(async () => {
     try {
@@ -147,6 +161,7 @@ export function Sidebar({
 
   const FILTER_TABS: Array<{ value: FilterTab; label: string }> = [
     { value: 'ALL', label: '全部' },
+    { value: 'PENDING', label: '待处理' },
     { value: 'IN-PROGRESS', label: '进行中' },
     { value: 'REVIEW', label: '待审阅' },
     { value: 'COMPLETED', label: '已完成' },
@@ -154,18 +169,33 @@ export function Sidebar({
 
   // Single-pass: count per filter + compute filtered list (Copilot optimization)
   const { filterCounts, filteredSessions } = useMemo(() => {
-    const counts: Record<FilterTab, number> = { ALL: 0, 'IN-PROGRESS': 0, REVIEW: 0, COMPLETED: 0 };
+    const counts: Record<FilterTab, number> = {
+      ALL: 0,
+      PENDING: 0,
+      'IN-PROGRESS': 0,
+      REVIEW: 0,
+      COMPLETED: 0,
+    };
     const filtered: SessionInfo[] = [];
+    // 搜索只影响列表，不影响各状态计数——计数表示的是「该状态总共有多少」。
+    const q = query.trim().toLowerCase();
     for (const s of sessions) {
       counts.ALL++;
       const status = getStatus(s.key);
-      if (status === 'IN-PROGRESS') counts['IN-PROGRESS']++;
+      // PENDING 是默认态，旧实现不统计它，导致这些会话只能从「全部」里翻。
+      if (status === 'PENDING') counts.PENDING++;
+      else if (status === 'IN-PROGRESS') counts['IN-PROGRESS']++;
       else if (status === 'REVIEW') counts.REVIEW++;
       else if (status === 'COMPLETED') counts.COMPLETED++;
-      if (filter === 'ALL' || status === filter) filtered.push(s);
+      if (filter !== 'ALL' && status !== filter) continue;
+      if (q) {
+        const haystack = `${s.title ?? ''}\n${s.workspace ?? ''}`.toLowerCase();
+        if (!haystack.includes(q)) continue;
+      }
+      filtered.push(s);
     }
     return { filterCounts: counts, filteredSessions: filtered };
-  }, [sessions, filter, getStatus]);
+  }, [sessions, filter, getStatus, query]);
 
   // IntersectionObserver: load next page when sentinel enters viewport
   useEffect(() => {
@@ -207,23 +237,74 @@ export function Sidebar({
         className="absolute top-0 right-0 w-1.5 h-full cursor-col-resize hover:bg-[var(--accent)]/30 transition-colors z-10"
         style={{ marginRight: -2 }}
       />
-      {/* Header: glitch M logo + Tasks title */}
-      <div className="flex items-center gap-2.5 px-4 py-3 shrink-0">
-        <MiQroForgeLogo size={28} />
-        <span className="text-sm font-semibold text-text" data-testid="nav-tasks-title">
+      {/* Header — 紧凑版：logo 28→22、标题 14→13.125、内边距 py-3→py-2，
+          实测头部 52→36px。搜索平时只占一个图标位，点击才展开成输入框，
+          不占常驻高度。 */}
+      <div className="flex items-center gap-2 px-3 py-2 shrink-0">
+        <MiQroForgeLogo size={22} />
+        {/* 用 text-xs 而非 text-size-2xs：后者(12.25px)和分组头同号，会把
+            「侧栏区块名」和「目录名」的层级压平。 */}
+        <span className="text-xs font-semibold text-text" data-testid="nav-tasks-title">
           任务
         </span>
-        <button
-          onClick={onNewSession}
-          className="ml-auto w-6 h-6 rounded flex items-center justify-center transition-colors hover:bg-[var(--surface-muted)]"
-          title="新建会话"
-          data-testid="nav-new-session"
-        >
-          <Plus size={14} style={{ color: 'var(--text-faint)' }} />
-        </button>
+        <div className="ml-auto flex items-center gap-0.5">
+          <button
+            onClick={() => {
+              // 关闭搜索时必须同时清 query：否则输入框藏起来了，列表却仍停在被
+              // 过滤的状态，用户看到残缺/空白的结果却找不到原因（Esc 本来就清两者）。
+              if (searchOpen) setQuery('');
+              setSearchOpen((v) => !v);
+            }}
+            className="w-6 h-6 rounded flex items-center justify-center transition-colors hover:bg-[var(--surface-muted)]"
+            title={searchOpen ? '关闭搜索' : '搜索会话'}
+            aria-expanded={searchOpen}
+            data-testid="nav-session-search"
+          >
+            <Search
+              size={13}
+              style={{ color: searchOpen ? 'var(--accent)' : 'var(--text-faint)' }}
+            />
+          </button>
+          <button
+            onClick={onNewSession}
+            className="w-6 h-6 rounded flex items-center justify-center transition-colors hover:bg-[var(--surface-muted)]"
+            title="新建会话"
+            data-testid="nav-new-session"
+          >
+            <Plus size={14} style={{ color: 'var(--text-faint)' }} />
+          </button>
+        </div>
       </div>
 
-      {/* Filter tabs — underline style */}
+      {searchOpen && (
+        <div className="shrink-0 px-3 pb-2">
+          <div className="relative flex items-center">
+            <Search
+              size={12}
+              className="absolute left-2 pointer-events-none"
+              style={{ color: 'var(--text-faint)' }}
+            />
+            <input
+              autoFocus
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Escape') {
+                  setQuery('');
+                  setSearchOpen(false);
+                }
+              }}
+              placeholder="搜索会话或目录"
+              aria-label="搜索会话"
+              className="w-full pl-7 pr-2 py-1 rounded-md text-size-2xs text-text border border-[var(--border-subtle)] focus:border-[var(--accent)] outline-none transition-colors"
+              style={{ background: 'var(--surface)' }}
+            />
+          </div>
+        </div>
+      )}
+
+      {/* Filter tabs — underline style（沿用原样式；5 个标签下每格约 47px，
+          3 个中文字已占 42px，故不再带数字徽标，否则必然溢出） */}
       <div className="shrink-0 overflow-x-auto px-3 pb-2">
         <div className="flex items-stretch justify-between min-w-max" role="tablist">
           {FILTER_TABS.map((tab) => {
@@ -244,21 +325,6 @@ export function Sidebar({
                 )}
               >
                 {tab.label}
-                {count > 0 && (
-                  <span
-                    className={cn(
-                      'inline-flex items-center justify-center min-w-[16px] h-[16px] px-1 rounded-full text-size-2xs font-medium leading-none',
-                      isActive ? 'text-[var(--accent)]' : 'text-[var(--text-faint)]'
-                    )}
-                    style={
-                      isActive
-                        ? { background: 'color-mix(in srgb, var(--accent) 18%, transparent)' }
-                        : { background: 'var(--surface-muted)' }
-                    }
-                  >
-                    {count}
-                  </span>
-                )}
                 {isActive && (
                   <span className="absolute bottom-0 left-2 right-2 h-[2px] rounded-full bg-[var(--accent)]/70" />
                 )}
@@ -326,7 +392,7 @@ export function Sidebar({
         </div>
       </div>
 
-      {/* Session list — card style with left border + description */}
+      {/* Session list — 平铺（分组已回退，见底部栏注释处的说明） */}
       <div ref={listContainerRef} className="flex-1 overflow-y-auto px-3 pt-1 pb-2">
         {initialLoading && sessions.length === 0 ? (
           <div className="flex items-center justify-center py-6">
@@ -336,6 +402,15 @@ export function Sidebar({
           <div className="flex flex-col items-center gap-2 py-8 text-center">
             <ListChecks size={20} style={{ color: 'var(--text-faint)', opacity: 0.4 }} />
             <p className="text-xs text-text-faint">暂无任务</p>
+          </div>
+        ) : filteredSessions.length === 0 ? (
+          // 计数为 0 的筛选 Tab 不渲染，但 filter 可能仍停在该值上（列表重载后
+          // 计数掉了）；搜索也可能一无所获。两种情况都要兜底，否则一片空白。
+          <div className="flex flex-col items-center gap-2 py-8 text-center">
+            <ListChecks size={20} style={{ color: 'var(--text-faint)', opacity: 0.4 }} />
+            <p className="text-xs text-text-faint">
+              {query.trim() ? '没有匹配的会话' : '该状态下暂无会话'}
+            </p>
           </div>
         ) : (
           <div className="space-y-2">
@@ -432,6 +507,7 @@ export function Sidebar({
                     <button
                       onClick={() => onSessionSelect?.(s.key)}
                       onContextMenu={onContextMenu}
+                      data-testid="session-item"
                       className={cn(
                         'w-full text-left rounded-xl px-3 py-3 transition-transform duration-150',
                         isActive && 'shadow-[0_2px_16px_rgba(0,0,0,0.14)]',
@@ -443,7 +519,7 @@ export function Sidebar({
                         border: `1px solid ${isActive ? (sessionStatus === 'IN-PROGRESS' ? status.bg : status.color) : status.cardBorder}`,
                       }}
                     >
-                      {/* Top row: status icon + label left · time right */}
+                      {/* Top row: status icon + label left · time right（用户：恢复原版） */}
                       <div className="flex items-center justify-between mb-2">
                         <div className="flex items-center gap-1.5">
                           <span
@@ -478,10 +554,6 @@ export function Sidebar({
                           {wsPath}
                         </p>
                       )}
-                      {/* Description — small gray, multi-line */}
-                      <p className="text-xs leading-relaxed text-text-muted">
-                        {s.message_count != null ? `${s.message_count} 条消息` : '暂无描述'}
-                      </p>
                     </button>
                   )}
                 </ContextMenu>
@@ -493,22 +565,45 @@ export function Sidebar({
         )}
       </div>
 
-      {/* Bottom bar */}
+      {/* Bottom bar。两个元素都必须禁止折行：窄侧栏(最小 180px)下它们是可压缩
+          的 flex 子项,「系统设置」和版本号会各自折成两行,把底部栏从 34px 撑到
+          50px。版本号改用 truncate,空间不够时省略号收尾而不是换行。 */}
       <div
         className="shrink-0 px-4 py-2.5 border-t flex items-center justify-between"
         style={{ borderColor: 'var(--sidebar-border)' }}
       >
         <button
-          className="flex items-center gap-1.5 text-size-2xs cursor-pointer transition duration-150 hover:scale-110 hover:text-[var(--text)] origin-left text-text-faint"
+          className="shrink-0 whitespace-nowrap flex items-center gap-1.5 text-size-2xs cursor-pointer transition duration-150 hover:scale-110 hover:text-[var(--text)] origin-left text-text-faint"
           onClick={() => onNavChange?.('settings')}
           data-testid="nav-system-settings"
         >
           <Settings size={13} />
           <span>系统设置</span>
         </button>
-        <span className="text-size-2xs font-mono text-text-faint">
-          PRO v{typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : 'dev'}
-        </span>
+        {currentNav === 'chat' ? (
+          // dev 模式(#1055)下版本号会带 commit hash(形如 0.32.0-dev-dev+2a270f53.dirty,
+          // 30+ 字符),260px 默认宽度都放不下。truncate 让它省略号收尾而不是折行,
+          // title 保证完整字符串仍可读到——否则 #1055 的可追溯性就没了。
+          <span
+            className="min-w-0 truncate text-size-2xs font-mono text-text-faint"
+            title={APP_VERSION_LABEL}
+          >
+            {APP_VERSION_LABEL}
+          </span>
+        ) : (
+          // 离开聊天后唯一的回程入口：上面的「系统设置」只会往设置页走，
+          // 不点某个会话就回不来（会话列表为空时更是死路）。版本号让位给它。
+          // 不用 hover:scale（旁边那个用了），180px 最小宽度下两个按钮会互相压到。
+          <button
+            className="shrink-0 whitespace-nowrap flex items-center gap-1.5 text-size-2xs cursor-pointer transition duration-150 hover:opacity-80"
+            style={{ color: 'var(--accent)' }}
+            onClick={() => onNavChange?.('chat')}
+            data-testid="nav-back-to-tasks"
+          >
+            <ArrowLeft size={13} />
+            <span>返回任务</span>
+          </button>
+        )}
       </div>
 
       {/* Rename dialog */}

@@ -29,7 +29,10 @@ const STREAM_MARKER = 'FRAMEGUARD';
 
 // Stream long enough that the crash always lands mid-stream, and leave enough
 // deltas after the crash for the forwarding path to be exercised.
-const DELTA_COUNT = 900;
+// 1800×50ms=90s：CI（慢 runner）上"预算预支"的 3 次崩溃-重载 + 15s 观测窗
+// 会把 45s 版的长流整段吃掉（实测 25213773 的 electron-e2e：finished 0→1，
+// afterWait.finished 断言挂）——流必须覆盖含预支在内的完整时间线。
+const DELTA_COUNT = 1800;
 const DELTA_INTERVAL_MS = 50;
 
 interface MockStream {
@@ -152,6 +155,18 @@ test.describe('Issue #1019 — no per-event send to a disposed render frame', ()
     electronApp = fixture.electronApp;
     page = fixture.page;
     miqiHome = fixture.miqiHome;
+
+    // (#1035 适配) 崩溃现在会触发主进程自动重载，本 spec 需要一个"真死帧"窗口：
+    // 1) 预热一发 thread/start——源码模式桥冷启动后首发该请求会丢（实测），
+    //    不预热会把首条消息拖 30 秒、把下面的流同步拖爆；
+    // 2) 被测崩溃前先把 10 分钟/3 次的自动重载预算花光（预算预支放在用例里、
+    //    UI 操作之后，见用例内注释）。超预算后主进程**静默停止**自动重载
+    //    （2026-09 口径：不弹对话框、不退出），帧被崩掉后保持真死，
+    //    断言前提天然保留——不再需要任何对话框桩。
+    await page.evaluate(() => {
+      void (window as any).miqi?.threads?.start?.({ title: 'e2e-warmup' })?.catch?.(() => {});
+    });
+    await page.waitForTimeout(1_200);
   }, 180_000);
 
   test.afterAll(async () => {
@@ -167,7 +182,7 @@ test.describe('Issue #1019 — no per-event send to a disposed render frame', ()
 
   test(
     'crashing the renderer mid-stream produces zero "Render frame was disposed" lines',
-    { timeout: 240_000 },
+    { timeout: 420_000 },
     async () => {
       // Count Electron's internal send-failure lines in the main process.
       // Electron emits these as console.error('Error sending from webFrameMain: ', err)
@@ -207,7 +222,6 @@ test.describe('Issue #1019 — no per-event send to a disposed render frame', ()
         };
       });
 
-      await waitForInputReady(page);
       await createFreshSession(page);
       await sendMessage(page, 'stream please');
 
@@ -216,7 +230,7 @@ test.describe('Issue #1019 — no per-event send to a disposed render frame', ()
       // not painted progressively, so the first paint lands only after the
       // whole stream is done (i.e. too late to crash mid-stream). Polling the
       // mock is both the real "mid-stream" signal and the non-vacuity check.
-      const deadline = Date.now() + 30_000;
+      const deadline = Date.now() + 60_000;
       while (Date.now() < deadline) {
         const s = mock.stats();
         if (s.deltas >= 100 && s.finished === 0) break;
@@ -233,16 +247,45 @@ test.describe('Issue #1019 — no per-event send to a disposed render frame', ()
         .screenshot({ path: 'test-results/issue-1019-mid-stream.png', timeout: 10_000 })
         .catch(() => {});
 
+      // (#1035 适配) 预算预支：此刻 UI 操作已全部完成（往下只剩主进程求值与
+      // mock 统计，不再需要 page），连崩 3 次把 10 分钟/3 次的自动重载预算花光。
+      // 否则下面的被测崩溃会被自动重载在毫秒级把死帧换成活帧，「向死帧持续
+      // 发送 ≥50 次守卫检查」的前提就不存在了。放在这里是因为：每次崩溃都会
+      // 更换渲染进程、令 Playwright 的 page 句柄永久作废（连 firstWindow()
+      // 也救不回），而上面的建会话/发消息/同步/截图都还要用 page。
+      // 每次迭代：崩溃前登记 did-finish-load 监听 → 硬崩溃（forcefullyCrashRenderer
+      // 在 Ubuntu CI 上会"只 resolve 不崩"，crashRendererHard 带 SIGKILL 兜底）→
+      // 等重载真正完成再进下一次（超时即断言失败，不静默放过）。
+      for (let i = 0; i < 3; i += 1) {
+        await electronApp.evaluate(({ BrowserWindow }) => {
+          const g = globalThis as any;
+          g.__reloadDone = false;
+          const wc = BrowserWindow.getAllWindows()[0]?.webContents;
+          if (!wc) return;
+          wc.once('did-finish-load', () => {
+            g.__reloadDone = true;
+          });
+        });
+        await crashRendererHard(electronApp);
+        const deadline = Date.now() + 15_000;
+        while (Date.now() < deadline) {
+          if (await electronApp.evaluate(() => (globalThis as any).__reloadDone === true)) break;
+          await new Promise((r) => setTimeout(r, 250));
+        }
+        // 超时必须让本轮迭代失败（CR 复审）：否则会在 did-finish-load 未完成的情况下
+        // 开始下一次崩溃循环，而后续断言（崩溃态/事件计数）兜不住它。
+        const reloadDone = await electronApp.evaluate(
+          () => (globalThis as any).__reloadDone === true
+        );
+        expect(reloadDone).toBe(true);
+      }
+
       // Kill the renderer the way an OOM does: process gone, frame disposed,
       // WebContents object still alive (which is exactly why the old
       // `!wc.isDestroyed()` guard let every event through).
-      const state = await electronApp.evaluate(({ BrowserWindow }) => {
-        const win = BrowserWindow.getAllWindows()[0];
-        if (!win) return 'no-window';
-        win.webContents.forcefullyCrashRenderer();
-        return 'crashed';
-      });
-      expect(state).toBe('crashed');
+      // 同样走硬崩溃：预算已花光，主进程走静默跳过路径（不重载、不弹框），
+      // 帧被崩掉后保持真死。
+      await crashRendererHard(electronApp);
       // Only guard invocations from here on count as "post-crash".
       const checksAtCrash = await electronApp.evaluate(() => (globalThis as any).__frameChecks);
 
@@ -282,4 +325,66 @@ async function createFreshSession(page: Page): Promise<void> {
     await newBtn.click();
     await page.waitForTimeout(500);
   }
+}
+
+/**
+ * 打掉渲染进程（硬崩溃，带兜底）。
+ *
+ * `forcefullyCrashRenderer()` 在 Ubuntu CI 上会"只 resolve 不崩"（与本仓库
+ * #1035 的 e2e 同款实测）：调用不抛、窗口还在，但 render-process-gone 从不
+ * 发出。所以这里在崩溃前挂一个独立的 render-process-gone 计数器，打完等它
+ * 增长；没等到就用进程级 SIGKILL 补一刀（Chromium 渲染进程忽略 SIGTERM，
+ * 必须显式 SIGKILL）。
+ */
+async function crashRendererHard(electronApp: ElectronApplication): Promise<void> {
+  const before = await electronApp.evaluate(({ BrowserWindow }) => {
+    const g = globalThis as any;
+    g.__goneCount = g.__goneCount ?? 0;
+    const wc = BrowserWindow.getAllWindows()[0]?.webContents;
+    if (!wc) return -1;
+    if (!(wc as any).__goneHooked) {
+      (wc as any).__goneHooked = true;
+      wc.on('render-process-gone', () => {
+        g.__goneCount += 1;
+      });
+    }
+    const baseline = g.__goneCount as number;
+    wc.forcefullyCrashRenderer();
+    return baseline;
+  });
+  expect(before, '应能拿到主窗口').toBeGreaterThanOrEqual(0);
+
+  const goneDeadline = Date.now() + 3_000;
+  let gone = false;
+  while (Date.now() < goneDeadline) {
+    // 注意：electronApp.evaluate 的 pageFunction 第一个参数固定是 electron 模块，
+    // 自定义参数在第二位（首版把模块当基线值比较，恒 false）。
+    gone = await electronApp.evaluate(
+      (_electron, baseline) => ((globalThis as any).__goneCount ?? 0) > baseline,
+      before
+    );
+    if (gone) break;
+    await new Promise((r) => setTimeout(r, 200));
+  }
+  if (!gone) {
+    await electronApp.evaluate(({ BrowserWindow }) => {
+      const wc = BrowserWindow.getAllWindows()[0]?.webContents;
+      if (!wc) return;
+      try {
+        process.kill(wc.getOSProcessId(), 'SIGKILL');
+      } catch {
+        /* 渲染进程可能刚好已在退出，忽略 */
+      }
+    });
+    const killDeadline = Date.now() + 3_000;
+    while (Date.now() < killDeadline) {
+      gone = await electronApp.evaluate(
+        (_electron, baseline) => ((globalThis as any).__goneCount ?? 0) > baseline,
+        before
+      );
+      if (gone) break;
+      await new Promise((r) => setTimeout(r, 200));
+    }
+  }
+  expect(gone, 'forcefullyCrashRenderer 与进程级 SIGKILL 都未产生 render-process-gone').toBe(true);
 }

@@ -16,10 +16,12 @@ import type { ElectronApplication, Page } from '@playwright/test';
 import {
   LLM_TIMEOUT,
   waitForInputReady,
+  waitForResponseComplete,
   launchElectronApp,
   closeElectronApp,
   switchToSessionWithMarker,
   waitForBridgeInitialized,
+  approvePlanCardIfAny,
 } from './helpers/electron-setup';
 
 // ─── Helpers ──────────────────────────────────────────────────────────
@@ -30,21 +32,13 @@ async function sendMessage(page: Page, text: string) {
   const before = await userBubbles.count();
   await textarea.fill(text);
   await textarea.press('Enter');
+  void approvePlanCardIfAny(page);
   // The optimistic-UI send (#364) mounts the user bubble immediately and
   // clears the input BEFORE the backend (providers:list) resolves — so the
   // reliable signal is a count increase plus the input clearing.
   await expect(userBubbles).toHaveCount(before + 1, { timeout: 10_000 });
   await expect(userBubbles.last()).toBeVisible({ timeout: 10_000 });
   await expect(page.locator('[data-testid="chat-input-container"] textarea')).toHaveValue('');
-}
-
-async function waitForResponseComplete(page: Page, timeout = 240_000) {
-  await expect(page.getByText('Thinking…')).toBeHidden({ timeout });
-  try {
-    await expect(page.locator('.tag-inprogress')).toBeHidden({ timeout: 15_000 });
-  } catch {
-    /* fast responses may never show IN PROGRESS */
-  }
 }
 
 /** Wait for a file card with the given filename to appear in Task Assets.

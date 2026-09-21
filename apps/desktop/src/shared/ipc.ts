@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import type { WslDiskStats } from './wslDiskStats';
 
 // ---------------------------------------------------------------------------
 // IPC channel names (invoke)
@@ -39,6 +40,7 @@ export const IPC = {
   SESSIONS_CLEAR_TRACKED_FILES: 'sessions:clear_tracked_files',
   SESSIONS_CLAIM_LEGACY: 'sessions:claim_legacy',
   SESSIONS_RENAME: 'sessions:rename',
+  SESSIONS_TRUNCATE: 'sessions:truncate',
 
   // Config
   CONFIG_GET: 'config:get',
@@ -240,6 +242,7 @@ export const ChatSendInput = z.object({
   mode: z.enum(['plan', 'manual', 'edit', 'auto']).optional(),
   workspace: z.string().optional(),
   resume_turn_id: z.string().optional(),
+  drop_from_turn_id: z.string().optional(),
   attachments: z
     .array(
       z.object({
@@ -267,6 +270,11 @@ export const SessionClaimLegacyInput = z.object({
 export const SessionRenameInput = z.object({
   session_key: z.string().min(1),
   title: z.string().min(1).max(100),
+});
+
+export const SessionTruncateInput = z.object({
+  session_key: z.string().min(1),
+  drop_last_turns: z.number().int().min(1),
 });
 
 export interface SessionClaimLegacyResult {
@@ -524,6 +532,8 @@ export interface ConfirmStep {
  *  ask_user_confirm_card (blocking human-in-the-loop). */
 export interface UserInputCardRequest {
   input_id: string;
+  /** `#646-v2` 渲染路由：timeline / todo_state（缺省为交互卡） */
+  display?: 'timeline' | 'todo_state';
   thread_id?: string;
   turn_id?: string;
   /** Originating session — cards are scoped per session and dropped on
@@ -535,6 +545,32 @@ export interface UserInputCardRequest {
   choices?: ConfirmChoice[];
   timeout_seconds?: number;
   allow_remember_choice?: boolean;
+  /** #646-v2 Plan Card（ask_user_plan_confirm）：任务计划卡字段 */
+  goal?: string;
+  permissions?: string[];
+  /** #684 契约扩展：触发工具名 + 校验警告（B 级必上卡）+ 产物元数据 */
+  toolName?: string;
+  warnings?: { code?: string; message: string; severity?: string }[];
+  metadata?: {
+    run_id?: string;
+    artifact_name?: string;
+    artifact_path?: string;
+    artifact_size?: number;
+    artifact_sha256?: string;
+  };
+  /** #646-v2 Action Card（request_action_confirmation）：危险动作确认字段 */
+  action?: string;
+  target?: string;
+  file_name?: string;
+  size_bytes?: number;
+  sha256?: string;
+  description?: string;
+  /** #646-v2 todo_state 投影（display='todo_state'）：CodeRabbit 二轮 Minor——
+   *  显式声明字段，renderer 不再 as any */
+  run_id?: string;
+  revision?: number;
+  summary?: string;
+  items?: { id: string; title: string; status: string }[];
 }
 
 /** Resolution pushed from the backend once the user picks / cancels. */
@@ -1021,7 +1057,9 @@ export interface ChatProgress {
   text?: string;
   /** Tool-hint flag — absent for pure-lifecycle events like stream:'turn'. */
   tool_hint?: boolean;
-  stream?: 'stdout' | 'stderr' | 'reasoning' | 'turn' | 'points';
+  /** `heartbeat` is the bridge's 10s liveness ping during silent stretches
+   *  (miqi/bridge/loop.py `_heartbeat`) — it carries no turn output. */
+  stream?: 'stdout' | 'stderr' | 'reasoning' | 'turn' | 'points' | 'heartbeat';
   delta?: string;
   tool_call_id?: string;
   /** Original tool-call arguments (e.g. web_fetch's url) — carried on the
@@ -1163,12 +1201,7 @@ export interface WslStatsResult {
     usage_pct: number; // 0-100, instantaneous snapshot
     cores: number;
   };
-  disk: {
-    total_gb: number;
-    used_gb: number;
-    free_gb: number;
-    used_pct: number;
-  };
+  disk: WslDiskStats;
   uptime_sec: number;
 }
 

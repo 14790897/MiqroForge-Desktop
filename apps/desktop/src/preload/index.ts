@@ -198,7 +198,8 @@ const api = {
       attachments?: Array<{ name: string; data_base64?: string; mime_type?: string }>,
       workspace?: string,
       reasoningMode?: string,
-      resumeTurnId?: string
+      resumeTurnId?: string,
+      dropFromTurnId?: string
     ): Promise<unknown> =>
       ipcRenderer.invoke(IPC.CHAT_SEND, {
         content,
@@ -209,6 +210,7 @@ const api = {
         workspace,
         reasoning_mode: reasoningMode,
         resume_turn_id: resumeTurnId,
+        drop_from_turn_id: dropFromTurnId,
       }),
     abort: (sessionKey?: string, threadId?: string): Promise<unknown> =>
       ipcRenderer.invoke(IPC.CHAT_ABORT, { session_key: sessionKey, thread_id: threadId }),
@@ -266,6 +268,14 @@ const api = {
       ipcRenderer.invoke(IPC.SESSIONS_CLAIM_LEGACY, { session_key: sessionKey }),
     rename: (sessionKey: string, title: string): Promise<{ renamed: boolean; title: string }> =>
       ipcRenderer.invoke(IPC.SESSIONS_RENAME, { session_key: sessionKey, title }),
+    truncate: (
+      sessionKey: string,
+      dropLastTurns: number
+    ): Promise<{ truncated: boolean; removed_messages: number }> =>
+      ipcRenderer.invoke(IPC.SESSIONS_TRUNCATE, {
+        session_key: sessionKey,
+        drop_last_turns: dropLastTurns,
+      }),
     listRecentWorkspaces: (): Promise<{ workspaces: string[] }> =>
       ipcRenderer.invoke(IPC.SESSIONS_LIST_RECENT_WORKSPACES),
   },

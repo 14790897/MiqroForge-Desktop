@@ -239,6 +239,9 @@ class ToolExecutionContext:
     # Execution policy flags
     bypass_approval: bool = False
     force_approval: bool = False
+    # #646-v2 决策②：本 turn 内已由模型侧 ActionCard 确认过的动作族
+    # （upload/payment/delete/external）——guard 不再对同类动作重复弹卡。
+    action_confirmed_families: frozenset[str] = frozenset()
     # #821: directories the user mentioned this turn (auto-sensed by the
     # turn runner); injected into file tools as ``_user_roots``.
     user_mentioned_roots: list[str] = field(default_factory=list)
@@ -995,8 +998,9 @@ class ToolOrchestrator:
 
         # Phase 21: pass runtime event emitter and cancellation to tools that
         # need it (exec for streaming output, paper_download for progress,
-        # paper_search for card rendering)
-        if ctx.tool_name in {"exec", "paper_download", "paper_search"}:
+        # paper_search for card rendering, web_search/web_fetch for structured
+        # source cards — #879)
+        if ctx.tool_name in {"exec", "paper_download", "paper_search", "web_search", "web_fetch"}:
             kwargs["_event_emitter"] = self.events
             kwargs["_turn_id"] = ctx.turn_id
             kwargs["_tool_call_id"] = ctx.tool_call_id

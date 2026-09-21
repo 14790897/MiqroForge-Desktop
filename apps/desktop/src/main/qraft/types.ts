@@ -43,20 +43,41 @@ export const QRAFT_ENV_DEFAULTS: Record<QraftEnv, QraftEnvConfig> = {
 };
 
 /**
- * 已知的历史默认 baseUrl（2026-09-17 生产域名由 forge.miqroera.com 迁移）。
- * 存储值精确命中旧默认时视为「从未自定义」，随当前环境默认更新；
+ * 已知的历史默认 baseUrl：存储值精确命中即视为「从未自定义」，随迁移更新；
  * 用户显式填写的自定义地址原样保留。
+ *  - prod：旧生产域名（2026-09-17 迁到 www.miqroforge.com）
+ *  - test：测试环境并入生产（2026-09-20）——存量测试登录态整体迁到生产
  */
 const LEGACY_DEFAULT_BASE_URLS: Record<QraftEnv, readonly string[]> = {
-  test: [],
+  test: ['https://test.forge.miqroera.com/api'],
   prod: ['https://forge.miqroera.com/api'],
 };
 
-/** 迁移存储中的历史默认 baseUrl（见 LEGACY_DEFAULT_BASE_URLS）。 */
-export function migrateStoredBaseUrl(env: QraftEnv, baseUrl: string): string {
-  return LEGACY_DEFAULT_BASE_URLS[env].includes(baseUrl)
-    ? QRAFT_ENV_DEFAULTS[env].baseUrl
-    : baseUrl;
+/** 生产环境在平台注册的 redirect_uri（随机端口未注册，生产只能用它）。 */
+export const PROD_REDIRECT_URI = 'http://localhost:38000/callback';
+
+/**
+ * 迁移存量登录态的环境与地址（域名收口）：
+ *  - 生产旧域名 → 当前生产域名；
+ *  - 测试环境并入生产：test.forge.miqroera.com 的存量登录态转成 prod，
+ *    并把测试环境自动生成的 loopback 回调换成平台注册值（否则下次登录
+ *    会因「生产环境必须使用注册值」被拒）。
+ *  仅当存储值精确命中历史默认时迁移；自定义地址保持原样。
+ */
+export function migrateStoredState(state: QraftStoredState): QraftStoredState {
+  if (!LEGACY_DEFAULT_BASE_URLS[state.env].includes(state.baseUrl)) return state;
+  if (state.env === 'prod') {
+    return { ...state, baseUrl: QRAFT_ENV_DEFAULTS.prod.baseUrl };
+  }
+  const migrated: QraftStoredState = {
+    ...state,
+    env: 'prod',
+    baseUrl: QRAFT_ENV_DEFAULTS.prod.baseUrl,
+  };
+  if (/^http:\/\/localhost:\d+\/callback$/.test(state.redirectUri)) {
+    migrated.redirectUri = PROD_REDIRECT_URI;
+  }
+  return migrated;
 }
 
 /**

@@ -5,7 +5,11 @@ Round 1 — no tool call in history yet: five ``write_file`` calls for
 (``r1104_\\d+``) travels in the latest user message.
 
 Round 2 — writes present, declaration absent: one ``declare_result_files``
-call for the report only.
+call for the report only.  The declared form is taken from an optional
+``DECLARE_AS=<path>`` directive in the latest user message; the spec uses it
+to declare the **workspace-base-relative** form (``sessions/<key>/files/…``)
+that the real agent emitted in #1131.  Without the directive the bare
+filename is declared (#1104 behaviour).
 
 Round 3 — declaration present: plain text ``declared <report> (mock complete).``
 
@@ -16,10 +20,13 @@ formats (``stream: true`` → SSE).  Prints its bound URL as
 """
 import json
 import re
+import socketserver
 import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 _TAG_RE = re.compile(r"r1104_\d{6,}")
+
+_DECLARE_AS_RE = re.compile(r"DECLARE_AS=(\S+)")
 
 _PROCESS_SUFFIXES = ("_script.py", "_data.json", "_trace.log", "_notes.md")
 
@@ -50,6 +57,16 @@ def _tool_call(call_id, name, args):
     }
 
 
+def _declared_path(messages, fallback):
+    """Path form the mock declares for the report.
+
+    ``DECLARE_AS=<path>`` in the latest user message wins; otherwise the bare
+    filename written in round 1.  See the module docstring (#1131).
+    """
+    m = _DECLARE_AS_RE.search(_last_user(messages))
+    return m.group(1) if m else fallback
+
+
 def _reply(messages):
     tag_m = _TAG_RE.search(_last_user(messages))
     tag = tag_m.group(0) if tag_m else None
@@ -73,7 +90,13 @@ def _reply(messages):
 
     if "declare_result_files" not in done:
         return _tool_calls_response(
-            [_tool_call("call_declare", "declare_result_files", {"paths": [report]})]
+            [
+                _tool_call(
+                    "call_declare",
+                    "declare_result_files",
+                    {"paths": [_declared_path(messages, report)]},
+                )
+            ]
         )
 
     return _text(f"declared {report} (mock complete).")
@@ -176,9 +199,21 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
 
+class FastBindHTTPServer(ThreadingHTTPServer):
+    """HTTPServer.server_bind() 会用 socket.getfqdn(host) 反查 DNS；
+    某些 CI runner（macOS）上该反查会卡住，导致 ready 行永远不打印、
+    serve_forever 永不执行。这里跳过反查：server_name 直接用 host。"""
+
+    def server_bind(self):
+        socketserver.TCPServer.server_bind(self)
+        host, port = self.server_address[:2]
+        self.server_name = host
+        self.server_port = port
+
+
 def main():
     port = int(sys.argv[1])
-    srv = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    srv = FastBindHTTPServer(("127.0.0.1", port), Handler)
     print(f"http://127.0.0.1:{port}/v1", flush=True)
     srv.serve_forever()
 

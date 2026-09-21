@@ -319,9 +319,15 @@ npm run build && npx playwright test --config=playwright.config.ts --project=ele
 
 | Platform | E2E Coverage | Notes |
 |---|---|---|
-| **Linux** (Ubuntu CI) | Full suite ✓ | bwrap sandbox + all specs |
+| **Linux** (Ubuntu CI) | Full suite ✓ | bwrap sandbox + all specs；并行度用 config 默认的 4 workers（实测 14.6–19.7 分钟；降到 2 只翻倍墙钟、换不到稳定性） |
 | **Windows** (WSL CI) | Full suite ✓ | WSL bwrap sandbox + all specs (needs `MIQI_RUN_SANDBOX_E2E=1`) |
-| **macOS** (CI) | Non-sandbox only | bwrap not available; sandbox specs excluded via `--grep-invert` |
+| **macOS** (CI) | **选定子集，不是完整覆盖** | 无 bwrap；为控制墙钟又额外排除最重的 LLM 套件 —— 未跑的部分由 Linux job 覆盖 |
+
+macOS job 实际 `--grep-invert` 掉的 describe 块：`Sandbox Exec`、`Sandbox Toggle`、`Sandbox toggle ready`、`Workspace Switch E2E (Sandbox ON)`、`session-key-mapping`、`PPTX Generator`、`Native Electron E2E`、`Feedback Page E2E`、`Execution Policy E2E`。也就是说 **Linux = 全量、macOS = 兼容性子集，两边覆盖率并不对等**；判断「某个用例有没有在 CI 上跑过」时要按平台分开看。
+
+> **flaky 怎么归因**（#1107）：两个 E2E job 结束时会把 Playwright JSON 报告里「首次失败、重试才通过」的用例汇总进 job summary（`apps/desktop/scripts/e2e-flaky-report.mjs`，由 `.github/actions/summarize-flaky` 调用），并各发一条 `::warning` 注解。此前这类用例只以日志中段的一行 `N flaky` 存在、job 仍判 success，等于静默漂着。
+
+> **谁能在 CI 上跑带 provider 凭据的 E2E**：`electron-e2e` / `macos-e2e` 只在受信任来源上执行 PR 代码 —— push、`workflow_dispatch`，以及 **head 分支就在本仓库**的 PR；外部 fork 的 PR 在这两个 job 里不检出、不执行任何 PR 代码（判据见 workflow 里的 `E2E_TRUSTED`）。`quick`（单测 + mock smoke，无凭据）对所有 PR 都跑。
 
 > **macOS known limitation**: The "restart recall" E2E test (`session-context-recall.spec.ts`) is skipped only when `process.env.CI && process.platform === 'darwin'` (local macOS runs still exercise the test). After a full app restart on macOS ARM64 CI runners, session history (chat messages) fails to render in `<main>` even though the sidebar session title loads correctly and the bridge reports `running / initialized`. This is likely a bridge IPC timing issue or APFS/SQLite WAL checkpoint race on cold start — needs native debugging. The non-restart session-switch recall test still validates #490 behavior on macOS.
 

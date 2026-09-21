@@ -144,13 +144,26 @@ async def test_interrupted_turn_survives_fresh_retry(tmp_path, fake_config):
             f"JSONL assistant msg missing: {jsonl_roles}"
         )
     except sqlite3.OperationalError as exc:
-        # SQLite 写锁竞争时（WAL 下的 SQLITE_BUSY_SNAPSHOT）不走 busy handler，
-        # 连接上的 timeout=30 也救不了，共享 runner 上会偶发 "database is locked"。
-        # 只把这一种错误降级成 skip：函数级 xfail(strict=False) 会把断言失败和
-        # 任何其它异常一起变成 XFAIL，丢快照的真回归也能悄悄通过（#1103 review）。
+        # #1012: this branch used to turn a "database is locked" write failure
+        # into a skip (PR #1103).  That kept CI green while the flake was still
+        # firing — it skipped again on 2026-09-18 and 2026-09-20 — so the
+        # failure is reported now instead of hidden.
+        #
+        # The root cause is fixed in miqi/runtime/db_util.py: a runtime store
+        # operation runs shielded from the caller's cancellation, so a stopped
+        # turn can no longer orphan a cursor and pin a stale WAL read snapshot
+        # on the store's connection.  A lock error here is therefore a real
+        # regression — fail loudly and dump the per-store recovery counters.
         if "database is locked" not in str(exc):
             raise
-        pytest.skip("SQLite write lock contended on a shared CI runner")
+        health: dict[str, object] = {}
+        for attr in ("ledger_runtime", "history_runtime", "thread_runtime"):
+            dbx = getattr(getattr(runtime.services, attr, None), "_dbx", None)
+            if dbx is not None:
+                health[attr] = dbx.health()
+        pytest.fail(
+            f"runtime.db write-lock failure (#1012): {exc!r}; store health={health}"
+        )
     finally:
         await runtime.stop()
 

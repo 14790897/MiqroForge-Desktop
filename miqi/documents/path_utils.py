@@ -20,6 +20,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from miqi.paths import normalize_declared_separators, normalize_session_prefixed
+
 
 def raw_output_path(kwargs: dict[str, Any]) -> str:
     """Extract the raw output path from tool kwargs (filename / file_path / path)."""
@@ -53,52 +55,6 @@ def enforce_boundary(path: Path, allowed_dir: Path | None, workspace: Path | Non
         )
 
 
-def _session_layout(workspace: Path) -> tuple[Path, str] | None:
-    """If *workspace* is ``<base>/sessions/<key>/files``, return (base, key)."""
-    try:
-        if workspace.name == "files" and workspace.parent.parent.name == "sessions":
-            return workspace.parent.parent.parent, workspace.parent.name
-    except Exception:  # pragma: no cover - defensive
-        pass
-    return None
-
-
-def _normalize_session_prefixed(rel: Path, workspace: Path) -> Path:
-    """Resolve a workspace-base-relative path against the session files root.
-
-    ``rel`` starts with ``sessions/<key>/files/...``:
-
-    - ``key`` is the current session key: strip the prefix so the file lands
-      in the session files root instead of being nested under it (#806).
-    - ``key`` is another session: reject — sessions are isolated.
-    - workspace is not session-structured: return None (caller falls back to
-      plain ``workspace / rel`` joining).
-    """
-    layout = _session_layout(workspace)
-    if layout is None:
-        return None
-    base, current_key = layout
-    parts = list(rel.parts)
-    if len(parts) < 3 or parts[0].lower() != "sessions" or parts[2].lower() != "files":
-        return None
-    other_key = parts[1]
-    if other_key != current_key:
-        raise PermissionError(
-            f"Path '{rel}' 指向其他会话（{other_key}）的目录；"
-            f"只能写入当前会话 files 目录（{workspace}）"
-        )
-    candidate = base.joinpath(*parts)
-    # Defense-in-depth: the normalized candidate must stay inside the
-    # session files root (guards against ".." escaping the prefix).
-    try:
-        candidate.resolve().relative_to(workspace.resolve())
-    except ValueError:
-        raise PermissionError(
-            f"Path '{rel}' escapes the session files root '{workspace}'"
-        )
-    return candidate
-
-
 def resolve_output_path(
     file_path: str,
     workspace: Path | None,
@@ -124,17 +80,13 @@ def resolve_output_path(
     """
     # Normalize backslashes so `sessions\key\files\...` style paths (as
     # emitted by the agent on Windows) parse correctly on every platform.
-    raw = file_path.replace("\\", "/")
-    # Strip a single leading separator ONLY for backslash-rooted input:
-    # `\sessions\key\files\...` (Windows rooted-relative) is equivalent to
-    # `sessions/key/files/...`.  A forward-slash leading path (`/home/...`)
-    # is a genuine POSIX absolute path and MUST be preserved; UNC
-    # (`//server/share`) is preserved too.
-    if file_path.startswith("\\") and raw.startswith("/"):
-        raw = raw[1:]
+    # The rule lives with the session-path helpers, not here: what counts as
+    # `sessions/<key>/files` is one decision, and both resolving layers have
+    # to read it the same way (#1131).
+    raw = normalize_declared_separators(file_path)
     p = Path(raw).expanduser()
     if not p.is_absolute() and workspace is not None:
-        normalized = _normalize_session_prefixed(p, workspace)
+        normalized = normalize_session_prefixed(p, workspace)
         p = normalized if normalized is not None else workspace / p
     resolved = p.resolve()
 

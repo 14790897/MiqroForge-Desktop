@@ -43,7 +43,7 @@ function getBypassLabel(status: ApprovalBypassStatus | null, autoMode: boolean):
 }
 
 function getBypassTitle(status: ApprovalBypassStatus | null, autoMode: boolean = false): string {
-  if (autoMode) return '自动模式：所有审批已绕过';
+  if (autoMode) return '自动模式：普通审批已绕过，部分高危动作仍需确认';
   if (status?.bypassAll) return '所有审批类别已启用绕过';
   const labels: string[] = [];
   if (status?.bypassCommandApproval) labels.push('命令审批');

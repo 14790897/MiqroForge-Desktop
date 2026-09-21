@@ -27,6 +27,7 @@ import {
   SessionDeleteInput,
   SessionClaimLegacyInput,
   SessionRenameInput,
+  SessionTruncateInput,
   ConfigUpdateInput,
   ProviderTestInput,
   ProviderUpdateInput,
@@ -88,6 +89,7 @@ import {
   shellEscape,
 } from './workspace-path';
 import { clampMinToWindow, panelWindowMinWidth } from '../../shared/layout';
+import { makeWslDiskStats } from '../../shared/wslDiskStats';
 
 const { ipcMain, dialog, shell, app, clipboard } = electron;
 
@@ -329,20 +331,25 @@ export function registerIpcHandlers(bridge: BridgeManager): void {
   ipcMain.handle(IPC.CHAT_SEND, async (_event, payload: unknown) => {
     const input = ChatSendInput.parse(payload);
 
+    const sessionKey = input.session_key ?? 'desktop:default';
+
     const sender = _event.sender;
     const safeSend = (channel: string, data: unknown) => {
       sendToFrame(sender, channel, data);
     };
+    // 通道异常结束（bridge 抛错）也算 turn 结束，否则登记表里会留下永远不会被
+    // 摘掉的"在飞"会话，下一次崩溃的恢复提示就会撒谎。
     const result = await bridge.send(
       'chat.send',
       {
         content: input.content,
-        session_key: input.session_key ?? 'desktop:default',
+        session_key: sessionKey,
         thread_id: (input as any).thread_id ?? undefined,
         mode: input.mode,
         attachments: input.attachments,
         workspace: input.workspace,
         resume_turn_id: (input as any).resume_turn_id ?? undefined,
+        drop_from_turn_id: (input as any).drop_from_turn_id ?? undefined,
       },
       (type: string, data: unknown) => {
         if (type === 'progress') {
@@ -599,6 +606,14 @@ export function registerIpcHandlers(bridge: BridgeManager): void {
     return bridge.send('sessions.rename', {
       session_key: input.session_key,
       title: input.title,
+    });
+  });
+
+  ipcMain.handle(IPC.SESSIONS_TRUNCATE, async (_event, payload: unknown) => {
+    const input = SessionTruncateInput.parse(payload);
+    return bridge.send('sessions.truncate', {
+      session_key: input.session_key,
+      drop_last_turns: input.drop_last_turns,
     });
   });
 
@@ -1309,7 +1324,7 @@ for m in ("pydantic", "httpx", "loguru"):
         distro: '',
         memory: { total_mb: 0, used_mb: 0, free_mb: 0, used_pct: 0 },
         cpu: { usage_pct: 0, cores: 0 },
-        disk: { total_gb: 0, used_gb: 0, free_gb: 0, used_pct: 0 },
+        disk: makeWslDiskStats(0, 0, 0),
         uptime_sec: 0,
       };
     }
@@ -1386,7 +1401,7 @@ for m in ("pydantic", "httpx", "loguru"):
           distro: '',
           memory: { total_mb: 0, used_mb: 0, free_mb: 0, used_pct: 0 },
           cpu: { usage_pct: 0, cores: 0 },
-          disk: { total_gb: 0, used_gb: 0, free_gb: 0, used_pct: 0 },
+          disk: makeWslDiskStats(0, 0, 0),
           uptime_sec: 0,
         };
       }
@@ -1429,7 +1444,7 @@ for m in ("pydantic", "httpx", "loguru"):
 
     let memory = { total_mb: 0, used_mb: 0, free_mb: 0, used_pct: 0 };
     let cores = 0;
-    let disk = { total_gb: 0, used_gb: 0, free_gb: 0, used_pct: 0 };
+    let disk = makeWslDiskStats(0, 0, 0);
     let uptimeSec = 0;
 
     if (fastResult.stdout) {
@@ -1459,12 +1474,7 @@ for m in ("pydantic", "httpx", "loguru"):
         const usedMb = parseInt(parts[1] || '0', 10);
         const freeMb = parseInt(parts[2] || '0', 10);
         if (!Number.isNaN(totalMb) && totalMb > 0 && usedMb <= totalMb) {
-          disk = {
-            total_gb: Math.round((totalMb / 1024) * 10) / 10,
-            used_gb: Math.round((usedMb / 1024) * 10) / 10,
-            free_gb: Math.round((freeMb / 1024) * 10) / 10,
-            used_pct: Math.round((usedMb / totalMb) * 100),
-          };
+          disk = makeWslDiskStats(totalMb, usedMb, freeMb);
         }
       }
       const uptimeLine = lines.find((l) => l.startsWith('UPTIME:'));
@@ -1506,12 +1516,7 @@ for m in ("pydantic", "httpx", "loguru"):
             u = vals[1],
             f = vals[2];
           if (!Number.isNaN(t) && t > 0 && !Number.isNaN(u) && u <= t) {
-            disk = {
-              total_gb: Math.round((t / 1024) * 10) / 10,
-              used_gb: Math.round((u / 1024) * 10) / 10,
-              free_gb: Math.round(((f || 0) / 1024) * 10) / 10,
-              used_pct: Math.round((u / t) * 100),
-            };
+            disk = makeWslDiskStats(t, u, f || 0);
           }
         }
       }
@@ -2001,6 +2006,23 @@ for m in ("pydantic", "httpx", "loguru"):
     }
   }
 
+  /**
+   * E2E runs on headless CI runners — there is no file manager and no default
+   * application for a PDF, so handing a path to the OS cannot succeed there and
+   * can instead wedge the app: `shell.openPath` resolves only once the handler
+   * it spawned exits, and the runner has nothing that will ever exit.  The app
+   * then cannot close cleanly (measured: `app.close()` never settles, the E2E
+   * harness force-kills at 15s) and the stray child keeps the Playwright worker
+   * from exiting, which fails the whole CI job on
+   * `worker-N process did not exit within 300000ms` even when every test passed.
+   *
+   * What the E2E specs actually assert on these paths is the resolution *before*
+   * the handoff — workspace containment, the session-relative candidate
+   * fallback, and the bytes `openBytes` writes to its temp file.  All of that
+   * still runs; only the OS handoff is skipped.
+   */
+  const skipOsLaunchForE2E = () => process.env.MIQI_E2E === '1';
+
   // -- Open file with system default application -------------------------
   ipcMain.handle(IPC.FILES_OPEN_EXTERNAL, async (_event, payload: unknown) => {
     const parsed = FilesOpenInput.safeParse(payload);
@@ -2080,7 +2102,7 @@ for m in ("pydantic", "httpx", "loguru"):
         if (!isWslUnc && !isWithinCanonicalWorkspace(candidate, getWorkspacePath(), extraRoots)) {
           continue;
         }
-        const error = await shell.openPath(candidate);
+        const error = skipOsLaunchForE2E() ? '' : await shell.openPath(candidate);
         if (!error) {
           opened = true;
           break;
@@ -2171,7 +2193,7 @@ for m in ("pydantic", "httpx", "loguru"):
     } catch (e: any) {
       return { opened: false, path: tmpPath, error: e?.message ?? String(e) };
     }
-    const error = await shell.openPath(tmpPath);
+    const error = skipOsLaunchForE2E() ? '' : await shell.openPath(tmpPath);
     // 外部应用可能稍后异步读取，延迟清理而不是立刻删除
     setTimeout(() => {
       try {
@@ -2287,7 +2309,7 @@ for m in ("pydantic", "httpx", "loguru"):
     const tmpPath = join(tmpdir(), `miqi-preview-${randomUUID()}.html`);
     try {
       writeFileSync(tmpPath, html, { encoding: 'utf8', mode: 0o600 });
-      const error = await shell.openPath(tmpPath);
+      const error = skipOsLaunchForE2E() ? '' : await shell.openPath(tmpPath);
       setTimeout(() => {
         try {
           unlinkSync(tmpPath);
@@ -2337,7 +2359,7 @@ for m in ("pydantic", "httpx", "loguru"):
       if (!isWithinCanonicalWorkspace(absolutePath, getWorkspacePath(), extraRoots)) {
         return { revealed: false, path: raw, error: `Path outside workspace: ${raw}` };
       }
-      shell.showItemInFolder(absolutePath);
+      if (!skipOsLaunchForE2E()) shell.showItemInFolder(absolutePath);
       return { revealed: true, path: raw };
     } catch (e: any) {
       return { revealed: false, path: raw, error: e?.message ?? String(e) };

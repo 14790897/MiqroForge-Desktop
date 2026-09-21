@@ -8,7 +8,6 @@ of truth for provider-message reconstruction and debug replay.
 
 from __future__ import annotations
 
-import asyncio
 import json
 import time
 import uuid
@@ -17,6 +16,23 @@ from pathlib import Path
 from typing import Any
 
 import aiosqlite
+
+from miqi.runtime.db_util import (
+    RuntimeDb,
+    execute_dml,
+    fetchall,
+    fetchone,
+    run_script,
+)
+
+_MAX_SEQ_SQL = """SELECT COALESCE(MAX(seq), 0) + 1
+                  FROM runtime_ledger_items
+                  WHERE session_id = ? AND thread_id = ?"""
+
+_INSERT_SQL = """INSERT INTO runtime_ledger_items
+                 (item_id, session_id, thread_id, turn_id, seq, item_type,
+                  role, content, payload_json, created_at)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"""
 
 
 @dataclass(frozen=True)
@@ -46,27 +62,20 @@ class LedgerRuntime:
     def __init__(self, db_path: Path, *, session_id: str):
         self.db_path = db_path
         self.session_id = session_id
-        self._db: aiosqlite.Connection | None = None
-        self._write_lock = asyncio.Lock()
+        self._dbx: RuntimeDb | None = None
 
     async def initialize(self) -> None:
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        # Same busy timeout as HistoryRuntime/StoredRuntime: all runtime
-        # stores open independent connections on the same DB file, and a
-        # cancelled turn's in-flight write can hold the file lock while a
-        # retry turn's mirror write waits. The default 5s is too short and
-        # surfaces as "database is locked" (flaky test_issue_886).
-        #
-        # isolation_level=None (autocommit) closes the OTHER lock-leak:
-        # with implicit transactions, a turn task cancelled between the
-        # INSERT await and the commit await leaves an open transaction
-        # holding the write lock indefinitely — the busy timeout only
-        # bounds the wait, it does not release the stranded lock.
-        self._db = await aiosqlite.connect(
-            str(self.db_path), timeout=30, isolation_level=None
-        )
-        await self._db.execute("PRAGMA journal_mode=WAL")
-        await self._db.execute("""
+        # All statements go through RuntimeDb (#1012): it keeps one persistent
+        # aiosqlite connection with a 30s busy timeout and autocommit, and runs
+        # each operation in a shielded task so a cancelled turn task can no
+        # longer orphan a cursor and pin a stale WAL read snapshot on it.
+        self._dbx = RuntimeDb(self.db_path, name="ledger", prepare=self._prepare)
+        await self._dbx.open()
+
+    @staticmethod
+    async def _prepare(db: aiosqlite.Connection) -> None:
+        db.row_factory = aiosqlite.Row
+        await run_script(db, """
             CREATE TABLE IF NOT EXISTS runtime_ledger_items (
                 item_id TEXT PRIMARY KEY,
                 session_id TEXT NOT NULL,
@@ -80,22 +89,29 @@ class LedgerRuntime:
                 created_at REAL NOT NULL
             )
         """)
-        await self._db.execute("""
+        await run_script(db, """
             CREATE INDEX IF NOT EXISTS idx_runtime_ledger_thread_seq
             ON runtime_ledger_items(session_id, thread_id, seq)
         """)
-        await self._db.commit()
+        await db.commit()
 
     async def close(self) -> None:
-        if self._db is not None:
-            await self._db.close()
-            self._db = None
+        if self._dbx is not None:
+            await self._dbx.close()
+            self._dbx = None
+
+    @property
+    def _db(self) -> aiosqlite.Connection | None:
+        """The live connection, or None once closed (diagnostics/tests)."""
+        if self._dbx is None or not self._dbx.is_open:
+            return None
+        return self._dbx.conn
 
     @property
     def _conn(self) -> aiosqlite.Connection:
-        if self._db is None:
+        if self._dbx is None:
             raise RuntimeError("LedgerRuntime.initialize() must be called before use")
-        return self._db
+        return self._dbx.conn
 
     async def append_item(
         self,
@@ -107,51 +123,52 @@ class LedgerRuntime:
         content: str = "",
         payload: dict[str, Any] | None = None,
     ) -> LedgerItem:
-        db = self._conn
         payload_dict = dict(payload or {})
-        async with self._write_lock:
-            async with db.execute(
-                """SELECT COALESCE(MAX(seq), 0) + 1
-                   FROM runtime_ledger_items
-                   WHERE session_id = ? AND thread_id = ?""",
-                (self.session_id, thread_id),
-            ) as cursor:
-                row = await cursor.fetchone()
-            seq = int(row[0])
-            item = LedgerItem(
-                item_id=str(uuid.uuid4()),
-                session_id=self.session_id,
-                thread_id=thread_id,
-                turn_id=turn_id,
-                seq=seq,
-                item_type=item_type,
-                role=role,
-                content=content,
-                payload=payload_dict,
-                created_at=time.time(),
-            )
-            # Phase 25: sanitize payload so non-JSON types don't crash
-            safe_payload = self._sanitize_payload(item.payload)
-            await db.execute(
-                """INSERT INTO runtime_ledger_items
-                   (item_id, session_id, thread_id, turn_id, seq, item_type,
-                    role, content, payload_json, created_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        # Phase 25: sanitize payload so non-JSON types don't crash
+        safe_payload = json.dumps(self._sanitize_payload(payload_dict))
+        item_id = str(uuid.uuid4())
+        created_at = time.time()
+
+        async def _append(db: aiosqlite.Connection) -> int:
+            row = await fetchone(db, _MAX_SEQ_SQL, (self.session_id, thread_id))
+            seq = int(row[0]) if row is not None else 1
+            await execute_dml(
+                db,
+                _INSERT_SQL,
                 (
-                    item.item_id,
-                    item.session_id,
-                    item.thread_id,
-                    item.turn_id,
-                    item.seq,
-                    item.item_type,
-                    item.role,
-                    item.content,
-                    json.dumps(safe_payload),
-                    item.created_at,
+                    item_id,
+                    self.session_id,
+                    thread_id,
+                    turn_id,
+                    seq,
+                    item_type,
+                    role,
+                    content,
+                    safe_payload,
+                    created_at,
                 ),
             )
             await db.commit()
-        return item
+            return seq
+
+        seq = await self._require_db().run(_append)
+        return LedgerItem(
+            item_id=item_id,
+            session_id=self.session_id,
+            thread_id=thread_id,
+            turn_id=turn_id,
+            seq=seq,
+            item_type=item_type,
+            role=role,
+            content=content,
+            payload=payload_dict,
+            created_at=created_at,
+        )
+
+    def _require_db(self) -> RuntimeDb:
+        if self._dbx is None:
+            raise RuntimeError("LedgerRuntime.initialize() must be called before use")
+        return self._dbx
 
     @staticmethod
     def _sanitize_payload(obj: Any) -> Any:
@@ -188,15 +205,15 @@ class LedgerRuntime:
             return f"str:{obj!r}"
 
     async def load_items(self, thread_id: str) -> list[LedgerItem]:
-        db = self._conn
-        db.row_factory = aiosqlite.Row
-        async with db.execute(
-            """SELECT * FROM runtime_ledger_items
-               WHERE session_id = ? AND thread_id = ?
-               ORDER BY seq ASC""",
-            (self.session_id, thread_id),
-        ) as cursor:
-            rows = await cursor.fetchall()
+        rows = await self._require_db().run(
+            lambda db: fetchall(
+                db,
+                """SELECT * FROM runtime_ledger_items
+                   WHERE session_id = ? AND thread_id = ?
+                   ORDER BY seq ASC""",
+                (self.session_id, thread_id),
+            )
+        )
         items: list[LedgerItem] = []
         for row in rows:
             try:
@@ -268,17 +285,32 @@ class LedgerRuntime:
         return copied
 
     async def append_rollback_marker(
-        self, thread_id: str, *, drop_last_turns: int
+        self,
+        thread_id: str,
+        *,
+        drop_last_turns: int = 0,
+        drop_from_turn_id: str | None = None,
     ) -> LedgerItem:
-        """Append a rollback marker removing the last N turns."""
+        """Append a rollback marker removing turns.
+
+        Either the last ``drop_last_turns`` turns, or — when
+        ``drop_from_turn_id`` is given — that turn and every later turn.
+        ``drop_from_turn_id`` wins when both are provided.
+        """
         turn_ids = await self.list_turn_ids(thread_id)
-        removed = turn_ids[-drop_last_turns:] if drop_last_turns > 0 else []
+        if drop_from_turn_id is not None and drop_from_turn_id in turn_ids:
+            removed = turn_ids[turn_ids.index(drop_from_turn_id):]
+        elif drop_last_turns > 0:
+            removed = turn_ids[-drop_last_turns:]
+        else:
+            removed = []
         return await self.append_item(
             thread_id=thread_id,
             item_type="thread_rollback",
             content="",
             payload={
                 "drop_last_turns": drop_last_turns,
+                "drop_from_turn_id": drop_from_turn_id,
                 "removed_turn_ids": removed,
             },
         )

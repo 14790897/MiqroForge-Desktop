@@ -77,6 +77,7 @@ async def test_task_runner_injects_visual_answer_instruction(fake_services):
     doi_marker = "doi" + ".org"
     assert doi_marker in system_prompt
     assert "参考文献" in system_prompt
+    assert "作者" in system_prompt
 
 
 @pytest.mark.asyncio

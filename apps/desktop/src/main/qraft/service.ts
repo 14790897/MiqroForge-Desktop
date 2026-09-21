@@ -31,6 +31,7 @@ import { QraftClient, QraftError, type QraftLogger, type ResolvedQraftConfig } f
 import { maskSecret } from './rsa';
 import { QraftStore } from './store';
 import {
+  PROD_REDIRECT_URI,
   QRAFT_ENV_DEFAULTS,
   prodEnvClientSecret,
   testEnvClientSecret,
@@ -68,6 +69,10 @@ export interface SlurmChargeResult {
  *  refresh_token 已失效（REFRESH_TOKEN_INVALID）属永久错误，不重试。 */
 const REFRESH_RETRY_BASE_MS = 60_000;
 const REFRESH_RETRY_MAX_MS = 30 * 60_000;
+/** Node setTimeout 上限（32 位有符号毫秒数，约 24.8 天）。超过会被截断为
+ *  1ms——超长有效期的 token（实测平台刷新返回 30 天）若不封顶，会形成
+ *  「刷新成功 → 调度 30 天 → 1ms 后立即再刷新」的高频刷新循环。 */
+const MAX_TIMEOUT_MS = 2_147_483_647;
 
 /** 刷新失败的永久性判定：只有平台明确作废 refresh_token 才引导重新登录；
  *  其余错误码（网络不可达/平台瞬时错误）均按瞬时失败静默退避重试。 */
@@ -102,8 +107,8 @@ export interface QraftServiceOptions {
 }
 
 export function defaultRedirectUri(): string {
-  // 1024–65535 随机端口；测试环境不校验注册值，生产环境需与注册值一致
-  //（可在设置页"高级设置"中覆盖）。
+  // 1024–65535 随机端口（仅测试环境用；生产环境走平台注册值
+  // PROD_REDIRECT_URI，可在设置页"高级设置"中覆盖）。
   const port = 1024 + Math.floor(Math.random() * (65535 - 1024));
   return `http://localhost:${port}/callback`;
 }
@@ -118,7 +123,7 @@ export function resolveConfig(
   stored: QraftStoredState | null,
   makeRedirectUri: () => string
 ): ResolvedQraftConfig {
-  const env: QraftEnv = opts.env ?? stored?.env ?? 'test';
+  const env: QraftEnv = opts.env ?? stored?.env ?? 'prod';
   const defaults = QRAFT_ENV_DEFAULTS[env];
   const storedMatches = stored && stored.env === env ? stored : null;
   return {
@@ -131,9 +136,9 @@ export function resolveConfig(
     redirectUri:
       opts.redirectUri ??
       storedMatches?.redirectUri ??
-      // 测试环境不校验注册值，可自动生成 loopback 地址；
-      // 生产环境必须使用注册值，缺失时由 validateConfig 拒绝。
-      (env === 'test' ? makeRedirectUri() : ''),
+      // 生产环境用平台注册值（随机端口未注册，平台会拒）；测试环境不校验
+      // 注册值，可用随机 loopback 便于隔离。
+      (env === 'prod' ? PROD_REDIRECT_URI : makeRedirectUri()),
   };
 }
 
@@ -224,7 +229,7 @@ export class QraftService {
   ): Promise<QraftLoginResult> {
     try {
       const stored = this.options.store.current;
-      const env: QraftEnv = opts.env ?? stored?.env ?? 'test';
+      const env: QraftEnv = opts.env ?? stored?.env ?? 'prod';
       const config = resolveConfig(
         opts,
         stored,
@@ -293,7 +298,7 @@ export class QraftService {
   async loginWithCode(code: string, opts: QraftLoginOptions = {}): Promise<QraftLoginResult> {
     try {
       const stored = this.options.store.current;
-      const env: QraftEnv = opts.env ?? stored?.env ?? 'test';
+      const env: QraftEnv = opts.env ?? stored?.env ?? 'prod';
       const config = resolveConfig(
         opts,
         stored,
@@ -352,7 +357,7 @@ export class QraftService {
    */
   resolveLoginConfig(opts: QraftLoginOptions): ResolvedQraftConfig {
     const stored = this.options.store.current;
-    const env: QraftEnv = opts.env ?? stored?.env ?? 'test';
+    const env: QraftEnv = opts.env ?? stored?.env ?? 'prod';
     const config = resolveConfig(opts, stored, this.options.makeRedirectUri ?? defaultRedirectUri);
     validateConfig(config, env);
     return config;
@@ -1002,17 +1007,25 @@ export class QraftService {
   private scheduleRefresh(state: QraftStoredState): void {
     this.cancelRefresh();
     const now = Date.now();
-    const expiresAt = state.tokens.expiresAt;
-    if (now >= expiresAt) {
-      // 已过期（应用重启后）：立即尝试刷新。
-      const delay = 0;
+    const fireAt = state.tokens.expiresAt - REFRESH_ADVANCE_MS;
+    if (now >= fireAt) {
+      // 已到期/进入提前刷新窗口（应用重启后）：立即尝试刷新。
       this.refreshScheduledAt = now;
-      this.refreshTimer = setTimeout(() => void this.tickRefresh(state), delay);
+      this.refreshTimer = setTimeout(() => void this.tickRefresh(state), 0);
       return;
     }
-    const delay = Math.max(0, expiresAt - REFRESH_ADVANCE_MS - now);
+    // 超长有效期（> 24.8 天）超出 setTimeout 上限，必须封顶（见
+    // MAX_TIMEOUT_MS）：提前醒来时若仍未到刷新时刻则重新调度，
+    // 而不是直接刷新，避免溢出截断成 1ms 后的高频刷新循环。
+    const delay = Math.min(fireAt - now, MAX_TIMEOUT_MS);
     this.refreshScheduledAt = now + delay;
-    this.refreshTimer = setTimeout(() => void this.tickRefresh(state), delay);
+    this.refreshTimer = setTimeout(() => {
+      if (Date.now() < fireAt) {
+        this.scheduleRefresh(state);
+        return;
+      }
+      void this.tickRefresh(state);
+    }, delay);
     this.options.log('INFO', `qraft: 已调度自动刷新（${Math.round(delay / 60_000)} 分钟后）`);
   }
 

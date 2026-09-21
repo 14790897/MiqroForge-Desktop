@@ -23,6 +23,7 @@ import {
   closeElectronApp,
   waitForInputReady,
   waitForBridgeInitialized,
+  approvePlanCardIfAny,
 } from './helpers/electron-setup';
 
 // ── Helpers ─────────────────────────────────────────────────────────
@@ -96,7 +97,7 @@ test.describe('Subagent Spawn E2E', () => {
   // If the tool-call path is broken, this test fails — which is exactly
   // what the issue is asking to verify.
 
-  test('AI can call the spawn tool and the result renders', async () => {
+  test('AI can call the spawn tool and the result renders', { timeout: 900_000 }, async () => {
     // 1. Prime the session.
     await ensureSession(page);
 
@@ -108,6 +109,47 @@ test.describe('Subagent Spawn E2E', () => {
       '这是对 spawn 工具的验证测试：你必须调用 spawn 工具，不要自己直接执行该命令。';
     await textarea.fill(prompt);
     await textarea.press('Enter');
+    void approvePlanCardIfAny(page);
+    // #646-v2 Action Guard：spawn 属高危外部副作用（risk>=10，外部复核 9-11 定的
+    // 规则）——模型调用后弹 ApprovalModal（role=alertdialog），必须点「允许一次」
+    // 才派发；否则回合卡在"等待你的确认"，subagent 结果永不渲染（CI 实测失败根因）。
+    void (async () => {
+      try {
+        for (let i = 0; i < 1400; i++) {
+          // #646-v2 起 spawn 要过**两层**审批，且顺序是：内联确认卡 → 操作审批弹窗。
+          //  1) Action Guard 内联确认卡（confirm-card，按钮「允许执行」）
+          //  2) 操作审批弹窗（ApprovalModal, role=alertdialog，按钮「允许一次」）
+          // CI 实测（demo-646-v8 本地复现）：只点第一层 → 弹窗无人点 → 超时 →
+          // 系统按「用户已拒绝: Approval timeout」处理 → subagent 永不派发 →
+          // 结果卡不存在（183 行断言失败）。因此**每轮都要重新探测**、连续点，
+          // 点完一次不能 return（旧实现 return 是这次失败的根因）。
+          const allowName = /允许执行|允许本次|允许一次/;
+          let clicked = false;
+          const inCard = page
+            .locator('[data-testid="confirm-card"]')
+            .getByRole('button', { name: allowName })
+            .first();
+          if (await inCard.isVisible().catch(() => false)) {
+            await inCard.click().catch(() => {});
+            clicked = true;
+            console.log(`[test] 自动批准 #${i}：内联确认卡（允许执行）`);
+          } else {
+            const dialog = page.getByRole('alertdialog').first();
+            if (await dialog.isVisible().catch(() => false)) {
+              const allow = dialog.getByRole('button', { name: allowName }).first();
+              if (await allow.isVisible().catch(() => false)) {
+                await allow.click().catch(() => {});
+                clicked = true;
+                console.log(`[test] 自动批准 #${i}：操作审批弹窗（允许一次）`);
+              }
+            }
+          }
+          await page.waitForTimeout(clicked ? 300 : 500);
+        }
+      } catch {
+        // 页面已关闭（测试结束）——静默退出
+      }
+    })();
     await expect(page.getByText(/请使用 spawn 工具/).first()).toBeVisible({ timeout: 10_000 });
 
     // 3. Wait for the subagent result card (rendered from chat:subagent_result).
@@ -117,14 +159,12 @@ test.describe('Subagent Spawn E2E', () => {
     //    subagent card appears (card count increases) AND the newest ✅ card
     //    actually contains the task text (proof the subagent ran it, not just
     //    the main agent echoing the prompt).
-    const countCards = (t: string) => (t.match(/(?:✅|❌) Subagent/g) || []).length;
-    const initialCards = countCards(
-      (await page
-        .locator('main')
-        .textContent()
-        .catch(() => '')) || ''
-    );
-    const deadline = Date.now() + 180_000;
+    // #646-v2：工具行改为 Hermes 式渲染后，卡片正文里不再有旧 UI 的
+    // 「✅ Subagent …」标记——改为按 subagent 结果卡本身定位（data-testid，
+    // 断言不依赖文案与折叠状态）。
+    const cardsLocator = page.locator('[data-testid="subagent-result"]');
+    const initialCards = await cardsLocator.count().catch(() => 0);
+    const deadline = Date.now() + 300_000;
     let rendered = false;
     let lastText = '';
     while (Date.now() < deadline) {
@@ -134,10 +174,14 @@ test.describe('Subagent Spawn E2E', () => {
           .textContent()
           .catch(() => '')) || '';
       lastText = mainText;
-      if (countCards(mainText) > initialCards) {
-        // New card appeared — extract the newest ✅ card and check its body.
-        const lastIdx = mainText.lastIndexOf('✅ Subagent');
-        const newestCard = lastIdx >= 0 ? mainText.slice(lastIdx) : '';
+      const cardCount = await cardsLocator.count().catch(() => 0);
+      if (cardCount > initialCards) {
+        // New subagent result card appeared — check its body.
+        const newestCard =
+          (await cardsLocator
+            .last()
+            .textContent()
+            .catch(() => '')) || '';
         if (newestCard.includes('hello-ai-spawn')) {
           rendered = true;
           break;

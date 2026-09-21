@@ -546,14 +546,29 @@ html.dark[data-sidebar-glass='true'] .sidebar-shell {
     var(--font-sans), 'Apple Color Emoji', 'Segoe UI Emoji', 'Noto Color Emoji',
     sans-serif;
 }
-.sidebar-shell .text-text {
-  color: var(--text);
+/* 侧栏文字色必须落在 layer 里：未分层的规则优先级高于任何 @layer，会连
+   hover:text-* 一起压掉（侧栏内所有文字色 hover 曾因此失效）。 */
+@layer components {
+  .sidebar-shell .text-text {
+    color: var(--text);
+  }
+  .sidebar-shell .text-text-muted {
+    color: var(--text-muted);
+  }
+  .sidebar-shell .text-text-faint {
+    color: var(--text-faint);
+  }
 }
-.sidebar-shell .text-text-muted {
-  color: var(--text-muted);
+
+/* 吸顶分组头：玻璃拟态下 shell 是半透明的，组头若用不透明底色，滚动时会在
+   顶部露出一条实色带。跟着 shell 一起半透明并同样模糊。 */
+html[data-sidebar-glass='true'] .sidebar-sticky-head {
+  background: color-mix(in srgb, var(--sidebar-bg) 85%, transparent);
+  backdrop-filter: blur(12px);
 }
-.sidebar-shell .text-text-faint {
-  color: var(--text-faint);
+
+html.dark[data-sidebar-glass='true'] .sidebar-sticky-head {
+  background: color-mix(in srgb, var(--sidebar-bg) 87%, transparent);
 }
 
 input::placeholder,

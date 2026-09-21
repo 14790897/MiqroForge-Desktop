@@ -8,6 +8,7 @@ import { writeMainProcessLog } from './electron-log';
 import { createSplash, closeSplash } from './splash';
 import { safeWrite, guardStdStreams } from './console-guard';
 import { sendToWindow } from './frame-send';
+import { crashRecovery, handleRendererCrash } from './crashRecovery';
 import { WINDOW_MIN_WIDTH } from '../shared/layout';
 
 const originalConsoleLog = console.log.bind(console);
@@ -28,7 +29,22 @@ function getIconPath(): string {
   return join(__dirname, '../../src/renderer/assets', iconName);
 }
 
+/**
+ * E2E（MIQI_E2E_OFFSCREEN=1）：应用窗口不出现在用户桌面上——跑自动化时窗口
+ * 弹出会遮挡操作并抢走焦点（并行 worker 一次开好几个实例，尤其明显）。
+ *
+ * 做法是「停到显示器之外 + showInactive（不激活）」而不是真·最小化：最小化
+ * 会让 Chromium 停止为窗口出帧，playwright 的 fullPage 截图（25 个 spec 在用）
+ * 会一直等不到新帧而超时；停屏幕外的窗口照常合成，截图/动画语义与普通可见
+ * 窗口一致。仅未打包生效，打包产物不受外部注入该变量影响。
+ */
+function shouldStartOffscreen(): boolean {
+  return !app.isPackaged && process.env['MIQI_E2E_OFFSCREEN'] === '1';
+}
+
 function createWindow(): void {
+  const startOffscreen = shouldStartOffscreen();
+
   mainWindow = new BrowserWindow({
     width: 1280,
     height: 860,
@@ -36,6 +52,10 @@ function createWindow(): void {
     minHeight: 760,
     title: 'MiQroForge Desktop',
     icon: getIconPath(),
+    // 先不显示：等首次绘制完成再挪到屏幕外并 showInactive，否则窗口会先在
+    // 用户桌面上弹一下。
+    show: !startOffscreen,
+    skipTaskbar: startOffscreen,
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
@@ -58,6 +78,17 @@ function createWindow(): void {
   // Remove native menu bar — app has its own navigation
   mainWindow.removeMenu();
 
+  if (startOffscreen) {
+    const win = mainWindow;
+    win.once('ready-to-show', () => {
+      if (win.isDestroyed()) return;
+      // -30000 远离所有显示器坐标（Windows 虚拟桌面不会延伸到那儿）。
+      const { x, y } = win.getBounds();
+      win.setBounds({ x: x - 30000, y });
+      win.showInactive();
+    });
+  }
+
   mainWindow.webContents.setWindowOpenHandler((details) => {
     shell.openExternal(details.url);
     return { action: 'deny' };
@@ -75,10 +106,22 @@ function createWindow(): void {
     }
   );
 
-  mainWindow.webContents.on('render-process-gone', (_event, details) => {
+  // #1035 复审 P1：生命周期登记**必须在这里**（窗口创建时），不能等崩溃发生
+  // 才登记——`close` 是一次性事件，"窗口正在关闭"这个状态只有提前监听了才
+  // 拿得到；等崩溃到来时窗口可能已经在关，恢复动作会去给一个正在拆的窗口
+  // 续命。登记后 handleRendererCrash 才分得清「还能恢复」和「碰不得了」。
+  crashRecovery.watch(mainWindow);
+
+  // #1035 复审：预算按窗口分开记，所以崩溃必须归到「发生崩溃的这个窗口」——
+  // 闭包固定创建时的实例，不走可变的 mainWindow（macOS activate 会重建它）。
+  const crashWindow = mainWindow;
+  crashWindow.webContents.on('render-process-gone', (_event, details) => {
     console.error(
       `[main] render-process-gone: reason=${details.reason} exitCode=${details.exitCode}`
     );
+    // #1035: 崩溃后按预算自动重载（判定/记账在 crashRecovery.ts，纯逻辑可单测）。
+    // 恢复动作对用户完全不可见：预算内静默重载、超预算静默停止。
+    handleRendererCrash(crashWindow, details.reason, details.exitCode);
   });
 
   mainWindow.webContents.on('console-message', (_event: unknown, ...args: unknown[]) => {
@@ -156,10 +199,23 @@ export function main(): void {
   // （会话/配置互相覆盖）。开发模式下按仓库绝对路径 hash 出独立子目录
   // （%APPDATA%\miqi-desktop-dev\ws-<hash>），每个工作区各用各的缓存。
   // 打包版保持默认行为（单安装目录，无多实例问题）。
+  //
+  // MIQI_USER_DATA_DIR（仅未打包环境）把该目录改道到调用方给的路径，供 E2E
+  // 每轮 run 拿独立 profile。**必须走这里**：下面的 setPath 会覆盖 Electron 的
+  // `--user-data-dir` 启动参数（见 tests/e2e/login-gate.spec.ts 的说明），所以
+  // 只传 CLI 参数拿不到隔离。没有它的话同一个 checkout 的所有 run（串行 + 并行
+  // worker）共用一份 ws-<hash>，Local Storage 里的 miqi:lastSession 跨 run 泄漏，
+  // 上一轮 run 的最后会话会被下一轮当作当前会话恢复（#1034 第七轮实锤，本分支
+  // 的 crash-recovery/并发 turn 用例同样吃这份状态）。
   if (!app.isPackaged) {
-    const repoRoot = join(__dirname, '../../..');
-    const wsHash = createHash('sha256').update(repoRoot).digest('hex').slice(0, 16);
-    app.setPath('userData', join(app.getPath('appData'), 'miqi-desktop-dev', `ws-${wsHash}`));
+    const userDataOverride = process.env['MIQI_USER_DATA_DIR']?.trim();
+    if (userDataOverride) {
+      app.setPath('userData', userDataOverride);
+    } else {
+      const repoRoot = join(__dirname, '../../..');
+      const wsHash = createHash('sha256').update(repoRoot).digest('hex').slice(0, 16);
+      app.setPath('userData', join(app.getPath('appData'), 'miqi-desktop-dev', `ws-${wsHash}`));
+    }
   }
 
   // ── 单实例（打包版，#1071）──────────────────────────────────────────
@@ -199,9 +255,12 @@ export function main(): void {
     bridgeManager.on('state', onState);
     bridgeManager.on('log', onLog);
 
-    createSplash(() => {
-      closeSplash();
-    });
+    // E2E 屏幕外模式下不建 splash（它 alwaysOnTop，会浮在用户桌面最上层）
+    if (!shouldStartOffscreen()) {
+      createSplash(() => {
+        closeSplash();
+      });
+    }
     createWindow();
 
     app.on('activate', () => {

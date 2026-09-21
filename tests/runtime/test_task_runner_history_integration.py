@@ -190,6 +190,97 @@ async def test_task_runner_persists_tool_call_messages(
 
 
 # ---------------------------------------------------------------------------
+# #1146: drop_from_turn_id truncates the model context before a new turn
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_task_runner_drop_from_turn_id_truncates_context(
+    fake_config, fake_provider, tmp_path,
+):
+    """编辑/重答/重新生成：drop_from_turn_id 在建上下文前截断 history_runtime。
+
+    三回合对话后编辑第二回合重答 —— 第三回合的模型上下文必须只含第一回合，
+    被替换掉的第二回合不能再进上下文。
+    """
+    captured_histories: list[list[dict]] = []
+
+    async def fake_run(
+        *, turn, user_content, system_prompt, tools, history=None, cancel_event=None, steer_queue=None,
+    ):
+        from miqi.runtime.turn_runner import TurnResult
+
+        captured_histories.append(history or [])
+        return TurnResult(
+            final_content=f"reply to {user_content}",
+            messages=[],
+            tools_used=[],
+            token_usage={},
+            messages_delta=[
+                {"role": "assistant", "content": f"reply to {user_content}"},
+            ],
+        )
+
+    runtime = RuntimeSession.create(
+        config=fake_config,
+        provider=fake_provider,
+        session_id="sess-drop-from",
+        workspace=tmp_path,
+    )
+    runtime.services.turn_runner.run = fake_run  # type: ignore[attr-defined]
+
+    from miqi.protocol.events import AgentMessageEvent, TurnCompleteEvent
+
+    async def drain():
+        seen_agent = False
+        seen_complete = False
+        while not (seen_agent and seen_complete):
+            ev = await runtime.next_event(timeout=15)
+            if ev is None:
+                break
+            if isinstance(ev, AgentMessageEvent):
+                seen_agent = True
+            if isinstance(ev, TurnCompleteEvent):
+                seen_complete = True
+
+    await runtime.start()
+    try:
+        await runtime.submit(UserMessage(content="turn one", thread_id="thread-d"))
+        await drain()
+        await runtime.submit(UserMessage(content="turn two", thread_id="thread-d"))
+        await drain()
+
+        turn_ids = await runtime.services.history_runtime.list_turn_ids("thread-d")
+        assert len(turn_ids) == 2, turn_ids
+
+        # Edit turn two away: third turn drops from turn two onward.
+        await runtime.submit(UserMessage(
+            content="edited turn two",
+            thread_id="thread-d",
+            drop_from_turn_id=turn_ids[1],
+        ))
+        await drain()
+
+        # Model context for turn 3 must contain only turn one — the replaced
+        # turn two is gone from `history` before the model sees it.
+        assert captured_histories[2] == [
+            {"role": "user", "content": "turn one"},
+            {"role": "assistant", "content": "reply to turn one"},
+        ], captured_histories[2]
+
+        # Persisted history: turn one + the edited turn two only.
+        stored = await runtime.services.history_runtime.load_messages("thread-d")
+        assert [m["content"] for m in stored] == [
+            "turn one",
+            "reply to turn one",
+            "edited turn two",
+            "reply to edited turn two",
+        ], stored
+    finally:
+        await runtime.stop()
+
+
+# ---------------------------------------------------------------------------
 # Phase 19: auto-compact before turn
 # ---------------------------------------------------------------------------
 

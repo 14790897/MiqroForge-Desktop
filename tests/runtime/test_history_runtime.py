@@ -286,6 +286,82 @@ async def test_history_delete_turn_messages(tmp_path):
         await runtime.close()
 
 
+# ── #1146: truncate model context on edit/regenerate/retry ────────────────
+
+
+@pytest.mark.asyncio
+async def test_truncate_from_turn_drops_edited_turn_and_later(tmp_path):
+    """编辑/重答/重新生成：从目标 turn 起截断到末尾，旧回合不再进上下文。
+
+    Mirrors issue #1146's repro: turn-2 is edited away, so the new turn's
+    load_messages must keep only turn-1 — the replaced turn-2/turn-3 content
+    must not be fed back to the model.
+    """
+    runtime = HistoryRuntime(tmp_path / "runtime.db", session_id="s1")
+    await runtime.initialize()
+    try:
+        for turn_id, q, a in [
+            ("turn-1", "水的化学式是什么？", "水的化学式是 H2O。"),
+            ("turn-2", "二氧化碳的化学式？", "二氧化碳的化学式是 CO2。"),
+            ("turn-3", "氮气的化学式？", "氮气的化学式是 N2。"),
+        ]:
+            await runtime.append_message(
+                thread_id="t1", turn_id=turn_id, role="user", content=q,
+            )
+            await runtime.append_message(
+                thread_id="t1", turn_id=turn_id, role="assistant", content=a,
+            )
+
+        removed = await runtime.truncate_from_turn("t1", "turn-2")
+
+        assert removed == ["turn-2", "turn-3"]
+        messages = await runtime.load_messages("t1")
+        assert [m["content"] for m in messages] == [
+            "水的化学式是什么？", "水的化学式是 H2O。",
+        ]
+        # The replaced turn's content is gone from the model context.
+        blob = " ".join(m["content"] for m in messages)
+        assert "二氧化碳" not in blob
+        assert "CO2" not in blob
+        assert "氮气" not in blob
+    finally:
+        await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_truncate_from_turn_unknown_turn_is_noop(tmp_path):
+    """from_turn_id 不存在（已 compact / 竞态）时幂等返回 []，不动历史。"""
+    runtime = HistoryRuntime(tmp_path / "runtime.db", session_id="s1")
+    await runtime.initialize()
+    try:
+        await runtime.append_message(
+            thread_id="t1", turn_id="turn-1", role="user", content="kept",
+        )
+
+        removed = await runtime.truncate_from_turn("t1", "turn-does-not-exist")
+
+        assert removed == []
+        messages = await runtime.load_messages("t1")
+        assert [m["content"] for m in messages] == ["kept"]
+    finally:
+        await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_list_turn_ids_preserves_insertion_order(tmp_path):
+    runtime = HistoryRuntime(tmp_path / "runtime.db", session_id="s1")
+    await runtime.initialize()
+    try:
+        await runtime.append_message(thread_id="t1", turn_id="turn-2", role="user", content="x")
+        await runtime.append_message(thread_id="t1", turn_id="turn-2", role="assistant", content="x")
+        await runtime.append_message(thread_id="t1", turn_id="turn-1", role="user", content="x")
+
+        # insertion order, deduped — not lexicographic
+        assert await runtime.list_turn_ids("t1") == ["turn-2", "turn-1"]
+    finally:
+        await runtime.close()
+
+
 # ── Issue #84: get_turn must degrade on corrupted JSON columns ────────────
 
 

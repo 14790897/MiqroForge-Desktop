@@ -186,21 +186,26 @@ test.describe('录屏：真实 BVSE 技能 + 任务资产面板（连续）', ()
     while (!url && Date.now() < deadline) await new Promise((r) => setTimeout(r, 250));
     if (!url) throw new Error('bvse mock 未启动');
 
-    const fixture = await launchElectronApp((config: any) => {
-      config.providers = config.providers ?? {};
-      config.providers.openai = { apiKey: 'mock-key', apiBase: url };
-      config.agents = {
-        ...(config.agents ?? {}),
-        defaults: { ...(config.agents?.defaults ?? {}), model: 'openai/gpt-4o-mini' },
-      };
-      config.tools = { ...config.tools, sandbox: { ...config.tools?.sandbox, enabled: false } };
-      // 打开「内联终端输出」（设置 → 通用）：pipeline 跑 9 分钟，默认折叠时
-      // 界面全程零可见进度，录屏看着像卡住；打开后 exec 输出会实时流进对话。
-      config.desktop = {
-        ...(config.desktop ?? {}),
-        ui: { ...(config.desktop?.ui ?? {}), inlineExecOutput: true },
-      };
-    });
+    const fixture = await launchElectronApp(
+      (config: any) => {
+        config.providers = config.providers ?? {};
+        config.providers.openai = { apiKey: 'mock-key', apiBase: url };
+        config.agents = {
+          ...(config.agents ?? {}),
+          defaults: { ...(config.agents?.defaults ?? {}), model: 'openai/gpt-4o-mini' },
+        };
+        config.tools = { ...config.tools, sandbox: { ...config.tools?.sandbox, enabled: false } };
+        // 打开「内联终端输出」（设置 → 通用）：pipeline 跑 9 分钟，默认折叠时
+        // 界面全程零可见进度，录屏看着像卡住；打开后 exec 输出会实时流进对话。
+        config.desktop = {
+          ...(config.desktop ?? {}),
+          ui: { ...(config.desktop?.ui ?? {}), inlineExecOutput: true },
+        };
+      },
+      // 录屏必须录到真实窗口画面：默认（本机）窗口停在屏幕外，desktopCapturer
+      // 抓这样的窗口可能只有空白/黑屏，这里显式要求窗口正常显示。
+      { showWindow: true }
+    );
     electronApp = fixture.electronApp;
     page = fixture.page;
     miqiHome = fixture.miqiHome;

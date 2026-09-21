@@ -12,6 +12,7 @@ import {
   waitForResponseComplete,
   launchElectronApp,
   closeElectronApp,
+  approvePlanCardIfAny,
 } from './helpers/electron-setup';
 
 // ─── Helpers ──────────────────────────────────────────────────────

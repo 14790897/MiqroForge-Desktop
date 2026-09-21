@@ -31,6 +31,7 @@ import {
   closeElectronApp,
   APPS_DESKTOP,
 } from './helpers/electron-setup';
+import { patchConfigForMock } from './helpers/mock-openai';
 
 const REPO_ROOT = join(APPS_DESKTOP, '..', '..');
 
@@ -95,14 +96,10 @@ test.describe('Write Authorization Card (#864)', () => {
 
     const fixture = await launchElectronApp(
       (config: any) => {
-        const providers = config.providers ?? {};
-        for (const [name, p] of Object.entries(providers)) {
-          if (p && typeof p === 'object') {
-            (p as any).apiBase = mock.mockUrl;
-            if (!(p as any).apiKey) (p as any).apiKey = 'mock-key';
-          }
-        }
-        config.providers = providers;
+        // 门禁适配（#1000/#1025）：统一走共享 patchConfigForMock——注入 mock
+        // provider + 可解析默认模型；否则本机 providers 为空时发送被拦（CI
+        // 用的是带凭据的 config 才没暴露，本地必挂）。
+        patchConfigForMock(config, mock.mockUrl);
         const tools = config.tools ?? {};
         config.tools = { ...tools, restrictToWorkspace: true };
       },
@@ -125,8 +122,9 @@ test.describe('Write Authorization Card (#864)', () => {
     'write_file 写 workspace 外目录 → 弹写授权卡 → 允许本次 → 写入成功',
     { timeout: LLM_TIMEOUT },
     async () => {
-      const cardArea = page.getByTestId('confirm-card-area');
-      const resolvedArea = page.getByTestId('confirm-card-resolved');
+      // #646-v2：确认卡并进工具链（Hermes 式）——断言页面级；回执用 data-receipt
+      const cardArea = page;
+      const resolvedArea = page.locator('[data-receipt="true"]');
 
       // 跳过 PermissionEngine 的通用「文件操作审批」dialog（legacy 路径会在
       // write_file 进入 tool.execute 之前先弹它），这样本测试能精确断言到
@@ -138,18 +136,24 @@ test.describe('Write Authorization Card (#864)', () => {
       await sendMessage(page, '写授权测试');
 
       // 写授权卡弹出（title 固定为「授权写入工作区外目录」）
-      await expect(cardArea).toBeVisible({ timeout: 60_000 });
-      await expect(cardArea.getByText('授权写入工作区外目录')).toBeVisible();
-      await expect(cardArea.getByRole('button', { name: '允许本次' })).toBeVisible();
-      await expect(cardArea.getByRole('button', { name: '本目录不再询问' })).toBeVisible();
-      await expect(cardArea.getByRole('button', { name: '拒绝' })).toBeVisible();
+      // #646-v2：卡并进工具链——cardArea 已是 page，页面级断言必须落在定位器上
+      await expect(cardArea.getByText('授权写入工作区外目录').first()).toBeVisible({
+        timeout: 60_000,
+      });
+      await expect(cardArea.getByRole('button', { name: '允许本次' }).first()).toBeVisible();
+      await expect(cardArea.getByRole('button', { name: '拒绝' }).first()).toBeVisible();
+      // 「本目录不再询问」是二级选项：Hermes 式确认条默认折叠（只有条上的
+      // 允许本次/拒绝常驻），点行头展开后才出现（2026-09-15 卡设计定稿）——
+      // 别要求它默认可见。
+      await cardArea.getByRole('button', { name: '授权写入工作区外目录' }).first().click();
+      await expect(cardArea.getByRole('button', { name: '本目录不再询问' }).first()).toBeVisible();
 
       await page.screenshot({
         path: `test-results/${test.info().title.replace(/\s+/g, '-')}-card.png`,
       });
 
       // 点「允许本次」→ 写放行
-      await cardArea.getByRole('button', { name: '允许本次' }).click();
+      await cardArea.getByRole('button', { name: '允许本次' }).first().click();
       await expect(resolvedArea.getByText(/授权写入工作区外目录/)).toBeVisible({
         timeout: 30_000,
       });
@@ -190,14 +194,8 @@ test.describe('Write Authorization Bypass (#864)', () => {
 
     // bypassAll 默认 true（electron-setup 的默认行为）——写授权卡应被跳过。
     const fixture = await launchElectronApp((config: any) => {
-      const providers = config.providers ?? {};
-      for (const [name, p] of Object.entries(providers)) {
-        if (p && typeof p === 'object') {
-          (p as any).apiBase = mock.mockUrl;
-          if (!(p as any).apiKey) (p as any).apiKey = 'mock-key';
-        }
-      }
-      config.providers = providers;
+      // 门禁适配（#1000/#1025）：同第一个 describe——共享 patchConfigForMock
+      patchConfigForMock(config, mock.mockUrl);
       const tools = config.tools ?? {};
       config.tools = { ...tools, restrictToWorkspace: true };
     });
@@ -218,7 +216,7 @@ test.describe('Write Authorization Bypass (#864)', () => {
     'approvals.bypass_all=true 时写 workspace 外目录不弹授权卡直接写入',
     { timeout: LLM_TIMEOUT },
     async () => {
-      const cardArea = page.getByTestId('confirm-card-area');
+      const cardArea = page; // #646-v2：卡并进工具链——页面级断言
       await sendMessage(page, '写授权测试');
 
       const target = join(outDir, 'auth_probe.txt');
@@ -226,7 +224,8 @@ test.describe('Write Authorization Bypass (#864)', () => {
       const content = readFileSync(target, 'utf-8');
       expect(content).toContain('authorization-card-e2e-probe');
 
-      await expect(cardArea).toBeHidden();
+      // #646-v2：cardArea 已是 page——"没有卡"必须用定位器计数断言
+      await expect(cardArea.getByText('授权写入工作区外目录')).toHaveCount(0);
       console.log(`[test] ✅ bypass 下写 workspace 外目录无需授权卡`);
     }
   );
