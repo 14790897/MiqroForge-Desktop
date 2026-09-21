@@ -104,18 +104,24 @@ class ClientSessionRegistry:
     def _account_matches(self, session_id: str) -> bool:
         """Whether a cached session still belongs to the account in use (#1185).
 
-        Unknown on either side answers True — i.e. keeps the pre-#1185
-        behaviour.  The recorded account is only ever written by
-        ``create_session``; a session placed straight into ``_sessions`` (tests
-        do this to drive handlers in isolation) has no account to compare
-        against, and treating "no bookkeeping" as "another account's session"
-        would turn it into "session not found" — which hangs the caller instead
-        of protecting anything.
+        The two sides fail in opposite directions on purpose:
+
+        * **No recorded account** → True, i.e. keep the pre-#1185 behaviour.
+          The recorded account is only ever written by ``create_session``; a
+          session placed straight into ``_sessions`` (tests do this to drive
+          handlers in isolation) has no account to compare against, and treating
+          "no bookkeeping" as "another account's session" turns it into "session
+          not found" — which hangs the caller instead of protecting anything.
+        * **Current account unknown** → False. A lookup failure is not evidence
+          that the cached runtime belongs to the account in use, and answering
+          True there is what would hand one account the other's runtime.
         """
         recorded = self._session_account.get(session_id)
-        current = _current_account_root()
-        if recorded is None or current is None:
+        if recorded is None:
             return True
+        current = _current_account_root()
+        if current is None:
+            return False
         return recorded == current
 
     # ── client_id resolution ─────────────────────────────────────────────

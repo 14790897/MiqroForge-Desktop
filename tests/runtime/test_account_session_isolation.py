@@ -192,6 +192,24 @@ def test_a_directly_seeded_session_is_still_served(data_root: Path):
     assert served is runtime
 
 
+def test_unknown_current_account_is_a_mismatch(data_root: Path, monkeypatch, fake_runtime):
+    """判不出当前账号时**不复用**（fail closed）。
+
+    「读不出来」不是「属于本账号」的证据；这一侧放行就是把上一个账号的
+    运行时交出去。另一侧（没有记账）才保持兼容 —— 见下一个用例。
+    """
+    registry = ClientSessionRegistry()
+    _set_active(data_root, "19")
+    ws_a = data_root / "accounts" / "19" / "workspace"
+    first = asyncio.run(_open(registry, ws_a))
+
+    monkeypatch.setattr("miqi.runtime.app_server._current_account_root", lambda: None)
+    second = asyncio.run(_open(registry, ws_a))
+
+    assert second is not first
+    assert first.stopped
+
+
 def test_account_root_follows_the_marker(data_root: Path):
     assert _current_account_root() == data_root / "workspace"
     _set_active(data_root, "19")
