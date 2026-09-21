@@ -4,6 +4,12 @@ import { defineConfig, externalizeDepsPlugin } from 'electron-vite';
 import tailwindcss from '@tailwindcss/vite';
 import pkg from './package.json';
 import { formatDevVersion, type GitVersionInfo } from './src/shared/dev-version';
+import { readSiteUrlSources } from './scripts/mkdocs-site-urls.mjs';
+
+const repoRoot = resolve(__dirname, '..', '..');
+
+// 文档站/仓库地址取自仓库根 mkdocs.yml（唯一事实来源，见 #1155）。
+const { docsBaseUrl, repoUrl } = readSiteUrlSources(resolve(repoRoot, 'mkdocs.yml'));
 
 /**
  * Read the current commit short hash + dirty flag from the repository.
@@ -12,7 +18,6 @@ import { formatDevVersion, type GitVersionInfo } from './src/shared/dev-version'
  * a non-git environment so the version degrades to a plain `-dev` suffix.
  */
 function readGitInfo(): GitVersionInfo | null {
-  const repoRoot = resolve(__dirname, '..', '..');
   try {
     const shortHash = execSync('git rev-parse --short HEAD', {
       cwd: repoRoot,
@@ -69,6 +74,8 @@ export default defineConfig(({ command }) => {
       },
       define: {
         __APP_VERSION__: JSON.stringify(appVersion),
+        __DOCS_BASE_URL__: JSON.stringify(docsBaseUrl),
+        __REPO_URL__: JSON.stringify(repoUrl),
       },
       build: {
         outDir: 'out/renderer',
