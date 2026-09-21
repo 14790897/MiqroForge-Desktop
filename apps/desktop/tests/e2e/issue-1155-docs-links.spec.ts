@@ -44,15 +44,19 @@ test('issue #1155: 设置页文档链接指向当前文档站而非旧仓库路�
       .evaluateAll((els) => els.map((el) => (el as HTMLAnchorElement).href));
     expect(hrefs.length).toBeGreaterThan(10);
 
-    // 文档链接（排除底部的 GitHub 仓库链接）必须全部落在当前文档站根地址下。
-    const docLinks = hrefs.filter((href) => !href.includes('github.com'));
+    // 面板里的链接只应有两类：文档站下的章节链接 + 底部那一条 GitHub 仓库链接。
+    // 一律用解析后的 origin / pathname 比对（不对 URL 做子串匹配）——旧仓库路径
+    // /MiQi/ 是这条 issue 的现场，pathname 前缀对不上就说明漂移回来了。
+    const docsBase = new URL(DOCS_BASE);
+    const repoHref = new URL(REPO_URL).href;
+    const parsedHrefs = hrefs.map((href) => new URL(href));
+
+    expect(parsedHrefs.filter((url) => url.href === repoHref)).toHaveLength(1);
+    const docLinks = parsedHrefs.filter((url) => url.href !== repoHref);
     expect(docLinks.length).toBeGreaterThan(10);
-    for (const href of docLinks) {
-      expect(href.startsWith(DOCS_BASE), `${href} 不在文档站根地址 ${DOCS_BASE} 下`).toBe(true);
-    }
-    // 旧仓库路径（/MiQi/）是这条 issue 的现场：一条都不许回来。
-    for (const href of hrefs) {
-      expect(href).not.toContain('/MiQi/');
+    for (const url of docLinks) {
+      expect(url.origin, url.href).toBe(docsBase.origin);
+      expect(url.pathname.startsWith(docsBase.pathname), url.href).toBe(true);
     }
 
     // 「完整文档站点」就是 issue 里点开 404 的那个入口，精确断言。
