@@ -118,6 +118,8 @@ export default function WslStatusPage() {
   const [installNextStep, setInstallNextStep] = useState<string | null>(null);
   /** WSL's own reason for WSL2 being unable to start, when it reports one. */
   const [platformIssue, setPlatformIssue] = useState<string | null>(null);
+  /** Mirrors `installing` for callbacks that must not read stale state. */
+  const installingRef = useRef(false);
 
   const fetchDistros = useCallback(async () => {
     try {
@@ -133,6 +135,17 @@ export default function WslStatusPage() {
           sorted.unshift(t);
         }
         setDistros(sorted);
+
+        // A usable distro now exists, so an earlier "安装失败 / 需要重启" card
+        // describes a state the machine is no longer in — the observed case was
+        // an install that outlived the app's wait and finished in the
+        // background.  Keep it while a flow is still running, though.
+        if (!installingRef.current) {
+          setInstallError(null);
+          setInstallNextStep(null);
+          setInstallRebootRequired(false);
+          setInstallPhase((phase) => (phase === 'error' ? null : phase));
+        }
 
         if (!initialFetch.current) {
           const auto =
@@ -171,6 +184,7 @@ export default function WslStatusPage() {
   // ── One-click install flow ─────────────────────────────────────────
   const handleInstall = useCallback(
     async (opts?: { resuming?: boolean }) => {
+      installingRef.current = true;
       setInstalling(true);
       setInstallError(null);
       setInstallRebootRequired(false);
@@ -201,6 +215,7 @@ export default function WslStatusPage() {
         setInstallError(e?.message ?? '安装过程出错');
         setInstallPhase('error');
       } finally {
+        installingRef.current = false;
         setInstalling(false);
       }
     },
