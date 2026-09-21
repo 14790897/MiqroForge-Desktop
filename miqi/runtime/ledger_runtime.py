@@ -285,17 +285,32 @@ class LedgerRuntime:
         return copied
 
     async def append_rollback_marker(
-        self, thread_id: str, *, drop_last_turns: int
+        self,
+        thread_id: str,
+        *,
+        drop_last_turns: int = 0,
+        drop_from_turn_id: str | None = None,
     ) -> LedgerItem:
-        """Append a rollback marker removing the last N turns."""
+        """Append a rollback marker removing turns.
+
+        Either the last ``drop_last_turns`` turns, or — when
+        ``drop_from_turn_id`` is given — that turn and every later turn.
+        ``drop_from_turn_id`` wins when both are provided.
+        """
         turn_ids = await self.list_turn_ids(thread_id)
-        removed = turn_ids[-drop_last_turns:] if drop_last_turns > 0 else []
+        if drop_from_turn_id is not None and drop_from_turn_id in turn_ids:
+            removed = turn_ids[turn_ids.index(drop_from_turn_id):]
+        elif drop_last_turns > 0:
+            removed = turn_ids[-drop_last_turns:]
+        else:
+            removed = []
         return await self.append_item(
             thread_id=thread_id,
             item_type="thread_rollback",
             content="",
             payload={
                 "drop_last_turns": drop_last_turns,
+                "drop_from_turn_id": drop_from_turn_id,
                 "removed_turn_ids": removed,
             },
         )

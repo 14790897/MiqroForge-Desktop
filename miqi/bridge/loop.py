@@ -1100,6 +1100,9 @@ class BridgeRuntimeLoop:
             # #680: pass the reasoning mode into the turn executor so the
             # desktop chain can apply the generation budget/prompts.
             reasoning_mode=mode_param if mode_param in ("fast", "think") else None,
+            # #1146: edit/regenerate/retry pass the turn boundary to truncate
+            # the model context to before the edited turn.
+            drop_from_turn_id=params.get("drop_from_turn_id"),
         ))
 
         # Subscribe client to session events so emit_event delivers to the sink.

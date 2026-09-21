@@ -827,6 +827,24 @@ class TaskRunner:
             )
 
         try:
+            # #1146: edit/regenerate/retry truncate the model context to the
+            # edited turn before building history, so the replaced turn is not
+            # fed back to the model. The frontend only slices its render list;
+            # here we also drop the runtime history (and record a ledger
+            # rollback marker for thread-view consistency, matching the
+            # thread/rollback handler). Unknown/compacted turn id → no-op.
+            drop_from = getattr(msg, "drop_from_turn_id", None)
+            if drop_from:
+                removed_turn_ids: list[str] = []
+                if history_runtime is not None:
+                    removed_turn_ids = await history_runtime.truncate_from_turn(
+                        thread_id, drop_from,
+                    )
+                if removed_turn_ids and ledger is not None:
+                    await ledger.append_rollback_marker(
+                        thread_id, drop_from_turn_id=drop_from,
+                    )
+
             # Phase 17: load history and start turn tracking
             if history_runtime is not None:
                 await history_runtime.start_turn(turn_id, thread_id=thread_id)
