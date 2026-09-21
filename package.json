@@ -1,6 +1,6 @@
 {
   "name": "miqi-desktop-release",
-  "version": "0.32.0-dev",
+  "version": "0.33.0-dev",
   "private": true,
   "description": "Release tooling for MiQroForge Desktop",
   "repository": {
