@@ -246,6 +246,15 @@ jobs:
           BRAVE_API_KEY: ${{ secrets.BRAVE_API_KEY }}
         timeout-minutes: 20
 
+      # ── WSL 状态监控的磁盘对账（#1157）─────────────────────────────
+      # 纯 UI + 主进程换算，不需要 LLM / 沙箱；单独一步是为了失败可见
+      # （上面那步 sandbox E2E 带 continue-on-error）。
+      - name: Run WSL disk accounting E2E (#1157)
+        if: always() && steps.build.outcome == 'success'
+        run: |
+          npx playwright test --config=playwright.config.ts --project=electron issue-1157-wsl-disk-accounting.spec.ts --workers=1
+        timeout-minutes: 10
+
       - name: Upload Playwright report (WSL E2E)
         if: failure()
         uses: actions/upload-artifact@v4
