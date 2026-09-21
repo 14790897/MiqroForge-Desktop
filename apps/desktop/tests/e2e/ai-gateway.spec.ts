@@ -161,4 +161,52 @@ test.describe('AI 网关 E2E (issue #922)', () => {
       fullPage: true,
     });
   });
+
+  test('active + 存量 gateway 型 provider 旧 key：默认模型仍自动就绪（#1172）', async () => {
+    // #1172 的主复现场景：全新安装的 agents.defaults.model 是 schema 默认值
+    // anthropic/claude-opus-4-5（config.get 把默认值带出来，永远非空）。
+    // 关键差异：这里额外给 siliconflow（is_gateway，按名字路由任意模型）留一把
+    // 旧 key —— 真实后端的 _model_provider_resolvable 会经「已配置 gateway 兜底」
+    // 把 anthropic 默认值判成可发起会话（active_model_resolvable=true），
+    // 若自动就绪只看该宽口径判据就会跳过写入，用户仍要手动选模型。
+    // 本用例断言严格判据下依然自动落盘为网关模型。
+    test.setTimeout(180_000);
+    await closeElectronApp(electronApp, fixture.miqiHome);
+    writeFileSync(storePath, buildSeededStoreContent({ status: 'active' }), 'utf8');
+    const f2 = await launchElectronApp((config) => {
+      config.agents = config.agents ?? {};
+      config.agents.defaults = config.agents.defaults ?? {};
+      config.agents.defaults.model = 'anthropic/claude-opus-4-5';
+      // 存量凭据：gateway 型 provider 的遗留 key（#835 收口前配置的）。
+      config.providers = config.providers ?? {};
+      config.providers.siliconflow = {
+        ...(config.providers.siliconflow ?? {}),
+        api_key: 'sk-e2e-legacy-siliconflow',
+      };
+    });
+    electronApp = f2.electronApp;
+    page = f2.page;
+    fixture = f2;
+
+    // 自动落盘：比较并设置（expectModel=遗留默认值）把默认模型换成网关模型
+    const configPath = join(fixture.miqiHome, 'config.json');
+    await expect
+      .poll(() => JSON.parse(readFileSync(configPath, 'utf8')).agents?.defaults?.model, {
+        timeout: 60_000,
+      })
+      .toBe('deepseek/deepseek-v4-flash');
+
+    // 模型 tab：没有任何手动选择，「当前默认模型」已是网关模型
+    await gotoQraftTab(page);
+    await page.getByRole('tab', { name: '模型' }).click();
+    await expect(page.getByTestId('providers-active-model')).toHaveText(
+      '当前默认模型：deepseek/deepseek-v4-flash',
+      { timeout: 15_000 }
+    );
+
+    await page.screenshot({
+      path: 'test-results/gateway-model-autoready-1172.png',
+      fullPage: true,
+    });
+  });
 });

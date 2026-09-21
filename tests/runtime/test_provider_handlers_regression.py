@@ -147,6 +147,90 @@ async def test_providers_list_gateway_creds_do_not_resolve_other_models(tmp_path
     assert result["result"]["active_model_resolvable"] is False
 
 
+# ── active_model_own_or_gateway_resolvable（#1172）：自动就绪的严格判据 ────
+#
+# 发送门禁要宽（active_model_resolvable：会话发得出去就行），登录后自动就绪
+# 默认模型要严（严格版：模型必须由自己的 provider 或平台网关路由）——否则
+# 存量配置里的 gateway 型 provider 旧 key 会把 schema 默认值经兜底判成
+# 「用户已选好」，自动写入永不触发（#1172）。
+
+
+@pytest.mark.asyncio
+async def test_strict_field_rejects_gateway_fallback_that_send_gate_accepts(
+    tmp_path, monkeypatch
+):
+    """有 siliconflow（is_gateway）旧 key 的存量配置：anthropic 默认值经兜底
+    被判成可发起会话（门禁放行），但严格判据为 False → 自动就绪仍会写入。"""
+    monkeypatch.delenv("QRAFT_GATEWAY_BASE", raising=False)
+    registry = _make_registry(
+        "anthropic/claude-opus-4-5", siliconflow="sk-sf-legacy-key"
+    )
+    cfg = registry.bridge_context["state"].load_config()
+    cfg.agents.defaults.workspace = str(tmp_path)
+
+    result = await providers_list_handler("r1", {}, "client-1", None, registry)
+
+    assert result["result"]["active_model_resolvable"] is True
+    assert result["result"]["active_model_own_or_gateway_resolvable"] is False
+
+
+@pytest.mark.asyncio
+async def test_strict_field_false_for_fresh_install_default(tmp_path, monkeypatch):
+    """全新安装：没有任何凭据时两个判据都为 False。"""
+    monkeypatch.delenv("QRAFT_GATEWAY_BASE", raising=False)
+    registry = _make_registry("anthropic/claude-opus-4-5")
+    cfg = registry.bridge_context["state"].load_config()
+    cfg.agents.defaults.workspace = str(tmp_path)
+
+    result = await providers_list_handler("r1", {}, "client-1", None, registry)
+
+    assert result["result"]["active_model_resolvable"] is False
+    assert result["result"]["active_model_own_or_gateway_resolvable"] is False
+
+
+@pytest.mark.asyncio
+async def test_strict_field_true_when_own_provider_configured(tmp_path, monkeypatch):
+    """用户自己配好的模型（归属 provider 有凭据）两个判据都为 True —— 自动
+    就绪不得覆盖用户的选择。"""
+    monkeypatch.delenv("QRAFT_GATEWAY_BASE", raising=False)
+    registry = _make_registry("deepseek/deepseek-v4-pro", deepseek="sk-ds-1234567890")
+    cfg = registry.bridge_context["state"].load_config()
+    cfg.agents.defaults.workspace = str(tmp_path)
+
+    result = await providers_list_handler("r1", {}, "client-1", None, registry)
+
+    assert result["result"]["active_model_resolvable"] is True
+    assert result["result"]["active_model_own_or_gateway_resolvable"] is True
+
+
+@pytest.mark.asyncio
+async def test_strict_field_true_via_ai_gateway(tmp_path, monkeypatch):
+    """平台 AI 网关路由不受严格开关影响：登录 + 网关凭据 active 且默认模型
+    就是网关模型时，严格判据同样为 True（已经就绪，无需再写）。"""
+    monkeypatch.delenv("QRAFT_GATEWAY_BASE", raising=False)
+    registry = _make_registry("deepseek/deepseek-v4-flash")
+    cfg = registry.bridge_context["state"].load_config()
+    cfg.agents.defaults.workspace = str(tmp_path)
+
+    qraft_dir = tmp_path / ".qraft"
+    qraft_dir.mkdir()
+    (qraft_dir / "token.json").write_text(
+        json.dumps({
+            "aiGateway": {
+                "status": "active",
+                "encryptedApiKey": "enc-key",
+                "configVersion": 1,
+            }
+        }),
+        encoding="utf-8",
+    )
+
+    result = await providers_list_handler("r1", {}, "client-1", None, registry)
+
+    assert result["result"]["active_model_resolvable"] is True
+    assert result["result"]["active_model_own_or_gateway_resolvable"] is True
+
+
 # ── 后端收口（#835）：providers.update 拒绝自配凭据 ─────────────────────────
 
 
