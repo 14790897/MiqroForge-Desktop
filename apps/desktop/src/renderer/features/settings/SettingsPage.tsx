@@ -7,6 +7,7 @@ import { cn } from '../../lib/utils';
 import { getCachedConfig, invalidateConfigCache } from '../../lib/configCache';
 import { sanitizeUiMessage } from '../../lib/sanitizeUiMessage';
 import { QraftLoginButton } from './components/QraftLoginCard';
+import { DOCS_BASE_URL, DOCS_TREE, REPO_LABEL, REPO_URL } from './docsLinks';
 import {
   RefreshCw,
   Download,
@@ -2323,69 +2324,6 @@ function ArchivedTab({ onRestore }: { onRestore?: (key: string) => void }) {
 }
 
 // ---- Docs Tab ----
-const DOCS_BASE = 'https://mygithub.sixiangjia.de/MiQi/';
-
-interface DocLink {
-  label: string;
-  href: string;
-  children?: DocLink[];
-}
-
-const DOCS_TREE: DocLink[] = [
-  { label: '🚀 快速开始', href: 'getting-started/' },
-  {
-    label: '🏗️ 系统架构',
-    href: 'architecture/',
-    children: [
-      { label: '整体架构', href: 'architecture/' },
-      { label: '数据流', href: 'architecture/data-flow/' },
-      { label: '项目结构', href: 'architecture/project-structure/' },
-    ],
-  },
-  {
-    label: '🐍 Python 后端',
-    href: 'backend/agent/',
-    children: [
-      { label: 'Agent 引擎', href: 'backend/agent/' },
-      { label: '工具系统', href: 'backend/tools/' },
-      { label: 'Provider 系统', href: 'backend/providers/' },
-      { label: '记忆系统', href: 'backend/memory/' },
-      { label: '会话管理', href: 'backend/session/' },
-      { label: '任务追踪', href: 'backend/trace/' },
-      { label: 'Bridge 通信', href: 'backend/bridge/' },
-    ],
-  },
-  {
-    label: '💻 Electron 前端',
-    href: 'frontend/overview/',
-    children: [
-      { label: '前端概览', href: 'frontend/overview/' },
-      { label: 'IPC 通信', href: 'frontend/ipc/' },
-      { label: '功能页面', href: 'frontend/features/' },
-      { label: 'SkillHub', href: 'frontend/skillhub/' },
-    ],
-  },
-  { label: '🔌 MCP 集成', href: 'mcp-integration/' },
-  {
-    label: '⚙️ 配置与部署',
-    href: 'configuration/',
-    children: [
-      { label: '配置参考', href: 'configuration/' },
-      { label: 'Docker 部署', href: 'deployment/docker/' },
-      { label: '桌面打包', href: 'deployment/packaging/' },
-    ],
-  },
-  {
-    label: '🛠️ 开发指南',
-    href: 'developer-guide/',
-    children: [
-      { label: '开发环境搭建', href: 'developer-guide/' },
-      { label: '贡献指南', href: 'contributing/' },
-    ],
-  },
-  { label: '📝 更新日志', href: 'changelog/' },
-];
-
 function DocsTab() {
   return (
     <div className="flex flex-col h-full overflow-y-auto">
@@ -2393,7 +2331,7 @@ function DocsTab() {
         <div className="flex items-center justify-between">
           <h3 className="text-subheading text-[var(--text)]">MiQroForge Desktop 文档</h3>
           <a
-            href={DOCS_BASE}
+            href={DOCS_BASE_URL}
             target="_blank"
             rel="noopener noreferrer"
             className="flex items-center gap-1 text-xs text-[var(--text-muted)] hover:text-[var(--accent)] transition-colors"
@@ -2412,7 +2350,7 @@ function DocsTab() {
             className="settings-hover-card border border-[var(--border-subtle)] rounded-lg overflow-hidden"
           >
             <a
-              href={DOCS_BASE + section.href}
+              href={DOCS_BASE_URL + section.href}
               target="_blank"
               rel="noopener noreferrer"
               className="block px-4 py-2.5 text-xs font-semibold text-[var(--text)] bg-[var(--surface-muted)] hover:bg-[var(--accent)]/10 transition-colors"
@@ -2424,7 +2362,7 @@ function DocsTab() {
                 {section.children.map((child) => (
                   <a
                     key={child.href}
-                    href={DOCS_BASE + child.href}
+                    href={DOCS_BASE_URL + child.href}
                     target="_blank"
                     rel="noopener noreferrer"
                     className="block px-4 py-2 text-xs text-[var(--text-muted)] hover:text-[var(--accent)] hover:bg-[var(--surface-muted)] transition-colors border-t border-[var(--border-subtle)]"
@@ -2439,13 +2377,13 @@ function DocsTab() {
 
         <div className="mt-2 pt-4 border-t border-[var(--border-subtle)]">
           <a
-            href="https://github.com/14790897/miqi"
+            href={REPO_URL}
             target="_blank"
             rel="noopener noreferrer"
             className="flex items-center gap-2 text-xs text-[var(--text-faint)] hover:text-[var(--accent)] transition-colors"
           >
             <ExternalLink size={12} />
-            GitHub 仓库：14790897/miqi
+            GitHub 仓库：{REPO_LABEL}
           </a>
         </div>
       </div>
