@@ -64,6 +64,18 @@ describe('findPlatformProblem', () => {
       'Virtualization is disabled on this machine.'
     );
     expect(findPlatformProblem('此计算机不支持虚拟化。')).toBe('此计算机不支持虚拟化。');
+    expect(
+      findPlatformProblem('WSL 2 cannot be started because virtualization is not enabled')
+    ).toBe('WSL 2 cannot be started because virtualization is not enabled');
+  });
+
+  it('stays quiet when virtualization is mentioned without a problem', () => {
+    // The subject word alone must never be enough: a healthy machine can print
+    // these, and flagging them would send users into an unnecessary repair.
+    expect(findPlatformProblem('Virtualization is enabled.')).toBeNull();
+    expect(findPlatformProblem('虚拟化已启用。')).toBeNull();
+    expect(findPlatformProblem('WSL 2 is running')).toBeNull();
+    expect(findPlatformProblem('WSL 2 正在运行')).toBeNull();
   });
 
   it('stays quiet on the advise lines and the help URL', () => {
