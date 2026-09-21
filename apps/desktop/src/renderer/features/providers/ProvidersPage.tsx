@@ -67,7 +67,7 @@ export function ProvidersPage({ onGoToQraft }: { onGoToQraft: () => void }) {
             onClick={load}
             className="text-xs text-[var(--text-faint)] hover:text-[var(--text-muted)] transition-colors px-2 py-1 rounded"
           >
-            Refresh
+            刷新
           </button>
         </div>
       </div>

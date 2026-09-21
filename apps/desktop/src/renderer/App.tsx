@@ -100,7 +100,7 @@ function StartupLoading() {
         >
           M
         </div>
-        <div style={{ fontSize: '13px', color: 'rgba(255,255,255,0.4)' }}>Loading MiQroForge…</div>
+        <div style={{ fontSize: '13px', color: 'rgba(255,255,255,0.4)' }}>正在启动 MiQroForge…</div>
       </div>
     </div>
   );
