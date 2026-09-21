@@ -2907,7 +2907,11 @@ export function SettingsPage({
         <Tabs.Content value="archived" className="flex-1 overflow-y-auto">
           <ArchivedTab />
         </Tabs.Content>
-        <Tabs.Content value="legal" className="flex-1 min-h-0 flex flex-col">
+        {/* min-w-0：正文里的 `min-w-[720px]` 表格会把 min-content 宽度顶上来，
+            flex item 的 min-width:auto 让本栏拒绝收缩到可用宽度以下，超出的
+            部分被祖先的 overflow-hidden 裁掉且无法滚动（#1159）。归零下限后
+            正文按可用宽度换行，宽表格回到自己的 overflow-x-auto 容器里滚动。 */}
+        <Tabs.Content value="legal" className="flex-1 min-w-0 min-h-0 flex flex-col">
           <ErrorBoundary
             fallback={(error, reset) => (
               <div className="p-6 text-sm" style={{ color: 'var(--danger)' }}>
