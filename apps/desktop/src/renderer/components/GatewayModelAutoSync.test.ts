@@ -68,7 +68,13 @@ describe('saveGatewayModelIfUnusable', () => {
     const updateConfig = vi.fn().mockResolvedValue({ saved: true });
     const invalidate = vi.fn();
 
-    await saveGatewayModelIfUnusable(getConfig, listProviders, updateConfig, invalidate);
+    await saveGatewayModelIfUnusable(
+      getConfig,
+      listProviders,
+      updateConfig,
+      invalidate,
+      () => true
+    );
 
     expect(updateConfig).toHaveBeenCalledWith(
       { agents: { defaults: { model: 'deepseek/deepseek-v4-flash' } } },
@@ -83,7 +89,13 @@ describe('saveGatewayModelIfUnusable', () => {
     const updateConfig = vi.fn().mockResolvedValue({ saved: true });
     const invalidate = vi.fn();
 
-    await saveGatewayModelIfUnusable(getConfig, listProviders, updateConfig, invalidate);
+    await saveGatewayModelIfUnusable(
+      getConfig,
+      listProviders,
+      updateConfig,
+      invalidate,
+      () => true
+    );
 
     expect(updateConfig).toHaveBeenCalledWith(
       { agents: { defaults: { model: 'deepseek/deepseek-v4-flash' } } },
@@ -102,7 +114,13 @@ describe('saveGatewayModelIfUnusable', () => {
     const updateConfig = vi.fn();
     const invalidate = vi.fn();
 
-    await saveGatewayModelIfUnusable(getConfig, listProviders, updateConfig, invalidate);
+    await saveGatewayModelIfUnusable(
+      getConfig,
+      listProviders,
+      updateConfig,
+      invalidate,
+      () => true
+    );
 
     expect(updateConfig).not.toHaveBeenCalled();
     expect(invalidate).not.toHaveBeenCalled();
@@ -116,7 +134,13 @@ describe('saveGatewayModelIfUnusable', () => {
     const updateConfig = vi.fn();
     const invalidate = vi.fn();
 
-    await saveGatewayModelIfUnusable(getConfig, listProviders, updateConfig, invalidate);
+    await saveGatewayModelIfUnusable(
+      getConfig,
+      listProviders,
+      updateConfig,
+      invalidate,
+      () => true
+    );
 
     expect(listProviders).not.toHaveBeenCalled();
     expect(updateConfig).not.toHaveBeenCalled();
@@ -132,7 +156,13 @@ describe('saveGatewayModelIfUnusable', () => {
     const updateConfig = vi.fn();
     const invalidate = vi.fn();
 
-    await saveGatewayModelIfUnusable(getConfig, listProviders, updateConfig, invalidate);
+    await saveGatewayModelIfUnusable(
+      getConfig,
+      listProviders,
+      updateConfig,
+      invalidate,
+      () => true
+    );
 
     expect(updateConfig).not.toHaveBeenCalled();
     expect(invalidate).not.toHaveBeenCalled();
@@ -146,9 +176,41 @@ describe('saveGatewayModelIfUnusable', () => {
       .mockResolvedValue({ saved: false, skipped: 'expect_model_mismatch' });
     const invalidate = vi.fn();
 
-    await saveGatewayModelIfUnusable(getConfig, listProviders, updateConfig, invalidate);
+    await saveGatewayModelIfUnusable(
+      getConfig,
+      listProviders,
+      updateConfig,
+      invalidate,
+      () => true
+    );
 
     expect(updateConfig).toHaveBeenCalledOnce();
+    expect(invalidate).not.toHaveBeenCalled();
+  });
+
+  it('does not write when eligibility is lost while reading config', async () => {
+    // 读快照 / 查 provider 列表都带 await：期间用户可能已登出或网关失效。
+    // 后端的比较并设置只看模型值，察觉不到这种变化 —— 写之前必须再查一次。
+    let eligible = true;
+    const getConfig = vi.fn().mockImplementation(async () => {
+      eligible = false; // 读取返回时用户已登出
+      return { agents: { defaults: { model: 'anthropic/claude-opus-4-5' } } };
+    });
+    const listProviders = vi
+      .fn()
+      .mockResolvedValue({ active_model_own_or_gateway_resolvable: false });
+    const updateConfig = vi.fn();
+    const invalidate = vi.fn();
+
+    await saveGatewayModelIfUnusable(
+      getConfig,
+      listProviders,
+      updateConfig,
+      invalidate,
+      () => eligible
+    );
+
+    expect(updateConfig).not.toHaveBeenCalled();
     expect(invalidate).not.toHaveBeenCalled();
   });
 });

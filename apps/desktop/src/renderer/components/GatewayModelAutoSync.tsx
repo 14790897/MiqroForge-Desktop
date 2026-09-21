@@ -97,6 +97,10 @@ interface ConfigUpdateResult {
  * 用当前模型值做 expectModel 比较并设置：后端只在磁盘上的默认模型仍与快照
  * 一致时写入。读取快照与写入之间用户若已手动改了模型，后端返回 saved=false，
  * 这里直接放弃，保留用户更新的选择。
+ *
+ * isEligible 在写入前再查一次（仍在「登录 + 网关 active」才允许写）：读快照
+ * 与查 provider 列表都带 await，期间用户完全可能已经登出或网关失效，而后端
+ * 的比较并设置只看模型值，察觉不到这种变化。
  */
 export async function saveGatewayModelIfUnusable(
   getConfig: () => Promise<unknown>,
@@ -105,7 +109,8 @@ export async function saveGatewayModelIfUnusable(
     config: Record<string, unknown>,
     expectModel?: string
   ) => Promise<ConfigUpdateResult | unknown>,
-  invalidate: () => void
+  invalidate: () => void,
+  isEligible: () => boolean
 ): Promise<void> {
   const config = await getConfig();
   const current = currentDefaultModel(config);
@@ -118,6 +123,7 @@ export async function saveGatewayModelIfUnusable(
   }
   const modelId = gatewayModelToAutoSet(current, ownOrGatewayResolvable);
   if (!modelId) return;
+  if (!isEligible()) return; // 登出 / 网关失效 → 不写
   const result = await updateConfig({ agents: { defaults: { model: modelId } } }, current);
   if (result && typeof result === 'object' && (result as ConfigUpdateResult).saved === false) {
     return; // 被比较并设置拦截：用户的选择优先
@@ -186,7 +192,8 @@ export function GatewayModelAutoSync() {
           () => window.miqi.config.get(),
           () => window.miqi.providers.list(),
           (config, expectModel) => window.miqi.config.update(config, expectModel),
-          invalidateConfigCache
+          invalidateConfigCache,
+          () => eligibleRef.current
         ),
       () => eligibleRef.current
     ).then((ok) => {
