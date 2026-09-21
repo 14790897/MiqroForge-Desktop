@@ -25,6 +25,7 @@ from __future__ import annotations
 import asyncio
 import threading
 import time
+import types
 
 import pytest
 
@@ -49,6 +50,25 @@ def _isolate_module_state(monkeypatch):
     monkeypatch.setattr(bwrap_mod, "_WSL_APT_ATTEMPT_TIMEOUT", 0.05)
 
 
+class _ManualClock:
+    """A monotonic clock the test drives by hand.
+
+    Needed by tests that care how much of the wall-clock budget was consumed.
+    A real clock is platform-fragile here: on Windows a sub-millisecond
+    ``asyncio.wait_for`` timeout truncates to 0 ms and resolves instantly, so
+    a tiny budget never drains.
+    """
+
+    def __init__(self, start: float = 1_000.0) -> None:
+        self.now = start
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
+
 class _FakeProc:
     """Stand-in for what ``asyncio.create_subprocess_exec`` returns."""
 
@@ -59,11 +79,13 @@ class _FakeProc:
         *,
         hang: bool = False,
         raise_timeout: bool = False,
+        before_timeout=None,
     ):
         self._rc = rc
         self._stderr = stderr
         self._hang = hang
         self._raise_timeout = raise_timeout
+        self._before_timeout = before_timeout
         self.returncode: int | None = None
         self.killed = False
 
@@ -71,6 +93,8 @@ class _FakeProc:
         if self._raise_timeout:
             # What the real wait_for produces; raising it here lets a test pin
             # the caller's timeout branch without waiting the real 10/30 s.
+            if self._before_timeout is not None:
+                self._before_timeout()
             raise asyncio.TimeoutError()
         if self._hang:
             # Outlast the (patched, 0.05 s) attempt timeout so the caller's
@@ -92,11 +116,13 @@ class _WslStub:
     """Answers every ``wsl.exe`` call ``_ensure_wsl_deps`` makes.
 
     ``install_results`` is consumed one entry per ``apt-get`` invocation:
-    ``"hang"`` makes that attempt outlive the timeout, a ``(rc, stderr)``
-    tuple is returned as-is.  ``ready_after`` is how many install attempts
-    must have happened before the readiness probe reports the toolchain as
-    present — set it below ``len(install_results)`` to model a runner that
-    installed everything but was simply too slow to say so in time.
+    ``"hang"`` makes that attempt outlive the timeout, ``"timeout"`` makes it
+    raise the timeout immediately (running ``on_install_timeout`` first, so a
+    test can burn the budget), and a ``(rc, stderr)`` tuple is returned as-is.
+    ``ready_after`` is how many install attempts must have happened before the
+    readiness probe reports the toolchain as present — set it below
+    ``len(install_results)`` to model a runner that installed everything but
+    was simply too slow to say so in time.
     """
 
     def __init__(
@@ -106,11 +132,13 @@ class _WslStub:
         ready_after,
         leftovers=False,
         pgrep_raises_timeout=False,
+        on_install_timeout=None,
     ):
         self.install_results = list(install_results)
         self.ready_after = ready_after
         self.leftovers = leftovers
         self.pgrep_raises_timeout = pgrep_raises_timeout
+        self.on_install_timeout = on_install_timeout
         self.install_cmds: list[str] = []
         self.install_attempts = 0
         self.terminate_calls = 0
@@ -139,6 +167,8 @@ class _WslStub:
         self.install_attempts += 1
         if result == "hang":
             return _FakeProc(hang=True)
+        if result == "timeout":
+            return _FakeProc(raise_timeout=True, before_timeout=self.on_install_timeout)
         rc, stderr = result
         return _FakeProc(rc, stderr=stderr)
 
@@ -278,9 +308,22 @@ async def test_total_budget_stops_a_second_attempt(monkeypatch):
     """The per-attempt cap must not multiply into the job-level timeout.
 
     Four WSL call sites each burning attempts × cap is more than the job has.
+    The clock is driven by hand so the first attempt provably burns the whole
+    budget and the second one must not start.  A wall-clock version of this is
+    platform-fragile: on Windows a sub-millisecond ``asyncio.wait_for``
+    timeout truncates to 0 ms and returns instantly, so the budget never
+    drains — which is exactly how this test failed on its first CI run.
     """
-    monkeypatch.setattr(bwrap_mod, "_WSL_APT_TOTAL_BUDGET", 0.01)
-    stub = _WslStub(["hang", (0, b"")], ready_after=99)
+    clock = _ManualClock()
+    monkeypatch.setattr(
+        bwrap_mod, "time", types.SimpleNamespace(monotonic=clock.monotonic)
+    )
+    monkeypatch.setattr(bwrap_mod, "_WSL_APT_TOTAL_BUDGET", 300.0)
+    stub = _WslStub(
+        ["timeout", (0, b"")],
+        ready_after=99,
+        on_install_timeout=lambda: clock.advance(301.0),
+    )
     monkeypatch.setattr(bwrap_mod, "_create_subprocess_exec", stub)
 
     assert await BwrapSandbox._ensure_wsl_deps(DISTRO) is False
