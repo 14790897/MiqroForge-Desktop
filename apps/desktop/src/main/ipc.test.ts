@@ -1,7 +1,7 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 import { EventEmitter } from 'events';
 import { spawn, spawnSync } from 'child_process';
-import { readFileSync, writeFileSync } from 'fs';
+import { readFileSync, rmSync, writeFileSync } from 'fs';
 import {
   classifyKernelInstall,
   classifyWslFeatureState,
@@ -33,6 +33,9 @@ vi.mock('fs', async (importOriginal) => {
     writeFileSync: vi.fn(),
     readFileSync: vi.fn(),
     rmSync: vi.fn(),
+    // The stale-directory sweep must not walk (or delete from) the real %TEMP%.
+    readdirSync: vi.fn(() => []),
+    statSync: vi.fn(),
   };
 });
 
@@ -40,6 +43,7 @@ const mockedSpawnSync = vi.mocked(spawnSync);
 const mockedSpawn = vi.mocked(spawn);
 const mockedReadFileSync = vi.mocked(readFileSync);
 const mockedWriteFileSync = vi.mocked(writeFileSync);
+const mockedRmSync = vi.mocked(rmSync);
 
 function spawnResult(result: Partial<ReturnType<typeof spawnSync>>) {
   return {
@@ -563,6 +567,8 @@ describe('runElevatedAsync', () => {
 
     child.emit('close', 0);
     await expect(pending).resolves.toEqual({ kind: 'ok', exitCode: 0, output: 'elevated done' });
+    // A collected run cleans up after itself.
+    expect(mockedRmSync).toHaveBeenCalled();
   });
 
   it('maps the declined-UAC exit code to cancelled', async () => {
@@ -583,6 +589,16 @@ describe('runElevatedAsync', () => {
     expect(result.kind).toBe('unknown');
     expect(result.error).toContain('超时');
     expect(child.killed).toBe(true);
+  });
+
+  it('keeps the result directory on timeout, for the run that is still going', async () => {
+    // Deleting it would strand the still-running elevated child: it writes its
+    // exit code into that directory when it eventually finishes.
+    mockAsyncChild();
+
+    await runElevatedAsync({ command: { file: 'wsl.exe' } }, 20);
+
+    expect(mockedRmSync).not.toHaveBeenCalled();
   });
 
   it('reports a spawn failure instead of hanging', async () => {

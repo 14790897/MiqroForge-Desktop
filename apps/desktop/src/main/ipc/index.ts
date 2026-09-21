@@ -69,6 +69,7 @@ import type {
 import { registerQraftIpcHandlers } from '../qraft/ipc';
 import { readConsentVersion, writeConsentVersion } from '../privacy-consent';
 import {
+  buildEnableFeaturesScript,
   buildPlatformRepairScript,
   classifyKernelInstall,
   classifyPlatformRepair,
@@ -1067,16 +1068,7 @@ for m in ("pydantic", "httpx", "loguru"):
         // The elevated process runs Enable-WindowsOptionalFeature and reports
         // its own output/exit code through the trampoline files: a declined
         // UAC prompt used to be indistinguishable from a DISM failure here.
-        const r = await runElevatedAsync(
-          {
-            powershell: [
-              '$ErrorActionPreference = "Continue"',
-              'Enable-WindowsOptionalFeature -Online -FeatureName Microsoft-Windows-Subsystem-Linux -NoRestart',
-              'Enable-WindowsOptionalFeature -Online -FeatureName VirtualMachinePlatform -NoRestart',
-            ].join('\r\n'),
-          },
-          120000
-        );
+        const r = await runElevatedAsync({ powershell: buildEnableFeaturesScript() }, 120000);
 
         if (r.kind === 'cancelled') {
           safeSend(IPC_EVENTS.WSL_INSTALL_PROGRESS, {

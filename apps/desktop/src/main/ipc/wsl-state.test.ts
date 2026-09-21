@@ -5,10 +5,12 @@
  */
 import { describe, expect, it } from 'vitest';
 import {
+  buildEnableFeaturesScript,
   buildPlatformRepairScript,
   classifyPlatformRepair,
   decodeWslOutput,
   findPlatformProblem,
+  isStaleElevatorDir,
   parseStaleOobeFlags,
   STALE_OOBE_VALUES,
 } from './wsl-state';
@@ -55,6 +57,13 @@ describe('findPlatformProblem', () => {
     expect(findPlatformProblem('WSL2 无法启动：当前系统未启用虚拟化支持')).toBe(
       'WSL2 无法启动：当前系统未启用虚拟化支持'
     );
+    expect(findPlatformProblem('虚拟化已被禁用，WSL2 无法使用。')).toBe(
+      '虚拟化已被禁用，WSL2 无法使用。'
+    );
+    expect(findPlatformProblem('Virtualization is disabled on this machine.')).toBe(
+      'Virtualization is disabled on this machine.'
+    );
+    expect(findPlatformProblem('此计算机不支持虚拟化。')).toBe('此计算机不支持虚拟化。');
   });
 
   it('stays quiet on the advise lines and the help URL', () => {
@@ -119,6 +128,45 @@ describe('buildPlatformRepairScript', () => {
     );
     expect(script).toContain('marker-cleared:');
     expect(script).toContain('marker-still-set:');
+  });
+});
+
+describe('buildEnableFeaturesScript', () => {
+  const script = buildEnableFeaturesScript();
+
+  it('enables both features and fails loudly on a cmdlet error', () => {
+    expect(script).toContain("$ErrorActionPreference = 'Stop'");
+    expect(script).toContain('Microsoft-Windows-Subsystem-Linux');
+    expect(script).toContain('VirtualMachinePlatform');
+  });
+
+  it('is the same enable step the platform repair runs', () => {
+    // One definition, so the plain path and the repair path cannot drift apart.
+    const repair = buildPlatformRepairScript();
+    for (const line of script
+      .split('\r\n')
+      .filter((l) => l.startsWith('Enable-WindowsOptionalFeature'))) {
+      expect(repair).toContain(line);
+    }
+  });
+});
+
+describe('isStaleElevatorDir', () => {
+  const now = 1_700_000_000_000;
+
+  it('sweeps the leftovers of past runs', () => {
+    expect(isStaleElevatorDir('miqi-elev-ab12', now - 25 * 3600 * 1000, now)).toBe(true);
+  });
+
+  it('leaves a directory a still-running run may write into', () => {
+    // A timed-out run keeps its directory on purpose: the elevated child writes
+    // its exit code there whenever it finishes.
+    expect(isStaleElevatorDir('miqi-elev-ab12', now - 60 * 1000, now)).toBe(false);
+    expect(isStaleElevatorDir('miqi-elev-ab12', now, now)).toBe(false);
+  });
+
+  it('ignores directories that are not ours', () => {
+    expect(isStaleElevatorDir('some-other-tool', now - 25 * 3600 * 1000, now)).toBe(false);
   });
 });
 

@@ -16,7 +16,7 @@
  *   without that, every failure mode collapses into one fallback message.
  */
 import { spawn, spawnSync } from 'child_process';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
+import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import type { WslFeatureState } from '../../shared/ipc';
@@ -222,6 +222,8 @@ interface ElevatorPaths {
 
 /** Temp-dir layout + trampoline command line for one elevated run. */
 function prepareElevator(payload: ElevatedPayload): { paths: ElevatorPaths; trampoline: string } {
+  // Also the cleanup hook for runs that timed out and were never collected.
+  sweepStaleElevatorDirs();
   const dir = mkdtempSync(join(tmpdir(), 'miqi-elev-'));
   const paths: ElevatorPaths = {
     dir,
@@ -252,6 +254,42 @@ function removeElevatorDir(dir: string | null): void {
   if (!dir) return;
   try {
     rmSync(dir, { recursive: true, force: true });
+  } catch {
+    /* best-effort */
+  }
+}
+
+/** One day is far longer than any install that is still worth waiting for. */
+export const ELEVATOR_DIR_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Whether a leftover elevator directory is old enough to sweep.  A timed-out
+ * run keeps its directory on purpose — the elevated child is still running and
+ * writes its exit code there — so age, not existence, decides what is garbage.
+ */
+export function isStaleElevatorDir(
+  name: string,
+  mtimeMs: number,
+  now: number,
+  maxAgeMs = ELEVATOR_DIR_MAX_AGE_MS
+): boolean {
+  return name.startsWith('miqi-elev-') && now - mtimeMs > maxAgeMs;
+}
+
+/** Best-effort sweep of elevator directories left behind by past runs. */
+function sweepStaleElevatorDirs(now = Date.now()): void {
+  try {
+    for (const entry of readdirSync(tmpdir(), { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue;
+      const dir = join(tmpdir(), entry.name);
+      try {
+        if (isStaleElevatorDir(entry.name, statSync(dir).mtimeMs, now)) {
+          rmSync(dir, { recursive: true, force: true });
+        }
+      } catch {
+        /* a directory that vanished mid-sweep is fine */
+      }
+    }
   } catch {
     /* best-effort */
   }
@@ -327,10 +365,13 @@ export function runElevatedAsync(
   return new Promise((resolve) => {
     let paths: ElevatorPaths | null = null;
     let settled = false;
-    const finish = (result: ElevatedRunResult) => {
+    const finish = (result: ElevatedRunResult, opts?: { keepDir?: boolean }) => {
       if (settled) return;
       settled = true;
-      removeElevatorDir(paths?.dir ?? null);
+      // A timed-out run keeps its directory: the elevated child is still
+      // running and writes its exit code there, so removing it would strand the
+      // background work's own result.  Leftovers are swept by the next run.
+      if (!opts?.keepDir) removeElevatorDir(paths?.dir ?? null);
       resolve(result);
     };
 
@@ -345,15 +386,19 @@ export function runElevatedAsync(
       );
 
       // On timeout the trampoline dies with the app's patience, but a running
-      // elevated child (DISM) is left to finish on its own.
+      // elevated child (DISM) is left to finish on its own — including writing
+      // its result files, which is why this path keeps the directory.
       const timer = setTimeout(() => {
         child.kill();
-        finish({
-          kind: 'unknown',
-          exitCode: null,
-          output: '',
-          error: `提权进程超时未返回（${Math.round(timeoutMs / 1000)} 秒）`,
-        });
+        finish(
+          {
+            kind: 'unknown',
+            exitCode: null,
+            output: '',
+            error: `提权进程超时未返回（${Math.round(timeoutMs / 1000)} 秒）`,
+          },
+          { keepDir: true }
+        );
       }, timeoutMs);
 
       child.once('error', (e) => {
@@ -568,6 +613,22 @@ export function readStaleOobeState(timeoutMs = 8000): StaleOobeState {
   }
 }
 
+/** The two optional features every WSL2 install needs, in install order. */
+const ENABLE_FEATURE_LINES = [
+  'Enable-WindowsOptionalFeature -Online -FeatureName Microsoft-Windows-Subsystem-Linux -NoRestart',
+  'Enable-WindowsOptionalFeature -Online -FeatureName VirtualMachinePlatform -NoRestart',
+];
+
+/**
+ * Elevated script that turns the optional features on.  `'Stop'` on purpose: a
+ * non-terminating failure would leave the exit code at 0 and the caller would
+ * report enabled features plus a reboot that never changes anything — the
+ * caller's own check only reads WSL's feature state, not VirtualMachinePlatform's.
+ */
+export function buildEnableFeaturesScript(): string {
+  return ["$ErrorActionPreference = 'Stop'", ...ENABLE_FEATURE_LINES].join('\r\n');
+}
+
 /**
  * Elevated repair for the state above: drop the stale markers, then re-submit
  * both optional features so the next boot applies them.
@@ -585,11 +646,9 @@ export function buildPlatformRepairScript(): string {
     '}',
   ].join('\r\n');
   return [
-    // 'Stop' on purpose: a non-terminating failure of
-    // Enable-WindowsOptionalFeature would leave the exit code at 0, and the
-    // caller only verifies the markers afterwards — it would report a repair
-    // that never happened and ask for a reboot that changes nothing.  The
-    // best-effort steps below each carry an explicit -ErrorAction.
+    // Same failure semantics as the plain enable script above ('Stop'), with
+    // the best-effort service and registry steps carrying an explicit
+    // -ErrorAction so they cannot abort the run.
     "$ErrorActionPreference = 'Stop'",
     `$key = '${WU_AUTO_UPDATE_KEY}'`,
     // Unattended Windows Update can write the markers back the moment it runs,
@@ -597,8 +656,7 @@ export function buildPlatformRepairScript(): string {
     // come back on their own.
     "foreach ($svc in 'wuauserv', 'UsoSvc') { Stop-Service -Name $svc -Force -ErrorAction SilentlyContinue }",
     ...clear,
-    'Enable-WindowsOptionalFeature -Online -FeatureName Microsoft-Windows-Subsystem-Linux -NoRestart',
-    'Enable-WindowsOptionalFeature -Online -FeatureName VirtualMachinePlatform -NoRestart',
+    ...ENABLE_FEATURE_LINES,
     // Clearing again after the feature work: that is the state the next boot
     // reads, and the markers have just been observed to come back while it runs.
     ...clear,
@@ -611,7 +669,8 @@ export function buildPlatformRepairScript(): string {
 // subject and a symptom on the same line: the healthy output also mentions
 // `enablevirtualization`, but only inside its help URL.
 const VIRTUALIZATION_SUBJECT = /虚拟化|virtualization/i;
-const PLATFORM_PROBLEM_SYMPTOM = /无法启动|cannot start|未启用|not enabled/i;
+const PLATFORM_PROBLEM_SYMPTOM =
+  /无法启动|cannot start|未启用|not enabled|不支持|not supported|禁用|disabled/i;
 
 /**
  * The `wsl --status` line saying WSL2 cannot start, or null when the platform
