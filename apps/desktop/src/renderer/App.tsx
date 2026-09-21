@@ -245,24 +245,26 @@ function AppShell() {
     }
   }, []);
   const sessionKeyRef = useRef(sessionKey);
+  /** 账号切换装上的默认哨兵，用来只跳过那一次落盘（见下面 persist effect）。 */
+  const switchSentinelRef = useRef<{ sub: string | null; key: string } | null>(null);
 
   useEffect(() => {
     sessionKeyRef.current = sessionKey;
   }, [sessionKey]);
 
   // Persist last active session so the app restores it on next launch
-  //
-  // 默认哨兵不覆盖**已存的**上次会话（#1185）：它表示「还没选定会话」，不是
-  // 一个会话，而账号切换时的重置 effect 正是把它放进 sessionKey —— 照写就会
-  // 用它盖掉该账号名下的真实「上次会话」，下次启动再也回不到自己的会话。
-  // 槽位为空时仍然写下哨兵：`miqi:lastSession` 有值是「Chromium profile 干净」
-  // 的判定依据（renderer-crash-recovery 的 expectFreshProfile 靠它），
-  // 一律不写会把那条判据变成永久缺失。
   useEffect(() => {
+    const pending = switchSentinelRef.current;
+    switchSentinelRef.current = null;
+    if (pending && pending.sub === sessionOwnerSubRef.current && sessionKey === pending.key) {
+      // 这次默认哨兵是**账号切换**装上的，不落盘：写下去就用它盖掉了新账号
+      // 自己名下的「上次会话」，该账号下次启动再也回不到自己的会话（#1185）。
+      // 只跳过这一帧 —— 其它来源的哨兵（首次启动、幽灵 key 回退、恢复校验失败
+      // 回退）照常落盘，那几条路径有既有用例在钉。
+      return;
+    }
     try {
-      const slot = lastSessionStorageKey(sessionOwnerSubRef.current);
-      if (sessionKey === DEFAULT_SESSION_KEY && localStorage.getItem(slot)) return;
-      localStorage.setItem(slot, sessionKey);
+      localStorage.setItem(lastSessionStorageKey(sessionOwnerSubRef.current), sessionKey);
     } catch {
       /* localStorage unavailable */
     }
@@ -294,8 +296,13 @@ function AppShell() {
     prevAccountSubRef.current = accountSub;
     sessionOwnerSubRef.current = accountSub;
     setWorkspace(null);
-    setSessionKey(DEFAULT_SESSION_KEY);
     setSessionRefreshKey((k) => k + 1);
+    // 只有真要换掉 key 时才记这一次哨兵：sessionKey 本来就是哨兵时不会触发
+    // persist effect，留着的记录会误伤后面某次正常的哨兵落盘。
+    if (sessionKeyRef.current !== DEFAULT_SESSION_KEY) {
+      switchSentinelRef.current = { sub: accountSub, key: DEFAULT_SESSION_KEY };
+      setSessionKey(DEFAULT_SESSION_KEY);
+    }
   }, [accountSub]);
 
   // #1118（#1035 移植）：恢复出来的 lastSession 可能指向一个**已经不存在的会话**
