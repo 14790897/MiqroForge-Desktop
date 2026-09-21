@@ -1302,7 +1302,7 @@ wheels = [
 
 [[package]]
 name = "miqi"
-version = "0.33.0.dev0"
+version = "0.32.0.dev0"
 source = { editable = "." }
 dependencies = [
     { name = "aiosqlite" },
