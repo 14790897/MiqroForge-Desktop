@@ -744,8 +744,9 @@ export async function launchElectronApp(
   // 覆盖 Electron 的 `--user-data-dir`（见 src/main/index.ts 的 dev-mode
   // 缓存隔离块），hash 只跟 checkout 路径有关——于是同一个 checkout 的
   // 所有 run（串行 + 并行 worker）共用一份 Local Storage，上一轮 run 写下的
-  // `miqi:lastSession` 会被下一轮当成当前会话恢复（#1118 第七轮实锤：
-  // 幽灵会话 + 首条 send 落错 key + 并行 worker 踩踏同一份 leveldb）。
+  // `miqi:lastSession` 会被下一轮当成当前会话恢复（#1034/#1118 第七轮实锤：
+  // 幽灵会话 + 首条 send 落错 key + 并行 worker 踩踏同一份 leveldb；本分支的
+  // renderer-crash-recovery 用例同样拿 sessionStorage/leveldb 里的状态做断言）。
   // 因此这里额外设 MIQI_USER_DATA_DIR 把 profile 也钉到本轮临时 home。
   const miqiHome = mkdtempSync(join(tmpdir(), 'miqi-e2e-'));
   const miqiSessionsDir = getMiqiSessionsDir(miqiHome);

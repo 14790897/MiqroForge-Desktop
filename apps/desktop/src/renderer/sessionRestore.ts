@@ -30,6 +30,12 @@
  * 结论时**显式回退到默认哨兵**再放行（`verifyRestoredSession` → `unverified`，
  * 见 `resolveUnverifiedRestoreKey`）。用户的会话仍在侧边栏可选，代价只是停在
  * 欢迎页而不是幽灵会话里。
+ *
+ * #1118 第十轮（计时器起点）：第九轮把「没能验证」统一成回退默认，但如果这个
+ * 结论是**计时器**在同意门还挡着的时候下的，回退的就不是「没能验证的 key」而是
+ * 「还没开始验证的 key」——同意页上多读一会儿协议，上次的会话就没了。兜底计时器
+ * 的武装条件因此收紧成「校验挂着 **且** 同意门已开」（`shouldArmRestoreTimeout`），
+ * 预算从桥真正开始启动的那一刻起算。
  */
 
 /** 空态哨兵会话 key（与 App.tsx 初值 / ChatConsole 的 DEFAULT_SESSION 同字面量）。 */
@@ -49,6 +55,28 @@ export function shouldVerifyRestoredSession(
 ): boolean {
   if (!restoredKey) return false;
   return restoredKey !== defaultKey;
+}
+
+/**
+ * 恢复门的**兜底计时器**该不该武装（#1118 第十轮 CR）。
+ *
+ * 计时器的语义是「等桥起来，等不到就回退默认」——它的预算必须从**桥开始启动**
+ * 的那一刻起算。而桥的启动被隐私同意门挡在后面（App.tsx 的 consent-first：
+ * `if (!consentOk) return;` 时不调 `runtime.start()`），所以同意前 `status.state`
+ * 恒不为 `running`、存在性校验根本不跑；此时武装计时器，等于让用户在同意页上
+ * 读协议的时间去消耗「等桥」的预算——停留超过 RESTORE_GATE_MAX_MS 就在校验
+ * **开始之前**把恢复出来的 key 判负、降级成默认哨兵（`openGateUnverified` 还会
+ * 顺手把 `restoredSessionCheckedRef` 置真，同意之后校验再也不会跑）。用户点了
+ * 同意也回不到上次的会话。
+ *
+ * 因此：只有「恢复校验还挂着」**且**「同意门已开」两个条件同时成立才武装。
+ * 同意门打开会让 effect 重跑（consentOk 在依赖里），届时预算从头算起。
+ *
+ * @param restorePending 恢复校验尚未出结论（默认哨兵/读不到 lastSession 时为 false）。
+ * @param consentOk      隐私同意门已通过（或 E2E 绕过）。
+ */
+export function shouldArmRestoreTimeout(restorePending: boolean, consentOk: boolean): boolean {
+  return restorePending && consentOk;
 }
 
 /**

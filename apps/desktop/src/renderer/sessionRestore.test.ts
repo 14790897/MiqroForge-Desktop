@@ -10,6 +10,7 @@ import {
   DEFAULT_SESSION_KEY,
   resolveUnverifiedRestoreKey,
   RESTORE_VERIFY_ATTEMPTS,
+  shouldArmRestoreTimeout,
   shouldFallbackToDefaultSession,
   shouldVerifyRestoredSession,
   verifyRestoredSession,
@@ -78,6 +79,34 @@ describe('shouldVerifyRestoredSession', () => {
   it('自定义默认 key 时同样成立', () => {
     expect(shouldVerifyRestoredSession('desktop:9', 'desktop:my-default')).toBe(true);
     expect(shouldVerifyRestoredSession('desktop:my-default', 'desktop:my-default')).toBe(false);
+  });
+});
+
+/**
+ * 第十轮 CR：兜底计时器只在**同意门开启后**武装。
+ *
+ * 为什么这是个真值表而不是「一行 &&」的仪式：计时器的语义是「等桥起不来就回退
+ * 默认」，而桥的启动被同意门挡在后面（consent-first）。同意前武装 = 用户在同意页
+ * 上读协议的时间会消耗「等桥」的预算，停留超过 RESTORE_GATE_MAX_MS 就在存在性
+ * 校验**开始之前**把恢复出来的 key 判负（`openGateUnverified` 还会把
+ * `restoredSessionCheckedRef` 置真 → 同意之后校验再也不跑）。
+ *
+ * 变异验证：把 App.tsx 的武装条件改回只看 `restorePending`（或把本函数实现改成
+ * `return restorePending`）——第一例立刻变红。E2E 侧见
+ * issue-1118-session-restore-race.spec.ts 的「同意页停留超过兜底预算」用例。
+ */
+describe('shouldArmRestoreTimeout（同意门开启前不武装兜底计时器）', () => {
+  it('校验还挂着 + 同意门未过 → 不武装（核心：别拿同意页的停留时间当等桥预算）', () => {
+    expect(shouldArmRestoreTimeout(true, false)).toBe(false);
+  });
+
+  it('校验还挂着 + 同意门已过 → 武装（同意后才从零开始计预算）', () => {
+    expect(shouldArmRestoreTimeout(true, true)).toBe(true);
+  });
+
+  it('已有结论（哨兵/读不到 lastSession）→ 不武装，无论同意与否', () => {
+    expect(shouldArmRestoreTimeout(false, true)).toBe(false);
+    expect(shouldArmRestoreTimeout(false, false)).toBe(false);
   });
 });
 

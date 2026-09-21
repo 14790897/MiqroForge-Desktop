@@ -40,6 +40,20 @@ import { type ExecutionPolicy } from '../../components/ExecutionPolicySelector';
 import { type ReasoningMode } from './components/ReasoningModeSwitch';
 import { clampPanelWidth, createPanelWindowSync } from './panelWindowSync';
 import {
+  addThreadTab,
+  closeThreadTab,
+  isEventForView,
+  isNewRecoveredTurnStart,
+  loadThreadState,
+  routingKeyFor,
+  safeSessionStorage,
+  saveActiveThread,
+  saveThreadTabs,
+  selectThreadTab,
+  shouldAdoptRecoveredEvent,
+  type ThreadTabsState,
+} from './threadTabs';
+import {
   MODE_SCENES,
   SKILL_ORDER,
   SKILL_SCENE_ICON,
@@ -308,7 +322,7 @@ function extractFileChips(content: string): { cleanContent: string; chips: FileC
 }
 
 interface Message {
-  role: 'user' | 'assistant' | 'progress' | 'error' | 'subagent';
+  role: 'user' | 'assistant' | 'progress' | 'error' | 'subagent' | 'system';
   content: string;
   /** Reasoning mode used when this message was sent (issue #680): fast/think */
   reasoningMode?: 'fast' | 'think';
@@ -5083,6 +5097,41 @@ export function ChatConsole({
   // 回合序号（第几个 user 回合，从 0 起）——source 回合索引（turnSourcesMap /
   // 文件卡片「相关引用」）。会话加载时重置；与 lifecycleSeqRef 分离。
   const turnSeqRef = useRef(0);
+  // Crash-recovery turn id (#1035): latched by the mount-time listeners from
+  // the first turn-tagged event after a renderer reload, so that turn's
+  // final/error/aborted are accepted while a superseded turn's are dropped.
+  // Scoped to ONE turn of ONE routing key — reset when the user leaves the tab
+  // (or session) that turn belongs to, see the switch effect below.
+  const recoveryTurnIdRef = useRef<string | null>(null);
+  // Terminal-state latch for the recovered turn (#1035 复审 P1): true from the
+  // moment the recovery listeners ACCEPTED a terminal (final/error/aborted) for
+  // the turn they adopted. The turn-id latch above is a different question — it
+  // says WHICH turn, this one says WHETHER that turn is still running. Without
+  // it, a late `chat:progress` of the finished turn (notably `points`, which
+  // `pointsEventToMessage` turns straight into a message) is still adopted and
+  // appends a fresh bubble to a recovery view that has already settled.
+  // Opened by the backend's next turn-start announcement under the same routing
+  // key (see isNewRecoveredTurnStart), and reset — together with the turn-id
+  // latch — on session switch, tab switch and a new handleSend(). Only the
+  // recovery listeners read it; the per-send path is untouched.
+  const recoveryTerminalRef = useRef(false);
+  // The turn the crash-recovery listeners put on screen (#1035 复审 P1): its
+  // session + routing key, or null when they are not driving the turn UI.
+  // Set where they light `streaming` (the per-send path never sets it — the
+  // hasLiveSend gate keeps the two apart, so a set ref unambiguously means
+  // "the recovery listener owns this turn"), cleared when its terminal settles
+  // it, when the user switches tab/session, or when a handleSend() takes the
+  // turn UI over.  Emphatically NOT derived from `streamingBySession`: that is
+  // session-wide, this is one tab's one turn.
+  const recoveryOwnedTurnRef = useRef<{ session: string; key: string } | null>(null);
+  // Sessions whose stop was already rendered by THIS component (handleAbort).
+  // Aborting releases the bridge's turn lock but its drain task keeps running
+  // until the terminal event, so a late chat:aborted (plus any trailing
+  // progress) still arrives — with the aborted invocation's listeners already
+  // unsubscribed it would otherwise be replayed by the crash-recovery listeners
+  // on top of the「已停止。」handleAbort just appended. Cleared when a new send
+  // starts for the session (#1035).
+  const localAbortSessionsRef = useRef<Set<string>>(new Set());
   const liveReasoningTsRef = useRef<number | null>(null);
   // Anchor of the first reasoning delta of the current turn — thinking
   // duration is measured from this (pure thinking, excluding tool time).
@@ -5124,29 +5173,49 @@ export function ChatConsole({
   const activeSendCleanupRef = useRef<(() => void) | null>(null);
 
   // ── Thread tabs for multi-agent support ──
-  interface ThreadTab {
-    threadId: string;
-    agentType: string;
-    label: string;
+  // Tabs + the selected tab are ONE piece of state and are persisted per
+  // session (#1035): a renderer crash reloads the page, and without the pair
+  // the UI would silently fall back to the main tab while the backend turn it
+  // was watching keeps streaming under `desktop:<threadId>` — the routing key
+  // both the per-send and the crash-recovery listeners filter on.
+  const [threadState, setThreadState] = useState<ThreadTabsState>(() =>
+    loadThreadState(sessionKey, safeSessionStorage())
+  );
+  // Which session the tab state describes.  A sessionKey change is applied
+  // during render (React's "adjust state when a prop changes" pattern) — an
+  // effect would be too late: the persistence effect below runs in the SAME
+  // commit and would save the leaving session's tabs under the new session's
+  // key.
+  const [threadStateSession, setThreadStateSession] = useState(sessionKey);
+  if (threadStateSession !== sessionKey) {
+    setThreadStateSession(sessionKey);
+    setThreadState(loadThreadState(sessionKey, safeSessionStorage()));
   }
-  const [threads, setThreads] = useState<ThreadTab[]>([
-    { threadId: 'main', agentType: 'main', label: '主线程' },
-  ]);
-  const [activeThreadId, setActiveThreadId] = useState('main');
+  const threads = threadState.tabs;
+  const activeThreadId = threadState.active;
+  // Ref mirror: the crash-recovery listeners are registered once on mount and
+  // must read the tab selected AT EVENT TIME, not the one captured when they
+  // were subscribed.  handleSend reads it too, so the routing key it sends
+  // under and the key the listeners filter on can never diverge.
+  const activeThreadIdRef = useRef(activeThreadId);
+  activeThreadIdRef.current = activeThreadId;
+  // Persist both halves on every change.  Keyed by the session the state was
+  // loaded for, so a stale pair is never written under another session.
+  useEffect(() => {
+    const store = safeSessionStorage();
+    saveThreadTabs(sessionKey, threadState.tabs, store);
+    saveActiveThread(sessionKey, threadState.active, store);
+  }, [sessionKey, threadState]);
 
   useEffect(() => {
     const unsub = window.miqi.agents?.onSpawned((data) => {
-      setThreads((prev) => {
-        if (prev.find((t) => t.threadId === data.sub_thread_id)) return prev;
-        return [
-          ...prev,
-          {
-            threadId: data.sub_thread_id,
-            agentType: data.agent_type,
-            label: data.task_label || data.agent_type,
-          },
-        ];
-      });
+      setThreadState((prev) =>
+        addThreadTab(prev, {
+          threadId: data.sub_thread_id,
+          agentType: data.agent_type,
+          label: data.task_label || data.agent_type,
+        })
+      );
     });
     return () => {
       if (unsub) unsub();
@@ -5155,11 +5224,12 @@ export function ChatConsole({
 
   useEffect(() => {
     const unsub = window.miqi.agents?.onCompleted((data) => {
-      setThreads((prev) =>
-        prev.map((t) =>
+      setThreadState((prev) => ({
+        ...prev,
+        tabs: prev.tabs.map((t) =>
           t.threadId === data.sub_thread_id ? { ...t, label: `${t.label.replace(/ ✓$/, '')} ✓` } : t
-        )
-      );
+        ),
+      }));
     });
     return () => {
       if (unsub) unsub();
@@ -5279,6 +5349,10 @@ export function ChatConsole({
     },
     []
   );
+  // Ref mirror so crash-recovery listeners (registered once on mount) always
+  // call the latest trackFile closure (#1035).
+  const trackFileRef = useRef(trackFile);
+  trackFileRef.current = trackFile;
 
   useEffect(() => {
     // True only on an actual sessionKey change.  loadTrigger can bump alone
@@ -5286,6 +5360,9 @@ export function ChatConsole({
     // must NOT wipe the user's typed input / attachments / streaming state,
     // which this PR's new explicit resets would otherwise do on every reload.
     const _sessionChanged = currentSessionRef.current !== sessionKey;
+    // The session being left, captured before currentSessionRef is repointed
+    // below — the crash-recovery resets key off it.
+    const _leavingSession = _sessionChanged ? currentSessionRef.current : null;
     // Snapshot the session we're leaving so switching back restores the
     // live-rendered thinking/reply instantly.  While on a session its events
     // take the LIVE path (in `messages`), never moduleInFlightCache — so
@@ -5323,6 +5400,27 @@ export function ChatConsole({
     currentThreadIdRef.current = null; // Reset on session change
     toolArgsByCallId.current.clear(); // drop tool-call args from the previous session
     if (_sessionChanged) {
+      // #1035: the crash-recovery latch belongs to ONE turn of ONE session. A
+      // switch must not carry it over — the newly displayed session may have
+      // its own turn in flight from before the crash, and a stale latch would
+      // make its (differently tagged) terminal look superseded and drop it.
+      recoveryTurnIdRef.current = null;
+      // The terminal latch is scoped to the same one turn of one session: the
+      // session now on screen may hold a turn of its own that is still running,
+      // and a surviving latch would swallow its progress (#1035 复审 P1).
+      recoveryTerminalRef.current = false;
+      // Same for the turn the recovery listeners had on screen (#1035 复审 P1):
+      // they only adopt events of the CURRENT session, so the leaving session's
+      // turn is abandoned — and its terminal, the only thing that would clear
+      // the spinner, will be rejected. `streamingBySession` is keyed per
+      // session and the switch-back heuristic below RE-LIGHTS the spinner from
+      // it, so a surviving entry means a stuck "生成中" forever; drop it with
+      // the turn it belonged to. (A live send of the leaving session cleans up
+      // after itself through its own listeners — this ref is never set then.)
+      if (_leavingSession && recoveryOwnedTurnRef.current?.session === _leavingSession) {
+        recoveryOwnedTurnRef.current = null;
+        streamingBySession.delete(_leavingSession);
+      }
       setHistoryLoaded(false);
       // ── Instant restore ─────────────────────────────────────────
       // sessions.get() is async, so clearing messages here and waiting would
@@ -5375,9 +5473,10 @@ export function ChatConsole({
       // where the heuristics below (cache progress, snapshot thinking, active
       // typewriter) all report false and the thinking indicator wrongly dies.
       const _hasLiveTurn = streamingBySession.has(sessionKey) || _cacheLiveTurn || _snapLiveTurn;
-      // #1118 第七轮：先算出这一拍要显示的基线，**同步**写进 messagesRef 再交给
-      // setMessages。messagesRef 是渲染期赋值（见 `messagesRef.current = messages`），
-      // 而下面 load() 的 sessions.get() 是异步的：切会话这一拍如果渲染还没提交
+      // #1118 第七轮（#1035 移植）：先算出这一拍要显示的基线，**同步**写进
+      // messagesRef 再交给 setMessages。messagesRef 是渲染期赋值（见
+      // `messagesRef.current = messages`），而下面 load() 的 sessions.get() 是
+      // 异步的：切会话（含切 thread tab 后的重新 load）这一拍如果渲染还没提交
       // （列表越大越慢——本用例的 ~6MB reasoning 正是最慢的那档），load() 完成时
       // 读到的 messagesRef 仍是**上一个会话**的消息，于是 #872 的 in-flight 保留
       // 分支会把上一个会话的用户气泡/思考块 append 进新会话的 merged 里。实测症状
@@ -5415,8 +5514,9 @@ export function ChatConsole({
       }
       setCurrentReqId(null);
       composerRef.current?.clear();
-      setThreads([{ threadId: 'main', agentType: 'main', label: '主线程' }]);
-      setActiveThreadId('main');
+      // NOTE: the thread tab state is NOT reset here — it is swapped for the
+      // new session's persisted tabs during render (see threadStateSession
+      // above), i.e. before this effect would have run.
       setPlan(null);
       setPlanOpen(false);
       fullContentRef.current = '';
@@ -6064,6 +6164,431 @@ export function ChatConsole({
     };
   }, []);
 
+  // ── Crash-recovery listeners (#1035) ────────────────────────────────────────
+  // When the renderer process crashes and reloads, ChatConsole remounts but no
+  // handleSend() runs, so the per-send chat:progress/final/error/aborted
+  // listeners are never registered. The backend keeps emitting events for the
+  // in-flight turn; these stable mount-time listeners catch them for the
+  // current session and update the UI. They intentionally yield to per-send
+  // listeners whenever a handleSend() turn is active.
+  //
+  // Scope note: exactly ONE turn is adopted — the one of the tab selected in
+  // the CURRENT session. The user was on both when the renderer died;
+  // `miqi:lastSession` restores the session and the tab pair is persisted per
+  // session (threadTabs.ts), so the reloaded renderer filters on exactly the
+  // routing key the crashed turn was sent under — the base session on the main
+  // tab, `desktop:<threadId>` on a sub-thread tab (see routingKeyFor).
+  //
+  // Deliberately key-scoped, NOT session-scoped (#1035 复审 P1): a session can
+  // have several turns in flight at once (main tab + sub-thread tabs), and
+  // this listener drives ONE set of turn-scoped refs — the latched turn id,
+  // the reasoning buffer, `streaming`. Adopting a second key would fuse two
+  // turns' reasoning into one thinking block, and the two terminals would race
+  // for the single latch: the loser is judged superseded, dropped, and its
+  // turn never leaves "生成中". The turn of a tab the user is not on is left
+  // to the normal history/cache path — it is not this listener's to finish.
+  // Events of other sessions/threads are dropped as before.
+  useEffect(() => {
+    const flushReasoning = (ts: number) => {
+      if (reasoningTimerRef.current) {
+        clearTimeout(reasoningTimerRef.current);
+        reasoningTimerRef.current = null;
+      }
+      const buffered = reasoningBufRef.current;
+      reasoningBufRef.current = '';
+      if (buffered) {
+        setMessages((prev) => appendReasoningDelta(prev, buffered, ts, reasoningModeRef.current));
+      }
+    };
+
+    // True while a handleSend() invocation of `session` still has listeners
+    // subscribed — the registry carries the base session for every invocation,
+    // thread-scoped ones included. The shared `activeSendCleanupRef` is NOT a
+    // sound proxy for this: onFinal schedules sendCleanup() 100ms out, which
+    // nulls that ref while the invocation's listeners stay subscribed until its
+    // send promise settles. Events landing in that window would be applied
+    // twice — once here and once by the per-send listener. The invocation
+    // registry is populated exactly while those listeners live, so it is the
+    // accurate signal (see the `myUnsubs` registration / teardown in
+    // handleSend).
+    const hasLiveSendForSession = (session: string) => {
+      for (const entry of sendInvocationRegistryRef.current.values()) {
+        if (entry.sessionKey === session) return true;
+      }
+      return false;
+    };
+
+    // The session this event should be adopted for, or null when it belongs to
+    // another session/thread or to a live per-send invocation that owns it.
+    // The decision itself lives in shouldAdoptRecoveredEvent (unit-tested);
+    // this only supplies the current refs to it.
+    const adoptableSession = (data: { session_key?: string }): string | null => {
+      const owner = currentSessionRef.current;
+      if (!owner) return null;
+      const adopt = shouldAdoptRecoveredEvent({
+        // `data.session_key` is the routing key the turn was sent under: the
+        // base session for a main-tab turn, `desktop:<threadId>` for a
+        // thread-scoped one. Only the key of the tab selected RIGHT NOW is
+        // adopted; anything else is another session, another thread, or the
+        // concurrent turn of the other tab in this same session.
+        eventSessionKey: data.session_key,
+        sessionKey: owner,
+        threadId: activeThreadIdRef.current,
+        hasLiveSend: hasLiveSendForSession(owner),
+        // Stop already rendered by this renderer — see localAbortSessionsRef.
+        // Session-scoped on purpose: handleAbort stops every invocation of the
+        // session, whatever routing key it was sent under.
+        locallyAborted: localAbortSessionsRef.current.has(owner),
+      });
+      return adopt ? owner : null;
+    };
+
+    /**
+     * True when a turn-tagged event belongs to the turn being resumed.
+     *
+     * The turn id cannot be required to match a value captured from the
+     * backend's `stream:'turn'` announcement: TurnStartedEvent fires once, at
+     * turn start, which is BEFORE the crash — a reloaded renderer never sees
+     * it, so a strict comparison against a never-set ref drops every terminal
+     * (verified against miqi/bridge/loop.py: only TurnStartedEvent emits
+     * `stream:'turn'`; final/error/aborted always carry `turn_id`). Latch the
+     * id from the first tagged event instead; a tagged event naming a
+     * DIFFERENT turn afterwards is stale (superseded turn) and still dropped.
+     */
+    const followsTurn = (turnId?: string) => {
+      if (typeof turnId !== 'string' || !turnId) return true;
+      if (recoveryTurnIdRef.current === null) recoveryTurnIdRef.current = turnId;
+      return turnId === recoveryTurnIdRef.current;
+    };
+
+    const unsubProgress = window.miqi.chat.onProgress((data: ChatProgress) => {
+      const owner = adoptableSession(data);
+      if (!owner) return;
+
+      // Terminal latch (#1035 复审 P1): once this listener has accepted the
+      // adopted turn's terminal, nothing more of that turn may reach the UI —
+      // a late `points` event would otherwise be converted into a fresh message
+      // on an already-settled recovery view. The ONE exception is the backend
+      // announcing the NEXT turn under this same routing key (`stream:'turn'`,
+      // emitted once per turn at its start): that is a new adoption, so the
+      // latch opens again. A late event of the finished turn carries either the
+      // latched turn id or no id at all — it can never name a different one.
+      if (recoveryTerminalRef.current) {
+        if (
+          !isNewRecoveredTurnStart({
+            stream: data.stream,
+            turnId: data.turn_id,
+            latchedTurnId: recoveryTurnIdRef.current,
+          })
+        ) {
+          return;
+        }
+        recoveryTerminalRef.current = false;
+      }
+
+      // Out-of-band notices are not turn output: a billing result travels on
+      // its own async side channel, and the 10s heartbeat task is cancelled
+      // only when the drain exits — either can land after the turn's terminal
+      // and would otherwise resurrect the "generating" spinner with no
+      // terminal left to switch it off.
+      if (data.stream !== 'points' && data.stream !== 'heartbeat') {
+        streamingBySession.add(owner);
+        setStreaming(true);
+        // This spinner is the recovery listener's, on the tab it filtered for:
+        // record it so leaving that tab can settle the state (below).
+        recoveryOwnedTurnRef.current = {
+          session: owner,
+          key: routingKeyFor(owner, activeThreadIdRef.current),
+        };
+      }
+
+      if (data.stream === 'turn' && typeof data.turn_id === 'string') {
+        recoveryTurnIdRef.current = data.turn_id;
+        return;
+      }
+
+      if (data.type === 'doc_progress' && data.file) {
+        setAttachments((prev) =>
+          prev.map((a) => {
+            if (a.name !== data.file || a.type !== 'document') return a;
+            const stage = data.stage ?? 'parsing';
+            const status =
+              stage === 'ready' || stage === 'done'
+                ? 'done'
+                : stage === 'error'
+                  ? 'error'
+                  : 'parsing';
+            return {
+              ...a,
+              status,
+              parseError: status === 'error' ? (data.message ?? '') : a.parseError,
+            };
+          })
+        );
+        return;
+      }
+
+      const pointsMessage = pointsEventToMessage(data);
+      if (pointsMessage) {
+        setMessages((prev) => [...prev, pointsMessage]);
+        return;
+      }
+
+      if (data.stream === 'reasoning' && typeof data.delta === 'string') {
+        const ts = Date.now();
+        liveReasoningTsRef.current = ts;
+        if (thinkingStartedAtRef.current === null) {
+          thinkingStartedAtRef.current = ts;
+        }
+        lastReasoningDeltaAtRef.current = ts;
+        reasoningBufRef.current += data.delta;
+        if (!reasoningTimerRef.current) {
+          const flushSession = owner;
+          reasoningTimerRef.current = setTimeout(() => {
+            reasoningTimerRef.current = null;
+            if (currentSessionRef.current !== flushSession) return;
+            const buffered = reasoningBufRef.current;
+            reasoningBufRef.current = '';
+            if (buffered) {
+              setMessages((prev) =>
+                appendReasoningDelta(prev, buffered, Date.now(), reasoningModeRef.current)
+              );
+            }
+          }, 60);
+        }
+        return;
+      }
+
+      if (data.stream && data.delta && data.tool_call_id) {
+        const stream = data.stream;
+        const delta = data.delta;
+        const toolCallId = data.tool_call_id;
+        setExecOutputs((prev) => {
+          const current = prev[toolCallId] || { stdout: '', stderr: '', running: true };
+          const streamKey = stream === 'stdout' ? 'stdout' : 'stderr';
+          return {
+            ...prev,
+            [toolCallId]: {
+              ...current,
+              [streamKey]: current[streamKey] + delta,
+            },
+          };
+        });
+        return;
+      }
+
+      const extracted = extractProgressMessage(data as ProgressPayload);
+      if (extracted) {
+        // paper_search result cards: derived from the event payload itself, so
+        // they survive the reload (unlike toolArgsByCallId, which starts empty
+        // on the remounted component).  Mirrors the per-send listener.
+        let toolName: string | undefined;
+        let toolData: unknown;
+        // Path A: item/toolResult notification (from turn_event_adapter)
+        if (data.tool_hint && data.text && !data.stream) {
+          const parsed = tryParsePaperSearchResult(data.text);
+          if (parsed?.items?.length) {
+            toolName = 'paper_search';
+            toolData = parsed;
+          }
+        }
+        // Path B: toolExecution/outputDelta from PaperSearchTool itself
+        if (!toolData && data.delta && typeof data.delta === 'string') {
+          try {
+            const inner = JSON.parse(data.delta);
+            if (inner?.type === 'paper_search_result' && inner.payload) {
+              toolName = 'paper_search';
+              toolData = inner.payload;
+            }
+          } catch {
+            /* not JSON, ignore */
+          }
+        }
+        const toolMsg: Message = {
+          role: extracted.role === 'error' ? 'error' : 'progress',
+          content: extracted.role === 'warning' ? `⚠️ ${extracted.message}` : extracted.message,
+          toolHint: data.tool_hint || toolName === 'paper_search',
+          toolCallId: data.tool_call_id,
+          toolName,
+          toolData,
+          toolArgs: data.tool_args,
+          timestamp: Date.now(),
+        };
+        setMessages((prev) => {
+          if (toolMsg.toolHint && toolMsg.toolCallId) {
+            for (let i = prev.length - 1; i >= 0; i -= 1) {
+              const m = prev[i];
+              if (m.role === 'progress' && m.toolHint && m.toolCallId === toolMsg.toolCallId) {
+                const next = [...prev];
+                next[i] = {
+                  ...m,
+                  content: toolMsg.content,
+                  toolName: toolMsg.toolName ?? m.toolName,
+                  toolData: toolMsg.toolData ?? m.toolData,
+                  toolArgs: toolMsg.toolArgs ?? m.toolArgs,
+                };
+                return next;
+              }
+            }
+          }
+          return [...prev, toolMsg];
+        });
+        const endCallId = data.tool_call_id;
+        const endOutput = data.tool_output;
+        if (endOutput && endCallId) {
+          setSearchResultsByCallId((prev) => ({ ...prev, [endCallId]: endOutput }));
+        }
+        if (data.tool_hint && data.text) {
+          const parsed = parseToolHint(data.text);
+          if (parsed) trackFileRef.current?.(parsed.path, parsed.op, parsed.truncated);
+        }
+      }
+    });
+
+    const unsubFinal = window.miqi.chat.onFinal((data: ChatFinal) => {
+      const owner = adoptableSession(data);
+      if (!owner) return;
+      if (!followsTurn(data.turn_id)) return;
+      // Accepted terminal → close the turn's progress stream for good (#1035 复审 P1).
+      recoveryTerminalRef.current = true;
+
+      setStreaming(false);
+      streamingBySession.delete(owner);
+      recoveryOwnedTurnRef.current = null;
+
+      flushReasoning(Date.now());
+      liveReasoningTsRef.current = null;
+      thinkingStartedAtRef.current = null;
+      lastReasoningDeltaAtRef.current = null;
+
+      const closeLiveReasoning = (prev: Message[]) =>
+        prev.some((m) => m.isLiveReasoning)
+          ? prev.map((m) =>
+              m.isLiveReasoning
+                ? {
+                    ...m,
+                    isLiveReasoning: false,
+                    content: data.reasoning || m.content,
+                    reasoning: data.reasoning || m.content,
+                  }
+                : m
+            )
+          : prev;
+
+      setMessages((prev) => {
+        let cleaned = removeTransientTurnMessagesSinceLastUser(prev);
+        cleaned = closeLiveReasoning(cleaned);
+        if (
+          data.reasoning &&
+          !cleaned.some((m) => m.role === 'progress' && m.reasoning === data.reasoning)
+        ) {
+          cleaned = insertStandaloneReasoning(cleaned, data.reasoning, undefined);
+        }
+        return cleaned;
+      });
+
+      if (data.content) {
+        setMessages((prev) => {
+          const last = prev[prev.length - 1];
+          if (last?.role === 'assistant' && last.content === data.content) return prev;
+          return [...prev, { role: 'assistant', content: data.content, timestamp: Date.now() }];
+        });
+      }
+    });
+
+    const unsubError = window.miqi.chat.onError((data: ChatError) => {
+      const owner = adoptableSession(data);
+      if (!owner) return;
+      if (!followsTurn(data.turn_id)) return;
+      // Accepted terminal → close the turn's progress stream for good (#1035 复审 P1).
+      recoveryTerminalRef.current = true;
+
+      setStreaming(false);
+      streamingBySession.delete(owner);
+      recoveryOwnedTurnRef.current = null;
+      flushReasoning(Date.now());
+      liveReasoningTsRef.current = null;
+      thinkingStartedAtRef.current = null;
+      lastReasoningDeltaAtRef.current = null;
+
+      const message = sanitizeUiMessage(data.message);
+      setMessages((prev) => [
+        ...prev.filter((m) => !m.isLiveReasoning),
+        { role: 'error', content: message, timestamp: Date.now() },
+      ]);
+    });
+
+    const unsubAborted = window.miqi.chat.onAborted((data: ChatAborted) => {
+      const owner = adoptableSession(data);
+      if (!owner) return;
+      if (!followsTurn(data.turn_id)) return;
+      // Accepted terminal → close the turn's progress stream for good (#1035 复审 P1).
+      recoveryTerminalRef.current = true;
+
+      setStreaming(false);
+      streamingBySession.delete(owner);
+      recoveryOwnedTurnRef.current = null;
+      flushReasoning(Date.now());
+      liveReasoningTsRef.current = null;
+      thinkingStartedAtRef.current = null;
+      lastReasoningDeltaAtRef.current = null;
+
+      setMessages((prev) => [
+        ...prev.filter((m) => !m.isLiveReasoning),
+        { role: 'progress', content: '已停止。', timestamp: Date.now() },
+      ]);
+    });
+
+    return () => {
+      unsubProgress();
+      unsubFinal();
+      unsubError();
+      unsubAborted();
+    };
+  }, []);
+
+  // ── Leaving the recovered turn's tab: abandon it cleanly (#1035 复审 P1) ─────
+  // The listener above follows exactly ONE routing key — the selected tab's. The
+  // moment the user picks another tab, that turn's events stop matching: its
+  // terminal, the only thing that would switch the spinner off, is rejected
+  // from then on. So everything the abandoned turn owns has to be settled here
+  // or the UI keeps waiting for a turn that can no longer finish:
+  //   · the latched turn id — otherwise the newly selected tab's turn looks
+  //     "superseded" and its terminal is swallowed;
+  //   · the buffered reasoning tail — otherwise it is emitted into the next
+  //     tab's thinking block, which is the very two-turns-in-one-block mixing
+  //     this route exists to prevent (flushed, not dropped: it is real output
+  //     of a turn the user watched);
+  //   · the spinner and the turn's thinking timestamps, but ONLY for the turn
+  //     the recovery listener lit (see recoveryOwnedTurnRef) — a live send owns
+  //     its own `streaming` across tab switches and must keep it.
+  // The matching case for a session switch is settled in the session-change
+  // effect (it also has to keep the two sessions' flags apart).
+  useEffect(() => {
+    recoveryTurnIdRef.current = null;
+    // Same for the terminal latch: it belongs to the turn of the tab the user
+    // just left, and the newly selected tab may have its own turn in flight
+    // (#1035 复审 P1).
+    recoveryTerminalRef.current = false;
+    const owned = recoveryOwnedTurnRef.current;
+    if (!owned) return;
+    // Not ours to clean if the session moved on underneath us (the
+    // session-change effect above runs first and settles that case) — just
+    // drop the stale ref.
+    if (owned.session !== currentSessionRef.current) {
+      recoveryOwnedTurnRef.current = null;
+      return;
+    }
+    if (owned.key === routingKeyFor(owned.session, activeThreadId)) return;
+    recoveryOwnedTurnRef.current = null;
+    flushReasoningRef.current?.(Date.now());
+    liveReasoningTsRef.current = null;
+    thinkingStartedAtRef.current = null;
+    lastReasoningDeltaAtRef.current = null;
+    streamingBySession.delete(owned.session);
+    setStreaming(false);
+  }, [activeThreadId]);
+
   const clearFinalCleanupTimer = useCallback(() => {
     if (finalCleanupTimerRef.current) {
       clearTimeout(finalCleanupTimerRef.current);
@@ -6432,6 +6957,13 @@ export function ChatConsole({
       for (const unsub of entry.unsubs) unsub();
       sendInvocationRegistryRef.current.delete(sendId);
     }
+    // The aborted turn's terminal is still coming (the drain task runs until
+    // it lands) and this invocation's listeners are now gone — record that the
+    // stop UI is already on screen so the crash-recovery listeners don't
+    // replay it (#1035).
+    if (currentSessionRef.current) {
+      localAbortSessionsRef.current.add(currentSessionRef.current);
+    }
     clearFinalCleanupTimer();
     if (revealAnimIdRef.current !== null) {
       cancelAnimationFrame(revealAnimIdRef.current);
@@ -6745,6 +7277,22 @@ export function ChatConsole({
     // turn's live final render.
     streamingBySession.add(sendSessionKey);
     finalHandledSessions.delete(sendSessionKey);
+    // A new turn supersedes any earlier stop in this session — drop the
+    // crash-recovery stop marker so this turn's terminal is not ignored (#1035).
+    localAbortSessionsRef.current.delete(sendSessionKey);
+    // …and hand the turn UI over from the crash-recovery listener (#1035 复审
+    // P1). From here on `hasLiveSend` gates that listener off, so it cannot own
+    // anything again before this invocation settles — a surviving ownership
+    // record would be a lie the switch effects below act on, letting a tab or
+    // session switch settle THIS live turn's spinner / session flag (which is
+    // the per-send path's to keep). Keeps the ref's invariant: set ⇒ the
+    // recovery listener is the one driving the turn UI.
+    recoveryOwnedTurnRef.current = null;
+    // …and the terminal latch too (#1035 复审 P1): this send's turn is a NEW one,
+    // its progress must flow even if the abandoned recovered turn had settled.
+    // (The hasLiveSend gate keeps the recovery listener off this turn anyway —
+    // this only clears state it would otherwise still be holding.)
+    recoveryTerminalRef.current = false;
     // Only auto-unsubscribe the previous invocation's listeners when it was
     // THIS session's send (same-session supersede).  Unsubscribing across
     // sessions strands the other session's in-flight turn: its terminal
@@ -7321,8 +7869,11 @@ export function ChatConsole({
     // tagged with a different key before the cache/live branch — otherwise
     // overlapping sends across sessions would each process (and settle on)
     // the other's events.
-    const routingKey =
-      activeThreadId === 'main' ? currentSessionRef.current : `desktop:${activeThreadId}`;
+    // Read through the ref, not the closure: switching tabs does not recreate
+    // this callback (activeThreadId is not a dependency), so the closure's
+    // copy can be the tab the user has already left — the send would then go
+    // out under the wrong key.
+    const routingKey = routingKeyFor(currentSessionRef.current, activeThreadIdRef.current);
 
     // Track last progress event time for watchdog
     let lastEventAt = Date.now();
@@ -9185,7 +9736,10 @@ export function ChatConsole({
           {threads.map((t) => (
             <button
               key={t.threadId}
-              onClick={() => setActiveThreadId(t.threadId)}
+              data-testid="chat-thread-tab"
+              data-thread-id={t.threadId}
+              data-active={activeThreadId === t.threadId}
+              onClick={() => setThreadState((prev) => selectThreadTab(prev, t.threadId))}
               className={cn(
                 'px-3 py-1.5 text-xs rounded-t whitespace-nowrap transition-colors',
                 activeThreadId === t.threadId
@@ -9199,8 +9753,7 @@ export function ChatConsole({
                   className="ml-1.5 text-[var(--text-muted)] hover:text-[var(--danger)]"
                   onClick={(e) => {
                     e.stopPropagation();
-                    setThreads((prev) => prev.filter((th) => th.threadId !== t.threadId));
-                    if (activeThreadId === t.threadId) setActiveThreadId('main');
+                    setThreadState((prev) => closeThreadTab(prev, t.threadId));
                   }}
                 >
                   ×
@@ -11800,6 +12353,27 @@ const MessageBubble = memo(function MessageBubble({
               onLoggedIn={() => onLoginSuccess?.(msg)}
             />
           )}
+        </div>
+      </div>
+    );
+  }
+
+  // #1035 崩溃恢复提示：中性样式，不能沿用 error 的红色危险气泡——这条不是
+  // 错误，是"已经自动恢复好了"的告知。
+  if (msg.role === 'system') {
+    return (
+      <div className="flex items-start gap-3" data-testid="chat-system-notice">
+        <RefreshCw size={16} style={{ color: 'var(--text-muted)', marginTop: 6 }} />
+        <div
+          className="text-xs rounded-xl px-3 py-2 break-words"
+          style={{
+            background: 'var(--surface-muted)',
+            color: 'var(--text-muted)',
+            border: '1px solid var(--border-subtle)',
+            maxWidth: '82%',
+          }}
+        >
+          {msg.content}
         </div>
       </div>
     );
