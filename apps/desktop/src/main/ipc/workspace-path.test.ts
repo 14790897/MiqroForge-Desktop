@@ -497,6 +497,20 @@ describe('account-scoped workspace (#1185)', () => {
     expect(getDefaultWorkspacePath()).toBe(join(accountsDir(), '19', 'workspace'));
   });
 
+  it('never moves an account that already used the new layout', () => {
+    // 登出后的 bridge 会把 <数据根>/workspace 建出来（骨架目录），下次登录
+    // 只看「根目录存在」就认领，会让这个账号自己的工作区凭空换到根目录、
+    // 原数据反而看不见。已经在新布局下用过 → 根目录里的东西不是它的存量。
+    mkdirSync(join(home, 'workspace'), { recursive: true });
+    mkdirSync(join(accountsDir(), '19', 'workspace', 'sessions'), { recursive: true });
+
+    setActiveAccount('19');
+    claimLegacyWorkspace('19');
+
+    expect(readLegacyWorkspaceOwner()).toBeNull();
+    expect(getDefaultWorkspacePath()).toBe(join(accountsDir(), '19', 'workspace'));
+  });
+
   it('mirrors the account into the WSL global-workspace fallback', () => {
     // 账号维度必须镜像到 WSL 侧：否则 B 账号的「定位」会从 A 的 WSL 工作区
     // 里把同名文件找回来（findFileInWsl 的全局回退分支）。

@@ -186,7 +186,7 @@ export function clearActiveAccount(): void {
 }
 
 /**
- * 存量数据归属（#1185 item 5）：升级前 `~/.miqi/workspace` 里的会话/记忆
+ * 存量数据归属（#1185 item 5）：升级前 `<数据根>/workspace` 里的会话/记忆
  * 归**首个在设备上登录的账号**，并且就地保留 —— 不搬目录。
  *
  * 搬家的收益只是布局整齐，代价是 `rename` 可能撞上仍在运行、句柄开在该
@@ -195,6 +195,12 @@ export function clearActiveAccount(): void {
  * 目录，其余账号各自拿到空的 `accounts/<sub>/workspace`。
  *
  * `.legacy-owner` 只写一次：后来的账号不会把前一个账号的旧数据认成自己的。
+ *
+ * 认领还有一个前提：**该账号名下还没有新布局的工作区**。否则会翻车——
+ * 账号在 `accounts/<sub>/workspace` 用过一阵之后登出，bridge 会同它当时的
+ * 无账号解析把 `<数据根>/workspace` 建出来（骨架目录），下次再登录时只看
+ * 「根目录存在」就会认领它，于是这个账号自己的工作区凭空换到根目录、原数据
+ * 反而看不见了。已经在新布局下用过，就说明根目录里的东西不是它的存量。
  */
 export function claimLegacyWorkspace(sub: string): void {
   if (!isValidAccountSub(sub)) return;
@@ -202,6 +208,7 @@ export function claimLegacyWorkspace(sub: string): void {
   try {
     if (existsSync(ownerFile)) return; // 已被（任一）账号认领
     if (!existsSync(join(getConfigDir(), 'workspace'))) return; // 无存量数据
+    if (existsSync(getAccountWorkspace(sub))) return; // 该账号已在新布局下用过
     mkdirSync(getAccountsDir(), { recursive: true });
     writeFileSync(ownerFile, sub, { encoding: 'utf8' });
   } catch {

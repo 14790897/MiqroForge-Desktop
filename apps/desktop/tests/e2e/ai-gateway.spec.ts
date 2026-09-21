@@ -19,6 +19,7 @@ import { writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs';
 import {
   launchElectronApp,
   closeElectronApp,
+  getAccountWorkspaceDir,
   type ElectronFixture,
 } from './helpers/electron-setup';
 
@@ -107,7 +108,8 @@ test.describe('AI 网关 E2E (issue #922)', () => {
     await expect(page.getByTestId('qraft-ai-gateway')).toContainText('配置版本 v1');
 
     // token 文件握手：登录态恢复时同步写入 aiGateway 块（Python make_provider 读取）
-    const tokenFile = join(fixture.miqiHome, 'workspace', '.qraft', 'token.json');
+    // #1185：预置了登录态 → 工作区按账号收口，落点是 accounts/<sub>/workspace。
+    const tokenFile = join(getAccountWorkspaceDir(fixture.miqiHome, '19'), '.qraft', 'token.json');
     await expect
       .poll(() => (existsSync(tokenFile) ? readFileSync(tokenFile, 'utf8') : ''), {
         timeout: 10_000,
