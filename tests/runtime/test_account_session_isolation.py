@@ -2,29 +2,28 @@
 
 工作区按登录账号收口之后，进程内缓存必须跟着走：bridge 是长期驻留进程，
 换账号不重启它。缓存键只有 ``client_id:session_key``，不含账号——谁拿着
-上一个账号的会话身份来请求，谁就会拿到那份属于旧工作区的运行时。
+上一个账号的会话身份来请求，谁就会拿到那份属于旧账号的运行时。
 """
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
-from miqi.runtime.app_server import ClientSessionRegistry, _serves_workspace
+from miqi.paths import ACCOUNTS_DIR_NAME, ACTIVE_ACCOUNT_FILE
+from miqi.runtime.app_server import ClientSessionRegistry, _current_account_root
 
 
 class _FakeRuntime:
-    """只保留注册表真正读到的形状：services.workspace + start/stop。"""
-
     def __init__(self, workspace: Path) -> None:
         self.services = SimpleNamespace(workspace=workspace)
-        self.started = False
         self.stopped = False
 
     async def start(self) -> None:
-        self.started = True
+        return None
 
     async def stop(self) -> None:
         self.stopped = True
@@ -40,8 +39,16 @@ class _FakeSandboxManager:
 
 
 @pytest.fixture
+def data_root(monkeypatch, tmp_path: Path) -> Path:
+    """把数据根钉在临时目录上，账号切换＝改 <数据根>/accounts/.active。"""
+    root = tmp_path / "miqi-home"
+    root.mkdir()
+    monkeypatch.setenv("MIQI_HOME", str(root))
+    return root
+
+
+@pytest.fixture
 def fake_runtime(monkeypatch):
-    """把 RuntimeSession.create 换成返回 _FakeRuntime 的工厂。"""
     created: list[_FakeRuntime] = []
 
     def _create(*, workspace, **kwargs):
@@ -55,110 +62,137 @@ def fake_runtime(monkeypatch):
     return created
 
 
+def _set_active(root: Path, sub: str) -> None:
+    accounts = root / ACCOUNTS_DIR_NAME
+    accounts.mkdir(parents=True, exist_ok=True)
+    (accounts / ACTIVE_ACCOUNT_FILE).write_text(sub, encoding="utf-8")
+
+
 def _config_for(workspace: Path) -> SimpleNamespace:
     # 注册表在 workspace 与 config.workspace_path 不同时会去写 folder 绑定；
     # 本测试只关心缓存复用，所以让两者一致，跳过那一段。
     return SimpleNamespace(workspace_path=workspace)
 
 
-@pytest.mark.asyncio
-async def test_same_workspace_reuses_the_cached_runtime(tmp_path: Path, fake_runtime):
-    registry = ClientSessionRegistry()
-    ws = tmp_path / "ws"
+async def _open(registry: ClientSessionRegistry, ws: Path, **kwargs):
+    return await registry.create_session(
+        client_id="miqi-desktop",
+        session_key="desktop:1",
+        config=_config_for(ws),
+        provider=None,
+        workspace=ws,
+        **kwargs,
+    )
 
-    first = await registry.create_session(
-        client_id="miqi-desktop",
-        session_key="desktop:1",
-        config=_config_for(ws),
-        provider=None,
-        workspace=ws,
-    )
-    again = await registry.create_session(
-        client_id="miqi-desktop",
-        session_key="desktop:1",
-        config=_config_for(ws),
-        provider=None,
-        workspace=ws,
-    )
+
+@pytest.mark.asyncio
+async def test_same_account_reuses_the_cached_runtime(data_root: Path, fake_runtime):
+    registry = ClientSessionRegistry()
+    _set_active(data_root, "19")
+    ws = data_root / "accounts" / "19" / "workspace"
+
+    first = await _open(registry, ws)
+    again = await _open(registry, ws)
 
     assert again is first
     assert len(fake_runtime) == 1
 
 
 @pytest.mark.asyncio
-async def test_another_workspace_never_reuses_the_cached_runtime(tmp_path: Path, fake_runtime):
-    """换了账号（工作区不同）→ 上一个账号的运行时必须退场，不能复用。"""
+async def test_get_session_refuses_a_runtime_from_another_account(
+    data_root: Path, fake_runtime
+):
+    """``chat.send`` 命中缓存走的是 get_session —— 这里也必须拦。"""
     registry = ClientSessionRegistry()
-    ws_a = tmp_path / "accounts" / "19" / "workspace"
-    ws_b = tmp_path / "accounts" / "20" / "workspace"
-    sandboxes = _FakeSandboxManager()
+    _set_active(data_root, "19")
+    ws_a = data_root / "accounts" / "19" / "workspace"
+    await _open(registry, ws_a)
 
-    first = await registry.create_session(
-        client_id="miqi-desktop",
-        session_key="desktop:1",
-        config=_config_for(ws_a),
-        provider=None,
-        workspace=ws_a,
-        sandbox_manager=sandboxes,
-    )
-    second = await registry.create_session(
-        client_id="miqi-desktop",
-        session_key="desktop:1",
-        config=_config_for(ws_b),
-        provider=None,
-        workspace=ws_b,
-        sandbox_manager=sandboxes,
-    )
+    _set_active(data_root, "20")
 
-    assert second is not first
-    assert first.stopped, "旧工作区的运行时没有被停掉"
-    assert len(fake_runtime) == 2
-    # 旧沙箱绑的是旧工作区，且同样只按这个会话键索引 —— 一并销毁。
-    assert sandboxes.destroyed == [("desktop:1", "miqi-desktop")]
-
-    # 保持原样：切到新工作区之后，该键上留下的是新运行时。
-    session_id = "miqi-desktop:desktop:1"
-    assert registry._sessions[session_id] is second
-    assert session_id not in registry._session_clients or registry._session_clients[
-        session_id
-    ] == {"miqi-desktop"}
+    assert await registry.get_session("miqi-desktop", "miqi-desktop:desktop:1") is None
 
 
 @pytest.mark.asyncio
-async def test_switching_back_rebuilds_instead_of_reusing_stale_state(tmp_path: Path, fake_runtime):
-    """切回原账号：不得捡起中间那段留在缓存里的旧对象，重建即可。"""
+async def test_another_account_retires_the_cached_runtime_and_its_sandbox(
+    data_root: Path, fake_runtime
+):
     registry = ClientSessionRegistry()
-    ws_a = tmp_path / "a"
-    ws_b = tmp_path / "b"
+    _set_active(data_root, "19")
+    ws_a = data_root / "accounts" / "19" / "workspace"
+    ws_b = data_root / "accounts" / "20" / "workspace"
+    sandboxes = _FakeSandboxManager()
 
-    a1 = await registry.create_session(
-        client_id="miqi-desktop",
-        session_key="desktop:1",
-        config=_config_for(ws_a),
-        provider=None,
-        workspace=ws_a,
-    )
-    await registry.create_session(
-        client_id="miqi-desktop",
-        session_key="desktop:1",
-        config=_config_for(ws_b),
-        provider=None,
-        workspace=ws_b,
-    )
-    a2 = await registry.create_session(
-        client_id="miqi-desktop",
-        session_key="desktop:1",
-        config=_config_for(ws_a),
-        provider=None,
-        workspace=ws_a,
-    )
+    first = await _open(registry, ws_a, sandbox_manager=sandboxes)
+    _set_active(data_root, "20")
+    second = await _open(registry, ws_b, sandbox_manager=sandboxes)
+
+    assert second is not first
+    assert first.stopped, "上一个账号的运行时没有被停掉"
+    assert len(fake_runtime) == 2
+    # 旧沙箱绑的是旧账号的工作区，且同样只按这个会话键索引 —— 一并销毁。
+    assert sandboxes.destroyed == [("desktop:1", "miqi-desktop")]
+    assert registry._sessions["miqi-desktop:desktop:1"] is second
+
+
+@pytest.mark.asyncio
+async def test_switching_back_rebuilds_instead_of_reusing_stale_state(
+    data_root: Path, fake_runtime
+):
+    registry = ClientSessionRegistry()
+    _set_active(data_root, "19")
+    ws_a = data_root / "accounts" / "19" / "workspace"
+    ws_b = data_root / "accounts" / "20" / "workspace"
+
+    a1 = await _open(registry, ws_a)
+    _set_active(data_root, "20")
+    await _open(registry, ws_b)
+    _set_active(data_root, "19")
+    a2 = await _open(registry, ws_a)
 
     assert a2 is not a1
     assert a1.stopped
 
 
-def test_unknown_workspace_is_not_treated_as_a_match(tmp_path: Path):
-    """读不出运行时的工作区时判不匹配 —— 重建比认错便宜得多。"""
-    assert _serves_workspace(SimpleNamespace(services=SimpleNamespace(workspace=None)), tmp_path) is False
-    assert _serves_workspace(SimpleNamespace(), tmp_path) is False
-    assert _serves_workspace(SimpleNamespace(services=SimpleNamespace(workspace=str(tmp_path))), tmp_path) is True
+@pytest.mark.asyncio
+async def test_folder_bound_session_survives_within_one_account(
+    data_root: Path, fake_runtime
+):
+    """同一账号内的文件夹绑定会话不能因为「工作区不同」被误杀。
+
+    判据是账号根而不是工作区根，正是为了这个：绑定会话的 workpace 是绑定的
+    那个目录，与配置里的工作区本来就不同。
+    """
+    registry = ClientSessionRegistry()
+    _set_active(data_root, "19")
+    bound = data_root / "some-project"
+
+    first = await _open(registry, bound)
+    again = await _open(registry, bound)
+
+    assert again is first
+    assert not first.stopped
+
+
+def test_a_directly_seeded_session_is_still_served(data_root: Path):
+    """没经过 create_session 的（测试直接塞的）会话不因「没记账」被拒。
+
+    把「不知道属于谁」当成「属于别人」会把调用方推进「会话不见了」，
+    而那是卡住而不是保护 —— 只有**记了账且不一致**才该拒。
+    """
+    registry = ClientSessionRegistry()
+    _set_active(data_root, "19")
+    runtime = _FakeRuntime(data_root / "workspace")
+    session_id = "miqi-desktop:desktop:1"
+    registry._sessions[session_id] = runtime
+    registry._session_clients[session_id] = {"miqi-desktop"}
+
+    served = asyncio.run(registry.get_session("miqi-desktop", session_id))
+
+    assert served is runtime
+
+
+def test_account_root_follows_the_marker(data_root: Path):
+    assert _current_account_root() == data_root / "workspace"
+    _set_active(data_root, "19")
+    assert _current_account_root() == data_root / "accounts" / "19" / "workspace"

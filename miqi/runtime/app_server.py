@@ -59,34 +59,22 @@ class AppServerError(Exception):
 # ── ClientSessionRegistry ────────────────────────────────────────────────
 
 
-def _captured_workspace(session: Any) -> Path | None:
-    """Workspace a RuntimeSession was built against, or None when unknown.
+def _current_account_root() -> Path | None:
+    """Data-root workspace of the account in use right now, or None.
 
-    ``RuntimeServices.workspace`` is captured at creation.  ``session._config``
-    is deliberately NOT used as the source: ``Config.workspace_path`` is
-    recomputed from the live account marker on every access, so it answers
-    "which account is active *now*" — not "which workspace this runtime was
-    built for", which is the question that matters here（#1185）.
+    That is ``<数据根>/workspace`` or ``<数据根>/accounts/<sub>/workspace``
+    (#1185) — deliberately **not** ``Config.workspace_path``: a runtime created
+    for a folder-bound session works in the bound folder, so the workspace is
+    legitimately different per session while the account stays the same.
+    Comparing workspaces would tear those sessions down for no reason;
+    comparing account roots asks the question that actually matters.
     """
     try:
-        return Path(session.services.workspace).expanduser().resolve()
+        from miqi.paths import get_default_workspace_path
+
+        return Path(get_default_workspace_path()).expanduser().resolve()
     except Exception:
         return None
-
-
-def _serves_workspace(session: Any, workspace: Any) -> bool:
-    """Whether a cached session may serve a request for *workspace*.
-
-    An unknown captured workspace answers False: rebuilding a session is cheap
-    next to handing one account another account's runtime.
-    """
-    captured = _captured_workspace(session)
-    if captured is None:
-        return False
-    try:
-        return captured == Path(workspace).expanduser().resolve()
-    except Exception:
-        return False
 
 
 class ClientSessionRegistry:
@@ -102,12 +90,33 @@ class ClientSessionRegistry:
         self._session_clients: dict[str, set[str]] = {}   # session_id → {client_id}
         self._sessions: dict[str, Any] = {}               # session_id → RuntimeSession
         self._last_activity: dict[str, float] = {}         # session_id → timestamp
+        # session_id → 创建时生效的账号根（#1185）。缓存键只有 client_id:session_key，
+        # 不含账号，而 bridge 换账号不重启进程——没有这一列就分不出「同一个会话」
+        # 和「同一个会话，但已经换了主人」。
+        self._session_account: dict[str, Path] = {}
         self._idle_timeout = idle_timeout_seconds
         self._lock = asyncio.Lock()
         # Phase 35 hardening: bridge_context holds shared state for handler DI.
         # Populated by BridgeRuntimeLoop during init. Handlers read from here
         # instead of importing miqi.bridge.server directly.
         self.bridge_context: dict[str, Any] = {}
+
+    def _account_matches(self, session_id: str) -> bool:
+        """Whether a cached session still belongs to the account in use (#1185).
+
+        Unknown on either side answers True — i.e. keeps the pre-#1185
+        behaviour.  The recorded account is only ever written by
+        ``create_session``; a session placed straight into ``_sessions`` (tests
+        do this to drive handlers in isolation) has no account to compare
+        against, and treating "no bookkeeping" as "another account's session"
+        would turn it into "session not found" — which hangs the caller instead
+        of protecting anything.
+        """
+        recorded = self._session_account.get(session_id)
+        current = _current_account_root()
+        if recorded is None or current is None:
+            return True
+        return recorded == current
 
     # ── client_id resolution ─────────────────────────────────────────────
 
@@ -147,18 +156,18 @@ class ClientSessionRegistry:
         async with self._lock:
             existing = self._sessions.get(session_id)
             if existing is not None:
-                if _serves_workspace(existing, workspace):
+                if self._account_matches(session_id):
                     # Session already exists — ensure client is authorized
                     self._client_sessions.setdefault(client_id, set()).add(session_id)
                     self._session_clients.setdefault(session_id, set()).add(client_id)
                     self._last_activity[session_id] = time.time()
                     return existing
 
-                # #1185：这份缓存属于**另一个工作区**（同一进程内换了登录账号）。
-                # 缓存键只有 client_id:session_key，不含账号，所以直接复用等于把
-                # 上一个账号的工作区、沙箱、provider 连同一整段会话历史交给当前
-                # 账号 —— 会话身份是唯一的入口，必须在这里拦住。跨账号的沙箱也要
-                # 一并销毁：它绑的是上一个账号的工作区，而它同样只按这个键索引。
+                # #1185：这份缓存属于**另一个登录账号**。缓存键只有
+                # client_id:session_key，不含账号，而 bridge 换账号不重启进程——
+                # 直接复用等于把上一个账号的工作区、沙箱、provider 连同一整段
+                # 会话历史交给当前账号。跨账号的沙箱也一并销毁：它绑的是上一个
+                # 账号的工作区，而它同样只按这个键索引。
                 await self._discard_session(
                     session_id,
                     existing,
@@ -246,6 +255,9 @@ class ClientSessionRegistry:
                     ) from exc
 
             self._sessions[session_id] = runtime
+            account_root = _current_account_root()
+            if account_root is not None:
+                self._session_account[session_id] = account_root
             self._client_sessions.setdefault(client_id, set()).add(session_id)
             self._session_clients[session_id] = {client_id}
             self._last_activity[session_id] = time.time()
@@ -278,6 +290,7 @@ class ClientSessionRegistry:
                 "ClientSessionRegistry: stop failed for {}: {}", session_id, exc
             )
         self._sessions.pop(session_id, None)
+        self._session_account.pop(session_id, None)
         self._session_clients.pop(session_id, None)
         self._last_activity.pop(session_id, None)
         for owned in self._client_sessions.values():
@@ -294,9 +307,23 @@ class ClientSessionRegistry:
                 )
 
     async def get_session(self, client_id: str, session_id: str) -> Any | None:
-        """Return RuntimeSession if client is authorized, else None."""
+        """Return RuntimeSession if client is authorized, else None.
+
+        A session cached under another login account answers None (#1185): this
+        is the path ``chat.send`` takes to reach a cached runtime, so the cache
+        has to be refused here too, not only at create time.  The entry is left
+        in place for ``create_session`` to retire (it holds the sandbox manager
+        needed to drop the matching sandbox as well); the caller falls through
+        to creating a fresh session for the current account.
+        """
         authorized = self._session_clients.get(session_id, set())
         if client_id not in authorized:
+            return None
+        if session_id in self._sessions and not self._account_matches(session_id):
+            logger.info(
+                "ClientSessionRegistry: session {} belongs to another account — refusing cached runtime",
+                session_id,
+            )
             return None
         self._last_activity[session_id] = time.time()
         return self._sessions.get(session_id)
