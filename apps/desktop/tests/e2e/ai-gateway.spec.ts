@@ -170,7 +170,7 @@ test.describe('AI 网关 E2E (issue #922)', () => {
     // 把 anthropic 默认值判成可发起会话（active_model_resolvable=true），
     // 若自动就绪只看该宽口径判据就会跳过写入，用户仍要手动选模型。
     // 本用例断言严格判据下依然自动落盘为网关模型。
-    test.setTimeout(180_000);
+    test.setTimeout(240_000);
     await closeElectronApp(electronApp, fixture.miqiHome);
     writeFileSync(storePath, buildSeededStoreContent({ status: 'active' }), 'utf8');
     const f2 = await launchElectronApp((config) => {
@@ -192,7 +192,8 @@ test.describe('AI 网关 E2E (issue #922)', () => {
     const configPath = join(fixture.miqiHome, 'config.json');
     await expect
       .poll(() => JSON.parse(readFileSync(configPath, 'utf8')).agents?.defaults?.model, {
-        timeout: 60_000,
+        // CI 冷启动 + 桥握手可能很慢，自动就绪的重试窗口本身最长约 26s，留足余量
+        timeout: 120_000,
       })
       .toBe('deepseek/deepseek-v4-flash');
 
