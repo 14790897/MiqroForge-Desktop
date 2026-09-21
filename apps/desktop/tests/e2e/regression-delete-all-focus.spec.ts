@@ -117,7 +117,10 @@ test.describe('Delete-all focus regression', () => {
   });
 
   function sidebarItems() {
-    return page.locator('div.flex.flex-col.shrink-0.border-r').first().locator('button.rounded-xl');
+    return page
+      .locator('div.flex.flex-col.shrink-0.border-r')
+      .first()
+      .locator('[data-testid="session-item"]');
   }
 
   function composerTextarea() {

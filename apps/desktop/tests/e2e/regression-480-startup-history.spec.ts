@@ -203,7 +203,7 @@ test.describe('Regression #480: Session loads on startup', () => {
       console.log(`[test] Sidebar has at least 2 sessions`);
 
       // ── Step 3: Click the first session card (session A) in sidebar ──
-      // Session cards are button.rounded-xl elements in the sidebar.
+      // Session cards carry data-testid="session-item" in the sidebar.
       // The first card in the list should be session A (sorted by updated_at).
       // We verify by checking main content after clicking.
       const sessionCards = getSidebarSessionItems(page);
