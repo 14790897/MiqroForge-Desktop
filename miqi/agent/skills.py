@@ -6,6 +6,7 @@ import re
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from packaging.requirements import InvalidRequirement, Requirement
 
@@ -92,10 +93,20 @@ class SkillsLoader:
     specific tools or perform certain tasks.
     """
 
-    def __init__(self, workspace: Path, builtin_skills_dir: Path | None = None):
+    def __init__(
+        self,
+        workspace: Path,
+        builtin_skills_dir: Path | None = None,
+        sandbox_manager: Any = None,
+    ):
         self.workspace = workspace
         self.workspace_skills = workspace / "skills"
         self.builtin_skills = builtin_skills_dir or BUILTIN_SKILLS_DIR
+        # Live sandbox manager (may be None/"disabled").  When exec runs inside
+        # the WSL/bwrap sandbox, the host interpreter's installed distributions
+        # are irrelevant to a skill's Python deps — _missing_python_deps flips
+        # to registry-only mode in that case (see its docstring).
+        self._sandbox_manager = sandbox_manager
         # #729: metadata/content 缓存——一次摘要构建内同一技能被查 450 次，
         # 每次无缓存都重读文件 + 全树 glob，实测单回合 5.7s。
         # #859: meta_cache 提升为进程级共享（所有实例共享 frontmatter 解析结果）；
@@ -507,17 +518,25 @@ class SkillsLoader:
         the requirement's version specifier via :mod:`importlib.metadata`.
         Named direct-URL requirements (``pkg @ https://…``) are checked by
         their distribution name only — URL provenance is not validated.
-        Checked against the host interpreter the loader runs in; the sandbox
-        interpreter may differ, so this is an approximation consistent with
-        ``requires.bins`` using ``shutil.which`` on the host PATH.
+
+        When a sandbox is active (:func:`miqi.sandbox.manager.sandbox_is_active`),
+        the host interpreter is NOT consulted — the skill's scripts run against
+        the sandbox python3, so a package the host has installed tells us
+        nothing about what the sandbox can import.  In that mode only the
+        provisioning registry is trustworthy: any declared requirement not yet
+        recorded as provisioned counts as missing, so the skill flips to
+        ``available=false`` and the agent can provision it.  This mirrors
+        ``SkillProvisioner.plan``'s "all active reqs minus provisioned" logic
+        and closes the host/sandbox drift where a host-installed matplotlib
+        made a skill look available while the sandbox still lacked it.
 
         Requirements already provisioned into a per-skill venv (recorded by
-        :func:`miqi.skills.provision.record_provision`) are treated as
-        satisfied on a best-effort basis. The registry is the host-side source
-        of truth because the Windows host cannot introspect the WSL venv. If a
-        future caller runs the skill without the sandbox (host fallback), the
-        provisioned deps may not be visible — this is the same limitation as
-        other host-sandbox approximations in this loader.
+        :func:`miqi.skills.provision.record_provision`) are always treated as
+        satisfied. The registry is the host-side source of truth because the
+        Windows host cannot introspect the WSL venv. If a future caller runs
+        the skill without the sandbox (host fallback), the provisioned deps
+        may not be visible — this is the same limitation as other host-sandbox
+        approximations in this loader.
         """
         reqs = self._read_requirements(name)
         if not reqs:
@@ -528,12 +547,21 @@ class SkillsLoader:
 
         provisioned = set(get_provisioned(name))
 
+        from miqi.sandbox.manager import sandbox_is_active
+
+        sandbox_mode = sandbox_is_active(self._sandbox_manager)
+
         missing: list[str] = []
         for req in reqs:
             if req.marker is not None and not req.marker.evaluate():
                 continue  # marker inactive on this interpreter
             if str(req) in provisioned:
                 continue  # already provisioned into the skill's venv/system
+            if sandbox_mode:
+                # Sandbox exec: host packages don't count — only provisioned
+                # deps do (mirrors SkillProvisioner.plan).
+                missing.append(str(req))
+                continue
             try:
                 dist = metadata.distribution(req.name)
             except (metadata.PackageNotFoundError, ValueError):
