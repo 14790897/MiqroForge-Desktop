@@ -210,13 +210,30 @@ async def test_timeout_does_not_disturb_a_distro_that_is_already_ready(monkeypat
     would be strictly harmful — and would be the one path that can leave dpkg
     interrupted — so the probe has to run before any cleanup.
     """
-    stub = _WslStub(["hang"], ready_after=1, leftovers=True)
+    stub = _WslStub(["hang"], ready_after=1, leftovers=False)
     monkeypatch.setattr(bwrap_mod, "_create_subprocess_exec", stub)
 
     assert await BwrapSandbox._ensure_wsl_deps(DISTRO) is True
     assert stub.install_attempts == 1, "a needless second attempt was made"
     assert stub.terminate_calls == 0, "a ready distro was restarted anyway"
     assert bwrap_mod._last_install_failure == {}
+
+
+async def test_ready_but_still_busy_distro_is_not_reported_as_success(monkeypatch):
+    """A passing probe only proves the files are there.
+
+    Killing the Windows-side wsl.exe leaves the in-distro apt running; since it
+    still holds the dpkg lock, reporting success would hand the collision to
+    the next installer (skills provisioning, the exec tool).  Clean up and
+    retry instead.
+    """
+    monkeypatch.setattr(bwrap_mod, "_WSL_APT_IDLE_WAIT_S", 0.0)
+    stub = _WslStub(["hang", (0, b"")], ready_after=1, leftovers=True)
+    monkeypatch.setattr(bwrap_mod, "_create_subprocess_exec", stub)
+
+    assert await BwrapSandbox._ensure_wsl_deps(DISTRO) is True
+    assert stub.terminate_calls == 1, "the busy distro was never cleaned up"
+    assert stub.install_attempts == 2, "it reported success without retrying"
 
 
 async def test_slow_but_successful_install_is_reported_as_ready(monkeypatch):
