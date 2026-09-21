@@ -70,16 +70,26 @@ function makeClientStub(): ClientStub {
 let dir: string;
 let store: QraftStore;
 let statusEvents: unknown[];
+/** 本用例的数据根。QraftService 会往里写账号标记，见下面的注释。 */
+let miqiHome: string;
 
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), 'qraft-service-'));
   store = new QraftStore(join(dir, 'qraft-auth.json'), null, noopLog);
   statusEvents = [];
+  // 每个用例都钉住 MIQI_HOME（#1185）：QraftService 的构造函数会按已存储的
+  // 登录态激活账号，也就是往 `<数据根>/accounts/` 写标记文件——不钉住的话，
+  // 「从存储恢复登录态」这类用例会把标记写进**真实用户目录**，既是环境污染，
+  // 也会让同进程里其它读工作区的测试读到这个活跃账号而失败（CI 上正是如此）。
+  miqiHome = join(dir, 'miqi-home');
+  mkdirSync(miqiHome, { recursive: true });
+  process.env['MIQI_HOME'] = miqiHome;
   // 测试环境 client_secret 不落仓库，测试从环境变量注入
   process.env.QRAFT_TEST_CLIENT_SECRET = 'test-env-secret';
 });
 afterEach(() => {
   rmSync(dir, { recursive: true, force: true });
+  delete process.env['MIQI_HOME'];
   delete process.env.QRAFT_TEST_CLIENT_SECRET;
   vi.useRealTimers();
 });
@@ -1308,18 +1318,8 @@ describe('QraftService 反馈平台通道（issue #1054）', () => {
 // #1185: 登录/登出驱动工作区根的账号维度。bridge 是长期驻留进程、不在登录时
 // 重启，所以切换完全依赖 .active 标记文件；标错了就会把会话写进别人的工作区。
 describe('账号维度的工作区根 (#1185)', () => {
-  let home: string;
-
-  beforeEach(() => {
-    home = mkdtempSync(join(tmpdir(), 'qraft-home-'));
-    process.env.MIQI_HOME = home;
-  });
-
-  afterEach(() => {
-    delete process.env.MIQI_HOME;
-    rmSync(home, { recursive: true, force: true });
-  });
-
+  // 数据根由文件级 beforeEach 钉在临时目录上（见上面那段注释）——这一组的用例
+  // 正是会触发标记文件写入的那些。
   const loggedInClient = () => {
     const stub = makeClientStub();
     stub.platformLogin.mockResolvedValue({ sub: '19', username: 'U', nickname: '登录昵称' });
@@ -1333,16 +1333,16 @@ describe('账号维度的工作区根 (#1185)', () => {
 
     // 登录前：无账号 → 共享工作区
     expect(readActiveAccount()).toBeNull();
-    expect(getDefaultWorkspacePath()).toBe(join(home, 'workspace'));
+    expect(getDefaultWorkspacePath()).toBe(join(miqiHome, 'workspace'));
 
     const result = await service.login('18500000000', 'p');
     expect(result.ok).toBe(true);
     expect(readActiveAccount()).toBe('19');
-    expect(getDefaultWorkspacePath()).toBe(join(home, 'accounts', '19', 'workspace'));
+    expect(getDefaultWorkspacePath()).toBe(join(miqiHome, 'accounts', '19', 'workspace'));
 
     service.logout();
     expect(readActiveAccount()).toBeNull();
-    expect(getDefaultWorkspacePath()).toBe(join(home, 'workspace'));
+    expect(getDefaultWorkspacePath()).toBe(join(miqiHome, 'workspace'));
   });
 
   it('启动时按已存储的登录态恢复账号维度', () => {
@@ -1352,7 +1352,7 @@ describe('账号维度的工作区根 (#1185)', () => {
     makeService(makeClientStub());
 
     expect(readActiveAccount()).toBe('19');
-    expect(getDefaultWorkspacePath()).toBe(join(home, 'accounts', '19', 'workspace'));
+    expect(getDefaultWorkspacePath()).toBe(join(miqiHome, 'accounts', '19', 'workspace'));
   });
 
   it('没有登录态时清掉残留标记（含 E2E loginBypass）', () => {
@@ -1361,19 +1361,19 @@ describe('账号维度的工作区根 (#1185)', () => {
 
     // 存储里没有登录态 → 运行时不该停在上一次会话用过的账号工作区上。
     expect(readActiveAccount()).toBeNull();
-    expect(getDefaultWorkspacePath()).toBe(join(home, 'workspace'));
+    expect(getDefaultWorkspacePath()).toBe(join(miqiHome, 'workspace'));
   });
 
   it('首个登录的账号认领升级前的存量工作区', async () => {
-    // 升级场景：~/.miqi/workspace 里已经是老用户的会话与记忆。
-    mkdirSync(join(home, 'workspace', 'sessions', 'desktop_old'), { recursive: true });
+    // 升级场景：<数据根>/workspace 里已经是老用户的会话与记忆。
+    mkdirSync(join(miqiHome, 'workspace', 'sessions', 'desktop_old'), { recursive: true });
     const service = makeService(loggedInClient());
 
     await service.login('18500000000', 'p');
 
     expect(readLegacyWorkspaceOwner()).toBe('19');
-    expect(getDefaultWorkspacePath()).toBe(join(home, 'workspace'));
-    expect(existsSync(join(home, 'workspace', 'sessions', 'desktop_old'))).toBe(true);
+    expect(getDefaultWorkspacePath()).toBe(join(miqiHome, 'workspace'));
+    expect(existsSync(join(miqiHome, 'workspace', 'sessions', 'desktop_old'))).toBe(true);
   });
 
   it('sub 为空（平台响应缺字段）时不猜目录，退回共享根', async () => {

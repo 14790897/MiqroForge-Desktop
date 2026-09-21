@@ -313,6 +313,26 @@ describe('sessionFilesDirKey (#1103)', () => {
 // #1103: WSL search script must sanitize the session key and canonicalize the
 // candidate against its authorization root so a workspace symlink cannot escape.
 describe('buildWslSearchScript (#1103)', () => {
+  // #1185: 全局工作区那一行现在由账号决定，所以这组用例必须自己钉住数据根——
+  // 没有账号标记时才是它断言的那个 `$HOME/.miqi/workspace`。
+  //
+  // 在此之前它不设 MIQI_HOME，靠的是「本文件前面的用例都还原了环境」这个巧合；
+  // 一旦环境里带着一个活跃账号（同 worker 的另一个测试文件留下的 MIQI_HOME、
+  // 或开发机上真实存在的 ~/.miqi/accounts/.active），断言就会读到一个按账号
+  // 分过的路径而失败——CI 上正是这么挂的。
+  let home: string;
+
+  beforeEach(() => {
+    home = join(tmpdir(), `miqi-wsl-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    process.env['MIQI_HOME'] = home;
+    expect(readActiveAccount()).toBeNull();
+  });
+
+  afterEach(() => {
+    delete process.env['MIQI_HOME'];
+    rmSync(home, { recursive: true, force: true });
+  });
+
   it('sanitizes the session key before embedding it in the script', () => {
     const script = buildWslSearchScript('report.md', '$(touch /tmp/pwn)');
     expect(script).not.toContain('$(touch /tmp/pwn)');
