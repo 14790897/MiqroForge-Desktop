@@ -33,7 +33,9 @@
  * 4. `同意页停留超过兜底预算`（第十轮新增，走**真同意门**）：桥的启动被同意门挡在
  *    后面（consent-first），同意前武装兜底计时器 = 拿用户在门页上的停留时间当
  *    「等桥」预算，超时就抢在存在性校验开始前把恢复 key 判负。见文件末尾的
- *    describe。
+ *    describe。第十一轮补齐时序：key 必须在 **App 挂载之前** 写好再 reload 重挂载，
+ *    并显式断言「App 确实把它初始化成了恢复 key」——否则旧条件（只看
+ *    `restorePending`）在这条用例上照样绿（详见文末 describe 的注释）。
  *
  * ## 观测手段
  * contextBridge 会把 `window.miqi.*` 冻结（见 repro-570-silent-send.spec.ts 的
@@ -499,6 +501,78 @@ test.describe('Issue #1035 — 恢复校验不误伤仍存在的会话（#1118 �
 /** 恢复门兜底计时器的预算（App.tsx 的 `RESTORE_GATE_MAX_MS`；改那边时这里同步）。 */
 const RESTORE_GATE_MAX_MS = 10_000;
 
+/** 渲染层 `miqi:lastSession` 读写探针的快照（见 installLastSessionProbe）。 */
+interface LastSessionProbe {
+  /** `getItem('miqi:lastSession')` 被调用的次数（reload 后的新文档内累计）。 */
+  reads: number;
+  /** 其中返回值 === 恢复 key 的次数。0 = App 没读到这个 key（用例前提不成立）。 */
+  readsWithRestoreKey: number;
+  lastReadValue: string | null;
+  /** `setItem('miqi:lastSession', …)` 依次写入的值（降级会把哨兵写进来）。 */
+  writes: string[];
+}
+
+/**
+ * 在**页面脚本之前**挂钩 `Storage.prototype` 的读写，记录 App 对
+ * `miqi:lastSession` 的每一次读写（构造见文末 describe 的注释）。
+ *
+ * `page.addInitScript` 只对**后续导航**生效，所以调用点必须在 `page.reload()`
+ * 之前；钩子装不上时探针计数恒为 0，用例会在「App 应读过这个 key」那条断言上显式
+ * 失败（而不是静默变绿）——这正是它要防的假绿。
+ *
+ * 计数用 `>= 1` 而不是 `=== 1`：React 的惰性 initializer 在渲染尝试被丢弃时会重跑
+ * （实测读到 2 次而只 write 1 次——说明只有一次提交跑了 effect），所以「读几次」
+ * 是实现细节，「读到过且写回的是它」才是断言该锁的性质。
+ */
+function installLastSessionProbe(restoreKey: string): void {
+  const probe: LastSessionProbe = {
+    reads: 0,
+    readsWithRestoreKey: 0,
+    lastReadValue: null,
+    writes: [],
+  };
+  (window as any).__miqiLastSessionProbe = probe;
+  const proto = Storage.prototype as any;
+  const originalGet = proto.getItem;
+  const originalSet = proto.setItem;
+  proto.getItem = function (key: string) {
+    const value = originalGet.call(this, key);
+    if (key === 'miqi:lastSession') {
+      probe.reads += 1;
+      probe.lastReadValue = value;
+      if (value === restoreKey) probe.readsWithRestoreKey += 1;
+    }
+    return value;
+  };
+  proto.setItem = function (key: string, value: string) {
+    if (key === 'miqi:lastSession') probe.writes.push(String(value));
+    return originalSet.call(this, key, value);
+  };
+}
+
+async function lastSessionProbe(page: Page): Promise<LastSessionProbe | null> {
+  return (await page.evaluate(
+    () => (window as any).__miqiLastSessionProbe ?? null
+  )) as LastSessionProbe | null;
+}
+
+/** 自证桥**此刻不在 running**：同意门挡着时桥不得启动，否则「门页停留」不消耗
+ *  等桥预算，本用例要复现的时序不成立（runtime.start() 只由渲染层 start effect
+ *  在 consentOk 之后调用，主进程不会自己起桥）。reload 前后各跑一次。 */
+async function expectBridgeNotRunning(page: Page): Promise<void> {
+  const status = await page.evaluate(async () => {
+    try {
+      return await (window as any).miqi.runtime.status();
+    } catch (e) {
+      return { error: String(e) };
+    }
+  });
+  expect(
+    status?.state,
+    `同意门挡着时桥不得处于 running（实际 ${JSON.stringify(status)}）`
+  ).not.toBe('running');
+}
+
 /**
  * #1118 第十轮 CR（Finding 1）——兜底计时器只在**同意门开启后**武装。
  *
@@ -515,6 +589,38 @@ const RESTORE_GATE_MAX_MS = 10_000;
  * 的那个 key，且门仍然挡着（从没离开过同意页）。变异验证：把 App.tsx 的武装条件
  * 改回只看 `restorePending`（或让 `shouldArmRestoreTimeout` 返回 `restorePending`）
  * ——本用例在 10s 处立刻变红。
+ *
+ * ## 第十一轮 CR（P2）：key 必须在 **App 挂载之前** 写、且要自证 App 看见了它
+ * 第十轮把「写 localStorage」放在门页已经渲染之后，这条用例因此是**假绿**的：
+ * App 只在首次挂载时读一次 `miqi:lastSession`（App.tsx:158 的 `useState` 初值，
+ * `restorePending` 由它经 :255 推出）。首启 profile 里这个值是 `desktop:default`
+ * ⇒ `restorePending` 已是 false；之后再改 localStorage 既不更新 React state、也
+ * 不会武装计时器。于是把武装条件改回 `return restorePending` 这种旧条件，本用例
+ * 照样通过——旗舰守卫抓不到它要守的缺陷（真值表单测能抓，但 E2E 这条必须同样能抓）。
+ *
+ * 现在的时序（与真实用户路径一致）：先写非默认 key → `page.reload()` 重挂载
+ * App → 门页重新出现 → 在门页上停留超过预算。reload 只影响渲染层，桥（主进程）
+ * 仍然没启动，所以「门页停留不消耗等桥预算」这个前提照旧成立（reload 后重跑
+ * 一次自证）。
+ *
+ * 同时把「App 确实看见了这个 key」变成显式断言（CR 点名要求）——否则「没降级」
+ * 可能只是「App 根本没看见」：那种情况下 `restorePending` 恒为 false、计时器永远
+ * 不武装，所有断言都是空跑。观测手段全部在测试侧，不改生产代码：
+ * `page.addInitScript` 在页面脚本之前挂 `Storage.prototype` 的 getItem/setItem
+ * 钩子（只对 reload 之后的新文档生效，所以必须在 reload 前装），记录
+ *   ① 读 `miqi:lastSession` 确实发生且读到的就是恢复 key；
+ *   ② 挂载时的持久化 effect（App.tsx:227）把**恢复 key**写回了 lastSession——
+ *      「写回的是它」等价于「sessionKey 初值 = 它」，而 `restorePending` 正是从
+ *      这个初值推出来的（同一个 `restoredSessionKeyRef`），这条把「读到了」升级成
+ *      「确实把它初始化成了恢复 key」。
+ * 负向信号用现成的可观察量：降级路径 `openGateUnverified`（App.tsx:267）会打
+ * `console.warn('... could not verify restored session ... (bridge not running
+ * within 10000ms)')`，且会把哨兵写进 localStorage——两者在旧条件下 10s 处必然
+ * 出现，本用例断言它们**一条都没有**。
+ *
+ * 为什么不在生产代码加 `data-*` 之类的观察点：测试侧已能拿到上述两个信号，而门页
+ * 期间 App 走的是 `if (!consentOk) return`（占位/ChatConsole 都不挂载），渲染层
+ * 没有现成的 DOM 信号可用——加观察点会为测试改产品渲染树，代价大于收益。
  *
  * ## key 为什么是「有效性未知」的那个形状
  * 这恰恰是被修的行为本身：App 在门开之前**无法**知道这个 key 是真会话还是幽灵
@@ -550,25 +656,61 @@ test.describe('#1118 同意页停留超过兜底预算', () => {
 
     await expect(page.getByTestId('privacy-consent-gate')).toBeVisible({ timeout: 60_000 });
 
-    // ── 前置自证：桥在同意前**没有**启动（否则「门页停留」不消耗等桥预算，
-    //    本用例要复现的时序不成立）。runtime.start() 只由渲染层的 start effect
-    //    在 consentOk 之后调用，主进程不会自己起桥。──
-    const before = await page.evaluate(async () => {
-      try {
-        return await (window as any).miqi.runtime.status();
-      } catch (e) {
-        return { error: String(e) };
-      }
-    });
-    expect(
-      before?.state,
-      `同意门挡着时桥不得处于 running（实际 ${JSON.stringify(before)}）`
-    ).not.toBe('running');
+    // ── 前置自证：桥在同意前**没有**启动（见 expectBridgeNotRunning）。──
+    await expectBridgeNotRunning(page);
 
-    // ── 触发：把 lastSession 指向一个「有效性未知」的 key，然后在门页上停留
-    //    超过兜底预算 ──
+    // ── 触发（第十一轮修正）：key 必须在 App **挂载之前** 写好 —— 先写 key，再
+    //    reload 重挂载，最后在门页上停留超过兜底预算。App 只在首次挂载时读一次
+    //    lastSession（App.tsx:158 → :255 推出 restorePending），在门页渲染之后
+    //    才写 key 的话 restorePending 永远是 false、计时器永远不武装，旧条件照样
+    //    绿（第十轮用例的假绿，见上面 rationale）。──
     const restoreKey = `desktop:${Date.now()}`;
+    // 探针只对后续导航生效 ⇒ 必须在 reload 之前装（见 installLastSessionProbe）。
+    await page.addInitScript(installLastSessionProbe, restoreKey);
     await page.evaluate((k) => localStorage.setItem('miqi:lastSession', k), restoreKey);
+
+    // 只收 reload 之后的渲染层日志（降级路径的 warn 必须在这里面找）。
+    const warnings: string[] = [];
+    collectAppWarnings(page, warnings);
+    await page.reload();
+    await page.waitForLoadState('domcontentloaded');
+
+    // 门页重新出现：localStorage 里只有 lastSession 被改过（同意记录在磁盘/persist
+    // 存储里，没动），所以逗留场景与首次启动一致。这一刻 App 才第一次读到上面那个
+    // 非默认 key。
+    await expect(page.getByTestId('privacy-consent-gate')).toBeVisible({ timeout: 60_000 });
+    // reload 后重跑「桥没启动」自证：reload 只重挂渲染层，桥（主进程）仍不该起来。
+    await expectBridgeNotRunning(page);
+
+    // ── 反假绿（CR 第十一轮点名）：App 启动时**确实**读到了这个非默认 key ──
+    // 没有这条，「没降级」可能只是「App 根本没看见这个 key」：那种情况下
+    // restorePending 恒为 false、计时器永不武装，下面全部断言都是空跑。
+    await expect
+      .poll(async () => (await lastSessionProbe(page))?.reads ?? 0, {
+        timeout: 30_000,
+        message:
+          'App 启动时应读到 miqi:lastSession（reload 后的挂载读，探针见 addInitScript）；恒为 0 = 探针没装上或 App 压根没看这个 key',
+      })
+      .toBeGreaterThan(0);
+    // 挂载时的持久化 effect（App.tsx:227）把**恢复 key** 写回 lastSession ⇒
+    // sessionKey 初值就是它 ⇒ restorePending 为真（同一个初值经 :255 推出）。
+    // 「写回的是它」比「读到了它」更强：哪怕读到了却没采纳，这里也会红。
+    await expect
+      .poll(async () => (await lastSessionProbe(page))?.writes ?? [], {
+        timeout: 30_000,
+        message: `App 挂载时应把恢复 key ${restoreKey} 写回 lastSession（写成别的值说明初值不是它）`,
+      })
+      .toContain(restoreKey);
+    const probe = (await lastSessionProbe(page)) as LastSessionProbe;
+    console.log(
+      `[e2e] reload 后 lastSession 读写探针（挂载读已发生）：${JSON.stringify(probe)}（恢复 key=${restoreKey}）`
+    );
+    expect(
+      probe.readsWithRestoreKey,
+      `App 启动时必须读到非默认的恢复 key ${restoreKey}（探针 ${JSON.stringify(probe)}）`
+    ).toBeGreaterThan(0);
+
+    // ── 停留超过兜底预算（门开着 ⇒ 桥没启动，与 runner 快慢无关）──
     await page.waitForTimeout(RESTORE_GATE_MAX_MS + 3_000);
 
     // ── 主断言：key 原样还在（修复前 10s 处被降级成 desktop:default）──
@@ -580,6 +722,23 @@ test.describe('#1118 同意页停留超过兜底预算', () => {
       stored,
       `同意门开启前不得武装兜底计时器：lastSession 应仍是 ${restoreKey}（实际 ${stored}）`
     ).toBe(restoreKey);
+
+    // ── 负向信号：降级路径的痕迹一条都不该有。旧条件下 10s 处必然出现
+    //    「could not verify restored session … (bridge not running within 10000ms)」
+    //    的 warn + 把哨兵写进 localStorage。──
+    const after = (await lastSessionProbe(page)) as LastSessionProbe;
+    console.log(
+      `[e2e] 停留结束时的探针：${JSON.stringify(after)}；渲染层日志：${JSON.stringify(warnings)}`
+    );
+    expectNoTimeoutFallback(warnings);
+    expect(
+      warnings.filter((w) => w.includes('could not verify restored session')),
+      `门页停留期间不得出现「恢复 key 被判负」的日志（实际 ${JSON.stringify(warnings)}）`
+    ).toEqual([]);
+    expect(
+      after.writes.filter((v) => v !== restoreKey),
+      `门页停留期间不得把 lastSession 写成别的值（降级会把哨兵写进来；实际写入序列 ${JSON.stringify(after.writes)}）`
+    ).toEqual([]);
 
     // ── 附带断言：门始终挡着（上面那 13s 确实停在同意页上，没有别的路径替我们
     //    把应用推过门）──
