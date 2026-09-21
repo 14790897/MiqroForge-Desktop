@@ -10913,7 +10913,7 @@ export function ChatConsole({
               {diffLoading ? (
                 <div className="flex items-center justify-center h-48">
                   <Loader2 size={24} className="animate-spin text-text-faint" />
-                  <span className="ml-2 text-sm text-text-faint">Loading diff...</span>
+                  <span className="ml-2 text-sm text-text-faint">正在加载差异…</span>
                 </div>
               ) : diffFile.diff ? (
                 <DiffView diff={diffFile.diff} />
