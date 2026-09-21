@@ -135,6 +135,96 @@ async def test_cancelled_caller_does_not_cancel_the_operation(tmp_path):
         await db.close()
 
 
+async def test_failed_orphan_quarantines_the_connection(tmp_path):
+    """An orphaned operation that FAILED must force a recycle on the next run.
+
+    ``_report_orphan`` is the only observer left once the caller has been
+    cancelled, so a failure there has to quarantine the connection — the
+    failure may have left it unusable and nothing else will notice.
+
+    The failure raised here is deliberately *not* a lock error: a
+    stale-snapshot lock error is already recovered inside ``_run_locked``, so
+    it would not exercise the quarantine path at all.
+    """
+    db = RuntimeDb(tmp_path / "runtime.db", name="test")
+    await db.open()
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def failing_operation(conn: aiosqlite.Connection) -> str:
+        started.set()
+        await release.wait()
+        raise sqlite3.OperationalError("no such table: nope")
+
+    try:
+        task = asyncio.create_task(db.run(failing_operation))
+        await asyncio.wait_for(started.wait(), timeout=5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert db.orphaned_ops == 1
+
+        release.set()
+        # Wait for the orphaned operation to finish so its done-callback runs.
+        for _ in range(250):
+            if db.health()["dirty"]:
+                break
+            await asyncio.sleep(0.02)
+        assert db.health()["dirty"] is True, (
+            "a failed orphan left the connection unquarantined"
+        )
+        assert db.recycle_count == 0
+
+        # The next operation recycles before issuing anything.
+        assert await db.run(lambda conn: fetchone(conn, "SELECT 1")) == (1,)
+        assert db.recycle_count == 1
+        assert db.health()["dirty"] is False
+    finally:
+        await db.close()
+
+
+async def test_successful_orphan_does_not_recycle(tmp_path):
+    """The quarantine must not fire for an orphan that completed cleanly.
+
+    Recycling a healthy connection is pure churn, and the orphaned operation
+    is the common case on every user stop — so the success path has to stay
+    exactly as cheap as it was.
+    """
+    db = RuntimeDb(tmp_path / "runtime.db", name="test")
+    await db.open()
+    started = asyncio.Event()
+    release = asyncio.Event()
+    finished = asyncio.Event()
+
+    async def operation(conn: aiosqlite.Connection) -> str:
+        started.set()
+        await release.wait()
+        finished.set()
+        return "done"
+
+    try:
+        task = asyncio.create_task(db.run(operation))
+        await asyncio.wait_for(started.wait(), timeout=5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        release.set()
+        await asyncio.wait_for(finished.wait(), timeout=5)
+        # Give the orphaned task a few event-loop turns to settle so its
+        # done-callback has run.  (The flag it would set is False either way,
+        # so this bounds the wait rather than racing it — the real assertion
+        # is that the next run does not recycle.)
+        for _ in range(10):
+            await asyncio.sleep(0.01)
+        assert db.health()["dirty"] is False
+
+        assert await db.run(lambda conn: fetchone(conn, "SELECT 1")) == (1,)
+        assert db.recycle_count == 0
+    finally:
+        await db.close()
+
+
 async def test_append_item_survives_caller_cancellation(tmp_path):
     """Same story through a real store method (the CI call site)."""
     db_path = tmp_path / "runtime.db"

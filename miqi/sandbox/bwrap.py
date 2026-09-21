@@ -184,6 +184,37 @@ _MAX_COMMAND_OUTPUT_CHARS = 1_000_000
 #: would otherwise last until the outer install timeout (CodeRabbit #820).
 _INSTALL_LOCK_WAIT_TIMEOUT = 180.0
 
+#: Wall clock allowed for one ``apt-get`` run inside a WSL distro.  A cold
+#: runner's first ``apt-get update`` regularly needs most of this and has been
+#: observed to exceed it outright (CI job 103196368053: 180.018 s, empty
+#: stderr).  Exceeding it therefore means "try again", not "bwrap is
+#: unavailable" — so it must not be the last word (see _WSL_READY_CMD below).
+_WSL_APT_ATTEMPT_TIMEOUT = 180.0
+
+#: Total wall clock the whole WSL dependency install may consume.  Each
+#: attempt is capped by :data:`_WSL_APT_ATTEMPT_TIMEOUT`, so without a total
+#: the worst case is attempts × cap — and the WSL suite reaches this installer
+#: from four places, which is easily enough to exhaust the job-level
+#: ``timeout-minutes`` before a single assertion runs.
+_WSL_APT_TOTAL_BUDGET = 300.0
+
+#: apt-get attempts before falling back to the readiness probe.
+_WSL_APT_ATTEMPTS = 2
+
+#: After a failed install, refuse to install again in the same distro for this
+#: long.  The four WSL call sites mostly bypass :data:`_auto_install_cache`
+#: (only ``is_available`` consults it), so without a cooldown one bad network
+#: burns the full budget over and over.
+_WSL_INSTALL_COOLDOWN_S = 600.0
+
+_last_install_failure: dict[str, float] = {}
+"""distro → ``time.monotonic()`` of the last failed install.
+
+See :data:`_WSL_INSTALL_COOLDOWN_S`.  Cleared on a successful install, and
+re-checked after the readiness probe, so a distro that recovered on its own
+is still reported as ready.
+"""
+
 #: WSL distro readiness probe: bwrap + python3/pip toolchain.
 #:
 #: Used by _detect_wsl_distro / _find_any_wsl_distro and by
@@ -1085,7 +1116,15 @@ class BwrapSandbox:
 
     @staticmethod
     def _is_transient_apt_error(msg: str) -> bool:
-        """apt 网络瞬断类错误（重试一次可恢复）；非瞬断错误立即失败。"""
+        """apt 瞬断 / 清理后可重试类错误；非重试类错误立即失败。
+
+        除了网络瞬断，还有一类值得重试：上一次被 kill 的 apt 留下的 dpkg
+        锁或空索引，表现成 "could not get lock" / "unable to locate
+        package" / "no installation candidate"。那不是包真的不存在——
+        CI job 103196368053 里第二次安装在 0.35 秒内报 "Unable to locate
+        package python3-pip"，同一次运行里工具链其实是装上了的。清理后重试
+        才有机会走通（见 :meth:`_reset_wsl_apt_state`）。
+        """
         low = msg.lower()
         return any(
             key in low
@@ -1095,8 +1134,85 @@ class BwrapSandbox:
                 "connection timed out",
                 "network is unreachable",
                 "connection refused",
+                "failed to fetch",
+                "could not get lock",
+                "unable to locate package",
+                "no installation candidate",
+                # A killed apt leaves dpkg interrupted; the retry command
+                # repairs it with `dpkg --configure -a` before installing.
+                "dpkg was interrupted",
             )
         )
+
+    @staticmethod
+    async def _distro_ready(distro: str, *, timeout: float = 30.0) -> bool:
+        """Run the readiness probe once; True only when it clearly passes.
+
+        Anything other than a clean exit — a slow probe, a failure to spawn
+        wsl.exe — reads as "not ready", because every caller uses this to
+        decide whether to intervene, and intervening is the safe direction.
+        """
+        check = None
+        try:
+            check = await _create_subprocess_exec(
+                "wsl.exe", "-d", distro, "--", "bash", "-c", _WSL_READY_CMD,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            await asyncio.wait_for(check.communicate(), timeout=timeout)
+            return check.returncode == 0
+        except (asyncio.TimeoutError, OSError):
+            if check is not None and check.returncode is None:
+                try:
+                    check.kill()
+                    await asyncio.wait_for(check.wait(), timeout=5.0)
+                except (asyncio.TimeoutError, ProcessLookupError, OSError):
+                    pass
+            return False
+
+    @staticmethod
+    async def _reset_wsl_apt_state(distro: str) -> None:
+        """Clear an apt/dpkg run left behind by a killed install.
+
+        ``proc.kill()`` only terminates the Windows-side ``wsl.exe`` forwarder.
+        The ``apt-get`` inside the distro keeps running and keeps the dpkg
+        lock, so the next install fails within milliseconds against a stale
+        index — reported as ``Unable to locate package``, which reads like a
+        missing package but is a poisoned distro (CI job 103196368053: a 180 s
+        timeout, then the next install failed in 0.35 s).
+
+        Only restarts the distro when a leftover process is actually found, so
+        the healthy path costs one bounded probe.
+        """
+        leftover = "pgrep -x apt-get >/dev/null 2>&1 || pgrep -x dpkg >/dev/null 2>&1"
+        try:
+            check = await _create_subprocess_exec(
+                "wsl.exe", "-d", distro, "--", "bash", "-c", leftover,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            await asyncio.wait_for(check.communicate(), timeout=10.0)
+            if check.returncode != 0:
+                return
+        except (asyncio.TimeoutError, OSError):
+            # Could not tell.  Fall through and restart anyway: a needless
+            # restart costs a few seconds, a missed one costs the whole job.
+            pass
+
+        logger.warning(
+            "Leftover apt/dpkg process in WSL distro '{}' — restarting the "
+            "distro to release the dpkg lock",
+            distro,
+        )
+        try:
+            term = await _create_subprocess_exec(
+                "wsl.exe", "--terminate", distro,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            await asyncio.wait_for(term.communicate(), timeout=30.0)
+        except (asyncio.TimeoutError, OSError):
+            pass
 
     @staticmethod
     async def _ensure_wsl_deps(distro: str) -> bool:
@@ -1106,6 +1222,13 @@ class BwrapSandbox:
 
         Returns True if bwrap and python3/pip are available after
         installation, False otherwise.
+
+        The readiness probe (:data:`_WSL_READY_CMD`) is the only ground truth
+        here.  apt's exit status is not: a cold runner can exceed the attempt
+        timeout while the packages are in fact being installed, and a killed
+        apt can leave a stale index that makes the next run report packages as
+        missing.  So every failure path ends at the probe rather than at a
+        ``return False``.
         """
         # Quick check: skip if bwrap and python3/pip already installed
         try:
@@ -1131,6 +1254,22 @@ class BwrapSandbox:
                 return True
         except (asyncio.TimeoutError, OSError):
             pass
+
+        # A failed install costs up to the full budget, and the WSL suite
+        # calls this from four places — don't pay for it repeatedly.  The
+        # readiness probe above has already run, so a distro that recovered
+        # on its own still reports True.
+        failed_at = _last_install_failure.get(distro)
+        if failed_at is not None:
+            age = time.monotonic() - failed_at
+            if age < _WSL_INSTALL_COOLDOWN_S:
+                logger.warning(
+                    "Skipping the sandbox dependency install in WSL distro "
+                    "'{}': the last attempt failed {:.0f}s ago (cooldown {:.0f}s)",
+                    distro, age, _WSL_INSTALL_COOLDOWN_S,
+                )
+                return False
+            del _last_install_failure[distro]
 
         # Serialize installation: if another thread is already running
         # apt-get (e.g. sandbox manager background init), poll-wait for
@@ -1237,40 +1376,101 @@ class BwrapSandbox:
                     distro,
                 )
 
-            # Build install command
-            install_cmd = (
+            # Build install command.
+            #
+            # Acquire::* stops one slow mirror from eating the whole attempt,
+            # and Dpkg::Lock::Timeout makes a lock collision wait rather than
+            # fail instantly.  Note the sudo wrap below puts this in single
+            # quotes, so the command must not itself contain a single quote.
+            apt_opts = (
+                "-o Acquire::http::Timeout=30 "
+                "-o Acquire::https::Timeout=30 "
+                "-o Acquire::Retries=2 "
+                "-o Dpkg::Lock::Timeout=60"
+            )
+            # 2>/dev/null used to hide this; an update failure has to reach
+            # err_msg to be classified at all.
+            install_body = (
                 "export DEBIAN_FRONTEND=noninteractive; "
-                "apt-get update -qq 2>/dev/null; "
-                "apt-get install -y -qq bubblewrap coreutils rsync "
+                f"apt-get update -qq {apt_opts}; "
+                f"apt-get install -y -qq {apt_opts} bubblewrap coreutils rsync "
                 "python3 python3-pip python3-venv unzip"
             )
-            if use_sudo:
-                install_cmd = f"sudo bash -c '{install_cmd}'"
+            # A retry only ever runs after an attempt failed or was killed, so
+            # dpkg may have been interrupted mid-configure — a killed dpkg
+            # leaves /var/lib/dpkg dirty and every later dpkg refuses to start
+            # until this runs.  It is a no-op on a clean dpkg, and it must stay
+            # inside the sudo wrapper, hence the shared wrap helper.
+            dpkg_repair = "dpkg --configure -a >/dev/null 2>&1 || true; "
 
-            # WSL/runner 网络偶发瞬断（Temporary failure resolving）会让
-            # 安装失败——瞬断类错误重试一次，非瞬断错误立即失败。
-            for _attempt in range(2):
+            def _wrap(body: str) -> str:
+                return f"sudo bash -c '{body}'" if use_sudo else body
+
+            install_cmd = _wrap(install_body)
+            retry_cmd = _wrap(dpkg_repair + install_body)
+
+            # 重试原则：网络瞬断，以及上一次被 kill 的 apt 留下的 dpkg 锁/空
+            # 索引，都可以重试；权限、包名之类非重试类错误立即放弃。总墙钟由
+            # _WSL_APT_TOTAL_BUDGET 兜住——单次上限乘尝试次数会叠成 job 级超时。
+            # 任何一条失败路径都不直接 return False：就绪探测才是判据。
+            deadline = _t0 + _WSL_APT_TOTAL_BUDGET
+            for _attempt in range(_WSL_APT_ATTEMPTS):
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    logger.warning(
+                        "Giving up on the WSL dependency install in '{}': the "
+                        "{:.0f}s budget is exhausted after {} attempt(s)",
+                        distro, _WSL_APT_TOTAL_BUDGET, _attempt,
+                    )
+                    break
+                attempt_timeout = min(_WSL_APT_ATTEMPT_TIMEOUT, remaining)
+                # First attempt runs the plain command; a retry repairs a
+                # possibly-interrupted dpkg first.
+                attempt_cmd = install_cmd if _attempt == 0 else retry_cmd
                 try:
                     proc = await _create_subprocess_exec(
                         "wsl.exe", "-d", distro, "--", "bash", "-c",
-                        install_cmd,
+                        attempt_cmd,
                         stdout=asyncio.subprocess.PIPE,
                         stderr=asyncio.subprocess.PIPE,
                     )
                     try:
                         _stdout, stderr = await asyncio.wait_for(
-                            proc.communicate(), timeout=180.0,
+                            proc.communicate(), timeout=attempt_timeout,
                         )
                     except asyncio.TimeoutError:
-                        # Kill the wsl.exe wrapper before releasing the lock —
-                        # an orphaned apt-get would keep holding the dpkg lock
-                        # and deadlock the next installer.
+                        # This kill only terminates the Windows-side wsl.exe
+                        # forwarder; the apt-get inside the distro keeps
+                        # running, so the probe below has to come before any
+                        # cleanup that would disturb it.
                         try:
                             proc.kill()
                             await asyncio.wait_for(proc.wait(), timeout=5.0)
                         except (asyncio.TimeoutError, ProcessLookupError, OSError):
                             pass
-                        raise
+                        logger.warning(
+                            "apt install timed out after {:.0f}s in WSL distro "
+                            "'{}' (attempt {}/{})",
+                            attempt_timeout, distro,
+                            _attempt + 1, _WSL_APT_ATTEMPTS,
+                        )
+                        # Before disturbing anything, ask whether the in-distro
+                        # install landed anyway: a cold runner that is merely
+                        # slow reaches exactly this state and finishes on its
+                        # own (CI job 103196368053 — the toolchain was there,
+                        # only the Windows-side wrapper had been waiting).
+                        if await BwrapSandbox._distro_ready(distro):
+                            logger.info(
+                                "Sandbox dependencies are present in WSL distro "
+                                "'{}' despite the {:.0f}s timeout (slow runner, "
+                                "total {:.0f}s)",
+                                distro, attempt_timeout, time.monotonic() - _t0,
+                            )
+                            return True
+                        # Not ready: the orphan apt/dpkg is holding the dpkg
+                        # lock and poisons the next attempt.
+                        await BwrapSandbox._reset_wsl_apt_state(distro)
+                        continue
                     stderr = stderr.decode("utf-8", errors="replace") if stderr else ""
 
                     if proc.returncode != 0:
@@ -1289,49 +1489,50 @@ class BwrapSandbox:
                                 "or run: wsl -d {0} -- sudo apt-get install "
                                 "bubblewrap python3 python3-pip)".format(distro)
                             )
-                        if _attempt == 0 and BwrapSandbox._is_transient_apt_error(err_msg):
+                        if (
+                            _attempt + 1 < _WSL_APT_ATTEMPTS
+                            and BwrapSandbox._is_transient_apt_error(err_msg)
+                        ):
                             logger.warning(
-                                "apt install failed with transient network error, retrying once: {}",
+                                "apt install failed with a retryable error, "
+                                "retrying once: {}",
                                 err_msg,
                             )
+                            await BwrapSandbox._reset_wsl_apt_state(distro)
                             continue
                         logger.warning(
                             "Failed to install dependencies in WSL distro "
                             "'{}': {}", distro, err_msg,
                         )
-                        return False
+                        break
                     break
-                except (asyncio.TimeoutError, OSError) as exc:
+                except OSError as exc:
+                    # Spawning wsl.exe itself failed — not a slow network, so
+                    # another attempt cannot help.
                     logger.warning(
                         "Failed to run apt install in WSL distro '{}': {}",
                         distro, exc,
                     )
-                    return False
+                    break
         finally:
             _install_lock.release()
 
-        # Verify bwrap + python3/pip are now available
-        try:
-            verify = await _create_subprocess_exec(
-                "wsl.exe", "-d", distro, "--", "bash", "-c", _WSL_READY_CMD,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
+        # Verify bwrap + python3/pip are now available.  This probe — not any
+        # apt exit status — decides the return value.
+        if await BwrapSandbox._distro_ready(distro):
+            logger.info(
+                "Successfully installed sandbox dependencies in WSL distro "
+                "'{}' (total {:.0f}s)", distro, time.monotonic() - _t0,
             )
-            await asyncio.wait_for(verify.communicate(), timeout=30.0)
-            if verify.returncode == 0:
-                logger.info(
-                    "Successfully installed sandbox dependencies in WSL distro "
-                    "'{}' (total {:.0f}s)", distro, time.monotonic() - _t0,
-                )
-                return True
-        except (asyncio.TimeoutError, OSError):
-            pass
+            _last_install_failure.pop(distro, None)
+            return True
 
         logger.warning(
             "Dependencies installed but bwrap or python3/pip still missing "
             "in WSL distro '{}'",
             distro,
         )
+        _last_install_failure[distro] = time.monotonic()
         return False
 
     # ── Lifecycle ──────────────────────────────────────────────────────

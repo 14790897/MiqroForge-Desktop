@@ -23,6 +23,10 @@ def _make_orchestrator(permission_engine=None, deny_patterns=None, permanent_all
         hook_runtime=HookRuntime(),
         tool_registry=None,
         event_emitter=MagicMock(),
+        # Tests that reach the approval path are resolved by timing out, so the
+        # production default (60 s) would make each of them a one-minute sleep.
+        # Nothing here asserts the timeout value itself.
+        approval_timeout_ms=200,
     )
     orchestrator.events.emit = AsyncMock()
     return orchestrator

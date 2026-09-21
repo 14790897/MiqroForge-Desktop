@@ -686,7 +686,12 @@ async def test_openai_stream_preconnect_retry(monkeypatch: Any) -> None:
 @pytest.mark.asyncio
 async def test_openai_stream_idle_timeout_yields_terminal_error(monkeypatch: Any) -> None:
     _patch_provider_sleep(monkeypatch)
-    provider = OpenAIProvider(api_key="sk-test", stream_idle_timeout=0.01)
+    # This stream never yields, so it is the FIRST-token timeout that fires,
+    # not the idle one — both are pinned to 0.01 so neither default (60 s and
+    # 30 s) can turn this test into two minutes of real sleep on CI.
+    provider = OpenAIProvider(
+        api_key="sk-test", stream_idle_timeout=0.01, first_token_timeout=0.01,
+    )
 
     async def fake_create(**kw: Any) -> Any:
         return _FakeStream([], hang=True)

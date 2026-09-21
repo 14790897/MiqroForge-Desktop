@@ -33,6 +33,13 @@ Two defences live here:
    lock error, :meth:`RuntimeDb.run` recycles the connection so that later
    operations are not poisoned, and replays the operation once — but only when
    the failed attempt had not already modified rows.
+3. **Quarantine after an orphaned failure.** An operation that outlives a
+   cancelled caller and *then* fails has nobody left to observe the failure,
+   so it marks the connection dirty (:meth:`RuntimeDb._report_orphan`) and the
+   next operation recycles before touching it.  Without this, poisoning is
+   only ever discovered by whichever statement happens to come second — which
+   may be the user-facing one, and which then is the one that reports the
+   failure.
 
 Ordinary write-lock contention is *not* retried and *not* masked: it waits for
 the busy timeout as before and then propagates.
@@ -402,16 +409,25 @@ class RuntimeDb:
             job.add_done_callback(self._report_orphan)
             raise
 
-    @staticmethod
-    def _report_orphan(job: "asyncio.Task[Any]") -> None:
+    def _report_orphan(self, job: "asyncio.Task[Any]") -> None:
         if job.cancelled():
             return
         exc = job.exception()
-        if exc is not None:
-            _db_logger.warning(
-                "RuntimeDb: operation that outlived its cancelled caller failed: {}",
-                format_sqlite_error(exc),
-            )
+        if exc is None:
+            # The operation completed fine after its caller left; the
+            # connection is healthy and must not be recycled.
+            return
+        # Nobody is left to observe this failure — the caller that awaited the
+        # operation is gone.  A failed statement is exactly the case that can
+        # leave the connection write-dead, so quarantine it: the next ``run``
+        # recycles before issuing anything.
+        self._dirty = True
+        _db_logger.warning(
+            "RuntimeDb({}): operation that outlived its cancelled caller failed "
+            "({}); recycling the connection before the next operation",
+            self.name,
+            format_sqlite_error(exc),
+        )
 
     async def _run_locked(self, fn: DbOperation) -> Any:
         async with self._lock:
@@ -466,6 +482,7 @@ class RuntimeDb:
             "name": self.name,
             "open": self.is_open,
             "wal_mode": self.wal_mode,
+            "dirty": self._dirty,
             "recycle_count": self.recycle_count,
             "orphaned_ops": self.orphaned_ops,
             "last_recycle_reason": self.last_recycle_reason,
