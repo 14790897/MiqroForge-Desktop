@@ -150,12 +150,39 @@ async function listKnownSessionKeys(): Promise<string[]> {
   return [...(list?.sessions ?? []), ...(archived?.sessions ?? [])].map((s) => s.key);
 }
 
+/**
+ * 上次活动会话的 localStorage 键，按登录账号分名（#1185）。
+ *
+ * 会话按账号存在各自的工作区根下，所以「上次打开的会话」也是账号级的：
+ * 共用同一个键，B 账号登录时会拿 A 账号的 key 去 `sessions.get`，而桥对未知
+ * key 走 get_or_create —— B 会凭空多出一个以 A 的 key 命名的空会话（#1118
+ * 描述过的幽灵 key 形状）。
+ */
+function lastSessionStorageKey(sub: string | null | undefined): string {
+  return sub ? `miqi:lastSession:${sub}` : 'miqi:lastSession';
+}
+
+/**
+ * 首帧就能拿到的登录账号：preload 在页面脚本之前同步读好，与
+ * `useQraftStatus` 的初始值是同一个来源（#1095 的同步登录门同理）。
+ */
+function preloadAccountSub(): string | null {
+  try {
+    return window.miqi?.qraft?.initialStatus?.account?.sub || null;
+  } catch {
+    /* 旧版 preload（如 smoke mock）可能没有该字段 */
+    return null;
+  }
+}
+
 function AppShell() {
   const { status } = useRuntime();
   const [activeNav, setActiveNav] = useState<NavId>('chat');
   const [sessionKey, setSessionKey] = useState(() => {
     try {
-      return localStorage.getItem('miqi:lastSession') || DEFAULT_SESSION_KEY;
+      return (
+        localStorage.getItem(lastSessionStorageKey(preloadAccountSub())) || DEFAULT_SESSION_KEY
+      );
     } catch {
       return DEFAULT_SESSION_KEY;
     }
@@ -192,6 +219,8 @@ function AppShell() {
   const { status: qraftStatus, loggedIn } = useQraftStatus();
   const [workspace, setWorkspace] = useState<string | null>(null);
   const [newSessionTrigger, setNewSessionTrigger] = useState(0);
+  /** 当前登录账号。会话、记忆、任务资产都按账号存在各自的工作区根下（#1185）。 */
+  const accountSub = qraftStatus?.account?.sub || null;
   const pendingWorkspace = useRef<{ sessionKey: string; workspace: string } | null>(null);
   // #615: guards for the "+" reuse-empty-session check — a lock prevents
   // re-entrancy (double-click), the ref prevents acting on a stale request
@@ -224,11 +253,41 @@ function AppShell() {
   // Persist last active session so the app restores it on next launch
   useEffect(() => {
     try {
-      localStorage.setItem('miqi:lastSession', sessionKey);
+      localStorage.setItem(lastSessionStorageKey(sessionOwnerSubRef.current), sessionKey);
     } catch {
       /* localStorage unavailable */
     }
   }, [sessionKey]);
+
+  // #1185: 换账号（登出、或登出后换一个账号登录）时把属于上一个账号的界面
+  // 状态退回干净态。
+  //
+  // 登录门会卸载整棵主界面树，侧栏 / 任务资产面板重挂时自己会重拉，但下面
+  // 几项是 **App 自己的** state，会跨过登出活下来：`sessionKey` 停在上一账号
+  // 的会话上，`workspace` 停在它的工作区路径上。带着它们进新账号，`sessions.get`
+  // 会把新账号里并不存在的 key 走 get_or_create —— 即在 B 账号下凭空建一个以
+  // A 的会话命名的空会话（#1118 记过的幽灵 key 形状）。
+  //
+  // 退回默认哨兵而不是恢复新账号的「上次会话」：恢复出来的 key 需要跑一遍
+  // 存在性校验才安全（#1118 的两阶段启动），而那套机器只在启动时跑一次；哨兵
+  // 本身就是「新会话」，是唯一不需要校验的落点。用户在新账号侧栏里一样能选到
+  // 自己的历史会话。
+  const prevAccountSubRef = useRef(accountSub);
+  /**
+   * `sessionKey` 属于哪个账号：写入 localStorage 的槽位跟这个走，而不是跟当时
+   * 的 `accountSub`。账号切换的那一帧里 `sessionKey` 还是上一个账号的（重置
+   * effect 的 setState 要到下一帧才反映），按 `accountSub` 写就会把 A 的会话
+   * key 存进 B 的名下。
+   */
+  const sessionOwnerSubRef = useRef(accountSub);
+  useEffect(() => {
+    if (prevAccountSubRef.current === accountSub) return;
+    prevAccountSubRef.current = accountSub;
+    sessionOwnerSubRef.current = accountSub;
+    setWorkspace(null);
+    setSessionKey(DEFAULT_SESSION_KEY);
+    setSessionRefreshKey((k) => k + 1);
+  }, [accountSub]);
 
   // #1118（#1035 移植）：恢复出来的 lastSession 可能指向一个**已经不存在的会话**
   // （会话在 SessionExplorer / 设置页被删、在另一个实例里被删、或工作区换目录后

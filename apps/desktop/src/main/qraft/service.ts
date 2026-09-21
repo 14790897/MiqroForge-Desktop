@@ -25,6 +25,12 @@ import {
 } from 'fs';
 import { randomUUID } from 'crypto';
 import { dirname, join } from 'path';
+import {
+  claimLegacyWorkspace,
+  clearActiveAccount,
+  isValidAccountSub,
+  setActiveAccount,
+} from '../ipc/workspace-path';
 import { CookieJar } from './cookie-jar';
 import { decryptMcpGatewayKey } from './mcp-gateway-key';
 import { QraftClient, QraftError, type QraftLogger, type ResolvedQraftConfig } from './client';
@@ -198,8 +204,15 @@ export class QraftService {
     const stored = this.options.store.load();
     if (stored) {
       this.restoreJar(stored);
+      // 账号维度的工作区根（#1185）必须在 syncTokenFile 之前就位：token
+      // 文件写在 <workspace>/.qraft/ 下，先写就会落进上一个账号的工作区。
+      this.activateAccount(stored.account?.sub);
       this.scheduleRefresh(stored);
       this.syncTokenFile(stored);
+    } else {
+      // 没有登录态（含 E2E loginBypass）：清掉可能残留的标记，否则运行时
+      // 会停在上一次会话用过的账号工作区上。
+      clearActiveAccount();
     }
     // 启动时恢复内存去重集合：charge_id 来自展示历史；复合作业键来自
     // 独立无上限索引文件（展示历史有 200 条截断，索引必须完整）。
@@ -372,6 +385,10 @@ export class QraftService {
     aiGateway?: QraftAiGateway,
     mcpGatewayKey?: string
   ): void {
+    // 先切工作区根再落 token 文件：syncTokenFile 的路径由 workspace 解析
+    // 得出（qraft/ipc.ts 的 tokenFilePath），顺序反了会把凭据写进上一个
+    // 账号的工作区。
+    this.activateAccount(account.sub);
     const state: QraftStoredState = {
       version: 1,
       env,
@@ -538,7 +555,10 @@ export class QraftService {
     this.inFlightRefresh = null;
     this.jar.clear();
     this.options.store.clear();
+    // deleteTokenFile 先于 clearActiveAccount：token 文件的路径由当前工作区
+    // 解析得出，标记清掉之后再删就会指向共享工作区（删错文件、留下凭据）。#1185
     this.deleteTokenFile();
+    clearActiveAccount();
     this.refreshError = null;
     this.refreshRetryAttempt = 0;
     this.requiresRelogin = false;
@@ -550,6 +570,23 @@ export class QraftService {
     this.inFlightCharges.clear();
     this.options.log('INFO', 'qraft: 已退出登录（cookie 与 token 均已清除）');
     this.emitStatus();
+  }
+
+  /**
+   * 把工作区根切到 `sub` 账号名下（#1185）。
+   *
+   * 未登录 / 拿不到合法 sub（老平台响应缺字段、sub 为空）时退回共享工作区
+   * 而不是猜一个目录：分享别人工作区比多一个共享目录更糟。
+   */
+  private activateAccount(sub: string | undefined): void {
+    if (!isValidAccountSub(sub)) {
+      clearActiveAccount();
+      return;
+    }
+    // 认领在前：存量 `~/.miqi/workspace` 归首个登录账号，之后 getWorkspacePath
+    // 才会把它解析成这个账号的工作区。
+    claimLegacyWorkspace(sub);
+    setActiveAccount(sub);
   }
 
   /** 拉取最新积分余额（设置页/登录后调用），成功后缓存并推送状态。 */

@@ -14,6 +14,12 @@ import { join } from 'path';
 import { QraftService, resolveConfig, defaultRedirectUri } from './service';
 import { QraftStore } from './store';
 import { QraftError, type QraftClient, type QraftLogger } from './client';
+import {
+  getDefaultWorkspacePath,
+  readActiveAccount,
+  readLegacyWorkspaceOwner,
+  setActiveAccount,
+} from '../ipc/workspace-path';
 import { PROD_REDIRECT_URI, type QraftStoredState, type QraftTokens } from './types';
 
 const noopLog = (() => undefined) as unknown as QraftLogger;
@@ -1296,5 +1302,90 @@ describe('QraftService 反馈平台通道（issue #1054）', () => {
     expect(result.message).toContain('content 不能为空');
     expect(client.refreshTokens).not.toHaveBeenCalled();
     expect(svc.status().requiresRelogin).toBe(false);
+  });
+});
+
+// #1185: 登录/登出驱动工作区根的账号维度。bridge 是长期驻留进程、不在登录时
+// 重启，所以切换完全依赖 .active 标记文件；标错了就会把会话写进别人的工作区。
+describe('账号维度的工作区根 (#1185)', () => {
+  let home: string;
+
+  beforeEach(() => {
+    home = mkdtempSync(join(tmpdir(), 'qraft-home-'));
+    process.env.MIQI_HOME = home;
+  });
+
+  afterEach(() => {
+    delete process.env.MIQI_HOME;
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  const loggedInClient = () => {
+    const stub = makeClientStub();
+    stub.platformLogin.mockResolvedValue({ sub: '19', username: 'U', nickname: '登录昵称' });
+    stub.authorizeFlow.mockResolvedValue(makeTokens());
+    stub.getUserInfo.mockResolvedValue({ sub: '19', username: 'U', nickname: '登录昵称' });
+    return stub;
+  };
+
+  it('登录后工作区切到该账号，登出后回到共享根', async () => {
+    const service = makeService(loggedInClient());
+
+    // 登录前：无账号 → 共享工作区
+    expect(readActiveAccount()).toBeNull();
+    expect(getDefaultWorkspacePath()).toBe(join(home, 'workspace'));
+
+    const result = await service.login('18500000000', 'p');
+    expect(result.ok).toBe(true);
+    expect(readActiveAccount()).toBe('19');
+    expect(getDefaultWorkspacePath()).toBe(join(home, 'accounts', '19', 'workspace'));
+
+    service.logout();
+    expect(readActiveAccount()).toBeNull();
+    expect(getDefaultWorkspacePath()).toBe(join(home, 'workspace'));
+  });
+
+  it('启动时按已存储的登录态恢复账号维度', () => {
+    // 已经登录过的用户重启应用：构造函数里就要把根切过去，否则首屏的
+    // sessions.list 读的是共享工作区（上一个账号的数据）。
+    store.save(makeStoredState());
+    makeService(makeClientStub());
+
+    expect(readActiveAccount()).toBe('19');
+    expect(getDefaultWorkspacePath()).toBe(join(home, 'accounts', '19', 'workspace'));
+  });
+
+  it('没有登录态时清掉残留标记（含 E2E loginBypass）', () => {
+    setActiveAccount('19');
+    makeService(makeClientStub());
+
+    // 存储里没有登录态 → 运行时不该停在上一次会话用过的账号工作区上。
+    expect(readActiveAccount()).toBeNull();
+    expect(getDefaultWorkspacePath()).toBe(join(home, 'workspace'));
+  });
+
+  it('首个登录的账号认领升级前的存量工作区', async () => {
+    // 升级场景：~/.miqi/workspace 里已经是老用户的会话与记忆。
+    mkdirSync(join(home, 'workspace', 'sessions', 'desktop_old'), { recursive: true });
+    const service = makeService(loggedInClient());
+
+    await service.login('18500000000', 'p');
+
+    expect(readLegacyWorkspaceOwner()).toBe('19');
+    expect(getDefaultWorkspacePath()).toBe(join(home, 'workspace'));
+    expect(existsSync(join(home, 'workspace', 'sessions', 'desktop_old'))).toBe(true);
+  });
+
+  it('sub 为空（平台响应缺字段）时不猜目录，退回共享根', async () => {
+    const stub = makeClientStub();
+    stub.platformLogin.mockResolvedValue({ sub: '', username: 'U', nickname: 'N' });
+    stub.authorizeFlow.mockResolvedValue(makeTokens());
+    stub.getUserInfo.mockRejectedValue(new QraftError('USERINFO_FAILED', 'boom'));
+    const service = makeService(stub);
+
+    const result = await service.login('18500000000', 'p');
+
+    expect(result.ok).toBe(true);
+    expect(readActiveAccount()).toBeNull();
   });
 });

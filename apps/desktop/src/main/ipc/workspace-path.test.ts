@@ -1,14 +1,20 @@
 import { describe, expect, it, beforeEach, afterEach } from 'vitest';
-import { mkdirSync, symlinkSync } from 'fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
-import { join } from 'path';
+import { dirname, join } from 'path';
 import {
   buildWslSearchScript,
+  claimLegacyWorkspace,
+  clearActiveAccount,
+  getDefaultWorkspacePath,
   getWorkspacePath,
   isWithinCanonicalWorkspace,
+  readActiveAccount,
+  readLegacyWorkspaceOwner,
   resolveWorkspacePath,
   sanitizeSessionKeyForPath,
   sessionFilesDirKey,
+  setActiveAccount,
   shellEscape,
 } from './workspace-path';
 
@@ -353,5 +359,194 @@ describe('buildWslSearchScript (#1103)', () => {
     expect(script).toContain('/tmp/miqi-sandboxes/miqi-desktop_desktop_123/home/miqi/workspace');
     expect(script).toContain('/sessions/desktop_123/files');
     expect(script).not.toContain('/sessions/miqi-desktop_desktop_123/files');
+  });
+});
+
+// #1185: 本地存储按登录账号划分。会话、记忆、技能、经验都挂在工作区根下，
+// 所以「账号维度」就是工作区根的维度。这里覆盖主进程这一侧的规则；Python
+// 侧的同名规则由 tests/test_account_workspace.py 覆盖，两边必须一致。
+describe('account-scoped workspace (#1185)', () => {
+  let home: string;
+
+  beforeEach(() => {
+    home = join(tmpdir(), `miqi-acct-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    mkdirSync(home, { recursive: true });
+    process.env['MIQI_HOME'] = home;
+  });
+
+  afterEach(() => {
+    delete process.env['MIQI_HOME'];
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  const accountsDir = () => join(home, 'accounts');
+  const writeMarker = (name: string, value: string) => {
+    mkdirSync(accountsDir(), { recursive: true });
+    writeFileSync(join(accountsDir(), name), value, 'utf8');
+  };
+  const writeConfig = (workspace: string) => {
+    writeFileSync(
+      join(home, 'config.json'),
+      JSON.stringify({ agents: { defaults: { workspace } } }),
+      'utf8'
+    );
+  };
+
+  it('keeps the shared workspace while no account is logged in', () => {
+    expect(readActiveAccount()).toBeNull();
+    expect(getDefaultWorkspacePath()).toBe(join(home, 'workspace'));
+    expect(getWorkspacePath()).toBe(join(home, 'workspace'));
+  });
+
+  it('scopes the default workspace to the logged-in account', () => {
+    writeMarker('.active', '19');
+
+    expect(readActiveAccount()).toBe('19');
+    expect(getDefaultWorkspacePath()).toBe(join(accountsDir(), '19', 'workspace'));
+    // 配置里是默认值 → 跟随账号；配置里是自定义目录 → 不跟随（下一个用例）。
+    writeConfig('~/.miqi/workspace');
+    expect(getWorkspacePath()).toBe(join(accountsDir(), '19', 'workspace'));
+  });
+
+  it('switches roots when the account switches', () => {
+    writeMarker('.active', '19');
+    const a = getDefaultWorkspacePath();
+    writeMarker('.active', '20');
+    const b = getDefaultWorkspacePath();
+
+    expect(a).not.toBe(b);
+    expect(b).toBe(join(accountsDir(), '20', 'workspace'));
+  });
+
+  it('does not account-scope a user-picked workspace', () => {
+    const custom = join(tmpdir(), 'miqi-custom-workspace');
+    writeMarker('.active', '19');
+    writeConfig(custom);
+
+    // 用户明确指到这个目录，尊重他的选择：宁可提示设备内共享，也不把他
+    // 的项目目录搬到一个按账号分的子目录下（#1185 item 6）。
+    expect(getWorkspacePath()).toBe(custom);
+  });
+
+  it('treats a traversal in the marker as "no account"', () => {
+    for (const bad of ['..', '.', '../evil', 'a/b', 'a\b', '']) {
+      writeMarker('.active', bad);
+      expect(readActiveAccount()).toBeNull();
+      expect(getDefaultWorkspacePath()).toBe(join(home, 'workspace'));
+    }
+  });
+
+  it('round-trips the active account marker', () => {
+    setActiveAccount('19');
+    expect(readActiveAccount()).toBe('19');
+    clearActiveAccount();
+    expect(readActiveAccount()).toBeNull();
+  });
+
+  it('leaves the legacy workspace to the first account that claims it', () => {
+    mkdirSync(join(home, 'workspace', 'sessions', 'desktop_k'), { recursive: true });
+    setActiveAccount('19');
+    claimLegacyWorkspace('19');
+
+    expect(readLegacyWorkspaceOwner()).toBe('19');
+    // 认领方就地继续用旧目录（不搬家：rename 会撞上仍开着句柄的 bridge，
+    // 而失败与「数据消失」在用户眼里没有区别）。
+    expect(getDefaultWorkspacePath()).toBe(join(home, 'workspace'));
+
+    // 另一个账号拿到自己的空目录，看不到那份存量数据。
+    setActiveAccount('20');
+    expect(getDefaultWorkspacePath()).toBe(join(accountsDir(), '20', 'workspace'));
+  });
+
+  it('never re-claims an already-claimed legacy workspace', () => {
+    mkdirSync(join(home, 'workspace'), { recursive: true });
+    claimLegacyWorkspace('19');
+    claimLegacyWorkspace('20');
+
+    expect(readLegacyWorkspaceOwner()).toBe('19');
+    // 后到的账号不会把前一个账号的旧数据认成自己的。
+    setActiveAccount('20');
+    expect(getDefaultWorkspacePath()).toBe(join(accountsDir(), '20', 'workspace'));
+  });
+
+  it('claims nothing when there is no legacy data to claim', () => {
+    setActiveAccount('19');
+    claimLegacyWorkspace('19');
+
+    expect(readLegacyWorkspaceOwner()).toBeNull();
+    expect(getDefaultWorkspacePath()).toBe(join(accountsDir(), '19', 'workspace'));
+  });
+
+  it('mirrors the account into the WSL global-workspace fallback', () => {
+    // 账号维度必须镜像到 WSL 侧：否则 B 账号的「定位」会从 A 的 WSL 工作区
+    // 里把同名文件找回来（findFileInWsl 的全局回退分支）。
+    expect(buildWslSearchScript('report.md', 'desktop:123')).toContain(
+      'ws="$HOME/.miqi/workspace"'
+    );
+
+    setActiveAccount('19');
+    const scoped = buildWslSearchScript('report.md', 'desktop:123');
+    expect(scoped).toContain('ws="$HOME/.miqi/accounts/19/workspace"');
+    expect(scoped).not.toContain('ws="$HOME/.miqi/workspace"');
+  });
+
+  it('lets the claiming account keep the un-scoped WSL workspace', () => {
+    mkdirSync(join(home, 'workspace'), { recursive: true });
+    setActiveAccount('19');
+    claimLegacyWorkspace('19');
+
+    // 认领方在 WSL 侧同样沿用旧位置——存量数据在那边也是一份旧的。
+    expect(buildWslSearchScript('report.md', 'desktop:123')).toContain(
+      'ws="$HOME/.miqi/workspace"'
+    );
+  });
+});
+
+// #1185 的账号维度是一条**跨进程**约定：桌面主进程写标记文件，Python 运行时
+// 读它。两边的常量各写各的，改了一边另一边不会报错——只会安静地把运行时指向
+// 上一个账号的工作区。这里直接读 Python 源码里的常量来对齐。
+describe('account marker contract with miqi/paths.py (#1185)', () => {
+  /** 从 cwd 往上找仓库根下的相对文件（打包/独立环境下找不到时返回 null）。 */
+  function repoFile(rel: string): string | null {
+    let dir = process.cwd();
+    for (let i = 0; i < 6; i++) {
+      const candidate = join(dir, rel);
+      if (existsSync(candidate)) return candidate;
+      const parent = dirname(dir);
+      if (parent === dir) break;
+      dir = parent;
+    }
+    return null;
+  }
+
+  it('uses the same accounts dir, marker names and default value', () => {
+    const path = repoFile(join('miqi', 'paths.py'));
+    if (!path) return; // 读不到源码（非仓库内运行）时无契约可校验
+    const source = readFileSync(path, 'utf8');
+    const literal = (name: string): string => {
+      const match = source.match(new RegExp(`^${name} = "([^"]+)"`, 'm'));
+      expect(match, `miqi/paths.py 里找不到常量 ${name}`).not.toBeNull();
+      return match![1];
+    };
+
+    expect(literal('ACCOUNTS_DIR_NAME')).toBe('accounts');
+    expect(literal('ACTIVE_ACCOUNT_FILE')).toBe('.active');
+    expect(literal('LEGACY_WORKSPACE_OWNER_FILE')).toBe('.legacy-owner');
+    // 默认值在 Python 侧由数据根名拼出（两者都跟随 #1175 的更名），约束的是
+    // 「拼出来的字面量必须是 ~/.miqi/workspace」而不是某个内部标识符。
+    expect(source).toContain('DEFAULT_WORKSPACE_VALUE = f"~/{DEFAULT_HOME_NAME}/workspace"');
+    expect(`~/${literal('DEFAULT_HOME_NAME')}/workspace`).toBe('~/.miqi/workspace');
+
+    // 标记文件必须落在 <数据根>/accounts/ 下，且内容是裸的 sub。
+    const home = join(tmpdir(), `miqi-contract-${Date.now()}`);
+    mkdirSync(home, { recursive: true });
+    process.env['MIQI_HOME'] = home;
+    try {
+      setActiveAccount('19');
+      expect(readFileSync(join(home, 'accounts', '.active'), 'utf8')).toBe('19');
+    } finally {
+      delete process.env['MIQI_HOME'];
+      rmSync(home, { recursive: true, force: true });
+    }
   });
 });

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 
 MIQI_HOME_ENV = "MIQI_HOME"
@@ -32,6 +33,131 @@ def get_legacy_data_dir() -> Path:
 
 def get_legacy_config_path() -> Path:
     return get_legacy_data_dir() / "config.json"
+
+
+# ── account-scoped storage layout (#1185) ──────────────────────────────
+# Sessions, task assets, memory, skills, experience and the workspace files
+# themselves all hang off the *workspace root*, so making that root
+# account-scoped is what keeps one account's conversation history out of the
+# next account's sidebar on a shared device.
+#
+# The account dimension deliberately does NOT go into ``MIQI_HOME`` itself:
+# ``config.json`` (providers, model choice, approvals) stays device-level, and
+# so do the install directory, the Chromium profile, the update cache and the
+# WSL sandbox distro — see the 设备级 list in #1185.
+#
+# Layout::
+#
+#     <data root>/workspace/                legacy, claimed by the first account
+#     <data root>/accounts/.active          登录账号 sub（登出即删）
+#     <data root>/accounts/.legacy-owner    认领上面那个目录的账号 sub
+#     <data root>/accounts/<sub>/workspace/ 其它账号各自的工作区
+#
+# Both the Desktop main process (``ipc/workspace-path.ts``) and this module
+# implement the same rule; they must stay in step or the renderer's
+# workspace-containment check and the runtime's writes disagree about where
+# the workspace is.
+
+ACCOUNTS_DIR_NAME = "accounts"
+ACTIVE_ACCOUNT_FILE = ".active"
+LEGACY_WORKSPACE_OWNER_FILE = ".legacy-owner"
+
+#: Serialised default of ``agents.defaults.workspace``.  A config carrying
+#: this exact string means "follow the data root" rather than "the user
+#: picked this directory", and only that case gets the account dimension.
+DEFAULT_WORKSPACE_VALUE = f"~/{DEFAULT_HOME_NAME}/workspace"
+
+#: Account ids come from the platform and end up as a path segment.  Anything
+#: outside this set is treated as "no account" rather than sanitised —
+#: sanitising ``../x`` into ``__x`` would silently point a request at a
+#: different account's directory.  Leading dots are excluded on top of the
+#: separator ban: ``..`` resolves to ``<data root>/workspace`` (the shared
+#: root), ``.`` to ``<accounts>/workspace``, and ``.active`` would collide
+#: with the marker file itself.
+_ACCOUNT_SUB_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+
+
+def is_valid_account_sub(sub: str | None) -> bool:
+    """Whether *sub* is safe to use as a path segment (see ``_ACCOUNT_SUB_RE``)."""
+    return bool(sub) and bool(_ACCOUNT_SUB_RE.match(sub))
+
+
+def get_accounts_dir() -> Path:
+    return get_miqi_home() / ACCOUNTS_DIR_NAME
+
+
+def get_active_account_file() -> Path:
+    return get_accounts_dir() / ACTIVE_ACCOUNT_FILE
+
+
+def get_legacy_workspace_owner_file() -> Path:
+    return get_accounts_dir() / LEGACY_WORKSPACE_OWNER_FILE
+
+
+def get_account_workspace(sub: str) -> Path:
+    """Workspace root of account *sub* (caller must have validated *sub*)."""
+    return get_accounts_dir() / sub / "workspace"
+
+
+def _read_account_marker(path: Path) -> str | None:
+    """Read an account sub from *path*; None when absent or unusable.
+
+    Invalid content is reported as "no account" instead of raising: a
+    truncated or hand-edited marker must not take the whole runtime down
+    with it, and must never be interpreted as a different account.
+    """
+    try:
+        if not path.exists():
+            return None
+        sub = path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    return sub if is_valid_account_sub(sub) else None
+
+
+def get_active_account() -> str | None:
+    """The account the Desktop is currently logged in as, if any.
+
+    Written by the Desktop main process on login and removed on logout, so
+    this follows an account switch without restarting the bridge.  Read on
+    every call rather than cached: the renderer mounts the sidebar the moment
+    login returns, and a stale answer here lists the previous account's
+    sessions.
+    """
+    return _read_account_marker(get_active_account_file())
+
+
+def get_legacy_workspace_owner() -> str | None:
+    """Account that claimed the pre-#1185 ``<data root>/workspace``, if any."""
+    return _read_account_marker(get_legacy_workspace_owner_file())
+
+
+def get_default_workspace_path() -> Path:
+    """Default workspace root, account-scoped when an account is active.
+
+    ``<data root>`` is ``MIQI_HOME`` when set, else ``~/.miqi`` with the
+    historical ``~/.assistant`` fallback — the same root
+    :func:`miqi.utils.helpers.get_data_path` picks, so the runtime's workspace
+    and the CLI's no longer disagree on legacy installs.
+    """
+    if _miqi_home_is_configured():
+        data_root = get_miqi_home()
+    else:
+        default_home = get_miqi_home()
+        legacy_home = get_legacy_data_dir()
+        data_root = (
+            legacy_home if legacy_home.exists() and not default_home.exists() else default_home
+        )
+
+    sub = get_active_account()
+    if sub is None or get_legacy_workspace_owner() == sub:
+        # No account (CLI, tests, Desktop before login) — and the account that
+        # claimed the legacy directory keeps working in place: moving
+        # ``<data root>/workspace`` would have to race the running bridge for
+        # it, and a failed move is exactly the "upgrade ate my history" case
+        # #1185 warns about.
+        return data_root / "workspace"
+    return data_root / ACCOUNTS_DIR_NAME / sub / "workspace"
 
 
 # ── session files layout ───────────────────────────────────────────────

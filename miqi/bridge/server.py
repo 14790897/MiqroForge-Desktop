@@ -51,6 +51,10 @@ _stdout_buffer = sys.stdout.buffer if hasattr(sys.stdout, 'buffer') else None
 
 _stdout_lock = threading.Lock()
 _file_logging_sinks: dict[Path, int] = {}
+#: Workspace `_ensure_workspace_init` last set up.  Re-running it is driven by
+#: this changing, not by the call itself — the effective workspace follows the
+#: logged-in account (#1185) and the bridge is never restarted on login.
+_last_initialized_workspace: Path | None = None
 
 # Client prefix used to namespace session keys in sandbox metadata lookups.
 _CLIENT_PREFIX = "miqi-desktop:"
@@ -164,6 +168,10 @@ class BridgeState:
         # pending-restart baseline (2026-09-01 review).
         if self.config_at_startup is None:
             self.config_at_startup = self.config.model_copy(deep=True)
+        # #1185: 账号切换不重启进程，这里是把新账号的工作区（目录骨架、模板、
+        # 日志落点）补齐的时机——每一个真正读写工作区的请求都会先穿过
+        # load_config。工作区没变时 _ensure_workspace_init 直接返回。
+        _ensure_workspace_init()
         return self.config
 
     async def get_runtime_session(self, session_key: str, *, caller_id: str = "", approval_callback=None):
@@ -496,20 +504,55 @@ def _add_file_logging(workspace: Path) -> None:
     _file_logging_sinks[workspace] = logger.add(_redacting_sink, level="DEBUG")
 
 
+def _retarget_file_logging(workspace: Path) -> None:
+    """Point the file sink at *workspace*, dropping the previous one.
+
+    The sink is created with its log directory baked in, so a workspace that
+    moved would keep receiving lines in the old root — after logging in as
+    another account (#1185) that writes the new account's bridge activity into
+    the previous account's ``logs/``.
+
+    Only one workspace sink is kept: adding a second would duplicate every
+    record into both roots.
+    """
+    from loguru import logger
+
+    for previous, handler_id in list(_file_logging_sinks.items()):
+        if previous == workspace:
+            continue
+        try:
+            logger.remove(handler_id)
+        except Exception:
+            pass  # sink already gone — nothing to undo
+        _file_logging_sinks.pop(previous, None)
+    _add_file_logging(workspace)
+
+
 def _ensure_workspace_init() -> None:
-    """Create workspace directories and template files if they don't exist."""
+    """Create workspace directories and template files if they don't exist.
+
+    Also re-runs for a workspace the process has not set up yet.  The effective
+    workspace follows the logged-in account (#1185) while the bridge is a
+    single long-lived process that is NOT restarted on login/logout, so without
+    this the account that logged in second would start with no bootstrap
+    templates and keep writing its log lines under the first account.
+    """
+    global _last_initialized_workspace
     try:
         from importlib.resources import files as pkg_files
 
         from miqi.utils.helpers import get_workspace_path
 
         workspace = get_workspace_path()
+        # Callers hit this on every config load, so the common case — same
+        # workspace as last time — must not redo the scaffolding.
+        if workspace == _last_initialized_workspace:
+            return
+
+        _retarget_file_logging(workspace)
         workspace.mkdir(parents=True, exist_ok=True)
         (workspace / "memory").mkdir(exist_ok=True)
         (workspace / "skills").mkdir(exist_ok=True)
-
-        # Add persistent file logging (daily rotation, 7-day retention)
-        _add_file_logging(workspace)
 
         templates_dir = pkg_files("miqi") / "templates"
         for item in templates_dir.iterdir():
@@ -525,6 +568,9 @@ def _ensure_workspace_init() -> None:
             memory_file.write_text(memory_template.read_text(encoding="utf-8"), encoding="utf-8")
 
         append_workspace_log(workspace, "Bridge workspace initialized", source="bridge")
+        # Set last: a workspace that failed to set up must be retried rather
+        # than remembered as done.
+        _last_initialized_workspace = workspace
         _log("Workspace ready")
     except Exception as exc:
         _log(f"Workspace init warning (non-fatal): {exc}")
