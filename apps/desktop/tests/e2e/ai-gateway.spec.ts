@@ -210,4 +210,45 @@ test.describe('AI 网关 E2E (issue #922)', () => {
       fullPage: true,
     });
   });
+
+  test('active + 全新安装（无任何用户配置）：默认模型自动就绪（#1172）', async () => {
+    // #1172 的另一个复现前提：MIQI_HOME 里**没有**用户配置 —— 既不拷贝开发者
+    // 本机的 provider 凭据，也没有显式配置过 agents.defaults.model。
+    // noUserConfig 关掉 launchElectronApp 的本机配置拷贝，临时 home 只剩启动
+    // 时写入的 approvals/channels，agents.defaults.model 完全是 schema 默认值。
+    test.setTimeout(240_000);
+    await closeElectronApp(electronApp, fixture.miqiHome);
+    writeFileSync(storePath, buildSeededStoreContent({ status: 'active' }), 'utf8');
+    const f2 = await launchElectronApp(undefined, { noUserConfig: true });
+    electronApp = f2.electronApp;
+    page = f2.page;
+    fixture = f2;
+
+    // 自动落盘：默认模型从 schema 默认值换成网关模型，全程无手动选择
+    const configPath = join(fixture.miqiHome, 'config.json');
+    await expect
+      .poll(
+        () => {
+          try {
+            return JSON.parse(readFileSync(configPath, 'utf8')).agents?.defaults?.model ?? '';
+          } catch {
+            return '';
+          }
+        },
+        { timeout: 120_000 }
+      )
+      .toBe('deepseek/deepseek-v4-flash');
+
+    await gotoQraftTab(page);
+    await page.getByRole('tab', { name: '模型' }).click();
+    await expect(page.getByTestId('providers-active-model')).toHaveText(
+      '当前默认模型：deepseek/deepseek-v4-flash',
+      { timeout: 15_000 }
+    );
+
+    await page.screenshot({
+      path: 'test-results/gateway-model-autoready-1172-no-config.png',
+      fullPage: true,
+    });
+  });
 });
