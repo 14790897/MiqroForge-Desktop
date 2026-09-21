@@ -1309,12 +1309,16 @@ for m in ("pydantic", "httpx", "loguru"):
       if (check.distros.length === 0 && check.featureState !== 'ready') {
         safeSend(IPC_EVENTS.WSL_INSTALL_PROGRESS, {
           phase: 'installing_distro',
-          message: '正在安装 Ubuntu 发行版（可能需要几分钟）...',
+          message: '正在下载并安装 Ubuntu 发行版（网络较慢时可能要十几分钟）...',
         } satisfies WslInstallProgress);
 
+        // Twenty minutes, not five: the distro download goes through whatever
+        // proxy the machine has configured, and a throttled node makes the
+        // install outlive a short timeout — the run was observed to finish in
+        // the background long after the app had given up and reported failure.
         const r = await runElevatedAsync(
           { command: { file: 'wsl.exe', args: ['--install', '-d', 'Ubuntu', '--no-launch'] } },
-          300000
+          1200000
         );
 
         if (r.kind === 'cancelled') {
@@ -1380,7 +1384,10 @@ for m in ("pydantic", "httpx", "loguru"):
             phase: 'error',
             errorCode: 'DISTRO_INSTALL_FAILED',
             error: `Ubuntu 发行版安装失败: ${detail}`,
-            nextStep: '以管理员身份打开 PowerShell 并运行: wsl --install -d Ubuntu',
+            // A slow download keeps running after the app stops waiting, so the
+            // first thing to try is a refresh rather than a manual reinstall.
+            nextStep:
+              '若网络较慢，安装可能仍在后台进行：稍等片刻后点上方刷新按钮查看；否则以管理员身份运行: wsl --install -d Ubuntu',
           } satisfies WslInstallAndProvisionResult;
         }
         check.distros = postCheck.distros;
