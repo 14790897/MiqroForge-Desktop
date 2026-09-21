@@ -6,9 +6,10 @@
  * 这里直接复用并 re-export，避免两份声明漂移。
  *
  * 依据《Qraft OAuth2 接入实测文档》(issue #726)：
- * - access_token 实测有效期约 2 小时（expires_in=7199），并非官方的 24 小时；
- * - refresh_token 轮换（刷新成功后旧值立即失效），必须持久化响应中的新值；
- *   平台升级可能作废存量 refresh_token，此时刷新返回 REFRESH_TOKEN_INVALID；
+ * - access_token 有效期以平台下发为准：2026-09-21 实测 expires_in=2591999（约 30 天），
+ *   早期实测 7199（约 2 小时），并非官方的 24 小时；
+ * - refresh_token 平台当前不轮换、可复用（2026-09-15 实测），仍必须持久化响应中的新值；
+ *   平台可能成批作废存量 refresh_token，此时刷新返回 REFRESH_TOKEN_INVALID；
  * - userinfo 响应无 picture 字段；
  * - 授权确认必须走 POST /oauth2/doConfirm（授权页修复前）；authorize 不传 state。
  */
@@ -113,7 +114,7 @@ export interface QraftTokens {
   refreshToken: string;
   openid: string;
   idToken?: string;
-  /** access_token 到期时间（epoch 毫秒），按实测 expires_in=7199 计算。 */
+  /** access_token 到期时间（epoch 毫秒），按平台下发的 expires_in 计算。 */
   expiresAt: number;
 }
 

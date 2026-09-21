@@ -1,11 +1,14 @@
 /**
- * MiQroForge 浏览器登录 E2E（真实测试环境，issue #726）。
+ * MiQroForge 浏览器登录 E2E（真实平台，issue #726）。
  *
  * 完整链路：设置页点「浏览器登录」→ 主进程打开 MiQroForge 授权窗口（独立
  * partition）→ 未登录被 302 到平台登录页 → 填入测试账号登录 → 主进程
  * 检测到登录态 cookie 后把窗口带回授权流程 → 服务端 302 回调
  * redirect_uri?code → 主进程拦截 code → 换 token + userinfo → 应用内
  * 完成登录 → 退出登录清理。
+ *
+ * 走应用当前默认环境（#1142 起为生产 www.miqroforge.com，平台已把测试
+ * 环境并入生产）。账号昵称由平台账号决定，断言不写死具体昵称。
  *
  * 凭据不写入仓库：需设置 QRAFT_PHONE / QRAFT_PASSWORD 环境变量，
  * 未设置时自动跳过（CI 默认跳过）。
@@ -30,7 +33,7 @@ const STORE_ENV = 'MIQI_QRAFT_STORE';
 
 let storePath: string;
 
-test.describe('MiQroForge 浏览器登录 E2E（真实测试环境）', () => {
+test.describe('MiQroForge 浏览器登录 E2E（真实平台）', () => {
   test.skip(!PHONE || !PASSWORD, '需要 QRAFT_PHONE / QRAFT_PASSWORD 环境变量');
 
   let fixture: ElectronFixture;
@@ -58,7 +61,10 @@ test.describe('MiQroForge 浏览器登录 E2E（真实测试环境）', () => {
     // 拦截回调 code 换 token → 设置页出现已登录账号信息（helper 全链路）
     const loginWin = await browserLogin(page, electronApp, PHONE, PASSWORD);
 
-    await expect(page.getByText('MiQi测试').first()).toBeVisible({ timeout: 120_000 });
+    // 账号信息区渲染「<昵称> 已登录」徽标（昵称由平台账号决定，不写死）；
+    // 环境显示生产（#1142：默认登录环境已由 test 改为 prod）
+    await expect(page.getByText(/\S+\s*已登录/).first()).toBeVisible({ timeout: 120_000 });
+    await expect(page.getByText(/环境\s*生产/)).toBeVisible();
     await expect(page.getByTestId('qraft-logout-btn')).toBeVisible();
 
     // 授权窗口已在完成时自动关闭

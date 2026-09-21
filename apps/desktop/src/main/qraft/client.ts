@@ -632,10 +632,11 @@ export class QraftClient {
   }
 
   /**
-   * 从 token 响应构造统一结构；实测 expires_in=7199（约 2 小时，非官方 24 小时）。
-   * 新平台轮换 refresh_token：刷新路径（refreshTokens）强制响应携带新值，
-   * 缺失直接报 REFRESH_TOKEN_INVALID；此处的回退只服务于 exchangeCode
-   *（登录换取 token，响应缺失属防御性兜底）。
+   * 从 token 响应构造统一结构；有效期以平台下发的 expires_in 为准
+   *（2026-09-21 实测约 30 天，早期为约 2 小时；响应缺失时按 7199 秒保守回退）。
+   * refresh_token 以响应中的值为准（平台当前不轮换，值可与旧值相同）：
+   * 刷新路径（refreshTokens）强制响应携带，缺失直接报 REFRESH_TOKEN_INVALID；
+   * 此处的回退只服务于 exchangeCode（登录换取 token，响应缺失属防御性兜底）。
    */
   private buildTokens(data: Record<string, unknown>, fallbackRefreshToken = ''): QraftTokens {
     const expiresIn = Number.parseInt(String(data.expires_in ?? '7199'), 10) || 7199;

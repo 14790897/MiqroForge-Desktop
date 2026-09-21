@@ -48,10 +48,10 @@ describe.skipIf(!LIVE || !PHONE || !PASSWORD)('MiQroForge live integration', () 
     expect(tokens.accessToken.length).toBeGreaterThan(20);
     expect(tokens.refreshToken.length).toBeGreaterThan(20);
     expect(tokens.openid).toBeTruthy();
-    // 实测 expires_in=7199（约 2 小时，非官方 24 小时）
+    // 有效期由平台下发：2026-09-21 实测 expires_in=2591999（约 30 天），
+    // 早期实测 7199（约 2 小时）——不做窗口断言，只验证解析出正值并记录。
     const ttlMs = tokens.expiresAt - Date.now();
-    expect(ttlMs).toBeGreaterThan(7_000_000);
-    expect(ttlMs).toBeLessThan(8_000_000);
+    expect(ttlMs).toBeGreaterThan(60_000);
     console.log(
       `[live] access_token=${maskSecret(tokens.accessToken)} ttl=${Math.round(ttlMs / 1000)}s`
     );
@@ -62,7 +62,7 @@ describe.skipIf(!LIVE || !PHONE || !PASSWORD)('MiQroForge live integration', () 
     expect(info.username).toBeTruthy();
     expect(info.sub).toBeTruthy();
 
-    // ⑦ 刷新：新平台轮换 refresh_token（旧值刷新后立即失效），响应应携带新值。
+    // ⑦ 刷新：平台当前不轮换 refresh_token（旧值可复用，2026-09-15 实测）。
     // 不强行断言轮换与否（以真实平台行为为准），只记录供排查。
     const refreshed = await client.refreshTokens(CONFIG, tokens.refreshToken);
     expect(refreshed.accessToken.length).toBeGreaterThan(20);
