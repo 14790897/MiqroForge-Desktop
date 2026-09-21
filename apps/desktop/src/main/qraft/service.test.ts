@@ -1298,3 +1298,118 @@ describe('QraftService 反馈平台通道（issue #1054）', () => {
     expect(svc.status().requiresRelogin).toBe(false);
   });
 });
+
+describe('QraftService 积分余额拉取（issue #1160）', () => {
+  const POINTS = { availablePoints: 950, heldPoints: 50, totalEarned: 1000, totalSpent: 50 };
+
+  function makePointsClient() {
+    return { getPointsBalance: vi.fn(), refreshTokens: vi.fn() };
+  }
+
+  it('登录态：拉取成功缓存并推送状态', async () => {
+    const client = makePointsClient();
+    client.getPointsBalance.mockResolvedValue(POINTS);
+    store.save(makeStoredState());
+    const svc = makeService(client as any);
+
+    const result = await svc.fetchPointsBalance();
+
+    expect(result).toEqual({ ok: true, points: POINTS });
+    expect(svc.status().points).toEqual(POINTS);
+    expect(statusEvents.some((s: any) => s?.points?.availablePoints === 950)).toBe(true);
+  });
+
+  it('未登录：返回 INVALID_CONFIG，不发请求', async () => {
+    const client = makePointsClient();
+    const svc = makeService(client as any);
+
+    const result = await svc.fetchPointsBalance();
+
+    expect(result).toMatchObject({ ok: false, code: 'INVALID_CONFIG' });
+    expect(client.getPointsBalance).not.toHaveBeenCalled();
+  });
+
+  it('access_token 失效：刷新后带新 token 重试一次', async () => {
+    const client = makePointsClient();
+    client.getPointsBalance
+      .mockRejectedValueOnce(new QraftError('SESSION_EXPIRED', 'access_token 已失效'))
+      .mockResolvedValueOnce(POINTS);
+    client.refreshTokens.mockResolvedValue(makeTokens({ accessToken: 'FRESH-TOKEN' }));
+    store.save(makeStoredState());
+    const svc = makeService(client as any);
+
+    const result = await svc.fetchPointsBalance();
+
+    expect(result).toEqual({ ok: true, points: POINTS });
+    expect(client.getPointsBalance).toHaveBeenCalledTimes(2);
+    expect((client.getPointsBalance.mock.calls[1] as any[])[1]).toBe('FRESH-TOKEN');
+  });
+
+  it('refresh_token 已作废：置 requiresRelogin 并推状态（登录失效三件套）', async () => {
+    const client = makePointsClient();
+    client.getPointsBalance.mockRejectedValue(
+      new QraftError('SESSION_EXPIRED', 'access_token 已失效')
+    );
+    client.refreshTokens.mockRejectedValue(
+      new QraftError('REFRESH_TOKEN_INVALID', 'refresh_token 已失效')
+    );
+    store.save(makeStoredState());
+    const svc = makeService(client as any);
+
+    const result = await svc.fetchPointsBalance();
+
+    expect(result).toMatchObject({ ok: false, code: 'REFRESH_TOKEN_INVALID' });
+    expect(svc.status().requiresRelogin).toBe(true);
+    expect(svc.status().refreshError).toBe('REFRESH_TOKEN_INVALID');
+    expect(statusEvents.some((s: any) => s?.requiresRelogin === true)).toBe(true);
+  });
+
+  it('刷新成功但新 token 仍被平台拒绝：置 requiresRelogin 引导重新登录', async () => {
+    const client = makePointsClient();
+    client.getPointsBalance.mockRejectedValue(
+      new QraftError('SESSION_EXPIRED', 'access_token 已失效')
+    );
+    client.refreshTokens.mockResolvedValue(makeTokens({ accessToken: 'FRESH-TOKEN' }));
+    store.save(makeStoredState());
+    const svc = makeService(client as any);
+
+    const result = await svc.fetchPointsBalance();
+
+    expect(result).toMatchObject({ ok: false, code: 'SESSION_EXPIRED' });
+    expect(client.getPointsBalance).toHaveBeenCalledTimes(2);
+    expect(svc.status().requiresRelogin).toBe(true);
+    expect(statusEvents.some((s: any) => s?.requiresRelogin === true)).toBe(true);
+  });
+
+  it('瞬时刷新失败（REFRESH_FAILED）：不置 requiresRelogin，透出错误码', async () => {
+    const client = makePointsClient();
+    client.getPointsBalance.mockRejectedValue(
+      new QraftError('SESSION_EXPIRED', 'access_token 已失效')
+    );
+    client.refreshTokens.mockRejectedValue(new QraftError('REFRESH_FAILED', '刷新 token 失败'));
+    store.save(makeStoredState());
+    const svc = makeService(client as any);
+
+    const result = await svc.fetchPointsBalance();
+
+    expect(result).toMatchObject({ ok: false, code: 'REFRESH_FAILED' });
+    expect(client.getPointsBalance).toHaveBeenCalledTimes(1);
+    // 瞬时刷新失败不置 requiresRelogin（不弹横幅/不拦截发送，#1087），仅排退避重试
+    expect(svc.status().requiresRelogin).toBe(false);
+  });
+
+  it('平台业务失败（POINTS_FAILED）：不刷新直接透出', async () => {
+    const client = makePointsClient();
+    client.getPointsBalance.mockRejectedValue(
+      new QraftError('POINTS_FAILED', '查询积分余额失败：未知错误')
+    );
+    store.save(makeStoredState());
+    const svc = makeService(client as any);
+
+    const result = await svc.fetchPointsBalance();
+
+    expect(result).toMatchObject({ ok: false, code: 'POINTS_FAILED' });
+    expect(client.refreshTokens).not.toHaveBeenCalled();
+    expect(svc.status().requiresRelogin).toBe(false);
+  });
+});
