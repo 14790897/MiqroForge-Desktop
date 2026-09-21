@@ -59,6 +59,36 @@ class AppServerError(Exception):
 # ── ClientSessionRegistry ────────────────────────────────────────────────
 
 
+def _captured_workspace(session: Any) -> Path | None:
+    """Workspace a RuntimeSession was built against, or None when unknown.
+
+    ``RuntimeServices.workspace`` is captured at creation.  ``session._config``
+    is deliberately NOT used as the source: ``Config.workspace_path`` is
+    recomputed from the live account marker on every access, so it answers
+    "which account is active *now*" — not "which workspace this runtime was
+    built for", which is the question that matters here（#1185）.
+    """
+    try:
+        return Path(session.services.workspace).expanduser().resolve()
+    except Exception:
+        return None
+
+
+def _serves_workspace(session: Any, workspace: Any) -> bool:
+    """Whether a cached session may serve a request for *workspace*.
+
+    An unknown captured workspace answers False: rebuilding a session is cheap
+    next to handing one account another account's runtime.
+    """
+    captured = _captured_workspace(session)
+    if captured is None:
+        return False
+    try:
+        return captured == Path(workspace).expanduser().resolve()
+    except Exception:
+        return False
+
+
 class ClientSessionRegistry:
     """Manages client_id ↔ session_id relationships with TTL eviction.
 
@@ -117,11 +147,25 @@ class ClientSessionRegistry:
         async with self._lock:
             existing = self._sessions.get(session_id)
             if existing is not None:
-                # Session already exists — ensure client is authorized
-                self._client_sessions.setdefault(client_id, set()).add(session_id)
-                self._session_clients.setdefault(session_id, set()).add(client_id)
-                self._last_activity[session_id] = time.time()
-                return existing
+                if _serves_workspace(existing, workspace):
+                    # Session already exists — ensure client is authorized
+                    self._client_sessions.setdefault(client_id, set()).add(session_id)
+                    self._session_clients.setdefault(session_id, set()).add(client_id)
+                    self._last_activity[session_id] = time.time()
+                    return existing
+
+                # #1185：这份缓存属于**另一个工作区**（同一进程内换了登录账号）。
+                # 缓存键只有 client_id:session_key，不含账号，所以直接复用等于把
+                # 上一个账号的工作区、沙箱、provider 连同一整段会话历史交给当前
+                # 账号 —— 会话身份是唯一的入口，必须在这里拦住。跨账号的沙箱也要
+                # 一并销毁：它绑的是上一个账号的工作区，而它同样只按这个键索引。
+                await self._discard_session(
+                    session_id,
+                    existing,
+                    sandbox_manager=sandbox_manager,
+                    session_key=session_key,
+                    client_id=client_id,
+                )
 
             # Phase N: forward subagent completions to the creating client's
             # event sink as `subagent_result`.  This is the only producer of
@@ -210,6 +254,44 @@ class ClientSessionRegistry:
             session_id, client_id,
         )
         return runtime
+
+    async def _discard_session(
+        self,
+        session_id: str,
+        session: Any,
+        *,
+        sandbox_manager: Any = None,
+        session_key: str | None = None,
+        client_id: str | None = None,
+    ) -> None:
+        """Retire a cached session that belongs to another workspace (#1185).
+
+        Called under ``self._lock``.  The sandbox is dropped alongside the
+        runtime: it is indexed by the same client-scoped session key and was
+        bound to the retired workspace, so leaving it cached would hand the
+        next account a sandbox rooted in the previous one.
+        """
+        try:
+            await session.stop()
+        except Exception as exc:
+            logger.warning(
+                "ClientSessionRegistry: stop failed for {}: {}", session_id, exc
+            )
+        self._sessions.pop(session_id, None)
+        self._session_clients.pop(session_id, None)
+        self._last_activity.pop(session_id, None)
+        for owned in self._client_sessions.values():
+            owned.discard(session_id)
+
+        if sandbox_manager is not None and session_key and hasattr(sandbox_manager, "destroy"):
+            try:
+                await sandbox_manager.destroy(session_key, client_id=client_id)
+            except Exception as exc:
+                logger.warning(
+                    "ClientSessionRegistry: sandbox destroy failed for {}: {}",
+                    session_id,
+                    exc,
+                )
 
     async def get_session(self, client_id: str, session_id: str) -> Any | None:
         """Return RuntimeSession if client is authorized, else None."""

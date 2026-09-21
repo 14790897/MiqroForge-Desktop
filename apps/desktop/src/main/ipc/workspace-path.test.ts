@@ -449,7 +449,9 @@ describe('account-scoped workspace (#1185)', () => {
   });
 
   it('treats a traversal in the marker as "no account"', () => {
-    for (const bad of ['..', '.', '../evil', 'a/b', 'a\b', '']) {
+    // 'a\\b' 是反斜杠（Windows 分隔符）；写成 'a\b' 会是 U+0008，那这条用例
+    // 就没在测分隔符了。
+    for (const bad of ['..', '.', '../evil', 'a/b', 'a\\b', '']) {
       writeMarker('.active', bad);
       expect(readActiveAccount()).toBeNull();
       expect(getDefaultWorkspacePath()).toBe(join(home, 'workspace'));

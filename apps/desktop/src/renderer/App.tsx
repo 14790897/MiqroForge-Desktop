@@ -251,7 +251,13 @@ function AppShell() {
   }, [sessionKey]);
 
   // Persist last active session so the app restores it on next launch
+  //
+  // 默认哨兵不写（#1185）：它表示「还没选定会话」，不是一个会话。账号切换时
+  // 重置 effect 正是把它放进 sessionKey，照写就会用哨兵覆盖掉该账号名下的
+  // 真实「上次会话」——下次启动再也回不到自己的会话。哨兵只在用户点「+」到
+  // 首条消息之间短暂出现，之后的真实 key 会被正常写下。
   useEffect(() => {
+    if (sessionKey === DEFAULT_SESSION_KEY) return;
     try {
       localStorage.setItem(lastSessionStorageKey(sessionOwnerSubRef.current), sessionKey);
     } catch {
