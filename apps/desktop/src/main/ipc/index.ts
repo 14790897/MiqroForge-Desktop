@@ -69,11 +69,15 @@ import type {
 import { registerQraftIpcHandlers } from '../qraft/ipc';
 import { readConsentVersion, writeConsentVersion } from '../privacy-consent';
 import {
+  buildPlatformRepairScript,
   classifyKernelInstall,
   classifyWslFeatureState,
+  decodeWslOutput,
+  findPlatformProblem,
   hasNonRootUser,
   isBashCapableDistro,
   readFeatureStates,
+  readStaleOobeState,
   runElevated,
   summarizeElevated,
   wslKernelPresent,
@@ -867,6 +871,7 @@ for m in ("pydantic", "httpx", "loguru"):
     let defaultDistro: string | null = null;
     let running = false;
     let initialized = false;
+    let platformIssue: string | null = null;
 
     try {
       const statusResult = spawnSync('wsl', ['--status'], {
@@ -876,20 +881,8 @@ for m in ("pydantic", "httpx", "loguru"):
       });
       if (statusResult.status === 0) {
         installed = true;
-        let output = '';
-        const buf = statusResult.stdout as Buffer | null;
-        if (buf && buf.length > 1) {
-          const hasBOM = buf[0] === 0xff && buf[1] === 0xfe;
-          const nullRatio =
-            buf.reduce((acc, b, i) => (i % 2 === 1 && b === 0 ? acc + 1 : acc), 0) /
-            Math.floor(buf.length / 2);
-          if (hasBOM || nullRatio > 0.3) {
-            output = buf.toString('utf16le');
-          } else {
-            output = buf.toString('utf8');
-          }
-          output = output.replace(/^﻿/, '').replace(/\0/g, '');
-        }
+        const output = decodeWslOutput(statusResult.stdout as Buffer | null);
+        platformIssue = findPlatformProblem(output);
         const defaultMatch = output.match(/(?:默认分发|Default Distr?ibution)\s*[:：]\s*(.+)/i);
         if (defaultMatch) defaultDistro = defaultMatch[1].trim();
         const verMatch = output.match(/(?:默认版本|Default Version)\s*[:：]\s*(\d+)/i);
@@ -907,19 +900,7 @@ for m in ("pydantic", "httpx", "loguru"):
           windowsHide: true,
         });
         if (listResult.status === 0) {
-          const buf = listResult.stdout as Buffer | null;
-          let raw = '';
-          if (buf && buf.length > 1) {
-            const hasBOM = buf[0] === 0xff && buf[1] === 0xfe;
-            const nullRatio =
-              buf.reduce((acc, b, i) => (i % 2 === 1 && b === 0 ? acc + 1 : acc), 0) /
-              Math.floor(buf.length / 2);
-            raw =
-              hasBOM || nullRatio > 0.3
-                ? buf.toString('utf16le').replace(/^﻿/, '').replace(/\0/g, '')
-                : buf.toString('utf8').replace(/\0/g, '');
-          }
-          const lines = raw
+          const lines = decodeWslOutput(listResult.stdout as Buffer | null)
             .split(/\r?\n/)
             .map((l) => l.trim())
             .filter(Boolean);
@@ -940,19 +921,7 @@ for m in ("pydantic", "httpx", "loguru"):
           windowsHide: true,
         });
         if (psResult.status === 0) {
-          const buf = psResult.stdout as Buffer | null;
-          let raw = '';
-          if (buf && buf.length > 1) {
-            const hasBOM = buf[0] === 0xff && buf[1] === 0xfe;
-            const nullRatio =
-              buf.reduce((acc, b, i) => (i % 2 === 1 && b === 0 ? acc + 1 : acc), 0) /
-              Math.floor(buf.length / 2);
-            raw =
-              hasBOM || nullRatio > 0.3
-                ? buf.toString('utf16le').replace(/^﻿/, '').replace(/\0/g, '')
-                : buf.toString('utf8').replace(/\0/g, '');
-          }
-          const runningLines = raw
+          const runningLines = decodeWslOutput(psResult.stdout as Buffer | null)
             .split(/\r?\n/)
             .map((l) => l.trim())
             .filter(Boolean);
@@ -990,14 +959,49 @@ for m in ("pydantic", "httpx", "loguru"):
       running,
       featureState,
       rebootRequired,
+      platformIssue,
     } satisfies WslCheckResult;
+  }
+
+  // -----------------------------------------------------------------------
+  // Persisted one-click install state.  The flow crosses a reboot, so the
+  // phase reached before it is written to disk; the UI uses it to continue
+  // where the user stopped instead of restarting from step one.
+  // -----------------------------------------------------------------------
+  function wslInstallStatePath(): string {
+    return join(homedir(), '.miqi', 'wsl_install_state.json');
+  }
+  function readWslInstallState(): { phase: string; at: number } | null {
+    try {
+      return JSON.parse(readFileSync(wslInstallStatePath(), 'utf8'));
+    } catch {
+      return null;
+    }
+  }
+  function writeWslInstallState(phase: string) {
+    try {
+      mkdirSync(join(homedir(), '.miqi'), { recursive: true });
+      writeFileSync(wslInstallStatePath(), JSON.stringify({ phase, at: Date.now() }));
+    } catch {
+      /* best-effort */
+    }
+  }
+  function clearWslInstallState() {
+    try {
+      unlinkSync(wslInstallStatePath());
+    } catch {
+      /* ignore */
+    }
   }
 
   // -----------------------------------------------------------------------
   // WSL2 check & install — Windows only, runs in main process.
   // Must work BEFORE the bridge starts (during Setup Wizard).
   // -----------------------------------------------------------------------
-  ipcMain.handle(IPC.WSL_CHECK, () => runWslCheckInternal());
+  ipcMain.handle(IPC.WSL_CHECK, () => ({
+    ...runWslCheckInternal(),
+    pendingInstall: readWslInstallState(),
+  }));
 
   ipcMain.handle(IPC.WSL_INSTALL, () => {
     if (process.platform !== 'win32') {
@@ -1039,32 +1043,6 @@ for m in ("pydantic", "httpx", "loguru"):
       } satisfies WslInstallAndProvisionResult;
     }
 
-    // ── Persisted state path ──────────────────────────────────────────
-    const statePath = join(homedir(), '.miqi', 'wsl_install_state.json');
-
-    function readState(): { phase: string; at: number } | null {
-      try {
-        return JSON.parse(readFileSync(statePath, 'utf8'));
-      } catch {
-        return null;
-      }
-    }
-    function writeState(phase: string) {
-      try {
-        mkdirSync(join(homedir(), '.miqi'), { recursive: true });
-        writeFileSync(statePath, JSON.stringify({ phase, at: Date.now() }));
-      } catch {
-        /* best-effort */
-      }
-    }
-    function clearState() {
-      try {
-        require('fs').unlinkSync(statePath);
-      } catch {
-        /* ignore */
-      }
-    }
-
     try {
       // ── Step 1: Check ───────────────────────────────────────────────
       safeSend(IPC_EVENTS.WSL_INSTALL_PROGRESS, {
@@ -1072,8 +1050,10 @@ for m in ("pydantic", "httpx", "loguru"):
         message: '正在检测 WSL 状态...',
       } satisfies WslInstallProgress);
 
+      // Every step below re-derives what is still missing from the live system
+      // state rather than from the persisted phase: the machine state is the
+      // only thing that stays true across a reboot.
       const check = runWslCheckInternal();
-      const saved = readState();
       safeSend(IPC_EVENTS.WSL_CHECK_UPDATED, {});
 
       // ── Step 2: not-enabled → DISM enable features ──────────────────
@@ -1138,7 +1118,7 @@ for m in ("pydantic", "httpx", "loguru"):
           } satisfies WslInstallAndProvisionResult;
         }
 
-        writeState('features_enabled');
+        writeWslInstallState('features_enabled');
 
         safeSend(IPC_EVENTS.WSL_INSTALL_PROGRESS, {
           phase: 'enabling_features',
@@ -1150,7 +1130,7 @@ for m in ("pydantic", "httpx", "loguru"):
           success: true,
           phase: 'enabling_features',
           rebootRequired: true,
-          nextStep: '请重启系统，重新打开 MiQroForge 后向导将自动继续',
+          nextStep: '请重启系统；重启后进入「WSL 状态监控」，安装会自动继续',
         } satisfies WslInstallAndProvisionResult;
       }
 
@@ -1208,7 +1188,7 @@ for m in ("pydantic", "httpx", "loguru"):
           } satisfies WslInstallAndProvisionResult;
         }
 
-        writeState('kernel_installed');
+        writeWslInstallState('kernel_installed');
 
         safeSend(IPC_EVENTS.WSL_INSTALL_PROGRESS, {
           phase: 'installing_wsl',
@@ -1220,7 +1200,73 @@ for m in ("pydantic", "httpx", "loguru"):
           success: true,
           phase: 'installing_wsl',
           rebootRequired: true,
-          nextStep: '请重启系统，重新打开 MiQroForge 后向导将自动继续',
+          nextStep: '请重启系统；重启后进入「WSL 状态监控」，安装会自动继续',
+        } satisfies WslInstallAndProvisionResult;
+      }
+
+      // ── Step 3.5: platform unusable → repair the deferred servicing ──
+      // WSL itself reports that WSL2 cannot start, i.e. the virtualization
+      // platform it needs is not actually there.  Installing a distro cannot
+      // succeed and the generic "reboot to continue" path would loop forever,
+      // so repair first: drop the stale OOBE markers that make Windows abort
+      // every startup servicing pass, then re-submit the optional features.
+      if (check.distros.length === 0 && check.featureState !== 'ready' && check.platformIssue) {
+        safeSend(IPC_EVENTS.WSL_INSTALL_PROGRESS, {
+          phase: 'enabling_features',
+          message: '检测到 WSL2 平台未就绪，正在修复被推迟的系统组件安装...',
+        } satisfies WslInstallProgress);
+
+        const repair = runElevated({ powershell: buildPlatformRepairScript() }, 180000);
+
+        if (repair.kind === 'cancelled') {
+          safeSend(IPC_EVENTS.WSL_INSTALL_PROGRESS, {
+            phase: 'error',
+            message: '修复系统组件安装被取消：管理员权限请求被拒绝',
+            error: 'ELEVATION_CANCELLED',
+          } satisfies WslInstallProgress);
+          return {
+            success: false,
+            phase: 'error',
+            errorCode: 'ELEVATION_CANCELLED',
+            error: '修复系统组件安装被取消',
+            nextStep: '重新点击「一键安装 WSL2」，并在弹出的 UAC 窗口中点击「是」',
+          } satisfies WslInstallAndProvisionResult;
+        }
+
+        // The repair script stays quiet on success, so verify by system state:
+        // the stale markers have to be gone for the next boot to apply them.
+        const stale = readStaleOobeState();
+        if (repair.kind !== 'ok' || (stale.ok && stale.stale)) {
+          const detail =
+            repair.kind === 'ok' ? '修复后仍检测到被推迟的更新' : summarizeElevated(repair);
+          safeSend(IPC_EVENTS.WSL_INSTALL_PROGRESS, {
+            phase: 'error',
+            message: `WSL2 平台修复失败: ${detail}`,
+            error: detail,
+          } satisfies WslInstallProgress);
+          return {
+            success: false,
+            phase: 'error',
+            errorCode: 'PLATFORM_REPAIR_FAILED',
+            error: `WSL2 平台修复失败: ${detail}`,
+            nextStep:
+              '请以管理员身份运行: DISM /Online /Enable-Feature /FeatureName:VirtualMachinePlatform /All，然后重启；仍不行请在「设置 → Windows 更新」安装全部更新后重试',
+          } satisfies WslInstallAndProvisionResult;
+        }
+
+        writeWslInstallState('platform_repair_pending');
+
+        safeSend(IPC_EVENTS.WSL_INSTALL_PROGRESS, {
+          phase: 'enabling_features',
+          rebootRequired: true,
+          message: '已重新提交「虚拟机平台」安装，需要重启系统完成。',
+        } satisfies WslInstallProgress);
+
+        return {
+          success: true,
+          phase: 'enabling_features',
+          rebootRequired: true,
+          nextStep: '请重启系统（关机后再开机更稳妥）；重启后进入「WSL 状态监控」，安装会自动继续',
         } satisfies WslInstallAndProvisionResult;
       }
 
@@ -1257,6 +1303,24 @@ for m in ("pydantic", "httpx", "loguru"):
           // kernel step that means "installed, reboot pending", not a failure.
           // Only a non-zero exit code is an install failure.
           if (r.kind === 'ok') {
+            if (postCheck.platformIssue) {
+              // Exit code 0 and still no distro, but WSL itself says the
+              // platform cannot start — no reboot will change that, so report
+              // what WSL actually said instead of promising one.
+              safeSend(IPC_EVENTS.WSL_INSTALL_PROGRESS, {
+                phase: 'error',
+                message: `WSL2 平台无法启动：${postCheck.platformIssue}`,
+                error: postCheck.platformIssue,
+              } satisfies WslInstallProgress);
+              return {
+                success: false,
+                phase: 'error',
+                errorCode: 'PLATFORM_NOT_READY',
+                error: postCheck.platformIssue,
+                nextStep:
+                  '请在「设置 → Windows 更新」安装全部更新后重启；仍不行请以管理员身份运行: DISM /Online /Cleanup-Image /RestoreHealth 后重启',
+              } satisfies WslInstallAndProvisionResult;
+            }
             safeSend(IPC_EVENTS.WSL_INSTALL_PROGRESS, {
               phase: 'installing_distro',
               rebootRequired: true,
@@ -1266,7 +1330,7 @@ for m in ("pydantic", "httpx", "loguru"):
               success: true,
               phase: 'installing_distro',
               rebootRequired: true,
-              nextStep: '请重启系统，重新打开 MiQroForge 后向导将自动继续',
+              nextStep: '请重启系统；重启后进入「WSL 状态监控」，安装会自动继续',
             } satisfies WslInstallAndProvisionResult;
           }
 
@@ -1289,7 +1353,7 @@ for m in ("pydantic", "httpx", "loguru"):
       }
 
       // ── Done ────────────────────────────────────────────────────────
-      clearState();
+      clearWslInstallState();
       safeSend(IPC_EVENTS.WSL_INSTALL_PROGRESS, {
         phase: 'complete',
         message: 'WSL2 安装配置完成！',
@@ -1338,21 +1402,7 @@ for m in ("pydantic", "httpx", "loguru"):
           windowsHide: true,
         });
         if (st.status === 0) {
-          const buf = st.stdout as Buffer | null;
-          let out = '';
-          if (buf && buf.length > 1) {
-            const hasBOM = buf[0] === 0xff && buf[1] === 0xfe;
-            out =
-              hasBOM ||
-              buf.reduce(
-                (a: number, b: number, i: number) => (i % 2 === 1 && b === 0 ? a + 1 : a),
-                0
-              ) /
-                Math.floor(buf.length / 2) >
-                0.3
-                ? buf.toString('utf16le').replace(/^﻿/, '').replace(/\0/g, '')
-                : buf.toString('utf8').replace(/\0/g, '');
-          }
+          const out = decodeWslOutput(st.stdout as Buffer | null);
           const m = out.match(/(?:默认分发|Default Distr?ibution)\s*[:：]\s*(.+)/i);
           if (m) targetDistro = m[1].trim();
         }
@@ -1368,22 +1418,7 @@ for m in ("pydantic", "httpx", "loguru"):
             windowsHide: true,
           });
           if (lr.status === 0) {
-            const buf = lr.stdout as Buffer | null;
-            let out = '';
-            if (buf && buf.length > 1) {
-              const hasBOM = buf[0] === 0xff && buf[1] === 0xfe;
-              out =
-                hasBOM ||
-                buf.reduce(
-                  (a: number, b: number, i: number) => (i % 2 === 1 && b === 0 ? a + 1 : a),
-                  0
-                ) /
-                  Math.floor(buf.length / 2) >
-                  0.3
-                  ? buf.toString('utf16le').replace(/^﻿/, '').replace(/\0/g, '')
-                  : buf.toString('utf8').replace(/\0/g, '');
-            }
-            const lines = out
+            const lines = decodeWslOutput(lr.stdout as Buffer | null)
               .split(/\r?\n/)
               .map((l: string) => l.trim())
               .filter(Boolean);

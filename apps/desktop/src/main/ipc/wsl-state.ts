@@ -399,3 +399,107 @@ export function classifyWslFeatureState(opts: {
   if (!opts.featureReadOk) return 'not-installed';
   return opts.featureWsl || opts.featureVmp ? 'not-installed' : 'not-enabled';
 }
+
+// ---------------------------------------------------------------------------
+// Stuck-servicing repair (live failure, 2026-09)
+//
+// Some OEM images leave `IsOOBEInProgress=1` behind in the Windows Update
+// state.  Windows then still believes setup is running and aborts every
+// startup servicing pass — CBS.log shows "Startup: Deferring startup
+// processing at users request" plus "Reboot mark set" on each boot — so a
+// queued `Enable-WindowsOptionalFeature VirtualMachinePlatform` is never
+// applied.  Without that payload there is no Hyper-V host compute service
+// (`vmcompute`), WSL2 reports that virtualization is not enabled, no distro
+// can be registered, and rebooting changes nothing.  Clearing the stale
+// markers is the only way out of that loop; the app being installed and
+// running proves OOBE finished long ago.
+// ---------------------------------------------------------------------------
+
+export const WU_AUTO_UPDATE_KEY =
+  'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\WindowsUpdate\\Auto Update';
+
+/** Markers a finished setup should not carry: they gate all servicing. */
+export const STALE_OOBE_VALUES = ['IsOOBEInProgress', 'AcceleratedInstallRequired'] as const;
+
+const READ_STALE_OOBE_CMD = [
+  `$key = '${WU_AUTO_UPDATE_KEY}'`,
+  `foreach ($name in ${STALE_OOBE_VALUES.map((n) => `'${n}'`).join(', ')}) {`,
+  '  $value = (Get-ItemProperty -LiteralPath $key -Name $name -ErrorAction SilentlyContinue).$name',
+  '  if ($null -ne $value) { "$name=$value" }',
+  '}',
+].join('\r\n');
+
+/** Parse `name=value` lines; names the registry does not carry stay absent. */
+export function parseStaleOobeFlags(stdout: string): Record<string, number> {
+  const flags: Record<string, number> = {};
+  for (const line of stdout.split(/\r?\n/)) {
+    const m = line.trim().match(/^(\w+)=(\d+)$/);
+    if (m) flags[m[1]] = parseInt(m[2], 10);
+  }
+  return flags;
+}
+
+export interface StaleOobeState {
+  /** False when the registry read itself failed; the rest is meaningless then. */
+  ok: boolean;
+  /** A marker is set, i.e. Windows is deferring every pending servicing pass. */
+  stale: boolean;
+  flags: Record<string, number>;
+}
+
+export function readStaleOobeState(timeoutMs = 8000): StaleOobeState {
+  try {
+    const r = spawnSync('powershell.exe', ['-NoProfile', '-Command', READ_STALE_OOBE_CMD], {
+      timeout: timeoutMs,
+      encoding: 'utf8',
+      windowsHide: true,
+    });
+    if (r.status !== 0) return { ok: false, stale: false, flags: {} };
+    const flags = parseStaleOobeFlags(r.stdout ?? '');
+    return { ok: true, stale: Object.values(flags).some((v) => v === 1), flags };
+  } catch {
+    return { ok: false, stale: false, flags: {} };
+  }
+}
+
+/**
+ * Elevated repair for the state above: drop the stale markers, then re-submit
+ * both optional features so the next boot applies them.
+ */
+export function buildPlatformRepairScript(): string {
+  const clear = STALE_OOBE_VALUES.map(
+    (name) => `Remove-ItemProperty -LiteralPath $key -Name ${name} -ErrorAction SilentlyContinue`
+  );
+  return [
+    "$ErrorActionPreference = 'Continue'",
+    `$key = '${WU_AUTO_UPDATE_KEY}'`,
+    // Unattended Windows Update can write the markers back the moment it runs,
+    // so pause it around the edit.  Both services are demand-started anyway and
+    // come back on their own.
+    "foreach ($svc in 'wuauserv', 'UsoSvc') { Stop-Service -Name $svc -Force -ErrorAction SilentlyContinue }",
+    ...clear,
+    "foreach ($svc in 'wuauserv', 'UsoSvc') { Start-Service -Name $svc -ErrorAction SilentlyContinue }",
+    'Enable-WindowsOptionalFeature -Online -FeatureName Microsoft-Windows-Subsystem-Linux -NoRestart',
+    'Enable-WindowsOptionalFeature -Online -FeatureName VirtualMachinePlatform -NoRestart',
+  ].join('\r\n');
+}
+
+// WSL reports why WSL2 cannot start in free text (localized).  Require both a
+// subject and a symptom on the same line: the healthy output also mentions
+// `enablevirtualization`, but only inside its help URL.
+const VIRTUALIZATION_SUBJECT = /虚拟化|virtualization/i;
+const PLATFORM_PROBLEM_SYMPTOM = /无法启动|cannot start|未启用|not enabled/i;
+
+/**
+ * The `wsl --status` line saying WSL2 cannot start, or null when the platform
+ * looks usable.  Non-null means installing a distro cannot work yet, whatever
+ * its exit code says.
+ */
+export function findPlatformProblem(statusText: string): string | null {
+  for (const raw of statusText.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line) continue;
+    if (VIRTUALIZATION_SUBJECT.test(line) && PLATFORM_PROBLEM_SYMPTOM.test(line)) return line;
+  }
+  return null;
+}
