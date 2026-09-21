@@ -15,7 +15,7 @@
  *   by having the elevated process write them to a file (see runElevated) —
  *   without that, every failure mode collapses into one fallback message.
  */
-import { spawnSync } from 'child_process';
+import { spawn, spawnSync } from 'child_process';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
@@ -211,62 +211,167 @@ export function summarizeElevated(r: ElevatedRunResult, maxLen = 300): string {
  * Run a command with administrator rights (UAC prompt) and recover its exit
  * code and output.  Blocks until the elevated process exits.
  */
-export function runElevated(payload: ElevatedPayload, timeoutMs = 300000): ElevatedRunResult {
-  let dir: string | null = null;
+interface ElevatorPaths {
+  dir: string;
+  outPath: string;
+  errPath: string;
+  codePath: string;
+  trampolinePath: string;
+}
+
+/** Temp-dir layout + trampoline command line for one elevated run. */
+function prepareElevator(payload: ElevatedPayload): { paths: ElevatorPaths; trampoline: string } {
+  const dir = mkdtempSync(join(tmpdir(), 'miqi-elev-'));
+  const paths: ElevatorPaths = {
+    dir,
+    outPath: join(dir, 'out.txt'),
+    errPath: join(dir, 'err.txt'),
+    codePath: join(dir, 'exit.txt'),
+    trampolinePath: join(dir, 'trampoline.txt'),
+  };
+
+  const elevated = payload.powershell
+    ? powershellCapture(payload.powershell, paths.outPath, paths.errPath, paths.codePath)
+    : commandCapture(payload.command ?? { file: '' }, paths.outPath, paths.errPath, paths.codePath);
+
+  const trampoline =
+    "$ErrorActionPreference='Stop'; " +
+    `try { Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-EncodedCommand','${encodeCommand(elevated)}') ` +
+    '-Verb RunAs -Wait -ErrorAction Stop } ' +
+    'catch { ' +
+    `if ($_.Exception.NativeErrorCode -eq ${ELEVATION_CANCELLED}) { exit ${ELEVATION_CANCELLED} } ` +
+    `Set-Content -LiteralPath '${psEscape(paths.trampolinePath)}' -Value $_.Exception.Message -Encoding UTF8; ` +
+    'exit 99 }';
+
+  return { paths, trampoline };
+}
+
+function removeElevatorDir(dir: string | null): void {
+  if (!dir) return;
   try {
-    dir = mkdtempSync(join(tmpdir(), 'miqi-elev-'));
-    const outPath = join(dir, 'out.txt');
-    const errPath = join(dir, 'err.txt');
-    const codePath = join(dir, 'exit.txt');
-    const trampolinePath = join(dir, 'trampoline.txt');
+    rmSync(dir, { recursive: true, force: true });
+  } catch {
+    /* best-effort */
+  }
+}
 
-    const elevated = payload.powershell
-      ? powershellCapture(payload.powershell, outPath, errPath, codePath)
-      : commandCapture(payload.command ?? { file: '' }, outPath, errPath, codePath);
+/** Build the result of an elevated run from its trampoline files. */
+function collectElevatedResult(
+  paths: ElevatorPaths,
+  info: {
+    cancelled?: boolean;
+    status: number | null;
+    stderr?: Buffer | string | null;
+    error?: string;
+  }
+): ElevatedRunResult {
+  if (info.error) return { kind: 'unknown', exitCode: null, output: '', error: info.error };
+  if (info.cancelled) return { kind: 'cancelled', exitCode: null, output: '' };
 
-    const trampoline =
-      "$ErrorActionPreference='Stop'; " +
-      `try { Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-EncodedCommand','${encodeCommand(elevated)}') ` +
-      '-Verb RunAs -Wait -ErrorAction Stop } ' +
-      'catch { ' +
-      `if ($_.Exception.NativeErrorCode -eq ${ELEVATION_CANCELLED}) { exit ${ELEVATION_CANCELLED} } ` +
-      `Set-Content -LiteralPath '${psEscape(trampolinePath)}' -Value $_.Exception.Message -Encoding UTF8; ` +
-      'exit 99 }';
+  const stdout = decodeWslOutput(readFileOrNull(paths.outPath));
+  const stderr = decodeWslOutput(readFileOrNull(paths.errPath));
+  const output = [stdout, stderr].filter((s) => s.length > 0).join('\n');
+  const exitCode = readExitCode(paths.codePath);
+  if (exitCode === null) {
+    // The elevated process never wrote its exit code: the trampoline failed
+    // (no UAC prompt was shown, or the elevated process was killed early).
+    const detail =
+      readTextOrNull(paths.trampolinePath) ||
+      decodeWslOutput(info.stderr) ||
+      `提权进程未返回结果（powershell 退出码 ${info.status}）`;
+    return { kind: 'unknown', exitCode: null, output, error: detail };
+  }
+  return exitCode === 0 ? { kind: 'ok', exitCode, output } : { kind: 'failed', exitCode, output };
+}
+
+/**
+ * Run a command with administrator rights (UAC prompt) and recover its exit
+ * code and output.  Blocks until the elevated process exits.
+ */
+export function runElevated(payload: ElevatedPayload, timeoutMs = 300000): ElevatedRunResult {
+  let paths: ElevatorPaths | null = null;
+  try {
+    const prepared = prepareElevator(payload);
+    paths = prepared.paths;
 
     const r = spawnSync(
       'powershell.exe',
-      ['-NoProfile', '-EncodedCommand', encodeCommand(trampoline)],
+      ['-NoProfile', '-EncodedCommand', encodeCommand(prepared.trampoline)],
       { timeout: timeoutMs, encoding: 'buffer', windowsHide: true }
     );
 
-    if (r.error) return { kind: 'unknown', exitCode: null, output: '', error: r.error.message };
-    if (r.status === ELEVATION_CANCELLED) return { kind: 'cancelled', exitCode: null, output: '' };
-
-    const stdout = decodeWslOutput(readFileOrNull(outPath));
-    const stderr = decodeWslOutput(readFileOrNull(errPath));
-    const output = [stdout, stderr].filter((s) => s.length > 0).join('\n');
-    const exitCode = readExitCode(codePath);
-    if (exitCode === null) {
-      // The elevated process never wrote its exit code: the trampoline failed
-      // (no UAC prompt was shown, or the elevated process was killed early).
-      const detail =
-        readTextOrNull(trampolinePath) ||
-        decodeWslOutput(r.stderr as Buffer | null) ||
-        `提权进程未返回结果（powershell 退出码 ${r.status}）`;
-      return { kind: 'unknown', exitCode: null, output, error: detail };
-    }
-    return exitCode === 0 ? { kind: 'ok', exitCode, output } : { kind: 'failed', exitCode, output };
+    return collectElevatedResult(paths, {
+      status: r.status,
+      stderr: r.stderr as Buffer | null,
+      error: r.error?.message,
+      cancelled: r.status === ELEVATION_CANCELLED,
+    });
   } catch (e: any) {
     return { kind: 'unknown', exitCode: null, output: '', error: e?.message ?? String(e) };
   } finally {
-    if (dir) {
-      try {
-        rmSync(dir, { recursive: true, force: true });
-      } catch {
-        /* best-effort */
-      }
-    }
+    removeElevatorDir(paths?.dir ?? null);
   }
+}
+
+/**
+ * Same contract as `runElevated`, but yields the main thread while the elevated
+ * process runs.  The app calls this from the Electron main process, where a
+ * blocking wait freezes every window until the user answers the UAC prompt and
+ * the elevated work (a DISM feature enable can take minutes) finishes.
+ */
+export function runElevatedAsync(
+  payload: ElevatedPayload,
+  timeoutMs = 300000
+): Promise<ElevatedRunResult> {
+  return new Promise((resolve) => {
+    let paths: ElevatorPaths | null = null;
+    let settled = false;
+    const finish = (result: ElevatedRunResult) => {
+      if (settled) return;
+      settled = true;
+      removeElevatorDir(paths?.dir ?? null);
+      resolve(result);
+    };
+
+    try {
+      const prepared = prepareElevator(payload);
+      paths = prepared.paths;
+
+      const child = spawn(
+        'powershell.exe',
+        ['-NoProfile', '-EncodedCommand', encodeCommand(prepared.trampoline)],
+        { windowsHide: true }
+      );
+
+      // On timeout the trampoline dies with the app's patience, but a running
+      // elevated child (DISM) is left to finish on its own.
+      const timer = setTimeout(() => {
+        child.kill();
+        finish({
+          kind: 'unknown',
+          exitCode: null,
+          output: '',
+          error: `提权进程超时未返回（${Math.round(timeoutMs / 1000)} 秒）`,
+        });
+      }, timeoutMs);
+
+      child.once('error', (e) => {
+        clearTimeout(timer);
+        finish({ kind: 'unknown', exitCode: null, output: '', error: e.message });
+      });
+      child.once('close', (status) => {
+        clearTimeout(timer);
+        finish(
+          collectElevatedResult(paths as ElevatorPaths, {
+            status,
+            cancelled: status === ELEVATION_CANCELLED,
+          })
+        );
+      });
+    } catch (e: any) {
+      finish({ kind: 'unknown', exitCode: null, output: '', error: e?.message ?? String(e) });
+    }
+  });
 }
 
 /** Base64 UTF-16LE, the encoding PowerShell's -EncodedCommand expects. */
@@ -470,17 +575,34 @@ export function buildPlatformRepairScript(): string {
   const clear = STALE_OOBE_VALUES.map(
     (name) => `Remove-ItemProperty -LiteralPath $key -Name ${name} -ErrorAction SilentlyContinue`
   );
+  // Report what the registry actually says once the script is done: the caller
+  // treats a still-set marker as a failed repair, so this line is its evidence.
+  const report = [
+    `foreach ($name in ${STALE_OOBE_VALUES.map((n) => `'${n}'`).join(', ')}) {`,
+    '  $value = (Get-ItemProperty -LiteralPath $key -Name $name -ErrorAction SilentlyContinue).$name',
+    '  if ($null -eq $value) { "marker-cleared: $name" } else { "marker-still-set: $name=$value" }',
+    '}',
+  ].join('\r\n');
   return [
-    "$ErrorActionPreference = 'Continue'",
+    // 'Stop' on purpose: a non-terminating failure of
+    // Enable-WindowsOptionalFeature would leave the exit code at 0, and the
+    // caller only verifies the markers afterwards — it would report a repair
+    // that never happened and ask for a reboot that changes nothing.  The
+    // best-effort steps below each carry an explicit -ErrorAction.
+    "$ErrorActionPreference = 'Stop'",
     `$key = '${WU_AUTO_UPDATE_KEY}'`,
     // Unattended Windows Update can write the markers back the moment it runs,
     // so pause it around the edit.  Both services are demand-started anyway and
     // come back on their own.
     "foreach ($svc in 'wuauserv', 'UsoSvc') { Stop-Service -Name $svc -Force -ErrorAction SilentlyContinue }",
     ...clear,
-    "foreach ($svc in 'wuauserv', 'UsoSvc') { Start-Service -Name $svc -ErrorAction SilentlyContinue }",
     'Enable-WindowsOptionalFeature -Online -FeatureName Microsoft-Windows-Subsystem-Linux -NoRestart',
     'Enable-WindowsOptionalFeature -Online -FeatureName VirtualMachinePlatform -NoRestart',
+    // Clearing again after the feature work: that is the state the next boot
+    // reads, and the markers have just been observed to come back while it runs.
+    ...clear,
+    report,
+    "foreach ($svc in 'wuauserv', 'UsoSvc') { Start-Service -Name $svc -ErrorAction SilentlyContinue }",
   ].join('\r\n');
 }
 

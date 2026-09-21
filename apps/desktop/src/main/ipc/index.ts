@@ -78,7 +78,7 @@ import {
   isBashCapableDistro,
   readFeatureStates,
   readStaleOobeState,
-  runElevated,
+  runElevatedAsync,
   summarizeElevated,
   wslKernelPresent,
 } from './wsl-state';
@@ -1053,7 +1053,7 @@ for m in ("pydantic", "httpx", "loguru"):
       // Every step below re-derives what is still missing from the live system
       // state rather than from the persisted phase: the machine state is the
       // only thing that stays true across a reboot.
-      const check = runWslCheckInternal();
+      let check = runWslCheckInternal();
       safeSend(IPC_EVENTS.WSL_CHECK_UPDATED, {});
 
       // ── Step 2: not-enabled → DISM enable features ──────────────────
@@ -1066,7 +1066,7 @@ for m in ("pydantic", "httpx", "loguru"):
         // The elevated process runs Enable-WindowsOptionalFeature and reports
         // its own output/exit code through the trampoline files: a declined
         // UAC prompt used to be indistinguishable from a DISM failure here.
-        const r = runElevated(
+        const r = await runElevatedAsync(
           {
             powershell: [
               '$ErrorActionPreference = "Continue"',
@@ -1141,7 +1141,7 @@ for m in ("pydantic", "httpx", "loguru"):
           message: '正在安装 WSL2 内核...',
         } satisfies WslInstallProgress);
 
-        const r = runElevated(
+        const r = await runElevatedAsync(
           {
             command: {
               file: 'wsl.exe',
@@ -1205,18 +1205,35 @@ for m in ("pydantic", "httpx", "loguru"):
       }
 
       // ── Step 3.5: platform unusable → repair the deferred servicing ──
-      // WSL itself reports that WSL2 cannot start, i.e. the virtualization
-      // platform it needs is not actually there.  Installing a distro cannot
-      // succeed and the generic "reboot to continue" path would loop forever,
-      // so repair first: drop the stale OOBE markers that make Windows abort
-      // every startup servicing pass, then re-submit the optional features.
+      // WSL itself reports that WSL2 cannot start.  The one cause this app can
+      // repair is the stale OOBE marker set: it makes Windows abort every
+      // startup servicing pass, so the queued 「虚拟机平台」 payload never lands.
+      // Without those markers (e.g. firmware virtualization switched off) a
+      // reboot fixes nothing, and asking for one would only repeat forever.
       if (check.distros.length === 0 && check.featureState !== 'ready' && check.platformIssue) {
+        const staleBefore = readStaleOobeState();
+        if (!staleBefore.ok || !staleBefore.stale) {
+          safeSend(IPC_EVENTS.WSL_INSTALL_PROGRESS, {
+            phase: 'error',
+            message: `WSL2 平台无法启动：${check.platformIssue}`,
+            error: check.platformIssue,
+          } satisfies WslInstallProgress);
+          return {
+            success: false,
+            phase: 'error',
+            errorCode: 'PLATFORM_NOT_READY',
+            error: check.platformIssue,
+            nextStep:
+              '请以管理员身份运行: DISM /Online /Enable-Feature /FeatureName:VirtualMachinePlatform /All 后重启；若固件（BIOS）里虚拟化未开启，请先开启它',
+          } satisfies WslInstallAndProvisionResult;
+        }
+
         safeSend(IPC_EVENTS.WSL_INSTALL_PROGRESS, {
           phase: 'enabling_features',
-          message: '检测到 WSL2 平台未就绪，正在修复被推迟的系统组件安装...',
+          message: '检测到被推迟的系统组件安装，正在修复...',
         } satisfies WslInstallProgress);
 
-        const repair = runElevated({ powershell: buildPlatformRepairScript() }, 180000);
+        const repair = await runElevatedAsync({ powershell: buildPlatformRepairScript() }, 300000);
 
         if (repair.kind === 'cancelled') {
           safeSend(IPC_EVENTS.WSL_INSTALL_PROGRESS, {
@@ -1233,41 +1250,59 @@ for m in ("pydantic", "httpx", "loguru"):
           } satisfies WslInstallAndProvisionResult;
         }
 
-        // The repair script stays quiet on success, so verify by system state:
-        // the stale markers have to be gone for the next boot to apply them.
-        const stale = readStaleOobeState();
-        if (repair.kind !== 'ok' || (stale.ok && stale.stale)) {
-          const detail =
-            repair.kind === 'ok' ? '修复后仍检测到被推迟的更新' : summarizeElevated(repair);
+        // What decides the next step is whether the platform became usable, not
+        // the exit code: the repair can apply the queued payload outright (as
+        // observed on the #1171 machine, where DISM finished the pending
+        // transaction and `vmcompute` came up) — then no reboot is needed and
+        // the flow continues with the distro install.
+        check = runWslCheckInternal();
+        if (!check.platformIssue) {
           safeSend(IPC_EVENTS.WSL_INSTALL_PROGRESS, {
-            phase: 'error',
-            message: `WSL2 平台修复失败: ${detail}`,
-            error: detail,
+            phase: 'enabling_features',
+            message: '系统组件已安装完成，继续安装发行版...',
           } satisfies WslInstallProgress);
+        } else {
+          // Still unusable: either the clear worked and the queued feature needs
+          // a boot to land, or the repair did not take — say which one it is.
+          const staleAfter = readStaleOobeState();
+          if (repair.kind !== 'ok' || !staleAfter.ok || staleAfter.stale) {
+            const detail =
+              repair.kind !== 'ok'
+                ? summarizeElevated(repair)
+                : staleAfter.stale
+                  ? '修复后仍检测到被推迟的更新'
+                  : '修复后无法确认标记已清除';
+            safeSend(IPC_EVENTS.WSL_INSTALL_PROGRESS, {
+              phase: 'error',
+              message: `WSL2 平台修复失败: ${detail}`,
+              error: detail,
+            } satisfies WslInstallProgress);
+            return {
+              success: false,
+              phase: 'error',
+              errorCode: 'PLATFORM_REPAIR_FAILED',
+              error: `WSL2 平台修复失败: ${detail}`,
+              nextStep:
+                '请以管理员身份运行: DISM /Online /Enable-Feature /FeatureName:VirtualMachinePlatform /All，然后重启；仍不行请在「设置 → Windows 更新」安装全部更新后重试',
+            } satisfies WslInstallAndProvisionResult;
+          }
+
+          writeWslInstallState('platform_repair_pending');
+
+          safeSend(IPC_EVENTS.WSL_INSTALL_PROGRESS, {
+            phase: 'enabling_features',
+            rebootRequired: true,
+            message: '已重新提交「虚拟机平台」安装，需要重启系统完成。',
+          } satisfies WslInstallProgress);
+
           return {
-            success: false,
-            phase: 'error',
-            errorCode: 'PLATFORM_REPAIR_FAILED',
-            error: `WSL2 平台修复失败: ${detail}`,
+            success: true,
+            phase: 'enabling_features',
+            rebootRequired: true,
             nextStep:
-              '请以管理员身份运行: DISM /Online /Enable-Feature /FeatureName:VirtualMachinePlatform /All，然后重启；仍不行请在「设置 → Windows 更新」安装全部更新后重试',
+              '请重启系统（关机后再开机更稳妥）；重启后进入「WSL 状态监控」，安装会自动继续',
           } satisfies WslInstallAndProvisionResult;
         }
-
-        writeWslInstallState('platform_repair_pending');
-
-        safeSend(IPC_EVENTS.WSL_INSTALL_PROGRESS, {
-          phase: 'enabling_features',
-          rebootRequired: true,
-          message: '已重新提交「虚拟机平台」安装，需要重启系统完成。',
-        } satisfies WslInstallProgress);
-
-        return {
-          success: true,
-          phase: 'enabling_features',
-          rebootRequired: true,
-          nextStep: '请重启系统（关机后再开机更稳妥）；重启后进入「WSL 状态监控」，安装会自动继续',
-        } satisfies WslInstallAndProvisionResult;
       }
 
       // ── Step 4: no distro → install Ubuntu ───────────────────────────
@@ -1277,7 +1312,7 @@ for m in ("pydantic", "httpx", "loguru"):
           message: '正在安装 Ubuntu 发行版（可能需要几分钟）...',
         } satisfies WslInstallProgress);
 
-        const r = runElevated(
+        const r = await runElevatedAsync(
           { command: { file: 'wsl.exe', args: ['--install', '-d', 'Ubuntu', '--no-launch'] } },
           300000
         );

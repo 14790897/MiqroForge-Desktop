@@ -90,6 +90,23 @@ describe('buildPlatformRepairScript', () => {
     expect(script).toContain('VirtualMachinePlatform');
     expect(script).toMatch(/Enable-WindowsOptionalFeature[^\n]*VirtualMachinePlatform/);
   });
+
+  it('fails loudly, so a silent feature-enable error cannot pass as success', () => {
+    // The caller only verifies the markers afterwards: with 'Continue' a
+    // non-terminating Enable-WindowsOptionalFeature failure would still exit 0.
+    expect(script).toContain("$ErrorActionPreference = 'Stop'");
+    expect(script).not.toContain("$ErrorActionPreference = 'Continue'");
+  });
+
+  it('clears the markers again after the feature work and reports the result', () => {
+    // Observed on the #1171 machine: the markers come back while DISM runs, and
+    // the next boot reads whatever state the script leaves behind.
+    expect(script.lastIndexOf('Remove-ItemProperty')).toBeGreaterThan(
+      script.lastIndexOf('Enable-WindowsOptionalFeature')
+    );
+    expect(script).toContain('marker-cleared:');
+    expect(script).toContain('marker-still-set:');
+  });
 });
 
 describe('decodeWslOutput', () => {
