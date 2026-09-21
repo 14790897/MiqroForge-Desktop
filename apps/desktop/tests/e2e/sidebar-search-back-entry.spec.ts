@@ -85,14 +85,26 @@ test.describe('Sidebar 搜索与返回入口 (#1150)', () => {
   const searchInput = () => page.locator('input[aria-label="搜索会话"]');
   const searchToggle = () => page.getByTestId('nav-session-search');
 
-  /** 造 N 条已落盘的会话（首条消息写入即持久化，回复完成才进列表）。 */
+  /**
+   * 造 N 条已落盘的会话（首条消息写入即持久化，回复完成才进列表）。
+   *
+   * 幂等：不能假设「上一条用例已经建好会话」——Playwright 的 beforeAll 是
+   * **每 worker 一次**，而 worker 会重启（某条用例失败后，剩余用例被重新排到
+   * 新 worker，beforeAll 重跑一次 launchElectronApp）。新实例的 MIQI_HOME 是
+   * 全新的，先前用例建的会话一条都不在，列表回到「暂无任务」空态。CI 上就是
+   * 这样挂的：第 2 条用例拿到 0 条会话，列表渲染空态而不是「没有匹配的会话」。
+   * 所以这里按目标条数补齐，已有会话直接复用。
+   */
   async function seedSessions(prompts: string[]) {
-    for (const p of prompts) {
+    const want = prompts.length;
+    let have = await sessionItems().count();
+    for (let i = have; i < want; i++) {
       await createNewConversation(page);
-      await sendMessage(page, p);
+      await sendMessage(page, prompts[i]);
       await waitForResponseComplete(page, 90_000);
+      have = await sessionItems().count();
     }
-    await expect(sessionItems()).toHaveCount(prompts.length, { timeout: 30_000 });
+    await expect(sessionItems()).toHaveCount(want, { timeout: 30_000 });
   }
 
   test.beforeAll(async () => {
@@ -100,8 +112,15 @@ test.describe('Sidebar 搜索与返回入口 (#1150)', () => {
     mock = m.proc;
     const fixture = await launchElectronApp((config: any) => {
       // 把所有已配置的 provider 指向 mock（provider 由 agents.defaults.model 解析，
-      // mock 忽略模型名与 key）。
+      // mock 忽略模型名与 key）。机器上一旦没有任何 provider（空 config），
+      // 循环就什么都不改，发送会被「没有可用模型」门禁拦掉——用例在本机
+      // 根本走不到断言。所以这里先兜底造一个，再统一改 apiBase。
+      const model = config.agents?.defaults?.model ?? 'deepseek/deepseek-v4-flash';
+      const providerName = String(model).split('/')[0] || 'deepseek';
       const providers = config.providers ?? {};
+      if (!providers[providerName]) {
+        providers[providerName] = { apiBase: m.url, apiKey: 'mock-key', models: [model] };
+      }
       for (const [, p] of Object.entries(providers)) {
         if (p && typeof p === 'object') {
           (p as any).apiBase = m.url;
@@ -109,6 +128,8 @@ test.describe('Sidebar 搜索与返回入口 (#1150)', () => {
         }
       }
       config.providers = providers;
+      config.agents = { ...(config.agents ?? {}) };
+      config.agents.defaults = { ...(config.agents?.defaults ?? {}), model };
     });
     electronApp = fixture.electronApp;
     page = fixture.page;
@@ -149,7 +170,12 @@ test.describe('Sidebar 搜索与返回入口 (#1150)', () => {
   });
 
   test('Esc 清空 query 并收起；无结果时给出提示', { timeout: 180_000 }, async () => {
+    // 本用例验的是「有会话但搜不到」的空态；列表为空时渲染的是「暂无任务」，
+    // 断言会指向另一个分支（CI 上就是这么挂的）。所以先自己把会话补齐，
+    // 三条标题都避开下面要搜的关键词。
+    await seedSessions(['随手记一条待办 1', '整理一下本周的待办 2', '顺手记点东西 3']);
     const total = await sessionItems().count();
+    expect(total).toBe(3);
 
     await searchToggle().click();
     await searchInput().fill('zzz-不存在的关键词');
