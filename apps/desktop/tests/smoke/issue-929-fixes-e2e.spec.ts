@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test';
-import { buildMockBridgeScript } from './mocks';
+import { buildMockBridgeScript, loggedInWithoutGateway } from './mocks';
 
 /**
  * #929 修复分支 E2E 评估 —— 验证审查发现修复后的用户可见行为：
@@ -33,6 +33,9 @@ test('激活/取消激活流程修复评估（#929 fixes）', async ({ page }) =
       activeModel: '',
       activeProvider: 'deepseek',
       providers: [{ ...DEEPSEEK_PROVIDER }],
+      // 未下发网关状态：本用例只关心激活流程，别让「登录后自动就绪模型」
+      //（#1172，网关 active + 空模型 → 自动写网关模型）改写页头断言。
+      qraftLoggedInStatus: loggedInWithoutGateway(),
     }),
   });
 
@@ -94,6 +97,8 @@ test('custom/* 遗留用户仍有激活入口（#929 fixes）', async ({ page })
       activeModel: 'custom/my-model',
       activeProvider: null,
       providers: [{ ...DEEPSEEK_PROVIDER }],
+      // 未下发网关状态：页头要如实显示遗留 custom 模型（见 #1172 自动就绪说明）
+      qraftLoggedInStatus: loggedInWithoutGateway(),
     }),
   });
 

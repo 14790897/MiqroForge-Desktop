@@ -161,4 +161,43 @@ test.describe('AI 网关 E2E (issue #922)', () => {
       fullPage: true,
     });
   });
+
+  test('active + 遗留默认模型不可解析 → 登录后自动就绪为网关模型（#1172）', async () => {
+    // #1172：全新安装时 agents.defaults.model 是 schema 默认值
+    // anthropic/claude-opus-4-5（config.get 把默认值带出来，永远非空）——
+    // 旧逻辑「只填空值」因此从不触发，用户登录后必须手动去模型 tab 选模型。
+    // 现在登录 + 网关 active 且当前模型不可解析时自动替换为网关模型。
+    test.setTimeout(180_000);
+    await closeElectronApp(electronApp, fixture.miqiHome);
+    writeFileSync(storePath, buildSeededStoreContent({ status: 'active' }), 'utf8');
+    const f2 = await launchElectronApp((config) => {
+      config.agents = config.agents ?? {};
+      config.agents.defaults = config.agents.defaults ?? {};
+      config.agents.defaults.model = 'anthropic/claude-opus-4-5';
+    });
+    electronApp = f2.electronApp;
+    page = f2.page;
+    fixture = f2;
+
+    // 落盘：比较并设置（expectModel=遗留值）把默认模型换成网关模型
+    const configPath = join(fixture.miqiHome, 'config.json');
+    await expect
+      .poll(() => JSON.parse(readFileSync(configPath, 'utf8')).agents?.defaults?.model, {
+        timeout: 30_000,
+      })
+      .toBe('deepseek/deepseek-v4-flash');
+
+    // 模型 tab：无需任何手动选择，「当前默认模型」已是网关模型
+    await gotoQraftTab(page);
+    await page.getByRole('tab', { name: '模型' }).click();
+    await expect(page.getByTestId('providers-active-model')).toHaveText(
+      '当前默认模型：deepseek/deepseek-v4-flash',
+      { timeout: 15_000 }
+    );
+
+    await page.screenshot({
+      path: 'test-results/gateway-model-autosync.png',
+      fullPage: true,
+    });
+  });
 });

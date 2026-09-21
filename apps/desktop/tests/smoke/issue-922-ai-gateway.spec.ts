@@ -380,4 +380,57 @@ test.describe('Issue #922 — AI 网关状态门禁', () => {
     const sends = await page.evaluate(() => (window as any).__chatSends);
     expect(sends).toBe(0);
   });
+
+  test('登录 + 网关 active + 遗留默认模型不可解析：自动就绪为网关模型（#1172）', async ({
+    page,
+  }) => {
+    // #1172：全新安装时默认模型是 schema 默认值 anthropic/claude-opus-4-5
+    //（config.get 把默认值带出来，永远非空）—— 旧逻辑「只填空值」因此从不
+    // 触发，用户登录后必须手动去模型 tab 选模型。现在登录 + 网关 active 且
+    // 当前模型不可解析时自动替换为网关模型，无需任何手动操作。
+    await page.addInitScript({
+      content: buildMockBridgeScript({
+        providers: [],
+        activeModel: 'anthropic/claude-opus-4-5',
+        activeModelResolvable: false,
+        config: { agents: { defaults: { model: 'anthropic/claude-opus-4-5' } } },
+        qraftStatus: {
+          loggedIn: true,
+          account: {
+            phone: '18500000000',
+            sub: '19',
+            username: 'U-GW',
+            nickname: '网关用户',
+          },
+          env: 'test',
+          baseUrl: 'https://test.forge.miqroera.com/api',
+          aiGateway: { status: 'active', configVersion: 1 },
+        },
+      }),
+    });
+    await page.goto('/');
+    await page.waitForSelector('#root', { state: 'visible' });
+
+    // 自动写入：比较并设置（expectModel=遗留值）
+    await expect
+      .poll(
+        () =>
+          page.evaluate(() => {
+            const updates = (window as any).__miqiMock.getConfigUpdates();
+            return updates.some(
+              (u: any) => u?.agents?.defaults?.model === 'deepseek/deepseek-v4-flash'
+            );
+          }),
+        { timeout: 10_000 }
+      )
+      .toBe(true);
+
+    // 模型 tab：无需手动选择，当前默认模型已是网关模型
+    await page.getByText(/^(System Settings|系统设置)$/).click();
+    await page.getByRole('tab', { name: '模型' }).click();
+    await expect(page.getByTestId('providers-active-model')).toHaveText(
+      '当前默认模型：deepseek/deepseek-v4-flash',
+      { timeout: 10_000 }
+    );
+  });
 });

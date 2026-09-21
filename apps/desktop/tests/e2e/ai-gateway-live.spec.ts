@@ -38,7 +38,14 @@ describeFn('AI 网关真实账号 live E2E (opt-in)', () => {
   let fixture: ElectronFixture;
 
   test.beforeAll(async () => {
-    fixture = await launchElectronApp();
+    // #1172：从「全新安装的遗留默认值」出发（schema 默认 anthropic/claude-opus-4-5，
+    // 运行时不可解析、config.get 永远非空）——验证真实登录 + 网关 active 后
+    // 默认模型自动就绪为网关模型，用户无需手动去模型 tab 选择。
+    fixture = await launchElectronApp((config) => {
+      config.agents = config.agents ?? {};
+      config.agents.defaults = config.agents.defaults ?? {};
+      config.agents.defaults.model = 'anthropic/claude-opus-4-5';
+    });
   }, 180_000);
 
   test.afterAll(async () => {
@@ -59,6 +66,14 @@ describeFn('AI 网关真实账号 live E2E (opt-in)', () => {
     await expect(page.getByTestId('qraft-ai-gateway')).toBeVisible({ timeout: 30_000 });
     await expect(page.getByTestId('qraft-ai-gateway-status')).toHaveText('可用');
     await expect(page.getByTestId('qraft-ai-gateway')).toContainText('配置版本 v1');
+
+    // 2.5 默认模型自动就绪（#1172）：遗留默认值不可解析 → 登录后自动换成
+    //     网关模型（用户无需手动选择）。
+    await page.getByRole('tab', { name: /^模型/ }).click();
+    await expect(page.getByTestId('providers-active-model')).toHaveText(
+      '当前默认模型：deepseek/deepseek-v4-flash',
+      { timeout: 60_000 }
+    );
 
     // 3. 新会话发消息（默认模型 deepseek/deepseek-v4-flash 即网关模型）
     await createNewConversation(page);

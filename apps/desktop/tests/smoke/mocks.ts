@@ -43,6 +43,30 @@ export interface MockBridgeOptions {
   qraftBillingHistoryResult?: Array<Record<string, unknown>>;
 }
 
+/**
+ * 登录态：已登录但平台未下发 AI 网关状态（aiGatewayKnown=false）。
+ *
+ * 与网关无关的用例（模型面板解锁即可）用它当 qraftLoggedInStatus：默认
+ * 登录态带 aiGateway active，会触发「登录后默认模型自动就绪」（#1172）——
+ * 登录 + 网关 active 且当前模型不可解析时自动写网关模型，给无关用例的
+ * configUpdates 计数与「页头如实显示遗留模型」断言引入额外写入。
+ */
+export function loggedInWithoutGateway(): Record<string, unknown> {
+  return {
+    loggedIn: true,
+    account: {
+      phone: '18500000000',
+      sub: '19',
+      username: 'U-HKY4-GB4E',
+      nickname: 'MiQi测试',
+    },
+    env: 'test',
+    baseUrl: 'https://test.forge.miqroera.com/api',
+    expiresAt: Date.now() + 7_199_000,
+    refreshScheduledAt: Date.now() + 6_299_000,
+  };
+}
+
 /** Build a self-contained init script that installs the mock bridge on
  *  `window.miqi` and exposes `window.__miqiMock` for tests to fire events. */
 export function buildMockBridgeScript(opts: MockBridgeOptions = {}): string {
