@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { ChevronDown } from 'lucide-react';
-import type { ModelInfo } from '../../../../shared/ipc';
+import type { ModelInfo, ProviderInfo } from '../../../../shared/ipc';
 import { PROVIDER_DISPLAY_NAMES } from '../../../lib/providers';
 
 /**
@@ -28,23 +28,37 @@ export const FALLBACK_MODEL_PRESETS: ModelInfo[] = [
 const FALLBACK_AVAILABLE_PROVIDERS = ['deepseek'];
 
 /**
- * 只保留「可用 provider」的模型：内置可激活（builtin_available）或已配置
- * 凭据（configured，兼容历史配置）。available 为 null 时不过滤（目录还没
- * 加载完）。gatewayRouted 为 true 时保留任意模型 —— 已配置的网关（如
- * OpenRouter）在运行时兜底路由任意模型（Config._match_provider），过滤
- * 掉反而会清掉用户能正常使用的模型（#929 review）。收口后 model/list
- * 仍返回全量目录，这里负责兜住 custom 等已从运行时工厂移除的 provider。
+ * 从 providers.list 结果推导下拉里可选的 provider 集合（#1179）。
+ *
+ * 唯一依据是 builtin_available —— 平台下发的内置 provider。收口（#835）后
+ * 第三方 provider 已无自配凭据入口，config.json 里的历史残留凭据只能让
+ * configured 再次为真，网关型 provider 的旧 key 也会让 is_gateway 项为真；
+ * 两者都不能作为放行依据，否则平台不参与的模型会重新列进下拉。
+ *
+ * 旧版 bridge 不带 builtin_available 字段时（整个清单都缺）退回 configured
+ * 判定，与 ipc.ts 对 active_model_resolvable 的兜底口径一致 —— 否则下拉会
+ * 被清空，比放行残留模型更难用。
+ */
+export function selectableProviders(providers: ProviderInfo[]): Set<string> {
+  const knowsBuiltin = providers.some((p) => p.builtin_available !== undefined);
+  return new Set(
+    providers.filter((p) => (knowsBuiltin ? p.builtin_available : p.configured)).map((p) => p.name)
+  );
+}
+
+/**
+ * 只保留「平台可选 provider」的模型（可用集合见 selectableProviders）。
+ * available 为 null 时不过滤（目录还没加载完）。收口后 model/list 仍返回
+ * 全量目录，这里负责兜住已从运行时工厂移除的 provider。
  */
 export function filterAvailableModels(
   models: ModelInfo[],
-  available: Set<string> | null,
-  gatewayRouted = false
+  available: Set<string> | null
 ): ModelInfo[] {
   if (available === null) return models;
-  const filtered = gatewayRouted ? models : models.filter((m) => available.has(m.provider));
-  // custom provider 已从运行时移除：即使网关兜底路由也不放行 custom/*，
-  // 否则选择后新会话会在 make_provider 报错（#933 review）。
-  return filtered.filter((m) => m.provider !== 'custom');
+  // custom provider 已从运行时移除：不放行 custom/*，否则选择后新会话会在
+  // make_provider 报错（#933 review）。
+  return models.filter((m) => m.provider !== 'custom' && available.has(m.provider));
 }
 
 function displayName(provider: string): string {
@@ -78,7 +92,6 @@ interface ModelSelectProps {
 export function ModelSelect({ value, onChange, presets }: ModelSelectProps) {
   const [loaded, setLoaded] = useState<ModelInfo[] | null>(null);
   const [availableProviders, setAvailableProviders] = useState<Set<string> | null>(null);
-  const [gatewayRouted, setGatewayRouted] = useState(false);
 
   useEffect(() => {
     let alive = true;
@@ -93,11 +106,7 @@ export function ModelSelect({ value, onChange, presets }: ModelSelectProps) {
     window.miqi.providers
       .list()
       .then((r) => {
-        if (!alive) return;
-        setAvailableProviders(
-          new Set(r.providers.filter((p) => p.builtin_available || p.configured).map((p) => p.name))
-        );
-        setGatewayRouted(r.providers.some((p) => p.is_gateway && p.configured));
+        if (alive) setAvailableProviders(selectableProviders(r.providers));
       })
       .catch(() => {
         if (alive) setAvailableProviders(new Set(FALLBACK_AVAILABLE_PROVIDERS));
@@ -109,12 +118,8 @@ export function ModelSelect({ value, onChange, presets }: ModelSelectProps) {
 
   const all = useMemo(() => {
     const source = loaded === null ? null : loaded.length > 0 ? loaded : null;
-    return filterAvailableModels(
-      source ?? presets ?? FALLBACK_MODEL_PRESETS,
-      availableProviders,
-      gatewayRouted
-    );
-  }, [loaded, presets, availableProviders, gatewayRouted]);
+    return filterAvailableModels(source ?? presets ?? FALLBACK_MODEL_PRESETS, availableProviders);
+  }, [loaded, presets, availableProviders]);
 
   const groups = useMemo(() => groupPresets(all), [all]);
   const isPreset = all.some((m) => m.id === value);

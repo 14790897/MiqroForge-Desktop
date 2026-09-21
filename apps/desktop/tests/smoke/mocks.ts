@@ -393,12 +393,9 @@ export function buildMockBridgeScript(opts: MockBridgeOptions = {}): string {
     },
 
     models: {
+      // 目录由 opts.models 决定（默认 deepseek + openai + custom，供门控过滤验证）；
+      // 想走 ModelSelect 的 FALLBACK_MODEL_PRESETS 分支就显式传 models: []。
       list: function() { return Promise.resolve({ models: JSON.parse(JSON.stringify(_modelCatalog)) }); },
-    },
-
-    models: {
-      // 空目录 → ModelSelect 回退 FALLBACK_MODEL_PRESETS（内置 DeepSeek 下拉）。
-      list: function() { return Promise.resolve({ models: [] }); },
     },
 
     channels: {
