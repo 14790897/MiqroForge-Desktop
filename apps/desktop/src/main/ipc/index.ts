@@ -89,6 +89,7 @@ import {
   shellEscape,
 } from './workspace-path';
 import { clampMinToWindow, panelWindowMinWidth } from '../../shared/layout';
+import { makeWslDiskStats } from '../../shared/wslDiskStats';
 
 const { ipcMain, dialog, shell, app, clipboard } = electron;
 
@@ -1318,7 +1319,7 @@ for m in ("pydantic", "httpx", "loguru"):
         distro: '',
         memory: { total_mb: 0, used_mb: 0, free_mb: 0, used_pct: 0 },
         cpu: { usage_pct: 0, cores: 0 },
-        disk: { total_gb: 0, used_gb: 0, free_gb: 0, used_pct: 0 },
+        disk: makeWslDiskStats(0, 0, 0),
         uptime_sec: 0,
       };
     }
@@ -1395,7 +1396,7 @@ for m in ("pydantic", "httpx", "loguru"):
           distro: '',
           memory: { total_mb: 0, used_mb: 0, free_mb: 0, used_pct: 0 },
           cpu: { usage_pct: 0, cores: 0 },
-          disk: { total_gb: 0, used_gb: 0, free_gb: 0, used_pct: 0 },
+          disk: makeWslDiskStats(0, 0, 0),
           uptime_sec: 0,
         };
       }
@@ -1438,7 +1439,7 @@ for m in ("pydantic", "httpx", "loguru"):
 
     let memory = { total_mb: 0, used_mb: 0, free_mb: 0, used_pct: 0 };
     let cores = 0;
-    let disk = { total_gb: 0, used_gb: 0, free_gb: 0, used_pct: 0 };
+    let disk = makeWslDiskStats(0, 0, 0);
     let uptimeSec = 0;
 
     if (fastResult.stdout) {
@@ -1468,12 +1469,7 @@ for m in ("pydantic", "httpx", "loguru"):
         const usedMb = parseInt(parts[1] || '0', 10);
         const freeMb = parseInt(parts[2] || '0', 10);
         if (!Number.isNaN(totalMb) && totalMb > 0 && usedMb <= totalMb) {
-          disk = {
-            total_gb: Math.round((totalMb / 1024) * 10) / 10,
-            used_gb: Math.round((usedMb / 1024) * 10) / 10,
-            free_gb: Math.round((freeMb / 1024) * 10) / 10,
-            used_pct: Math.round((usedMb / totalMb) * 100),
-          };
+          disk = makeWslDiskStats(totalMb, usedMb, freeMb);
         }
       }
       const uptimeLine = lines.find((l) => l.startsWith('UPTIME:'));
@@ -1515,12 +1511,7 @@ for m in ("pydantic", "httpx", "loguru"):
             u = vals[1],
             f = vals[2];
           if (!Number.isNaN(t) && t > 0 && !Number.isNaN(u) && u <= t) {
-            disk = {
-              total_gb: Math.round((t / 1024) * 10) / 10,
-              used_gb: Math.round((u / 1024) * 10) / 10,
-              free_gb: Math.round(((f || 0) / 1024) * 10) / 10,
-              used_pct: Math.round((u / t) * 100),
-            };
+            disk = makeWslDiskStats(t, u, f || 0);
           }
         }
       }

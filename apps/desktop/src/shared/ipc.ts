@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import type { WslDiskStats } from './wslDiskStats';
 
 // ---------------------------------------------------------------------------
 // IPC channel names (invoke)
@@ -1197,12 +1198,7 @@ export interface WslStatsResult {
     usage_pct: number; // 0-100, instantaneous snapshot
     cores: number;
   };
-  disk: {
-    total_gb: number;
-    used_gb: number;
-    free_gb: number;
-    used_pct: number;
-  };
+  disk: WslDiskStats;
   uptime_sec: number;
 }
 

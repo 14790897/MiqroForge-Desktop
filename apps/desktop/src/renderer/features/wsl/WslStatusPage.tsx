@@ -543,6 +543,9 @@ export default function WslStatusPage() {
                     ['磁盘总量', `${dsk?.total_gb ?? 0} GB`],
                     ['磁盘已用', `${dsk?.used_gb ?? 0} GB (${dsk?.used_pct ?? 0}%)`],
                     ['磁盘可用', `${dsk?.free_gb ?? 0} GB`],
+                    // #1157：ext4 等文件系统给 root 留了保留块，df 的 avail 已扣除，
+                    // 于是「总量 − 已用 ≠ 可用」；把差额列出来，三项才好对账
+                    ...(dsk && dsk.reserved_gb > 0 ? [['系统保留', `${dsk.reserved_gb} GB`]] : []),
                   ].map(([k, v], i) => (
                     <tr
                       key={String(k)}
@@ -554,6 +557,11 @@ export default function WslStatusPage() {
                   ))}
                 </tbody>
               </table>
+              {dsk && dsk.reserved_gb > 0 && (
+                <p className="px-5 py-2.5 text-size-2xs text-[var(--text-faint)] border-t border-[var(--border-subtle)]">
+                  磁盘总量 = 已用 + 可用 + 系统保留（系统保留为 root 预留、普通用户不可用的空间）
+                </p>
+              )}
             </div>
           </div>
         )}
