@@ -163,17 +163,21 @@ test.describe('AI 网关 E2E (issue #922)', () => {
   });
 
   test('active + 遗留默认模型不可解析 → 登录后自动就绪为网关模型（#1172）', async () => {
-    // #1172：全新安装时 agents.defaults.model 是 schema 默认值
-    // anthropic/claude-opus-4-5（config.get 把默认值带出来，永远非空）——
-    // 旧逻辑「只填空值」因此从不触发，用户登录后必须手动去模型 tab 选模型。
-    // 现在登录 + 网关 active 且当前模型不可解析时自动替换为网关模型。
+    // #1172：全新安装时 agents.defaults.model 被 config.get 带出 schema 默认值
+    //（永远非空）—— 旧逻辑「只填空值」因此从不触发，用户登录后必须手动去
+    // 模型 tab 选模型。现在登录 + 网关 active 且当前模型不可解析时自动替换。
     test.setTimeout(180_000);
     await closeElectronApp(electronApp, fixture.miqiHome);
     writeFileSync(storePath, buildSeededStoreContent({ status: 'active' }), 'utf8');
     const f2 = await launchElectronApp((config) => {
+      // 用 custom/* 当「遗留模型」：#835 合规收口移除的 provider，运行时判定
+      //（_model_provider_resolvable）对它硬编码 false，任何 provider 配置下都
+      // 不可解析 —— CI 的 config.json 会注入已配置的 siliconflow（is_gateway，
+      // 网关兜底把 anthropic/* 之类误判为可解析），换 anthropic 默认值会让
+      // 本用例在 CI 上不触发自动写入而失败。
       config.agents = config.agents ?? {};
       config.agents.defaults = config.agents.defaults ?? {};
-      config.agents.defaults.model = 'anthropic/claude-opus-4-5';
+      config.agents.defaults.model = 'custom/legacy-model';
     });
     electronApp = f2.electronApp;
     page = f2.page;

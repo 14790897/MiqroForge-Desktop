@@ -38,13 +38,14 @@ describeFn('AI 网关真实账号 live E2E (opt-in)', () => {
   let fixture: ElectronFixture;
 
   test.beforeAll(async () => {
-    // #1172：从「全新安装的遗留默认值」出发（schema 默认 anthropic/claude-opus-4-5，
-    // 运行时不可解析、config.get 永远非空）——验证真实登录 + 网关 active 后
-    // 默认模型自动就绪为网关模型，用户无需手动去模型 tab 选择。
+    // #1172：从「遗留默认模型」出发（custom/* 是 #835 收口移除的 provider，
+    // 运行时判定硬编码不可解析；比 anthropic 默认值更稳 —— 本机/CI 的
+    // 已配置 gateway provider 不会经兜底把它误判为可用）——验证真实登录 +
+    // 网关 active 后默认模型自动就绪为网关模型，用户无需手动去模型 tab 选择。
     fixture = await launchElectronApp((config) => {
       config.agents = config.agents ?? {};
       config.agents.defaults = config.agents.defaults ?? {};
-      config.agents.defaults.model = 'anthropic/claude-opus-4-5';
+      config.agents.defaults.model = 'custom/legacy-model';
     });
   }, 180_000);
 
