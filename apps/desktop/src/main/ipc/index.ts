@@ -561,9 +561,11 @@ export function registerIpcHandlers(bridge: BridgeManager): void {
   // Sessions
   // -----------------------------------------------------------------------
   ipcMain.handle(IPC.SESSIONS_LIST, async () => {
-    const result = await bridge.sendSafe('sessions.list');
-    if (result == null) return { sessions: [] };
-    return result;
+    // 失败时返回 null，而不是伪造一个空列表：`sendSafe` 超时后也返回 null，
+    // 而超时与「用户真的没有会话」在渲染层必须可区分——否则侧栏只能把两者
+    // 都当成「清空」。实测 sessions.list 会被别的请求挤到 12 分钟才超时
+    // （见 #1191），那不是清空用户会话列表的理由。
+    return bridge.sendSafe('sessions.list');
   });
 
   ipcMain.handle(IPC.SESSIONS_GET, async (_event, payload: unknown) => {
