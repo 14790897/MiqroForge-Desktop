@@ -273,6 +273,24 @@ export async function stopMockServer(
 }
 
 /**
+ * 点掉一张「等待你的决定」态的计划卡；没有可点的卡就返回 false。
+ *
+ * 判据用 `plan-confirm`（仅在 waiting && !editing 渲染，天然排除历史已处理卡；
+ * 按钮可访问名是「按当前方案执行」，旧的 name:'开始执行' 匹配不到）。为什么还要
+ * 额外查可见性 / 可用性，见下面的行内注释。
+ */
+export async function approvePlanCardOnce(page: Page): Promise<boolean> {
+  const btn = page.getByTestId('plan-confirm').first();
+  // 只点**可见且可用**的那张。plan-confirm 仅在 waiting && !editing 渲染（已确认的卡
+  // 会把它卸载），可见性顺带排除别处的历史卡；isEnabled 再挡一层「已点、还在提交中」
+  // 的窗口 —— 点击后按钮会 disabled（PlanCard 内部另有 ref 同步拦第二次，不依赖它）。
+  if (!(await btn.isVisible().catch(() => false))) return false;
+  if (!(await btn.isEnabled().catch(() => false))) return false;
+  await btn.click({ force: true, timeout: 5_000 });
+  return true;
+}
+
+/**
  * Wait for the reply of a just-sent message to finish streaming.
  *
  * `.tag-inprogress` is the DOM projection of the renderer's per-session
@@ -289,20 +307,48 @@ export async function stopMockServer(
  * Two rAF frames then satisfy any "stable for N samples" rule in ≈33 ms, so a
  * still-reasoning turn reads as finished and the caller asserts against a
  * panel that has not been updated yet.
+ *
+ * 等待期间会顺手点掉计划卡（`approvePlanCard`，默认开）。理由：#646-v2 之后
+ * 「edit 模式 + 复杂度够高的工具调用 → 计划卡」会让回合停在「等待你的决定」上，
+ * 而此时渲染进程的 `streaming` 仍是 true、标签照挂 —— 回合是真的没结束，只是
+ * 卡在等人点按钮。真实模型在温度 1 下会不会走到需要计划的工具调用是随机的，于是
+ * 表现为「同一个 spec 这次超时、重试却 8 秒就过」的抖动：2026-09-21 electron-e2e
+ * 在多个无关分支上红了一整天，失败的 error-context 快照里都躺着同一张
+ * 「AI 准备执行任务 / 等待你的决定」计划卡，而绝大多数 spec 并不会自己批准它。
+ * 只测计划卡本身的用例（plan-card / confirm-card / auto-timeline / issue-1104）
+ * 要么在调用前已把卡点掉、要么自己后台批准，传 `approvePlanCard: false` 可显式退出。
  */
-export async function waitForResponseComplete(page: Page, timeout = 120_000) {
+export async function waitForResponseComplete(
+  page: Page,
+  timeout = 120_000,
+  opts: { approvePlanCard?: boolean } = {}
+) {
+  const approvePlanCard = opts.approvePlanCard ?? true;
   const deadline = Date.now() + timeout;
   const inProgress = page.locator('.tag-inprogress');
 
   let anchor = await mainTextLength(page);
   let stable = 0;
   let sawRunning = false;
+  let approvedPlanCard = false;
 
   while (Date.now() < deadline) {
     if ((await inProgress.count()) > 0) {
       sawRunning = true;
       stable = 0;
       anchor = await mainTextLength(page);
+      // 标签在 = 回合在跑；此时若是计划卡在等人，就替用户点了。只在标签在时才查，
+      // 没卡的那些回合每次采样只多一次廉价的 count()。
+      if (approvePlanCard) {
+        try {
+          if (await approvePlanCardOnce(page)) {
+            approvedPlanCard = true;
+            console.log('[test] waitForResponseComplete: 自动批准计划卡（按当前方案执行）');
+          }
+        } catch {
+          // 页面正在关闭 —— 让后面的采样照常抛错，别在这里吞掉真实失败
+        }
+      }
     } else {
       const len = await mainTextLength(page);
       // Only a jump of ≥10 characters counts as progress: the live
@@ -323,10 +369,24 @@ export async function waitForResponseComplete(page: Page, timeout = 120_000) {
     await page.waitForTimeout(200);
   }
 
+  // 超时报错要把「卡在计划卡上」直说出来：否则它和「模型慢」「桥死了」在日志里
+  // 长得一模一样，只能靠拉 error-context 截图才分得出来（2026-09-21 的排查就
+  // 卡在这里）。卡还在等确认时，这一句就是根因。
+  const planCardStillWaiting =
+    (await page
+      .getByTestId('plan-confirm')
+      .count()
+      .catch(() => 0)) > 0;
   throw new Error(
     `waitForResponseComplete: 回合在 ${timeout}ms 内没有结束（` +
       (sawRunning ? '「进行中」标签一直没消失' : '未出现「进行中」标签，且主区文本仍在变化') +
-      '）'
+      `）` +
+      (planCardStillWaiting
+        ? '——且此刻页面上仍有一张等待确认的计划卡（「按当前方案执行」）：回合是被计划卡挡住的，不是模型慢。' +
+          '该 spec 需要批准计划卡（本函数默认会点，若传了 approvePlanCard:false 请自行处理）。'
+        : approvedPlanCard
+          ? '——注意：本次等待期间批准过计划卡。'
+          : '')
   );
 }
 
@@ -345,12 +405,9 @@ export async function approvePlanCardIfAny(page: Page, timeoutMs = 90_000) {
   let checked = 0;
   while (Date.now() < deadline) {
     try {
-      // CodeRabbit（9-11）：按 testid 定位等待态计划卡的确认钮（plan-confirm
-      // 仅在 waiting && !editing 渲染——天然排除历史已处理卡）；按钮可访问名
-      // 为「按当前方案执行」（PlanCard 重写后），旧 name:'开始执行' 匹配不到。
-      const btn = page.getByTestId('plan-confirm').first();
-      if (await btn.isVisible({ timeout: 400 }).catch(() => false)) {
-        await btn.click({ force: true, timeout: 5_000 });
+      // 判定复用 approvePlanCardOnce（plan-confirm 仅在 waiting && !editing 渲染，
+      // 天然排除历史已处理卡；按钮可访问名是「按当前方案执行」）。
+      if (await approvePlanCardOnce(page)) {
         console.log('[test] 自动批准计划卡（按当前方案执行）');
         return;
       }
