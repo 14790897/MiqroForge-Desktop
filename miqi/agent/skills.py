@@ -513,8 +513,9 @@ class SkillsLoader:
     def _missing_python_deps(self, name: str) -> list[str]:
         """Return requirements that are missing or version-incompatible.
 
-        Skips requirements whose environment marker is inactive on the current
-        interpreter. For the rest, checks the installed distribution against
+        Skips requirements whose environment marker is inactive for the
+        interpreter that runs the skill (the sandbox python3 when a sandbox is
+        active, otherwise the host). For the rest, checks the installed distribution against
         the requirement's version specifier via :mod:`importlib.metadata`.
         Named direct-URL requirements (``pkg @ https://…``) are checked by
         their distribution name only — URL provenance is not validated.
@@ -547,13 +548,17 @@ class SkillsLoader:
 
         provisioned = set(get_provisioned(name))
 
-        from miqi.sandbox.manager import sandbox_is_active
+        from miqi.sandbox.manager import (
+            sandbox_is_active,
+            sandbox_marker_environment,
+        )
 
         sandbox_mode = sandbox_is_active(self._sandbox_manager)
+        marker_env = sandbox_marker_environment(self._sandbox_manager)
 
         missing: list[str] = []
         for req in reqs:
-            if req.marker is not None and not req.marker.evaluate():
+            if req.marker is not None and not req.marker.evaluate(environment=marker_env):
                 continue  # marker inactive on this interpreter
             if str(req) in provisioned:
                 continue  # already provisioned into the skill's venv/system

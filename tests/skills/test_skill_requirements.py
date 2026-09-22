@@ -301,3 +301,31 @@ def test_sandbox_disabled_sentinel_keeps_host_check(tmp_path):
         requirements="pydantic\n",
     )
     assert loader._check_requirements("sandbox-disabled-pydantic") is True
+
+
+def test_sandbox_active_skips_windows_markers(tmp_path):
+    """A win32-only marker is inactive in the Linux sandbox (not reported missing)."""
+    loader, workspace = _sandbox_loader(tmp_path, _fake_sandbox_manager())
+    _make_skill(
+        workspace / "skills",
+        "sandbox-win-marker",
+        "Windows-only dep",
+        requirements=f'{_MISSING_DIST}; sys_platform == "win32"\n',
+    )
+    # The sandbox runs Linux, so a win32-only requirement is inactive there.
+    assert loader._missing_python_deps("sandbox-win-marker") == []
+    assert loader._check_requirements("sandbox-win-marker") is True
+
+
+def test_sandbox_active_evaluates_linux_markers(tmp_path):
+    """A linux-only marker is active in the sandbox (reported missing on a Windows host)."""
+    loader, workspace = _sandbox_loader(tmp_path, _fake_sandbox_manager())
+    _make_skill(
+        workspace / "skills",
+        "sandbox-linux-marker",
+        "Linux-only dep",
+        requirements=f'{_MISSING_DIST}; sys_platform == "linux"\n',
+    )
+    missing = loader._missing_python_deps("sandbox-linux-marker")
+    assert len(missing) == 1 and _MISSING_DIST in missing[0]
+    assert loader._check_requirements("sandbox-linux-marker") is False
