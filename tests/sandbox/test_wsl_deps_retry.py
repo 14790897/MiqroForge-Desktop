@@ -133,14 +133,20 @@ class _WslStub:
         leftovers=False,
         pgrep_raises_timeout=False,
         on_install_timeout=None,
+        hang_ready_at=frozenset(),
+        hang_busy=False,
     ):
         self.install_results = list(install_results)
         self.ready_after = ready_after
         self.leftovers = leftovers
         self.pgrep_raises_timeout = pgrep_raises_timeout
         self.on_install_timeout = on_install_timeout
+        #: 1-based indices of READY_CMD calls that hang instead of answering.
+        self.hang_ready_at = set(hang_ready_at)
+        self.hang_busy = hang_busy
         self.install_cmds: list[str] = []
         self.install_attempts = 0
+        self.ready_calls = 0
         self.terminate_calls = 0
         self.pgrep_calls = 0
 
@@ -152,11 +158,16 @@ class _WslStub:
 
         payload = args[-1]
         if payload == READY_CMD:
+            self.ready_calls += 1
+            if self.ready_calls in self.hang_ready_at:
+                return _FakeProc(hang=True)
             return _FakeProc(0 if self.install_attempts >= self.ready_after else 1)
         if payload == SUDO_PROBE:
             return _FakeProc(1)  # no passwordless sudo -> install runs unwrapped
         if "pgrep -x apt-get" in payload:
             self.pgrep_calls += 1
+            if self.hang_busy:
+                return _FakeProc(hang=True)
             if self.pgrep_raises_timeout:
                 return _FakeProc(raise_timeout=True)
             return _FakeProc(0 if self.leftovers else 1)
@@ -345,6 +356,46 @@ async def test_total_budget_stops_a_second_attempt(monkeypatch):
 
     assert await BwrapSandbox._ensure_wsl_deps(DISTRO) is False
     assert stub.install_attempts == 1, "the budget guard let a second attempt run"
+
+
+async def test_the_whole_call_stays_within_budget_plus_allowance(monkeypatch):
+    """The declared bound has to hold, and the verdict probe has to survive it.
+
+    There are two ways to get this wrong, and this pins both.  Letting the
+    cleanup steps fall back to a floor when the allowance is spent pushes the
+    total past ``budget + allowance``.  Clamping them to the verdict deadline
+    without reserving the probe's slice hands the probe a zero-second timeout
+    instead — and a zero-timeout probe always reports "not ready", turning a
+    distro that is fine into a failure.
+
+    Every WSL probe here burns its whole timeout, so the elapsed wall clock
+    *is* the budget the code handed out.  The verdict probe is the one call
+    that answers instead of hanging.
+    """
+    monkeypatch.setattr(bwrap_mod, "_WSL_APT_ATTEMPT_TIMEOUT", 0.10)
+    monkeypatch.setattr(bwrap_mod, "_WSL_APT_TOTAL_BUDGET", 0.20)
+    monkeypatch.setattr(bwrap_mod, "_WSL_APT_CLEANUP_ALLOWANCE_S", 0.20)
+    monkeypatch.setattr(bwrap_mod, "_WSL_VERDICT_PROBE_TIMEOUT_S", 0.10)
+    monkeypatch.setattr(bwrap_mod, "_WSL_CLEANUP_PROBE_TIMEOUT_S", 0.20)
+    monkeypatch.setattr(bwrap_mod, "_WSL_RESET_TIMEOUT_S", 0.10)
+
+    stub = _WslStub(
+        ["hang", "hang"],
+        ready_after=1,       # the toolchain really is installed
+        hang_ready_at={2},   # only the pre-verdict probe burns its timeout
+        hang_busy=True,
+    )
+    monkeypatch.setattr(bwrap_mod, "_create_subprocess_exec", stub)
+
+    started = time.monotonic()
+    assert await BwrapSandbox._ensure_wsl_deps(DISTRO) is True
+    elapsed = time.monotonic() - started
+
+    assert stub.ready_calls >= 3, "the verdict probe was never reached"
+    assert elapsed <= 0.20 + 0.20 + 0.20, (
+        f"the call ran {elapsed:.2f}s, past the declared "
+        f"budget + allowance = 0.40s"
+    )
 
 
 async def test_cooldown_never_shadows_a_distro_that_is_ready(monkeypatch):

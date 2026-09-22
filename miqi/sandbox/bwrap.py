@@ -219,8 +219,26 @@ _WSL_APT_IDLE_WAIT_S = 30.0
 _WSL_RESET_TIMEOUT_S = 40.0
 
 #: Floor for the final readiness probe.  It decides the return value, so it
-#: must never be starved by an exhausted budget.
+#: must never be starved by an exhausted budget — it is therefore *reserved*
+#: out of :data:`_WSL_APT_CLEANUP_ALLOWANCE_S` and the cleanup steps before it
+#: are clamped to end that much earlier.
 _WSL_VERDICT_PROBE_TIMEOUT_S = 30.0
+
+#: Cap on killing and reaping a subprocess wrapper that outlived its timeout.
+_REAP_TIMEOUT_S = 5.0
+
+
+def _bounded(timeout: float, not_after: float | None) -> float:
+    """``timeout``, further clamped to the time left before ``not_after``.
+
+    ``0`` is a legitimate result: the caller's budget is spent, so the
+    operation gets no time and its own timeout path takes over immediately.
+    That is what keeps a declared total bound honest instead of letting each
+    step fall back to its own generous cap.
+    """
+    if not_after is None:
+        return timeout
+    return min(timeout, max(not_after - time.monotonic(), 0.0))
 
 #: After a failed install, refuse to install again in the same distro for this
 #: long.  The four WSL call sites mostly bypass :data:`_auto_install_cache`
@@ -1174,7 +1192,9 @@ class BwrapSandbox:
         )
 
     @staticmethod
-    async def _run_bounded(args: tuple[str, ...], timeout: float) -> int | None:
+    async def _run_bounded(
+        args: tuple[str, ...], timeout: float, *, not_after: float | None = None
+    ) -> int | None:
         """Run a bounded ``wsl.exe`` command; ``None`` if it timed out or failed.
 
         A process that outlives its timeout is always killed *and reaped* here.
@@ -1182,6 +1202,9 @@ class BwrapSandbox:
         ``apt-get`` running past the point where the caller believes it is
         done — which is exactly how one distro gets poisoned for every later
         test in the same job.
+
+        ``not_after`` additionally clamps that reap: cleaning up after a
+        timeout must not itself overrun the caller's budget.
         """
         proc = None
         try:
@@ -1198,44 +1221,54 @@ class BwrapSandbox:
             if proc is not None and proc.returncode is None:
                 try:
                     proc.kill()
-                    await asyncio.wait_for(proc.wait(), timeout=5.0)
+                    await asyncio.wait_for(
+                        proc.wait(), timeout=_bounded(_REAP_TIMEOUT_S, not_after)
+                    )
                 except (asyncio.TimeoutError, ProcessLookupError, OSError):
                     pass
 
     @staticmethod
-    async def _distro_ready(distro: str, *, timeout: float = 30.0) -> bool:
+    async def _distro_ready(
+        distro: str, *, timeout: float = 30.0, not_after: float | None = None
+    ) -> bool:
         """Run the readiness probe once; True only when it clearly passes.
 
         Anything other than a clean exit — a slow probe, a failure to spawn
-        wsl.exe — reads as "not ready", because every caller uses this to
-        decide whether to intervene, and intervening is the safe direction.
+        wsl.exe, an exhausted budget — reads as "not ready", because every
+        caller uses this to decide whether to intervene, and intervening is
+        the safe direction.
         """
         rc = await BwrapSandbox._run_bounded(
             ("wsl.exe", "-d", distro, "--", "bash", "-c", _WSL_READY_CMD),
-            timeout,
+            _bounded(timeout, not_after),
+            not_after=not_after,
         )
         return rc == 0
 
     @staticmethod
     async def _has_leftover_pkg_manager(
-        distro: str, *, timeout: float = 10.0
+        distro: str, *, timeout: float = 10.0, not_after: float | None = None
     ) -> bool:
         """True when an apt-get or dpkg is still running inside the distro.
 
-        "Cannot tell" (probe timed out, or wsl.exe could not be spawned) reads
-        as True on purpose: the callers react to "busy" by waiting a bounded
-        time or restarting the distro, both of which are safe, while a wrong
-        "idle" hands the next installer a dpkg-lock collision.
+        "Cannot tell" (probe timed out, wsl.exe could not be spawned, no time
+        left) reads as True on purpose: the callers react to "busy" by waiting
+        a bounded time or restarting the distro, both of which are safe, while
+        a wrong "idle" hands the next installer a dpkg-lock collision.
         """
         rc = await BwrapSandbox._run_bounded(
             ("wsl.exe", "-d", distro, "--", "bash", "-c", _PKG_MANAGER_BUSY_CMD),
-            timeout,
+            _bounded(timeout, not_after),
+            not_after=not_after,
         )
         return rc != 1
 
     @staticmethod
     async def _wait_for_pkg_managers_idle(
-        distro: str, *, timeout: float = _WSL_APT_IDLE_WAIT_S
+        distro: str,
+        *,
+        timeout: float | None = None,
+        not_after: float | None = None,
     ) -> bool:
         """Wait until no apt-get/dpkg is running in the distro.
 
@@ -1245,17 +1278,29 @@ class BwrapSandbox:
         hand the next installer — skills provisioning, the exec tool — a
         collision, so let it settle first.
         """
+        if timeout is None:
+            # Resolved here rather than as a default argument so the module
+            # constant stays patchable (and so tests do not wait it out).
+            timeout = _WSL_APT_IDLE_WAIT_S
         deadline = time.monotonic() + timeout
+        if not_after is not None:
+            deadline = min(deadline, not_after)
         while True:
-            if not await BwrapSandbox._has_leftover_pkg_manager(distro):
+            if not await BwrapSandbox._has_leftover_pkg_manager(
+                distro, not_after=deadline
+            ):
                 return True
-            if time.monotonic() >= deadline:
+            nap = min(1.0, deadline - time.monotonic())
+            if nap <= 0:
                 return False
-            await asyncio.sleep(1.0)
+            await asyncio.sleep(nap)
 
     @staticmethod
     async def _reset_wsl_apt_state(
-        distro: str, *, timeout: float = _WSL_RESET_TIMEOUT_S
+        distro: str,
+        *,
+        timeout: float | None = None,
+        not_after: float | None = None,
     ) -> None:
         """Clear an apt/dpkg run left behind by a killed install.
 
@@ -1268,11 +1313,15 @@ class BwrapSandbox:
 
         Only restarts the distro when a leftover process is actually found, so
         the healthy path costs one bounded probe.  Both steps are clamped by
-        ``timeout`` so the caller's budget covers the whole cleanup.
+        ``not_after`` so the caller's total bound covers the whole cleanup.
         """
+        if timeout is None:
+            timeout = _WSL_RESET_TIMEOUT_S
         deadline = time.monotonic() + timeout
+        if not_after is not None:
+            deadline = min(deadline, not_after)
         if not await BwrapSandbox._has_leftover_pkg_manager(
-            distro, timeout=min(10.0, max(deadline - time.monotonic(), 1.0))
+            distro, timeout=10.0, not_after=deadline
         ):
             return
 
@@ -1283,7 +1332,8 @@ class BwrapSandbox:
         )
         await BwrapSandbox._run_bounded(
             ("wsl.exe", "--terminate", distro),
-            max(deadline - time.monotonic(), 1.0),
+            _bounded(30.0, deadline),
+            not_after=deadline,
         )
 
     @staticmethod
@@ -1487,14 +1537,14 @@ class BwrapSandbox:
             # 任何一条失败路径都不直接 return False：就绪探测才是判据。
             deadline = _t0 + _WSL_APT_TOTAL_BUDGET
             # Everything after the apt attempts — reaping, the readiness
-            # re-probe, the distro reset, the verdict probe — shares its own
-            # bounded allowance, so the whole call stays within
-            # budget + allowance instead of drifting past it.
-            cleanup_deadline = deadline + _WSL_APT_CLEANUP_ALLOWANCE_S
-
-            def _cleanup_left(floor: float) -> float:
-                """Time left in the cleanup allowance, never below ``floor``."""
-                return max(cleanup_deadline - time.monotonic(), floor)
+            # re-probe, the distro reset, the verdict probe — has to fit in the
+            # cleanup allowance, and the verdict probe's slice is reserved up
+            # front.  Clamping the earlier steps to ``cleanup_deadline`` is what
+            # makes the declared bound hold: no step here can be handed more
+            # time than the window has left, so the call ends by
+            # ``_t0 + _WSL_APT_TOTAL_BUDGET + _WSL_APT_CLEANUP_ALLOWANCE_S``.
+            verdict_deadline = deadline + _WSL_APT_CLEANUP_ALLOWANCE_S
+            cleanup_deadline = verdict_deadline - _WSL_VERDICT_PROBE_TIMEOUT_S
 
             for _attempt in range(_WSL_APT_ATTEMPTS):
                 remaining = deadline - time.monotonic()
@@ -1543,15 +1593,14 @@ class BwrapSandbox:
                         # only the Windows-side wrapper had been waiting).
                         if await BwrapSandbox._distro_ready(
                             distro,
-                            timeout=min(
-                                _WSL_CLEANUP_PROBE_TIMEOUT_S, _cleanup_left(1.0)
-                            ),
+                            timeout=_WSL_CLEANUP_PROBE_TIMEOUT_S,
+                            not_after=cleanup_deadline,
                         ):
                             # ...but only report success once apt/dpkg has
                             # actually stopped, or the next installer inherits
                             # the dpkg lock this one still holds.
                             if await BwrapSandbox._wait_for_pkg_managers_idle(
-                                distro, timeout=min(_WSL_APT_IDLE_WAIT_S, _cleanup_left(1.0))
+                                distro, not_after=cleanup_deadline
                             ):
                                 logger.info(
                                     "Sandbox dependencies are present in WSL distro "
@@ -1569,7 +1618,7 @@ class BwrapSandbox:
                         # Not ready (or not idle): the orphan apt/dpkg holds the
                         # dpkg lock and poisons the next attempt.
                         await BwrapSandbox._reset_wsl_apt_state(
-                            distro, timeout=min(_WSL_RESET_TIMEOUT_S, _cleanup_left(1.0))
+                            distro, not_after=cleanup_deadline
                         )
                         continue
                     stderr = stderr.decode("utf-8", errors="replace") if stderr else ""
@@ -1600,8 +1649,7 @@ class BwrapSandbox:
                                 err_msg,
                             )
                             await BwrapSandbox._reset_wsl_apt_state(
-                                distro,
-                                timeout=min(_WSL_RESET_TIMEOUT_S, _cleanup_left(1.0)),
+                                distro, not_after=cleanup_deadline
                             )
                             continue
                         logger.warning(
@@ -1622,10 +1670,13 @@ class BwrapSandbox:
             _install_lock.release()
 
         # Verify bwrap + python3/pip are now available.  This probe — not any
-        # apt exit status — decides the return value, so it keeps a floor even
-        # when the cleanup allowance is used up.
+        # apt exit status — decides the return value, which is why its slice is
+        # reserved out of the cleanup allowance and the steps above were
+        # clamped to end before it.
         if await BwrapSandbox._distro_ready(
-            distro, timeout=_cleanup_left(_WSL_VERDICT_PROBE_TIMEOUT_S)
+            distro,
+            timeout=_WSL_VERDICT_PROBE_TIMEOUT_S,
+            not_after=verdict_deadline,
         ):
             logger.info(
                 "Successfully installed sandbox dependencies in WSL distro "
