@@ -25,7 +25,7 @@
 
 import { test, expect } from '@playwright/test';
 import { join } from 'node:path';
-import { existsSync, readFileSync, readdirSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync } from 'node:fs';
 import {
   launchElectronApp,
   closeElectronApp,
@@ -71,6 +71,7 @@ describeFn('本地存储按登录账号划分（#1185）— 真实账号 live E2
   }, 180_000);
 
   test.afterAll(async () => {
+    stopCapture(); // 用例中途失败时的兜底：别让抓帧循环挂在已关闭的窗口上
     if (fixture?.electronApp) await closeElectronApp(fixture.electronApp, fixture.miqiHome);
   });
 
@@ -143,11 +144,42 @@ describeFn('本地存储按登录账号划分（#1185）— 真实账号 live E2
     return (await fixture.page.getByTestId('session-item').allInnerTexts()).join('\n');
   }
 
+  /** 关键节点截图（给 PR 留证据）。 */
+  const shotDir = join('test-results', 'issue-1185-live');
+  async function shoot(name: string): Promise<void> {
+    mkdirSync(shotDir, { recursive: true });
+    await fixture.page.screenshot({ path: join(shotDir, `${name}.png`) });
+  }
+
+  /**
+   * 逐帧抓拍，事后用 ffmpeg 合成录屏。
+   *
+   * Playwright 的 `video` 只对浏览器生效，**对 `_electron.launch()` 不录**，
+   * 所以录屏只能自己抓帧。间隔放宽到 700ms：抓帧和测试动作共用一条 CDP 连接，
+   * 太密会拖慢真实回合。
+   */
+  const framesDir = join(shotDir, 'frames');
+  let captureTimer: ReturnType<typeof setInterval> | null = null;
+  let frameNo = 0;
+  function startCapture(): void {
+    mkdirSync(framesDir, { recursive: true });
+    captureTimer = setInterval(() => {
+      void fixture.page
+        .screenshot({ path: join(framesDir, `frame-${String(frameNo++).padStart(4, '0')}.png`) })
+        .catch(() => undefined);
+    }, 700);
+  }
+  function stopCapture(): void {
+    if (captureTimer) clearInterval(captureTimer);
+    captureTimer = null;
+  }
+
   test(
     '逐个真实账号登录：看不到此前任何一个账号的对话，登回第一个自己的还在',
     // 每个账号都要登录 + 真实回一条，按账号数放宽：3 个账号 ≈ 10 分钟。
     { timeout: Math.max(TURN_TIMEOUT, 240_000 + ACCOUNTS.length * 120_000) },
     async () => {
+      startCapture();
       const page = fixture.page;
       /** 已发过消息的账号：label / sub / token / 它的会话目录。 */
       const sent: Array<{ label: string; sub: string; token: string; sessions: string }> = [];
@@ -177,6 +209,9 @@ describeFn('本地存储按登录账号划分（#1185）— 真实账号 live E2
           ).not.toContain(prev.token);
         }
 
+        // 这一屏正是「看不到前面任何账号的对话」——截图留证。
+        await shoot(`${account.label}-1-logged-in-no-previous`);
+
         // ── 再让这个账号说一句自己的，作为下一位的对照物 ────────────────
         const token = `ACCOUNTISOLATION${account.label}${Date.now()}`;
         await createNewConversation(page);
@@ -205,6 +240,7 @@ describeFn('本地存储按登录账号划分（#1185）— 真实账号 live E2
           .toContain(token);
 
         expect(readMarker('.active')).toBe(sub);
+        await shoot(`${account.label}-2-own-session`);
         sent.push({ label: account.label, sub, token, sessions: ownSessions });
         console.log(
           `[1185] ${account.label}(sub=${sub}) 工作区=${ownSessions} ` +
@@ -225,10 +261,13 @@ describeFn('本地存储按登录账号划分（#1185）— 真实账号 live E2
           other.token
         );
       }
+      await shoot('first-3-back-own-session-only');
+
       // 切走不删数据：前面每个账号的会话目录都还在。
       for (const s of sent) {
         expect(existsSync(s.sessions), `账号 ${s.label} 的会话目录不该因为换账号被删掉`).toBe(true);
       }
+      stopCapture();
     }
   );
 });
