@@ -135,20 +135,17 @@ def get_legacy_workspace_owner() -> str | None:
 def get_default_workspace_path() -> Path:
     """Default workspace root, account-scoped when an account is active.
 
-    ``<data root>`` is ``MIQI_HOME`` when set, else ``~/.miqi`` with the
-    historical ``~/.assistant`` fallback — the same root
-    :func:`miqi.utils.helpers.get_data_path` picks, so the runtime's workspace
-    and the CLI's no longer disagree on legacy installs.
+    ``<data root>`` is always :func:`get_miqi_home` — i.e. ``MIQI_HOME`` when
+    set, else ``~/.miqi``, with **no** ``~/.assistant`` fallback.  The marker
+    files above live under the same root, and the Desktop (``getConfigDir()``)
+    has no legacy fallback either: picking a different root here would make
+    Python read ``<root>/accounts/.active`` while resolving the workspace under
+    another root, so the two processes would disagree about where an account's
+    workspace is.  The fallback stays where it belongs, in
+    :func:`miqi.utils.helpers.get_data_path`, for callers that only need
+    "wherever this install's data lives" (review on #1185).
     """
-    if _miqi_home_is_configured():
-        data_root = get_miqi_home()
-    else:
-        default_home = get_miqi_home()
-        legacy_home = get_legacy_data_dir()
-        data_root = (
-            legacy_home if legacy_home.exists() and not default_home.exists() else default_home
-        )
-
+    data_root = get_miqi_home()
     sub = get_active_account()
     if sub is None or get_legacy_workspace_owner() == sub:
         # No account (CLI, tests, Desktop before login) — and the account that

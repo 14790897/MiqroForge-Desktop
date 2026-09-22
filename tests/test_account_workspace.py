@@ -254,3 +254,29 @@ def test_a_then_b_then_a_keeps_their_own_sessions_and_memory(data_root: Path):
     assert "desktop:bbb" not in keys
     memory = (Config().workspace_path / "memory" / "MEMORY.md").read_text(encoding="utf-8")
     assert memory == "A 的记忆"
+
+
+# ── 文件工具的「默认工作区」判定必须跟着账号走 ─────────────────────────
+
+
+def test_file_tools_treat_the_account_workspace_as_default(data_root: Path):
+    """账号工作区必须被文件工具认作**默认**工作区。
+
+    否则 `create_runtime_tool_registry` 会把它当用户自定义目录，跳过
+    `sessions/<key>/files` 的 per-session 资产隔离与台账根处理 —— 账号会话表面
+    上能用，文件却全落在工作区根上（#1185 评审抓到的回归，当时的单测与 E2E 都
+    没覆盖：E2E 里 A 恰好认领了共享根，所以只有 A 那侧是真的）。
+    """
+    from miqi.agent.tools.filesystem import _is_default_workspace
+
+    # 拿到账号级目录的账号
+    _set_active(data_root, ACCOUNT_A)
+    assert _is_default_workspace(Config().workspace_path) is True
+
+    # 认领了旧目录的账号（工作区是 <数据根>/workspace）同样成立
+    _set_legacy_owner(data_root, ACCOUNT_B)
+    _set_active(data_root, ACCOUNT_B)
+    assert _is_default_workspace(Config().workspace_path) is True
+
+    # 而真正自定义的目录不该被认成默认 —— 那会把项目文件藏进 sessions/<key>/files
+    assert _is_default_workspace(data_root / "some-project") is False

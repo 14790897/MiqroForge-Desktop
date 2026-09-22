@@ -474,6 +474,16 @@ describe('account-scoped workspace (#1185)', () => {
     expect(() => setActiveAccount('19')).toThrow(/账号标记写入失败/);
   });
 
+  it('throws when the marker cannot be cleared', () => {
+    // 把 .active 占成**目录**：`rmSync` 不带 recursive 会 EISDIR（force 只吞
+    // ENOENT），退一步的「写坏它」也会 EISDIR —— 两条路都堵死时必须抛。
+    // 静默成功会让 logout() 报 ok，而运行时继续按上一个账号解析工作区
+    // （#1185 评审）。
+    mkdirSync(join(accountsDir(), '.active'), { recursive: true });
+
+    expect(() => clearActiveAccount()).toThrow(/无法清除账号标记/);
+  });
+
   it('leaves the legacy workspace to the first account that claims it', () => {
     mkdirSync(join(home, 'workspace', 'sessions', 'desktop_k'), { recursive: true });
     setActiveAccount('19');

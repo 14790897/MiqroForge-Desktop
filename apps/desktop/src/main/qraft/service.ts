@@ -211,22 +211,39 @@ export class QraftService {
       // 的标记（上一轮运行写下的就是同一个 sub），写失败不改变现状；而新登录
       // 时标记指向的是上一个账号，写失败必须让登录失败。所以这里吞掉异常、记
       // 一条日志继续启动，由 persistLogin 那条路径负责终止登录。
+      let accountReady = true;
       try {
         this.activateAccount(stored.account?.sub);
       } catch (err) {
+        accountReady = false;
         this.options.log(
-          'WARN',
+          'ERROR',
           `qraft: 启动时激活账号失败（${
             err instanceof Error ? err.message : err
-          }）；沿用磁盘上已有的标记`
+          }）；本次不写 token 文件，以免凭据落进上一个账号的工作区`
         );
       }
       this.scheduleRefresh(stored);
-      this.syncTokenFile(stored);
+      // 标记没能换成当前账号时**不能**同步 token 文件：`syncTokenFile` 的路径由
+      // `getWorkspacePath()` 解析，而它跟的是磁盘上那个（此时可能还是别人的）标记
+      // —— 写下去就是把当前账号的凭据留进上一个账号的工作区（#1185 评审）。
+      if (accountReady) this.syncTokenFile(stored);
     } else {
       // 没有登录态（含 E2E loginBypass）：清掉可能残留的标记，否则运行时
       // 会停在上一次会话用过的账号工作区上。
-      clearActiveAccount();
+      //
+      // 这里同样只报告不抛出：构造函数不该因为清不掉一个标记而起不来 ——
+      // 紧接着的 else 语义是「本次以无账号态运行」，那正是标记清掉后的结果。
+      try {
+        clearActiveAccount();
+      } catch (err) {
+        this.options.log(
+          'ERROR',
+          `qraft: 启动时清除账号标记失败（${
+            err instanceof Error ? err.message : err
+          }）；运行时可能仍按上一个账号解析工作区`
+        );
+      }
     }
     // 启动时恢复内存去重集合：charge_id 来自展示历史；复合作业键来自
     // 独立无上限索引文件（展示历史有 200 条截断，索引必须完整）。
@@ -572,7 +589,19 @@ export class QraftService {
     // deleteTokenFile 先于 clearActiveAccount：token 文件的路径由当前工作区
     // 解析得出，标记清掉之后再删就会指向共享工作区（删错文件、留下凭据）。#1185
     this.deleteTokenFile();
-    clearActiveAccount();
+    try {
+      clearActiveAccount();
+    } catch (err) {
+      // 凭据已经清掉了，用户确实是登出状态 —— 不能因此把登出判失败。但这件事
+      // 必须看得见：标记还在，长期驻留的运行时在下一次登录成功之前会继续按
+      // **上一个账号**解析工作区（#1185 评审）。
+      this.options.log(
+        'ERROR',
+        `qraft: 退出登录时清除账号标记失败（${
+          err instanceof Error ? err.message : err
+        }）；在下一次登录成功之前，运行时可能仍按上一个账号解析工作区`
+      );
+    }
     this.refreshError = null;
     this.refreshRetryAttempt = 0;
     this.requiresRelogin = false;

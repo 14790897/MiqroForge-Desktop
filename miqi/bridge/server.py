@@ -528,6 +528,27 @@ def _retarget_file_logging(workspace: Path) -> None:
     _add_file_logging(workspace)
 
 
+def _retarget_sandbox_manager(workspace: Path) -> None:
+    """Point the shared SandboxManager's fallback workspace at *workspace* (#1185).
+
+    The manager is built once, from the first account's ``config.workspace_path``.
+    Its ``get_or_create`` resolves the sandbox workspace as: explicit override →
+    session resolver → ``self.workspace``.  Bridge tool callers pass no override,
+    and the resolver reads the live config (already account-correct) — so only
+    the fallback goes stale, and it is exactly what a new account's session
+    would mount when the resolver has nothing to say.
+
+    Best-effort: a failure here must not take down workspace initialization.
+    """
+    manager = getattr(_bridge_state, "_sandbox_manager", None)
+    if manager is None or isinstance(manager, str):
+        return  # 未创建 / 已标记为 "disabled"
+    try:
+        manager.retarget(workspace)
+    except Exception as exc:
+        _log(f"Sandbox manager retarget warning (non-fatal): {exc}")
+
+
 def _ensure_workspace_init() -> None:
     """Create workspace directories and template files if they don't exist.
 
@@ -550,6 +571,7 @@ def _ensure_workspace_init() -> None:
             return
 
         _retarget_file_logging(workspace)
+        _retarget_sandbox_manager(workspace)
         workspace.mkdir(parents=True, exist_ok=True)
         (workspace / "memory").mkdir(exist_ok=True)
         (workspace / "skills").mkdir(exist_ok=True)

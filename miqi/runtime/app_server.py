@@ -94,6 +94,9 @@ class ClientSessionRegistry:
         # 不含账号，而 bridge 换账号不重启进程——没有这一列就分不出「同一个会话」
         # 和「同一个会话，但已经换了主人」。
         self._session_account: dict[str, Path] = {}
+        # 最近一次 create_session 传进来的沙箱管理器：`get_session` 那条路径没有
+        # 这个参数，但退役跨账号会话时要销毁同一个键上的沙箱（#1185 评审）。
+        self._sandbox_manager: Any = None
         self._idle_timeout = idle_timeout_seconds
         self._lock = asyncio.Lock()
         # Phase 35 hardening: bridge_context holds shared state for handler DI.
@@ -158,6 +161,15 @@ class ClientSessionRegistry:
         # Phase 26: session_id is namespaced client_id:session_key
         # In Phase 27, switch to a pure opaque session_id with display name.
         session_id = f"{client_id}:{session_key}"
+
+        # 账号根在**任何 await 之前**采样（#1185 评审）：登录/登出是另一个进程里
+        # 的动作，下面建运行时、写 folder 绑定都要 await，中途换账号会把「为 A 建
+        # 的运行时」登记成 B 的 —— 于是 B 复用它就拿到了 A 的工作区、provider 与
+        # 沙箱，正好绕开本类要防的那件事。
+        account_root = _current_account_root()
+        # 记住这个 manager：get_session 那条路径也要能销毁同键沙箱。
+        if sandbox_manager is not None and not isinstance(sandbox_manager, str):
+            self._sandbox_manager = sandbox_manager
 
         async with self._lock:
             existing = self._sessions.get(session_id)
@@ -260,8 +272,23 @@ class ClientSessionRegistry:
                         code="INTERNAL",
                     ) from exc
 
+            # 这里的等待（start / folder 绑定）期间可能已经换了账号：这份运行时是
+            # 按采样时的账号建的，登记给当前账号就等于把它交给别人（#1185 评审）。
+            if _current_account_root() != account_root:
+                await self._discard_session(
+                    session_id,
+                    runtime,
+                    sandbox_manager=sandbox_manager,
+                    session_key=session_key,
+                    client_id=client_id,
+                )
+                raise AppServerError(
+                    "Account switched while the session was being created; "
+                    "please retry",
+                    code="INTERNAL",
+                )
+
             self._sessions[session_id] = runtime
-            account_root = _current_account_root()
             if account_root is not None:
                 self._session_account[session_id] = account_root
             self._client_sessions.setdefault(client_id, set()).add(session_id)
@@ -302,9 +329,11 @@ class ClientSessionRegistry:
         for owned in self._client_sessions.values():
             owned.discard(session_id)
 
-        if sandbox_manager is not None and session_key and hasattr(sandbox_manager, "destroy"):
+        # `get_session` 那条路径拿不到 sandbox_manager 参数，用创建时记下的那个。
+        manager = sandbox_manager if sandbox_manager is not None else self._sandbox_manager
+        if manager is not None and session_key and hasattr(manager, "destroy"):
             try:
-                await sandbox_manager.destroy(session_key, client_id=client_id)
+                await manager.destroy(session_key, client_id=client_id)
             except Exception as exc:
                 logger.warning(
                     "ClientSessionRegistry: sandbox destroy failed for {}: {}",
@@ -326,10 +355,22 @@ class ClientSessionRegistry:
         if client_id not in authorized:
             return None
         if session_id in self._sessions and not self._account_matches(session_id):
-            logger.info(
-                "ClientSessionRegistry: session {} belongs to another account — refusing cached runtime",
-                session_id,
-            )
+            # 不只拒绝，**退役**它（#1185 评审）：只拒绝的话，这份属于上一个账号
+            # 的运行时连同它在飞的回合与沙箱会一直活着，并把 A 的事件继续投给已经
+            # 登录的 B —— 而调用方很少会再用同一个 key 走 create_session，那条路
+            # 才是原来唯一会清理它的地方。
+            async with self._lock:
+                stale = self._sessions.get(session_id)
+                if stale is None or self._account_matches(session_id):
+                    return None  # 别的任务已经处理过 / 又切回来了
+                logger.info(
+                    "ClientSessionRegistry: session {} belongs to another account — retiring cached runtime",
+                    session_id,
+                )
+                session_key = session_id.split(":", 1)[1] if ":" in session_id else session_id
+                await self._discard_session(
+                    session_id, stale, session_key=session_key, client_id=client_id
+                )
             return None
         self._last_activity[session_id] = time.time()
         return self._sessions.get(session_id)

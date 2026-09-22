@@ -326,11 +326,12 @@ function getNestedStr(obj: Record<string, unknown>, ...keys: string[]): string {
  * 按原样用，同设备的其它账号也能看到。
  *
  * 判定口径必须跟主进程一致：`ipc/workspace-path.ts` 的 `getWorkspacePath()`
- * 把「空值或 `~/.miqi/workspace`」当作默认，其余一律当自定义目录展开。
+ * 把「空值或 `~/.miqi/workspace`」当作默认，其余一律按原始字符串当自定义目录
+ * 展开。这里**不能 trim**：`'  ~/.miqi/workspace  '` 在两侧都被当成自定义路径，
+ * trim 过就会提示「已隔离」，而实际上是共享的（#1185 评审）。
  */
 function isAccountScopedWorkspace(raw: string): boolean {
-  const trimmed = raw.trim();
-  return trimmed === '' || trimmed === '~/.miqi/workspace';
+  return raw === '' || raw === '~/.miqi/workspace';
 }
 
 import { SettingsToggle } from './components/SettingsToggle';

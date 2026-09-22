@@ -194,12 +194,35 @@ export function setActiveAccount(sub: string): void {
   }
 }
 
-/** Forget the logged-in account (logout). */
+/**
+ * Forget the logged-in account (logout).
+ *
+ * **Throws when the marker cannot be cleared** (#1185 review).  Swallowing it
+ * left `.active` pointing at the account that just logged out while
+ * `logout()` reported success, so the long-lived bridge kept resolving that
+ * account's workspace for anything asked before the next login.
+ *
+ * A failed delete first retries by *overwriting* the marker with content the
+ * readers reject (`'.'` fails {@link isValidAccountSub}), which has the same
+ * effect as "no account" — a lock that blocks `rmSync` does not necessarily
+ * block a write.
+ */
 export function clearActiveAccount(): void {
+  const file = getActiveAccountFile();
   try {
-    rmSync(getActiveAccountFile(), { force: true });
+    rmSync(file, { force: true });
+    return;
   } catch {
-    /* 删除失败：由下次登录覆写 */
+    /* 删除失败 → 退而求其次：写坏它 */
+  }
+  try {
+    writeFileSync(file, '.', { encoding: 'utf8' });
+  } catch (err) {
+    throw new Error(
+      `退出登录时无法清除账号标记（${file}）：${
+        err instanceof Error ? err.message : String(err)
+      }；运行时可能继续按上一个账号解析工作区`
+    );
   }
 }
 

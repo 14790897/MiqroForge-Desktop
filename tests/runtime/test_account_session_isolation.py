@@ -102,15 +102,21 @@ async def test_same_account_reuses_the_cached_runtime(data_root: Path, fake_runt
 async def test_get_session_refuses_a_runtime_from_another_account(
     data_root: Path, fake_runtime
 ):
-    """``chat.send`` 命中缓存走的是 get_session —— 这里也必须拦。"""
+    """``chat.send`` 命中缓存走的是 get_session —— 这里也必须拦。
+
+    而且要**退役**它，不只是拒绝：只拒绝的话，这份属于上一个账号的运行时连同
+    在飞的回合与沙箱会一直活着，把 A 的事件继续投给已经登录的 B（#1185 评审）。
+    """
     registry = ClientSessionRegistry()
     _set_active(data_root, "19")
     ws_a = data_root / "accounts" / "19" / "workspace"
-    await _open(registry, ws_a)
+    first = await _open(registry, ws_a)
 
     _set_active(data_root, "20")
 
     assert await registry.get_session("miqi-desktop", "miqi-desktop:desktop:1") is None
+    assert first.stopped, "属于上一个账号的运行时必须被停掉"
+    assert "miqi-desktop:desktop:1" not in registry._sessions
 
 
 @pytest.mark.asyncio
@@ -231,3 +237,31 @@ def test_account_root_follows_the_marker(data_root: Path):
     assert _current_account_root() == data_root / "workspace"
     _set_active(data_root, "19")
     assert _current_account_root() == data_root / "accounts" / "19" / "workspace"
+
+
+def test_sandbox_manager_retargets_on_account_switch(tmp_path: Path):
+    """切账号后沙箱管理器的**兜底**工作区必须跟着走（#1185 评审）。
+
+    `get_or_create` 的解析顺序是「显式 override → 会话解析器 → self.workspace」，
+    而工具侧调用一律不带 override，解析器读的是实时配置（本来就对）—— 只有
+    `self.workspace` 会停在创建时的那个账号。它正是「解析器没话说」时新账号的
+    会话会去挂载的目录，不跟就会挂到上一个账号的工作区上。
+    """
+    from miqi.sandbox.manager import SandboxManager
+
+    ws_a = tmp_path / "a"
+    ws_b = tmp_path / "b"
+    manager = SandboxManager(workspace=ws_a, enabled=False)
+    assert manager.workspace == ws_a
+
+    manager.retarget(ws_b)
+    assert manager.workspace == ws_b
+    # sandbox_base_dir 没被显式配置过 → 跟随 workspace
+    assert manager.sandbox_base_dir == ws_b / "sandboxes"
+
+    # 显式配置过的 base dir 是用户选择，不跟着走
+    explicit = tmp_path / "custom-base"
+    manager2 = SandboxManager(workspace=ws_a, sandbox_base_dir=explicit, enabled=False)
+    manager2.retarget(ws_b)
+    assert manager2.workspace == ws_b
+    assert manager2.sandbox_base_dir == explicit

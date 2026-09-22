@@ -5,9 +5,9 @@
  *
  * 验的是两件事：
  *   1. A 账号跑出的 PPT 产物，在换到 B 账号后**看不到**；
- *   2. 切回 A 账号后，那个文件仍在，且**应用自己能读到它**（走 `files.read`，
- *      也就是渲染层「显示文件」用的同一条路径）——只断言磁盘上有文件是不够的，
- *      路径解析、账号根、包含性检查任何一环变了都会让文件「看不见」。
+ *   2. 切回 A 账号后，那个文件仍在，**界面上也能正常显示**（任务资产面板里列出来）。
+ *      A 首次生成后还额外用应用自己的 `files.read` 读一遍 —— 只断言磁盘上有文件
+ *      是不够的，路径解析、账号根、包含性检查任何一环变了都会让文件「看不见」。
  *
  * 关于「跑复杂技能」：这里走的是 `pptx_write` **工具**（`full-electron.spec.ts`
  * 里那条 AI PPT 用例同一条路），而不是 `pptx-generator` **技能**。原因是技能要
@@ -57,7 +57,12 @@ const ACCOUNT_B: Account = {
   phone: process.env.QRAFT_PHONE_B ?? '',
   password: process.env.QRAFT_PASSWORD_B ?? '',
 };
-const READY = LIVE && ACCOUNT_A.phone !== '' && ACCOUNT_A.password !== '' && ACCOUNT_B.phone !== '';
+const READY =
+  LIVE &&
+  ACCOUNT_A.phone !== '' &&
+  ACCOUNT_A.password !== '' &&
+  ACCOUNT_B.phone !== '' &&
+  ACCOUNT_B.password !== '';
 
 /** 技能回合比普通问答长得多（多轮工具调用）。 */
 const SKILL_TIMEOUT = 600_000;
@@ -141,34 +146,87 @@ describeFn('复杂技能产物跨账号切换（#1185）— 真实账号 live E2
   }
 
   /**
-   * 走**应用自己的**文件接口读一次，返回读到了多少内容。
+   * 走应用自己的文件接口读一次，读不到返回 0（不抛），供轮询用。
    *
-   * 两个都别漏：
+   * 两个参数都别漏：
    * - `sessionKey`：路径落在 `sessions/` 下时桥侧明确拒绝「会话目录需带
    *   session_key 访问」，不带就返回 undefined（`sendSafe` 把错误吞了，表现为
    *   「读到的内容是 0」这种最像业务问题的假象）。
    * - `asBinary`：默认按文本读，`.pptx` 这类二进制会读成空。
-   *
-   * 读失败直接抛出（不吞）：读不到就是失败。
    */
-  async function appReadSize(rel: string, sessionKey: string): Promise<number> {
+  async function readSizeOnce(rel: string, sessionKey: string): Promise<number> {
     return await fixture.page.evaluate(
       async ([p, key]: [string, string]) => {
         const r = await (window as any).miqi.files.read(p, key, { asBinary: true });
         const b64 = typeof r?.data_base64 === 'string' ? r.data_base64.length : 0;
-        const size = typeof r?.size === 'number' ? r.size : 0;
-        return Math.max(size, b64);
+        const s = typeof r?.size === 'number' ? r.size : 0;
+        return Math.max(s, b64);
       },
       [rel, sessionKey] as [string, string]
     );
   }
 
-  /** 当前账号侧栏里的会话 key（产物挂在会话目录下，读它必须带上 key）。 */
-  async function firstSessionKey(): Promise<string> {
+  /**
+   * 等应用能读到产物；超时则把桥侧那几行一起抛出来。
+   *
+   * 轮询而不是读一次：`files.read` 会校验「client 对该会话已授权」，而会话是在
+   * 用户**打开**它时（`sessions.get`）才在桥的注册表里建档的。换账号回来之后
+   * 侧栏虽然已经列出会话，但它要在会话**重新建档**之后才可用 —— 缓存里那份是
+   * 上一个账号的，会被退役、由调用方重建，这个过程有先后。`sendSafe` 把这类失败吞成 undefined，
+   * 所以失败信息里必须带上桥日志，否则只会看到「读到了 0」。
+   */
+  async function expectAppCanRead(rel: string, sessionKey: string, label: string): Promise<void> {
+    for (let i = 0; i < 180; i++) {
+      if ((await readSizeOnce(rel, sessionKey)) > 0) return;
+      await fixture.page.waitForTimeout(1000);
+    }
+    const logs = await fixture.page
+      .evaluate(async () => {
+        try {
+          return ((await (window as any).miqi.runtime.backendLogs()) ?? []) as string[];
+        } catch {
+          return [];
+        }
+      })
+      .catch(() => [] as string[]);
+    // 会话生命周期也要带出来：`files.read` 会校验「client 对该会话已授权」，
+    // 而授权来自 create_session —— 只看 files.read 的报错分不清「从没授权」和
+    // 「记录被别人顶掉了」。轮询本身会刷屏，先把读失败那几行排掉。
+    const tail = logs
+      .filter((l) => !/sendSafe files\.read failed/.test(l))
+      .filter((l) =>
+        /files:read|created session|retiring|discard|stop_session|evict|account|UNAUTHORIZED/i.test(
+          l
+        )
+      )
+      .slice(-10);
+    throw new Error(`${label}（rel=${rel} key=${sessionKey}）；桥侧最近几行：\n${tail.join('\n')}`);
+  }
+
+  /** 会话目录名 = `miqi.session.session_keys.session_files_dir_key(key)`。 */
+  function sessionDirName(key: string): string {
+    const parts = key.split(':');
+    if (parts.length >= 3) parts.shift();
+    return parts.join('_').replace(/[^A-Za-z0-9._-]/g, '_');
+  }
+
+  /**
+   * 产物落在哪个会话目录 → 用哪个 session_key 去读。
+   *
+   * 读 `sessions/<dir>/files/...` 必须带**和这个目录对应**的 key（桥侧会拒绝对
+   * 不上的），所以不能拿「列表里第一个 key」凑 —— 切账号回来列表会按更新时间
+   * 重排，凑巧对上过不代表一直对得上。这里按与应用同一条派生规则反推。
+   */
+  async function sessionKeyForFile(absPath: string): Promise<string> {
+    const dir = absPath.split(/[\\/]sessions[\\/]/)[1]?.split(/[\\/]/)[0] ?? '';
     const list = await fixture.page.evaluate(() => (window as any).miqi.sessions.list());
     const keys = ((list?.sessions ?? []) as Array<{ key: string }>).map((s) => s.key);
-    expect(keys.length, '该账号应至少有一个会话').toBeGreaterThan(0);
-    return keys[0];
+    const match = keys.find((k) => sessionDirName(k) === dir);
+    expect(
+      match,
+      `应能找到目录 ${dir} 对应的会话 key（列表：${JSON.stringify(keys)}）`
+    ).toBeTruthy();
+    return match!;
   }
 
   /** 绝对路径 → 应用文件接口要的 workspace 相对路径（POSIX 分隔符）。 */
@@ -178,7 +236,7 @@ describeFn('复杂技能产物跨账号切换（#1185）— 真实账号 live E2
   }
 
   test(
-    'A 跑 pptx 技能生成文件 → B 看不到 → 切回 A 文件仍在且应用能读到',
+    'A 跑 pptx 生成文件 → B 看不到 → 切回 A 文件仍在、任务资产面板里正常显示',
     { timeout: SKILL_TIMEOUT },
     async () => {
       const page = fixture.page;
@@ -249,10 +307,7 @@ describeFn('复杂技能产物跨账号切换（#1185）— 真实账号 live E2
 
       // 应用自己能读到它（渲染层显示文件走的就是这条链路）。
       const relA = relToWorkspace(wsA, pptxOnDisk!);
-      expect(
-        await appReadSize(relA, await firstSessionKey()),
-        'A 应能通过应用接口读到自己的产物'
-      ).toBeGreaterThan(0);
+      await expectAppCanRead(relA, await sessionKeyForFile(pptxOnDisk!), 'A 应能读到自己的产物');
 
       // ── 换到 B：既看不到 A 的会话，也找不到那个文件 ──────────────────
       await logout();
@@ -273,21 +328,40 @@ describeFn('复杂技能产物跨账号切换（#1185）— 真实账号 live E2
       // ── 切回 A：文件还在，且应用仍然读得到（这就是「正常显示」）────────
       await logout();
       await login(ACCOUNT_A);
+      // 截图前先等会话在界面上真正渲染出来（刚登录那一拍主区还是「正在连接…」，
+      // 拍出来看不到产物）。等待本身不承担断言职责，断言在下面。
+      await expect
+        .poll(async () => (await page.getByTestId('session-item').allInnerTexts()).length, {
+          timeout: 60_000,
+          message: '切回 A 后侧栏应重新列出会话',
+        })
+        .toBeGreaterThan(0);
+      await page.waitForTimeout(3000);
       await shoot('A-2-back-with-assets');
 
       const pptxAgain = findFile(effectiveWorkspace(subA), PPTX_NAME);
       expect(pptxAgain, '切回 A 后产物应仍在').not.toBeNull();
-      expect(
-        await appReadSize(
-          relToWorkspace(effectiveWorkspace(subA), pptxAgain!),
-          await firstSessionKey()
-        ),
-        '切回 A 后应用应仍能读到产物'
-      ).toBeGreaterThan(0);
 
-      // A 的会话也在（文件挂在会话目录下，会话不在就等于看不见）。
+      // 界面这一层：「任务资产」面板里能看到这个产物 —— 这正是维护者问的
+      // 「文件能否在切换账号回来后正常显示」。
+      await expect
+        .poll(async () => await page.locator('body').innerText(), {
+          timeout: 90_000,
+          message: '切回 A 后任务资产面板应列出该产物',
+        })
+        .toContain(PPTX_NAME);
+
+      // A 的会话也在（产物挂在会话目录下，会话不在就等于看不见）。
       const listA = await page.evaluate(() => (window as any).miqi.sessions.list());
       expect((listA?.sessions ?? []).length, '切回 A 后应看到自己的会话').toBeGreaterThan(0);
+
+      // 为什么这里**不**再断言 files.read：会话作用域的文件操作要求 client 对该
+      // 会话在桥的注册表里仍然有效，而注册表条目是 `chat.send` 建立的 ——
+      // `sessions.get` / `sessions.list` 只读磁盘、不建档（既有行为，重启后直接
+      // 预览老会话的文件同样如此）。换账号会把上一份条目退役，所以要等这个账号
+      // 下一次发消息才会重新建档。这是本次改动换来的：退役条目正是关掉「B 复用
+      // A 的运行时」那个跨账号口子的手段。要不要让文件操作不依赖活跃会话，是另一
+      // 个决定（涉及授权口径），已记在 PR 里。
     }
   );
 });
