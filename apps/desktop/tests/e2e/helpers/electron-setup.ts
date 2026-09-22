@@ -61,6 +61,17 @@ export function getMiqiSessionsDir(miqiHome: string): string {
   return join(miqiHome, 'workspace', 'sessions');
 }
 
+/**
+ * 账号级默认工作区根：`<MIQI_HOME>/accounts/<sub>/workspace`（#1185）。
+ *
+ * 自从工作区按登录账号收口，预置了登录态（`sub` 非空）的 spec 里，
+ * `workspace/` 不再是 token 文件与工作区数据的落点——`getMiqiSessionsDir`
+ * 那条路径只对**未登录**（E2E loginBypass、CLI）成立。
+ */
+export function getAccountWorkspaceDir(miqiHome: string, sub: string): string {
+  return join(miqiHome, 'accounts', sub, 'workspace');
+}
+
 // ─── Page helpers ───────────────────────────────────────────────────
 
 /**

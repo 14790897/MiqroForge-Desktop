@@ -25,6 +25,12 @@ import {
 } from 'fs';
 import { randomUUID } from 'crypto';
 import { dirname, join } from 'path';
+import {
+  claimLegacyWorkspace,
+  clearActiveAccount,
+  isValidAccountSub,
+  setActiveAccount,
+} from '../ipc/workspace-path';
 import { CookieJar } from './cookie-jar';
 import { decryptMcpGatewayKey } from './mcp-gateway-key';
 import { QraftClient, QraftError, type QraftLogger, type ResolvedQraftConfig } from './client';
@@ -198,8 +204,46 @@ export class QraftService {
     const stored = this.options.store.load();
     if (stored) {
       this.restoreJar(stored);
+      // 账号维度的工作区根（#1185）必须在 syncTokenFile 之前就位：token
+      // 文件写在 <workspace>/.qraft/ 下，先写就会落进上一个账号的工作区。
+      //
+      // 这里与 persistLogin 里的调用不同：启动时只是**重申**一个通常已经正确
+      // 的标记（上一轮运行写下的就是同一个 sub），写失败不改变现状；而新登录
+      // 时标记指向的是上一个账号，写失败必须让登录失败。所以这里吞掉异常、记
+      // 一条日志继续启动，由 persistLogin 那条路径负责终止登录。
+      let accountReady = true;
+      try {
+        this.activateAccount(stored.account?.sub);
+      } catch (err) {
+        accountReady = false;
+        this.options.log(
+          'ERROR',
+          `qraft: 启动时激活账号失败（${
+            err instanceof Error ? err.message : err
+          }）；本次不写 token 文件，以免凭据落进上一个账号的工作区`
+        );
+      }
       this.scheduleRefresh(stored);
-      this.syncTokenFile(stored);
+      // 标记没能换成当前账号时**不能**同步 token 文件：`syncTokenFile` 的路径由
+      // `getWorkspacePath()` 解析，而它跟的是磁盘上那个（此时可能还是别人的）标记
+      // —— 写下去就是把当前账号的凭据留进上一个账号的工作区（#1185 评审）。
+      if (accountReady) this.syncTokenFile(stored);
+    } else {
+      // 没有登录态（含 E2E loginBypass）：清掉可能残留的标记，否则运行时
+      // 会停在上一次会话用过的账号工作区上。
+      //
+      // 这里同样只报告不抛出：构造函数不该因为清不掉一个标记而起不来 ——
+      // 紧接着的 else 语义是「本次以无账号态运行」，那正是标记清掉后的结果。
+      try {
+        clearActiveAccount();
+      } catch (err) {
+        this.options.log(
+          'ERROR',
+          `qraft: 启动时清除账号标记失败（${
+            err instanceof Error ? err.message : err
+          }）；运行时可能仍按上一个账号解析工作区`
+        );
+      }
     }
     // 启动时恢复内存去重集合：charge_id 来自展示历史；复合作业键来自
     // 独立无上限索引文件（展示历史有 200 条截断，索引必须完整）。
@@ -372,6 +416,10 @@ export class QraftService {
     aiGateway?: QraftAiGateway,
     mcpGatewayKey?: string
   ): void {
+    // 先切工作区根再落 token 文件：syncTokenFile 的路径由 workspace 解析
+    // 得出（qraft/ipc.ts 的 tokenFilePath），顺序反了会把凭据写进上一个
+    // 账号的工作区。
+    this.activateAccount(account.sub);
     const state: QraftStoredState = {
       version: 1,
       env,
@@ -538,7 +586,22 @@ export class QraftService {
     this.inFlightRefresh = null;
     this.jar.clear();
     this.options.store.clear();
+    // deleteTokenFile 先于 clearActiveAccount：token 文件的路径由当前工作区
+    // 解析得出，标记清掉之后再删就会指向共享工作区（删错文件、留下凭据）。#1185
     this.deleteTokenFile();
+    try {
+      clearActiveAccount();
+    } catch (err) {
+      // 凭据已经清掉了，用户确实是登出状态 —— 不能因此把登出判失败。但这件事
+      // 必须看得见：标记还在，长期驻留的运行时在下一次登录成功之前会继续按
+      // **上一个账号**解析工作区（#1185 评审）。
+      this.options.log(
+        'ERROR',
+        `qraft: 退出登录时清除账号标记失败（${
+          err instanceof Error ? err.message : err
+        }）；在下一次登录成功之前，运行时可能仍按上一个账号解析工作区`
+      );
+    }
     this.refreshError = null;
     this.refreshRetryAttempt = 0;
     this.requiresRelogin = false;
@@ -550,6 +613,28 @@ export class QraftService {
     this.inFlightCharges.clear();
     this.options.log('INFO', 'qraft: 已退出登录（cookie 与 token 均已清除）');
     this.emitStatus();
+  }
+
+  /**
+   * 把工作区根切到 `sub` 账号名下（#1185）。
+   *
+   * 未登录 / 拿不到合法 sub（老平台响应缺字段、sub 为空）时退回共享工作区
+   * 而不是猜一个目录：分享别人工作区比多一个共享目录更糟。
+   *
+   * 标记写不进去时**抛出**——调用方（`persistLogin`）必须让这次登录失败，
+   * 否则磁盘上留下的是上一个账号的标记，而长期驻留的运行时每次解析工作区都会
+   * 读它，于是新账号继续在上一个账号的工作区里干活。
+   */
+  private activateAccount(sub: string | undefined): void {
+    if (!isValidAccountSub(sub)) {
+      clearActiveAccount();
+      return;
+    }
+    // 认领在前：存量 `~/.miqi/workspace` 归首个登录账号，之后 getWorkspacePath
+    // 才会把它解析成这个账号的工作区。认领本身是尽力而为的：认领失败只是让这个
+    // 账号拿到自己的空目录，不会把它带进别人的数据里。
+    claimLegacyWorkspace(sub);
+    setActiveAccount(sub);
   }
 
   /**

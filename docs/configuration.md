@@ -102,7 +102,23 @@ MiQroForge Desktop 的全局配置存储在 `~/.miqi/config.json` 中。
 | `max_tokens` | int | 16000 | 单次响应最大 Token |
 | `memory_window` | int | 100 | 对话记忆窗口大小 |
 | `name` | string | "miqi" | Agent 默认名称 |
-| `workspace` | string | "~/.miqi/workspace" | 默认工作区路径 |
+| `workspace` | string | "~/.miqi/workspace" | 默认工作区路径；保留默认值（或留空）时按登录账号隔离，见下 |
+
+#### 工作区按登录账号划分（#1185）
+
+会话历史、任务资产、记忆（`memory/`）、技能（`skills/`）、经验（`traces/`）都挂在
+工作区根下，所以工作区根就是账号维度的落点：
+
+| `workspace` 的值 | 实际根目录 |
+|------------------|-----------|
+| 默认值 `~/.miqi/workspace` 或留空 | 已登录：`<数据根>/accounts/<账号>/workspace`；未登录（CLI / 测试）：`<数据根>/workspace` |
+| 升级前就存在的 `<数据根>/workspace` | 由**首个在设备上登录的账号**认领并就地保留，其余账号各用自己的 `accounts/<账号>/workspace`；已经在新布局下用过的账号不会被改判过去 |
+| 其它任意目录（设置页「工作目录」填过值） | 按原样使用，**不**按账号隔离 —— 同一台设备上的其它账号也能看到该目录内容（设置页会就地提示） |
+
+`<数据根>` 即 `MIQI_HOME`，未设置时为 `~/.miqi`。设备级（不随账号变化）的数据：
+`config.json`、安装目录、Chromium profile、WSL 沙箱发行版本体、`~/.miqi/snapshots/`
+（按内容哈希寻址的文件回滚快照）。桌面端把当前账号记在 `<数据根>/accounts/.active`，
+Python 侧每次解析工作区时读取，因此登录/登出**不需要重启 bridge 进程**。
 
 ### agents.self_improvement — 自改进系统
 

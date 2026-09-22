@@ -1,12 +1,13 @@
 """Configuration schema using Pydantic."""
 
-import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from pydantic.alias_generators import to_camel
 from pydantic_settings import BaseSettings
+
+from miqi.paths import DEFAULT_WORKSPACE_VALUE, get_default_workspace_path
 
 if TYPE_CHECKING:
     from miqi.providers.base import LLMProvider
@@ -207,7 +208,9 @@ class AgentDefaults(Base):
     """Default agent configuration."""
 
     name: str = DEFAULT_AGENT_NAME
-    workspace: str = "~/.miqi/workspace"
+    # 序列化默认值 = 「跟随数据根」（默认工作区），workspace_path 据此决定
+    # 是否套用 MIQI_HOME 重定基与账号维度（#1185）。
+    workspace: str = DEFAULT_WORKSPACE_VALUE
     model: str = "anthropic/claude-opus-4-5"
     max_tokens: int = 8192
     temperature: float = 0.1
@@ -640,18 +643,27 @@ class Config(BaseSettings):
     def workspace_path(self) -> Path:
         """Get expanded workspace path.
 
-        When the raw workspace equals the serialized default
-        ``~/.miqi/workspace`` *and* MIQI_HOME is explicitly set to a
-        non-blank value, the runtime path is rebased to
-        ``<MIQI_HOME>/workspace`` so that the default follows the
-        configured MiQi home.  An explicit (non-default) workspace is
-        never rebased — it is expanded as-is.
+        A raw workspace that is empty or equal to the serialized default
+        ``~/.miqi/workspace`` means "follow the data root": the path is
+        resolved by :func:`miqi.paths.get_default_workspace_path`, which
+        rebases it onto ``MIQI_HOME`` when that is set and scopes it to the
+        logged-in account (#1185) — ``<data root>/accounts/<sub>/workspace``,
+        or the legacy ``<data root>/workspace`` for the account that claimed
+        it.  An explicit (non-default) workspace is never rebased nor
+        account-scoped: the user pointed at that directory on purpose, and it
+        is shared by every account on the device (see the 自定义工作区 note in
+        #1185).
+
+        Empty counts as the default because that is what clearing the 工作目录
+        field writes (the Desktop's placeholder is the default path) and what
+        every other reader of a workspace string already assumes — see
+        :func:`miqi.utils.helpers.get_workspace_path`, which treats a falsy
+        argument as "unset".  Resolving it literally handed the runtime
+        ``Path("").resolve()``, i.e. the bridge process's current directory.
         """
         raw = self.agents.defaults.workspace
-        if raw == "~/.miqi/workspace" and os.environ.get("MIQI_HOME", "").strip():
-            from miqi.paths import get_miqi_home
-
-            return get_miqi_home() / "workspace"
+        if not raw or raw == DEFAULT_WORKSPACE_VALUE:
+            return get_default_workspace_path()
         return Path(raw).expanduser().resolve()
 
     def _match_provider(self, model: str | None = None) -> tuple["ProviderConfig | None", str | None]:
