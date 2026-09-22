@@ -210,6 +210,23 @@ def test_unknown_current_account_is_a_mismatch(data_root: Path, monkeypatch, fak
     assert first.stopped
 
 
+@pytest.mark.asyncio
+async def test_stop_session_clears_the_account_record(data_root: Path, fake_runtime):
+    """停掉的会话不能留下归属记录（空闲淘汰会反复走到这条路径）。"""
+    registry = ClientSessionRegistry()
+    _set_active(data_root, "19")
+    ws_a = data_root / "accounts" / "19" / "workspace"
+    session_id = "miqi-desktop:desktop:1"
+
+    await _open(registry, ws_a)
+    assert session_id in registry._session_account
+
+    await registry.stop_session(session_id)
+
+    assert session_id not in registry._session_account
+    assert session_id not in registry._sessions
+
+
 def test_account_root_follows_the_marker(data_root: Path):
     assert _current_account_root() == data_root / "workspace"
     _set_active(data_root, "19")

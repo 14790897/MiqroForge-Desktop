@@ -379,6 +379,9 @@ class ClientSessionRegistry:
             client_set.discard(session_id)
         self._session_clients.pop(session_id, None)
         self._last_activity.pop(session_id, None)
+        # 账号记录跟着一起清（#1185）：漏掉它，每次空闲淘汰都会留下一份已停
+        # 会话的归属记录，而且那条记录还会让下一次同键复用的比对拿到过期账号。
+        self._session_account.pop(session_id, None)
 
     async def stop_all(self) -> None:
         """Stop all sessions (shutdown hook)."""
