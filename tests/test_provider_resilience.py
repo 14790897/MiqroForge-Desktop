@@ -543,21 +543,35 @@ class _FakeStreamChunk:
 
 
 class _FakeStream:
-    """Async iterable yielding pre-defined chunks."""
+    """Async iterable yielding pre-defined chunks.
 
-    def __init__(self, chunks: list[_FakeStreamChunk], *, hang: bool = False) -> None:
+    ``hang`` stalls before the first chunk (the first-token timeout fires);
+    ``hang_after`` yields the chunks and only then stalls (the idle timeout
+    fires).
+    """
+
+    def __init__(
+        self,
+        chunks: list[_FakeStreamChunk],
+        *,
+        hang: bool = False,
+        hang_after: bool = False,
+    ) -> None:
         self._chunks = chunks
         self._index = 0
         self._hang = hang
+        self._hang_after = hang_after
 
     def __aiter__(self) -> "_FakeStream":
         return self
 
     async def __anext__(self) -> _FakeStreamChunk:
+        if self._index >= len(self._chunks):
+            if self._hang or self._hang_after:
+                await asyncio.Event().wait()
+            raise StopAsyncIteration
         if self._hang:
             await asyncio.Event().wait()
-        if self._index >= len(self._chunks):
-            raise StopAsyncIteration
         chunk = self._chunks[self._index]
         self._index += 1
         return chunk
@@ -684,9 +698,14 @@ async def test_openai_stream_preconnect_retry(monkeypatch: Any) -> None:
 
 
 @pytest.mark.asyncio
-async def test_openai_stream_idle_timeout_yields_terminal_error(monkeypatch: Any) -> None:
+async def test_openai_stream_first_token_timeout_yields_terminal_error(monkeypatch: Any) -> None:
     _patch_provider_sleep(monkeypatch)
-    provider = OpenAIProvider(api_key="sk-test", stream_idle_timeout=0.01)
+    # The stream stalls before its first chunk, so it is the FIRST-token
+    # timeout that fires here; the idle one is pinned too so neither default
+    # (60 s and 30 s) can turn this test into real sleeping on CI.
+    provider = OpenAIProvider(
+        api_key="sk-test", stream_idle_timeout=0.01, first_token_timeout=0.01,
+    )
 
     async def fake_create(**kw: Any) -> Any:
         return _FakeStream([], hang=True)
@@ -701,6 +720,28 @@ async def test_openai_stream_idle_timeout_yields_terminal_error(monkeypatch: Any
     assert events[0].kind == "completed"
     assert events[0].response.finish_reason == "error"
     assert events[0].response.error_kind == "transient"
+
+
+@pytest.mark.asyncio
+async def test_openai_stream_idle_timeout_yields_terminal_error(monkeypatch: Any) -> None:
+    """A stall AFTER the first chunk is the idle timeout, not the first-token one."""
+    _patch_provider_sleep(monkeypatch)
+    provider = OpenAIProvider(
+        api_key="sk-test", stream_idle_timeout=0.01, first_token_timeout=0.01,
+    )
+
+    async def fake_create(**kw: Any) -> Any:
+        return _FakeStream([_FakeStreamChunk("hi")], hang_after=True)
+
+    provider._client = SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=fake_create)),
+        timeout=600.0,
+    )
+
+    events = [event async for event in provider.stream_chat(messages=[{"role": "user", "content": "hi"}])]
+    assert [event.kind for event in events] == ["content_delta", "completed"]
+    assert events[-1].response.finish_reason == "error"
+    assert events[-1].response.error_kind == "transient"
 
 
 # ---------------------------------------------------------------------------
