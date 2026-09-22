@@ -172,6 +172,38 @@ async def test_failure_before_any_output_falls_back_to_chat(monkeypatch):
     assert events[-1].response.content == "兜底答复"
 
 
+async def test_terminal_error_before_output_skips_chat_fallback(monkeypatch):
+    """#1190：流前终态错误（配额耗尽 → PAYMENT_REQUIRED）不再回退 chat()——
+    再发一次注定失败的请求纯属浪费；按 chat() 的契约直接交回 error 响应。"""
+    import anthropic
+
+    quota_err = anthropic.RateLimitError.__new__(anthropic.RateLimitError)
+    Exception.__init__(
+        quota_err,
+        "Error code: 429 - {'error': {'message': 'Token quota exhausted, please contact the administrator', 'code': 'consumer_token_quota_exceeded', 'type': 'quota_exceeded'}}",
+    )
+
+    class _QuotaExhaustedStream(_FakeStream):
+        async def __aiter__(self):
+            raise quota_err
+            yield  # pragma: no cover — async generator 语义占位
+
+    provider = _provider()
+    _attach(provider, _QuotaExhaustedStream([]))
+
+    async def fake_chat(**kwargs):
+        raise AssertionError("终态错误不得回退调用 chat()")
+
+    monkeypatch.setattr(provider, "chat", fake_chat)
+
+    events = [e async for e in provider.stream_chat([{"role": "user", "content": "hi"}])]
+
+    assert [e.kind for e in events] == ["completed"]
+    resp = events[-1].response
+    assert resp.finish_reason == "error"
+    assert resp.error_kind == "payment_required"
+
+
 async def test_failure_mid_stream_surfaces_error_response():
     provider = _provider()
     _attach(provider, _FakeStream([_delta("text_delta", text="半截")], raise_after=1))
