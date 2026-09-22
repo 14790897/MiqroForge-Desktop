@@ -64,7 +64,11 @@ def _get_skills_loader(registry: Any) -> Any:
     state = get_bridge_state(registry)
     config = state.load_config()
     from miqi.agent.skills import SkillsLoader
-    return SkillsLoader(workspace=config.workspace_path)
+
+    return SkillsLoader(
+        workspace=config.workspace_path,
+        sandbox_manager=getattr(state, "_sandbox_manager", None),
+    )
 
 
 async def _invalidate_and_notify(client_id: str, registry: Any, name: str) -> None:

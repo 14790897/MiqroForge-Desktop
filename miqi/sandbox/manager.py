@@ -60,6 +60,31 @@ def sandbox_is_active(sandbox_manager: Any) -> bool:
     )
 
 
+def sandbox_marker_environment(sandbox_manager: Any) -> dict[str, str] | None:
+    """Marker-environment overrides for the sandbox interpreter, or None.
+
+    Skill requirements with platform markers (``; sys_platform == "linux"``)
+    must be evaluated against the interpreter that runs the skill's scripts.
+    When exec runs inside the WSL/bwrap sandbox that interpreter is Linux,
+    while the loader/provisioner themselves run on the host (Windows).  Return
+    the OS-identity keys that differ so callers can pass them to
+    ``Marker.evaluate(environment=...)``; the remaining keys (python_version,
+    platform_machine, …) stay host defaults — the sandbox python is the
+    distro's python3, whose exact version/arch are not known without an async
+    probe, and platform markers are overwhelmingly OS-gated.
+
+    Returns ``None`` when the sandbox is inactive so callers keep the default
+    host environment.
+    """
+    if not sandbox_is_active(sandbox_manager):
+        return None
+    return {
+        "os_name": "posix",
+        "sys_platform": "linux",
+        "platform_system": "Linux",
+    }
+
+
 _git_bash_checked = False
 _git_bash_path: str | None = None
 

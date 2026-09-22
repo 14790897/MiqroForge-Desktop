@@ -15,8 +15,8 @@
  *   by having the elevated process write them to a file (see runElevated) —
  *   without that, every failure mode collapses into one fallback message.
  */
-import { spawnSync } from 'child_process';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
+import { spawn, spawnSync } from 'child_process';
+import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import type { WslFeatureState } from '../../shared/ipc';
@@ -211,62 +211,213 @@ export function summarizeElevated(r: ElevatedRunResult, maxLen = 300): string {
  * Run a command with administrator rights (UAC prompt) and recover its exit
  * code and output.  Blocks until the elevated process exits.
  */
-export function runElevated(payload: ElevatedPayload, timeoutMs = 300000): ElevatedRunResult {
-  let dir: string | null = null;
+interface ElevatorPaths {
+  /** Temp directory holding the trampoline's result files. */
+  dir: string;
+  outPath: string;
+  errPath: string;
+  codePath: string;
+  trampolinePath: string;
+}
+
+/** Temp-dir layout + trampoline command line for one elevated run. */
+function prepareElevator(payload: ElevatedPayload): { paths: ElevatorPaths; trampoline: string } {
+  // Also the cleanup hook for runs that timed out and were never collected.
+  sweepStaleElevatorDirs();
+  const dir = mkdtempSync(join(tmpdir(), 'miqi-elev-'));
+  const paths: ElevatorPaths = {
+    dir,
+    outPath: join(dir, 'out.txt'),
+    errPath: join(dir, 'err.txt'),
+    codePath: join(dir, 'exit.txt'),
+    trampolinePath: join(dir, 'trampoline.txt'),
+  };
+
+  const elevated = payload.powershell
+    ? powershellCapture(payload.powershell, paths.outPath, paths.errPath, paths.codePath)
+    : commandCapture(payload.command ?? { file: '' }, paths.outPath, paths.errPath, paths.codePath);
+
+  const trampoline =
+    "$ErrorActionPreference='Stop'; " +
+    `try { Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-EncodedCommand','${encodeCommand(elevated)}') ` +
+    '-Verb RunAs -Wait -ErrorAction Stop } ' +
+    'catch { ' +
+    `if ($_.Exception.NativeErrorCode -eq ${ELEVATION_CANCELLED}) { exit ${ELEVATION_CANCELLED} } ` +
+    `Set-Content -LiteralPath '${psEscape(paths.trampolinePath)}' -Value $_.Exception.Message -Encoding UTF8; ` +
+    'exit 99 }';
+
+  return { paths, trampoline };
+}
+
+/** Drop an elevator's temp directory; failures here must never mask a result. */
+function removeElevatorDir(dir: string | null): void {
+  if (!dir) return;
   try {
-    dir = mkdtempSync(join(tmpdir(), 'miqi-elev-'));
-    const outPath = join(dir, 'out.txt');
-    const errPath = join(dir, 'err.txt');
-    const codePath = join(dir, 'exit.txt');
-    const trampolinePath = join(dir, 'trampoline.txt');
+    rmSync(dir, { recursive: true, force: true });
+  } catch {
+    /* best-effort */
+  }
+}
 
-    const elevated = payload.powershell
-      ? powershellCapture(payload.powershell, outPath, errPath, codePath)
-      : commandCapture(payload.command ?? { file: '' }, outPath, errPath, codePath);
+/** One day is far longer than any install that is still worth waiting for. */
+export const ELEVATOR_DIR_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 
-    const trampoline =
-      "$ErrorActionPreference='Stop'; " +
-      `try { Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-EncodedCommand','${encodeCommand(elevated)}') ` +
-      '-Verb RunAs -Wait -ErrorAction Stop } ' +
-      'catch { ' +
-      `if ($_.Exception.NativeErrorCode -eq ${ELEVATION_CANCELLED}) { exit ${ELEVATION_CANCELLED} } ` +
-      `Set-Content -LiteralPath '${psEscape(trampolinePath)}' -Value $_.Exception.Message -Encoding UTF8; ` +
-      'exit 99 }';
+/**
+ * Whether a leftover elevator directory is old enough to sweep.  A timed-out
+ * run keeps its directory on purpose — the elevated child is still running and
+ * writes its exit code there — so age, not existence, decides what is garbage.
+ */
+export function isStaleElevatorDir(
+  name: string,
+  mtimeMs: number,
+  now: number,
+  maxAgeMs = ELEVATOR_DIR_MAX_AGE_MS
+): boolean {
+  return name.startsWith('miqi-elev-') && now - mtimeMs > maxAgeMs;
+}
+
+/** Best-effort sweep of elevator directories left behind by past runs. */
+function sweepStaleElevatorDirs(now = Date.now()): void {
+  try {
+    for (const entry of readdirSync(tmpdir(), { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue;
+      const dir = join(tmpdir(), entry.name);
+      try {
+        if (isStaleElevatorDir(entry.name, statSync(dir).mtimeMs, now)) {
+          rmSync(dir, { recursive: true, force: true });
+        }
+      } catch {
+        /* a directory that vanished mid-sweep is fine */
+      }
+    }
+  } catch {
+    /* best-effort */
+  }
+}
+/** Build the result of an elevated run from its trampoline files. */
+function collectElevatedResult(
+  paths: ElevatorPaths,
+  info: {
+    cancelled?: boolean;
+    status: number | null;
+    stderr?: Buffer | string | null;
+    error?: string;
+  }
+): ElevatedRunResult {
+  if (info.error) return { kind: 'unknown', exitCode: null, output: '', error: info.error };
+  if (info.cancelled) return { kind: 'cancelled', exitCode: null, output: '' };
+
+  const stdout = decodeWslOutput(readFileOrNull(paths.outPath));
+  const stderr = decodeWslOutput(readFileOrNull(paths.errPath));
+  const output = [stdout, stderr].filter((s) => s.length > 0).join('\n');
+  const exitCode = readExitCode(paths.codePath);
+  if (exitCode === null) {
+    // The elevated process never wrote its exit code: the trampoline failed
+    // (no UAC prompt was shown, or the elevated process was killed early).
+    const detail =
+      readTextOrNull(paths.trampolinePath) ||
+      decodeWslOutput(info.stderr) ||
+      `提权进程未返回结果（powershell 退出码 ${info.status}）`;
+    return { kind: 'unknown', exitCode: null, output, error: detail };
+  }
+  return exitCode === 0 ? { kind: 'ok', exitCode, output } : { kind: 'failed', exitCode, output };
+}
+
+/**
+ * Run a command with administrator rights (UAC prompt) and recover its exit
+ * code and output.  Blocks until the elevated process exits.
+ */
+export function runElevated(payload: ElevatedPayload, timeoutMs = 300000): ElevatedRunResult {
+  let paths: ElevatorPaths | null = null;
+  try {
+    const prepared = prepareElevator(payload);
+    paths = prepared.paths;
 
     const r = spawnSync(
       'powershell.exe',
-      ['-NoProfile', '-EncodedCommand', encodeCommand(trampoline)],
+      ['-NoProfile', '-EncodedCommand', encodeCommand(prepared.trampoline)],
       { timeout: timeoutMs, encoding: 'buffer', windowsHide: true }
     );
 
-    if (r.error) return { kind: 'unknown', exitCode: null, output: '', error: r.error.message };
-    if (r.status === ELEVATION_CANCELLED) return { kind: 'cancelled', exitCode: null, output: '' };
-
-    const stdout = decodeWslOutput(readFileOrNull(outPath));
-    const stderr = decodeWslOutput(readFileOrNull(errPath));
-    const output = [stdout, stderr].filter((s) => s.length > 0).join('\n');
-    const exitCode = readExitCode(codePath);
-    if (exitCode === null) {
-      // The elevated process never wrote its exit code: the trampoline failed
-      // (no UAC prompt was shown, or the elevated process was killed early).
-      const detail =
-        readTextOrNull(trampolinePath) ||
-        decodeWslOutput(r.stderr as Buffer | null) ||
-        `提权进程未返回结果（powershell 退出码 ${r.status}）`;
-      return { kind: 'unknown', exitCode: null, output, error: detail };
-    }
-    return exitCode === 0 ? { kind: 'ok', exitCode, output } : { kind: 'failed', exitCode, output };
+    return collectElevatedResult(paths, {
+      status: r.status,
+      stderr: r.stderr as Buffer | null,
+      error: r.error?.message,
+      cancelled: r.status === ELEVATION_CANCELLED,
+    });
   } catch (e: any) {
     return { kind: 'unknown', exitCode: null, output: '', error: e?.message ?? String(e) };
   } finally {
-    if (dir) {
-      try {
-        rmSync(dir, { recursive: true, force: true });
-      } catch {
-        /* best-effort */
-      }
-    }
+    removeElevatorDir(paths?.dir ?? null);
   }
+}
+
+/**
+ * Same contract as `runElevated`, but yields the main thread while the elevated
+ * process runs.  The app calls this from the Electron main process, where a
+ * blocking wait freezes every window until the user answers the UAC prompt and
+ * the elevated work (a DISM feature enable can take minutes) finishes.
+ */
+export function runElevatedAsync(
+  payload: ElevatedPayload,
+  timeoutMs = 300000
+): Promise<ElevatedRunResult> {
+  return new Promise((resolve) => {
+    let paths: ElevatorPaths | null = null;
+    let settled = false;
+    const finish = (result: ElevatedRunResult, opts?: { keepDir?: boolean }) => {
+      if (settled) return;
+      settled = true;
+      // A timed-out run keeps its directory: the elevated child is still
+      // running and writes its exit code there, so removing it would strand the
+      // background work's own result.  Leftovers are swept by the next run.
+      if (!opts?.keepDir) removeElevatorDir(paths?.dir ?? null);
+      resolve(result);
+    };
+
+    try {
+      const prepared = prepareElevator(payload);
+      paths = prepared.paths;
+
+      const child = spawn(
+        'powershell.exe',
+        ['-NoProfile', '-EncodedCommand', encodeCommand(prepared.trampoline)],
+        { windowsHide: true }
+      );
+
+      // On timeout the trampoline dies with the app's patience, but a running
+      // elevated child (DISM) is left to finish on its own — including writing
+      // its result files, which is why this path keeps the directory.
+      const timer = setTimeout(() => {
+        child.kill();
+        finish(
+          {
+            kind: 'unknown',
+            exitCode: null,
+            output: '',
+            error: `提权进程超时未返回（${Math.round(timeoutMs / 1000)} 秒）`,
+          },
+          { keepDir: true }
+        );
+      }, timeoutMs);
+
+      child.once('error', (e) => {
+        clearTimeout(timer);
+        finish({ kind: 'unknown', exitCode: null, output: '', error: e.message });
+      });
+      child.once('close', (status) => {
+        clearTimeout(timer);
+        finish(
+          collectElevatedResult(paths as ElevatorPaths, {
+            status,
+            cancelled: status === ELEVATION_CANCELLED,
+          })
+        );
+      });
+    } catch (e: any) {
+      finish({ kind: 'unknown', exitCode: null, output: '', error: e?.message ?? String(e) });
+    }
+  });
 }
 
 /** Base64 UTF-16LE, the encoding PowerShell's -EncodedCommand expects. */
@@ -398,4 +549,176 @@ export function classifyWslFeatureState(opts: {
   // step repairs both cases.
   if (!opts.featureReadOk) return 'not-installed';
   return opts.featureWsl || opts.featureVmp ? 'not-installed' : 'not-enabled';
+}
+
+// ---------------------------------------------------------------------------
+// Stuck-servicing repair (live failure, 2026-09)
+//
+// Some OEM images leave `IsOOBEInProgress=1` behind in the Windows Update
+// state.  Windows then still believes setup is running and aborts every
+// startup servicing pass — CBS.log shows "Startup: Deferring startup
+// processing at users request" plus "Reboot mark set" on each boot — so a
+// queued `Enable-WindowsOptionalFeature VirtualMachinePlatform` is never
+// applied.  Without that payload there is no Hyper-V host compute service
+// (`vmcompute`), WSL2 reports that virtualization is not enabled, no distro
+// can be registered, and rebooting changes nothing.  Clearing the stale
+// markers is the only way out of that loop; the app being installed and
+// running proves OOBE finished long ago.
+// ---------------------------------------------------------------------------
+
+export const WU_AUTO_UPDATE_KEY =
+  'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\WindowsUpdate\\Auto Update';
+
+/** Markers a finished setup should not carry: they gate all servicing. */
+export const STALE_OOBE_VALUES = ['IsOOBEInProgress', 'AcceleratedInstallRequired'] as const;
+
+const READ_STALE_OOBE_CMD = [
+  `$key = '${WU_AUTO_UPDATE_KEY}'`,
+  `foreach ($name in ${STALE_OOBE_VALUES.map((n) => `'${n}'`).join(', ')}) {`,
+  '  $value = (Get-ItemProperty -LiteralPath $key -Name $name -ErrorAction SilentlyContinue).$name',
+  '  if ($null -ne $value) { "$name=$value" }',
+  '}',
+].join('\r\n');
+
+/** Parse `name=value` lines; names the registry does not carry stay absent. */
+export function parseStaleOobeFlags(stdout: string): Record<string, number> {
+  const flags: Record<string, number> = {};
+  for (const line of stdout.split(/\r?\n/)) {
+    const m = line.trim().match(/^(\w+)=(\d+)$/);
+    if (m) flags[m[1]] = parseInt(m[2], 10);
+  }
+  return flags;
+}
+
+export interface StaleOobeState {
+  /** False when the registry read itself failed; the rest is meaningless then. */
+  ok: boolean;
+  /** A marker is set, i.e. Windows is deferring every pending servicing pass. */
+  stale: boolean;
+  flags: Record<string, number>;
+}
+
+export function readStaleOobeState(timeoutMs = 8000): StaleOobeState {
+  try {
+    const r = spawnSync('powershell.exe', ['-NoProfile', '-Command', READ_STALE_OOBE_CMD], {
+      timeout: timeoutMs,
+      encoding: 'utf8',
+      windowsHide: true,
+    });
+    if (r.status !== 0) return { ok: false, stale: false, flags: {} };
+    const flags = parseStaleOobeFlags(r.stdout ?? '');
+    return { ok: true, stale: Object.values(flags).some((v) => v === 1), flags };
+  } catch {
+    return { ok: false, stale: false, flags: {} };
+  }
+}
+
+/** The two optional features every WSL2 install needs, in install order. */
+const ENABLE_FEATURE_LINES = [
+  'Enable-WindowsOptionalFeature -Online -FeatureName Microsoft-Windows-Subsystem-Linux -NoRestart',
+  'Enable-WindowsOptionalFeature -Online -FeatureName VirtualMachinePlatform -NoRestart',
+];
+
+/**
+ * Elevated script that turns the optional features on.  `'Stop'` on purpose: a
+ * non-terminating failure would leave the exit code at 0 and the caller would
+ * report enabled features plus a reboot that never changes anything — the
+ * caller's own check only reads WSL's feature state, not VirtualMachinePlatform's.
+ */
+export function buildEnableFeaturesScript(): string {
+  return ["$ErrorActionPreference = 'Stop'", ...ENABLE_FEATURE_LINES].join('\r\n');
+}
+
+/**
+ * Elevated repair for the state above: drop the stale markers, then re-submit
+ * both optional features so the next boot applies them.
+ */
+export function buildPlatformRepairScript(): string {
+  const clear = STALE_OOBE_VALUES.map(
+    (name) => `Remove-ItemProperty -LiteralPath $key -Name ${name} -ErrorAction SilentlyContinue`
+  );
+  // Report what the registry actually says once the script is done: the caller
+  // treats a still-set marker as a failed repair, so this line is its evidence.
+  const report = [
+    `foreach ($name in ${STALE_OOBE_VALUES.map((n) => `'${n}'`).join(', ')}) {`,
+    '  $value = (Get-ItemProperty -LiteralPath $key -Name $name -ErrorAction SilentlyContinue).$name',
+    '  if ($null -eq $value) { "marker-cleared: $name" } else { "marker-still-set: $name=$value" }',
+    '}',
+  ].join('\r\n');
+  return [
+    // Same failure semantics as the plain enable script above ('Stop'), with
+    // the best-effort service and registry steps carrying an explicit
+    // -ErrorAction so they cannot abort the run.
+    "$ErrorActionPreference = 'Stop'",
+    `$key = '${WU_AUTO_UPDATE_KEY}'`,
+    // Unattended Windows Update can write the markers back the moment it runs,
+    // so pause it around the edit.  Both services are demand-started anyway and
+    // come back on their own.
+    "foreach ($svc in 'wuauserv', 'UsoSvc') { Stop-Service -Name $svc -Force -ErrorAction SilentlyContinue }",
+    ...clear,
+    ...ENABLE_FEATURE_LINES,
+    // Clearing again after the feature work: that is the state the next boot
+    // reads, and the markers have just been observed to come back while it runs.
+    ...clear,
+    report,
+    "foreach ($svc in 'wuauserv', 'UsoSvc') { Start-Service -Name $svc -ErrorAction SilentlyContinue }",
+  ].join('\r\n');
+}
+
+// WSL reports why WSL2 cannot start in free text (localized).  Require both a
+// subject and a symptom on the same line: the healthy output also mentions
+// `enablevirtualization`, but only inside its help URL.
+const VIRTUALIZATION_SUBJECT = /虚拟化|virtualization/i;
+const PLATFORM_PROBLEM_SYMPTOM =
+  /无法启动|cannot start|未启用|not enabled|不支持|not supported|禁用|disabled/i;
+
+/**
+ * The `wsl --status` line saying WSL2 cannot start, or null when the platform
+ * looks usable.  Non-null means installing a distro cannot work yet, whatever
+ * its exit code says.
+ */
+export function findPlatformProblem(statusText: string): string | null {
+  for (const raw of statusText.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line) continue;
+    if (VIRTUALIZATION_SUBJECT.test(line) && PLATFORM_PROBLEM_SYMPTOM.test(line)) return line;
+  }
+  return null;
+}
+
+export type PlatformRepairOutcome =
+  /** Platform is usable again — install the distro in the same click. */
+  | { status: 'continue' }
+  /** Features were submitted and a boot is what applies them. */
+  | { status: 'reboot-required' }
+  /** Nothing verifiable happened: do not pretend a reboot will help. */
+  | { status: 'failed'; detail: string };
+
+/**
+ * Decide what the installer does after the elevated platform repair.
+ *
+ * The machine's state decides, not the script's exit code: on the #1171 machine
+ * DISM applied the queued payload outright (vmcompute came up, pending.xml was
+ * consumed) while the markers were rewritten mid-run, so judging by the exit
+ * code or the markers alone would have reported a failure that had not
+ * happened — and asking for a reboot that was not needed.
+ *
+ * A failed or unreadable run still wins whenever the platform did *not*
+ * recover: then nothing may fall through to the distro install.
+ */
+export function classifyPlatformRepair(opts: {
+  /** Result of the elevated repair run. */
+  repair: ElevatedRunResult;
+  /** `wsl --status` still reports a platform problem, or null when it does not. */
+  platformIssueAfter: string | null;
+  /** Stale-marker state read after the repair; `ok: false` means unreadable. */
+  staleAfter: { ok: boolean; stale: boolean };
+}): PlatformRepairOutcome {
+  if (!opts.platformIssueAfter) return { status: 'continue' };
+  if (opts.repair.kind !== 'ok') {
+    return { status: 'failed', detail: summarizeElevated(opts.repair) };
+  }
+  if (!opts.staleAfter.ok) return { status: 'failed', detail: '修复后无法确认标记已清除' };
+  if (opts.staleAfter.stale) return { status: 'failed', detail: '修复后仍检测到被推迟的更新' };
+  return { status: 'reboot-required' };
 }

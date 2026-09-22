@@ -148,4 +148,41 @@ test.describe('Plan Card (#646-v2)', () => {
       }
     }
   );
+
+  // ── 回归（2026-09-21 electron-e2e 抖动）──────────────────────────────
+  // 一个**不关心计划卡**的 spec，只要提示词恰好让模型走到需要计划的工具调用，
+  // 回合就会停在「等待你的决定」上：渲染进程的 `streaming` 仍是 true、标签照挂，
+  // 于是 waitForResponseComplete 一路等到超时，报出来却是
+  // 「回合在 120000ms 内没有结束（「进行中」标签一直没消失）」——从报错完全看不出
+  // 和计划卡有关。当天多个无关分支上红的就是这个签名，失败快照里躺着同一张未确认
+  // 的计划卡（模型在温度 1 下会不会走到这类工具调用是随机的，所以同一个 spec
+  // 重试常常 8 秒就过）。修复后 waitForResponseComplete 在等待期间自己把卡点掉。
+  test(
+    '等待中的计划卡由 waitForResponseComplete 自动批准（不关心卡片的 spec 不再卡死）',
+    { timeout: LLM_TIMEOUT },
+    async () => {
+      const fixture = await launchWithMock();
+      const electronApp: ElectronApplication = fixture.electronApp;
+      const page: Page = fixture.page;
+
+      try {
+        await createNewConversation(page);
+        // mock 见用户消息里的「计划」二字就走 ask_user_plan_confirm → 一张等待态计划卡。
+        await sendMessage(page, '计划：生成 MOF-5 实验报告并上传');
+
+        const confirm = page.getByTestId('plan-confirm');
+        await expect(confirm).toBeVisible({ timeout: 60_000 });
+
+        // 关键：这里**不点**卡，交给 waitForResponseComplete。超时给得短是故意的
+        // ——本用例只钉「卡被自动批准」这一步，不需要等整条链跑完（后面还有
+        // web_search 等真实工具，本地没有 key 时跑不到底）。
+        const waiting = waitForResponseComplete(page, 30_000).catch(() => {});
+        await expect(confirm).toHaveCount(0, { timeout: 25_000 });
+        await waiting;
+      } finally {
+        await closeElectronApp(electronApp, fixture.miqiHome);
+        fixture.mockServer.kill();
+      }
+    }
+  );
 });
