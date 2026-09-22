@@ -1169,6 +1169,14 @@ export interface WslCheckResult {
   featureState: WslFeatureState;
   /** Whether a system reboot is required before WSL can be used */
   rebootRequired: boolean;
+  /**
+   * WSL's own explanation of why WSL2 cannot start (virtualization platform
+   * unavailable), or null/absent when the platform is usable.  A distro
+   * install cannot succeed while this is set, however its exit code reads.
+   */
+  platformIssue?: string | null;
+  /** Set while a one-click install is waiting for its reboot to continue. */
+  pendingInstall?: { phase: string; at: number } | null;
 }
 export interface WslExportDistroResult {
   exported: boolean;

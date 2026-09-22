@@ -3,7 +3,7 @@
  *   登录（平台登录 → 授权码流程 → userinfo）→ 加密落盘 → 自动刷新调度
  *   → 状态事件推送 → 退出登录清理。
  *
- * 刷新策略按实测数据：access_token 约 2 小时（expires_in=7199），
+ * 刷新策略：按平台下发的 expires_in（2026-09-21 实测约 30 天，早期约 2 小时）
  * 提前 15 分钟用 refresh_token 刷新。刷新失败按性质区分（issue #1087）：
  * 瞬时失败（网络不可达/平台 5xx）静默指数退避重试，不打扰用户；只有
  * 平台明确作废 refresh_token（REFRESH_TOKEN_INVALID）才置 requiresRelogin，

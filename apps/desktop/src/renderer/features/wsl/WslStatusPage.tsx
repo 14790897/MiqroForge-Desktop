@@ -97,6 +97,16 @@ const PHASE_INDEX: Record<string, number> = {
   error: -1,
 };
 
+/** Persisted phases that mean "waiting for a reboot to continue". */
+const RESUMABLE_PHASES = ['features_enabled', 'kernel_installed', 'platform_repair_pending'];
+
+/**
+ * Auto-resume is for the reboot hand-off, which takes minutes — not for
+ * resurrecting a months-old leftover: an install that was abandoned a day ago
+ * should not silently start an elevated repair the next time the page opens.
+ */
+const RESUME_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+
 export default function WslStatusPage() {
   const [stats, setStats] = useState<WslStatsResult | null>(null);
   const [fetching, setFetching] = useState(false);
@@ -113,10 +123,15 @@ export default function WslStatusPage() {
   const [installRebootRequired, setInstallRebootRequired] = useState(false);
   const [installError, setInstallError] = useState<string | null>(null);
   const [installNextStep, setInstallNextStep] = useState<string | null>(null);
+  /** WSL's own reason for WSL2 being unable to start, when it reports one. */
+  const [platformIssue, setPlatformIssue] = useState<string | null>(null);
+  /** Mirrors `installing` for callbacks that must not read stale state. */
+  const installingRef = useRef(false);
 
   const fetchDistros = useCallback(async () => {
     try {
       const r = await window.miqi.wsl.check();
+      setPlatformIssue(r?.platformIssue ?? null);
       if (r?.installed && r.distros?.length > 0) {
         const sorted = [...r.distros];
         const idx = sorted.findIndex(
@@ -127,6 +142,17 @@ export default function WslStatusPage() {
           sorted.unshift(t);
         }
         setDistros(sorted);
+
+        // A usable distro now exists, so an earlier "安装失败 / 需要重启" card
+        // describes a state the machine is no longer in — the observed case was
+        // an install that outlived the app's wait and finished in the
+        // background.  Keep it while a flow is still running, though.
+        if (!installingRef.current) {
+          setInstallError(null);
+          setInstallNextStep(null);
+          setInstallRebootRequired(false);
+          setInstallPhase((phase) => (phase === 'error' ? null : phase));
+        }
 
         if (!initialFetch.current) {
           const auto =
@@ -163,38 +189,45 @@ export default function WslStatusPage() {
   );
 
   // ── One-click install flow ─────────────────────────────────────────
-  const handleInstall = useCallback(async () => {
-    setInstalling(true);
-    setInstallError(null);
-    setInstallRebootRequired(false);
-    setInstallNextStep(null);
-    setInstallPhase('checking');
-    setInstallMessage('正在检测 WSL 状态...');
+  const handleInstall = useCallback(
+    async (opts?: { resuming?: boolean }) => {
+      installingRef.current = true;
+      setInstalling(true);
+      setInstallError(null);
+      setInstallRebootRequired(false);
+      setInstallNextStep(null);
+      setInstallPhase('checking');
+      setInstallMessage(
+        opts?.resuming ? '检测到上次安装未完成，正在自动继续...' : '正在检测 WSL 状态...'
+      );
 
-    try {
-      const result = await window.miqi.wsl.installAndProvision();
-      if (result.success) {
-        if (result.rebootRequired) {
-          setInstallRebootRequired(true);
-          setInstallNextStep(result.nextStep ?? null);
+      try {
+        const result = await window.miqi.wsl.installAndProvision();
+        if (result.success) {
+          if (result.rebootRequired) {
+            setInstallRebootRequired(true);
+            setInstallNextStep(result.nextStep ?? null);
+          } else {
+            setInstallPhase('complete');
+            setInstallMessage('WSL2 安装配置完成！');
+          }
         } else {
-          setInstallPhase('complete');
-          setInstallMessage('WSL2 安装配置完成！');
+          setInstallError(result.error ?? '安装失败');
+          setInstallNextStep(result.nextStep ?? null);
+          setInstallPhase('error');
         }
-      } else {
-        setInstallError(result.error ?? '安装失败');
-        setInstallNextStep(result.nextStep ?? null);
+        // Refresh distro list
+        await fetchDistros();
+      } catch (e: any) {
+        setInstallError(e?.message ?? '安装过程出错');
         setInstallPhase('error');
+      } finally {
+        installingRef.current = false;
+        setInstalling(false);
       }
-      // Refresh distro list
-      await fetchDistros();
-    } catch (e: any) {
-      setInstallError(e?.message ?? '安装过程出错');
-      setInstallPhase('error');
-    } finally {
-      setInstalling(false);
-    }
-  }, [fetchDistros]);
+    },
+    [fetchDistros]
+  );
 
   // ── Listen for install progress events ─────────────────────────────
   useEffect(() => {
@@ -218,6 +251,24 @@ export default function WslStatusPage() {
   useEffect(() => {
     fetchDistros();
   }, [fetchDistros]);
+
+  // ── Resume an install that its own reboot request interrupted ──────
+  // The flow persists the phase it reached before asking for a reboot; this
+  // page running again is what the "重启后会自动继续" copy promises.
+  const resumeAttempted = useRef(false);
+  useEffect(() => {
+    if (resumeAttempted.current) return;
+    resumeAttempted.current = true;
+    (async () => {
+      const r = await window.miqi.wsl.check();
+      if (!r?.pendingInstall || !RESUMABLE_PHASES.includes(r.pendingInstall.phase)) return;
+      if (Date.now() - r.pendingInstall.at > RESUME_MAX_AGE_MS) return;
+      if ((r.distros?.length ?? 0) > 0) return;
+      await handleInstall({ resuming: true });
+    })().catch(() => {
+      /* leave the page usable; the button is still there */
+    });
+  }, [handleInstall]);
   useEffect(() => {
     if (selected) {
       setStats(null);
@@ -360,7 +411,7 @@ export default function WslStatusPage() {
             <>
               {/* Install button when no distros available */}
               <button
-                onClick={handleInstall}
+                onClick={() => handleInstall()}
                 disabled={installing}
                 className="flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg bg-[var(--accent)] text-white hover:bg-[var(--accent)]/85 disabled:opacity-50 transition-colors"
               >
@@ -452,6 +503,11 @@ export default function WslStatusPage() {
                 <p className="text-xs text-[var(--text-faint)]">
                   点击上方「一键安装 WSL2」自动完成安装和配置
                 </p>
+                {platformIssue && (
+                  <p className="text-xs text-[var(--warning)] max-w-md text-center">
+                    {platformIssue}
+                  </p>
+                )}
               </>
             )}
           </div>

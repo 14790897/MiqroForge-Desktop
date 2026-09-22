@@ -1,0 +1,80 @@
+name: Qraft Cloud Login Live E2E
+
+# 真实平台云端登录（生产域名 www.miqroforge.com）的 live E2E：
+# 授权窗口 → 平台登录页填测试账号 → 回调换 token → 应用内已登录。
+#
+# 只在本仓库自身的运行里跑（push develop / 定时 / 手动）——没有 PR 触发，
+# 因此不存在「PR 代码与测试账号凭据同处一 job」的暴露面（对照 desktop-ci.yml
+# 的 E2E_TRUSTED 门禁）。凭据只经 QRAFT_PHONE / QRAFT_PASSWORD secrets 注入，
+# 未配置时 spec 自身 skip（test.skip(!PHONE || !PASSWORD)）。
+#
+# 产物策略：本 workflow 不传任何 artifact，且 playwright.live.config.ts 关闭
+# 录屏/截图/追踪 —— 授权窗口里会真实输入账号手机号，公开仓库的 artifact
+# 对任何读者可下载，不能带出账号信息。
+on:
+  schedule:
+    # 每天 UTC 18:37（北京时间 02:37）——避开整点资源高峰
+    - cron: '37 18 * * *'
+  workflow_dispatch:
+  push:
+    branches: [develop]
+    paths:
+      - '.github/workflows/qraft-cloud-login-live.yml'
+      - 'apps/desktop/playwright.live.config.ts'
+      - 'apps/desktop/tests/e2e/qraft-browser-login.spec.ts'
+      - 'apps/desktop/tests/e2e/qraft-login-entry.spec.ts'
+      - 'apps/desktop/tests/e2e/helpers/electron-setup.ts'
+      - 'apps/desktop/src/main/qraft/**'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: qraft-cloud-login-live
+  cancel-in-progress: false
+
+jobs:
+  cloud-login:
+    runs-on: ubuntu-latest
+    # 真实登录一次约 1-2 分钟，整套含环境搭建在 10 分钟内；给足余量。
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: apps/desktop
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          npm ci
+          pip install uv
+          uv sync
+          sudo apt-get update -qq && sudo apt-get install -y -qq bubblewrap
+
+      - name: Install Playwright browsers
+        run: npx playwright install chromium --with-deps
+
+      - name: Build renderer
+        run: npm run build -- --logLevel warn
+
+      - name: Cloud login E2E（真实平台 / 生产环境）
+        run: |
+          xvfb-run --auto-servernum \
+            npx playwright test --config=playwright.live.config.ts
+        env:
+          PLAYWRIGHT_SKIP_WEB_SERVER: '1'
+          QRAFT_PHONE: ${{ secrets.QRAFT_PHONE }}
+          QRAFT_PASSWORD: ${{ secrets.QRAFT_PASSWORD }}
