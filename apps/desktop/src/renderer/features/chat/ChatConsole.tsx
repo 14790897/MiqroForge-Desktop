@@ -9764,7 +9764,7 @@ export function ChatConsole({
         </div>
       )}
 
-      {/* ── Top header bar: Logo | Search | Badges | User ── */}
+      {/* ── Top header bar: Logo | Badges | User ── */}
       <div
         className="flex items-center gap-3 px-5 h-10 border-b shrink-0"
         style={{
@@ -9780,32 +9780,8 @@ export function ChatConsole({
           MiQroForge Desktop
         </span>
 
-        {/* Center: Search */}
-        <div
-          className="flex-1 max-w-[400px] mx-auto flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs"
-          style={{
-            background: 'var(--surface-muted)',
-            border: '1px solid var(--border-subtle)',
-            color: 'var(--text-faint)',
-          }}
-        >
-          <svg
-            width="13"
-            height="13"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="2"
-            strokeLinecap="round"
-          >
-            <circle cx="11" cy="11" r="8" />
-            <path d="m21 21-4.3-4.3" />
-          </svg>
-          <span className="select-none">搜索或输入命令...</span>
-        </div>
-
         {/* Right: Badges + user + actions */}
-        <div className="flex items-center gap-2 shrink-0">
+        <div className="ml-auto flex items-center gap-2 shrink-0">
           {/* User avatar + name */}
           <div className="flex items-center gap-1.5 pl-2 ml-1 border-l border-border-subtle">
             <div
