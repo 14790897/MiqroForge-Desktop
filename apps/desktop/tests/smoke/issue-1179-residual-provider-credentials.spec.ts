@@ -8,9 +8,10 @@ import { buildMockBridgeScript } from './mocks';
  * 收口前配置的第三方凭据（anthropic / openai / dashscope / gemini），外加一个带
  * 旧 key 的网关型 provider（openrouter）。干净机器只有平台下发的 deepseek。
  *
- * 门控口径（builtin_available 为唯一依据）修好前后，本用例下拉里都能且只能看到
- * deepseek/deepseek-v4-flash；修复前 anthropic/*、dashscope/*、gemini/*、openai
- * 以及网关旁路放行的全量目录都会出现在下拉里。
+ * 复现路径是「设置 → 通用 → 默认模型」（issue 步骤 2），这里先断言该路径，再断言
+ * 同一个 ModelSelect 的另一处入口（模型选项卡）。修复前两处都会列出残留 provider
+ * 的模型（anthropic/*、dashscope/*、gemini/*、openai/gpt-4o），修复后都只剩
+ * deepseek/deepseek-v4-flash。
  */
 test('残留凭据机器的模型下拉只列平台下发的模型（#1179）', async ({ page }) => {
   test.setTimeout(90_000);
@@ -139,27 +140,37 @@ test('残留凭据机器的模型下拉只列平台下发的模型（#1179）', 
 
   await page.getByText(/^(System Settings|系统设置)$/).click();
   await page.evaluate(() => (window as any).miqi.qraft.login('18500000000', 'test-password'));
+
+  /** 断言当前可见的默认模型下拉只列平台下发的模型。 */
+  const expectOnlyPlatformModel = async () => {
+    const select = page.locator('select').first();
+    await expect(select).toBeVisible({ timeout: 10_000 });
+    // 平台下发的模型仍可选
+    await expect(select).toContainText('deepseek/deepseek-v4-flash');
+    // 残留凭据的 provider 不得进入下拉
+    await expect(select).not.toContainText('anthropic');
+    await expect(select).not.toContainText('claude');
+    await expect(select).not.toContainText('dashscope');
+    await expect(select).not.toContainText('qwen');
+    await expect(select).not.toContainText('gemini');
+    await expect(select).not.toContainText('openai');
+    await expect(select).not.toContainText('gpt-4o');
+    // 网关旁路也不得放行全量目录
+    await expect(select).not.toContainText('custom');
+    // 下拉里除占位项外只剩平台 provider 的模型（未设置默认模型时会有占位项）
+    const modelOptions = (await select.locator('option').allTextContents()).filter(
+      (text) => text !== '请选择模型…'
+    );
+    expect(modelOptions).toEqual(['deepseek/deepseek-v4-flash']);
+  };
+
+  // 复现路径（issue #1179 步骤 2）：设置 → 通用 → 默认模型
+  await page.getByRole('tab', { name: '通用' }).click();
+  await expectOnlyPlatformModel();
+  await page.screenshot({ path: 'test-results/1179-shots/01-general-tab-default-model.png' });
+
+  // 同一个 ModelSelect 组件的另一处入口（模型选项卡），一并守住
   await page.getByRole('tab', { name: '模型' }).click();
-
-  const select = page.locator('select').first();
-  await expect(select).toBeVisible({ timeout: 10_000 });
-
-  // 平台下发的模型仍可选
-  await expect(select).toContainText('deepseek/deepseek-v4-flash');
-  // 残留凭据的 provider 不得进入下拉
-  await expect(select).not.toContainText('anthropic');
-  await expect(select).not.toContainText('claude');
-  await expect(select).not.toContainText('dashscope');
-  await expect(select).not.toContainText('qwen');
-  await expect(select).not.toContainText('gemini');
-  await expect(select).not.toContainText('openai');
-  await expect(select).not.toContainText('gpt-4o');
-  // 网关旁路也不得放行全量目录
-  await expect(select).not.toContainText('custom');
-
-  // 下拉分组只剩平台 provider
-  const optionTexts = await select.locator('option').allTextContents();
-  expect(optionTexts).toEqual(['deepseek/deepseek-v4-flash']);
-
-  await page.screenshot({ path: 'test-results/1179-shots/01-model-dropdown-residual-creds.png' });
+  await expectOnlyPlatformModel();
+  await page.screenshot({ path: 'test-results/1179-shots/02-model-tab-model-select.png' });
 });
