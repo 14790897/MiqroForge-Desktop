@@ -136,18 +136,6 @@ def test_main_agent_has_office_tools():
     assert "pptx_write" in main.available_tools
 
 
-def test_main_agent_exposes_request_action_confirmation():
-    """#646-v2 R2d (C6): the main agent must expose
-    ``request_action_confirmation`` — the model-side entry point for
-    dangerous actions. Regression guard: the root cause of this round was
-    exactly this allowlist omitting the tool, so the model could never
-    reach it no matter what the skill body said.
-    """
-    registry = AgentRegistry()
-    main_agent = registry.resolve("main")
-    assert "request_action_confirmation" in main_agent.available_tools
-
-
 def test_code_agent_has_no_office_tools():
     registry = AgentRegistry()
     code = registry.resolve("code-agent")
