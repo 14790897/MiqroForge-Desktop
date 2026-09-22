@@ -474,7 +474,7 @@ class TaskRunner:
             await self._events.put(ErrorEvent(
                 turn_id=turn_id,
                 severity=EventSeverity.ERROR,
-                message="An internal error occurred while running the shell command.",
+                message="执行 shell 命令时发生内部错误，请查看运行时日志后重试。",
                 recoverable=False,
             ))
         finally:

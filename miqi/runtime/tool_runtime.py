@@ -60,6 +60,11 @@ class ToolRuntime:
         self, turn: Any, tool_calls: list[Any],
     ) -> list[ToolExecutionContext]:
         """Execute multiple tool calls concurrently through the orchestrator."""
+        # 确认卡会阻塞等用户作答：同批次里若还有依赖它的动作，gather 会让那些
+        # 动作在用户作答前就跑掉（确认形同虚设）→ 含确认卡的批次改串行，
+        # 不含的保持并发。
+        if any(call.name == "ask_user_confirm_card" for call in tool_calls):
+            return [await self.execute_one(turn, call) for call in tool_calls]
         return await asyncio.gather(
             *[self.execute_one(turn, call) for call in tool_calls],
         )

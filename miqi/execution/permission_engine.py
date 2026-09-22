@@ -175,6 +175,13 @@ class PermissionEngine:
                     reason=f"Matches deny pattern: {pattern}",
                 )
 
+        # 1a. 确认卡本身是「用户决策入口」——它必须在审批层之前跑起来，
+        # 否则 manual 的 force_approval / 未知工具的审批会先把它挡住，
+        # 用户永远看不到那张卡（卡就是确认动作，再套一层审批即死锁）。
+        # 放在 deny list 之后：显式封禁仍然优先。
+        if tool_name == "ask_user_confirm_card":
+            return PermissionDecision(verdict=PermissionVerdict.ALLOW)
+
         # 1b. Execution policy: bypass skips all checks.
         # IMPORTANT: safety relies on the caller filtering tool availability
         # BEFORE setting this flag (e.g. plan mode removes write/exec tools

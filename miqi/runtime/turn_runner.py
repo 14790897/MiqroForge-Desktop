@@ -64,13 +64,13 @@ def _strip_leak_notice(text: str) -> str:
 
 
 def _build_step_tracker(arguments: Any) -> Any:
-    """从 `ask_user_plan_confirm` 的参数里取 steps，建步骤进度跟踪器（#1078）。"""
+    """从 `ask_user_confirm_card` 的参数里取 steps，建步骤进度跟踪器（#1078）。"""
     from miqi.plan.step_progress import StepProgressTracker
 
     try:
         args = arguments if isinstance(arguments, dict) else json.loads(arguments or "{}")
     except (TypeError, ValueError):
-        logger.warning("turn_runner: ask_user_plan_confirm 参数无法解析，步骤进度不可用")
+        logger.warning("turn_runner: ask_user_confirm_card 参数无法解析，步骤进度不可用")
         return None
     raw_steps = args.get("steps") or []
     if not raw_steps:
@@ -813,9 +813,9 @@ class TurnRunner:
                 response.tool_calls = _kept
 
             for tc in response.tool_calls:
-                # #1078：计划卡调用出现后，用它携带的 steps 建立步骤进度跟踪，
+                # #1078：确认卡调用出现后，用它携带的 steps 建立步骤进度跟踪，
                 # 本回合后续的工具事件都按 steps[].tools 归到对应步骤上。
-                if tc.name == "ask_user_plan_confirm" and _step_tracker is None:
+                if tc.name == "ask_user_confirm_card" and _step_tracker is None:
                     _step_tracker = _build_step_tracker(tc.arguments)
                 await self._events.emit(ToolCallBeginEvent(
                     turn_id=turn.turn_id,
