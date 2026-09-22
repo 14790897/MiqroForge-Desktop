@@ -111,7 +111,9 @@ def _qraft_gateway_routable(config: Any, model: str) -> bool:
     return bool(creds and gateway_origin())
 
 
-def _model_provider_resolvable(config: Any, model: str) -> bool:
+def _model_provider_resolvable(
+    config: Any, model: str, *, allow_gateway_fallback: bool = True
+) -> bool:
     """Whether the model resolves to a USABLE provider at runtime.
 
     镜像 Config._match_provider 的路由契约：模型自身 provider 必须持有可用
@@ -119,6 +121,14 @@ def _model_provider_resolvable(config: Any, model: str) -> bool:
     gateway 可以兜底路由。仅注册表成员资格不够 —— 无凭据的 provider 会
     落到 _match_provider 的「第一个已配置 provider」兜底，把模型发到错误
     的 API（#929 review）。
+
+    ``allow_gateway_fallback=False`` 不计入最后一条「已配置 gateway 型
+    provider 兜底」：openrouter/aihubmix/siliconflow/volcengine 按名字路由
+    任意模型，这条兜底只说明「会话发得出去」，不说明「这个模型是用户的本意」
+    —— 模型名会被原样发给一个未必认它的 API。登录后自动就绪默认模型
+    （#1172）要的正是后者：存量配置里留着的这些旧 key 会靠兜底把 schema
+    默认值 anthropic/claude-opus-4-5 判成「已选好的可用模型」，从而盖住
+    自动写入。平台 AI 网关路由（_qraft_gateway_routable）不受该开关影响。
     """
     from miqi.providers.registry import PROVIDERS, find_by_model, find_by_name
 
@@ -141,6 +151,8 @@ def _model_provider_resolvable(config: Any, model: str) -> bool:
         # 归属 provider 无凭据时运行时还会继续走关键字与网关兜底 ——
         # 不直接拒绝，交给下面的网关判定。
     # 没有可用归属 provider —— 只有已配置的 gateway 能路由这个模型。
+    if not allow_gateway_fallback:
+        return False
     for gateway_spec in PROVIDERS:
         if not gateway_spec.is_gateway:
             continue
@@ -271,6 +283,14 @@ async def providers_list_handler(
             # 「未配置模型服务」。这里用与运行时同一套判定（含网关路由）告诉
             # 前端当前默认模型是否可以真正发起会话。
             "active_model_resolvable": _model_provider_resolvable(config, model),
+            # 登录后自动就绪默认模型（#1172）的判据：严格版，不计入「已配置
+            # gateway 型 provider 兜底」——那条兜底只说明会话发得出去，不能
+            # 说明当前模型是用户选好的。存量配置里的 siliconflow/openrouter
+            # 旧 key 会把 schema 默认值（anthropic/claude-opus-4-5）经兜底判成
+            # 可用，令自动写入永不触发。发送门禁继续用上面那个宽口径字段。
+            "active_model_own_or_gateway_resolvable": _model_provider_resolvable(
+                config, model, allow_gateway_fallback=False
+            ),
         }
     }
 

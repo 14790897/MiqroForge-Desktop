@@ -28,6 +28,24 @@ const CONFIGURED_DEEPSEEK = {
   builtin_activated: false,
 };
 
+/** #1172：gateway 型 provider（按名字路由任意模型）持有遗留 key 的存量配置。 */
+const CONFIGURED_SILICONFLOW = {
+  name: 'siliconflow',
+  display_name: 'SiliconFlow',
+  env_key: 'SILICONFLOW_API_KEY',
+  provider_type: 'openai',
+  is_gateway: true,
+  is_local: false,
+  default_api_base: '',
+  configured: true,
+  api_key_hint: 'sk-s...flow',
+  api_base: null,
+  configured_model: null,
+  verification_status: 'success',
+  builtin_available: false,
+  builtin_activated: false,
+};
+
 async function gotoModelTab(page: import('@playwright/test').Page) {
   await page.goto('/');
   await page.waitForSelector('#root', { state: 'visible' });
@@ -379,5 +397,148 @@ test.describe('Issue #922 — AI 网关状态门禁', () => {
     await page.waitForTimeout(500);
     const sends = await page.evaluate(() => (window as any).__chatSends);
     expect(sends).toBe(0);
+  });
+
+  test('登录 + 网关 active + 全新安装默认模型不可用：自动就绪为网关模型（#1172）', async ({
+    page,
+  }) => {
+    // #1172：全新安装时 agents.defaults.model 会被 config.get 带出 schema 默认值
+    // anthropic/claude-opus-4-5（永远非空、且无凭据不可用）——旧逻辑「只填空值」
+    // 因此从不触发，用户登录后必须手动去模型 tab 选模型。现在按可用性判定，
+    // 不可用即自动写为网关模型。
+    await page.addInitScript({
+      content: buildMockBridgeScript({
+        providers: [],
+        activeModel: 'anthropic/claude-opus-4-5',
+        activeModelResolvable: false,
+        activeModelOwnOrGatewayResolvable: false,
+        config: { agents: { defaults: { model: 'anthropic/claude-opus-4-5' } } },
+        qraftStatus: {
+          loggedIn: true,
+          account: {
+            phone: '18500000000',
+            sub: '19',
+            username: 'U-GW',
+            nickname: '网关用户',
+          },
+          env: 'test',
+          baseUrl: 'https://test.forge.miqroera.com/api',
+          aiGateway: { status: 'active', configVersion: 1 },
+        },
+      }),
+    });
+    await page.goto('/');
+    await page.waitForSelector('#root', { state: 'visible' });
+
+    await expect
+      .poll(
+        () =>
+          page.evaluate(() => {
+            const updates = (window as any).__miqiMock.getConfigUpdates();
+            return updates.some(
+              (u: any) => u?.agents?.defaults?.model === 'deepseek/deepseek-v4-flash'
+            );
+          }),
+        { timeout: 10_000 }
+      )
+      .toBe(true);
+
+    // 模型 tab：无需任何手动选择，「当前默认模型」已是网关模型
+    await page.getByText(/^(System Settings|系统设置)$/).click();
+    await page.getByRole('tab', { name: '模型' }).click();
+    await expect(page.getByTestId('providers-active-model')).toHaveText(
+      '当前默认模型：deepseek/deepseek-v4-flash',
+      { timeout: 10_000 }
+    );
+  });
+
+  test('存量配置里 gateway 型 provider 有旧 key：宽松判定为真也照样自动就绪（#1172）', async ({
+    page,
+  }) => {
+    // 本 PR 与「按 active_model_resolvable 判定」的分水岭：siliconflow 是
+    // is_gateway（按名字路由任意模型），它的旧 key 会让 _model_provider_resolvable
+    // 的兜底分支把 schema 默认值 anthropic/claude-opus-4-5 判成「可发起会话」
+    // （active_model_resolvable=true）——但那只是说会话发得出去（模型名会被
+    // 原样发给未必认它的 API），不代表用户选好了模型。严格判据
+    // （active_model_own_or_gateway_resolvable=false）据此仍触发自动就绪。
+    await page.addInitScript({
+      content: buildMockBridgeScript({
+        providers: [CONFIGURED_SILICONFLOW],
+        activeModel: 'anthropic/claude-opus-4-5',
+        activeModelResolvable: true,
+        activeModelOwnOrGatewayResolvable: false,
+        config: { agents: { defaults: { model: 'anthropic/claude-opus-4-5' } } },
+        qraftStatus: {
+          loggedIn: true,
+          account: {
+            phone: '18500000000',
+            sub: '19',
+            username: 'U-GW',
+            nickname: '网关用户',
+          },
+          env: 'test',
+          baseUrl: 'https://test.forge.miqroera.com/api',
+          aiGateway: { status: 'active', configVersion: 1 },
+        },
+      }),
+    });
+    await page.goto('/');
+    await page.waitForSelector('#root', { state: 'visible' });
+
+    await expect
+      .poll(
+        () =>
+          page.evaluate(() => {
+            const updates = (window as any).__miqiMock.getConfigUpdates();
+            return updates.some(
+              (u: any) => u?.agents?.defaults?.model === 'deepseek/deepseek-v4-flash'
+            );
+          }),
+        { timeout: 10_000 }
+      )
+      .toBe(true);
+
+    await page.getByText(/^(System Settings|系统设置)$/).click();
+    await page.getByRole('tab', { name: '模型' }).click();
+    await expect(page.getByTestId('providers-active-model')).toHaveText(
+      '当前默认模型：deepseek/deepseek-v4-flash',
+      { timeout: 10_000 }
+    );
+  });
+
+  test('用户自己配好的模型不被自动就绪覆盖（#1172）', async ({ page }) => {
+    // 严格判据为真（归属 provider 凭据齐备）→ 保持用户的选择不动。
+    await page.addInitScript({
+      content: buildMockBridgeScript({
+        providers: [CONFIGURED_DEEPSEEK],
+        activeModel: 'deepseek/deepseek-chat',
+        activeModelResolvable: true,
+        activeModelOwnOrGatewayResolvable: true,
+        config: { agents: { defaults: { model: 'deepseek/deepseek-chat' } } },
+        qraftStatus: {
+          loggedIn: true,
+          account: {
+            phone: '18500000000',
+            sub: '19',
+            username: 'U-GW',
+            nickname: '网关用户',
+          },
+          env: 'test',
+          baseUrl: 'https://test.forge.miqroera.com/api',
+          aiGateway: { status: 'active', configVersion: 1 },
+        },
+      }),
+    });
+    await page.goto('/');
+    await page.waitForSelector('#root', { state: 'visible' });
+    await page.getByText(/^(System Settings|系统设置)$/).click();
+    await page.getByRole('tab', { name: '模型' }).click();
+    await expect(page.getByTestId('providers-active-model')).toHaveText(
+      '当前默认模型：deepseek/deepseek-chat',
+      { timeout: 10_000 }
+    );
+
+    const updates = await page.evaluate(() => (window as any).__miqiMock.getConfigUpdates());
+    expect(updates).toHaveLength(0);
   });
 });

@@ -410,6 +410,14 @@ export interface ProvidersListResult {
    * 旧版 bridge 不返回该字段时为 undefined（前端回退到 configured 判定）。
    */
   active_model_resolvable?: boolean;
+  /**
+   * 当前默认模型是否确实由它自己的 provider（凭据齐备）或平台 AI 网关路由
+   * —— 严格版判定，不含「已配置 gateway 型 provider 兜底」那条（#1172）。
+   * 登录后自动就绪默认模型用它判断「用户是否已选好模型」：兜底只说明会话
+   * 发得出去（模型名会被原样发给未必认它的 API），不能说明这是用户的本意。
+   * 旧版 bridge 不返回该字段时为 undefined（前端只做空值兜底）。
+   */
+  active_model_own_or_gateway_resolvable?: boolean;
 }
 
 export interface ProviderUpdateResult {

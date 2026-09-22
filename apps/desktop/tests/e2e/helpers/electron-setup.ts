@@ -825,6 +825,12 @@ export async function launchElectronApp(
     noLoginBypass?: boolean;
     /** 强制窗口显示在屏幕上（默认本机启动时停在屏幕外，见 applyWindowVisibilityEnv） */
     showWindow?: boolean;
+    /**
+     * 不把开发者本机 `~/.miqi/config.json` 拷进临时 MIQI_HOME —— 模拟全新安装
+     * （没有任何用户 provider 凭据、也没有显式配置过 agents.defaults.model）。
+     * 默认拷贝是给需要真实 LLM 的用例用的；#1172 这类「无配置」场景必须显式打开。
+     */
+    noUserConfig?: boolean;
   }
 ): Promise<ElectronFixture> {
   // Create unique temporary home per test worker for full isolation.
@@ -845,9 +851,10 @@ export async function launchElectronApp(
   console.log(`[test] MIQI_HOME=${miqiHome}`);
 
   // Copy user's provider config into the temp home so the LLM backend is reachable.
+  // noUserConfig 时跳过：临时 home 保持「无用户配置」状态（全新安装）。
   const userConfigPath = join(homedir(), '.miqi', 'config.json');
   const destConfigPath = join(miqiHome, 'config.json');
-  if (existsSync(userConfigPath)) {
+  if (!opts?.noUserConfig && existsSync(userConfigPath)) {
     cpSync(userConfigPath, destConfigPath);
   }
 

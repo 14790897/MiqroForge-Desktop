@@ -1,9 +1,13 @@
 import { expect, test } from '@playwright/test';
-import { buildMockBridgeScript } from './mocks';
+import { buildMockBridgeScript, loggedInWithoutGateway } from './mocks';
 
 async function injectMockAndGoto(page: import('@playwright/test').Page) {
   await page.addInitScript({
     content: buildMockBridgeScript({
+      // 未下发网关状态：本用例断言「清空只发一条 config.update」，不能被
+      // 「登录后自动就绪默认模型」（#1172，网关 active 且当前模型不是自己
+      // provider/平台网关路由时自动写网关模型）多出的写入干扰。
+      qraftLoggedInStatus: loggedInWithoutGateway(),
       config: {
         agents: {
           defaults: {
