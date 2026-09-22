@@ -1,6 +1,7 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest';
-import { spawnSync } from 'child_process';
-import { readFileSync, writeFileSync } from 'fs';
+import { EventEmitter } from 'events';
+import { spawn, spawnSync } from 'child_process';
+import { readFileSync, rmSync, writeFileSync } from 'fs';
 import {
   classifyKernelInstall,
   classifyWslFeatureState,
@@ -10,6 +11,7 @@ import {
   isBashCapableDistro,
   readFeatureStates,
   runElevated,
+  runElevatedAsync,
   summarizeElevated,
   wslKernelPresent,
   wslPackageInstalled,
@@ -19,6 +21,7 @@ import {
 // The helpers under test spawn system commands; mock child_process.
 vi.mock('child_process', () => ({
   spawnSync: vi.fn(),
+  spawn: vi.fn(),
 }));
 
 // ...and touch the filesystem only through the trampoline temp dir.
@@ -30,12 +33,17 @@ vi.mock('fs', async (importOriginal) => {
     writeFileSync: vi.fn(),
     readFileSync: vi.fn(),
     rmSync: vi.fn(),
+    // The stale-directory sweep must not walk (or delete from) the real %TEMP%.
+    readdirSync: vi.fn(() => []),
+    statSync: vi.fn(),
   };
 });
 
 const mockedSpawnSync = vi.mocked(spawnSync);
+const mockedSpawn = vi.mocked(spawn);
 const mockedReadFileSync = vi.mocked(readFileSync);
 const mockedWriteFileSync = vi.mocked(writeFileSync);
+const mockedRmSync = vi.mocked(rmSync);
 
 function spawnResult(result: Partial<ReturnType<typeof spawnSync>>) {
   return {
@@ -392,27 +400,30 @@ describe('classifyKernelInstall', () => {
   });
 });
 
+/** Stub the trampoline result files the elevator reads after the elevated run. */
+function mockElevatorFiles(files: {
+  out?: string | Buffer;
+  err?: string;
+  exit?: string;
+  trampoline?: string;
+}) {
+  mockedReadFileSync.mockImplementation(((p: string) => {
+    const name = String(p);
+    const out = files.out;
+    if (name.endsWith('out.txt') && out !== undefined) {
+      return Buffer.isBuffer(out) ? out : Buffer.from(out);
+    }
+    if (name.endsWith('err.txt') && files.err !== undefined) return Buffer.from(files.err);
+    if (name.endsWith('exit.txt') && files.exit !== undefined) return Buffer.from(files.exit);
+    if (name.endsWith('trampoline.txt') && files.trampoline !== undefined) {
+      return Buffer.from(files.trampoline);
+    }
+    throw new Error(`ENOENT: ${name}`);
+  }) as any);
+}
+
 describe('runElevated', () => {
-  function mockFiles(files: {
-    out?: string | Buffer;
-    err?: string;
-    exit?: string;
-    trampoline?: string;
-  }) {
-    mockedReadFileSync.mockImplementation(((p: string) => {
-      const name = String(p);
-      const out = files.out;
-      if (name.endsWith('out.txt') && out !== undefined) {
-        return Buffer.isBuffer(out) ? out : Buffer.from(out);
-      }
-      if (name.endsWith('err.txt') && files.err !== undefined) return Buffer.from(files.err);
-      if (name.endsWith('exit.txt') && files.exit !== undefined) return Buffer.from(files.exit);
-      if (name.endsWith('trampoline.txt') && files.trampoline !== undefined) {
-        return Buffer.from(files.trampoline);
-      }
-      throw new Error(`ENOENT: ${name}`);
-    }) as any);
-  }
+  const mockFiles = mockElevatorFiles;
 
   /** The PowerShell script runElevated asked Windows to run elevated. */
   function elevatedScript(): string {
@@ -515,5 +526,87 @@ describe('runElevated', () => {
     expect(script).toContain('Enable-WindowsOptionalFeature -Online');
     // Merging the error stream is what keeps a failed cmdlet's message visible.
     expect(script).toContain('*>&1');
+  });
+});
+
+describe('runElevatedAsync', () => {
+  /**
+   * Stand-in for ChildProcess: the callers only use `kill()` and the
+   * `close`/`error` events, and `kill()` deliberately does NOT emit `close`
+   * (a real one does not either — the exit code arrives later, if at all).
+   */
+  class FakeChild extends EventEmitter {
+    killed = false;
+    kill(): boolean {
+      this.killed = true;
+      return true;
+    }
+  }
+
+  function mockAsyncChild(): FakeChild {
+    const child = new FakeChild();
+    mockedSpawn.mockReturnValue(child as any);
+    return child;
+  }
+
+  it('resolves only after the elevated process exits, not when it starts', async () => {
+    mockElevatorFiles({ out: 'elevated done', exit: '0' });
+    const child = mockAsyncChild();
+
+    const pending = runElevatedAsync({ command: { file: 'wsl.exe' } }, 60_000);
+    let settled = false;
+    void pending.then(() => {
+      settled = true;
+    });
+
+    await new Promise((r) => setTimeout(r, 25));
+    // Judging the platform while the repair is still running would inspect a
+    // machine the elevated process has not touched yet.
+    expect(settled).toBe(false);
+    expect(mockedReadFileSync).not.toHaveBeenCalled();
+
+    child.emit('close', 0);
+    await expect(pending).resolves.toEqual({ kind: 'ok', exitCode: 0, output: 'elevated done' });
+    // A collected run cleans up after itself.
+    expect(mockedRmSync).toHaveBeenCalled();
+  });
+
+  it('maps the declined-UAC exit code to cancelled', async () => {
+    mockElevatorFiles({ exit: '0' });
+    const child = mockAsyncChild();
+
+    const pending = runElevatedAsync({ command: { file: 'wsl.exe' } }, 60_000);
+    child.emit('close', ELEVATION_CANCELLED);
+
+    await expect(pending).resolves.toEqual({ kind: 'cancelled', exitCode: null, output: '' });
+  });
+
+  it('gives up on timeout and kills the trampoline', async () => {
+    const child = mockAsyncChild();
+
+    const result = await runElevatedAsync({ command: { file: 'wsl.exe' } }, 20);
+
+    expect(result.kind).toBe('unknown');
+    expect(result.error).toContain('超时');
+    expect(child.killed).toBe(true);
+  });
+
+  it('keeps the result directory on timeout, for the run that is still going', async () => {
+    // Deleting it would strand the still-running elevated child: it writes its
+    // exit code into that directory when it eventually finishes.
+    mockAsyncChild();
+
+    await runElevatedAsync({ command: { file: 'wsl.exe' } }, 20);
+
+    expect(mockedRmSync).not.toHaveBeenCalled();
+  });
+
+  it('reports a spawn failure instead of hanging', async () => {
+    const child = mockAsyncChild();
+    const pending = runElevatedAsync({ command: { file: 'wsl.exe' } }, 60_000);
+
+    child.emit('error', new Error('spawn failed'));
+
+    await expect(pending).resolves.toMatchObject({ kind: 'unknown', error: 'spawn failed' });
   });
 });

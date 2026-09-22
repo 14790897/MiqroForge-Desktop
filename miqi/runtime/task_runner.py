@@ -687,7 +687,10 @@ class TaskRunner:
             try:
                 from miqi.agent.skills import SkillsLoader
 
-                _skills_summary = SkillsLoader(_ws).build_skills_summary(
+                _skills_summary = SkillsLoader(
+                    _ws,
+                    sandbox_manager=getattr(self.services, "sandbox_manager", None),
+                ).build_skills_summary(
                     description_max_chars=160,
                 )
             except Exception:

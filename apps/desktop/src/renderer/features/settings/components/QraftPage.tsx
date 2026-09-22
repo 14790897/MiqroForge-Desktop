@@ -294,7 +294,7 @@ export function QraftPage() {
             </dl>
             <p className="mt-2 flex items-center gap-1.5 text-size-2xs text-[var(--text-faint)]">
               <BadgeInfo size={11} />
-              实测 access_token 有效期约 2 小时，MiQroForge 会在到期前 15 分钟自动刷新。
+              MiQroForge 会在 access_token 到期前 15 分钟自动刷新。
             </p>
 
             {/* AI 网关状态：#922 —— active 才允许模型调用走网关 */}

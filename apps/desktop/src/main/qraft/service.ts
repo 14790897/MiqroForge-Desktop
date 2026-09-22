@@ -3,7 +3,7 @@
  *   登录（平台登录 → 授权码流程 → userinfo）→ 加密落盘 → 自动刷新调度
  *   → 状态事件推送 → 退出登录清理。
  *
- * 刷新策略按实测数据：access_token 约 2 小时（expires_in=7199），
+ * 刷新策略：按平台下发的 expires_in（2026-09-21 实测约 30 天，早期约 2 小时）
  * 提前 15 分钟用 refresh_token 刷新。刷新失败按性质区分（issue #1087）：
  * 瞬时失败（网络不可达/平台 5xx）静默指数退避重试，不打扰用户；只有
  * 平台明确作废 refresh_token（REFRESH_TOKEN_INVALID）才置 requiresRelogin，
@@ -637,19 +637,26 @@ export class QraftService {
     setActiveAccount(sub);
   }
 
-  /** 拉取最新积分余额（设置页/登录后调用），成功后缓存并推送状态。 */
+  /**
+   * 拉取最新积分余额（设置页/登录后/状态栏轮询调用），成功后缓存并推送状态。
+   * access_token 失效（SESSION_EXPIRED）先刷新再重试一次（对齐
+   * submitPlatformFeedback）；新 token 仍被平台拒绝说明会话整体失效，
+   * 置 requiresRelogin 由登录失效三件套引导重新登录（issue #1160）。
+   */
   async fetchPointsBalance(): Promise<
     { ok: true; points: QraftPointsBalance } | { ok: false; code: QraftErrorCode; message: string }
   > {
     const state = this.options.store.current;
     if (!state) return { ok: false, code: 'INVALID_CONFIG', message: '尚未登录' };
+    const config: ResolvedQraftConfig = {
+      baseUrl: state.baseUrl,
+      clientId: state.clientId,
+      clientSecret: state.clientSecret,
+      redirectUri: state.redirectUri,
+    };
+    const generation = this.authGeneration;
+    const accountSub = state.account.sub;
     try {
-      const config: ResolvedQraftConfig = {
-        baseUrl: state.baseUrl,
-        clientId: state.clientId,
-        clientSecret: state.clientSecret,
-        redirectUri: state.redirectUri,
-      };
       const points = await this.options.client.getPointsBalance(config, state.tokens.accessToken);
       // 拉取期间可能已退出登录：丢弃过期结果，不写缓存。
       if (!this.options.store.current) {
@@ -659,6 +666,68 @@ export class QraftService {
       this.emitStatus();
       return { ok: true, points };
     } catch (err) {
+      if (err instanceof QraftError && err.code === 'SESSION_EXPIRED') {
+        // access_token 已失效：主进程自动刷新可能刚好错过窗口，先刷新再重试一次。
+        const refreshed = await this.refreshNow();
+        if (!refreshed.ok) {
+          return {
+            ok: false,
+            code: refreshed.code ?? 'REFRESH_FAILED',
+            message: refreshed.message ?? '刷新 token 失败',
+          };
+        }
+        const fresh = this.options.store.current;
+        // 刷新期间可能退出登录/换账号：绝不拿新账号的凭据顶替原账号查询。
+        if (!fresh || this.authGeneration !== generation || fresh.account.sub !== accountSub) {
+          return {
+            ok: false,
+            code: 'SESSION_EXPIRED',
+            message: '登录状态已变化，积分余额未拉取',
+          };
+        }
+        try {
+          const points = await this.options.client.getPointsBalance(
+            {
+              baseUrl: fresh.baseUrl,
+              clientId: fresh.clientId,
+              clientSecret: fresh.clientSecret,
+              redirectUri: fresh.redirectUri,
+            },
+            fresh.tokens.accessToken
+          );
+          // 拉取期间可能再次退出登录：丢弃过期结果，不写缓存。
+          if (!this.options.store.current) {
+            return { ok: false, code: 'INVALID_CONFIG', message: '尚未登录' };
+          }
+          this.pointsBalance = points;
+          this.emitStatus();
+          return { ok: true, points };
+        } catch (retryErr) {
+          if (retryErr instanceof QraftError && retryErr.code === 'SESSION_EXPIRED') {
+            // 新 token 仍被平台拒绝：会话整体失效（平台作废整会话等），
+            // 置 requiresRelogin 停掉渲染层重试并引导重新登录（issue #1160）。
+            this.requiresRelogin = true;
+            this.emitStatus();
+            this.options.log(
+              'ERROR',
+              'qraft: 刷新后重试积分余额仍失败（SESSION_EXPIRED）：会话已失效，请重新登录'
+            );
+          } else {
+            this.options.log(
+              'WARN',
+              `qraft: 查询积分余额失败（${retryErr instanceof QraftError ? retryErr.code : retryErr}）`
+            );
+          }
+          if (retryErr instanceof QraftError) {
+            return { ok: false, code: retryErr.code, message: retryErr.message };
+          }
+          return {
+            ok: false,
+            code: 'INTERNAL',
+            message: retryErr instanceof Error ? retryErr.message : String(retryErr),
+          };
+        }
+      }
       this.options.log(
         'WARN',
         `qraft: 查询积分余额失败（${err instanceof QraftError ? err.code : err}）`

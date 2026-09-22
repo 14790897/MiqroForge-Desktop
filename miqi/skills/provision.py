@@ -183,9 +183,12 @@ class SkillProvisioner:
         apt_src: list[str] = []
         venv: list[str] = []
         system = self._system_installs_available()
+        from miqi.sandbox.manager import sandbox_marker_environment
+
+        marker_env = sandbox_marker_environment(self._sandbox_manager)
         for req in reqs:
-            if req.marker is not None and not req.marker.evaluate():
-                continue  # marker inactive on this interpreter
+            if req.marker is not None and not req.marker.evaluate(environment=marker_env):
+                continue  # marker inactive for the target interpreter
             dist = str(req)
             if dist in provisioned:
                 continue  # already installed into the venv/system

@@ -225,3 +225,107 @@ def test_provisioned_version_specifier_is_not_reported_missing(tmp_path):
     record_provision("provisioned-pydantic", ["pydantic>=999"], has_venv=True)
     assert loader._missing_python_deps("provisioned-pydantic") == []
     assert loader._check_requirements("provisioned-pydantic") is True
+
+
+def _fake_sandbox_manager():
+    """A minimal stand-in that ``sandbox_is_active`` treats as an active sandbox."""
+    import types
+
+    return types.SimpleNamespace(enabled=True, _initialized=True)
+
+
+def _sandbox_loader(tmp_path, sandbox_manager, ws_name="ws"):
+    """Build a SkillsLoader bound to a (possibly fake) sandbox manager."""
+    workspace = tmp_path / ws_name
+    builtin = tmp_path / "builtin"
+    builtin.mkdir(exist_ok=True)
+    return (
+        SkillsLoader(
+            workspace=workspace,
+            builtin_skills_dir=builtin,
+            sandbox_manager=sandbox_manager,
+        ),
+        workspace,
+    )
+
+
+def test_sandbox_active_ignores_host_installed_package(tmp_path):
+    """With a sandbox active, a host-installed package still counts as missing."""
+    loader, workspace = _sandbox_loader(tmp_path, _fake_sandbox_manager())
+    # pydantic is installed on the host, but the sandbox may not have it —
+    # the host check must be bypassed in sandbox mode.
+    _make_skill(
+        workspace / "skills",
+        "sandbox-needs-pydantic",
+        "Needs pydantic",
+        requirements="pydantic\n",
+    )
+    assert loader._check_requirements("sandbox-needs-pydantic") is False
+    assert (
+        "Python: pydantic"
+        in loader._get_missing_requirements("sandbox-needs-pydantic")
+    )
+
+
+def test_sandbox_active_provisioned_dep_is_available(tmp_path, monkeypatch):
+    """A provisioned dep satisfies the requirement even with a sandbox active."""
+    from miqi.skills import provision as prov
+    from miqi.skills.provision import record_provision
+
+    # Isolate the registry so the test never touches the real data dir.
+    monkeypatch.setattr(
+        prov, "_registry_path", lambda: tmp_path / "skill-provisioning.json"
+    )
+
+    loader, workspace = _sandbox_loader(tmp_path, _fake_sandbox_manager())
+    _make_skill(
+        workspace / "skills",
+        "sandbox-provisioned-pydantic",
+        "Provisioned under sandbox",
+        requirements="pydantic\n",
+    )
+    assert loader._check_requirements("sandbox-provisioned-pydantic") is False
+
+    record_provision("sandbox-provisioned-pydantic", ["pydantic"], has_venv=True)
+    assert loader._missing_python_deps("sandbox-provisioned-pydantic") == []
+    assert loader._check_requirements("sandbox-provisioned-pydantic") is True
+
+
+def test_sandbox_disabled_sentinel_keeps_host_check(tmp_path):
+    """The "disabled" sentinel is not an active sandbox; host check still applies."""
+    loader, workspace = _sandbox_loader(tmp_path, "disabled")
+    _make_skill(
+        workspace / "skills",
+        "sandbox-disabled-pydantic",
+        "Needs pydantic",
+        requirements="pydantic\n",
+    )
+    assert loader._check_requirements("sandbox-disabled-pydantic") is True
+
+
+def test_sandbox_active_skips_windows_markers(tmp_path):
+    """A win32-only marker is inactive in the Linux sandbox (not reported missing)."""
+    loader, workspace = _sandbox_loader(tmp_path, _fake_sandbox_manager())
+    _make_skill(
+        workspace / "skills",
+        "sandbox-win-marker",
+        "Windows-only dep",
+        requirements=f'{_MISSING_DIST}; sys_platform == "win32"\n',
+    )
+    # The sandbox runs Linux, so a win32-only requirement is inactive there.
+    assert loader._missing_python_deps("sandbox-win-marker") == []
+    assert loader._check_requirements("sandbox-win-marker") is True
+
+
+def test_sandbox_active_evaluates_linux_markers(tmp_path):
+    """A linux-only marker is active in the sandbox (reported missing on a Windows host)."""
+    loader, workspace = _sandbox_loader(tmp_path, _fake_sandbox_manager())
+    _make_skill(
+        workspace / "skills",
+        "sandbox-linux-marker",
+        "Linux-only dep",
+        requirements=f'{_MISSING_DIST}; sys_platform == "linux"\n',
+    )
+    missing = loader._missing_python_deps("sandbox-linux-marker")
+    assert len(missing) == 1 and _MISSING_DIST in missing[0]
+    assert loader._check_requirements("sandbox-linux-marker") is False

@@ -517,17 +517,34 @@ class AnthropicProvider(LLMProvider):
                     ),
                 )
                 return
-            # 还没吐出任何东西：退回带重试的整段调用（即旧实现的行为），
-            # 一次网络抖动不至于丢掉整轮。
-            logger.warning("stream_chat: falling back to chat(): {}", e)
-            response = await self.chat(
-                messages=messages,
-                tools=tools,
-                model=model,
-                max_tokens=max_tokens,
-                temperature=temperature,
+            # 还没吐出任何东西：可重试类（瞬时/真限流）退回带重试的整段调用
+            # （即旧实现的行为），一次网络抖动不至于丢掉整轮。终态错误（#1190
+            # 配额耗尽、认证失败等）再调 chat() 也不会成功，直接按错误回复
+            # 交回，省掉一次注定失败的请求。
+            if resilience.is_retryable(kind):
+                logger.warning("stream_chat: falling back to chat(): {}", e)
+                response = await self.chat(
+                    messages=messages,
+                    tools=tools,
+                    model=model,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                )
+                yield LLMStreamEvent(kind="completed", response=response)
+                return
+            logger.warning(
+                "stream_chat: terminal error ({}), skipping chat() fallback: {}",
+                kind.value,
+                e,
             )
-            yield LLMStreamEvent(kind="completed", response=response)
+            yield LLMStreamEvent(
+                kind="completed",
+                response=LLMResponse(
+                    content=f"Error calling LLM: {e}",
+                    finish_reason="error",
+                    error_kind=kind.value,
+                ),
+            )
             return
 
         response = self._parse_response(final_message)

@@ -244,6 +244,86 @@ def test_bare_billing_word_is_not_payment_required() -> None:
     ) == ErrorKind.AUTH
 
 
+# ── Issue #1190: 429 + quota signals → PAYMENT_REQUIRED（非 RATE_LIMIT）──────
+
+
+@pytest.mark.parametrize("message", [
+    # 平台网关实测形态：429 + "Token quota exhausted" + 结构化错误体
+    "Error code: 429 - {'error': {'message': 'Token quota exhausted, please contact the administrator', 'code': 'consumer_token_quota_exceeded', 'type': 'quota_exceeded'}}",
+    # 只有 code 字段、无可读 message 的形态
+    "429 {'error': {'code': 'consumer_token_quota_exceeded'}}",
+    # 只有 type 字段
+    "429 {'error': {'type': 'quota_exceeded'}}",
+])
+def test_classify_error_429_quota_exhausted_is_payment_required(message: str) -> None:
+    """配额耗尽的 429 必须归 PAYMENT_REQUIRED（终态、不可重试），而不是
+    可重试的 RATE_LIMIT——否则会反复重试 + 原始英文错误透出前端。"""
+    assert classify_error(_RateLimitError(message)) == ErrorKind.PAYMENT_REQUIRED
+
+
+def test_classify_error_429_quota_false_field_is_not_payment() -> None:
+    """结构化字段的否定形态不是配额耗尽（#1190 CodeRabbit）：裸子串匹配会
+    把 {"quota_exceeded": false} 误判为 PAYMENT_REQUIRED 并错误地禁用重试。"""
+    assert classify_error(
+        _RateLimitError("429 {'error': {'quota_exceeded': False, 'message': 'rate limit'}}")
+    ) == ErrorKind.RATE_LIMIT
+
+
+def test_classify_error_429_not_quota_exceeded_field_is_not_payment() -> None:
+    """value=not_quota_exceeded 同样不命中——结构化匹配要求值完整等于配额码。"""
+    assert classify_error(
+        _RateLimitError("429 {'error': {'type': 'not_quota_exceeded'}}")
+    ) == ErrorKind.RATE_LIMIT
+
+
+def test_classify_error_429_quota_exhausted_not_retryable() -> None:
+    kind = classify_error(
+        _RateLimitError(
+            "429 {'error': {'code': 'consumer_token_quota_exceeded', 'type': 'quota_exceeded'}}"
+        )
+    )
+    assert is_retryable(kind) is False
+    assert ProviderError(kind=kind, message="quota").recoverable is False
+
+
+def test_classify_error_rate_limit_wording_with_quota_signal_is_payment() -> None:
+    """429 报错同时含 "rate limit" 措辞与配额耗尽信号：配额是终态，优先判定。"""
+    assert classify_error(
+        Exception("429 rate limit: token quota exhausted, please contact the administrator")
+    ) == ErrorKind.PAYMENT_REQUIRED
+
+
+def test_classify_error_anthropic_sdk_rate_limit_quota_signal() -> None:
+    """#1190 实测路径：anthropic SDK 的 RateLimitError 实例携带配额信号时
+    归 PAYMENT_REQUIRED（SDK 类型分支此前先于消息检查短路为 RATE_LIMIT）。"""
+    import anthropic
+
+    exc = anthropic.RateLimitError.__new__(anthropic.RateLimitError)
+    Exception.__init__(
+        exc,
+        "Error code: 429 - {'error': {'message': 'Token quota exhausted, please contact the administrator', 'code': 'consumer_token_quota_exceeded', 'type': 'quota_exceeded'}}",
+    )
+    assert classify_error(exc) == ErrorKind.PAYMENT_REQUIRED
+
+
+def test_classify_error_anthropic_sdk_plain_rate_limit_stays() -> None:
+    """对照组：无配额信号的 anthropic RateLimitError 仍归 RATE_LIMIT（可重试）。"""
+    import anthropic
+
+    exc = anthropic.RateLimitError.__new__(anthropic.RateLimitError)
+    Exception.__init__(exc, "Error code: 429 - {'error': {'message': 'rate limited'}}")
+    assert classify_error(exc) == ErrorKind.RATE_LIMIT
+
+
+def test_classify_error_openai_sdk_rate_limit_quota_signal() -> None:
+    """openai SDK 的 RateLimitError 实例同样先按配额信号分流。"""
+    import openai
+
+    exc = openai.RateLimitError.__new__(openai.RateLimitError)
+    Exception.__init__(exc, "429: Token quota exhausted")
+    assert classify_error(exc) == ErrorKind.PAYMENT_REQUIRED
+
+
 def test_classify_error_context_length_message() -> None:
     assert classify_error(Exception("context length exceeded")) == ErrorKind.CONTEXT_LENGTH
 
@@ -543,21 +623,35 @@ class _FakeStreamChunk:
 
 
 class _FakeStream:
-    """Async iterable yielding pre-defined chunks."""
+    """Async iterable yielding pre-defined chunks.
 
-    def __init__(self, chunks: list[_FakeStreamChunk], *, hang: bool = False) -> None:
+    ``hang`` stalls before the first chunk (the first-token timeout fires);
+    ``hang_after`` yields the chunks and only then stalls (the idle timeout
+    fires).
+    """
+
+    def __init__(
+        self,
+        chunks: list[_FakeStreamChunk],
+        *,
+        hang: bool = False,
+        hang_after: bool = False,
+    ) -> None:
         self._chunks = chunks
         self._index = 0
         self._hang = hang
+        self._hang_after = hang_after
 
     def __aiter__(self) -> "_FakeStream":
         return self
 
     async def __anext__(self) -> _FakeStreamChunk:
+        if self._index >= len(self._chunks):
+            if self._hang or self._hang_after:
+                await asyncio.Event().wait()
+            raise StopAsyncIteration
         if self._hang:
             await asyncio.Event().wait()
-        if self._index >= len(self._chunks):
-            raise StopAsyncIteration
         chunk = self._chunks[self._index]
         self._index += 1
         return chunk
@@ -684,9 +778,14 @@ async def test_openai_stream_preconnect_retry(monkeypatch: Any) -> None:
 
 
 @pytest.mark.asyncio
-async def test_openai_stream_idle_timeout_yields_terminal_error(monkeypatch: Any) -> None:
+async def test_openai_stream_first_token_timeout_yields_terminal_error(monkeypatch: Any) -> None:
     _patch_provider_sleep(monkeypatch)
-    provider = OpenAIProvider(api_key="sk-test", stream_idle_timeout=0.01)
+    # The stream stalls before its first chunk, so it is the FIRST-token
+    # timeout that fires here; the idle one is pinned too so neither default
+    # (60 s and 30 s) can turn this test into real sleeping on CI.
+    provider = OpenAIProvider(
+        api_key="sk-test", stream_idle_timeout=0.01, first_token_timeout=0.01,
+    )
 
     async def fake_create(**kw: Any) -> Any:
         return _FakeStream([], hang=True)
@@ -701,6 +800,28 @@ async def test_openai_stream_idle_timeout_yields_terminal_error(monkeypatch: Any
     assert events[0].kind == "completed"
     assert events[0].response.finish_reason == "error"
     assert events[0].response.error_kind == "transient"
+
+
+@pytest.mark.asyncio
+async def test_openai_stream_idle_timeout_yields_terminal_error(monkeypatch: Any) -> None:
+    """A stall AFTER the first chunk is the idle timeout, not the first-token one."""
+    _patch_provider_sleep(monkeypatch)
+    provider = OpenAIProvider(
+        api_key="sk-test", stream_idle_timeout=0.01, first_token_timeout=0.01,
+    )
+
+    async def fake_create(**kw: Any) -> Any:
+        return _FakeStream([_FakeStreamChunk("hi")], hang_after=True)
+
+    provider._client = SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=fake_create)),
+        timeout=600.0,
+    )
+
+    events = [event async for event in provider.stream_chat(messages=[{"role": "user", "content": "hi"}])]
+    assert [event.kind for event in events] == ["content_delta", "completed"]
+    assert events[-1].response.finish_reason == "error"
+    assert events[-1].response.error_kind == "transient"
 
 
 # ---------------------------------------------------------------------------
