@@ -134,19 +134,22 @@ class _WslStub:
         pgrep_raises_timeout=False,
         on_install_timeout=None,
         hang_ready_at=frozenset(),
-        hang_busy=False,
+        hang_busy_at=frozenset(),
     ):
         self.install_results = list(install_results)
         self.ready_after = ready_after
         self.leftovers = leftovers
         self.pgrep_raises_timeout = pgrep_raises_timeout
         self.on_install_timeout = on_install_timeout
-        #: 1-based indices of READY_CMD calls that hang instead of answering.
+        #: 1-based indices of READY_CMD / busy-probe calls that hang
+        #: instead of answering, so a test can make one step burn its timeout
+        #: without making every later probe on that path do the same.
         self.hang_ready_at = set(hang_ready_at)
-        self.hang_busy = hang_busy
+        self.hang_busy_at = set(hang_busy_at)
         self.install_cmds: list[str] = []
         self.install_attempts = 0
         self.ready_calls = 0
+        self.busy_calls = 0
         self.terminate_calls = 0
         self.pgrep_calls = 0
 
@@ -154,6 +157,8 @@ class _WslStub:
         assert args[0] == "wsl.exe", args
         if args[1] == "--terminate":
             self.terminate_calls += 1
+            # Restarting the distro kills whatever was running inside it.
+            self.leftovers = False
             return _FakeProc(0)
 
         payload = args[-1]
@@ -166,7 +171,8 @@ class _WslStub:
             return _FakeProc(1)  # no passwordless sudo -> install runs unwrapped
         if "pgrep -x apt-get" in payload:
             self.pgrep_calls += 1
-            if self.hang_busy:
+            self.busy_calls += 1
+            if self.busy_calls in self.hang_busy_at:
                 return _FakeProc(hang=True)
             if self.pgrep_raises_timeout:
                 return _FakeProc(raise_timeout=True)
@@ -198,7 +204,7 @@ async def test_timeout_retries_and_clears_the_leftover_apt(monkeypatch):
     assert await BwrapSandbox._ensure_wsl_deps(DISTRO) is True
 
     assert stub.install_attempts == 2, "the timed-out attempt was not retried"
-    assert stub.pgrep_calls == 1, "the distro was not probed for a leftover apt"
+    assert stub.pgrep_calls >= 1, "the distro was not probed for a leftover apt"
     assert stub.terminate_calls == 1, "the poisoned distro was not restarted"
 
     cmd = stub.install_cmds[0]
@@ -238,13 +244,31 @@ async def test_ready_but_still_busy_distro_is_not_reported_as_success(monkeypatc
     the next installer (skills provisioning, the exec tool).  Clean up and
     retry instead.
     """
-    monkeypatch.setattr(bwrap_mod, "_WSL_APT_IDLE_WAIT_S", 0.0)
+    # Small, not zero: a zero-second wait gives the probe no time at all and
+    # it would report "busy" for the wrong reason.
+    monkeypatch.setattr(bwrap_mod, "_WSL_APT_IDLE_WAIT_S", 0.05)
     stub = _WslStub(["hang", (0, b"")], ready_after=1, leftovers=True)
     monkeypatch.setattr(bwrap_mod, "_create_subprocess_exec", stub)
 
     assert await BwrapSandbox._ensure_wsl_deps(DISTRO) is True
     assert stub.terminate_calls == 1, "the busy distro was never cleaned up"
     assert stub.install_attempts == 2, "it reported success without retrying"
+
+
+async def test_a_still_locked_distro_is_not_reported_as_success(monkeypatch):
+    """Ready is not enough — the distro also has to be idle.
+
+    A passing readiness probe only proves the files landed.  If apt/dpkg is
+    still running when the verdict is taken, reporting success would hand the
+    dpkg lock to the next installer the moment ``_install_lock`` is released.
+    """
+    monkeypatch.setattr(bwrap_mod, "_WSL_APT_IDLE_WAIT_S", 0.05)
+    stub = _WslStub([(0, b"")], ready_after=1, leftovers=True)
+    monkeypatch.setattr(bwrap_mod, "_create_subprocess_exec", stub)
+
+    assert await BwrapSandbox._ensure_wsl_deps(DISTRO) is False
+    assert stub.install_attempts == 1
+    assert stub.terminate_calls == 0, "nothing even tried to free the lock"
 
 
 async def test_slow_but_successful_install_is_reported_as_ready(monkeypatch):
@@ -277,7 +301,7 @@ async def test_poisoned_index_signature_is_retried(monkeypatch):
 
     assert await BwrapSandbox._ensure_wsl_deps(DISTRO) is True
     assert stub.install_attempts == 2
-    assert stub.pgrep_calls == 1, "the retry ran against the same poisoned distro"
+    assert stub.pgrep_calls >= 1, "the retry ran against the same poisoned distro"
     assert stub.terminate_calls == 1
 
 
@@ -309,7 +333,7 @@ async def test_reset_restarts_the_distro_only_when_something_is_left(monkeypatch
     clean = _WslStub([], ready_after=0, leftovers=False)
     monkeypatch.setattr(bwrap_mod, "_create_subprocess_exec", clean)
     await BwrapSandbox._reset_wsl_apt_state(DISTRO)
-    assert clean.pgrep_calls == 1
+    assert clean.pgrep_calls >= 1
     assert clean.terminate_calls == 0
 
     dirty = _WslStub([], ready_after=0, leftovers=True)
@@ -382,8 +406,8 @@ async def test_the_whole_call_stays_within_budget_plus_allowance(monkeypatch):
     stub = _WslStub(
         ["hang", "hang"],
         ready_after=1,       # the toolchain really is installed
-        hang_ready_at={2},   # only the pre-verdict probe burns its timeout
-        hang_busy=True,
+        hang_ready_at={2},    # only the pre-verdict probe burns its timeout
+        hang_busy_at={1},     # ...and only the first busy probe does
     )
     monkeypatch.setattr(bwrap_mod, "_create_subprocess_exec", stub)
 

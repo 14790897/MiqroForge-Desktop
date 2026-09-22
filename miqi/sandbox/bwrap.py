@@ -1301,7 +1301,7 @@ class BwrapSandbox:
         *,
         timeout: float | None = None,
         not_after: float | None = None,
-    ) -> None:
+    ) -> bool:
         """Clear an apt/dpkg run left behind by a killed install.
 
         ``proc.kill()`` only terminates the Windows-side ``wsl.exe`` forwarder.
@@ -1314,6 +1314,11 @@ class BwrapSandbox:
         Only restarts the distro when a leftover process is actually found, so
         the healthy path costs one bounded probe.  Both steps are clamped by
         ``not_after`` so the caller's total bound covers the whole cleanup.
+
+        Returns True only when the distro is verifiably free of apt/dpkg
+        afterwards — an unconfirmed restart is reported rather than assumed,
+        because the caller must not hand a still-locked distro to the next
+        installer.
         """
         if timeout is None:
             timeout = _WSL_RESET_TIMEOUT_S
@@ -1323,18 +1328,28 @@ class BwrapSandbox:
         if not await BwrapSandbox._has_leftover_pkg_manager(
             distro, timeout=10.0, not_after=deadline
         ):
-            return
+            return True
 
         logger.warning(
             "Leftover apt/dpkg process in WSL distro '{}' — restarting the "
             "distro to release the dpkg lock",
             distro,
         )
-        await BwrapSandbox._run_bounded(
+        rc = await BwrapSandbox._run_bounded(
             ("wsl.exe", "--terminate", distro),
             _bounded(30.0, deadline),
             not_after=deadline,
         )
+        if rc == 0:
+            return True
+        logger.warning(
+            "Could not confirm that WSL distro '{}' was restarted "
+            "(wsl.exe --terminate returned {}); apt/dpkg may still hold the "
+            "dpkg lock",
+            distro,
+            "no result" if rc is None else rc,
+        )
+        return False
 
     @staticmethod
     async def _ensure_wsl_deps(distro: str) -> bool:
@@ -1617,9 +1632,15 @@ class BwrapSandbox:
                             )
                         # Not ready (or not idle): the orphan apt/dpkg holds the
                         # dpkg lock and poisons the next attempt.
-                        await BwrapSandbox._reset_wsl_apt_state(
+                        if not await BwrapSandbox._reset_wsl_apt_state(
                             distro, not_after=cleanup_deadline
-                        )
+                        ):
+                            logger.warning(
+                                "WSL distro '{}' could not be confirmed clear of "
+                                "apt/dpkg before the retry; it may collide with "
+                                "the dpkg lock",
+                                distro,
+                            )
                         continue
                     stderr = stderr.decode("utf-8", errors="replace") if stderr else ""
 
@@ -1648,9 +1669,15 @@ class BwrapSandbox:
                                 "retrying once: {}",
                                 err_msg,
                             )
-                            await BwrapSandbox._reset_wsl_apt_state(
+                            if not await BwrapSandbox._reset_wsl_apt_state(
                                 distro, not_after=cleanup_deadline
-                            )
+                            ):
+                                logger.warning(
+                                    "WSL distro '{}' could not be confirmed clear "
+                                    "of apt/dpkg before the retry; it may collide "
+                                    "with the dpkg lock",
+                                    distro,
+                                )
                             continue
                         logger.warning(
                             "Failed to install dependencies in WSL distro "
@@ -1666,32 +1693,44 @@ class BwrapSandbox:
                         distro, exc,
                     )
                     break
+            # Verify bwrap + python3/pip are now available — and that nothing
+            # is still installing.  This probe, not any apt exit status,
+            # decides the return value, which is why its slice is reserved out
+            # of the cleanup allowance and the steps above were clamped to end
+            # before it.  Both checks run with ``_install_lock`` still held, so
+            # a distro that is still locked is never handed to the next
+            # installer.
+            if await BwrapSandbox._distro_ready(
+                distro,
+                timeout=_WSL_VERDICT_PROBE_TIMEOUT_S,
+                not_after=verdict_deadline,
+            ):
+                if await BwrapSandbox._wait_for_pkg_managers_idle(
+                    distro, not_after=verdict_deadline
+                ):
+                    logger.info(
+                        "Successfully installed sandbox dependencies in WSL "
+                        "distro '{}' (total {:.0f}s)",
+                        distro, time.monotonic() - _t0,
+                    )
+                    _last_install_failure.pop(distro, None)
+                    return True
+                logger.warning(
+                    "Sandbox dependencies are present in WSL distro '{}' but "
+                    "apt/dpkg is still running — not reporting success, since "
+                    "that would hand the dpkg lock to the next installer",
+                    distro,
+                )
+            else:
+                logger.warning(
+                    "Dependencies installed but bwrap or python3/pip still "
+                    "missing in WSL distro '{}'",
+                    distro,
+                )
+            _last_install_failure[distro] = time.monotonic()
+            return False
         finally:
             _install_lock.release()
-
-        # Verify bwrap + python3/pip are now available.  This probe — not any
-        # apt exit status — decides the return value, which is why its slice is
-        # reserved out of the cleanup allowance and the steps above were
-        # clamped to end before it.
-        if await BwrapSandbox._distro_ready(
-            distro,
-            timeout=_WSL_VERDICT_PROBE_TIMEOUT_S,
-            not_after=verdict_deadline,
-        ):
-            logger.info(
-                "Successfully installed sandbox dependencies in WSL distro "
-                "'{}' (total {:.0f}s)", distro, time.monotonic() - _t0,
-            )
-            _last_install_failure.pop(distro, None)
-            return True
-
-        logger.warning(
-            "Dependencies installed but bwrap or python3/pip still missing "
-            "in WSL distro '{}'",
-            distro,
-        )
-        _last_install_failure[distro] = time.monotonic()
-        return False
 
     # ── Lifecycle ──────────────────────────────────────────────────────
 
