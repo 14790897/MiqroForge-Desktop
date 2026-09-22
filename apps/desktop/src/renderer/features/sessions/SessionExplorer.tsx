@@ -6,6 +6,7 @@ import { ScrollArea } from '../../components/ui/ScrollArea';
 import { ContextMenu } from '../../components/ContextMenu';
 import { cn } from '../../lib/utils';
 import { formatAbsoluteTime } from '../../lib/formatTime';
+import { resolveSessionsList } from '../../lib/sessionsList';
 import {
   MessageSquare,
   Trash2,
@@ -92,9 +93,18 @@ export function SessionExplorer({
     setLoading(true);
     try {
       const r = await window.miqi.sessions.list();
-      setSessions(r?.sessions ?? []);
+      const next = resolveSessionsList(r);
+      if (next !== null) {
+        setSessions(next);
+        // 成功路径的痕迹。不写这行，「列表空了」在日志上分不清是拿不到还是
+        // 后端确实没有（#1202）。模板字符串得在这儿拼好——主进程的 console
+        // 转发只取第一个字符串参数，插值不会落盘。
+        console.info(`[sessions] sessions.list 返回 ${next.length} 条`);
+      } else {
+        console.warn('[sessions] sessions.list 未返回结果（桥超时/不可用），保留现有列表');
+      }
     } catch {
-      // Bridge not available
+      // Bridge not available —— 保留现有列表
     }
     setLoading(false);
   }, []);
