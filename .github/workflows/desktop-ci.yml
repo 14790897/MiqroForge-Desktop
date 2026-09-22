@@ -83,7 +83,8 @@ jobs:
       contents: read
     # 信任来源门禁（#1107 安全评审的结论）：下面这些会执行 PR 检出代码的步骤，只对受信任来源运行。
     # 不受信任时（外部 fork 的 pull_request_target）它们整体跳过，于是 PR 代码不再与
-    # DEEPSEEK/BRAVE 凭据同处一个 job —— 这同时收掉了既有的「PR head 的 spec 读 key」暴露。
+    # DEEPSEEK/BRAVE/QRAFT（云端登录测试账号）凭据同处一个 job —— 这同时收掉了既有的
+    # 「PR head 的 spec 读 key」暴露。
     # 用**步骤级** if 而不是 job 级：electron-e2e 是 develop 的必需检查，job 级 if 为假时
     # check 可能根本不上报，PR 会卡在 "Expected — Waiting for status"。
     # 这是**仓库的安全策略**（信任边界＝「有写权限的人推上来的代码」），不是强隔离：受信任来源
@@ -188,6 +189,21 @@ jobs:
         env:
           PLAYWRIGHT_SKIP_WEB_SERVER: '1'
 
+      - name: Assert QRAFT secrets are present
+        # 云端登录用例（qraft-browser-login / qraft-login-entry 的真实 OAuth）由
+        # QRAFT_PHONE / QRAFT_PASSWORD 门控，缺失时 spec 自身 skip —— 显式失败，
+        # 避免「登录链路其实没跑」的绿色假象。与其它 provider 凭据同一信任边界：
+        # 只有受信任来源（E2E_TRUSTED）才走到这一步。
+        if: env.E2E_TRUSTED == 'true'
+        env:
+          QRAFT_PHONE: ${{ secrets.QRAFT_PHONE }}
+          QRAFT_PASSWORD: ${{ secrets.QRAFT_PASSWORD }}
+        run: |
+          if [ -z "$QRAFT_PHONE" ] || [ -z "$QRAFT_PASSWORD" ]; then
+            echo "::error::QRAFT_PHONE/QRAFT_PASSWORD secrets 缺失——云端登录用例会被 skip，按失败处理"
+            exit 1
+          fi
+
       - name: Run Electron E2E
         if: env.E2E_TRUSTED == 'true'
         # 并行度用 config 的默认值（4）。#1107 最初设想「4 vCPU 跑 4 个并行 Electron 会过载、
@@ -203,6 +219,10 @@ jobs:
         timeout-minutes: 45
         env:
           PLAYWRIGHT_SKIP_WEB_SERVER: '1'
+          # 云端登录 live 用例（真实账号、生产环境）已并入本套件：凭据在此注入，
+          # 对应的两个 spec 自己声明关闭录屏/截图/追踪（手机号不进产物）。
+          QRAFT_PHONE: ${{ secrets.QRAFT_PHONE }}
+          QRAFT_PASSWORD: ${{ secrets.QRAFT_PASSWORD }}
 
       - name: Summarize flaky E2E tests
         # #1107：flaky 清单就地汇总，报告**不离开这个 job**（上传 artifact / release asset 都会
