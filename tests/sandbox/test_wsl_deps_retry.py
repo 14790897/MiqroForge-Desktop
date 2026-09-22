@@ -169,7 +169,7 @@ class _WslStub:
             return _FakeProc(0 if self.install_attempts >= self.ready_after else 1)
         if payload == SUDO_PROBE:
             return _FakeProc(1)  # no passwordless sudo -> install runs unwrapped
-        if "pgrep -x apt-get" in payload:
+        if "apt-get|dpkg" in payload:
             self.pgrep_calls += 1
             self.busy_calls += 1
             if self.busy_calls in self.hang_busy_at:
@@ -416,9 +416,12 @@ async def test_the_whole_call_stays_within_budget_plus_allowance(monkeypatch):
     elapsed = time.monotonic() - started
 
     assert stub.ready_calls >= 3, "the verdict probe was never reached"
-    assert elapsed <= 0.20 + 0.20 + 0.20, (
+    # budget + allowance, plus one named scheduling-slack term — the bound
+    # itself must stay visible instead of being padded by an anonymous number.
+    slack = 0.10
+    assert elapsed <= 0.20 + 0.20 + slack, (
         f"the call ran {elapsed:.2f}s, past the declared "
-        f"budget + allowance = 0.40s"
+        f"budget + allowance = 0.40s (+{slack:.2f}s scheduling slack)"
     )
 
 
@@ -452,3 +455,19 @@ def test_transient_classifier_covers_the_ci_signatures():
 
     # A genuine configuration problem must not look retryable.
     assert not BwrapSandbox._is_transient_apt_error("E: Unmet dependencies.")
+
+
+def test_busy_probe_needs_no_external_binary():
+    """The probe must not depend on a package that may be absent.
+
+    It decides whether a distro may be handed on, and "cannot run" reads as
+    "busy" — so a probe needing an external binary would report a
+    *successfully* installed distro as unusable and put it in the cooldown
+    (CodeRabbit review of #1186: `pgrep` ships in `procps`, which the install
+    set never included).
+    """
+    cmd = bwrap_mod._PKG_MANAGER_BUSY_CMD
+    assert "pgrep" not in cmd, cmd
+    assert "/proc/" in cmd, cmd
+    for name in ("apt-get", "dpkg"):
+        assert name in cmd, (name, cmd)

@@ -278,8 +278,16 @@ _WSL_READY_CMD = (
 #: yes, 1 means no, anything else (including a probe that never answered) is
 #: treated as "yes, assume busy" by
 #: :meth:`BwrapSandbox._has_leftover_pkg_manager`.
+#:
+#: Reads ``/proc`` directly rather than shelling out to ``pgrep``: ``pgrep``
+#: ships in ``procps``, and a probe that cannot run answers "busy" forever —
+#: which would report a *successfully* installed distro as unusable and put it
+#: in the cooldown on top of that (CodeRabbit review of #1186).
 _PKG_MANAGER_BUSY_CMD = (
-    "pgrep -x apt-get >/dev/null 2>&1 || pgrep -x dpkg >/dev/null 2>&1"
+    'for c in /proc/[0-9]*/comm; do '
+    'read -r n < "$c" 2>/dev/null || continue; '
+    'case "$n" in apt-get|dpkg) exit 0;; esac; '
+    'done; exit 1'
 )
 """Serialize _ensure_wsl_deps to prevent concurrent apt-get.
 

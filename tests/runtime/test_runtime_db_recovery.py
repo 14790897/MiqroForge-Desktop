@@ -550,3 +550,55 @@ async def test_queued_successor_never_sees_a_poisoned_connection(tmp_path):
         )
     finally:
         await db.close()
+
+
+async def test_failed_replay_also_quarantines(tmp_path):
+    """A failure of the stale-snapshot *replay* must quarantine too.
+
+    The replay runs inside the ``except sqlite3.OperationalError`` handler, and
+    a failure raised inside an ``except`` block is not caught by a sibling
+    handler — so keeping the quarantine side by side with it would let a failed
+    replay escape un-quarantined and hand the connection to a queued successor
+    (CodeRabbit review of #1186).
+    """
+    db = RuntimeDb(tmp_path / "runtime.db", name="test")
+    await db.open()
+    calls = 0
+    in_flight = asyncio.Event()
+    release = asyncio.Event()
+
+    async def flaky(conn: aiosqlite.Connection) -> str:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            in_flight.set()
+            await release.wait()
+            # Fast lock error with no extended code -> classified as a stale
+            # snapshot, so _run_locked recycles and replays.
+            raise sqlite3.OperationalError("database is locked")
+        # The replay itself fails, and it must not slip past the quarantine.
+        raise sqlite3.OperationalError("no such table: nope")
+
+    try:
+        first = asyncio.create_task(db.run(flaky))
+        await asyncio.wait_for(in_flight.wait(), timeout=5)
+
+        successor = asyncio.create_task(
+            db.run(lambda conn: fetchone(conn, "SELECT 1"))
+        )
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+        release.set()
+        with pytest.raises(sqlite3.OperationalError):
+            await first
+        assert calls == 2, "the replay never ran"
+        assert db.recycle_count == 1, "the stale snapshot was not recycled"
+
+        assert await successor == (1,)
+        assert db.recycle_count == 2, (
+            "the queued successor reused the connection the failed replay left "
+            "behind — the replay failure skipped the quarantine"
+        )
+    finally:
+        await db.close()

@@ -439,24 +439,29 @@ class RuntimeDb:
             started = time.monotonic()
             before = connection.total_changes
             try:
-                return await fn(connection)
-            except sqlite3.OperationalError as exc:
-                if not is_stale_snapshot_error(exc, time.monotonic() - started):
-                    # Ordinary contention: the busy handler already waited, and
-                    # masking it here would hide a real lock conflict.
-                    self._quarantine()
-                    raise
-                # A stale snapshot predates this call, so the write that tripped
-                # over it is this call's first write.  Recycle so every later
-                # operation on this store is healthy again, and replay once —
-                # but only when the failed attempt wrote nothing, which keeps
-                # the replay from duplicating rows.
-                modified = connection.total_changes != before
-                await self._recycle(f"stale snapshot: {format_sqlite_error(exc)}")
-                if modified:
-                    raise
-                return await fn(self.conn)
+                try:
+                    return await fn(connection)
+                except sqlite3.OperationalError as exc:
+                    if not is_stale_snapshot_error(exc, time.monotonic() - started):
+                        # Ordinary contention: the busy handler already waited,
+                        # and masking it here would hide a real lock conflict.
+                        raise
+                    # A stale snapshot predates this call, so the write that
+                    # tripped over it is this call's first write.  Recycle so
+                    # every later operation on this store is healthy again, and
+                    # replay once — but only when the failed attempt wrote
+                    # nothing, which keeps the replay from duplicating rows.
+                    modified = connection.total_changes != before
+                    await self._recycle(f"stale snapshot: {format_sqlite_error(exc)}")
+                    if modified:
+                        raise
+                    return await fn(self.conn)
             except BaseException:
+                # One quarantine point for the first attempt *and* the replay.
+                # A failure raised inside an ``except`` block is not caught by
+                # a sibling handler, so keeping them side by side would let a
+                # failed replay escape without quarantining the connection
+                # (CodeRabbit review of #1186).
                 self._quarantine()
                 raise
 
