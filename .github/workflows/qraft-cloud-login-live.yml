@@ -3,19 +3,27 @@ name: Qraft Cloud Login Live E2E
 # 真实平台云端登录（生产域名 www.miqroforge.com）的 live E2E：
 # 授权窗口 → 平台登录页填测试账号 → 回调换 token → 应用内已登录。
 #
-# 只在本仓库自身的运行里跑（push develop / 定时 / 手动）——没有 PR 触发，
-# 因此不存在「PR 代码与测试账号凭据同处一 job」的暴露面（对照 desktop-ci.yml
-# 的 E2E_TRUSTED 门禁）。凭据只经 QRAFT_PHONE / QRAFT_PASSWORD secrets 注入，
-# 未配置时 spec 自身 skip（test.skip(!PHONE || !PASSWORD)）。
+# 触发：同仓 PR（pull_request_target，路径过滤）+ push develop + 手动。
+# pull_request_target 用**基分支**的 workflow 定义并携带 secrets；因此必须
+# 门禁到「head 分支来自本仓库」（=推分支需要写权限=受信任，同 desktop-ci.yml
+# 的 E2E_TRUSTED）——外部 fork 的 PR 整 job 跳过。本 workflow 不是必需检查，
+# 跳过不影响 PR 合并状态。
+#
+# 凭据只经 QRAFT_PHONE / QRAFT_PASSWORD secrets 注入；缺失时下面有显式断言
+# 失败，避免「静默 skip 出绿色」。
 #
 # 产物策略：本 workflow 不传任何 artifact，且 playwright.live.config.ts 关闭
 # 录屏/截图/追踪 —— 授权窗口里会真实输入账号手机号，公开仓库的 artifact
 # 对任何读者可下载，不能带出账号信息。
 on:
-  schedule:
-    # 每天 UTC 18:37（北京时间 02:37）——避开整点资源高峰
-    - cron: '37 18 * * *'
-  workflow_dispatch:
+  pull_request_target:
+    paths:
+      - '.github/workflows/qraft-cloud-login-live.yml'
+      - 'apps/desktop/playwright.live.config.ts'
+      - 'apps/desktop/tests/e2e/qraft-browser-login.spec.ts'
+      - 'apps/desktop/tests/e2e/qraft-login-entry.spec.ts'
+      - 'apps/desktop/tests/e2e/helpers/electron-setup.ts'
+      - 'apps/desktop/src/main/qraft/**'
   push:
     branches: [develop]
     paths:
@@ -25,16 +33,19 @@ on:
       - 'apps/desktop/tests/e2e/qraft-login-entry.spec.ts'
       - 'apps/desktop/tests/e2e/helpers/electron-setup.ts'
       - 'apps/desktop/src/main/qraft/**'
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: qraft-cloud-login-live
-  cancel-in-progress: false
+  group: qraft-cloud-login-live-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   cloud-login:
+    # 信任边界：只跑 head 分支来自本仓库的 PR（推分支需要写权限）；其余事件照常。
+    if: github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     # 真实登录一次约 1-2 分钟，整套含环境搭建在 10 分钟内；给足余量。
     timeout-minutes: 30
@@ -44,16 +55,22 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        # 不受信任来源直接不检出（写成原始表达式是刻意的：CodeQL 的
+        # actions/untrusted-checkout 只把挂在 checkout 自身上的显式条件当作有效控制）。
+        if: ${{ github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository }}
         with:
+          ref: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || github.ref }}
           persist-credentials: false
 
       - uses: actions/setup-node@v4
+        if: ${{ github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository }}
         with:
           node-version: 22
           cache: npm
           cache-dependency-path: apps/desktop/package-lock.json
 
       - uses: actions/setup-python@v5
+        if: ${{ github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository }}
         with:
           python-version: '3.12'
 
@@ -69,6 +86,25 @@ jobs:
 
       - name: Build renderer
         run: npm run build -- --logLevel warn
+
+      - name: Generate ~/.miqi/config.json
+        # 主界面挂载以 python.check().config_exists（~/.miqi/config.json 是否存在）
+        # 为准：不存在则进首启动向导，chat-input 永不出现 —— 2026-09-22 CI 首跑
+        # 5/5 失败即此因。这里只写最小空配置，不为登录链路引入任何 provider 密钥。
+        run: |
+          mkdir -p ~/.miqi
+          printf '{}' > ~/.miqi/config.json
+
+      - name: Assert QRAFT secrets are present
+        # 空凭据会让用例静默 skip（test.skip(!PHONE || !PASSWORD)）并出绿色假象
+        env:
+          QRAFT_PHONE: ${{ secrets.QRAFT_PHONE }}
+          QRAFT_PASSWORD: ${{ secrets.QRAFT_PASSWORD }}
+        run: |
+          if [ -z "$QRAFT_PHONE" ] || [ -z "$QRAFT_PASSWORD" ]; then
+            echo "::error::QRAFT_PHONE/QRAFT_PASSWORD secrets 缺失——云端登录用例会被 skip，按失败处理"
+            exit 1
+          fi
 
       - name: Cloud login E2E（真实平台 / 生产环境）
         run: |
