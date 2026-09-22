@@ -5,16 +5,22 @@
  * 都落在 launchElectronApp 的临时 MIQI_HOME，测试结束随临时目录清理 —— 不碰开发机
  * 的 `~/.miqi`，也不在仓库里留下任何凭据。
  *
- * 用法：
+ * 用法（至少两对账号，可给到三对）：
  *   QRAFT_LIVE=1 \
  *   QRAFT_PHONE_A=<账号A> QRAFT_PASSWORD_A=<密码A> \
  *   QRAFT_PHONE_B=<账号B> QRAFT_PASSWORD_B=<密码B> \
+ *   [QRAFT_PHONE_C=<账号C> QRAFT_PASSWORD_C=<密码C>] \
  *   PLAYWRIGHT_SKIP_WEB_SERVER=1 \
  *   npx playwright test --config=playwright.config.ts --project=electron \
  *     issue-1185-account-isolation-live.spec.ts
  *
- * 覆盖 issue #1185 的验收路径：**A 发消息 → 登出 → 登入 B（看不到 A 的会话）→
- * 登出 → 登回 A（自己的会话还在）**。
+ * 验收路径：**逐个账号登录并发一条带唯一 token 的消息；每个账号登录后都要证明
+ * 前面所有账号的 token 在工作区与侧栏里都找不到；最后登回第一个账号，它自己的
+ * 还在**。
+ *
+ * 判据刻意用「消息内容」而不是会话 key：`desktop:default` 是默认哨兵 key，每个
+ * 账号登录都会被建一个同名会话 —— 拿 key 比对会把「两边各有自己的哨兵会话」误报
+ * 成泄漏。
  */
 
 import { test, expect } from '@playwright/test';
@@ -30,16 +36,31 @@ import {
 } from './helpers/electron-setup';
 
 const LIVE = process.env.QRAFT_LIVE === '1';
-const PHONE_A = process.env.QRAFT_PHONE_A ?? '';
-const PASSWORD_A = process.env.QRAFT_PASSWORD_A ?? '';
-const PHONE_B = process.env.QRAFT_PHONE_B ?? '';
-const PASSWORD_B = process.env.QRAFT_PASSWORD_B ?? '';
-const READY = LIVE && PHONE_A !== '' && PASSWORD_A !== '' && PHONE_B !== '' && PASSWORD_B !== '';
+
+interface Account {
+  label: string;
+  phone: string;
+  password: string;
+}
+
+const ACCOUNTS: Account[] = (
+  [
+    ['A', 'QRAFT_PHONE_A', 'QRAFT_PASSWORD_A'],
+    ['B', 'QRAFT_PHONE_B', 'QRAFT_PASSWORD_B'],
+    ['C', 'QRAFT_PHONE_C', 'QRAFT_PASSWORD_C'],
+  ] as const
+)
+  .map(([label, phoneVar, passwordVar]) => ({
+    label,
+    phone: process.env[phoneVar] ?? '',
+    password: process.env[passwordVar] ?? '',
+  }))
+  .filter((a) => a.phone !== '' && a.password !== '');
 
 /** 真实网关回一次话比 mock 慢得多，给足预算。 */
 const TURN_TIMEOUT = 300_000;
 
-const describeFn = READY ? test.describe : test.describe.skip;
+const describeFn = LIVE && ACCOUNTS.length >= 2 ? test.describe : test.describe.skip;
 
 describeFn('本地存储按登录账号划分（#1185）— 真实账号 live E2E (opt-in)', () => {
   let fixture: ElectronFixture;
@@ -67,13 +88,13 @@ describeFn('本地存储按登录账号划分（#1185）— 真实账号 live E2
   }
 
   /** 走应用自己的登录入口（登录门按钮调的就是它），返回该账号的 sub。 */
-  async function login(phone: string, password: string): Promise<string> {
+  async function login(account: Account): Promise<string> {
     const page = fixture.page;
     const result = await page.evaluate(([p, pw]) => (window as any).miqi.qraft.login(p, pw), [
-      phone,
-      password,
+      account.phone,
+      account.password,
     ] as const);
-    expect(result?.ok, `登录失败：${JSON.stringify(result)}`).toBe(true);
+    expect(result?.ok, `账号 ${account.label} 登录失败：${JSON.stringify(result)}`).toBe(true);
     await expect(page.getByTestId('nav-new-session')).toBeVisible({ timeout: 60_000 });
     await waitForRuntime();
     return String(result.account?.sub ?? '');
@@ -83,22 +104,6 @@ describeFn('本地存储按登录账号划分（#1185）— 真实账号 live E2
     const page = fixture.page;
     await page.evaluate(() => (window as any).miqi.qraft.logout());
     await expect(page.getByTestId('login-step')).toBeVisible({ timeout: 60_000 });
-  }
-
-  /**
-   * 当前账号侧栏里的会话 key（与侧栏同一个数据源）。
-   *
-   * 形状不对就抛：否则 bridge 没起来时返回的 `undefined` 会让「B 看不到 A 的
-   * 会话」变成空数组直接通过 —— 那是最典型的假绿。
-   */
-  async function sessionKeys(): Promise<string[]> {
-    const list = await fixture.page.evaluate(() => (window as any).miqi.sessions.list());
-    expect(list, 'sessions.list 应返回对象').toBeTruthy();
-    expect(
-      Array.isArray(list.sessions),
-      `sessions.list 应带 sessions 数组：${JSON.stringify(list)}`
-    ).toBe(true);
-    return (list.sessions as Array<{ key: string }>).map((s) => s.key);
   }
 
   function readMarker(name: string): string {
@@ -120,102 +125,110 @@ describeFn('本地存储按登录账号划分（#1185）— 真实账号 live E2
   }
 
   /**
-   * 账号**实际**的工作区根。
+   * 账号**实际**的工作区根 —— 首个账号有两种可能，取决于一次竞态。
    *
-   * 真机上这条路径通常不走 accounts/<sub>/：应用停在登录门时 bridge 已经跑过一次
-   * （无账号态），把 `<数据根>/workspace` 建了出来；首个账号登录就按 #1185 的存量
-   * 归属规则把它认领走、就地使用。第二个账号才会拿到 accounts/<sub>/workspace。
-   * 断言必须按 `.legacy-owner` 分情况，否则验的就不是真实行为。
+   * 应用停在登录门时 bridge 会按无账号态跑一次并把 `<数据根>/workspace` 建出来；
+   * 登录若发生在它之后，首个账号就按 #1185 的存量归属规则把这个目录认领走、就地
+   * 使用（`.legacy-owner=<sub>`）；登录若赶在它之前，则三个账号都拿到
+   * `accounts/<sub>/workspace`。两种结果实测都出现过，功能上等效（各账号互不可见），
+   * 所以断言按 `.legacy-owner` 分情况，而不是假定某一种。
    */
   function effectiveSessions(sub: string): string {
-    const legacyOwner = readMarker('.legacy-owner');
-    return legacyOwner === sub
+    return readMarker('.legacy-owner') === sub
       ? join(fixture.miqiHome, 'workspace', 'sessions')
       : accountSessions(sub);
   }
 
+  async function sidebarText(): Promise<string> {
+    return (await fixture.page.getByTestId('session-item').allInnerTexts()).join('\n');
+  }
+
   test(
-    'A 发消息 → 登出 → 登入 B 看不到 A 的会话 → 登回 A 数据仍在',
-    { timeout: TURN_TIMEOUT },
+    '逐个真实账号登录：看不到此前任何一个账号的对话，登回第一个自己的还在',
+    // 每个账号都要登录 + 真实回一条，按账号数放宽：3 个账号 ≈ 10 分钟。
+    { timeout: Math.max(TURN_TIMEOUT, 240_000 + ACCOUNTS.length * 120_000) },
     async () => {
       const page = fixture.page;
-      // 判据用「这句话本身」而不是会话 key：`desktop:default` 是默认哨兵 key，
-      // 每个账号登录都会被建一个同名的会话 —— 拿 key 比对会把「两边各有自己的
-      // 哨兵会话」误报成泄漏，而真正要验的是**内容**互不可见。
-      const token = `ACCOUNTISOLATION${Date.now()}`;
+      /** 已发过消息的账号：label / sub / token / 它的会话目录。 */
+      const sent: Array<{ label: string; sub: string; token: string; sessions: string }> = [];
 
-      // ── A：真实登录 → 新建会话 → 真实网关回一条 ──────────────────────
-      const subA = await login(PHONE_A, PASSWORD_A);
-      await createNewConversation(page);
-      await sendMessage(page, `只回复两个字：收到（${token}）`);
-      await waitForResponseComplete(page, 240_000);
+      for (const account of ACCOUNTS) {
+        if (sent.length > 0) await logout();
+        const sub = await login(account);
+        expect(
+          sent.map((s) => s.sub),
+          `账号 ${account.label} 的 sub 不该与已测账号重复`
+        ).not.toContain(sub);
 
-      // 先确认这条消息真的走通了网关 —— 否则拿到的可能只是一个「运行时未就绪」
-      // 的报错回合，那就不是在验真实链路。
-      const assistantText = await page.getByTestId('chat-message-assistant').last().innerText();
-      expect(assistantText, '真实网关应给出回复').not.toContain('运行时未启动');
+        // ── 先证明「看不到前面的」：这是本用例的主诉求 ──────────────────
+        const ownSessions = effectiveSessions(sub);
+        for (const prev of sent) {
+          expect(
+            prev.sessions,
+            `账号 ${prev.label} 与 ${account.label} 的会话目录不该是同一个`
+          ).not.toBe(ownSessions);
+          expect(
+            sessionsDirContains(ownSessions, prev.token),
+            `账号 ${account.label} 的工作区里不该有账号 ${prev.label} 的对话`
+          ).toBe(false);
+          expect(
+            await sidebarText(),
+            `账号 ${account.label} 的侧栏里不该出现账号 ${prev.label} 的对话`
+          ).not.toContain(prev.token);
+        }
 
-      await expect
-        .poll(sessionKeys, { timeout: 120_000, message: 'A 发完消息后侧栏应出现会话' })
-        .not.toEqual([]);
-      // 磁盘布局：标记指向当前账号，且该账号的工作区根下确实落了会话。
-      expect(readMarker('.active')).toBe(subA);
-      const aSessions = effectiveSessions(subA);
-      console.log(
-        `[1185] A(sub=${subA}) 工作区=${aSessions} .legacy-owner=${readMarker('.legacy-owner')}`
-      );
-      expect(existsSync(aSessions), `A 的会话目录应存在：${aSessions}`).toBe(true);
-      expect(sessionsDirContains(aSessions, token), 'A 的那句话应该落在 A 自己的会话目录里').toBe(
-        true
-      );
-      // 用户可见的那一层：A 的侧栏里能看到这句话。
-      await expect(page.getByTestId('session-item').first()).toContainText(token, {
-        timeout: 30_000,
-      });
+        // ── 再让这个账号说一句自己的，作为下一位的对照物 ────────────────
+        const token = `ACCOUNTISOLATION${account.label}${Date.now()}`;
+        await createNewConversation(page);
+        await sendMessage(page, `只回复两个字：收到（${token}）`);
+        await waitForResponseComplete(page, 240_000);
 
-      // ── 登出，登入 B：看不到 A 的任何对话 ────────────────────────────
+        // 先确认这条消息真的走通了网关 —— 否则拿到的可能是一个「运行时未就绪」
+        // 的报错回合，那就不是在验真实链路。
+        const assistantText = await page.getByTestId('chat-message-assistant').last().innerText();
+        expect(assistantText, `账号 ${account.label} 应拿到真实网关回复`).not.toContain(
+          '运行时未启动'
+        );
+
+        // 自己的落盘与侧栏都要能看到这句话（否则下一轮的「看不到」就没有意义）。
+        await expect
+          .poll(() => sessionsDirContains(ownSessions, token), {
+            timeout: 120_000,
+            message: `账号 ${account.label} 的那句话应落在自己的工作区里`,
+          })
+          .toBe(true);
+        await expect
+          .poll(sidebarText, {
+            timeout: 60_000,
+            message: `账号 ${account.label} 的侧栏应出现该会话`,
+          })
+          .toContain(token);
+
+        expect(readMarker('.active')).toBe(sub);
+        sent.push({ label: account.label, sub, token, sessions: ownSessions });
+        console.log(
+          `[1185] ${account.label}(sub=${sub}) 工作区=${ownSessions} ` +
+            `.active=${readMarker('.active')} .legacy-owner=${readMarker('.legacy-owner')}`
+        );
+      }
+
+      // ── 登回第一个账号：自己的对话还在，别人的照旧不在 ────────────────
       await logout();
-      const subB = await login(PHONE_B, PASSWORD_B);
-      expect(subB, '两个账号的 sub 应不同').not.toBe(subA);
-      expect(readMarker('.active')).toBe(subB);
-      // B 的账号工作区由它自己的第一次会话操作建出来（SessionManager 初始化时
-      // ensure_dir），所以这里要等一拍 —— 直接断言会撞上时序。
+      const first = ACCOUNTS[0];
+      const subFirst = await login(first);
+      expect(readMarker('.active')).toBe(subFirst);
       await expect
-        .poll(() => existsSync(accountSessions(subB)), {
-          timeout: 60_000,
-          message: `B 应拿到自己的账号工作区：${accountSessions(subB)}`,
-        })
-        .toBe(true);
-      expect(accountSessions(subB)).not.toBe(aSessions);
-      console.log(
-        `[1185] A(sub=${subA}) 会话目录=${aSessions}
-` +
-          `[1185] B(sub=${subB}) 会话目录=${accountSessions(subB)}
-` +
-          `[1185] .active=${readMarker('.active')} .legacy-owner=${readMarker('.legacy-owner')}`
-      );
-
-      // 1) 磁盘：B 的会话目录里找不到 A 的那句话。
-      expect(sessionsDirContains(accountSessions(subB), token), 'B 的工作区里不该有 A 的对话').toBe(
-        false
-      );
-      // 2) 侧栏：用户看不到 A 的会话。
-      const titlesB = await page.getByTestId('session-item').allInnerTexts();
-      expect(titlesB.join('\n'), 'B 的侧栏里不该出现 A 的对话').not.toContain(token);
-      // 3) 切走不删数据：A 的会话目录原封不动。
-      expect(existsSync(aSessions), 'A 的会话目录不该因为换账号被删掉').toBe(true);
-
-      // ── 登回 A：自己的对话还在 ──────────────────────────────────────
-      await logout();
-      await login(PHONE_A, PASSWORD_A);
-      expect(readMarker('.active')).toBe(subA);
-
-      await expect
-        .poll(async () => (await page.getByTestId('session-item').allInnerTexts()).join('\n'), {
-          timeout: 60_000,
-          message: '切回 A 后自己的会话应重新出现',
-        })
-        .toContain(token);
+        .poll(sidebarText, { timeout: 60_000, message: '切回第一个账号后自己的会话应重新出现' })
+        .toContain(sent[0].token);
+      for (const other of sent.slice(1)) {
+        expect(await sidebarText(), `第一个账号的侧栏不该出现 ${other.label} 的对话`).not.toContain(
+          other.token
+        );
+      }
+      // 切走不删数据：前面每个账号的会话目录都还在。
+      for (const s of sent) {
+        expect(existsSync(s.sessions), `账号 ${s.label} 的会话目录不该因为换账号被删掉`).toBe(true);
+      }
     }
   );
 });
