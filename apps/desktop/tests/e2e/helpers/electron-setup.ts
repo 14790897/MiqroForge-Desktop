@@ -63,35 +63,70 @@ export function getMiqiSessionsDir(miqiHome: string): string {
 
 // ─── Page helpers ───────────────────────────────────────────────────
 
-/** Wait for the chat input textarea to be present and enabled */
+/**
+ * Wait for the chat input textarea to be present and enabled.
+ *
+ * 同时判定应用「能否进入主界面」：没有 ~/.miqi/config.json 时应用停在首启动
+ * 向导（App.tsx 以 python.check().config_exists 决定 needsSetup），
+ * chat-input 永不挂载 —— 检测到向导就点「使用默认配置，进入应用」把它带进
+ * 主界面；若点了仍进不去，报错明确指出停在向导（而非泛指超时）。
+ * 背景：2026-09-22 云端登录流水线首跑 5/5 全挂即此形态（PR #1189）。
+ */
 export async function waitForInputReady(page: Page, timeout = 60_000) {
-  const textarea = page.locator('[data-testid="chat-input-container"] textarea');
-
-  // Wait for textarea to exist first
-  await expect(page.locator('[data-testid="chat-input-container"]')).toBeVisible({ timeout });
-
-  // Retry with exponential backoff - input may briefly appear/disappear during UI transitions
+  const container = page.locator('[data-testid="chat-input-container"]');
+  const textarea = container.locator('textarea');
+  const enterWithDefaults = page.getByRole('button', { name: /使用默认配置，进入应用/ });
   const deadline = Date.now() + timeout;
   let lastError: Error | null = null;
+  let wizardHandled = false;
 
   while (Date.now() < deadline) {
-    try {
-      await expect(textarea).toBeEnabled({ timeout: 5000 });
-      return textarea;
-    } catch (e) {
-      lastError = e as Error;
-      // Wait before retrying
-      await page.waitForTimeout(1000);
+    if (await container.isVisible().catch(() => false)) {
+      // Retry with exponential backoff - input may briefly appear/disappear during UI transitions
+      try {
+        await expect(textarea).toBeEnabled({ timeout: 5000 });
+        return textarea;
+      } catch (e) {
+        lastError = e as Error;
+        await page.waitForTimeout(1000);
+        continue;
+      }
     }
+
+    if (
+      !wizardHandled &&
+      (await enterWithDefaults.isVisible({ timeout: 5000 }).catch(() => false))
+    ) {
+      console.log(
+        '[test] 判定：应用停在首启动向导（无 ~/.miqi/config.json）——点「使用默认配置，进入应用」后等待主界面'
+      );
+      // 点击成功才置标志：瞬时遮挡/重渲染导致的点击失败要留给下一轮重试
+      try {
+        await enterWithDefaults.click({ timeout: 5000 });
+        wizardHandled = true;
+      } catch (e) {
+        lastError = e as Error;
+        await page.waitForTimeout(500);
+      }
+      continue;
+    }
+
+    await page.waitForTimeout(500);
   }
 
   // Log diagnostic info before throwing
   const count = await textarea.count();
-  const containerVisible = await page.locator('[data-testid="chat-input-container"]').isVisible();
+  const containerVisible = await container.isVisible().catch(() => false);
+  const stuckOnWizard = await enterWithDefaults.isVisible().catch(() => false);
   console.log(
-    `[diagnostic] waitForInputReady failed: textarea count=${count}, container visible=${containerVisible}`
+    `[diagnostic] waitForInputReady failed: textarea count=${count}, container visible=${containerVisible}, setup-wizard=${stuckOnWizard}`
   );
-  throw lastError;
+  if (stuckOnWizard) {
+    throw new Error(
+      '应用停在首启动向导，未能进入主界面：点「使用默认配置，进入应用」后 chat-input 仍未挂载'
+    );
+  }
+  throw lastError ?? new Error('waitForInputReady 超时：chat-input-container 不可见');
 }
 
 /** Send a message and confirm it appears in the chat */
