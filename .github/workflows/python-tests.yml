@@ -25,6 +25,7 @@ permissions:
 jobs:
   lint:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -43,6 +44,11 @@ jobs:
       matrix:
         os: [windows-latest, ubuntu-latest]
     runs-on: ${{ matrix.os }}
+    # 实测 pytest 步骤 ubuntu 348-375s、windows 475-512s，45 分钟是 4.5 倍余量。
+    # 此前完全没有上限，已经真实烧掉过两次 6 小时 runner（job 105446711757
+    # 2026-09-18、job 106055400629 2026-09-20），都被 GitHub 的 360 分钟默认
+    # 上限硬杀，且因为 pytest -q 只打点而定位不了卡在哪。
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -55,44 +61,11 @@ jobs:
       - name: Run portable and subprocess tests
         run: uv run pytest -q -m "not sandbox and not wsl" --tb=short
 
-  bwrap:
-    runs-on: ubuntu-latest
-    # GitHub runner 上 apt-get update 偶发网络挂死（无超时默认可挂 6h），
-    # 加 job 级上限避免 CI 无限白等
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-      - name: Install uv and bubblewrap
-        run: |
-          python -m pip install uv
-          sudo apt-get update -o Acquire::http::Timeout=60 -o Acquire::Retries=3
-          sudo apt-get install -y --no-install-recommends -o Acquire::http::Timeout=60 -o Acquire::Retries=3 bubblewrap
-      - name: Install dependencies
-        run: uv sync --all-extras
-      - name: Check bwrap availability
-        id: bwrap-check
-        run: |
-          if bwrap --version && bwrap --ro-bind / / /bin/true; then
-            echo "available=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "bwrap is not usable on this runner; skipping bwrap-only tests."
-            echo "available=false" >> "$GITHUB_OUTPUT"
-          fi
-      - name: Run sandbox tests
-        if: steps.bwrap-check.outputs.available == 'true'
-        run: |
-          set +e
-          uv run pytest -q -m "sandbox and bwrap"
-          status=$?
-          set -e
-          if [ "$status" -eq 5 ]; then
-            echo "No sandbox+bwrap tests matched; treating as skipped."
-            exit 0
-          fi
-          exit "$status"
+  # bwrap(ubuntu) job 已删除：ubuntu-latest 上 `bwrap --ro-bind / / /bin/true`
+  # 恒为失败（setting up uid map: Permission denied），`Run sandbox tests` 步骤
+  # 在所有记录里都是 skipped，整个 job 19 秒跑完——却带着一条 sudo apt-get
+  # install 和它自己的 20 分钟上限。删除零覆盖损失：同一批标记
+  # （`-m "sandbox and bwrap"`）在下面的 wsl-sandbox job 里照跑。
 
   wsl-sandbox:
     runs-on: windows-latest
