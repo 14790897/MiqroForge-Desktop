@@ -465,6 +465,15 @@ describe('account-scoped workspace (#1185)', () => {
     expect(readActiveAccount()).toBeNull();
   });
 
+  it('throws when the marker cannot be replaced', () => {
+    // 把 .active 占成目录：rename 没法用它替换，于是写入失败。这里必须是**抛**，
+    // 不能像以前那样静默吞掉 —— 静默失败会留下上一个账号的标记，而长期驻留的
+    // 运行时每次解析工作区都读它（#1185 评审）。
+    mkdirSync(join(accountsDir(), '.active'), { recursive: true });
+
+    expect(() => setActiveAccount('19')).toThrow(/账号标记写入失败/);
+  });
+
   it('leaves the legacy workspace to the first account that claims it', () => {
     mkdirSync(join(home, 'workspace', 'sessions', 'desktop_k'), { recursive: true });
     setActiveAccount('19');

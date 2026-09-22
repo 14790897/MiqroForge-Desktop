@@ -206,7 +206,21 @@ export class QraftService {
       this.restoreJar(stored);
       // 账号维度的工作区根（#1185）必须在 syncTokenFile 之前就位：token
       // 文件写在 <workspace>/.qraft/ 下，先写就会落进上一个账号的工作区。
-      this.activateAccount(stored.account?.sub);
+      //
+      // 这里与 persistLogin 里的调用不同：启动时只是**重申**一个通常已经正确
+      // 的标记（上一轮运行写下的就是同一个 sub），写失败不改变现状；而新登录
+      // 时标记指向的是上一个账号，写失败必须让登录失败。所以这里吞掉异常、记
+      // 一条日志继续启动，由 persistLogin 那条路径负责终止登录。
+      try {
+        this.activateAccount(stored.account?.sub);
+      } catch (err) {
+        this.options.log(
+          'WARN',
+          `qraft: 启动时激活账号失败（${
+            err instanceof Error ? err.message : err
+          }）；沿用磁盘上已有的标记`
+        );
+      }
       this.scheduleRefresh(stored);
       this.syncTokenFile(stored);
     } else {
@@ -577,6 +591,10 @@ export class QraftService {
    *
    * 未登录 / 拿不到合法 sub（老平台响应缺字段、sub 为空）时退回共享工作区
    * 而不是猜一个目录：分享别人工作区比多一个共享目录更糟。
+   *
+   * 标记写不进去时**抛出**——调用方（`persistLogin`）必须让这次登录失败，
+   * 否则磁盘上留下的是上一个账号的标记，而长期驻留的运行时每次解析工作区都会
+   * 读它，于是新账号继续在上一个账号的工作区里干活。
    */
   private activateAccount(sub: string | undefined): void {
     if (!isValidAccountSub(sub)) {
@@ -584,7 +602,8 @@ export class QraftService {
       return;
     }
     // 认领在前：存量 `~/.miqi/workspace` 归首个登录账号，之后 getWorkspacePath
-    // 才会把它解析成这个账号的工作区。
+    // 才会把它解析成这个账号的工作区。认领本身是尽力而为的：认领失败只是让这个
+    // 账号拿到自己的空目录，不会把它带进别人的数据里。
     claimLegacyWorkspace(sub);
     setActiveAccount(sub);
   }

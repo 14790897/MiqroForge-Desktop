@@ -98,7 +98,12 @@ describeFn('本地存储按登录账号划分（#1185）— 真实账号 live E2
     expect(result?.ok, `账号 ${account.label} 登录失败：${JSON.stringify(result)}`).toBe(true);
     await expect(page.getByTestId('nav-new-session')).toBeVisible({ timeout: 60_000 });
     await waitForRuntime();
-    return String(result.account?.sub ?? '');
+    const sub = String(result.account?.sub ?? '');
+    // 空 sub 必须在这里拦住：`accountSessions('')` 指的是一个并不存在的目录，
+    // 而 `sessionsDirContains` 对不存在的目录一律返回 false —— 后面的「看不到
+    // 别人的」就成了空转的假绿（#1185 评审）。这里是唯一能拦的地方。
+    expect(sub, `账号 ${account.label} 的登录响应里没有 sub`).not.toBe('');
+    return sub;
   }
 
   async function logout(): Promise<void> {

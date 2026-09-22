@@ -1388,4 +1388,21 @@ describe('账号维度的工作区根 (#1185)', () => {
     expect(result.ok).toBe(true);
     expect(readActiveAccount()).toBeNull();
   });
+
+  it('账号标记写不进去时登录必须失败，且不落盘', async () => {
+    // 把 .active 占成目录 → setActiveAccount 的 rename 失败。此前它被静默吞掉，
+    // 于是登录照常报成功、磁盘上留着**上一个账号**的标记，而长期驻留的运行时
+    // 每次解析工作区都读它 —— 新账号会继续在上一个账号的工作区里干活（#1185 评审）。
+    mkdirSync(join(miqiHome, 'accounts', '.active'), { recursive: true });
+    const service = makeService(loggedInClient());
+    expect(store.load(), '前置：开始时应无登录态').toBeNull();
+
+    const result = await service.login('18500000000', 'p');
+
+    expect(result.ok).toBe(false);
+    // 关键：登录态没被写下来。写了的话下次启动会按「已登录」恢复，
+    // 而标记仍指着别人。
+    expect(store.load()).toBeNull();
+    expect(readActiveAccount()).toBeNull();
+  });
 });

@@ -160,19 +160,37 @@ export function getDefaultWorkspacePath(): string {
  * env or a config field because the bridge is a single long-lived process
  * that is NOT restarted on login/logout, while `agents.defaults.workspace`
  * would classify as a tier-B change and toast the user on every switch.
+ *
+ * **Throws when the marker cannot be replaced** (#1185 review). Swallowing the
+ * error here is what let a failed switch keep the *previous* account's marker
+ * on disk while the login still reported success — the long-lived Python
+ * resolver reads that marker on every workspace resolution, so the new account
+ * would go on working inside the old account's workspace. Callers that are
+ * about to persist a new login must treat a throw as "the login did not
+ * happen"; a caller that merely re-asserts an already-correct marker (the
+ * startup restore path) may log and carry on.
  */
 export function setActiveAccount(sub: string): void {
   const file = getActiveAccountFile();
+  mkdirSync(dirname(file), { recursive: true });
+  // 原子替换：桥可能会在任意时刻读取该文件，就地截断会让它读到空串，
+  // 也就是「无账号」——恰好退回共享工作区。rename 在 POSIX 与 Windows
+  // 上都会替换已存在的目标文件。
+  const tmp = `${file}.${process.pid}.tmp`;
   try {
-    mkdirSync(dirname(file), { recursive: true });
-    // 原子替换：桥可能会在任意时刻读取该文件，就地截断会让它读到空串，
-    // 也就是「无账号」——恰好退回共享工作区。rename 在 POSIX 与 Windows
-    // 上都会替换已存在的目标文件。
-    const tmp = `${file}.${process.pid}.tmp`;
     writeFileSync(tmp, sub, { encoding: 'utf8' });
     renameSync(tmp, file);
-  } catch {
-    /* 标记写入失败：退回共享工作区（本次登录的隔离不生效，但不影响使用） */
+  } catch (err) {
+    try {
+      rmSync(tmp, { force: true });
+    } catch {
+      /* 临时文件清理失败无碍：它不含凭据，且下次会被覆写 */
+    }
+    throw new Error(
+      `账号标记写入失败（${file}）：${
+        err instanceof Error ? err.message : String(err)
+      }；本次登录已中止，以免运行时继续使用上一个账号的工作区`
+    );
   }
 }
 

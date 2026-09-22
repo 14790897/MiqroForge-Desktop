@@ -25,6 +25,7 @@ const STORE_ENV = 'MIQI_QRAFT_STORE';
 const ACCOUNT_FIRST = '19';
 const ACCOUNT_SECOND = '20';
 const LEGACY_TITLE = '老用户的存量会话';
+const SECOND_TITLE = '后到账号自己的会话';
 
 let tmpDir: string;
 let storePath: string;
@@ -78,6 +79,30 @@ function readMarker(name: string): string {
   return existsSync(file) ? readFileSync(file, 'utf8').trim() : '<无标记>';
 }
 
+/** 在指定工作区根下预置一段会话（格式与 `SessionManager.save` 一致）。 */
+function seedConversation(root: string, key: string, title: string, content: string): void {
+  const dir = join(root, 'sessions', sessionDirName(key));
+  mkdirSync(dir, { recursive: true });
+  const now = new Date().toISOString();
+  const metadata = {
+    _type: 'metadata',
+    key,
+    owner_client_id: 'miqi-desktop',
+    created_at: now,
+    updated_at: now,
+    metadata: { owner_client_id: 'miqi-desktop', title },
+    last_consolidated: 0,
+  };
+  // 用 fromCharCode 而不是字面量转义：这个文件里已经因为转义吃过一次亏。
+  const NL = String.fromCharCode(10);
+  const message = { role: 'user', content, timestamp: now };
+  writeFileSync(
+    join(dir, 'conversation.jsonl'),
+    [JSON.stringify(metadata), JSON.stringify(message)].join(NL) + NL,
+    'utf8'
+  );
+}
+
 async function sidebarTitles(page: Page): Promise<string[]> {
   return page.getByTestId('session-item').allInnerTexts();
 }
@@ -113,6 +138,15 @@ test.describe.serial('存量工作区归属（#1185）', () => {
     await closeElectronApp(electronApp, miqiHome, true);
 
     expect(existsSync(legacyWorkspace()), '无账号启动应建出存量根目录').toBe(true);
+    // 给第二个账号也预置一段**它自己的**会话。断言「看不到存量」需要一个正向栅栏：
+    // 侧栏初始是空数组，`length === 0` 的轮询完全可能在 list 返回之前就通过
+    // （#1185 评审）。
+    seedConversation(
+      accountWorkspace(ACCOUNT_SECOND),
+      'desktop:second',
+      SECOND_TITLE,
+      '后到的账号'
+    );
     // 往里放一段老用户的会话 —— 升级前它就在这个位置。
     const dir = join(legacyWorkspace(), 'sessions', sessionDirName('desktop:legacy'));
     mkdirSync(dir, { recursive: true });
@@ -159,11 +193,12 @@ test.describe.serial('存量工作区归属（#1185）', () => {
     expect(existsSync(accountWorkspace(ACCOUNT_FIRST))).toBe(false);
   });
 
-  test('后到的账号看不到那份存量历史，拿到自己的空工作区', async () => {
+  test('后到的账号看不到那份存量历史，拿到自己的账号工作区', async () => {
     await switchTo(ACCOUNT_SECOND);
 
-    await expect.poll(async () => (await sidebarTitles(page)).length, { timeout: 30_000 }).toBe(0);
-    expect((await sidebarTitles(page)).join('\n')).not.toContain(LEGACY_TITLE);
+    // 正向栅栏：先等到**它自己的**会话出现（证明 list 已经返回），再断言存量那
+    // 条不在。只等空列表的话，可能在 list 还没回来时就通过 —— 那是假绿。
+    await expectSidebarToShow(page, SECOND_TITLE, LEGACY_TITLE);
 
     // 不会被改写成第二个账号的存量：归属标记仍是首个账号。
     expect(readMarker('.legacy-owner')).toBe(ACCOUNT_FIRST);
