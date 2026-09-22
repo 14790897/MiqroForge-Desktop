@@ -506,3 +506,47 @@ async def test_non_wal_fallback_still_reads_and_writes(tmp_path, monkeypatch):
         assert [r[0] for r in rows] == ["x"]
     finally:
         await db.close()
+
+
+async def test_queued_successor_never_sees_a_poisoned_connection(tmp_path):
+    """A successor already parked on the lock must see the quarantine.
+
+    The failure has to be recorded while ``_run_locked`` still holds the lock.
+    Left to the task's done callback instead, the waiter resumed by
+    ``Lock.release`` runs *before* that callback — both are scheduled with
+    ``call_soon`` during the same step and the waiter goes first — so it would
+    read ``_dirty == False`` and issue its statement against the very
+    connection the failure just called into question.
+    """
+    db = RuntimeDb(tmp_path / "runtime.db", name="test")
+    await db.open()
+    in_flight = asyncio.Event()
+    fail = asyncio.Event()
+
+    async def failing(conn: aiosqlite.Connection) -> str:
+        in_flight.set()
+        await fail.wait()
+        raise sqlite3.OperationalError("no such table: nope")
+
+    try:
+        first = asyncio.create_task(db.run(failing))
+        await asyncio.wait_for(in_flight.wait(), timeout=5)
+
+        # Park a successor behind it on the store's lock.
+        successor = asyncio.create_task(
+            db.run(lambda conn: fetchone(conn, "SELECT 1"))
+        )
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+        fail.set()
+        with pytest.raises(sqlite3.OperationalError):
+            await first
+
+        assert await successor == (1,)
+        assert db.recycle_count == 1, (
+            "the queued successor reused the connection the failed operation "
+            "left behind — the quarantine was applied too late"
+        )
+    finally:
+        await db.close()

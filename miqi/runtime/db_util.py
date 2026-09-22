@@ -33,13 +33,13 @@ Two defences live here:
    lock error, :meth:`RuntimeDb.run` recycles the connection so that later
    operations are not poisoned, and replays the operation once — but only when
    the failed attempt had not already modified rows.
-3. **Quarantine after an orphaned failure.** An operation that outlives a
-   cancelled caller and *then* fails has nobody left to observe the failure,
-   so it marks the connection dirty (:meth:`RuntimeDb._report_orphan`) and the
-   next operation recycles before touching it.  Without this, poisoning is
-   only ever discovered by whichever statement happens to come second — which
-   may be the user-facing one, and which then is the one that reports the
-   failure.
+3. **Quarantine on failure, under the lock.** Any failure escaping
+   :meth:`RuntimeDb._run_locked` marks the connection dirty
+   (:meth:`RuntimeDb._quarantine`) and the next operation recycles before
+   touching it.  The flag is set *while the lock is still held* — a successor
+   waiting on that lock is resumed by ``Lock.release`` before this task's done
+   callbacks run, so a quarantine applied from a callback would arrive too
+   late for exactly the operation it is meant to protect.
 
 Ordinary write-lock contention is *not* retried and *not* masked: it waits for
 the busy timeout as before and then propagates.
@@ -418,13 +418,12 @@ class RuntimeDb:
             # connection is healthy and must not be recycled.
             return
         # Nobody is left to observe this failure — the caller that awaited the
-        # operation is gone.  A failed statement is exactly the case that can
-        # leave the connection write-dead, so quarantine it: the next ``run``
-        # recycles before issuing anything.
-        self._dirty = True
+        # operation is gone — so say so loudly.  The quarantine itself is
+        # *not* done here: this callback runs after ``_run_locked`` has already
+        # released the lock, which is too late to keep a queued successor from
+        # reusing the connection (see RuntimeDb._quarantine).
         _db_logger.warning(
-            "RuntimeDb({}): operation that outlived its cancelled caller failed "
-            "({}); recycling the connection before the next operation",
+            "RuntimeDb({}): operation that outlived its cancelled caller failed: {}",
             self.name,
             format_sqlite_error(exc),
         )
@@ -434,7 +433,7 @@ class RuntimeDb:
             if self._db is None:
                 raise RuntimeError(f"{self.name}: RuntimeDb is closed")
             if self._dirty:
-                await self._recycle("cancelled mid-operation")
+                await self._recycle("quarantined by an earlier failure")
 
             connection = self.conn
             started = time.monotonic()
@@ -445,6 +444,7 @@ class RuntimeDb:
                 if not is_stale_snapshot_error(exc, time.monotonic() - started):
                     # Ordinary contention: the busy handler already waited, and
                     # masking it here would hide a real lock conflict.
+                    self._quarantine()
                     raise
                 # A stale snapshot predates this call, so the write that tripped
                 # over it is this call's first write.  Recycle so every later
@@ -456,6 +456,23 @@ class RuntimeDb:
                 if modified:
                     raise
                 return await fn(self.conn)
+            except BaseException:
+                self._quarantine()
+                raise
+
+    def _quarantine(self) -> None:
+        """Mark the connection untrustworthy; the next ``run`` recycles it.
+
+        Called from inside :meth:`_run_locked`, i.e. **while it still holds the
+        lock** — and that is the whole point.  ``Lock.release`` wakes a waiting
+        caller with ``call_soon``, and this task's done callbacks are scheduled
+        the same way *later* in the same step, so a successor resumed by the
+        release runs before any done callback would.  Recording the failure
+        there instead would let that successor read ``_dirty == False`` and
+        issue its statement against the very connection this failure just
+        called into question (#1012 review).
+        """
+        self._dirty = True
 
     async def _recycle(self, reason: str) -> None:
         db, self._db = self._db, None
