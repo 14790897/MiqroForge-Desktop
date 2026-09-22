@@ -33,6 +33,10 @@ const STORE_ENV = 'MIQI_QRAFT_STORE';
 
 let storePath: string;
 
+// 真实登录会打开授权窗口并输入账号手机号：本文件关闭录屏/截图/追踪，
+// 避免账号信息随失败产物外泄（公开仓库的 artifact 对任何读者可下载）。
+test.use({ video: 'off', screenshot: 'off', trace: 'off' });
+
 test.describe('MiQroForge 浏览器登录 E2E（真实平台）', () => {
   test.skip(!PHONE || !PASSWORD, '需要 QRAFT_PHONE / QRAFT_PASSWORD 环境变量');
 
