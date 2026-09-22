@@ -100,8 +100,14 @@ export async function waitForInputReady(page: Page, timeout = 60_000) {
       console.log(
         '[test] 判定：应用停在首启动向导（无 ~/.miqi/config.json）——点「使用默认配置，进入应用」后等待主界面'
       );
-      wizardHandled = true;
-      await enterWithDefaults.click({ timeout: 5000 }).catch(() => {});
+      // 点击成功才置标志：瞬时遮挡/重渲染导致的点击失败要留给下一轮重试
+      try {
+        await enterWithDefaults.click({ timeout: 5000 });
+        wizardHandled = true;
+      } catch (e) {
+        lastError = e as Error;
+        await page.waitForTimeout(500);
+      }
       continue;
     }
 
