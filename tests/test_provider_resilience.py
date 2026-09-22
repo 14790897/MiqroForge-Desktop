@@ -244,6 +244,69 @@ def test_bare_billing_word_is_not_payment_required() -> None:
     ) == ErrorKind.AUTH
 
 
+# ── Issue #1190: 429 + quota signals → PAYMENT_REQUIRED（非 RATE_LIMIT）──────
+
+
+@pytest.mark.parametrize("message", [
+    # 平台网关实测形态：429 + "Token quota exhausted" + 结构化错误体
+    "Error code: 429 - {'error': {'message': 'Token quota exhausted, please contact the administrator', 'code': 'consumer_token_quota_exceeded', 'type': 'quota_exceeded'}}",
+    # 只有 code 字段、无可读 message 的形态（靠 "quota_exceeded" 信号兜底）
+    "429 {'error': {'code': 'consumer_token_quota_exceeded'}}",
+])
+def test_classify_error_429_quota_exhausted_is_payment_required(message: str) -> None:
+    """配额耗尽的 429 必须归 PAYMENT_REQUIRED（终态、不可重试），而不是
+    可重试的 RATE_LIMIT——否则会反复重试 + 原始英文错误透出前端。"""
+    assert classify_error(_RateLimitError(message)) == ErrorKind.PAYMENT_REQUIRED
+
+
+def test_classify_error_429_quota_exhausted_not_retryable() -> None:
+    kind = classify_error(
+        _RateLimitError(
+            "429 {'error': {'code': 'consumer_token_quota_exceeded', 'type': 'quota_exceeded'}}"
+        )
+    )
+    assert is_retryable(kind) is False
+    assert ProviderError(kind=kind, message="quota").recoverable is False
+
+
+def test_classify_error_rate_limit_wording_with_quota_signal_is_payment() -> None:
+    """429 报错同时含 "rate limit" 措辞与配额耗尽信号：配额是终态，优先判定。"""
+    assert classify_error(
+        Exception("429 rate limit: token quota exhausted, please contact the administrator")
+    ) == ErrorKind.PAYMENT_REQUIRED
+
+
+def test_classify_error_anthropic_sdk_rate_limit_quota_signal() -> None:
+    """#1190 实测路径：anthropic SDK 的 RateLimitError 实例携带配额信号时
+    归 PAYMENT_REQUIRED（SDK 类型分支此前先于消息检查短路为 RATE_LIMIT）。"""
+    import anthropic
+
+    exc = anthropic.RateLimitError.__new__(anthropic.RateLimitError)
+    Exception.__init__(
+        exc,
+        "Error code: 429 - {'error': {'message': 'Token quota exhausted, please contact the administrator', 'code': 'consumer_token_quota_exceeded', 'type': 'quota_exceeded'}}",
+    )
+    assert classify_error(exc) == ErrorKind.PAYMENT_REQUIRED
+
+
+def test_classify_error_anthropic_sdk_plain_rate_limit_stays() -> None:
+    """对照组：无配额信号的 anthropic RateLimitError 仍归 RATE_LIMIT（可重试）。"""
+    import anthropic
+
+    exc = anthropic.RateLimitError.__new__(anthropic.RateLimitError)
+    Exception.__init__(exc, "Error code: 429 - {'error': {'message': 'rate limited'}}")
+    assert classify_error(exc) == ErrorKind.RATE_LIMIT
+
+
+def test_classify_error_openai_sdk_rate_limit_quota_signal() -> None:
+    """openai SDK 的 RateLimitError 实例同样先按配额信号分流。"""
+    import openai
+
+    exc = openai.RateLimitError.__new__(openai.RateLimitError)
+    Exception.__init__(exc, "429: Token quota exhausted")
+    assert classify_error(exc) == ErrorKind.PAYMENT_REQUIRED
+
+
 def test_classify_error_context_length_message() -> None:
     assert classify_error(Exception("context length exceeded")) == ErrorKind.CONTEXT_LENGTH
 

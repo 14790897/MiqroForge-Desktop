@@ -98,12 +98,15 @@ def _classify_by_message(exc: BaseException) -> ErrorKind | None:
     """Classify by substrings for generic exceptions without SDK type/status code."""
     message = str(exc).lower()
 
-    if "rate limit" in message or "too many requests" in message:
-        return ErrorKind.RATE_LIMIT
     # Issue #528: check billing/quota before AUTH — a 402 body that mentions
     # "forbidden"-ish wording would otherwise be misread as authentication.
+    # #1190: also before the rate-limit keywords — a 429 body that mentions
+    # quota exhaustion is terminal (retrying won't add balance) and must not
+    # be classified as retryable RATE_LIMIT just because it says "rate limit".
     if _is_payment_required_error(exc):
         return ErrorKind.PAYMENT_REQUIRED
+    if "rate limit" in message or "too many requests" in message:
+        return ErrorKind.RATE_LIMIT
     # 平台内容安全拦截同样带 "forbidden"/403 特征（网关实测 403 + security_violation），
     # 必须在 AUTH 之前判定，否则用户被引导去改 API Key（真因是内容被拦）。
     if _is_content_policy_error(exc):
@@ -150,6 +153,11 @@ _PAYMENT_REQUIRED_SIGNALS = (
     "out of credits",
     "credit balance is too low",
     "exceeded your current quota",
+    # #1190: 平台网关 429 配额错误只带 code/type 字段、没有可读 message 时
+    # （consumer_token_quota_exceeded 本身也含 "quota_exceeded" 子串）也要命中。
+    # 实测 "Token quota exhausted" 的 message 已由 "quota exhausted" 覆盖，
+    # 此信号兜住只剩结构化错误体的形态。
+    "quota_exceeded",
     # CodeRabbit (#528): no bare "billing" — too broad. It misclassified
     # AUTH-style messages like "Forbidden: billing access denied" as
     # PAYMENT_REQUIRED (checked before the AUTH branch). Only balance/quota-
@@ -193,6 +201,11 @@ def _classify_by_status_code(exc: BaseException) -> ErrorKind | None:
         return None
 
     if code == 429:
+        # #1190: 429 也可能是配额耗尽（平台网关 consumer_token_quota_exceeded，
+        # "Token quota exhausted"）——终态、不可重试。先按配额信号分流，
+        # 真正的限流才归可重试的 RATE_LIMIT。
+        if _is_payment_required_error(exc):
+            return ErrorKind.PAYMENT_REQUIRED
         return ErrorKind.RATE_LIMIT
     if code in (401, 403):
         # 平台网关的内容安全拦截同样是 403：先按审核信号分流，否则会被当成
@@ -273,6 +286,11 @@ def classify_error(exc: BaseException) -> ErrorKind:
         if isinstance(exc, (api_timeout_error, timeout_error)):
             return ErrorKind.TRANSIENT
         if isinstance(exc, rate_limit_error):
+            # #1190: 429 配额耗尽（consumer_token_quota_exceeded）是终态，
+            # 须在 SDK 类型分支内先于 RATE_LIMIT 判定，否则会被当作可重试限流
+            # 反复重试，且原始英文错误会一路透出到前端。
+            if _is_payment_required_error(exc):
+                return ErrorKind.PAYMENT_REQUIRED
             return ErrorKind.RATE_LIMIT
         if isinstance(exc, (authentication_error, permission_denied_error)):
             # PermissionDeniedError 也承载内容审核 403（网关实测）：审核信号
@@ -337,6 +355,12 @@ def classify_error(exc: BaseException) -> ErrorKind:
         if isinstance(exc, (api_timeout_error, timeout_error)):
             return ErrorKind.TRANSIENT
         if isinstance(exc, rate_limit_error):
+            # #1190: 网关 429 配额耗尽（"Token quota exhausted"，
+            # type=quota_exceeded）是终态，须先于 RATE_LIMIT 判定——实测
+            # 该路径曾把配额错误当可重试限流重试 3 次 + 流式回退 chat() 再
+            # 429，且原始英文错误透出到前端。
+            if _is_payment_required_error(exc):
+                return ErrorKind.PAYMENT_REQUIRED
             return ErrorKind.RATE_LIMIT
         if isinstance(exc, (authentication_error, permission_denied_error)):
             # PermissionDeniedError 也承载内容审核 403（网关实测）：审核信号
