@@ -4,7 +4,7 @@ description: |
   Complete E2E testing workflow for Electron apps with Playwright, including:
   test spec creation, React textarea handling (type vs fill), approval dialog
   auto-click, *:* wildcard pre-approval, PPTX content verification, screen
-  recording (frame capture + ffmpeg), session streaming isolation fix,
+  recording (Electron desktopCapturer window capture), session streaming isolation fix,
   and multi-agent review checklist.
   Triggers: "测e2e", "写E2E测试", "write e2e test", "run e2e", "e2e录屏",
   "approval handling", "PPTX verification", "write playwright test",
@@ -40,8 +40,8 @@ e2e 任务（electron-e2e / wsl-e2e / macos-e2e）只做回归兜底，不用作
 
 2. 为什么必须先本地跑：
    - CI 的 e2e 队列慢（常 10 分钟以上），失败一轮就白等，改一轮又一轮
-   - 调试产物只有本地能拿：test-results 截图、录屏（frame capture +
-     ffmpeg）、Playwright trace；本技能"测试完成必须截图展示"也依赖本地
+   - 调试产物只有本地能拿：test-results 截图、录屏（desktopCapturer 窗口录制）、
+     Playwright trace；本技能"测试完成必须截图展示"也依赖本地
      test-results 产物
    - 本地失败立刻能看到页面实际状态，CI 上只能靠日志猜
 
@@ -190,33 +190,74 @@ if (!result.pass) {
 }
 ```
 
-## Screen recording (frame capture + ffmpeg)
+## Screen recording (Electron desktopCapturer — 真·窗口录制)
+
+**不要用 `page.screenshot` 逐帧拼帧**（帧间隔大 → 幻灯片；拼接不连续两段 → 跳变），
+也不要抽帧。用 Electron 自带 `desktopCapturer` + `getDisplayMedia` +
+`MediaRecorder` 在应用内录**窗口流**：真·窗口、窗口跟随、全自动，播放器能正常播。
+
+现成参考实现（`startRecording` / `drainChunks` / `stopRecording` 可直接照抄）：
+[apps/desktop/tests/e2e/record-bvse-skill.spec.ts](../../apps/desktop/tests/e2e/record-bvse-skill.spec.ts)
 
 ```ts
-// Add dense frame capture during AI processing
-const shot = () => page.screenshot({
-  path: `test-results/videos/f${String(++_fn).padStart(4,'0')}.png`,
-  timeout: 5000,
-}).catch(() => {});
+// 1) 主进程：按「当前窗口标题」精确挑捕获源
+const title = await electronApp.evaluate(async ({ session, desktopCapturer, BrowserWindow }) => {
+  const t = BrowserWindow.getAllWindows()[0]?.getTitle() ?? '';
+  session.defaultSession.setDisplayMediaRequestHandler(async (_req, cb) => {
+    const srcs = await desktopCapturer.getSources({ types: ['window'] });
+    const win = srcs.find(s => s.name === t) ?? srcs.find(s => /miqroforge/i.test(s.name)) ?? null;
+    // 不要 `?? srcs[0]`：匹配失败会静默录到别的程序窗口
+    if (!win) { console.log('[record] 可用窗口：' + srcs.map(s => s.name).join(' | ')); return cb({}); }
+    cb({ video: win });
+  });
+  return t;
+});
 
-// Capture every 8s during Thinking...
-const deadline = Date.now() + 300_000;
-while (Date.now() < deadline) {
-  const thinking = await page.getByText('Thinking…').isVisible().catch(() => false);
-  if (!thinking) break;
-  await page.waitForTimeout(8000);
-  await shot();
-}
+// 2) 渲染进程：开录（1s 分片，测试侧每 ~10s drain 落盘，长录像不撑爆内存）
+const info = await page.evaluate(async () => {
+  const stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false });
+  const rec = new MediaRecorder(stream, { mimeType: 'video/webm;codecs=vp9', videoBitsPerSecond: 1_200_000 });
+  (window as any).__rec = { rec, chunks: [] as Blob[] };
+  rec.ondataavailable = (e: BlobEvent) => { if (e.data.size) (window as any).__rec.chunks.push(e.data); };
+  rec.start(1000);
+  const t = stream.getVideoTracks()[0];
+  return { surface: t.getSettings().displaySurface, w: t.getSettings().width, h: t.getSettings().height, label: t.label };
+});
+expect(info.surface).toBe('window');           // 录错层（屏幕而非窗口）会被抓到
+expect(info.label).toMatch(/miqroforge/i);     // 回退到别家窗口也会被抓到
 ```
 
-Compile with ffmpeg:
+停止：`rec.stop()` → 等 `onstop` → 把 `chunks`（`splice(0)` 取走）逐个 base64 交回测试
+`appendFileSync` 写盘（110s ≈ 1.4MB mp4 / 3.7MB webm，CDP 传 base64 可接受）。
+
+**判停**：`page.getByLabel('停止生成')` 出现 = 回合在跑、**持续消失**（≥3 次轮询 ~2s）
+= 回合结束。工具调用之间/等待确认卡时该按钮会短暂消失，一见就停会把录屏截断在提交前。
 
 ```bash
-cd test-results/videos
-ffmpeg -y -framerate 0.6 -start_number 1 -i "f%04d.png" \
-  -vf "scale=trunc(iw/2)*2:trunc(ih/2)*2,format=yuv420p" \
-  -c:v libx264 -r 10 output.mp4
+# webm → mp4（libx264 要求偶数宽高）
+ffmpeg -y -i rec.webm -vf "scale=trunc(iw/2)*2:trunc(ih/2)*2" \
+  -c:v libx264 -crf 26 -pix_fmt yuv420p -movflags +faststart rec.mp4
 ```
+
+备选（区域裁剪，非窗口）：`ffmpeg -f gdigrab -offset_x X -offset_y Y -video_size WxH -i desktop`；
+坑：`-i title="<标题>"` 对 GPU 合成的 Electron 窗口全黑，加 `--disable-gpu` 该应用启动即崩溃，
+且固定坐标会因窗口移动/被遮挡录偏。Playwright 的 Electron 启动**不支持 `recordVideo`**
+（`use.video:'on'` 对 Electron 无效）。
+
+录制已知坑：
+
+- **窗口必须真在屏**：E2E 默认把窗口停在屏幕外（`MIQI_E2E_OFFSCREEN`，见
+  [helpers/electron-setup.ts](../../apps/desktop/tests/e2e/helpers/electron-setup.ts)）→
+  用 `launchElectronApp(..., { showWindow: true })`，否则抓到空白/黑屏。真·最小化同样录成黑屏。
+- **`test-results/` 会被清空**：它是默认 outputDir，跑任一 project 都清 →
+  录完立刻 `cp` 出去再跑别的 spec，否则上一段录像被删。产物建议放 `$RECORD_OUT_DIR` 这类独立目录。
+- **无 LLM 回合的演示**（如反馈提交）没有「停止生成」可判停：用固定节奏
+  `pressSequentially(..., { delay: 50-60 })` 逐字输入 + 每步 `waitForTimeout(400-800)`。
+  多场景可以各录一段**连续**视频再 `concat`（各段内部连续不算拼帧），绝不在一段内跳时间。
+- **贴 PR**：`<video>` 标签播不了 release 资产（302 后 `Content-Type:
+  application/octet-stream` + `X-Content-Type-Options: nosniff`）→ 给可点击的下载直链并注明
+  「点击下载播放」，别指望内嵌播放。
+- **校验非黑屏**：抽一帧用 Read 直接读该 png，或按体积粗判（黑屏 54s ≈ 60KB）。
 
 ## Test selector tips
 
