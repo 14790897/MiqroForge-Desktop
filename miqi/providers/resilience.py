@@ -153,11 +153,6 @@ _PAYMENT_REQUIRED_SIGNALS = (
     "out of credits",
     "credit balance is too low",
     "exceeded your current quota",
-    # #1190: 平台网关 429 配额错误只带 code/type 字段、没有可读 message 时
-    # （consumer_token_quota_exceeded 本身也含 "quota_exceeded" 子串）也要命中。
-    # 实测 "Token quota exhausted" 的 message 已由 "quota exhausted" 覆盖，
-    # 此信号兜住只剩结构化错误体的形态。
-    "quota_exceeded",
     # CodeRabbit (#528): no bare "billing" — too broad. It misclassified
     # AUTH-style messages like "Forbidden: billing access denied" as
     # PAYMENT_REQUIRED (checked before the AUTH branch). Only balance/quota-
@@ -166,9 +161,21 @@ _PAYMENT_REQUIRED_SIGNALS = (
 )
 
 
+# #1190: 平台网关 429 配额错误可能只有结构化字段、没有可读 message
+# （code=consumer_token_quota_exceeded / type=quota_exceeded）。键必须是
+# code/type、值必须完整等于配额码的精确匹配——裸子串匹配会把
+# {"quota_exceeded": false} 或 "not_quota_exceeded" 误判为配额耗尽并错误地
+# 禁用重试（CodeRabbit #1199）。
+_QUOTA_FIELD_PATTERN = re.compile(
+    r"(?:code|type)['\"]?\s*[:=]\s*['\"](?:consumer_token_)?quota_exceeded['\"]"
+)
+
+
 def _is_payment_required_error(exc: BaseException) -> bool:
     """Detect 402/balance/quota exhaustion from message text."""
     message = str(exc).lower()
+    if _QUOTA_FIELD_PATTERN.search(message):
+        return True
     return any(s in message for s in _PAYMENT_REQUIRED_SIGNALS)
 
 

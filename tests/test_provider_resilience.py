@@ -250,13 +250,30 @@ def test_bare_billing_word_is_not_payment_required() -> None:
 @pytest.mark.parametrize("message", [
     # 平台网关实测形态：429 + "Token quota exhausted" + 结构化错误体
     "Error code: 429 - {'error': {'message': 'Token quota exhausted, please contact the administrator', 'code': 'consumer_token_quota_exceeded', 'type': 'quota_exceeded'}}",
-    # 只有 code 字段、无可读 message 的形态（靠 "quota_exceeded" 信号兜底）
+    # 只有 code 字段、无可读 message 的形态
     "429 {'error': {'code': 'consumer_token_quota_exceeded'}}",
+    # 只有 type 字段
+    "429 {'error': {'type': 'quota_exceeded'}}",
 ])
 def test_classify_error_429_quota_exhausted_is_payment_required(message: str) -> None:
     """配额耗尽的 429 必须归 PAYMENT_REQUIRED（终态、不可重试），而不是
     可重试的 RATE_LIMIT——否则会反复重试 + 原始英文错误透出前端。"""
     assert classify_error(_RateLimitError(message)) == ErrorKind.PAYMENT_REQUIRED
+
+
+def test_classify_error_429_quota_false_field_is_not_payment() -> None:
+    """结构化字段的否定形态不是配额耗尽（#1190 CodeRabbit）：裸子串匹配会
+    把 {"quota_exceeded": false} 误判为 PAYMENT_REQUIRED 并错误地禁用重试。"""
+    assert classify_error(
+        _RateLimitError("429 {'error': {'quota_exceeded': False, 'message': 'rate limit'}}")
+    ) == ErrorKind.RATE_LIMIT
+
+
+def test_classify_error_429_not_quota_exceeded_field_is_not_payment() -> None:
+    """value=not_quota_exceeded 同样不命中——结构化匹配要求值完整等于配额码。"""
+    assert classify_error(
+        _RateLimitError("429 {'error': {'type': 'not_quota_exceeded'}}")
+    ) == ErrorKind.RATE_LIMIT
 
 
 def test_classify_error_429_quota_exhausted_not_retryable() -> None:
