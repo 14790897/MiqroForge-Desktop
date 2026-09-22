@@ -33,6 +33,13 @@ Two defences live here:
    lock error, :meth:`RuntimeDb.run` recycles the connection so that later
    operations are not poisoned, and replays the operation once — but only when
    the failed attempt had not already modified rows.
+3. **Quarantine on failure, under the lock.** Any failure escaping
+   :meth:`RuntimeDb._run_locked` marks the connection dirty
+   (:meth:`RuntimeDb._quarantine`) and the next operation recycles before
+   touching it.  The flag is set *while the lock is still held* — a successor
+   waiting on that lock is resumed by ``Lock.release`` before this task's done
+   callbacks run, so a quarantine applied from a callback would arrive too
+   late for exactly the operation it is meant to protect.
 
 Ordinary write-lock contention is *not* retried and *not* masked: it waits for
 the busy timeout as before and then propagates.
@@ -402,44 +409,75 @@ class RuntimeDb:
             job.add_done_callback(self._report_orphan)
             raise
 
-    @staticmethod
-    def _report_orphan(job: "asyncio.Task[Any]") -> None:
+    def _report_orphan(self, job: "asyncio.Task[Any]") -> None:
         if job.cancelled():
             return
         exc = job.exception()
-        if exc is not None:
-            _db_logger.warning(
-                "RuntimeDb: operation that outlived its cancelled caller failed: {}",
-                format_sqlite_error(exc),
-            )
+        if exc is None:
+            # The operation completed fine after its caller left; the
+            # connection is healthy and must not be recycled.
+            return
+        # Nobody is left to observe this failure — the caller that awaited the
+        # operation is gone — so say so loudly.  The quarantine itself is
+        # *not* done here: this callback runs after ``_run_locked`` has already
+        # released the lock, which is too late to keep a queued successor from
+        # reusing the connection (see RuntimeDb._quarantine).
+        _db_logger.warning(
+            "RuntimeDb({}): operation that outlived its cancelled caller failed: {}",
+            self.name,
+            format_sqlite_error(exc),
+        )
 
     async def _run_locked(self, fn: DbOperation) -> Any:
         async with self._lock:
             if self._db is None:
                 raise RuntimeError(f"{self.name}: RuntimeDb is closed")
             if self._dirty:
-                await self._recycle("cancelled mid-operation")
+                await self._recycle("quarantined by an earlier failure")
 
             connection = self.conn
             started = time.monotonic()
             before = connection.total_changes
             try:
-                return await fn(connection)
-            except sqlite3.OperationalError as exc:
-                if not is_stale_snapshot_error(exc, time.monotonic() - started):
-                    # Ordinary contention: the busy handler already waited, and
-                    # masking it here would hide a real lock conflict.
-                    raise
-                # A stale snapshot predates this call, so the write that tripped
-                # over it is this call's first write.  Recycle so every later
-                # operation on this store is healthy again, and replay once —
-                # but only when the failed attempt wrote nothing, which keeps
-                # the replay from duplicating rows.
-                modified = connection.total_changes != before
-                await self._recycle(f"stale snapshot: {format_sqlite_error(exc)}")
-                if modified:
-                    raise
-                return await fn(self.conn)
+                try:
+                    return await fn(connection)
+                except sqlite3.OperationalError as exc:
+                    if not is_stale_snapshot_error(exc, time.monotonic() - started):
+                        # Ordinary contention: the busy handler already waited,
+                        # and masking it here would hide a real lock conflict.
+                        raise
+                    # A stale snapshot predates this call, so the write that
+                    # tripped over it is this call's first write.  Recycle so
+                    # every later operation on this store is healthy again, and
+                    # replay once — but only when the failed attempt wrote
+                    # nothing, which keeps the replay from duplicating rows.
+                    modified = connection.total_changes != before
+                    await self._recycle(f"stale snapshot: {format_sqlite_error(exc)}")
+                    if modified:
+                        raise
+                    return await fn(self.conn)
+            except BaseException:
+                # One quarantine point for the first attempt *and* the replay.
+                # A failure raised inside an ``except`` block is not caught by
+                # a sibling handler, so keeping them side by side would let a
+                # failed replay escape without quarantining the connection
+                # (CodeRabbit review of #1186).
+                self._quarantine()
+                raise
+
+    def _quarantine(self) -> None:
+        """Mark the connection untrustworthy; the next ``run`` recycles it.
+
+        Called from inside :meth:`_run_locked`, i.e. **while it still holds the
+        lock** — and that is the whole point.  ``Lock.release`` wakes a waiting
+        caller with ``call_soon``, and this task's done callbacks are scheduled
+        the same way *later* in the same step, so a successor resumed by the
+        release runs before any done callback would.  Recording the failure
+        there instead would let that successor read ``_dirty == False`` and
+        issue its statement against the very connection this failure just
+        called into question (#1012 review).
+        """
+        self._dirty = True
 
     async def _recycle(self, reason: str) -> None:
         db, self._db = self._db, None
@@ -466,6 +504,7 @@ class RuntimeDb:
             "name": self.name,
             "open": self.is_open,
             "wal_mode": self.wal_mode,
+            "dirty": self._dirty,
             "recycle_count": self.recycle_count,
             "orphaned_ops": self.orphaned_ops,
             "last_recycle_reason": self.last_recycle_reason,

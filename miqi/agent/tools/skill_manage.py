@@ -39,7 +39,7 @@ class SkillManageTool(Tool):
     def __init__(self, workspace: Path, sandbox_manager: Any | None = None):
         """Bind the workspace, a ``SkillsLoader`` and the optional sandbox manager."""
         self.workspace = workspace
-        self._skills = SkillsLoader(workspace)
+        self._skills = SkillsLoader(workspace, sandbox_manager=sandbox_manager)
         self._sandbox_manager = sandbox_manager
 
     @property

@@ -28,6 +28,7 @@
 - [e2e-localstorage-shared-userdata](e2e-localstorage-shared-userdata.md) — --user-data-dir 被 setPath 覆盖，localStorage 跨运行共享
 - [e2e-inject-chat-events](e2e-inject-chat-events.md) — webContents.send('chat:progress') 注入事件测渲染契约
 - [local-sandbox-e2e-unavailable](local-sandbox-e2e-unavailable.md) — E2E 沙箱不初始化是 config 问题，patch enabled:true 即可
+- [local-e2e-before-cloud-verification](local-e2e-before-cloud-verification.md) — 为提速：本地 E2E 先跑通再推云端做最终验证，别靠反复推 CI 迭代
 - [smoke-privacy-gate-and-cwd-sensitive-tests](smoke-privacy-gate-and-cwd-sensitive-tests.md) — smoke 前置条件与 cwd 敏感测试
 - [session-scoped-bridge-reads-null](session-scoped-bridge-reads-null.md) — 桥下文件读取必须用全路径且不带 session key
 - [use-luma-mcp-for-images](use-luma-mcp-for-images.md) — 读图用 luma-mcp 工具，Read 工具读图返回 Unsupported

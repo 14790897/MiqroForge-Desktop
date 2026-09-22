@@ -410,6 +410,14 @@ export interface ProvidersListResult {
    * 旧版 bridge 不返回该字段时为 undefined（前端回退到 configured 判定）。
    */
   active_model_resolvable?: boolean;
+  /**
+   * 当前默认模型是否确实由它自己的 provider（凭据齐备）或平台 AI 网关路由
+   * —— 严格版判定，不含「已配置 gateway 型 provider 兜底」那条（#1172）。
+   * 登录后自动就绪默认模型用它判断「用户是否已选好模型」：兜底只说明会话
+   * 发得出去（模型名会被原样发给未必认它的 API），不能说明这是用户的本意。
+   * 旧版 bridge 不返回该字段时为 undefined（前端只做空值兜底）。
+   */
+  active_model_own_or_gateway_resolvable?: boolean;
 }
 
 export interface ProviderUpdateResult {
@@ -532,8 +540,6 @@ export interface ConfirmStep {
  *  ask_user_confirm_card (blocking human-in-the-loop). */
 export interface UserInputCardRequest {
   input_id: string;
-  /** `#646-v2` 渲染路由：timeline / todo_state（缺省为交互卡） */
-  display?: 'timeline' | 'todo_state';
   thread_id?: string;
   turn_id?: string;
   /** Originating session — cards are scoped per session and dropped on
@@ -545,32 +551,6 @@ export interface UserInputCardRequest {
   choices?: ConfirmChoice[];
   timeout_seconds?: number;
   allow_remember_choice?: boolean;
-  /** #646-v2 Plan Card（ask_user_plan_confirm）：任务计划卡字段 */
-  goal?: string;
-  permissions?: string[];
-  /** #684 契约扩展：触发工具名 + 校验警告（B 级必上卡）+ 产物元数据 */
-  toolName?: string;
-  warnings?: { code?: string; message: string; severity?: string }[];
-  metadata?: {
-    run_id?: string;
-    artifact_name?: string;
-    artifact_path?: string;
-    artifact_size?: number;
-    artifact_sha256?: string;
-  };
-  /** #646-v2 Action Card（request_action_confirmation）：危险动作确认字段 */
-  action?: string;
-  target?: string;
-  file_name?: string;
-  size_bytes?: number;
-  sha256?: string;
-  description?: string;
-  /** #646-v2 todo_state 投影（display='todo_state'）：CodeRabbit 二轮 Minor——
-   *  显式声明字段，renderer 不再 as any */
-  run_id?: string;
-  revision?: number;
-  summary?: string;
-  items?: { id: string; title: string; status: string }[];
 }
 
 /** Resolution pushed from the backend once the user picks / cancels. */
@@ -1169,6 +1149,14 @@ export interface WslCheckResult {
   featureState: WslFeatureState;
   /** Whether a system reboot is required before WSL can be used */
   rebootRequired: boolean;
+  /**
+   * WSL's own explanation of why WSL2 cannot start (virtualization platform
+   * unavailable), or null/absent when the platform is usable.  A distro
+   * install cannot succeed while this is set, however its exit code reads.
+   */
+  platformIssue?: string | null;
+  /** Set while a one-click install is waiting for its reboot to continue. */
+  pendingInstall?: { phase: string; at: number } | null;
 }
 export interface WslExportDistroResult {
   exported: boolean;

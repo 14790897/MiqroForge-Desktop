@@ -14,6 +14,12 @@ import { join } from 'path';
 import { QraftService, resolveConfig, defaultRedirectUri } from './service';
 import { QraftStore } from './store';
 import { QraftError, type QraftClient, type QraftLogger } from './client';
+import {
+  getDefaultWorkspacePath,
+  readActiveAccount,
+  readLegacyWorkspaceOwner,
+  setActiveAccount,
+} from '../ipc/workspace-path';
 import { PROD_REDIRECT_URI, type QraftStoredState, type QraftTokens } from './types';
 
 const noopLog = (() => undefined) as unknown as QraftLogger;
@@ -64,16 +70,26 @@ function makeClientStub(): ClientStub {
 let dir: string;
 let store: QraftStore;
 let statusEvents: unknown[];
+/** 本用例的数据根。QraftService 会往里写账号标记，见下面的注释。 */
+let miqiHome: string;
 
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), 'qraft-service-'));
   store = new QraftStore(join(dir, 'qraft-auth.json'), null, noopLog);
   statusEvents = [];
+  // 每个用例都钉住 MIQI_HOME（#1185）：QraftService 的构造函数会按已存储的
+  // 登录态激活账号，也就是往 `<数据根>/accounts/` 写标记文件——不钉住的话，
+  // 「从存储恢复登录态」这类用例会把标记写进**真实用户目录**，既是环境污染，
+  // 也会让同进程里其它读工作区的测试读到这个活跃账号而失败（CI 上正是如此）。
+  miqiHome = join(dir, 'miqi-home');
+  mkdirSync(miqiHome, { recursive: true });
+  process.env['MIQI_HOME'] = miqiHome;
   // 测试环境 client_secret 不落仓库，测试从环境变量注入
   process.env.QRAFT_TEST_CLIENT_SECRET = 'test-env-secret';
 });
 afterEach(() => {
   rmSync(dir, { recursive: true, force: true });
+  delete process.env['MIQI_HOME'];
   delete process.env.QRAFT_TEST_CLIENT_SECRET;
   vi.useRealTimers();
 });
@@ -1294,6 +1310,212 @@ describe('QraftService 反馈平台通道（issue #1054）', () => {
 
     expect(result).toMatchObject({ ok: false, code: 'FEEDBACK_FAILED' });
     expect(result.message).toContain('content 不能为空');
+    expect(client.refreshTokens).not.toHaveBeenCalled();
+    expect(svc.status().requiresRelogin).toBe(false);
+  });
+});
+
+// #1185: 登录/登出驱动工作区根的账号维度。bridge 是长期驻留进程、不在登录时
+// 重启，所以切换完全依赖 .active 标记文件；标错了就会把会话写进别人的工作区。
+describe('账号维度的工作区根 (#1185)', () => {
+  // 数据根由文件级 beforeEach 钉在临时目录上（见上面那段注释）——这一组的用例
+  // 正是会触发标记文件写入的那些。
+  const loggedInClient = () => {
+    const stub = makeClientStub();
+    stub.platformLogin.mockResolvedValue({ sub: '19', username: 'U', nickname: '登录昵称' });
+    stub.authorizeFlow.mockResolvedValue(makeTokens());
+    stub.getUserInfo.mockResolvedValue({ sub: '19', username: 'U', nickname: '登录昵称' });
+    return stub;
+  };
+
+  it('登录后工作区切到该账号，登出后回到共享根', async () => {
+    const service = makeService(loggedInClient());
+
+    // 登录前：无账号 → 共享工作区
+    expect(readActiveAccount()).toBeNull();
+    expect(getDefaultWorkspacePath()).toBe(join(miqiHome, 'workspace'));
+
+    const result = await service.login('18500000000', 'p');
+    expect(result.ok).toBe(true);
+    expect(readActiveAccount()).toBe('19');
+    expect(getDefaultWorkspacePath()).toBe(join(miqiHome, 'accounts', '19', 'workspace'));
+
+    service.logout();
+    expect(readActiveAccount()).toBeNull();
+    expect(getDefaultWorkspacePath()).toBe(join(miqiHome, 'workspace'));
+  });
+
+  it('启动时按已存储的登录态恢复账号维度', () => {
+    // 已经登录过的用户重启应用：构造函数里就要把根切过去，否则首屏的
+    // sessions.list 读的是共享工作区（上一个账号的数据）。
+    store.save(makeStoredState());
+    makeService(makeClientStub());
+
+    expect(readActiveAccount()).toBe('19');
+    expect(getDefaultWorkspacePath()).toBe(join(miqiHome, 'accounts', '19', 'workspace'));
+  });
+
+  it('没有登录态时清掉残留标记（含 E2E loginBypass）', () => {
+    setActiveAccount('19');
+    makeService(makeClientStub());
+
+    // 存储里没有登录态 → 运行时不该停在上一次会话用过的账号工作区上。
+    expect(readActiveAccount()).toBeNull();
+    expect(getDefaultWorkspacePath()).toBe(join(miqiHome, 'workspace'));
+  });
+
+  it('首个登录的账号认领升级前的存量工作区', async () => {
+    // 升级场景：<数据根>/workspace 里已经是老用户的会话与记忆。
+    mkdirSync(join(miqiHome, 'workspace', 'sessions', 'desktop_old'), { recursive: true });
+    const service = makeService(loggedInClient());
+
+    await service.login('18500000000', 'p');
+
+    expect(readLegacyWorkspaceOwner()).toBe('19');
+    expect(getDefaultWorkspacePath()).toBe(join(miqiHome, 'workspace'));
+    expect(existsSync(join(miqiHome, 'workspace', 'sessions', 'desktop_old'))).toBe(true);
+  });
+
+  it('sub 为空（平台响应缺字段）时不猜目录，退回共享根', async () => {
+    const stub = makeClientStub();
+    stub.platformLogin.mockResolvedValue({ sub: '', username: 'U', nickname: 'N' });
+    stub.authorizeFlow.mockResolvedValue(makeTokens());
+    stub.getUserInfo.mockRejectedValue(new QraftError('USERINFO_FAILED', 'boom'));
+    const service = makeService(stub);
+
+    const result = await service.login('18500000000', 'p');
+
+    expect(result.ok).toBe(true);
+    expect(readActiveAccount()).toBeNull();
+  });
+
+  it('账号标记写不进去时登录必须失败，且不落盘', async () => {
+    // 把 .active 占成目录 → setActiveAccount 的 rename 失败。此前它被静默吞掉，
+    // 于是登录照常报成功、磁盘上留着**上一个账号**的标记，而长期驻留的运行时
+    // 每次解析工作区都读它 —— 新账号会继续在上一个账号的工作区里干活（#1185 评审）。
+    mkdirSync(join(miqiHome, 'accounts', '.active'), { recursive: true });
+    const service = makeService(loggedInClient());
+    expect(store.load(), '前置：开始时应无登录态').toBeNull();
+
+    const result = await service.login('18500000000', 'p');
+
+    expect(result.ok).toBe(false);
+    // 关键：登录态没被写下来。写了的话下次启动会按「已登录」恢复，
+    // 而标记仍指着别人。
+    expect(store.load()).toBeNull();
+    expect(readActiveAccount()).toBeNull();
+  });
+});
+describe('QraftService 积分余额拉取（issue #1160）', () => {
+  const POINTS = { availablePoints: 950, heldPoints: 50, totalEarned: 1000, totalSpent: 50 };
+
+  function makePointsClient() {
+    return { getPointsBalance: vi.fn(), refreshTokens: vi.fn() };
+  }
+
+  it('登录态：拉取成功缓存并推送状态', async () => {
+    const client = makePointsClient();
+    client.getPointsBalance.mockResolvedValue(POINTS);
+    store.save(makeStoredState());
+    const svc = makeService(client as any);
+
+    const result = await svc.fetchPointsBalance();
+
+    expect(result).toEqual({ ok: true, points: POINTS });
+    expect(svc.status().points).toEqual(POINTS);
+    expect(statusEvents.some((s: any) => s?.points?.availablePoints === 950)).toBe(true);
+  });
+
+  it('未登录：返回 INVALID_CONFIG，不发请求', async () => {
+    const client = makePointsClient();
+    const svc = makeService(client as any);
+
+    const result = await svc.fetchPointsBalance();
+
+    expect(result).toMatchObject({ ok: false, code: 'INVALID_CONFIG' });
+    expect(client.getPointsBalance).not.toHaveBeenCalled();
+  });
+
+  it('access_token 失效：刷新后带新 token 重试一次', async () => {
+    const client = makePointsClient();
+    client.getPointsBalance
+      .mockRejectedValueOnce(new QraftError('SESSION_EXPIRED', 'access_token 已失效'))
+      .mockResolvedValueOnce(POINTS);
+    client.refreshTokens.mockResolvedValue(makeTokens({ accessToken: 'FRESH-TOKEN' }));
+    store.save(makeStoredState());
+    const svc = makeService(client as any);
+
+    const result = await svc.fetchPointsBalance();
+
+    expect(result).toEqual({ ok: true, points: POINTS });
+    expect(client.getPointsBalance).toHaveBeenCalledTimes(2);
+    expect((client.getPointsBalance.mock.calls[1] as any[])[1]).toBe('FRESH-TOKEN');
+  });
+
+  it('refresh_token 已作废：置 requiresRelogin 并推状态（登录失效三件套）', async () => {
+    const client = makePointsClient();
+    client.getPointsBalance.mockRejectedValue(
+      new QraftError('SESSION_EXPIRED', 'access_token 已失效')
+    );
+    client.refreshTokens.mockRejectedValue(
+      new QraftError('REFRESH_TOKEN_INVALID', 'refresh_token 已失效')
+    );
+    store.save(makeStoredState());
+    const svc = makeService(client as any);
+
+    const result = await svc.fetchPointsBalance();
+
+    expect(result).toMatchObject({ ok: false, code: 'REFRESH_TOKEN_INVALID' });
+    expect(svc.status().requiresRelogin).toBe(true);
+    expect(svc.status().refreshError).toBe('REFRESH_TOKEN_INVALID');
+    expect(statusEvents.some((s: any) => s?.requiresRelogin === true)).toBe(true);
+  });
+
+  it('刷新成功但新 token 仍被平台拒绝：置 requiresRelogin 引导重新登录', async () => {
+    const client = makePointsClient();
+    client.getPointsBalance.mockRejectedValue(
+      new QraftError('SESSION_EXPIRED', 'access_token 已失效')
+    );
+    client.refreshTokens.mockResolvedValue(makeTokens({ accessToken: 'FRESH-TOKEN' }));
+    store.save(makeStoredState());
+    const svc = makeService(client as any);
+
+    const result = await svc.fetchPointsBalance();
+
+    expect(result).toMatchObject({ ok: false, code: 'SESSION_EXPIRED' });
+    expect(client.getPointsBalance).toHaveBeenCalledTimes(2);
+    expect(svc.status().requiresRelogin).toBe(true);
+    expect(statusEvents.some((s: any) => s?.requiresRelogin === true)).toBe(true);
+  });
+
+  it('瞬时刷新失败（REFRESH_FAILED）：不置 requiresRelogin，透出错误码', async () => {
+    const client = makePointsClient();
+    client.getPointsBalance.mockRejectedValue(
+      new QraftError('SESSION_EXPIRED', 'access_token 已失效')
+    );
+    client.refreshTokens.mockRejectedValue(new QraftError('REFRESH_FAILED', '刷新 token 失败'));
+    store.save(makeStoredState());
+    const svc = makeService(client as any);
+
+    const result = await svc.fetchPointsBalance();
+
+    expect(result).toMatchObject({ ok: false, code: 'REFRESH_FAILED' });
+    expect(client.getPointsBalance).toHaveBeenCalledTimes(1);
+    // 瞬时刷新失败不置 requiresRelogin（不弹横幅/不拦截发送，#1087），仅排退避重试
+    expect(svc.status().requiresRelogin).toBe(false);
+  });
+
+  it('平台业务失败（POINTS_FAILED）：不刷新直接透出', async () => {
+    const client = makePointsClient();
+    client.getPointsBalance.mockRejectedValue(
+      new QraftError('POINTS_FAILED', '查询积分余额失败：未知错误')
+    );
+    store.save(makeStoredState());
+    const svc = makeService(client as any);
+
+    const result = await svc.fetchPointsBalance();
+
+    expect(result).toMatchObject({ ok: false, code: 'POINTS_FAILED' });
     expect(client.refreshTokens).not.toHaveBeenCalled();
     expect(svc.status().requiresRelogin).toBe(false);
   });

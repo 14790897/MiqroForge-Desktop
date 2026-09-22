@@ -49,7 +49,7 @@ class TurnContext:
     permission_profile: Any | None = None
     cancel_event: Any | None = None  # asyncio.Event for turn abort signalling
     # Execution policy flags for approval layer
-    bypass_approval: bool = False    # skip category approvals (guard still applies, #1102)
+    bypass_approval: bool = False    # skip all approval checks
     force_approval: bool = False     # require approval even if switch is off
     # #821: directories the user mentioned in this turn's messages
     # (auto-sensed by the turn runner; injected into file tools as

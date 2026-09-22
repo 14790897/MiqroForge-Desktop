@@ -21,6 +21,10 @@ import { launchElectronApp, closeElectronApp, browserLogin } from './helpers/ele
 const PHONE = process.env.QRAFT_PHONE ?? '';
 const PASSWORD = process.env.QRAFT_PASSWORD ?? '';
 
+// 真实登录会打开授权窗口并输入账号手机号：本文件关闭录屏/截图/追踪，
+// 避免账号信息随失败产物外泄（公开仓库的 artifact 对任何读者可下载）。
+test.use({ video: 'off', screenshot: 'off', trace: 'off' });
+
 test.describe('登录入口显性化 (#1000)', () => {
   let electronApp: ElectronApplication;
   let page: Page;

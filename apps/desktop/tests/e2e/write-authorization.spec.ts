@@ -101,7 +101,16 @@ test.describe('Write Authorization Card (#864)', () => {
         // 用的是带凭据的 config 才没暴露，本地必挂）。
         patchConfigForMock(config, mock.mockUrl);
         const tools = config.tools ?? {};
-        config.tools = { ...tools, restrictToWorkspace: true };
+        config.tools = {
+          ...tools,
+          restrictToWorkspace: true,
+          // 本机 config 里 tools.sandbox.enabled 常为 true（bridge 初始化成功后
+          // 自动回写，wslDistro=AIShadowSandbox）：写会走 WSL 沙箱，而沙箱里
+          // /mnt/c 只读 → 写宿主临时目录必挂「Read-only file system」。CI 的
+          // config 没有 tools.sandbox，一直是宿主路径——与其它宿主路径 spec
+          // 同一处置（见 guard-issue-811 / issue-1104 等）。
+          sandbox: { ...config.tools?.sandbox, enabled: false },
+        };
       },
       { bypassAll: false }
     );
@@ -122,9 +131,8 @@ test.describe('Write Authorization Card (#864)', () => {
     'write_file 写 workspace 外目录 → 弹写授权卡 → 允许本次 → 写入成功',
     { timeout: LLM_TIMEOUT },
     async () => {
-      // #646-v2：确认卡并进工具链（Hermes 式）——断言页面级；回执用 data-receipt
-      const cardArea = page;
-      const resolvedArea = page.locator('[data-receipt="true"]');
+      const cardArea = page.getByTestId('confirm-card-area');
+      const resolvedArea = page.getByTestId('confirm-card-resolved');
 
       // 跳过 PermissionEngine 的通用「文件操作审批」dialog（legacy 路径会在
       // write_file 进入 tool.execute 之前先弹它），这样本测试能精确断言到
@@ -136,24 +144,18 @@ test.describe('Write Authorization Card (#864)', () => {
       await sendMessage(page, '写授权测试');
 
       // 写授权卡弹出（title 固定为「授权写入工作区外目录」）
-      // #646-v2：卡并进工具链——cardArea 已是 page，页面级断言必须落在定位器上
-      await expect(cardArea.getByText('授权写入工作区外目录').first()).toBeVisible({
-        timeout: 60_000,
-      });
-      await expect(cardArea.getByRole('button', { name: '允许本次' }).first()).toBeVisible();
-      await expect(cardArea.getByRole('button', { name: '拒绝' }).first()).toBeVisible();
-      // 「本目录不再询问」是二级选项：Hermes 式确认条默认折叠（只有条上的
-      // 允许本次/拒绝常驻），点行头展开后才出现（2026-09-15 卡设计定稿）——
-      // 别要求它默认可见。
-      await cardArea.getByRole('button', { name: '授权写入工作区外目录' }).first().click();
-      await expect(cardArea.getByRole('button', { name: '本目录不再询问' }).first()).toBeVisible();
+      await expect(cardArea).toBeVisible({ timeout: 60_000 });
+      await expect(cardArea.getByText('授权写入工作区外目录')).toBeVisible();
+      await expect(cardArea.getByRole('button', { name: '允许本次' })).toBeVisible();
+      await expect(cardArea.getByRole('button', { name: '本目录不再询问' })).toBeVisible();
+      await expect(cardArea.getByRole('button', { name: '拒绝' })).toBeVisible();
 
       await page.screenshot({
         path: `test-results/${test.info().title.replace(/\s+/g, '-')}-card.png`,
       });
 
       // 点「允许本次」→ 写放行
-      await cardArea.getByRole('button', { name: '允许本次' }).first().click();
+      await cardArea.getByRole('button', { name: '允许本次' }).click();
       await expect(resolvedArea.getByText(/授权写入工作区外目录/)).toBeVisible({
         timeout: 30_000,
       });
@@ -194,10 +196,15 @@ test.describe('Write Authorization Bypass (#864)', () => {
 
     // bypassAll 默认 true（electron-setup 的默认行为）——写授权卡应被跳过。
     const fixture = await launchElectronApp((config: any) => {
-      // 门禁适配（#1000/#1025）：同第一个 describe——共享 patchConfigForMock
+      // 门禁适配（#1000/#1025）：同上——共享 patchConfigForMock
       patchConfigForMock(config, mock.mockUrl);
       const tools = config.tools ?? {};
-      config.tools = { ...tools, restrictToWorkspace: true };
+      // 同上：关掉本机 WSL 沙箱，让写入落在宿主路径（与 CI 一致）
+      config.tools = {
+        ...tools,
+        restrictToWorkspace: true,
+        sandbox: { ...config.tools?.sandbox, enabled: false },
+      };
     });
     electronApp = fixture.electronApp;
     page = fixture.page;
@@ -216,7 +223,7 @@ test.describe('Write Authorization Bypass (#864)', () => {
     'approvals.bypass_all=true 时写 workspace 外目录不弹授权卡直接写入',
     { timeout: LLM_TIMEOUT },
     async () => {
-      const cardArea = page; // #646-v2：卡并进工具链——页面级断言
+      const cardArea = page.getByTestId('confirm-card-area');
       await sendMessage(page, '写授权测试');
 
       const target = join(outDir, 'auth_probe.txt');
@@ -224,8 +231,7 @@ test.describe('Write Authorization Bypass (#864)', () => {
       const content = readFileSync(target, 'utf-8');
       expect(content).toContain('authorization-card-e2e-probe');
 
-      // #646-v2：cardArea 已是 page——"没有卡"必须用定位器计数断言
-      await expect(cardArea.getByText('授权写入工作区外目录')).toHaveCount(0);
+      await expect(cardArea).toBeHidden();
       console.log(`[test] ✅ bypass 下写 workspace 外目录无需授权卡`);
     }
   );

@@ -4,7 +4,7 @@ import { useRuntime } from '../contexts/RuntimeContext';
 import { useRestartRequired } from '../contexts/RestartRequiredContext';
 import { useQraftStatus } from '../hooks/useQraftStatus';
 import { Coins, Loader2, RefreshCw } from 'lucide-react';
-import type { QraftBillingHistoryEntry } from '../../shared/ipc';
+import type { QraftBillingHistoryEntry, QraftErrorCode } from '../../shared/ipc';
 
 const STATES: Record<string, { label: string; color: string }> = {
   stopped: { label: '已停止', color: 'var(--text-faint)' },
@@ -13,6 +13,48 @@ const STATES: Record<string, { label: string; color: string }> = {
   stopping: { label: '停止中', color: 'var(--warning)' },
   error: { label: '错误', color: 'var(--danger)' },
 };
+
+// ── 积分余额轮询重试策略（issue #1160）──────────────────────────────
+/** 瞬时失败（网络抖动/平台暂不可达）的重试间隔：30 秒起步翻倍，封顶 5 分钟。 */
+const POINTS_RETRY_BASE_MS = 30_000;
+const POINTS_RETRY_MAX_MS = 5 * 60_000;
+/** 瞬时失败最多尝试次数（含首次）：用尽即停，避免长期刷屏。 */
+const POINTS_RETRY_MAX_ATTEMPTS = 5;
+
+/**
+ * 会话级永久失败：停止重试，等重新登录成功后自然重拉
+ * （登录失效三件套——横幅/顶栏 chip/发送拦截——负责引导重新登录）。
+ * 主进程 fetchPointsBalance 已先刷新重试一次，到这里仍返回
+ * SESSION_EXPIRED / REFRESH_TOKEN_INVALID 说明会话确实失效。
+ */
+export function isPermanentPointsError(code: QraftErrorCode | undefined): boolean {
+  return (
+    code === 'SESSION_EXPIRED' || code === 'REFRESH_TOKEN_INVALID' || code === 'INVALID_CONFIG'
+  );
+}
+
+/** 已完成 attemptsDone 次尝试（1 起）后的退避等待毫秒数：30s → 1m → 2m → 4m → 5m 封顶。 */
+export function nextPointsRetryDelayMs(attemptsDone: number): number {
+  return Math.min(POINTS_RETRY_BASE_MS * 2 ** (attemptsDone - 1), POINTS_RETRY_MAX_MS);
+}
+
+export interface PointsRetryDecision {
+  /** 是否安排下一次重试。 */
+  retry: boolean;
+  /** 下次重试的等待毫秒数（不重试时无意义）。 */
+  delayMs: number;
+}
+
+/** 根据本次结果与已完成尝试次数决定是否重试：成功/永久失败/次数用尽即停。 */
+export function decidePointsRetry(
+  outcome: { ok: boolean; code?: QraftErrorCode } | undefined,
+  attemptsDone: number
+): PointsRetryDecision {
+  if (outcome?.ok) return { retry: false, delayMs: 0 };
+  if (isPermanentPointsError(outcome?.code)) return { retry: false, delayMs: 0 };
+  if (attemptsDone >= POINTS_RETRY_MAX_ATTEMPTS) return { retry: false, delayMs: 0 };
+  return { retry: true, delayMs: nextPointsRetryDelayMs(attemptsDone) };
+}
 
 function fmtDateTime(epochMs?: number): string {
   if (!epochMs) return '—';
@@ -82,18 +124,24 @@ export function StatusBar({ onOpenPoints }: { onOpenPoints?: () => void }) {
 
   // 登录后拉取一次积分余额：主进程（QraftService.fetchPointsBalance）成功
   // 缓存后会推送 statusChanged，此处经 useQraftStatus 自动收到带 points
-  // 的状态。拉取失败（平台暂不可达等）30 秒后重试，成功或退出登录即停。
+  // 的状态。失败分两类（issue #1160）：会话级永久失败（SESSION_EXPIRED /
+  // REFRESH_TOKEN_INVALID）不再重试，由登录失效三件套引导重新登录；瞬时
+  // 失败（平台暂不可达等）按 30 秒起步翻倍退避重试，最多 5 次尝试。
   useEffect(() => {
-    if (!loggedIn || qraftStatus?.points !== undefined) return;
+    if (!loggedIn || qraftStatus?.points !== undefined || qraftStatus?.requiresRelogin) return;
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
+    let attemptsDone = 0;
     const attempt = () => {
+      attemptsDone += 1;
       try {
         window.miqi.qraft
           .pointsBalance()
-          .catch(() => {})
+          .catch(() => undefined)
           .then((result) => {
-            if (!result?.ok && !cancelled) timer = setTimeout(attempt, 30_000);
+            if (cancelled) return;
+            const decision = decidePointsRetry(result, attemptsDone);
+            if (decision.retry) timer = setTimeout(attempt, decision.delayMs);
           });
       } catch {
         /* 旧版 preload（如 smoke mock）没有 qraft 命名空间 */
@@ -104,7 +152,7 @@ export function StatusBar({ onOpenPoints }: { onOpenPoints?: () => void }) {
       cancelled = true;
       if (timer) clearTimeout(timer);
     };
-  }, [loggedIn, qraftStatus?.points]);
+  }, [loggedIn, qraftStatus?.points, qraftStatus?.requiresRelogin]);
 
   const handleRestart = async () => {
     setRestarting(true);

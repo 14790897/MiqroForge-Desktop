@@ -33,6 +33,12 @@ jobs:
               return text.startsWith('## ') ? '' : text;
             };
 
+            // 发布同步 PR（develop → main）无界面变更，官方发版流水线（weekly-release.yml）
+            // 在「截图」节写的也是文字说明，这类 PR 不强制贴图；其余 PR 仍必须真实截图。
+            const isReleaseSync =
+              context.payload.pull_request.base.ref === 'main' &&
+              context.payload.pull_request.head.ref === 'develop';
+
             const checks = [
               {
                 label: '类型',
@@ -62,8 +68,8 @@ jobs:
               },
               {
                 label: '截图',
-                // 必须有真实截图，文字占位（如「无需截图」）不算
-                check: () => IMAGE_RE.test(sectionText('截图')),
+                // 必须有真实截图，文字占位（如「无需截图」）不算；发布同步 PR 例外
+                check: () => isReleaseSync || IMAGE_RE.test(sectionText('截图')),
               },
             ];
 

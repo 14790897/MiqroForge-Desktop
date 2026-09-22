@@ -61,37 +61,83 @@ export function getMiqiSessionsDir(miqiHome: string): string {
   return join(miqiHome, 'workspace', 'sessions');
 }
 
+/**
+ * 账号级默认工作区根：`<MIQI_HOME>/accounts/<sub>/workspace`（#1185）。
+ *
+ * 自从工作区按登录账号收口，预置了登录态（`sub` 非空）的 spec 里，
+ * `workspace/` 不再是 token 文件与工作区数据的落点——`getMiqiSessionsDir`
+ * 那条路径只对**未登录**（E2E loginBypass、CLI）成立。
+ */
+export function getAccountWorkspaceDir(miqiHome: string, sub: string): string {
+  return join(miqiHome, 'accounts', sub, 'workspace');
+}
+
 // ─── Page helpers ───────────────────────────────────────────────────
 
-/** Wait for the chat input textarea to be present and enabled */
+/**
+ * Wait for the chat input textarea to be present and enabled.
+ *
+ * 同时判定应用「能否进入主界面」：没有 ~/.miqi/config.json 时应用停在首启动
+ * 向导（App.tsx 以 python.check().config_exists 决定 needsSetup），
+ * chat-input 永不挂载 —— 检测到向导就点「使用默认配置，进入应用」把它带进
+ * 主界面；若点了仍进不去，报错明确指出停在向导（而非泛指超时）。
+ * 背景：2026-09-22 云端登录流水线首跑 5/5 全挂即此形态（PR #1189）。
+ */
 export async function waitForInputReady(page: Page, timeout = 60_000) {
-  const textarea = page.locator('[data-testid="chat-input-container"] textarea');
-
-  // Wait for textarea to exist first
-  await expect(page.locator('[data-testid="chat-input-container"]')).toBeVisible({ timeout });
-
-  // Retry with exponential backoff - input may briefly appear/disappear during UI transitions
+  const container = page.locator('[data-testid="chat-input-container"]');
+  const textarea = container.locator('textarea');
+  const enterWithDefaults = page.getByRole('button', { name: /使用默认配置，进入应用/ });
   const deadline = Date.now() + timeout;
   let lastError: Error | null = null;
+  let wizardHandled = false;
 
   while (Date.now() < deadline) {
-    try {
-      await expect(textarea).toBeEnabled({ timeout: 5000 });
-      return textarea;
-    } catch (e) {
-      lastError = e as Error;
-      // Wait before retrying
-      await page.waitForTimeout(1000);
+    if (await container.isVisible().catch(() => false)) {
+      // Retry with exponential backoff - input may briefly appear/disappear during UI transitions
+      try {
+        await expect(textarea).toBeEnabled({ timeout: 5000 });
+        return textarea;
+      } catch (e) {
+        lastError = e as Error;
+        await page.waitForTimeout(1000);
+        continue;
+      }
     }
+
+    if (
+      !wizardHandled &&
+      (await enterWithDefaults.isVisible({ timeout: 5000 }).catch(() => false))
+    ) {
+      console.log(
+        '[test] 判定：应用停在首启动向导（无 ~/.miqi/config.json）——点「使用默认配置，进入应用」后等待主界面'
+      );
+      // 点击成功才置标志：瞬时遮挡/重渲染导致的点击失败要留给下一轮重试
+      try {
+        await enterWithDefaults.click({ timeout: 5000 });
+        wizardHandled = true;
+      } catch (e) {
+        lastError = e as Error;
+        await page.waitForTimeout(500);
+      }
+      continue;
+    }
+
+    await page.waitForTimeout(500);
   }
 
   // Log diagnostic info before throwing
   const count = await textarea.count();
-  const containerVisible = await page.locator('[data-testid="chat-input-container"]').isVisible();
+  const containerVisible = await container.isVisible().catch(() => false);
+  const stuckOnWizard = await enterWithDefaults.isVisible().catch(() => false);
   console.log(
-    `[diagnostic] waitForInputReady failed: textarea count=${count}, container visible=${containerVisible}`
+    `[diagnostic] waitForInputReady failed: textarea count=${count}, container visible=${containerVisible}, setup-wizard=${stuckOnWizard}`
   );
-  throw lastError;
+  if (stuckOnWizard) {
+    throw new Error(
+      '应用停在首启动向导，未能进入主界面：点「使用默认配置，进入应用」后 chat-input 仍未挂载'
+    );
+  }
+  throw lastError ?? new Error('waitForInputReady 超时：chat-input-container 不可见');
 }
 
 /** Send a message and confirm it appears in the chat */
@@ -135,40 +181,18 @@ export async function sendUntilDoneOrProviderDown(
 ): Promise<boolean> {
   const { maxAttempts = 2, perAttemptWaitMs = 150_000, silenceExtendMs = 150_000 } = opts;
   const errLocator = page.getByText(PROVIDER_UNAVAILABLE_TEXT);
-  // 门禁（#1000/#1025）：未登录/无可用模型时发送被 fail-fast 拦下，
-  // 消息被替换成登录引导气泡——这不是 provider 错误，也不是回归。
-  const gateLocator = page.getByText('尚未登录平台账号');
-  if ((await gateLocator.count()) > 0) return false;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     // Snapshot BEFORE the send: an error that surfaces during sendMessage
     // itself must count as this attempt's error. Error bubbles from earlier
     // attempts stay in the message list, so match by count delta — only an
     // error that appeared after this snapshot counts.
     const errCountBefore = await errLocator.count();
-    // 发送被拦（未配置/不可用的 provider → 门禁 fail-fast，user 气泡根本
-    // 不会挂载）时，sendMessage 内部的计数断言会抛错——按「provider 不可用」
-    // 处理，返回 false 让调用方 skip，而不是把环境问题当成回归 fail。
-    try {
-      await sendMessage(page, text);
-    } catch (err) {
-      // 只有两种可判明的「环境不可用 / 门禁拦截」情形才降级为 skip：
-      //  1) 发送后门禁引导气泡已出现（未登录/无可用模型 → fail-fast 拦下，
-      //     user 气泡根本没挂载，sendMessage 内部的计数断言因此抛错）；
-      //  2) 发送后出现了新的 provider 错误气泡（相对发送前快照 errCountBefore
-      //     的增量，即这次发送招来的错误）。
-      // 其它异常（断言失败、选择器超时、真实功能回归等）一律原样重抛——
-      // 早先无条件 return false 会把真实回归吞成 skip，掩盖缺陷。
-      if ((await gateLocator.count()) > 0) return false;
-      if ((await errLocator.count()) > errCountBefore) return false;
-      throw err;
-    }
+    await sendMessage(page, text);
     let sawError = false;
 
     let deadline = Date.now() + perAttemptWaitMs;
     while (Date.now() < deadline) {
       if (await isDone()) return true;
-      // 门禁引导气泡（发送后出现）——立即判定为不可用
-      if ((await gateLocator.count()) > 0) return false;
       if ((await errLocator.count()) > errCountBefore) {
         sawError = true;
         break;
@@ -183,7 +207,6 @@ export async function sendUntilDoneOrProviderDown(
       deadline = Date.now() + silenceExtendMs;
       while (Date.now() < deadline) {
         if (await isDone()) return true;
-        if ((await gateLocator.count()) > 0) return false;
         if ((await errLocator.count()) > errCountBefore) {
           sawError = true;
           break;
@@ -273,6 +296,24 @@ export async function stopMockServer(
 }
 
 /**
+ * 点掉一张「等待你的决定」态的计划卡；没有可点的卡就返回 false。
+ *
+ * 判据用 `plan-confirm`（仅在 waiting && !editing 渲染，天然排除历史已处理卡；
+ * 按钮可访问名是「按当前方案执行」，旧的 name:'开始执行' 匹配不到）。为什么还要
+ * 额外查可见性 / 可用性，见下面的行内注释。
+ */
+export async function approvePlanCardOnce(page: Page): Promise<boolean> {
+  const btn = page.getByTestId('plan-confirm').first();
+  // 只点**可见且可用**的那张。plan-confirm 仅在 waiting && !editing 渲染（已确认的卡
+  // 会把它卸载），可见性顺带排除别处的历史卡；isEnabled 再挡一层「已点、还在提交中」
+  // 的窗口 —— 点击后按钮会 disabled（PlanCard 内部另有 ref 同步拦第二次，不依赖它）。
+  if (!(await btn.isVisible().catch(() => false))) return false;
+  if (!(await btn.isEnabled().catch(() => false))) return false;
+  await btn.click({ force: true, timeout: 5_000 });
+  return true;
+}
+
+/**
  * Wait for the reply of a just-sent message to finish streaming.
  *
  * `.tag-inprogress` is the DOM projection of the renderer's per-session
@@ -289,20 +330,48 @@ export async function stopMockServer(
  * Two rAF frames then satisfy any "stable for N samples" rule in ≈33 ms, so a
  * still-reasoning turn reads as finished and the caller asserts against a
  * panel that has not been updated yet.
+ *
+ * 等待期间会顺手点掉计划卡（`approvePlanCard`，默认开）。理由：#646-v2 之后
+ * 「edit 模式 + 复杂度够高的工具调用 → 计划卡」会让回合停在「等待你的决定」上，
+ * 而此时渲染进程的 `streaming` 仍是 true、标签照挂 —— 回合是真的没结束，只是
+ * 卡在等人点按钮。真实模型在温度 1 下会不会走到需要计划的工具调用是随机的，于是
+ * 表现为「同一个 spec 这次超时、重试却 8 秒就过」的抖动：2026-09-21 electron-e2e
+ * 在多个无关分支上红了一整天，失败的 error-context 快照里都躺着同一张
+ * 「AI 准备执行任务 / 等待你的决定」计划卡，而绝大多数 spec 并不会自己批准它。
+ * 只测计划卡本身的用例（plan-card / confirm-card / auto-timeline / issue-1104）
+ * 要么在调用前已把卡点掉、要么自己后台批准，传 `approvePlanCard: false` 可显式退出。
  */
-export async function waitForResponseComplete(page: Page, timeout = 120_000) {
+export async function waitForResponseComplete(
+  page: Page,
+  timeout = 120_000,
+  opts: { approvePlanCard?: boolean } = {}
+) {
+  const approvePlanCard = opts.approvePlanCard ?? true;
   const deadline = Date.now() + timeout;
   const inProgress = page.locator('.tag-inprogress');
 
   let anchor = await mainTextLength(page);
   let stable = 0;
   let sawRunning = false;
+  let approvedPlanCard = false;
 
   while (Date.now() < deadline) {
     if ((await inProgress.count()) > 0) {
       sawRunning = true;
       stable = 0;
       anchor = await mainTextLength(page);
+      // 标签在 = 回合在跑；此时若是计划卡在等人，就替用户点了。只在标签在时才查，
+      // 没卡的那些回合每次采样只多一次廉价的 count()。
+      if (approvePlanCard) {
+        try {
+          if (await approvePlanCardOnce(page)) {
+            approvedPlanCard = true;
+            console.log('[test] waitForResponseComplete: 自动批准计划卡（按当前方案执行）');
+          }
+        } catch {
+          // 页面正在关闭 —— 让后面的采样照常抛错，别在这里吞掉真实失败
+        }
+      }
     } else {
       const len = await mainTextLength(page);
       // Only a jump of ≥10 characters counts as progress: the live
@@ -323,55 +392,29 @@ export async function waitForResponseComplete(page: Page, timeout = 120_000) {
     await page.waitForTimeout(200);
   }
 
+  // 超时报错要把「卡在计划卡上」直说出来：否则它和「模型慢」「桥死了」在日志里
+  // 长得一模一样，只能靠拉 error-context 截图才分得出来（2026-09-21 的排查就
+  // 卡在这里）。卡还在等确认时，这一句就是根因。
+  const planCardStillWaiting =
+    (await page
+      .getByTestId('plan-confirm')
+      .count()
+      .catch(() => 0)) > 0;
   throw new Error(
     `waitForResponseComplete: 回合在 ${timeout}ms 内没有结束（` +
       (sawRunning ? '「进行中」标签一直没消失' : '未出现「进行中」标签，且主区文本仍在变化') +
-      '）'
+      `）` +
+      (planCardStillWaiting
+        ? '——且此刻页面上仍有一张等待确认的计划卡（「按当前方案执行」）：回合是被计划卡挡住的，不是模型慢。' +
+          '该 spec 需要批准计划卡（本函数默认会点，若传了 approvePlanCard:false 请自行处理）。'
+        : approvedPlanCard
+          ? '——注意：本次等待期间批准过计划卡。'
+          : '')
   );
 }
 
 /** Poll for approval dialogs and click "永久允许" until the AI stops
  *  thinking.  Used by sandbox and session-isolation tests. */
-/**
- * Auto-approve the harness PlanCard ("开始执行") if it appears.
- *
- * #646-v2 plan 常态（edit 模式任何 produces_artifact 工具 → 计划卡）让既有
- * E2E（exec/write_file/spawn 类真实对话）被计划卡挡住——工具不执行、spec
- * retry 死循环（CI electron-e2e 30min 超时）。调用方在 sendMessage 后启动
- * 后台轮询（像 autoApprove 一样），计划卡出现即点"开始执行"。
- */
-export async function approvePlanCardIfAny(page: Page, timeoutMs = 90_000) {
-  const deadline = Date.now() + timeoutMs;
-  let checked = 0;
-  while (Date.now() < deadline) {
-    try {
-      // CodeRabbit（9-11）：按 testid 定位等待态计划卡的确认钮（plan-confirm
-      // 仅在 waiting && !editing 渲染——天然排除历史已处理卡）；按钮可访问名
-      // 为「按当前方案执行」（PlanCard 重写后），旧 name:'开始执行' 匹配不到。
-      const btn = page.getByTestId('plan-confirm').first();
-      if (await btn.isVisible({ timeout: 400 }).catch(() => false)) {
-        await btn.click({ force: true, timeout: 5_000 });
-        console.log('[test] 自动批准计划卡（按当前方案执行）');
-        return;
-      }
-      checked += 1;
-      if (checked % 20 === 1) {
-        console.log(
-          `[test] approvePlanCardIfAny: 检查 ${checked} 次，计划卡未出现（${Date.now() < deadline ? '继续等' : '超时'}）`
-        );
-      }
-    } catch {
-      // 页面已关闭（测试结束）——静默退出
-      return;
-    }
-    try {
-      await page.waitForTimeout(500);
-    } catch {
-      return; // 页面已关闭
-    }
-  }
-}
-
 export async function approveLoop(page: Page, timeout = 180_000) {
   // The thinking indicator was removed, so completion can't be detected via
   // [data-testid="thinking-indicator"].  Keep auto-approving any dialogs, and
@@ -387,13 +430,6 @@ export async function approveLoop(page: Page, timeout = 180_000) {
     if (await btn.isVisible({ timeout: 1000 }).catch(() => false)) {
       await btn.click();
       console.log('[test] Auto-approved tool');
-    }
-    // #646-v2 plan 常态：edit 模式 produces_artifact 工具 → 计划卡——自动点"开始执行"
-    // CodeRabbit（9-11）：同上——testid 定位等待态确认钮
-    const go = page.getByTestId('plan-confirm').first();
-    if (await go.isVisible({ timeout: 1000 }).catch(() => false)) {
-      await go.click({ force: true, timeout: 5_000 });
-      console.log('[test] Auto-approved plan card (按当前方案执行)');
     }
     const text = await page
       .locator('main')
@@ -733,6 +769,12 @@ export async function launchElectronApp(
     noLoginBypass?: boolean;
     /** 强制窗口显示在屏幕上（默认本机启动时停在屏幕外，见 applyWindowVisibilityEnv） */
     showWindow?: boolean;
+    /**
+     * 不把开发者本机 `~/.miqi/config.json` 拷进临时 MIQI_HOME —— 模拟全新安装
+     * （没有任何用户 provider 凭据、也没有显式配置过 agents.defaults.model）。
+     * 默认拷贝是给需要真实 LLM 的用例用的；#1172 这类「无配置」场景必须显式打开。
+     */
+    noUserConfig?: boolean;
   }
 ): Promise<ElectronFixture> {
   // Create unique temporary home per test worker for full isolation.
@@ -753,9 +795,10 @@ export async function launchElectronApp(
   console.log(`[test] MIQI_HOME=${miqiHome}`);
 
   // Copy user's provider config into the temp home so the LLM backend is reachable.
+  // noUserConfig 时跳过：临时 home 保持「无用户配置」状态（全新安装）。
   const userConfigPath = join(homedir(), '.miqi', 'config.json');
   const destConfigPath = join(miqiHome, 'config.json');
-  if (existsSync(userConfigPath)) {
+  if (!opts?.noUserConfig && existsSync(userConfigPath)) {
     cpSync(userConfigPath, destConfigPath);
   }
 
