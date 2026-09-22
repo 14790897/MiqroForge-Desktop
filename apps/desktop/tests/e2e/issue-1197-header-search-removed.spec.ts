@@ -19,7 +19,11 @@
 
 import { test, expect } from '@playwright/test';
 import type { ElectronApplication, Page } from '@playwright/test';
-import { launchElectronApp, closeElectronApp, waitForBridgeInitialized } from './helpers/electron-setup';
+import {
+  launchElectronApp,
+  closeElectronApp,
+  waitForBridgeInitialized,
+} from './helpers/electron-setup';
 
 test.describe('#1197 顶部栏装饰性搜索框移除', () => {
   let electronApp: ElectronApplication;
