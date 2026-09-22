@@ -12,8 +12,6 @@ DEFAULT_WINDOW_SIZE = 8
 DEFAULT_THRESHOLD = 3
 STORM_EXEMPT_TOOLS = frozenset({
     "request_user_input", "user_input", "ask_user", "ask_user_confirm_card",
-    # #646-v2: 反复弹同一张确认卡是用户侧行为，不应被风暴熔断抑制
-    "ask_user_plan_confirm", "request_action_confirmation",
 })
 
 

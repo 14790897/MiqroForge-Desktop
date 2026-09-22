@@ -6,9 +6,6 @@ from pathlib import Path
 
 import pytest
 
-from miqi.agent.tools.ask_user_confirm import ASK_USER_CONFIRM_INSTRUCTION
-from miqi.agent.tools.ask_user_plan_confirm import ASK_PLAN_CONFIRM_INSTRUCTION
-from miqi.agent.tools.request_action_confirmation import REQUEST_ACTION_CONFIRM_INSTRUCTION
 from miqi.kun_runtime.cancellation import InflightTracker
 from miqi.kun_runtime.compactor import ContextCompactor
 from miqi.kun_runtime.event_bus import EventBus
@@ -422,62 +419,3 @@ class TestAgentLoopUserRoots:
         context = loop_opts.tool_host.calls[-1][1]
         roots = [str(Path(r)) for r in context.user_mentioned_roots]
         assert str(out_dir.resolve()) in roots
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# 确认类指令注入（#646-v2 R2c ③）——逐工具判名，不再「确认卡一在就塞计划卡」
-# ═══════════════════════════════════════════════════════════════════════════════
-
-
-class TestConfirmInstructionInjection:
-    @pytest.mark.asyncio
-    async def test_action_confirmation_injects_own_instruction_only(
-        self, loop_opts: AgentLoopOptions, thread_store: FileThreadStore, turn_svc: TurnService
-    ) -> None:
-        """暴露 request_action_confirmation 时只注入它自己的指令。"""
-        loop_opts.model = FakeModelClient(text_chunks=["ok"])
-        loop_opts.tool_host = FakeToolHost(
-            tools=[
-                {
-                    "name": "request_action_confirmation",
-                    "description": "Request user confirmation before a risky action",
-                    "inputSchema": {},
-                    "toolKind": "tool_call",
-                }
-            ],
-        )
-        loop = AgentLoop(loop_opts)
-        thread_id, turn_id = await _setup_thread_and_turn(thread_store, turn_svc)
-
-        assert await loop.run_turn(thread_id, turn_id) == "completed"
-
-        instructions = loop_opts.model._requests[0].context_instructions
-        assert REQUEST_ACTION_CONFIRM_INSTRUCTION in instructions
-        assert ASK_USER_CONFIRM_INSTRUCTION not in instructions
-        assert ASK_PLAN_CONFIRM_INSTRUCTION not in instructions
-
-    @pytest.mark.asyncio
-    async def test_plan_confirm_injects_own_instruction_only(
-        self, loop_opts: AgentLoopOptions, thread_store: FileThreadStore, turn_svc: TurnService
-    ) -> None:
-        """暴露 ask_user_plan_confirm 时只注入它自己的指令。"""
-        loop_opts.model = FakeModelClient(text_chunks=["ok"])
-        loop_opts.tool_host = FakeToolHost(
-            tools=[
-                {
-                    "name": "ask_user_plan_confirm",
-                    "description": "Ask user to confirm a plan",
-                    "inputSchema": {},
-                    "toolKind": "tool_call",
-                }
-            ],
-        )
-        loop = AgentLoop(loop_opts)
-        thread_id, turn_id = await _setup_thread_and_turn(thread_store, turn_svc)
-
-        assert await loop.run_turn(thread_id, turn_id) == "completed"
-
-        instructions = loop_opts.model._requests[0].context_instructions
-        assert ASK_PLAN_CONFIRM_INSTRUCTION in instructions
-        assert REQUEST_ACTION_CONFIRM_INSTRUCTION not in instructions
-        assert ASK_USER_CONFIRM_INSTRUCTION not in instructions

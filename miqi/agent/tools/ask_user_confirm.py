@@ -1,12 +1,10 @@
 """ask_user_confirm_card tool (issue #646).
 
 AI-initiated human-in-the-loop confirmation. The model calls this tool when
-it needs the user to make a structured decision in non-dangerous scenarios
-(e.g. choosing among plans/formats/ranges, or confirming a specific
-parameter). Dangerous actions (uploading to external platforms, payments,
-destructive deletes, sending data/messages externally) must go through
-``request_action_confirmation`` instead. The desktop renders an inline
-confirm card, blocks the turn, and returns the user's choice as a tool result.
+it needs the user to make a structured decision (e.g. before external network
+requests, file writes, multi-step skill execution, cost-incurring actions, or
+uploading a workflow definition). The desktop renders an inline confirm card,
+blocks the turn, and returns the user's choice as a tool result.
 
 Execution path:
     ToolHost.execute() intercepts ``ask_user_confirm_card`` and routes it
@@ -34,18 +32,15 @@ DEFAULT_TIMEOUT_SECONDS = 120
 # System-prompt guidance injected into every KUN turn (issue #646, 功能描述④).
 # Tells the model WHEN to call ask_user_confirm_card and how to interpret it.
 ASK_USER_CONFIRM_INSTRUCTION = (
-    "你可以调用 ask_user_confirm_card 工具，在需要用户做**结构化选择**时主动弹出一张确认卡片，"
-    "暂停当前任务等待用户决定（不要只在文本里询问）。\n"
-    "**仅限非危险场景**，例如：\n"
-    "1. 需要用户在若干方案 / 格式 / 范围 / 对象之间做选择；\n"
-    "2. 执行前需要用户补充或确认一个具体参数（如目标目录、命名、范围）。\n"
-    "**危险动作不要使用本工具**——向外部平台上传、支付/产生费用、破坏性删除（目录/通配/递归/关键路径）、"
-    "外发数据或消息，必须调用 request_action_confirmation。\n"
-    "**多步骤任务开始前不要调用本工具**——请调用 ask_user_plan_confirm 展示任务计划；"
-    "普通文件写入/网络请求由系统自动放行，不需要确认。\n"
+    "你可以调用 ask_user_confirm_card 工具，在关键步骤执行前主动弹出一张确认卡片，"
+    "暂停当前任务等待用户做结构化选择。**必须**在以下场景主动调用（不要只在文本里询问）：\n"
+    "1. 执行多步骤 Skill 方案前（先展示步骤列表让用户确认）；\n"
+    "2. 任何外部网络请求、文件写入、可能产生费用的操作前；\n"
+    "3. 向外部平台（如 MiQroForge）上传文件前；\n"
+    "4. 需要用户补充关键参数、或在多个方案间做选择时。\n"
     "调用前先在正文解释为什么需要用户决定；调用后工具会返回用户的选择。"
     "返回 status 为 cancelled（用户取消或超时）时不要继续执行，"
-    "choice_id 为 adjust 时应重新规划方案并再次调用相应工具。"
+    "choice_id 为 adjust 时应重新规划方案并再次调用本工具。"
 )
 
 
@@ -74,10 +69,12 @@ class AskUserConfirmCardTool(Tool):
         return (
             "弹出一张确认卡片，等待用户在桌面端做结构化选择，并把选择结果返回给你。"
             "这是 AI 主动发起的人机握手：调用后当前 Turn 会暂停，直到用户点选或超时。"
-            "**仅限非危险的决策场景**（方案/格式/范围选择、参数确认）。"
-            "危险动作（向外部平台上传、支付、破坏性删除、外发数据/消息）请调用 request_action_confirmation；"
-            "多步骤任务的计划确认请使用 ask_user_plan_confirm（不要在本工具传 steps）。"
+            "**必须在你准备执行以下动作之前主动调用**：涉及外部网络请求、文件写入、"
+            "多步骤 Skill 执行、可能产生费用的操作、或向外部平台上传文件（如 MiQroForge）。"
             "调用前先在正文里解释为什么需要用户决定。"
+            "返回结果 status 为 confirmed / cancelled（超时或用户取消）；"
+            "用户选择 adjust 时 status 为 cancelled 且 choice_id 为 adjust，"
+            "此时应重新规划方案并再次调用本工具，不要继续执行。"
         )
 
     @property
