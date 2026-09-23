@@ -11,6 +11,7 @@
  * **绝不回退到扩大删除范围**（宁可漏删，不可错删）。
  */
 import path from 'node:path';
+import { win32 as pathWin32 } from 'node:path';
 import constants from './cleanup-constants.json';
 
 export const WSL_SANDBOX_DISTRO = constants.wslSandboxDistro;
@@ -55,6 +56,15 @@ export interface SafetyDecision {
   reason?: string;
 }
 
+/**
+ * 按 ctx.platform 选择路径实现：win32 语义必须用 path.win32 解析，
+ * 与宿主操作系统无关（Linux CI 上的单测模拟 Windows 场景依赖这一点）。
+ * 运行时清理只在 Windows 执行，win32 与宿主实现重合，行为不变。
+ */
+function pathFor(platform: CleanupPlatform): typeof path {
+  return platform === 'win32' ? pathWin32 : path;
+}
+
 function samePath(a: string, b: string, platform: CleanupPlatform): boolean {
   if (!a || !b) return false;
   return platform === 'win32' ? a.toLowerCase() === b.toLowerCase() : a === b;
@@ -76,13 +86,14 @@ export function isSafeDeletionRoot(dir: string, ctx: CleanupContext): SafetyDeci
   // Windows 的 path.resolve 对 NUL 不抛错（fs 系统调用层才会失败），
   // 但含 NUL 的路径永远无效——在这里显式拒绝。
   if (dir.includes('\0')) return { safe: false, reason: '路径包含非法字符' };
+  const p = pathFor(ctx.platform);
   let resolved: string;
   try {
-    resolved = path.resolve(dir);
+    resolved = p.resolve(dir);
   } catch {
     return { safe: false, reason: `路径无法解析: ${dir}` };
   }
-  const root = path.parse(resolved).root;
+  const root = p.parse(resolved).root;
   if (samePath(resolved, root, ctx.platform)) {
     return { safe: false, reason: `拒绝删除文件系统根目录: ${resolved}` };
   }
@@ -121,9 +132,10 @@ export interface DataRootResolution {
  * 默认名候选逐个探测存在性（见 dataRootDeletionTargets）。
  */
 export function resolveExplicitDataRoot(ctx: CleanupContext): DataRootResolution | null {
+  const p = pathFor(ctx.platform);
   const registry = ctx.registryDataRoot?.trim();
   if (registry) {
-    const resolved = path.resolve(registry);
+    const resolved = p.resolve(registry);
     const decision = isSafeDeletionRoot(resolved, ctx);
     return decision.safe
       ? { path: resolved, source: 'registry', safe: true }
@@ -131,7 +143,7 @@ export function resolveExplicitDataRoot(ctx: CleanupContext): DataRootResolution
   }
   const envHome = ctx.env['MIQI_HOME']?.trim();
   if (envHome) {
-    const resolved = path.resolve(envHome);
+    const resolved = p.resolve(envHome);
     const decision = isSafeDeletionRoot(resolved, ctx);
     return decision.safe
       ? { path: resolved, source: 'env', safe: true }
@@ -150,7 +162,8 @@ export function dataRootDeletionTargets(ctx: CleanupContext): string[] {
   if (explicit) {
     return explicit.safe ? [explicit.path] : [];
   }
-  return DATA_ROOT_CANDIDATE_NAMES.map((name) => path.join(ctx.homeDir, name));
+  const p = pathFor(ctx.platform);
+  return DATA_ROOT_CANDIDATE_NAMES.map((name) => p.join(ctx.homeDir, name));
 }
 
 /**
@@ -161,14 +174,15 @@ export function classifyDataRootCandidate(
   dir: string,
   ctx: CleanupContext
 ): { kind: 'default' | 'legacy' | 'custom' | 'not-a-candidate'; name?: string } {
+  const p = pathFor(ctx.platform);
   let resolved: string;
   try {
-    resolved = path.resolve(dir);
+    resolved = p.resolve(dir);
   } catch {
     return { kind: 'not-a-candidate' };
   }
   for (const name of DATA_ROOT_CANDIDATE_NAMES) {
-    if (samePath(resolved, path.join(ctx.homeDir, name), ctx.platform)) {
+    if (samePath(resolved, p.join(ctx.homeDir, name), ctx.platform)) {
       return name === '.assistant' ? { kind: 'legacy', name } : { kind: 'default', name };
     }
   }
@@ -187,10 +201,11 @@ export function classifyDataRootCandidate(
  * 同步更新 cleanup-constants.json 的 activeDataRootDefaultName。
  */
 export function resolveActiveDataRoot(ctx: CleanupContext): string {
+  const p = pathFor(ctx.platform);
   const envHome = ctx.env['MIQI_HOME']?.trim();
-  if (envHome) return path.resolve(envHome);
-  const defaultDir = path.join(ctx.homeDir, ACTIVE_DATA_ROOT_DEFAULT_NAME);
-  const legacyDir = path.join(ctx.homeDir, '.assistant');
+  if (envHome) return p.resolve(envHome);
+  const defaultDir = p.join(ctx.homeDir, ACTIVE_DATA_ROOT_DEFAULT_NAME);
+  const legacyDir = p.join(ctx.homeDir, '.assistant');
   const exists = ctx.dirExists ?? (() => false);
   if (exists(legacyDir) && !exists(defaultDir)) return legacyDir;
   return defaultDir;
@@ -223,12 +238,13 @@ export interface CleanupItem {
 }
 
 export function planCleanupItems(ctx: CleanupContext): CleanupItem[] {
+  const p = pathFor(ctx.platform);
   const explicit = resolveExplicitDataRoot(ctx);
   // UI 展示用主数据根：显式配置优先，否则默认名候选（探测后替换）。
   const primaryRoot = explicit?.safe
     ? explicit.path
-    : path.join(ctx.homeDir, ACTIVE_DATA_ROOT_DEFAULT_NAME);
-  const workspacePath = path.join(primaryRoot, 'workspace');
+    : p.join(ctx.homeDir, ACTIVE_DATA_ROOT_DEFAULT_NAME);
+  const workspacePath = p.join(primaryRoot, 'workspace');
 
   return [
     {
@@ -258,7 +274,7 @@ export function planCleanupItems(ctx: CleanupContext): CleanupItem[] {
       kind: 'user-data',
       label: '应用用户数据',
       description: '登录态、界面设置、扣费历史与 Chromium 缓存',
-      path: path.join(ctx.appDataDir, PACKAGED_USER_DATA_DIR_NAME),
+      path: p.join(ctx.appDataDir, PACKAGED_USER_DATA_DIR_NAME),
       excludes: [],
       exists: null,
       defaultChecked: false,
@@ -280,7 +296,7 @@ export function planCleanupItems(ctx: CleanupContext): CleanupItem[] {
       kind: 'updater-cache',
       label: '自动更新缓存',
       description: '安装包下载缓存（#1124 接入 electron-updater 后产生）',
-      path: path.join(ctx.localAppDataDir, UPDATER_CACHE_DIR_NAME),
+      path: p.join(ctx.localAppDataDir, UPDATER_CACHE_DIR_NAME),
       excludes: [],
       exists: null,
       defaultChecked: true,
