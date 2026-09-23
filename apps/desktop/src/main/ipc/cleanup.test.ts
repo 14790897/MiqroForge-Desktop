@@ -19,14 +19,17 @@ import {
 } from './cleanup';
 
 function makeCtx(homeDir: string): CleanupContext {
+  // fixture 目录是真实宿主路径（mkdtemp），ctx.platform 必须跟随宿主：
+  // Linux CI 上用 linux 语义（POSIX join），Windows 上 win32 语义。
+  const platform = process.platform === 'win32' ? 'win32' : 'linux';
   return {
-    platform: 'win32',
+    platform,
     homeDir,
     appDataDir: join(homeDir, 'AppData', 'Roaming'),
     localAppDataDir: join(homeDir, 'AppData', 'Local'),
     registryDataRoot: null,
     env: {},
-    systemRoot: 'C:\\Windows',
+    ...(platform === 'win32' ? { systemRoot: 'C:\\Windows' } : {}),
   };
 }
 
