@@ -319,11 +319,13 @@ npm run build && npx playwright test --config=playwright.config.ts --project=ele
 
 | Platform | E2E Coverage | Notes |
 |---|---|---|
-| **Linux** (Ubuntu CI) | Full suite ✓ | bwrap sandbox + all specs；并行度用 config 默认的 4 workers（实测 14.6–19.7 分钟；降到 2 只翻倍墙钟、换不到稳定性） |
-| **Windows** (WSL CI) | Full suite ✓ | WSL bwrap sandbox + all specs (needs `MIQI_RUN_SANDBOX_E2E=1`) |
+| **Linux** (Ubuntu CI) | Full suite 中**未设守卫**的部分 | bwrap sandbox + all specs，但平台/开关守卫（`process.platform !== 'win32'`、`MIQI_RUN_*`、`QRAFT_LIVE` 等）在 CI 上一律不成立；并行度用 config 默认的 4 workers（实测 14.6–19.7 分钟；降到 2 只翻倍墙钟、换不到稳定性） |
+| **Windows** (WSL CI) | **按名字点名的 7 个 spec**，不是全量 | wsl-one-click-install、sandbox-exec、session-key-mapping、sandbox-toggle、#1157、#1171、open-external-path-security |
 | **macOS** (CI) | **选定子集，不是完整覆盖** | 无 bwrap；为控制墙钟又额外排除最重的 LLM 套件 —— 未跑的部分由 Linux job 覆盖 |
 
-macOS job 实际 `--grep-invert` 掉的 describe 块：`Sandbox Exec`、`Sandbox Toggle`、`Sandbox toggle ready`、`Workspace Switch E2E (Sandbox ON)`、`session-key-mapping`、`PPTX Generator`、`Native Electron E2E`、`Feedback Page E2E`、`Execution Policy E2E`。也就是说 **Linux = 全量、macOS = 兼容性子集，两边覆盖率并不对等**；判断「某个用例有没有在 CI 上跑过」时要按平台分开看。
+macOS job 实际 `--grep-invert` 掉的 describe 块：`Sandbox Exec`、`Sandbox Toggle`、`Sandbox toggle ready`、`Workspace Switch E2E (Sandbox ON)`、`session-key-mapping`、`PPTX Generator`、`Native Electron E2E`、`Feedback Page E2E`、`Execution Policy E2E`。也就是说 **Linux = 全量（减去设了守卫的）、macOS = 兼容性子集，两边覆盖率并不对等**；判断「某个用例有没有在 CI 上跑过」时要按平台分开看。
+
+> **零 CI 覆盖清单**：`apps/desktop/tests/e2e/CI-COVERAGE.md` 列出了**在任何 runner 上都不会执行**的 21 个 spec（Windows-only 语义、只在本地设置的 `MIQI_RUN_*` / `QRAFT_LIVE`、真实账号 live 用例、本机私有资产等）。`apps/desktop/tests/e2eCiCoverage.test.ts`（`npm test`，quick job）强制「新守卫必须登记、旧条目必须销账」，别改坏了这些路径还以为 CI 会兜住（#1196）。
 
 > **flaky 怎么归因**（#1107）：两个 E2E job 结束时会把 Playwright JSON 报告里「首次失败、重试才通过」的用例汇总进 job summary（`apps/desktop/scripts/e2e-flaky-report.mjs`，由 `.github/actions/summarize-flaky` 调用），并各发一条 `::warning` 注解。此前这类用例只以日志中段的一行 `N flaky` 存在、job 仍判 success，等于静默漂着。
 
