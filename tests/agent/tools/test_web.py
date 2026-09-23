@@ -924,8 +924,14 @@ def test_ddgs_backend_is_a_registered_engine():
     # "auto"/"all" 是 _get_engines 里的特殊字符串，不是注册表键——放行它们，
     # 否则这个断言会在正确的值上直接失败。
     valid = set(ENGINES["text"]) | {"auto", "all"}
-    requested = {b.strip() for b in web_module._DDGS_BACKEND.split(",") if b.strip()}
-    assert requested, "_DDGS_BACKEND 不能为空——空串同样会静默回落到 auto（#1046）"
+    # 先要求每一项非空：ddgs 只对名字查注册表，空项会被记成无效 backend 并打警告，
+    # 所以 ""、"auto,"、",auto"、"auto,,brave" 这类值同样不能放过（#1046）。
+    parts = [b.strip() for b in web_module._DDGS_BACKEND.split(",")]
+    assert all(parts), (
+        f"_DDGS_BACKEND={web_module._DDGS_BACKEND!r} 含空项——空串或多余逗号同样会被 "
+        "ddgs 记为无效 backend 并打警告（#1046）"
+    )
+    requested = set(parts)
     assert requested <= valid, (
         f"_DDGS_BACKEND={web_module._DDGS_BACKEND!r} 含未知引擎 {sorted(requested - valid)}；"
         f"合法值：{sorted(valid)}。ddgs 不会报错，只会打警告后静默扇出。"
