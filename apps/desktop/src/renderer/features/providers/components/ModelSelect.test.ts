@@ -34,7 +34,27 @@ describe('ModelSelect（issue #788 常用模型预设）', () => {
     expect(html).not.toContain('provider/model-name');
   });
 
-  it('外部传入预设时使用外部预设', () => {
+  it('外部传入预设时使用外部预设（SSR 下可用性未解析，仍按兜底集合过滤）', () => {
+    const html = renderToStaticMarkup(
+      createElement(ModelSelect, {
+        value: 'deepseek/x',
+        onChange: () => {},
+        presets: [
+          {
+            id: 'deepseek/x',
+            name: 'X Y',
+            provider: 'deepseek',
+            providerDisplayName: 'DeepSeek',
+            hidden: false,
+            default: false,
+          },
+        ],
+      })
+    );
+    expect(html).toContain('deepseek/x');
+  });
+
+  it('外部预设里的非平台 provider 在可用性未解析时同样不放行', () => {
     const html = renderToStaticMarkup(
       createElement(ModelSelect, {
         value: 'x/y',
@@ -51,7 +71,7 @@ describe('ModelSelect（issue #788 常用模型预设）', () => {
         ],
       })
     );
-    expect(html).toContain('x/y');
+    expect(html).not.toContain('x/y');
   });
 });
 
@@ -81,8 +101,11 @@ describe('filterAvailableModels（#929 可用 provider 过滤回归）', () => {
     expect(result.map((m) => m.id)).toEqual(['deepseek/deepseek-v4-flash']);
   });
 
-  it('可用集合未知（null）时不过滤，原样返回', () => {
-    expect(filterAvailableModels(catalog, null)).toBe(catalog);
+  it('可用集合未知（null）时按兜底集合过滤，不放行全量目录（#1179 竞态）', () => {
+    // models.list 常先于 providers.list 返回：此时若原样放行目录，残留凭据机器上
+    // openai/gpt-4o 这类已收口 provider 的模型会在下拉里短暂可选。
+    const result = filterAvailableModels(catalog, null);
+    expect(result.map((m) => m.id)).toEqual(['deepseek/deepseek-v4-flash']);
   });
 
   it('custom/* 已从运行时移除，即使列为可用也不放行（#933 review）', () => {

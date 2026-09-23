@@ -24,8 +24,11 @@ export const FALLBACK_MODEL_PRESETS: ModelInfo[] = [
   },
 ];
 
-/** providers.list 不可用时的可用 provider 兜底：仅内置可激活的 DeepSeek。 */
-const FALLBACK_AVAILABLE_PROVIDERS = ['deepseek'];
+/**
+ * providers.list 未返回（未解析）或调用失败时的可用 provider 兜底：仅内置可激活的
+ * DeepSeek。两者都按「只认内置」处理，绝不放行后端全量目录（见 filterAvailableModels）。
+ */
+const FALLBACK_AVAILABLE_PROVIDERS = new Set(['deepseek']);
 
 /**
  * 从 providers.list 结果推导下拉里可选的 provider 集合（#1179）。
@@ -48,17 +51,20 @@ export function selectableProviders(providers: ProviderInfo[]): Set<string> {
 
 /**
  * 只保留「平台可选 provider」的模型（可用集合见 selectableProviders）。
- * available 为 null 时不过滤（目录还没加载完）。收口后 model/list 仍返回
- * 全量目录，这里负责兜住已从运行时工厂移除的 provider。
+ *
+ * available 为 null（providers.list 尚未返回）时按兜底集合过滤，**不放行目录**：
+ * models.list 通常先于 providers.list 返回，此期间若原样放行，残留凭据机器上的
+ * anthropic/dashscope/… 会在下拉里可被选中（#1179：收口后 model/list 仍返回全量
+ * 目录，过滤是唯一防线）。
  */
 export function filterAvailableModels(
   models: ModelInfo[],
   available: Set<string> | null
 ): ModelInfo[] {
-  if (available === null) return models;
+  const providers = available ?? FALLBACK_AVAILABLE_PROVIDERS;
   // custom provider 已从运行时移除：不放行 custom/*，否则选择后新会话会在
   // make_provider 报错（#933 review）。
-  return models.filter((m) => m.provider !== 'custom' && available.has(m.provider));
+  return models.filter((m) => m.provider !== 'custom' && providers.has(m.provider));
 }
 
 function displayName(provider: string): string {
@@ -109,7 +115,7 @@ export function ModelSelect({ value, onChange, presets }: ModelSelectProps) {
         if (alive) setAvailableProviders(selectableProviders(r.providers));
       })
       .catch(() => {
-        if (alive) setAvailableProviders(new Set(FALLBACK_AVAILABLE_PROVIDERS));
+        if (alive) setAvailableProviders(FALLBACK_AVAILABLE_PROVIDERS);
       });
     return () => {
       alive = false;
