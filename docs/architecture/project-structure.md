@@ -179,7 +179,7 @@ miqi-desktop/
 │   │   └── sqlite_store.py      SQLite 存储后端
 │   ├── config/                  配置管理
 │   │   ├── schema.py            Pydantic 配置模型
-│   │   └── loader.py            配置文件加载与保存 (~/.miqi/config.json)
+│   │   └── loader.py            配置文件加载与保存 (~/.forge/config.json)
 │   ├── channels/                消息通道 (飞书/Telegram/Slack/Discord/钉钉/QQ/邮件/...)
 │   ├── cron/                    定时任务服务
 │   ├── context/                 上下文 (fragments, thread_store)

@@ -35,7 +35,7 @@ describe('resolveWorkspacePath', () => {
 
   beforeEach(() => {
     // Point MIQI_HOME at a fresh temp dir (no config.json) so the default
-    // workspace rebases to <tmp>/workspace and never reads the real ~/.miqi.
+    // workspace rebases to <tmp>/workspace and never reads the real ~/.forge.
     const home = join(
       tmpdir(),
       `miqi-ws-test-${Date.now()}-${Math.random().toString(36).slice(2)}`
@@ -314,11 +314,11 @@ describe('sessionFilesDirKey (#1103)', () => {
 // candidate against its authorization root so a workspace symlink cannot escape.
 describe('buildWslSearchScript (#1103)', () => {
   // #1185: 全局工作区那一行现在由账号决定，所以这组用例必须自己钉住数据根——
-  // 没有账号标记时才是它断言的那个 `$HOME/.miqi/workspace`。
+  // 没有账号标记时才是它断言的那个 `$HOME/.forge/workspace`。
   //
   // 在此之前它不设 MIQI_HOME，靠的是「本文件前面的用例都还原了环境」这个巧合；
   // 一旦环境里带着一个活跃账号（同 worker 的另一个测试文件留下的 MIQI_HOME、
-  // 或开发机上真实存在的 ~/.miqi/accounts/.active），断言就会读到一个按账号
+  // 或开发机上真实存在的 ~/.forge/accounts/.active），断言就会读到一个按账号
   // 分过的路径而失败——CI 上正是这么挂的。
   let home: string;
 
@@ -357,7 +357,7 @@ describe('buildWslSearchScript (#1103)', () => {
     const script = buildWslSearchScript('report.md', 'desktop:123');
     expect(script).toContain('/tmp/miqi-sandboxes/desktop_123/home/miqi/workspace');
     expect(script).toContain('/sessions/desktop_123/files');
-    expect(script).toContain('$HOME/.miqi/workspace');
+    expect(script).toContain('$HOME/.forge/workspace');
   });
 
   it('omits the global workspace for folder-bound sessions (#1103 review)', () => {
@@ -366,7 +366,7 @@ describe('buildWslSearchScript (#1103)', () => {
     });
     // 绑定会话的相对路径锚在绑定目录上：那里没有就该报 not found，不能退到全局
     // 工作区——否则全局的同名文件会被 copyFromWsl 复制进绑定目录再打开。
-    expect(script).not.toContain('$HOME/.miqi/workspace');
+    expect(script).not.toContain('$HOME/.forge/workspace');
     expect(script).not.toContain('"$ws/$RP"');
     expect(script).not.toContain('"$s/$RP"');
     // 会话自己的 WSL 位置仍然可搜
@@ -424,7 +424,7 @@ describe('account-scoped workspace (#1185)', () => {
     expect(readActiveAccount()).toBe('19');
     expect(getDefaultWorkspacePath()).toBe(join(accountsDir(), '19', 'workspace'));
     // 配置里是默认值 → 跟随账号；配置里是自定义目录 → 不跟随（下一个用例）。
-    writeConfig('~/.miqi/workspace');
+    writeConfig('~/.forge/workspace');
     expect(getWorkspacePath()).toBe(join(accountsDir(), '19', 'workspace'));
   });
 
@@ -536,13 +536,13 @@ describe('account-scoped workspace (#1185)', () => {
     // 账号维度必须镜像到 WSL 侧：否则 B 账号的「定位」会从 A 的 WSL 工作区
     // 里把同名文件找回来（findFileInWsl 的全局回退分支）。
     expect(buildWslSearchScript('report.md', 'desktop:123')).toContain(
-      'ws="$HOME/.miqi/workspace"'
+      'ws="$HOME/.forge/workspace"'
     );
 
     setActiveAccount('19');
     const scoped = buildWslSearchScript('report.md', 'desktop:123');
-    expect(scoped).toContain('ws="$HOME/.miqi/accounts/19/workspace"');
-    expect(scoped).not.toContain('ws="$HOME/.miqi/workspace"');
+    expect(scoped).toContain('ws="$HOME/.forge/accounts/19/workspace"');
+    expect(scoped).not.toContain('ws="$HOME/.forge/workspace"');
   });
 
   it('lets the claiming account keep the un-scoped WSL workspace', () => {
@@ -552,7 +552,7 @@ describe('account-scoped workspace (#1185)', () => {
 
     // 认领方在 WSL 侧同样沿用旧位置——存量数据在那边也是一份旧的。
     expect(buildWslSearchScript('report.md', 'desktop:123')).toContain(
-      'ws="$HOME/.miqi/workspace"'
+      'ws="$HOME/.forge/workspace"'
     );
   });
 });
@@ -588,9 +588,9 @@ describe('account marker contract with miqi/paths.py (#1185)', () => {
     expect(literal('ACTIVE_ACCOUNT_FILE')).toBe('.active');
     expect(literal('LEGACY_WORKSPACE_OWNER_FILE')).toBe('.legacy-owner');
     // 默认值在 Python 侧由数据根名拼出（两者都跟随 #1175 的更名），约束的是
-    // 「拼出来的字面量必须是 ~/.miqi/workspace」而不是某个内部标识符。
+    // 「拼出来的字面量必须是 ~/.forge/workspace」而不是某个内部标识符。
     expect(source).toContain('DEFAULT_WORKSPACE_VALUE = f"~/{DEFAULT_HOME_NAME}/workspace"');
-    expect(`~/${literal('DEFAULT_HOME_NAME')}/workspace`).toBe('~/.miqi/workspace');
+    expect(`~/${literal('DEFAULT_HOME_NAME')}/workspace`).toBe('~/.forge/workspace');
 
     // 标记文件必须落在 <数据根>/accounts/ 下，且内容是裸的 sub。
     const home = join(tmpdir(), `miqi-contract-${Date.now()}`);

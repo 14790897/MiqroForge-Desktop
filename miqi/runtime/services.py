@@ -224,7 +224,7 @@ class RuntimeServices:
         )
 
         # Phase 52: shared agent graph persistence (created before AgentControl)
-        agent_graph_db = workspace / ".miqi-runtime" / "agent_graph.db"
+        agent_graph_db = workspace / ".forge-runtime" / "agent_graph.db"
         from miqi.runtime.agent_graph_store import AgentGraphStore
 
         agent_graph_store = AgentGraphStore(agent_graph_db)
@@ -300,7 +300,7 @@ class RuntimeServices:
         mcp_runtime = McpRuntime(plugin_manager=plugin_manager)
 
         # Phase 24: ledger runtime (created early so TurnRunner can use it)
-        runtime_db = workspace / ".miqi-runtime" / "runtime.db"
+        runtime_db = workspace / ".forge-runtime" / "runtime.db"
         from miqi.runtime.ledger_runtime import LedgerRuntime
 
         ledger_runtime = LedgerRuntime(runtime_db, session_id=session_id)

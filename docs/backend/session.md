@@ -77,7 +77,7 @@ sessions/
   "files": [
     {
       "path": "/abs/path/to/file.py",
-      "snapshot": ".miqi_snapshots/hash123.snap",
+      "snapshot": ".forge_snapshots/hash123.snap",
       "modified_at": 1747123456.789
     }
   ]

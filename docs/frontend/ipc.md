@@ -146,7 +146,7 @@ ipcMain.handle(IPC.CONFIG_GET, async () => {
   ok: boolean           // 环境是否就绪
   python_version: string // Python 版本号（打包环境为 'bundled' 或实际版本）
   issues: string[]      // 问题列表
-  config_exists: boolean // ~/.miqi/config.json 是否存在
+  config_exists: boolean // ~/.forge/config.json 是否存在
 }
 ```
 

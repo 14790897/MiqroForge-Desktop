@@ -527,7 +527,7 @@ async def _require_session(registry: Any, client_id: str, session_id: str | None
 def _runtime_db_path_from_registry(registry: Any) -> Path:
     state = get_bridge_state(registry)
     config = state.load_config()
-    return config.workspace_path / ".miqi-runtime" / "runtime.db"
+    return config.workspace_path / ".forge-runtime" / "runtime.db"
 
 
 def _stored_reader(registry: Any, client_id: str) -> StoredRuntimeReader:

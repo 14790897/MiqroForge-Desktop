@@ -18,7 +18,7 @@
  *      （_FILE_WRITE_TOOLS），未修复的 develop 上也会绿，故只作 smoke，不作证据。
  *
  * 前提：本 spec 仅在 session_workspace_enabled=true 下有效（关掉后产物落
- * <ws>/<file>、findSessionDirWithFile 返回 null → 假红）。本机 ~/.miqi/config.json
+ * <ws>/<file>、findSessionDirWithFile 返回 null → 假红）。本机 ~/.forge/config.json
  * 为 true；CI 未设 → 默认 True（miqi/config/schema.py:237）。下方有显式 guard。
  *
  * Run: cd apps/desktop && npx playwright test --config=playwright.config.ts \

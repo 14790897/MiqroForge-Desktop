@@ -108,7 +108,7 @@ Write-Host ""
 
 # ---- Sandbox State ----
 Write-Host "**Sandbox State**"
-$stateFile = "$env:USERPROFILE\.miqi\sandbox_state.json"
+$stateFile = "$env:USERPROFILE\.forge\sandbox_state.json"
 if (Test-Path $stateFile) {
     Get-Content $stateFile
 } else {

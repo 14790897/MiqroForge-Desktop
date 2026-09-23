@@ -138,8 +138,8 @@ jobs:
       - name: Generate config.json
         shell: bash
         run: |
-          mkdir -p ~/.miqi
-          cat > ~/.miqi/config.json << 'CONFEOF'
+          mkdir -p ~/.forge
+          cat > ~/.forge/config.json << 'CONFEOF'
           {
             "providers": {
               "siliconflow": {

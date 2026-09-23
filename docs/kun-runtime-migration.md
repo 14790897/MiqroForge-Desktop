@@ -248,7 +248,7 @@ thread_id = session_key_to_thread_id(session_key)  # or generate new
 | R2 | Provider doesn't support streaming | Medium | Medium | Pseudo-streaming in Phase 5; real streaming for OpenAI/DeepSeek in Phase 5b |
 | R3 | KUN thread/item store conflicts with MiQi session store | Medium | Medium | Coexist initially; `session_key → threadId` mapping in `migration_adapter.py` |
 | R4 | Approval semantics mismatch (CLI prompt → gate API) | Medium | Medium | Keep dangerous-command detection; replace blocking prompt with gate event |
-| R5 | Tests touch real `~/.miqi` | Low | High | ALL tests use `tmp_path` or explicit temp config directory |
+| R5 | Tests touch real `~/.forge` | Low | High | ALL tests use `tmp_path` or explicit temp config directory |
 | R6 | Two runtimes increase codebase complexity | Medium | Medium | Clear sunset timeline for legacy loop; feature flag gates new code |
 | R7 | Context compaction behavior differs | Medium | Low | Port KUN compactor first; MiQi compressor as model-summary backend |
 | R8 | MCP tool semantics differ (KUN providers vs MiQi direct) | Medium | Medium | Wrap MiQi MCP tools as KUN ToolProviders |
@@ -414,7 +414,7 @@ thread_id = session_key_to_thread_id(session_key)  # or generate new
 ### Isolation Rules
 
 - **ALL tests MUST use `tmp_path`** (pytest fixture) or explicit temporary config directories
-- **No test may read/write `~/.miqi`** or any real user directory
+- **No test may read/write `~/.forge`** or any real user directory
 - Tests that need workspace/config must create them under `tmp_path`
 - Use pytest `monkeypatch` to override any path-resolving functions
 

@@ -65,7 +65,7 @@ class StoredRuntimeReader:
     async def _ensure_schema(self) -> None:
         """Create the runtime database and all required tables if missing.
 
-        Creates the .miqi-runtime directory, runtime.db, and the
+        Creates the .forge-runtime directory, runtime.db, and the
         runtime_threads, runtime_ledger_items, and runtime_history_items
         tables.  Idempotent — safe to call before every write operation.
         Does NOT create a live RuntimeSession.

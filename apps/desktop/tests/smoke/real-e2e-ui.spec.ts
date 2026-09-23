@@ -6,7 +6,7 @@
  *
  * Run: cd apps/desktop && npx playwright test --config=playwright.config.ts --grep "Real Agent"
  *
- * ⚠️ Requires: valid config at ~/.miqi/config.json with API keys
+ * ⚠️ Requires: valid config at ~/.forge/config.json with API keys
  */
 
 import { test, expect } from '@playwright/test';

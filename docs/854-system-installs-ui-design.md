@@ -6,7 +6,7 @@
 ## 1. 现状与问题
 
 - **功能已存在**：`tools.sandbox.allow_system_installs`（schema.py:458，默认 False）开启后，沙箱内 `sudo apt-get install ...` 自动路由到 WSL 发行版以 root 执行、跨会话持久（#820 已落地）
-- **开通路径只有一条**：手改 `~/.miqi/config.json` + 重启——普通用户不可达
+- **开通路径只有一条**：手改 `~/.forge/config.json` + 重启——普通用户不可达
 - **拦截行为**：关闭状态下 AI 执行安装命令 → `_SYSTEM_INSTALL_NOT_ENABLED_MSG`（shell.py:254）直接拒绝，文案指向"配置中开启"（非 UI）
 - **设置页**：Sandbox 段只有 `enabled` 总开关（SettingsPage.tsx:554-567），`allowSystemInstalls` 0 命中
 - **确认卡机制已存在**（#646）：`ask_user_confirm_card` 工具 → resolver（用户输入通道）→ 桌面卡片 → 用户选择返回。resolver 是注入式（ask_user_confirm.py:144），**工具层可直接复用弹卡**

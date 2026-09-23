@@ -15,7 +15,7 @@ State persistence (落盘):
 - On graceful shutdown, all sandboxes are destroyed and state cleared
 
 Usage:
-    manager = SandboxManager(workspace=Path("~/.miqi/workspace"))
+    manager = SandboxManager(workspace=Path("~/.forge/workspace"))
     await manager.initialize()
 
     # When a session activates:

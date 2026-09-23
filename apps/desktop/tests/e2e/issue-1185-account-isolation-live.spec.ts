@@ -3,7 +3,7 @@
  *
  * 与 billing-live / ai-gateway-live 同策略：凭据只经环境变量注入，登录态与工作区
  * 都落在 launchElectronApp 的临时 MIQI_HOME，测试结束随临时目录清理 —— 不碰开发机
- * 的 `~/.miqi`，也不在仓库里留下任何凭据。
+ * 的 `~/.forge`，也不在仓库里留下任何凭据。
  *
  * 用法（至少两对账号，可给到三对）：
  *   QRAFT_LIVE=1 \

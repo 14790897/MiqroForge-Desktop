@@ -85,7 +85,7 @@ def test_phase38_runtime_handlers_do_not_import_bridge_server_directly():
 
 def test_phase38_config_tests_must_not_write_real_config():
     """Root test conftest must isolate MIQI_HOME so tests never touch
-    ~/.miqi/config.json.
+    ~/.forge/config.json.
 
     Plan 60 replaces the runtime-specific mock_save_config workaround with a
     global autouse fixture that sets MIQI_HOME/HOME/TEMP below tmp_path.

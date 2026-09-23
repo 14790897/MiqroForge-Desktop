@@ -72,7 +72,7 @@ npx electron-builder --win --publish never
 
 ## 配置文件位置
 
-首次运行后，配置文件自动生成在 `~/.miqi/config.json`。详见 [配置参考](configuration.md)。
+首次运行后，配置文件自动生成在 `~/.forge/config.json`。详见 [配置参考](configuration.md)。
 
 ## 环境变量
 

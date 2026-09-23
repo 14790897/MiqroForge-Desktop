@@ -794,7 +794,7 @@ for m in ("pydantic", "httpx", "loguru"):
       }
     }
 
-    const configExists = existsSync(join(homedir(), '.miqi', 'config.json'));
+    const configExists = existsSync(getConfigPath());
 
     return {
       ok: issues.length === 0,
@@ -973,7 +973,7 @@ for m in ("pydantic", "httpx", "loguru"):
   // where the user stopped instead of restarting from step one.
   // -----------------------------------------------------------------------
   function wslInstallStatePath(): string {
-    return join(homedir(), '.miqi', 'wsl_install_state.json');
+    return join(homedir(), '.forge', 'wsl_install_state.json');
   }
   function readWslInstallState(): { phase: string; at: number } | null {
     try {
@@ -984,7 +984,7 @@ for m in ("pydantic", "httpx", "loguru"):
   }
   function writeWslInstallState(phase: string) {
     try {
-      mkdirSync(join(homedir(), '.miqi'), { recursive: true });
+      mkdirSync(join(homedir(), '.forge'), { recursive: true });
       writeFileSync(wslInstallStatePath(), JSON.stringify({ phase, at: Date.now() }));
     } catch {
       /* best-effort */

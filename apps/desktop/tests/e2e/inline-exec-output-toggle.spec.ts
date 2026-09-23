@@ -148,7 +148,7 @@ test.describe('Inline Exec Output Toggle E2E', () => {
     await clickToggle(page);
 
     // Read fresh from disk (not from in-memory cache) — verifies the update
-    // actually wrote to ~/.miqi/config.json.  We do this by calling config.get
+    // actually wrote to ~/.forge/config.json.  We do this by calling config.get
     // via a separate IPC round-trip after a small delay.
     await page.waitForTimeout(500);
     const value = await readConfigInlineExecOutput(page);

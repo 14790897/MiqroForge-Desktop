@@ -29,7 +29,7 @@ interface PythonStatus {
   config_exists: boolean;
 }
 
-const DEFAULT_WORKSPACE = '~/.miqi/workspace';
+const DEFAULT_WORKSPACE = '~/.forge/workspace';
 
 export function SetupWizard({
   onComplete,

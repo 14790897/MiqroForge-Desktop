@@ -7,7 +7,7 @@ import re
 from pathlib import Path
 
 MIQI_HOME_ENV = "MIQI_HOME"
-DEFAULT_HOME_NAME = ".miqi"
+DEFAULT_HOME_NAME = ".forge"
 LEGACY_HOME_NAME = ".assistant"
 
 
@@ -136,7 +136,7 @@ def get_default_workspace_path() -> Path:
     """Default workspace root, account-scoped when an account is active.
 
     ``<data root>`` is always :func:`get_miqi_home` — i.e. ``MIQI_HOME`` when
-    set, else ``~/.miqi``, with **no** ``~/.assistant`` fallback.  The marker
+    set, else ``~/.forge``, with **no** ``~/.assistant`` fallback.  The marker
     files above live under the same root, and the Desktop (``getConfigDir()``)
     has no legacy fallback either: picking a different root here would make
     Python read ``<root>/accounts/.active`` while resolving the workspace under
