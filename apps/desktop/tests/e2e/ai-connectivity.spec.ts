@@ -94,7 +94,7 @@ test.describe('AI Connectivity', () => {
       if (providerInfo.configuredCount === 0) {
         throw new Error(
           'AI connectivity check failed (stage=list): ' +
-            'No configured providers found in ~/.miqi/config.json. ' +
+            'No configured providers found in ~/.forge/config.json. ' +
             'Check DEEPSEEK_API_KEY / DEEPSEEK_API_BASE secrets.'
         );
       }

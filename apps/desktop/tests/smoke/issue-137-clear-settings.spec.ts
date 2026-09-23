@@ -51,7 +51,7 @@ test('issue #137: clearing workspace sends explicit empty values', async ({ page
 
   await page.getByText(/^(System Settings|系统设置)$/).click();
 
-  const workspaceInput = page.getByPlaceholder('~/.miqi/workspace');
+  const workspaceInput = page.getByPlaceholder('~/.forge/workspace');
   const modelSelect = page.locator('select').first();
   await expect(workspaceInput).toHaveValue('C:/old-workspace');
   await expect(modelSelect).toBeVisible();

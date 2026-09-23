@@ -403,7 +403,7 @@ async def test_runtime_session_start_initializes_history_stores(
 
     await runtime.start()
     try:
-        db_path = tmp_path / ".miqi-runtime" / "runtime.db"
+        db_path = tmp_path / ".forge-runtime" / "runtime.db"
         assert db_path.exists(), f"runtime DB should exist at {db_path}"
 
         # Default thread must exist

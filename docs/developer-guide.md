@@ -98,7 +98,7 @@ miqi/
 │   └── protocol.py     JSON-line 协议解析
 ├── config/
 │   ├── schema.py      Pydantic 配置模型（含 SandboxConfig）
-│   └── loader.py      配置加载（~/.miqi/config.json）
+│   └── loader.py      配置加载（~/.forge/config.json）
 ├── providers/         LLM 提供商适配
 ├── sandbox/
 │   ├── bwrap.py       BwrapSandbox — per-session bwrap 封装
@@ -113,7 +113,7 @@ miqi/
 | `AgentLoop` | 管理 LLM 调用循环，处理工具调用结果，注入上下文 |
 | `BridgeServer` | 57 个 IPC handler，管理 Bridge 状态、SandboxManager、配置热更新 |
 | `BwrapSandbox` | 封装 bwrap 命令构建与执行，自动检测 Windows+WSL 环境 |
-| `SandboxManager` | 管理 per-session 沙箱生命周期，状态落盘到 `~/.miqi/sandbox_state.json` |
+| `SandboxManager` | 管理 per-session 沙箱生命周期，状态落盘到 `~/.forge/sandbox_state.json` |
 | `SandboxConfig` | 沙箱配置：`enabled`、`share_net`、`wsl_distro`、`sandbox_distro_name`、`max_sandboxes` 等 |
 
 ### 前端开发
@@ -153,7 +153,7 @@ apps/desktop/src/
 
 ### 沙箱配置
 
-`~/.miqi/config.json` 中 `tools.sandbox` 段：
+`~/.forge/config.json` 中 `tools.sandbox` 段：
 
 ```json
 {
@@ -343,7 +343,7 @@ logger.info("Debug message")  # → DevTools Console
 #### 查看沙箱状态
 
 ```bash
-cat ~/.miqi/sandbox_state.json
+cat ~/.forge/sandbox_state.json
 ```
 
 状态文件记录所有活跃沙箱的 session_key、路径、创建时间。Bridge 重启时自动清理遗留沙箱。
@@ -369,7 +369,7 @@ bwrap \
   --ro-bind-try /lib64 /lib64 \
   --bind /tmp/miqi-sandboxes/YOUR_SESSION_KEY/etc /etc \
   --bind /tmp/miqi-sandboxes/YOUR_SESSION_KEY/home/miqi /home/miqi \
-  --bind /mnt/c/Users/Intership003/.miqi/workspace /home/miqi/workspace \
+  --bind /mnt/c/Users/Intership003/.forge/workspace /home/miqi/workspace \
   --tmpfs /tmp \
   --die-with-parent --new-session \
   --setenv HOME /home/miqi \
@@ -411,7 +411,7 @@ Windows 路径在 WSL sandbox 中自动映射：
 
 | Windows 路径 | WSL 内路径 |
 |--------------|-----------|
-| `C:\Users\foo\.miqi\workspace` | `/mnt/c/Users/foo/.miqi/workspace` |
+| `C:\Users\foo\.forge\workspace` | `/mnt/c/Users/foo/.forge/workspace` |
 | `D:\projects\app` | `/mnt/d/projects/app` |
 
 `filesystem.py` 中的 `_resolve_sandbox_path()` 和 `_resolve_sandbox_cwd()` 处理路径自动转换。

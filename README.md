@@ -212,7 +212,7 @@ miqi-bridge.exe --check
 
 ## Configuration
 
-The application configuration file is located at `~/.miqi/config.json`:
+The application configuration file is located at `~/.forge/config.json`:
 
 ```json
 {

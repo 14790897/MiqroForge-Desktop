@@ -462,7 +462,7 @@ async def test_compaction_record_persisted_and_reused(
     from miqi.runtime.task_runner import TaskRunner
 
     # Build a real HistoryRuntime
-    db_path = tmp_path / ".miqi-runtime" / "runtime.db"
+    db_path = tmp_path / ".forge-runtime" / "runtime.db"
     hist = HistoryRuntime(db_path, session_id="sess-cp")
     await hist.initialize()
     for i in range(10):

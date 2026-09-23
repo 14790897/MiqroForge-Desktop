@@ -8,4 +8,4 @@ type: user
 
 **Why:** 用户用中文在字段里做自我备忘，不认为它会被当 key 的一部分。
 
-**How to apply:** 排查该用户"报错失败/UnicodeEncodeError"类问题时，先检查 `~/.miqi/config.json` 的 providers.*.apiKey 是否带中文或空格。`miqi/config/schema.py` 的 `ProviderConfig._clean_api_key` 已在配置加载时自愈（去空白+去非 ASCII）。相关回归 E2E：`apps/desktop/tests/e2e/bridge-chinese-error.spec.ts`（注入脏 key 断言请求仍到达 mock）。stderr 编码层面见 [loguru-stream-sink-encoding](loguru-stream-sink-encoding.md)。
+**How to apply:** 排查该用户"报错失败/UnicodeEncodeError"类问题时，先检查 `~/.forge/config.json` 的 providers.*.apiKey 是否带中文或空格。`miqi/config/schema.py` 的 `ProviderConfig._clean_api_key` 已在配置加载时自愈（去空白+去非 ASCII）。相关回归 E2E：`apps/desktop/tests/e2e/bridge-chinese-error.spec.ts`（注入脏 key 断言请求仍到达 mock）。stderr 编码层面见 [loguru-stream-sink-encoding](loguru-stream-sink-encoding.md)。

@@ -165,17 +165,17 @@ def test_sanitize_name_rejects_empty_and_reserved_device_prefix():
 def test_resolve_downloads_dir_default_workspace(tmp_path, monkeypatch):
     root, session_files, _ = _env(tmp_path, monkeypatch)
     out = resolve_downloads_dir(root, SESSION_KEY)
-    assert out == session_files / ".miqi" / "downloads"
+    assert out == session_files / ".forge" / "downloads"
 
 
 def test_resolve_downloads_dir_custom_workspace(tmp_path):
     root = tmp_path / "project"
     root.mkdir()
     out = resolve_downloads_dir(root, SESSION_KEY)
-    assert out == root / ".miqi" / "downloads"
+    assert out == root / ".forge" / "downloads"
     # 空 session_key 同样退回 base（现有 filesystem 隔离语义）
     out2 = resolve_downloads_dir(root, "")
-    assert out2 == root / ".miqi" / "downloads"
+    assert out2 == root / ".forge" / "downloads"
 
 
 # ── 单包成功路径 ────────────────────────────────────────────────────────────
@@ -454,10 +454,10 @@ def test_atomic_write_leaves_no_part_on_success(tmp_path):
 
 
 async def test_unwritable_download_dir_raises_io_error(tmp_path):
-    """`.miqi` 被文件占位 → mkdir 失败 → OSError 统一归 DOWNLOAD_IO_ERROR。"""
+    """`.forge` 被文件占位 → mkdir 失败 → OSError 统一归 DOWNLOAD_IO_ERROR。"""
     root = tmp_path / "ws"
     root.mkdir()
-    (root / ".miqi").write_text("blocked", encoding="utf-8")  # 文件占位目录名
+    (root / ".forge").write_text("blocked", encoding="utf-8")  # 文件占位目录名
     sink = DownloadSink(base_workspace=root)
     data = b"io-fail-check"
     with pytest.raises(DownloadIoError) as ei:

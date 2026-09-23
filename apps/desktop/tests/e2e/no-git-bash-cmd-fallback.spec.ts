@@ -124,7 +124,7 @@ test.describe('No-Git-Bash cmd fallback E2E', () => {
       let lastText = '';
       while (Date.now() - runStart < RUN_CAP && Date.now() < idleDeadline) {
         // Auto-confirm any approval dialog (networked exec / confirm card).
-        const primary = page.locator('[data-testid="confirm-card"]').getByTestId('confirm-run');
+        const primary = page.locator('[data-testid="confirm-card-primary"]');
         if (await primary.isVisible({ timeout: 400 }).catch(() => false)) {
           await primary.first().click();
           idleDeadline = Date.now() + IDLE_DEADLINE;

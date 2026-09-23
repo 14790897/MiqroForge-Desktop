@@ -163,7 +163,7 @@ def isolated_process_environment(monkeypatch, tmp_path, request):
     iso_dir = tmp_path / ".pytest-isolation"
     iso_dir.mkdir()
     home = iso_dir / "home"
-    miqi_home = iso_dir / ".miqi"
+    miqi_home = iso_dir / ".forge"
     temp_dir = iso_dir / "tmp"
     home.mkdir()
     temp_dir.mkdir()

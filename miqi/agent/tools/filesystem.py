@@ -34,7 +34,7 @@ _log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # File snapshot store — keeps original content before first write/edit
 # so we can diff and revert without git.
-# Snapshots are persisted to ~/.miqi/snapshots/<sha256>.json
+# Snapshots are persisted to ~/.forge/snapshots/<sha256>.json
 # ---------------------------------------------------------------------------
 
 _snapshots_lock = threading.Lock()
@@ -229,12 +229,7 @@ def _tracked_store_root(workspace: Path | None, session_key: str | None) -> Path
     if ws.name != "files" or ws.parent.parent.name != "sessions":
         return ws                              # 形状不符 → 不剥
     base = ws.parent.parent.parent
-    try:
-        from miqi.paths import get_miqi_home
-        default_base = (get_miqi_home() / "workspace").resolve()
-    except Exception:
-        return ws                              # fail-closed：拿不到默认根绝不剥
-    if base != default_base:
+    if base != _default_workspace_root():
         return ws                              # 自定义工作区 → 不剥
     if ws.parent.name != _session_files_dir_key(session_key):
         return ws                              # 目录名非本会话派生名 → 不剥
@@ -411,7 +406,7 @@ def _sandbox_to_host_path(sandbox_path: str, workspace: Path | None, sandbox) ->
     inside its mount namespace (see :meth:`BwrapSandbox._build_bwrap_args`).
     This function maps sandbox-internal absolute paths like
     ``/home/miqi/workspace/report.md`` to their host-workspace equivalent
-    (e.g. ``/home/user/.miqi/workspace/report.md``).
+    (e.g. ``/home/user/.forge/workspace/report.md``).
 
     Also handles /mnt/<drive>/... paths from WSL sandbox that access the
     host filesystem directly (issue #474).
@@ -459,7 +454,7 @@ def _canonicalize_wsl_mnt_path(
 
     ``extra_roots`` lets callers broaden the whitelist beyond the per-session
     workspace to host-global shared roots (issue #516) such as
-    ``~/.miqi/workspace/memory`` and ``~/.miqi/workspace/skills`` — the
+    ``~/.forge/workspace/memory`` and ``~/.forge/workspace/skills`` — the
     directories the system prompt legitimately directs the agent to read and
     write.  A path under another session's ``sessions/<other>/files`` is never
     in any root, so per-session isolation is preserved.
@@ -603,10 +598,28 @@ async def _ensure_sandbox(sandbox_manager, tool_name="file_tool", session_key=No
     return sandbox
 
 
-def _is_default_workspace(path: Path | None) -> bool:
-    """Return True when *path* is the global default workspace.
+def _default_workspace_root() -> Path:
+    """Canonical default workspace root for the account in use.
 
-    The default is ``~/.miqi/workspace`` (rebased under MIQI_HOME when set).
+    Deliberately **not** ``get_miqi_home() / "workspace"``: once storage is
+    per-account (#1185) the default root for a logged-in account is
+    ``<data root>/accounts/<sub>/workspace`` (or the legacy
+    ``<data root>/workspace`` for the account that claimed it).  Comparing
+    against the bare ``~/.forge/workspace`` would classify every account
+    workspace as a *custom* one — which silently turns off per-session files
+    isolation and tracked-file root handling for account sessions.
+    """
+    from miqi.paths import get_default_workspace_path
+
+    return get_default_workspace_path().resolve()
+
+
+def _is_default_workspace(path: Path | None) -> bool:
+    """Return True when *path* is the default workspace of the account in use.
+
+    The default is ``get_default_workspace_path()`` — ``~/.forge/workspace``
+    (rebased under MIQI_HOME when set), or the account-scoped root when the
+    Desktop is logged in (#1185).
     When a session has a custom workspace (the user picked a project
     directory in the workspace picker), the file tools must operate
     directly on that directory — nesting it under ``sessions/<key>/files``
@@ -620,10 +633,8 @@ def _is_default_workspace(path: Path | None) -> bool:
         # would misclassify any custom project dir that happens to end in
         # `workspace` (e.g. /home/user/projects/workspace) as the default and
         # wrongly enable per-session files isolation for it.
-        from miqi.paths import get_miqi_home
         resolved = path.expanduser().resolve()
-        default = (get_miqi_home() / "workspace").resolve()
-        return resolved == default
+        return resolved == _default_workspace_root()
     except Exception:
         return True
 
@@ -829,7 +840,7 @@ async def _redirect_new_file_write(
     per-session files dir (session isolation, #221 / #613 follow-up).
 
     The system prompt advertises the workspace root as the working directory,
-    so models write absolute root paths (e.g. ``C:\\Users\\...\\.miqi\\workspace\\x.md``).
+    so models write absolute root paths (e.g. ``C:\\Users\\...\\.forge\\workspace\\x.md``).
     Those must land in ``sessions/<key>/files/`` instead of the shared root.
     Files that already exist at the target are edited in place (shared
     bootstrap files such as AGENTS.md), and shared sub-roots (memory/,

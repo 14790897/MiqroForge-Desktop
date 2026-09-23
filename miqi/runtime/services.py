@@ -4,6 +4,9 @@ This is the single factory that creates the full service graph (ToolRegistry,
 ToolOrchestrator, AgentControl, TurnRunner, PluginManager, CapabilityResolver,
 McpRuntime, etc.) for one session. Frontends should use RuntimeSession instead
 of building services directly.
+
+Phase 48: RuntimeServices owns the service graph directly. Model configuration
+is carried by the immutable RuntimeModelSettings value object.
 """
 
 from __future__ import annotations
@@ -60,32 +63,47 @@ class RuntimeModelSettings:
 
 @dataclass
 class RuntimeServices:
-    """All services needed for a single runtime session."""
+    """All services needed for a single runtime session.
+
+    Owns the full service graph for a single session — ToolRegistry,
+    ToolOrchestrator, AgentControl, TurnRunner, PluginManager,
+    CapabilityResolver, McpRuntime, and all related wiring.
+    Created once per session via from_config().
+    """
 
     session_id: str
     workspace: Path
-    bus: Any
+    bus: Any  # MessageBus
     provider: Any
     event_emitter: RuntimeEventEmitter
-    model_settings: RuntimeModelSettings
+    model_settings: RuntimeModelSettings  # immutable model config from config.agents.defaults
     tool_registry: Any
     orchestrator: Any
-    agent_registry: Any
-    agent_control: Any
-    tool_runtime: Any
-    context_runtime: Any
-    turn_runner: Any
+    agent_registry: Any  # AgentRegistry
+    agent_control: Any  # AgentControl
+    tool_runtime: Any  # ToolRuntime (Phase 12)
+    context_runtime: Any  # ContextRuntime (Phase 12)
+    turn_runner: Any  # TurnRunner (Phase 12)
+    # Phase 13
     plugin_manager: Any | None = None
-    agent_jobs: Any | None = None
-    capability_resolver: Any | None = None
+    agent_jobs: Any | None = None  # AgentJobRuntime
+    capability_resolver: Any | None = None  # CapabilityResolver
+    # Phase 17: session / thread / history runtime
     session_state: Any | None = None
     history_runtime: Any | None = None
     thread_runtime: Any | None = None
+    # Phase 21: MCP runtime adapter
     mcp_runtime: Any | None = None
+    # Phase 24: append-only event ledger
     ledger_runtime: Any | None = None
+    # Phase 25: replay/debug runtime
     replay_runtime: Any | None = None
+    # Phase 51.3: shared lifecycle hook runtime
     hooks: HookRuntime | None = None
+    # Phase 52: shared agent graph persistence
     agent_graph_store: Any | None = None
+    # Live sandbox manager reference (enabled/_initialized reflect current
+    # state) — used by prompt builders for an accurate exec environment story.
     sandbox_manager: Any | None = None
 
     @classmethod
@@ -101,6 +119,11 @@ class RuntimeServices:
         agent_completion_callback: Any | None = None,
         has_approval_responder: bool = True,
     ) -> "RuntimeServices":
+        """Build the full service graph from a Config + provider.
+
+        Returns a RuntimeServices ready for use by RuntimeSession.
+        """
+        # Lazy imports to avoid circular imports
         from miqi.bus.queue import MessageBus
         from miqi.execution.factory import create_default_orchestrator
         from miqi.plan.plan_tracker import PlanTracker
@@ -111,10 +134,18 @@ class RuntimeServices:
         bus = MessageBus()
         defaults = config.agents.defaults
         effective_bypass = getattr(config, "effective_approval_bypass", None)
-        approval_bypass = effective_bypass() if callable(effective_bypass) else getattr(config, "approvals", None)
+        approval_bypass = (
+            effective_bypass()
+            if callable(effective_bypass)
+            else getattr(config, "approvals", None)
+        )
         if bool(getattr(getattr(config, "approvals", None), "enabled", False)):
-            logger.warning("Approval bypass is enabled for session {}; approval prompts may be skipped.", session_id)
+            logger.warning(
+                "Approval bypass is enabled for session {}; approval prompts may be skipped.",
+                session_id,
+            )
 
+        # Historical (Phase 22): runtime-owned tool registry (replaced AgentLoop._register_default_tools)
         plan_tracker = PlanTracker()
         tool_registry = create_runtime_tool_registry(
             config=config,
@@ -127,6 +158,7 @@ class RuntimeServices:
             plan_tracker=plan_tracker,
         )
 
+        # Immutable model configuration for runtime-owned execution
         model_settings = RuntimeModelSettings(
             model=defaults.model,
             temperature=defaults.temperature,
@@ -135,11 +167,18 @@ class RuntimeServices:
             context_limit_chars=defaults.context_limit_chars,
         )
 
-        if hasattr(config, "observability") and getattr(config.observability, "enabled", False):
+        # Phase 59: tee telemetry sink when enabled (additive, no-op by default).
+        # Telemetry failures are silently swallowed — they never break a turn.
+        if (
+            hasattr(config, "observability")
+            and getattr(config.observability, "enabled", False)
+        ):
             from miqi.observability.otel import build_telemetry_sink
+
             telemetry_handle = build_telemetry_sink(config.observability)
             if telemetry_handle is not None:
                 original_sink = event_sink
+
                 async def _tee(event: Any) -> None:
                     if original_sink is not None:
                         await original_sink(event)
@@ -147,6 +186,7 @@ class RuntimeServices:
                         await telemetry_handle(event)
                     except Exception:
                         pass
+
                 event_sink = _tee
 
         emitter = RuntimeEventEmitter(event_sink)
@@ -183,8 +223,10 @@ class RuntimeServices:
             has_approval_responder=has_approval_responder,
         )
 
-        agent_graph_db = workspace / ".miqi-runtime" / "agent_graph.db"
+        # Phase 52: shared agent graph persistence (created before AgentControl)
+        agent_graph_db = workspace / ".forge-runtime" / "agent_graph.db"
         from miqi.runtime.agent_graph_store import AgentGraphStore
+
         agent_graph_store = AgentGraphStore(agent_graph_db)
 
         registry = AgentRegistry()
@@ -202,18 +244,23 @@ class RuntimeServices:
             sandbox_manager=sandbox_manager,
         )
 
+        # Wire SpawnTool into AgentControl
         spawn_tool = tool_registry.get("spawn")
         if spawn_tool is not None and hasattr(spawn_tool, "_agent_control"):
             spawn_tool._agent_control = agent_control
             spawn_tool._event_emitter = emitter
 
-        from miqi.runtime.collaborative_turn_runner import CollaborativeTurnRunner
+        # Phase 12: runtime-owned turn execution components
         from miqi.runtime.context_runtime import ContextRuntime
         from miqi.runtime.tool_runtime import ToolRuntime
+        from miqi.runtime.turn_runner import TurnRunner
 
         tool_runtime = ToolRuntime(orchestrator=orchestrator)
 
-        async def _summarize_for_compaction(msgs: list[dict[str, Any]], model: str) -> str:
+        # Phase 19 follow-up: wire real ContextCompressor via provider.chat()
+        async def _summarize_for_compaction(
+            msgs: list[dict[str, Any]], model: str,
+        ) -> str:
             response = await provider.chat(
                 messages=msgs,
                 tools=None,
@@ -229,6 +276,7 @@ class RuntimeServices:
             hooks=hook_runtime,
         )
 
+        # Phase 13: capability resolver (requires PluginManager and ToolRegistry)
         from pathlib import Path as _Path
 
         from miqi.paths import get_miqi_home
@@ -241,20 +289,32 @@ class RuntimeServices:
             workspace=workspace,
             hook_runtime=hook_runtime,
         )
-        capability_resolver = CapabilityResolver(tool_registry=tool_registry, plugin_manager=plugin_manager)
 
+        capability_resolver = CapabilityResolver(
+            tool_registry=tool_registry,
+            plugin_manager=plugin_manager,
+        )
+
+        # Phase 21: MCP runtime adapter
         from miqi.runtime.mcp_runtime import McpRuntime
         mcp_runtime = McpRuntime(plugin_manager=plugin_manager)
 
-        runtime_db = workspace / ".miqi-runtime" / "runtime.db"
+        # Phase 24: ledger runtime (created early so TurnRunner can use it)
+        runtime_db = workspace / ".forge-runtime" / "runtime.db"
         from miqi.runtime.ledger_runtime import LedgerRuntime
+
         ledger_runtime = LedgerRuntime(runtime_db, session_id=session_id)
+
+        # Phase 31.8: wire ledger into orchestrator so exec/approval events
+        # are recorded for replay.
         orchestrator._ledger = ledger_runtime
 
+        # Phase 25: replay runtime (wraps ledger for reconstruction)
         from miqi.runtime.replay_runtime import ReplayRuntime
+
         replay_runtime = ReplayRuntime(ledger_runtime)
 
-        turn_runner = CollaborativeTurnRunner(
+        turn_runner = TurnRunner(
             provider=provider,
             tool_runtime=tool_runtime,
             context_runtime=context_runtime,
@@ -265,13 +325,17 @@ class RuntimeServices:
             hooks=hook_runtime,
         )
 
+        # Phase 13: AgentJobRuntime (depends on TurnRunner)
         from miqi.runtime.agent_jobs import AgentJobRuntime
+
+        # Phase 17: session state, history runtime, thread runtime
         from miqi.runtime.history_runtime import HistoryRuntime
         from miqi.runtime.session_state import SessionState
         from miqi.runtime.thread_runtime import ThreadRuntime
 
         history_runtime = HistoryRuntime(runtime_db, session_id=session_id)
         thread_runtime = ThreadRuntime(runtime_db, session_id=session_id)
+        # #740: wire history runtime into TurnRunner for execution snapshots
         turn_runner._history = history_runtime
 
         session_state = SessionState(
@@ -281,6 +345,7 @@ class RuntimeServices:
             config_snapshot=config,
         )
 
+        # Build partial services so AgentJobRuntime can reference them
         services = cls(
             session_id=session_id,
             workspace=workspace,
@@ -310,7 +375,10 @@ class RuntimeServices:
         agent_jobs = AgentJobRuntime(services=services, store=agent_graph_store)
         services.agent_jobs = agent_jobs
         services.agent_graph_store = agent_graph_store
+
+        # Wire AgentJobRuntime into AgentControl (Phase 13 delegation)
         agent_control._agent_jobs = agent_jobs
+
         return services
 
     # ── Hot config reload (#789) ─────────────────────────────────────────

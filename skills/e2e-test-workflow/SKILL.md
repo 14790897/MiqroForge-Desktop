@@ -24,7 +24,7 @@ cd apps/desktop && npm run build && npx playwright test --config=playwright.conf
 npx playwright test tests/e2e/file.spec.ts --config=playwright.config.ts --project=electron --reporter=list
 
 # Clean workspace between runs
-rm -rf ~/.miqi/workspace/sessions
+rm -rf ~/.forge/workspace/sessions
 ```
 
 ## 先本地跑，再上 CI（硬性规则）

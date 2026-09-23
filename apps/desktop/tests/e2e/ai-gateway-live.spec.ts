@@ -15,7 +15,7 @@
  *   → 聊天发消息 → 主进程写 token.json → Python make_provider 路由
  *   AnthropicProvider → 平台 AI 网关真实回复。
  *
- * 关键前提：本用例**不拷贝**开发者本机的 ~/.miqi/config.json（noUserConfig），
+ * 关键前提：本用例**不拷贝**开发者本机的 ~/.forge/config.json（noUserConfig），
  * 以复现 #1172 的「全新安装」状态 —— MIQI_HOME 里没有用户 provider 凭据、也没
  * 有显式配置过 agents.defaults.model（config.get 带出的是 schema 默认值）。
  */

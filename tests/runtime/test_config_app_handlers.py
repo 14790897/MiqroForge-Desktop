@@ -178,7 +178,7 @@ async def test_config_batch_write_delete_removes_optional_value():
         "client-1", None,
     )
     assert response["result"]["saved"] is True
-    assert state.config.agents.defaults.workspace == "~/.miqi/workspace"
+    assert state.config.agents.defaults.workspace == "~/.forge/workspace"
 
 
 @pytest.mark.asyncio
@@ -369,7 +369,7 @@ def test_config_batch_write_does_not_touch_real_config_path(monkeypatch):
     """Prove that config/batchWrite writes only to the tmp_path fixture."""
     import miqi.config.loader as loader_module
 
-    real_config = Path.home() / ".miqi" / "config.json"
+    real_config = Path.home() / ".forge" / "config.json"
     recorded_path: list[Path] = []
 
     def _tracked_save(config, config_path=None):

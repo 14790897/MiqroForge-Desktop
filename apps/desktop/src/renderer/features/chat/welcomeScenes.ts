@@ -1406,7 +1406,7 @@ export const SKILL_STARTERS: Record<string, SkillStarterCopy> = {
     icon: '🧺',
     title: '清理工作区',
     scenario:
-      '~/.miqi/workspace 里散落着下载的 PDF、数据、脚本、报告等文件，想归类整理并归档旧文件时。',
+      '~/.forge/workspace 里散落着下载的 PDF、数据、脚本、报告等文件，想归类整理并归档旧文件时。',
     deliverable: '整理后的目录结构（artifacts/ 六大子类 + archive/YYYY-MM/），以及一份清理报告。',
     ask: '【用 workspace-cleanup 整理我的工作区，把散落文件归类并归档超过 30 天的旧文件】',
     needs: '无需额外信息，直接说需求即可；脚本只移动不删除文件。',

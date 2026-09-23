@@ -228,18 +228,19 @@ python <skill_dir>/scripts/validate_run.py <落盘文件> --schema <权威版或
 
 只读不改：方案视图是上传前的展示，不要在此步骤修改 JSON。
 
-### Step 7: 会话确认（必做，走 #646-v2 ActionCard）
+### Step 7: 会话确认（必做，走 #646 确认卡片）
 
-方案视图输出后，**必须调用 `request_action_confirmation` 工具**请求确认（危险动作：upload），不要只在文本里问：
+方案视图输出后，**必须调用 `ask_user_confirm_card` 工具**请求确认，不要只在文本里问：
 
-- `action`: `upload`；`target`: `MiQroForge 测试环境 test.forge.miqroera.com`
-- `file_name` / `size_bytes` / `sha256`：Step 1-5 生成并校验过的 WorkflowDefinition JSON（sha256 取 Step 4 校验值）
-- `description`：方案摘要（title、N artifacts / M claims / K metrics）
+- 卡片标题：`确认上传方案到 MiQroForge 平台？`
+- 卡片正文：方案摘要（title、产物统计 N artifacts / M claims / K metrics）+ 上传目标（测试环境 `test.forge.miqroera.com`）
+- choices：`confirm`（确认上传）/ `adjust`（调整方案，返回修改）/ `cancel`（取消）
 
 结果处理：
 
-- `status=confirmed`（action_confirmed=true）→ 进入 Step 8；
-- `cancelled` → 停止，不上传，告知用户可随时重来；「调整方案」改走聊天反馈 → 修改 JSON → 从 Step 4 重新校验 → 重走 Step 6–7。
+- `confirmed` → 进入 Step 8；
+- `cancelled` 且 choice_id 为 `adjust` → 与用户确认要改什么，修改 JSON 后从 Step 4 重新校验，再走 Step 6–7；
+- `cancelled`（超时/取消）→ 停止，不上传，告知用户可随时重来。
 
 ### Step 8: 凭据检查 + 上传
 

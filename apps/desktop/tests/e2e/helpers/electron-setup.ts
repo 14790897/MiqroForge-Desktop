@@ -61,12 +61,23 @@ export function getMiqiSessionsDir(miqiHome: string): string {
   return join(miqiHome, 'workspace', 'sessions');
 }
 
+/**
+ * 账号级默认工作区根：`<MIQI_HOME>/accounts/<sub>/workspace`（#1185）。
+ *
+ * 自从工作区按登录账号收口，预置了登录态（`sub` 非空）的 spec 里，
+ * `workspace/` 不再是 token 文件与工作区数据的落点——`getMiqiSessionsDir`
+ * 那条路径只对**未登录**（E2E loginBypass、CLI）成立。
+ */
+export function getAccountWorkspaceDir(miqiHome: string, sub: string): string {
+  return join(miqiHome, 'accounts', sub, 'workspace');
+}
+
 // ─── Page helpers ───────────────────────────────────────────────────
 
 /**
  * Wait for the chat input textarea to be present and enabled.
  *
- * 同时判定应用「能否进入主界面」：没有 ~/.miqi/config.json 时应用停在首启动
+ * 同时判定应用「能否进入主界面」：没有 ~/.forge/config.json 时应用停在首启动
  * 向导（App.tsx 以 python.check().config_exists 决定 needsSetup），
  * chat-input 永不挂载 —— 检测到向导就点「使用默认配置，进入应用」把它带进
  * 主界面；若点了仍进不去，报错明确指出停在向导（而非泛指超时）。
@@ -98,7 +109,7 @@ export async function waitForInputReady(page: Page, timeout = 60_000) {
       (await enterWithDefaults.isVisible({ timeout: 5000 }).catch(() => false))
     ) {
       console.log(
-        '[test] 判定：应用停在首启动向导（无 ~/.miqi/config.json）——点「使用默认配置，进入应用」后等待主界面'
+        '[test] 判定：应用停在首启动向导（无 ~/.forge/config.json）——点「使用默认配置，进入应用」后等待主界面'
       );
       // 点击成功才置标志：瞬时遮挡/重渲染导致的点击失败要留给下一轮重试
       try {
@@ -170,40 +181,18 @@ export async function sendUntilDoneOrProviderDown(
 ): Promise<boolean> {
   const { maxAttempts = 2, perAttemptWaitMs = 150_000, silenceExtendMs = 150_000 } = opts;
   const errLocator = page.getByText(PROVIDER_UNAVAILABLE_TEXT);
-  // 门禁（#1000/#1025）：未登录/无可用模型时发送被 fail-fast 拦下，
-  // 消息被替换成登录引导气泡——这不是 provider 错误，也不是回归。
-  const gateLocator = page.getByText('尚未登录平台账号');
-  if ((await gateLocator.count()) > 0) return false;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     // Snapshot BEFORE the send: an error that surfaces during sendMessage
     // itself must count as this attempt's error. Error bubbles from earlier
     // attempts stay in the message list, so match by count delta — only an
     // error that appeared after this snapshot counts.
     const errCountBefore = await errLocator.count();
-    // 发送被拦（未配置/不可用的 provider → 门禁 fail-fast，user 气泡根本
-    // 不会挂载）时，sendMessage 内部的计数断言会抛错——按「provider 不可用」
-    // 处理，返回 false 让调用方 skip，而不是把环境问题当成回归 fail。
-    try {
-      await sendMessage(page, text);
-    } catch (err) {
-      // 只有两种可判明的「环境不可用 / 门禁拦截」情形才降级为 skip：
-      //  1) 发送后门禁引导气泡已出现（未登录/无可用模型 → fail-fast 拦下，
-      //     user 气泡根本没挂载，sendMessage 内部的计数断言因此抛错）；
-      //  2) 发送后出现了新的 provider 错误气泡（相对发送前快照 errCountBefore
-      //     的增量，即这次发送招来的错误）。
-      // 其它异常（断言失败、选择器超时、真实功能回归等）一律原样重抛——
-      // 早先无条件 return false 会把真实回归吞成 skip，掩盖缺陷。
-      if ((await gateLocator.count()) > 0) return false;
-      if ((await errLocator.count()) > errCountBefore) return false;
-      throw err;
-    }
+    await sendMessage(page, text);
     let sawError = false;
 
     let deadline = Date.now() + perAttemptWaitMs;
     while (Date.now() < deadline) {
       if (await isDone()) return true;
-      // 门禁引导气泡（发送后出现）——立即判定为不可用
-      if ((await gateLocator.count()) > 0) return false;
       if ((await errLocator.count()) > errCountBefore) {
         sawError = true;
         break;
@@ -218,7 +207,6 @@ export async function sendUntilDoneOrProviderDown(
       deadline = Date.now() + silenceExtendMs;
       while (Date.now() < deadline) {
         if (await isDone()) return true;
-        if ((await gateLocator.count()) > 0) return false;
         if ((await errLocator.count()) > errCountBefore) {
           sawError = true;
           break;
@@ -427,43 +415,6 @@ export async function waitForResponseComplete(
 
 /** Poll for approval dialogs and click "永久允许" until the AI stops
  *  thinking.  Used by sandbox and session-isolation tests. */
-/**
- * Auto-approve the harness PlanCard ("开始执行") if it appears.
- *
- * #646-v2 plan 常态（edit 模式任何 produces_artifact 工具 → 计划卡）让既有
- * E2E（exec/write_file/spawn 类真实对话）被计划卡挡住——工具不执行、spec
- * retry 死循环（CI electron-e2e 30min 超时）。调用方在 sendMessage 后启动
- * 后台轮询（像 autoApprove 一样），计划卡出现即点"开始执行"。
- */
-export async function approvePlanCardIfAny(page: Page, timeoutMs = 90_000) {
-  const deadline = Date.now() + timeoutMs;
-  let checked = 0;
-  while (Date.now() < deadline) {
-    try {
-      // 判定复用 approvePlanCardOnce（plan-confirm 仅在 waiting && !editing 渲染，
-      // 天然排除历史已处理卡；按钮可访问名是「按当前方案执行」）。
-      if (await approvePlanCardOnce(page)) {
-        console.log('[test] 自动批准计划卡（按当前方案执行）');
-        return;
-      }
-      checked += 1;
-      if (checked % 20 === 1) {
-        console.log(
-          `[test] approvePlanCardIfAny: 检查 ${checked} 次，计划卡未出现（${Date.now() < deadline ? '继续等' : '超时'}）`
-        );
-      }
-    } catch {
-      // 页面已关闭（测试结束）——静默退出
-      return;
-    }
-    try {
-      await page.waitForTimeout(500);
-    } catch {
-      return; // 页面已关闭
-    }
-  }
-}
-
 export async function approveLoop(page: Page, timeout = 180_000) {
   // The thinking indicator was removed, so completion can't be detected via
   // [data-testid="thinking-indicator"].  Keep auto-approving any dialogs, and
@@ -479,13 +430,6 @@ export async function approveLoop(page: Page, timeout = 180_000) {
     if (await btn.isVisible({ timeout: 1000 }).catch(() => false)) {
       await btn.click();
       console.log('[test] Auto-approved tool');
-    }
-    // #646-v2 plan 常态：edit 模式 produces_artifact 工具 → 计划卡——自动点"开始执行"
-    // CodeRabbit（9-11）：同上——testid 定位等待态确认钮
-    const go = page.getByTestId('plan-confirm').first();
-    if (await go.isVisible({ timeout: 1000 }).catch(() => false)) {
-      await go.click({ force: true, timeout: 5_000 });
-      console.log('[test] Auto-approved plan card (按当前方案执行)');
     }
     const text = await page
       .locator('main')
@@ -826,7 +770,7 @@ export async function launchElectronApp(
     /** 强制窗口显示在屏幕上（默认本机启动时停在屏幕外，见 applyWindowVisibilityEnv） */
     showWindow?: boolean;
     /**
-     * 不把开发者本机 `~/.miqi/config.json` 拷进临时 MIQI_HOME —— 模拟全新安装
+     * 不把开发者本机 `~/.forge/config.json` 拷进临时 MIQI_HOME —— 模拟全新安装
      * （没有任何用户 provider 凭据、也没有显式配置过 agents.defaults.model）。
      * 默认拷贝是给需要真实 LLM 的用例用的；#1172 这类「无配置」场景必须显式打开。
      */
@@ -852,7 +796,12 @@ export async function launchElectronApp(
 
   // Copy user's provider config into the temp home so the LLM backend is reachable.
   // noUserConfig 时跳过：临时 home 保持「无用户配置」状态（全新安装）。
-  const userConfigPath = join(homedir(), '.miqi', 'config.json');
+  // .miqi → .forge 过渡期回退：pull_request 事件的 CI 仍用 base 分支(develop)的
+  // workflow 把 config 写到 ~/.miqi（workflow 文件变更对 pull_request 不生效），
+  // 所以优先读新路径、回退旧路径，直到 workflow 合入 develop 生效。
+  const forgeConfigPath = join(homedir(), '.forge', 'config.json');
+  const legacyConfigPath = join(homedir(), '.miqi', 'config.json');
+  const userConfigPath = existsSync(forgeConfigPath) ? forgeConfigPath : legacyConfigPath;
   const destConfigPath = join(miqiHome, 'config.json');
   if (!opts?.noUserConfig && existsSync(userConfigPath)) {
     cpSync(userConfigPath, destConfigPath);

@@ -19,13 +19,13 @@ ALLOWED_DIRECT_HOME_FILES = {
 
 
 def test_production_code_does_not_construct_dot_miqi_from_path_home():
-    """Source audit: no direct Path.home() / '.miqi' in production code."""
+    """Source audit: no direct Path.home() / '.forge' in production code."""
     violations = []
     for path in Path("miqi").rglob("*.py"):
         if path in ALLOWED_DIRECT_HOME_FILES:
             continue
         text = path.read_text(encoding="utf-8")
-        if "Path.home() / \".miqi\"" in text or "_Path.home() / \".miqi\"" in text:
+        if "Path.home() / \".forge\"" in text or "_Path.home() / \".forge\"" in text:
             violations.append(str(path))
 
     assert violations == []

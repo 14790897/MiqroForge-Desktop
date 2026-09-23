@@ -142,8 +142,8 @@ jobs:
       - name: Generate config.json
         if: env.E2E_TRUSTED == 'true'
         run: |
-          mkdir -p ~/.miqi
-          cat > ~/.miqi/config.json << 'CONFEOF'
+          mkdir -p ~/.forge
+          cat > ~/.forge/config.json << 'CONFEOF'
           {
             "providers": {
               "siliconflow": {
@@ -248,7 +248,7 @@ jobs:
           NODE_OPTIONS: ''
       - name: Upload Playwright report (E2E)
         # 只在 push（develop 等仓库自己的分支，代码可信）的运行里留存失败产物：test-results/
-        # 的内容由 PR 控制的测试进程写出，而这些进程是在 provider 凭据落到 ~/.miqi/config.json
+        # 的内容由 PR 控制的测试进程写出，而这些进程是在 provider 凭据落到 ~/.forge/config.json
         # **之后**跑的 —— 对 pull_request_target 的运行上传，等于给任意 PR 一条把 runner 上
         # 文件公开出去的通道（artifact 对仓库读者可下载）。PR 运行的失败详情仍在作业日志里。
         if: failure() && github.event_name == 'push'
@@ -319,8 +319,8 @@ jobs:
       - name: Generate config.json
         if: env.E2E_TRUSTED == 'true'
         run: |
-          mkdir -p ~/.miqi
-          cat > ~/.miqi/config.json << 'CONFEOF'
+          mkdir -p ~/.forge
+          cat > ~/.forge/config.json << 'CONFEOF'
           {
             "providers": {
               "siliconflow": {
