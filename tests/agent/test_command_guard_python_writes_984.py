@@ -355,12 +355,12 @@ class TestAuthorizedRootsAllowed:
         """POSIX-native paths reach the host home / config home directly in
         the sandbox (no /mnt/<drive> mapping) — ``_is_system_path`` still
         wins over a per-call grant."""
-        rt = sandbox_rt(tmp_path, roots=("/srv/home/.ssh", "/srv/home/.miqi"))
+        rt = sandbox_rt(tmp_path, roots=("/srv/home/.ssh", "/srv/home/.forge"))
         rt = RuntimePaths(
             **{**rt.__dict__, "host_home": "/srv/home",
-               "miqi_home": "/srv/home/.miqi"}
+               "miqi_home": "/srv/home/.forge"}
         )
-        for target in ("/srv/home/.ssh/id_rsa", "/srv/home/.miqi/config.json"):
+        for target in ("/srv/home/.ssh/id_rsa", "/srv/home/.forge/config.json"):
             verdict = v(
                 f'python3 -c "open(\'{target}\',\'w\').write(\'x\')"', rt,
             )

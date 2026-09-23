@@ -1,13 +1,13 @@
 """#983 缺口 2：MCP 下载产物落盘后必须进会话 tracked（任务附件面板可见）。
 
 背景：#975 ``DownloadSink`` 把 binary artifact 交付到
-``<ws>/sessions/<key>/files/.miqi/downloads/``，但**不写 tracked_files.json**
+``<ws>/sessions/<key>/files/.forge/downloads/``，但**不写 tracked_files.json**
 → 产物只存在于磁盘，资产面板（``sessions.get_tracked_files``）看不到，用户
 拿不到 #877 的「下载/另存为」入口。
 
 修复：``materialize`` 在产物提交后调用 ``_persist_tracked_file``（与
 create_pdf/docx 同机制）。落盘根与登记根同源（``_downloads_root_base``），
-故条目键为 ``.miqi/downloads/<name>``。
+故条目键为 ``.forge/downloads/<name>``。
 
 面板读端两条链路（默认工作区布局，现网形态）：
 - 存储读端 ``sessions.get_tracked_files`` → ``SessionManager(<ws>)
@@ -16,7 +16,7 @@ create_pdf/docx 同机制）。落盘根与登记根同源（``_downloads_root_b
   ``<ws>/sessions/<key>/files``（``file_handlers._resolve_session_files_path``）。
 
 **边界（既有读端行为，非本改动引入）**：自选工作区布局下产物落
-``<custom>/.miqi/downloads``，而文件读端仍锚 ``<custom>/sessions/<key>/files``
+``<custom>/.forge/downloads``，而文件读端仍锚 ``<custom>/sessions/<key>/files``
 → 条目可见但按相对路径取不到字节（create_pdf 等文档工具同此）。本文件只断言
 存储读端；文件读端的端到端回路见
 ``tests/runtime/test_file_handlers.py::test_get_tracked_files_reads_sink_delivered_artifact``。
@@ -149,19 +149,19 @@ async def test_single_shot_artifact_lands_in_session_tracked_store():
 
     artifact = await _materialize(sink, _result_from_text(_artifact_payload(data)))
 
-    assert artifact.path == files_dir / ".miqi" / "downloads" / "result.cube"
+    assert artifact.path == files_dir / ".forge" / "downloads" / "result.cube"
     assert artifact.path.read_bytes() == data
 
     tracked = _read_tracked(_store_path(ws))
-    assert ".miqi/downloads/result.cube" in tracked, f"条目未落会话存储根：{sorted(tracked)}"
-    assert tracked[".miqi/downloads/result.cube"]["op"] == "write"
-    assert tracked[".miqi/downloads/result.cube"]["name"] == "result.cube"
+    assert ".forge/downloads/result.cube" in tracked, f"条目未落会话存储根：{sorted(tracked)}"
+    assert tracked[".forge/downloads/result.cube"]["op"] == "write"
+    assert tracked[".forge/downloads/result.cube"]["name"] == "result.cube"
 
     # 孤儿路径（会话 files 目录被当仓库根）不得出现
     assert not _store_path(files_dir).exists()
 
     # 面板读端（sessions.get_tracked_files 同源读端）必须读到
-    assert ".miqi/downloads/result.cube" in _panel_tracked(ws)
+    assert ".forge/downloads/result.cube" in _panel_tracked(ws)
 
 
 @pytest.mark.asyncio
@@ -210,8 +210,8 @@ async def test_chunked_transfer_tracked_only_after_completion():
     assert artifact.path.read_bytes() == full
 
     tracked = _read_tracked(_store_path(ws))
-    assert ".miqi/downloads/chunked.cube" in tracked
-    assert ".miqi/downloads/chunked.cube" in _panel_tracked(ws)
+    assert ".forge/downloads/chunked.cube" in tracked
+    assert ".forge/downloads/chunked.cube" in _panel_tracked(ws)
 
 
 # ── 正例：复用既有文件（reuse_existing）仍登记 ───────────────────────────
@@ -231,7 +231,7 @@ async def test_reuse_existing_artifact_is_tracked_again():
     artifact = await _materialize(sink, _result_from_text(payload))
 
     assert artifact.path.read_bytes() == b"same-bytes"
-    assert ".miqi/downloads/result.cube" in _read_tracked(store)
+    assert ".forge/downloads/result.cube" in _read_tracked(store)
 
 
 # ── 正例：自定义工作区（非默认根）────────────────────────────────────────
@@ -239,7 +239,7 @@ async def test_reuse_existing_artifact_is_tracked_again():
 
 @pytest.mark.asyncio
 async def test_custom_workspace_tracks_at_workspace_store_root(tmp_path):
-    """自选项目目录：产物落 ``<custom>/.miqi/downloads``，条目落
+    """自选项目目录：产物落 ``<custom>/.forge/downloads``，条目落
     ``<custom>/sessions/<key>/tracked_files.json``——与存储读端
     （``SessionManager(config.workspace_path)``）同根同 key。
 
@@ -253,12 +253,12 @@ async def test_custom_workspace_tracks_at_workspace_store_root(tmp_path):
 
     artifact = await _materialize(sink, _result_from_text(_artifact_payload(b"c")))
 
-    assert artifact.path == custom / ".miqi" / "downloads" / "result.cube"
+    assert artifact.path == custom / ".forge" / "downloads" / "result.cube"
     tracked = _read_tracked(_store_path(custom))
-    assert ".miqi/downloads/result.cube" in tracked
-    assert ".miqi/downloads/result.cube" in _panel_tracked(custom)
+    assert ".forge/downloads/result.cube" in tracked
+    assert ".forge/downloads/result.cube" in _panel_tracked(custom)
     # 不得把会话目录当成仓库根再嵌套一层（#1003 的孤儿形态）
-    nested = custom / ".miqi" / "downloads" / "sessions"
+    nested = custom / ".forge" / "downloads" / "sessions"
     assert not nested.exists(), f"条目仍落嵌套孤儿路径：{nested}"
 
 
@@ -282,7 +282,7 @@ async def test_failed_download_is_not_tracked():
 
     assert not _store_path(ws).exists()
     assert not (ws / "sessions" / _session_files_dir_key(SESSION_KEY)
-                / "files" / ".miqi" / "downloads" / "bad.cube").exists()
+                / "files" / ".forge" / "downloads" / "bad.cube").exists()
 
 
 @pytest.mark.asyncio

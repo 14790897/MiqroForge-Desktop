@@ -24,7 +24,7 @@ site/
 *.log
 .ruff_cache/
 featherflow/agent/memory.py.bak
-.miqi/
+.forge/
 CLAUDE*.md
 .workbuddy/
 dist-new/

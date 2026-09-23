@@ -118,7 +118,7 @@ def _is_protected_prefix(root: Path) -> bool:
         return True
     if _PROTECTED_ANY_COMPONENT & {p.lower() for p in parts[1:]}:
         return True
-    # The host config directory (~/.miqi) and everything under it.  Roots
+    # The host config directory (~/.forge) and everything under it.  Roots
     # that merely *contain* it are left to the existing guards: the home
     # directory and drive roots are dropped above, and ``_is_protected_extra_root``
     # rejects any root covering the config file once a workspace is known.
@@ -133,7 +133,7 @@ def _is_protected_extra_root(root: Path, workspace: Path) -> bool:
     """Return True when *root* would make protected paths writable.
 
     Auto-sensed (and user-configured) extra roots must never cover the host
-    config file or per-session files, otherwise a broad root (e.g. ``~/.miqi``
+    config file or per-session files, otherwise a broad root (e.g. ``~/.forge``
     or the workspace itself) could bypass read-only config handling and
     session isolation.
     """
@@ -257,7 +257,7 @@ def _accept_root(root: Path, workspace: Path | None) -> bool:
     if _is_top_level_system_dir(root):
         return False
     # #984: protected system subtrees below the drive root
-    # (C:\Windows\Temp\x, /etc/…, ~/.miqi/…) — the depth-1 check above
+    # (C:\Windows\Temp\x, /etc/…, ~/.forge/…) — the depth-1 check above
     # does not catch these.
     if _is_protected_prefix(root):
         return False

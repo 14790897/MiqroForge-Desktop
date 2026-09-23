@@ -101,7 +101,7 @@ async def test_detect_skips_distro_with_bwrap_but_no_python():
     if not pip_dir:
         pytest.skip(f"Could not locate pip package in '{distro}'")
 
-    hidden = pip_dir + ".miqi-test-bak"
+    hidden = pip_dir + ".forge-test-bak"
     hid_ok = False
     try:
         rc = await _run_in_distro(distro, f"mv {pip_dir} {hidden}")
@@ -176,7 +176,7 @@ async def test_detect_falls_back_to_another_distro_when_preferred_missing_pip():
         d for d in distros if d != preferred and await _distro_ready(d)
     ]
 
-    hidden = pip_dir + ".miqi-test-bak"
+    hidden = pip_dir + ".forge-test-bak"
     hid_ok = False
     try:
         rc = await _run_in_distro(preferred, f"mv {pip_dir} {hidden}")

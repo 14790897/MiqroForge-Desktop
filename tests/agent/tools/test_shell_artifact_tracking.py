@@ -52,7 +52,7 @@ def test_snapshot_records_files(exec_tool, fake_workspace):
 
 def test_snapshot_excludes_noise_dirs(exec_tool, fake_workspace):
     (fake_workspace / "report.md").write_text("deliverable")
-    for noise in (".git", "node_modules", "sessions", ".miqi-runtime", "logs", "__pycache__"):
+    for noise in (".git", "node_modules", "sessions", ".forge-runtime", "logs", "__pycache__"):
         (fake_workspace / noise).mkdir()
         (fake_workspace / noise / "x.txt").write_text("noise")
 

@@ -9,7 +9,7 @@
  * reply.
  *
  * The spec points the app at the user's REAL workspace
- * (C:\Users\Intership003\.miqi\workspace): the qraft token lives in
+ * (C:\Users\Intership003\.forge\workspace): the qraft token lives in
  * .qraft/token.json there, and the e2e temp home would have neither
  * token nor prior artifacts.  The qraft-workflowspec-export skill
  * itself ships with the app under miqi/skills/.
@@ -50,7 +50,7 @@ import {
 // Qraft token is missing or about to expire — CI workers without a
 // fresh login must not fail on this.
 const REAL_WORKSPACE =
-  process.env.MIQI_E2E_WORKSPACE ?? 'C:\\Users\\Intership003\\.miqi\\workspace';
+  process.env.MIQI_E2E_WORKSPACE ?? 'C:\\Users\\Intership003\\.forge\\workspace';
 
 function qraftTokenValid(): boolean {
   const tokenPath = join(REAL_WORKSPACE, '.qraft', 'token.json');

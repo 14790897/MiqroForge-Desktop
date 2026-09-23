@@ -11,7 +11,7 @@ from miqi.paths import (
 )
 
 # Kept as public aliases for callers that still reference these constants.
-DEFAULT_DATA_DIR = ".miqi"
+DEFAULT_DATA_DIR = ".forge"
 LEGACY_DATA_DIR = ".assistant"
 
 
@@ -26,13 +26,13 @@ def get_data_path() -> Path:
 
     Resolution order:
     1. If ``MIQI_HOME`` is explicitly set, use it.
-    2. If the legacy ``~/.assistant`` directory exists but ``~/.miqi`` does
+    2. If the legacy ``~/.assistant`` directory exists but ``~/.forge`` does
        not, return the legacy directory so existing data remains accessible.
-    3. Otherwise return ``~/.miqi`` (the default for new installs).
+    3. Otherwise return ``~/.forge`` (the default for new installs).
 
     This preserves backward compatibility for users who have not migrated
-    their data to the new ``~/.miqi`` location, while keeping the default
-    data root at ``~/.miqi`` for fresh installations.
+    their data to the new ``~/.forge`` location, while keeping the default
+    data root at ``~/.forge`` for fresh installations.
     """
     if _miqi_home_is_configured():
         return ensure_dir(get_miqi_home())

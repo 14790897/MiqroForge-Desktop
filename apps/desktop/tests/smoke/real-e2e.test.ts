@@ -4,7 +4,7 @@
  * These tests call `uv run miqi agent -m "..."` and verify responses.
  * They require:
  *   - Python + miqi installed (uv run handles this)
- *   - Valid config at ~/.miqi/config.json with API keys
+ *   - Valid config at ~/.forge/config.json with API keys
  *   - Network access (for LLM API calls)
  *
  * Run: cd apps/desktop && npx vitest run tests/smoke/real-e2e.test.ts

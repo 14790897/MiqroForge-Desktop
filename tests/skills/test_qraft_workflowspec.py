@@ -454,15 +454,15 @@ class TestTokenFileCandidates:
         assert "token_file:" in data["source"]
 
     def test_candidates_respect_miqi_home_policy(self):
-        """仓库策略：生产代码不得构造 Path.home() / '.miqi'。"""
+        """仓库策略：生产代码不得构造 Path.home() / '.forge'。"""
         from pathlib import Path as _Path
 
         import miqi.skills  # noqa: F401
 
         src_file = _Path("miqi") / "skills" / "qraft-workflowspec-export" / "scripts" / "auth.py"
         text = src_file.read_text(encoding="utf-8")
-        assert 'Path.home() / ".miqi"' not in text
-        assert '_Path.home() / ".miqi"' not in text
+        assert 'Path.home() / ".forge"' not in text
+        assert '_Path.home() / ".forge"' not in text
 
 
 class TestValidateDefinition:

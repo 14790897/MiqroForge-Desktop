@@ -770,12 +770,12 @@ async def test_get_tracked_files_reads_sink_delivered_artifact(tmp_path):
         "req-1", {"session_key": key}, "client-A", None, registry,
     )
     paths = {item["path"] for item in out["result"]["tracked_files"]}
-    assert ".miqi/downloads/report.pdf" in paths, paths
+    assert ".forge/downloads/report.pdf" in paths, paths
 
     # 面板「下载/另存为」链路：条目键 → files.read 取回原字节
     read = await files_read_handler(
         "req-2",
-        {"path": ".miqi/downloads/report.pdf", "session_key": key, "as_binary": True},
+        {"path": ".forge/downloads/report.pdf", "session_key": key, "as_binary": True},
         "client-A", None, registry,
     )
     assert base64.b64decode(read["result"]["data_base64"]) == data

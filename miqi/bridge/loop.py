@@ -1175,7 +1175,7 @@ class BridgeRuntimeLoop:
                 sm = SessionManager(config.workspace_path)
                 sess = sm.get_or_create(session_key, client_id=client_id)
                 ws = sess.metadata.get("workspace") or config.workspace_path
-                db_path = _Path(ws) / ".miqi-runtime" / "runtime.db"
+                db_path = _Path(ws) / ".forge-runtime" / "runtime.db"
                 if db_path.exists():
                     hr = HistoryRuntime(db_path, session_id=runtime_id)
                     await hr.initialize()

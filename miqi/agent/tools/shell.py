@@ -3168,14 +3168,14 @@ class ExecTool(Tool):
     # ── Phase 59: subprocess artifact tracking (#607) ───────────────────────
 
     # Directories never treated as AI artifacts: VCS/deps/caches plus the
-    # app's own session/runtime state. `sessions/`, `.miqi-runtime/` and
+    # app's own session/runtime state. `sessions/`, `.forge-runtime/` and
     # `logs/` are written by the app itself DURING an exec (ledger,
     # tracked_files.json, sandbox logs) — tracking them would
     # self-reference the panel with every command.
     _WORKSPACE_SNAPSHOT_EXCLUDES = frozenset({
         ".git", ".hg", ".svn", "node_modules", "__pycache__", ".venv",
         "venv", ".mypy_cache", ".pytest_cache", ".ruff_cache", ".tox",
-        ".nox", "sessions", ".miqi-runtime", "logs",
+        ".nox", "sessions", ".forge-runtime", "logs",
     })
     _WORKSPACE_SNAPSHOT_MAX_FILES = 5000
 

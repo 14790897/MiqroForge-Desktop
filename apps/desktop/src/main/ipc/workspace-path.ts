@@ -10,18 +10,18 @@ import {
 import { homedir } from 'os';
 import { basename, dirname, isAbsolute, join, resolve } from 'path';
 
-/** Directory holding the local config file (`~/.miqi` by default, overridable via MIQI_HOME). */
+/** Directory holding the local config file (`~/.forge` by default, overridable via MIQI_HOME). */
 export function getConfigDir(): string {
   const miqiHome = process.env['MIQI_HOME']?.trim();
-  return miqiHome ? miqiHome : join(homedir(), '.miqi');
+  return miqiHome ? miqiHome : join(homedir(), '.forge');
 }
 
 /**
- * Default name of the data root, used where the *literal* `~/.miqi` spelling
+ * Default name of the data root, used where the *literal* `~/.forge` spelling
  * matters rather than the resolved root — inside WSL, where `$HOME` is the
  * distro's own home and `MIQI_HOME` (a Windows path) does not apply.
  */
-const DEFAULT_HOME_DIR_NAME = '.miqi';
+const DEFAULT_HOME_DIR_NAME = '.forge';
 
 /** Path to the config JSON file (inside the MIQI_HOME config dir). */
 export function getConfigPath(): string {
@@ -40,7 +40,7 @@ export function readLocalConfig(): Record<string, unknown> {
   }
 }
 
-/** Resolve the configured workspace root (default `~/.miqi/workspace`, rebased to MIQI_HOME). */
+/** Resolve the configured workspace root (default `~/.forge/workspace`, rebased to MIQI_HOME). */
 export function getWorkspacePath(): string {
   const config = readLocalConfig();
   const agents = (config['agents'] as Record<string, unknown> | undefined) ?? {};

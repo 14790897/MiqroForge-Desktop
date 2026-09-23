@@ -79,7 +79,7 @@ export function PluginMarket() {
           </div>
           <p className="text-sm font-medium text-[var(--text-muted)] mb-1">暂无已安装插件</p>
           <p className="text-xs text-[var(--text-faint)] text-center leading-relaxed">
-            将插件添加到 ~/.miqi/plugins/ 或 &lt;workspace&gt;/.miqi/plugins/
+            将插件添加到 ~/.forge/plugins/ 或 &lt;workspace&gt;/.forge/plugins/
           </p>
         </div>
       ) : (

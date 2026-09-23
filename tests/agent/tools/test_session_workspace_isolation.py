@@ -155,8 +155,8 @@ async def test_redirect_new_file_write_redirects_when_missing(tmp_path):
 
 @pytest.mark.asyncio
 async def test_redirect_new_file_write_noop_without_dirs(tmp_path):
-    out = await _redirect_new_file_write("C:/Users/x/.miqi/workspace/a.md", None, None, _exists_false)
-    assert out == "C:/Users/x/.miqi/workspace/a.md"
+    out = await _redirect_new_file_write("C:/Users/x/.forge/workspace/a.md", None, None, _exists_false)
+    assert out == "C:/Users/x/.forge/workspace/a.md"
 
 
 # ── write_file (native, no sandbox) ────────────────────────────────────────
