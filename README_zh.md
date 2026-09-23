@@ -341,7 +341,7 @@ npm run build && npx playwright test --config=playwright.config.ts --project=ele
 | **Windows** (WSL CI) | **按名字点名的 7 个 spec**，不是全量 | wsl-one-click-install、sandbox-exec、session-key-mapping、sandbox-toggle、#1157、#1171、open-external-path-security |
 | **macOS** (CI) | 选定子集，不是完整覆盖 | bwrap 不可用；沙箱与最重的 LLM 套件通过 `--grep-invert` 排除 |
 
-> **零 CI 覆盖清单**：`apps/desktop/tests/e2e/CI-COVERAGE.md` 列出了**在任何 runner 上都不会执行**的 21 个 spec（Windows-only 语义、只在本地设置的 `MIQI_RUN_*` / `QRAFT_LIVE`、真实账号 live 用例、本机私有资产等）。判断「某个用例有没有在 CI 上跑过」先查它，别按平台直觉——`apps/desktop/tests/e2eCiCoverage.test.ts`（`npm test`）会强制新守卫登记、旧条目销账（#1196）。
+> **零 CI 覆盖清单**：`apps/desktop/tests/e2e/CI-COVERAGE.md` 列出了 21 个 spec，**每个都至少有一个用例在任何 runner 上都不会执行**（Windows-only 语义、只在本地设置的 `MIQI_RUN_*` / `QRAFT_LIVE`、真实账号 live 用例、本机私有资产等；`full-electron` / `task-assets` 是部分用例，文件里其余用例在 CI 上照跑）。判断「某个用例有没有在 CI 上跑过」先查它，别按平台直觉——`apps/desktop/tests/e2eCiCoverage.test.ts`（`npm test`）会强制新守卫登记、旧条目销账（#1196）。
 
 > **macOS 已知限制**：「重启 recall」E2E 测试 (`session-context-recall.spec.ts`) 仅在 `process.env.CI && process.platform === 'darwin'` 时被跳过（本地 macOS 运行仍会执行该测试）。macOS ARM64 CI runner 上应用完全重启后，即使 sidebar 会话标题加载正确且 bridge 报告 `running / initialized`，会话历史（聊天消息）也无法在 `<main>` 中渲染。这很可能是 bridge IPC 时序问题或 APFS/SQLite WAL checkpoint 在冷启动时的竞态问题——需要原生调试。不涉及重启的会话切换 recall 测试仍然在 macOS 上验证 #490 行为。
 

@@ -11,13 +11,14 @@
  *   1. 检测到致命守卫的 spec 必须登记 —— 否则红（新加一个 MIQI_RUN_* 门不再静默）；
  *   2. 登记为「守卫」的行必须仍被检测到 —— 守卫被删/改名后清单不许留尸。
  *
- * 判定分两层：
+ * 判定分三层：
  *   - `parseWorkflowJobs` 把 workflow 解析成 job / step 粒度：每个 job 的 `runs-on` 与
  *     各级 `env:`，以及每个 step 里 playwright 调用了哪些 spec（或是否全量跑 electron 项目）。
- *   - `analyzeSpec` 从 skip 实参出发沿模块级 const / function 展开，收集可达的
- *     `process.env.X` 与 `process.platform`，再对照**真正会收集到这个 spec 的 job/step**
- *     的 env 并集（#1209 评审 P2：此前是「变量名在任一 workflow 出现过就算设置」，
- *     `billing-hosted-live` 的 `DEEPSEEK_API_KEY` 就因此漏判）。
+ *   - `analyzeSpec` 从 skip 实参出发沿模块级 const / function 展开，得到「这个 spec 需要什么」
+ *     （可达的 `process.env.X` 与 `process.platform`）。
+ *   - `fatalReasons` **逐个执行者**核对：必须存在某一个 job/step 同时满足全部门与平台条件，
+ *     才算在 CI 上有覆盖。按并集判定会漏掉「门在 A step、win32 在 B step」这类跨 step
+ *     泄漏（#1209 评审 P2 / CodeRabbit 复审）。
  *
  * 它仍然是**漂移报警**，不是覆盖率证明：判据是启发式（字符串解析，不是 TS AST），
  * 残余盲区是个别 step 内部的运行时分支；人工确认过的例外在清单里标「人工」。
@@ -195,26 +196,25 @@ function parseWorkflowJobs(wf: Workflow): JobScope[] {
 // ─── spec 侧的守卫分析 ────────────────────────────────────────────────
 
 interface GateAnalysis {
-  /** skip 上下文里可达、且覆盖它的 job/step 从未设置的 process.env 变量（`CI` 除外）。 */
-  fatalEnvs: string[];
-  /** skip 上下文里可达的全部 env 变量（含 CI 上会设置的，便于人工核对）。 */
-  allEnvs: string[];
-  /** skip 上下文要求 win32，而没有任何 windows runner 的 job/step 会收集它。 */
-  win32Only: boolean;
+  /** skip 上下文里可达的 process.env 变量（`CI` 除外）——需要某个执行者全部提供。 */
+  requiredEnvs: string[];
+  /** skip 上下文要求 win32。 */
+  needsWindows: boolean;
   /** `const XXX_ON_CI = !!process.env.CI` 这种「只在 CI 上跳过」的独占门。 */
   bareOnCiGate: boolean;
   /** 被 `test.skip('标题', fn)` / `test.fixme('标题', fn)` 永久禁用的用例标题。 */
   disabledTests: string[];
 }
 
-/** 某个 spec 的 CI 覆盖率信息：谁会收集它、那些 job/step 里有哪些 env。 */
-interface Coverage {
+/** 一个「执行者」作用域：某个会收集到这个 spec 的 job/step，连同它能提供的 env 与平台。 */
+interface StepScope {
+  label: string;
   envs: Set<string>;
   windows: boolean;
 }
 
-/** 沿 const / function 展开 skip 实参，收集其中可达的 env / platform 引用。 */
-function analyzeSpec(source: string, coverage: Coverage): GateAnalysis {
+/** 沿 const / function 展开 skip 实参，收集这个 spec 对执行环境的要求。 */
+function analyzeSpec(source: string): GateAnalysis {
   const consts = new Map<string, string>();
   for (const m of source.matchAll(
     /^(?:export\s+)?const\s+([A-Za-z_$][\w$]*)\s*(?::[^=\n]*)?=\s*/gm
@@ -265,19 +265,49 @@ function analyzeSpec(source: string, coverage: Coverage): GateAnalysis {
   }
 
   return {
-    fatalEnvs: [...allEnvs].filter((v) => v !== 'CI' && !coverage.envs.has(v)).sort(),
-    allEnvs: [...allEnvs].sort(),
-    win32Only: /process\.platform\s*!==\s*['"]win32['"]/.test(expanded) && !coverage.windows,
+    requiredEnvs: [...allEnvs].filter((v) => v !== 'CI').sort(),
+    needsWindows: /process\.platform\s*!==\s*['"]win32['"]/.test(expanded),
     bareOnCiGate,
     disabledTests,
   };
 }
 
-/** 一条致命守卫的说明；返回空数组表示这个 spec 在 CI 上有执行者。 */
-function fatalReasons(a: GateAnalysis): string[] {
+/**
+ * 一条致命守卫的说明；返回空数组表示这个 spec 在 CI 上有执行者。
+ * 逐 scope 判定：只要**某一个** job/step 同时满足全部门与平台条件，就算覆盖；
+ * 否则分别指出「哪都没设」「没有 windows 执行者」「条件分散在不同执行者」。
+ */
+function fatalReasons(a: GateAnalysis, scopes: StepScope[]): string[] {
   const reasons: string[] = [];
-  if (a.fatalEnvs.length) reasons.push(`CI 未设置的门：${a.fatalEnvs.join(', ')}`);
-  if (a.win32Only) reasons.push("`process.platform !== 'win32'`，且没有 windows job 会收集它");
+  const satisfied = scopes.some(
+    (s) => a.requiredEnvs.every((v) => s.envs.has(v)) && (!a.needsWindows || s.windows)
+  );
+  if (!satisfied) {
+    if (scopes.length === 0) {
+      reasons.push('没有任何 CI job/step 会收集它');
+    } else {
+      const missingEverywhere = a.requiredEnvs.filter((v) => !scopes.some((s) => s.envs.has(v)));
+      if (missingEverywhere.length) reasons.push(`CI 未设置的门：${missingEverywhere.join(', ')}`);
+      const windowsOk = scopes.some((s) => s.windows);
+      if (a.needsWindows && !windowsOk) {
+        reasons.push("`process.platform !== 'win32'`，且没有 windows job 会收集它");
+      }
+      if (!missingEverywhere.length && (!a.needsWindows || windowsOk)) {
+        // 变量都能找到、平台也满足，但凑不到同一个执行者身上——跨 step 泄漏
+        const need = [...a.requiredEnvs, ...(a.needsWindows ? ['win32'] : [])];
+        const detail = scopes
+          .map((s) => {
+            const missing = [
+              ...a.requiredEnvs.filter((v) => !s.envs.has(v)),
+              ...(a.needsWindows && !s.windows ? ['win32'] : []),
+            ];
+            return `${s.label} 缺 ${missing.join('/')}`;
+          })
+          .join('；');
+        reasons.push(`没有任何单个 job/step 同时满足 ${need.join(' + ')}（${detail}）`);
+      }
+    }
+  }
   if (a.bareOnCiGate) reasons.push('`= !!process.env.CI` 独占门（CI 上永远跳过）');
   if (a.disabledTests.length) reasons.push(`被永久禁用的用例：${a.disabledTests.join(' / ')}`);
   return reasons;
@@ -291,21 +321,23 @@ describe('e2e CI 覆盖守卫（#1196）', () => {
 
   /**
    * 谁会收集到这个 spec？点名它的 step，或全量跑 electron 项目的 step。
-   * 那些 job/step 的 env 并集就是「这个 spec 在 CI 上能看到的变量」。
+   * 每个这样的 job/step 都是一个**独立的执行者作用域**——判定时不能把它们的 env
+   * 并起来看，否则会漏掉「门在 A step、win32 在 B step」这类跨 step 泄漏。
    */
-  function coverageFor(specFile: string): Coverage {
-    const envs = new Set<string>();
-    let windows = false;
+  function scopesFor(specFile: string): StepScope[] {
+    const scopes: StepScope[] = [];
     for (const job of jobs) {
       for (const step of job.playwrightSteps) {
         const collects = step.fullSuite || step.names.includes(specFile);
         if (!collects) continue;
-        for (const v of job.env) envs.add(v);
-        for (const v of step.env) envs.add(v);
-        if (/windows/i.test(job.runsOn)) windows = true;
+        scopes.push({
+          label: `${job.id}${step.fullSuite ? '（全量）' : '（点名）'}`,
+          envs: new Set<string>([...job.env, ...step.env]),
+          windows: /windows/i.test(job.runsOn),
+        });
       }
     }
-    return { envs, windows };
+    return scopes;
   }
 
   const manifestText = readFileSync(MANIFEST, 'utf-8');
@@ -317,8 +349,8 @@ describe('e2e CI 覆盖守卫（#1196）', () => {
   it('检测到致命守卫的 spec 都已登记进 CI-COVERAGE.md', () => {
     const missing: string[] = [];
     for (const file of specFiles) {
-      const analysis = analyzeSpec(readFileSync(join(E2E_DIR, file), 'utf-8'), coverageFor(file));
-      const reasons = fatalReasons(analysis);
+      const analysis = analyzeSpec(readFileSync(join(E2E_DIR, file), 'utf-8'));
+      const reasons = fatalReasons(analysis, scopesFor(file));
       if (reasons.length && !manifestRows.some((r) => r.file === file)) {
         missing.push(`  ${file} — ${reasons.join('；')}`);
       }
@@ -345,8 +377,8 @@ describe('e2e CI 覆盖守卫（#1196）', () => {
         continue;
       }
       if (row.verdict === '守卫') {
-        const analysis = analyzeSpec(source, coverageFor(row.file));
-        if (!fatalReasons(analysis).length) {
+        const analysis = analyzeSpec(source);
+        if (!fatalReasons(analysis, scopesFor(row.file)).length) {
           stale.push(
             `  ${row.file} — 标为「守卫」但已检测不到致命守卫（守卫形态变了就改标「人工」，真被接进 CI 了就删掉这行）`
           );

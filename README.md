@@ -325,7 +325,7 @@ npm run build && npx playwright test --config=playwright.config.ts --project=ele
 
 macOS job 实际 `--grep-invert` 掉的 describe 块：`Sandbox Exec`、`Sandbox Toggle`、`Sandbox toggle ready`、`Workspace Switch E2E (Sandbox ON)`、`session-key-mapping`、`PPTX Generator`、`Native Electron E2E`、`Feedback Page E2E`、`Execution Policy E2E`。也就是说 **Linux = 全量（减去设了守卫的）、macOS = 兼容性子集，两边覆盖率并不对等**；判断「某个用例有没有在 CI 上跑过」时要按平台分开看。
 
-> **零 CI 覆盖清单**：`apps/desktop/tests/e2e/CI-COVERAGE.md` 列出了**在任何 runner 上都不会执行**的 21 个 spec（Windows-only 语义、只在本地设置的 `MIQI_RUN_*` / `QRAFT_LIVE`、真实账号 live 用例、本机私有资产等）。`apps/desktop/tests/e2eCiCoverage.test.ts`（`npm test`，quick job）强制「新守卫必须登记、旧条目必须销账」，别改坏了这些路径还以为 CI 会兜住（#1196）。
+> **零 CI 覆盖清单**：`apps/desktop/tests/e2e/CI-COVERAGE.md` 列出了 21 个 spec，**每个都至少有一个用例在任何 runner 上都不会执行**（Windows-only 语义、只在本地设置的 `MIQI_RUN_*` / `QRAFT_LIVE`、真实账号 live 用例、本机私有资产等；`full-electron` / `task-assets` 是部分用例，文件里其余用例在 CI 上照跑）。`apps/desktop/tests/e2eCiCoverage.test.ts`（`npm test`，quick job）强制「新守卫必须登记、旧条目必须销账」，别改坏了这些路径还以为 CI 会兜住（#1196）。
 
 > **flaky 怎么归因**（#1107）：两个 E2E job 结束时会把 Playwright JSON 报告里「首次失败、重试才通过」的用例汇总进 job summary（`apps/desktop/scripts/e2e-flaky-report.mjs`，由 `.github/actions/summarize-flaky` 调用），并各发一条 `::warning` 注解。此前这类用例只以日志中段的一行 `N flaky` 存在、job 仍判 success，等于静默漂着。
 
