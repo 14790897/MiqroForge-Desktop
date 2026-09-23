@@ -3,7 +3,7 @@
  * 核心回归面：#1103 教训——路径解析失败或指向家目录/盘根/系统目录时，
  * 删除目标必须被拒，绝不回退到扩大删除范围。
  */
-import path from 'node:path';
+import { win32 as path } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   classifyDataRootCandidate,
