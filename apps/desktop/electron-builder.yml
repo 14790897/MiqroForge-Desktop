@@ -55,6 +55,10 @@ nsis:
   oneClick: false
   createDesktopShortcut: true
   createStartMenuShortcut: true
+  # 卸载残留清理（#1177）：由 scripts/generate-uninstaller-nsh.mjs 生成，
+  # 卸载时提供「同时删除应用数据」复选框（默认不勾），勾选后清除数据根 /
+  # userData / WSL 沙箱 distro / 更新缓存，结果写入 %TEMP%\miqi-uninstall.log。
+  include: build/installer.nsh
 dmg:
   # DMG 挂载协议页（SLA）不启用：build/ 下 license_*.txt 会被 dmg-builder
   # 按约定拾取，中文文本无法用 mac_roman 编码导致打包失败。macOS 用户由
@@ -62,4 +66,4 @@ dmg:
   license: null
 publish:
   - provider: generic
-    url: ""
+    url: ''
