@@ -45,7 +45,7 @@
 | `billing-live.spec.ts` | 守卫 | `SLURM_MCP_KEY` | 中（真实网关） | 需要 slurm MCP 网关 key，CI 未注入 |
 | `billing-hosted-live.spec.ts` | 守卫 | `HAS_CREDS` 里的 `DEEPSEEK_API_KEY` | 中（真实账号 + 真实计费网关） | 该变量只被写进 config.json、从未作为环境变量注入任何会收集本文件的 job（`electron-e2e` / `macos-e2e` 只注入 `QRAFT_PHONE` / `QRAFT_PASSWORD`），`HAS_CREDS` 恒为 false。要让它在 CI 真跑，需在 `electron-e2e` 注入该变量（live 用例是否每 PR 都花真实额度是产品决策） |
 | `mof-synthesis-price-agent.spec.ts` | 守卫 | `MOF_PRICE_PROJECT`（含 extract/、enrich/、report.py 的项目根）+ 私有技能目录 | 高（真实 LLM） | 项目根与 `miqi/skills/mof-synthesis-price-agent` 都是本机私有资产，仓库里没有 |
-| `bvse-skill-assets.spec.ts` | 守卫 | `BVSE_SKILL_DIR`（默认 `~/.miqi/skills/bvse-mof-local-ssh`，需含 `.venv`）+ `BVSE_TEST_CIF`（真实 MOF CIF 文件） | 中（本机技能 venv + mock server，长流程） | 需要本机装好的 BVSE 技能依赖与真实 CIF 文件；macOS CI 还因 loopback 到 mock server 不可达额外跳过 |
+| `bvse-skill-assets.spec.ts` | 守卫 | `BVSE_SKILL_DIR`（默认 `~/.forge/skills/bvse-mof-local-ssh`，需含 `.venv`）+ `BVSE_TEST_CIF`（真实 MOF CIF 文件） | 中（本机技能 venv + mock server，长流程） | 需要本机装好的 BVSE 技能依赖与真实 CIF 文件；macOS CI 还因 loopback 到 mock server 不可达额外跳过 |
 | `record-bvse-skill.spec.ts` | 守卫 | 同 `bvse-skill-assets`（`RECORD_OUT_DIR` 只是可选输出目录，不是门） | 中（同左，且全程录屏） | 同上：录屏演示真实 BVSE 技能，依赖本机环境 |
 | `tool-error-neutral.spec.ts`（部分） | 守卫 | `SKIP_SANDBOX_ON_CI`（`MIQI_RUN_SANDBOX_E2E`） | 中（真实 LLM + WSL 沙箱） | 该变量只在 wsl-e2e 的沙箱点名步骤里设置，而那一步只收集 sandbox-exec / session-key-mapping / sandbox-toggle，不含本文件；「注入事件」那条 describe 在 Linux 上照跑，只有「真实链路 + 沙箱」这条零覆盖 |
 | `task-assets.spec.ts`（部分） | 守卫 | 无条件 `test.skip('标题', fn)` | 低 | 「AI 生成 .docx → 任务资产预览」一条被永久禁用；该文件其余用例在 Linux 上跑 |
