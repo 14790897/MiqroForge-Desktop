@@ -3,6 +3,11 @@
 *.pyc
 dist/
 build/
+# #1176：electron-builder 自定义 NSIS 脚本需随源码提交；apps/desktop/build/ 下其余内容
+# （license_*.txt 等）仍由构建生成、不提交。
+!apps/desktop/build/
+apps/desktop/build/*
+!apps/desktop/build/installer.nsh
 *.egg-info/
 *.egg
 *.pyc
