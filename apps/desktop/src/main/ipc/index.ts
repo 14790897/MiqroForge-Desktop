@@ -794,8 +794,7 @@ for m in ("pydantic", "httpx", "loguru"):
       }
     }
 
-    const configDir = process.env['MIQI_HOME']?.trim() || join(homedir(), '.forge');
-    const configExists = existsSync(join(configDir, 'config.json'));
+    const configExists = existsSync(getConfigPath());
 
     return {
       ok: issues.length === 0,

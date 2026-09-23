@@ -153,6 +153,21 @@ def test_data_path_prefers_miqi_when_both_homes_exist(monkeypatch, tmp_path):
     assert data_path == default_home.resolve()
 
 
+def test_data_path_does_not_fallback_to_old_miqi_dir(monkeypatch, tmp_path):
+    """#1175: 旧的 ~/.miqi 不做迁移——即使它存在，也新建/返回 ~/.forge。"""
+    monkeypatch.delenv("MIQI_HOME", raising=False)
+    home = tmp_path / "home"
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    old_home = home / ".miqi"
+    old_home.mkdir(parents=True)
+    default_home = home / ".forge"
+
+    data_path = get_data_path()
+
+    assert data_path == default_home.resolve()
+    assert default_home.exists()
+
+
 def test_config_loader_uses_miqi_home(monkeypatch, tmp_path):
     miqi_home = tmp_path / "isolated"
     monkeypatch.setenv("MIQI_HOME", str(miqi_home))

@@ -1,10 +1,10 @@
 # 配置参考
 
-MiQroForge Desktop 的全局配置存储在 `~/.forge/config.json` 中。
+MiQroForge Desktop 的全局配置默认存储在 `~/.forge/config.json` 中；设置 `MIQI_HOME` 环境变量时，改存到 `$MIQI_HOME/config.json`。
 
 ## 配置文件位置
 
-| 操作系统 | 路径 |
+| 操作系统 | 默认路径 |
 |----------|------|
 | Linux / macOS | `~/.forge/config.json` |
 | Windows | `C:\Users\{username}\.forge\config.json` |
