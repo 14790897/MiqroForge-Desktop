@@ -7,6 +7,7 @@ import { cn } from '../../lib/utils';
 import { getCachedConfig, invalidateConfigCache } from '../../lib/configCache';
 import { sanitizeUiMessage } from '../../lib/sanitizeUiMessage';
 import { QraftLoginButton } from './components/QraftLoginCard';
+import { CleanupSettings } from './CleanupSettings';
 import { DOCS_BASE_URL, DOCS_TREE, REPO_LABEL, REPO_URL } from './docsLinks';
 import {
   RefreshCw,
@@ -118,6 +119,7 @@ export type SettingsTab =
   | 'cron'
   | 'wsl'
   | 'logs'
+  | 'cleanup'
   | 'archived'
   | 'legal'
   | 'docs'
@@ -278,6 +280,13 @@ const SETTINGS_CATEGORIES: SettingsCategory[] = [
         description: '运行日志与排障',
         keywords: ['log', '日志', 'debug'],
         icon: ScrollText,
+      },
+      {
+        value: 'cleanup',
+        label: '清理应用数据',
+        description: '清除数据与 WSL 沙箱残留',
+        keywords: ['cleanup', 'clean', '清理', '卸载', '残留', 'uninstall', 'clear'],
+        icon: Trash2,
       },
       {
         value: 'archived',
@@ -2768,6 +2777,24 @@ export function SettingsPage({
             )}
           >
             <CronPage />
+          </ErrorBoundary>
+        </Tabs.Content>
+        <Tabs.Content value="cleanup" className="flex-1 overflow-y-auto">
+          <ErrorBoundary
+            fallback={(error, reset) => (
+              <div className="p-6 text-sm" style={{ color: 'var(--danger)' }}>
+                ⚠️ 清理设置加载失败: {error.message}
+                <button
+                  onClick={reset}
+                  className="ml-2 underline"
+                  style={{ color: 'var(--accent)' }}
+                >
+                  重试
+                </button>
+              </div>
+            )}
+          >
+            <CleanupSettings />
           </ErrorBoundary>
         </Tabs.Content>
         <Tabs.Content value="wsl" className="flex-1 overflow-y-auto">

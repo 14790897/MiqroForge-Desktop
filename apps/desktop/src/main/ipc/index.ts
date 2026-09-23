@@ -19,6 +19,14 @@ import type { BrowserWindow } from 'electron';
 import type { BridgeManager } from '../bridge';
 import { sendToFrame } from '../frame-send';
 import {
+  buildCleanupContext,
+  launchQuitAndClean,
+  runCleanup,
+  scanCleanup,
+  type CleanupScope,
+} from './cleanup';
+import { planCleanupItems } from '../../shared/cleanup-paths';
+import {
   IPC,
   IPC_EVENTS,
   ChatSendInput,
@@ -65,6 +73,8 @@ import type {
   WslStatsResult,
   WslInstallProgress,
   WslInstallAndProvisionResult,
+  CleanupRunReport,
+  CleanupItemId,
 } from '../../shared/ipc';
 import { registerQraftIpcHandlers } from '../qraft/ipc';
 import { readConsentVersion, writeConsentVersion } from '../privacy-consent';
@@ -1724,6 +1734,81 @@ for m in ("pydantic", "httpx", "loguru"):
   // #854: allow_system_installs runtime toggle (no restart)
   ipcMain.handle(IPC.SANDBOX_SET_ALLOW_SYSTEM_INSTALLS, async (_event, enabled: boolean) => {
     return bridge.send('sandbox.setAllowSystemInstalls', { enabled });
+  });
+
+  // ---------------------------------------------------------------------------
+  // Cleanup（#1177：卸载残留/应用数据清理）
+  // 打包版可用；dev 用 MIQI_E2E_ALLOW_CLEANUP=1 显式放行（E2E 配合 MIQI_HOME
+  // 改道到临时目录，避免动到开发者真实数据根）。
+  // ---------------------------------------------------------------------------
+  function cleanupAvailable(): boolean {
+    return electron.app.isPackaged || process.env['MIQI_E2E_ALLOW_CLEANUP'] === '1';
+  }
+
+  ipcMain.handle(IPC.CLEANUP_SCAN, async () => {
+    if (!cleanupAvailable()) {
+      return { items: [], available: false, reason: '应用数据清理仅在安装版可用' };
+    }
+    const ctx = buildCleanupContext();
+    const items = await scanCleanup(ctx);
+    return { items, available: true };
+  });
+
+  ipcMain.handle(IPC.CLEANUP_RUN, async (_event, payload: { ids?: unknown }) => {
+    const report: CleanupRunReport = {
+      cleaned: [],
+      failed: [],
+      logPath: join(tmpdir(), `miqi-cleanup-${Date.now()}.log`),
+    };
+    if (!cleanupAvailable()) {
+      report.failed.push({ id: 'data-root:rest', label: '清理', reason: '仅安装版可用' });
+      return report;
+    }
+    const ids = Array.isArray(payload?.ids)
+      ? (payload.ids.filter((x) => typeof x === 'string') as CleanupItemId[])
+      : [];
+    const ctx = buildCleanupContext();
+    const selected = planCleanupItems(ctx).filter((i) => ids.includes(i.id));
+    // 运行态不可删项（user-data）拒绝执行，提示走「退出并清理」。
+    const runnable = selected.filter((i) => i.deletableNow);
+    const blocked = selected.filter((i) => !i.deletableNow);
+    const wantsDataRoot = runnable.some((i) => i.kind === 'workspace' || i.kind === 'data-root');
+    const out = await runCleanup(ctx, runnable, {
+      beforeDataRootDelete: wantsDataRoot ? () => bridge.stop() : undefined,
+    });
+    for (const b of blocked) {
+      out.failed.push({
+        id: b.id,
+        label: b.label,
+        reason: '应用运行中无法删除，请使用「退出并清理」',
+      });
+    }
+    return out;
+  });
+
+  ipcMain.handle(IPC.CLEANUP_QUIT_AND_CLEAN, async (_event, payload: { ids?: unknown }) => {
+    if (!cleanupAvailable()) return { ok: false, reason: '仅安装版可用' };
+    const ids = Array.isArray(payload?.ids)
+      ? (payload.ids.filter((x) => typeof x === 'string') as CleanupItemId[])
+      : [];
+    const ctx = buildCleanupContext();
+    const scope: CleanupScope = {
+      ctx: {
+        homeDir: ctx.homeDir,
+        appDataDir: ctx.appDataDir,
+        localAppDataDir: ctx.localAppDataDir,
+        registryDataRoot: ctx.registryDataRoot,
+        systemRoot: ctx.systemRoot,
+        platform: ctx.platform,
+      },
+      ids,
+      logPath: join(tmpdir(), `miqi-cleanup-${Date.now()}.log`),
+    };
+    const launched = launchQuitAndClean(process.execPath, scope);
+    if (!launched.ok) return launched;
+    // 给 renderer 留出收到响应的时间，再退出让清理实例接手（清理完成后不自动重启）。
+    setTimeout(() => electron.app.quit(), 300);
+    return { ok: true };
   });
 
   ipcMain.handle(IPC.DIALOG_OPEN_FILE, async () => {
