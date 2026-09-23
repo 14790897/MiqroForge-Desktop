@@ -53,6 +53,10 @@ nsis:
   # 按用户安装（不设 perMachine）：免 UAC，存量 %LOCALAPPDATA%\Programs 副本可原地
   # 覆盖升级；perMachine 模式要求管理员且固定装 Program Files，会切断更新链路（#1124）。
   oneClick: false
+  # #1176：开启目录页，允许自定义安装路径（默认值仍为按用户路径，免 UAC 语义不变）。
+  allowToChangeInstallationDirectory: true
+  # 目录页校验脚本：按用户模式下拦截需管理员权限的系统目录（见 build/installer.nsh）。
+  include: build/installer.nsh
   createDesktopShortcut: true
   createStartMenuShortcut: true
   # 卸载残留清理（#1177）：由 scripts/generate-uninstaller-nsh.mjs 生成，
