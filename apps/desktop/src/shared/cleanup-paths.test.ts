@@ -186,7 +186,7 @@ describe('resolveActiveDataRoot (mirrors miqi/utils/helpers.py get_data_path)', 
 
   it('default wins when both exist', () => {
     const ctx = makeCtx({ dirExists: () => true });
-    expect(resolveActiveDataRoot(ctx)).toBe(path.join(ctx.homeDir, '.miqi'));
+    expect(resolveActiveDataRoot(ctx)).toBe(path.join(ctx.homeDir, '.forge'));
   });
 
   it('legacy 用户（仅 ~/.assistant 存在）的清理计划指向 legacy 根而非不存在的默认名', () => {
@@ -206,7 +206,7 @@ describe('resolveActiveDataRoot (mirrors miqi/utils/helpers.py get_data_path)', 
 
   it('defaults to the active default name', () => {
     const ctx = makeCtx({ dirExists: () => false });
-    expect(resolveActiveDataRoot(ctx)).toBe(path.join(ctx.homeDir, '.miqi'));
+    expect(resolveActiveDataRoot(ctx)).toBe(path.join(ctx.homeDir, '.forge'));
   });
 });
 
@@ -227,7 +227,9 @@ describe('planCleanupItems', () => {
   });
 
   it('data-root:rest excludes the workspace from deletion', () => {
-    expect(byId['data-root:rest'].excludes).toEqual([path.join(ctx.homeDir, '.miqi', 'workspace')]);
+    expect(byId['data-root:rest'].excludes).toEqual([
+      path.join(ctx.homeDir, '.forge', 'workspace'),
+    ]);
   });
 
   it('WSL distro item carries the exact distro name and no filesystem path', () => {

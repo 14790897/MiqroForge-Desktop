@@ -8,7 +8,11 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { planCleanupItems, type CleanupContext } from '../../shared/cleanup-paths';
+import {
+  ACTIVE_DATA_ROOT_DEFAULT_NAME,
+  planCleanupItems,
+  type CleanupContext,
+} from '../../shared/cleanup-paths';
 import {
   dirSizeBytes,
   parseWslDistroList,
@@ -36,7 +40,7 @@ function makeCtx(homeDir: string): CleanupContext {
 /** 临时家目录 + 假数据根（workspace/sessions/sandbox_state.json）。 */
 function makeFixtureRoot(): { homeDir: string; root: string } {
   const homeDir = mkdtempSync(join(tmpdir(), 'miqi-cleanup-test-'));
-  const root = join(homeDir, '.miqi');
+  const root = join(homeDir, ACTIVE_DATA_ROOT_DEFAULT_NAME);
   mkdirSync(join(root, 'workspace', 'session1', 'files'), { recursive: true });
   mkdirSync(join(root, 'sessions'), { recursive: true });
   mkdirSync(join(root, 'plugins'), { recursive: true });
