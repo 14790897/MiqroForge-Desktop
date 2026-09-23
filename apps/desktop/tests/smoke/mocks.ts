@@ -22,6 +22,13 @@ export interface MockBridgeOptions {
    * 无本地凭据的场景需显式传 true 才等价于网关路由可用。
    */
   activeModelResolvable?: boolean;
+  /**
+   * providers.list 的 active_model_own_or_gateway_resolvable（#1172 的严格判据，
+   * 供登录后自动就绪默认模型判断「用户是否已选好模型」）。省略时与
+   * activeModelResolvable 取同一个值 —— mock 的 provider 列表不含 is_gateway，
+   * 无法复刻「gateway 型 provider 兜底」这一条差异，需要该差异的用例显式传值。
+   */
+  activeModelOwnOrGatewayResolvable?: boolean;
   config?: Record<string, unknown>;
   /** MiQroForge 登录态（issue #726 设置页）。默认未登录。 */
   qraftStatus?: Record<string, unknown>;
@@ -41,6 +48,31 @@ export interface MockBridgeOptions {
   hangChatSend?: boolean;
   /** qraft.billingHistory 的返回结果。默认空列表。 */
   qraftBillingHistoryResult?: Array<Record<string, unknown>>;
+}
+
+/**
+ * 登录态：已登录但平台未下发 AI 网关状态。
+ *
+ * 与网关无关的用例（模型面板解锁、清空设置、激活流程）用它当
+ * qraftLoggedInStatus：默认登录态带 aiGateway active，会触发「登录后默认模型
+ * 自动就绪」（#1172）——登录 + 网关 active 且当前模型不是自己 provider/平台
+ * 网关路由的，会被自动改写成网关模型，给无关用例的 configUpdates 计数与
+ * 「页头如实显示当前模型」断言引入额外写入。
+ */
+export function loggedInWithoutGateway(): Record<string, unknown> {
+  return {
+    loggedIn: true,
+    account: {
+      phone: '18500000000',
+      sub: '19',
+      username: 'U-HKY4-GB4E',
+      nickname: 'MiQi测试',
+    },
+    env: 'test',
+    baseUrl: 'https://test.forge.miqroera.com/api',
+    expiresAt: Date.now() + 7_199_000,
+    refreshScheduledAt: Date.now() + 6_299_000,
+  };
 }
 
 /** Build a self-contained init script that installs the mock bridge on
@@ -93,6 +125,10 @@ export function buildMockBridgeScript(opts: MockBridgeOptions = {}): string {
   // null → 每次调用按「任一 provider 已配置」动态计算（镜像无网关时的真实后端）
   const activeModelResolvableJson =
     opts.activeModelResolvable === undefined ? 'null' : String(opts.activeModelResolvable);
+  const activeModelOwnOrGatewayResolvableJson =
+    opts.activeModelOwnOrGatewayResolvable === undefined
+      ? 'null'
+      : String(opts.activeModelOwnOrGatewayResolvable);
   const configJson = JSON.stringify(opts.config || {});
   const qraftStatusJson = JSON.stringify(opts.qraftStatus || { loggedIn: false });
   const qraftLoginResultJson = JSON.stringify(
@@ -163,6 +199,7 @@ export function buildMockBridgeScript(opts: MockBridgeOptions = {}): string {
   var _activeModel = ${activeModelJson};
   var _activeProvider = ${activeProviderJson};
   var _activeModelResolvableOpt = ${activeModelResolvableJson};
+  var _activeModelOwnOrGatewayResolvableOpt = ${activeModelOwnOrGatewayResolvableJson};
 
   // ── Interactive helpers ──────────────────────────────────────────
   var _callbacks = {
@@ -351,7 +388,10 @@ export function buildMockBridgeScript(opts: MockBridgeOptions = {}): string {
         if (resolvable === null) {
           resolvable = providersCopy.some(function(p) { return !!p.configured; });
         }
-        return Promise.resolve({ providers: providersCopy, active_model: _activeModel, active_provider: _activeProvider, active_model_resolvable: resolvable });
+        // #1172 严格判据：未显式指定时与 resolvable 同值（见 MockBridgeOptions 注释）。
+        var ownOrGateway = _activeModelOwnOrGatewayResolvableOpt;
+        if (ownOrGateway === null) ownOrGateway = resolvable;
+        return Promise.resolve({ providers: providersCopy, active_model: _activeModel, active_provider: _activeProvider, active_model_resolvable: resolvable, active_model_own_or_gateway_resolvable: ownOrGateway });
       },
       test: function() { return Promise.resolve({ ok: true }); },
       update: function(providerName, apiKey, apiBase, headers, model) {

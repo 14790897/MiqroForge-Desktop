@@ -6,7 +6,6 @@ import {
   useCallback,
   useMemo,
   memo,
-  Fragment,
   type ComponentProps,
 } from 'react';
 import { createPortal } from 'react-dom';
@@ -21,12 +20,12 @@ import { InterruptedTurnCard } from './components/InterruptedTurnCard';
 import { DiffView } from './components/DiffView';
 import { renderContent } from './components/renderContent';
 import { TrackedFileCard } from './components/TrackedFileCard';
-import { ConfirmCardArea, ConfirmCardItem, isConfirmCard } from './components/ConfirmCardArea';
+import { ConfirmCardArea } from './components/ConfirmCardArea';
 import { TurnStatusBar } from './components/TurnStatusBar';
 import { QraftLoginButton, QraftLoginCard } from '../settings/components/QraftLoginCard';
 import { useQraftStatus } from '../../hooks/useQraftStatus';
 import { ToolCommandBlock } from './components/ToolCommandBlock';
-import { useUserInput, type UserInputCardEntry } from '../../contexts/UserInputContext';
+import { useUserInput } from '../../contexts/UserInputContext';
 import { ErrorBoundary } from '../../components/ErrorBoundary';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -329,11 +328,11 @@ interface Message {
   attachments?: Attachment[];
   toolHint?: boolean;
   toolCallId?: string;
+  /** 产生该消息的 backend turn（#1146：编辑/重答/重试回退时的截断边界；
+   *  乐观 user 气泡由 turn_started 事件回填 turn_id） */
+  turnId?: string;
   /** Tool name for specialized rendering (e.g. 'paper_search') */
   toolName?: string;
-  /** 产生该消息的 turn（流式 assistant 消息由 activeTurnId 标记——
-   *  2026-08-27 卡片内联关联用：计划/确认是 AI 回答的一部分） */
-  turnId?: string;
   /** Parsed tool data for card rendering */
   toolData?: unknown;
   /** Structured web sources (title/url/snippet) from web_search/web_fetch (#879) */
@@ -1963,8 +1962,6 @@ export function sessionMsgsToUi(rawMsgs: any[]): Message[] {
             toolName: 'paper_search',
             toolData: paperData,
             collapsed: false,
-            // CodeRabbit（9-11）：链卡按 turn 归属需要行级 turnId（恢复路径）
-            turnId: String((m as { turn_id?: unknown }).turn_id ?? '') || undefined,
             timestamp: ts,
           });
         } else {
@@ -1976,7 +1973,6 @@ export function sessionMsgsToUi(rawMsgs: any[]): Message[] {
             summary: 'paper_search',
             toolHint: true,
             collapsed: true,
-            turnId: String((m as { turn_id?: unknown }).turn_id ?? '') || undefined,
             timestamp: ts,
           });
         }
@@ -1994,7 +1990,6 @@ export function sessionMsgsToUi(rawMsgs: any[]): Message[] {
           toolName,
           toolOutput: true,
           collapsed: true,
-          turnId: String((m as { turn_id?: unknown }).turn_id ?? '') || undefined,
           timestamp: ts,
         });
       }
@@ -3916,7 +3911,7 @@ function pointsEventToMessage(pd: ChatProgress): Message | null {
     content:
       typeof pd.message === 'string' && pd.message
         ? pd.message
-        : '平台积分不足，任务未执行。请到 设置 → MiQroForge 平台 查看余额。',
+        : '平台积分不足，任务未执行。请到 设置 → Qraft 平台账号 查看余额。',
     timestamp: Date.now(),
   };
 }
@@ -3949,8 +3944,6 @@ function cachedEventsToMessages(events: InFlightEvent[], mode?: ReasoningMode): 
           content: fd.content,
           timestamp: Date.now(),
           reasoningMode: mode,
-          // 2026-08-27：turn 关联——卡内联进 AI 回答
-          turnId: (fd as ChatFinal & { turn_id?: string }).turn_id ?? undefined,
         });
       }
     } else if (ev.type === 'error') {
@@ -4156,8 +4149,6 @@ export function ChatConsole({
   // 工具输出里，模型可能摘要掉——用户会误以为「允许并记住」已永久生效。
   // 扫描消息中的失败标记并发 window 事件，由 App 级 toast 呈现（不依赖模型）。
   const warnedInstallWarnRef = useRef(new Map<string, number>());
-  // 2026-08-27：当前 turn 的 id——final 消息打 turnId 标记（卡内联关联用）
-  const activeTurnIdRef = useRef<string | null>(null);
   useEffect(() => {
     const warned = warnedInstallWarnRef.current;
     for (const m of messages) {
@@ -4171,73 +4162,6 @@ export function ChatConsole({
       }
     }
   }, [messages]);
-  // 2026-08-26 用户裁决：有确认/计划卡时输入框隐藏（WorkBuddy 式）
-  // 2026-08-27：计划/确认是 AI 回答的一部分——卡片内联在产生它的消息后
-  const {
-    pending: pendingCards,
-    resolved: resolvedCards,
-    resolve: resolveCard,
-    timeoutCard,
-  } = useUserInput();
-  const allCards = useMemo(
-    () => [...Object.values(resolvedCards), ...Object.values(pendingCards)],
-    [pendingCards, resolvedCards]
-  );
-  // 2026-08-27：卡属于 AI 回答——按 turn_id 关联到消息，在消息内部渲染
-  const cardsByTurn = useMemo(() => {
-    const map = new Map<string, typeof allCards>();
-    for (const c of allCards) {
-      const t = c.request.turn_id;
-      if (t) {
-        const arr = map.get(t) ?? [];
-        arr.push(c);
-        map.set(t, arr);
-      }
-    }
-    return map;
-  }, [allCards]);
-  const matchedTurnIds = useMemo(() => {
-    // #646-v2：本集合的唯一消费方是 ConfirmCardArea 的「确认卡是否已内联」排除
-    // 过滤（plan/action 卡不受影响）。工具链只有在**链里真有 ask_user_confirm_card
-    // 行**时才内联画确认卡（ToolChain：`isConfirmRow && card`）——因此只有
-    // 「确实有确认卡行」的 turn 才能算已匹配：
-    //  · 不带工具行的确认卡（写授权卡 / 安装授权卡，filesystem 等经 user-input
-    //    通道直接弹卡）永远留在兜底区，否则两边都不画、直接消失（E2E 实测）；
-    //  · CR review（#1071, 2026-09-15）：此前还把「有 assistant 消息的 turn」
-    //    一并算已匹配，但 MessageBubble 已不渲染确认卡——该条件只会让
-    //    「有 assistant 消息 + 链里无确认卡行」的确认卡被误排除 → 卡消失。
-    //    故仅保留确认卡行这一个条件。
-    const msgTurnIds = new Set<string>();
-    const hasConfirmRow = (m: Message) =>
-      m.role === 'progress' &&
-      (m.toolName === 'ask_user_confirm_card' ||
-        (m.content ?? '').includes('ask_user_confirm_card'));
-    for (const m of messages) {
-      if (m.turnId && hasConfirmRow(m)) msgTurnIds.add(m.turnId);
-    }
-    const active = activeTurnIdRef.current;
-    if (active && messages.some((m) => m.turnId === active && hasConfirmRow(m))) {
-      msgTurnIds.add(active);
-    }
-    return new Set([...cardsByTurn.keys()].filter((t) => msgTurnIds.has(t)));
-  }, [cardsByTurn, messages]);
-
-  // #1071 review P1（2026-09-16）：同一张卡只允许一个 DOM 实例。消息内联
-  // （MessageBubble 的 inline-cards）与兜底区（ConfirmCardArea）必须共用
-  // 同一个「哪些卡会被内联渲染」的谓词——此前 cards= 只滤掉确认卡、兜底区
-  // 又对 plan/action 无条件保留，同一张 plan/action 卡会同时出现在两处。
-  // 角色门槛：计划/确认是 AI 回答的一部分，用户气泡不承载卡（用户消息从不
-  // 带 turnId，此门槛当前是防御性空操作，只为与 inlineCardIds 保持同口径）。
-  const inlineCardsForGroup = useCallback(
-    (group: { msg: Message }): UserInputCardEntry[] => {
-      if (group.msg.role === 'user' || !group.msg.turnId) return [];
-      const cards = cardsByTurn.get(group.msg.turnId);
-      if (!cards || cards.length === 0) return [];
-      // 2026-08-27：确认卡由工具链行渲染（Hermes 式）——inline 只留 plan/action 卡
-      return cards.filter((c) => !isConfirmCard(c as never));
-    },
-    [cardsByTurn]
-  );
   // sourcesByMsg cache: keyed by a tool-only signature so the map object is
   // stable across typewriter frames (see sourcesByMsg below).
   const sourcesCacheRef = useRef<{ sig: string; map: Map<string, MessageSource[]> } | null>(null);
@@ -4947,18 +4871,27 @@ export function ChatConsole({
       streaming || messages.some((m) => m.role === 'user' || m.role === 'assistant');
     onSessionActivityChange?.(hasActivity);
   }, [streaming, messages, onSessionActivityChange]);
-  const { setActiveSession } = useUserInput();
-  // #646-v2（2026-09-15 定稿，对齐 Claude Code 的 resubmit 语义）：用户在计划卡里
-  // 提交调整意见后，由后端在**同一回合**重新规划（CollaborativeTurnRunner 的
-  // _plan_adjustment_pending → 追加一轮 provider → 新计划卡）。前端**不再**聚焦底部
-  // 输入框、不再提示"请输入调整要求"——否则与「有卡等待时输入框隐藏」的定稿冲突，
-  // 并且诱导用户把同一意见再输一遍（旧 lastAdjustAt/adjustHint 机制已移除）。
-  const adjustHint = false;
+  const { lastAdjustAt, setActiveSession } = useUserInput();
+  // 调整提示占位词用 state 驱动（而非直接改 DOM placeholder）——React 不会
+  // 主动重写该属性，直改会永久残留（CodeRabbit #711）。
+  const [adjustHint, setAdjustHint] = useState(false);
   // 会话隔离（CodeRabbit #666）：切会话 → 清空全部确认卡
   useEffect(() => {
     setActiveSession(sessionKey);
+    setAdjustHint(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionKey]);
+  // 用户点了"调整方案"→ 聚焦输入框并提示输入调整要求（issue #646）。
+  // 聚焦在 composer 重新可用（流式结束）之后执行——disabled 状态下
+  // focus 无效，回合结束后焦点会丢失（CodeRabbit #711）。
+  useEffect(() => {
+    if (!lastAdjustAt) return;
+    setAdjustHint(true);
+  }, [lastAdjustAt]);
+  useEffect(() => {
+    if (!adjustHint || streaming) return;
+    composerRef.current?.focus();
+  }, [adjustHint, streaming]);
   // 原生 window.confirm 模态框关闭后，Chromium 可能不把“真实的 OS 激活”交还
   // renderer：键盘事件被吞、点输入条无光标，刷新重建页面才恢复（手动复现）。
   // 早期版本里空/非空输入条是两棵子树，删除对话时旧 textarea 卸载重挂会顺带
@@ -7157,8 +7090,8 @@ export function ChatConsole({
   }, [complexHint]);
 
   const handleSend = useCallback(async () => {
-    // #646-v2（2026-09-15 定稿）：调整意见已在计划卡内提交、由后端同轮重规划，
-    // 发送路径不再需要清理任何"调整提示"状态。
+    // 发送即清除调整提示——占位词只属于"点了调整方案之后"的输入场景
+    setAdjustHint(false);
     // #740: resume consumes the pending resume-turn id (set by 继续执行).
     const _resumeId = resumeTurnIdRef.current;
     resumeTurnIdRef.current = null;
@@ -7793,37 +7726,18 @@ export function ChatConsole({
           const ts = userMsg.timestamp + 1;
           setMessages((prev) => {
             const last = prev[prev.length - 1];
-            // #1071 review P1（2026-09-16）：binding 必须用 invocation-local 的 myTurnId——
-            // activeTurnIdRef 跨 invocation 共享，别的 turn 的 turn_started 会改写它，
-            // 导致本消息被绑到错误的 turn。
             if (
               last?.role === 'assistant' &&
               last.timestamp === ts &&
               last.content !== fullContent
             ) {
-              return [
-                ...prev.slice(0, -1),
-                { ...last, content: fullContent, turnId: myTurnId ?? last.turnId },
-              ];
+              return [...prev.slice(0, -1), { ...last, content: fullContent }];
             }
-            // #1071 review P1（2026-09-16）：分支②同一竞态，一律用 invocation-local myTurnId。
             if (last?.role === 'assistant' && last.content !== fullContent) {
-              return [
-                ...prev.slice(0, -1),
-                { ...last, content: fullContent, turnId: myTurnId ?? last.turnId },
-              ];
+              return [...prev.slice(0, -1), { ...last, content: fullContent }];
             }
             if (!last || last.role !== 'assistant') {
-              return [
-                ...prev,
-                {
-                  role: 'assistant',
-                  content: fullContent,
-                  timestamp: ts,
-                  // #1071 review P1（2026-09-16）：新建 bubble 的 turnId 同样取 invocation-local myTurnId。
-                  turnId: myTurnId ?? undefined,
-                },
-              ];
+              return [...prev, { role: 'assistant', content: fullContent, timestamp: ts }];
             }
             return prev;
           });
@@ -8051,7 +7965,6 @@ export function ChatConsole({
       // turn_started can't make this turn's terminals look stale.
       if (data.stream === 'turn' && typeof data.turn_id === 'string') {
         myTurnId = data.turn_id;
-        activeTurnIdRef.current = data.turn_id;
         // #1146: 给本轮乐观 user 气泡回填 backend turn_id，供编辑/重试取截断边界。
         setMessages((prev) => {
           for (let i = prev.length - 1; i >= 0; i--) {
@@ -8222,11 +8135,6 @@ export function ChatConsole({
             : data.tool_call_id
               ? toolArgsByCallId.current.get(data.tool_call_id)
               : undefined,
-          // CodeRabbit（9-11）：链卡按 turn 归属需要行级 turnId（实时路径）
-          // #1071 review P1（2026-09-16）：binding 必须用 invocation-local 的 myTurnId——
-          // activeTurnIdRef 跨 invocation 共享，别的 turn 的 turn_started 会改写它，
-          // 导致本消息被绑到错误的 turn。（review 只点了 reveal 三处，此处同一竞态一并统一）
-          turnId: myTurnId ?? undefined,
           timestamp: Date.now(),
         };
         setMessages((prev) => {
@@ -9333,21 +9241,6 @@ export function ChatConsole({
 
   // Tool rows grouped into collapsible「工具调用 · N」chains for rendering.
   const chatGroups = useMemo(() => groupChatMessages(messages), [messages]);
-  // #1071 review P1（2026-09-16）：会被内联渲染的卡 id 集合——ConfirmCardArea
-  // 用它把「已经在消息里画过」的卡从兜底区排除，保证同一张卡只有一个 DOM 实例。
-  // 与 cards= 传参共用 inlineCardsForGroup，两边谓词不可能再漂移；
-  // 未被内联的卡（无对应 assistant 消息）不在集合里，继续留在兜底区（防卡消失）。
-  const inlineCardIds = useMemo(() => {
-    const ids = new Set<string>();
-    for (const group of chatGroups) {
-      if (group.kind === 'chain' || group.kind === 'reply-head') continue;
-      for (const c of inlineCardsForGroup(group)) {
-        const id = c.request.input_id;
-        if (id) ids.add(String(id));
-      }
-    }
-    return ids;
-  }, [chatGroups, inlineCardsForGroup]);
   // #843：活跃 assistant = 最后一条 assistant 分组（追加子代理行/重复 assistant 不影响）
   const lastAssistantIdx = useMemo(() => lastAssistantGroupIndex(chatGroups), [chatGroups]);
   // R5 P2：其后已出现 user 分组时不回溯（新回合 assistant 未挂上的窗口内，
@@ -9764,7 +9657,7 @@ export function ChatConsole({
         </div>
       )}
 
-      {/* ── Top header bar: Logo | Search | Badges | User ── */}
+      {/* ── Top header bar: Logo | Badges | User ── */}
       <div
         className="flex items-center gap-3 px-5 h-10 border-b shrink-0"
         style={{
@@ -9780,32 +9673,8 @@ export function ChatConsole({
           MiQroForge Desktop
         </span>
 
-        {/* Center: Search */}
-        <div
-          className="flex-1 max-w-[400px] mx-auto flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs"
-          style={{
-            background: 'var(--surface-muted)',
-            border: '1px solid var(--border-subtle)',
-            color: 'var(--text-faint)',
-          }}
-        >
-          <svg
-            width="13"
-            height="13"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="2"
-            strokeLinecap="round"
-          >
-            <circle cx="11" cy="11" r="8" />
-            <path d="m21 21-4.3-4.3" />
-          </svg>
-          <span className="select-none">搜索或输入命令...</span>
-        </div>
-
         {/* Right: Badges + user + actions */}
-        <div className="flex items-center gap-2 shrink-0">
+        <div className="ml-auto flex items-center gap-2 shrink-0">
           {/* User avatar + name */}
           <div className="flex items-center gap-1.5 pl-2 ml-1 border-l border-border-subtle">
             <div
@@ -10433,23 +10302,11 @@ export function ChatConsole({
                         downloadingPaperId={downloadingPaperId}
                         paperDownloadStates={paperDownloadStates}
                         sending={sendingFor(sessionKey)}
-                        // #1071 review P1（2026-09-16）：内联哪几张卡统一走
-                        // inlineCardsForGroup——兜底区（ConfirmCardArea）的
-                        // inlineCardIds 由同一个 helper 推导，保证同源。
-                        cards={inlineCardsForGroup(group)}
                       />
                     </div>
                   )
                 )
               )}
-
-              {/* 用户明确：#646 确认卡属于「回答界面」——timelines/resolved 跟随消息流；
-                  pending 确认卡在输入框位置（variant=bottom，Composer 区） */}
-              {/* 兜底渲染：只画**没有被消息内联**的卡——已被内联的场次（含
-                  plan/action 卡）经 inlineCardIds 排除，同一张卡不会有两份
-                  DOM；turn 进行中尚未挂到 assistant 消息上的卡继续在这里可见，
-                  AI 消息生成后自动移入消息内部（防「卡消失」回归，#1071）。 */}
-              <ConfirmCardArea matchedTurnIds={matchedTurnIds} inlineCardIds={inlineCardIds} />
             </div>
           </div>
 
@@ -10462,25 +10319,14 @@ export function ChatConsole({
             }}
           />
 
-          {/* Composer——确认卡弹出时隐藏（WorkBuddy 式：界面只有一个卡片） */}
+          {/* Composer */}
           <div
             className="shrink-0 px-5 pb-4 pt-3"
             style={{
               background: 'var(--background)',
             }}
           >
-            {Object.keys(pendingCards).length > 0 && (
-              <div
-                className="max-w-[760px] mx-auto text-center text-[11px] py-3"
-                style={{ color: '#a0a6b0' }}
-              >
-                等待你的确认…
-              </div>
-            )}
-            <div
-              className="max-w-[760px] min-w-[min(360px,100%)] mx-auto"
-              style={Object.keys(pendingCards).length > 0 ? { display: 'none' } : undefined}
-            >
+            <div className="max-w-[760px] min-w-[min(360px,100%)] mx-auto">
               {attachments.length > 0 &&
                 (() => {
                   // 附件预览渲染到输入框「内部」:portal 投到 Composer 的框内插槽,
@@ -10734,8 +10580,8 @@ export function ChatConsole({
               {/* Turn status (issue #646: 等待你的确认) */}
               <TurnStatusBar />
 
-              {/* #646-v2：兜底 ConfirmCardArea 渲染在消息区尾部（见上方
-                  matchedTurnIds 处，带 turn 过滤）——此处不再重复渲染 */}
+              {/* AI-initiated user confirmation cards (issue #646) */}
+              <ConfirmCardArea />
 
               {/* 欢迎态工作目录胶囊：独立于输入框、在它正上方（同宽左对齐，不嵌进卡内）。
                   首条消息后隐藏——会话进行中改由子标题栏胶囊承接。与子标题栏用同一套
@@ -11703,41 +11549,14 @@ function ToolChainGroup({
 >) {
   const [open, setOpen] = useState(true);
   const autoCollapsedRef = useRef(false);
-  // 2026-08-27：确认/计划是工具的一部分（Hermes 式）——审批条在工具行下。
-  // 卡按 createdAt 顺序与 ask_user_confirm_card 工具行一一对应（单 turn 主场景）。
-  const {
-    pending: chainPending,
-    resolved: chainResolved,
-    resolve: chainResolve,
-    timeoutCard: chainTimeout,
-  } = useUserInput();
-  // 2026-08-27 Hermes 式：含确认卡的工具链不自动收起——审批条消失后行保留
-  const hasConfirmRow = rows.some(
-    (r) =>
-      r.toolName === 'ask_user_confirm_card' || (r.content ?? '').includes('ask_user_confirm_card')
-  );
-  const chainCards = useMemo(() => {
-    // CodeRabbit（9-11）：① 只保留确认卡——plan/action 卡由 MessageBubble 渲染，
-    // 混入会让 confirmRowIdx 与 confirm 行错位；② 按本链 turn 过滤——多链同屏
-    // 时防止把别条链的卡挂进来（行级 turnId：实时走 activeTurnIdRef，恢复走
-    // raw.turn_id）。
-    const chainTurnId = rows.find((r) => r.turnId)?.turnId;
-    return [...Object.values(chainResolved), ...Object.values(chainPending)]
-      .filter((c) => isConfirmCard(c as never))
-      .filter((c) => !chainTurnId || c.request.turn_id === chainTurnId)
-      .sort((a, b) => (a.createdAt ?? 0) - (b.createdAt ?? 0));
-  }, [chainPending, chainResolved, rows]);
-  // 工具链内 ask_user_confirm_card 行（按顺序）→ 卡队列索引
-  const confirmRowIdxRef = useRef(0);
-  confirmRowIdxRef.current = 0;
   // Auto-fold once, when the turn completes (a later manual expand is kept).
   useEffect(() => {
-    if (done && !autoCollapsedRef.current && !hasConfirmRow) {
+    if (done && !autoCollapsedRef.current) {
       autoCollapsedRef.current = true;
       const t = setTimeout(() => setOpen(false), 1500);
       return () => clearTimeout(t);
     }
-  }, [done, hasConfirmRow]);
+  }, [done]);
 
   const label = `工具调用 · ${rows.length}`;
   return (
@@ -11766,38 +11585,18 @@ function ToolChainGroup({
         </button>
         {open && (
           <div className="mt-0.5 flex flex-col">
-            {rows.map((row, i) => {
-              const isConfirmRow =
-                row.toolName === 'ask_user_confirm_card' ||
-                (row.content ?? '').includes('ask_user_confirm_card');
-              const card = isConfirmRow ? chainCards[confirmRowIdxRef.current++] : undefined;
-              return (
-                <div key={`${row.timestamp}-${i}`}>
-                  <MessageBubble
-                    msg={row}
-                    // develop 侧 #879 起按 sourcesKey(row) 取来源（同一 msg 对象在
-                    // 不同会话/重放下的 key 不同）；本分支的内联确认卡沿用原结构。
-                    sources={sourcesByMsg.get(sourcesKey(row)) ?? EMPTY_SOURCES}
-                    toolStepIndex={i + 1}
-                    isLastToolRow={i === rows.length - 1}
-                    isLast={false}
-                    searchResults={
-                      row.toolCallId ? searchResultsByCallId[row.toolCallId] : undefined
-                    }
-                    {...bubbleProps}
-                  />
-                  {isConfirmRow && card && (
-                    <div className="mt-1">
-                      <ConfirmCardItem
-                        entry={card as never}
-                        resolve={chainResolve}
-                        timeoutCard={chainTimeout}
-                      />
-                    </div>
-                  )}
-                </div>
-              );
-            })}
+            {rows.map((row, i) => (
+              <MessageBubble
+                key={`${row.timestamp}-${i}`}
+                msg={row}
+                sources={sourcesByMsg.get(sourcesKey(row)) ?? EMPTY_SOURCES}
+                toolStepIndex={i + 1}
+                isLastToolRow={i === rows.length - 1}
+                isLast={false}
+                searchResults={row.toolCallId ? searchResultsByCallId[row.toolCallId] : undefined}
+                {...bubbleProps}
+              />
+            ))}
           </div>
         )}
       </div>
@@ -11854,9 +11653,6 @@ interface MessageBubbleProps {
   isLastToolRow?: boolean;
   /** web_search result text for this row (click-to-expand cards). */
   searchResults?: string;
-  /** 2026-08-27：本 turn 的确认/计划卡——AI 回答的一部分（内容后、操作栏前） */
-  cards?: UserInputCardEntry[];
-  /** #740/#1042: resume/restart an interrupted turn (half-generated reply).
   /** 编辑用户消息并重新回答(#828)。 */
   onEdit?: (msg: Message, newText: string) => void;
   /** #740: resume/restart an interrupted turn (half-generated reply).
@@ -11896,12 +11692,9 @@ const MessageBubble = memo(function MessageBubble({
   onResume,
   onRestart,
   reasoningMode,
-  cards,
 }: MessageBubbleProps) {
   const [expanded, setExpanded] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
-  // 2026-08-27：卡属于 AI 回答——消息内部渲染（resolve/timeout 直接取自 context）
-  const { resolve: resolveCard, timeoutCard } = useUserInput();
   // 编辑态(#828):用户消息原地变输入框,提交后截断重发
   const [editing, setEditing] = useState(false);
   const [editText, setEditText] = useState('');
@@ -12381,7 +12174,7 @@ const MessageBubble = memo(function MessageBubble({
 
   if (msg.role === 'subagent') {
     return (
-      <div className="flex items-start gap-3" data-testid="subagent-result">
+      <div className="flex items-start gap-3">
         <GitMerge size={18} style={{ color: 'var(--accent)', marginTop: 6 }} />
         <div
           className="text-sm rounded-2xl px-4 py-3 prose prose-sm max-w-none break-words overflow-x-auto"
@@ -12504,10 +12297,7 @@ const MessageBubble = memo(function MessageBubble({
             data-testid={isUser ? 'chat-message-user' : 'chat-message-assistant'}
           >
             {!isUser && !hideHeader && (
-              <div
-                className="flex items-center gap-2 mb-1.5 pl-2"
-                data-testid="assistant-avatar-row"
-              >
+              <div className="flex items-center gap-2 mb-3 pl-2">
                 <AgentAvatar />
                 <span
                   className="text-[16px] font-semibold shrink-0 whitespace-nowrap"
@@ -12814,20 +12604,6 @@ const MessageBubble = memo(function MessageBubble({
                   </ErrorBoundary>
                 )}
               </div>
-
-              {/* 2026-08-27：计划/确认是 AI 回答的一部分——卡在消息内容后、操作栏前 */}
-              {cards && cards.length > 0 && (
-                <div className="flex flex-col gap-1 w-full mt-1" data-testid="inline-cards">
-                  {cards.map((c) => (
-                    <ConfirmCardItem
-                      key={c.request.input_id}
-                      entry={c as never}
-                      resolve={resolveCard}
-                      timeoutCard={timeoutCard}
-                    />
-                  ))}
-                </div>
-              )}
 
               {/* 用户消息操作 — 复制 / 编辑(仅鼠标靠近/hover 消息时显示,#828;
                   编辑态下隐藏,避免与编辑框叠在一起)。
@@ -13232,28 +13008,6 @@ function WorkspacePickerMenu({
 }
 
 /**
- * #1071 review P1（2026-09-16）：`cards` 的浅数组比较。
- *
- * 必须**逐项**比身份，不能比数组引用：渲染点写的是
- * `cards={inlineCardsForGroup(group)}`（L8097），而 `inlineCardsForGroup` 每次
- * 调用都 `filter` 出一个新数组——比引用会恒为 false，反而把 #538 的 memo 优化
- * 整个废掉。逐项比身份的正确性来自数据源：卡条目出自 `cardsByTurn`（`useMemo`
- * 于 `allCards`），卡没变则条目对象不变 → 相等 → 气泡跳过渲染；卡晚到或
- * pending→confirmed/cancelled/modify 时产生新条目 → 不等 → 重渲染。
- *
- * 修的是真缺陷：`inlineCardIds`（L7064）在 memo 之外算，兜底区已把该卡排除，
- * 气泡若不重渲染，这张卡就哪里都不显示。
- */
-export function cardsEqual(a?: UserInputCardEntry[], b?: UserInputCardEntry[]): boolean {
-  if (a === b) return true;
-  // undefined 与 [] 同为「无卡」，视为相等（渲染点目前恒传数组，此处是防御）
-  const left = a ?? [];
-  const right = b ?? [];
-  if (left.length !== right.length) return false;
-  return left.every((entry, i) => entry === right[i]);
-}
-
-/**
  * Memo comparator: skip re-render unless a rendering-relevant prop changed.
  * All callbacks are stable useCallback references; msg/sources/searchResults
  * stay referentially stable while the typewriter streams (see sourcesByMsg's
@@ -13263,7 +13017,6 @@ export function cardsEqual(a?: UserInputCardEntry[], b?: UserInputCardEntry[]): 
 function areMessageBubblePropsEqual(a: MessageBubbleProps, b: MessageBubbleProps): boolean {
   return (
     a.msg === b.msg &&
-    cardsEqual(a.cards, b.cards) &&
     a.sessionKey === b.sessionKey &&
     a.turnIndex === b.turnIndex &&
     a.copyIdx === b.copyIdx &&

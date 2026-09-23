@@ -249,7 +249,7 @@ const api = {
 
   // -- Sessions ---------------------------------------------------------------
   sessions: {
-    list: (): Promise<{ sessions: SessionInfo[] }> => ipcRenderer.invoke(IPC.SESSIONS_LIST),
+    list: (): Promise<{ sessions: SessionInfo[] } | null> => ipcRenderer.invoke(IPC.SESSIONS_LIST),
     get: (sessionKey: string, extra?: Record<string, unknown>): Promise<SessionDetail> =>
       ipcRenderer.invoke(IPC.SESSIONS_GET, { session_key: sessionKey, ...(extra ?? {}) }),
     delete: (sessionKey: string): Promise<{ deleted: boolean }> =>

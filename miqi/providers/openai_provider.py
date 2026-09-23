@@ -47,6 +47,7 @@ class OpenAIProvider(LLMProvider):
         provider_name: str | None = None,
         request_timeout: float | None = None,
         stream_idle_timeout: float | None = None,
+        first_token_timeout: float | None = None,
     ):
         self._selected_spec = find_by_name(provider_name) if provider_name else None
         self._gateway = find_gateway(provider_name, api_key, api_base)
@@ -60,6 +61,14 @@ class OpenAIProvider(LLMProvider):
         self.default_model = default_model
         self.extra_headers = extra_headers or {}
         self._stream_idle_timeout = stream_idle_timeout or DEFAULT_STREAM_IDLE_TIMEOUT
+        # Explicit None check rather than `or`: a caller asking for 0.0
+        # (a test that wants no waiting at all) must not silently get the
+        # 60 s default back.
+        self._first_token_timeout = (
+            DEFAULT_FIRST_TOKEN_TIMEOUT
+            if first_token_timeout is None
+            else first_token_timeout
+        )
 
         if api_key:
             self._setup_env(api_key, api_base)
@@ -522,7 +531,7 @@ class OpenAIProvider(LLMProvider):
         is_first = True
         while True:
             try:
-                timeout = DEFAULT_FIRST_TOKEN_TIMEOUT if is_first else self._stream_idle_timeout
+                timeout = self._first_token_timeout if is_first else self._stream_idle_timeout
                 async with asyncio.timeout(timeout):
                     chunk = await anext(aiter)
             except StopAsyncIteration:

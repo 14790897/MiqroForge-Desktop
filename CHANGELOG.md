@@ -1,3 +1,36 @@
+# [0.34.0](https://github.com/14790897/MiqroForge-Desktop/compare/v0.33.0...v0.34.0) (2026-09-22)
+
+
+### Bug Fixes
+
+* **bridge:** 网关 429 配额耗尽不再当作可重试限流——归类 PAYMENT_REQUIRED、流式终态错误不回退 chat()，前端显示中文充值提示（[#1190](https://github.com/14790897/MiqroForge-Desktop/issues/1190)） ([#1199](https://github.com/14790897/MiqroForge-Desktop/issues/1199)) ([4aff1b4](https://github.com/14790897/MiqroForge-Desktop/commit/4aff1b461be528d25e92e6d2de88b5d103227581))
+* **ci:** PR 模板校验对发布同步 PR 放行「截图」节 ([#1168](https://github.com/14790897/MiqroForge-Desktop/issues/1168)) ([fbd84f3](https://github.com/14790897/MiqroForge-Desktop/commit/fbd84f334e46e25699c933f5bceb1e4746c2f3c1))
+* **ci:** 修复 CI 基线抖动——WSL apt 超时不再判死、runtime 孤儿写锁隔离 ([#1080](https://github.com/14790897/MiqroForge-Desktop/issues/1080)) ([#1186](https://github.com/14790897/MiqroForge-Desktop/issues/1186)) ([c93d130](https://github.com/14790897/MiqroForge-Desktop/commit/c93d13068d3152956ac4245c90a2918a5f52a2e1)), closes [#1149](https://github.com/14790897/MiqroForge-Desktop/issues/1149) [#1103](https://github.com/14790897/MiqroForge-Desktop/issues/1103)
+* **desktop:** sessions.list 失败不再清空左侧会话列表 ([#1191](https://github.com/14790897/MiqroForge-Desktop/issues/1191)) ([#1195](https://github.com/14790897/MiqroForge-Desktop/issues/1195)) ([f428f3d](https://github.com/14790897/MiqroForge-Desktop/commit/f428f3dac8c8ad0943e523157a645f673f5750d9))
+* **desktop:** WSL 一键安装识别并修复被推迟的系统组件安装 ([#1174](https://github.com/14790897/MiqroForge-Desktop/issues/1174)) ([6521c9c](https://github.com/14790897/MiqroForge-Desktop/commit/6521c9cd9431de655821494b3e36d9da276caa0d)), closes [#1171](https://github.com/14790897/MiqroForge-Desktop/issues/1171)
+* **desktop:** 登录后默认模型按可用性自动就绪，网关模型不再漏写 ([#1178](https://github.com/14790897/MiqroForge-Desktop/issues/1178)) ([0b4424d](https://github.com/14790897/MiqroForge-Desktop/commit/0b4424d29c8fd8eb96819b3c08f8aaa2a86111a0)), closes [#1172](https://github.com/14790897/MiqroForge-Desktop/issues/1172) [#1172](https://github.com/14790897/MiqroForge-Desktop/issues/1172) [#1172](https://github.com/14790897/MiqroForge-Desktop/issues/1172)
+* **desktop:** 登录态失效后积分余额查询不再无限重试——SESSION_EXPIRED 刷新重试一次后停止，瞬时失败退避封顶（[#1160](https://github.com/14790897/MiqroForge-Desktop/issues/1160)） ([#1169](https://github.com/14790897/MiqroForge-Desktop/issues/1169)) ([b795775](https://github.com/14790897/MiqroForge-Desktop/commit/b7957758cd7b1edc8c3e2eb8f33791ccfafd85e4))
+* **desktop:** 移除顶部栏无交互的装饰性搜索框 ([#1198](https://github.com/14790897/MiqroForge-Desktop/issues/1198)) ([6e66836](https://github.com/14790897/MiqroForge-Desktop/commit/6e6683606e3f308ca9175bc19ccafa9734d10881)), closes [#1197](https://github.com/14790897/MiqroForge-Desktop/issues/1197) [#1197](https://github.com/14790897/MiqroForge-Desktop/issues/1197) [#1197](https://github.com/14790897/MiqroForge-Desktop/issues/1197)
+* **skills:** 沙箱激活时 available 门禁不再误信宿主解释器 ([#1181](https://github.com/14790897/MiqroForge-Desktop/issues/1181)) ([#1183](https://github.com/14790897/MiqroForge-Desktop/issues/1183)) ([1054d5a](https://github.com/14790897/MiqroForge-Desktop/commit/1054d5a964ba55ca17e6d49918a51141973b49e3)), closes [#1056](https://github.com/14790897/MiqroForge-Desktop/issues/1056)
+
+
+### Features
+
+* **desktop:** 本地存储按登录账号划分，多账号同设备不再共享会话（[#1185](https://github.com/14790897/MiqroForge-Desktop/issues/1185)） ([#1187](https://github.com/14790897/MiqroForge-Desktop/issues/1187)) ([f5fb4bd](https://github.com/14790897/MiqroForge-Desktop/commit/f5fb4bd625870ea8ebb47ed6cf267aafe4554024)), closes [#1103](https://github.com/14790897/MiqroForge-Desktop/issues/1103)
+
+
+### Reverts
+
+* **#1071:** 回退 646-v2 计划/确认/危险动作交互重做（保留夹带的无关改进） ([#1205](https://github.com/14790897/MiqroForge-Desktop/issues/1205)) ([09f64f1](https://github.com/14790897/MiqroForge-Desktop/commit/09f64f14a79142e2304cde2ee068b40ee62a4f95)), closes [#1071](https://github.com/14790897/MiqroForge-Desktop/issues/1071) [#1071](https://github.com/14790897/MiqroForge-Desktop/issues/1071) [#1071](https://github.com/14790897/MiqroForge-Desktop/issues/1071) [#1146](https://github.com/14790897/MiqroForge-Desktop/issues/1146) [#1078](https://github.com/14790897/MiqroForge-Desktop/issues/1078) [#1071](https://github.com/14790897/MiqroForge-Desktop/issues/1071) [#1146](https://github.com/14790897/MiqroForge-Desktop/issues/1146) [#1071](https://github.com/14790897/MiqroForge-Desktop/issues/1071) [#1071](https://github.com/14790897/MiqroForge-Desktop/issues/1071) [#1078](https://github.com/14790897/MiqroForge-Desktop/issues/1078) [pre-#1071](https://github.com/pre-/issues/1071) [#714](https://github.com/14790897/MiqroForge-Desktop/issues/714)
+
+---
+## 下载说明
+
+macOS 用户请按芯片架构选择安装包：
+
+- **Apple Silicon (M1/M2/M3/M4)**：下载 `0.34.0-arm64.dmg`（ARM 架构）
+- **Intel**：下载 `0.34.0.dmg`（x86 无后缀）
+
 # [0.33.0](https://github.com/14790897/MiqroForge-Desktop/compare/v0.32.0...v0.33.0) (2026-09-21)
 
 

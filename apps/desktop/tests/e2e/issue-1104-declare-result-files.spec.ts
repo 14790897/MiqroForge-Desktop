@@ -26,7 +26,6 @@ import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import {
   LLM_TIMEOUT,
   sendMessage,
-  approvePlanCardIfAny,
   waitForResponseComplete,
   waitForBridgeInitialized,
   launchElectronApp,
@@ -180,13 +179,6 @@ test.describe('Issue #1104 — declare_result_files 显式声明结果文件', (
         page,
         `Write the five files ${tag} and declare the report. DECLARE_AS=${declaredAs}`
       );
-      // #646-v2 计划闸门：edit 模式下这批 write_file 触发了 produces_artifact
-      // 计划卡，卡不点掉回合就停在「等待你的确认…」，mock 的第 3 轮文本永远不
-      // 会出现（实测 240s 超时 ×3）。与 task-assets / subagent-spawn 等 spec
-      // 同一处理方式——后台轮询，卡出现即「按当前方案执行」，没卡则静默超时退出。
-      // 与上面的 approvals.addPermanent('*:*') 不重叠：那只放行**权限层**，而
-      // 计划卡是 user-input 卡，不走 permission_engine。
-      void approvePlanCardIfAny(page);
 
       // Turn end: wait for the mock's final text (unique per turn).
       await expect(

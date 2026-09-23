@@ -120,9 +120,13 @@ export function Sidebar({
   const loadSessions = useCallback(async () => {
     try {
       const r = await window.miqi.sessions.list();
-      setSessions(r?.sessions ?? []);
+      // 只有拿到**真实**列表才覆盖。桥超时/不可用时主进程返回 null——而
+      // sessions.list 实测会被别的请求挤到超时（见 #1191），那时清空列表等于把
+      // 用户已有的会话全从眼前抹掉。保留旧列表，下一次刷新自然会纠正；
+      // 后端**确实**没有会话时给的是 {sessions: []}，与失败可以区分。
+      if (r && Array.isArray(r.sessions)) setSessions(r.sessions);
     } catch {
-      /* Bridge not available */
+      /* Bridge not available —— 保留现有列表 */
     }
     setInitialLoading(false);
   }, []);

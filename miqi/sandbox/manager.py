@@ -60,6 +60,31 @@ def sandbox_is_active(sandbox_manager: Any) -> bool:
     )
 
 
+def sandbox_marker_environment(sandbox_manager: Any) -> dict[str, str] | None:
+    """Marker-environment overrides for the sandbox interpreter, or None.
+
+    Skill requirements with platform markers (``; sys_platform == "linux"``)
+    must be evaluated against the interpreter that runs the skill's scripts.
+    When exec runs inside the WSL/bwrap sandbox that interpreter is Linux,
+    while the loader/provisioner themselves run on the host (Windows).  Return
+    the OS-identity keys that differ so callers can pass them to
+    ``Marker.evaluate(environment=...)``; the remaining keys (python_version,
+    platform_machine, …) stay host defaults — the sandbox python is the
+    distro's python3, whose exact version/arch are not known without an async
+    probe, and platform markers are overwhelmingly OS-gated.
+
+    Returns ``None`` when the sandbox is inactive so callers keep the default
+    host environment.
+    """
+    if not sandbox_is_active(sandbox_manager):
+        return None
+    return {
+        "os_name": "posix",
+        "sys_platform": "linux",
+        "platform_system": "Linux",
+    }
+
+
 _git_bash_checked = False
 _git_bash_path: str | None = None
 
@@ -397,6 +422,8 @@ class SandboxManager:
         session_workspace_resolver: Any = None,
     ):
         self.workspace = workspace
+        # 显式配置过就跟着配置走；没配过则跟随 workspace（retarget 时要分辨）。
+        self._sandbox_base_dir_explicit = sandbox_base_dir is not None
         self.sandbox_base_dir = sandbox_base_dir or workspace / "sandboxes"
         self.share_net = share_net
         self.enabled = enabled
@@ -759,6 +786,32 @@ class SandboxManager:
         if client_id is not None:
             return f"{client_id}:{session_key}"
         return session_key
+
+    def retarget(self, workspace: Path) -> None:
+        """Point the manager's **fallback** workspace at *workspace* (#1185).
+
+        ``get_or_create`` picks the sandbox workspace in this order: the
+        explicit ``workspace`` override → the session resolver → ``self.workspace``.
+        The bridge's tool callers pass no override, and the resolver reads the
+        live config (so it is already account-correct) — only this fallback
+        goes stale, and it is what a new account's session would mount when the
+        resolver has nothing to say.  The manager is created once, at the first
+        account's ``config.workspace_path``, so without this an A→B switch could
+        still bind B's session to A's workspace.
+
+        Existing sandboxes are keyed by their own session key and stay bound to
+        the old root; retiring them is the caller's job (``destroy`` /
+        ``destroy_all``), because this runs on the synchronous config path.
+
+        ``sandbox_base_dir`` follows the workspace **only when it was derived
+        from it** — an explicitly configured base dir is a user choice.
+        """
+        resolved = Path(workspace).expanduser().resolve()
+        if resolved == self.workspace:
+            return
+        self.workspace = resolved
+        if not self._sandbox_base_dir_explicit:
+            self.sandbox_base_dir = resolved / "sandboxes"
 
     async def get_or_create(
         self, session_key: str, *, client_id: str | None = None, workspace: Path | None = None,

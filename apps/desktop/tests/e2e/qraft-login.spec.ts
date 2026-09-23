@@ -20,6 +20,7 @@ import { writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs';
 import {
   launchElectronApp,
   closeElectronApp,
+  getAccountWorkspaceDir,
   type ElectronFixture,
 } from './helpers/electron-setup';
 
@@ -177,7 +178,8 @@ test.describe('MiQroForge 平台登录 E2E (issue #726)', () => {
 
     // token 文件通道：登录态恢复时同步写入 workspace/.qraft/token.json
     //（供 Skill/agent 读取，仅含 accessToken + expiresAt）
-    const tokenFile = join(fixture.miqiHome, 'workspace', '.qraft', 'token.json');
+    // #1185：预置的是「已登录」态，工作区按账号收口，落点在 accounts/<sub>/ 下。
+    const tokenFile = join(getAccountWorkspaceDir(fixture.miqiHome, '19'), '.qraft', 'token.json');
     await expect
       .poll(() => (existsSync(tokenFile) ? readFileSync(tokenFile, 'utf8') : ''), {
         timeout: 10_000,

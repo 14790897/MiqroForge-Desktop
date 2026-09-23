@@ -48,10 +48,12 @@ describe.skipIf(!LIVE || !PHONE || !PASSWORD)('MiQroForge live integration', () 
     expect(tokens.accessToken.length).toBeGreaterThan(20);
     expect(tokens.refreshToken.length).toBeGreaterThan(20);
     expect(tokens.openid).toBeTruthy();
-    // 实测 expires_in=7199（约 2 小时，非官方 24 小时）
+    // 有效期由平台下发：2026-09-21 实测 expires_in=2591999（约 30 天），
+    // 早期实测 7199（约 2 小时）——不做窗口断言，只验证解析出正值并记录。
+    // 「平台是否真的下发了 expires_in」由 ⑧ 直接读原始响应验证：这里的下限
+    // 断言会被 buildTokens 的 7199 兜底满足，单靠它测不出字段漏发。
     const ttlMs = tokens.expiresAt - Date.now();
-    expect(ttlMs).toBeGreaterThan(7_000_000);
-    expect(ttlMs).toBeLessThan(8_000_000);
+    expect(ttlMs).toBeGreaterThan(60_000);
     console.log(
       `[live] access_token=${maskSecret(tokens.accessToken)} ttl=${Math.round(ttlMs / 1000)}s`
     );
@@ -62,7 +64,7 @@ describe.skipIf(!LIVE || !PHONE || !PASSWORD)('MiQroForge live integration', () 
     expect(info.username).toBeTruthy();
     expect(info.sub).toBeTruthy();
 
-    // ⑦ 刷新：新平台轮换 refresh_token（旧值刷新后立即失效），响应应携带新值。
+    // ⑦ 刷新：平台当前不轮换 refresh_token（旧值可复用，2026-09-15 实测）。
     // 不强行断言轮换与否（以真实平台行为为准），只记录供排查。
     const refreshed = await client.refreshTokens(CONFIG, tokens.refreshToken);
     expect(refreshed.accessToken.length).toBeGreaterThan(20);
@@ -71,6 +73,30 @@ describe.skipIf(!LIVE || !PHONE || !PASSWORD)('MiQroForge live integration', () 
     console.log(
       `[live] refresh ok（refresh_token ${rotated ? '已轮换' : '未轮换'}：${maskSecret(refreshed.refreshToken)}）`
     );
+
+    // ⑧ 原始 token 响应必须真实携带 expires_in：buildTokens 在字段缺失/非法时
+    // 回退 7199 秒，只看解析结果的话，平台漏发会被静默吞掉（CodeRabbit #1170）。
+    // 直接再刷一次（平台不轮换、可重复调用），读原始 JSON 与客户端解析出的
+    // 到期时间比对——若走了兜底，两者相差一个量级。
+    const rawRes = await fetch(`${CONFIG.baseUrl}/oauth2/refresh`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        grant_type: 'refresh_token',
+        refresh_token: tokens.refreshToken,
+        client_id: CONFIG.clientId,
+        client_secret: CONFIG.clientSecret,
+      }).toString(),
+    });
+    const rawJson = JSON.parse(await rawRes.text()) as Record<string, unknown>;
+    const rawNested = (rawJson.data ?? {}) as Record<string, unknown>;
+    const rawExpiresIn = Number(rawJson.expires_in ?? rawNested.expires_in);
+    if (!(Number.isFinite(rawExpiresIn) && rawExpiresIn > 0)) {
+      // 失败信息不带响应体（含 token 原文），只报字段清单
+      throw new Error(`平台未下发 expires_in（响应字段：${Object.keys(rawJson).join(',')}）`);
+    }
+    const refreshedTtlMs = refreshed.expiresAt - Date.now();
+    expect(Math.abs(refreshedTtlMs - rawExpiresIn * 1000)).toBeLessThan(10_000);
   }, 120_000);
 
   it('未加白/凭据类错误能给出分类提示（防御性验证错误映射）', async () => {

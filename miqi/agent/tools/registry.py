@@ -85,9 +85,6 @@ _NEVER_PARALLEL_TOOLS: frozenset[str] = frozenset({
     "spawn",
     "cron",
     "ask_user_confirm_card",
-    # #646-v2: 阻塞型人机握手工具，等待用户输入期间不得并行派发
-    "ask_user_plan_confirm",
-    "request_action_confirmation",
 })
 
 

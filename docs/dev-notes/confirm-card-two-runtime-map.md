@@ -16,5 +16,3 @@ type: project
 - E2E 目录：apps/desktop/tests/e2e/confirm-card.spec.ts（mock 五轮）、confirm-card-real-llm.spec.ts（真实 LLM）
 
 **2026-09-02 复核（重要更正）**：KUN 移植引擎（miqi/kun_runtime/）的循环引擎 AgentLoop **没有任何实例化调用**，未接入主执行路径。当前桌面聊天主路径是 miqi/runtime/ 的 RuntimeSession → TaskRunner → TurnRunner（回合执行器自实现模型-工具循环）。kun_runtime 唯一的外部消费者是 agent/user_input_resolver.py（借用 UserInputGate 作为共享确认门 + lazy import loop._remember_key）。写产品/技术文档时不要把「KUN runtime」写成已启用路径。
-
-（2026-09 边界：危险动作走 request_action_confirmation；见 [confirm-entry-boundary](confirm-entry-boundary.md)）

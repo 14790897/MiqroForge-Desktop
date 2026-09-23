@@ -321,6 +321,19 @@ function getNestedStr(obj: Record<string, unknown>, ...keys: string[]): string {
   return cur == null ? '' : String(cur);
 }
 
+/**
+ * 工作目录留空或填默认值时，工作区按登录账号隔离（#1185）；填了别的目录就
+ * 按原样用，同设备的其它账号也能看到。
+ *
+ * 判定口径必须跟主进程一致：`ipc/workspace-path.ts` 的 `getWorkspacePath()`
+ * 把「空值或 `~/.miqi/workspace`」当作默认，其余一律按原始字符串当自定义目录
+ * 展开。这里**不能 trim**：`'  ~/.miqi/workspace  '` 在两侧都被当成自定义路径，
+ * trim 过就会提示「已隔离」，而实际上是共享的（#1185 评审）。
+ */
+function isAccountScopedWorkspace(raw: string): boolean {
+  return raw === '' || raw === '~/.miqi/workspace';
+}
+
 import { SettingsToggle } from './components/SettingsToggle';
 
 function SandboxToggle() {
@@ -558,6 +571,11 @@ function GeneralTab({
             浏览
           </Button>
         </div>
+        <p className="mt-1 text-size-xs text-[var(--text-faint)]">
+          {isAccountScopedWorkspace(workspace)
+            ? '默认目录按登录账号隔离：同一台设备上换账号登录，各自的工作区、会话与记忆互不可见。'
+            : '指定目录后按原样使用，不再按账号隔离——同一台设备上的其它账号也能看到这个目录里的内容。'}
+        </p>
       </div>
 
       <div className="flex flex-col gap-1.5">
