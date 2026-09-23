@@ -48,7 +48,9 @@ export function CleanupSettings() {
         new Set(r.items.filter((i) => i.exists !== false && i.defaultChecked).map((i) => i.id))
       );
     } catch (err) {
-      setItems(null);
+      // 扫描失败不能停在「正在扫描」的假加载态：显示错误 + 重试入口。
+      setItems([]);
+      setAvailable(false);
       setReason(err instanceof Error ? err.message : String(err));
     }
   }, []);
@@ -93,8 +95,21 @@ export function CleanupSettings() {
 
   const doQuitAndClean = useCallback(async () => {
     setConfirmDialogOpen(false);
-    await window.miqi.cleanup.quitAndClean(selected.map((i) => i.id));
-    // 应用即将退出，无 UI 后续。
+    // 启动失败/拒绝时应用不会退出：把原因落到报告页，避免静默无反馈。
+    let reason: string | undefined;
+    try {
+      const r = await window.miqi.cleanup.quitAndClean(selected.map((i) => i.id));
+      if (r.ok) return; // 应用即将退出，无 UI 后续。
+      reason = r.reason ?? '无法启动清理进程';
+    } catch (err) {
+      reason = err instanceof Error ? err.message : String(err);
+    }
+    setReport({
+      cleaned: [],
+      failed: [{ id: 'user-data', label: '退出并清理', reason }],
+      logPath: '',
+    });
+    setStep('report');
   }, [selected]);
 
   if (items === null) {
@@ -118,6 +133,10 @@ export function CleanupSettings() {
             </div>
           </div>
         </div>
+        <Button variant="secondary" size="sm" onClick={() => void rescan()}>
+          <RefreshCw size={14} className="mr-1.5" />
+          重新扫描
+        </Button>
       </div>
     );
   }

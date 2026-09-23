@@ -6,7 +6,8 @@
  * 每个目标在删除前再过一次候选分类与安全校验（#1103：解析不出安全目标
  * 就跳过并记日志，绝不扩大删除范围）。
  */
-import { spawn, spawnSync } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
+import { promisify } from 'node:util';
 import {
   appendFileSync,
   existsSync,
@@ -21,10 +22,10 @@ import { join } from 'node:path';
 import {
   ACTIVE_DATA_ROOT_DEFAULT_NAME,
   classifyDataRootCandidate,
-  dataRootDeletionTargets,
   isSafeDeletionRoot,
   PACKAGED_USER_DATA_DIR_NAME,
   planCleanupItems,
+  resolveActiveDataRoot,
   resolveExplicitDataRoot,
   UPDATER_CACHE_DIR_NAME,
   WSL_SANDBOX_DISTRO,
@@ -33,7 +34,10 @@ import {
   type CleanupItemId,
 } from '../../shared/cleanup-paths';
 import type { CleanupRunReport, CleanupScanItem } from '../../shared/ipc';
+import { computeRegistryDataRoot } from '../data-root-registry';
 import { decodeWslOutput } from './wsl-state';
+
+const execFileAsync = promisify(execFile);
 
 // ---------------------------------------------------------------------------
 // 上下文构建（注册表 DataRoot 快照 + 环境变量）
@@ -46,28 +50,38 @@ function platformOf(): CleanupContext['platform'] {
   return 'other';
 }
 
-/** 读取 HKCU 数据根注册表值（reg.exe 查询，失败返回 null）。 */
-export function readRegistryDataRoot(): string | null {
-  if (process.platform !== 'win32') return null;
+/**
+ * WSL 命令的异步执行（不阻塞 Electron 主进程事件循环）：
+ * execFile 带超时；非零退出/超时都归一成 { status, stdout, stderr }，
+ * 超时时仍返回已捕获的部分输出。
+ */
+async function runWsl(
+  args: string[],
+  timeoutMs: number
+): Promise<{ status: number | null; stdout: Buffer; stderr: Buffer }> {
   try {
-    const r = spawnSync('reg.exe', ['QUERY', 'HKCU\\Software\\MiqroForge', '/v', 'DataRoot'], {
+    const { stdout, stderr } = await execFileAsync('wsl.exe', args, {
+      timeout: timeoutMs,
       windowsHide: true,
-      timeout: 10000,
       encoding: 'buffer',
+      maxBuffer: 16 * 1024 * 1024,
     });
-    if (r.status !== 0 || !r.stdout) return null;
-    const text = decodeWslOutput(r.stdout);
-    // 形如 "    DataRoot    REG_SZ    C:\Users\x\.miqi"
-    const m = text.match(/DataRoot\s+REG_SZ\s+(.+)$/m);
-    return m?.[1]?.trim() || null;
-  } catch {
-    return null;
+    return { status: 0, stdout, stderr };
+  } catch (err) {
+    const e = err as { code?: string | number; stdout?: Buffer; stderr?: Buffer };
+    return {
+      status: typeof e.code === 'number' ? e.code : null,
+      stdout: e.stdout ?? Buffer.alloc(0),
+      stderr: e.stderr ?? Buffer.alloc(0),
+    };
   }
 }
 
 export function buildCleanupContext(opts?: {
   env?: Record<string, string | undefined>;
   registryDataRoot?: string | null;
+  /** 应用当前 profile 的 userData（dev 下与打包版 %APPDATA%\miqi-desktop 不同）。 */
+  userDataDir?: string;
 }): CleanupContext {
   const home = homedir();
   return {
@@ -75,10 +89,19 @@ export function buildCleanupContext(opts?: {
     homeDir: home,
     appDataDir: process.env['APPDATA'] || join(home, 'AppData', 'Roaming'),
     localAppDataDir: process.env['LOCALAPPDATA'] || join(home, 'AppData', 'Local'),
+    // 与打包版启动时写入注册表的计算同源（computeRegistryDataRoot）：
+    // 环境变量 MIQI_HOME 优先、legacy 探测、默认名——避免另起一套 reg.exe
+    // 解析逻辑。非 Windows 上无注册表概念，走默认名候选。
     registryDataRoot:
-      opts?.registryDataRoot !== undefined ? opts.registryDataRoot : readRegistryDataRoot(),
+      opts?.registryDataRoot !== undefined
+        ? opts.registryDataRoot
+        : process.platform === 'win32'
+          ? computeRegistryDataRoot()
+          : null,
     env: opts?.env ?? process.env,
     systemRoot: process.env['SystemRoot'] || undefined,
+    dirExists: existsSync,
+    userDataDir: opts?.userDataDir,
   };
 }
 
@@ -138,11 +161,11 @@ export function parseWslDistroList(text: string): string[] {
   return names;
 }
 
-/** WSL 沙箱 distro 探测：存在性 + distro 内磁盘占用。 */
-export function probeWslSandbox(opts?: {
+/** WSL 沙箱 distro 探测：存在性 + distro 内磁盘占用（异步，不阻塞主进程）。 */
+export async function probeWslSandbox(opts?: {
   statusTimeoutMs?: number;
   sizeTimeoutMs?: number;
-}): WslProbe {
+}): Promise<WslProbe> {
   const statusTimeoutMs = opts?.statusTimeoutMs ?? 10000;
   const sizeTimeoutMs = opts?.sizeTimeoutMs ?? 60000;
   if (process.platform !== 'win32') {
@@ -153,66 +176,42 @@ export function probeWslSandbox(opts?: {
       detail: '非 Windows',
     };
   }
-  try {
-    const status = spawnSync('wsl.exe', ['--status'], {
-      timeout: statusTimeoutMs,
-      encoding: 'buffer',
-      windowsHide: true,
-    });
-    if (status.status !== 0) {
-      return {
-        wslAvailable: false,
-        distroExists: null,
-        distroSizeBytes: null,
-        detail: 'WSL 不可用（未安装或服务未启动），沙箱发行版无法清理',
-      };
-    }
-  } catch (err) {
+
+  const status = await runWsl(['--status'], statusTimeoutMs);
+  if (status.status !== 0) {
     return {
       wslAvailable: false,
       distroExists: null,
       distroSizeBytes: null,
-      detail: `WSL 探测失败: ${(err as Error).message}`,
+      detail: 'WSL 不可用（未安装或服务未启动），沙箱发行版无法清理',
     };
   }
 
   let exists: boolean | null = null;
-  try {
-    const list = spawnSync('wsl.exe', ['-l', '-q'], {
-      timeout: statusTimeoutMs,
-      encoding: 'buffer',
-      windowsHide: true,
-    });
-    if (list.status === 0) {
-      const names = parseWslDistroList(decodeWslOutput(list.stdout));
-      exists = names.includes(WSL_SANDBOX_DISTRO);
-    }
-  } catch {
-    /* exists 保持 null（未知） */
+  const list = await runWsl(['-l', '-q'], statusTimeoutMs);
+  if (list.status === 0) {
+    const names = parseWslDistroList(decodeWslOutput(list.stdout));
+    exists = names.includes(WSL_SANDBOX_DISTRO);
   }
 
   let size: number | null = null;
   if (exists) {
-    try {
-      const du = spawnSync('wsl.exe', ['-d', WSL_SANDBOX_DISTRO, '--', 'du', '-s', '-k', '/'], {
-        timeout: sizeTimeoutMs,
-        encoding: 'buffer',
-        windowsHide: true,
-      });
-      if (du.status === 0) {
-        const kb = parseInt(decodeWslOutput(du.stdout).trim().split(/\s/)[0] ?? '', 10);
-        if (!Number.isNaN(kb)) size = kb * 1024;
-      }
-    } catch {
-      /* 大小未知 */
-    }
+    // -x 只统计 distro 自身文件系统（不跨 /mnt/c 遍历 Windows 盘），
+    // -u root 避开普通用户对 /proc /root 等的权限报错。du 个别条目报错时
+    // 会以非零退出但 stdout 仍带总量——只要解析得出来就采用。
+    const du = await runWsl(
+      ['-d', WSL_SANDBOX_DISTRO, '-u', 'root', '--', 'du', '-s', '-x', '-k', '/'],
+      sizeTimeoutMs
+    );
+    const kb = parseInt(decodeWslOutput(du.stdout).trim().split(/\s/)[0] ?? '', 10);
+    if (!Number.isNaN(kb)) size = kb * 1024;
   }
   return { wslAvailable: true, distroExists: exists, distroSizeBytes: size };
 }
 
 export async function scanCleanup(ctx: CleanupContext): Promise<CleanupScanItem[]> {
   const items = planCleanupItems(ctx);
-  const wsl = process.platform === 'win32' ? probeWslSandbox() : null;
+  const wsl = process.platform === 'win32' ? await probeWslSandbox() : null;
   const out: CleanupScanItem[] = [];
   for (const item of items) {
     let exists: boolean | null = null;
@@ -229,7 +228,17 @@ export async function scanCleanup(ctx: CleanupContext): Promise<CleanupScanItem[
       }
     } else if (item.path) {
       exists = existsSync(item.path);
-      if (exists) sizeBytes = await dirSizeBytes(item.path);
+      if (exists) {
+        sizeBytes = await dirSizeBytes(item.path);
+        // data-root:rest 的显示大小要扣除 excludes（保留的 workspace），
+        // 否则确认页会把「不会删除」的空间也算进删除量。
+        for (const ex of item.excludes) {
+          if (sizeBytes == null) break;
+          if (!existsSync(ex)) continue;
+          const exSize = await dirSizeBytes(ex);
+          sizeBytes = exSize == null ? null : Math.max(0, sizeBytes - exSize);
+        }
+      }
     }
     out.push({
       id: item.id,
@@ -333,7 +342,7 @@ async function rmDirGuarded(
   }
 }
 
-/** WSL 沙箱 distro 注销：terminate → unregister，只碰精确名字。 */
+/** WSL 沙箱 distro 注销：terminate → unregister，只碰精确名字（异步）。 */
 export async function unregisterWslSandbox(
   label: string,
   report: CleanupRunReport,
@@ -342,24 +351,15 @@ export async function unregisterWslSandbox(
 ): Promise<void> {
   if (opts.terminate) {
     // 未运行时报错可忽略
-    spawnSync('wsl.exe', ['--terminate', WSL_SANDBOX_DISTRO], {
-      timeout: 30000,
-      windowsHide: true,
-    });
+    await runWsl(['--terminate', WSL_SANDBOX_DISTRO], 30000);
   }
-  const r = spawnSync('wsl.exe', ['--unregister', WSL_SANDBOX_DISTRO], {
-    timeout: 180000,
-    encoding: 'buffer',
-    windowsHide: true,
-  });
+  const r = await runWsl(['--unregister', WSL_SANDBOX_DISTRO], 180000);
   if (r.status === 0) {
     report.cleaned.push({ id: 'wsl-distro', label });
     logCleanupLine(logPath, `[已清理] ${label}: ${WSL_SANDBOX_DISTRO}`);
     return;
   }
-  const stderr = decodeWslOutput(r.stderr as Buffer | null)
-    .replace(/\s+/g, ' ')
-    .trim();
+  const stderr = decodeWslOutput(r.stderr).replace(/\s+/g, ' ').trim();
   const reason = stderr
     ? `注销失败（退出码 ${r.status ?? '?'}）：${stderr.slice(0, 200)}`
     : `注销失败（退出码 ${r.status ?? '?'}）。可手动执行: wsl --unregister ${WSL_SANDBOX_DISTRO}`;
@@ -396,10 +396,12 @@ export async function runCleanup(
       report.failed.push({ id: item.id, label: item.label, reason });
     }
   }
-  // 删除目标全集：显式安全根，或全部默认名候选（与 dataRootDeletionTargets 一致，
-  // 卸载场景下 .forge/.miqi/.assistant 哪个存在删哪个）。
-  const rootTargets = explicit ? [explicit.path] : dataRootDeletionTargets(ctx);
-  const primaryRoot = explicit ? explicit.path : join(ctx.homeDir, ACTIVE_DATA_ROOT_DEFAULT_NAME);
+  // 应用内清理只删扫描/确认页展示的那一个根（与 planCleanupItems 一致）：
+  // 显式安全根，或 resolveActiveDataRoot 的生效根（MIQI_HOME/legacy/默认名，
+  // ctx.dirExists 由 buildCleanupContext 注入）。全部候选根的清除由 NSIS
+  // 卸载器负责（那边逐候选探测），应用内不越界删除未展示的路径。
+  const primaryRoot = explicit?.safe ? explicit.path : resolveActiveDataRoot(ctx);
+  const rootTargets = [primaryRoot];
 
   for (const item of selected) {
     // 已在上面的 dataRootBlocked 分支记入 failed，这里不重复执行。
@@ -484,7 +486,9 @@ export async function runCleanup(
           report.failed.push({ id: item.id, label: item.label, reason: '路径不可确认，跳过' });
           continue;
         }
-        const expected = join(ctx.appDataDir, PACKAGED_USER_DATA_DIR_NAME);
+        // dev/E2E 下 userData 是 miqi-desktop-dev\ws-<hash>（或 MIQI_USER_DATA_DIR），
+        // 以调用方注入的 userDataDir 为准，避免误删打包版真实 profile。
+        const expected = ctx.userDataDir ?? join(ctx.appDataDir, PACKAGED_USER_DATA_DIR_NAME);
         await rmDirGuarded(
           item.path,
           item.label,
@@ -542,6 +546,7 @@ export interface CleanupScope {
     registryDataRoot: string | null;
     systemRoot?: string;
     platform: CleanupContext['platform'];
+    userDataDir?: string;
   };
   ids: CleanupItemId[];
   logPath: string;
@@ -575,11 +580,13 @@ export function readCleanupScope(scopePath: string): CleanupScope | null {
 export function launchQuitAndClean(
   execPath: string,
   scope: CleanupScope,
-  scopePath = defaultCleanupScopePath()
+  scopePath = defaultCleanupScopePath(),
+  extraArgs: string[] = []
 ): { ok: boolean; reason?: string } {
   try {
     writeCleanupScope(scope, scopePath);
-    const child = spawn(execPath, ['--cleanup', scopePath], {
+    // dev 下 execPath 是 electron.exe，必须带上应用路径才能跑进本应用的 main()。
+    const child = spawn(execPath, [...extraArgs, '--cleanup', scopePath], {
       detached: true,
       stdio: 'ignore',
       windowsHide: true,
@@ -616,6 +623,8 @@ export async function runCleanupFromScope(scopePath: string): Promise<CleanupRun
     registryDataRoot: scope.ctx.registryDataRoot,
     env: process.env,
     systemRoot: scope.ctx.systemRoot,
+    dirExists: existsSync,
+    userDataDir: scope.ctx.userDataDir,
   };
   const selected = planCleanupItems(ctx).filter((i) => scope.ids.includes(i.id));
   return runCleanup(ctx, selected, {

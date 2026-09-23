@@ -47,7 +47,7 @@
       Abort
     ${EndIf}
 
-    ${NSD_CreateLabel} 0 0u 100% 84u "即将卸载 MiQroForge Desktop。$\r$\n勾选下方选项可同时删除全部应用数据（默认不勾选，数据会保留）：$\r$\n$\r$\n· 数据根目录：$R0（会话、技能、插件、日志、配置、沙箱状态）$\r$\n· 应用用户数据：$APPDATA\@@USERDATA_DIR@@$\r$\n· WSL 沙箱发行版：@@DISTRO@@（如存在，可能占用数 GB）$\r$\n· 自动更新缓存：$LOCALAPPDATA\@@UPDATER_DIR@@"
+    ${NSD_CreateLabel} 0 0u 100% 84u "即将卸载 MiQroForge Desktop。$\r$\n勾选下方选项可同时删除全部应用数据（默认不勾选，数据会保留）：$\r$\n$\r$\n· 数据根目录：$R0（含 workspace 用户文档、会话、技能、日志、配置、沙箱状态，将被整体删除）$\r$\n· 应用用户数据：$APPDATA\@@USERDATA_DIR@@$\r$\n· WSL 沙箱发行版：@@DISTRO@@（如存在，可能占用数 GB）$\r$\n· 自动更新缓存：$LOCALAPPDATA\@@UPDATER_DIR@@"
     Pop $R1
 
     ${NSD_CreateCheckbox} 0 92u 100% 12u "同时删除应用数据（含 WSL 沙箱 @@DISTRO@@）"
@@ -92,13 +92,19 @@
     ExecWait '$SYSDIR\cmd.exe /C "$SYSDIR\wsl.exe" -l -q > "$R0"' $R1
     StrCpy $R2 "0"
     IfFileExists $R0 0 miqi_wsl_nolist
+    ClearErrors
     FileOpen $R3 $R0 r
     miqi_wsl_read:
     FileReadUTF16LE $R3 $R4
     IfErrors miqi_wsl_done
-    ; 每行即一个 distro 名（FileReadUTF16LE 已剥掉换行），全等比较即可。
     ; 不用 StrContains：其内部 Call 的是安装器函数，卸载器里不能调用。
-    StrCmp $R4 "@@DISTRO@@" 0 miqi_wsl_read
+    ; FileReadUTF16LE 是否剥掉行尾换行随 NSIS 版本而异，三种形态都匹配
+    ; （带 $\r$\n、带 $\r、无行尾的最后一行）。
+    StrCmp $R4 "@@DISTRO@@" miqi_wsl_found
+    StrCmp $R4 "@@DISTRO@@$\r" miqi_wsl_found
+    StrCmp $R4 "@@DISTRO@@$\r$\n" miqi_wsl_found
+    Goto miqi_wsl_read
+    miqi_wsl_found:
     StrCpy $R2 "1"
     miqi_wsl_done:
     FileClose $R3
@@ -138,17 +144,45 @@
     Goto miqi_cleanup_dataroot_done
 
     miqi_cleanup_regroot:
-    ; 去尾部反斜杠后做安全校验：拒绝主目录/系统目录/盘根（#1103）。
+    ; 去尾部反斜杠后做安全校验（#1103）：拒绝空值/盘根/主目录及其祖先/
+    ; 系统目录/AppData 等，含 ".." 或 "/" 的路径也拒绝——绝不扩大删除范围。
     miqi_trim:
     StrCpy $R5 $R0 1 -1
     StrCmp $R5 "\" 0 miqi_trim_done
     StrCpy $R0 $R0 -1
     Goto miqi_trim
     miqi_trim_done:
+    StrCmp $R0 "" miqi_cleanup_regroot_unsafe
     StrCmp $R0 "$PROFILE" miqi_cleanup_regroot_unsafe
     StrCmp $R0 "$WINDIR" miqi_cleanup_regroot_unsafe
+    StrCmp $R0 "$APPDATA" miqi_cleanup_regroot_unsafe
+    StrCmp $R0 "$LOCALAPPDATA" miqi_cleanup_regroot_unsafe
+    StrCmp $R0 "$PROGRAMFILES" miqi_cleanup_regroot_unsafe
+    ; 长度 < 4（盘根 "C:" 之类）拒绝；IntCmp 参数序：equal/less/more。
     StrLen $R1 $R0
-    IntCmp $R1 4 miqi_cleanup_regroot_unsafe 0 0
+    IntCmp $R1 4 miqi_cleanup_regroot_len_ok miqi_cleanup_regroot_unsafe miqi_cleanup_regroot_len_ok
+    miqi_cleanup_regroot_len_ok:
+    ; $PROFILE 的祖先目录（如 C:\Users）也拒绝：$R0 是 $PROFILE 的前缀
+    ; 且 $PROFILE 的下一个字符是分隔符才算祖先。
+    StrLen $R1 $R0
+    StrCpy $R3 "$PROFILE" $R1
+    StrCmp $R3 $R0 0 miqi_cleanup_regroot_scan
+    StrCpy $R3 "$PROFILE" 1 $R1
+    StrCmp $R3 "\" miqi_cleanup_regroot_unsafe
+    miqi_cleanup_regroot_scan:
+    ; 含 "/" 或 ".." 的路径不可能指向已知数据根，拒绝（游标逐位比对）。
+    StrCpy $R2 $R0
+    StrLen $R1 $R2
+    miqi_scan_chars:
+    IntCmp $R1 0 miqi_cleanup_regroot_del 0 0
+    StrCpy $R3 $R2 1
+    StrCmp $R3 "/" miqi_cleanup_regroot_unsafe
+    StrCpy $R3 $R2 2
+    StrCmp $R3 ".." miqi_cleanup_regroot_unsafe
+    StrCpy $R2 $R2 1
+    IntOp $R1 $R1 - 1
+    Goto miqi_scan_chars
+    miqi_cleanup_regroot_del:
     !insertmacro CleanupRemoveDir "$R0" "数据根（注册表 DataRoot）" regroot
     Goto miqi_cleanup_dataroot_done
 

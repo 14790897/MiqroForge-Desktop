@@ -48,6 +48,19 @@ describe('isSafeDeletionRoot', () => {
     expect(r.safe).toBe(false);
   });
 
+  it('rejects ancestors of the home directory (如 C:\\Users)', () => {
+    // MIQI_HOME=C:\Users\tester\.. 解析漂移到 C:\Users 时绝不能放行，
+    // 否则 data-root 清理会逐个删掉 C:\Users 的子目录（含整个用户目录）。
+    const r = isSafeDeletionRoot('C:\\Users', ctx);
+    expect(r.safe).toBe(false);
+    expect(r.reason).toContain('祖先');
+  });
+
+  it('handles a systemRoot with a trailing separator (relative 语义)', () => {
+    const withTrailing = makeCtx({ systemRoot: 'C:\\Windows\\' });
+    expect(isSafeDeletionRoot('C:\\Windows\\system32', withTrailing).safe).toBe(false);
+  });
+
   it('rejects system directories and anything inside them', () => {
     expect(isSafeDeletionRoot('C:\\Windows', ctx).safe).toBe(false);
     expect(isSafeDeletionRoot('C:\\windows\\system32\\x', ctx).safe).toBe(false);
@@ -174,6 +187,21 @@ describe('resolveActiveDataRoot (mirrors miqi/utils/helpers.py get_data_path)', 
   it('default wins when both exist', () => {
     const ctx = makeCtx({ dirExists: () => true });
     expect(resolveActiveDataRoot(ctx)).toBe(path.join(ctx.homeDir, '.miqi'));
+  });
+
+  it('legacy 用户（仅 ~/.assistant 存在）的清理计划指向 legacy 根而非不存在的默认名', () => {
+    const ctx = makeCtx();
+    const legacy = path.join(ctx.homeDir, '.assistant');
+    const withLegacy = { ...ctx, dirExists: (d: string) => d === legacy };
+    const rest = planCleanupItems(withLegacy).find((i) => i.id === 'data-root:rest')!;
+    expect(rest.path).toBe(legacy);
+    expect(rest.excludes).toEqual([path.join(legacy, 'workspace')]);
+  });
+
+  it('userDataDir 注入优先于默认 %APPDATA% 组合路径', () => {
+    const ctx = makeCtx({ userDataDir: 'D:\\dev-profile' });
+    const userData = planCleanupItems(ctx).find((i) => i.id === 'user-data')!;
+    expect(userData.path).toBe('D:\\dev-profile');
   });
 
   it('defaults to the active default name', () => {

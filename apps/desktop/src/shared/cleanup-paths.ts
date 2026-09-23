@@ -44,6 +44,11 @@ export interface CleanupContext {
   systemRoot?: string;
   /** 目录存在性探测（主进程注入 fs.stat；纯模块不碰文件系统）。 */
   dirExists?: (dir: string) => boolean;
+  /**
+   * 应用当前 profile 的 userData 目录；缺省为 <appData>/miqi-desktop
+   * （打包版）。dev/E2E 下调用方注入 getPath('userData')，避免误删真实 profile。
+   */
+  userDataDir?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -72,9 +77,12 @@ function samePath(a: string, b: string, platform: CleanupPlatform): boolean {
 
 /** p 等于 base 或位于 base 之内（win32 大小写不敏感）。 */
 function isSameOrInside(p: string, base: string, platform: CleanupPlatform): boolean {
-  if (samePath(p, base, platform)) return true;
-  const prefix = platform === 'win32' ? `${base.toLowerCase()}\\` : `${base}/`;
-  return platform === 'win32' ? p.toLowerCase().startsWith(prefix) : p.startsWith(prefix);
+  // 用 relative 语义而非字符串前缀：base 带尾分隔符、大小写差异
+  // （win32）都由 path 实现归一，`..` 前缀表示 p 在 base 之外。
+  const impl = pathFor(platform);
+  const rel = impl.relative(base, p);
+  if (rel === '') return true;
+  return !rel.startsWith('..') && !impl.isAbsolute(rel);
 }
 
 /**
@@ -97,8 +105,10 @@ export function isSafeDeletionRoot(dir: string, ctx: CleanupContext): SafetyDeci
   if (samePath(resolved, root, ctx.platform)) {
     return { safe: false, reason: `拒绝删除文件系统根目录: ${resolved}` };
   }
-  if (samePath(resolved, ctx.homeDir, ctx.platform)) {
-    return { safe: false, reason: `拒绝删除用户主目录: ${resolved}` };
+  // 拒绝主目录本身**及其祖先**（如 C:\Users）：MIQI_HOME=C:\Users\x\.. 这类
+  // 解析漂移绝不能把删除范围扩大到整个用户目录（#1103）。
+  if (isSameOrInside(ctx.homeDir, resolved, ctx.platform)) {
+    return { safe: false, reason: `拒绝删除用户主目录或其祖先目录: ${resolved}` };
   }
   if (ctx.systemRoot && isSameOrInside(resolved, ctx.systemRoot, ctx.platform)) {
     return { safe: false, reason: `拒绝删除系统目录: ${resolved}` };
@@ -240,10 +250,10 @@ export interface CleanupItem {
 export function planCleanupItems(ctx: CleanupContext): CleanupItem[] {
   const p = pathFor(ctx.platform);
   const explicit = resolveExplicitDataRoot(ctx);
-  // UI 展示用主数据根：显式配置优先，否则默认名候选（探测后替换）。
-  const primaryRoot = explicit?.safe
-    ? explicit.path
-    : p.join(ctx.homeDir, ACTIVE_DATA_ROOT_DEFAULT_NAME);
+  // UI 展示用主数据根：显式配置优先，否则 resolveActiveDataRoot 的生效根
+  // （MIQI_HOME/legacy 存在性/默认名——legacy 用户看到的是 ~/.assistant 而非
+  // 不存在的 ~/.miqi）。ctx.dirExists 由调用方注入存在性探测。
+  const primaryRoot = explicit?.safe ? explicit.path : resolveActiveDataRoot(ctx);
   const workspacePath = p.join(primaryRoot, 'workspace');
 
   return [
@@ -274,7 +284,8 @@ export function planCleanupItems(ctx: CleanupContext): CleanupItem[] {
       kind: 'user-data',
       label: '应用用户数据',
       description: '登录态、界面设置、扣费历史与 Chromium 缓存',
-      path: p.join(ctx.appDataDir, PACKAGED_USER_DATA_DIR_NAME),
+      // dev/E2E 下注入的 userDataDir 与打包版默认路径不同，以注入值为准。
+      path: ctx.userDataDir ?? p.join(ctx.appDataDir, PACKAGED_USER_DATA_DIR_NAME),
       excludes: [],
       exists: null,
       defaultChecked: false,

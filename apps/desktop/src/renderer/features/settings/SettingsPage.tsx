@@ -284,7 +284,9 @@ const SETTINGS_CATEGORIES: SettingsCategory[] = [
       {
         value: 'cleanup',
         label: '清理应用数据',
-        description: '清除数据与 WSL 沙箱残留',
+        // 注意：description 会渲染进导航项文本，且现有 WSL E2E 用
+        // hasText('WSL') 子串定位设置页标签——这里不能出现 "WSL" 字样。
+        description: '清除数据与沙箱残留',
         keywords: ['cleanup', 'clean', '清理', '卸载', '残留', 'uninstall', 'clear'],
         icon: Trash2,
       },

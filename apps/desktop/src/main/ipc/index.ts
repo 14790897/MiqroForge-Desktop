@@ -1749,7 +1749,7 @@ for m in ("pydantic", "httpx", "loguru"):
     if (!cleanupAvailable()) {
       return { items: [], available: false, reason: '应用数据清理仅在安装版可用' };
     }
-    const ctx = buildCleanupContext();
+    const ctx = buildCleanupContext({ userDataDir: electron.app.getPath('userData') });
     const items = await scanCleanup(ctx);
     return { items, available: true };
   });
@@ -1767,7 +1767,7 @@ for m in ("pydantic", "httpx", "loguru"):
     const ids = Array.isArray(payload?.ids)
       ? (payload.ids.filter((x) => typeof x === 'string') as CleanupItemId[])
       : [];
-    const ctx = buildCleanupContext();
+    const ctx = buildCleanupContext({ userDataDir: electron.app.getPath('userData') });
     const selected = planCleanupItems(ctx).filter((i) => ids.includes(i.id));
     // 运行态不可删项（user-data）拒绝执行，提示走「退出并清理」。
     const runnable = selected.filter((i) => i.deletableNow);
@@ -1791,7 +1791,7 @@ for m in ("pydantic", "httpx", "loguru"):
     const ids = Array.isArray(payload?.ids)
       ? (payload.ids.filter((x) => typeof x === 'string') as CleanupItemId[])
       : [];
-    const ctx = buildCleanupContext();
+    const ctx = buildCleanupContext({ userDataDir: electron.app.getPath('userData') });
     const scope: CleanupScope = {
       ctx: {
         homeDir: ctx.homeDir,
@@ -1800,11 +1800,18 @@ for m in ("pydantic", "httpx", "loguru"):
         registryDataRoot: ctx.registryDataRoot,
         systemRoot: ctx.systemRoot,
         platform: ctx.platform,
+        userDataDir: ctx.userDataDir,
       },
       ids,
       logPath: join(tmpdir(), `miqi-cleanup-${Date.now()}.log`),
     };
-    const launched = launchQuitAndClean(process.execPath, scope);
+    // dev 下 execPath 是 electron.exe，附加应用路径才能跑进本应用 main()。
+    const launched = launchQuitAndClean(
+      process.execPath,
+      scope,
+      undefined,
+      electron.app.isPackaged ? [] : [electron.app.getAppPath()]
+    );
     if (!launched.ok) return launched;
     // 给 renderer 留出收到响应的时间，再退出让清理实例接手（清理完成后不自动重启）。
     setTimeout(() => electron.app.quit(), 300);
