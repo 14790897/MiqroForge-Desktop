@@ -87,9 +87,11 @@
   !macro CleanupWslDistro
     ; 探测：wsl -l -q 重定向到临时文件（wsl 重定向输出为 UTF-16LE），
     ; FileReadUTF16LE 逐行比对 distro 名；不存在则整段跳过。
+    ; 注意：cmd /C 后首个字符若是引号，cmd 会剥掉首尾引号导致路径损坏
+    ; （"a" b > "c" → a" b > "c）——$SYSDIR 无空格，exe 路径不加引号。
     StrCpy $R0 "$TEMP\miqi-wsl-list.tmp"
     Delete $R0
-    ExecWait '$SYSDIR\cmd.exe /C "$SYSDIR\wsl.exe" -l -q > "$R0"' $R1
+    ExecWait '$SYSDIR\cmd.exe /C $SYSDIR\wsl.exe -l -q > "$R0"' $R1
     StrCpy $R2 "0"
     IfFileExists $R0 0 miqi_wsl_nolist
     ClearErrors
@@ -113,6 +115,7 @@
 
     StrCmp $R2 "1" 0 miqi_wsl_end
     ; 先 terminate 释放占用（未运行时报错可忽略），再 unregister。
+    ; 无需 cmd 包装：wsl.exe 是真实可执行文件，直接 ExecWait。
     ExecWait '$SYSDIR\wsl.exe --terminate @@DISTRO@@' $R1
     ExecWait '$SYSDIR\wsl.exe --unregister @@DISTRO@@' $R1
     ${If} $R1 == 0
@@ -127,10 +130,11 @@
   ; ── 清理主体（卸载 section 内、删除程序文件之前执行）───────────────
 
   !macro customUnInstall
-    ${If} ${Silent}
-      ; 静默卸载走环境变量（e2e 驱动）；交互模式已由复选框页写入 $MiqiCleanupChecked。
-      ReadEnvStr $MiqiCleanupChecked "MIQI_UNINSTALL_CLEANUP"
-    ${EndIf}
+    ; 静默卸载（/S 或编译期 SilentInstall，运行时 IfSilent 判定）走环境变量
+    ; （e2e 驱动）；交互模式已由复选框页写入 $MiqiCleanupChecked，此处不覆盖。
+    IfSilent 0 miqi_cleanup_check_skip
+    ReadEnvStr $MiqiCleanupChecked "MIQI_UNINSTALL_CLEANUP"
+    miqi_cleanup_check_skip:
     StrCmp $MiqiCleanupChecked "1" 0 miqi_cleanup_end
 
     StrCpy $MiqiCleanupRan "1"
