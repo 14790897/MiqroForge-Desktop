@@ -72,7 +72,7 @@ async def test_skills_extra_roots_set_is_client_scoped_and_emits_event(tmp_path)
 @pytest.mark.asyncio
 async def test_hooks_list_reads_workspace_hooks(tmp_path):
     cwd = tmp_path / "workspace"
-    hooks_dir = cwd / ".miqi" / "hooks"
+    hooks_dir = cwd / ".forge" / "hooks"
     hooks_dir.mkdir(parents=True)
     (hooks_dir / "hooks.json").write_text(
         '{"hooks":[{"name":"pre-tool","event":"pre_tool"}]}',
@@ -306,7 +306,7 @@ async def test_hooks_list_invalid_json_is_sanitized(tmp_path):
     from miqi.runtime.skills_app_handlers import register_skills_app_handlers
 
     cwd = tmp_path / "workspace"
-    hooks_dir = cwd / ".miqi" / "hooks"
+    hooks_dir = cwd / ".forge" / "hooks"
     hooks_dir.mkdir(parents=True)
     hooks_file = hooks_dir / "hooks.json"
     hooks_file.write_text("not valid json {{", encoding="utf-8")

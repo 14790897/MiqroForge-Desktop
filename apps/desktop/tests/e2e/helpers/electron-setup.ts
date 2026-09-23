@@ -77,7 +77,7 @@ export function getAccountWorkspaceDir(miqiHome: string, sub: string): string {
 /**
  * Wait for the chat input textarea to be present and enabled.
  *
- * 同时判定应用「能否进入主界面」：没有 ~/.miqi/config.json 时应用停在首启动
+ * 同时判定应用「能否进入主界面」：没有 ~/.forge/config.json 时应用停在首启动
  * 向导（App.tsx 以 python.check().config_exists 决定 needsSetup），
  * chat-input 永不挂载 —— 检测到向导就点「使用默认配置，进入应用」把它带进
  * 主界面；若点了仍进不去，报错明确指出停在向导（而非泛指超时）。
@@ -109,7 +109,7 @@ export async function waitForInputReady(page: Page, timeout = 60_000) {
       (await enterWithDefaults.isVisible({ timeout: 5000 }).catch(() => false))
     ) {
       console.log(
-        '[test] 判定：应用停在首启动向导（无 ~/.miqi/config.json）——点「使用默认配置，进入应用」后等待主界面'
+        '[test] 判定：应用停在首启动向导（无 ~/.forge/config.json）——点「使用默认配置，进入应用」后等待主界面'
       );
       // 点击成功才置标志：瞬时遮挡/重渲染导致的点击失败要留给下一轮重试
       try {
@@ -770,7 +770,7 @@ export async function launchElectronApp(
     /** 强制窗口显示在屏幕上（默认本机启动时停在屏幕外，见 applyWindowVisibilityEnv） */
     showWindow?: boolean;
     /**
-     * 不把开发者本机 `~/.miqi/config.json` 拷进临时 MIQI_HOME —— 模拟全新安装
+     * 不把开发者本机 `~/.forge/config.json` 拷进临时 MIQI_HOME —— 模拟全新安装
      * （没有任何用户 provider 凭据、也没有显式配置过 agents.defaults.model）。
      * 默认拷贝是给需要真实 LLM 的用例用的；#1172 这类「无配置」场景必须显式打开。
      */
@@ -796,7 +796,12 @@ export async function launchElectronApp(
 
   // Copy user's provider config into the temp home so the LLM backend is reachable.
   // noUserConfig 时跳过：临时 home 保持「无用户配置」状态（全新安装）。
-  const userConfigPath = join(homedir(), '.miqi', 'config.json');
+  // .miqi → .forge 过渡期回退：pull_request 事件的 CI 仍用 base 分支(develop)的
+  // workflow 把 config 写到 ~/.miqi（workflow 文件变更对 pull_request 不生效），
+  // 所以优先读新路径、回退旧路径，直到 workflow 合入 develop 生效。
+  const forgeConfigPath = join(homedir(), '.forge', 'config.json');
+  const legacyConfigPath = join(homedir(), '.miqi', 'config.json');
+  const userConfigPath = existsSync(forgeConfigPath) ? forgeConfigPath : legacyConfigPath;
   const destConfigPath = join(miqiHome, 'config.json');
   if (!opts?.noUserConfig && existsSync(userConfigPath)) {
     cpSync(userConfigPath, destConfigPath);

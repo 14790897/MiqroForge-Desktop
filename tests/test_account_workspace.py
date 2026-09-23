@@ -33,7 +33,7 @@ ACCOUNT_B = "20"
 
 @pytest.fixture
 def data_root(monkeypatch, tmp_path: Path) -> Path:
-    """把数据根钉在临时目录上，避免读到开发机真实的 ~/.miqi。"""
+    """把数据根钉在临时目录上，避免读到开发机真实的 ~/.forge。"""
     root = tmp_path / "miqi-home"
     root.mkdir()
     monkeypatch.setenv("MIQI_HOME", str(root))
@@ -202,13 +202,13 @@ def test_unclaimed_legacy_workspace_is_invisible_to_a_logged_in_account(data_roo
 
 
 def test_default_field_still_serializes_to_the_documented_value(data_root: Path):
-    """账号维度不进 config.json：默认值仍是 `~/.miqi/workspace`。
+    """账号维度不进 config.json：默认值仍是 `~/.forge/workspace`。
 
     写进配置就成了一次 tier-B 变更，每次切换账号都会弹「新会话生效」提示，
     而且会把用户配置改写成某个账号的绝对路径。
     """
     assert Config().agents.defaults.workspace == DEFAULT_WORKSPACE_VALUE
-    assert DEFAULT_WORKSPACE_VALUE == "~/.miqi/workspace"
+    assert DEFAULT_WORKSPACE_VALUE == "~/.forge/workspace"
 
 
 # ── 端到端：issue #1185 item 8 的验收场景 ─────────────────────────────

@@ -50,7 +50,7 @@ def test_sandbox_is_active(manager, expected):
 @pytest.mark.parametrize(
     "win_path,expected",
     [
-        (r"C:\Users\Intership003\.miqi\workspace", "/c/Users/Intership003/.miqi/workspace"),
+        (r"C:\Users\Intership003\.forge\workspace", "/c/Users/Intership003/.forge/workspace"),
         ("D:/data/out", "/d/data/out"),
         ("/already/posix", "/already/posix"),
     ],

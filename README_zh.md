@@ -210,7 +210,7 @@ miqi-bridge.exe --check
 
 ## 配置说明
 
-应用配置文件位于 `~/.miqi/config.json`：
+应用配置文件位于 `~/.forge/config.json`：
 
 ```json
 {

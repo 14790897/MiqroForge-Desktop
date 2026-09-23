@@ -166,7 +166,7 @@ def register_skills_app_handlers(server: AppServer) -> None:
         hooks = []
         for cwd_raw in cwds:
             cwd = _resolve_allowed_cwd(str(cwd_raw), workspace)
-            path = cwd / ".miqi" / "hooks" / "hooks.json"
+            path = cwd / ".forge" / "hooks" / "hooks.json"
             if not path.exists():
                 continue
             try:

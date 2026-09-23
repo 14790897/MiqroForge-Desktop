@@ -39,7 +39,7 @@ def _server(tmp_path):
 
 @pytest.mark.asyncio
 async def test_thread_read_reads_stored_thread_without_live_session(tmp_path):
-    db = tmp_path / ".miqi-runtime" / "runtime.db"
+    db = tmp_path / ".forge-runtime" / "runtime.db"
     await _seed_thread(db)
     server = _server(tmp_path)
     response = await server.dispatch(
@@ -56,7 +56,7 @@ async def test_thread_read_reads_stored_thread_without_live_session(tmp_path):
 
 @pytest.mark.asyncio
 async def test_thread_turns_list_reads_stored_turns_without_live_session(tmp_path):
-    db = tmp_path / ".miqi-runtime" / "runtime.db"
+    db = tmp_path / ".forge-runtime" / "runtime.db"
     await _seed_thread(db)
     server = _server(tmp_path)
     response = await server.dispatch(
@@ -70,7 +70,7 @@ async def test_thread_turns_list_reads_stored_turns_without_live_session(tmp_pat
 
 @pytest.mark.asyncio
 async def test_thread_list_pages_stored_threads(tmp_path):
-    db = tmp_path / ".miqi-runtime" / "runtime.db"
+    db = tmp_path / ".forge-runtime" / "runtime.db"
     await _seed_thread(db, thread_id="thread-1")
     await _seed_thread(db, thread_id="thread-2")
     server = _server(tmp_path)
@@ -94,7 +94,7 @@ async def test_thread_list_finds_threads_with_bare_session_key(tmp_path):
     This pins that the bare session_key is namespaced under the client
     before filtering, so resume can find the prior thread.
     """
-    db = tmp_path / ".miqi-runtime" / "runtime.db"
+    db = tmp_path / ".forge-runtime" / "runtime.db"
     await _seed_thread(db, session_id="client-a:desktop:1739", thread_id="thread-resume")
     server = _server(tmp_path)
     response = await server.dispatch(
@@ -126,7 +126,7 @@ async def test_thread_list_surfaces_turn_count_for_richness_resume(tmp_path):
     """
     import aiosqlite as _aiosqlite
 
-    db = tmp_path / ".miqi-runtime" / "runtime.db"
+    db = tmp_path / ".forge-runtime" / "runtime.db"
     session_id = "client-a:desktop:1789"
 
     async def _seed(thread_id, turn_ids):
@@ -183,7 +183,7 @@ async def test_thread_read_finds_thread_with_bare_session_key(tmp_path):
     """Issue #490: the stored read path must also namespace a bare
     session_key, otherwise reopening a thread in a session not currently
     live fails to load its history."""
-    db = tmp_path / ".miqi-runtime" / "runtime.db"
+    db = tmp_path / ".forge-runtime" / "runtime.db"
     await _seed_thread(db, session_id="client-a:desktop:1739", thread_id="thread-resume")
     server = _server(tmp_path)
     response = await server.dispatch(
@@ -198,7 +198,7 @@ async def test_thread_read_finds_thread_with_bare_session_key(tmp_path):
 
 @pytest.mark.asyncio
 async def test_thread_read_rejects_foreign_stored_thread(tmp_path):
-    db = tmp_path / ".miqi-runtime" / "runtime.db"
+    db = tmp_path / ".forge-runtime" / "runtime.db"
     await _seed_thread(db, session_id="client-b:default", thread_id="thread-b")
     server = _server(tmp_path)
     response = await server.dispatch(
@@ -226,7 +226,7 @@ async def test_thread_list_leaves_unknown_namespaced_session_key_unmolested(tmp_
     Here ``cli:user`` is unknown to client-a → returned unchanged → matches no
     stored row → empty list (safe no-op, no leak).
     """
-    db = tmp_path / ".miqi-runtime" / "runtime.db"
+    db = tmp_path / ".forge-runtime" / "runtime.db"
     await _seed_thread(
         db, session_id="client-a:cli:user", thread_id="thread-cli"
     )
@@ -247,7 +247,7 @@ async def test_thread_list_foreign_namespaced_value_does_not_leak(tmp_path):
     client-a's results. Pins that namespacing does not weaken cross-client
     isolation, including for thread/import's foreign-session rejection.
     """
-    db = tmp_path / ".miqi-runtime" / "runtime.db"
+    db = tmp_path / ".forge-runtime" / "runtime.db"
     # A foreign client's row — must never be returned to client-a.
     await _seed_thread(
         db, session_id="client-b:default", thread_id="thread-foreign"
@@ -262,7 +262,7 @@ async def test_thread_list_foreign_namespaced_value_does_not_leak(tmp_path):
 
 @pytest.mark.asyncio
 async def test_thread_read_ambiguous_thread_requires_session_id(tmp_path):
-    db = tmp_path / ".miqi-runtime" / "runtime.db"
+    db = tmp_path / ".forge-runtime" / "runtime.db"
     await _seed_thread(db, session_id="client-a:one", thread_id="same")
     await _seed_thread(db, session_id="client-a:two", thread_id="same")
     server = _server(tmp_path)
@@ -304,7 +304,7 @@ async def test_thread_turns_items_list_still_unsupported(tmp_path):
 
 @pytest.mark.asyncio
 async def test_thread_rollback_works_on_stored_thread_without_live_session(tmp_path):
-    db = tmp_path / ".miqi-runtime" / "runtime.db"
+    db = tmp_path / ".forge-runtime" / "runtime.db"
     await _seed_thread(db)
     # Add a second turn directly
     ledger = LedgerRuntime(db, session_id="client-a:default")
@@ -328,7 +328,7 @@ async def test_thread_rollback_works_on_stored_thread_without_live_session(tmp_p
 
 @pytest.mark.asyncio
 async def test_thread_fork_copies_stored_thread_without_live_session(tmp_path):
-    db = tmp_path / ".miqi-runtime" / "runtime.db"
+    db = tmp_path / ".forge-runtime" / "runtime.db"
     await _seed_thread(db, thread_id="source")
     server = _server(tmp_path)
     response = await server.dispatch(
@@ -391,7 +391,7 @@ async def test_thread_read_returns_not_found_on_clean_workspace(tmp_path):
 async def test_thread_list_default_desc_returns_newest_first(tmp_path):
     """thread/list default sortDirection=desc returns newest thread first."""
     import aiosqlite
-    db = tmp_path / ".miqi-runtime" / "runtime.db"
+    db = tmp_path / ".forge-runtime" / "runtime.db"
     # Seed two threads with different updated_at
     await _seed_thread(db, thread_id="old")
     await _seed_thread(db, thread_id="new")
@@ -416,7 +416,7 @@ async def test_thread_list_default_desc_returns_newest_first(tmp_path):
 async def test_thread_list_asc_returns_oldest_first(tmp_path):
     """thread/list with sortDirection=asc returns oldest thread first."""
     import aiosqlite
-    db = tmp_path / ".miqi-runtime" / "runtime.db"
+    db = tmp_path / ".forge-runtime" / "runtime.db"
     await _seed_thread(db, thread_id="old")
     await _seed_thread(db, thread_id="new")
     async with aiosqlite.connect(str(db)) as conn:
@@ -438,7 +438,7 @@ async def test_thread_list_asc_returns_oldest_first(tmp_path):
 async def test_thread_list_pagination_cursor_stable_with_desc(tmp_path):
     """Cursor-based pagination is stable in desc order."""
     import aiosqlite
-    db = tmp_path / ".miqi-runtime" / "runtime.db"
+    db = tmp_path / ".forge-runtime" / "runtime.db"
     for tid in ["t1", "t2", "t3"]:
         await _seed_thread(db, thread_id=tid)
     async with aiosqlite.connect(str(db)) as conn:
@@ -471,7 +471,7 @@ async def test_stored_fork_copies_history_rows(tmp_path):
     from miqi.runtime.history_runtime import HistoryItem
     from miqi.runtime.stored_runtime import StoredRuntimeReader
 
-    db = tmp_path / ".miqi-runtime" / "runtime.db"
+    db = tmp_path / ".forge-runtime" / "runtime.db"
     await _seed_thread(db, thread_id="src-fork")
     # Seed history for source thread
     reader = StoredRuntimeReader(db, client_id="client-a")
@@ -503,7 +503,7 @@ async def test_stored_rollback_deletes_history_for_removed_turns(tmp_path):
     from miqi.runtime.history_runtime import HistoryItem
     from miqi.runtime.stored_runtime import StoredRuntimeReader
 
-    db = tmp_path / ".miqi-runtime" / "runtime.db"
+    db = tmp_path / ".forge-runtime" / "runtime.db"
     await _seed_thread(db, thread_id="rollback-hist")
     reader = StoredRuntimeReader(db, client_id="client-a")
     # Two turns worth of history

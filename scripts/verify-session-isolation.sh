@@ -3,7 +3,7 @@
 # Usage: bash scripts/verify-session-isolation.sh
 set -euo pipefail
 
-WORKSPACE="${MIQI_WORKSPACE:-$HOME/.miqi/workspace}"
+WORKSPACE="${MIQI_WORKSPACE:-$HOME/.forge/workspace}"
 PASS=0
 FAIL=0
 

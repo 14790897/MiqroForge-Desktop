@@ -43,7 +43,7 @@ async def _seed(db_path, *, session_id="client-a:default", thread_id="thread-1")
 
 @pytest.mark.asyncio
 async def test_legacy_replay_turns_works_without_live_session(tmp_path):
-    db = tmp_path / ".miqi-runtime" / "runtime.db"
+    db = tmp_path / ".forge-runtime" / "runtime.db"
     await _seed(db)
     server = _server(tmp_path)
 
@@ -56,7 +56,7 @@ async def test_legacy_replay_turns_works_without_live_session(tmp_path):
 
 @pytest.mark.asyncio
 async def test_debug_replay_thread_returns_document(tmp_path):
-    db = tmp_path / ".miqi-runtime" / "runtime.db"
+    db = tmp_path / ".forge-runtime" / "runtime.db"
     await _seed(db)
     server = _server(tmp_path)
 
@@ -81,7 +81,7 @@ async def test_debug_replay_messages_reports_history_ledger_matches_when_consist
     from miqi.runtime.history_runtime import HistoryItem
     from miqi.runtime.stored_runtime import StoredRuntimeReader
 
-    db = tmp_path / ".miqi-runtime" / "runtime.db"
+    db = tmp_path / ".forge-runtime" / "runtime.db"
     await _seed(db)
     # Seed history matching the ledger message from _seed (user "hello")
     reader = StoredRuntimeReader(db, client_id="client-a")
@@ -102,7 +102,7 @@ async def test_debug_replay_messages_reports_history_ledger_matches_when_consist
 
 @pytest.mark.asyncio
 async def test_debug_replay_rejects_foreign_session(tmp_path):
-    db = tmp_path / ".miqi-runtime" / "runtime.db"
+    db = tmp_path / ".forge-runtime" / "runtime.db"
     await _seed(db, session_id="client-b:default", thread_id="foreign")
     server = _server(tmp_path)
 
@@ -170,7 +170,7 @@ async def test_debug_replay_diff_requires_documents(tmp_path):
 
 @pytest.mark.asyncio
 async def test_debug_replay_turn_returns_metadata_shape(tmp_path):
-    db = tmp_path / ".miqi-runtime" / "runtime.db"
+    db = tmp_path / ".forge-runtime" / "runtime.db"
     await _seed(db)
     server = _server(tmp_path)
 
@@ -191,7 +191,7 @@ async def test_debug_replay_turn_returns_metadata_shape(tmp_path):
 
 @pytest.mark.asyncio
 async def test_debug_replay_turn_include_raw_ledger(tmp_path):
-    db = tmp_path / ".miqi-runtime" / "runtime.db"
+    db = tmp_path / ".forge-runtime" / "runtime.db"
     await _seed(db)
     server = _server(tmp_path)
 
@@ -208,7 +208,7 @@ async def test_debug_replay_turn_include_raw_ledger(tmp_path):
 
 @pytest.mark.asyncio
 async def test_debug_replay_turn_include_raw_ledger_false_returns_empty(tmp_path):
-    db = tmp_path / ".miqi-runtime" / "runtime.db"
+    db = tmp_path / ".forge-runtime" / "runtime.db"
     await _seed(db)
     server = _server(tmp_path)
 
@@ -223,7 +223,7 @@ async def test_debug_replay_turn_include_raw_ledger_false_returns_empty(tmp_path
 
 @pytest.mark.asyncio
 async def test_debug_replay_turn_unknown_turn_null_timeline_with_metadata(tmp_path):
-    db = tmp_path / ".miqi-runtime" / "runtime.db"
+    db = tmp_path / ".forge-runtime" / "runtime.db"
     await _seed(db)
     server = _server(tmp_path)
 
@@ -244,7 +244,7 @@ async def test_debug_replay_turn_unknown_turn_null_timeline_with_metadata(tmp_pa
 
 @pytest.mark.asyncio
 async def test_debug_replay_turn_foreign_session_unauthorized(tmp_path):
-    db = tmp_path / ".miqi-runtime" / "runtime.db"
+    db = tmp_path / ".forge-runtime" / "runtime.db"
     await _seed(db, session_id="client-b:default", thread_id="foreign")
     server = _server(tmp_path)
 
@@ -264,7 +264,7 @@ async def test_debug_replay_turn_foreign_session_unauthorized(tmp_path):
 async def test_debug_replay_messages_reports_mismatch_when_history_empty(tmp_path):
     """When runtime_history_items is empty but ledger has messages,
     debug/replay/messages must report historyMessages=[], matches=False."""
-    db = tmp_path / ".miqi-runtime" / "runtime.db"
+    db = tmp_path / ".forge-runtime" / "runtime.db"
     await _seed(db)  # ledger has message, history is empty
     server = _server(tmp_path)
 
@@ -282,7 +282,7 @@ async def test_debug_replay_messages_reports_mismatch_when_history_empty(tmp_pat
 async def test_debug_replay_integrity_fails_when_history_empty_ledger_nonempty(tmp_path):
     """debug/replay/integrity must report ok=False when history is empty
     but ledger has messages."""
-    db = tmp_path / ".miqi-runtime" / "runtime.db"
+    db = tmp_path / ".forge-runtime" / "runtime.db"
     await _seed(db)  # ledger has message, history is empty
     server = _server(tmp_path)
 

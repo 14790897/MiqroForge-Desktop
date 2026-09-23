@@ -22,14 +22,14 @@ async function openGeneralTab(page: Page, workspace: string) {
 /** 工作目录字段连同它下面的提示行（供截图取证）。 */
 function workspaceField(page: Page) {
   return page
-    .getByPlaceholder('~/.miqi/workspace')
+    .getByPlaceholder('~/.forge/workspace')
     .locator('xpath=ancestor::div[contains(@class,"flex flex-col gap-1.5")][1]');
 }
 
 test('issue #1185: 默认工作目录提示按登录账号隔离', async ({ page }) => {
-  await openGeneralTab(page, '~/.miqi/workspace');
+  await openGeneralTab(page, '~/.forge/workspace');
 
-  await expect(page.getByPlaceholder('~/.miqi/workspace')).toHaveValue('~/.miqi/workspace');
+  await expect(page.getByPlaceholder('~/.forge/workspace')).toHaveValue('~/.forge/workspace');
   await expect(page.getByText(/按登录账号隔离/)).toBeVisible();
   await expect(page.getByText(/其它账号也能看到/)).toHaveCount(0);
 
@@ -41,7 +41,7 @@ test('issue #1185: 默认工作目录提示按登录账号隔离', async ({ page
 test('issue #1185: 自定义工作目录提示不隔离', async ({ page }) => {
   await openGeneralTab(page, 'D:/shared-project');
 
-  await expect(page.getByPlaceholder('~/.miqi/workspace')).toHaveValue('D:/shared-project');
+  await expect(page.getByPlaceholder('~/.forge/workspace')).toHaveValue('D:/shared-project');
   await expect(page.getByText(/其它账号也能看到/)).toBeVisible();
   await expect(page.getByText(/按登录账号隔离/)).toHaveCount(0);
 

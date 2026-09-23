@@ -113,7 +113,7 @@ class AuthError(Exception):
 
 def _default_home_workspace() -> Path | None:
     """经 miqi.paths 解析默认 home 的 workspace（遵守 MIQI_HOME 策略，
-    不直接构造 ~/.miqi 路径）。skill 脚本在 MiQi 环境内运行时可用；
+    不直接构造 ~/.forge 路径）。skill 脚本在 MiQi 环境内运行时可用；
     独立运行时 ImportError 则跳过该候选。
 
     **用 `get_default_workspace_path()` 而不是 `get_miqi_home()/"workspace"`**：

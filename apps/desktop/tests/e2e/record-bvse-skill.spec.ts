@@ -6,7 +6,7 @@
  * 录像把渲染进程内存撑爆。
  *
  * 前置（同 bvse-skill-assets.spec.ts）：本机装好 skill venv 与测试 CIF：
- *   BVSE_SKILL_DIR 默认 ~/.miqi/skills/bvse-mof-local-ssh
+ *   BVSE_SKILL_DIR 默认 ~/.forge/skills/bvse-mof-local-ssh
  *   BVSE_TEST_CIF  指向真实 MOF CIF
  *
  * Run:
@@ -34,7 +34,7 @@ import {
 
 const REPO_ROOT = join(APPS_DESKTOP, '..', '..');
 const SKILL_DIR =
-  process.env.BVSE_SKILL_DIR ?? join(homedir(), '.miqi', 'skills', 'bvse-mof-local-ssh');
+  process.env.BVSE_SKILL_DIR ?? join(homedir(), '.forge', 'skills', 'bvse-mof-local-ssh');
 const SKILL_PY =
   process.platform === 'win32'
     ? join(SKILL_DIR, '.venv', 'Scripts', 'python.exe')

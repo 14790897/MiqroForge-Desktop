@@ -15,7 +15,7 @@ async def test_stored_inspector_builds_thread_document(tmp_path):
     from miqi.runtime.stored_runtime import StoredRuntimeReader
     from miqi.runtime.thread_runtime import ThreadRuntime
 
-    db = tmp_path / ".miqi-runtime" / "runtime.db"
+    db = tmp_path / ".forge-runtime" / "runtime.db"
     threads = ThreadRuntime(db, session_id="client-a:default")
     ledger = LedgerRuntime(db, session_id="client-a:default")
     await threads.initialize()
@@ -54,7 +54,7 @@ async def test_integrity_detects_history_ledger_provider_message_mismatch(tmp_pa
     from miqi.runtime.stored_runtime import StoredRuntimeReader
     from miqi.runtime.thread_runtime import ThreadRuntime
 
-    db = tmp_path / ".miqi-runtime" / "runtime.db"
+    db = tmp_path / ".forge-runtime" / "runtime.db"
     threads = ThreadRuntime(db, session_id="client-a:default")
     ledger = LedgerRuntime(db, session_id="client-a:default")
     await threads.initialize()
@@ -86,7 +86,7 @@ async def test_integrity_detects_duplicate_or_non_monotonic_seq(tmp_path):
     from miqi.runtime.replay_inspector import ReplayInspector
     from miqi.runtime.stored_runtime import StoredRuntimeReader
 
-    db = tmp_path / ".miqi-runtime" / "runtime.db"
+    db = tmp_path / ".forge-runtime" / "runtime.db"
     reader = StoredRuntimeReader(db, client_id="client-a")
     await reader._ensure_schema()
     async with aiosqlite.connect(str(db)) as conn:
@@ -118,7 +118,7 @@ async def test_integrity_detects_dangling_tool_exec_and_approval(tmp_path):
     from miqi.runtime.replay_inspector import ReplayInspector
     from miqi.runtime.thread_runtime import ThreadRuntime
 
-    db = tmp_path / ".miqi-runtime" / "runtime.db"
+    db = tmp_path / ".forge-runtime" / "runtime.db"
     threads = ThreadRuntime(db, session_id="client-a:default")
     ledger = LedgerRuntime(db, session_id="client-a:default")
     await threads.initialize()
@@ -168,7 +168,7 @@ async def test_history_empty_ledger_nonempty_reports_mismatch(tmp_path):
     from miqi.runtime.replay_inspector import ReplayInspector
     from miqi.runtime.thread_runtime import ThreadRuntime
 
-    db = tmp_path / ".miqi-runtime" / "runtime.db"
+    db = tmp_path / ".forge-runtime" / "runtime.db"
     threads = ThreadRuntime(db, session_id="client-a:default")
     ledger = LedgerRuntime(db, session_id="client-a:default")
     await threads.initialize()
@@ -199,7 +199,7 @@ async def test_integrity_fails_when_history_empty_ledger_nonempty(tmp_path):
     from miqi.runtime.replay_inspector import ReplayInspector
     from miqi.runtime.thread_runtime import ThreadRuntime
 
-    db = tmp_path / ".miqi-runtime" / "runtime.db"
+    db = tmp_path / ".forge-runtime" / "runtime.db"
     threads = ThreadRuntime(db, session_id="client-a:default")
     ledger = LedgerRuntime(db, session_id="client-a:default")
     await threads.initialize()
@@ -227,7 +227,7 @@ async def test_thread_document_empty_provider_messages_when_history_empty(tmp_pa
     from miqi.runtime.replay_inspector import ReplayInspector
     from miqi.runtime.thread_runtime import ThreadRuntime
 
-    db = tmp_path / ".miqi-runtime" / "runtime.db"
+    db = tmp_path / ".forge-runtime" / "runtime.db"
     threads = ThreadRuntime(db, session_id="client-a:default")
     ledger = LedgerRuntime(db, session_id="client-a:default")
     await threads.initialize()
@@ -255,7 +255,7 @@ async def test_build_turn_response_includes_metadata(tmp_path):
     from miqi.runtime.replay_inspector import ReplayInspector
     from miqi.runtime.thread_runtime import ThreadRuntime
 
-    db = tmp_path / ".miqi-runtime" / "runtime.db"
+    db = tmp_path / ".forge-runtime" / "runtime.db"
     threads = ThreadRuntime(db, session_id="client-a:default")
     ledger = LedgerRuntime(db, session_id="client-a:default")
     await threads.initialize()
@@ -286,7 +286,7 @@ async def test_build_turn_response_include_raw_ledger(tmp_path):
     from miqi.runtime.replay_inspector import ReplayInspector
     from miqi.runtime.thread_runtime import ThreadRuntime
 
-    db = tmp_path / ".miqi-runtime" / "runtime.db"
+    db = tmp_path / ".forge-runtime" / "runtime.db"
     threads = ThreadRuntime(db, session_id="client-a:default")
     ledger = LedgerRuntime(db, session_id="client-a:default")
     await threads.initialize()
@@ -314,7 +314,7 @@ async def test_build_turn_response_unknown_turn_null_timeline(tmp_path):
     from miqi.runtime.replay_inspector import ReplayInspector
     from miqi.runtime.thread_runtime import ThreadRuntime
 
-    db = tmp_path / ".miqi-runtime" / "runtime.db"
+    db = tmp_path / ".forge-runtime" / "runtime.db"
     threads = ThreadRuntime(db, session_id="client-a:default")
     ledger = LedgerRuntime(db, session_id="client-a:default")
     await threads.initialize()

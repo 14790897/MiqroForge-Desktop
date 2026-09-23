@@ -644,7 +644,7 @@ class Config(BaseSettings):
         """Get expanded workspace path.
 
         A raw workspace that is empty or equal to the serialized default
-        ``~/.miqi/workspace`` means "follow the data root": the path is
+        ``~/.forge/workspace`` means "follow the data root": the path is
         resolved by :func:`miqi.paths.get_default_workspace_path`, which
         rebases it onto ``MIQI_HOME`` when that is set and scopes it to the
         logged-in account (#1185) — ``<data root>/accounts/<sub>/workspace``,

@@ -630,7 +630,7 @@ export class QraftService {
       clearActiveAccount();
       return;
     }
-    // 认领在前：存量 `~/.miqi/workspace` 归首个登录账号，之后 getWorkspacePath
+    // 认领在前：存量 `~/.forge/workspace` 归首个登录账号，之后 getWorkspacePath
     // 才会把它解析成这个账号的工作区。认领本身是尽力而为的：认领失败只是让这个
     // 账号拿到自己的空目录，不会把它带进别人的数据里。
     claimLegacyWorkspace(sub);

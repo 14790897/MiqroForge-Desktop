@@ -61,7 +61,7 @@ def test_miqi_home_defaults_to_dot_miqi(monkeypatch, tmp_path):
     monkeypatch.delenv("MIQI_HOME", raising=False)
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "home"))
 
-    assert get_miqi_home() == (tmp_path / "home" / ".miqi").resolve()
+    assert get_miqi_home() == (tmp_path / "home" / ".forge").resolve()
 
 
 def test_miqi_home_uses_absolute_override(monkeypatch, tmp_path):
@@ -82,7 +82,7 @@ def test_blank_miqi_home_uses_default(monkeypatch, tmp_path):
     monkeypatch.setenv("MIQI_HOME", "   ")
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "home"))
 
-    assert get_miqi_home() == (tmp_path / "home" / ".miqi").resolve()
+    assert get_miqi_home() == (tmp_path / "home" / ".forge").resolve()
 
 
 def test_config_and_legacy_paths(monkeypatch, tmp_path):
@@ -116,13 +116,13 @@ def test_data_path_uses_miqi_home_when_configured(monkeypatch, tmp_path):
 
 
 def test_data_path_defaults_to_dot_miqi_without_legacy(monkeypatch, tmp_path):
-    """Fresh install: no MIQI_HOME and no legacy dir -> default ~/.miqi."""
+    """Fresh install: no MIQI_HOME and no legacy dir -> default ~/.forge."""
     monkeypatch.delenv("MIQI_HOME", raising=False)
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "home"))
 
     data_path = get_data_path()
 
-    assert data_path == (tmp_path / "home" / ".miqi").resolve()
+    assert data_path == (tmp_path / "home" / ".forge").resolve()
 
 
 def test_data_path_falls_back_to_legacy_assistant(monkeypatch, tmp_path):
@@ -139,12 +139,12 @@ def test_data_path_falls_back_to_legacy_assistant(monkeypatch, tmp_path):
 
 
 def test_data_path_prefers_miqi_when_both_homes_exist(monkeypatch, tmp_path):
-    """If both legacy and current home exist, prefer the current ~/.miqi."""
+    """If both legacy and current home exist, prefer the current ~/.forge."""
     monkeypatch.delenv("MIQI_HOME", raising=False)
     home = tmp_path / "home"
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
     legacy = home / ".assistant"
-    default_home = home / ".miqi"
+    default_home = home / ".forge"
     legacy.mkdir(parents=True)
     default_home.mkdir(parents=True)
 
@@ -176,7 +176,7 @@ def test_default_config_workspace_uses_miqi_home(monkeypatch, tmp_path):
     miqi_home = tmp_path / "isolated"
     monkeypatch.setenv("MIQI_HOME", str(miqi_home))
 
-    assert Config().agents.defaults.workspace == "~/.miqi/workspace"
+    assert Config().agents.defaults.workspace == "~/.forge/workspace"
     assert Config().workspace_path == (miqi_home / "workspace").resolve()
 
 
