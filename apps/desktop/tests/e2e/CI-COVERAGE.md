@@ -19,7 +19,12 @@
 `apps/desktop/tests/e2eCiCoverage.test.ts`（`npm test`，quick job）会校验本文件——
 **检测到致命守卫却没登记 → 红；登记为「守卫」的行守卫已消失 → 红**。
 
-第二列「判定」：`守卫` = 由上述测试自动检测；`人工` = 守卫形态检测不到、但人工确认过零覆盖。
+检测是 job/step 粒度的：测试先解析每个 workflow 的 job（`runs-on`、各级 `env`）与 step
+（哪个 step 按名字收集了哪些 spec、哪个 step 全量跑 electron 项目），只有**真正会收集到
+这个 spec 的 job/step** 里设置过的变量才算「CI 已设置」。所以 `billing-hosted-live` 那种
+「变量在别的 job / config.json 里出现过、收集它的 job 却没注入」的情况会被如实判为致命门。
+第二列「判定」：`守卫` = 由上述测试自动检测；`人工` = 守卫形态检测不到、但人工确认过零覆盖
+（当前没有这类行，保留为逃生口）。
 
 | spec | 判定 | 门 | 运行代价 | 为什么不在 CI 跑 |
 |---|---|---|---|---|
@@ -38,11 +43,11 @@
 | `issue-1185-account-isolation-live.spec.ts` | 守卫 | `QRAFT_LIVE=1` + ≥2 个真实账号 | 中（真实平台账号） | 需要两个账号来回切换验证本地存储隔离 |
 | `issue-1185-task-assets-live.spec.ts` | 守卫 | `QRAFT_LIVE=1` | 中（真实平台账号） | 同上：复杂技能产物跨账号切换 |
 | `billing-live.spec.ts` | 守卫 | `SLURM_MCP_KEY` | 中（真实网关） | 需要 slurm MCP 网关 key，CI 未注入 |
-| `billing-hosted-live.spec.ts` | 人工 | `HAS_CREDS` 里的 `DEEPSEEK_API_KEY` | 中（真实账号 + 真实计费网关） | 该变量只被写进 config.json、从未作为环境变量注入任何跑 e2e 的 job（desktop-ci.yml 的 `DEEPSEEK_API_KEY` 只出现在 heredoc 里），`HAS_CREDS` 恒为 false——守卫看不见它，故标「人工」。要让它在 CI 真跑，需在 `electron-e2e` 注入该变量（live 用例是否每 PR 都花真实额度是产品决策） |
+| `billing-hosted-live.spec.ts` | 守卫 | `HAS_CREDS` 里的 `DEEPSEEK_API_KEY` | 中（真实账号 + 真实计费网关） | 该变量只被写进 config.json、从未作为环境变量注入任何会收集本文件的 job（`electron-e2e` / `macos-e2e` 只注入 `QRAFT_PHONE` / `QRAFT_PASSWORD`），`HAS_CREDS` 恒为 false。要让它在 CI 真跑，需在 `electron-e2e` 注入该变量（live 用例是否每 PR 都花真实额度是产品决策） |
 | `mof-synthesis-price-agent.spec.ts` | 守卫 | `MOF_PRICE_PROJECT`（含 extract/、enrich/、report.py 的项目根）+ 私有技能目录 | 高（真实 LLM） | 项目根与 `miqi/skills/mof-synthesis-price-agent` 都是本机私有资产，仓库里没有 |
 | `bvse-skill-assets.spec.ts` | 守卫 | `BVSE_SKILL_DIR`（默认 `~/.miqi/skills/bvse-mof-local-ssh`，需含 `.venv`）+ `BVSE_TEST_CIF`（真实 MOF CIF 文件） | 中（本机技能 venv + mock server，长流程） | 需要本机装好的 BVSE 技能依赖与真实 CIF 文件；macOS CI 还因 loopback 到 mock server 不可达额外跳过 |
 | `record-bvse-skill.spec.ts` | 守卫 | 同 `bvse-skill-assets`（`RECORD_OUT_DIR` 只是可选输出目录，不是门） | 中（同左，且全程录屏） | 同上：录屏演示真实 BVSE 技能，依赖本机环境 |
-| `tool-error-neutral.spec.ts`（部分） | 人工 | `SKIP_SANDBOX_ON_CI`（`MIQI_RUN_SANDBOX_E2E`） | 中（真实 LLM + WSL 沙箱） | 该变量只在 wsl-e2e 的沙箱点名步骤里设置，而那一步不跑本文件；「注入事件」那条 describe 在 Linux 上照跑，只有「真实链路 + 沙箱」这条零覆盖 |
+| `tool-error-neutral.spec.ts`（部分） | 守卫 | `SKIP_SANDBOX_ON_CI`（`MIQI_RUN_SANDBOX_E2E`） | 中（真实 LLM + WSL 沙箱） | 该变量只在 wsl-e2e 的沙箱点名步骤里设置，而那一步只收集 sandbox-exec / session-key-mapping / sandbox-toggle，不含本文件；「注入事件」那条 describe 在 Linux 上照跑，只有「真实链路 + 沙箱」这条零覆盖 |
 | `task-assets.spec.ts`（部分） | 守卫 | 无条件 `test.skip('标题', fn)` | 低 | 「AI 生成 .docx → 任务资产预览」一条被永久禁用；该文件其余用例在 Linux 上跑 |
 
 ## 已接进 CI（#1196）
