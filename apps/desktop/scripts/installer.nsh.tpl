@@ -21,6 +21,10 @@
 
 !ifdef BUILD_UNINSTALLER
 
+  ; 32 位卸载器进程里 $SYSDIR 会被重定向到 SysWOW64，而 wsl.exe 只存在于
+  ; 原生 System32——访问前必须关闭文件系统重定向（x64.nsh 随 NSIS 分发）。
+  !include "x64.nsh"
+
   Var MiqiCleanupChecked
   Var MiqiCleanupRan
   Var MiqiCleanupFailures
@@ -38,8 +42,9 @@
     !insertmacro MUI_HEADER_TEXT "卸载 MiQroForge Desktop" "选择是否同时删除应用数据"
     ; 页面清单里优先展示注册表记录的数据根，缺省时展示当前默认目录。
     ReadRegStr $R0 HKCU "@@REG_KEY@@" "@@REG_VALUE@@"
-    StrCmp $R0 "" 0 +3
+    ${If} $R0 == ""
       StrCpy $R0 "$PROFILE\@@ACTIVE_DEFAULT@@"
+    ${EndIf}
 
     nsDialogs::Create 1018
     Pop $R1
@@ -89,6 +94,7 @@
     ; FileReadUTF16LE 逐行比对 distro 名；不存在则整段跳过。
     ; 注意：cmd /C 后首个字符若是引号，cmd 会剥掉首尾引号导致路径损坏
     ; （"a" b > "c" → a" b > "c）——$SYSDIR 无空格，exe 路径不加引号。
+    ${DisableX64FSRedirection}
     StrCpy $R0 "$TEMP\miqi-wsl-list.tmp"
     Delete $R0
     ExecWait '$SYSDIR\cmd.exe /C $SYSDIR\wsl.exe -l -q > "$R0"' $R1
@@ -125,6 +131,7 @@
       StrCpy $MiqiCleanupFailures "$MiqiCleanupFailuresWSL 沙箱 @@DISTRO@@（退出码 $R1）$\r$\n"
     ${EndIf}
     miqi_wsl_end:
+    ${EnableX64FSRedirection}
   !macroend
 
   ; ── 清理主体（卸载 section 内、删除程序文件之前执行）───────────────
@@ -175,6 +182,7 @@
     StrCmp $R3 "\" miqi_cleanup_regroot_unsafe
     miqi_cleanup_regroot_scan:
     ; 含 "/" 或 ".." 的路径不可能指向已知数据根，拒绝（游标逐位比对）。
+    ; StrCpy dest src "" 1 = 从第 1 个字符开始复制（丢弃首字符），游标前进。
     StrCpy $R2 $R0
     StrLen $R1 $R2
     miqi_scan_chars:
@@ -183,7 +191,7 @@
     StrCmp $R3 "/" miqi_cleanup_regroot_unsafe
     StrCpy $R3 $R2 2
     StrCmp $R3 ".." miqi_cleanup_regroot_unsafe
-    StrCpy $R2 $R2 1
+    StrCpy $R2 $R2 "" 1
     IntOp $R1 $R1 - 1
     Goto miqi_scan_chars
     miqi_cleanup_regroot_del:

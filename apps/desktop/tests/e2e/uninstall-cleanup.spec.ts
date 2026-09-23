@@ -33,7 +33,7 @@ const installDir = join(process.env.LOCALAPPDATA ?? '', 'Programs', 'miqi-deskto
 /** 注册表是否已记录 DataRoot（卸载器会按它删除，存在即视为真实数据）。 */
 function registryDataRootSet(): boolean {
   if (!isWindows) return false;
-  const r = spawnSync('reg.exe', ['QUERY', 'HKCU\Software\MiqroForge', '/v', 'DataRoot'], {
+  const r = spawnSync('reg.exe', ['QUERY', 'HKCU\\Software\\MiqroForge', '/v', 'DataRoot'], {
     encoding: 'utf8',
     windowsHide: true,
     timeout: 15000,

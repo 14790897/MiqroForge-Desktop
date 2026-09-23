@@ -52,13 +52,13 @@ function platformOf(): CleanupContext['platform'] {
 
 /**
  * WSL 命令的异步执行（不阻塞 Electron 主进程事件循环）：
- * execFile 带超时；非零退出/超时都归一成 { status, stdout, stderr }，
+ * execFile 带超时；非零退出/超时都归一成 { status, stdout, stderr, timedOut }，
  * 超时时仍返回已捕获的部分输出。
  */
 async function runWsl(
   args: string[],
   timeoutMs: number
-): Promise<{ status: number | null; stdout: Buffer; stderr: Buffer }> {
+): Promise<{ status: number | null; stdout: Buffer; stderr: Buffer; timedOut: boolean }> {
   try {
     const { stdout, stderr } = await execFileAsync('wsl.exe', args, {
       timeout: timeoutMs,
@@ -66,13 +66,14 @@ async function runWsl(
       encoding: 'buffer',
       maxBuffer: 16 * 1024 * 1024,
     });
-    return { status: 0, stdout, stderr };
+    return { status: 0, stdout, stderr, timedOut: false };
   } catch (err) {
-    const e = err as { code?: string | number; stdout?: Buffer; stderr?: Buffer };
+    const e = err as { code?: string | number; killed?: boolean; stdout?: Buffer; stderr?: Buffer };
     return {
       status: typeof e.code === 'number' ? e.code : null,
       stdout: e.stdout ?? Buffer.alloc(0),
       stderr: e.stderr ?? Buffer.alloc(0),
+      timedOut: e.killed === true,
     };
   }
 }
@@ -181,7 +182,9 @@ export async function probeWslSandbox(opts?: {
   if (status.status !== 0) {
     return {
       wslAvailable: false,
-      distroExists: null,
+      // WSL 服务不可用（非超时的失败）→ distro 不可能可用，判定不存在；
+      // 超时 → 状态未知（null），不替用户下结论。
+      distroExists: status.timedOut ? null : false,
       distroSizeBytes: null,
       detail: 'WSL 不可用（未安装或服务未启动），沙箱发行版无法清理',
     };
