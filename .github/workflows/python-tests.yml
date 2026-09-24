@@ -100,8 +100,9 @@ jobs:
       cancel-in-progress: true
     runs-on: windows-latest
     # 冷 runner 预算：one-click-install(15) + WSL 回退安装 + 清理 + 沙箱 E2E(20)
-    # ——30 分钟连续多次被砍（#891/#875 CI 实测），放宽到 45
-    timeout-minutes: 45
+    # + Windows-only E2E(10，见 #1196)——30 分钟连续多次被砍（#891/#875 CI 实测），
+    # 先放宽到 45，#1196 加入最后一步后再放宽到 55
+    timeout-minutes: 55
     defaults:
       run:
         working-directory: apps/desktop
@@ -226,6 +227,19 @@ jobs:
         if: always() && steps.build.outcome == 'success'
         run: |
           npx playwright test --config=playwright.config.ts --project=electron issue-1157-wsl-disk-accounting.spec.ts --workers=1
+        timeout-minutes: 10
+
+      # ── Windows-only 语义的 E2E（#1196）────────────────────────────
+      # 这两个 spec 是文件级 `process.platform !== 'win32'` 守卫：ubuntu/macOS 的
+      # 全量套件都跑不到，Windows 侧此前只按名字跑 5 个，于是它们从未被执行过
+      # （#1196 的零覆盖清单）。两者不依赖 LLM / WSL 沙箱（issue-1171 把
+      # `wsl:check` 换成桩结果，open-external-path-security 只走 files IPC），
+      # 所以不设 continue-on-error —— 要的就是这两条路径改坏了有红灯。
+      # 清单与守卫：apps/desktop/tests/e2e/CI-COVERAGE.md + npm test。
+      - name: Run Windows-only E2E (#1196)
+        if: always() && steps.build.outcome == 'success'
+        run: |
+          npx playwright test --config=playwright.config.ts --project=electron issue-1171-wsl-platform-guidance.spec.ts open-external-path-security.spec.ts --workers=1
         timeout-minutes: 10
 
       - name: Upload Playwright report (WSL E2E)
