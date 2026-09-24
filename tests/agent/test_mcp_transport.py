@@ -203,8 +203,8 @@ class TestDownloadExecute:
         assert summary["sha256"] == hashlib.sha256(data).hexdigest()
         # base64 不进 ctx.result（wrapper 输出）
         assert _b64(data) not in result
-        # 落盘文件内容正确（custom workspace → <ws>/.miqi/downloads）
-        target = tmp_path / ".miqi" / "downloads" / "cube.cube"
+        # 落盘文件内容正确（custom workspace → <ws>/.forge/downloads）
+        target = tmp_path / ".forge" / "downloads" / "cube.cube"
         assert target.read_bytes() == data
 
     async def test_non_download_tool_passthrough_unchanged(self, tmp_path):
@@ -214,7 +214,7 @@ class TestDownloadExecute:
         result = await w.execute(job_id="42")
         assert json.loads(result)["note"] == text
         # 不进 sink、不建 downloads
-        assert not (tmp_path / ".miqi").exists()
+        assert not (tmp_path / ".forge").exists()
 
     async def test_timeout_semantics_unchanged(self, tmp_path):
         import asyncio
@@ -223,7 +223,7 @@ class TestDownloadExecute:
         w = _wrapper(session, "download_file", base_workspace=tmp_path)
         result = await w.execute(name="cube.cube")
         assert "timed out" in result  # 与现有 timeout 文案一致，不触发落盘
-        assert not (tmp_path / ".miqi").exists()
+        assert not (tmp_path / ".forge").exists()
 
     async def test_sink_failure_digested_to_error_json(self, tmp_path):
         session = _FakeSession(response=_mcp_text_result('{"success": true, "name": "a.cube"}'))
@@ -287,7 +287,7 @@ class TestDownloadBillingNoRegression:
         assert emissions[0]["job_id"] == "900002"
         # ……且下载照常交付摘要
         assert summary["type"] == "download_artifact"
-        assert (tmp_path / ".miqi" / "downloads" / "cube.cube").read_bytes() == data
+        assert (tmp_path / ".forge" / "downloads" / "cube.cube").read_bytes() == data
         # 摘要只含 5 字段（billing 视图与 materialize 完全解耦，互不污染）
         assert set(summary) == {"type", "name", "path", "size_bytes", "sha256"}
 

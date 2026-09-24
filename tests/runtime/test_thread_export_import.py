@@ -7,7 +7,7 @@ from tests.runtime.test_thread_stored_handlers import _seed_thread, _server
 
 @pytest.mark.asyncio
 async def test_thread_export_returns_versioned_document(tmp_path):
-    db = tmp_path / ".miqi-runtime" / "runtime.db"
+    db = tmp_path / ".forge-runtime" / "runtime.db"
     await _seed_thread(db)
     server = _server(tmp_path)
     response = await server.dispatch(
@@ -21,7 +21,7 @@ async def test_thread_export_returns_versioned_document(tmp_path):
 
 @pytest.mark.asyncio
 async def test_thread_export_rejects_foreign_thread(tmp_path):
-    db = tmp_path / ".miqi-runtime" / "runtime.db"
+    db = tmp_path / ".forge-runtime" / "runtime.db"
     await _seed_thread(db, session_id="client-b:default", thread_id="thread-b")
     server = _server(tmp_path)
     response = await server.dispatch(
@@ -44,7 +44,7 @@ async def test_thread_export_missing_thread_id_rejected(tmp_path):
 
 @pytest.mark.asyncio
 async def test_thread_import_round_trips_exported_document(tmp_path):
-    db = tmp_path / ".miqi-runtime" / "runtime.db"
+    db = tmp_path / ".forge-runtime" / "runtime.db"
     await _seed_thread(db, thread_id="source")
     server = _server(tmp_path)
     exported = await server.dispatch(
@@ -142,7 +142,7 @@ async def test_thread_import_creates_db_and_table_on_clean_workspace(tmp_path):
     )
     assert imported["result"]["thread"]["id"] == "imported-clean"
     # Verify the DB file was created
-    db = tmp_path / ".miqi-runtime" / "runtime.db"
+    db = tmp_path / ".forge-runtime" / "runtime.db"
     assert db.exists()
     # thread/read should now find it
     read = await server.dispatch(
@@ -163,7 +163,7 @@ async def test_export_includes_provider_messages(tmp_path):
     from miqi.runtime.history_runtime import HistoryItem
     from miqi.runtime.stored_runtime import StoredRuntimeReader
 
-    db = tmp_path / ".miqi-runtime" / "runtime.db"
+    db = tmp_path / ".forge-runtime" / "runtime.db"
     await _seed_thread(db, thread_id="export-me")
     # Write some history items directly
     import time
@@ -214,7 +214,7 @@ async def test_import_writes_provider_visible_history(tmp_path):
         "1", "thread/import", {"document": document, "includeTurns": True},
         "client-a", None,
     )
-    db = tmp_path / ".miqi-runtime" / "runtime.db"
+    db = tmp_path / ".forge-runtime" / "runtime.db"
     reader = StoredRuntimeReader(db, client_id="client-a")
     msgs = await reader.load_provider_messages(
         await reader.resolve_thread("hist-1"),
@@ -233,7 +233,7 @@ async def test_import_overwrite_deletes_stale_history(tmp_path):
     from miqi.runtime.stored_runtime import StoredRuntimeReader
 
     server = _server(tmp_path)
-    db = tmp_path / ".miqi-runtime" / "runtime.db"
+    db = tmp_path / ".forge-runtime" / "runtime.db"
     reader = StoredRuntimeReader(db, client_id="client-a")
     await reader._ensure_schema()
     await reader._write_history_items(
@@ -286,7 +286,7 @@ async def test_import_round_trip_does_not_duplicate_provider_history(tmp_path):
     from miqi.runtime.ledger_runtime import LedgerRuntime
     from miqi.runtime.stored_runtime import StoredRuntimeReader
 
-    db = tmp_path / ".miqi-runtime" / "runtime.db"
+    db = tmp_path / ".forge-runtime" / "runtime.db"
     await _seed_thread(db, thread_id="src")
     # Add a second message-type ledger item so ledger has 2 messages
     ledger = LedgerRuntime(db, session_id="client-a:default")
@@ -368,7 +368,7 @@ async def test_import_uses_provider_messages_fallback_when_no_ledger_messages(tm
         "client-a", None,
     )
     assert resp["result"]["thread"]["id"] == "fallback-1"
-    db = tmp_path / ".miqi-runtime" / "runtime.db"
+    db = tmp_path / ".forge-runtime" / "runtime.db"
     reader = StoredRuntimeReader(db, client_id="client-a")
     msgs = await reader.load_provider_messages(
         await reader.resolve_thread("fallback-1"),
@@ -406,7 +406,7 @@ async def test_import_ledger_wins_over_provider_messages_when_both_present(tmp_p
         {"document": document, "threadId": "both-1", "includeTurns": True},
         "client-a", None,
     )
-    db = tmp_path / ".miqi-runtime" / "runtime.db"
+    db = tmp_path / ".forge-runtime" / "runtime.db"
     reader = StoredRuntimeReader(db, client_id="client-a")
     msgs = await reader.load_provider_messages(
         await reader.resolve_thread("both-1"),
@@ -427,7 +427,7 @@ async def test_import_overwrite_does_not_duplicate_provider_history(tmp_path):
     from miqi.runtime.history_runtime import HistoryItem
     from miqi.runtime.stored_runtime import StoredRuntimeReader
 
-    db = tmp_path / ".miqi-runtime" / "runtime.db"
+    db = tmp_path / ".forge-runtime" / "runtime.db"
     reader = StoredRuntimeReader(db, client_id="client-a")
     await reader._ensure_schema()
     # Pre-seed a thread with history

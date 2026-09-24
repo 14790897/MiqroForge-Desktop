@@ -219,7 +219,7 @@ async def test_mcp_download_turn_ledger_and_model_never_see_base64(fake_config, 
                 break
 
         # 1) 落盘成功且 sha 一致（事故路径端到端）
-        target = tmp_path / ".miqi" / "downloads" / "secret.cube"
+        target = tmp_path / ".forge" / "downloads" / "secret.cube"
         assert target.read_bytes() == payload_bytes
 
         # 2) ledger tool_call_completed 只含摘要：base64 与原始负载绝不出现在任何

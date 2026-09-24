@@ -76,8 +76,8 @@ class PluginManager:
     """Discovers, loads, and manages plugins.
 
     Plugin search paths (in order):
-    1. ~/.miqi/plugins/           — user plugins
-    2. <workspace>/.miqi/plugins/ — workspace plugins
+    1. ~/.forge/plugins/           — user plugins
+    2. <workspace>/.forge/plugins/ — workspace plugins
     3. <miqi_install>/plugins/    — system/builtin plugins
     """
 
@@ -197,7 +197,7 @@ class PluginManager:
         ]
         if self.workspace:
             search_paths.append(
-                (self.workspace / ".miqi" / "plugins", "workspace")
+                (self.workspace / ".forge" / "plugins", "workspace")
             )
 
         discovered = []

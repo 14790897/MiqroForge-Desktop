@@ -8,6 +8,12 @@ async function injectMockAndGoto(page: import('@playwright/test').Page) {
       // 「登录后自动就绪默认模型」（#1172，网关 active 且当前模型不是自己
       // provider/平台网关路由时自动写网关模型）多出的写入干扰。
       qraftLoggedInStatus: loggedInWithoutGateway(),
+      // 下拉只在「有可用 provider」时才有内容：不给 providers 时清单为空、
+      // ModelSelect 会把目录整个过滤掉，`toBeVisible` 就在断言一个空下拉
+      // （#1179 review）。这里给平台内置 provider + 显式空目录，走
+      // FALLBACK_MODEL_PRESETS 分支，断言才有意义。
+      providers: [{ name: 'deepseek', builtin_available: true }],
+      models: [],
       config: {
         agents: {
           defaults: {
@@ -51,10 +57,12 @@ test('issue #137: clearing workspace sends explicit empty values', async ({ page
 
   await page.getByText(/^(System Settings|系统设置)$/).click();
 
-  const workspaceInput = page.getByPlaceholder('~/.miqi/workspace');
+  const workspaceInput = page.getByPlaceholder('~/.forge/workspace');
   const modelSelect = page.locator('select').first();
   await expect(workspaceInput).toHaveValue('C:/old-workspace');
   await expect(modelSelect).toBeVisible();
+  // 下拉必须有内容：空下拉同样「可见」，不能证明这是个可用的选择器
+  await expect(modelSelect).toContainText('deepseek/deepseek-v4-flash');
 
   await workspaceInput.fill('');
   const generalPanel = workspaceInput.locator('xpath=ancestor::div[contains(@class, "p-6")][1]');

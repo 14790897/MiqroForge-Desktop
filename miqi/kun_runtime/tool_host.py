@@ -578,6 +578,10 @@ def _classify_tool_kind(name: str) -> str:
 
 def _requires_approval(name: str, approval_policy: str = "auto") -> bool:
     """Return whether the KUN tool host should ask its approval gate."""
+    # 确认卡就是「用户决策入口」本身：再套一层审批会让它被挡在审批层后，
+    # 用户永远看不到那张卡（issue #646 的 handshake 死锁）。
+    if name == ASK_USER_CONFIRM_TOOL:
+        return False
     if approval_policy in ("never", "none", "disabled"):
         return False
     if approval_policy in ("untrusted", "suggest", "on_request", "always"):

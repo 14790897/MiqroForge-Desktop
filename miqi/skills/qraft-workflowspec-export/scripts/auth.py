@@ -113,12 +113,18 @@ class AuthError(Exception):
 
 def _default_home_workspace() -> Path | None:
     """经 miqi.paths 解析默认 home 的 workspace（遵守 MIQI_HOME 策略，
-    不直接构造 ~/.miqi 路径）。skill 脚本在 MiQi 环境内运行时可用；
-    独立运行时 ImportError 则跳过该候选。"""
-    try:
-        from miqi.paths import get_miqi_home
+    不直接构造 ~/.forge 路径）。skill 脚本在 MiQi 环境内运行时可用；
+    独立运行时 ImportError 则跳过该候选。
 
-        return get_miqi_home() / "workspace"
+    **用 `get_default_workspace_path()` 而不是 `get_miqi_home()/"workspace"`**：
+    桌面端把 token 写在「当前账号的工作区根」下，而登录后那个根是
+    `<数据根>/accounts/<sub>/workspace`（#1185）。拼死路径会让技能在登录态下
+    永远找不到 token 文件。
+    """
+    try:
+        from miqi.paths import get_default_workspace_path
+
+        return get_default_workspace_path()
     except ImportError:
         return None
 

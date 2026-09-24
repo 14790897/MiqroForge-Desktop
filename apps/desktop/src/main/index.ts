@@ -9,6 +9,8 @@ import { createSplash, closeSplash } from './splash';
 import { safeWrite, guardStdStreams } from './console-guard';
 import { sendToWindow } from './frame-send';
 import { crashRecovery, handleRendererCrash } from './crashRecovery';
+import { computeRegistryDataRoot, writeDataRootToRegistry } from './data-root-registry';
+import { runCleanupFromScope } from './ipc/cleanup';
 import { WINDOW_MIN_WIDTH } from '../shared/layout';
 
 const originalConsoleLog = console.log.bind(console);
@@ -192,6 +194,29 @@ export function main(): void {
     safeWrite(process.stderr, originalConsoleError, args);
   };
 
+  // ── --cleanup 退出清理模式（#1177）───────────────────────────────────
+  // 由「退出并清理」拉起的第二个实例：不建窗口、不走单实例锁、不写注册表，
+  // 读 scope 文件执行清理（此时原实例已退出，userData 已解锁），完成后
+  // 直接退出、不自动重启（产品决策：重启由用户手动完成，下次启动即全新首启）。
+  const cleanupArgIdx = process.argv.indexOf('--cleanup');
+  if (cleanupArgIdx !== -1) {
+    const scopePath = process.argv[cleanupArgIdx + 1];
+    if (scopePath) {
+      runCleanupFromScope(scopePath)
+        .then((report) => {
+          console.log('[cleanup] 完成:', JSON.stringify(report));
+        })
+        .catch((err) => {
+          console.error('[cleanup] 异常:', err);
+        })
+        .finally(() => app.exit(0));
+    } else {
+      console.error('[cleanup] 缺少 scope 文件参数');
+      app.exit(1);
+    }
+    return;
+  }
+
   // ── Dev-mode cache isolation ──────────────────────────────────────
   // 多 checkout 并行开发（如 ziti 与 539 工作区）时，各实例共享同一个
   // Chromium userData（%APPDATA%\miqi-desktop），会互相踩缓存：启动时
@@ -236,6 +261,20 @@ export function main(): void {
       win.show();
       win.focus();
     });
+  }
+
+  // ── 卸载清理定位（#1177）─────────────────────────────────────────────
+  // 打包版把实际数据根写入注册表，NSIS 卸载器勾选「删除应用数据」时按此
+  // 定位并清除残留；写失败时卸载器退回默认名候选（~/.forge/.miqi/.assistant）。
+  if (app.isPackaged && process.platform === 'win32') {
+    try {
+      const dataRoot = computeRegistryDataRoot();
+      if (!writeDataRootToRegistry(dataRoot)) {
+        console.warn(`[uninstall] 数据根注册表写入失败: ${dataRoot}`);
+      }
+    } catch (err) {
+      console.warn('[uninstall] 数据根注册表写入异常:', err);
+    }
   }
 
   app.whenReady().then(() => {

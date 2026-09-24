@@ -10,7 +10,7 @@
  * 运行（真计算、真产物，不是桩），再核对面板/台账完整性。
  *
  * 前置（本机/CI 无则 skip）：
- *   - BVSE_SKILL_DIR 默认 ~/.miqi/skills/bvse-mof-local-ssh（含 .venv 依赖）
+ *   - BVSE_SKILL_DIR 默认 ~/.forge/skills/bvse-mof-local-ssh（含 .venv 依赖）
  *   - BVSE_TEST_CIF 指向一个真实 MOF CIF（如 1499489..._freeONLY.cif）
  *
  * Run:
@@ -36,7 +36,7 @@ import {
 const REPO_ROOT = join(APPS_DESKTOP, '..', '..');
 
 const SKILL_DIR =
-  process.env.BVSE_SKILL_DIR ?? join(homedir(), '.miqi', 'skills', 'bvse-mof-local-ssh');
+  process.env.BVSE_SKILL_DIR ?? join(homedir(), '.forge', 'skills', 'bvse-mof-local-ssh');
 const SKILL_PY =
   process.platform === 'win32'
     ? join(SKILL_DIR, '.venv', 'Scripts', 'python.exe')

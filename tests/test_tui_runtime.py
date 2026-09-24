@@ -20,8 +20,8 @@ def test_tui_load_runtime_from_config_calls_make_provider():
         workspace = Path(tmp)
 
         # Create a minimal config file
-        (workspace / ".miqi").mkdir(exist_ok=True)
-        config_path = workspace / ".miqi" / "config.yaml"
+        (workspace / ".forge").mkdir(exist_ok=True)
+        config_path = workspace / ".forge" / "config.yaml"
         config_path.write_text("""
 agents:
   defaults:

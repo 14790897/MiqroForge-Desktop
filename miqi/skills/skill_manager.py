@@ -3,7 +3,7 @@
 Skills are markdown instruction files that augment the agent's system prompt.
 They can be loaded from:
 - Built-in skills (shipped with MiQi)
-- Workspace skills (.miqi/skills/)
+- Workspace skills (.forge/skills/)
 - Plugin skills (plugin_dir/skills/)
 
 Each skill is defined by a SKILL.md file with YAML frontmatter.
@@ -95,7 +95,7 @@ class SkillsManager:
             (self.user_dir, SkillScope.USER),
         ]
         if self.workspace:
-            ws_skills = self.workspace / ".miqi" / "skills"
+            ws_skills = self.workspace / ".forge" / "skills"
             search_dirs.append((ws_skills, SkillScope.WORKSPACE))
 
         for base_dir, default_scope in search_dirs:

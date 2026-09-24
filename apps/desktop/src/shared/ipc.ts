@@ -133,6 +133,11 @@ export const IPC = {
   // #854: allow_system_installs runtime toggle (no restart)
   SANDBOX_SET_ALLOW_SYSTEM_INSTALLS: 'sandbox:setAllowSystemInstalls',
 
+  // 卸载残留清理（#1177）
+  CLEANUP_SCAN: 'cleanup:scan',
+  CLEANUP_RUN: 'cleanup:run',
+  CLEANUP_QUIT_AND_CLEAN: 'cleanup:quitAndClean',
+
   // Write initial config (no bridge needed �? used by Setup Wizard)
   CONFIG_WRITE_INITIAL: 'config:write_initial',
 
@@ -540,8 +545,6 @@ export interface ConfirmStep {
  *  ask_user_confirm_card (blocking human-in-the-loop). */
 export interface UserInputCardRequest {
   input_id: string;
-  /** `#646-v2` 渲染路由：timeline / todo_state（缺省为交互卡） */
-  display?: 'timeline' | 'todo_state';
   thread_id?: string;
   turn_id?: string;
   /** Originating session — cards are scoped per session and dropped on
@@ -553,32 +556,6 @@ export interface UserInputCardRequest {
   choices?: ConfirmChoice[];
   timeout_seconds?: number;
   allow_remember_choice?: boolean;
-  /** #646-v2 Plan Card（ask_user_plan_confirm）：任务计划卡字段 */
-  goal?: string;
-  permissions?: string[];
-  /** #684 契约扩展：触发工具名 + 校验警告（B 级必上卡）+ 产物元数据 */
-  toolName?: string;
-  warnings?: { code?: string; message: string; severity?: string }[];
-  metadata?: {
-    run_id?: string;
-    artifact_name?: string;
-    artifact_path?: string;
-    artifact_size?: number;
-    artifact_sha256?: string;
-  };
-  /** #646-v2 Action Card（request_action_confirmation）：危险动作确认字段 */
-  action?: string;
-  target?: string;
-  file_name?: string;
-  size_bytes?: number;
-  sha256?: string;
-  description?: string;
-  /** #646-v2 todo_state 投影（display='todo_state'）：CodeRabbit 二轮 Minor——
-   *  显式声明字段，renderer 不再 as any */
-  run_id?: string;
-  revision?: number;
-  summary?: string;
-  items?: { id: string; title: string; status: string }[];
 }
 
 /** Resolution pushed from the backend once the user picks / cancels. */
@@ -1591,4 +1568,45 @@ export interface QraftStatus {
   points?: QraftPointsBalance;
   /** 平台 AI 网关开通状态（登录且 active 时模型调用走网关）。 */
   aiGateway?: QraftAiGatewayInfo;
+}
+
+// ---------------------------------------------------------------------------
+// Cleanup types (#1177：卸载残留/应用数据清理)
+// ---------------------------------------------------------------------------
+
+export type CleanupItemId =
+  'data-root:workspace' | 'data-root:rest' | 'user-data' | 'wsl-distro' | 'updater-cache';
+
+export interface CleanupScanItem {
+  id: CleanupItemId;
+  label: string;
+  description: string;
+  /** 文件系统路径；null = 本平台不适用或非文件系统对象（WSL distro）。 */
+  path: string | null;
+  exists: boolean | null;
+  /** 占用大小；null = 未知（探测失败/超时/非文件系统对象）。 */
+  sizeBytes: number | null;
+  defaultChecked: boolean;
+  /** false = 删除它必须先退出应用（Windows 文件锁）。 */
+  deletableNow: boolean;
+  /** 探测附注（如 WSL 不可用原因）。 */
+  detail?: string;
+}
+
+export interface CleanupScanResult {
+  items: CleanupScanItem[];
+  /** 清理功能是否可用（打包版可用；dev 需 MIQI_E2E_ALLOW_CLEANUP=1）。 */
+  available: boolean;
+  reason?: string;
+}
+
+export interface CleanupRunReport {
+  cleaned: { id: CleanupItemId; label: string }[];
+  failed: { id: CleanupItemId; label: string; reason: string }[];
+  logPath: string;
+}
+
+export interface CleanupQuitAndCleanResult {
+  ok: boolean;
+  reason?: string;
 }

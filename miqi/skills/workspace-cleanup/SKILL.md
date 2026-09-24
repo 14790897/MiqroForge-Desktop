@@ -1,12 +1,12 @@
 ---
 name: workspace-cleanup
-description: "Organize and clean up the miqi workspace directory (~/.miqi/workspace). Classifies generated files into structured subdirectories, archives old files, and produces a cleanup report."
+description: "Organize and clean up the miqi workspace directory (~/.forge/workspace). Classifies generated files into structured subdirectories, archives old files, and produces a cleanup report."
 metadata: {"miqi":{"emoji":"🗂️","requires":{"bins":["find","mv","du"]}}}
 ---
 
 # Workspace Cleanup
 
-Organize `~/.miqi/workspace` by classifying generated files into a structured layout, archiving old content, and reporting what was done.
+Organize `~/.forge/workspace` by classifying generated files into a structured layout, archiving old content, and reporting what was done.
 
 ## ⚠️ Sacred directories — NEVER touch these
 
@@ -56,7 +56,7 @@ workspace/
 ### Step 1 — Survey the workspace
 
 ```bash
-WORKSPACE="$HOME/.miqi/workspace"
+WORKSPACE="$HOME/.forge/workspace"
 echo "=== Current workspace layout ==="
 find "$WORKSPACE" -maxdepth 2 \
   -not -path "*/memory*" \
@@ -79,7 +79,7 @@ Read the survey output carefully. Build a mental map of what exists before movin
 ### Step 2 — Create target directories
 
 ```bash
-WORKSPACE="$HOME/.miqi/workspace"
+WORKSPACE="$HOME/.forge/workspace"
 mkdir -p \
   "$WORKSPACE/artifacts/papers" \
   "$WORKSPACE/artifacts/data" \
@@ -118,7 +118,7 @@ mv "$WORKSPACE/structure.cif" "$WORKSPACE/artifacts/data/"
 Find files in `artifacts/` that haven't been modified in over 30 days and move them to `archive/YYYY-MM/` using their modification date.
 
 ```bash
-WORKSPACE="$HOME/.miqi/workspace"
+WORKSPACE="$HOME/.forge/workspace"
 CUTOFF=30  # days
 
 # Find old files in artifacts (not recursing into archive itself)
@@ -174,7 +174,7 @@ After all moves are done, produce a concise summary:
 ```
 === Workspace Cleanup Report — YYYY-MM-DD ===
 
-Workspace: ~/.miqi/workspace
+Workspace: ~/.forge/workspace
 Total size after cleanup: X MB
 
 Files organized:

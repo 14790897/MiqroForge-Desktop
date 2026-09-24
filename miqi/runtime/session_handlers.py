@@ -548,7 +548,7 @@ async def _load_interrupted_turns(
         if ws is not None:
             from miqi.runtime.history_runtime import HistoryRuntime
 
-            db_path = ws / ".miqi-runtime" / "runtime.db"
+            db_path = ws / ".forge-runtime" / "runtime.db"
             if not db_path.exists():
                 return []
             hr = HistoryRuntime(db_path, session_id=sid)

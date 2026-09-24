@@ -37,6 +37,10 @@ import type {
   WslStatsResult,
   WslInstallProgress,
   WslInstallAndProvisionResult,
+  CleanupScanResult,
+  CleanupRunReport,
+  CleanupQuitAndCleanResult,
+  CleanupItemId,
   SkillsListResult,
   SkillDetail,
   McpServerConfig,
@@ -643,6 +647,15 @@ const api = {
     // #854: allow_system_installs runtime toggle (no restart)
     setAllowSystemInstalls: (enabled: boolean): Promise<{ allowSystemInstalls: boolean }> =>
       ipcRenderer.invoke(IPC.SANDBOX_SET_ALLOW_SYSTEM_INSTALLS, enabled),
+  },
+
+  // -- Cleanup (#1177: 卸载残留/应用数据清理) ----------------------------------
+  cleanup: {
+    scan: (): Promise<CleanupScanResult> => ipcRenderer.invoke(IPC.CLEANUP_SCAN),
+    run: (ids: CleanupItemId[]): Promise<CleanupRunReport> =>
+      ipcRenderer.invoke(IPC.CLEANUP_RUN, { ids }),
+    quitAndClean: (ids: CleanupItemId[]): Promise<CleanupQuitAndCleanResult> =>
+      ipcRenderer.invoke(IPC.CLEANUP_QUIT_AND_CLEAN, { ids }),
   },
 
   // -- Initial config write (no bridge needed) --------------------------------

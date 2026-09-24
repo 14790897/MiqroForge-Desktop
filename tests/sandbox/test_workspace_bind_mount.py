@@ -37,7 +37,7 @@ def _bind_mounts(args: list[str]) -> list[tuple[str, str]]:
 
 
 def test_default_workspace_binds_private_sandbox_dir():
-    sb = _make_sandbox(Path("/home/user/.miqi/workspace"), custom=False)
+    sb = _make_sandbox(Path("/home/user/.forge/workspace"), custom=False)
     args = sb._build_bwrap_args("echo hi")
     mounts = _bind_mounts(args)
     # Should bind the private sandbox_workspace, NOT any host path.

@@ -9,7 +9,7 @@ const ITEMS: P[] = [
   { key: 'plan', label: '规划', desc: '只分析出方案，不动手', color: '#a855f7' },
   { key: 'manual', label: '手动', desc: '每步说明并等待确认', color: '#0b7f91' },
   { key: 'edit', label: '允许编辑', desc: '改文件自动放行，危险操作确认', color: '#3b82f6' },
-  { key: 'auto', label: '自动', desc: '完全自主执行，部分高危动作仍需确认', color: '#f59e0b' },
+  { key: 'auto', label: '自动', desc: '完全自主执行，无需确认', color: '#f59e0b' },
 ];
 const LABELS: Record<string, string> = Object.fromEntries(ITEMS.map((p) => [p.key, p.label]));
 
@@ -322,7 +322,7 @@ export function ExecutionPolicySelector({ policy, onChange, disabled, onOpenAppr
                 开启自动模式
               </div>
               <p style={{ fontSize: 11, color: 'var(--text-muted)', margin: '3px 0 0' }}>
-                Agent 将完全自主执行，普通操作不再弹窗；部分高危动作仍需确认
+                Agent 将完全自主执行，不再弹窗确认
               </p>
               <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 10 }}>
                 <button

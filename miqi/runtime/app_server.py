@@ -59,6 +59,24 @@ class AppServerError(Exception):
 # ── ClientSessionRegistry ────────────────────────────────────────────────
 
 
+def _current_account_root() -> Path | None:
+    """Data-root workspace of the account in use right now, or None.
+
+    That is ``<数据根>/workspace`` or ``<数据根>/accounts/<sub>/workspace``
+    (#1185) — deliberately **not** ``Config.workspace_path``: a runtime created
+    for a folder-bound session works in the bound folder, so the workspace is
+    legitimately different per session while the account stays the same.
+    Comparing workspaces would tear those sessions down for no reason;
+    comparing account roots asks the question that actually matters.
+    """
+    try:
+        from miqi.paths import get_default_workspace_path
+
+        return Path(get_default_workspace_path()).expanduser().resolve()
+    except Exception:
+        return None
+
+
 class ClientSessionRegistry:
     """Manages client_id ↔ session_id relationships with TTL eviction.
 
@@ -72,12 +90,42 @@ class ClientSessionRegistry:
         self._session_clients: dict[str, set[str]] = {}   # session_id → {client_id}
         self._sessions: dict[str, Any] = {}               # session_id → RuntimeSession
         self._last_activity: dict[str, float] = {}         # session_id → timestamp
+        # session_id → 创建时生效的账号根（#1185）。缓存键只有 client_id:session_key，
+        # 不含账号，而 bridge 换账号不重启进程——没有这一列就分不出「同一个会话」
+        # 和「同一个会话，但已经换了主人」。
+        self._session_account: dict[str, Path] = {}
+        # 最近一次 create_session 传进来的沙箱管理器：`get_session` 那条路径没有
+        # 这个参数，但退役跨账号会话时要销毁同一个键上的沙箱（#1185 评审）。
+        self._sandbox_manager: Any = None
         self._idle_timeout = idle_timeout_seconds
         self._lock = asyncio.Lock()
         # Phase 35 hardening: bridge_context holds shared state for handler DI.
         # Populated by BridgeRuntimeLoop during init. Handlers read from here
         # instead of importing miqi.bridge.server directly.
         self.bridge_context: dict[str, Any] = {}
+
+    def _account_matches(self, session_id: str) -> bool:
+        """Whether a cached session still belongs to the account in use (#1185).
+
+        The two sides fail in opposite directions on purpose:
+
+        * **No recorded account** → True, i.e. keep the pre-#1185 behaviour.
+          The recorded account is only ever written by ``create_session``; a
+          session placed straight into ``_sessions`` (tests do this to drive
+          handlers in isolation) has no account to compare against, and treating
+          "no bookkeeping" as "another account's session" turns it into "session
+          not found" — which hangs the caller instead of protecting anything.
+        * **Current account unknown** → False. A lookup failure is not evidence
+          that the cached runtime belongs to the account in use, and answering
+          True there is what would hand one account the other's runtime.
+        """
+        recorded = self._session_account.get(session_id)
+        if recorded is None:
+            return True
+        current = _current_account_root()
+        if current is None:
+            return False
+        return recorded == current
 
     # ── client_id resolution ─────────────────────────────────────────────
 
@@ -114,14 +162,37 @@ class ClientSessionRegistry:
         # In Phase 27, switch to a pure opaque session_id with display name.
         session_id = f"{client_id}:{session_key}"
 
+        # 账号根在**任何 await 之前**采样（#1185 评审）：登录/登出是另一个进程里
+        # 的动作，下面建运行时、写 folder 绑定都要 await，中途换账号会把「为 A 建
+        # 的运行时」登记成 B 的 —— 于是 B 复用它就拿到了 A 的工作区、provider 与
+        # 沙箱，正好绕开本类要防的那件事。
+        account_root = _current_account_root()
+        # 记住这个 manager：get_session 那条路径也要能销毁同键沙箱。
+        if sandbox_manager is not None and not isinstance(sandbox_manager, str):
+            self._sandbox_manager = sandbox_manager
+
         async with self._lock:
             existing = self._sessions.get(session_id)
             if existing is not None:
-                # Session already exists — ensure client is authorized
-                self._client_sessions.setdefault(client_id, set()).add(session_id)
-                self._session_clients.setdefault(session_id, set()).add(client_id)
-                self._last_activity[session_id] = time.time()
-                return existing
+                if self._account_matches(session_id):
+                    # Session already exists — ensure client is authorized
+                    self._client_sessions.setdefault(client_id, set()).add(session_id)
+                    self._session_clients.setdefault(session_id, set()).add(client_id)
+                    self._last_activity[session_id] = time.time()
+                    return existing
+
+                # #1185：这份缓存属于**另一个登录账号**。缓存键只有
+                # client_id:session_key，不含账号，而 bridge 换账号不重启进程——
+                # 直接复用等于把上一个账号的工作区、沙箱、provider 连同一整段
+                # 会话历史交给当前账号。跨账号的沙箱也一并销毁：它绑的是上一个
+                # 账号的工作区，而它同样只按这个键索引。
+                await self._discard_session(
+                    session_id,
+                    existing,
+                    sandbox_manager=sandbox_manager,
+                    session_key=session_key,
+                    client_id=client_id,
+                )
 
             # Phase N: forward subagent completions to the creating client's
             # event sink as `subagent_result`.  This is the only producer of
@@ -201,7 +272,25 @@ class ClientSessionRegistry:
                         code="INTERNAL",
                     ) from exc
 
+            # 这里的等待（start / folder 绑定）期间可能已经换了账号：这份运行时是
+            # 按采样时的账号建的，登记给当前账号就等于把它交给别人（#1185 评审）。
+            if _current_account_root() != account_root:
+                await self._discard_session(
+                    session_id,
+                    runtime,
+                    sandbox_manager=sandbox_manager,
+                    session_key=session_key,
+                    client_id=client_id,
+                )
+                raise AppServerError(
+                    "Account switched while the session was being created; "
+                    "please retry",
+                    code="INTERNAL",
+                )
+
             self._sessions[session_id] = runtime
+            if account_root is not None:
+                self._session_account[session_id] = account_root
             self._client_sessions.setdefault(client_id, set()).add(session_id)
             self._session_clients[session_id] = {client_id}
             self._last_activity[session_id] = time.time()
@@ -211,10 +300,77 @@ class ClientSessionRegistry:
         )
         return runtime
 
+    async def _discard_session(
+        self,
+        session_id: str,
+        session: Any,
+        *,
+        sandbox_manager: Any = None,
+        session_key: str | None = None,
+        client_id: str | None = None,
+    ) -> None:
+        """Retire a cached session that belongs to another workspace (#1185).
+
+        Called under ``self._lock``.  The sandbox is dropped alongside the
+        runtime: it is indexed by the same client-scoped session key and was
+        bound to the retired workspace, so leaving it cached would hand the
+        next account a sandbox rooted in the previous one.
+        """
+        try:
+            await session.stop()
+        except Exception as exc:
+            logger.warning(
+                "ClientSessionRegistry: stop failed for {}: {}", session_id, exc
+            )
+        self._sessions.pop(session_id, None)
+        self._session_account.pop(session_id, None)
+        self._session_clients.pop(session_id, None)
+        self._last_activity.pop(session_id, None)
+        for owned in self._client_sessions.values():
+            owned.discard(session_id)
+
+        # `get_session` 那条路径拿不到 sandbox_manager 参数，用创建时记下的那个。
+        manager = sandbox_manager if sandbox_manager is not None else self._sandbox_manager
+        if manager is not None and session_key and hasattr(manager, "destroy"):
+            try:
+                await manager.destroy(session_key, client_id=client_id)
+            except Exception as exc:
+                logger.warning(
+                    "ClientSessionRegistry: sandbox destroy failed for {}: {}",
+                    session_id,
+                    exc,
+                )
+
     async def get_session(self, client_id: str, session_id: str) -> Any | None:
-        """Return RuntimeSession if client is authorized, else None."""
+        """Return RuntimeSession if client is authorized, else None.
+
+        A session cached under another login account answers None (#1185): this
+        is the path ``chat.send`` takes to reach a cached runtime, so the cache
+        has to be refused here too, not only at create time.  The entry is left
+        in place for ``create_session`` to retire (it holds the sandbox manager
+        needed to drop the matching sandbox as well); the caller falls through
+        to creating a fresh session for the current account.
+        """
         authorized = self._session_clients.get(session_id, set())
         if client_id not in authorized:
+            return None
+        if session_id in self._sessions and not self._account_matches(session_id):
+            # 不只拒绝，**退役**它（#1185 评审）：只拒绝的话，这份属于上一个账号
+            # 的运行时连同它在飞的回合与沙箱会一直活着，并把 A 的事件继续投给已经
+            # 登录的 B —— 而调用方很少会再用同一个 key 走 create_session，那条路
+            # 才是原来唯一会清理它的地方。
+            async with self._lock:
+                stale = self._sessions.get(session_id)
+                if stale is None or self._account_matches(session_id):
+                    return None  # 别的任务已经处理过 / 又切回来了
+                logger.info(
+                    "ClientSessionRegistry: session {} belongs to another account — retiring cached runtime",
+                    session_id,
+                )
+                session_key = session_id.split(":", 1)[1] if ":" in session_id else session_id
+                await self._discard_session(
+                    session_id, stale, session_key=session_key, client_id=client_id
+                )
             return None
         self._last_activity[session_id] = time.time()
         return self._sessions.get(session_id)
@@ -264,6 +420,9 @@ class ClientSessionRegistry:
             client_set.discard(session_id)
         self._session_clients.pop(session_id, None)
         self._last_activity.pop(session_id, None)
+        # 账号记录跟着一起清（#1185）：漏掉它，每次空闲淘汰都会留下一份已停
+        # 会话的归属记录，而且那条记录还会让下一次同键复用的比对拿到过期账号。
+        self._session_account.pop(session_id, None)
 
     async def stop_all(self) -> None:
         """Stop all sessions (shutdown hook)."""

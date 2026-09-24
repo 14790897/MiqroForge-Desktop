@@ -74,8 +74,8 @@ echo ""
 
 # ---- Sandbox State ----
 echo "**Sandbox State**"
-if [ -f ~/.miqi/sandbox_state.json ]; then
-    cat ~/.miqi/sandbox_state.json 2>/dev/null || echo "(read failed)"
+if [ -f ~/.forge/sandbox_state.json ]; then
+    cat ~/.forge/sandbox_state.json 2>/dev/null || echo "(read failed)"
 else
     echo "NO STATE FILE"
 fi
