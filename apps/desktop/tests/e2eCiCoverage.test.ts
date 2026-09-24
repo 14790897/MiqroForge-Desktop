@@ -55,11 +55,17 @@ function statementAt(source: string, start: number, cap: number): string {
 function functionAt(source: string, start: number, cap: number): string {
   const brace = source.indexOf('{', start);
   if (brace >= 0) {
-    // 单行函数体（`{ ... }` 在同一个换行内闭合）就地截断，避免滑到上限把后续语句吞进来
-    const sameLineClose = source.indexOf('}', brace);
-    const nextNewline = source.indexOf('\n', brace);
-    if (sameLineClose >= 0 && (nextNewline < 0 || sameLineClose < nextNewline)) {
-      return source.slice(start, sameLineClose + 1);
+    // 单行函数体（`{ ... }` 在同一个换行内闭合）就地截断，避免滑到上限把后续语句吞进来。
+    // 必须配平花括号：体里可能先出现嵌套的 `{...}`（对象字面量等），停在第一个 `}` 会截断函数体。
+    const newline = source.indexOf('\n', brace);
+    const limit = newline < 0 ? Math.min(source.length, brace + cap) : newline;
+    let depth = 0;
+    for (let i = brace; i < limit; i++) {
+      if (source[i] === '{') depth++;
+      else if (source[i] === '}') {
+        depth--;
+        if (depth === 0) return source.slice(start, i + 1);
+      }
     }
   }
   const close = source.indexOf('\n}', start);
@@ -105,12 +111,17 @@ interface JobScope {
 }
 
 /**
- * 这个 job 会不会在 Windows 上跑？直接 `runs-on: windows-*`，或 `matrix.os` 里含 windows。
- * `runs-on: ${{ matrix.os }}` 而拿不到 matrix 取值时按「不是 windows」处理——方向上是
- * 多报警（要求 win32 的 spec 会被要求登记），比静默漏报安全。
+ * 这个 job 会不会在 Windows 上跑？
+ *   - `runs-on: ${{ matrix.os }}` → 由 matrix 取值决定；
+ *   - 固定 runs-on（如 `ubuntu-latest`）→ 只看字面值：matrix 里恰好列了 windows 取值
+ *     也不能算（真正的 runner 由固定 runs-on 决定）。
+ * 拿不到 matrix 取值时按「不是 windows」处理——方向是多报警，比静默漏报安全。
  */
 function isWindowsJob(job: JobScope): boolean {
-  return /windows/i.test(job.runsOn) || job.matrixOs.some((v) => /windows/i.test(v));
+  if (/\$\{\{\s*matrix\.os\s*\}\}/.test(job.runsOn)) {
+    return job.matrixOs.some((v) => /windows/i.test(v));
+  }
+  return /windows/i.test(job.runsOn);
 }
 
 const STEP_KEY =
@@ -444,7 +455,7 @@ describe('e2e CI 覆盖守卫（#1196）', () => {
     expect(reasons).toEqual([expect.stringContaining('MIQI_DEEP_GATE')]);
   });
 
-  it('matrix.os 含 windows 的 job 被当作 windows 执行者（#1209 评审 P3）', () => {
+  it('matrix.os 含 windows 的 job 被当作 windows 执行者；固定 runs-on 不受 matrix 影响（#1209 评审 P3）', () => {
     const workflow = [
       'jobs:',
       '  matrix-job:',
@@ -455,6 +466,14 @@ describe('e2e CI 覆盖守卫（#1196）', () => {
       '    steps:',
       '      - name: run',
       '        run: npx playwright test --config=playwright.config.ts --project=electron some-spec.spec.ts',
+      '  fixed-linux:',
+      '    strategy:',
+      '      matrix:',
+      '        os: [windows-latest, ubuntu-latest]',
+      '    runs-on: ubuntu-latest',
+      '    steps:',
+      '      - name: run',
+      '        run: npx playwright test --config=playwright.config.ts --project=electron fixed-spec.spec.ts',
       '  linux-only:',
       '    runs-on: ubuntu-latest',
       '    steps:',
@@ -463,9 +482,25 @@ describe('e2e CI 覆盖守卫（#1196）', () => {
     ].join('\n');
     const parsed = parseWorkflowJobs({ file: 'synthetic.yml', text: workflow });
     const matrixJob = parsed.find((j) => j.id === 'matrix-job');
+    const fixedLinuxJob = parsed.find((j) => j.id === 'fixed-linux');
     const linuxJob = parsed.find((j) => j.id === 'linux-only');
     expect(matrixJob && isWindowsJob(matrixJob)).toBe(true);
     expect(matrixJob?.playwrightSteps.flatMap((s) => s.names)).toContain('some-spec.spec.ts');
+    // 固定 runs-on: ubuntu-latest —— matrix 里列了 windows 也不能算 Windows 执行者
+    expect(fixedLinuxJob && isWindowsJob(fixedLinuxJob)).toBe(false);
     expect(linuxJob && isWindowsJob(linuxJob)).toBe(false);
+  });
+
+  it('单行函数体含嵌套花括号时仍能取到完整函数体（#1209 评审）', () => {
+    const source = [
+      'const L1 = gateConfig();',
+      "function gateConfig() { const o = { a: 1 }; return o.a ? true : process.env.MIQI_NESTED_GATE === '1'; }",
+      "test.describe('nested', () => {",
+      "  test.skip(!L1, 'nested gate');",
+      "  test('t', async () => {});",
+      '});',
+    ].join('\n');
+    const analysis = analyzeSpec(source);
+    expect(analysis.requiredEnvs).toContain('MIQI_NESTED_GATE');
   });
 });
