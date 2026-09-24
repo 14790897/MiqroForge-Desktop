@@ -332,7 +332,7 @@ def create_runtime_tool_registry(
     tools_cfg = getattr(config, "tools", None)
     _shared_roots: list[Path] = []
     # Workspace root itself (issue #689): the agent legitimately needs to
-    # read/write files directly under ~/.miqi/workspace/ (e.g. reports,
+    # read/write files directly under ~/.forge/workspace/ (e.g. reports,
     # test files).  Cross-session access stays blocked by the per-session
     # isolation check in filesystem.py — only this root is whitelisted,
     # never another session's files.

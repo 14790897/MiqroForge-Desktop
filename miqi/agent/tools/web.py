@@ -227,8 +227,16 @@ async def _emit_web_sources(
         pass
 
 
+# ddgs >=9 从导入期构建的引擎注册表里选引擎。"html"/"lite" 是旧包
+# duckduckgo_search 的 backend 名，在 ddgs 里从未生效过：非法 backend 不报错，
+# ddgs 打一条警告后静默扇出到全部引擎（部分合法时更只降级到合法子集、连回退
+# 警告都没有 —— #1046）。用 "auto" 而非钉死单个引擎：实测单引擎可达性随网络
+# 变化（本机 `duckduckgo` 直接返回空），多引擎扇出才是搜索可用的原因。
+_DDGS_BACKEND = "auto"
+
+
 class DDGSProvider(SearchProvider):
-    """DuckDuckGo via the ddgs library — keyless, always available."""
+    """Keyless search via ddgs — fans out across its engine pool, not DuckDuckGo alone."""
 
     name = "ddgs"
 
@@ -248,7 +256,7 @@ class DDGSProvider(SearchProvider):
                         DDGS().text(
                             query,
                             max_results=count,
-                            backend="html,lite",  # multiple endpoints, more resilient
+                            backend=_DDGS_BACKEND,
                         )
                     )
                 )
@@ -620,6 +628,9 @@ _ERROR_REASONS: dict[str, str] = {
     "SERVER_ERROR": "搜索服务暂时不可用（服务端错误）",
     "UNSUPPORTED": "当前 {provider} 服务商不支持联网搜索（仅官方 api.deepseek.com 支持）",
 }
+
+# 用户/模型可见的服务名，属产品层级命名而非具体引擎：ddgs 一项实际会扇出到
+# 多个引擎（见 _DDGS_BACKEND），改名需与桌面端设置页、CLI 向导文案同步（#1046）。
 _PROVIDER_LABELS: dict[str, str] = {
     "tavily": "Tavily",
     "brave": "Brave",

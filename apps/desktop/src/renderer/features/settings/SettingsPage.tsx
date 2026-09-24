@@ -7,6 +7,7 @@ import { cn } from '../../lib/utils';
 import { getCachedConfig, invalidateConfigCache } from '../../lib/configCache';
 import { sanitizeUiMessage } from '../../lib/sanitizeUiMessage';
 import { QraftLoginButton } from './components/QraftLoginCard';
+import { CleanupSettings } from './CleanupSettings';
 import { DOCS_BASE_URL, DOCS_TREE, REPO_LABEL, REPO_URL } from './docsLinks';
 import {
   RefreshCw,
@@ -118,6 +119,7 @@ export type SettingsTab =
   | 'cron'
   | 'wsl'
   | 'logs'
+  | 'cleanup'
   | 'archived'
   | 'legal'
   | 'docs'
@@ -280,6 +282,15 @@ const SETTINGS_CATEGORIES: SettingsCategory[] = [
         icon: ScrollText,
       },
       {
+        value: 'cleanup',
+        label: '清理应用数据',
+        // 注意：description 会渲染进导航项文本，且现有 WSL E2E 用
+        // hasText('WSL') 子串定位设置页标签——这里不能出现 "WSL" 字样。
+        description: '清除数据与沙箱残留',
+        keywords: ['cleanup', 'clean', '清理', '卸载', '残留', 'uninstall', 'clear'],
+        icon: Trash2,
+      },
+      {
         value: 'archived',
         label: '已归档',
         description: '历史归档任务',
@@ -326,12 +337,12 @@ function getNestedStr(obj: Record<string, unknown>, ...keys: string[]): string {
  * 按原样用，同设备的其它账号也能看到。
  *
  * 判定口径必须跟主进程一致：`ipc/workspace-path.ts` 的 `getWorkspacePath()`
- * 把「空值或 `~/.miqi/workspace`」当作默认，其余一律按原始字符串当自定义目录
- * 展开。这里**不能 trim**：`'  ~/.miqi/workspace  '` 在两侧都被当成自定义路径，
+ * 把「空值或 `~/.forge/workspace`」当作默认，其余一律按原始字符串当自定义目录
+ * 展开。这里**不能 trim**：`'  ~/.forge/workspace  '` 在两侧都被当成自定义路径，
  * trim 过就会提示「已隔离」，而实际上是共享的（#1185 评审）。
  */
 function isAccountScopedWorkspace(raw: string): boolean {
-  return raw === '' || raw === '~/.miqi/workspace';
+  return raw === '' || raw === '~/.forge/workspace';
 }
 
 import { SettingsToggle } from './components/SettingsToggle';
@@ -557,7 +568,7 @@ function GeneralTab({
           <Input
             value={workspace}
             onChange={(e) => setWorkspace(e.target.value)}
-            placeholder="~/.miqi/workspace"
+            placeholder="~/.forge/workspace"
             className="flex-1"
           />
           <Button
@@ -2786,6 +2797,24 @@ export function SettingsPage({
             )}
           >
             <CronPage />
+          </ErrorBoundary>
+        </Tabs.Content>
+        <Tabs.Content value="cleanup" className="flex-1 overflow-y-auto">
+          <ErrorBoundary
+            fallback={(error, reset) => (
+              <div className="p-6 text-sm" style={{ color: 'var(--danger)' }}>
+                ⚠️ 清理设置加载失败: {error.message}
+                <button
+                  onClick={reset}
+                  className="ml-2 underline"
+                  style={{ color: 'var(--accent)' }}
+                >
+                  重试
+                </button>
+              </div>
+            )}
+          >
+            <CleanupSettings />
           </ErrorBoundary>
         </Tabs.Content>
         <Tabs.Content value="wsl" className="flex-1 overflow-y-auto">

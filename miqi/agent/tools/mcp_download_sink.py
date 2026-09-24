@@ -430,7 +430,7 @@ def sanitize_name(name: str) -> str:
     return cleaned
 
 
-_DOWNLOADS_RELDIR = Path(".miqi") / "downloads"
+_DOWNLOADS_RELDIR = Path(".forge") / "downloads"
 
 
 def _downloads_root_base(base_workspace: Path, session_key: str) -> Path:
@@ -452,9 +452,9 @@ def _downloads_root_base(base_workspace: Path, session_key: str) -> Path:
 def resolve_downloads_dir(base_workspace: Path, session_key: str) -> Path:
     """会话落盘根（v6.2 §R1）：复用 filesystem 的会话目录权威逻辑。
 
-    默认 workspace → ``<ws>/sessions/<safe_key>/files/.miqi/downloads``
+    默认 workspace → ``<ws>/sessions/<safe_key>/files/.forge/downloads``
     （文件工具合法根内，模型可直接读/搬，不跨会话互见）；自选项目目录 /
-    空 session_key → ``<ws>/.miqi/downloads``。**不在此文件自创目录算法**。
+    空 session_key → ``<ws>/.forge/downloads``。**不在此文件自创目录算法**。
     """
     return _downloads_root_base(base_workspace, session_key) / _DOWNLOADS_RELDIR
 
@@ -898,7 +898,7 @@ class DownloadSink:
         ``asyncio.to_thread``——大文件不阻塞主循环。
         """
         # 落盘根与 tracked 登记根同源（#983 缺口 2）：tracking_base 是会话
-        # files 目录（默认工作区）或工作区根，条目键即 ``.miqi/downloads/<name>``。
+        # files 目录（默认工作区）或工作区根，条目键即 ``.forge/downloads/<name>``。
         # 默认工作区布局下面板 ``files.read`` 按同一根解析到产物；自选工作区
         # 布局下读端仍锚 ``<ws>/sessions/<key>/files``（既有语义，见 PR 后续计划）。
         tracking_base = _downloads_root_base(self._base_workspace, session_key)

@@ -2,8 +2,9 @@
 
 Covers: provider normalization (hybrid→auto), the auto fallback chain
 (Tavily → Brave → DDGS), error classification (RATE_LIMIT/AUTH/NO_RESULT),
-the model-facing string format, and the legacy api_key → brave_api_key
-config migration.
+the model-facing string format, the legacy api_key → brave_api_key
+config migration, and the ddgs backend value's contract with the installed
+library (#1046).
 """
 
 import json
@@ -909,4 +910,30 @@ async def test_web_fetch_no_source_on_error(monkeypatch):
         _event_emitter=emitter, _turn_id="t1", _tool_call_id="c1",
     )
     assert emitter.events == []
+
+
+# ── ddgs backend value vs the installed library (#1046) ──────────────────
+
+
+def test_ddgs_backend_is_a_registered_engine():
+    """非法 ddgs backend 不报错——ddgs 只打警告后静默回落 auto，扇出全部引擎（#1046）。"""
+    from ddgs.engines import ENGINES
+
+    from miqi.agent.tools import web as web_module
+
+    # "auto"/"all" 是 _get_engines 里的特殊字符串，不是注册表键——放行它们，
+    # 否则这个断言会在正确的值上直接失败。
+    valid = set(ENGINES["text"]) | {"auto", "all"}
+    # 先要求每一项非空：ddgs 只对名字查注册表，空项会被记成无效 backend 并打警告，
+    # 所以 ""、"auto,"、",auto"、"auto,,brave" 这类值同样不能放过（#1046）。
+    parts = [b.strip() for b in web_module._DDGS_BACKEND.split(",")]
+    assert all(parts), (
+        f"_DDGS_BACKEND={web_module._DDGS_BACKEND!r} 含空项——空串或多余逗号同样会被 "
+        "ddgs 记为无效 backend 并打警告（#1046）"
+    )
+    requested = set(parts)
+    assert requested <= valid, (
+        f"_DDGS_BACKEND={web_module._DDGS_BACKEND!r} 含未知引擎 {sorted(requested - valid)}；"
+        f"合法值：{sorted(valid)}。ddgs 不会报错，只会打警告后静默扇出。"
+    )
 

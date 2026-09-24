@@ -1,0 +1,13 @@
+{
+  "wslSandboxDistro": "AIShadowSandbox",
+  "dataRootCandidateNames": [
+    ".forge",
+    ".miqi",
+    ".assistant"
+  ],
+  "activeDataRootDefaultName": ".forge",
+  "packagedUserDataDirName": "miqi-desktop",
+  "updaterCacheDirName": "miqi-desktop-updater",
+  "registryKeyPath": "Software\\MiqroForge",
+  "registryValueDataRoot": "DataRoot"
+}

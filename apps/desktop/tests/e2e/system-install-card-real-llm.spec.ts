@@ -14,7 +14,7 @@
  * 三选项齐全、点击后决议回传、回合正常收尾。
  *
  * 依赖：本机 WSL 发行版可用（sandbox.enabled 由 patchConfig 强制开启）；
- * 真实 provider 配置来自用户 ~/.miqi/config.json（launchElectronApp 复制）。
+ * 真实 provider 配置来自用户 ~/.forge/config.json（launchElectronApp 复制）。
  *
  * Run: cd apps/desktop && npx electron-vite build &&
  *      PLAYWRIGHT_SKIP_WEB_SERVER=1 npx playwright test \

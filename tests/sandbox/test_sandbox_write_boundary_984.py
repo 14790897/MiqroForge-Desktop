@@ -155,16 +155,16 @@ class TestPerCallRwBinds:
 
     def test_workspace_and_static_roots_bindable_under_layer2(self) -> None:
         """Workspace on /mnt/c + a configured extra root stay writable."""
-        sb = _make_sandbox(workspace=r"C:\Users\x\.miqi\workspace")
+        sb = _make_sandbox(workspace=r"C:\Users\x\.forge\workspace")
         args = sb._build_bwrap_args(
             "echo hi",
             extra_rw_binds=[
-                r"C:\Users\x\.miqi\workspace",
+                r"C:\Users\x\.forge\workspace",
                 r"C:\Users\x\Desktop\shared_out",
             ],
         )
         pairs = _bind_pairs(args)
-        assert ("/mnt/c/Users/x/.miqi/workspace",) * 2 in pairs
+        assert ("/mnt/c/Users/x/.forge/workspace",) * 2 in pairs
         assert ("/mnt/c/Users/x/Desktop/shared_out",) * 2 in pairs
 
     def test_multiple_binds_keep_order(self) -> None:
@@ -212,12 +212,12 @@ class TestCrossSessionGuard:
     WSL + bubblewrap and cannot run on the Windows dev host).
     """
 
-    _WS = r"C:\Users\x\.miqi\workspace"
-    _FILES = r"C:\Users\x\.miqi\workspace\sessions\desktop_1\files"
+    _WS = r"C:\Users\x\.forge\workspace"
+    _FILES = r"C:\Users\x\.forge\workspace\sessions\desktop_1\files"
     _OUT = r"C:\Users\x\Desktop\out"
-    _WS_SB = "/mnt/c/Users/x/.miqi/workspace"
-    _SESSIONS_SB = "/mnt/c/Users/x/.miqi/workspace/sessions"
-    _FILES_SB = "/mnt/c/Users/x/.miqi/workspace/sessions/desktop_1/files"
+    _WS_SB = "/mnt/c/Users/x/.forge/workspace"
+    _SESSIONS_SB = "/mnt/c/Users/x/.forge/workspace/sessions"
+    _FILES_SB = "/mnt/c/Users/x/.forge/workspace/sessions/desktop_1/files"
 
     def _args(self, extra_rw_binds: list[str], **kwargs) -> list[str]:
         sb = _make_sandbox(workspace=self._WS)
@@ -293,7 +293,7 @@ class TestCrossSessionGuard:
         """A PARENT of the workspace re-opens sessions just as well."""
         sb = _make_sandbox(workspace=self._WS)
         args = sb._build_bwrap_args(
-            "echo hi", extra_rw_binds=[r"C:\Users\x\.miqi"],
+            "echo hi", extra_rw_binds=[r"C:\Users\x\.forge"],
             workspace_root=self._WS, session_files_dir=self._FILES,
         )
         assert _index_of_triplet(args, "--ro-bind-try", self._SESSIONS_SB) >= 0
@@ -303,7 +303,7 @@ class TestCrossSessionGuard:
         sb = _make_sandbox(workspace=self._WS)
         args = sb._build_bwrap_args(
             "echo hi",
-            extra_rw_binds=[r"C:\Users\x\.miqi\workspace-other"],
+            extra_rw_binds=[r"C:\Users\x\.forge\workspace-other"],
             workspace_root=self._WS, session_files_dir=self._FILES,
         )
         assert self._SESSIONS_SB not in args
@@ -413,11 +413,11 @@ class TestRunCommandPassthrough:
 
         await sb.run_command(
             "echo hi",
-            extra_rw_binds=[r"C:\Users\x\.miqi\workspace"],
-            workspace_root=r"C:\Users\x\.miqi\workspace",
-            session_files_dir=r"C:\Users\x\.miqi\workspace\sessions\k\files",
+            extra_rw_binds=[r"C:\Users\x\.forge\workspace"],
+            workspace_root=r"C:\Users\x\.forge\workspace",
+            session_files_dir=r"C:\Users\x\.forge\workspace\sessions\k\files",
         )
-        assert seen["workspace_root"] == r"C:\Users\x\.miqi\workspace"
+        assert seen["workspace_root"] == r"C:\Users\x\.forge\workspace"
         assert seen["session_files_dir"] == (
-            r"C:\Users\x\.miqi\workspace\sessions\k\files"
+            r"C:\Users\x\.forge\workspace\sessions\k\files"
         )

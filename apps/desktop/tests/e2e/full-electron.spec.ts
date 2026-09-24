@@ -5,7 +5,7 @@
  * (PR #39012) uses app.commandLine.appendSwitch() instead of the
  * removed --remote-debugging-port CLI flag.  No manual CDP needed.
  *
- * User config at ~/.miqi/config.json is used automatically.
+ * User config at ~/.forge/config.json is used automatically.
  *
  * Run: cd apps/desktop && npx playwright test --config=playwright.config.ts --project=electron
  */

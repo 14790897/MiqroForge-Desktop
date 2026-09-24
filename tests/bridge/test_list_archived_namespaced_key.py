@@ -12,7 +12,7 @@ canonical 目录；读侧 handler 若按历史 raw 公式（``key.replace(":", "
 
 与 ``tests/bridge/test_sessions_empty_ephemeral.py`` 的 harness 相比，这里只把
 ``_get_session_manager`` 换成 tmp_path 上的 manager（handler 主体、registry、
-client 作用域过滤全部照跑）：避免向真实 ``~/.miqi/workspace`` 写测试会话，也
+client 作用域过滤全部照跑）：避免向真实 ``~/.forge/workspace`` 写测试会话，也
 不受并发/残留目录影响；被测的读侧派生逻辑不受影响。
 """
 
