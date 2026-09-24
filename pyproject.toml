@@ -1,6 +1,6 @@
 [project]
 name = "miqi"
-version = "0.34.0-dev"
+version = "0.35.0-dev"
 description = "A lightweight personal AI assistant framework"
 requires-python = ">=3.11"
 license = {text = "MIT"}
