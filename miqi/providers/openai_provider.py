@@ -60,10 +60,16 @@ class OpenAIProvider(LLMProvider):
         super().__init__(api_key, effective_base)
         self.default_model = default_model
         self.extra_headers = extra_headers or {}
-        self._stream_idle_timeout = stream_idle_timeout or DEFAULT_STREAM_IDLE_TIMEOUT
-        # Explicit None check rather than `or`: a caller asking for 0.0
+        # Explicit None checks rather than `or`: a caller asking for 0.0
         # (a test that wants no waiting at all) must not silently get the
-        # 60 s default back.
+        # default back.  #1200 fixed the first-token knob; the idle one had
+        # the same trap and is fixed here for symmetry — no caller passes it
+        # today, both are injection points for tests.
+        self._stream_idle_timeout = (
+            DEFAULT_STREAM_IDLE_TIMEOUT
+            if stream_idle_timeout is None
+            else stream_idle_timeout
+        )
         self._first_token_timeout = (
             DEFAULT_FIRST_TOKEN_TIMEOUT
             if first_token_timeout is None
@@ -581,21 +587,39 @@ class OpenAIProvider(LLMProvider):
                     }
                 continue
 
-            is_first = False  # first real content chunk received
-
             delta = chunk.choices[0].delta
             choice_finish = chunk.choices[0].finish_reason
             if choice_finish:
                 finish_reason = choice_finish
 
-            # Content delta
             content_text = getattr(delta, "content", None) or ""
+            reasoning_text = getattr(delta, "reasoning_content", None) or ""
+            delta_tool_calls = getattr(delta, "tool_calls", None) or []
+
+            # `is_first` means "the model has produced no output yet", NOT "we
+            # have seen a chunk with a non-empty choices list" (CodeRabbit
+            # finding on #1200).  OpenAI-compatible streams routinely open with
+            # a role-only primer — {"delta": {"role": "assistant", "content":
+            # ""}}; OpenAI and DeepSeek both do it — which carries no output at
+            # all.  Counting it as an answer would spend the 30 s idle budget
+            # on the wait for the first real token instead of the 60 s
+            # first-token budget, and report the generic error instead of the
+            # actionable one — backwards exactly for the buffered-reasoning
+            # providers whose first delta can land well past 30 s (see
+            # first_reasoning_elapsed above).
+            #
+            # A bare `finish_reason` chunk does end the window: the model
+            # demonstrably answered, so a stall after it is a stalled tail, not
+            # a missing first token, and the generic message is the honest one.
+            if content_text or reasoning_text or delta_tool_calls or choice_finish:
+                is_first = False
+
+            # Content delta
             if content_text:
                 content_parts.append(content_text)
                 yield LLMStreamEvent(kind="content_delta", delta=content_text)
 
             # Reasoning delta (Kimi, DeepSeek-R1, etc.)
-            reasoning_text = getattr(delta, "reasoning_content", None) or ""
             if reasoning_text:
                 if first_reasoning_elapsed is None:
                     first_reasoning_elapsed = time.monotonic() - request_started
@@ -621,8 +645,8 @@ class OpenAIProvider(LLMProvider):
                 yield LLMStreamEvent(kind="reasoning_delta", delta=reasoning_text)
 
             # Tool calls — incremental accumulation
-            if hasattr(delta, "tool_calls") and delta.tool_calls:
-                for tc in delta.tool_calls:
+            if delta_tool_calls:
+                for tc in delta_tool_calls:
                     idx = tc.index
                     if idx not in tool_call_accum:
                         tool_call_accum[idx] = {
