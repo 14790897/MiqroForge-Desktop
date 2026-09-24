@@ -1,3 +1,27 @@
+# [0.35.0](https://github.com/14790897/MiqroForge-Desktop/compare/v0.34.0...v0.35.0) (2026-09-24)
+
+
+### Bug Fixes
+
+* **agent:** ddgs backend 非法值改显式常量 + 注册表契约测试（[#1046](https://github.com/14790897/MiqroForge-Desktop/issues/1046)） ([#1211](https://github.com/14790897/MiqroForge-Desktop/issues/1211)) ([cd089e6](https://github.com/14790897/MiqroForge-Desktop/commit/cd089e6d6d569e00840154d21eb33db7808ba6ad))
+* **desktop:** SessionExplorer 不再在 sessions.list 失败时清空列表 ([#1202](https://github.com/14790897/MiqroForge-Desktop/issues/1202)) ([#1204](https://github.com/14790897/MiqroForge-Desktop/issues/1204)) ([2318c37](https://github.com/14790897/MiqroForge-Desktop/commit/2318c379bc2a054889282777dd38a95eaf0cc93c)), closes [#1191](https://github.com/14790897/MiqroForge-Desktop/issues/1191) [#1191](https://github.com/14790897/MiqroForge-Desktop/issues/1191)
+* **desktop:** 模型下拉只列平台下发模型，残留凭据不再复活已收口 provider（[#1179](https://github.com/14790897/MiqroForge-Desktop/issues/1179)） ([#1182](https://github.com/14790897/MiqroForge-Desktop/issues/1182)) ([8f1e946](https://github.com/14790897/MiqroForge-Desktop/commit/8f1e9469d18fe1a06e3da90d99ecf8a6a3b60345)), closes [#835](https://github.com/14790897/MiqroForge-Desktop/issues/835)
+* **providers:** 首 token 窗口只在产生真实输出后关闭（[#1200](https://github.com/14790897/MiqroForge-Desktop/issues/1200) 跟进） ([#1212](https://github.com/14790897/MiqroForge-Desktop/issues/1212)) ([e16b68e](https://github.com/14790897/MiqroForge-Desktop/commit/e16b68e8f9d8944dbe9d25e55eca434a80edb488))
+
+
+### Features
+
+* **desktop:** 卸载器与应用内清理清除全部残留（[#1177](https://github.com/14790897/MiqroForge-Desktop/issues/1177)） ([#1208](https://github.com/14790897/MiqroForge-Desktop/issues/1208)) ([9149a14](https://github.com/14790897/MiqroForge-Desktop/commit/9149a14572697ec40503586f1e8da124b2eecd1c)), closes [#1103](https://github.com/14790897/MiqroForge-Desktop/issues/1103) [#1176](https://github.com/14790897/MiqroForge-Desktop/issues/1176) [#1103](https://github.com/14790897/MiqroForge-Desktop/issues/1103) [#1175](https://github.com/14790897/MiqroForge-Desktop/issues/1175) [#1175](https://github.com/14790897/MiqroForge-Desktop/issues/1175) [_#imgup](https://github.com/_/issues/imgup)
+* **desktop:** 安装器支持自定义安装路径（[#1176](https://github.com/14790897/MiqroForge-Desktop/issues/1176)） ([#1210](https://github.com/14790897/MiqroForge-Desktop/issues/1210)) ([ab271ed](https://github.com/14790897/MiqroForge-Desktop/commit/ab271eddba0d556c03528ed951d23cc547052e40)), closes [#1124](https://github.com/14790897/MiqroForge-Desktop/issues/1124)
+
+---
+## 下载说明
+
+macOS 用户请按芯片架构选择安装包：
+
+- **Apple Silicon (M1/M2/M3/M4)**：下载 `0.35.0-arm64.dmg`（ARM 架构）
+- **Intel**：下载 `0.35.0.dmg`（x86 无后缀）
+
 # [0.34.0](https://github.com/14790897/MiqroForge-Desktop/compare/v0.33.0...v0.34.0) (2026-09-22)
 
 
