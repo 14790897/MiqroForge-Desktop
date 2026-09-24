@@ -37,7 +37,8 @@ const MANIFEST = join(E2E_DIR, 'CI-COVERAGE.md');
 const MAX_CONST_INIT = 400;
 const MAX_FN_BODY = 1200;
 const MAX_SKIP_CONTEXT = 400;
-const EXPAND_ROUNDS = 3;
+/** 展开迭代到不动点（每轮把所有新出现的 const / function 都并进来），上限只是防病态输入。 */
+const MAX_EXPAND_ROUNDS = 8;
 
 /**
  * 从 start 起截到「行尾的 `;`」——即一条语句的边界，带兜底上限。
@@ -50,8 +51,17 @@ function statementAt(source: string, start: number, cap: number): string {
   return source.slice(start, end);
 }
 
-/** 同上，但截到模块级函数的收尾 `}`（行首）——函数体不会把下一个函数吞进来。 */
+/** 同上，但截到模块级函数的收尾 `}`——函数体不会把下一个函数吞进来。 */
 function functionAt(source: string, start: number, cap: number): string {
+  const brace = source.indexOf('{', start);
+  if (brace >= 0) {
+    // 单行函数体（`{ ... }` 在同一个换行内闭合）就地截断，避免滑到上限把后续语句吞进来
+    const sameLineClose = source.indexOf('}', brace);
+    const nextNewline = source.indexOf('\n', brace);
+    if (sameLineClose >= 0 && (nextNewline < 0 || sameLineClose < nextNewline)) {
+      return source.slice(start, sameLineClose + 1);
+    }
+  }
   const close = source.indexOf('\n}', start);
   const end = close >= 0 && close - start < cap ? close + 2 : Math.min(source.length, start + cap);
   return source.slice(start, end);
@@ -87,9 +97,20 @@ interface PlaywrightStep {
 interface JobScope {
   id: string;
   runsOn: string;
+  /** `strategy.matrix.os` 列出的取值（形如 `os: [windows-latest, ubuntu-latest]`）。 */
+  matrixOs: string[];
   /** job 级 env 变量名。 */
   env: Set<string>;
   playwrightSteps: PlaywrightStep[];
+}
+
+/**
+ * 这个 job 会不会在 Windows 上跑？直接 `runs-on: windows-*`，或 `matrix.os` 里含 windows。
+ * `runs-on: ${{ matrix.os }}` 而拿不到 matrix 取值时按「不是 windows」处理——方向上是
+ * 多报警（要求 win32 的 spec 会被要求登记），比静默漏报安全。
+ */
+function isWindowsJob(job: JobScope): boolean {
+  return /windows/i.test(job.runsOn) || job.matrixOs.some((v) => /windows/i.test(v));
 }
 
 const STEP_KEY =
@@ -124,7 +145,7 @@ function parseWorkflowJobs(wf: Workflow): JobScope[] {
     const mJob = line.match(/^  ([A-Za-z0-9_-]+):\s*$/);
     if (mJob && indent === 2) {
       if (job) jobs.push(job);
-      job = { id: mJob[1], runsOn: '', env: new Set(), playwrightSteps: [] };
+      job = { id: mJob[1], runsOn: '', matrixOs: [], env: new Set(), playwrightSteps: [] };
       step = null;
       closeEnv();
       continue;
@@ -148,6 +169,16 @@ function parseWorkflowJobs(wf: Workflow): JobScope[] {
     if (mRunsOn) {
       job.runsOn = mRunsOn[1];
       continue;
+    }
+
+    // matrix 取值列表（`strategy.matrix.os: [windows-latest, ubuntu-latest]`）——
+    // `runs-on: ${{ matrix.os }}` 的 job 靠它判断是否会落在 Windows 上
+    const mMatrixOs = line.match(/^\s+os:\s*\[(.+)\]\s*$/);
+    if (mMatrixOs) {
+      job.matrixOs = mMatrixOs[1]
+        .split(',')
+        .map((v) => v.trim().replace(/^['"]|['"]$/g, ''))
+        .filter(Boolean);
     }
 
     if (/^\s*env:\s*$/.test(line)) {
@@ -235,7 +266,7 @@ function analyzeSpec(source: string): GateAnalysis {
   )) {
     expanded += '\n' + callAt(source, m.index!, MAX_SKIP_CONTEXT);
   }
-  for (let round = 0; round < EXPAND_ROUNDS; round++) {
+  for (let round = 0; round < MAX_EXPAND_ROUNDS; round++) {
     let added = false;
     for (const id of new Set(expanded.match(/[A-Za-z_$][\w$]*/g) ?? [])) {
       if (seen.has(id)) continue;
@@ -333,7 +364,7 @@ describe('e2e CI 覆盖守卫（#1196）', () => {
         scopes.push({
           label: `${job.id}${step.fullSuite ? '（全量）' : '（点名）'}`,
           envs: new Set<string>([...job.env, ...step.env]),
-          windows: /windows/i.test(job.runsOn),
+          windows: isWindowsJob(job),
         });
       }
     }
@@ -391,5 +422,50 @@ describe('e2e CI 覆盖守卫（#1196）', () => {
   it('清单里没有重复行', () => {
     const dupes = manifestRows.map((r) => r.file).filter((f, i, all) => all.indexOf(f) !== i);
     expect(dupes, `CI-COVERAGE.md 里重复登记：${dupes.join(', ')}`).toEqual([]);
+  });
+
+  it('展开迭代到不动点：四层 const/function 间接引用也能追到门（#1209 评审 P3）', () => {
+    const source = [
+      "const L3 = process.env.MIQI_DEEP_GATE === '1';",
+      'function level2() { return L3; }',
+      'const L2 = level2();',
+      'function level1() { return L2; }',
+      'const L1 = level1();',
+      "test.describe('depth probe', () => {",
+      "  test.skip(!L1, 'deep gate');",
+      "  test('t', async () => {});",
+      '});',
+    ].join('\n');
+    const analysis = analyzeSpec(source);
+    expect(analysis.requiredEnvs).toContain('MIQI_DEEP_GATE');
+    const reasons = fatalReasons(analysis, [
+      { label: 'synthetic', envs: new Set(), windows: false },
+    ]);
+    expect(reasons).toEqual([expect.stringContaining('MIQI_DEEP_GATE')]);
+  });
+
+  it('matrix.os 含 windows 的 job 被当作 windows 执行者（#1209 评审 P3）', () => {
+    const workflow = [
+      'jobs:',
+      '  matrix-job:',
+      '    strategy:',
+      '      matrix:',
+      '        os: [windows-latest, ubuntu-latest]',
+      '    runs-on: ${{ matrix.os }}',
+      '    steps:',
+      '      - name: run',
+      '        run: npx playwright test --config=playwright.config.ts --project=electron some-spec.spec.ts',
+      '  linux-only:',
+      '    runs-on: ubuntu-latest',
+      '    steps:',
+      '      - name: run',
+      '        run: npx playwright test --config=playwright.config.ts --project=electron other-spec.spec.ts',
+    ].join('\n');
+    const parsed = parseWorkflowJobs({ file: 'synthetic.yml', text: workflow });
+    const matrixJob = parsed.find((j) => j.id === 'matrix-job');
+    const linuxJob = parsed.find((j) => j.id === 'linux-only');
+    expect(matrixJob && isWindowsJob(matrixJob)).toBe(true);
+    expect(matrixJob?.playwrightSteps.flatMap((s) => s.names)).toContain('some-spec.spec.ts');
+    expect(linuxJob && isWindowsJob(linuxJob)).toBe(false);
   });
 });
