@@ -11,7 +11,11 @@ import pytest
 import miqi.providers.resilience as resilience
 from miqi.providers.anthropic_provider import AnthropicProvider
 from miqi.providers.base import LLMResponse
-from miqi.providers.openai_provider import OpenAIProvider
+from miqi.providers.openai_provider import (
+    DEFAULT_FIRST_TOKEN_TIMEOUT,
+    DEFAULT_STREAM_IDLE_TIMEOUT,
+    OpenAIProvider,
+)
 from miqi.providers.resilience import (
     ErrorKind,
     ProviderError,
@@ -609,13 +613,33 @@ class _FakeOpenAIResponse:
 
 
 class _FakeStreamChunk:
-    def __init__(self, content: str = "", finish_reason: str | None = None) -> None:
+    def __init__(
+        self,
+        content: str = "",
+        finish_reason: str | None = None,
+        role: str | None = None,
+        reasoning: str = "",
+        tool_call: str | None = None,
+    ) -> None:
         self.choices = [
             SimpleNamespace(
                 delta=SimpleNamespace(
                     content=content or None,
-                    reasoning_content=None,
-                    tool_calls=None,
+                    reasoning_content=reasoning or None,
+                    tool_calls=(
+                        [
+                            SimpleNamespace(
+                                index=0,
+                                id="call_1",
+                                function=SimpleNamespace(name=tool_call, arguments=""),
+                            )
+                        ]
+                        if tool_call
+                        else None
+                    ),
+                    # OpenAI-compatible streams routinely open with a role-only
+                    # primer (`delta.role` set, no content at all).
+                    role=role,
                 ),
                 finish_reason=finish_reason,
             )
@@ -777,14 +801,70 @@ async def test_openai_stream_preconnect_retry(monkeypatch: Any) -> None:
     assert final.finish_reason == "stop"
 
 
+# The two timeout branches of OpenAIProvider.stream_chat are indistinguishable
+# by kind / finish_reason / error_kind — all three are identical — so the
+# emitted content is the only host-side observable that says WHICH branch
+# fired.  Assert on it, or a hard-coded `is_first` leaves the tests below
+# green.  The literals are duplicated on purpose: the wording is user-visible
+# contract, so a change in miqi/providers/openai_provider.py must be re-read
+# here rather than silently absorbed.
+_FIRST_TOKEN_TIMEOUT_MSG = (
+    "The model did not respond within the first-token timeout. This may "
+    "indicate the model is overloaded or stuck in a long reasoning phase. "
+    "Please try again or use a different model."
+)
+_GENERIC_ERROR_MSG = "An unexpected error occurred while processing your request."
+
+
+def _capture_warnings() -> tuple[list[str], Any]:
+    """Return (messages, remove_handler) collecting loguru WARNING+ records.
+
+    loguru keeps its own sinks, so pytest's caplog does not see them.
+    """
+    from loguru import logger as loguru_logger
+
+    messages: list[str] = []
+    handler_id = loguru_logger.add(
+        lambda m: messages.append(m.record["message"]), level="WARNING"
+    )
+    return messages, lambda: loguru_logger.remove(handler_id)
+
+
+# The two branches of the timeout gate differ on TWO axes: which budget they
+# read (first-token vs idle) and which wording/log line they emit.  Asserting
+# only on the wording leaves the budget axis invisible — swapping the two
+# budgets keeps every assertion here green unless the delays are distinct and
+# observed.  These two values must stay different for that reason; the wait
+# they cause is short (0.02 s / 0.25 s), and no assertion below is on wall
+# clock time.
+_FIRST_TOKEN_BUDGET = 0.02
+_IDLE_BUDGET = 0.25
+
+
+def _record_timeouts(monkeypatch: Any) -> list[float]:
+    """Record the delay handed to each `asyncio.timeout(...)` in stream_chat."""
+    recorded: list[float] = []
+    real_timeout = asyncio.timeout
+
+    def recording_timeout(delay: float) -> Any:
+        recorded.append(delay)
+        return real_timeout(delay)
+
+    monkeypatch.setattr(asyncio, "timeout", recording_timeout)
+    return recorded
+
+
 @pytest.mark.asyncio
 async def test_openai_stream_first_token_timeout_yields_terminal_error(monkeypatch: Any) -> None:
     _patch_provider_sleep(monkeypatch)
+    recorded = _record_timeouts(monkeypatch)
     # The stream stalls before its first chunk, so it is the FIRST-token
     # timeout that fires here; the idle one is pinned too so neither default
     # (60 s and 30 s) can turn this test into real sleeping on CI.
     provider = OpenAIProvider(
-        api_key="sk-test", stream_idle_timeout=0.01, first_token_timeout=0.01,
+        api_key="sk-test",
+        stream_idle_timeout=_IDLE_BUDGET,
+        first_token_timeout=_FIRST_TOKEN_BUDGET,
     )
 
     async def fake_create(**kw: Any) -> Any:
@@ -795,19 +875,32 @@ async def test_openai_stream_first_token_timeout_yields_terminal_error(monkeypat
         timeout=600.0,
     )
 
-    events = [event async for event in provider.stream_chat(messages=[{"role": "user", "content": "hi"}])]
+    warnings, remove_handler = _capture_warnings()
+    try:
+        events = [event async for event in provider.stream_chat(messages=[{"role": "user", "content": "hi"}])]
+    finally:
+        remove_handler()
+
     assert len(events) == 1
     assert events[0].kind == "completed"
     assert events[0].response.finish_reason == "error"
     assert events[0].response.error_kind == "transient"
+    # ...and it was the first-token branch, not the idle one: both in wording
+    # and in the budget the wait was given.
+    assert events[0].response.content == _FIRST_TOKEN_TIMEOUT_MSG
+    assert recorded == [_FIRST_TOKEN_BUDGET]
+    assert any("LLM first-token timeout" in m for m in warnings), warnings
 
 
 @pytest.mark.asyncio
 async def test_openai_stream_idle_timeout_yields_terminal_error(monkeypatch: Any) -> None:
     """A stall AFTER the first chunk is the idle timeout, not the first-token one."""
     _patch_provider_sleep(monkeypatch)
+    recorded = _record_timeouts(monkeypatch)
     provider = OpenAIProvider(
-        api_key="sk-test", stream_idle_timeout=0.01, first_token_timeout=0.01,
+        api_key="sk-test",
+        stream_idle_timeout=_IDLE_BUDGET,
+        first_token_timeout=_FIRST_TOKEN_BUDGET,
     )
 
     async def fake_create(**kw: Any) -> Any:
@@ -818,10 +911,147 @@ async def test_openai_stream_idle_timeout_yields_terminal_error(monkeypatch: Any
         timeout=600.0,
     )
 
-    events = [event async for event in provider.stream_chat(messages=[{"role": "user", "content": "hi"}])]
+    warnings, remove_handler = _capture_warnings()
+    try:
+        events = [event async for event in provider.stream_chat(messages=[{"role": "user", "content": "hi"}])]
+    finally:
+        remove_handler()
+
     assert [event.kind for event in events] == ["content_delta", "completed"]
     assert events[-1].response.finish_reason == "error"
     assert events[-1].response.error_kind == "transient"
+    # The generic wording is shared with two unrelated exception paths, so the
+    # branch log line is what pins the IDLE-timeout branch specifically.
+    assert events[-1].response.content == _GENERIC_ERROR_MSG
+    assert events[-1].response.content != _FIRST_TOKEN_TIMEOUT_MSG
+    # First wait opened the window, second wait was the idle budget.
+    assert recorded == [_FIRST_TOKEN_BUDGET, _IDLE_BUDGET]
+    assert any("LLM stream idle timeout" in m for m in warnings), warnings
+
+
+@pytest.mark.asyncio
+async def test_openai_stream_role_only_primer_keeps_first_token_window(
+    monkeypatch: Any,
+) -> None:
+    """A role-only primer chunk carries no output — it must not end the window.
+
+    OpenAI-compatible streams routinely open with
+    ``{"choices":[{"delta":{"role":"assistant","content":""}}]}`` (OpenAI and
+    DeepSeek both do).  Counting that as "the model answered" hands the wait
+    for the first real token to the 30 s idle budget instead of the 60 s
+    first-token one, and reports the generic error — which defeats the
+    first-token timeout exactly for the buffered-reasoning providers that need
+    it most (CodeRabbit finding on PR #1200).
+    """
+    _patch_provider_sleep(monkeypatch)
+    recorded = _record_timeouts(monkeypatch)
+    provider = OpenAIProvider(
+        api_key="sk-test",
+        stream_idle_timeout=_IDLE_BUDGET,
+        first_token_timeout=_FIRST_TOKEN_BUDGET,
+    )
+
+    async def fake_create(**kw: Any) -> Any:
+        return _FakeStream([_FakeStreamChunk("", role="assistant")], hang_after=True)
+
+    provider._client = SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=fake_create)),
+        timeout=600.0,
+    )
+
+    warnings, remove_handler = _capture_warnings()
+    try:
+        events = [event async for event in provider.stream_chat(messages=[{"role": "user", "content": "hi"}])]
+    finally:
+        remove_handler()
+
+    assert [event.kind for event in events] == ["completed"]
+    assert events[-1].response.content == _FIRST_TOKEN_TIMEOUT_MSG
+    # The wait AFTER the primer must still be the first-token budget — this is
+    # the whole point: the primer must not hand the wait to the idle budget.
+    assert recorded == [_FIRST_TOKEN_BUDGET, _FIRST_TOKEN_BUDGET]
+    assert any("LLM first-token timeout" in m for m in warnings), warnings
+
+
+@pytest.mark.parametrize(
+    ("chunk", "ends_window"),
+    [
+        pytest.param(_FakeStreamChunk(""), False, id="empty-delta"),
+        pytest.param(_FakeStreamChunk("", role="assistant"), False, id="role-only-primer"),
+        pytest.param(_FakeStreamChunk("hi"), True, id="content"),
+        pytest.param(_FakeStreamChunk(reasoning="think"), True, id="reasoning"),
+        pytest.param(_FakeStreamChunk(tool_call="get_weather"), True, id="tool-call-fragment"),
+        pytest.param(_FakeStreamChunk(finish_reason="stop"), True, id="finish-reason-only"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_openai_stream_first_token_window_closes_on_output_only(
+    monkeypatch: Any, chunk: _FakeStreamChunk, ends_window: bool
+) -> None:
+    """Pin exactly which chunk shapes end the first-token window.
+
+    The window stands for "the model has produced nothing yet", so it must stay
+    open for a role-only primer or an empty delta — those carry no output — and
+    close for content, reasoning, tool-call fragments, and a bare
+    `finish_reason` (the last one because the model demonstrably answered, so a
+    later stall is a stalled tail, not a missing first token).
+
+    Asserted through the budget the NEXT wait is given, so nothing here depends
+    on wall-clock time.
+    """
+    _patch_provider_sleep(monkeypatch)
+    recorded = _record_timeouts(monkeypatch)
+    provider = OpenAIProvider(
+        api_key="sk-test",
+        stream_idle_timeout=_IDLE_BUDGET,
+        first_token_timeout=_FIRST_TOKEN_BUDGET,
+    )
+
+    async def fake_create(**kw: Any) -> Any:
+        return _FakeStream([chunk], hang_after=True)
+
+    provider._client = SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=fake_create)),
+        timeout=600.0,
+    )
+
+    events = [event async for event in provider.stream_chat(messages=[{"role": "user", "content": "hi"}])]
+
+    assert recorded == [
+        _FIRST_TOKEN_BUDGET,
+        _IDLE_BUDGET if ends_window else _FIRST_TOKEN_BUDGET,
+    ]
+    assert events[-1].kind == "completed"
+    assert events[-1].response.finish_reason == "error"
+
+
+# ---------------------------------------------------------------------------
+# Timeout knobs: an explicit 0.0 is a value, not "unset" (PR #1200)
+# ---------------------------------------------------------------------------
+
+
+def test_openai_provider_preserves_explicit_zero_first_token_timeout() -> None:
+    """`first_token_timeout=0.0` means "do not wait at all" and must survive.
+
+    PR #1200 replaced `first_token_timeout or DEFAULT_FIRST_TOKEN_TIMEOUT` with
+    an explicit `is None` check for exactly this reason; that behaviour was
+    only ever verified by hand, so pin it here.
+    """
+    provider = OpenAIProvider(api_key="sk-test", first_token_timeout=0.0)
+    assert provider._first_token_timeout == 0.0
+
+
+def test_openai_provider_preserves_explicit_zero_stream_idle_timeout() -> None:
+    """Same contract for the sibling knob, which had the identical `or` trap."""
+    provider = OpenAIProvider(api_key="sk-test", stream_idle_timeout=0.0)
+    assert provider._stream_idle_timeout == 0.0
+
+
+def test_openai_provider_applies_timeout_defaults_when_unset() -> None:
+    """`None` — the documented "unset" — remains the only value that defaults."""
+    provider = OpenAIProvider(api_key="sk-test")
+    assert provider._first_token_timeout == DEFAULT_FIRST_TOKEN_TIMEOUT
+    assert provider._stream_idle_timeout == DEFAULT_STREAM_IDLE_TIMEOUT
 
 
 # ---------------------------------------------------------------------------
