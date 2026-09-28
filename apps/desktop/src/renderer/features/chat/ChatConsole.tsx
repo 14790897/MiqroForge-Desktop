@@ -110,6 +110,7 @@ import type {
   SpreadsheetData,
   DocumentBlocks,
 } from '../../../shared/ipc';
+import { isChatNotDispatched } from '../../../shared/ipc';
 import { extractProgressMessage, type ProgressPayload } from './progressUtils';
 import { sanitizeUiMessage } from '../../lib/sanitizeUiMessage';
 import {
@@ -7266,11 +7267,17 @@ export function ChatConsole({
     // the background.  If it rejects, the send proceeds anyway — the bridge
     // surfaces the underlying runtime error through the stream/error path.
     //
-    // #1011 P1(review):记录 chat.send 是否真正送出 —— 只有确定「未派发」
-    // 的失败(此前的附件/内容构造/thread start 等)才允许恢复编辑快照;
-    // chat.send 调用之后的 reject(bridge/IPC/timeout)可能请求已送达后端,
-    // 此时恢复旧列表会与后端状态分叉,一律不做。
-    let turnDispatched = false;
+    // #1011 P1(review)/#1072:本次 send 的派发状态(三态)。
+    //   · 'not_dispatched' —— 已证明请求从未写入 bridge 管道:此前的附件/内容
+    //     构造/thread start 失败,同步 throw,或 main 以「确定未派发」正常返回
+    //     (bridge 没在跑 / 参数构造失败 / 序列化失败)。
+    //   · 'unknown' —— 已调用 invoke,但没有「后端已受理」的确认 —— 按可能已派发
+    //     处理(timeout、bridge 退出、热重载重启等)。
+    //   · 'dispatched' —— 已收到后端的流式/终态事件,后端确实开始了这个 turn。
+    // 只有 'not_dispatched' 允许恢复编辑快照;后两者恢复旧列表会与已接收请求的
+    // 后端状态分叉,一律保留截断后的列表 + 错误提示。'unknown' 与 'dispatched'
+    // 在回滚判定上等价,分列只为让状态含义自明。
+    let dispatchState: 'not_dispatched' | 'unknown' | 'dispatched' = 'not_dispatched';
     try {
       // #922/#1000：网关状态先取一次，供「未登录 → 登录引导」与
       // 「已登录但网关未就绪 → 网关提示」两个分支共用。旧 preload/
@@ -7889,6 +7896,9 @@ export function ChatConsole({
       // the owning invocation's handlers process it.  Untagged legacy events
       // fall through (back-compat: treated as this send's own).
       if (data.session_key && data.session_key !== routingKey) return;
+      // #1072: 后端已为本会话产出流式事件 —— turn 确实被受理(派发三态的
+      // 'dispatched')。此后即便 Promise 再 reject,也绝不允许回滚编辑快照。
+      dispatchState = 'dispatched';
       // Accepted events route under THIS invocation's UI session owner.  The
       // routing key can differ from the session key for thread-scoped sends
       // (desktop:<threadId>) — routing by it would cache events under a key
@@ -8608,17 +8618,15 @@ export function ChatConsole({
       }
 
       // Fire send — server parses synchronously in _chat_send_handler
-      // #1011 P1(baiye-banned review):判定点必须早于「请求可能已送出」的
-      // 第一刻。chat.send 内部是 ipcRenderer.invoke → main → bridge.send,
-      // 一旦调用,即使 Promise 之后 reject,请求也可能已被后端接收并开始
-      // turn —— 此时恢复旧 snapshot 会造成前后端状态分叉。因此:
-      //   · chat.send 调用之前的失败(附件/内容构造/thread start)= 确定未派发 → 允许恢复
-      //   · 调用之后的一切失败(resolve 或 reject 皆然)= 可能已派发 → 不恢复
-      //     (与普通发送失败语义一致:保留列表 + 错误提示)
-      // #1011 P3(baiye-banned 终审):区分「同步 throw」——preload 的 chat.send
-      // 是普通函数,参数序列化失败 / API 缺失会在调用时同步抛出,此时请求
-      // 从未进入 IPC;仅在调用成功返回 Promise 后才标记 dispatched,
-      // 同步 throw 交由外层 catch 走「确定未派发」的恢复路径。
+      // #1072:派发状态由 main 显式给出,不再靠「是否调用过 invoke」推测。
+      // chat.send 内部是 ipcRenderer.invoke → main → bridge.send,Promise 的
+      // resolve/reject 本身分不清「请求从未送出」与「已送达后端但后续失败」。
+      // 现在:调用成功先按 unknown(可能已派发),main 判定「请求从未写入
+      // bridge 管道」时以带标记的结果正常返回(见下方 await 处),降回
+      // not_dispatched 后才允许恢复编辑快照。
+      // #1011 P3(baiye-banned 终审):preload 的 chat.send 是普通函数,参数
+      // 序列化失败 / API 缺失会在调用时同步抛出,此时请求从未进入 IPC ——
+      // 保持 not_dispatched,交由外层 catch 走「确定未派发」的恢复路径。
       let sendPromise: Promise<unknown>;
       try {
         sendPromise = window.miqi.chat.send(
@@ -8632,14 +8640,13 @@ export function ChatConsole({
           _resumeId ?? undefined,
           dropFromTurnId ?? undefined
         );
-        turnDispatched = true;
+        dispatchState = 'unknown';
       } catch (syncSendError) {
-        // 同步 throw:未进入 IPC —— 保持 turnDispatched=false,允许恢复
+        // 同步 throw:未进入 IPC —— 保持 not_dispatched,允许恢复
         throw syncSendError;
       }
-      // 请求已发出 —— 清除本次 send 的编辑回滚点(此后失败一律不恢复,
-      // 见上方 turnDispatched 注释;此处删除防 Map 泄漏)
-      editRollbacksRef.current.delete(thisSendId);
+      // 回滚点不再在此处删除(#1072):调用成功 ≠ 请求已写入管道,main 仍可能
+      // 判为未派发并需要恢复编辑快照。删除点改为 await 之后的确定态。
 
       // Mark as done after a tick — server parsing is synchronous, already complete
       if (sentAttachments.some((a) => a.type === 'document')) {
@@ -8659,7 +8666,17 @@ export function ChatConsole({
         }, 100);
       }
 
-      await sendPromise;
+      const sendResult = await sendPromise;
+      if (isChatNotDispatched(sendResult)) {
+        // #1072:main 明确「请求从未写入 bridge 管道」(bridge 没在跑 / 参数构造
+        // 失败 / 序列化失败)。派发状态降回 not_dispatched 后走与失败分支同一套
+        // 渲染 + 清理逻辑(抛出的 Error 会被下方 catch 按普通失败做 sanitize 与
+        // 错误提示),区别只在于此时才允许恢复编辑快照。
+        dispatchState = 'not_dispatched';
+        throw new Error(sendResult.message);
+      }
+      // 派发已成定局(收到终态事件)——回滚点用完即弃,防 Map 泄漏。
+      editRollbacksRef.current.delete(thisSendId);
       settleLifecycle();
       // The turn's promise settled, but the terminal LISTENER may never have
       // run: a later send unsubscribed it (cross-session listener kill), or
@@ -8696,13 +8713,19 @@ export function ChatConsole({
         return;
       }
       const errMsg = sanitizeUiMessage(e?.message ?? String(e ?? '未知错误'));
-      // 编辑重答(#1011 P1):仅当「确定未派发」(chat.send 尚未送出)时才恢复
-      // 截断前的完整列表;已送出后的 reject 可能请求已达后端,恢复会造成
-      // 前后端状态分叉 —— 此时保留截断后的列表 + 错误提示。
+      // 编辑重答(#1072):仅当「确定未派发」时才恢复截断前的完整列表。已派发的
+      // 失败(unknown: timeout / bridge 退出 / 热重载重启;dispatched: 后端已开始
+      // turn)可能请求已达后端,恢复会造成前后端状态分叉 —— 此时保留截断后的
+      // 列表 + 错误提示。恢复时同时把编辑后的文本与附件还回输入框(与
+      // 预派发拦截分支同一套收尾),否则气泡被回滚掉、用户的新文本无处可取。
+      // ⚠️ 恢复是**视图层**的:handleEdit 在发请求前就已 sessions.truncate 落库
+      // (否则重载会复活旧问答,#1020),而那条截断不可逆 —— 恢复出来的旧问答
+      // 只存在于当前视图,刷新后依旧消失。这里取「先让用户拿回上下文、并保住
+      // 刚编辑的文本」,而不是让列表与后端保持一致。
       const sendFailRollback = editRollbacksRef.current.get(thisSendId);
       editRollbacksRef.current.delete(thisSendId);
       const sendFailRollbackApplies =
-        !turnDispatched &&
+        dispatchState === 'not_dispatched' &&
         !!sendFailRollback &&
         sendFailRollback.sessionKey === sendSessionKey &&
         currentSessionRef.current === sendSessionKey;
@@ -8714,11 +8737,17 @@ export function ChatConsole({
         setMessages((prev) =>
           sendFailRollbackApplies ? [...sendFailRollback!.snapshot, failMsg] : [...prev, failMsg]
         );
+        if (sendFailRollbackApplies) {
+          composerRef.current?.setText(text);
+          setAttachments(atts);
+        }
       } else if (sendFailRollbackApplies) {
         setMessages([
           ...sendFailRollback!.snapshot,
           { role: 'error' as const, content: errMsg, timestamp: Date.now() },
         ]);
+        composerRef.current?.setText(text);
+        setAttachments(atts);
       } else if (e?.code) {
         setMessages((prev) => [
           ...prev,
