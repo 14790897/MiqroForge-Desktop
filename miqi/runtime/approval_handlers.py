@@ -326,14 +326,29 @@ async def approvals_history_handler(
 ) -> dict[str, Any]:
     """Get approval history, scoped by client and optionally session.
 
-    Returns history entries filtered to this client's session keys.
+    Merges two sources, newest first:
+
+    * the dangerous-command approval history (``source="dangerous_command"``),
+      filtered to this client's session keys;
+    * the system-install authorization audit (#935,
+      ``source="system_install"``), returned to every client regardless of
+      session — the grant it records is machine-global
+      (``tools.sandbox.allow_system_installs``), exactly like the
+      ``permanent_allowlist`` rendered on the same page.  Its
+      ``session_key`` still travels in the entry, so which session asked
+      for it stays traceable.
+
     When no session_id is provided, returns entries for all of this
     client's sessions.
     """
     from miqi.agent.command_approval import get_approval_history
+    from miqi.agent.system_install_audit import get_install_audit
 
     limit = params.get("limit", 200)
-    history = get_approval_history(limit)
+    history = [
+        {**entry, "source": "dangerous_command"}
+        for entry in get_approval_history(limit)
+    ]
 
     # Scope: only return entries for this client's sessions
     # session_key in the history entry is the raw session key
@@ -356,4 +371,7 @@ async def approvals_history_handler(
             filtered.append(entry)
         # else: other client's session — exclude
 
-    return {"result": {"history": filtered}}
+    merged = filtered + get_install_audit(limit)
+    merged.sort(key=lambda entry: entry.get("timestamp", 0.0), reverse=True)
+
+    return {"result": {"history": merged[:limit]}}

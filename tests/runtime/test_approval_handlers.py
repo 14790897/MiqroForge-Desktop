@@ -575,3 +575,78 @@ async def test_approvals_history_returns_data(fake_config, fake_provider, tmp_pa
     result = await approvals_history_handler("req-1", {"limit": 10}, "client-1", None, registry)
     assert "history" in result["result"]
     assert isinstance(result["result"]["history"], list)
+
+
+@pytest.mark.asyncio
+async def test_approvals_history_tags_dangerous_command_source(fake_config, fake_provider, tmp_path):
+    """每条危险命令历史都带 source 标记，前端据此区分两个审计流（#935）。"""
+    from miqi.agent.command_approval import add_approval_history
+    from miqi.runtime.app_server import ClientSessionRegistry
+    from miqi.runtime.approval_handlers import approvals_history_handler
+
+    add_approval_history(
+        pattern_key="test-pattern-src",
+        description="test command",
+        command="rm -rf /test",
+        decision="once",
+        session_key="",  # 全局条目 → 不受会话过滤影响
+    )
+
+    registry = ClientSessionRegistry()
+    result = await approvals_history_handler("req-1", {"limit": 50}, "client-1", None, registry)
+    tagged = [
+        e for e in result["result"]["history"]
+        if e.get("pattern_key") == "test-pattern-src"
+    ]
+    assert tagged and tagged[0]["source"] == "dangerous_command"
+
+
+@pytest.mark.asyncio
+async def test_approvals_history_merges_system_install_audit(fake_config, fake_provider, tmp_path):
+    """#935：系统包安装授权审计并入同一份历史。
+
+    授权条目对任何客户端都返回——它记的是机器全局的
+    ``tools.sandbox.allow_system_installs``，与同一页面上的 permanent
+    allowlist 同类；session_key 仍随条目返回以备追溯（本用例故意用一个
+    非请求方的会话，正是为了钉住这条口径）。
+    """
+    from miqi.agent.system_install_audit import (
+        clear_audit,
+        record_authorization,
+        record_result,
+    )
+    from miqi.runtime.app_server import ClientSessionRegistry
+    from miqi.runtime.approval_handlers import approvals_history_handler
+
+    clear_audit()
+    try:
+        grant_id = record_authorization(
+            decision="always",
+            command="apt-get install -y texlive-xetex",
+            session_key="other-client:other-session",
+            thread_id="thread-1",
+            turn_id="turn-1",
+            persist_failed=False,
+            runtime_failed=True,
+        )
+        record_result(grant_id, exit_code=0, duration_ms=1500)
+
+        registry = ClientSessionRegistry()
+        result = await approvals_history_handler(
+            "req-1", {"limit": 50}, "client-1", None, registry,
+        )
+        installs = [
+            e for e in result["result"]["history"]
+            if e.get("source") == "system_install"
+        ]
+        assert len(installs) == 1
+        entry = installs[0]
+        assert entry["id"] == grant_id
+        assert entry["decision"] == "always"
+        assert entry["command"] == "apt-get install -y texlive-xetex"
+        assert entry["session_key"] == "other-client:other-session"
+        assert entry["runtime_failed"] is True
+        assert entry["result"]["success"] is True
+        assert entry["result"]["duration_ms"] == 1500
+    finally:
+        clear_audit()

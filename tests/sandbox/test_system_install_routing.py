@@ -13,6 +13,7 @@ import json
 
 import pytest
 
+from miqi.agent import system_install_audit as audit
 from miqi.agent.tools.shell import ExecTool
 from miqi.execution.sandbox_policy import SandboxSelection, SandboxType
 from miqi.protocol.permissions import (
@@ -32,16 +33,20 @@ class FakeSandbox:
         *,
         supports_system_installs: bool = True,
         fail_rc: int = 0,
+        raise_on_run: bool = False,
     ):
         self.is_running = True
         self.supports_system_installs = supports_system_installs
         self.fail_rc = fail_rc
+        self.raise_on_run = raise_on_run
         self.install_calls: list[tuple[str, float]] = []
         self.last_on_output = None
 
     async def run_in_distro_root(self, command, timeout=1200.0, on_output=None):
         self.install_calls.append((command, timeout))
         self.last_on_output = on_output
+        if self.raise_on_run:
+            raise RuntimeError("distro run exploded")
         if self.fail_rc:
             return (self.fail_rc, "E: Unable to locate package evilpkg", "")
         # simulate a streaming distro run: one chunk through the callback
@@ -1833,3 +1838,243 @@ async def test_request_system_install_approval_passes_runtime_failed():
                      system_install_approver=_pair)
     d2, pf2, rf2 = await tool2._request_system_install_approval("sudo apt-get install -y x")
     assert d2 == "always" and pf2 is True and rf2 is False
+
+
+# ── 授权审计（#935） ────────────────────────────────────────────────────
+
+
+@pytest.fixture(autouse=True)
+def _isolate_install_audit():
+    """每例一个干净的审计内存环（文件后端在测试中不启用）。"""
+    audit.clear_audit()
+    yield
+    audit.clear_audit()
+
+
+async def test_audit_records_allow_once_with_normalized_command():
+    """「允许本次」→ 审计行含归一化命令、会话与线程，结果写回同一 grant。"""
+    manager = FakeSandboxManager(
+        allow_system_installs=False,
+        sandbox=FakeSandbox(),
+    )
+
+    async def _once(command: str) -> str:
+        return "once"
+
+    tool = ExecTool(working_dir=".", sandbox_manager=manager,
+                    system_install_approver=_once)
+    result = await tool._maybe_route_system_install(
+        "sudo apt-get install -y texlive-xetex",
+        sandbox_selection=_make_selection(),
+        session_key="client-1:sess-1",
+        thread_id="thread-1",
+        turn_id="turn-1",
+    )
+    assert result is not None and result.exit_code == 0
+
+    records = audit.get_install_audit()
+    assert len(records) == 1
+    record = records[0]
+    assert record["source"] == "system_install"
+    assert record["decision"] == "once"
+    # #935 要求「最终执行命令（归一化后）」——不是带 sudo 前缀的原始命令
+    assert record["command"] == "apt-get install -y texlive-xetex"
+    assert record["session_key"] == "client-1:sess-1"
+    assert record["thread_id"] == "thread-1"
+    assert record["turn_id"] == "turn-1"
+    assert record["persist_failed"] is False
+    assert record["runtime_failed"] is False
+    # 「允许本次」是调用级授权：不写全局开关，但结果照记
+    assert record["result"]["success"] is True
+    assert record["result"]["exit_code"] == 0
+    assert record["result"]["reason"] == ""
+    assert record["result"]["duration_ms"] >= 0
+
+
+async def test_audit_records_allow_always_with_persist_and_runtime_state():
+    """「允许并记住」→ persist/runtime 两个状态都必须进审计行（#935 要求四）。"""
+    manager = FakeSandboxManager(
+        allow_system_installs=False,
+        sandbox=FakeSandbox(),
+    )
+
+    async def _always(command: str):
+        manager.allow_system_installs = True  # 模拟统一入口持久化
+        return ("always", False, True)  # config 已存盘，runtime 未生效
+
+    tool = ExecTool(working_dir=".", sandbox_manager=manager,
+                    system_install_approver=_always)
+    result = await tool._maybe_route_system_install(
+        "sudo apt-get install -y texlive-xetex",
+        sandbox_selection=_make_selection(),
+        session_key="k",
+    )
+    assert result is not None and result.exit_code == 0
+
+    record = audit.get_install_audit()[0]
+    assert record["decision"] == "always"
+    assert record["persist_failed"] is False
+    assert record["runtime_failed"] is True
+    assert record["result"]["success"] is True
+
+
+async def test_audit_records_denial_without_result():
+    """拒绝也留一行（否则「用户被问过没有」无从查证），但没有执行结果。"""
+    manager = FakeSandboxManager(
+        allow_system_installs=False,
+        sandbox=FakeSandbox(),
+    )
+
+    async def _deny(command: str) -> str:
+        return "deny"
+
+    tool = ExecTool(working_dir=".", sandbox_manager=manager,
+                    system_install_approver=_deny)
+    await tool._maybe_route_system_install(
+        "sudo apt-get install -y texlive-xetex",
+        sandbox_selection=_make_selection(),
+        session_key="k",
+    )
+
+    records = audit.get_install_audit()
+    assert len(records) == 1
+    assert records[0]["decision"] == "deny"
+    assert records[0]["command"] == "apt-get install -y texlive-xetex"
+    assert records[0]["result"] is None
+
+
+async def test_audit_records_no_channel_denial():
+    """无桌面通道（卡从未出现）同样留痕——排查「为什么装不上」要看得到。"""
+    manager = FakeSandboxManager(allow_system_installs=False, sandbox=FakeSandbox())
+
+    async def _no_channel(command: str):
+        return ("deny_no_channel", False)
+
+    tool = ExecTool(working_dir=".", sandbox_manager=manager,
+                    system_install_approver=_no_channel)
+    await tool._maybe_route_system_install(
+        "sudo apt-get install -y texlive-xetex",
+        sandbox_selection=_make_selection(),
+        session_key="k",
+    )
+
+    record = audit.get_install_audit()[0]
+    assert record["decision"] == "deny_no_channel"
+    assert record["result"] is None
+
+
+async def test_audit_records_interception_after_grant():
+    """已授权但沙箱不可用 → 结果行说明「没执行」及原因，而不是成功。"""
+    manager = FakeSandboxManager(allow_system_installs=False, sandbox=None)
+
+    async def _once(command: str) -> str:
+        return "once"
+
+    tool = ExecTool(working_dir=".", sandbox_manager=manager,
+                    system_install_approver=_once)
+    result = await tool._maybe_route_system_install(
+        "sudo apt-get install -y texlive-xetex",
+        sandbox_selection=_make_selection(),
+        session_key="k",
+    )
+    assert result is not None and result.exit_code == 1
+
+    record = audit.get_install_audit()[0]
+    assert record["decision"] == "once"
+    assert record["result"]["success"] is False
+    assert record["result"]["reason"] == "no live sandbox"
+
+
+async def test_audit_records_failed_install_exit_code():
+    """安装以非零退出 → 审计如实记失败与退出码（不得谎报成功）。"""
+    manager = FakeSandboxManager(
+        allow_system_installs=False,
+        sandbox=FakeSandbox(fail_rc=100),
+    )
+
+    async def _always(command: str) -> str:
+        return "always"
+
+    tool = ExecTool(working_dir=".", sandbox_manager=manager,
+                    system_install_approver=_always)
+    result = await tool._maybe_route_system_install(
+        "sudo apt-get install -y texlive-xetex",
+        sandbox_selection=_make_selection(),
+        session_key="k",
+    )
+    assert result is not None and result.exit_code == 100
+
+    record = audit.get_install_audit()[0]
+    assert record["result"]["success"] is False
+    assert record["result"]["exit_code"] == 100
+
+
+async def test_audit_records_raised_install_as_failure():
+    """安装过程中抛异常 → 结果行记失败并带上原因，然后照常向上抛。
+
+    不记的话这条授权在审计里永远停留在「执行中」——异常也是结果。
+    """
+    manager = FakeSandboxManager(
+        allow_system_installs=False,
+        sandbox=FakeSandbox(raise_on_run=True),
+    )
+
+    async def _once(command: str) -> str:
+        return "once"
+
+    tool = ExecTool(working_dir=".", sandbox_manager=manager,
+                    system_install_approver=_once)
+    with pytest.raises(RuntimeError):
+        await tool._maybe_route_system_install(
+            "sudo apt-get install -y texlive-xetex",
+            sandbox_selection=_make_selection(),
+            session_key="k",
+        )
+
+    record = audit.get_install_audit()[0]
+    assert record["result"]["success"] is False
+    assert record["result"]["exit_code"] == -1
+    assert "RuntimeError" in record["result"]["reason"]
+
+
+async def test_no_audit_row_when_toggle_already_on():
+    """开关已开（没弹卡）→ 不产生授权行：这次调用没有授权决议可记。"""
+    manager = FakeSandboxManager(
+        allow_system_installs=True,
+        sandbox=FakeSandbox(),
+    )
+    tool = ExecTool(working_dir=".", sandbox_manager=manager)
+
+    result = await tool._maybe_route_system_install(
+        "sudo apt-get install -y texlive-xetex",
+        sandbox_selection=_make_selection(),
+        session_key="k",
+    )
+    assert result is not None and result.exit_code == 0
+    assert audit.get_install_audit() == []
+
+
+async def test_audit_failure_never_breaks_the_install(monkeypatch):
+    """审计写失败不得影响安装：装成功照旧返回 0（#935 尽力而为）。"""
+    manager = FakeSandboxManager(
+        allow_system_installs=False,
+        sandbox=FakeSandbox(),
+    )
+
+    def _boom(**kwargs):
+        raise RuntimeError("audit store down")
+
+    monkeypatch.setattr(audit, "record_authorization", _boom)
+
+    async def _once(command: str) -> str:
+        return "once"
+
+    tool = ExecTool(working_dir=".", sandbox_manager=manager,
+                    system_install_approver=_once)
+    result = await tool._maybe_route_system_install(
+        "sudo apt-get install -y texlive-xetex",
+        sandbox_selection=_make_selection(),
+        session_key="k",
+    )
+    assert result is not None and result.exit_code == 0
+    assert manager._sandbox.install_calls  # 安装照常执行

@@ -747,6 +747,7 @@ class ExecTool(Tool):
                 session_key=_session_key,
                 cancel_event=cancel_event,
                 event_emitter=event_emitter,
+                thread_id=thread_id,
                 turn_id=turn_id,
                 tool_call_id=tool_call_id,
                 requested_timeout_ms=requested_timeout_ms,
@@ -2494,6 +2495,7 @@ class ExecTool(Tool):
         session_key: str | None,
         cancel_event: asyncio.Event | None = None,
         event_emitter=None,
+        thread_id: str = "",
         turn_id: str = "",
         tool_call_id: str = "",
         # #810: the model's per-call timeout request; routed installs must
@@ -2543,6 +2545,11 @@ class ExecTool(Tool):
         9. WSL-only — native Linux sandboxes get a WSL-only message.
         10. Cancel check, then the normalized command is executed as root in
             the WSL distro.
+        11. Every card resolution — grant or refusal — is audited (#935):
+            the normalized command, the decision, the session/thread, and
+            the persist/runtime state of the grant land in a row written
+            before anything executes; the exit code is written back onto
+            the same grant when the install ends (or is intercepted).
         """
         if self._sandbox_manager is None:
             return None
@@ -2591,6 +2598,7 @@ class ExecTool(Tool):
 
         persist_failed = False
         runtime_failed = False  # #875 review P4: 弹卡分支可能置位
+        grant_id = ""  # #935: 授权审计行的 grant_id，仅弹卡分支有值
 
         # O1: check the allow toggle before touching the sandbox.  When it
         # is off the command is not dead on arrival — an approval card is
@@ -2604,10 +2612,30 @@ class ExecTool(Tool):
             decision, persist_failed, runtime_failed = (
                 await self._request_system_install_approval(normalized)
             )
+            # #935 审计：卡片每一次表决都留一行，拒绝也记——只记授权的话，
+            # 「用户究竟被问过没有、答了什么」就无从查证。记的命令是归一化后
+            # 的那一份，即卡面显示、也是最终以 root 执行的命令（显示=执行）。
+            # 全局开关走设置页那条路（apply_system_installs_toggle）不在这里
+            # 记录：它没有 once/always 授权类型，也没有逐次命令。
+            try:
+                from miqi.agent.system_install_audit import record_authorization
+
+                grant_id = record_authorization(
+                    decision=decision,
+                    command=normalized,
+                    session_key=session_key or "",
+                    thread_id=thread_id,
+                    turn_id=turn_id,
+                    persist_failed=persist_failed,
+                    runtime_failed=runtime_failed,
+                )
+            except Exception:  # noqa: BLE001 - 审计失败不得影响安装决策
+                logger.warning("system install audit: authorization not recorded")
             if decision not in ("once", "always"):
                 # 卡已弹但用户拒绝/超时 → 明确告知；无桌面通道（卡从未出现）
                 # → 指向设置页（#875 review P3-2/F3——approver 恒非 None，
                 # 以 deny_no_channel 决策区分，而非 approver 是否为 None）。
+                # 拒绝没有执行结果，故不写 result 行（审计视图里 result 为空）。
                 if decision == "deny_no_channel":
                     return _ExecResult(output=_SYSTEM_INSTALL_NOT_ENABLED_MSG, exit_code=1)
                 return _ExecResult(output=_SYSTEM_INSTALL_DENIED_MSG, exit_code=1)
@@ -2644,12 +2672,21 @@ class ExecTool(Tool):
             # cmd when no sandbox is available — "sudo is not recognized"
             # despite the environment claiming installs are routed (review
             # #759 N2).  Intercept with a clear message instead.
+            self._record_install_result(
+                grant_id, exit_code=1, reason="no live sandbox",
+            )
             return _ExecResult(output=_SYSTEM_INSTALL_NO_SANDBOX_MSG, exit_code=1)
 
         if not getattr(sandbox, "supports_system_installs", False):
+            self._record_install_result(
+                grant_id, exit_code=1, reason="WSL-only",
+            )
             return _ExecResult(output=_SYSTEM_INSTALL_WSL_ONLY_MSG, exit_code=1)
 
         if cancel_event is not None and cancel_event.is_set():
+            self._record_install_result(
+                grant_id, exit_code=-1, reason="cancelled before start",
+            )
             return _ExecResult(
                 output="Error: 命令在启动前被取消。",
                 exit_code=-1, cancelled=True,
@@ -2665,7 +2702,27 @@ class ExecTool(Tool):
             # （拒绝/无沙箱/WSL-only）会残留，导致后续安装误报。
             persist_failed=persist_failed,
             runtime_failed=runtime_failed,
+            # #935: 授权审计行的归属——执行结果写回同一 grant。
+            grant_id=grant_id,
         )
+
+    def _record_install_result(
+        self, grant_id: str, *, exit_code: int, duration_ms: int = 0, reason: str = "",
+    ) -> None:
+        """写回系统安装授权的结果行（#935）；无 grant（未弹卡）时静默跳过。
+
+        审计是尽力而为：这里抛错会盖掉安装本身的返回值，绝不允许。
+        """
+        if not grant_id:
+            return
+        try:
+            from miqi.agent.system_install_audit import record_result
+
+            record_result(
+                grant_id, exit_code=exit_code, duration_ms=duration_ms, reason=reason,
+            )
+        except Exception:  # noqa: BLE001 - 审计失败不得影响安装结果
+            logger.warning("system install audit: result not recorded")
 
     async def _execute_system_install(
         self, sandbox, command: str,
@@ -2681,6 +2738,8 @@ class ExecTool(Tool):
         persist_failed: bool = False,
         # #875 review P4: config 已保存但 runtime 未立即生效（重启后生效）
         runtime_failed: bool = False,
+        # #935: 授权审计行 id——安装结束时把结果（退出码/耗时）写回同一 grant。
+        grant_id: str = "",
     ) -> _ExecResult:
         """Run a normalized install command as root in the WSL distro (#759).
 
@@ -2766,6 +2825,14 @@ class ExecTool(Tool):
             rc, out, err = await sandbox.run_in_distro_root(
                 install_cmd, timeout=install_timeout, on_output=_progress,
             )
+        except BaseException as exc:
+            # #935: 异常路径也要落结果行，否则这条授权在审计里永远停在
+            # 「执行中」——失败同样是「结果」。
+            self._record_install_result(
+                grant_id, exit_code=-1,
+                reason=f"install run raised ({type(exc).__name__})",
+            )
+            raise
         finally:
             heartbeat_task.cancel()
             try:
@@ -2813,6 +2880,10 @@ class ExecTool(Tool):
                 "\n[提示] 「允许并记住」已保存到配置，但当前运行时未能立即生效——"
                 "本次安装已放行，重启后系统包安装将自动以 root 执行。"
             )
+
+        # #935: 结果行（成功/失败 + 耗时）——与授权行的 persist/runtime 状态
+        # 合起来构成「这次授权最后怎么样了」的完整答案。
+        self._record_install_result(grant_id, exit_code=rc, duration_ms=duration_ms)
 
         return _ExecResult(
             output="\n".join(output_parts),

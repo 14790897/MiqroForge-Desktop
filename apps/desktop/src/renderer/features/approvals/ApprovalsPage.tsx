@@ -101,6 +101,8 @@ function decisionLabel(d: string): { text: string; color: string } {
   switch (d) {
     case 'deny':
       return { text: '已拒绝', color: 'text-[var(--danger)]' };
+    case 'deny_no_channel':
+      return { text: '未授权', color: 'text-[var(--danger)]' };
     case 'once':
       return { text: '允许一次', color: 'text-[var(--info)]' };
     case 'session':
@@ -110,6 +112,15 @@ function decisionLabel(d: string): { text: string; color: string } {
     default:
       return { text: d, color: 'text-[var(--text-muted)]' };
   }
+}
+
+/** #935: how a system-install grant ended, as one short line. */
+function installOutcomeLabel(h: ApprovalHistoryEntry): string {
+  if (h.decision !== 'once' && h.decision !== 'always') return '未执行';
+  const r = h.result;
+  if (!r) return '执行中';
+  if (r.reason) return `未执行（${r.reason}）`;
+  return r.success ? '安装成功' : `安装失败（exit ${r.exit_code}）`;
 }
 
 // ---------------------------------------------------------------------------
@@ -686,6 +697,8 @@ export function ApprovalsPage() {
                   <div className="divide-y divide-[var(--border-subtle)]">
                     {history.map((h) => {
                       const d = decisionLabel(h.decision);
+                      const isInstall = h.source === 'system_install';
+                      const outcome = isInstall ? installOutcomeLabel(h) : '';
                       const isExpanded = expandedHistory.has(h.id);
                       return (
                         <div key={h.id}>
@@ -698,12 +711,24 @@ export function ApprovalsPage() {
                             ) : (
                               <ChevronRight size={12} className="text-[var(--text-faint)]" />
                             )}
+                            {isInstall && (
+                              <span className="text-size-2xs shrink-0 px-2 py-0.5 rounded-full border border-[var(--border-subtle)] bg-[var(--surface-muted)] text-[var(--text-muted)]">
+                                系统包安装
+                              </span>
+                            )}
                             <span className={`text-xs font-medium shrink-0 ${d.color}`}>
                               {d.text}
                             </span>
                             <code className="flex-1 text-xs font-mono text-[var(--text-muted)] truncate">
-                              {h.description}
+                              {isInstall ? h.command : h.description}
                             </code>
+                            {isInstall &&
+                              h.decision !== 'deny' &&
+                              h.decision !== 'deny_no_channel' && (
+                                <span className="text-size-2xs shrink-0 text-[var(--text-faint)]">
+                                  {outcome}
+                                </span>
+                              )}
                             <span className="text-size-2xs text-[var(--text-faint)] shrink-0">
                               {formatAbsoluteTime(h.timestamp * 1000)}
                             </span>
@@ -714,20 +739,52 @@ export function ApprovalsPage() {
                                 <span className="text-[var(--text-faint)] shrink-0">决策：</span>
                                 <span className={d.color}>{d.text}</span>
                               </div>
-                              <div className="flex gap-2">
-                                <span className="text-[var(--text-faint)] shrink-0">
-                                  规则模式：
-                                </span>
-                                <code className="font-mono text-[var(--text)] break-all">
-                                  {h.pattern_key}
-                                </code>
-                              </div>
+                              {h.pattern_key && (
+                                <div className="flex gap-2">
+                                  <span className="text-[var(--text-faint)] shrink-0">
+                                    规则模式：
+                                  </span>
+                                  <code className="font-mono text-[var(--text)] break-all">
+                                    {h.pattern_key}
+                                  </code>
+                                </div>
+                              )}
                               <div className="flex gap-2">
                                 <span className="text-[var(--text-faint)] shrink-0">命令：</span>
                                 <code className="font-mono text-[var(--text)] break-all">
                                   {h.command}
                                 </code>
                               </div>
+                              {isInstall && (
+                                <>
+                                  <div className="flex gap-2">
+                                    <span className="text-[var(--text-faint)] shrink-0">
+                                      结果：
+                                    </span>
+                                    <span>{outcome}</span>
+                                  </div>
+                                  {(h.persist_failed || h.runtime_failed) && (
+                                    <div className="flex gap-2">
+                                      <span className="text-[var(--text-faint)] shrink-0">
+                                        授权状态：
+                                      </span>
+                                      <span className="text-[var(--danger)]">
+                                        {h.persist_failed
+                                          ? '未保存（重启后需重新授权）'
+                                          : '已保存但当前会话未生效（重启后自愈）'}
+                                      </span>
+                                    </div>
+                                  )}
+                                  {h.result && !h.result.reason && (
+                                    <div className="flex gap-2">
+                                      <span className="text-[var(--text-faint)] shrink-0">
+                                        耗时：
+                                      </span>
+                                      <span>{(h.result.duration_ms / 1000).toFixed(1)}s</span>
+                                    </div>
+                                  )}
+                                </>
+                              )}
                               <div className="flex gap-2">
                                 <span className="text-[var(--text-faint)] shrink-0">会话：</span>
                                 <span className="font-mono">{h.session_key || '-'}</span>
