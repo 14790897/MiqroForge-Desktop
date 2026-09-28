@@ -56,6 +56,39 @@ export function routingKeyFor(sessionKey: string, threadId: string): string {
   return threadId === MAIN_THREAD_ID ? sessionKey : `desktop:${threadId}`;
 }
 
+/** The task a turn belongs to, as recorded on the send that started it (#981). */
+export interface TurnTask {
+  /** Base session the send was made in. */
+  sessionKey: string;
+  /** The tab's routing key — what the send's chat.send went out under. */
+  routingKey: string;
+}
+
+/**
+ * Whether a send in `sessionKey` from the selected tab `threadId` may supersede
+ * (abort) `prior` — the most recent turn, whichever session or tab it belongs to.
+ *
+ * A supersede means "interrupt the turn I am watching and start a new one", so
+ * it is only valid inside the SAME TASK: same session AND same tab. Switching to
+ * — or spawning — another task is not a stop; nor is sending from another tab of
+ * the same session. Either must leave the running turn alone (#981).
+ *
+ * Matching on the base session alone is what made a send from a sub-thread tab
+ * kill the main tab's running turn: both share `sessionKey` while their routing
+ * keys (`desktop:<threadId>` vs the session key) name different turns.
+ */
+export function supersedesPriorTurn(params: {
+  prior: TurnTask | null | undefined;
+  sessionKey: string;
+  threadId: string;
+}): boolean {
+  const { prior, sessionKey, threadId } = params;
+  if (!prior) return false;
+  return (
+    prior.sessionKey === sessionKey && prior.routingKey === routingKeyFor(sessionKey, threadId)
+  );
+}
+
 /**
  * Whether an event tagged `eventSessionKey` belongs to the view the user is on
  * (base session `sessionKey`, selected tab `threadId`).

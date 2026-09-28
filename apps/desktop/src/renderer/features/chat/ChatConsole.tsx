@@ -50,6 +50,7 @@ import {
   saveThreadTabs,
   selectThreadTab,
   shouldAdoptRecoveredEvent,
+  supersedesPriorTurn,
   type ThreadTabsState,
 } from './threadTabs';
 import {
@@ -4054,6 +4055,21 @@ const HDR_CTL_TOGGLE_ON = `${HDR_CTL_ICON} bg-[var(--surface-muted)] hover:bg-[v
  *  wedged backend stalling interrupt-and-resend indefinitely. */
 const TURN_ABORT_SETTLE_MS = 3000;
 
+/** One in-flight turn, as tracked by `lifecycleRef` (#981).
+ *
+ *  `sessionKey` + `routingKey` name the TASK the turn belongs to — only a turn
+ *  of the same task may be superseded, and an abort is addressed to the turn's
+ *  own routing key rather than to whichever tab is selected when it lands.
+ *  `threadId` is the backend thread the send registered the turn under, filled
+ *  in once the send resolves it (absent for a send that never got that far). */
+type TurnLifecycle = {
+  id: number;
+  promise: Promise<void>;
+  sessionKey: string;
+  routingKey: string;
+  threadId?: string;
+};
+
 /** Fallback for aborted events WITHOUT a turn_id (legacy/mock bridges): a
  *  stale aborted event from a superseded turn arriving this soon after a new
  *  send started is dropped. Bridges that emit turn ids use the authoritative
@@ -5021,9 +5037,9 @@ export function ChatConsole({
   // exited, so the new chat.send is not rejected with TURN_IN_PROGRESS.
   // Kept after a manual stop (only cleared by the owning handleSend in its
   // identity-checked finally) so stop-then-quick-send still serializes.
-  const lifecycleRef = useRef<{ id: number; promise: Promise<void>; sessionKey: string } | null>(
-    null
-  );
+  // The task fields are what keep a supersede (and the abort it fires) inside
+  // one task — see TurnLifecycle (#981).
+  const lifecycleRef = useRef<TurnLifecycle | null>(null);
   // Monotonic id for lifecycleRef identity checks — never reset, so a session
   // switch cannot reuse an old turn's id and collide with a still-in-flight
   // lifecycle (would let an old settle clear the NEW lifecycle) (#879 ③ CodeRabbit).
@@ -6907,12 +6923,21 @@ export function ChatConsole({
     // await the aborted turn's settlement so its terminal event (and the
     // backend drain task) cannot race the replacement send.
     try {
-      // Pass the current thread id so the backend aborts the SAME thread the
-      // streaming turn registered its cancel event under — without it the
-      // abort resolves to "default" and misses the turn entirely (#542).
+      // Stop the turn actually running in THIS session — the most recent one —
+      // addressed by ITS OWN routing key and thread, not by whichever tab is
+      // selected.  A turn sent from a sub-thread tab streams under
+      // `desktop:<threadId>`; the bare session key named the session's main task
+      // instead, so stopping from that tab missed the turn it was showing and
+      // (before #981) killed the main task.  Falls back to the session's main
+      // task when no turn of this session is on record.
+      // The thread id is the one the turn registered its cancel event under —
+      // without it the abort resolves to "default" and misses the turn
+      // entirely (#542).
+      const runningTurn = lifecycleRef.current;
+      const abortOurs = runningTurn != null && runningTurn.sessionKey === currentSessionRef.current;
       await window.miqi.chat.abort(
-        currentSessionRef.current,
-        currentThreadIdRef.current ?? undefined
+        abortOurs ? runningTurn.routingKey : currentSessionRef.current,
+        (abortOurs ? runningTurn.threadId : currentThreadIdRef.current) ?? undefined
       );
     } catch {
       /* ignore */
@@ -7163,6 +7188,15 @@ export function ChatConsole({
     // currentSessionRef.  The watchdog below must not warn into another
     // session after the user switched away.
     const sendSessionKey = currentSessionRef.current;
+    // The TASK this send belongs to — the session plus the thread tab selected
+    // right now.  Snapshotted here with the session: the supersede below must be
+    // decided against the tab the user was on when they pressed Enter, and the
+    // optimistic bubble, the listeners and chat.send must all agree on that same
+    // tab.  Read through the ref, not the `activeThreadId` state — this callback
+    // is not recreated on a tab switch, so the closure's copy can be a tab the
+    // user has already left.
+    const sendThreadId = activeThreadIdRef.current;
+    const sendRoutingKey = routingKeyFor(sendSessionKey, sendThreadId);
 
     // The optimistic user bubble — committed to the UI immediately.  Stamped
     // with `userMsg.timestamp` so a late-failing provider check can match and
@@ -7454,13 +7488,18 @@ export function ChatConsole({
 
     // If a reveal animation is still running from the previous response,
     // cancel it and abort the in-flight request so we can start fresh.  A
-    // supersede is ONLY valid for a prior turn in THIS SESSION — lifecycleRef
-    // is global (the most recent turn across all sessions), so a new send in
-    // session B must not abort/cancel session A's still-streaming turn.
+    // supersede is ONLY valid for a prior turn of THIS TASK — lifecycleRef is
+    // global (the most recent turn across all sessions and tabs), so neither a
+    // send in another session nor a send from another tab of this same session
+    // may abort/cancel this tab's still-streaming turn: switching to, or
+    // spawning, a task is not a stop (#981).
     const supersededLifecycle = lifecycleRef.current;
-    const supersedeSameSession =
-      supersededLifecycle != null && supersededLifecycle.sessionKey === sendSessionKey;
-    if (wasStreaming && supersededLifecycle && supersedeSameSession) {
+    const supersedeSameTask = supersedesPriorTurn({
+      prior: supersededLifecycle,
+      sessionKey: sendSessionKey,
+      threadId: sendThreadId,
+    });
+    if (wasStreaming && supersededLifecycle && supersedeSameTask) {
       // A prior turn is still in flight and the user sent a new message —
       // supersede it before starting this turn (the optimistic bubble is
       // already shown).  Only the abort itself is awaited here; the prior
@@ -7475,14 +7514,17 @@ export function ChatConsole({
       }
       cleanupListeners();
       try {
-        // Pass the session key — without it the backend resolves no session
-        // and rejects the abort with UNAUTHORIZED, leaving the old stream
-        // running while the new turn starts.  Also pass the current thread id
-        // so the abort hits the turn's registered thread instead of the
-        // backend's "default" fallback (which misses every real thread) (#542).
+        // Address the abort to the SUPERSEDED turn — its own routing key and
+        // its own thread — not to whatever tab/session is on screen now.  The
+        // routing key carries the session or `desktop:<threadId>` the turn was
+        // sent under, so without it the backend resolves no session (rejects
+        // with UNAUTHORIZED) or, worse, hits the MAIN task of a session whose
+        // sub-thread tab is the one actually streaming.  The thread id is the
+        // one that turn registered its cancel event under instead of the
+        // backend's "default" fallback, which misses every real thread (#542).
         await window.miqi.chat.abort(
-          currentSessionRef.current,
-          currentThreadIdRef.current ?? undefined
+          supersededLifecycle.routingKey,
+          supersededLifecycle.threadId ?? undefined
         );
       } catch {
         /* ignore */
@@ -7495,9 +7537,10 @@ export function ChatConsole({
     // new turn registers listeners — and the backend's drain task has exited,
     // so the new chat.send is not rejected with TURN_IN_PROGRESS. Bounded so a
     // wedged backend cannot stall interrupt-and-resend (see TURN_ABORT_SETTLE_MS).
-    // A cross-session lifecycle (from a session the user switched away from)
-    // resolves on its own — do NOT block this send on it.
-    if (supersededLifecycle && supersedeSameSession) {
+    // A cross-session / cross-tab lifecycle (from a task the user switched away
+    // from) resolves on its own — do NOT block this send on it: that task keeps
+    // running in the background by design (#981).
+    if (supersededLifecycle && supersedeSameTask) {
       try {
         await Promise.race([
           supersededLifecycle.promise,
@@ -7518,7 +7561,12 @@ export function ChatConsole({
     const lifecyclePromise = new Promise<void>((resolve) => {
       resolveLifecycle = resolve;
     });
-    const lifecycle = { id: turnId, promise: lifecyclePromise, sessionKey: sendSessionKey };
+    const lifecycle: TurnLifecycle = {
+      id: turnId,
+      promise: lifecyclePromise,
+      sessionKey: sendSessionKey,
+      routingKey: sendRoutingKey,
+    };
     lifecycleRef.current = lifecycle;
     const settleLifecycle = () => {
       if (lifecycleRef.current?.id === turnId) lifecycleRef.current = null;
@@ -7783,18 +7831,20 @@ export function ChatConsole({
       persistReveal();
     };
 
-    // The exact routing key this invocation passes to chat.send.  For
-    // thread-scoped sessions it differs from sendSessionKey
+    // The exact routing key this invocation passes to chat.send — the task
+    // snapshotted at the top of this send, NOT the tab that happens to be
+    // selected now.  For thread-scoped tasks it differs from sendSessionKey
     // (`desktop:<threadId>` vs the session key), so the handlers must filter
     // on THIS value, not sendSessionKey.  Every IPC handler drops events
     // tagged with a different key before the cache/live branch — otherwise
-    // overlapping sends across sessions would each process (and settle on)
-    // the other's events.
-    // Read through the ref, not the closure: switching tabs does not recreate
-    // this callback (activeThreadId is not a dependency), so the closure's
-    // copy can be the tab the user has already left — the send would then go
-    // out under the wrong key.
-    const routingKey = routingKeyFor(currentSessionRef.current, activeThreadIdRef.current);
+    // overlapping sends across tasks would each process (and settle on) the
+    // other's events.
+    // One identity for the whole invocation: the optimistic bubble, this
+    // turn's lifecycle, the supersede target and the abort all refer to the
+    // same task.  Re-deriving it here from the refs would let the awaits above
+    // (provider check, supersede abort) move the send to a tab the user
+    // switched to mid-send while its bubble stayed on the old one (#981).
+    const routingKey = sendRoutingKey;
 
     // Track last progress event time for watchdog
     let lastEventAt = Date.now();
@@ -8594,6 +8644,10 @@ export function ChatConsole({
       // handlers must agree, or this turn's own stream would be dropped as
       // foreign before it reaches the cache/live branch.
       const key = routingKey;
+      // This turn now has a thread, so record it on its lifecycle: a later
+      // supersede (or a stop) addresses the abort to THIS thread instead of
+      // reusing whatever tab is selected by then (#542 / #981).
+      lifecycle.threadId = threadId ?? undefined;
       const chatAttachments = sentAttachments
         .filter((a) => (a.type === 'document' && a.dataBase64) || (a.type === 'image' && a.dataUrl))
         .map((a) => ({

@@ -27,6 +27,7 @@ import {
   saveThreadTabs,
   selectThreadTab,
   shouldAdoptRecoveredEvent,
+  supersedesPriorTurn,
   threadTabsStorageKey,
   type StorageLike,
   type ThreadTab,
@@ -97,6 +98,69 @@ describe('routing key 口径 (#1035)', () => {
     expect(routingKeyFor(SESSION, 'a:b')).toBe('desktop:a:b');
     expect(isEventForView('desktop:a:b', SESSION, 'a:b')).toBe(true);
     expect(isEventForView('desktop:a', SESSION, 'a:b')).toBe(false);
+  });
+});
+
+describe('supersede 的判定口径 supersedesPriorTurn (#981)', () => {
+  /** 主 tab 上一条正在跑的 turn。 */
+  const mainTurn = { sessionKey: SESSION, routingKey: routingKeyFor(SESSION, MAIN_THREAD_ID) };
+  /** 子线程 tab 上一条正在跑的 turn。 */
+  const threadATurn = { sessionKey: SESSION, routingKey: routingKeyFor(SESSION, 'thread-a') };
+
+  it('同一个任务的重新发送：可 supersede', () => {
+    expect(
+      supersedesPriorTurn({ prior: mainTurn, sessionKey: SESSION, threadId: MAIN_THREAD_ID })
+    ).toBe(true);
+    expect(
+      supersedesPriorTurn({ prior: threadATurn, sessionKey: SESSION, threadId: 'thread-a' })
+    ).toBe(true);
+  });
+
+  it('同一 session 的另一个 tab 发消息：不得 supersede（切换/新建任务≠停止旧任务）', () => {
+    // 主 tab 的 turn 在跑，用户在子线程 tab 里发消息 —— 旧实现按基础 session
+    // 判定，会把主 tab 的 turn abort 掉；这正是 #981 报的「切换即中断」。
+    expect(
+      supersedesPriorTurn({ prior: mainTurn, sessionKey: SESSION, threadId: 'thread-a' })
+    ).toBe(false);
+    // 反过来同理：子线程 tab 在跑，用户回主 tab 发消息。
+    expect(
+      supersedesPriorTurn({ prior: threadATurn, sessionKey: SESSION, threadId: MAIN_THREAD_ID })
+    ).toBe(false);
+    // 两个子线程 tab 之间也不互相打断。
+    expect(
+      supersedesPriorTurn({ prior: threadATurn, sessionKey: SESSION, threadId: 'thread-b' })
+    ).toBe(false);
+  });
+
+  it('另一个 session 的 turn：不得 supersede（原有跨会话保护不变）', () => {
+    expect(
+      supersedesPriorTurn({
+        prior: { sessionKey: 'desktop:other', routingKey: 'desktop:other' },
+        sessionKey: SESSION,
+        threadId: MAIN_THREAD_ID,
+      })
+    ).toBe(false);
+  });
+
+  it('thread id 相同但 session 不同：不得 supersede', () => {
+    // routing key `desktop:<threadId>` 不含基础 session，不同会话靠 thread id
+    // 全局唯一来区分 —— 万一撞 id，sessionKey 这一半仍要挡住。
+    expect(
+      supersedesPriorTurn({
+        prior: { sessionKey: 'desktop:other', routingKey: 'desktop:thread-a' },
+        sessionKey: SESSION,
+        threadId: 'thread-a',
+      })
+    ).toBe(false);
+  });
+
+  it('没有上一条 turn：不 supersede（首个回合）', () => {
+    expect(
+      supersedesPriorTurn({ prior: null, sessionKey: SESSION, threadId: MAIN_THREAD_ID })
+    ).toBe(false);
+    expect(
+      supersedesPriorTurn({ prior: undefined, sessionKey: SESSION, threadId: 'thread-a' })
+    ).toBe(false);
   });
 });
 
