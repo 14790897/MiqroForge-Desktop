@@ -1119,6 +1119,39 @@ export interface ChatSubagentResult {
   session_key: string;
 }
 
+/**
+ * `chat:send` 派发三态里的「确定未派发」标记(#1072)。
+ *
+ * `chat:send` 是 ipcRenderer.invoke → main → bridge.send 链,Promise 的
+ * resolve/reject 本身无法区分「请求从未送出」与「已送达后端但后续失败」——
+ * 而这两者对编辑/重试的回滚判定要求相反:前者应恢复编辑快照,后者必须保留
+ * 截断后的列表(否则与已接收请求的后端状态分叉)。
+ *
+ * 因此 main 把「请求从未写入 bridge 管道」这一类失败 **正常返回** 成这个带
+ * 标记的结果,而不是 reject。不放在 reject 的错误对象上是因为 ipcMain.handle
+ * 的拒绝经 Electron 序列化后只剩 message 字符串(自定义属性丢失),渲染层读不
+ * 到任何机器可判定的字段。
+ */
+export const CHAT_NOT_DISPATCHED = '__miqiChatNotDispatched' as const;
+
+export interface ChatNotDispatchedResult {
+  __miqiChatNotDispatched: true;
+  /** 原始失败原因(渲染层仍按普通错误消息 sanitize 后展示)。 */
+  message: string;
+}
+
+export function isChatNotDispatched(value: unknown): value is ChatNotDispatchedResult {
+  return (
+    !!value &&
+    typeof value === 'object' &&
+    (value as Record<string, unknown>)[CHAT_NOT_DISPATCHED] === true
+  );
+}
+
+export function chatNotDispatchedResult(message: string): ChatNotDispatchedResult {
+  return { [CHAT_NOT_DISPATCHED]: true, message };
+}
+
 // ---------------------------------------------------------------------------
 // Python check result
 // ---------------------------------------------------------------------------
