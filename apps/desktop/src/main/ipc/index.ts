@@ -72,18 +72,16 @@ import type {
   FeedbackPlatformOutcome,
   WslCheckResult,
   WslStatsResult,
-  WslInstallProgress,
   WslInstallAndProvisionResult,
   CleanupRunReport,
   CleanupItemId,
 } from '../../shared/ipc';
 import { registerQraftIpcHandlers } from '../qraft/ipc';
 import { readConsentVersion, writeConsentVersion } from '../privacy-consent';
+import { installPhaseIsObsolete, NOT_WINDOWS_RESULT, provisionWsl } from './wsl-provision';
 import {
   buildEnableFeaturesScript,
   buildPlatformRepairScript,
-  classifyKernelInstall,
-  classifyPlatformRepair,
   classifyWslFeatureState,
   decodeWslOutput,
   findPlatformProblem,
@@ -92,7 +90,6 @@ import {
   readFeatureStates,
   readStaleOobeState,
   runElevatedAsync,
-  summarizeElevated,
   wslKernelPresent,
 } from './wsl-state';
 import {
@@ -1031,10 +1028,17 @@ for m in ("pydantic", "httpx", "loguru"):
   // WSL2 check & install — Windows only, runs in main process.
   // Must work BEFORE the bridge starts (during Setup Wizard).
   // -----------------------------------------------------------------------
-  ipcMain.handle(IPC.WSL_CHECK, () => ({
-    ...runWslCheckInternal(),
-    pendingInstall: readWslInstallState(),
-  }));
+  ipcMain.handle(IPC.WSL_CHECK, () => {
+    const check = runWslCheckInternal();
+    // Drop a phase the machine has outgrown before reporting it, so a distro
+    // that showed up after the reboot request never reads as "install still in
+    // flight" — the page's auto-resume gates on the distro list alone.
+    if (installPhaseIsObsolete(check)) clearWslInstallState();
+    return {
+      ...check,
+      pendingInstall: readWslInstallState(),
+    };
+  });
 
   ipcMain.handle(IPC.WSL_INSTALL, () => {
     if (process.platform !== 'win32') {
@@ -1059,385 +1063,64 @@ for m in ("pydantic", "httpx", "loguru"):
   // WSL one-click install & provision (new in #361)
   // Simplified flow: wsl --install handles everything → reboot once →
   // auto-provision user. Sends progress events to renderer.
+  //
+  // The orchestration lives in ./wsl-provision, where its ordering rules carry
+  // tests; this handler only wires it to the real system.
   // -----------------------------------------------------------------------
   ipcMain.handle(IPC.WSL_INSTALL_AND_PROVISION, async (_event) => {
     const sender = _event.sender;
-    const safeSend = (channel: string, data: unknown) => {
-      sendToFrame(sender, channel, data);
-    };
 
-    if (process.platform !== 'win32') {
-      return {
-        success: false,
-        phase: 'error',
-        error: 'Not on Windows',
-        errorCode: 'NOT_WINDOWS',
-        nextStep: '此功能仅适用于 Windows 系统',
-      } satisfies WslInstallAndProvisionResult;
-    }
+    // Refused before the flow is entered, so that a platform without WSL gets
+    // no progress event and no refresh nudge at all — the install button is
+    // reachable on every platform.  The state machine keeps the same guard on
+    // `check.isWindows` for callers that hand it a foreign probe.
+    if (process.platform !== 'win32') return NOT_WINDOWS_RESULT;
 
-    try {
-      // ── Step 1: Check ───────────────────────────────────────────────
-      safeSend(IPC_EVENTS.WSL_INSTALL_PROGRESS, {
-        phase: 'checking',
-        message: '正在检测 WSL 状态...',
-      } satisfies WslInstallProgress);
+    // The page re-reads what it shows once a check has produced a newer picture
+    // of the machine than it is displaying.  Only the opening check does that:
+    // the mid-flow probes feed the flow's own decisions, and each nudge costs
+    // the main process another full, blocking probe over IPC.
+    let firstProbe = true;
 
-      // Every step below re-derives what is still missing from the live system
-      // state rather than from the persisted phase: the machine state is the
-      // only thing that stays true across a reboot.
-      let check = runWslCheckInternal();
-      safeSend(IPC_EVENTS.WSL_CHECK_UPDATED, {});
-
-      // ── Step 2: not-enabled → DISM enable features ──────────────────
-      if (check.featureState === 'not-enabled') {
-        safeSend(IPC_EVENTS.WSL_INSTALL_PROGRESS, {
-          phase: 'enabling_features',
-          message: '正在启用 Windows 可选功能 (WSL + 虚拟机平台)...',
-        } satisfies WslInstallProgress);
-
-        // The elevated process runs Enable-WindowsOptionalFeature and reports
-        // its own output/exit code through the trampoline files: a declined
-        // UAC prompt used to be indistinguishable from a DISM failure here.
-        const r = await runElevatedAsync({ powershell: buildEnableFeaturesScript() }, 120000);
-
-        if (r.kind === 'cancelled') {
-          safeSend(IPC_EVENTS.WSL_INSTALL_PROGRESS, {
-            phase: 'error',
-            message: '启用 Windows 功能被取消：管理员权限请求被拒绝',
-            error: 'ELEVATION_CANCELLED',
-          } satisfies WslInstallProgress);
-          return {
-            success: false,
-            phase: 'error',
-            errorCode: 'ELEVATION_CANCELLED',
-            error: '启用 Windows 功能被取消',
-            nextStep: '重新点击「一键安装 WSL2」，并在弹出的 UAC 窗口中点击「是」',
-          } satisfies WslInstallAndProvisionResult;
+    return provisionWsl({
+      probe: () => {
+        const result = runWslCheckInternal();
+        if (firstProbe) {
+          firstProbe = false;
+          sendToFrame(sender, IPC_EVENTS.WSL_CHECK_UPDATED, {});
         }
-
-        // Verification requires a successful read with the WSL feature on.
-        // VirtualMachinePlatform is intentionally not required: on machines
-        // with VBS/Core Isolation, WMI keeps VMP reported as Disabled while
-        // it is functional (observed in live testing) — gating on it would
-        // recreate the false-failure bug this step was fixed for.
-        const featuresAfter = readFeatureStates();
-        if (!featuresAfter.ok || !featuresAfter.featureWsl) {
-          // A failed DISM cmdlet leaves the exit code at 0, so the captured
-          // output is the only place the real reason appears — fall back to the
-          // generic text only when the elevated run produced nothing at all.
-          const produced = r.kind === 'unknown' || r.exitCode !== 0 || r.output.trim().length > 0;
-          const detail = produced ? summarizeElevated(r) : '功能状态未变化';
-          safeSend(IPC_EVENTS.WSL_INSTALL_PROGRESS, {
-            phase: 'error',
-            message: `启用 Windows 功能失败: ${detail}`,
-            error: detail,
-          } satisfies WslInstallProgress);
-          return {
-            success: false,
-            phase: 'error',
-            errorCode: 'FEATURE_ENABLE_FAILED',
-            error: '无法启用 Windows 可选功能',
-            nextStep: '以管理员身份打开 PowerShell 并运行: wsl --install',
-          } satisfies WslInstallAndProvisionResult;
-        }
-
-        writeWslInstallState('features_enabled');
-
-        safeSend(IPC_EVENTS.WSL_INSTALL_PROGRESS, {
-          phase: 'enabling_features',
-          rebootRequired: true,
-          message: 'Windows 功能已启用。需要重启系统，重启后 MiQroForge 将自动继续安装。',
-        } satisfies WslInstallProgress);
-
-        return {
-          success: true,
-          phase: 'enabling_features',
-          rebootRequired: true,
-          nextStep: '请重启系统；重启后进入「WSL 状态监控」，安装会自动继续',
-        } satisfies WslInstallAndProvisionResult;
-      }
-
-      // ── Step 3: not-installed → wsl --install --no-distribution ─────
-      if (check.featureState === 'not-installed') {
-        safeSend(IPC_EVENTS.WSL_INSTALL_PROGRESS, {
-          phase: 'installing_wsl',
-          message: '正在安装 WSL2 内核...',
-        } satisfies WslInstallProgress);
-
-        const r = await runElevatedAsync(
-          {
-            command: {
-              file: 'wsl.exe',
-              args: ['--install', '--no-distribution', '--no-launch'],
-            },
-          },
+        return result;
+      },
+      enableFeatures: () => runElevatedAsync({ powershell: buildEnableFeaturesScript() }, 120000),
+      readFeatures: () => readFeatureStates(),
+      installKernel: () =>
+        runElevatedAsync(
+          { command: { file: 'wsl.exe', args: ['--install', '--no-distribution', '--no-launch'] } },
           300000
-        );
-
-        // Only ask the system when the elevated run itself was inconclusive:
-        // exit code 0 already proves the install, and a declined UAC prompt
-        // proves nothing was attempted, so probing would just add latency.
-        const kernelPresent =
-          r.kind === 'failed' || r.kind === 'unknown' ? wslKernelPresent() : false;
-        const outcome = classifyKernelInstall(r, kernelPresent);
-
-        if (outcome.status === 'cancelled') {
-          safeSend(IPC_EVENTS.WSL_INSTALL_PROGRESS, {
-            phase: 'error',
-            message: 'WSL2 内核安装被取消：管理员权限请求被拒绝',
-            error: 'ELEVATION_CANCELLED',
-          } satisfies WslInstallProgress);
-          return {
-            success: false,
-            phase: 'error',
-            errorCode: 'ELEVATION_CANCELLED',
-            error: 'WSL2 内核安装被取消',
-            nextStep: '重新点击「一键安装 WSL2」，并在弹出的 UAC 窗口中点击「是」',
-          } satisfies WslInstallAndProvisionResult;
-        }
-
-        if (outcome.status === 'failed') {
-          safeSend(IPC_EVENTS.WSL_INSTALL_PROGRESS, {
-            phase: 'error',
-            message: `WSL2 内核安装失败: ${outcome.detail}`,
-            error: outcome.detail,
-          } satisfies WslInstallProgress);
-          return {
-            success: false,
-            phase: 'error',
-            errorCode: 'KERNEL_INSTALL_FAILED',
-            error: `WSL2 内核安装失败: ${outcome.detail}`,
-            nextStep: '以管理员身份打开 PowerShell 并运行: wsl --install --no-distribution',
-          } satisfies WslInstallAndProvisionResult;
-        }
-
-        writeWslInstallState('kernel_installed');
-
-        safeSend(IPC_EVENTS.WSL_INSTALL_PROGRESS, {
-          phase: 'installing_wsl',
-          rebootRequired: true,
-          message: 'WSL2 内核安装完成。需要重启系统以继续。',
-        } satisfies WslInstallProgress);
-
-        return {
-          success: true,
-          phase: 'installing_wsl',
-          rebootRequired: true,
-          nextStep: '请重启系统；重启后进入「WSL 状态监控」，安装会自动继续',
-        } satisfies WslInstallAndProvisionResult;
-      }
-
-      // ── Step 3.5: platform unusable → repair the deferred servicing ──
-      // WSL itself reports that WSL2 cannot start.  The one cause this app can
-      // repair is the stale OOBE marker set: it makes Windows abort every
-      // startup servicing pass, so the queued 「虚拟机平台」 payload never lands.
-      // Without those markers (e.g. firmware virtualization switched off) a
-      // reboot fixes nothing, and asking for one would only repeat forever.
-      if (check.distros.length === 0 && check.featureState !== 'ready' && check.platformIssue) {
-        const staleBefore = readStaleOobeState();
-        if (!staleBefore.ok || !staleBefore.stale) {
-          safeSend(IPC_EVENTS.WSL_INSTALL_PROGRESS, {
-            phase: 'error',
-            message: `WSL2 平台无法启动：${check.platformIssue}`,
-            error: check.platformIssue,
-          } satisfies WslInstallProgress);
-          return {
-            success: false,
-            phase: 'error',
-            errorCode: 'PLATFORM_NOT_READY',
-            error: check.platformIssue,
-            nextStep:
-              '请以管理员身份运行: DISM /Online /Enable-Feature /FeatureName:VirtualMachinePlatform /All 后重启；若固件（BIOS）里虚拟化未开启，请先开启它',
-          } satisfies WslInstallAndProvisionResult;
-        }
-
-        safeSend(IPC_EVENTS.WSL_INSTALL_PROGRESS, {
-          phase: 'enabling_features',
-          message: '检测到被推迟的系统组件安装，正在修复...',
-        } satisfies WslInstallProgress);
-
-        const repair = await runElevatedAsync({ powershell: buildPlatformRepairScript() }, 300000);
-
-        if (repair.kind === 'cancelled') {
-          safeSend(IPC_EVENTS.WSL_INSTALL_PROGRESS, {
-            phase: 'error',
-            message: '修复系统组件安装被取消：管理员权限请求被拒绝',
-            error: 'ELEVATION_CANCELLED',
-          } satisfies WslInstallProgress);
-          return {
-            success: false,
-            phase: 'error',
-            errorCode: 'ELEVATION_CANCELLED',
-            error: '修复系统组件安装被取消',
-            nextStep: '重新点击「一键安装 WSL2」，并在弹出的 UAC 窗口中点击「是」',
-          } satisfies WslInstallAndProvisionResult;
-        }
-
-        // What decides the next step is whether the platform became usable, not
-        // the exit code: the repair can apply the queued payload outright (as
-        // observed on the #1171 machine, where DISM finished the pending
-        // transaction and `vmcompute` came up) — then no reboot is needed and
-        // the flow continues with the distro install.
-        check = runWslCheckInternal();
-        const outcome = classifyPlatformRepair({
-          repair,
-          platformIssueAfter: check.platformIssue ?? null,
-          staleAfter: readStaleOobeState(),
-        });
-
-        if (outcome.status === 'continue') {
-          safeSend(IPC_EVENTS.WSL_INSTALL_PROGRESS, {
-            phase: 'enabling_features',
-            message: '系统组件已安装完成，继续安装发行版...',
-          } satisfies WslInstallProgress);
-        } else if (outcome.status === 'reboot-required') {
-          writeWslInstallState('platform_repair_pending');
-
-          safeSend(IPC_EVENTS.WSL_INSTALL_PROGRESS, {
-            phase: 'enabling_features',
-            rebootRequired: true,
-            message: '已重新提交「虚拟机平台」安装，需要重启系统完成。',
-          } satisfies WslInstallProgress);
-
-          return {
-            success: true,
-            phase: 'enabling_features',
-            rebootRequired: true,
-            nextStep:
-              '请重启系统（关机后再开机更稳妥）；重启后进入「WSL 状态监控」，安装会自动继续',
-          } satisfies WslInstallAndProvisionResult;
-        } else {
-          // Nothing verifiable happened and the platform is still unusable:
-          // stop here rather than install a distro that cannot register.
-          safeSend(IPC_EVENTS.WSL_INSTALL_PROGRESS, {
-            phase: 'error',
-            message: `WSL2 平台修复失败: ${outcome.detail}`,
-            error: outcome.detail,
-          } satisfies WslInstallProgress);
-          return {
-            success: false,
-            phase: 'error',
-            errorCode: 'PLATFORM_REPAIR_FAILED',
-            error: `WSL2 平台修复失败: ${outcome.detail}`,
-            nextStep:
-              '请以管理员身份运行: DISM /Online /Enable-Feature /FeatureName:VirtualMachinePlatform /All，然后重启；仍不行请在「设置 → Windows 更新」安装全部更新后重试',
-          } satisfies WslInstallAndProvisionResult;
-        }
-      }
-
-      // ── Step 4: no distro → install Ubuntu ───────────────────────────
-      if (check.distros.length === 0 && check.featureState !== 'ready') {
-        safeSend(IPC_EVENTS.WSL_INSTALL_PROGRESS, {
-          phase: 'installing_distro',
-          message: '正在下载并安装 Ubuntu 发行版（网络较慢时可能要十几分钟）...',
-        } satisfies WslInstallProgress);
-
+        ),
+      installDistro: () =>
         // Twenty minutes, not five: the distro download goes through whatever
         // proxy the machine has configured, and a throttled node makes the
         // install outlive a short timeout — the run was observed to finish in
         // the background long after the app had given up and reported failure.
-        const r = await runElevatedAsync(
+        runElevatedAsync(
           { command: { file: 'wsl.exe', args: ['--install', '-d', 'Ubuntu', '--no-launch'] } },
           1200000
-        );
-
-        if (r.kind === 'cancelled') {
-          safeSend(IPC_EVENTS.WSL_INSTALL_PROGRESS, {
-            phase: 'error',
-            message: 'Ubuntu 安装被取消：管理员权限请求被拒绝',
-            error: 'ELEVATION_CANCELLED',
-          } satisfies WslInstallProgress);
-          return {
-            success: false,
-            phase: 'error',
-            errorCode: 'ELEVATION_CANCELLED',
-            error: 'Ubuntu 发行版安装被取消',
-            nextStep: '重新点击「一键安装 WSL2」，并在弹出的 UAC 窗口中点击「是」',
-          } satisfies WslInstallAndProvisionResult;
-        }
-
-        const postCheck = runWslCheckInternal();
-        if (postCheck.distros.length === 0) {
-          // The command succeeded but no distro is registered yet: as with the
-          // kernel step that means "installed, reboot pending", not a failure.
-          // Only a non-zero exit code is an install failure.
-          if (r.kind === 'ok') {
-            if (postCheck.platformIssue) {
-              // Exit code 0 and still no distro, but WSL itself says the
-              // platform cannot start — no reboot will change that, so report
-              // what WSL actually said instead of promising one.
-              safeSend(IPC_EVENTS.WSL_INSTALL_PROGRESS, {
-                phase: 'error',
-                message: `WSL2 平台无法启动：${postCheck.platformIssue}`,
-                error: postCheck.platformIssue,
-              } satisfies WslInstallProgress);
-              return {
-                success: false,
-                phase: 'error',
-                errorCode: 'PLATFORM_NOT_READY',
-                error: postCheck.platformIssue,
-                nextStep:
-                  '请在「设置 → Windows 更新」安装全部更新后重启；仍不行请以管理员身份运行: DISM /Online /Cleanup-Image /RestoreHealth 后重启',
-              } satisfies WslInstallAndProvisionResult;
-            }
-            safeSend(IPC_EVENTS.WSL_INSTALL_PROGRESS, {
-              phase: 'installing_distro',
-              rebootRequired: true,
-              message: 'Ubuntu 已安装，需要重启系统以继续。',
-            } satisfies WslInstallProgress);
-            return {
-              success: true,
-              phase: 'installing_distro',
-              rebootRequired: true,
-              nextStep: '请重启系统；重启后进入「WSL 状态监控」，安装会自动继续',
-            } satisfies WslInstallAndProvisionResult;
-          }
-
-          const detail = summarizeElevated(r);
-          safeSend(IPC_EVENTS.WSL_INSTALL_PROGRESS, {
-            phase: 'error',
-            message: `Ubuntu 安装失败: ${detail}`,
-            error: detail,
-          } satisfies WslInstallProgress);
-          return {
-            success: false,
-            phase: 'error',
-            errorCode: 'DISTRO_INSTALL_FAILED',
-            error: `Ubuntu 发行版安装失败: ${detail}`,
-            // A slow download keeps running after the app stops waiting, so the
-            // first thing to try is a refresh rather than a manual reinstall.
-            nextStep:
-              '若网络较慢，安装可能仍在后台进行：稍等片刻后点上方刷新按钮查看；否则以管理员身份运行: wsl --install -d Ubuntu',
-          } satisfies WslInstallAndProvisionResult;
-        }
-        check.distros = postCheck.distros;
-        check.defaultDistro = postCheck.defaultDistro;
-      }
-
-      // ── Done ────────────────────────────────────────────────────────
-      clearWslInstallState();
-      safeSend(IPC_EVENTS.WSL_INSTALL_PROGRESS, {
-        phase: 'complete',
-        message: 'WSL2 安装配置完成！',
-      } satisfies WslInstallProgress);
-      safeSend(IPC_EVENTS.WSL_CHECK_UPDATED, {});
-
-      return { success: true, phase: 'complete' } satisfies WslInstallAndProvisionResult;
-    } catch (e: any) {
-      safeSend(IPC_EVENTS.WSL_INSTALL_PROGRESS, {
-        phase: 'error',
-        message: `出错: ${e?.message ?? e}`,
-        error: e?.message ?? String(e),
-      } satisfies WslInstallProgress);
-      return {
-        success: false,
-        phase: 'error',
-        error: e?.message ?? String(e),
-        errorCode: 'UNKNOWN',
-        nextStep: 'https://learn.microsoft.com/windows/wsl/install',
-      } satisfies WslInstallAndProvisionResult;
-    }
+        ),
+      kernelPresent: () => wslKernelPresent(),
+      repairPlatform: () => runElevatedAsync({ powershell: buildPlatformRepairScript() }, 300000),
+      readStale: () => readStaleOobeState(),
+      emit: (p) => {
+        sendToFrame(sender, IPC_EVENTS.WSL_INSTALL_PROGRESS, p);
+        // The closing state also means the page distro list is stale.
+        if (p.phase === 'complete') sendToFrame(sender, IPC_EVENTS.WSL_CHECK_UPDATED, {});
+      },
+      state: {
+        read: () => readWslInstallState(),
+        write: (phase) => writeWslInstallState(phase),
+        clear: () => clearWslInstallState(),
+      },
+    });
   });
 
   // -----------------------------------------------------------------------

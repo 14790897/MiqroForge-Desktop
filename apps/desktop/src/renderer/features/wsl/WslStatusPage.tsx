@@ -98,7 +98,12 @@ const PHASE_INDEX: Record<string, number> = {
 };
 
 /** Persisted phases that mean "waiting for a reboot to continue". */
-const RESUMABLE_PHASES = ['features_enabled', 'kernel_installed', 'platform_repair_pending'];
+const RESUMABLE_PHASES = [
+  'features_enabled',
+  'kernel_installed',
+  'platform_repair_pending',
+  'distro_installed',
+];
 
 /**
  * Auto-resume is for the reboot hand-off, which takes minutes — not for
