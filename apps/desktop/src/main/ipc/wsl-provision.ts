@@ -40,6 +40,21 @@ export const NOT_WINDOWS_RESULT: WslInstallAndProvisionResult = {
   nextStep: '此功能仅适用于 Windows 系统',
 };
 
+/**
+ * Whether a persisted install phase has been overtaken by the machine.
+ *
+ * A usable distro is the end state the whole flow works towards, and every
+ * step that asks for a reboot can only run while the distro list is empty — so
+ * a phase still on disk next to a live distro is stale by definition: it was
+ * written when an earlier run asked for the reboot, and no later run reached
+ * Done to clear it.  It has to go, because the page's auto-resume gates on
+ * exactly that list being empty — a phase left behind here would launch an
+ * elevated install the next time the distro list blinks.
+ */
+export function installPhaseIsObsolete(check: WslCheckResult): boolean {
+  return check.distros.length > 0;
+}
+
 export interface ProvisionWslDeps {
   /**
    * Re-derive the live machine state (`wsl --status`, distro list, feature

@@ -78,7 +78,7 @@ import type {
 } from '../../shared/ipc';
 import { registerQraftIpcHandlers } from '../qraft/ipc';
 import { readConsentVersion, writeConsentVersion } from '../privacy-consent';
-import { NOT_WINDOWS_RESULT, provisionWsl } from './wsl-provision';
+import { installPhaseIsObsolete, NOT_WINDOWS_RESULT, provisionWsl } from './wsl-provision';
 import {
   buildEnableFeaturesScript,
   buildPlatformRepairScript,
@@ -1028,10 +1028,17 @@ for m in ("pydantic", "httpx", "loguru"):
   // WSL2 check & install — Windows only, runs in main process.
   // Must work BEFORE the bridge starts (during Setup Wizard).
   // -----------------------------------------------------------------------
-  ipcMain.handle(IPC.WSL_CHECK, () => ({
-    ...runWslCheckInternal(),
-    pendingInstall: readWslInstallState(),
-  }));
+  ipcMain.handle(IPC.WSL_CHECK, () => {
+    const check = runWslCheckInternal();
+    // Drop a phase the machine has outgrown before reporting it, so a distro
+    // that showed up after the reboot request never reads as "install still in
+    // flight" — the page's auto-resume gates on the distro list alone.
+    if (installPhaseIsObsolete(check)) clearWslInstallState();
+    return {
+      ...check,
+      pendingInstall: readWslInstallState(),
+    };
+  });
 
   ipcMain.handle(IPC.WSL_INSTALL, () => {
     if (process.platform !== 'win32') {

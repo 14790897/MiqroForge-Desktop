@@ -9,7 +9,7 @@
  * hand-off (every branch that asks for one persists its phase; Done clears it).
  */
 import { describe, expect, it, vi } from 'vitest';
-import { provisionWsl, type ProvisionWslDeps } from './wsl-provision';
+import { installPhaseIsObsolete, provisionWsl, type ProvisionWslDeps } from './wsl-provision';
 import type { ElevatedRunResult, FeatureStates, StaleOobeState } from './wsl-state';
 import type { WslCheckResult, WslInstallProgress } from '../../shared/ipc';
 
@@ -521,5 +521,20 @@ describe('provisionWsl — 重启交接与完成', () => {
     expect(result).toMatchObject({ success: false, phase: 'error', errorCode: 'UNKNOWN' });
     expect(result.error).toBe('spawn wsl.exe ENOENT');
     expect(emitted.at(-1)?.message).toContain('spawn wsl.exe ENOENT');
+  });
+});
+
+// ── The lifecycle of a persisted phase ──────────────────────────────
+
+describe('provisionWsl — 持久化 phase 的生命周期', () => {
+  it('treats a persisted phase as obsolete once a usable distro answers', () => {
+    // Every reboot branch can only be reached while the distro list is empty,
+    // so a phase surviving next to a live distro was left behind by a run that
+    // never reached Done — and the page's auto-resume gates on exactly this
+    // list being empty, which is what would make it fire again.
+    expect(installPhaseIsObsolete(distroReady())).toBe(true);
+    expect(installPhaseIsObsolete(distroMissing())).toBe(false);
+    // A broken platform is the opposite case: the machine still needs help.
+    expect(installPhaseIsObsolete(brokenPlatform())).toBe(false);
   });
 });
