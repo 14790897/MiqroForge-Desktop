@@ -65,28 +65,54 @@ export interface TurnTask {
 }
 
 /**
- * Whether a send in `sessionKey` from the selected tab `threadId` may supersede
- * (abort) `prior` — the most recent turn, whichever session or tab it belongs to.
+ * In-flight turns, keyed by the TASK they belong to (#981).
  *
- * A supersede means "interrupt the turn I am watching and start a new one", so
- * it is only valid inside the SAME TASK: same session AND same tab. Switching to
- * — or spawning — another task is not a stop; nor is sending from another tab of
- * the same session. Either must leave the running turn alone (#981).
- *
- * Matching on the base session alone is what made a send from a sub-thread tab
- * kill the main tab's running turn: both share `sessionKey` while their routing
- * keys (`desktop:<threadId>` vs the session key) name different turns.
+ * The keying is the rule, not an implementation detail: a task's record must
+ * survive another task's turn starting. One slot per session does not — a send
+ * in the sub-thread tab overwrites the main tab's record, and the next send in
+ * the main tab no longer finds the turn it should supersede. It then fires a
+ * second turn into that task's runtime while the first is still running, and the
+ * backend rejects it with TURN_IN_PROGRESS — the exact error this issue is about.
  */
-export function supersedesPriorTurn(params: {
-  prior: TurnTask | null | undefined;
-  sessionKey: string;
-  threadId: string;
-}): boolean {
-  const { prior, sessionKey, threadId } = params;
-  if (!prior) return false;
-  return (
-    prior.sessionKey === sessionKey && prior.routingKey === routingKeyFor(sessionKey, threadId)
-  );
+export type TaskTurnMap<T extends TurnTask> = Map<string, T>;
+
+/**
+ * The in-flight turn of the task a send in `sessionKey` from `threadId` belongs
+ * to, or null. This is the one turn that send may supersede (abort and await).
+ *
+ * Keyed by the task's routing key, so a send in another tab of the same session —
+ * or in another session — yields null: switching to, or spawning, a task is not
+ * a stop. The `sessionKey` half is checked against the record as well, since a
+ * sub-thread routing key (`desktop:<threadId>`) does not embed the session; only
+ * the backend's globally unique thread ids keep two sessions' keys apart.
+ */
+export function taskTurnFor<T extends TurnTask>(
+  turns: ReadonlyMap<string, T>,
+  sessionKey: string,
+  threadId: string
+): T | null {
+  const turn = turns.get(routingKeyFor(sessionKey, threadId)) ?? null;
+  return turn != null && turn.sessionKey === sessionKey ? turn : null;
+}
+
+/**
+ * Every in-flight turn of `sessionKey` — what the stop button aborts, each
+ * addressed by its own routing key and thread.
+ *
+ * All of them, because "停止" is a session-level control (one composer, and the
+ * stop path already disposes every send invocation of the session), while a turn
+ * sent from a sub-thread tab streams under `desktop:<threadId>` and a bare
+ * session key would never name it. Turns of other sessions are excluded.
+ */
+export function sessionTurnsOf<T extends TurnTask>(
+  turns: ReadonlyMap<string, T>,
+  sessionKey: string
+): T[] {
+  const mine: T[] = [];
+  for (const turn of turns.values()) {
+    if (turn.sessionKey === sessionKey) mine.push(turn);
+  }
+  return mine;
 }
 
 /**

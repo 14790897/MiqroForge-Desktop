@@ -49,8 +49,10 @@ import {
   saveActiveThread,
   saveThreadTabs,
   selectThreadTab,
+  sessionTurnsOf,
   shouldAdoptRecoveredEvent,
-  supersedesPriorTurn,
+  taskTurnFor,
+  type TaskTurnMap,
   type ThreadTabsState,
 } from './threadTabs';
 import {
@@ -4069,7 +4071,6 @@ type TurnLifecycle = {
   routingKey: string;
   threadId?: string;
 };
-
 /** Fallback for aborted events WITHOUT a turn_id (legacy/mock bridges): a
  *  stale aborted event from a superseded turn arriving this soon after a new
  *  send started is dropped. Bridges that emit turn ids use the authoritative
@@ -5012,6 +5013,12 @@ export function ChatConsole({
   // session; otherwise a send in session B silently kills session A's
   // in-flight listeners and its terminal events are never processed.
   const unsubsSessionRef = useRef<string | null>(null);
+  // …and the TASK within that session (#981): the same reasoning applies one
+  // level down.  Two tasks of one session stream concurrently now, so a send in
+  // the sub-thread tab must not unsubscribe the main tab's live turn — that
+  // strands it (terminal never processed, cleanup never runs, its 60s watchdog
+  // survives to fire a false "后端 60s 无响应").
+  const unsubsRoutingKeyRef = useRef<string | null>(null);
   // EVERY active send invocation's cleanup resources, keyed by its unique
   // send id.  The unsubsRef singleton only remembers the latest invocation —
   // without this registry, cross-session invocations outlive it and their
@@ -5037,9 +5044,11 @@ export function ChatConsole({
   // exited, so the new chat.send is not rejected with TURN_IN_PROGRESS.
   // Kept after a manual stop (only cleared by the owning handleSend in its
   // identity-checked finally) so stop-then-quick-send still serializes.
-  // The task fields are what keep a supersede (and the abort it fires) inside
-  // one task — see TurnLifecycle (#981).
-  const lifecycleRef = useRef<TurnLifecycle | null>(null);
+  // A TaskTurnMap, not a single slot (#981): a task runs one turn at a time, but
+  // a session can run several tasks at once, and each must find, supersede, await
+  // and stop its OWN turn without seeing another task's — see TaskTurnMap for why
+  // one slot per session re-creates TURN_IN_PROGRESS.
+  const lifecycleRef = useRef<TaskTurnMap<TurnLifecycle>>(new Map());
   // Monotonic id for lifecycleRef identity checks — never reset, so a session
   // switch cannot reuse an old turn's id and collide with a still-in-flight
   // lifecycle (would let an old settle clear the NEW lifecycle) (#879 ③ CodeRabbit).
@@ -6572,12 +6581,14 @@ export function ChatConsole({
         if (unsubsRef.current === onlyMine) {
           unsubsRef.current = [];
           unsubsSessionRef.current = null;
+          unsubsRoutingKeyRef.current = null;
         }
         return;
       }
       for (const unsub of unsubsRef.current) unsub();
       unsubsRef.current = [];
       unsubsSessionRef.current = null;
+      unsubsRoutingKeyRef.current = null;
     },
     [clearFinalCleanupTimer]
   );
@@ -6923,22 +6934,30 @@ export function ChatConsole({
     // await the aborted turn's settlement so its terminal event (and the
     // backend drain task) cannot race the replacement send.
     try {
-      // Stop the turn actually running in THIS session — the most recent one —
-      // addressed by ITS OWN routing key and thread, not by whichever tab is
-      // selected.  A turn sent from a sub-thread tab streams under
-      // `desktop:<threadId>`; the bare session key named the session's main task
-      // instead, so stopping from that tab missed the turn it was showing and
-      // (before #981) killed the main task.  Falls back to the session's main
-      // task when no turn of this session is on record.
+      // Stop every turn running in THIS session, each addressed by ITS OWN
+      // routing key and thread rather than by whichever tab is selected.  A turn
+      // sent from a sub-thread tab streams under `desktop:<threadId>`; the bare
+      // session key named the session's main task instead, so stopping from that
+      // tab missed the turn it was showing and (before #981) killed the main
+      // task.  All of them, because "停止" is the session's control (one
+      // composer, and the cleanup above already disposed every invocation of
+      // this session) — not just the tab in front.
       // The thread id is the one the turn registered its cancel event under —
       // without it the abort resolves to "default" and misses the turn
       // entirely (#542).
-      const runningTurn = lifecycleRef.current;
-      const abortOurs = runningTurn != null && runningTurn.sessionKey === currentSessionRef.current;
-      await window.miqi.chat.abort(
-        abortOurs ? runningTurn.routingKey : currentSessionRef.current,
-        (abortOurs ? runningTurn.threadId : currentThreadIdRef.current) ?? undefined
-      );
+      // No turn of this session on record → the session's main task, which is
+      // what this call always used to abort.
+      const runningTurns = sessionTurnsOf(lifecycleRef.current, currentSessionRef.current);
+      if (runningTurns.length === 0) {
+        await window.miqi.chat.abort(
+          currentSessionRef.current,
+          currentThreadIdRef.current ?? undefined
+        );
+      } else {
+        for (const turn of runningTurns) {
+          await window.miqi.chat.abort(turn.routingKey, turn.threadId ?? undefined);
+        }
+      }
     } catch {
       /* ignore */
     }
@@ -7266,7 +7285,15 @@ export function ChatConsole({
     // sessions strands the other session's in-flight turn: its terminal
     // events are never processed, its send cleanup never runs, and its 60s
     // watchdog survives to fire a false "后端 60s 无响应" later.
-    if (unsubsSessionRef.current === sendSessionKey) cleanupListeners();
+    // Same one level down (#981): another TASK of this session may be streaming
+    // right now (the main tab while the user is in a sub-thread tab), and it is
+    // not this send's to stop — only the SAME task's previous invocation is.
+    if (
+      unsubsSessionRef.current === sendSessionKey &&
+      unsubsRoutingKeyRef.current === sendRoutingKey
+    ) {
+      cleanupListeners();
+    }
     // A new send supersedes any in-flight typewriter for this session — cancel
     // the RAF chain so the previous reply stops typing the moment a new message
     // is sent, and reset its state so the new turn does NOT inherit the old
@@ -7488,18 +7515,13 @@ export function ChatConsole({
 
     // If a reveal animation is still running from the previous response,
     // cancel it and abort the in-flight request so we can start fresh.  A
-    // supersede is ONLY valid for a prior turn of THIS TASK — lifecycleRef is
-    // global (the most recent turn across all sessions and tabs), so neither a
-    // send in another session nor a send from another tab of this same session
-    // may abort/cancel this tab's still-streaming turn: switching to, or
-    // spawning, a task is not a stop (#981).
-    const supersededLifecycle = lifecycleRef.current;
-    const supersedeSameTask = supersedesPriorTurn({
-      prior: supersededLifecycle,
-      sessionKey: sendSessionKey,
-      threadId: sendThreadId,
-    });
-    if (wasStreaming && supersededLifecycle && supersedeSameTask) {
+    // supersede is ONLY valid for a prior turn of THIS TASK: the lookup is
+    // keyed by this send's routing key, so a send in another session or from
+    // another tab of this session never finds — and never aborts — this tab's
+    // still-streaming turn.  Switching to, or spawning, a task is not a stop
+    // (#981).
+    const supersededLifecycle = taskTurnFor(lifecycleRef.current, sendSessionKey, sendThreadId);
+    if (wasStreaming && supersededLifecycle) {
       // A prior turn is still in flight and the user sent a new message —
       // supersede it before starting this turn (the optimistic bubble is
       // already shown).  Only the abort itself is awaited here; the prior
@@ -7537,10 +7559,10 @@ export function ChatConsole({
     // new turn registers listeners — and the backend's drain task has exited,
     // so the new chat.send is not rejected with TURN_IN_PROGRESS. Bounded so a
     // wedged backend cannot stall interrupt-and-resend (see TURN_ABORT_SETTLE_MS).
-    // A cross-session / cross-tab lifecycle (from a task the user switched away
-    // from) resolves on its own — do NOT block this send on it: that task keeps
-    // running in the background by design (#981).
-    if (supersededLifecycle && supersedeSameTask) {
+    // A task the user switched away from resolves on its own — do NOT block
+    // this send on it: that task keeps running in the background by design, and
+    // `taskTurnFor` above found only THIS task's turn anyway (#981).
+    if (supersededLifecycle) {
       try {
         await Promise.race([
           supersededLifecycle.promise,
@@ -7567,9 +7589,14 @@ export function ChatConsole({
       sessionKey: sendSessionKey,
       routingKey: sendRoutingKey,
     };
-    lifecycleRef.current = lifecycle;
+    lifecycleRef.current.set(sendRoutingKey, lifecycle);
     const settleLifecycle = () => {
-      if (lifecycleRef.current?.id === turnId) lifecycleRef.current = null;
+      // Identity-checked delete: a newer turn of the SAME task may already have
+      // replaced this entry — settling must not clear the new one (#879 ③
+      // CodeRabbit).  Turn records of OTHER tasks are untouched.
+      if (lifecycleRef.current.get(sendRoutingKey)?.id === turnId) {
+        lifecycleRef.current.delete(sendRoutingKey);
+      }
       resolveLifecycle();
     };
     // The user hit stop (or a newer send took over) while the aborts above were
@@ -8598,6 +8625,7 @@ export function ChatConsole({
     const myUnsubs = [unsubProgress, unsubFinal, unsubError, unsubAborted];
     unsubsRef.current = myUnsubs;
     unsubsSessionRef.current = sendSessionKey;
+    unsubsRoutingKeyRef.current = sendRoutingKey;
     // Register this invocation so unmount (and settle) can dispose its
     // resources even when it is no longer the latest send.
     sendInvocationRegistryRef.current.set(thisSendId, {
@@ -8749,6 +8777,7 @@ export function ChatConsole({
       if (unsubsRef.current === myUnsubs) {
         unsubsRef.current = [];
         unsubsSessionRef.current = null;
+        unsubsRoutingKeyRef.current = null;
       }
       sendInvocationRegistryRef.current.delete(thisSendId);
     } catch (e: any) {
