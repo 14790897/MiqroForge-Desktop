@@ -503,12 +503,29 @@ export interface PermanentEntry {
 
 export interface ApprovalHistoryEntry {
   id: string;
-  pattern_key: string;
+  pattern_key?: string;
   description: string;
   command: string;
   decision: string;
   timestamp: number;
   session_key: string;
+  /** Which audit stream the row came from (#935): "dangerous_command" | "system_install". */
+  source?: 'dangerous_command' | 'system_install';
+  /** system_install only — the thread/turn whose card was resolved. */
+  thread_id?: string;
+  turn_id?: string;
+  /** system_install only — the grant's persistence/activation state. */
+  persist_failed?: boolean;
+  runtime_failed?: boolean;
+  /** system_install only — how the install ended (null until it does). */
+  result?: SystemInstallAuditResult | null;
+}
+
+export interface SystemInstallAuditResult {
+  exit_code: number;
+  success: boolean;
+  duration_ms: number;
+  reason: string;
 }
 
 export interface ApprovalsListResult {
