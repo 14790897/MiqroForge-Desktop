@@ -168,6 +168,11 @@ test.describe.serial('编辑重答失败的派发三态判定(#1072)', () => {
     // —— 不恢复时这里恰好相反(旧回答消失、新气泡留着)
     await expect(bubbleWith(page, 'assistant', '第一版回答内容')).toHaveCount(1);
     await expect(bubbleWith(page, 'user', '第二版回答内容')).toHaveCount(0);
+    // 还输入框:恢复必须把编辑后的文本放回 composer —— 气泡被回滚掉了,
+    // 输入框是用户重发这段内容的唯一去处(setText 被删掉要能红)
+    await expect(page.locator('[data-testid="chat-input-container"] textarea')).toHaveValue(
+      'MOCK_REPLY:第二版回答内容'
+    );
 
     // 证据截图(CI 默认贴到 PR,本地静默跳过) —— 见 helpers/pr-image-post
     const shot = 'test-results/issue-1072-not-dispatched-restored.png';
