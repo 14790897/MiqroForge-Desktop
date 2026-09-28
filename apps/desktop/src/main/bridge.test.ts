@@ -801,3 +801,82 @@ describe('BridgeManager sandbox tracking', () => {
     expect(() => bridge.emitState()).not.toThrow();
   });
 });
+
+// ============================================================
+// #1072 — 派发三态:区分「请求从未写入 bridge 管道」与「写出后的失败」
+// ============================================================
+
+describe('BridgeManager dispatch classification (#1072)', () => {
+  /** 捕获一次 send 的拒绝对象,便于断言分类标记。 */
+  async function captureRejection(promise: Promise<unknown>): Promise<Error> {
+    try {
+      await promise;
+    } catch (e) {
+      return e as Error;
+    }
+    throw new Error('expected the send to reject');
+  }
+
+  it('未启动(bridge not running)→ 标记为「确定未派发」', async () => {
+    const { BridgeManager, isRequestNotDispatched } = await import('./bridge');
+    const bridge = new BridgeManager('/fake/root');
+
+    const err = await captureRejection(bridge.send('chat.send', { content: 'hi' }));
+
+    expect(err.message).toBe('Bridge not running');
+    expect(isRequestNotDispatched(err)).toBe(true);
+  });
+
+  it('stdin 不可写(进程已死)→ 标记为「确定未派发」', async () => {
+    const { BridgeManager, isRequestNotDispatched } = await import('./bridge');
+    const proc = createMockProcess();
+    const bridge = new BridgeManager('/fake/root');
+    await startBridge(proc, bridge);
+
+    proc.stdin.writable = false;
+    const err = await captureRejection(bridge.send('chat.send', { content: 'hi' }));
+
+    expect(isRequestNotDispatched(err)).toBe(true);
+  });
+
+  it('后端 error 响应(请求已写出)→ 不得标记为「确定未派发」', async () => {
+    const { BridgeManager, isRequestNotDispatched } = await import('./bridge');
+    const proc = createMockProcess();
+    const bridge = new BridgeManager('/fake/root');
+    await startBridge(proc, bridge);
+
+    const promise = bridge.send('chat.send', { content: 'hi' });
+    const id = findRequestId(proc, 'chat.send');
+    feedLine(proc, { id, error: 'Turn task failed', code: 'INTERNAL_ERROR' });
+
+    const err = await captureRejection(promise);
+    expect(err.message).toContain('Turn task failed');
+    // 请求已写入管道,后端可能已受理 → 调用方不得据此回滚本地状态
+    expect(isRequestNotDispatched(err)).toBe(false);
+  });
+
+  it('请求已写出后进程退出 → 不得标记为「确定未派发」', async () => {
+    const { BridgeManager, isRequestNotDispatched } = await import('./bridge');
+    const proc = createMockProcess();
+    const bridge = new BridgeManager('/fake/root');
+    await startBridge(proc, bridge);
+
+    const promise = bridge.send('chat.send', { content: 'hi' });
+    await new Promise((r) => setTimeout(r, 50));
+    const stopping = bridge.stop();
+    // mock 进程不会自己上报 close,而 stop() 的兜底定时器要等 5.5s —— 直接
+    // 触发它注册的 close 回调,让 stop() 走「pending 全部 reject」这条路径。
+    // 取最后一次注册:start() 期间也注册过 close 处理器,先注册的那个不是
+    // stop() 的收尾逻辑。
+    const closeHandler = (proc.once as ReturnType<typeof vi.fn>).mock.calls
+      .filter((c) => c[0] === 'close')
+      .pop()?.[1] as (() => void) | undefined;
+    closeHandler?.();
+    await stopping;
+
+    const err = await captureRejection(promise);
+    expect(err.message).toContain('Bridge stopped');
+    // 请求已写入管道,后端可能已受理 → 调用方不得据此回滚本地状态
+    expect(isRequestNotDispatched(err)).toBe(false);
+  });
+});

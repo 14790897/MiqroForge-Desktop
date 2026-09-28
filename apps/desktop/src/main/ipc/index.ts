@@ -16,7 +16,7 @@ import { homedir, tmpdir } from 'os';
 import { randomUUID } from 'crypto';
 import { basename, join } from 'path';
 import type { BrowserWindow } from 'electron';
-import type { BridgeManager } from '../bridge';
+import { isRequestNotDispatched, type BridgeManager } from '../bridge';
 import { sendToFrame } from '../frame-send';
 import {
   buildCleanupContext,
@@ -30,6 +30,7 @@ import {
   IPC,
   IPC_EVENTS,
   ChatSendInput,
+  chatNotDispatchedResult,
   ChatAbortInput,
   SessionGetInput,
   SessionDeleteInput,
@@ -342,7 +343,13 @@ export function registerIpcHandlers(bridge: BridgeManager): void {
   // Chat
   // -----------------------------------------------------------------------
   ipcMain.handle(IPC.CHAT_SEND, async (_event, payload: unknown) => {
-    const input = ChatSendInput.parse(payload);
+    let input: ReturnType<typeof ChatSendInput.parse>;
+    try {
+      input = ChatSendInput.parse(payload);
+    } catch (e) {
+      // #1072: 参数都没构造出来 —— 请求从未离开本进程,确定未派发。
+      return chatNotDispatchedResult(e instanceof Error ? e.message : String(e));
+    }
 
     const sessionKey = input.session_key ?? 'desktop:default';
 
@@ -352,7 +359,7 @@ export function registerIpcHandlers(bridge: BridgeManager): void {
     };
     // 通道异常结束（bridge 抛错）也算 turn 结束，否则登记表里会留下永远不会被
     // 摘掉的"在飞"会话，下一次崩溃的恢复提示就会撒谎。
-    const result = await bridge.send(
+    const sendPromise = bridge.send(
       'chat.send',
       {
         content: input.content,
@@ -422,7 +429,19 @@ export function registerIpcHandlers(bridge: BridgeManager): void {
       }
     );
 
-    return result;
+    // #1072: 派发三态的出口。请求从未写入 bridge 管道时以「确定未派发」正常
+    // 返回,而不是走 reject —— ipcMain.handle 的拒绝经 Electron 序列化后只剩
+    // message 字符串(自定义属性丢失),渲染层拿到后无法区分「请求未送出」与
+    // 「已送达后端但后续失败」,只能一律保守地不回滚编辑快照。写出之后的失败
+    // (进程退出 / 热重载重启 / 超时 / 后端 error)依旧 reject,按已派发对待。
+    try {
+      return await sendPromise;
+    } catch (e) {
+      if (isRequestNotDispatched(e)) {
+        return chatNotDispatchedResult(e instanceof Error ? e.message : String(e));
+      }
+      throw e;
+    }
   });
 
   ipcMain.handle(IPC.CHAT_ABORT, async (_event, payload: unknown) => {

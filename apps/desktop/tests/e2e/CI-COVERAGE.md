@@ -51,7 +51,7 @@
 | `record-bvse-skill.spec.ts` | 守卫 | 同 `bvse-skill-assets`（`RECORD_OUT_DIR` 只是可选输出目录，不是门） | 中（同左，且全程录屏） | 同上：录屏演示真实 BVSE 技能，依赖本机环境 |
 | `tool-error-neutral.spec.ts`（部分） | 守卫 | `SKIP_SANDBOX_ON_CI`（`MIQI_RUN_SANDBOX_E2E`） | 中（真实 LLM + WSL 沙箱） | 该变量只在 wsl-e2e 的沙箱点名步骤里设置，而那一步只收集 sandbox-exec / session-key-mapping / sandbox-toggle，不含本文件；「注入事件」那条 describe 在 Linux 上照跑，只有「真实链路 + 沙箱」这条零覆盖 |
 | `task-assets.spec.ts`（部分） | 守卫 | 无条件 `test.skip('标题', fn)` | 低 | 「AI 生成 .docx → 任务资产预览」一条被永久禁用；该文件其余用例在 Linux 上跑 |
-| `uninstall-cleanup.spec.ts` | 守卫 | `MIQI_E2E_UNINSTALL=1`（显式 opt-in）+ win32 + `~/.miqi`/`%APPDATA%\miqi-desktop` 当前不存在 + `dist-new/` 下有构建好的安装器；WSL 断言另需 `MIQI_E2E_WSL_ROOTFS` | 高（真实 NSIS 安装 → 造残留 → 静默卸载；WSL 部分还要 `wsl --import` 一个 rootfs） | 它会真的安装再卸载整套应用，并读写 `%APPDATA%\miqi-desktop`、`%LOCALAPPDATA%\miqi-desktop-updater`、`HKCU\Software\MiqroForge` 等真实用户数据根——只能在被明确告知「本机可跑安装/卸载」的机器上执行；CI runner 上既没有待卸载的既有安装，也没有这些门（WSL 注销逻辑另有 `src/main/ipc/cleanup.test.ts` 单测覆盖） |
+| `uninstall-cleanup.spec.ts` | 守卫 | `MIQI_E2E_UNINSTALL=1`（显式 opt-in）+ win32 + `~/.miqi`/`%APPDATA%\miqi-desktop` 当前不存在 + `dist-new/` 下有构建好的安装器；WSL 断言另需 `MIQI_E2E_WSL_ROOTFS` | 高（真机 NSIS 安装/卸载 + WSL 卷清理） | 卸载残留清理只能在真实 Windows 安装上验证：CI 既不设 `MIQI_E2E_UNINSTALL`、job 里也没有构建好的安装器（wsl-e2e 那一步按名字收集的 7 个 spec 不含本文件）；且它会真的安装再卸载整套应用、读写 `%APPDATA%` / `%LOCALAPPDATA%` / `HKCU\Software\MiqroForge` 等真实数据根，只能在被明确告知「本机可跑安装/卸载」的机器上执行（WSL 注销逻辑另有 `src/main/ipc/cleanup.test.ts` 单测覆盖） |
 
 ## 已接进 CI（#1196）
 
