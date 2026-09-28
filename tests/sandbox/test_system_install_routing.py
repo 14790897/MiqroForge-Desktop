@@ -33,20 +33,20 @@ class FakeSandbox:
         *,
         supports_system_installs: bool = True,
         fail_rc: int = 0,
-        raise_on_run: bool = False,
+        raise_exc: BaseException | None = None,
     ):
         self.is_running = True
         self.supports_system_installs = supports_system_installs
         self.fail_rc = fail_rc
-        self.raise_on_run = raise_on_run
+        self.raise_exc = raise_exc
         self.install_calls: list[tuple[str, float]] = []
         self.last_on_output = None
 
     async def run_in_distro_root(self, command, timeout=1200.0, on_output=None):
         self.install_calls.append((command, timeout))
         self.last_on_output = on_output
-        if self.raise_on_run:
-            raise RuntimeError("distro run exploded")
+        if self.raise_exc is not None:
+            raise self.raise_exc
         if self.fail_rc:
             return (self.fail_rc, "E: Unable to locate package evilpkg", "")
         # simulate a streaming distro run: one chunk through the callback
@@ -2016,7 +2016,7 @@ async def test_audit_records_raised_install_as_failure():
     """
     manager = FakeSandboxManager(
         allow_system_installs=False,
-        sandbox=FakeSandbox(raise_on_run=True),
+        sandbox=FakeSandbox(raise_exc=RuntimeError("distro run exploded")),
     )
 
     async def _once(command: str) -> str:
@@ -2035,6 +2035,36 @@ async def test_audit_records_raised_install_as_failure():
     assert record["result"]["success"] is False
     assert record["result"]["exit_code"] == -1
     assert "RuntimeError" in record["result"]["reason"]
+
+
+async def test_audit_records_cancellation_as_interrupted_not_failure():
+    """运行中被取消 → 记「取消」，不是「安装失败」。
+
+    distro 侧的子进程不随取消被杀（bwrap._run_linux_command 不捕获
+    CancelledError、不 kill），安装可能仍在继续——按失败记等于替用户下结论。
+    """
+    manager = FakeSandboxManager(
+        allow_system_installs=False,
+        sandbox=FakeSandbox(raise_exc=asyncio.CancelledError()),
+    )
+
+    async def _always(command: str) -> str:
+        return "always"
+
+    tool = ExecTool(working_dir=".", sandbox_manager=manager,
+                    system_install_approver=_always)
+    with pytest.raises(asyncio.CancelledError):
+        await tool._maybe_route_system_install(
+            "sudo apt-get install -y texlive-xetex",
+            sandbox_selection=_make_selection(),
+            session_key="k",
+        )
+
+    record = audit.get_install_audit()[0]
+    assert record["result"]["reason"] == (
+        "cancelled during run (distro install may still complete)"
+    )
+    assert record["result"]["exit_code"] == -1
 
 
 async def test_no_audit_row_when_toggle_already_on():

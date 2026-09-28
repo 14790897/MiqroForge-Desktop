@@ -114,12 +114,25 @@ function decisionLabel(d: string): { text: string; color: string } {
   }
 }
 
+/**
+ * #935: 结果行里「确实没开始跑」的原因（识别不出来的一律按结果未知处理）。
+ * 别改成按错误信息前缀判断——后端换个措辞就会静默错分类。
+ */
+const PRE_START_REASONS = new Set(['no live sandbox', 'WSL-only', 'cancelled before start']);
+
 /** #935: how a system-install grant ended, as one short line. */
 function installOutcomeLabel(h: ApprovalHistoryEntry): string {
   if (h.decision !== 'once' && h.decision !== 'always') return '未执行';
   const r = h.result;
   if (!r) return '执行中';
-  if (r.reason) return `未执行（${r.reason}）`;
+  if (r.reason) {
+    // 已知的「根本没开始」才配称「未执行」；其余（含运行中被取消——distro
+    // 侧子进程不会随取消被杀，安装可能仍在继续）结果是未知的，不能替用户
+    // 下结论说「没装」。
+    return PRE_START_REASONS.has(r.reason)
+      ? `未执行（${r.reason}）`
+      : `执行中断/结果未知（${r.reason}）`;
+  }
   return r.success ? '安装成功' : `安装失败（exit ${r.exit_code}）`;
 }
 

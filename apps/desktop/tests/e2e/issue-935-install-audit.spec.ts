@@ -34,8 +34,9 @@ import {
 
 const GRANTED_COMMAND = 'apt-get install -y texlive-xetex';
 const DENIED_COMMAND = 'apt-get install -y evilpkg';
+const CANCELLED_COMMAND = 'apt-get install -y texlive-lang-chinese';
 
-/** 授权行 + 结果行（同 grant_id）与一条拒绝，覆盖两种表决。 */
+/** 授权行 + 结果行（同 grant_id）三种结局：成功 / 拒绝 / 运行中被取消。 */
 function seedRows(): string[] {
   const t = Date.now() / 1000;
   return [
@@ -74,6 +75,31 @@ function seedRows(): string[] {
       command: DENIED_COMMAND,
       persist_failed: false,
       runtime_failed: false,
+    },
+    // 运行中被取消：distro 侧子进程不会随取消被杀，安装可能仍在继续——
+    // 这种结果不能在界面上说成「未执行」（CodeRabbit review）。
+    {
+      id: 'e2e-auth-cancelled',
+      kind: 'authorization',
+      grant_id: 'e2e-grant-cancelled',
+      timestamp: t - 5,
+      session_key: 'e2e-client:e2e-session',
+      thread_id: 'e2e-thread',
+      turn_id: 'e2e-turn',
+      decision: 'once',
+      command: CANCELLED_COMMAND,
+      persist_failed: false,
+      runtime_failed: false,
+    },
+    {
+      id: 'e2e-result-cancelled',
+      kind: 'result',
+      grant_id: 'e2e-grant-cancelled',
+      timestamp: t - 4,
+      exit_code: -1,
+      success: false,
+      duration_ms: 4_000,
+      reason: 'cancelled during run (distro install may still complete)',
     },
   ].map((row) => JSON.stringify(row));
 }
@@ -125,6 +151,10 @@ test.describe('#935 系统包安装授权审计', () => {
     // 拒绝也留痕（只记授权的话，「用户被问过没有、答了什么」无从查证）
     await expect(page.getByText('已拒绝').first()).toBeVisible();
     await expect(page.getByText(DENIED_COMMAND)).toBeVisible();
+
+    // 运行中被取消 → 「结果未知」，不是「未执行」（distro 侧安装可能仍在继续）
+    await expect(page.getByText(CANCELLED_COMMAND)).toBeVisible();
+    await expect(page.getByText(/执行中断\/结果未知/)).toBeVisible();
 
     // 截图留证据（PR 描述里的界面截图）
     await page.screenshot({ path: 'test-reports/issue-935-install-audit.png' });

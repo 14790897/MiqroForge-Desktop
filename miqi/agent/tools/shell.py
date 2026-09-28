@@ -2827,11 +2827,15 @@ class ExecTool(Tool):
             )
         except BaseException as exc:
             # #935: 异常路径也要落结果行，否则这条授权在审计里永远停在
-            # 「执行中」——失败同样是「结果」。
-            self._record_install_result(
-                grant_id, exit_code=-1,
-                reason=f"install run raised ({type(exc).__name__})",
+            # 「执行中」——失败同样是「结果」。取消单独给一个原因：distro
+            # 侧的子进程不会随取消被杀（见 bwrap._run_linux_command），安装
+            # 可能仍在继续，记成「失败」等于替用户下结论。
+            reason = (
+                "cancelled during run (distro install may still complete)"
+                if isinstance(exc, asyncio.CancelledError)
+                else f"install run raised ({type(exc).__name__})"
             )
+            self._record_install_result(grant_id, exit_code=-1, reason=reason)
             raise
         finally:
             heartbeat_task.cancel()
