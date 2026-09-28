@@ -71,6 +71,8 @@ interface HarnessOpts {
   probes?: WslCheckResult[];
   /** Stale-marker reads, consumed in order; the last one repeats. */
   stale?: StaleOobeState[];
+  /** What `state.read()` reports: the phase a previous round left behind. */
+  previousPhase?: string;
   features?: FeatureStates;
   enabled?: ElevatedRunResult;
   kernel?: ElevatedRunResult;
@@ -136,6 +138,10 @@ async function run(opts: HarnessOpts = {}) {
     // Writes and clears join the call log too, so an exact-sequence assertion
     // pins down *when* the phase was persisted, not just that it was.
     state: {
+      read: () => {
+        calls.push('state.read');
+        return opts.previousPhase ? { phase: opts.previousPhase, at: Date.now() } : null;
+      },
       write: (phase) => {
         calls.push(`state.write:${phase}`);
         written.push(phase);
@@ -384,7 +390,36 @@ describe('provisionWsl — 发行版安装 (Step 4)', () => {
       rebootRequired: true,
     });
     expect(written).toEqual(['distro_installed']);
-    expect(calls).toEqual(['probe', 'installDistro', 'probe', 'state.write:distro_installed']);
+    expect(calls).toEqual([
+      'probe',
+      'installDistro',
+      'probe',
+      'state.read',
+      'state.write:distro_installed',
+    ]);
+  });
+
+  it('breaks the reboot cycle when the previous round ended in the same state', async () => {
+    // install → no distro → reboot → resume → install → no distro: each round
+    // rewrites the phase (refreshing its timestamp), so the 24h resume limit
+    // never ends it.  One repeat is proof enough — WSL registers the distro
+    // when the install completes, so a second silent no-show is not about a
+    // missing reboot — and clearing the phase is what makes it stop.
+    const { result, calls, written, emitted } = await run({
+      probes: [distroMissing()],
+      previousPhase: 'distro_installed',
+      distro: ok(),
+    });
+
+    expect(result).toMatchObject({
+      success: false,
+      phase: 'error',
+      errorCode: 'DISTRO_NOT_REGISTERED',
+    });
+    expect(result.rebootRequired).toBeUndefined();
+    expect(written).toEqual([]);
+    expect(calls).toEqual(['probe', 'installDistro', 'probe', 'state.read', 'state.clear']);
+    expect(emitted.at(-1)).toMatchObject({ phase: 'error', error: 'DISTRO_NOT_REGISTERED' });
   });
 
   it('stops with ELEVATION_CANCELLED on a declined UAC prompt', async () => {

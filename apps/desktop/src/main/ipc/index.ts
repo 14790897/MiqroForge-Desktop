@@ -1116,6 +1116,7 @@ for m in ("pydantic", "httpx", "loguru"):
         if (p.phase === 'complete') sendToFrame(sender, IPC_EVENTS.WSL_CHECK_UPDATED, {});
       },
       state: {
+        read: () => readWslInstallState(),
         write: (phase) => writeWslInstallState(phase),
         clear: () => clearWslInstallState(),
       },

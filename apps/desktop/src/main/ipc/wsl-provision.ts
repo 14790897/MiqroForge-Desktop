@@ -85,8 +85,16 @@ export interface ProvisionWslDeps {
   readStale: () => StaleOobeState;
   /** Progress for the UI, in the order the flow reaches each phase. */
   emit: (p: WslInstallProgress) => void;
-  /** The install phase persisted across a reboot, and its cleanup. */
-  state: { write(phase: string): void; clear(): void };
+  /**
+   * The install phase persisted across a reboot, and its cleanup.  `read` is
+   * what makes a repeat visible: a phase seen again while the machine is
+   * unchanged means the reboot hand-off did not move anything.
+   */
+  state: {
+    read(): { phase: string; at: number } | null;
+    write(phase: string): void;
+    clear(): void;
+  };
 }
 
 export async function provisionWsl(deps: ProvisionWslDeps): Promise<WslInstallAndProvisionResult> {
@@ -397,6 +405,35 @@ export async function provisionWsl(deps: ProvisionWslDeps): Promise<WslInstallAn
               error: postCheck.platformIssue,
               nextStep:
                 '请在「设置 → Windows 更新」安装全部更新后重启；仍不行请以管理员身份运行: DISM /Online /Cleanup-Image /RestoreHealth 后重启',
+            } satisfies WslInstallAndProvisionResult;
+          }
+
+          // The phase already on disk says the previous round ended in exactly
+          // the state this one is about to produce: install reported success,
+          // the reboot was taken (the page resumes while the distro list is
+          // empty), and the distro still never registered.  Asking for yet
+          // another reboot would only repeat the cycle — and because every
+          // write refreshes the phase's timestamp, the 24-hour resume limit
+          // cannot end it either.  WSL's own docs say `--no-launch` registers
+          // the distro once the install completes, so a repeat here points at
+          // a real problem rather than at a missing reboot.  Clearing the phase
+          // is what actually stops it: the resume fires on an empty distro
+          // list alone, so leaving it behind would re-run this elevated
+          // install on every visit to the page.
+          if (state.read()?.phase === 'distro_installed') {
+            state.clear();
+            emit({
+              phase: 'error',
+              message: `Ubuntu 已安装，但发行版始终未注册（上一次尝试同样如此）`,
+              error: 'DISTRO_NOT_REGISTERED',
+            } satisfies WslInstallProgress);
+            return {
+              success: false,
+              phase: 'error',
+              errorCode: 'DISTRO_NOT_REGISTERED',
+              error: 'Ubuntu 已安装，但发行版始终未注册',
+              nextStep:
+                '请以管理员身份打开 PowerShell 运行: wsl --install -d Ubuntu，并按提示完成首次启动（创建用户名与密码）；仍不见发行版请在「设置 → Windows 更新」安装全部更新后重试',
             } satisfies WslInstallAndProvisionResult;
           }
 
