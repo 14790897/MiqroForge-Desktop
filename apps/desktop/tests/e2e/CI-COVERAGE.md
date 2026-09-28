@@ -51,6 +51,7 @@
 | `record-bvse-skill.spec.ts` | 守卫 | 同 `bvse-skill-assets`（`RECORD_OUT_DIR` 只是可选输出目录，不是门） | 中（同左，且全程录屏） | 同上：录屏演示真实 BVSE 技能，依赖本机环境 |
 | `tool-error-neutral.spec.ts`（部分） | 守卫 | `SKIP_SANDBOX_ON_CI`（`MIQI_RUN_SANDBOX_E2E`） | 中（真实 LLM + WSL 沙箱） | 该变量只在 wsl-e2e 的沙箱点名步骤里设置，而那一步只收集 sandbox-exec / session-key-mapping / sandbox-toggle，不含本文件；「注入事件」那条 describe 在 Linux 上照跑，只有「真实链路 + 沙箱」这条零覆盖 |
 | `task-assets.spec.ts`（部分） | 守卫 | 无条件 `test.skip('标题', fn)` | 低 | 「AI 生成 .docx → 任务资产预览」一条被永久禁用；该文件其余用例在 Linux 上跑 |
+| `uninstall-cleanup.spec.ts` | 守卫 | `MIQI_E2E_UNINSTALL=1` + win32 + `dist-new` 下已构建的安装器 | 高（真机安装/卸载 + WSL 卷清理） | 卸载残留清理只能在真实 Windows 安装上验证：CI 既不设 `MIQI_E2E_UNINSTALL`，job 里也没有构建好的安装器；wsl-e2e 那一步按名字收集的 7 个 spec 不含本文件 |
 
 ## 已接进 CI（#1196）
 
