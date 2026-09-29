@@ -1,3 +1,25 @@
+# [0.36.0](https://github.com/14790897/MiqroForge-Desktop/compare/v0.35.0...v0.36.0) (2026-09-29)
+
+
+### Bug Fixes
+
+* **desktop,bridge:** [#981](https://github.com/14790897/MiqroForge-Desktop/issues/981) 判定按任务寻址 + 接线子智能体线程 tab（spawn/completed 转发） ([#1218](https://github.com/14790897/MiqroForge-Desktop/issues/1218)) ([e61787d](https://github.com/14790897/MiqroForge-Desktop/commit/e61787df6042374ceb2ba0801812ca06cd3b491c))
+* **desktop:** chat.send 派发三态,编辑/重答回滚不再靠「调用过 invoke」推测([#1072](https://github.com/14790897/MiqroForge-Desktop/issues/1072)) ([#1215](https://github.com/14790897/MiqroForge-Desktop/issues/1215)) ([201e383](https://github.com/14790897/MiqroForge-Desktop/commit/201e3838d9af56a5643845e9bb3c493fc990a296)), closes [#1196](https://github.com/14790897/MiqroForge-Desktop/issues/1196) [#1011](https://github.com/14790897/MiqroForge-Desktop/issues/1011) [#1020](https://github.com/14790897/MiqroForge-Desktop/issues/1020)
+* **desktop:** 去掉 electron-builder.yml 重复的 include key，修复打包全挂 ([#1222](https://github.com/14790897/MiqroForge-Desktop/issues/1222)) ([c627a0e](https://github.com/14790897/MiqroForge-Desktop/commit/c627a0efad2e007615b98fc418e72ace9343a6f5)), closes [#1176](https://github.com/14790897/MiqroForge-Desktop/issues/1176) [#1177](https://github.com/14790897/MiqroForge-Desktop/issues/1177) [#1177](https://github.com/14790897/MiqroForge-Desktop/issues/1177) [#1176](https://github.com/14790897/MiqroForge-Desktop/issues/1176)
+
+
+### Features
+
+* **agent:** 系统包安装「允许并记住」授权审计——归一化命令/会话/结果落盘可追溯（[#935](https://github.com/14790897/MiqroForge-Desktop/issues/935)） ([#1217](https://github.com/14790897/MiqroForge-Desktop/issues/1217)) ([0a118e8](https://github.com/14790897/MiqroForge-Desktop/commit/0a118e8d419457c642b65870d34cff093e896a3b)), closes [#875](https://github.com/14790897/MiqroForge-Desktop/issues/875)
+
+---
+## 下载说明
+
+macOS 用户请按芯片架构选择安装包：
+
+- **Apple Silicon (M1/M2/M3/M4)**：下载 `0.36.0-arm64.dmg`（ARM 架构）
+- **Intel**：下载 `0.36.0.dmg`（x86 无后缀）
+
 # [0.35.0](https://github.com/14790897/MiqroForge-Desktop/compare/v0.34.0...v0.35.0) (2026-09-24)
 
 
