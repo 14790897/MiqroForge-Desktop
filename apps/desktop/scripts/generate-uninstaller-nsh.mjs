@@ -1,9 +1,15 @@
 /**
- * 生成 NSIS 卸载残留清理脚本 build/installer.nsh（issue #1177）。
+ * 生成 electron-builder 的自定义 NSIS 脚本 build/installer.nsh。
  *
- * 单一事实来源：src/shared/cleanup-constants.json —— 主进程/渲染器/单测
- * 引用同一份常量（cleanup-paths.ts），本脚本在构建前把它渲染进 NSIS，
- * 保证卸载器与运行时代码的路径/名字永不漂移。
+ * 该文件是**生成产物**，由两份源码拼成（顺序不可换）：
+ *   1. scripts/installer-dirpage.nsh —— 安装期：目录页校验（issue #1176），
+ *      依赖 !define MUI_PAGE_CUSTOMFUNCTION_LEAVE 早于 MUI_PAGE_DIRECTORY 展开。
+ *   2. scripts/installer.nsh.tpl     —— 卸载期：残留清理（issue #1177），
+ *      占位符由 src/shared/cleanup-constants.json 渲染，保证卸载器与运行时代码
+ *      的路径/名字永不漂移。
+ *
+ * 两份脚本各自有 !ifndef / !ifdef BUILD_UNINSTALLER 守卫，互不干扰；
+ * 但 electron-builder 的 nsis.include 只能指一个文件，必须合并输出。
  *
  * 输出带 UTF-8 BOM：makensis 无 BOM 时按 ANSI 码页解读，中文会乱码。
  */
@@ -16,6 +22,7 @@ const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const constants = JSON.parse(
   readFileSync(path.join(rootDir, 'src/shared/cleanup-constants.json'), 'utf8')
 );
+const dirPage = readFileSync(path.join(rootDir, 'scripts/installer-dirpage.nsh'), 'utf8');
 const tpl = readFileSync(path.join(rootDir, 'scripts/installer.nsh.tpl'), 'utf8');
 
 // NSIS 标签不能含点号/非标识符字符，候选目录名需要清洗后做标签 id。
@@ -39,7 +46,8 @@ const tokens = {
   '@@CANDIDATE_RM_LINES@@': candidateRmLines,
 };
 
-let out = tpl;
+// 目录页脚本在前（见文件头注释的顺序约束），卸载清理模板在后。
+let out = `${dirPage.trimEnd()}\n\n${tpl}`;
 for (const [token, value] of Object.entries(tokens)) {
   out = out.replaceAll(token, value);
 }
