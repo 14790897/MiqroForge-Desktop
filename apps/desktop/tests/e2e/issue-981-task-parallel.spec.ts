@@ -59,6 +59,12 @@ const TURN_IN_PROGRESS_TEXT = '上一个任务还在进行中';
 
 const SHOT_DIR = join(APPS_DESKTOP, 'test-reports', 'issue981');
 
+// macOS CI cannot run the mock-based specs: the runner's undici fetch fails
+// against a local 127.0.0.1 listener and the spawned mock's stdout pipe never
+// delivers（同 tool-error-neutral.spec.ts 的 SKIP_MOCK_ON_MACOS_CI；仓库里 22 个
+// e2e spec 带这个守卫）。本 spec 依赖 mock_hang，macos-e2e 上要么挂、要么假绿。
+const SKIP_MOCK_ON_MACOS_CI = process.platform === 'darwin' && !!process.env.CI;
+
 /** 把所有 provider 指向 mock，并把默认模型钉到 deepseek —— 真实 API 永不被调用。 */
 function patchProvidersToMock(config: any, mockUrl: string): void {
   const providers = config.providers ?? {};
@@ -111,6 +117,10 @@ test.describe('#981 多任务并行：切换任务不中断', () => {
   let page: Page;
   let miqiHome: string;
   let mockServer: ChildProcess;
+
+  // describe 级 skip：默认整块跳过（含 beforeAll —— 不启 mock、不 launch Electron），
+  // 放在 describe 体里而不是测试体里才能连 hook 一起挡住。
+  test.skip(SKIP_MOCK_ON_MACOS_CI, 'macOS CI cannot reach the local mock server');
 
   test.beforeAll(async () => {
     const mock = await startMockServer('mock_hang.py');
