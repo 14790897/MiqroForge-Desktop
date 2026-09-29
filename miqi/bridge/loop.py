@@ -1527,11 +1527,11 @@ class BridgeRuntimeLoop:
                             "chat.send: forwarding {} failed: {}",
                             ipc_event, exc,
                         )
-                    # 兼容原有行为：这类事件此前走通用 progress 分支透出过，保留。
-                    await _emit("progress", {
-                        "event": event_name,
-                        "data": payload,
-                    })
+                    # 刻意**不再**把这两个事件当通用 progress 透出（改动前它们会落进
+                    # 下面那个 else，在会话里渲染成一行裸事件名 "[SubAgentSpawnedEvent]"）。
+                    # 子智能体现在有了正经的呈现（线程 tab），那行开发者噪声没有
+                    # 存在的理由；其余未识别事件的行为不变。
+                    continue
                 else:
                     await _emit("progress", {
                         "event": event_name,
