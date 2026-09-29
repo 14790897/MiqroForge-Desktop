@@ -726,6 +726,18 @@ def main() -> None:
     except Exception as exc:
         _log(f"Approval history init warning (non-fatal): {exc}")
 
+    # Persist the system-install authorization audit (#935) — the grant made
+    # by 「允许并记住」 must stay traceable across restarts, otherwise "why
+    # does this machine suddenly allow system package installs" is
+    # unanswerable once the process that granted it is gone.
+    try:
+        from miqi.agent.system_install_audit import init_audit_file
+        from miqi.config.loader import get_data_dir
+
+        init_audit_file(get_data_dir() / "system_install_audit.jsonl")
+    except Exception as exc:
+        _log(f"System install audit init warning (non-fatal): {exc}")
+
     # Initialize bridge state — reuse the global _state instance
     _bridge_state = _state
 

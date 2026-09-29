@@ -41,6 +41,25 @@ interface SendOptions {
   timeoutMode?: 'total' | 'inactivity';
 }
 
+/**
+ * 请求从未写入 bridge 管道(#1072)。
+ *
+ * 只有「确定未派发」的失败才用它:bridge 没在跑、stdin 不可写、以及
+ * 序列化/写入前的同步抛错——此时后端进程根本没有机会开始这个 turn。与之相对,
+ * 请求写出之后的失败(进程退出、热重载重启、inactivity 超时、后端返回 error)
+ * 一律用普通 Error:请求可能已被后端受理,调用方不得据此回滚本地状态。
+ */
+export class RequestNotDispatchedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'RequestNotDispatchedError';
+  }
+}
+
+export function isRequestNotDispatched(err: unknown): boolean {
+  return err instanceof RequestNotDispatchedError;
+}
+
 export interface NormalizedBridgeMessage {
   requestId: string | null;
   result?: unknown;
@@ -94,6 +113,26 @@ export function normalizeBridgeMessage(resp: BridgeResponse): NormalizedBridgeMe
     eventType,
     data: resp.data,
   };
+}
+
+/**
+ * Renderer IPC channel for an orphan bridge event, or undefined when the event
+ * name maps to no known channel (then it is dropped — never mis-routed).
+ *
+ * Two naming conventions reach the orphan forwarder:
+ *   · the chat.* family — `subagent_result` → `CHAT_SUBAGENT_RESULT`;
+ *   · product events that already carry their renderer IPC name —
+ *     `agent:spawned` → `AGENT_SPAWNED`, `agent:completed` → `AGENT_COMPLETED`
+ *     (#981: 子智能体线程 tab 的入口/收尾事件).
+ * Try the CHAT_ convention first (unchanged for existing emitters), then the
+ * event name normalized into a constant key.
+ */
+export function channelForEventType(eventType: string): string | undefined {
+  const upper = eventType.toUpperCase();
+  return (
+    IPC_EVENTS[`CHAT_${upper}` as keyof typeof IPC_EVENTS] ??
+    IPC_EVENTS[upper.replace(/[^A-Z0-9]/g, '_') as keyof typeof IPC_EVENTS]
+  );
 }
 
 export function buildInitializeParams(version: string): InitializeParams {
@@ -481,8 +520,7 @@ export class BridgeManager extends EventEmitter {
             // Use normalized.eventType (not raw resp.type) so events sent via
             // the "event" field are handled correctly — consistent with the
             // primary handler (#335).
-            const eventKey = `CHAT_${normalized.eventType.toUpperCase()}`;
-            const channel = IPC_EVENTS[eventKey as keyof typeof IPC_EVENTS];
+            const channel = channelForEventType(normalized.eventType);
             if (channel) {
               const allWindows = BrowserWindow.getAllWindows();
               for (const win of allWindows) {
@@ -826,7 +864,7 @@ export class BridgeManager extends EventEmitter {
       (options.allowStarting === true && this.process !== null && this.state === 'starting');
 
     if (!canSend) {
-      throw new Error('Bridge not running');
+      throw new RequestNotDispatchedError('Bridge not running');
     }
 
     const id = randomUUID();
@@ -905,21 +943,27 @@ export class BridgeManager extends EventEmitter {
       if (!stdin.writable || stdin.destroyed) {
         clearTimeout(timeout);
         this.pending.delete(id);
-        reject(new Error('Bridge not running'));
+        reject(new RequestNotDispatchedError('Bridge not running'));
         return;
       }
       try {
         stdin.write(JSON.stringify(request) + '\n', (err) => {
           if (err) {
+            // 写入失败(EPIPE 等):行没有完整送达,后端不会开始这个 turn。
+            // 保守起见不标 not-dispatched —— 数据可能已进入管道缓冲区,
+            // 由上层按「可能已派发」处理。
             clearTimeout(timeout);
             this.pending.delete(id);
             reject(err);
           }
         });
       } catch (err) {
+        // 序列化失败(JSON.stringify 抛错)或 stdin.write 同步抛错 —— 一个字节
+        // 都没写出去,后端无从知晓这次请求(#1072 的「本地/序列化失败」)。
         clearTimeout(timeout);
         this.pending.delete(id);
-        reject(err instanceof Error ? err : new Error(String(err)));
+        const message = err instanceof Error ? err.message : String(err);
+        reject(new RequestNotDispatchedError(message));
       }
     });
   }

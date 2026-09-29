@@ -49,7 +49,10 @@ import {
   saveActiveThread,
   saveThreadTabs,
   selectThreadTab,
+  sessionTurnsOf,
   shouldAdoptRecoveredEvent,
+  taskTurnFor,
+  type TaskTurnMap,
   type ThreadTabsState,
 } from './threadTabs';
 import {
@@ -110,6 +113,7 @@ import type {
   SpreadsheetData,
   DocumentBlocks,
 } from '../../../shared/ipc';
+import { isChatNotDispatched } from '../../../shared/ipc';
 import { extractProgressMessage, type ProgressPayload } from './progressUtils';
 import { sanitizeUiMessage } from '../../lib/sanitizeUiMessage';
 import {
@@ -4053,6 +4057,20 @@ const HDR_CTL_TOGGLE_ON = `${HDR_CTL_ICON} bg-[var(--surface-muted)] hover:bg-[v
  *  wedged backend stalling interrupt-and-resend indefinitely. */
 const TURN_ABORT_SETTLE_MS = 3000;
 
+/** One in-flight turn, as tracked by `lifecycleRef` (#981).
+ *
+ *  `sessionKey` + `routingKey` name the TASK the turn belongs to — only a turn
+ *  of the same task may be superseded, and an abort is addressed to the turn's
+ *  own routing key rather than to whichever tab is selected when it lands.
+ *  `threadId` is the backend thread the send registered the turn under, filled
+ *  in once the send resolves it (absent for a send that never got that far). */
+type TurnLifecycle = {
+  id: number;
+  promise: Promise<void>;
+  sessionKey: string;
+  routingKey: string;
+  threadId?: string;
+};
 /** Fallback for aborted events WITHOUT a turn_id (legacy/mock bridges): a
  *  stale aborted event from a superseded turn arriving this soon after a new
  *  send started is dropped. Bridges that emit turn ids use the authoritative
@@ -4995,14 +5013,25 @@ export function ChatConsole({
   // session; otherwise a send in session B silently kills session A's
   // in-flight listeners and its terminal events are never processed.
   const unsubsSessionRef = useRef<string | null>(null);
+  // …and the TASK within that session (#981): the same reasoning applies one
+  // level down.  Two tasks of one session stream concurrently now, so a send in
+  // the sub-thread tab must not unsubscribe the main tab's live turn — that
+  // strands it (terminal never processed, cleanup never runs, its 60s watchdog
+  // survives to fire a false "后端 60s 无响应").
+  const unsubsRoutingKeyRef = useRef<string | null>(null);
   // EVERY active send invocation's cleanup resources, keyed by its unique
   // send id.  The unsubsRef singleton only remembers the latest invocation —
   // without this registry, cross-session invocations outlive it and their
   // watchdogs/listeners would keep calling setMessages after unmount.  The
   // session key lets abort/stop dispose only the invocation of the session
-  // being stopped instead of the latest one.
+  // being stopped instead of the latest one; `routingKey` does the same one
+  // level down — disposing only the TASK being stopped / superseded (#981),
+  // since a session can run several tasks at once.
   const sendInvocationRegistryRef = useRef<
-    Map<number, { unsubs: Array<() => void>; cleanup: () => void; sessionKey: string }>
+    Map<
+      number,
+      { unsubs: Array<() => void>; cleanup: () => void; sessionKey: string; routingKey: string }
+    >
   >(new Map());
   const finalCleanupTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Shared across handleSend closures: a new send aborts the previous turn's
@@ -5020,9 +5049,11 @@ export function ChatConsole({
   // exited, so the new chat.send is not rejected with TURN_IN_PROGRESS.
   // Kept after a manual stop (only cleared by the owning handleSend in its
   // identity-checked finally) so stop-then-quick-send still serializes.
-  const lifecycleRef = useRef<{ id: number; promise: Promise<void>; sessionKey: string } | null>(
-    null
-  );
+  // A TaskTurnMap, not a single slot (#981): a task runs one turn at a time, but
+  // a session can run several tasks at once, and each must find, supersede, await
+  // and stop its OWN turn without seeing another task's — see TaskTurnMap for why
+  // one slot per session re-creates TURN_IN_PROGRESS.
+  const lifecycleRef = useRef<TaskTurnMap<TurnLifecycle>>(new Map());
   // Monotonic id for lifecycleRef identity checks — never reset, so a session
   // switch cannot reuse an old turn's id and collide with a still-in-flight
   // lifecycle (would let an old settle clear the NEW lifecycle) (#879 ③ CodeRabbit).
@@ -5140,9 +5171,38 @@ export function ChatConsole({
     saveActiveThread(sessionKey, threadState.active, store);
   }, [sessionKey, threadState]);
 
+  /**
+   * 把一个子智能体事件落到**它所属会话**的 tab 状态里（#981 接线）。
+   *
+   * 当前会话 → 更新组件状态（既有的持久化 effect 会写回 sessionStorage）；
+   * 其它会话 → 直接改那一份持久化状态，用户切回去时 loadThreadState 读得到。
+   * 两种都不能丢：主进程把这类事件广播给所有窗口，而 tab 列表是按会话存的，
+   * 丢掉（早先直接 return 的做法）会让后台会话里起的子智能体永远没有 tab。
+   */
+  const applyAgentEventToSession = useCallback(
+    (targetSession: string, update: (state: ThreadTabsState) => ThreadTabsState) => {
+      if (targetSession === currentSessionRef.current) {
+        setThreadState(update);
+        return;
+      }
+      const store = safeSessionStorage();
+      const next = update(loadThreadState(targetSession, store));
+      saveThreadTabs(targetSession, next.tabs, store);
+      saveActiveThread(targetSession, next.active, store);
+    },
+    []
+  );
+
   useEffect(() => {
     const unsub = window.miqi.agents?.onSpawned((data) => {
-      setThreadState((prev) =>
+      // 子智能体事件按**它属于的那个会话**落盘（#981 接线）：tab 列表是按会话存在
+      // sessionStorage 里的（loadThreadState / saveThreadTabs），所以别的会话里起的
+      // 子智能体不能丢 —— 直接写进那个会话的持久化状态，用户切回去时读得到
+      // （CodeRabbit 复审：早先直接丢弃，会让后台会话的 tab 永远不出现）。
+      // 事件不带 session_key 时（老版本桥）按「本会话」处理，与 preload 里
+      // 「未打标即本会话」的既有口径一致。
+      const target = data.session_key ?? currentSessionRef.current;
+      applyAgentEventToSession(target, (prev) =>
         addThreadTab(prev, {
           threadId: data.sub_thread_id,
           agentType: data.agent_type,
@@ -5157,7 +5217,8 @@ export function ChatConsole({
 
   useEffect(() => {
     const unsub = window.miqi.agents?.onCompleted((data) => {
-      setThreadState((prev) => ({
+      const target = data.session_key ?? currentSessionRef.current;
+      applyAgentEventToSession(target, (prev) => ({
         ...prev,
         tabs: prev.tabs.map((t) =>
           t.threadId === data.sub_thread_id ? { ...t, label: `${t.label.replace(/ ✓$/, '')} ✓` } : t
@@ -6555,12 +6616,14 @@ export function ChatConsole({
         if (unsubsRef.current === onlyMine) {
           unsubsRef.current = [];
           unsubsSessionRef.current = null;
+          unsubsRoutingKeyRef.current = null;
         }
         return;
       }
       for (const unsub of unsubsRef.current) unsub();
       unsubsRef.current = [];
       unsubsSessionRef.current = null;
+      unsubsRoutingKeyRef.current = null;
     },
     [clearFinalCleanupTimer]
   );
@@ -6906,13 +6969,30 @@ export function ChatConsole({
     // await the aborted turn's settlement so its terminal event (and the
     // backend drain task) cannot race the replacement send.
     try {
-      // Pass the current thread id so the backend aborts the SAME thread the
-      // streaming turn registered its cancel event under — without it the
-      // abort resolves to "default" and misses the turn entirely (#542).
-      await window.miqi.chat.abort(
-        currentSessionRef.current,
-        currentThreadIdRef.current ?? undefined
-      );
+      // Stop every turn running in THIS session, each addressed by ITS OWN
+      // routing key and thread rather than by whichever tab is selected.  A turn
+      // sent from a sub-thread tab streams under `desktop:<threadId>`; the bare
+      // session key named the session's main task instead, so stopping from that
+      // tab missed the turn it was showing and (before #981) killed the main
+      // task.  All of them, because "停止" is the session's control (one
+      // composer, and the cleanup above already disposed every invocation of
+      // this session) — not just the tab in front.
+      // The thread id is the one the turn registered its cancel event under —
+      // without it the abort resolves to "default" and misses the turn
+      // entirely (#542).
+      // No turn of this session on record → the session's main task, which is
+      // what this call always used to abort.
+      const runningTurns = sessionTurnsOf(lifecycleRef.current, currentSessionRef.current);
+      if (runningTurns.length === 0) {
+        await window.miqi.chat.abort(
+          currentSessionRef.current,
+          currentThreadIdRef.current ?? undefined
+        );
+      } else {
+        for (const turn of runningTurns) {
+          await window.miqi.chat.abort(turn.routingKey, turn.threadId ?? undefined);
+        }
+      }
     } catch {
       /* ignore */
     }
@@ -7162,6 +7242,15 @@ export function ChatConsole({
     // currentSessionRef.  The watchdog below must not warn into another
     // session after the user switched away.
     const sendSessionKey = currentSessionRef.current;
+    // The TASK this send belongs to — the session plus the thread tab selected
+    // right now.  Snapshotted here with the session: the supersede below must be
+    // decided against the tab the user was on when they pressed Enter, and the
+    // optimistic bubble, the listeners and chat.send must all agree on that same
+    // tab.  Read through the ref, not the `activeThreadId` state — this callback
+    // is not recreated on a tab switch, so the closure's copy can be a tab the
+    // user has already left.
+    const sendThreadId = activeThreadIdRef.current;
+    const sendRoutingKey = routingKeyFor(sendSessionKey, sendThreadId);
 
     // The optimistic user bubble — committed to the UI immediately.  Stamped
     // with `userMsg.timestamp` so a late-failing provider check can match and
@@ -7231,7 +7320,15 @@ export function ChatConsole({
     // sessions strands the other session's in-flight turn: its terminal
     // events are never processed, its send cleanup never runs, and its 60s
     // watchdog survives to fire a false "后端 60s 无响应" later.
-    if (unsubsSessionRef.current === sendSessionKey) cleanupListeners();
+    // Same one level down (#981): another TASK of this session may be streaming
+    // right now (the main tab while the user is in a sub-thread tab), and it is
+    // not this send's to stop — only the SAME task's previous invocation is.
+    if (
+      unsubsSessionRef.current === sendSessionKey &&
+      unsubsRoutingKeyRef.current === sendRoutingKey
+    ) {
+      cleanupListeners();
+    }
     // A new send supersedes any in-flight typewriter for this session — cancel
     // the RAF chain so the previous reply stops typing the moment a new message
     // is sent, and reset its state so the new turn does NOT inherit the old
@@ -7266,11 +7363,17 @@ export function ChatConsole({
     // the background.  If it rejects, the send proceeds anyway — the bridge
     // surfaces the underlying runtime error through the stream/error path.
     //
-    // #1011 P1(review):记录 chat.send 是否真正送出 —— 只有确定「未派发」
-    // 的失败(此前的附件/内容构造/thread start 等)才允许恢复编辑快照;
-    // chat.send 调用之后的 reject(bridge/IPC/timeout)可能请求已送达后端,
-    // 此时恢复旧列表会与后端状态分叉,一律不做。
-    let turnDispatched = false;
+    // #1011 P1(review)/#1072:本次 send 的派发状态(三态)。
+    //   · 'not_dispatched' —— 已证明请求从未写入 bridge 管道:此前的附件/内容
+    //     构造/thread start 失败,同步 throw,或 main 以「确定未派发」正常返回
+    //     (bridge 没在跑 / 参数构造失败 / 序列化失败)。
+    //   · 'unknown' —— 已调用 invoke,但没有「后端已受理」的确认 —— 按可能已派发
+    //     处理(timeout、bridge 退出、热重载重启等)。
+    //   · 'dispatched' —— 已收到后端的流式/终态事件,后端确实开始了这个 turn。
+    // 只有 'not_dispatched' 允许恢复编辑快照;后两者恢复旧列表会与已接收请求的
+    // 后端状态分叉,一律保留截断后的列表 + 错误提示。'unknown' 与 'dispatched'
+    // 在回滚判定上等价,分列只为让状态含义自明。
+    let dispatchState: 'not_dispatched' | 'unknown' | 'dispatched' = 'not_dispatched';
     try {
       // #922/#1000：网关状态先取一次，供「未登录 → 登录引导」与
       // 「已登录但网关未就绪 → 网关提示」两个分支共用。旧 preload/
@@ -7447,35 +7550,52 @@ export function ChatConsole({
 
     // If a reveal animation is still running from the previous response,
     // cancel it and abort the in-flight request so we can start fresh.  A
-    // supersede is ONLY valid for a prior turn in THIS SESSION — lifecycleRef
-    // is global (the most recent turn across all sessions), so a new send in
-    // session B must not abort/cancel session A's still-streaming turn.
-    const supersededLifecycle = lifecycleRef.current;
-    const supersedeSameSession =
-      supersededLifecycle != null && supersededLifecycle.sessionKey === sendSessionKey;
-    if (wasStreaming && supersededLifecycle && supersedeSameSession) {
+    // supersede is ONLY valid for a prior turn of THIS TASK: the lookup is
+    // keyed by this send's routing key, so a send in another session or from
+    // another tab of this session never finds — and never aborts — this tab's
+    // still-streaming turn.  Switching to, or spawning, a task is not a stop
+    // (#981).
+    const supersededLifecycle = taskTurnFor(lifecycleRef.current, sendSessionKey, sendThreadId);
+    if (wasStreaming && supersededLifecycle) {
       // A prior turn is still in flight and the user sent a new message —
       // supersede it before starting this turn (the optimistic bubble is
       // already shown).  Only the abort itself is awaited here; the prior
       // turn's settle is awaited below.
-      if (revealAnimIdRef.current !== null) {
-        cancelAnimationFrame(revealAnimIdRef.current);
-        revealAnimIdRef.current = null;
+      //
+      // Dispose the SUPERSEDED turn's invocation BY IDENTITY — its listeners,
+      // its watchdog and its typewriter, through the entry's own cleanup —
+      // instead of the shared `unsubsRef`/`watchdogTimerRef`/`revealAnimIdRef`
+      // slots.  Those hold whichever invocation is newest, and one session can
+      // run several tasks: after a send in the sub-thread tab they point at
+      // THAT task's live turn, so tearing them down here would strand a turn
+      // the user never stopped and kill its 60s watchdog (CodeRabbit review).
+      clearFinalCleanupTimer();
+      const supersededKey = supersededLifecycle.routingKey;
+      for (const [sendId, entry] of sendInvocationRegistryRef.current) {
+        if (entry.routingKey !== supersededKey) continue;
+        entry.cleanup();
+        for (const unsub of entry.unsubs) unsub();
+        sendInvocationRegistryRef.current.delete(sendId);
+        // Identity-check the shared refs before clearing them, exactly as
+        // cleanupListeners does — they may already point at a newer send.
+        if (unsubsRef.current === entry.unsubs) {
+          unsubsRef.current = [];
+          unsubsSessionRef.current = null;
+          unsubsRoutingKeyRef.current = null;
+        }
       }
-      if (watchdogTimerRef.current !== null) {
-        clearInterval(watchdogTimerRef.current);
-        watchdogTimerRef.current = null;
-      }
-      cleanupListeners();
       try {
-        // Pass the session key — without it the backend resolves no session
-        // and rejects the abort with UNAUTHORIZED, leaving the old stream
-        // running while the new turn starts.  Also pass the current thread id
-        // so the abort hits the turn's registered thread instead of the
-        // backend's "default" fallback (which misses every real thread) (#542).
+        // Address the abort to the SUPERSEDED turn — its own routing key and
+        // its own thread — not to whatever tab/session is on screen now.  The
+        // routing key carries the session or `desktop:<threadId>` the turn was
+        // sent under, so without it the backend resolves no session (rejects
+        // with UNAUTHORIZED) or, worse, hits the MAIN task of a session whose
+        // sub-thread tab is the one actually streaming.  The thread id is the
+        // one that turn registered its cancel event under instead of the
+        // backend's "default" fallback, which misses every real thread (#542).
         await window.miqi.chat.abort(
-          currentSessionRef.current,
-          currentThreadIdRef.current ?? undefined
+          supersededLifecycle.routingKey,
+          supersededLifecycle.threadId ?? undefined
         );
       } catch {
         /* ignore */
@@ -7488,9 +7608,10 @@ export function ChatConsole({
     // new turn registers listeners — and the backend's drain task has exited,
     // so the new chat.send is not rejected with TURN_IN_PROGRESS. Bounded so a
     // wedged backend cannot stall interrupt-and-resend (see TURN_ABORT_SETTLE_MS).
-    // A cross-session lifecycle (from a session the user switched away from)
-    // resolves on its own — do NOT block this send on it.
-    if (supersededLifecycle && supersedeSameSession) {
+    // A task the user switched away from resolves on its own — do NOT block
+    // this send on it: that task keeps running in the background by design, and
+    // `taskTurnFor` above found only THIS task's turn anyway (#981).
+    if (supersededLifecycle) {
       try {
         await Promise.race([
           supersededLifecycle.promise,
@@ -7511,10 +7632,20 @@ export function ChatConsole({
     const lifecyclePromise = new Promise<void>((resolve) => {
       resolveLifecycle = resolve;
     });
-    const lifecycle = { id: turnId, promise: lifecyclePromise, sessionKey: sendSessionKey };
-    lifecycleRef.current = lifecycle;
+    const lifecycle: TurnLifecycle = {
+      id: turnId,
+      promise: lifecyclePromise,
+      sessionKey: sendSessionKey,
+      routingKey: sendRoutingKey,
+    };
+    lifecycleRef.current.set(sendRoutingKey, lifecycle);
     const settleLifecycle = () => {
-      if (lifecycleRef.current?.id === turnId) lifecycleRef.current = null;
+      // Identity-checked delete: a newer turn of the SAME task may already have
+      // replaced this entry — settling must not clear the new one (#879 ③
+      // CodeRabbit).  Turn records of OTHER tasks are untouched.
+      if (lifecycleRef.current.get(sendRoutingKey)?.id === turnId) {
+        lifecycleRef.current.delete(sendRoutingKey);
+      }
       resolveLifecycle();
     };
     // The user hit stop (or a newer send took over) while the aborts above were
@@ -7776,18 +7907,20 @@ export function ChatConsole({
       persistReveal();
     };
 
-    // The exact routing key this invocation passes to chat.send.  For
-    // thread-scoped sessions it differs from sendSessionKey
+    // The exact routing key this invocation passes to chat.send — the task
+    // snapshotted at the top of this send, NOT the tab that happens to be
+    // selected now.  For thread-scoped tasks it differs from sendSessionKey
     // (`desktop:<threadId>` vs the session key), so the handlers must filter
     // on THIS value, not sendSessionKey.  Every IPC handler drops events
     // tagged with a different key before the cache/live branch — otherwise
-    // overlapping sends across sessions would each process (and settle on)
-    // the other's events.
-    // Read through the ref, not the closure: switching tabs does not recreate
-    // this callback (activeThreadId is not a dependency), so the closure's
-    // copy can be the tab the user has already left — the send would then go
-    // out under the wrong key.
-    const routingKey = routingKeyFor(currentSessionRef.current, activeThreadIdRef.current);
+    // overlapping sends across tasks would each process (and settle on) the
+    // other's events.
+    // One identity for the whole invocation: the optimistic bubble, this
+    // turn's lifecycle, the supersede target and the abort all refer to the
+    // same task.  Re-deriving it here from the refs would let the awaits above
+    // (provider check, supersede abort) move the send to a tab the user
+    // switched to mid-send while its bubble stayed on the old one (#981).
+    const routingKey = sendRoutingKey;
 
     // Track last progress event time for watchdog
     let lastEventAt = Date.now();
@@ -7889,6 +8022,9 @@ export function ChatConsole({
       // the owning invocation's handlers process it.  Untagged legacy events
       // fall through (back-compat: treated as this send's own).
       if (data.session_key && data.session_key !== routingKey) return;
+      // #1072: 后端已为本会话产出流式事件 —— turn 确实被受理(派发三态的
+      // 'dispatched')。此后即便 Promise 再 reject,也绝不允许回滚编辑快照。
+      dispatchState = 'dispatched';
       // Accepted events route under THIS invocation's UI session owner.  The
       // routing key can differ from the session key for thread-scoped sends
       // (desktop:<threadId>) — routing by it would cache events under a key
@@ -8538,12 +8674,14 @@ export function ChatConsole({
     const myUnsubs = [unsubProgress, unsubFinal, unsubError, unsubAborted];
     unsubsRef.current = myUnsubs;
     unsubsSessionRef.current = sendSessionKey;
+    unsubsRoutingKeyRef.current = sendRoutingKey;
     // Register this invocation so unmount (and settle) can dispose its
     // resources even when it is no longer the latest send.
     sendInvocationRegistryRef.current.set(thisSendId, {
       unsubs: myUnsubs,
       cleanup: sendCleanup,
       sessionKey: sendSessionKey,
+      routingKey: sendRoutingKey,
     });
 
     try {
@@ -8584,6 +8722,10 @@ export function ChatConsole({
       // handlers must agree, or this turn's own stream would be dropped as
       // foreign before it reaches the cache/live branch.
       const key = routingKey;
+      // This turn now has a thread, so record it on its lifecycle: a later
+      // supersede (or a stop) addresses the abort to THIS thread instead of
+      // reusing whatever tab is selected by then (#542 / #981).
+      lifecycle.threadId = threadId ?? undefined;
       const chatAttachments = sentAttachments
         .filter((a) => (a.type === 'document' && a.dataBase64) || (a.type === 'image' && a.dataUrl))
         .map((a) => ({
@@ -8608,17 +8750,15 @@ export function ChatConsole({
       }
 
       // Fire send — server parses synchronously in _chat_send_handler
-      // #1011 P1(baiye-banned review):判定点必须早于「请求可能已送出」的
-      // 第一刻。chat.send 内部是 ipcRenderer.invoke → main → bridge.send,
-      // 一旦调用,即使 Promise 之后 reject,请求也可能已被后端接收并开始
-      // turn —— 此时恢复旧 snapshot 会造成前后端状态分叉。因此:
-      //   · chat.send 调用之前的失败(附件/内容构造/thread start)= 确定未派发 → 允许恢复
-      //   · 调用之后的一切失败(resolve 或 reject 皆然)= 可能已派发 → 不恢复
-      //     (与普通发送失败语义一致:保留列表 + 错误提示)
-      // #1011 P3(baiye-banned 终审):区分「同步 throw」——preload 的 chat.send
-      // 是普通函数,参数序列化失败 / API 缺失会在调用时同步抛出,此时请求
-      // 从未进入 IPC;仅在调用成功返回 Promise 后才标记 dispatched,
-      // 同步 throw 交由外层 catch 走「确定未派发」的恢复路径。
+      // #1072:派发状态由 main 显式给出,不再靠「是否调用过 invoke」推测。
+      // chat.send 内部是 ipcRenderer.invoke → main → bridge.send,Promise 的
+      // resolve/reject 本身分不清「请求从未送出」与「已送达后端但后续失败」。
+      // 现在:调用成功先按 unknown(可能已派发),main 判定「请求从未写入
+      // bridge 管道」时以带标记的结果正常返回(见下方 await 处),降回
+      // not_dispatched 后才允许恢复编辑快照。
+      // #1011 P3(baiye-banned 终审):preload 的 chat.send 是普通函数,参数
+      // 序列化失败 / API 缺失会在调用时同步抛出,此时请求从未进入 IPC ——
+      // 保持 not_dispatched,交由外层 catch 走「确定未派发」的恢复路径。
       let sendPromise: Promise<unknown>;
       try {
         sendPromise = window.miqi.chat.send(
@@ -8632,14 +8772,13 @@ export function ChatConsole({
           _resumeId ?? undefined,
           dropFromTurnId ?? undefined
         );
-        turnDispatched = true;
+        dispatchState = 'unknown';
       } catch (syncSendError) {
-        // 同步 throw:未进入 IPC —— 保持 turnDispatched=false,允许恢复
+        // 同步 throw:未进入 IPC —— 保持 not_dispatched,允许恢复
         throw syncSendError;
       }
-      // 请求已发出 —— 清除本次 send 的编辑回滚点(此后失败一律不恢复,
-      // 见上方 turnDispatched 注释;此处删除防 Map 泄漏)
-      editRollbacksRef.current.delete(thisSendId);
+      // 回滚点不再在此处删除(#1072):调用成功 ≠ 请求已写入管道,main 仍可能
+      // 判为未派发并需要恢复编辑快照。删除点改为 await 之后的确定态。
 
       // Mark as done after a tick — server parsing is synchronous, already complete
       if (sentAttachments.some((a) => a.type === 'document')) {
@@ -8659,7 +8798,17 @@ export function ChatConsole({
         }, 100);
       }
 
-      await sendPromise;
+      const sendResult = await sendPromise;
+      if (isChatNotDispatched(sendResult)) {
+        // #1072:main 明确「请求从未写入 bridge 管道」(bridge 没在跑 / 参数构造
+        // 失败 / 序列化失败)。派发状态降回 not_dispatched 后走与失败分支同一套
+        // 渲染 + 清理逻辑(抛出的 Error 会被下方 catch 按普通失败做 sanitize 与
+        // 错误提示),区别只在于此时才允许恢复编辑快照。
+        dispatchState = 'not_dispatched';
+        throw new Error(sendResult.message);
+      }
+      // 派发已成定局(收到终态事件)——回滚点用完即弃,防 Map 泄漏。
+      editRollbacksRef.current.delete(thisSendId);
       settleLifecycle();
       // The turn's promise settled, but the terminal LISTENER may never have
       // run: a later send unsubscribed it (cross-session listener kill), or
@@ -8678,6 +8827,7 @@ export function ChatConsole({
       if (unsubsRef.current === myUnsubs) {
         unsubsRef.current = [];
         unsubsSessionRef.current = null;
+        unsubsRoutingKeyRef.current = null;
       }
       sendInvocationRegistryRef.current.delete(thisSendId);
     } catch (e: any) {
@@ -8696,13 +8846,19 @@ export function ChatConsole({
         return;
       }
       const errMsg = sanitizeUiMessage(e?.message ?? String(e ?? '未知错误'));
-      // 编辑重答(#1011 P1):仅当「确定未派发」(chat.send 尚未送出)时才恢复
-      // 截断前的完整列表;已送出后的 reject 可能请求已达后端,恢复会造成
-      // 前后端状态分叉 —— 此时保留截断后的列表 + 错误提示。
+      // 编辑重答(#1072):仅当「确定未派发」时才恢复截断前的完整列表。已派发的
+      // 失败(unknown: timeout / bridge 退出 / 热重载重启;dispatched: 后端已开始
+      // turn)可能请求已达后端,恢复会造成前后端状态分叉 —— 此时保留截断后的
+      // 列表 + 错误提示。恢复时同时把编辑后的文本与附件还回输入框(与
+      // 预派发拦截分支同一套收尾),否则气泡被回滚掉、用户的新文本无处可取。
+      // ⚠️ 恢复是**视图层**的:handleEdit 在发请求前就已 sessions.truncate 落库
+      // (否则重载会复活旧问答,#1020),而那条截断不可逆 —— 恢复出来的旧问答
+      // 只存在于当前视图,刷新后依旧消失。这里取「先让用户拿回上下文、并保住
+      // 刚编辑的文本」,而不是让列表与后端保持一致。
       const sendFailRollback = editRollbacksRef.current.get(thisSendId);
       editRollbacksRef.current.delete(thisSendId);
       const sendFailRollbackApplies =
-        !turnDispatched &&
+        dispatchState === 'not_dispatched' &&
         !!sendFailRollback &&
         sendFailRollback.sessionKey === sendSessionKey &&
         currentSessionRef.current === sendSessionKey;
@@ -8714,11 +8870,17 @@ export function ChatConsole({
         setMessages((prev) =>
           sendFailRollbackApplies ? [...sendFailRollback!.snapshot, failMsg] : [...prev, failMsg]
         );
+        if (sendFailRollbackApplies) {
+          composerRef.current?.setText(text);
+          setAttachments(atts);
+        }
       } else if (sendFailRollbackApplies) {
         setMessages([
           ...sendFailRollback!.snapshot,
           { role: 'error' as const, content: errMsg, timestamp: Date.now() },
         ]);
+        composerRef.current?.setText(text);
+        setAttachments(atts);
       } else if (e?.code) {
         setMessages((prev) => [
           ...prev,
