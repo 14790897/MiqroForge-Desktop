@@ -221,9 +221,13 @@ test.describe('#981 多任务并行：切换任务不中断', () => {
       if (resolveSpawnedAgent(spawnResult) === null) await page.waitForTimeout(1500);
     }
     if (resolveSpawnedAgent(spawnResult) === null) {
-      // 同 subagent-bridge-api.spec.ts：宿主 runner 上沙箱不可用时 spawn 返回
-      // null，属环境限制而非回归。
-      test.skip(true, `agent.spawn 未返回句柄（沙箱/环境限制）：${JSON.stringify(spawnResult)}`);
+      // 拿不到句柄要**判失败**，不能静默跳过（CodeRabbit 复审）：跳过会把真实故障
+      // 吞掉，让这条用例「绿着却什么都没验证」。宿主 runner 上若真有环境限制，
+      // 应该用**显式的环境门**（platform/CI 条件）挡在前面，而不是在这里兜底。
+      throw new Error(
+        'agents.spawn 未返回句柄 —— 这属于子智能体接线/子系统故障，不是「环境跳过」：' +
+          JSON.stringify(spawnResult)
+      );
     }
 
     // tab 的 id 来自 `agent:spawned` 事件里的 `sub_thread_id`，与 spawn 返回值里

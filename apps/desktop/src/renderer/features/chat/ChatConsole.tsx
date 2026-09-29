@@ -5171,15 +5171,38 @@ export function ChatConsole({
     saveActiveThread(sessionKey, threadState.active, store);
   }, [sessionKey, threadState]);
 
+  /**
+   * 把一个子智能体事件落到**它所属会话**的 tab 状态里（#981 接线）。
+   *
+   * 当前会话 → 更新组件状态（既有的持久化 effect 会写回 sessionStorage）；
+   * 其它会话 → 直接改那一份持久化状态，用户切回去时 loadThreadState 读得到。
+   * 两种都不能丢：主进程把这类事件广播给所有窗口，而 tab 列表是按会话存的，
+   * 丢掉（早先直接 return 的做法）会让后台会话里起的子智能体永远没有 tab。
+   */
+  const applyAgentEventToSession = useCallback(
+    (targetSession: string, update: (state: ThreadTabsState) => ThreadTabsState) => {
+      if (targetSession === currentSessionRef.current) {
+        setThreadState(update);
+        return;
+      }
+      const store = safeSessionStorage();
+      const next = update(loadThreadState(targetSession, store));
+      saveThreadTabs(targetSession, next.tabs, store);
+      saveActiveThread(targetSession, next.active, store);
+    },
+    []
+  );
+
   useEffect(() => {
     const unsub = window.miqi.agents?.onSpawned((data) => {
-      // 只认本会话 spawn 出来的子智能体（#981 接线）：主进程把这类事件广播给
-      // 所有窗口，而 tab 列表是按会话存的（sessionStorage key 带 sessionKey），
-      // 别的会话的 spawn 不该往当前视图里插一个 tab。
-      // 事件不带 session_key 时（老版本桥）保持原样收下 —— 与 preload 里
+      // 子智能体事件按**它属于的那个会话**落盘（#981 接线）：tab 列表是按会话存在
+      // sessionStorage 里的（loadThreadState / saveThreadTabs），所以别的会话里起的
+      // 子智能体不能丢 —— 直接写进那个会话的持久化状态，用户切回去时读得到
+      // （CodeRabbit 复审：早先直接丢弃，会让后台会话的 tab 永远不出现）。
+      // 事件不带 session_key 时（老版本桥）按「本会话」处理，与 preload 里
       // 「未打标即本会话」的既有口径一致。
-      if (data.session_key && data.session_key !== currentSessionRef.current) return;
-      setThreadState((prev) =>
+      const target = data.session_key ?? currentSessionRef.current;
+      applyAgentEventToSession(target, (prev) =>
         addThreadTab(prev, {
           threadId: data.sub_thread_id,
           agentType: data.agent_type,
@@ -5194,8 +5217,8 @@ export function ChatConsole({
 
   useEffect(() => {
     const unsub = window.miqi.agents?.onCompleted((data) => {
-      if (data.session_key && data.session_key !== currentSessionRef.current) return;
-      setThreadState((prev) => ({
+      const target = data.session_key ?? currentSessionRef.current;
+      applyAgentEventToSession(target, (prev) => ({
         ...prev,
         tabs: prev.tabs.map((t) =>
           t.threadId === data.sub_thread_id ? { ...t, label: `${t.label.replace(/ ✓$/, '')} ✓` } : t
