@@ -20,6 +20,18 @@
  *   - provider 不可用（限流/过载）→ skip；
  *   - 模型没调 spawn、tab 一直不出现 → skip（这一步测不到东西）；
  *   - 主回合在切走之前就结束了 → skip（覆盖不到「生成中被切走」）。
+ *
+ * ⚠️ **这条用例不构成回归判别**——本机实测：把两个前端文件退回修复前（保留接线），
+ * 它同样通过。原因是这套 UI 的判据都是**会话级**的：`streaming` 与「停止生成」按钮
+ * 反映的是「本会话有没有 turn 在飞」，子智能体自己的回合就能让它为真，于是「切走时
+ * 主任务还在生成」这个前置条件会被子回合满足，「主任务有没有被掐断」也就无从判定
+ * （而修复前的 abort 又会先退订主 invocation 的监听，不留下可见痕迹）。
+ *
+ * 所以它的定位是两个：
+ *   1. **可复现的实证** —— 真模型、真 spawn、真两个 tab，界面上的每个字都是真的；
+ *   2. **接线的端到端冒烟** —— `spawn` → sub_agent_spawned → `agent:spawned` → tab，
+ *      接线断掉时这里等不到第二个 tab。
+ * 「修复前失败 / 修复后通过」的回归判别由 `issue-981-task-parallel.spec.ts` 承担。
  */
 
 import { test, expect } from '@playwright/test';
@@ -150,17 +162,15 @@ test.describe('#981 真实模型 · 真子智能体（零注入）', () => {
       }
       await page.screenshot({ path: join(SHOT_DIR, '2-two-tabs-real.png') });
 
-      // 3) 主回合必须还在生成，否则覆盖不到「生成中被切走」
+      // 3) 会话里还有 turn 在飞（**注意**：这是会话级标志，子智能体的回合也能让它
+      // 为真，所以它并不保证「主任务还在生成」——见文件头「不构成回归判别」）。
       if ((await streamingStop(page).count()) === 0) {
-        test.skip(true, '主回合在切 tab 之前就结束了，无法覆盖「生成中被切走」');
+        test.skip(true, '会话里没有在飞的 turn，本场景不成立');
       }
 
       const subTab = page.locator('[data-testid="chat-thread-tab"]:not([data-thread-id="main"])');
-      // 切走之前主任务回复的长度：它此刻在流式，所以回来时必须**继续增长**——
-      // 被 abort 的话生成会停在切走那一刻。绝对字数不可靠（真模型不保证写满），
-      // 增长与否才是「有没有被掐断」的判据。
       const beforeSwitch = (await longestAssistantText(page)).length;
-      console.log(`[e2e981-real] 切走前主任务回复长度: ${beforeSwitch}`);
+      console.log(`[e2e981-real] 切走前会话内最长回复长度: ${beforeSwitch}（仅记录，不作判据）`);
       await subTab.first().click();
       await expect(subTab.first()).toHaveAttribute('data-active', 'true');
 
@@ -188,11 +198,14 @@ test.describe('#981 真实模型 · 真子智能体（零注入）', () => {
       });
       const mainReply = await longestAssistantText(page);
       await page.screenshot({ path: join(SHOT_DIR, '4-back-on-main-real.png') });
+      // 收敛性检查（**不是判别点**，理由见文件头）：流程跑完、无中断标记、会话里留下了
+      // 实质回复。消息列表按会话共享，这里量到的最长气泡可能就是子任务那条——正因为
+      // 分不清是谁的，它只能当 sanity check。
       expect(
         mainReply.length,
-        `主任务被切走后必须继续生成完（切走时 ${beforeSwitch} 字，最终 ${mainReply.length} 字）——` +
-          ' 若被 abort，长度会停在切走那一刻'
-      ).toBeGreaterThan(beforeSwitch);
+        `流程跑完后会话里应有实质回复（切走前 ${beforeSwitch} 字，实测 ${mainReply.length} 字）；` +
+          ' 这条不是判别点，回归判别见 issue-981-task-parallel.spec.ts'
+      ).toBeGreaterThan(30);
 
       console.log(`[e2e981-real] screenshots -> ${SHOT_DIR}`);
     }
