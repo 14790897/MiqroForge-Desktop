@@ -20,9 +20,20 @@
  *
  * mock：scripts/mock_hang.py —— POST 永不响应，于是两个 tab 的 turn 都一直
  * in-flight。真实 provider 全程不被调用。会话正文与「思考中」的内容由本用例
- * 按一个正常的数据汇总场景书写（文件名带本轮短码，作为唯一判据），子线程 tab
- * 的生成事件由主进程用 `webContents.send('agent:spawned')` 注入（= 正常流程里
- * subagent spawn 时主进程发的同一个事件），避免依赖真实子智能体。
+ * 按一个正常的数据汇总场景书写（文件名带本轮短码，作为唯一判据）。
+ *
+ * ⚠️ 本用例覆盖的是**当前产品里走不到的一条路径**，必须知道这点再读它的结果：
+ * 子线程 tab 只能由 `agent:spawned` 事件产生（ChatConsole 的 `agents.onSpawned`
+ * 是 `addThreadTab` 的唯一调用点），而 `IPC_EVENTS.AGENT_SPAWNED`
+ * （src/shared/ipc.ts:224）**全仓库没有任何地方 send 过**——主进程 chat 事件的
+ * 转发白名单里只有 progress/final/error/aborted/approval*/userInput*/
+ * subagent_result（src/main/ipc/index.ts:379-395），Python 侧发的是
+ * `sub_agent_spawned` 且没有转发。也就是说：当前版本 tab 列表永远只有
+ * `['main']`，tab 栏不渲染，「同一会话下的多个任务」在产品里尚不存在。
+ * 本用例因此**主动注入** `agent:spawned` 来构造这条路径——它锁的是 #981 修好的
+ * 那段判定逻辑（一旦 spawn 事件接线，或将来有别的入口产生第二个任务，这段逻辑
+ * 就是对的），不是「用户现在真能复现」的证据。真实模型版同理跑不通（等不到
+ * 第二个 tab），已删除。
  */
 
 import { test, expect } from '@playwright/test';
@@ -153,7 +164,8 @@ test.describe('#981 多任务并行：切换任务不中断', () => {
 
     await page.screenshot({ path: join(SHOT_DIR, '1-main-task-running.png') });
 
-    // ── 2. 生成子线程 tab（= subagent spawn 时主进程发的同一个事件）────
+    // ── 2. 生成子线程 tab（注入 agent:spawned —— 当前产品里没有任何地方发它，
+    //      见文件头 ⚠️；这是构造这条路径的唯一方式）────────────────────────
     await electronApp.evaluate(
       ({ BrowserWindow }, payload) => {
         const win = BrowserWindow.getAllWindows().find(
