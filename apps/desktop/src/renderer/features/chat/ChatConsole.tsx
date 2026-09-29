@@ -5173,6 +5173,12 @@ export function ChatConsole({
 
   useEffect(() => {
     const unsub = window.miqi.agents?.onSpawned((data) => {
+      // 只认本会话 spawn 出来的子智能体（#981 接线）：主进程把这类事件广播给
+      // 所有窗口，而 tab 列表是按会话存的（sessionStorage key 带 sessionKey），
+      // 别的会话的 spawn 不该往当前视图里插一个 tab。
+      // 事件不带 session_key 时（老版本桥）保持原样收下 —— 与 preload 里
+      // 「未打标即本会话」的既有口径一致。
+      if (data.session_key && data.session_key !== currentSessionRef.current) return;
       setThreadState((prev) =>
         addThreadTab(prev, {
           threadId: data.sub_thread_id,
@@ -5188,6 +5194,7 @@ export function ChatConsole({
 
   useEffect(() => {
     const unsub = window.miqi.agents?.onCompleted((data) => {
+      if (data.session_key && data.session_key !== currentSessionRef.current) return;
       setThreadState((prev) => ({
         ...prev,
         tabs: prev.tabs.map((t) =>

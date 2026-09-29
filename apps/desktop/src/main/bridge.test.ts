@@ -4,6 +4,7 @@ import {
   buildInitializeParams,
   CHAT_BACKEND_DRAIN_TIMEOUT_MS,
   CHAT_SEND_TIMEOUT_MS,
+  channelForEventType,
   normalizeBridgeMessage,
 } from './bridge';
 
@@ -878,5 +879,27 @@ describe('BridgeManager dispatch classification (#1072)', () => {
     expect(err.message).toContain('Bridge stopped');
     // 请求已写入管道,后端可能已受理 → 调用方不得据此回滚本地状态
     expect(isRequestNotDispatched(err)).toBe(false);
+  });
+});
+
+// ============================================================
+// 孤儿事件 → 渲染层通道（#981 接线）
+// ============================================================
+
+describe('channelForEventType', () => {
+  it('chat.* 家族仍走 CHAT_ 前缀（不改动既有产出方）', () => {
+    expect(channelForEventType('subagent_result')).toBe('chat:subagent_result');
+  });
+
+  it('已带渲染层 IPC 名的事件按名归一化（子智能体 tab 的入口/收尾）', () => {
+    // 这两个名字必须能推出来，否则子智能体的 spawn/完成事件会被静默丢掉，
+    // tab 列表又回到永远只有 ['main']。
+    expect(channelForEventType('agent:spawned')).toBe('agent:spawned');
+    expect(channelForEventType('agent:completed')).toBe('agent:completed');
+  });
+
+  it('不认识的事件名返回 undefined（宁可丢掉，也不误投到别的通道）', () => {
+    expect(channelForEventType('totally_unknown_event')).toBeUndefined();
+    expect(channelForEventType('')).toBeUndefined();
   });
 });

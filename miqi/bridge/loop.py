@@ -1330,6 +1330,8 @@ class BridgeRuntimeLoop:
                 ExecCommandBeginEvent,
                 ExecCommandEndEvent,
                 ExecCommandOutputDeltaEvent,
+                SubAgentCompletedEvent,
+                SubAgentSpawnedEvent,
                 ToolCallBeginEvent,
                 ToolCallEndEvent,
                 ToolCallOutputDeltaEvent,
@@ -1483,6 +1485,52 @@ class BridgeRuntimeLoop:
                         "tool_hint": True,
                         "tool_call_id": event.tool_call_id,
                         "tool_output": event.output_preview,
+                    })
+                elif isinstance(event, (SubAgentSpawnedEvent, SubAgentCompletedEvent)):
+                    # #981 接线：子智能体线程 tab 的入口/收尾事件。渲染层的
+                    # `agents.onSpawned` / `onCompleted` 监听的是
+                    # IPC_EVENTS.AGENT_SPAWNED ('agent:spawned') / AGENT_COMPLETED
+                    # ('agent:completed')，而在此之前**没有任何地方发过这两个
+                    # 事件**：ts 侧的常量与 preload API 都在，主进程的 chat 事件
+                    # 转发白名单里却没有它们，Python 侧发的 sub_agent_spawned 也
+                    # 无人转发 —— 于是 tab 列表永远只有 ['main']，tab 栏
+                    # （threads.length > 1 才渲染）永远不出现。
+                    #
+                    # 走 emit_client_event（同 subagent_result 的孤儿事件通路），
+                    # 不走本 drain 的 _emit：后者要求 chat.send 的 per-request 回调
+                    # 再维护一份类型白名单，而子智能体的**完成**事件常常在主回合
+                    # 结束之后才到，那时订阅与请求都已消失，只有这条按 client 直投
+                    # 的通路收得到。
+                    # session_key 一并带上：渲染层按会话存 tab 列表，别的会话
+                    # spawn 出来的子智能体不该往当前视图里插 tab。
+                    payload_out = {
+                        "session_key": session_key,
+                        **asdict(event),
+                    }
+                    payload_out.pop("type", None)
+                    # 事件名直接用渲染层的 IPC 名（`agent:spawned` /
+                    # `agent:completed`），不要用 dataclass 自带的
+                    # `sub_agent_spawned` —— 主进程 bridge.ts 是按事件名推通道的
+                    # （见那里的 key 归一化），名字对不上就投不到渲染层。
+                    ipc_event = (
+                        "agent:spawned"
+                        if isinstance(event, SubAgentSpawnedEvent)
+                        else "agent:completed"
+                    )
+                    try:
+                        await self._app_server.emit_client_event(
+                            client_id, ipc_event, payload_out,
+                        )
+                    except Exception as exc:
+                        # 投递失败不能影响回合：tab 是增强，不是主流程。
+                        logger.debug(
+                            "chat.send: forwarding {} failed: {}",
+                            ipc_event, exc,
+                        )
+                    # 兼容原有行为：这类事件此前走通用 progress 分支透出过，保留。
+                    await _emit("progress", {
+                        "event": event_name,
+                        "data": payload,
                     })
                 else:
                     await _emit("progress", {

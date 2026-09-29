@@ -22,18 +22,20 @@
  * in-flight。真实 provider 全程不被调用。会话正文与「思考中」的内容由本用例
  * 按一个正常的数据汇总场景书写（文件名带本轮短码，作为唯一判据）。
  *
- * ⚠️ 本用例覆盖的是**当前产品里走不到的一条路径**，必须知道这点再读它的结果：
- * 子线程 tab 只能由 `agent:spawned` 事件产生（ChatConsole 的 `agents.onSpawned`
- * 是 `addThreadTab` 的唯一调用点），而 `IPC_EVENTS.AGENT_SPAWNED`
- * （src/shared/ipc.ts:224）**全仓库没有任何地方 send 过**——主进程 chat 事件的
- * 转发白名单里只有 progress / final / error / aborted / 审批与 userInput 相关事件 /
- * subagent_result（src/main/ipc/index.ts:379-395），Python 侧发的是
- * `sub_agent_spawned` 且没有转发。也就是说：当前版本 tab 列表永远只有
- * `['main']`，tab 栏不渲染，「同一会话下的多个任务」在产品里尚不存在。
- * 本用例因此**主动注入** `agent:spawned` 来构造这条路径——它锁的是 #981 修好的
- * 那段判定逻辑（一旦 spawn 事件接线，或将来有别的入口产生第二个任务，这段逻辑
- * 就是对的），不是「用户现在真能复现」的证据。真实模型版同理跑不通（等不到
- * 第二个 tab），已删除。
+ * 这个用例里**什么真、什么造**（读它的结果前先看这段）：
+ *
+ *   ✅ 真的：真实 Electron 应用（本分支源码构建）；主任务与子任务都是真实回合
+ *      （真的 chat.send、真的 runtime、真的 turn 锁）；**子线程 tab 由真实
+ *      sub-agent 产生** —— 用例走产品自己的 `window.miqi.agents.spawn`（与 UI 同
+ *      一条 IPC），Python 侧 `sub_agent_spawned` 经本 PR 加的接线转成
+ *      `agent:spawned` 投给渲染层建 tab；
+ *   ❌ 造的：**模型回复的增量流** —— provider 指向 mock_hang（POST 永不响应），
+ *      思考内容与后台进度都是用例写好、经 `chat:progress` 的 `delta` 手动喂进去
+ *      的（`delta` 就是「AI 回复的每次增量」，手填它等于替模型说话）。这样做的
+ *      目的见常量处说明：要的是**渲染层判定**可稳定复现，不是模型行为。
+ *
+ * 所以本用例能证明的是：#981 修好的那段判定（主任务那条 turn 的监听是否还在）
+ * 在真实应用里按预期工作；它**不证明**任何模型行为。
  */
 
 import { test, expect } from '@playwright/test';
@@ -93,6 +95,15 @@ async function injectProgress(
     if (!win) throw new Error('main window not found');
     win.webContents.send('chat:progress', data);
   }, payload);
+}
+
+/** 解析 agents.spawn 的返回句柄（扁平 {agent_id, thread_id}，见 subagent 用例）。 */
+function resolveSpawnedAgent(raw: any): { agent_id: string; thread_id: string } | null {
+  const r = raw ?? {};
+  for (const candidate of [r, r.result, r.agent, r.result?.agent]) {
+    if (candidate && typeof candidate.agent_id === 'string') return candidate;
+  }
+  return null;
 }
 
 test.describe('#981 多任务并行：切换任务不中断', () => {
@@ -179,25 +190,46 @@ test.describe('#981 多任务并行：切换任务不中断', () => {
 
     await page.screenshot({ path: join(SHOT_DIR, '1-main-task-running.png') });
 
-    // ── 2. 生成子线程 tab（注入 agent:spawned —— 当前产品里没有任何地方发它，
-    //      见文件头 ⚠️；这是构造这条路径的唯一方式）────────────────────────
-    await electronApp.evaluate(
-      ({ BrowserWindow }, payload) => {
-        const win = BrowserWindow.getAllWindows().find(
-          (w) => w.getTitle() === 'MiQroForge Desktop'
-        );
-        if (!win) throw new Error('main window not found');
-        win.webContents.send('agent:spawned', payload);
-      },
-      { sub_thread_id: `sub-${run}`, agent_type: 'code-agent', task_label: SUB_TAB_LABEL }
+    // ── 2. 真子智能体：走产品自己的桥接口（与 UI 同一条 IPC）─────────────
+    // 这一步同时就是 #981 接线的验证：主进程把 Python 的 `sub_agent_spawned`
+    // 转成 `agent:spawned` 投给渲染层，渲染层据此建 tab。接线之前，这里无论等
+    // 多久都不会出现第二个 tab（当时只能靠注入事件伪造）。
+    const sessionKey = await page.evaluate(
+      () => localStorage.getItem('miqi:lastSession') ?? 'desktop:default'
     );
+    let spawnResult: any = null;
+    for (let attempt = 0; attempt < 2 && resolveSpawnedAgent(spawnResult) === null; attempt++) {
+      spawnResult = await page.evaluate(
+        (args: any) => (window as any).miqi.agents.spawn(args.t, args.task, args.label, args.sk),
+        {
+          t: 'code-agent',
+          task: '生成一份本周待办清单草稿。',
+          label: SUB_TAB_LABEL,
+          sk: sessionKey,
+        }
+      );
+      if (resolveSpawnedAgent(spawnResult) === null) await page.waitForTimeout(1500);
+    }
+    if (resolveSpawnedAgent(spawnResult) === null) {
+      // 同 subagent-bridge-api.spec.ts：宿主 runner 上沙箱不可用时 spawn 返回
+      // null，属环境限制而非回归。
+      test.skip(true, `agent.spawn 未返回句柄（沙箱/环境限制）：${JSON.stringify(spawnResult)}`);
+    }
 
-    const subTab = page.locator(`[data-testid="chat-thread-tab"][data-thread-id="sub-${run}"]`);
-    await expect(subTab, '子线程 tab 必须出现').toBeVisible({ timeout: 15_000 });
-    await expect(page.getByTestId('chat-thread-tab')).toHaveCount(2, { timeout: 15_000 });
-    await subTab.click();
+    // tab 的 id 来自 `agent:spawned` 事件里的 `sub_thread_id`，与 spawn 返回值里
+    // 那个 namespaced `thread_id` 不是同一个串 —— 按「非主 tab 的那一个」定位。
+    const subTab = page.locator('[data-testid="chat-thread-tab"]:not([data-thread-id="main"])');
+    await expect(
+      page.getByTestId('chat-thread-tab'),
+      '主 tab + 真子智能体 tab 应共两个（#981 接线）'
+    ).toHaveCount(2, { timeout: 60_000 });
+    await expect(subTab.first(), '子线程 tab 必须出现').toBeVisible({ timeout: 15_000 });
+    await subTab.first().click();
     await page.waitForTimeout(1000);
-    await expect(subTab, '点击后子线程 tab 应处于选中态').toHaveAttribute('data-active', 'true');
+    await expect(subTab.first(), '点击后子线程 tab 应处于选中态').toHaveAttribute(
+      'data-active',
+      'true'
+    );
 
     // ── 3. 场景 1：在子线程 tab 发消息（旧实现会在这里 abort 掉主任务）──
     await sendMessage(page, SUB_PROMPT);
