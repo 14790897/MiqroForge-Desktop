@@ -151,14 +151,14 @@ test.describe('#981 多任务并行：切换任务不中断', () => {
       task_label: `X981 子任务 ${stamp}`,
     };
     await electronApp.evaluate(({ BrowserWindow }, payload) => {
-      const win = BrowserWindow.getAllWindows().find(
-        (w) => w.getTitle() === 'MiQroForge Desktop'
-      );
+      const win = BrowserWindow.getAllWindows().find((w) => w.getTitle() === 'MiQroForge Desktop');
       if (!win) throw new Error('main window not found');
       win.webContents.send('agent:spawned', payload);
     }, spawnPayload);
 
-    const subTab = page.locator(`[data-testid="chat-thread-tab"][data-thread-id="${SUB_THREAD_ID}"]`);
+    const subTab = page.locator(
+      `[data-testid="chat-thread-tab"][data-thread-id="${SUB_THREAD_ID}"]`
+    );
     await expect(subTab, '子线程 tab 必须出现').toBeVisible({ timeout: 15_000 });
     await expect(page.getByTestId('chat-thread-tab')).toHaveCount(2, { timeout: 15_000 });
     await subTab.click();
@@ -216,9 +216,7 @@ test.describe('#981 多任务并行：切换任务不中断', () => {
       page.getByText(TURN_IN_PROGRESS_TEXT),
       '回原任务重发不得撞 TURN_IN_PROGRESS（同任务 supersede 必须命中）'
     ).toHaveCount(0);
-    await expect
-      .poll(() => seesInList(page, RESEND_PROMPT), { timeout: 10_000 })
-      .toBe(true);
+    await expect.poll(() => seesInList(page, RESEND_PROMPT), { timeout: 10_000 }).toBe(true);
 
     await page.screenshot({ path: join(SHOT_DIR, '4-resend-on-main-ok.png') });
     console.log(`[e2e981] screenshots -> ${SHOT_DIR}`);
