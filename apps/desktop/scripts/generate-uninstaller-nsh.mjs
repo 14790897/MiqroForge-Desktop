@@ -13,7 +13,7 @@
  *
  * 输出带 UTF-8 BOM：makensis 无 BOM 时按 ANSI 码页解读，中文会乱码。
  */
-import { readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 
@@ -58,7 +58,8 @@ if (leftover) {
   process.exit(1);
 }
 
-// BOM：见文件头注释。
+// BOM：见文件头注释。build/ 不入库（生成产物目录），干净检出下要先建出来。
 const outPath = path.join(rootDir, 'build/installer.nsh');
+mkdirSync(path.dirname(outPath), { recursive: true });
 writeFileSync(outPath, '﻿' + out, 'utf8');
 console.log(`[generate-uninstaller-nsh] 已生成 ${outPath}`);
