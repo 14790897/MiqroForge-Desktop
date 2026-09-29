@@ -5024,9 +5024,14 @@ export function ChatConsole({
   // without this registry, cross-session invocations outlive it and their
   // watchdogs/listeners would keep calling setMessages after unmount.  The
   // session key lets abort/stop dispose only the invocation of the session
-  // being stopped instead of the latest one.
+  // being stopped instead of the latest one; `routingKey` does the same one
+  // level down — disposing only the TASK being stopped / superseded (#981),
+  // since a session can run several tasks at once.
   const sendInvocationRegistryRef = useRef<
-    Map<number, { unsubs: Array<() => void>; cleanup: () => void; sessionKey: string }>
+    Map<
+      number,
+      { unsubs: Array<() => void>; cleanup: () => void; sessionKey: string; routingKey: string }
+    >
   >(new Map());
   const finalCleanupTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Shared across handleSend closures: a new send aborts the previous turn's
@@ -7526,15 +7531,29 @@ export function ChatConsole({
       // supersede it before starting this turn (the optimistic bubble is
       // already shown).  Only the abort itself is awaited here; the prior
       // turn's settle is awaited below.
-      if (revealAnimIdRef.current !== null) {
-        cancelAnimationFrame(revealAnimIdRef.current);
-        revealAnimIdRef.current = null;
+      //
+      // Dispose the SUPERSEDED turn's invocation BY IDENTITY — its listeners,
+      // its watchdog and its typewriter, through the entry's own cleanup —
+      // instead of the shared `unsubsRef`/`watchdogTimerRef`/`revealAnimIdRef`
+      // slots.  Those hold whichever invocation is newest, and one session can
+      // run several tasks: after a send in the sub-thread tab they point at
+      // THAT task's live turn, so tearing them down here would strand a turn
+      // the user never stopped and kill its 60s watchdog (CodeRabbit review).
+      clearFinalCleanupTimer();
+      const supersededKey = supersededLifecycle.routingKey;
+      for (const [sendId, entry] of sendInvocationRegistryRef.current) {
+        if (entry.routingKey !== supersededKey) continue;
+        entry.cleanup();
+        for (const unsub of entry.unsubs) unsub();
+        sendInvocationRegistryRef.current.delete(sendId);
+        // Identity-check the shared refs before clearing them, exactly as
+        // cleanupListeners does — they may already point at a newer send.
+        if (unsubsRef.current === entry.unsubs) {
+          unsubsRef.current = [];
+          unsubsSessionRef.current = null;
+          unsubsRoutingKeyRef.current = null;
+        }
       }
-      if (watchdogTimerRef.current !== null) {
-        clearInterval(watchdogTimerRef.current);
-        watchdogTimerRef.current = null;
-      }
-      cleanupListeners();
       try {
         // Address the abort to the SUPERSEDED turn — its own routing key and
         // its own thread — not to whatever tab/session is on screen now.  The
@@ -8632,6 +8651,7 @@ export function ChatConsole({
       unsubs: myUnsubs,
       cleanup: sendCleanup,
       sessionKey: sendSessionKey,
+      routingKey: sendRoutingKey,
     });
 
     try {
