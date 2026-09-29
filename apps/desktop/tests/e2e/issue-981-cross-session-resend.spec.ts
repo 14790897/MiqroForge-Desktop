@@ -121,12 +121,31 @@ test.describe('#981 跨会话重发：不被锁拒、也不掐掉对方', () => 
   let page: Page;
   let miqiHome: string;
   let mockServer: ChildProcess;
+  /**
+   * 后端收据：mock_hang.py 每收到一次 POST 就打一行
+   * 「[mock-hang] request received — hanging」（scripts/mock_hang.py:41）。
+   * 数这些行 = 数「真的有几次请求到了 provider」。
+   *
+   * 为什么需要它：断言① 是否定断言（`toHaveCount(0)`），「重发根本没发出去」也会通过
+   * ——UI 上的乐观气泡只证明 sendMessage 被点了（CodeRabbit 复审）。有了这个计数，
+   * 就能正向断言「重发确实到了后端」。它顺带也是判别点：修复前重发被后端以
+   * TURN_IN_PROGRESS 拒掉，**根本到不了 provider**，计数不会涨。
+   *
+   * 按累计文本计数，不按单个 chunk —— Node 的 pipe 会把一次 write 切成任意多段，
+   * 只匹配单 chunk 会漏（同 helpers/mock-server.ts 里 ready 行的教训）。
+   */
+  let mockStdout = '';
+  const mockRequests = (): number =>
+    (mockStdout.match(/\[mock-hang\] request received/g) ?? []).length;
 
   test.skip(SKIP_MOCK_ON_MACOS_CI, 'macOS CI cannot reach the local mock server');
 
   test.beforeAll(async () => {
     const mock = await startMockServer('mock_hang.py');
     mockServer = mock.proc;
+    mockServer.stdout?.on('data', (d) => {
+      mockStdout += String(d);
+    });
     const fixture = await launchElectronApp((config: any) => {
       patchProvidersToMock(config, mock.mockUrl);
       config.tools = { ...config.tools, sandbox: { ...config.tools?.sandbox, enabled: false } };
@@ -182,7 +201,18 @@ test.describe('#981 跨会话重发：不被锁拒、也不掐掉对方', () => 
 
     // ── 3. 回 A 重发 —— 判别点 ──────────────────────────────────────────
     await switchToSession(page, A_PROMPT);
+    const postsBeforeResend = mockRequests();
     await sendMessage(page, A_RESEND);
+
+    // 先要「到后端」这个正向收据,再看否定断言:
+    // 修复前这次重发被 TURN_IN_PROGRESS 拒在 bridge 层,provider 一次都收不到,
+    // 计数不涨 —— 所以这条断言自己也是判别点。
+    await expect
+      .poll(mockRequests, {
+        timeout: 20_000,
+        message: `A 的重发必须真的到达 provider（mock 收到的请求数应从 ${postsBeforeResend} 增加）`,
+      })
+      .toBeGreaterThan(postsBeforeResend);
     await page.waitForTimeout(5000);
 
     // 取证：这一刻的画面就是判别点（旧代码这里会出现红色的「上一个任务还在进行中」）。
