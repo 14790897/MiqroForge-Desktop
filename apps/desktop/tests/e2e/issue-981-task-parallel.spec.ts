@@ -26,7 +26,7 @@
  * 子线程 tab 只能由 `agent:spawned` 事件产生（ChatConsole 的 `agents.onSpawned`
  * 是 `addThreadTab` 的唯一调用点），而 `IPC_EVENTS.AGENT_SPAWNED`
  * （src/shared/ipc.ts:224）**全仓库没有任何地方 send 过**——主进程 chat 事件的
- * 转发白名单里只有 progress/final/error/aborted/approval*/userInput*/
+ * 转发白名单里只有 progress / final / error / aborted / 审批与 userInput 相关事件 /
  * subagent_result（src/main/ipc/index.ts:379-395），Python 侧发的是
  * `sub_agent_spawned` 且没有转发。也就是说：当前版本 tab 列表永远只有
  * `['main']`，tab 栏不渲染，「同一会话下的多个任务」在产品里尚不存在。
