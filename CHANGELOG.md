@@ -1,3 +1,18 @@
+## [0.36.1](https://github.com/14790897/MiqroForge-Desktop/compare/v0.36.0...v0.36.1) (2026-09-29)
+
+
+### Bug Fixes
+
+* **desktop:** NSIS 自定义脚本改为合并生成，卸载清理真正进包 ([#1225](https://github.com/14790897/MiqroForge-Desktop/issues/1225)) ([f635c6e](https://github.com/14790897/MiqroForge-Desktop/commit/f635c6e52088dd42d6c8a7c7a2d04330cebf34d5)), closes [#1176](https://github.com/14790897/MiqroForge-Desktop/issues/1176) [#1177](https://github.com/14790897/MiqroForge-Desktop/issues/1177)
+
+---
+## 下载说明
+
+macOS 用户请按芯片架构选择安装包：
+
+- **Apple Silicon (M1/M2/M3/M4)**：下载 `0.36.1-arm64.dmg`（ARM 架构）
+- **Intel**：下载 `0.36.1.dmg`（x86 无后缀）
+
 # [0.36.0](https://github.com/14790897/MiqroForge-Desktop/compare/v0.35.0...v0.36.0) (2026-09-29)
 
 
