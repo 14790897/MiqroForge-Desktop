@@ -26,7 +26,9 @@ import {
   saveActiveThread,
   saveThreadTabs,
   selectThreadTab,
+  sessionTurnsOf,
   shouldAdoptRecoveredEvent,
+  taskTurnFor,
   threadTabsStorageKey,
   type StorageLike,
   type ThreadTab,
@@ -97,6 +99,76 @@ describe('routing key 口径 (#1035)', () => {
     expect(routingKeyFor(SESSION, 'a:b')).toBe('desktop:a:b');
     expect(isEventForView('desktop:a:b', SESSION, 'a:b')).toBe(true);
     expect(isEventForView('desktop:a', SESSION, 'a:b')).toBe(false);
+  });
+});
+
+describe('按任务查在飞 turn：taskTurnFor / sessionTurnsOf (#981)', () => {
+  /** 主 tab 上一条正在跑的 turn。 */
+  const mainTurn = { sessionKey: SESSION, routingKey: routingKeyFor(SESSION, MAIN_THREAD_ID) };
+  /** 子线程 tab 上一条正在跑的 turn。 */
+  const threadATurn = { sessionKey: SESSION, routingKey: routingKeyFor(SESSION, 'thread-a') };
+  const turnMap = (...turns: Array<typeof mainTurn>) =>
+    new Map(turns.map((t) => [t.routingKey, t]));
+
+  describe('taskTurnFor —— 这条 send 唯一可以 supersede（abort + await）的 turn', () => {
+    it('同一个任务的重新发送：命中该任务自己的 turn', () => {
+      expect(taskTurnFor(turnMap(mainTurn), SESSION, MAIN_THREAD_ID)).toBe(mainTurn);
+      expect(taskTurnFor(turnMap(threadATurn), SESSION, 'thread-a')).toBe(threadATurn);
+    });
+
+    it('同一 session 的另一个 tab 发消息：查不到（切换/新建任务≠停止旧任务）', () => {
+      // 主 tab 的 turn 在跑，用户在子线程 tab 里发消息 —— 旧实现按基础 session
+      // 判定、且只有一个槽位，会把主 tab 的 turn abort 掉；这正是 #981 报的
+      // 「切换即中断」。
+      expect(taskTurnFor(turnMap(mainTurn), SESSION, 'thread-a')).toBeNull();
+      // 反过来同理：子线程 tab 在跑，用户回主 tab 发消息。
+      expect(taskTurnFor(turnMap(threadATurn), SESSION, MAIN_THREAD_ID)).toBeNull();
+      // 两个子线程 tab 之间也不互相打断。
+      expect(taskTurnFor(turnMap(threadATurn), SESSION, 'thread-b')).toBeNull();
+    });
+
+    it('并发任务各查各的：B 的 turn 不会顶掉 A 的记录（CodeRabbit 复审点）', () => {
+      // 单槽实现（lifecycleRef 只存「最近一条」）会在这里失败：A 的记录被 B
+      // 覆盖后，回 A 重新发送查不到 A 的 turn → 不做 supersede 直接再发一条，
+      // 后端以 TURN_IN_PROGRESS 拒绝 —— 正是本 issue 要消除的错误。
+      const two = turnMap(mainTurn, threadATurn);
+      expect(taskTurnFor(two, SESSION, MAIN_THREAD_ID)).toBe(mainTurn);
+      expect(taskTurnFor(two, SESSION, 'thread-a')).toBe(threadATurn);
+    });
+
+    it('另一个 session 的 turn：查不到（原有跨会话保护不变）', () => {
+      const other = { sessionKey: 'desktop:other', routingKey: 'desktop:other' };
+      expect(taskTurnFor(turnMap(other), SESSION, MAIN_THREAD_ID)).toBeNull();
+    });
+
+    it('thread id 相同但 session 不同：查不到', () => {
+      // routing key `desktop:<threadId>` 不含基础 session，不同会话靠 thread id
+      // 全局唯一来区分 —— 万一撞 id，sessionKey 这一半仍要挡住。
+      const foreign = { sessionKey: 'desktop:other', routingKey: 'desktop:thread-a' };
+      expect(taskTurnFor(turnMap(foreign), SESSION, 'thread-a')).toBeNull();
+    });
+
+    it('没有在飞的 turn（首个回合 / 已结算）：返回 null', () => {
+      expect(taskTurnFor(turnMap(), SESSION, MAIN_THREAD_ID)).toBeNull();
+      expect(taskTurnFor(turnMap(), SESSION, 'thread-a')).toBeNull();
+    });
+  });
+
+  describe('sessionTurnsOf —— 停止按钮要中止的 turn（整个会话，不是当前那个 tab）', () => {
+    it('返回本会话全部在飞的 turn，含子线程 tab 的', () => {
+      const two = turnMap(mainTurn, threadATurn);
+      expect(sessionTurnsOf(two, SESSION)).toEqual([mainTurn, threadATurn]);
+    });
+
+    it('不含其它会话的 turn', () => {
+      const other = { sessionKey: 'desktop:other', routingKey: 'desktop:other' };
+      expect(sessionTurnsOf(turnMap(mainTurn, other), SESSION)).toEqual([mainTurn]);
+      expect(sessionTurnsOf(turnMap(other), SESSION)).toEqual([]);
+    });
+
+    it('没有在飞的 turn：空数组（调用方回落到基础 session 的旧行为）', () => {
+      expect(sessionTurnsOf(turnMap(), SESSION)).toEqual([]);
+    });
   });
 });
 

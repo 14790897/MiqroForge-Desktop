@@ -115,6 +115,26 @@ export function normalizeBridgeMessage(resp: BridgeResponse): NormalizedBridgeMe
   };
 }
 
+/**
+ * Renderer IPC channel for an orphan bridge event, or undefined when the event
+ * name maps to no known channel (then it is dropped — never mis-routed).
+ *
+ * Two naming conventions reach the orphan forwarder:
+ *   · the chat.* family — `subagent_result` → `CHAT_SUBAGENT_RESULT`;
+ *   · product events that already carry their renderer IPC name —
+ *     `agent:spawned` → `AGENT_SPAWNED`, `agent:completed` → `AGENT_COMPLETED`
+ *     (#981: 子智能体线程 tab 的入口/收尾事件).
+ * Try the CHAT_ convention first (unchanged for existing emitters), then the
+ * event name normalized into a constant key.
+ */
+export function channelForEventType(eventType: string): string | undefined {
+  const upper = eventType.toUpperCase();
+  return (
+    IPC_EVENTS[`CHAT_${upper}` as keyof typeof IPC_EVENTS] ??
+    IPC_EVENTS[upper.replace(/[^A-Z0-9]/g, '_') as keyof typeof IPC_EVENTS]
+  );
+}
+
 export function buildInitializeParams(version: string): InitializeParams {
   return {
     clientId: 'miqi-desktop',
@@ -500,8 +520,7 @@ export class BridgeManager extends EventEmitter {
             // Use normalized.eventType (not raw resp.type) so events sent via
             // the "event" field are handled correctly — consistent with the
             // primary handler (#335).
-            const eventKey = `CHAT_${normalized.eventType.toUpperCase()}`;
-            const channel = IPC_EVENTS[eventKey as keyof typeof IPC_EVENTS];
+            const channel = channelForEventType(normalized.eventType);
             if (channel) {
               const allWindows = BrowserWindow.getAllWindows();
               for (const win of allWindows) {

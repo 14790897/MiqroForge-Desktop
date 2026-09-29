@@ -1309,6 +1309,8 @@ export interface AgentSpawnedEvent {
   sub_thread_id: string;
   agent_type: string;
   task_label: string;
+  /** 基础会话 key —— tab 列表按会话存，渲染层据此丢弃别的会话的 spawn（#981 接线）。 */
+  session_key?: string;
 }
 
 export interface AgentCompletedEvent {
@@ -1316,6 +1318,8 @@ export interface AgentCompletedEvent {
   sub_thread_id: string;
   outcome: string;
   summary: string;
+  /** 同 AgentSpawnedEvent：跨会话的子智能体不该改当前视图的 tab。 */
+  session_key?: string;
 }
 
 export interface PlanUpdatedEvent {
