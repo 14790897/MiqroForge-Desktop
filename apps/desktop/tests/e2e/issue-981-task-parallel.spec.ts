@@ -132,10 +132,24 @@ test.describe('#981 多任务并行：切换任务不中断', () => {
     const SUB_PROMPT = '把刚才的汇总结果整理成 Markdown 表格';
     const RESEND_PROMPT = '再把这个表格导出成 CSV';
     const SUB_TAB_LABEL = `汇总 ${DATA_FILE}`;
-    /** 后台注入的进度文本 —— 主任务「仍在被消费」的判据。 */
-    const BG_PROGRESS = `正在处理 ${DATA_FILE}：已汇总 7/12 个月`;
-    /** 前台注入的思考内容片段（保证注入真的被消费）。 */
-    const THINKING = ['先读表头确认列结构，', '再按月份分组求和，', '最后按月份排序输出。'];
+    /**
+     * ⚠️ 下面两个常量是**本用例伪造的「模型输出」**，不是 AI 的真实回复。
+     *
+     * `chat:progress` 的 `delta` 字段就是「AI 回复的每次增量」；这里手动填它，
+     * 等于替模型说话。之所以这么做：本用例要覆盖的是**渲染层的判定**（主任务的
+     * 那条 turn 的监听是否还活着、还消费不消费这条流），不是模型的回答质量——
+     * 用一个必然 in-flight 的 mock provider + 自己造的增量流，才能稳定地把
+     * 「该被消费 / 不该被消费」这一点逼出来。判据本身（下面断言的那句）是**注入
+     * 文本**，读的时候不要把它当成模型会说出来的话。
+     */
+    /** 注入的后台进度 delta —— 主任务「仍在被消费」的判据（伪造的模型输出）。 */
+    const INJECTED_BG_DELTA = `正在处理 ${DATA_FILE}：已汇总 7/12 个月`;
+    /** 注入的前台思考 delta（伪造的模型输出，用来先证明「注入确实会被消费」）。 */
+    const INJECTED_THINKING_DELTAS = [
+      '先读表头确认列结构，',
+      '再按月份分组求和，',
+      '最后按月份排序输出。',
+    ];
 
     // ── 1. 主任务：起一个永不结束的 turn ────────────────────────────────
     await sendMessage(page, MAIN_PROMPT);
@@ -152,11 +166,12 @@ test.describe('#981 多任务并行：切换任务不中断', () => {
 
     // 前台自检：注入的思考内容必须被消费（思考块真的在长）。
     // 这一步同时是后面「后台仍被消费」判据的对照组。
-    for (const delta of THINKING) {
+    // （下面喂的是本用例伪造的 delta，不是模型输出 —— 见常量处的说明。）
+    for (const delta of INJECTED_THINKING_DELTAS) {
       await injectProgress(electronApp, { stream: 'reasoning', delta, session_key: mainKey });
     }
     await expect
-      .poll(() => seesInList(page, THINKING[0]), {
+      .poll(() => seesInList(page, INJECTED_THINKING_DELTAS[0]), {
         timeout: 15_000,
         message: '前台注入必须被消费（思考块真的在长）',
       })
@@ -199,9 +214,11 @@ test.describe('#981 多任务并行：切换任务不中断', () => {
     // 判据：主任务的后台事件仍被 live 消费 —— 注入一条带主 key 的 progress，
     // 切回主 tab 必须看得见。修复前 supersede 先 cleanupListeners() 退订了主
     // invocation，这条注入不会再被消费。
+    // 注意这条 delta 是**本用例伪造的模型输出**（不是 AI 的真实回复）；它测的
+    // 是「主任务那条 turn 的监听还在不在」，不是模型行为。
     await injectProgress(electronApp, {
       stream: 'reasoning',
-      delta: BG_PROGRESS,
+      delta: INJECTED_BG_DELTA,
       session_key: mainKey,
     });
 
@@ -209,7 +226,7 @@ test.describe('#981 多任务并行：切换任务不中断', () => {
     await mainTab.click();
     await expect(mainTab).toHaveAttribute('data-active', 'true');
     await expect
-      .poll(() => seesInList(page, BG_PROGRESS), {
+      .poll(() => seesInList(page, INJECTED_BG_DELTA), {
         timeout: 15_000,
         message: '切回主 tab 后，主任务的后台事件必须仍被消费（主 turn 未被中断）',
       })
