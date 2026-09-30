@@ -150,7 +150,7 @@ jobs:
             },
             "agents": {
               "defaults": {
-                "model": "deepseek-v4-pro",
+                "model": "deepseek-flash",
                 "maxTokens": 8000,
                 "temperature": 0.1,
                 "maxToolIterations": 10,
