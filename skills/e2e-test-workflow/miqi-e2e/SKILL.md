@@ -145,6 +145,10 @@ on:
 
 ## Bridge API Testing Without LLM
 
+⚠️ 无 LLM 的桥接/契约用例只算补充，不能单独当功能验证交付——按
+`e2e-test-workflow` 的「必须有真实 AI 测试」硬性规则，同一功能还要有一条真实模型
+往返的用例（`<feature>-real-llm.spec.ts`）。
+
 ```ts
 // Verify method exists
 const hasMethod = await page.evaluate(() =>
