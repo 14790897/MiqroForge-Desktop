@@ -5,10 +5,11 @@ description: |
   test spec creation, React textarea handling (type vs fill), approval dialog
   auto-click, *:* wildcard pre-approval, PPTX content verification, screen
   recording (Electron desktopCapturer window capture), session streaming isolation fix,
+  real-LLM test requirement (mock-only coverage is not acceptable),
   and multi-agent review checklist.
   Triggers: "测e2e", "写E2E测试", "write e2e test", "run e2e", "e2e录屏",
-  "approval handling", "PPTX verification", "write playwright test",
-  "session isolation", "流式隔离".
+  "真实AI测试", "real llm e2e", "approval handling", "PPTX verification",
+  "write playwright test", "session isolation", "流式隔离".
 agent_created: true
 ---
 
@@ -58,6 +59,39 @@ e2e 任务（electron-e2e / wsl-e2e / macos-e2e）只做回归兜底，不用作
 4. 本地跑通 → 推分支提 PR → CI 的 e2e 通过才算完。若 CI 失败而本地通过，
    优先怀疑平台差异（Linux/Windows 断言、mock 可达性），参考 miqi-e2e
    技能的"Platform-dependent testing"小节。
+
+## 必须有真实 AI 测试（硬性规则）
+
+**凡新增/修改功能，E2E 覆盖里必须至少有一条用例打在真实模型上**（真实 provider 的
+HTTP 往返），不能只交 mock 用例。mock server / 打桩 provider 证明的是"链路按我假设的
+形状走"，证明不了真实模型 + 真实请求真的走得通——2026-09-05 用户明确要求（#922 当时
+只有 mock e2e，被质疑后才补真实实测），此后也多次出现「mock 全绿、真实路径仍坏」。
+
+分工写法（沿用仓库既有模式）：
+
+- mock 用例照常保留（快、稳定、可断言细节）；真机验证放同目录
+  `<feature>-real-llm.spec.ts`。参考：`confirm-card.spec.ts` +
+  `confirm-card-real-llm.spec.ts`、`system-install-card-real-llm.spec.ts`、
+  `guard-issue-811-real-llm.spec.ts`。
+- 真实 provider 的来源：`launchElectronApp()` **不传 `patchConfig`** —— helper 会把
+  真实的 `~/.forge/config.json`（本机）或 CI 注入的 config.json（siliconflow key）
+  拷进临时 MIQI_HOME。只有要打 mock 时才用 patchConfig 把 apiBase 指到本地 mock server。
+- 断言收敛：真实模型文案不可控，只断言结构信号（卡片出现、工具被调用、回合正常收尾），
+  不断言具体措辞。
+- provider 抖动不是回归：用 `sendUntilDoneOrProviderDown()`（自动重发一次）；全失败就
+  `test.skip()` 并在 skip 文案里注明 provider 不可用，别把共享 key 限流当红灯。
+- 本机跑之前确认 config 里有可用 provider：走 qraft 登录态的本机配置没有 provider 条目，
+  发送会被「尚未配置模型服务」门禁拦下（**与代码无关**，别误判成回归）；先给临时
+  MIQI_HOME 补一个可用 provider。
+- **涉及真实账号**（平台登录/计费/网关凭据等）的功能，除真机 LLM 外还要补 opt-in live
+  用例：`QRAFT_LIVE=1` + 真实账号（凭据只经环境变量注入，永不入仓库/CI），模式沿用
+  `billing-live.spec.ts` / `ai-gateway-live.spec.ts`。
+- 真机用例常带守卫（`QRAFT_LIVE` / `MIQI_RUN_*` / win32 等）⇒ 在 CI 上永不执行：必须
+  登记进 `apps/desktop/tests/e2e/CI-COVERAGE.md`，否则 `npm test` 的
+  `e2eCiCoverage.test.ts` 会红（#1196）。真机用例的超时用 `LLM_TIMEOUT`（4 分钟）。
+
+交付口径：说「修好了/做完了」之前，真机用例必须**实际跑过**并给出结果（回复/截图），
+不能拿 mock 用例的绿灯代替（mock 通过 ≠ 真实路径修好）。
 
 ## Test spec structure
 
