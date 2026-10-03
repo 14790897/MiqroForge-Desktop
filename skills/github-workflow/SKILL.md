@@ -197,7 +197,7 @@ add auto-install support                   ❌ 缺少语义前缀
 
 | 流水线 | 触发 | 行为 |
 |--------|------|------|
-| `.github/workflows/release.yml` | push 到 `main`、push 到 `develop`、手动 | `main`：semantic-release 正式发版（写 CHANGELOG + 四个版本号文件 + 打 tag）→ 打包 Win/macOS；`develop`：只发 `vX.Y.Z-dev.N` 的 GitHub **Prerelease**，不写任何文件、不打包 |
+| `.github/workflows/release.yml` | push 到 `main`、push 到 `develop`、手动 | `main`：semantic-release 正式发版（写 CHANGELOG + 四个版本号文件 + 打 tag）→ 打包 Win/macOS；`develop`：每次推送都会跑 semantic-release，提交符合发布规则（`feat`/`fix`/`perf`/破坏性变更）时发 `vX.Y.Z-dev.N` 的 GitHub **Prerelease**，全是 `chore`/`docs`/`test` 这类提交则不创建 release；预发布不写任何文件、不打包 |
 | `.github/workflows/weekly-release.yml` | 每周三、周五 00:00 (Asia/Shanghai，cron `0 16 * * 2,4` UTC) / 手动 `workflow_dispatch` | 自动创建 develop→main 发布 PR（标题 `chore(release): merge develop into main`）并**立即合并**，随后 release.yml 的 semantic-release 自动发版打包 |
 | `.github/workflows/sync-main-into-develop.yml` | release published（正式 `v*` tag） / 手动 | 用临时分支 `chore/sync-main-into-develop` 把 main 的 release 提交反向同步回 develop，附 `chore(version): develop 版本号标记为 X-dev` 提交并**立即合并** |
 

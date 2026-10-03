@@ -57,18 +57,30 @@ jobs:
       - name: Detect new release
         id: check
         run: |
-          LATEST=$(gh release list --limit 1 --json tagName,isPrerelease 2>/dev/null || echo '[]')
-          TAG=$(echo "$LATEST" | jq -r '.[0].tagName // empty')
-          PRERELEASE=$(echo "$LATEST" | jq -r '.[0].isPrerelease // false')
+          # 只认本次运行在 HEAD 上打的 tag：concurrency 是按分支分组的，develop 与 main 可以同时在跑，
+          # 用 gh release list 取「仓库最新 release」会拿到另一个分支刚发的版本，导致打包被误跳过
+          # （main 的正式版本被 develop 的预发布顶掉 → prerelease=true → 不打包）。
+          TAG=$(git tag --points-at HEAD | sort -V | tail -1)
           BEFORE="${{ steps.before.outputs.tag }}"
-          echo "prerelease=$PRERELEASE" >> "$GITHUB_OUTPUT"
-          if [ "$TAG" != "$BEFORE" ] && [ -n "$TAG" ]; then
+          if [ -n "$TAG" ] && [ "$TAG" != "$BEFORE" ]; then
+            # 按 tag 查这个 release 本身的 prerelease 标记（不是查「最新 release」，所以没有并发问题）
+            PRERELEASE=$(gh release view "$TAG" --json isPrerelease -q '.isPrerelease' 2>/dev/null)
+            if [ -z "$PRERELEASE" ]; then
+              # 查询失败时按语义化版本兜底：vX.Y.Z 无预发布号，vX.Y.Z-dev.N 有（'-' 之后即预发布号）
+              case "$TAG" in
+                *-*) PRERELEASE=true ;;
+                *) PRERELEASE=false ;;
+              esac
+              echo "::warning::gh release view $TAG 失败，按 tag 名判断 prerelease=$PRERELEASE"
+            fi
             echo "new_release=true" >> "$GITHUB_OUTPUT"
             echo "tag_name=$TAG" >> "$GITHUB_OUTPUT"
+            echo "prerelease=$PRERELEASE" >> "$GITHUB_OUTPUT"
             echo "::notice::New release created: $TAG (was: $BEFORE, prerelease: $PRERELEASE)"
           else
             echo "new_release=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::No new release (latest: $TAG)"
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::No new release (tag on HEAD: ${TAG:-none}; latest before: ${BEFORE:-none})"
           fi
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
