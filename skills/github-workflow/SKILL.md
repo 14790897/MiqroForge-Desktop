@@ -197,8 +197,13 @@ add auto-install support                   ❌ 缺少语义前缀
 
 | 流水线 | 触发 | 行为 |
 |--------|------|------|
+| `.github/workflows/release.yml` | push 到 `main`、push 到 `develop`、手动 | `main`：semantic-release 正式发版（写 CHANGELOG + 四个版本号文件 + 打 tag）→ 打包 Win/macOS；`develop`：只发 `vX.Y.Z-dev.N` 的 GitHub **Prerelease**，不写任何文件、不打包 |
 | `.github/workflows/weekly-release.yml` | 每周三、周五 00:00 (Asia/Shanghai，cron `0 16 * * 2,4` UTC) / 手动 `workflow_dispatch` | 自动创建 develop→main 发布 PR（标题 `chore(release): merge develop into main`）并**立即合并**，随后 release.yml 的 semantic-release 自动发版打包 |
 | `.github/workflows/sync-main-into-develop.yml` | release published（正式 `v*` tag） / 手动 | 用临时分支 `chore/sync-main-into-develop` 把 main 的 release 提交反向同步回 develop，附 `chore(version): develop 版本号标记为 X-dev` 提交并**立即合并** |
+
+- 分支相关的插件差异写在根目录 `release.config.cjs`（2026-10-03 从 package.json 的 `release` 字段迁出）：`GITHUB_REF_NAME=develop` 时跳过 changelog / exec / git 三个会改仓库文件的插件
+- **develop 预发布刻意不写文件**：develop 的版本号由反向同步统一标记为 `<已发布版本>-dev`，若 develop 侧的 semantic-release 也改 CHANGELOG/版本号，两边会互相覆盖，每周的 develop→main 合并必然在 CHANGELOG 上冲突。故预发布只在 GitHub 上留 tag + release notes
+- 预发布不打包（release.yml 的 build-win/build-mac 用 `prerelease != 'true'` 门控）；GitHub 的 `/releases/latest` 也不含 prerelease，桌面端自动更新不受影响
 
 - 手动触发：`gh workflow run weekly-release.yml -f dry_run=true`（只建 PR 不合并，用于测试）
 - 发布 PR 的 body 由流水线生成，含全部必填节（`[x] 其他` + `## 截图` 等），能通过 pr-template-check

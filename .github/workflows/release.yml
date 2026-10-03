@@ -1,14 +1,21 @@
 name: Release and Build
 
+# push 到 main：正式发版 + 打包 Win/macOS（main 的 push 来自 weekly-release.yml 的发布 PR 或手动合并）
+# push 到 develop：只发 x.y.z-dev.N 的 GitHub Prerelease（不写文件、不打包），见 release.config.cjs
 on:
   push:
-    branches: [main]
+    branches: [main, develop]
   workflow_dispatch:
 
 permissions:
   contents: write
   issues: write
   pull-requests: write
+
+# 同一分支上串行执行：develop 连续推送时避免两轮 semantic-release 抢同一个预发布版本号
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   # ── Job 1: Semantic Release ────────────────────────────────────────
@@ -18,6 +25,7 @@ jobs:
     outputs:
       new_release: ${{ steps.check.outputs.new_release }}
       tag_name: ${{ steps.check.outputs.tag_name }}
+      prerelease: ${{ steps.check.outputs.prerelease }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -49,12 +57,15 @@ jobs:
       - name: Detect new release
         id: check
         run: |
-          TAG=$(gh release list --limit 1 --json tagName -q '.[0].tagName' 2>/dev/null || echo "")
+          LATEST=$(gh release list --limit 1 --json tagName,isPrerelease 2>/dev/null || echo '[]')
+          TAG=$(echo "$LATEST" | jq -r '.[0].tagName // empty')
+          PRERELEASE=$(echo "$LATEST" | jq -r '.[0].isPrerelease // false')
           BEFORE="${{ steps.before.outputs.tag }}"
+          echo "prerelease=$PRERELEASE" >> "$GITHUB_OUTPUT"
           if [ "$TAG" != "$BEFORE" ] && [ -n "$TAG" ]; then
             echo "new_release=true" >> "$GITHUB_OUTPUT"
             echo "tag_name=$TAG" >> "$GITHUB_OUTPUT"
-            echo "::notice::New release created: $TAG (was: $BEFORE)"
+            echo "::notice::New release created: $TAG (was: $BEFORE, prerelease: $PRERELEASE)"
           else
             echo "new_release=false" >> "$GITHUB_OUTPUT"
             echo "::notice::No new release (latest: $TAG)"
@@ -65,7 +76,7 @@ jobs:
   # ── Job 2: Build Desktop App (Windows) ────────────────────────────
   build-win:
     needs: release
-    if: needs.release.outputs.new_release == 'true'
+    if: needs.release.outputs.new_release == 'true' && needs.release.outputs.prerelease != 'true'
     runs-on: windows-latest
     steps:
       - name: Checkout code
@@ -124,7 +135,7 @@ jobs:
   # ── Job 3: Build Desktop App (macOS) ─────────────────────────────
   build-mac:
     needs: release
-    if: needs.release.outputs.new_release == 'true'
+    if: needs.release.outputs.new_release == 'true' && needs.release.outputs.prerelease != 'true'
     runs-on: macos-latest
     steps:
       - name: Checkout code
