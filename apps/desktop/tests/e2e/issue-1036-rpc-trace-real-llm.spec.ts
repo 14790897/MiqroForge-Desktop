@@ -44,7 +44,6 @@ import {
   closeElectronApp,
   createNewConversation,
   launchElectronApp,
-  sendMessage,
   sendUntilDoneOrProviderDown,
   waitForBridgeInitialized,
 } from './helpers/electron-setup';
@@ -62,21 +61,54 @@ function newestMainLog(): string | null {
   return files[0] ?? null;
 }
 
+/**
+ * A position in the main log, taken before the action under test.
+ *
+ * The file name is date-based, so a run that crosses UTC midnight makes the
+ * main process start writing a NEW file — which is why the file is
+ * re-resolved on every read instead of being pinned here (see `readSince`).
+ */
+interface LogCursor {
+  file: string;
+  offset: number;
+}
+
+function openLogCursor(): LogCursor {
+  const file = newestMainLog();
+  if (!file) {
+    throw new Error(
+      `主进程日志不存在：${LOG_DIR}（E2E 前必须先在仓库根 npm run build，` +
+        `且不要在 worktree 里 junction out/）`
+    );
+  }
+  // offset is a whole-line boundary: every write appends a complete line.
+  return { file, offset: statSync(file).size };
+}
+
 /** Bytes appended to `file` since `offset` (offset is a whole-line boundary). */
 function readAppended(file: string, offset: number): string {
   const buf = readFileSync(file);
   return buf.subarray(Math.min(offset, buf.length)).toString('utf8');
 }
 
-async function waitForLog(file: string, offset: number, match: (text: string) => boolean) {
+/** Everything written since the cursor was opened, plus the file it now is. */
+function readSince(cursor: LogCursor): { file: string; text: string } {
+  const file = newestMainLog() ?? cursor.file;
+  // Date rolled over → the writer moved to a new file; read that one whole.
+  return file === cursor.file
+    ? { file, text: readAppended(file, cursor.offset) }
+    : { file, text: readAppended(file, 0) };
+}
+
+async function waitForLog(cursor: LogCursor, match: (text: string) => boolean) {
   const deadline = Date.now() + 60_000;
-  let text = '';
+  let last = readSince(cursor);
   while (Date.now() < deadline) {
-    text = readAppended(file, offset);
-    if (match(text)) return text;
+    last = readSince(cursor);
+    if (match(last.text)) return last;
     await new Promise((r) => setTimeout(r, 500));
   }
-  return text;
+  return last;
 }
 
 /** Every segment a single request must leave a line in, in wire order. */
@@ -139,13 +171,7 @@ test.describe('#1036 bridge RPC transport trace (real LLM)', () => {
     await waitForBridgeInitialized(page, 60);
 
     // 只读本次用例新追加的部分：这份日志是追加写、跨 run 共享的。
-    const logFile = newestMainLog();
-    expect(
-      logFile,
-      `主进程日志不存在：${LOG_DIR}（E2E 前必须先在仓库根 npm run build，` +
-        `且不要在 worktree 里 junction out/）`
-    ).toBeTruthy();
-    const offset = statSync(logFile!).size;
+    const cursor = openLogCursor();
 
     // ── 真实模型往返（本 spec 的存在理由之一）────────────────────────
     await createNewConversation(page);
@@ -164,7 +190,7 @@ test.describe('#1036 bridge RPC transport trace (real LLM)', () => {
     const cfgValue = await page.evaluate(() => (window as any).miqi.config.get());
     expect(cfgValue, 'config.get 必须真的从桥拿到值（而不是本地兜底）').toBeTruthy();
 
-    const text = await waitForLog(logFile!, offset, (t) => fullyTracedIds(t).length > 0);
+    const { file: logFile, text } = await waitForLog(cursor, (t) => fullyTracedIds(t).length > 0);
 
     // 1. 每一类埋点都必须出现（桥的启动行除外 —— 它在本窗口之前就发了）
     for (const prefix of TRACE_CHAIN) {
@@ -189,8 +215,13 @@ test.describe('#1036 bridge RPC transport trace (real LLM)', () => {
         `pid=${bridgePid}`
       );
     }
-    // 并且这一代桥确实有一条启动行 —— 跨重启的日志串台正是它要防的。
-    const fullText = readFileSync(logFile!, 'utf8');
+    // 并且这一代桥确实有一条启动行 —— 跨重启的日志串台正是它要防的。启动行
+    // 在本窗口之前就发了，所以要在**整份**文件里找；跨 UTC 日界换过文件时两份
+    // 都算（启动那一刻写进哪份取决于运行时点）。
+    const fullText =
+      logFile === cursor.file
+        ? readFileSync(logFile, 'utf8')
+        : readFileSync(cursor.file, 'utf8') + readFileSync(logFile, 'utf8');
     expect(fullText, `日志里没有 bridge-start pid=${bridgePid} 这一代`).toContain(
       `bridge-start pid=${bridgePid} epoch=`
     );
