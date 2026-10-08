@@ -164,9 +164,7 @@ export async function sendMessage(page: Page, text: string) {
  */
 export async function setReasoningMode(page: Page, mode: 'fast' | 'think') {
   await page.locator('button[aria-label="回答模式"]').first().click();
-  await page
-    .getByRole('button', { name: mode === 'think' ? /深度研究/ : /极速回答/ })
-    .click();
+  await page.getByRole('button', { name: mode === 'think' ? /深度研究/ : /极速回答/ }).click();
   await expect
     .poll(async () => page.evaluate(() => sessionStorage.getItem('miqi-reasoning-mode')))
     .toBe(mode);
