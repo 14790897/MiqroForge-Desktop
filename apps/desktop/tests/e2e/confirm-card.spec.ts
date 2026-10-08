@@ -23,6 +23,7 @@ import { join } from 'node:path';
 import {
   LLM_TIMEOUT,
   sendMessage,
+  setReasoningMode,
   waitForResponseComplete,
   launchElectronApp,
   closeElectronApp,
@@ -105,12 +106,23 @@ test.describe('Confirm Card (ask_user_confirm_card)', () => {
     // ignores model names and API keys.
     // 门禁（#1000/#1025）：显式注入 deepseek mock provider + 默认模型，
     // 否则 active_model_resolvable=false 会被发送拦截（详见 patchConfigForMock）。
-    const fixture = await launchElectronApp((config: any) =>
-      patchConfigForMock(config, mock.mockUrl)
-    );
+    const fixture = await launchElectronApp((config: any) => {
+      patchConfigForMock(config, mock.mockUrl);
+      // workspace 归一到「跟随数据根」的默认值（与 CI 相同：CI config 不带此键）。
+      // mock 状态机按「请求历史里的工具结果」推进——开发者本机若在 config 里
+      // 显式配置了 workspace，上一轮（甚至别的 spec）写下的历史会跨 run 残留，
+      // 状态机被推进到后段分支、卡片根本不弹（本机实测）。归一到默认值后，
+      // 历史落在本轮临时 MIQI_HOME 内，天然干净。
+      config.agents.defaults.workspace = '~/.forge/workspace';
+      return config;
+    });
     electronApp = fixture.electronApp;
     page = fixture.page;
     miqiHome = fixture.miqiHome;
+    // #680 接通后，默认 fast 档的 3 轮工具帽真正生效；本文件的 mock 状态机
+    // 需要 5 轮模型往返（卡1 → web_search → write_file → 卡2 → final），
+    // 统一切「深度研究」(think)，避免回合被 fast 预算收尾截断。
+    await setReasoningMode(page, 'think');
   }, 180_000);
 
   test.afterAll(async () => {
