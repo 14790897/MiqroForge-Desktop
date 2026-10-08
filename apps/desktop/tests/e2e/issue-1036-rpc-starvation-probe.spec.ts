@@ -22,6 +22,10 @@
  * ⚠️ 也必须 fire-and-forget（采样本写进页面数组、轮询其长度），否则 Playwright
  * 会等到这个 Promise **settle**（命中时要 720s）才返回，节奏变成 ~750s/次。
  *
+ * ⚠️ 采样记录要**在发起时就落**、settle 时回填：只记 settle 的调用会漏掉最典型的
+ * 饿死 —— 饿死从窗口后段开始时那条请求要 720s 才 settle，永远赶不上窗口结束，
+ * 于是「样本全健康」判成假阴性。窗口结束时仍未 settle 的，按「已等待时长」计入。
+ *
  * ⚠️ **turn 存活率进判据**：真实模型的 turn 长度不完全可控。若 turn 在窗口中途
  * 就结束，剩下的样本是在「没有 turn 需要转发」的状态下采的，那这轮是**无结论**
  * 而不是「没命中」——所以用 chat 事件的时间跨度量出 turn 的真实存活时长，不足
@@ -102,9 +106,19 @@ const OUT_DIR = join(APPS_DESKTOP, 'test-results');
 const LOG_DIR = join(APPS_DESKTOP, '..', '..', 'workspace', 'logs');
 
 interface CfgSample {
+  /** 发起时刻（epoch ms）。 */
+  t0: number;
+  /**
+   * settle 用时。**在窗口结束时仍未 settle 的记录里，这里是「已经等了多久」**
+   * —— 必须这样算，否则会漏掉最典型的饿死：饿死从窗口后段开始时，那条请求
+   * 要 720s 才 settle，永远赶不上窗口结束，于是「全部样本健康」→ 假阴性
+   * （CodeRabbit 指出的那条）。
+   */
   ms: number;
+  settled: boolean;
   /** 超时路径也会 resolve（拿到本地兜底配置），所以它只作留痕，不参与判据。 */
   gotValue: boolean;
+  err?: string;
 }
 
 interface ProbeState {
@@ -302,11 +316,15 @@ test.describe('#1036 RPC starvation probe (real model + real exec)', () => {
         w.__lastProgressAt = Date.now();
       });
       w.__cfgTimer = setInterval(() => {
-        const t0 = Date.now();
+        // 先落一条「已发起」记录，settle 时再回填 —— 只记 settle 的调用会漏掉
+        // 那些到窗口结束还没 settle 的（= 正在被饿死的）。
+        const rec: any = { t0: Date.now(), ms: -1, settled: false, gotValue: false };
+        w.__cfgSamples.push(rec);
         w.miqi.config.get().then(
-          (v: unknown) => w.__cfgSamples.push({ ms: Date.now() - t0, gotValue: v != null }),
+          (v: unknown) =>
+            Object.assign(rec, { ms: Date.now() - rec.t0, gotValue: v != null, settled: true }),
           (e: unknown) =>
-            w.__cfgSamples.push({ ms: Date.now() - t0, gotValue: false, err: String(e) })
+            Object.assign(rec, { ms: Date.now() - rec.t0, settled: true, err: String(e) })
         );
       }, sampleMs);
     }, SAMPLE_MS);
@@ -341,6 +359,11 @@ test.describe('#1036 RPC starvation probe (real model + real exec)', () => {
       const w = window as any;
       clearInterval(w.__cfgTimer);
       w.__offProgress?.();
+      // 仍未 settle 的按「到此刻已经等了多久」计 —— 这正是被饿死的那批。
+      const now = Date.now();
+      for (const s of w.__cfgSamples ?? []) {
+        if (!s.settled) s.ms = now - s.t0;
+      }
       return {
         samples: w.__cfgSamples ?? [],
         progressCount: w.__progressCount ?? 0,
@@ -355,7 +378,15 @@ test.describe('#1036 RPC starvation probe (real model + real exec)', () => {
       : 0;
     const unhealthy = samples.filter((s) => s.ms >= HEALTHY_MS);
     const table = samples
-      .map((s, i) => `  #${i + 1} ${s.ms}ms ${s.ms >= HEALTHY_MS ? '⚠️ 命中' : 'ok'}`)
+      .map((s, i) => {
+        const tag =
+          s.ms < HEALTHY_MS
+            ? 'ok'
+            : s.settled
+              ? '⚠️ 命中'
+              : '⚠️ 命中（到窗口结束仍未 settle，按已等待时长计）';
+        return `  #${i + 1} ${s.ms}ms ${tag}`;
+      })
       .join('\n');
 
     // 应用自身的证据（注入采样之外的那一路，见 AppEvidence 注释）。
@@ -422,7 +453,11 @@ test.describe('#1036 RPC starvation probe (real model + real exec)', () => {
     // 被吃、连 720s 超时都还没到。所以先判「有没有丢失证据」，再谈无结论。
     const reasons: string[] = [];
     if (unhealthy.length) {
-      reasons.push(`${unhealthy.length}/${samples.length} 次注入采样走满超时`);
+      const pendingHits = unhealthy.filter((s) => !s.settled).length;
+      reasons.push(
+        `${unhealthy.length}/${samples.length} 次注入采样走满超时` +
+          (pendingHits ? `（其中 ${pendingHits} 次到窗口结束时仍未 settle，按已等待时长计）` : '')
+      );
     }
     if (app.maxIpcMs >= HEALTHY_MS) {
       reasons.push(`应用自身出现 ${app.maxIpcMs}ms 的 IPC（≥ ${HEALTHY_MS}ms）`);

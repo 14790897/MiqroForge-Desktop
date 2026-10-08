@@ -94,10 +94,17 @@ function readAppended(file: string, offset: number): string {
 /** Everything written since the cursor was opened, plus the file it now is. */
 function readSince(cursor: LogCursor): { file: string; text: string } {
   const file = newestMainLog() ?? cursor.file;
-  // Date rolled over → the writer moved to a new file; read that one whole.
-  return file === cursor.file
-    ? { file, text: readAppended(file, cursor.offset) }
-    : { file, text: readAppended(file, 0) };
+  if (file === cursor.file) {
+    return { file, text: readAppended(file, cursor.offset) };
+  }
+  // Date rolled over: the writer moved to a new file. Keep BOTH the old file
+  // from the cursor AND the new one from its start — a chain that spans the
+  // rollover (dispatched into the old file, answered in the new one) has to
+  // stay joinable, otherwise a healthy request fails on a technicality.
+  return {
+    file,
+    text: readAppended(cursor.file, cursor.offset) + readAppended(file, 0),
+  };
 }
 
 async function waitForLog(cursor: LogCursor, match: (text: string) => boolean) {
@@ -150,6 +157,24 @@ function fieldOf(lines: string[], prefix: string, key: string): string | null {
   return line?.match(new RegExp(` ${key}=(\\d+)`))?.[1] ?? null;
 }
 
+/**
+ * The request id of the first `config.get` the main process wrote at/after
+ * `sinceMs` — i.e. the one this spec's own call produced.
+ *
+ * Needed because "the window contains *some* complete chain" is a weaker
+ * condition than "this spec's `config.get` completed": the window opens before
+ * the model turn, so any other component's RPC could satisfy it while our own
+ * call never made it (CodeRabbit finding).
+ */
+function configGetIdSince(text: string, sinceMs: number): string | null {
+  for (const line of text.split('\n')) {
+    if (!line.includes('bridge-req written') || !line.includes('method=config.get')) continue;
+    const at = Date.parse(line.match(/\[(\S+?Z)\]/)?.[1] ?? '');
+    if (Number.isFinite(at) && at >= sinceMs) return line.match(/ id=(\S+)/)?.[1] ?? null;
+  }
+  return null;
+}
+
 test.describe('#1036 bridge RPC transport trace (real LLM)', () => {
   let electronApp: ElectronApplication;
   let page: Page;
@@ -187,6 +212,7 @@ test.describe('#1036 bridge RPC transport trace (real LLM)', () => {
     }
 
     // ── 链路证据：真实走一次事故里被饿死的方法 ────────────────────────
+    const cfgCallAt = Date.now();
     const cfgValue = await page.evaluate(() => (window as any).miqi.config.get());
     expect(cfgValue, 'config.get 必须真的从桥拿到值（而不是本地兜底）').toBeTruthy();
 
@@ -197,12 +223,21 @@ test.describe('#1036 bridge RPC transport trace (real LLM)', () => {
       expect(text, `本次窗口里缺少埋点「${prefix}」：\n${tail(text)}`).toContain(prefix);
     }
 
-    // 2. 至少有一条请求能被**按 id** 完整串起来（按方法名对齐会被并发同名
-    //    请求骗到，这正是本 spec 要防的）
-    const ids = fullyTracedIds(text);
-    expect(ids.length, `没有任何请求走完整条链路：\n${tail(text)}`).toBeGreaterThan(0);
+    // 2. 完整链路必须**属于本次 config.get**：只看「窗口里有任意完整链路」不够
+    //    —— 窗口从模型回合之前就开了，别的组件任何一条 RPC 都能满足它
+    //    （CodeRabbit finding）。按 id 对齐仍然是不变的要求（按方法名会被并发
+    //    同名请求骗到）。
+    const joinedId = configGetIdSince(text, cfgCallAt);
+    expect(
+      joinedId,
+      `本次 config.get（${new Date(cfgCallAt).toISOString()}）之后没有对应的 ` +
+        `method=config.get 写入行：\n${tail(text)}`
+    ).toBeTruthy();
+    expect(
+      fullyTracedIds(text),
+      `本次 config.get（id=${joinedId}）没有走完整条链路：\n${tail(text)}`
+    ).toContain(joinedId);
 
-    const joinedId = ids[0];
     const chain = text.split('\n').filter((line) => line.includes(`id=${joinedId}`));
 
     // 3. 链路两侧的 pid 必须是同一个数。main 侧用的是 ready 握手里桥自报的

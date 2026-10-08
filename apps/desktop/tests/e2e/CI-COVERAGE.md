@@ -40,7 +40,7 @@
 | `pptx-generator.spec.ts` | 守卫 | `MIQI_RUN_REAL_PPTX_E2E !== '1'` | 中（真实 LLM） | 同上；macOS job 还额外 `--grep-invert` 掉了 "PPTX Generator" |
 | `skill-invocation-eval.spec.ts` | 守卫 | `MIQI_RUN_SKILL_EVAL !== '1'` | 高（多轮真实 LLM 的量化评估） | 评估型用例：本地默认跑、CI 明确关闭（spec 头注明） |
 | `issue-1034-renderer-oom-probe.spec.ts` | 守卫 | `MIQI_1034_PROBE === '1'` | 极高（长跑测量） | spec 自身注明「测量用长跑探针默认跳过」，只在排查 #1034 时手动开 |
-| `issue-1036-rpc-starvation-probe.spec.ts` | 守卫 | `MIQI_1036_PROBE === '1'` | 极高（真实模型 + 真实 exec 长跑，命中一次要等满 720s） | 测量用长跑探针：默认跳过，只在排查 #1036「长 turn 期间部分 RPC 被饿死」时手动开。窗口默认 20 分钟起（判据要求 ≥3 个样本、命中样本本身要 720s），electron-e2e 的 job 上限撑不住；它回答的是「这个问题是否存在」而非回归 |
+| `issue-1036-rpc-starvation-probe.spec.ts` | 守卫 | `MIQI_1036_PROBE === '1'` | 极高（真实模型 + 真实 exec 长跑；窗口默认 20 分钟） | 测量用长跑探针：默认跳过，只在排查 #1036「长 turn 期间部分 RPC 被饿死」时手动开。判据是「一次 `config.get` settle 用时 ≥ 30s」即命中（30s 是判据阈值；720s 是它的客户端超时上限，不是命中所需时长），窗口必须同时长到能容纳若干采样，electron-e2e 的 job 上限撑不住；它回答的是「这个问题是否存在」而非回归 |
 | `full-electron.spec.ts`（部分） | 守卫 | `MIQI_RUN_REAL_WEB_SEARCH_E2E` / `MIQI_RUN_STATEFUL_SESSION_E2E` | 高（真实 LLM） | 5 个用例在 PR CI 上不稳定（#187）：real web search 1、stateful session 1、sidebar switching 2、重启 history 1；该文件其余 11 个用例在 Linux 全量套件里照跑 |
 | `ai-gateway-live.spec.ts` | 守卫 | `QRAFT_LIVE=1` | 中（真实平台账号） | opt-in live 用例；CI 从未设置 `QRAFT_LIVE`（连已删除的 cloud-login live workflow 也只跑两个登录 spec） |
 | `issue-1185-account-isolation-live.spec.ts` | 守卫 | `QRAFT_LIVE=1` + ≥2 个真实账号 | 中（真实平台账号） | 需要两个账号来回切换验证本地存储隔离 |
