@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import re
 import sqlite3
 import sys
 import threading
@@ -35,6 +37,74 @@ CHAT_HEARTBEAT_INTERVAL_SECONDS = 10
 # creation, which ignores asyncio cancellation) — the turn lock is force-
 # released so the session recovers instead of waiting for TTL eviction (#563).
 STALE_TURN_TIMEOUT = 300.0  # seconds (5 min)
+
+
+# ── #1036 transport trace ───────────────────────────────────────────────────
+# During one long turn a subset of the Desktop's requests (config.get 17x,
+# plugins.list 3x) ran out the full 720 s client-side timeout while other
+# requests on the same channel (files.read, 22x) were answered normally.  The
+# loss can sit in any of four segments — main-side write, bridge read, bridge
+# reply, main-side match — and two of them left no durable trace at all, which
+# is why the incident could not be localised.  The lines below make each
+# segment observable; every one carries the bridge pid so that a log spanning a
+# bridge restart can still be split by which process wrote which line (the
+# `bridge-start` line opens each generation).
+_BRIDGE_PID = os.getpid()
+_BRIDGE_START_EPOCH = time.time()
+
+# Request ids are strings on the wire (`randomUUID()` on the Desktop side), so
+# the stdin reader can recover one without parsing the whole line.
+_TRACE_ID_RE = re.compile(r'"id"\s*:\s*"([^"]+)"')
+
+
+def _peek_request_id(raw: str) -> str:
+    """Best-effort request id for a raw stdin line (never raises)."""
+    match = _TRACE_ID_RE.search(raw)
+    return match.group(1) if match else "?"
+
+
+def _peek_line_request(raw: str) -> tuple[str, str]:
+    """Best-effort ``(id, method)`` for a raw stdin line (never raises)."""
+    try:
+        req = json.loads(raw)
+    except Exception:
+        return _peek_request_id(raw), ""
+    if not isinstance(req, dict):
+        return "?", ""
+    req_id = req.get("id") or req.get("request_id") or "?"
+    return str(req_id), str(req.get("method") or "")
+
+
+def _response_bytes(response: Any) -> int:
+    """Size the line this response will be sent as (-1 when not serialisable).
+
+    Encoded exactly like ``server._send`` encodes it, so the number can be
+    compared with ``bytes=`` on the matching ``bridge-resp sent`` line.
+    Serialising twice is deliberate: it is the only way to size a response
+    that is never written (a handler that hangs, or a reply lost pre-stdout).
+    """
+    try:
+        return len((json.dumps(response, ensure_ascii=False) + "\n").encode("utf-8"))
+    except Exception:
+        return -1
+
+
+async def _enqueue_with_trace(queue: "asyncio.Queue", raw: str, req_id: str) -> None:
+    """Put *raw* on the stdin queue, then trace the resulting depth.
+
+    Kept as a coroutine so the depth is read after the put really happened
+    (``queue.put`` blocks while the queue is full) and from inside the loop
+    thread, where ``qsize()`` is authoritative.  Boundary: this line can only
+    appear once the put completed, so "the queue was full" shows up as a
+    *delay* before it, not in its own number.
+    """
+    await queue.put(raw)
+    logger.info(
+        "stdin-enqueue pid={} id={} qsize={}",
+        _BRIDGE_PID,
+        req_id,
+        queue.qsize(),
+    )
 
 
 def attachment_dest_dir(ws_root: Path, session_key: str) -> Path:
@@ -144,6 +214,11 @@ class BridgeRuntimeLoop:
         4. Drain request queue (blocking)
         5. Shutdown
         """
+        # #1036: open this bridge generation in the trace log. Every other
+        # trace line carries the same pid, so a log that spans a restart can be
+        # split by generation instead of being read as one continuous channel.
+        logger.info("bridge-start pid={} epoch={:.3f}", _BRIDGE_PID, _BRIDGE_START_EPOCH)
+
         # 1. Create AppServer
         await self._init_app_server()
 
@@ -165,8 +240,13 @@ class BridgeRuntimeLoop:
         reader_thread.start()
         logger.info("BridgeRuntimeLoop: stdin reader started")
 
-        # 5. Signal ready to Desktop (Electron bridge.ts waits for this)
-        self._send({"type": "ready"})
+        # 5. Signal ready to Desktop (Electron bridge.ts waits for this).
+        # The pid travels with the handshake because on Windows a venv's
+        # python.exe is a launcher that re-execs the real interpreter, so the
+        # pid Electron spawned (`child.pid`) is NOT the pid this process sees
+        # in os.getpid().  The #1036 trace is joined across both logs by pid,
+        # so both sides must use the same number — this one.
+        self._send({"type": "ready", "pid": _BRIDGE_PID})
 
         # 5.5. Start sandbox manager initialization in background.
         # First-run auto-install of WSL deps (apt-get) can take 60-120 s,
@@ -1674,16 +1754,36 @@ class BridgeRuntimeLoop:
         Runs in a daemon thread. Uses run_coroutine_threadsafe() to
         safely push items into the queue owned by the persistent loop.
         A None sentinel is pushed when stdin closes (EOF).
+
+        #1036: this thread is the bridge end of the transport trace. Before it
+        existed, "the line never reached the bridge" and "it reached the
+        bridge but the loop never ran the put" left the same signature — none.
+        ``stdin-read`` is emitted before the hand-off; ``stdin-enqueue``
+        (logged from inside the loop thread, after the put completed) closes
+        that gap.
         """
         loop = self._loop
         queue = self._stdin_queue
         if loop is None or queue is None:
             return
+        ctr = 0
         try:
             for line in sys.stdin:
                 raw = line.strip()
+                ctr += 1
+                req_id = _peek_request_id(raw)
+                logger.info(
+                    "stdin-read pid={} id={} len={} ctr={}",
+                    _BRIDGE_PID,
+                    req_id,
+                    len(raw),
+                    ctr,
+                )
                 try:
-                    asyncio.run_coroutine_threadsafe(queue.put(raw), loop)
+                    asyncio.run_coroutine_threadsafe(
+                        _enqueue_with_trace(queue, raw, req_id),
+                        loop,
+                    )
                 except Exception:
                     # Loop likely closed — stop reading
                     break
@@ -1731,6 +1831,11 @@ class BridgeRuntimeLoop:
         in_flight: set[asyncio.Task] = set()
         max_concurrent = 16
         sem = asyncio.Semaphore(max_concurrent)
+        # #1036: how many dispatches hold a semaphore slot right now. Logged on
+        # every dispatch-start so a backlog is readable at a glance — a queue
+        # that keeps filling while `inflight` sits pinned at max_concurrent is
+        # exactly the "some requests starve while others are served" shape.
+        inflight_now = 0
         # Lazy init lock: must be created on the running event loop.
         # asyncio.Lock() is safe to create here (we are inside _drain_loop,
         # which is awaited from _run on the persistent loop).
@@ -1738,8 +1843,24 @@ class BridgeRuntimeLoop:
 
         def _spawn(line: str) -> None:
             async def _run() -> None:
+                nonlocal inflight_now
+                waited_from = time.monotonic()
                 async with sem:
-                    await self._dispatch_one_line(line)
+                    # Time spent queued for a slot. The semaphore has no
+                    # timeout today, so this is the only measurement that can
+                    # show a request stuck waiting for a busy peer (#1036
+                    # 期望行为 2B — a concrete timeout value comes later, from
+                    # this data).
+                    queued_ms = (time.monotonic() - waited_from) * 1000.0
+                    inflight_now += 1
+                    try:
+                        await self._dispatch_one_line(
+                            line,
+                            queued_ms=queued_ms,
+                            inflight=inflight_now,
+                        )
+                    finally:
+                        inflight_now -= 1
 
             task = asyncio.create_task(_run())
             in_flight.add(task)
@@ -1756,9 +1877,22 @@ class BridgeRuntimeLoop:
                 break
             if not line:
                 continue
+            # #1036: the line left the queue (the drain loop is alive and this
+            # request was picked up). Paired with `stdin-enqueue` this pins the
+            # stall to the drain loop itself when the two disagree.
+            recv_id, recv_method = _peek_line_request(line)
+            logger.info(
+                "stdin-recv pid={} id={} method={} qsize={}",
+                _BRIDGE_PID,
+                recv_id,
+                recv_method,
+                queue.qsize(),
+            )
             _spawn(line)
 
-    async def _dispatch_one_line(self, line: str) -> None:
+    async def _dispatch_one_line(
+        self, line: str, *, queued_ms: float = 0.0, inflight: int = 0,
+    ) -> None:
         """Dispatch a single stdin line as an independent request.
 
         Extracted from _drain_loop so that a slow handler (e.g. a first-time
@@ -1766,11 +1900,65 @@ class BridgeRuntimeLoop:
         requests on the stdin queue.  The outer _drain_loop wraps each call
         in a fire-and-forget task; the AppServer's internal lock still
         serializes state-mutating operations on the session registry.
+
+        ``queued_ms`` / ``inflight`` are the #1036 trace inputs from
+        ``_drain_loop`` (semaphore wait and slot occupancy).
         """
         send = self._send
         app_server = self._app_server
         dispatch_legacy = self._dispatch_legacy
         conn_state = self._connection_state
+
+        async def _dispatch(
+            request_id: str,
+            method: str,
+            params: dict,
+            client_id: str,
+            session_id: str | None,
+        ) -> dict:
+            """``app_server.dispatch`` wrapped in the #1036 transport trace.
+
+            Both call sites below — the initialize special case and the normal
+            path — go through here.  The success path used to be completely
+            silent, so "the bridge never dispatched this request" and "it
+            dispatched and answered it" were indistinguishable from the log.
+            """
+            started = time.monotonic()
+            logger.info(
+                "dispatch-start pid={} id={} method={} queued_ms={:.1f} inflight={}",
+                _BRIDGE_PID,
+                request_id,
+                method,
+                queued_ms,
+                inflight,
+            )
+            try:
+                response = await app_server.dispatch(
+                    request_id=request_id,
+                    method=method,
+                    params=params,
+                    client_id=client_id,
+                    session_id=session_id,
+                )
+            except BaseException as exc:
+                logger.info(
+                    "dispatch-error pid={} id={} method={} elapsed_ms={:.1f} err={}",
+                    _BRIDGE_PID,
+                    request_id,
+                    method,
+                    (time.monotonic() - started) * 1000.0,
+                    type(exc).__name__,
+                )
+                raise
+            logger.info(
+                "dispatch-done pid={} id={} method={} elapsed_ms={:.1f} resp_bytes={}",
+                _BRIDGE_PID,
+                request_id,
+                method,
+                (time.monotonic() - started) * 1000.0,
+                _response_bytes(response),
+            )
+            return response
 
         req_id = "?"
         try:
@@ -1794,12 +1982,12 @@ class BridgeRuntimeLoop:
                     })
                     return
 
-                response = await app_server.dispatch(
-                    request_id=req_id,
-                    method=method,
-                    params=params,
-                    client_id="pre-init",
-                    session_id=None,
+                response = await _dispatch(
+                    req_id,
+                    method,
+                    params,
+                    "pre-init",
+                    None,
                 )
                 # If initialize succeeded, update connection state.
                 # Use a per-loop lock to make initialize + connection-state
@@ -1870,12 +2058,12 @@ class BridgeRuntimeLoop:
 
             # Check if this method is registered on AppServer
             if method in getattr(app_server, "_methods", {}):
-                response = await app_server.dispatch(
-                    request_id=req_id,
-                    method=method,
-                    params=params,
-                    client_id=client_id,
-                    session_id=session_id,
+                response = await _dispatch(
+                    req_id,
+                    method,
+                    params,
+                    client_id,
+                    session_id,
                 )
                 send(response)
             elif dispatch_legacy is not None:

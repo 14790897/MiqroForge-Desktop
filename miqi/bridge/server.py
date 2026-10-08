@@ -50,6 +50,10 @@ if hasattr(sys.stdin, 'reconfigure'):
 _stdout_buffer = sys.stdout.buffer if hasattr(sys.stdout, 'buffer') else None
 
 _stdout_lock = threading.Lock()
+#: #1036 transport trace — this process's identity, stamped on every
+#: `bridge-resp sent` line so a log that spans a bridge restart can be split
+#: by generation (loop.py opens each generation with `bridge-start`).
+_BRIDGE_PID = os.getpid()
 _file_logging_sinks: dict[Path, int] = {}
 #: Workspace `_ensure_workspace_init` last set up.  Re-running it is driven by
 #: this changing, not by the call itself — the effective workspace follows the
@@ -94,8 +98,32 @@ def _init_logging() -> None:
     )
 
 
+def _is_response_envelope(data: dict[str, Any]) -> bool:
+    """True for a response (``result``/``error`` envelope), false for an event.
+
+    The discriminator is "carries no event key", matching the receive side
+    (`normalizeBridgeMessage` in apps/desktop/src/main/bridge.ts, which reads
+    `type` and then `event`).  Both keys are checked so a producer that later
+    switches to `event` cannot make the trace silently stop matching, and so
+    events — which also carry an `id` — are never logged as responses.
+    """
+    return "type" not in data and "event" not in data
+
+
 def _send(data: dict[str, Any]) -> None:
-    """Write one atomic JSON line to stdout as UTF-8 bytes (thread-safe)."""
+    """Write one atomic JSON line to stdout as UTF-8 bytes (thread-safe).
+
+    #1036: every response is also traced to stderr as
+    ``bridge-resp sent pid=… id=… bytes=…`` so that "the bridge answered but
+    the reply never reached the main process" can be told apart from "the
+    bridge never answered".  Sized after encoding, so ``bytes=`` matches the
+    ``resp_bytes=`` on the ``dispatch-done`` line for the same request.
+
+    The trace lives here rather than in ``_result``/``_error`` because those
+    legacy helpers are no longer on the path the Desktop uses: AppServer
+    responses are written by the dispatch loop in ``loop.py``, straight from
+    ``app_server.dispatch``'s return value.
+    """
     line = (json.dumps(data, ensure_ascii=False) + "\n").encode('utf-8')
     with _stdout_lock:
         if _stdout_buffer is not None:
@@ -104,6 +132,16 @@ def _send(data: dict[str, Any]) -> None:
         else:
             sys.stdout.write(line.decode('utf-8'))
             sys.stdout.flush()
+    # `_log` prints to sys.stderr, and `print(file=None)` would fall back to
+    # stdout — i.e. straight into the protocol channel.  Skip the trace rather
+    # than risk that (a windowed build has no stderr; the protocol must not
+    # depend on the trace being writable).
+    if _is_response_envelope(data) and sys.stderr is not None:
+        _log(
+            f"bridge-resp sent pid={_BRIDGE_PID} "
+            f"id={data.get('id') or data.get('request_id') or '?'} "
+            f"bytes={len(line)}"
+        )
 
 
 def _result(req_id: str, result: Any = None) -> None:
