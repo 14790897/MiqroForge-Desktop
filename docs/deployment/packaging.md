@@ -201,6 +201,10 @@ Wheel 包含：
 `tests/test_version_sync.py` 会在任一方漂移时让 CI 失败，因此不要手工只改其中一个；
 发版时 `@semantic-release/git` 也会把四个文件一并提交。
 
+develop 分支上的预发布（`vX.Y.Z-dev.N`）只发布 GitHub Prerelease 和 tag，**不动这四个文件**
+（`release.config.cjs` 里 develop 走的是精简插件集）：develop 的版本号由发布后的反向同步统一
+标记成 `<已发布版本>-dev`，两边都写会互相覆盖。
+
 `uv.lock` 里也有一个 `miqi` 的 `version`（`[[package]] name = "miqi"`），
 但它由 `uv sync` / `uv lock` 自动重写、且写成 PEP 440 规范形式
 （`0.30.0-dev` → `0.30.0.dev0`），不需要也不应该手工维护。
