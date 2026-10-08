@@ -1702,3 +1702,58 @@ def test_find_ledger_root_ignores_app_home_but_keeps_folder_binding(tmp_path):
     found = _find_ledger_root(sm, key, "client-A", runtime_workspace=str(folder))
     assert found is not None
     assert found == folder.resolve()
+
+
+@pytest.mark.asyncio
+async def test_sessions_workspace_none_when_runtime_workspace_is_app_home(fake_config, fake_provider):
+    """#1236：活跃 runtime 的 workspace == app-home 时，sessions.workspace 也必须返回 null。
+
+    回归前：seed 探测把 app-home 根当成绑定根，主进程会拿到一个多余的「额外根」
+    （整个工作区）用于包含性校验。
+    """
+    from types import SimpleNamespace
+
+    from miqi.runtime.session_handlers import sessions_workspace_handler
+
+    key = "desktop:1236-ws-app-home"
+    _sm, ws = _setup_session(key, "client-1")
+    runtime = SimpleNamespace(services=SimpleNamespace(workspace=ws))
+
+    async def _get_session(cid, sid):
+        return runtime
+
+    out = await sessions_workspace_handler(
+        "req-1", {"session_key": key}, "client-1", None,
+        SimpleNamespace(get_session=_get_session),
+    )
+    assert out["result"]["workspace"] is None
+
+
+@pytest.mark.asyncio
+async def test_files_write_cross_session_blocked_when_stub_workspace_is_app_home(fake_config, fake_provider, tmp_path):
+    """#1236：stub 记录的 workspace == app-home（seed 2）时，写端同样不许跨会话。
+
+    files.write 不传 runtime_workspace，只会命中 seed 1=None / seed 2=stub 记录；
+    回归前该 seed 同样把 app-home 判成绑定根，跨会话写路径会被放行。
+    """
+    from miqi.runtime.app_server import AppServerError
+    from miqi.runtime.file_handlers import files_write_handler
+    from miqi.session.session_keys import session_files_dir_key
+
+    own_key = "desktop:1236-write-own"
+    other_key = "desktop:1236-write-other"
+    sm, ws = _setup_session(own_key, "client-1")
+    _setup_session(other_key, "client-2")
+
+    stub = sm.load_existing(own_key)
+    stub.metadata["workspace"] = str(ws)
+    sm.save(stub)
+
+    other_rel = f"sessions/{session_files_dir_key(other_key)}/files/evil.md"
+    with pytest.raises(AppServerError) as exc_info:
+        await files_write_handler(
+            "req-1",
+            {"path": other_rel, "content": "evil", "session_key": own_key},
+            "client-1", None, None,
+        )
+    assert exc_info.value.code == "INVALID_PARAMS"
