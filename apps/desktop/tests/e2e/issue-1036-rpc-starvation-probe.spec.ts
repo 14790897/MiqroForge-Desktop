@@ -198,8 +198,10 @@ function readSince(cursor: LogCursor): string {
   return old + readFileSync(file).toString('utf8');
 }
 
-/** 应用自身证据。`graceMs` 内的请求可能还在飞，不计入 unread。 */
-function readAppEvidence(cursor: LogCursor | null, windowEndAt: number): AppEvidence {
+/** 应用自身证据。`graceMs` 内的请求可能还在飞，不计入 unread。 */ function readAppEvidence(
+  cursor: LogCursor | null,
+  windowEndAt: number
+): AppEvidence {
   const empty: AppEvidence = {
     slowIpc: [],
     maxIpcMs: 0,
@@ -263,6 +265,32 @@ function readAppEvidence(cursor: LogCursor | null, windowEndAt: number): AppEvid
     writeFailed,
     parseErrors,
   };
+}
+
+/**
+ * 本次 `chat.send` 的（桥 pid, 请求 id）—— 从窗口内第一条 `method=chat.send`
+ * 的写入行里抓。
+ *
+ * 恢复用例必须**按这对标识**等 drain 完成：只等「窗口里出现过 `chat.send drain done`」
+ * 会被别的会话/别的回合的 drain 满足，于是「刚 drain 完就发 config.get」这个前提
+ * 根本没成立（评审指出的那条）。标识取自 main 侧的写入行（桥自报的 pid + UUID），
+ * 再拿去匹配桥侧的完成行，顺带交叉验证了两侧用的是同一个 pid。
+ */
+function chatSendIdentity(text: string): { pid: string; id: string } | null {
+  const m = text.match(/bridge-req written pid=(\d+) id=(\S+) method=chat\.send/);
+  return m ? { pid: m[1], id: m[2] } : null;
+}
+
+/** 窗口内是否出现了**这一次** chat.send 的 drain 完成行（request 与 pid 都要对上）。 */
+function drainedFor(text: string, identity: { pid: string; id: string }): boolean {
+  return text
+    .split('\n')
+    .some(
+      (line) =>
+        line.includes('chat.send drain done') &&
+        line.includes(`request=${identity.id}`) &&
+        line.includes(`pid=${identity.pid}`)
+    );
 }
 
 /**
@@ -355,17 +383,32 @@ test.describe('#1036 RPC starvation probe (real model + real exec)', () => {
     const cursor = openLogCursor();
     await sendMessage(page, longTurnPrompt(RECOVERY_CMD_SECONDS));
 
-    // 等这一轮真的 drain 完（桥自己在日志里打的 `chat.send drain done`）
+    // 先认出**本次** chat.send 的标识（桥 pid + 请求 id），再等它的 drain 完成行。
+    // 只等「有 drain done」会被别的会话/回合满足 —— 那样「刚 drain 完就发请求」
+    // 这个前提根本没成立（评审指出的那条）。
     const deadline = Date.now() + 7 * 60_000;
+    let identity: { pid: string; id: string } | null = null;
+    while (Date.now() < deadline && !identity) {
+      identity = cursor ? chatSendIdentity(readSince(cursor)) : null;
+      if (!identity) await page.waitForTimeout(500);
+    }
+    expect(
+      identity,
+      '认不出本次 chat.send 的标识：窗口内没有 method=chat.send 的写入行（它没被发出去？）'
+    ).toBeTruthy();
+
     let drained = false;
     while (Date.now() < deadline) {
-      if (cursor && readSince(cursor).includes('chat.send drain done')) {
+      if (cursor && drainedFor(readSince(cursor), identity!)) {
         drained = true;
         break;
       }
       await page.waitForTimeout(1_000);
     }
-    test.skip(!drained, '本轮无结论：等不到 chat.send drain done（turn 没在那段时间内收尾）');
+    test.skip(
+      !drained,
+      `本轮无结论：等不到本次 chat.send（request=${identity!.id} / pid=${identity!.pid}）的 drain 完成行`
+    );
 
     const t0 = Date.now();
     const value = await page.evaluate(() => (window as any).miqi.config.get());

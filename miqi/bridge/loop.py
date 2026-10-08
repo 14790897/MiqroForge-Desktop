@@ -1661,10 +1661,14 @@ class BridgeRuntimeLoop:
         finally:
             # Stop the heartbeat — the turn is done (or the drain died).
             if reasoning_chunks:
+                # request= / pid= 是给「按标识匹配」用的：只有 session 的话，
+                # 并发会话下没法把这一行绑到具体某次 chat.send 上（#1036 的恢复
+                # 用例就是按这对标识等 drain 完成的）。
                 logger.info(
                     "chat.send drain done: forwarded {} reasoning chunks "
-                    "({} chars) for session={}",
+                    "({} chars) for session={} request={} pid={}",
                     reasoning_chunks, reasoning_chars, session_id,
+                    request_id, _BRIDGE_PID,
                 )
             if heartbeat_task is not None:
                 heartbeat_task.cancel()
