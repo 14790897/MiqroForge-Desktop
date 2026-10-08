@@ -303,7 +303,12 @@ test.describe('#1036 RPC starvation probe (real model + real exec)', () => {
 
   test.beforeAll(async () => {
     // 不 patch provider —— 真实模型往返（本地 deepseek / CI siliconflow）。
-    const fixture = await launchElectronApp();
+    // 只打开顶栏那个「审批绕过」标注：它的文案与显隐都来自 `config.get`，正是
+    // 本次修复影响的那条通道 —— 用来验证「后台请求被打断时，用户在界面上会看到
+    // 什么」。注意必须写 camelCase（渲染层读的是 `approvals.bypassAll`）。
+    const fixture = await launchElectronApp((config: any) => {
+      config.approvals = { ...(config.approvals ?? {}), bypassAll: true, bypass_all: true };
+    });
     electronApp = fixture.electronApp;
     page = fixture.page;
     miqiHome = fixture.miqiHome;
@@ -324,6 +329,15 @@ test.describe('#1036 RPC starvation probe (real model + real exec)', () => {
     test.setTimeout(WINDOW_MS + 10 * 60_000);
 
     await createNewConversation(page);
+
+    // 「用户能看到的那一面」：顶栏的审批绕过标注，显隐与文案都来自 config.get。
+    // 请求被饿死时界面回退到本地兜底配置（空）→ 这个标注**整个消失**，用户看到
+    // 的是「没有绕过」，而后台其实还开着 —— 这就是 #1036 在界面上唯一可见的差异。
+    const bypassChip = page.getByRole('button', { name: /绕过/ });
+    expect(
+      await bypassChip.count(),
+      '前置不成立：顶栏的审批绕过标注没渲染出来，本轮无从验证用户可见性'
+    ).toBe(1);
 
     // 采样器与证据采集都装在页面里。采样必须 fire-and-forget：写成
     // `await page.evaluate(...)` 时 Playwright 会等到这个 Promise settle
@@ -415,6 +429,8 @@ test.describe('#1036 RPC starvation probe (real model + real exec)', () => {
 
     // 应用自身的证据（注入采样之外的那一路，见 AppEvidence 注释）。
     const app = readAppEvidence(logCursor, Date.now());
+    // 同一时刻再确认那次「用户可见的标注」还在不在（见上面 bypassChip 的说明）。
+    const chipAtEnd = await bypassChip.count();
     const appSummary =
       `[probe1036] 应用自身证据：bridge-req written ${app.written} 条，` +
       `其中「写了但桥侧从未 stdin-read」${app.unread.length} 条` +
@@ -424,6 +440,7 @@ test.describe('#1036 RPC starvation probe (real model + real exec)', () => {
             .map((i) => i.slice(0, 8))
             .join(', ')}…）`
         : '') +
+      `\n[probe1036] 顶栏「审批绕过」标注：开始=1 窗口结束时=${chipAtEnd}` +
       `\n[probe1036] 最长 IPC=${app.maxIpcMs}ms` +
       (app.slowIpc.length ? `，≥判据的 ${app.slowIpc.length} 条：${app.slowIpc.join(' | ')}` : '') +
       `\n[probe1036] orphan=${app.orphans} write-failed=${app.writeFailed} ` +
@@ -495,6 +512,12 @@ test.describe('#1036 RPC starvation probe (real model + real exec)', () => {
     if (samples.length === 0 && app.unread.length > 0) {
       reasons.push(
         '注入采样的请求一个都没 settle —— 它们本身就落进了上面那批「写了但桥侧从未读到」'
+      );
+    }
+    if (chipAtEnd === 0) {
+      reasons.push(
+        '顶栏的「审批绕过」标注在长 turn 期间消失了 —— 界面拿到了本地兜底配置，' +
+          '用户看到的是一个与后台实际状态不符的界面（#1036 在界面上唯一可见的那一面）'
       );
     }
     expect(
