@@ -225,13 +225,15 @@ function ComposerImpl(
           —— 卡片沾满输入框宽度、位于输入框内，而不是浮在窗口中央的模态。
           放在附件插槽之前，审批要压在最上面。 */}
       <div data-testid="approval-slot" />
-      {/* 框内顶部插槽：附件预览由 ChatConsole portal 投到这里(显示在输入框内部) */}
-      <div ref={attachmentSlotRef} />
       {/* 审批挂起时，卡片（ApprovalModal portal 进上面的插槽）直接顶掉输入内容。
           审批是阻塞的：等待期间输入框除了「中断当前生成」没有实际用途，留着它白占
           ~100px 高度。用 hidden 而不是条件卸载，用户已输入的文字和内部状态都保留；
           常态用 display:contents 包一层，对原有 flex 布局零影响。 */}
       <div className={pendingApproval ? 'hidden' : 'contents'}>
+        {/* 框内顶部插槽：附件预览由 ChatConsole portal 投到这里(显示在输入框内部)。
+            放在让位包裹层**之内**——放外面的话审批期间附件预览会留在卡片下方不跟着
+            让位。必须在让位时保持挂载（它是 portal 目标），所以随包裹层 hidden 而不是卸载 */}
+        <div ref={attachmentSlotRef} />
         {/* issue #962 起点任务：选过的子项目 / 子子项目以可移除胶囊显示在输入框里
           （形态对齐 WorkBuddy 的「文档处理 ×」）。#1021/#1042 之后输入框被抽成
           Composer 组件，这段就跟着搬过来——数据由 ChatConsole 传，这里只负责画。

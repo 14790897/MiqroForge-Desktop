@@ -33,18 +33,40 @@ export function ApprovalModal() {
   resolveRef.current = resolve;
 
   // 输入框内插槽（聊天页才有）。审批期间监听 DOM 变化，因为切页面会挂/卸 Composer。
+  // 但「插槽存在」不等于「插槽可见」：App.tsx 切到设置等页面时只是给聊天区加
+  // `hidden`、并**不卸载** ChatConsole，插槽元素仍在 DOM 里。portal 进一个
+  // display:none 的容器 = 审批卡彻底不可见、turn 卡到超时，所以必须确认插槽真的
+  // 被渲染（offsetParent 非 null）。拿不到就退回居中模态 —— 模态是 fixed 定位，
+  // 在任何页面都可见。
+  //
+  // 还要盯住插槽**祖先链**的 class/style：页面切换就是给祖先换 className，只观察
+  // childList 的话「审批挂着时用户切走」不会重算，卡片会跟着聊天区一起消失。
   const [slot, setSlot] = useState<HTMLElement | null>(null);
   useEffect(() => {
     if (!pending) {
       setSlot(null);
       return;
     }
-    const find = () =>
-      setSlot(document.querySelector<HTMLElement>('[data-testid="approval-slot"]'));
-    find();
-    const observer = new MutationObserver(find);
+    let observedSlot: HTMLElement | null = null;
+    let observer: MutationObserver | null = null;
+
+    function sync() {
+      const el = document.querySelector<HTMLElement>('[data-testid="approval-slot"]');
+      setSlot(el && el.offsetParent !== null ? el : null);
+      if (el === observedSlot) return;
+      observedSlot = el;
+      // MutationObserver 没有 unobserve（只能整个 disconnect），所以换目标时重挂
+      observer?.disconnect();
+      observer?.observe(document.body, { childList: true, subtree: true });
+      for (let n = el?.parentElement; n && n !== document.body; n = n.parentElement) {
+        observer?.observe(n, { attributes: true, attributeFilter: ['class', 'style'] });
+      }
+    }
+
+    observer = new MutationObserver(sync);
     observer.observe(document.body, { childList: true, subtree: true });
-    return () => observer.disconnect();
+    sync();
+    return () => observer?.disconnect();
   }, [pending]);
 
   // Esc → 拒绝；⏎ → 允许一次。让位规则只看**当前真正可见、可编辑**的元素：
@@ -123,8 +145,46 @@ function ApprovalCard({
   // 不损失键盘可达性。
   const rootRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
-    rootRef.current?.focus();
+    const root = rootRef.current;
+    const prev = document.activeElement as HTMLElement | null;
+    root?.focus();
+    return () => {
+      // 审批结束后把焦点还回去，否则键盘流断掉（批准后还得先点一下才能打字）。
+      // 内联形态归还给**输入框**——卡片顶掉的就是它，⏎ 批准后直接接着打字最顺；
+      // 实测卡片挂载时 activeElement 已经是被 blur 掉的 body（发消息后就如此），
+      // 所以"还给打开前的元素"在内联形态下等于什么都没做。
+      // 兜底形态才还给打开前的元素：那时聊天区仍可能是 hidden，把焦点丢进一个
+      // 不可见的 textarea 只会让人困惑。
+      // 只在焦点仍由本卡持有时归还——用户已经点到别处了就别抢回来。
+      const active = document.activeElement;
+      if (!root || (active !== root && active !== document.body)) return;
+      const target = inline
+        ? document.querySelector<HTMLElement>('[data-testid="chat-input-container"] textarea')
+        : prev;
+      if (target?.isConnected) target.focus();
+    };
   }, []);
+  // 兜底模态把 Tab 圈在卡内。`aria-modal` 只声明语义、不拦键盘：不拦的话 Tab 会走到
+  // 遮罩后面的按钮上——那些按钮用户看不见，却能按回车点中。内联形态不需要（它就是
+  // 输入框的一部分，没有"后面"）。
+  const onKeyDownTrap = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    if (inline || e.key !== 'Tab') return;
+    const root = rootRef.current;
+    const list = Array.from(
+      root?.querySelectorAll<HTMLElement>(
+        'button:not([disabled]), [href], input:not([disabled]), [tabindex]:not([tabindex="-1"])'
+      ) ?? []
+    );
+    if (list.length === 0) return;
+    const first = list[0];
+    const last = list[list.length - 1];
+    const active = document.activeElement;
+    const outside = !root || !root.contains(active) || active === root;
+    if (e.shiftKey ? outside || active === first : outside || active === last) {
+      e.preventDefault();
+      (e.shiftKey ? last : first).focus();
+    }
+  };
   const title = getApprovalTitle(pending.category);
   const display = getApprovalDisplay(pending);
   const description = (pending.description ?? '').trim();
@@ -150,7 +210,8 @@ function ApprovalCard({
       ref={rootRef}
       tabIndex={-1}
       role={inline ? 'group' : undefined}
-      aria-labelledby={inline ? undefined : 'approval-title'}
+      aria-labelledby={inline ? 'approval-title' : undefined}
+      onKeyDown={onKeyDownTrap}
       className={cn('outline-none!', inline && 'flex flex-col')}
     >
       {/* 标题行：图标 + 标题 …… 剩余秒数 + 关闭（关闭 = 拒绝）。
