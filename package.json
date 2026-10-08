@@ -34,52 +34,6 @@
     "prettier": "^3.9.4",
     "semantic-release": "^25.0.5"
   },
-  "release": {
-    "branches": [
-      "main",
-      {
-        "name": "develop",
-        "prerelease": "dev"
-      }
-    ],
-    "plugins": [
-      "@semantic-release/commit-analyzer",
-      [
-        "@semantic-release/release-notes-generator",
-        {
-          "writerOpts": {
-            "footerPartial": "{{#if noteGroups}}\n{{#each noteGroups}}\n\n### {{title}}\n\n{{#each notes}}\n* {{text}}\n{{/each}}\n{{/each}}\n{{/if}}\n---\n## 下载说明\n\nmacOS 用户请按芯片架构选择安装包：\n\n- **Apple Silicon (M1/M2/M3/M4)**：下载 `{{version}}-arm64.dmg`（ARM 架构）\n- **Intel**：下载 `{{version}}.dmg`（x86 无后缀）\n"
-          }
-        }
-      ],
-      [
-        "@semantic-release/changelog",
-        {
-          "changelogFile": "CHANGELOG.md"
-        }
-      ],
-      [
-        "@semantic-release/exec",
-        {
-          "prepareCmd": "bash scripts/update-version.sh ${nextRelease.version}"
-        }
-      ],
-      [
-        "@semantic-release/git",
-        {
-          "assets": [
-            "CHANGELOG.md",
-            "package.json",
-            "pyproject.toml",
-            "apps/desktop/package.json",
-            "miqi/__init__.py"
-          ],
-          "message": "chore(release): ${nextRelease.version} [skip ci]"
-        }
-      ],
-      "@semantic-release/github"
-    ]
-  },
   "config": {
     "commitizen": {
       "path": "./node_modules/cz-conventional-changelog"

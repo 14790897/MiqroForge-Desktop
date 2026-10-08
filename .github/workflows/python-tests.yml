@@ -150,8 +150,8 @@ jobs:
             },
             "agents": {
               "defaults": {
-                "model": "deepseek-v4-pro",
-                "maxTokens": 8000,
+                "model": "deepseek-flash",
+                "maxTokens": 393216,
                 "temperature": 0.1,
                 "maxToolIterations": 10,
                 "runtime": "app_server"

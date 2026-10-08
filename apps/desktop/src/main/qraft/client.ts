@@ -420,7 +420,7 @@ export class QraftClient {
     }
     const data = parseBusinessJson(bodyText);
     if (data.code !== 200 || !data.access_token) {
-      const detail = refreshServerDetail(data, refreshToken);
+      const detail = serverDetail(data, [refreshToken]);
       if (isInvalidRefreshToken(detail)) {
         throw new QraftError(
           'REFRESH_TOKEN_INVALID',
@@ -523,7 +523,7 @@ export class QraftClient {
     if (data.code !== 200 || !data.data) {
       throw new QraftError(
         'POINTS_FAILED',
-        `查询积分余额失败：${data.message || data.msg || '未知错误'}`
+        `查询积分余额失败：${serverDetail(data) || '未知错误'}`
       );
     }
     this.log('INFO', 'qraft: 积分余额查询成功');
@@ -568,10 +568,7 @@ export class QraftClient {
       );
     }
     if (data.code !== 200 || !data.data) {
-      throw new QraftError(
-        'POINTS_FAILED',
-        `扣除积分失败：${data.message || data.msg || '未知错误'}`
-      );
+      throw new QraftError('POINTS_FAILED', `扣除积分失败：${serverDetail(data) || '未知错误'}`);
     }
     this.log('INFO', 'qraft: 积分扣除成功');
     return parsePointsBalance(data.data);
@@ -686,9 +683,10 @@ function sanitizeServerMessage(message: string, secrets: string[]): string {
   return out.slice(0, 200);
 }
 
-/** 提取刷新失败的服务端明细：优先 data.data.originalMessage（Sa-Token 异常
- *  详情），退化为顶层 message/msg；含脱敏。 */
-function refreshServerDetail(data: BusinessEnvelope, refreshToken: string): string {
+/** 提取业务失败的服务端明细：优先 data.data.originalMessage（平台把真实的
+ *  异常栈摘要放在这里，顶层 msg 往往只是「未知错误」），退化为顶层
+ *  message/msg；含脱敏与截断。 */
+function serverDetail(data: BusinessEnvelope, secrets: string[] = []): string {
   const nested = data.data;
   const original =
     typeof nested === 'object' && nested !== null
@@ -697,7 +695,7 @@ function refreshServerDetail(data: BusinessEnvelope, refreshToken: string): stri
   const raw = [original, data.message, data.msg]
     .filter((s): s is string => typeof s === 'string' && s.length > 0)
     .join('；');
-  return sanitizeServerMessage(raw, [refreshToken]);
+  return sanitizeServerMessage(raw, secrets);
 }
 
 /** refresh_token 已失效（平台侧作废/过期）：重试必然失败，属永久错误。 */

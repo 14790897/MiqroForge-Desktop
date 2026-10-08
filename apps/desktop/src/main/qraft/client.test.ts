@@ -782,6 +782,33 @@ describe('QraftClient.getPointsBalance', () => {
       message: expect.stringContaining('服务端异常') as unknown as string,
     });
   });
+
+  // 实测平台把真实异常放在 data.originalMessage，顶层 msg 只有「未知错误」：
+  // 不取 originalMessage 的话，界面与日志都只剩一个「未知错误」无法排查。
+  it('业务失败（异常在 data.originalMessage）→ 明细进 message', async () => {
+    const fetch = createFetchMock([
+      {
+        url: /\/oauth2\/points\/balance$/,
+        response: mockResponse(
+          200,
+          JSON.stringify({
+            code: 500,
+            msg: '未知错误',
+            data: {
+              message: '未知错误',
+              originalMessage: "SQLException: Data truncated for column 'type' at row 1",
+            },
+          }),
+          jsonHeaders()
+        ),
+      },
+    ]);
+    const client = new QraftClient(fetch, noopLog);
+    await expect(client.getPointsBalance(CONFIG, 'TOKEN')).rejects.toMatchObject({
+      code: 'POINTS_FAILED',
+      message: expect.stringContaining("Data truncated for column 'type'") as unknown as string,
+    });
+  });
 });
 
 describe('QraftClient.deductPoints', () => {

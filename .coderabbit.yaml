@@ -1,0 +1,9 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+# CodeRabbit 仓库级配置。优先级高于 Organization UI；inheritance: true 让本文件未定义的设置继续沿用上层配置，
+# 否则那些设置会掉回 schema 默认值。
+inheritance: true
+
+reviews:
+  auto_review:
+    enabled: true
+    drafts: true

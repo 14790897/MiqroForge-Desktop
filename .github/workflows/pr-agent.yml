@@ -41,8 +41,8 @@ jobs:
           github_action_config.pr_actions: '["opened", "reopened", "synchronize", "ready_for_review", "review_requested"]'
           github_action_config.handle_push_trigger: "true"
           github_action_config.push_commands: '["/review", "/describe", "/improve"]'
-          config.model: "openai/deepseek-v4-pro"
-          config.fallback_models: '["openai/deepseek-v4-pro"]'
+          config.model: "openai/deepseek-flash"
+          config.fallback_models: '["openai/deepseek-flash"]'
           config.custom_model_max_tokens: "128000"
           config.max_model_tokens: "128000"
           config.reasoning_effort: "xhigh"
