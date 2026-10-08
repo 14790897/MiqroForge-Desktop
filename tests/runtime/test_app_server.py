@@ -371,3 +371,42 @@ async def test_app_server_cancels_owned_background_tasks_on_stop():
 
     assert task.done()
     assert task.cancelled() or task.exception() is not None
+
+
+# ── 会话授权门对各方法的适用性 ────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_dispatch_allows_files_read_without_a_live_session():
+    """files.read 不该被 registry 门挡住。
+
+    它自己解析路径并做会话归属校验（file_handlers._validate_file_path，带
+    client_id + session_key），数据来自磁盘，**不需要存活的 runtime session**。
+    用 registry 挡它，等于在会话尚未注册时拒绝一次合法读取——bridge 重启后、
+    会话第一条消息之前、以及会话闲置被回收之后都是这种状态，而桌面端会随渲染
+    反复重试，于是一次误拒会持续复现成 Not authorized。
+
+    反向断言同样重要：同一批里**没有**豁免的方法（这里用 files.tree 代表）在
+    有 session_id 但没有存活会话时必须仍被拒——否则就不是「只放宽了一个」。
+    """
+    from miqi.runtime.app_server import AppServer, ClientSessionRegistry
+
+    server = AppServer(ClientSessionRegistry())
+
+    async def _ok(request_id, params, client_id, session_id, registry):
+        return {"ok": True}
+
+    server.register_method("files.read", _ok)
+    server.register_method("files.tree", _ok)
+
+    # 会话没有注册给这个客户端 —— 重启后 / 首条消息前 / 闲置回收后
+    allowed = await server.dispatch(
+        "1", "files.read", {"session_key": "desktop:1"}, "client-a", "client-a:desktop:1",
+    )
+    assert allowed.get("code") != "UNAUTHORIZED", allowed
+    assert allowed.get("ok") is True, allowed
+
+    blocked = await server.dispatch(
+        "2", "files.tree", {"session_key": "desktop:1"}, "client-a", "client-a:desktop:1",
+    )
+    assert blocked.get("code") == "UNAUTHORIZED", blocked
