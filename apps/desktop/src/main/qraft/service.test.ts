@@ -1519,4 +1519,32 @@ describe('QraftService 积分余额拉取（issue #1160）', () => {
     expect(client.refreshTokens).not.toHaveBeenCalled();
     expect(svc.status().requiresRelogin).toBe(false);
   });
+
+  // 曾经只打错误码，平台侧 SQL 报错在日志里完全不可见（只能看到 POINTS_FAILED）。
+  it('平台业务失败：日志同时带错误码与服务端明细', async () => {
+    const client = makePointsClient();
+    client.getPointsBalance.mockRejectedValue(
+      new QraftError(
+        'POINTS_FAILED',
+        "查询积分余额失败：SQLException: Data truncated for column 'type' at row 1；未知错误"
+      )
+    );
+    store.save(makeStoredState());
+    const logs: string[] = [];
+    const svc = new QraftService({
+      client: client as unknown as QraftClient,
+      store,
+      log: ((_level: string, message: string) => {
+        logs.push(message);
+      }) as unknown as QraftLogger,
+      makeRedirectUri: () => 'http://localhost:38000/callback',
+      tokenFilePath: () => join(dir, 'qraft-token.json'),
+    });
+
+    await svc.fetchPointsBalance();
+
+    const logged = logs.join('\n');
+    expect(logged).toContain('POINTS_FAILED');
+    expect(logged).toContain("Data truncated for column 'type'");
+  });
 });
