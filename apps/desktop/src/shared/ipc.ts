@@ -245,6 +245,11 @@ export const ChatSendInput = z.object({
   session_key: z.string().optional(),
   thread_id: z.string().optional(),
   mode: z.enum(['plan', 'manual', 'edit', 'auto']).optional(),
+  // #680 断线修复：renderer/preload 一直在发 reasoning_mode，但 zod parse
+  // 默认剥离未知键 → 后端永远收不到档位（bridge 日志 reasoning_mode 0 次）。
+  // enum 而非 free string：非法档位在参数构造阶段就按「确定未派发」拦下，
+  // 与 bridge 侧「非 fast/think 一律 None」的宽松降级互补。
+  reasoning_mode: z.enum(['fast', 'think']).optional(),
   workspace: z.string().optional(),
   resume_turn_id: z.string().optional(),
   drop_from_turn_id: z.string().optional(),
