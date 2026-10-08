@@ -86,6 +86,14 @@ export function isPermanentRefreshError(code: QraftErrorCode | null): boolean {
   return code === 'REFRESH_TOKEN_INVALID';
 }
 
+/** 积分查询失败的日志文案：带上服务端明细，否则只留一个错误码，
+ *  平台侧异常（如 SQL 报错）会完全不可见。 */
+function pointsFailureLog(err: unknown): string {
+  // QraftError 的 message 自带「查询积分余额失败：」前缀，错误码缀在末尾即可。
+  if (err instanceof QraftError) return `qraft: ${err.message}（${err.code}）`;
+  return `qraft: 查询积分余额失败（${err instanceof Error ? err.message : String(err)}）`;
+}
+
 export interface QraftServiceOptions {
   client: QraftClient;
   store: QraftStore;
@@ -713,10 +721,7 @@ export class QraftService {
               'qraft: 刷新后重试积分余额仍失败（SESSION_EXPIRED）：会话已失效，请重新登录'
             );
           } else {
-            this.options.log(
-              'WARN',
-              `qraft: 查询积分余额失败（${retryErr instanceof QraftError ? retryErr.code : retryErr}）`
-            );
+            this.options.log('WARN', pointsFailureLog(retryErr));
           }
           if (retryErr instanceof QraftError) {
             return { ok: false, code: retryErr.code, message: retryErr.message };
@@ -728,10 +733,7 @@ export class QraftService {
           };
         }
       }
-      this.options.log(
-        'WARN',
-        `qraft: 查询积分余额失败（${err instanceof QraftError ? err.code : err}）`
-      );
+      this.options.log('WARN', pointsFailureLog(err));
       if (err instanceof QraftError) return { ok: false, code: err.code, message: err.message };
       return {
         ok: false,

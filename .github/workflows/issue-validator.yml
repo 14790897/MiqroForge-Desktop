@@ -19,3 +19,4 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           ai-api-key: ${{ secrets.DEEPSEEK_API_KEY }}
           ai-api-base: ${{ secrets.DEEPSEEK_API_BASE }}
+          ai-model: deepseek-flash
