@@ -47,6 +47,18 @@ def _client_session_id(client_id: str, session_key: str) -> str:
     return f"{client_id}:{session_key}"
 
 
+def _app_home_workspace_root(sm: Any) -> str:
+    """Canonical string of the app-home workspace root.
+
+    A folder binding is by definition a folder *other than* the app-home root:
+    the app-home root keeps every unbound session under ``<ws>/sessions/<key>/``,
+    so probing it cannot tell "bound to this very root" from "not bound at all"
+    (#1236).  The scan and the seed probe below both compare against this single
+    value, so the two cannot drift apart.
+    """
+    return str(Path(sm.workspace).expanduser().resolve())
+
+
 def _candidate_workspace_roots(
     sm: Any,
     client_id: str,
@@ -80,7 +92,7 @@ def _candidate_workspace_roots(
         sm.list_bound_workspaces(client_id=client_id, include_archived=True)
     )
 
-    default_ws = str(Path(sm.workspace).expanduser().resolve())
+    default_ws = _app_home_workspace_root(sm)
     roots: list[Path] = []
     seen: set[str] = set()
     for raw in raw_roots:
@@ -227,17 +239,27 @@ def _find_ledger_root(
     Scanning walks stubs newest-first, so a stale ledger-less copy comes first
     and answers for the ledger — reads come back empty and clears wipe the wrong
     folder.  Scan candidates must hold the ledger themselves to qualify.
+
+    The app-home workspace is never such a root: an unbound session keeps its
+    files under ``<ws>/sessions/<key>/``, so probing it always "finds" a copy
+    and answering with it would re-anchor session-relative paths at the
+    workspace root (#1236).  Callers fall back to ``sm`` for exactly that case.
     """
     from miqi.session.manager import SessionManager
 
     stub = sm.load_existing(session_key)
     seeds = [runtime_workspace, stub.metadata.get("workspace") if stub else None]
+    app_home = _app_home_workspace_root(sm)
     for seed in seeds:
         if not seed:
             continue
         try:
             seed_root = SessionManager._validate_workspace(Path(seed))
         except Exception:
+            continue
+        # See the docstring: the app-home root is not a folder binding, and the
+        # scan below has always excluded it — this probe must agree (#1236).
+        if str(seed_root) == app_home:
             continue
         if _probe_folder(seed_root, session_key, client_id) is not None:
             return seed_root

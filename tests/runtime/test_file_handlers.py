@@ -1610,3 +1610,95 @@ async def test_files_tree_skips_links_into_reserved_roots(
     names = [child["name"] for child in result["result"]["root"]["children"]]
     assert "sessions" not in names
     assert "innocent-link" not in names
+
+
+# ── #1236: app-home runtime workspace must not become the session's bound root ──
+
+
+@pytest.mark.asyncio
+async def test_files_read_bare_name_when_runtime_workspace_is_app_home(fake_config, fake_provider, tmp_path):
+    """#1236：活跃 runtime 的 workspace == app-home 工作区时，裸名必须仍按会话相对解析。
+
+    回归前：`_find_ledger_root` 的 seed 探测把 app-home 根当成会话的绑定根
+    （`SessionManager(<ws>).load_existing()` 对本会话必然命中），于是
+    `_validate_file_path` 的规则 (a) 把整个工作区当成会话自己的区域，裸名被锚到
+    `<ws>/note.txt` → File not found。
+    """
+    from types import SimpleNamespace
+
+    from miqi.runtime.file_handlers import files_read_handler
+
+    key = "desktop:1236-live-home"
+    sm, ws = _setup_session(key, "client-1")
+    _ensure_session_file(ws, key, "note.txt", "session payload")
+
+    runtime = SimpleNamespace(services=SimpleNamespace(workspace=ws))
+
+    async def _get_session(cid, sid):
+        return runtime
+
+    registry = SimpleNamespace(get_session=_get_session)
+    result = await files_read_handler(
+        "req-1", {"path": "note.txt", "session_key": key}, "client-1", None, registry,
+    )
+    assert result["result"]["content"] == "session payload"
+
+
+@pytest.mark.asyncio
+async def test_files_read_cross_session_blocked_when_runtime_workspace_is_app_home(fake_config, fake_provider, tmp_path):
+    """#1236：同一条件下，读写他人会话目录必须仍被拒绝。
+
+    回归前：规则 (a) 在保留区检查之前 return（own_area 塌陷成整个工作区），
+    `sessions/<他人会话>/files/...` 会被放行。
+    """
+    from types import SimpleNamespace
+
+    from miqi.runtime.app_server import AppServerError
+    from miqi.runtime.file_handlers import files_read_handler
+    from miqi.session.session_keys import session_files_dir_key
+
+    own_key = "desktop:1236-own"
+    other_key = "desktop:1236-other"
+    _, ws = _setup_session(own_key, "client-1")
+    _setup_session(other_key, "client-2")
+    _ensure_session_file(ws, other_key, "secret.txt", "secret")
+
+    runtime = SimpleNamespace(services=SimpleNamespace(workspace=ws))
+
+    async def _get_session(cid, sid):
+        return runtime
+
+    registry = SimpleNamespace(get_session=_get_session)
+    other_rel = f"sessions/{session_files_dir_key(other_key)}/files/secret.txt"
+    with pytest.raises(AppServerError) as exc_info:
+        await files_read_handler(
+            "req-1", {"path": other_rel, "session_key": own_key}, "client-1", None, registry,
+        )
+    assert exc_info.value.code == "INVALID_PARAMS"
+
+
+def test_find_ledger_root_ignores_app_home_but_keeps_folder_binding(tmp_path):
+    """#1236：app-home 工作区不再算绑定根；真正的文件夹绑定行为保持不变（#1061/#1083）。"""
+    from miqi.runtime.session_handlers import _find_ledger_root
+    from miqi.session.manager import SessionManager
+
+    ws = tmp_path / "workspace"
+    ws.mkdir()
+    sm = SessionManager(ws)
+    key = "desktop:1236-unit"
+    session = sm.get_or_create(key, client_id="client-A")
+    session.metadata["owner_client_id"] = "client-A"
+    sm.save(session)
+
+    assert _find_ledger_root(sm, key, "client-A", runtime_workspace=str(ws)) is None
+
+    folder = tmp_path / "bound-folder"
+    folder.mkdir()
+    folder_sm = SessionManager(folder)
+    folder_session = folder_sm.get_or_create(key, client_id="client-A")
+    folder_session.metadata["owner_client_id"] = "client-A"
+    folder_sm.save(folder_session)
+
+    found = _find_ledger_root(sm, key, "client-A", runtime_workspace=str(folder))
+    assert found is not None
+    assert found == folder.resolve()
