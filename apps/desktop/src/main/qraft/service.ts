@@ -89,9 +89,8 @@ export function isPermanentRefreshError(code: QraftErrorCode | null): boolean {
 /** 积分查询失败的日志文案：带上服务端明细，否则只留一个错误码，
  *  平台侧异常（如 SQL 报错）会完全不可见。 */
 function pointsFailureLog(err: unknown): string {
-  if (err instanceof QraftError) {
-    return `qraft: 查询积分余额失败（${err.code}）：${err.message}`;
-  }
+  // QraftError 的 message 自带「查询积分余额失败：」前缀，错误码缀在末尾即可。
+  if (err instanceof QraftError) return `qraft: ${err.message}（${err.code}）`;
   return `qraft: 查询积分余额失败（${err instanceof Error ? err.message : String(err)}）`;
 }
 
