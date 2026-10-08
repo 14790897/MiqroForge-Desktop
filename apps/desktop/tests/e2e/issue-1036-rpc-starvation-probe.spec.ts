@@ -55,11 +55,21 @@
  * 判读：**通过 = 本窗口内没复现；失败 = 复现了**；**skip = 这轮无结论**（turn
  * 早于窗口结束 / 一个样本都没落袋）。结论必须连窗口时长、样本数、turn 存活时长
  * 与事件数一起报。
+ *
+ * 判据是**三路合并**的，原因是实测踩到过一次假阴性：注入的采样器那一相位的调用
+ * 全部正常（~10ms），被吃掉的却是应用自己另一个相位的 30s 轮询。所以除了注入
+ * 采样，还必须读主进程日志里**应用自身**的证据：
+ *   1. `IPC <method> took ≥30s`（应用自己观测到的饿死）；
+ *   2. `bridge-req written` 存在、但桥侧从未出现该 id 的 `stdin-read`
+ *      —— 即 issue「待确认」表第 2 行「卡在管道/读线程侧」，这是最有力的定位指标。
+ * 判定顺序也是踩出来的：**先判有没有丢失证据，再谈无结论**。第二轮实测注入采样
+ * 一个样本都没落袋（请求全被吃、连 720s 超时都还没到），若先按「样本太少」判
+ * skip，就会把最强的命中读成「无结论」。
  */
 
 import { test, expect } from '@playwright/test';
 import type { ElectronApplication, Page } from '@playwright/test';
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import {
   APPS_DESKTOP,
@@ -89,6 +99,7 @@ const POLL_MS = 1_000;
 const SCREENSHOT_EVERY_MS = 3 * 60_000;
 
 const OUT_DIR = join(APPS_DESKTOP, 'test-results');
+const LOG_DIR = join(APPS_DESKTOP, '..', '..', 'workspace', 'logs');
 
 interface CfgSample {
   ms: number;
@@ -101,6 +112,101 @@ interface ProbeState {
   /** turn 存活证据：chat 事件条数与最后一次到达的时刻。 */
   progressCount: number;
   lastProgressAt: number;
+}
+
+/**
+ * 主进程日志里**应用自己**留下的证据 —— 与注入的采样器互补。
+ *
+ * 为什么必须有这一路：注入采样只能证明「我这一路调用没饿死」。实测第一轮正式
+ * 实验里，注入采样（相位 :26/:56）全部 ~10ms 正常，而被吃掉的恰恰是应用自己
+ * 另一个相位的 30s 轮询（:00/:30）——只看注入采样会给出**假阴性**。
+ */
+interface AppEvidence {
+  /** 用时 ≥ 判据的 IPC 行（应用自身观测到的饿死）。 */
+  slowIpc: string[];
+  maxIpcMs: number;
+  /** `bridge-req written` 总条数。 */
+  written: number;
+  /** 主进程写出去了、桥侧却从未 `stdin-read` 的请求 id（issue 表第 2 行）。 */
+  unread: string[];
+  orphans: number;
+  writeFailed: number;
+  parseErrors: number;
+}
+
+function newestMainLog(): string | null {
+  try {
+    const files = readdirSync(LOG_DIR)
+      .filter((f) => f.startsWith('electron-main-') && f.endsWith('.log'))
+      .map((f) => join(LOG_DIR, f))
+      .sort((a, b) => statSync(b).mtimeMs - statSync(a).mtimeMs);
+    return files[0] ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/** 应用自身证据。`graceMs` 内的请求可能还在飞，不计入 unread。 */
+function readAppEvidence(fromOffset: number, windowEndAt: number): AppEvidence {
+  const file = newestMainLog();
+  const empty: AppEvidence = {
+    slowIpc: [],
+    maxIpcMs: 0,
+    written: 0,
+    unread: [],
+    orphans: 0,
+    writeFailed: 0,
+    parseErrors: 0,
+  };
+  if (!file) return empty;
+  const text = readFileSync(file).subarray(fromOffset).toString('utf8');
+  const lines = text.split('\n');
+
+  const written = new Map<string, number>(); // id -> written 时刻(ms)
+  const read = new Set<string>();
+  const slowIpc: string[] = [];
+  let maxIpcMs = 0;
+  let orphans = 0;
+  let writeFailed = 0;
+  let parseErrors = 0;
+
+  for (const line of lines) {
+    let m = line.match(/IPC (\S+) took (\d+)ms/);
+    if (m) {
+      const ms = Number(m[2]);
+      if (ms > maxIpcMs) maxIpcMs = ms;
+      if (ms >= HEALTHY_MS) slowIpc.push(m[0].trim());
+    }
+    m = line.match(
+      /\[(\S+?Z)\] \[INFO\] \[bridge\] bridge-req written pid=\d+ id=(\S+) method=(\S+)/
+    );
+    if (m) {
+      written.set(m[2], Date.parse(m[1]));
+      continue;
+    }
+    m = line.match(/stdin-read pid=\d+ id=(\S+) len/);
+    if (m) {
+      read.add(m[1]);
+      continue;
+    }
+    if (line.includes('bridge-resp orphan')) orphans += 1;
+    if (line.includes('bridge-req write-failed')) writeFailed += 1;
+    if (line.includes('Error processing stdout line')) parseErrors += 1;
+  }
+
+  const unread = [...written.entries()]
+    .filter(([id, at]) => !read.has(id) && windowEndAt - at > 60_000)
+    .map(([id]) => id);
+
+  return {
+    slowIpc: slowIpc.slice(-20),
+    maxIpcMs,
+    written: written.size,
+    unread,
+    orphans,
+    writeFailed,
+    parseErrors,
+  };
 }
 
 /**
@@ -205,6 +311,10 @@ test.describe('#1036 RPC starvation probe (real model + real exec)', () => {
       }, sampleMs);
     }, SAMPLE_MS);
 
+    // 记下主进程日志的起点：应用自身的证据（慢 IPC / 写了却没被桥读到）只读这段增量。
+    const logFile = newestMainLog();
+    const logOffset = logFile ? statSync(logFile).size : 0;
+
     const turnStartedAt = Date.now();
     await sendMessage(page, longTurnPrompt(CMD_SECONDS));
 
@@ -247,11 +357,29 @@ test.describe('#1036 RPC starvation probe (real model + real exec)', () => {
     const table = samples
       .map((s, i) => `  #${i + 1} ${s.ms}ms ${s.ms >= HEALTHY_MS ? '⚠️ 命中' : 'ok'}`)
       .join('\n');
+
+    // 应用自身的证据（注入采样之外的那一路，见 AppEvidence 注释）。
+    const app = readAppEvidence(logOffset, Date.now());
+    const appSummary =
+      `[probe1036] 应用自身证据：bridge-req written ${app.written} 条，` +
+      `其中「写了但桥侧从未 stdin-read」${app.unread.length} 条` +
+      (app.unread.length
+        ? `（${app.unread
+            .slice(0, 6)
+            .map((i) => i.slice(0, 8))
+            .join(', ')}…）`
+        : '') +
+      `\n[probe1036] 最长 IPC=${app.maxIpcMs}ms` +
+      (app.slowIpc.length ? `，≥判据的 ${app.slowIpc.length} 条：${app.slowIpc.join(' | ')}` : '') +
+      `\n[probe1036] orphan=${app.orphans} write-failed=${app.writeFailed} ` +
+      `stdout 解析失败=${app.parseErrors}`;
+
     const summary =
       `[probe1036] 真实模型 + 真实 exec（无 mock）\n` +
       `[probe1036] 命令时长=${CMD_SECONDS}s 窗口=${windowS}s 样本=${samples.length} ` +
       `命中=${unhealthy.length}\n` +
       `[probe1036] turn 存活=${aliveS}s / 窗口 ${windowS}s，chat 事件 ${state.progressCount} 条\n` +
+      `${appSummary}\n` +
       `[probe1036] 样本:\n${table || '  （一个样本都没落袋）'}`;
     console.log(summary);
 
@@ -287,8 +415,36 @@ test.describe('#1036 RPC starvation probe (real model + real exec)', () => {
     mkdirSync(OUT_DIR, { recursive: true });
     await page.screenshot({ path: join(OUT_DIR, 'probe1036-verdict.png'), fullPage: true });
 
-    // turn 没活满窗口 ⇒ 本轮无结论（剩下的样本是在「没有 turn 要转发」的
-    // 状态下采的），别把这种结果当成「没命中」。
+    // 判据（issue 写死）：用时 < 30s 才算健康；err 恒为 null，不看它。
+    // 三路一起判：注入采样 + 应用自身的慢 IPC + 「写了但桥侧从未读到」。
+    // 只看注入采样会漏两次（实测都踩到了）：注入那一路可能全绿而被吃的是应用
+    // 另一个相位的轮询；也可能**一个样本都不落袋**——那恰恰是注入的请求全部
+    // 被吃、连 720s 超时都还没到。所以先判「有没有丢失证据」，再谈无结论。
+    const reasons: string[] = [];
+    if (unhealthy.length) {
+      reasons.push(`${unhealthy.length}/${samples.length} 次注入采样走满超时`);
+    }
+    if (app.maxIpcMs >= HEALTHY_MS) {
+      reasons.push(`应用自身出现 ${app.maxIpcMs}ms 的 IPC（≥ ${HEALTHY_MS}ms）`);
+    }
+    if (app.unread.length) {
+      reasons.push(
+        `${app.unread.length}/${app.written} 条请求「主进程写出去了、桥侧从未读到」` +
+          `（issue「待确认」表第 2 行：卡在管道/读线程侧）`
+      );
+    }
+    if (samples.length === 0 && app.unread.length > 0) {
+      reasons.push(
+        '注入采样的请求一个都没 settle —— 它们本身就落进了上面那批「写了但桥侧从未读到」'
+      );
+    }
+    expect(
+      reasons,
+      `复现了：\n  - ${reasons.join('\n  - ')}\n${summary}\n` +
+        `—— 这正是 issue 描述的形态（同一通道，一部分有来有回，另一部分石沉大海）。`
+    ).toEqual([]);
+
+    // 到这里说明「没有丢失证据」。此时若 turn 没活满窗口、或样本太少，才是无结论。
     test.skip(
       aliveS < windowS * MIN_ALIVE_RATIO,
       `本轮无结论：turn 只活了 ${aliveS}s / 窗口 ${windowS}s（模型可能没按提示跑长命令）。` +
@@ -298,12 +454,5 @@ test.describe('#1036 RPC starvation probe (real model + real exec)', () => {
       samples.length < MIN_SAMPLES,
       `本轮无结论：只落袋 ${samples.length} 个样本（< ${MIN_SAMPLES}），采样器可能没跑起来`
     );
-
-    // 判据（issue 写死）：用时 < 30s 才算健康；err 恒为 null，不看它。
-    expect(
-      unhealthy.length,
-      `复现了：${unhealthy.length}/${samples.length} 次 config.get 走满超时（判据 ≥ ${HEALTHY_MS}ms）。\n` +
-        `${summary}\n—— 这正是 issue 描述的形态；下一步照 issue「待确认」表对着看埋点。`
-    ).toBe(0);
   });
 });
