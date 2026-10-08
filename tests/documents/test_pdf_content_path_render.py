@@ -1307,3 +1307,143 @@ async def test_content_path_md_copy_dangling_symlink_not_written_through(tmp_pat
     assert not target.exists(), "源稿副本写穿悬空链接，落到了输出目录之外"
     assert list(outside_dir.iterdir()) == [], result
     assert "跳过" in result, result
+
+
+# ── #1238：表格单元格换行 + 项目符号字形降级 ────────────────────────
+#
+# 修复前实测（本机 SimHei）：4 列中文行程表 6 对 span 重叠（纯字符串单元格是
+# 单行 drawString，长中文溢出列宽压到邻列）；3 条列表的 "•"(U+2022) 在 SimHei
+# 无字形 → 空心方框，文本层 3 个 \x00。断言尽量字体无关：结构断言用 Paragraph
+# 入参捕获，几何断言用 ASCII 单元格（CI runner 无 CJK 字体，中文提取不可靠）。
+
+
+def _overlapping_span_pairs(pdf_path):
+    """bbox 重叠面积 / 较小 span 面积 > 25% 的 span 对（与复现脚本同口径）。"""
+    import pymupdf
+
+    doc = pymupdf.open(str(pdf_path))
+    pairs = []
+    for pno, page in enumerate(doc):
+        spans = []
+        for block in page.get_text("dict")["blocks"]:
+            if block.get("type") != 0:
+                continue
+            for line in block.get("lines", []):
+                for span in line.get("spans", []):
+                    text = span.get("text", "").strip()
+                    if text:
+                        spans.append((pymupdf.Rect(span["bbox"]), text))
+        for i in range(len(spans)):
+            for j in range(i + 1, len(spans)):
+                r1, r2 = spans[i][0], spans[j][0]
+                inter = r1 & r2
+                if inter.is_empty:
+                    continue
+                smaller = min(r1.get_area(), r2.get_area())
+                if smaller > 0 and inter.get_area() / smaller > 0.25:
+                    pairs.append((pno + 1, spans[i][1][:30], spans[j][1][:30]))
+    doc.close()
+    return pairs
+
+
+@pytest.mark.asyncio
+async def test_table_long_cells_wrap_no_overlap(tmp_path):
+    """#1238: 宽于列宽的长单元格按列宽换行，span 不重叠、文本完整。
+
+    用纯 ASCII 长句（CI runner 无 CJK 字体，中文提取不可靠）。修复前纯字符串
+    单元格单行绘制、溢出压到邻列 → overlap 非空；修复后换行、零重叠。
+    """
+    from miqi.documents.pdf_create_tool import CreatePdfTool
+
+    long_a = "The first column carries a fairly long english sentence that must wrap."
+    long_b = "Second column also holds a long sentence which previously spilled over."
+    (tmp_path / "r.md").write_text(
+        f"| Col A | Col B |\n| --- | --- |\n| {long_a} | {long_b} |\n",
+        encoding="utf-8",
+    )
+    tool = CreatePdfTool(workspace=tmp_path, allowed_dir=tmp_path)
+    assert "Created:" in await tool.execute(filename="o.pdf", content_path="r.md")
+
+    assert _overlapping_span_pairs(tmp_path / "o.pdf") == [], "单元格文本溢出列宽产生重叠"
+    squashed = _squash(_pdf_text(tmp_path / "o.pdf"))
+    assert _squash(long_a) in squashed
+    assert _squash(long_b) in squashed
+
+
+@pytest.mark.asyncio
+async def test_table_cells_render_as_paragraphs_with_cjk(tmp_path, paragraph_texts):
+    """#1238: 单元格内容以 Paragraph 渲染（结构级断言，字体无关）。
+
+    修复前单元格是纯字符串（drawString），单元格文本根本不会出现在 Paragraph
+    构造函数入参里 → 本用例对修复前代码必红（ci 无 CJK 字体也能判定）。
+    """
+    from miqi.documents.pdf_create_tool import CreatePdfTool
+
+    cell = "长中文单元格内容需要按列宽换行"
+    (tmp_path / "r.md").write_text(
+        f"| 列一 | 列二 |\n| --- | --- |\n| {cell} | 短 |\n", encoding="utf-8"
+    )
+    tool = CreatePdfTool(workspace=tmp_path, allowed_dir=tmp_path)
+    assert "Created:" in await tool.execute(filename="o.pdf", content_path="r.md")
+
+    assert cell in paragraph_texts, paragraph_texts
+
+
+def test_list_bullet_falls_back_when_font_lacks_u2022(monkeypatch):
+    """#1238: 项目符号按字体 cmap 降级：• → ·（SimHei 场景）→ -；未知按支持处理。"""
+    import miqi.documents.pdf_create_tool as pdfmod
+
+    coverage = {
+        "FontNoBullet": {0x00B7, 0x2192},  # 无 U+2022、有 U+00B7（SimHei 的形状）
+        "FontWithBullet": {0x2022},
+        "FontBare": set(),
+    }
+    monkeypatch.setattr(
+        pdfmod,
+        "_font_supports_char",
+        lambda name, ch: (ord(ch) in coverage[name]) if name in coverage else None,
+    )
+    pdfmod._BULLET_CACHE.clear()
+
+    assert pdfmod._list_bullet("FontWithBullet") == "\u2022"
+    assert pdfmod._list_bullet("FontNoBullet") == "\u00b7"
+    assert pdfmod._list_bullet("FontBare") == "-"
+    assert pdfmod._list_bullet("UnknownFont") == "\u2022"
+
+
+@pytest.mark.asyncio
+async def test_list_item_bullet_not_nul_in_text_layer(tmp_path):
+    """#1238: 列表项目符号在文本层不得是 \\x00（ASCII 列表项，任意 runner 可提取）。
+
+    Windows 上（SimHei 被发现）修复前 "•" 缺字形 → NUL；无 CJK 字体的 runner
+    走 Helvetica（内置 • 可用）修复前后都绿——本用例语义是「任何环境都不得 NUL」。
+    """
+    from miqi.documents.pdf_create_tool import CreatePdfTool
+
+    (tmp_path / "r.md").write_text("- first item\n- second item\n", encoding="utf-8")
+    tool = CreatePdfTool(workspace=tmp_path, allowed_dir=tmp_path)
+    assert "Created:" in await tool.execute(filename="o.pdf", content_path="r.md")
+
+    text = _pdf_text(tmp_path / "o.pdf")
+    assert "\x00" not in text, repr(text)
+    assert "first item" in text
+    assert any(b in text for b in ("\u2022", "\u00b7", "-"))
+
+
+def test_list_bullet_simhei_uses_middot():
+    """#1238 本机真实字体回归：SimHei 缺 U+2022 → 选 U+00B7（非 Windows 平台跳过）。"""
+    from pathlib import Path
+
+    simhei = Path("C:/Windows/Fonts/simhei.ttf")
+    if not simhei.exists():
+        pytest.skip("SimHei 仅存在于 Windows")
+
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.ttfonts import TTFont
+
+    from miqi.documents.pdf_create_tool import _list_bullet
+
+    probe = "SimHeiBulletProbe"
+    if probe not in pdfmetrics.getRegisteredFontNames():
+        pdfmetrics.registerFont(TTFont(probe, str(simhei)))
+    assert _list_bullet(probe) == "\u00b7"
