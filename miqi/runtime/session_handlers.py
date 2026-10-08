@@ -243,13 +243,20 @@ def _find_ledger_root(
     The app-home workspace is never such a root: an unbound session keeps its
     files under ``<ws>/sessions/<key>/``, so probing it always "finds" a copy
     and answering with it would re-anchor session-relative paths at the
-    workspace root (#1236).  Callers fall back to ``sm`` for exactly that case.
+    workspace root (#1236).  An app-home seed is therefore an *answer* — the
+    runtime there (or the stub still naming it) is writing the current ledger —
+    and not a reason to keep scanning: a session that once lived in a folder
+    leaves that folder's copy (and its ledger) behind, and the folder stays in
+    the candidate list while any *other* session is bound to it, so the scan
+    below would answer with the stale copy.  Callers fall back to ``sm`` for
+    exactly that case.
     """
     from miqi.session.manager import SessionManager
 
     stub = sm.load_existing(session_key)
     seeds = [runtime_workspace, stub.metadata.get("workspace") if stub else None]
     app_home = _app_home_workspace_root(sm)
+    app_home_seed_seen = False
     for seed in seeds:
         if not seed:
             continue
@@ -257,12 +264,19 @@ def _find_ledger_root(
             seed_root = SessionManager._validate_workspace(Path(seed))
         except Exception:
             continue
-        # See the docstring: the app-home root is not a folder binding, and the
-        # scan below has always excluded it — this probe must agree (#1236).
+        # See the docstring: the app-home root is not a folder binding (#1236).
+        # Recorded rather than returned so a separately bound seed — the stub
+        # naming a real folder — is still honoured first.
         if str(seed_root) == app_home:
+            app_home_seed_seen = True
             continue
         if _probe_folder(seed_root, session_key, client_id) is not None:
             return seed_root
+
+    if app_home_seed_seen:
+        # Authoritative unbound: scanning past this point could only surface a
+        # folder copy the session has already left (see the docstring).
+        return None
 
     for root in _candidate_workspace_roots(sm, client_id):
         probed = _probe_folder(root, session_key, client_id)

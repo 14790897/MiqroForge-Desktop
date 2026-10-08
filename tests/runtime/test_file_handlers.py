@@ -1757,3 +1757,43 @@ async def test_files_write_cross_session_blocked_when_stub_workspace_is_app_home
             "client-1", None, None,
         )
     assert exc_info.value.code == "INVALID_PARAMS"
+
+
+@pytest.mark.asyncio
+async def test_find_ledger_root_rejects_stale_folder_copy_when_unbound_at_app_home(fake_config, fake_provider, tmp_path):
+    """#1236 评审：会话回到 app-home 后，旧文件夹里那份带账本的副本不得再被扫描选中。
+
+    会话曾绑定文件夹 F（F 里留了副本和账本），之后回到 app-home；只要**别的**
+    会话还绑着 F，F 就仍在候选列表里，扫描会 probe 到那份旧副本、且它有账本，
+    于是把绑定根判成 F —— 裸名读会解析到 F 而不是当前会话目录。app-home seed
+    因此必须作为「未绑定」的权威答案直接返回，而不是继续扫描。
+    """
+    from types import SimpleNamespace
+
+    from miqi.runtime.file_handlers import files_read_handler
+    from miqi.runtime.session_handlers import _find_ledger_root
+
+    key = "desktop:1236-stale"
+    keeper = "desktop:1236-keeper"
+    sm, ws = _setup_session(key, "client-1")
+    _ensure_session_file(ws, key, "note.txt", "current session file")
+    _setup_session(keeper, "client-1")
+
+    folder = tmp_path / "old-folder"
+    folder.mkdir()
+    _make_folder_session(folder, key, "client-1", asset="stale.txt")
+    (folder / "note.txt").write_text("stale folder file", encoding="utf-8")
+    _bind_session_to_folder(sm, keeper, folder, "client-1")
+
+    assert _find_ledger_root(sm, key, "client-1", runtime_workspace=str(ws)) is None
+
+    runtime = SimpleNamespace(services=SimpleNamespace(workspace=ws))
+
+    async def _get_session(cid, sid):
+        return runtime
+
+    result = await files_read_handler(
+        "req-1", {"path": "note.txt", "session_key": key}, "client-1", None,
+        SimpleNamespace(get_session=_get_session),
+    )
+    assert result["result"]["content"] == "current session file"
