@@ -82,7 +82,11 @@ def _isolate_stdout(monkeypatch):
 
 
 def test_send_returns_immediately_while_the_pipe_is_full(monkeypatch):
-    """关键断言：底层写入卡住时，_send 不许跟着卡。"""
+    """关键断言：底层写入卡住时，_send 不许跟着卡，且不会写重。
+
+    最后那条"进 200 条、出 200 条"是防重复的：_send 只入队一次，writer 也只写
+    一次——不存在"循环线程先同步写一遍、再进队列写第二遍"这种情况。
+    """
     sink = BlockingSink()
     monkeypatch.setattr(server, "_stdout_buffer", sink)
 
@@ -100,6 +104,9 @@ def test_send_returns_immediately_while_the_pipe_is_full(monkeypatch):
 
     sink.release.set()
     _drain()
+
+    # 放行后：进多少出多少，一条不多一条不少。
+    assert len(sink.chunks) == calls, f"写出 {len(sink.chunks)} 条，应为 {calls} 条"
 
 
 def test_lines_survive_backpressure_in_order(monkeypatch):
