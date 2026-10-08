@@ -143,6 +143,18 @@ interface AppEvidence {
   written: number;
   /** 主进程写出去了、桥侧却从未 `stdin-read` 的请求 id（issue 表第 2 行）。 */
   unread: string[];
+  /**
+   * 窗口内「请求没拿到桥的值、静默回退到本地配置」的次数。
+   *
+   * 关键：**resolve 得快不等于成功**。桥没在跑时 `sendSafe` 立刻 `return null`，
+   * `ipc/index.ts` 紧接着返回本地那份 —— 这条路径 10ms 内就 resolve，用时判据完全
+   * 看不出来。所以必须单独数这两条日志（本轮 #1036 新加的埋点）：
+   *   · `config.get returned no value — serving the local config instead`
+   *   · `sendSafe … skipped: bridge not running`
+   * 只统计**窗口内**的：应用启动/退出时也会有这类行（那时桥确实没在跑），拿整份
+   * 日志数会永远命中。
+   */
+  fallbackServed: number;
   orphans: number;
   writeFailed: number;
   parseErrors: number;
@@ -193,6 +205,7 @@ function readAppEvidence(cursor: LogCursor | null, windowEndAt: number): AppEvid
     maxIpcMs: 0,
     written: 0,
     unread: [],
+    fallbackServed: 0,
     orphans: 0,
     writeFailed: 0,
     parseErrors: 0,
@@ -205,6 +218,7 @@ function readAppEvidence(cursor: LogCursor | null, windowEndAt: number): AppEvid
   const read = new Set<string>();
   const slowIpc: string[] = [];
   let maxIpcMs = 0;
+  let fallbackServed = 0;
   let orphans = 0;
   let writeFailed = 0;
   let parseErrors = 0;
@@ -228,6 +242,8 @@ function readAppEvidence(cursor: LogCursor | null, windowEndAt: number): AppEvid
       read.add(m[1]);
       continue;
     }
+    if (line.includes('returned no value — serving the local config')) fallbackServed += 1;
+    if (line.includes('skipped: bridge not running')) fallbackServed += 1;
     if (line.includes('bridge-resp orphan')) orphans += 1;
     if (line.includes('bridge-req write-failed')) writeFailed += 1;
     if (line.includes('Error processing stdout line')) parseErrors += 1;
@@ -242,6 +258,7 @@ function readAppEvidence(cursor: LogCursor | null, windowEndAt: number): AppEvid
     maxIpcMs,
     written: written.size,
     unread,
+    fallbackServed,
     orphans,
     writeFailed,
     parseErrors,
@@ -293,6 +310,9 @@ async function dismissApprovalCards(page: Page): Promise<void> {
   await (once ? sessionBtn : page.getByRole('button', { name: '允许一次' })).first().click();
 }
 
+/** 恢复用例里让模型跑多长（秒）—— 短到能在几分钟内收尾。 */
+const RECOVERY_CMD_SECONDS = Number(process.env['MIQI_1036_RECOVERY_CMD_SECONDS'] ?? 120);
+
 test.describe('#1036 RPC starvation probe (real model + real exec)', () => {
   // describe 级 skip：默认整块跳过（含 beforeAll —— 不 launch Electron）。
   test.skip(!PROBE_ENABLED, '测量用长跑探针默认跳过：设 MIQI_1036_PROBE=1 才运行');
@@ -322,6 +342,39 @@ test.describe('#1036 RPC starvation probe (real model + real exec)', () => {
 
   test.afterAll(async () => {
     await closeElectronApp(electronApp, miqiHome);
+  });
+
+  // ⚠️ 顺序有意为之：这条**放在长 turn 那条之前**跑，这样它执行时没有别的 turn 在飞，
+  // 「drain done」不会来自另一条用例的回合。
+  test('turn 结束后立刻发 config.get —— 必须在 30s 内返回（期望行为 3）', async () => {
+    // 期望行为 3 的判据：drain 结束后发出的请求必须很快返回。必须**卡在 drain 那一刻**
+    // 立刻发 —— 不能靠现成 UI 触发（TopBar 是 30s 周期 + inFlight 去重，人工卡不进窗口）。
+    test.setTimeout(10 * 60_000);
+
+    await createNewConversation(page);
+    const cursor = openLogCursor();
+    await sendMessage(page, longTurnPrompt(RECOVERY_CMD_SECONDS));
+
+    // 等这一轮真的 drain 完（桥自己在日志里打的 `chat.send drain done`）
+    const deadline = Date.now() + 7 * 60_000;
+    let drained = false;
+    while (Date.now() < deadline) {
+      if (cursor && readSince(cursor).includes('chat.send drain done')) {
+        drained = true;
+        break;
+      }
+      await page.waitForTimeout(1_000);
+    }
+    test.skip(!drained, '本轮无结论：等不到 chat.send drain done（turn 没在那段时间内收尾）');
+
+    const t0 = Date.now();
+    const value = await page.evaluate(() => (window as any).miqi.config.get());
+    const ms = Date.now() - t0;
+    console.log(`[probe1036] drain 之后立刻 config.get：${ms}ms`);
+    expect(value, 'drain 之后必须真的从桥拿到配置（不是本地兜底）').toBeTruthy();
+    expect(ms, '期望行为 3：drain 结束后发出的 config.get 必须在 30s 内返回').toBeLessThan(
+      HEALTHY_MS
+    );
   });
 
   test('真实长 turn 期间每 30s 打一次 config.get —— settle 用时是否走满超时', async () => {
@@ -441,6 +494,7 @@ test.describe('#1036 RPC starvation probe (real model + real exec)', () => {
             .join(', ')}…）`
         : '') +
       `\n[probe1036] 顶栏「审批绕过」标注：开始=1 窗口结束时=${chipAtEnd}` +
+      `\n[probe1036] 静默回退到本地配置的次数（窗口内）=${app.fallbackServed}` +
       `\n[probe1036] 最长 IPC=${app.maxIpcMs}ms` +
       (app.slowIpc.length ? `，≥判据的 ${app.slowIpc.length} 条：${app.slowIpc.join(' | ')}` : '') +
       `\n[probe1036] orphan=${app.orphans} write-failed=${app.writeFailed} ` +
@@ -502,6 +556,12 @@ test.describe('#1036 RPC starvation probe (real model + real exec)', () => {
     }
     if (app.maxIpcMs >= HEALTHY_MS) {
       reasons.push(`应用自身出现 ${app.maxIpcMs}ms 的 IPC（≥ ${HEALTHY_MS}ms）`);
+    }
+    if (app.fallbackServed) {
+      reasons.push(
+        `窗口内有 ${app.fallbackServed} 次请求没拿到桥的值、静默回退到本地配置` +
+          `（resolve 得快也算命中：桥没在跑时这条路径 10ms 就返回，用时判据看不出来）`
+      );
     }
     if (app.unread.length) {
       reasons.push(

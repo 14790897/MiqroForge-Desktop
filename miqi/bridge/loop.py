@@ -54,15 +54,30 @@ STALE_TURN_TIMEOUT = 300.0  # seconds (5 min)
 _BRIDGE_PID = os.getpid()
 _BRIDGE_START_EPOCH = time.time()
 
-# Request ids are strings on the wire (`randomUUID()` on the Desktop side), so
-# the stdin reader can recover one without parsing the whole line.
+# Fallback only: the top-level id is the authoritative one (see
+# `_peek_request_id`), and request ids are strings on the wire
+# (`randomUUID()` on the Desktop side).  This regex exists for the case where
+# the line is not valid JSON at all — all we need then is a number to correlate.
 _TRACE_ID_RE = re.compile(r'"id"\s*:\s*"([^"]+)"')
 
 
 def _peek_request_id(raw: str) -> str:
-    """Best-effort request id for a raw stdin line (never raises)."""
-    match = _TRACE_ID_RE.search(raw)
-    return match.group(1) if match else "?"
+    """Best-effort request id for a raw stdin line (never raises).
+
+    以**顶层** ``id`` 为准：正则只看第一个 ``"id"`` 字面量，而请求体里的 ``params``
+    也可能带 ``id``（且按 JSON 顺序可能排在前面）——那样 ``stdin-read`` /
+    ``stdin-enqueue`` 会记成嵌套那个 id，与 ``stdin-recv`` / dispatch 记的对不上，
+    同一条请求的链路就拼不起来。JSON 解析失败时才退回正则（要的只是「能对上个号」）。
+    """
+    try:
+        req = json.loads(raw)
+    except Exception:
+        match = _TRACE_ID_RE.search(raw)
+        return match.group(1) if match else "?"
+    if not isinstance(req, dict):
+        return "?"
+    req_id = req.get("id") or req.get("request_id")
+    return str(req_id) if req_id else "?"
 
 
 def _peek_line_request(raw: str) -> tuple[str, str]:

@@ -89,8 +89,11 @@ def _log(msg: str, level: str = "INFO") -> None:
     """
     try:
         print(f"[miqi-bridge] {msg}", file=sys.stderr, flush=True)
-    except OSError:
-        # stderr may be closed during shutdown on Windows / PyInstaller
+    except (OSError, ValueError):
+        # stderr may be closed during shutdown on Windows / PyInstaller — and a
+        # *closed* stream raises ValueError, not OSError.  Tracing must never
+        # take down a caller (in `_send` it would surface as a second response
+        # for the same request, via the dispatch error path).
         pass
 
 
@@ -831,6 +834,11 @@ def _detach_protocol_stdin(fd: int = 0) -> Any:
         # 标准输入到此为止：``fd``（Windows 上还有 STD_INPUT_HANDLE，由 os.dup2
         # 一并更新）都指向空设备。此后起的子进程再读标准输入只会读到 EOF。
         os.dup2(devnull_fd, fd)
+    except OSError:
+        # 重定向失败：把已经 dup 出来的协议描述符关掉再放弃，否则既泄漏一个
+        # 描述符，又会让异常冲出 main() 的「返回 None 就保持原状」兜底。
+        os.close(protocol_fd)
+        return None
     finally:
         os.close(devnull_fd)
     # 读线程按行读 sys.stdin（loop.py 的 _stdin_reader），所以 fd 0 的情况要把
