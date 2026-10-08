@@ -160,9 +160,34 @@ function newestMainLog(): string | null {
   }
 }
 
-/** 应用自身证据。`graceMs` 内的请求可能还在飞，不计入 unread。 */
-function readAppEvidence(fromOffset: number, windowEndAt: number): AppEvidence {
+/**
+ * 窗口起点的日志位置：**文件名与偏移一起记**。
+ *
+ * 只记偏移是不够的 —— 文件名按日期取，窗口跨 UTC 日界时主进程会改写到新文件，
+ * 那时把旧偏移套到新文件上会跳过新文件开头、又完全读不到旧文件尾部，证据凭空
+ * 少一截，探针就可能给出「没复现」的假阴性（其实现场有）。`issue-1036-rpc-trace-
+ * real-llm.spec.ts` 的 `readSince` 已是这个写法，这里保持一致。
+ */
+interface LogCursor {
+  file: string;
+  offset: number;
+}
+
+function openLogCursor(): LogCursor | null {
   const file = newestMainLog();
+  return file ? { file, offset: statSync(file).size } : null;
+}
+
+/** 游标之后的全部日志：换过文件就把「旧文件尾段 + 新文件全文」拼起来。 */
+function readSince(cursor: LogCursor): string {
+  const file = newestMainLog() ?? cursor.file;
+  const old = readFileSync(cursor.file).subarray(cursor.offset).toString('utf8');
+  if (file === cursor.file) return old;
+  return old + readFileSync(file).toString('utf8');
+}
+
+/** 应用自身证据。`graceMs` 内的请求可能还在飞，不计入 unread。 */
+function readAppEvidence(cursor: LogCursor | null, windowEndAt: number): AppEvidence {
   const empty: AppEvidence = {
     slowIpc: [],
     maxIpcMs: 0,
@@ -172,8 +197,8 @@ function readAppEvidence(fromOffset: number, windowEndAt: number): AppEvidence {
     writeFailed: 0,
     parseErrors: 0,
   };
-  if (!file) return empty;
-  const text = readFileSync(file).subarray(fromOffset).toString('utf8');
+  if (!cursor) return empty;
+  const text = readSince(cursor);
   const lines = text.split('\n');
 
   const written = new Map<string, number>(); // id -> written 时刻(ms)
@@ -330,8 +355,7 @@ test.describe('#1036 RPC starvation probe (real model + real exec)', () => {
     }, SAMPLE_MS);
 
     // 记下主进程日志的起点：应用自身的证据（慢 IPC / 写了却没被桥读到）只读这段增量。
-    const logFile = newestMainLog();
-    const logOffset = logFile ? statSync(logFile).size : 0;
+    const logCursor = openLogCursor();
 
     const turnStartedAt = Date.now();
     await sendMessage(page, longTurnPrompt(CMD_SECONDS));
@@ -390,7 +414,7 @@ test.describe('#1036 RPC starvation probe (real model + real exec)', () => {
       .join('\n');
 
     // 应用自身的证据（注入采样之外的那一路，见 AppEvidence 注释）。
-    const app = readAppEvidence(logOffset, Date.now());
+    const app = readAppEvidence(logCursor, Date.now());
     const appSummary =
       `[probe1036] 应用自身证据：bridge-req written ${app.written} 条，` +
       `其中「写了但桥侧从未 stdin-read」${app.unread.length} 条` +
