@@ -100,6 +100,7 @@ class PluginManager:
         async def _callback(ctx) -> HookOutcome:
             proc = await asyncio.create_subprocess_shell(
                 target,
+                stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )

@@ -560,6 +560,7 @@ class BwrapSandbox:
         try:
             process = await _create_subprocess_exec(
                 *full_args,
+                stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
@@ -2109,6 +2110,7 @@ class BwrapSandbox:
         """
         process = await _create_subprocess_exec(
             *bwrap_args,
+            stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             start_new_session=True,
@@ -2168,6 +2170,7 @@ class BwrapSandbox:
 
         process = await _create_subprocess_exec(
             *full_args,
+            stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
