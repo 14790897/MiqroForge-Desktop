@@ -718,6 +718,48 @@ def _clear_sandbox_state_file_fast() -> None:
         pass
 
 
+def _detach_protocol_stdin(fd: int = 0) -> Any:
+    """把 JSON 协议从 fd ``fd`` 挪到专用描述符，并让 ``fd`` 指向空设备(#1036)。
+
+    桥用 stdin 收发协议。而 Windows（与 POSIX）会把父进程的标准输入交给**每一个
+    没有显式重定向它的子进程** —— 于是桥在沙箱里跑命令时，那条命令链
+    （``wsl.exe …``）拿的是**同一根管道**，命令存活期间就能把协议行读走：那些
+    请求永远到不了本进程的读线程，Desktop 一路等到 720s 超时(#1036)。
+
+    给每个 spawn 显式接 ``stdin=DEVNULL`` 只能治已知的那几处（全仓库 58 处
+    spawn 点，历史上只有 3 处设过它）。这里把隔离做成**结构性**的：协议挪到
+    私有描述符，``fd`` 变成空设备 —— 之后**任何**子进程（含第三方库自己起的）
+    继承到的都是空设备。
+
+    实测（Windows）：调用后新起的、没给 ``stdin=`` 的子进程读到空；而桥自己仍
+    能从专用描述符读到协议行。
+
+    返回承载协议的流（``fd`` 为 0 时同时绑到 ``sys.stdin``）；环境不允许隔离时
+    返回 None —— 保持原状，绝不因此阻塞启动。
+    """
+    try:
+        protocol_fd = os.dup(fd)          # Python 3.4+ 起 dup 出的描述符不可继承
+    except OSError:
+        return None
+    try:
+        devnull_fd = os.open(os.devnull, os.O_RDONLY)
+    except OSError:
+        os.close(protocol_fd)
+        return None
+    try:
+        # 标准输入到此为止：``fd``（Windows 上还有 STD_INPUT_HANDLE，由 os.dup2
+        # 一并更新）都指向空设备。此后起的子进程再读标准输入只会读到 EOF。
+        os.dup2(devnull_fd, fd)
+    finally:
+        os.close(devnull_fd)
+    # 读线程按行读 sys.stdin（loop.py 的 _stdin_reader），所以 fd 0 的情况要把
+    # 它换成私有描述符上的包装；编码与启动时的 reconfigure 一致。
+    protocol = os.fdopen(protocol_fd, "r", encoding="utf-8", errors="replace")
+    if fd == 0:
+        sys.stdin = protocol
+    return protocol
+
+
 def main() -> None:
     global _bridge_state
 
@@ -753,6 +795,12 @@ def main() -> None:
 
     _init_logging()
     _log("Bridge server starting")
+    # #1036: 先做结构性隔离 —— 之后启动的任何子进程（工作区初始化、沙箱、
+    # 插件 hook、MCP…）都继承不到协议管道。详见 _detach_protocol_stdin。
+    if _detach_protocol_stdin() is not None:
+        _log("Bridge protocol stdin detached from fd 0 (children inherit the null device)")
+    else:
+        _log("Bridge protocol stdin left as-is (could not detach; per-spawn DEVNULL still applies)")
     _ensure_workspace_init()
 
     # Persist approval history so records survive bridge restarts
