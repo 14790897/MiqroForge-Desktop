@@ -21,6 +21,8 @@ from typing import Any
 
 from loguru import logger
 
+from miqi.bridge.loop_watchdog import watch_loop_lag
+
 CHAT_DRAIN_IDLE_TIMEOUT_SECONDS = 600
 
 # #798: the frontend watchdog reports "后端 60s 无响应" after 60s without
@@ -93,6 +95,8 @@ class BridgeRuntimeLoop:
         self._released_drain_tasks: dict[str, asyncio.Task] = {}
         # Phase 45: Codex-style connection state (initialize handshake)
         self._connection_state: Any = None  # Created in _init_app_server
+        # #1203: loop-lag watchdog, started in _run().
+        self._watchdog_task: asyncio.Task | None = None
 
     # ── public API ─────────────────────────────────────────────────────────
 
@@ -144,6 +148,12 @@ class BridgeRuntimeLoop:
         4. Drain request queue (blocking)
         5. Shutdown
         """
+        # 0. Watch this loop for stalls (#1203).  A blocked loop is invisible
+        #    from the outside — every request simply stops being answered — so
+        #    the only way to tell afterwards how long the bridge was stuck is
+        #    to have measured it while it happened.
+        self._watchdog_task = asyncio.create_task(watch_loop_lag())
+
         # 1. Create AppServer
         await self._init_app_server()
 

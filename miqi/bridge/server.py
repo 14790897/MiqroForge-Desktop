@@ -21,6 +21,7 @@ import asyncio
 import atexit
 import json
 import os
+import queue
 import signal
 import subprocess
 import sys
@@ -49,7 +50,22 @@ if hasattr(sys.stdin, 'reconfigure'):
 # Get raw binary stdout for _send so we bypass any remaining text-layer encoding
 _stdout_buffer = sys.stdout.buffer if hasattr(sys.stdout, 'buffer') else None
 
-_stdout_lock = threading.Lock()
+# stdout 的写全部交给一条专用线程，事件循环一个字节都不写。
+#
+# 往管道里写，OS 缓冲（Windows 上约 64KB）一满就阻塞；而读端是 Electron 主进程，
+# 它最可能停止排空的时刻正是它最忙的时候——也就是长回合期间。于是循环线程上的
+# 一次阻塞写会冻住**所有**在飞的请求（chat.abort 也在内），冻多久取决于父进程忙多久
+# （#1203：长回合期间 bridge 停摆约 60 秒，停止按钮与只读请求集体超时，栈上抓到的
+# 就是 _send 里的 write）。改成 _send 只入队，循环就再也不会被管道拖住。
+_stdout_queue: "queue.Queue[bytes | None]" = queue.Queue()
+_stdout_writer_thread: threading.Thread | None = None
+_stdout_writer_lock = threading.Lock()
+#: Set when stdout itself is gone (parent died / stream closed). Restarting the
+#: writer then would just spin: every attempt fails immediately.
+_stdout_writer_dead = False
+#: 队列积到这个深度说明父进程已经完全不读了；报一次，让下一次故障可见。
+_STDOUT_BACKLOG_WARN = 1024
+_stdout_backlog_warned_at = 0.0
 _file_logging_sinks: dict[Path, int] = {}
 #: Workspace `_ensure_workspace_init` last set up.  Re-running it is driven by
 #: this changing, not by the call itself — the effective workspace follows the
@@ -94,16 +110,83 @@ def _init_logging() -> None:
     )
 
 
+def _ensure_stdout_writer() -> None:
+    """Start the stdout writer thread unless one is already running."""
+    global _stdout_writer_thread
+    if _stdout_writer_dead:
+        return
+    thread = _stdout_writer_thread
+    if thread is not None and thread.is_alive():
+        return
+    with _stdout_writer_lock:
+        thread = _stdout_writer_thread
+        if thread is not None and thread.is_alive():
+            return
+        _stdout_writer_thread = threading.Thread(
+            target=_stdout_writer_loop, daemon=True, name="bridge-stdout-writer"
+        )
+        _stdout_writer_thread.start()
+
+
+def _stdout_writer_loop() -> None:
+    """Block on the queue and write each line; the only place stdout is written."""
+    global _stdout_writer_dead
+    while True:
+        line = _stdout_queue.get()
+        try:
+            if line is None:  # shutdown sentinel
+                return
+            # Re-read the module global every time so tests can swap the sink.
+            buffer = _stdout_buffer
+            try:
+                if buffer is not None:
+                    buffer.write(line)
+                    buffer.flush()
+                else:
+                    sys.stdout.write(line.decode('utf-8'))
+                    sys.stdout.flush()
+            except (OSError, ValueError):
+                # Parent went away or the stream was closed underneath us; there
+                # is nobody left to deliver to, so stop instead of spinning.
+                _stdout_writer_dead = True
+                return
+        finally:
+            _stdout_queue.task_done()
+
+
+def _stop_stdout_writer(timeout: float = 5.0) -> None:
+    """Flush whatever is queued and stop the writer thread."""
+    thread = _stdout_writer_thread
+    if thread is None or not thread.is_alive():
+        return
+    _stdout_queue.put(None)
+    thread.join(timeout=timeout)
+
+
 def _send(data: dict[str, Any]) -> None:
-    """Write one atomic JSON line to stdout as UTF-8 bytes (thread-safe)."""
+    """Queue one atomic JSON line for stdout as UTF-8 bytes.
+
+    Never blocks: the write itself — and therefore any pipe backpressure — is
+    handled by the writer thread, so a parent that stops draining stdout can no
+    longer stall the event loop (#1203).
+    """
+    global _stdout_backlog_warned_at
     line = (json.dumps(data, ensure_ascii=False) + "\n").encode('utf-8')
-    with _stdout_lock:
-        if _stdout_buffer is not None:
-            _stdout_buffer.write(line)
-            _stdout_buffer.flush()
-        else:
-            sys.stdout.write(line.decode('utf-8'))
-            sys.stdout.flush()
+    _ensure_stdout_writer()
+    _stdout_queue.put(line)
+
+    # 积压意味着父进程已经不读了。趁还在发生时报出来——否则事后只能靠
+    # 「哪些请求没回」反推，那正是 #1203 一直查不出来的原因。
+    depth = _stdout_queue.qsize()
+    if depth >= _STDOUT_BACKLOG_WARN:
+        now = time.monotonic()
+        if now - _stdout_backlog_warned_at > 30.0:
+            _stdout_backlog_warned_at = now
+            _log(
+                f"stdout backlog {depth} messages — the parent is not draining stdout; "
+                f"the bridge keeps serving (writes are off the event loop)",
+                "WARNING",
+            )
 
 
 def _result(req_id: str, result: Any = None) -> None:
@@ -787,6 +870,8 @@ def main() -> None:
 
     # stdin closed — graceful exit
     _graceful_shutdown()
+    # Flush whatever is still queued for stdout before the process goes away.
+    _stop_stdout_writer()
     _log("Bridge server stopped")
 
 
