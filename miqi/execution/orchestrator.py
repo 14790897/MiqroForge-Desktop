@@ -788,7 +788,17 @@ class ToolOrchestrator:
             if not path:
                 return None
             return f"{tool}:{path}"
-        # Fallback: use the description field (user-visible text)
+        # Fallback: 与 PermissionEngine._make_key 使用**同一个稳定键**。
+        # tool_confirmation 类工具（spawn/memory/mcp_sure_* 等）的 details 携带
+        # arguments（见 _request_approval 支行 9），据此算键，保证「本次会话允许 /
+        # 永久允许」写入的 pattern 能在 check() 的匹配端命中。历史缺陷：此处曾
+        # 回退到 description 字符串，而匹配端是 "tool:<args 摘要>"，两者永不相等，
+        # 「记住」形同虚设（#1256 D5-A 验收发现）。
+        args = (meta.get("details") or {}).get("arguments")
+        if isinstance(args, dict):
+            return PermissionEngine.key_for(tool, args)
+        # 最后兜底：参数不可得（如 network 分支的 details 无 arguments）时退回
+        # description 仅作记录，不参与匹配（与该分支的历史行为一致）。
         pattern = (meta.get("description") or "").strip()
         if not pattern:
             return None

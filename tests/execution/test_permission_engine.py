@@ -132,6 +132,45 @@ async def test_default_deny_by_default():
     assert decision.verdict == PermissionVerdict.APPROVAL_REQUIRED
 
 
+# SURE 项目核查工具(MCP server 'sure',命名 mcp_<server>_<tool>,#1256 D5-A)
+MCP_SURE_TOOLS = (
+    "mcp_sure_sure_check",
+    "mcp_sure_sure_get_report",
+    "mcp_sure_sure_get_repair",
+    "mcp_sure_sure_recheck",
+    "mcp_sure_sure_status",
+)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool_name", MCP_SURE_TOOLS)
+async def test_mcp_sure_tools_require_approval_with_permanent_allow(tool_name):
+    """D5-A:SURE 核查工具是已知工具——仍弹审批,但可「永久允许」。
+
+    加入 TOOL_CONFIRMATION_TOOLS 之前,它们落 unknown-tool 默认分支:
+    每次调用都弹审批、allow_permanent=False(弹窗没有「记住」选项)、
+    文案为 "Unknown tool: …"。加入后:allow_permanent=True,文案变为
+    "<tool>: <target>" 形式。
+    """
+    engine = PermissionEngine()
+    ctx = FakeContext(tool_name, {"project": r"D:\Code\MiQi\sure-poc\hello"})
+    decision = await engine.check(ctx)
+    assert decision.verdict == PermissionVerdict.APPROVAL_REQUIRED
+    assert decision.category == "tool_confirmation"
+    assert decision.allow_permanent is True
+    assert not decision.description.startswith("Unknown tool")
+
+
+@pytest.mark.asyncio
+async def test_other_mcp_tools_keep_no_permanent_allow():
+    """对照组:其他 MCP 服务器的工具保持 unknown-tool 默认分支(本次改动不放宽兜底)。"""
+    engine = PermissionEngine()
+    ctx = FakeContext("mcp_other_server_some_tool", {})
+    decision = await engine.check(ctx)
+    assert decision.verdict == PermissionVerdict.APPROVAL_REQUIRED
+    assert decision.allow_permanent is False
+
+
 @pytest.mark.asyncio
 async def test_deny_pattern_blocks_read_only_tools():
     engine = PermissionEngine(deny_patterns={"secret_file"})
