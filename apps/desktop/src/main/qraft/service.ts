@@ -70,6 +70,15 @@ export interface SlurmChargeResult {
   /** 去重命中（该作业已计费过），未发起新的扣费请求。 */
   dedup?: boolean;
 }
+
+/**
+ * 登录凭据握手文件（`<workspace>/.qraft/token.json`）的同步结果。
+ *
+ * 写失败时必须能被调用方看见：这份文件是 Python 判定「平台网关凭据可用」
+ * 的唯一依据，静默失败会让渲染进程的「网关可用」与后端的「读不到凭据」
+ * 长期不一致（#1258）。
+ */
+export type TokenSyncOutcome = { ok: true; path: string } | { ok: false; message: string };
 /** 瞬时刷新失败（网络/平台 5xx）的指数退避重试：1 分钟起步翻倍，
  *  封顶 30 分钟（issue #1087：瞬时失败静默退避，不置 requiresRelogin）。
  *  refresh_token 已失效（REFRESH_TOKEN_INVALID）属永久错误，不重试。 */
@@ -468,15 +477,26 @@ export class QraftService {
    *  agent 可写，恶意/意外替换成 symlink 或预置文件时不能把凭据写进去）。
    *  写入采用同目录临时文件 + rename 原子替换：rename 替换目录条目本身
    *  （不跟随目标 symlink），且凭据只落在新建 inode 上 —— 原地 writeFileSync
-   *  会跟随 symlink、并把攻击者经硬链接预置的文件就地覆写。 */
-  private syncTokenFile(state: QraftStoredState): void {
+   *  会跟随 symlink、并把攻击者经硬链接预置的文件就地覆写。
+   *
+   *  返回写入结果而不是只记日志：这份文件是 Python 侧判定「网关凭据可用」的
+   *  唯一依据，写失败必须能被调用方看到（#1258）。
+   */
+  private syncTokenFile(state: QraftStoredState): TokenSyncOutcome {
     const filePath = this.options.tokenFilePath?.();
-    if (!filePath) return;
+    // 路径解析不出来时旧实现直接 return，连日志都没有：Python 永远读不到凭据，
+    // 而渲染进程的 login store 照旧「网关可用」，保存必被后端拒绝（#1258）。
+    if (!filePath) {
+      const message = '无法解析工作目录下的 .qraft/token.json 路径';
+      this.options.log('WARN', `qraft: 同步 token 文件失败（${message}）`);
+      return { ok: false, message };
+    }
     let tmpPath: string | null = null;
     try {
       const dir = dirname(filePath);
       mkdirSync(dir, { recursive: true });
       const dirStat = lstatSync(dir);
+      // Windows 上目录 junction 在 lstat 里同样是 symlink，一样拒绝（保留原语义）。
       if (!dirStat.isDirectory() || dirStat.isSymbolicLink()) {
         throw new Error('.qraft 不是真实目录（可能被符号链接替换），跳过写入');
       }
@@ -530,11 +550,11 @@ export class QraftService {
       renameSync(tmpPath, filePath);
       tmpPath = null;
       chmodSync(filePath, 0o600);
+      return { ok: true, path: filePath };
     } catch (err) {
-      this.options.log(
-        'WARN',
-        `qraft: 同步 token 文件失败（${err instanceof Error ? err.message : err}）`
-      );
+      const message = err instanceof Error ? err.message : String(err);
+      this.options.log('WARN', `qraft: 同步 token 文件失败（${message}）`);
+      return { ok: false, message };
     } finally {
       if (tmpPath) {
         try {
@@ -544,6 +564,21 @@ export class QraftService {
         }
       }
     }
+  }
+
+  /**
+   * 重新同步登录凭据（握手文件），并把结果如实回报调用方。
+   *
+   * 渲染进程在保存网关模型被后端以 ``GATEWAY_CREDS_UNAVAILABLE`` 拒绝后调用：
+   * 后端读的是磁盘上的 ``<workspace>/.qraft/token.json``，而渲染进程判定
+   * 「网关可用」用的是内存里的登录态 —— 两者之间没有一致性校验，握手文件
+   * 没落盘时用户就只会拿到一句误导的 ``Unsupported model``（#1258）。重试前
+   * 先把磁盘视图补上，写不进去则如实返回失败原因（以前只有一条 WARN）。
+   */
+  syncTokenFileNow(): TokenSyncOutcome {
+    const state = this.options.store.current;
+    if (!state) return { ok: false, message: '尚未登录，无法同步登录凭据' };
+    return this.syncTokenFile(state);
   }
 
   /** 退出登录时删除 token 文件，避免过期凭据残留。 */

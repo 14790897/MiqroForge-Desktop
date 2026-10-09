@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   autoSyncGatewayModel,
+  bridgeErrorCode,
   currentDefaultModel,
   gatewayModelToAutoSet,
   saveGatewayModelIfUnusable,
@@ -212,6 +213,137 @@ describe('saveGatewayModelIfUnusable', () => {
 
     expect(updateConfig).not.toHaveBeenCalled();
     expect(invalidate).not.toHaveBeenCalled();
+  });
+});
+
+// ── 网关凭据握手失败时的重新同步 + 重试（#1258）─────────────────────────
+//
+// 后端判定「网关凭据可用」读的是磁盘上的 <workspace>/.qraft/token.json，而
+// 渲染进程判定「网关可用」用的是内存登录态 —— 两者从不校验一致性。握手文件
+// 没落盘时用户只会拿到一句误导的 `Unsupported model`，且自动就绪重试全败后
+// 静默放弃。真实用户两次遇到。
+
+describe('桥错误码与握手文件重新同步（#1258）', () => {
+  const gatewayCredsError = () =>
+    new Error(
+      "Error invoking remote method 'config:update': Error: 平台 AI 网关凭据在本机尚未就绪，" +
+        '请重试保存 (GATEWAY_CREDS_UNAVAILABLE)'
+    );
+
+  const setup = () => ({
+    getConfig: vi
+      .fn()
+      .mockResolvedValue({ agents: { defaults: { model: 'anthropic/claude-opus-4-5' } } }),
+    listProviders: vi.fn().mockResolvedValue({ active_model_own_or_gateway_resolvable: false }),
+  });
+
+  it('bridgeErrorCode 从桥错误文案里取回错误码', () => {
+    expect(bridgeErrorCode(gatewayCredsError())).toBe('GATEWAY_CREDS_UNAVAILABLE');
+    expect(
+      bridgeErrorCode(
+        new Error(
+          "Error invoking remote method 'config:update': Error: Unsupported model: deepseek/deepseek-v4-flash (INVALID_PARAMS)"
+        )
+      )
+    ).toBe('INVALID_PARAMS');
+    expect(bridgeErrorCode(new Error('网络超时'))).toBeNull();
+    expect(bridgeErrorCode(null)).toBeNull();
+  });
+
+  it('GATEWAY_CREDS_UNAVAILABLE：重新同步握手文件后重试一次即写入成功', async () => {
+    const { getConfig, listProviders } = setup();
+    const updateConfig = vi
+      .fn()
+      .mockRejectedValueOnce(gatewayCredsError())
+      .mockResolvedValueOnce({ saved: true });
+    const invalidate = vi.fn();
+    const resyncToken = vi.fn().mockResolvedValue({ ok: true });
+
+    await saveGatewayModelIfUnusable(
+      getConfig,
+      listProviders,
+      updateConfig,
+      invalidate,
+      () => true,
+      resyncToken
+    );
+
+    expect(resyncToken).toHaveBeenCalledOnce();
+    expect(updateConfig).toHaveBeenCalledTimes(2);
+    expect(invalidate).toHaveBeenCalledOnce();
+  });
+
+  it('重新同步本身失败时不重试、不假装成功（错误向上抛）', async () => {
+    const { getConfig, listProviders } = setup();
+    const updateConfig = vi.fn().mockRejectedValue(gatewayCredsError());
+    const invalidate = vi.fn();
+    const resyncToken = vi.fn().mockResolvedValue({ ok: false, message: '.qraft 不是真实目录' });
+
+    await expect(
+      saveGatewayModelIfUnusable(
+        getConfig,
+        listProviders,
+        updateConfig,
+        invalidate,
+        () => true,
+        resyncToken
+      )
+    ).rejects.toThrow(/GATEWAY_CREDS_UNAVAILABLE/);
+
+    expect(updateConfig).toHaveBeenCalledOnce();
+    expect(invalidate).not.toHaveBeenCalled();
+  });
+
+  it('重试仍被拒时错误向上抛（不再吞掉）', async () => {
+    const { getConfig, listProviders } = setup();
+    const updateConfig = vi.fn().mockRejectedValue(gatewayCredsError());
+    const resyncToken = vi.fn().mockResolvedValue({ ok: true });
+
+    await expect(
+      saveGatewayModelIfUnusable(
+        getConfig,
+        listProviders,
+        updateConfig,
+        vi.fn(),
+        () => true,
+        resyncToken
+      )
+    ).rejects.toThrow(/GATEWAY_CREDS_UNAVAILABLE/);
+
+    expect(updateConfig).toHaveBeenCalledTimes(2); // 首次 + 重试一次
+  });
+
+  it('其他错误码不触发重新同步（模型真的不支持时不该重试）', async () => {
+    const { getConfig, listProviders } = setup();
+    const updateConfig = vi
+      .fn()
+      .mockRejectedValue(new Error('Unsupported model: x/y (INVALID_PARAMS)'));
+    const resyncToken = vi.fn();
+
+    await expect(
+      saveGatewayModelIfUnusable(
+        getConfig,
+        listProviders,
+        updateConfig,
+        vi.fn(),
+        () => true,
+        resyncToken
+      )
+    ).rejects.toThrow(/Unsupported model/);
+
+    expect(resyncToken).not.toHaveBeenCalled();
+    expect(updateConfig).toHaveBeenCalledOnce();
+  });
+
+  it('旧版 preload 没有 syncToken 时保持原样（错误直接上抛）', async () => {
+    const { getConfig, listProviders } = setup();
+    const updateConfig = vi.fn().mockRejectedValue(gatewayCredsError());
+
+    await expect(
+      saveGatewayModelIfUnusable(getConfig, listProviders, updateConfig, vi.fn(), () => true)
+    ).rejects.toThrow(/GATEWAY_CREDS_UNAVAILABLE/);
+
+    expect(updateConfig).toHaveBeenCalledOnce();
   });
 });
 

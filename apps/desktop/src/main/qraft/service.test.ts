@@ -871,6 +871,53 @@ describe('QraftService AI 网关字段（#922）', () => {
     expect(store.current?.aiGateway?.encryptedApiKey).toBe('sk-test-gateway-secret');
     expect(service.status().aiGateway?.status).toBe('active');
   });
+
+  // ── 握手文件重新同步（#1258）──────────────────────────────────────────
+  // 这份文件是 Python 判定「网关凭据可用」的唯一依据；写失败以前只留一条
+  // WARN，渲染进程照旧按内存登录态认为网关可用 → 保存必然被后端拒绝，用户
+  // 只拿到一句误导的 Unsupported model。
+
+  it('syncTokenFileNow 重新写出握手文件并回报成功', async () => {
+    const stub = makeClientStub();
+    stub.platformLogin.mockResolvedValue({ sub: '19', username: 'u', nickname: 'n' });
+    stub.authorizeFlow.mockResolvedValue(makeTokens());
+    stub.getUserInfo.mockResolvedValue(userinfoWithGateway());
+    const service = makeService(stub);
+    const tokenPath = join(dir, 'qraft-token.json');
+
+    await service.login('18500000000', 'p');
+    rmSync(tokenPath, { force: true }); // 磁盘视图丢了（写失败/被清理）
+
+    expect(service.syncTokenFileNow()).toEqual({ ok: true, path: tokenPath });
+    expect(JSON.parse(readFileSync(tokenPath, 'utf8')).aiGateway).toEqual(GATEWAY);
+  });
+
+  it('syncTokenFileNow 写不进去时如实回报失败（不再静默）', async () => {
+    const stub = makeClientStub();
+    stub.platformLogin.mockResolvedValue({ sub: '19', username: 'u', nickname: 'n' });
+    stub.authorizeFlow.mockResolvedValue(makeTokens());
+    stub.getUserInfo.mockResolvedValue(userinfoWithGateway());
+    // 用同名普通文件占住目录位置：mkdirSync 必然失败 → 写入被跳过。
+    writeFileSync(join(dir, 'blocked'), 'not a directory', 'utf8');
+    const service = new QraftService({
+      client: stub as unknown as QraftClient,
+      store,
+      log: noopLog,
+      makeRedirectUri: () => 'http://localhost:38000/callback',
+      tokenFilePath: () => join(dir, 'blocked', 'token.json'),
+    });
+
+    await service.login('18500000000', 'p'); // 登录本身不受影响
+
+    const outcome = service.syncTokenFileNow();
+    expect(outcome.ok).toBe(false);
+    expect(outcome.ok === false && outcome.message.length > 0).toBe(true);
+  });
+
+  it('syncTokenFileNow 未登录时拒绝同步', () => {
+    const service = makeService(makeClientStub());
+    expect(service.syncTokenFileNow()).toMatchObject({ ok: false });
+  });
 });
 
 // ── Slurm 作业扣费（issue #927）─────────────────────────────────────────
