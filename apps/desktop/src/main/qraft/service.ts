@@ -75,6 +75,12 @@ export interface SlurmChargeResult {
  *  refresh_token 已失效（REFRESH_TOKEN_INVALID）属永久错误，不重试。 */
 const REFRESH_RETRY_BASE_MS = 60_000;
 const REFRESH_RETRY_MAX_MS = 30 * 60_000;
+/** 网关信息（userinfo）补拉的退避重试：1 分钟起步翻倍，封顶 8 分钟，最多 5 次。
+ *  平台侧开通网关发生在用户登录之后是常态（先登录、后台再开通），只在登录
+ *  那一刻拉一次的旧行为会让应用永远停在「未下发」——见 syncAccountInfo。 */
+const GATEWAY_INFO_RETRY_BASE_MS = 60_000;
+const GATEWAY_INFO_RETRY_MAX_MS = 8 * 60_000;
+const GATEWAY_INFO_RETRY_LIMIT = 5;
 /** Node setTimeout 上限（32 位有符号毫秒数，约 24.8 天）。超过会被截断为
  *  1ms——超长有效期的 token（实测平台刷新返回 30 天）若不封顶，会形成
  *  「刷新成功 → 调度 30 天 → 1ms 后立即再刷新」的高频刷新循环。 */
@@ -84,6 +90,15 @@ const MAX_TIMEOUT_MS = 2_147_483_647;
  *  其余错误码（网络不可达/平台瞬时错误）均按瞬时失败静默退避重试。 */
 export function isPermanentRefreshError(code: QraftErrorCode | null): boolean {
   return code === 'REFRESH_TOKEN_INVALID';
+}
+
+/** 登录态里的网关是否已经「可用」——拿到可用网关就停止补拉重试。
+ *  判据与 Python 侧 read_gateway_creds 一致（凭据非空 + status==='active'），
+ *  只有这一种情况模型调用会走网关。其余状态（未下发 / 开通中 / 开通失败 /
+ *  已停用）都继续按退避重试：平台侧开通或恢复后能自动接上，代价只是最多
+ *  5 次 userinfo 请求。 */
+export function isGatewayUsable(state: QraftStoredState): boolean {
+  return !!state.aiGateway?.encryptedApiKey && state.aiGateway.status === 'active';
 }
 
 /** 积分查询失败的日志文案：带上服务端明细，否则只留一个错误码，
@@ -186,6 +201,9 @@ export class QraftService {
   private refreshScheduledAt: number | null = null;
   private refreshError: QraftErrorCode | null = null;
   private requiresRelogin = false;
+  /** 网关信息补拉的定时器与代数（syncAccountInfo 的退避重试）。 */
+  private gatewayInfoTimer: ReturnType<typeof setTimeout> | null = null;
+  private gatewayInfoAttempt = 0;
   /** 瞬时刷新失败的退避重试代数（决定下次重试间隔），成功刷新/登录/登出时归零。 */
   private refreshRetryAttempt = 0;
   /** 最近一次已处理失败的在途刷新 Promise：手动与自动路径并发 await
@@ -236,6 +254,10 @@ export class QraftService {
       // `getWorkspacePath()` 解析，而它跟的是磁盘上那个（此时可能还是别人的）标记
       // —— 写下去就是把当前账号的凭据留进上一个账号的工作区（#1185 评审）。
       if (accountReady) this.syncTokenFile(stored);
+      // 启动时补拉一次账号 / 网关信息：平台在用户登录**之后**才开通网关、
+      // 或登录那次 userinfo 失败时，登录态里的「未下发」会一直留着 ——
+      // 启动即重拉，让「重启应用」也能生效（拉不到时再按退避重试）。
+      if (accountReady) void this.syncAccountInfo();
     } else {
       // 没有登录态（含 E2E loginBypass）：清掉可能残留的标记，否则运行时
       // 会停在上一次会话用过的账号工作区上。
@@ -448,6 +470,12 @@ export class QraftService {
     this.scheduleRefresh(state);
     this.syncTokenFile(state);
     this.emitStatus();
+    // 登录时平台没下发网关（未开通/开通中）→ 排上补拉重试：平台侧开通后
+    // 无需重新登录即可生效（#1251）。**先取消**：不登出直接重新登录时
+    //（例如登录失效后重登），上一份登录态可能已经用完退避预算、或还挂着
+    // 旧计时器 —— 不重置的话新登录会拿不到补拉（正是本 issue 要修的现象）。
+    this.cancelGatewayInfoRetry();
+    if (!isGatewayUsable(state)) this.scheduleGatewayInfoRetry();
   }
 
   private errorResult(err: unknown): QraftLoginResult {
@@ -589,6 +617,8 @@ export class QraftService {
 
   logout(): void {
     this.cancelRefresh();
+    // 登出后不再补拉网关信息：计时器留着会在无登录态时白跑一次。
+    this.cancelGatewayInfoRetry();
     // 使登出前发起的在途刷新结果作废（runRefresh 代际校验丢弃）。
     this.authGeneration += 1;
     this.inFlightRefresh = null;
@@ -1123,8 +1153,12 @@ export class QraftService {
     }
   }
 
-  /** 手动刷新（设置页"刷新"按钮）。 */
-  async refreshNow(): Promise<QraftLoginResult> {
+  /** 手动刷新（设置页"刷新"按钮）。
+   *
+   *  刷新 token 之后顺带补拉一次 userinfo（syncInfo，见 syncAccountInfo）：
+   *  平台在用户登录**之后**才开通网关是常态，这个按钮也是用户唯一的
+   *  「重新取一次下发」入口 —— 只刷 token 的话，界面会一直停在「未下发」。 */
+  async refreshNow(opts: { syncInfo?: boolean } = {}): Promise<QraftLoginResult> {
     const state = this.options.store.current;
     if (!state) return { ok: false, code: 'INVALID_CONFIG', message: '尚未登录' };
     const refresh = this.doRefresh(state);
@@ -1134,7 +1168,9 @@ export class QraftService {
       this.refreshError = null;
       this.requiresRelogin = false;
       this.emitStatus();
-      return { ok: true, account: state.account };
+      // 补拉失败不影响刷新结果：token 已经是新的，网关信息下次再取。
+      if (opts.syncInfo !== false) await this.syncAccountInfo();
+      return { ok: true, account: this.options.store.current?.account ?? state.account };
     } catch (err) {
       this.options.log(
         'ERROR',
@@ -1155,6 +1191,149 @@ export class QraftService {
         message: err instanceof Error ? err.message : String(err),
       };
     }
+  }
+
+  // ── 账号 / 网关信息补拉 ────────────────────────────────────────────────
+
+  /**
+   * 重新拉取 `/oauth2/userinfo`，把账号与网关信息落盘（含 token 文件同步）。
+   * 安全入口：补拉是尽力而为的，绝不让异常影响调用方（刷新结果、启动流程）
+   * ——否则会被刷新路径误判成刷新失败去排重试。
+   */
+  private async syncAccountInfo(): Promise<void> {
+    try {
+      await this.syncAccountInfoInner();
+    } catch (err) {
+      this.options.log(
+        'WARN',
+        `qraft: 补拉网关信息异常（${err instanceof Error ? err.message : err}）`
+      );
+    }
+  }
+
+  /**
+   * 为什么需要补拉：AI 网关是平台按账号开通的，而开通动作经常发生在用户登录
+   * **之后**（或登录那一次 userinfo 恰好失败 —— 登录流程只记警告、照常成功）。
+   * 而 userinfo 原先只在两处登录入口调用过，token 自动刷新与设置页「立即刷新」
+   * 都不重拉，登录态里那份「未下发」就永远留着，用户只能退出登录重登。
+   *
+   * 调用点：应用启动、手动刷新、token 自动刷新成功后。拉不到「可用」网关时
+   * 按退避再试有限次（见 scheduleGatewayInfoRetry），平台侧开通后无需重登。
+   */
+  private async syncAccountInfoInner(): Promise<void> {
+    const initial = this.options.store.current;
+    if (!initial) return;
+    const generation = this.authGeneration;
+    const accountSub = initial.account.sub;
+
+    let outcome = await this.fetchUserInfo(initial);
+    if (!outcome.ok && outcome.expired) {
+      // access_token 可能刚好过期（启动补拉时常见）：刷新一次再取。
+      // 这里的刷新不再回头补拉（syncInfo:false），避免两条路径互相递归。
+      const refreshed = await this.refreshNow({ syncInfo: false });
+      if (!refreshed.ok) return;
+      const fresh = this.options.store.current;
+      if (!fresh) return;
+      outcome = await this.fetchUserInfo(fresh);
+    }
+    if (!outcome.ok) {
+      this.options.log('WARN', `qraft: 补拉网关信息失败（${outcome.code}）`);
+      this.scheduleGatewayInfoRetry();
+      return;
+    }
+
+    // 补拉期间登出 / 换账号：丢弃结果，绝不把别的账号的信息写进当前登录态。
+    const current = this.options.store.current;
+    if (!current || this.authGeneration !== generation || current.account.sub !== accountSub) {
+      return;
+    }
+    // 平台返回的账号与本地登录态不一致：多半是凭据串了，宁可停在旧信息上
+    // 也不能悄悄切换账号（工作区根是按 sub 解析的）。
+    const { info } = outcome;
+    if (info.sub && accountSub && info.sub !== accountSub) {
+      this.options.log(
+        'WARN',
+        `qraft: userinfo 账号（${info.sub}）与登录态（${accountSub}）不一致，忽略本次补拉`
+      );
+      return;
+    }
+
+    const next: QraftStoredState = {
+      ...current,
+      account: {
+        ...current.account,
+        sub: info.sub || current.account.sub,
+        username: info.username || current.account.username,
+        nickname: info.nickname || current.account.nickname,
+      },
+      // 本次没带网关时保留原有值（可能来自更早一次下发），不因「这次没带」清空。
+      ...(info.aiGateway ? { aiGateway: info.aiGateway } : {}),
+      ...(info.mcpGatewayKey ? { mcpGatewayKey: info.mcpGatewayKey } : {}),
+    };
+    this.options.store.save(next);
+    this.syncTokenFile(next);
+    this.emitStatus();
+    this.options.log(
+      'INFO',
+      `qraft: 账号/网关信息已更新（网关 ${info.aiGateway?.status ?? '未下发'}）`
+    );
+    if (!isGatewayUsable(next)) this.scheduleGatewayInfoRetry();
+    else this.cancelGatewayInfoRetry();
+  }
+
+  /** 单次 userinfo 调用；expired 表示 access_token 失效（调用方可刷新后重试）。 */
+  private async fetchUserInfo(
+    state: QraftStoredState
+  ): Promise<
+    | { ok: true; info: Awaited<ReturnType<QraftClient['getUserInfo']>> }
+    | { ok: false; expired: boolean; code: string }
+  > {
+    try {
+      const info = await this.options.client.getUserInfo(
+        {
+          baseUrl: state.baseUrl,
+          clientId: state.clientId,
+          clientSecret: state.clientSecret,
+          redirectUri: state.redirectUri,
+        },
+        state.tokens.accessToken
+      );
+      return { ok: true, info };
+    } catch (err) {
+      if (err instanceof QraftError)
+        return { ok: false, expired: err.code === 'SESSION_EXPIRED', code: err.code };
+      return { ok: false, expired: false, code: err instanceof Error ? err.message : String(err) };
+    }
+  }
+
+  /**
+   * 网关未下发 / 开通中 / 开通失败时的退避重试（1 分钟起步翻倍，封顶 8 分钟，
+   * 最多 5 次）。
+   *
+   * 平台侧开通发生在登录之后是常态，这个重试让应用自己「过一会儿就好了」，
+   * 而不是逼用户退出重登或重启。拿到可用网关即停（见 isGatewayUsable）。
+   */
+  private scheduleGatewayInfoRetry(): void {
+    if (this.gatewayInfoTimer !== null) return; // 已经排好，不重复排
+    if (this.gatewayInfoAttempt >= GATEWAY_INFO_RETRY_LIMIT) return;
+    const delay = Math.min(
+      GATEWAY_INFO_RETRY_BASE_MS * 2 ** this.gatewayInfoAttempt,
+      GATEWAY_INFO_RETRY_MAX_MS
+    );
+    this.gatewayInfoAttempt += 1;
+    this.gatewayInfoTimer = setTimeout(() => {
+      this.gatewayInfoTimer = null;
+      void this.syncAccountInfo();
+    }, delay);
+    this.options.log('INFO', `qraft: 网关信息未就绪，${Math.round(delay / 60_000)} 分钟后重新拉取`);
+  }
+
+  private cancelGatewayInfoRetry(): void {
+    if (this.gatewayInfoTimer !== null) {
+      clearTimeout(this.gatewayInfoTimer);
+      this.gatewayInfoTimer = null;
+    }
+    this.gatewayInfoAttempt = 0;
   }
 
   // ── 自动刷新调度 ──────────────────────────────────────────────────────
@@ -1203,6 +1382,9 @@ export class QraftService {
       this.refreshError = null;
       this.requiresRelogin = false;
       this.emitStatus();
+      // 每次自动刷新顺带补拉一次网关信息：应用长期驻留时也能拿到后来才
+      // 开通的网关（拉不到时按退避重试，见 syncAccountInfo）。
+      await this.syncAccountInfo();
     } catch (err) {
       if (!this.options.store.current) return; // 失败发生在登出前后：同样丢弃
       // 同一失败的并发观察者（手动刷新也 await 同一个 inFlightRefresh）：
