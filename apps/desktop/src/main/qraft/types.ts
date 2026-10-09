@@ -133,13 +133,13 @@ export interface QraftStoredState {
   /**
    * 平台 AI 网关信息（userinfo 下发）。encryptedApiKey 属密钥：只存在于
    * safeStorage 加密的 store 与 0600 的 token 文件中，绝不进渲染进程/日志。
-   * token 刷新不重拉 userinfo，故随本存储带入并在重写 token 文件时保留。
+   * 登录后由 syncAccountInfo 在启动/刷新时补拉，重写 token 文件时保留。
    */
   aiGateway?: QraftAiGateway;
   /**
    * 平台托管 MCP 网关凭据（userinfo 下发，作 Authorization Bearer）。
    * 属密钥：只存在于加密 store 与 0600 token 文件，绝不进渲染进程/日志。
-   * token 刷新不重拉 userinfo，故随本存储带入并在重写 token 文件时保留。
+   * 与 aiGateway 同源补拉，重写 token 文件时保留。
    */
   mcpGatewayKey?: string;
 }
