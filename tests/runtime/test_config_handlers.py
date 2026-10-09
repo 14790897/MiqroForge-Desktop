@@ -293,7 +293,11 @@ async def test_config_update_accepts_gateway_model_with_active_qraft_creds(
 async def test_config_update_rejects_gateway_model_without_qraft_creds(
     fake_config, fake_provider, tmp_path, monkeypatch,
 ):
-    """无网关凭据时，网关模型与其他模型一样必须由本地 provider 凭据背书。"""
+    """无网关凭据时，网关模型与其他模型一样必须由本地 provider 凭据背书。
+
+    #1258 起错误码改为可重试的 GATEWAY_CREDS_UNAVAILABLE：凭据缺失是暂态
+    （握手文件还没落盘/写失败），报成「模型不支持」会误导用户且无法重试。
+    """
     from miqi.runtime.app_server import AppServerError
     from miqi.runtime.config_handlers import config_update_handler
 
@@ -306,7 +310,8 @@ async def test_config_update_rejects_gateway_model_without_qraft_creds(
             {"config": {"agents": {"defaults": {"model": "deepseek/deepseek-v4-flash"}}}},
             "client-1", None, registry,
         )
-    assert exc_info.value.code == "INVALID_PARAMS"
+    assert exc_info.value.code == "GATEWAY_CREDS_UNAVAILABLE"
+    assert exc_info.value.recoverable is True
 
 
 @pytest.mark.asyncio
@@ -329,6 +334,156 @@ async def test_config_update_rejects_non_gateway_model_even_with_qraft_creds(
             "client-1", None, registry,
         )
     assert exc_info.value.code == "INVALID_PARAMS"
+
+
+# ── #1258：网关模型「凭据暂缺」与「模型真不支持」必须分开 ────────────────
+#
+# 真实用户两次遇到：登录后把默认模型写成网关模型，后端回
+# `Unsupported model: deepseek/deepseek-v4-flash (INVALID_PARAMS)`。
+# 那不是模型选错了 —— 是后端读的握手文件 <workspace>/.qraft/token.json 不可用，
+# 而渲染进程判定「网关可用」用的是内存登录态，两者之间没有一致性校验。
+# 把这种暂态报成「模型不存在」，用户既看不懂也没法重试。
+
+
+@pytest.mark.asyncio
+async def test_config_update_reports_gateway_creds_missing_as_retryable(
+    fake_config, fake_provider, tmp_path, monkeypatch,
+):
+    """网关模型 + 本机凭据不可用 → 可重试的 GATEWAY_CREDS_UNAVAILABLE。"""
+    from miqi.runtime.app_server import AppServerError
+    from miqi.runtime.config_handlers import config_update_handler
+
+    monkeypatch.delenv("QRAFT_GATEWAY_BASE", raising=False)
+    # 不写 token 文件：握手文件缺失（写失败/尚未落盘/被读到半个文件都归这一类）
+    registry = _setup_registry(fake_config, tmp_path)
+
+    with pytest.raises(AppServerError) as exc_info:
+        await config_update_handler(
+            "req-1",
+            {"config": {"agents": {"defaults": {"model": "deepseek/deepseek-v4-flash"}}}},
+            "client-1", None, registry,
+        )
+
+    err = exc_info.value
+    assert err.code == "GATEWAY_CREDS_UNAVAILABLE", err
+    assert err.recoverable is True, err
+    # 不能再说「模型不支持」——模型是对的，缺的是凭据
+    assert "Unsupported model" not in err.message, err
+    assert "deepseek/deepseek-v4-flash" not in err.message, err
+
+
+@pytest.mark.asyncio
+async def test_config_update_keeps_unsupported_model_for_non_gateway_model(
+    fake_config, fake_provider, tmp_path, monkeypatch,
+):
+    """非网关模型（或网关凭据正常但模型不属于任何可用 provider）保持旧语义。
+
+    收紧校验不允许：只有「网关模型 + 凭据暂缺」这一种暂态能被判成可重试。
+    """
+    from miqi.runtime.app_server import AppServerError
+    from miqi.runtime.config_handlers import config_update_handler
+
+    monkeypatch.delenv("QRAFT_GATEWAY_BASE", raising=False)
+    registry = _setup_registry(fake_config, tmp_path)
+
+    with pytest.raises(AppServerError) as exc_info:
+        await config_update_handler(
+            "req-1",
+            {"config": {"agents": {"defaults": {"model": "openai/gpt-4o"}}}},
+            "client-1", None, registry,
+        )
+
+    err = exc_info.value
+    assert err.code == "INVALID_PARAMS", err
+    assert "Unsupported model: openai/gpt-4o" in err.message, err
+
+
+@pytest.mark.parametrize(
+    ("status", "expect_retryable"),
+    [("active", False), ("provisioning", True)],
+)
+@pytest.mark.asyncio
+async def test_config_update_requires_active_gateway_creds(
+    fake_config, fake_provider, tmp_path, monkeypatch, status, expect_retryable,
+):
+    """非 active 的网关凭据同样算「本机不可用」（可重试）；active 时正常保存。"""
+    from unittest import mock
+
+    from miqi.runtime.app_server import AppServerError
+    from miqi.runtime.config_handlers import config_update_handler
+
+    monkeypatch.delenv("QRAFT_GATEWAY_BASE", raising=False)
+    _write_qraft_gateway_token(fake_config, status=status)
+    registry = _setup_registry(fake_config, tmp_path)
+
+    if not expect_retryable:
+        with mock.patch("miqi.config.loader.save_config"):
+            result = await config_update_handler(
+                "req-1",
+                {"config": {"agents": {"defaults": {"model": "deepseek/deepseek-v4-flash"}}}},
+                "client-1", None, registry,
+            )
+        assert result["result"]["saved"] is True
+        return
+
+    with pytest.raises(AppServerError) as exc_info:
+        await config_update_handler(
+            "req-1",
+            {"config": {"agents": {"defaults": {"model": "deepseek/deepseek-v4-flash"}}}},
+            "client-1", None, registry,
+        )
+    assert exc_info.value.code == "GATEWAY_CREDS_UNAVAILABLE", exc_info.value
+
+
+@pytest.mark.asyncio
+async def test_config_update_reports_gateway_origin_misconfig_as_not_retryable(
+    fake_config, fake_provider, tmp_path, monkeypatch,
+):
+    """凭据齐备但 QRAFT_GATEWAY_BASE 非法（非 https）：环境问题，重试无用，
+    必须与「凭据暂缺」区分开，不能都报成可重试。"""
+    from miqi.runtime.app_server import AppServerError
+    from miqi.runtime.config_handlers import config_update_handler
+
+    monkeypatch.setenv("QRAFT_GATEWAY_BASE", "http://gateway.example.com")
+    _write_qraft_gateway_token(fake_config)
+    registry = _setup_registry(fake_config, tmp_path)
+
+    with pytest.raises(AppServerError) as exc_info:
+        await config_update_handler(
+            "req-1",
+            {"config": {"agents": {"defaults": {"model": "deepseek/deepseek-v4-flash"}}}},
+            "client-1", None, registry,
+        )
+
+    err = exc_info.value
+    assert err.code == "GATEWAY_ORIGIN_INVALID", err
+    assert err.recoverable is False, err
+
+
+@pytest.mark.asyncio
+async def test_config_batch_write_reports_gateway_creds_missing_as_retryable(
+    fake_config, fake_provider, tmp_path, monkeypatch,
+):
+    """config.batchWrite 与 config.update 共用同一门控语义（#1258）。"""
+    from miqi.runtime.app_server import AppServer
+    from miqi.runtime.config_app_handlers import register_config_app_handlers
+
+    monkeypatch.delenv("QRAFT_GATEWAY_BASE", raising=False)
+    registry = _setup_registry(fake_config, tmp_path)
+    server = AppServer(registry)
+    register_config_app_handlers(server)
+
+    envelope = await server.dispatch(
+        "req-bw",
+        "config/batchWrite",
+        {"edits": [
+            {"op": "set", "path": "agents.defaults.model",
+             "value": "deepseek/deepseek-v4-flash"},
+        ]},
+        "client-1",
+    )
+
+    assert envelope.get("code") == "GATEWAY_CREDS_UNAVAILABLE", envelope
 
 
 @pytest.mark.asyncio

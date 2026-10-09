@@ -5,9 +5,9 @@
  *
  * 刷新策略：按平台下发的 expires_in（2026-09-21 实测约 30 天，早期约 2 小时）
  * 提前 15 分钟用 refresh_token 刷新。刷新失败按性质区分（issue #1087）：
- * 瞬时失败（网络不可达/平台 5xx）静默指数退避重试，不打扰用户；只有
- * 平台明确作废 refresh_token（REFRESH_TOKEN_INVALID）才置 requiresRelogin，
- * 由「登录失效三件套」（横幅/顶栏 chip/发送拦截）引导重新登录。
+ * 瞬时失败（网络不可达/平台 5xx）静默指数退避重试，不打扰用户；平台明确作废
+ * refresh_token（REFRESH_TOKEN_INVALID）或会话整体被拒时不再重试，**自动退出
+ * 登录**并在登录页说明「登录已失效，已自动退出」（见 logoutSessionExpired）。
  */
 
 import {
@@ -70,6 +70,15 @@ export interface SlurmChargeResult {
   /** 去重命中（该作业已计费过），未发起新的扣费请求。 */
   dedup?: boolean;
 }
+
+/**
+ * 登录凭据握手文件（`<workspace>/.qraft/token.json`）的同步结果。
+ *
+ * 写失败时必须能被调用方看见：这份文件是 Python 判定「平台网关凭据可用」
+ * 的唯一依据，静默失败会让渲染进程的「网关可用」与后端的「读不到凭据」
+ * 长期不一致（#1258）。
+ */
+export type TokenSyncOutcome = { ok: true; path: string } | { ok: false; message: string };
 /** 瞬时刷新失败（网络/平台 5xx）的指数退避重试：1 分钟起步翻倍，
  *  封顶 30 分钟（issue #1087：瞬时失败静默退避，不置 requiresRelogin）。
  *  refresh_token 已失效（REFRESH_TOKEN_INVALID）属永久错误，不重试。 */
@@ -208,6 +217,9 @@ export class QraftService {
   private refreshScheduledAt: number | null = null;
   private refreshError: QraftErrorCode | null = null;
   private requiresRelogin = false;
+  /** 因平台判定登录已失效而自动退出登录：登录页据此给出「已自动退出」说明。
+   *  只存在于本次进程内，重新登录成功即清除（见 logoutSessionExpired）。 */
+  private sessionExpired = false;
   /** 网关信息补拉的定时器与代数（syncAccountInfo 的退避重试）。 */
   private gatewayInfoTimer: ReturnType<typeof setTimeout> | null = null;
   private gatewayInfoAttempt = 0;
@@ -474,6 +486,8 @@ export class QraftService {
     this.refreshError = null;
     this.refreshRetryAttempt = 0;
     this.requiresRelogin = false;
+    // 重新登录成功：清掉「已自动退出」的说明，登录页不再赘述上一次失效。
+    this.sessionExpired = false;
     this.scheduleRefresh(state);
     this.syncTokenFile(state);
     this.emitStatus();
@@ -503,15 +517,26 @@ export class QraftService {
    *  agent 可写，恶意/意外替换成 symlink 或预置文件时不能把凭据写进去）。
    *  写入采用同目录临时文件 + rename 原子替换：rename 替换目录条目本身
    *  （不跟随目标 symlink），且凭据只落在新建 inode 上 —— 原地 writeFileSync
-   *  会跟随 symlink、并把攻击者经硬链接预置的文件就地覆写。 */
-  private syncTokenFile(state: QraftStoredState): void {
+   *  会跟随 symlink、并把攻击者经硬链接预置的文件就地覆写。
+   *
+   *  返回写入结果而不是只记日志：这份文件是 Python 侧判定「网关凭据可用」的
+   *  唯一依据，写失败必须能被调用方看到（#1258）。
+   */
+  private syncTokenFile(state: QraftStoredState): TokenSyncOutcome {
     const filePath = this.options.tokenFilePath?.();
-    if (!filePath) return;
+    // 路径解析不出来时旧实现直接 return，连日志都没有：Python 永远读不到凭据，
+    // 而渲染进程的 login store 照旧「网关可用」，保存必被后端拒绝（#1258）。
+    if (!filePath) {
+      const message = '无法解析工作目录下的 .qraft/token.json 路径';
+      this.options.log('WARN', `qraft: 同步 token 文件失败（${message}）`);
+      return { ok: false, message };
+    }
     let tmpPath: string | null = null;
     try {
       const dir = dirname(filePath);
       mkdirSync(dir, { recursive: true });
       const dirStat = lstatSync(dir);
+      // Windows 上目录 junction 在 lstat 里同样是 symlink，一样拒绝（保留原语义）。
       if (!dirStat.isDirectory() || dirStat.isSymbolicLink()) {
         throw new Error('.qraft 不是真实目录（可能被符号链接替换），跳过写入');
       }
@@ -565,11 +590,11 @@ export class QraftService {
       renameSync(tmpPath, filePath);
       tmpPath = null;
       chmodSync(filePath, 0o600);
+      return { ok: true, path: filePath };
     } catch (err) {
-      this.options.log(
-        'WARN',
-        `qraft: 同步 token 文件失败（${err instanceof Error ? err.message : err}）`
-      );
+      const message = err instanceof Error ? err.message : String(err);
+      this.options.log('WARN', `qraft: 同步 token 文件失败（${message}）`);
+      return { ok: false, message };
     } finally {
       if (tmpPath) {
         try {
@@ -579,6 +604,21 @@ export class QraftService {
         }
       }
     }
+  }
+
+  /**
+   * 重新同步登录凭据（握手文件），并把结果如实回报调用方。
+   *
+   * 渲染进程在保存网关模型被后端以 ``GATEWAY_CREDS_UNAVAILABLE`` 拒绝后调用：
+   * 后端读的是磁盘上的 ``<workspace>/.qraft/token.json``，而渲染进程判定
+   * 「网关可用」用的是内存里的登录态 —— 两者之间没有一致性校验，握手文件
+   * 没落盘时用户就只会拿到一句误导的 ``Unsupported model``（#1258）。重试前
+   * 先把磁盘视图补上，写不进去则如实返回失败原因（以前只有一条 WARN）。
+   */
+  syncTokenFileNow(): TokenSyncOutcome {
+    const state = this.options.store.current;
+    if (!state) return { ok: false, message: '尚未登录，无法同步登录凭据' };
+    return this.syncTokenFile(state);
   }
 
   /** 退出登录时删除 token 文件，避免过期凭据残留。 */
@@ -597,7 +637,9 @@ export class QraftService {
 
   status(): QraftStatus {
     const state = this.options.store.current;
-    if (!state) return { loggedIn: false };
+    // 未登录也要带出「为什么退出」：平台判定失效后应用自动退出，登录页据此说明。
+    if (!state)
+      return { loggedIn: false, ...(this.sessionExpired ? { sessionExpired: true } : {}) };
     const now = Date.now();
     return {
       loggedIn: true,
@@ -622,7 +664,11 @@ export class QraftService {
     };
   }
 
-  logout(): void {
+  /**
+   * 退出登录。`sessionExpired` 表示这次是被平台判定登录失效后的**自动退出**
+   * （见 logoutSessionExpired）：登录页据此说明原因；用户主动登出不带该标记。
+   */
+  logout(opts: { sessionExpired?: boolean } = {}): void {
     this.cancelRefresh();
     // 登出后不再补拉网关信息：计时器留着会在无登录态时白跑一次。
     this.cancelGatewayInfoRetry();
@@ -636,6 +682,8 @@ export class QraftService {
         `qraft: 登出收尾失败（${err instanceof Error ? err.message : err}）`
       );
     }
+    // 先记下来：emitStatus 在方法末尾，登录页读到的就是这次退出的原因。
+    this.sessionExpired = opts.sessionExpired === true;
     // 使登出前发起的在途刷新结果作废（runRefresh 代际校验丢弃）。
     this.authGeneration += 1;
     this.inFlightRefresh = null;
@@ -760,12 +808,11 @@ export class QraftService {
         } catch (retryErr) {
           if (retryErr instanceof QraftError && retryErr.code === 'SESSION_EXPIRED') {
             // 新 token 仍被平台拒绝：会话整体失效（平台作废整会话等），
-            // 置 requiresRelogin 停掉渲染层重试并引导重新登录（issue #1160）。
-            this.requiresRelogin = true;
-            this.emitStatus();
-            this.options.log(
-              'ERROR',
-              'qraft: 刷新后重试积分余额仍失败（SESSION_EXPIRED）：会话已失效，请重新登录'
+            // 自动退出登录并说明原因（issue #1160 / 自动退出）。
+            this.logoutSessionExpired(
+              '积分余额查询',
+              '刷新后仍被平台拒绝（会话已失效）',
+              generation
             );
           } else {
             this.options.log('WARN', pointsFailureLog(retryErr));
@@ -841,6 +888,15 @@ export class QraftService {
           );
           return { ok: true };
         } catch (retryErr) {
+          if (retryErr instanceof QraftError && retryErr.code === 'SESSION_EXPIRED') {
+            // 刷新后的新 token 仍被平台拒绝：会话整体失效 → 自动退出登录
+            //（与积分余额查询路径同一判定，CodeRabbit #1255）。
+            this.logoutSessionExpired(
+              '反馈平台提交',
+              '刷新后仍被平台拒绝（会话已失效）',
+              generation
+            );
+          }
           if (retryErr instanceof QraftError) {
             return { ok: false, code: retryErr.code, message: retryErr.message };
           }
@@ -1021,16 +1077,30 @@ export class QraftService {
             if (!fresh || this.authGeneration !== generation || fresh.account.sub !== accountSub) {
               throw new QraftError('INTERNAL', '登录状态在计费期间发生变化，本次作业计费已取消');
             }
-            balance = await this.options.client.deductPoints(
-              {
-                ...config,
-                baseUrl: fresh.baseUrl,
-                clientId: fresh.clientId,
-                clientSecret: fresh.clientSecret,
-              },
-              fresh.tokens.accessToken,
-              { amount: SLURM_JOB_COST, source: 'slurm-job', resourceType: 'slurm', memo }
-            );
+            // 刷新后的新 token 仍被平台拒绝 = 会话整体失效 → 自动退出登录
+            //（与积分余额查询路径同一判定，CodeRabbit #1255）。只在这一步
+            // 判定：刷新本身失败属瞬时/永久由刷新路径负责，不在这里重复。
+            try {
+              balance = await this.options.client.deductPoints(
+                {
+                  ...config,
+                  baseUrl: fresh.baseUrl,
+                  clientId: fresh.clientId,
+                  clientSecret: fresh.clientSecret,
+                },
+                fresh.tokens.accessToken,
+                { amount: SLURM_JOB_COST, source: 'slurm-job', resourceType: 'slurm', memo }
+              );
+            } catch (retryErr) {
+              if (retryErr instanceof QraftError && retryErr.code === 'SESSION_EXPIRED') {
+                this.logoutSessionExpired(
+                  'Slurm 作业扣费',
+                  '刷新后仍被平台拒绝（会话已失效）',
+                  generation
+                );
+              }
+              throw retryErr;
+            }
           } else {
             throw err;
           }
@@ -1178,6 +1248,8 @@ export class QraftService {
   async refreshNow(opts: { syncInfo?: boolean } = {}): Promise<QraftLoginResult> {
     const state = this.options.store.current;
     if (!state) return { ok: false, code: 'INVALID_CONFIG', message: '尚未登录' };
+    // 发起前捕获登录代际：失败回来时若已登出/重登，这份失败属于旧会话。
+    const generation = this.authGeneration;
     const refresh = this.doRefresh(state);
     try {
       await refresh;
@@ -1198,7 +1270,7 @@ export class QraftService {
         // 不再重复处理 —— 先到的路径已归类失败并排好退避重试（CodeRabbit #1114）。
         if (this.lastHandledRefreshFailure !== refresh) {
           this.lastHandledRefreshFailure = refresh;
-          this.handleRefreshFailure(err, state, '手动');
+          this.handleRefreshFailure(err, state, '手动', generation);
         }
         return { ok: false, code: err.code, message: err.message };
       }
@@ -1392,6 +1464,8 @@ export class QraftService {
   private async tickRefresh(state: QraftStoredState): Promise<void> {
     // 已退出登录（store 已清）时丢弃过期定时任务，不重试也不写回任何状态。
     if (!this.options.store.current) return;
+    // 发起前捕获登录代际（同 refreshNow）：失败回来时可能已经登出/重登。
+    const generation = this.authGeneration;
     const refresh = this.doRefresh(state);
     try {
       await refresh;
@@ -1409,28 +1483,59 @@ export class QraftService {
       // （CodeRabbit #1114）。
       if (this.lastHandledRefreshFailure === refresh) return;
       this.lastHandledRefreshFailure = refresh;
-      this.handleRefreshFailure(err, state, '自动');
+      this.handleRefreshFailure(err, state, '自动', generation);
     }
+  }
+
+  /**
+   * 平台判定登录已失效（refresh_token 被作废 / 会话被平台拒绝）时的收尾：
+   * **自动退出登录**，而不是留在「已登录但平台调用必然失败」的僵尸状态里，
+   * 等用户自己点重新登录。退出后登录门（#1095）把人停在登录页，并由
+   * sessionExpired 标记说明「登录已失效，已自动退出」——用户不会看到
+   * 一个没有解释的登录页，也不会误以为应用崩了。
+   *
+   * 只处理永久失效：瞬时失败（网络/平台 5xx）继续静默退避重试，不打扰用户。
+   *
+   * `generation` 是发起这次请求时的登录代际：退出登录/重新登录会把它 +1，
+   * 于是「上一份登录态的在途请求失败后才回来」不会被拿来踢掉新会话
+   *（CodeRabbit #1255）—— 否则用户刚重登成功就会被一条旧失败退出登录。
+   */
+  private logoutSessionExpired(via: string, reason: string, generation: number): void {
+    if (this.authGeneration !== generation) {
+      this.options.log('WARN', `qraft: ${via}：${reason}，但登录态已变化，忽略本次自动退出`);
+      return;
+    }
+    this.options.log('WARN', `qraft: ${via}：${reason}，已自动退出登录`);
+    this.logout({ sessionExpired: true });
   }
 
   /**
    * 刷新失败的统一处理（refreshNow 与 tickRefresh 共用，按在途 Promise
    * 身份去重后只调用一次）：
-   *   - REFRESH_TOKEN_INVALID（平台作废）：永久失败，置 requiresRelogin 走
-   *     登录失效三件套，撤销定时器不再重试；
-   *   - 其余（网络/平台 5xx）：瞬时失败，不置 requiresRelogin（不弹横幅、
-   *     不拦截发送），指数退避静默重试（issue #1087）。
+   *   - REFRESH_TOKEN_INVALID（平台作废）：永久失败，不再重试，自动退出登录
+   *     （见 logoutSessionExpired）；
+   *   - 其余（网络/平台 5xx）：瞬时失败，不打扰用户，指数退避静默重试
+   *     （issue #1087）。
+   *
+   * `generation` 由调用方在发起刷新前捕获，用于判定这份失败是否还属于当前
+   * 登录态（见 logoutSessionExpired）。
    */
-  private handleRefreshFailure(err: unknown, state: QraftStoredState, via: '自动' | '手动'): void {
+  private handleRefreshFailure(
+    err: unknown,
+    state: QraftStoredState,
+    via: '自动' | '手动',
+    generation: number
+  ): void {
     const code = err instanceof QraftError ? err.code : 'REFRESH_FAILED';
+    if (this.authGeneration !== generation) {
+      // 这份失败属于已经结束的登录态（期间登出或重新登录）：既不能拿它
+      // 踢掉新会话，也不能把错误码/退避重试写到新会话的状态上（CodeRabbit #1255）。
+      this.options.log('WARN', `qraft: ${via}刷新失败（${code}）属于已结束的登录态，忽略`);
+      return;
+    }
     this.refreshError = code;
     if (isPermanentRefreshError(code)) {
-      this.requiresRelogin = true;
-      this.cancelRefresh();
-      this.options.log(
-        'ERROR',
-        `qraft: ${via}刷新失败（${code}）：refresh_token 已失效，请重新登录（不再自动重试）`
-      );
+      this.logoutSessionExpired(via + '刷新失败', '平台判定 refresh_token 已失效', generation);
     } else {
       const delay = this.nextRefreshRetryDelay();
       this.refreshRetryAttempt += 1;

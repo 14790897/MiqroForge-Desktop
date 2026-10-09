@@ -83,6 +83,80 @@ def _pick_usable_default_model(config: Any, exclude: str | None = None) -> str:
     return ""
 
 
+def _gateway_model_name(model: str) -> str | None:
+    """Bare model id when ``model`` is the platform gateway's measured model.
+
+    Single source of the "is this a gateway model" rule, shared by
+    :func:`_qraft_gateway_routable` and :func:`_gateway_cred_reason` so the save
+    gate and the runtime route cannot drift apart.  Case-sensitive on purpose —
+    it mirrors ``factory.make_provider``.
+    """
+    from miqi.providers.gateway import GATEWAY_MODEL
+
+    if not model.startswith("deepseek/"):
+        return None
+    bare = model[len("deepseek/"):]
+    return bare if bare == GATEWAY_MODEL else None
+
+
+def _gateway_cred_reason(config: Any, model: str) -> str | None:
+    """Why a gateway model is not routable right now; None when it is fine.
+
+    ``"creds"`` — the login handshake's on-disk view
+    (``<workspace>/.qraft/token.json``) is missing, unreadable or not active.
+    This is a **transient** state, not a bad model choice (#1258): the renderer
+    decides the gateway is usable from the in-memory login store, while the
+    backend resolves credentials from that file, and nothing ever checks the
+    two agree.  The file write itself can be skipped (guards, unreadable
+    directory) or lost to a concurrent replace, all silently.
+
+    ``"origin"`` — ``QRAFT_GATEWAY_BASE`` is explicitly configured but not
+    https, so :func:`gateway_origin` refuses it.  An environment problem:
+    retrying will not help, so it must not be reported as retryable.
+    """
+    if _gateway_model_name(model) is None:
+        return None
+    from miqi.providers.gateway import (
+        gateway_origin,
+        gateway_token_file,
+        read_gateway_creds,
+    )
+
+    workspace = getattr(config, "workspace_path", None)
+    if not workspace or read_gateway_creds(gateway_token_file(config)) is None:
+        return "creds"
+    if gateway_origin() is None:
+        return "origin"
+    return None
+
+
+def unsupported_model_error(config: Any, model: str) -> AppServerError:
+    """Error to raise when ``model`` cannot resolve to a usable provider.
+
+    The gateway model's two failure modes get their own codes instead of the
+    blanket ``Unsupported model``: "credentials not on disk yet" is retryable
+    (the frontend re-syncs the handshake file and tries again), "gateway origin
+    misconfigured" is not.  Only a model that resolves nowhere keeps
+    ``Unsupported model`` — otherwise a handshake hiccup tells the user their
+    model does not exist, which is both wrong and unactionable (#1258).
+    """
+    reason = _gateway_cred_reason(config, model)
+    if reason == "creds":
+        return AppServerError(
+            "平台 AI 网关凭据对当前账号不可用（本机登录凭据握手文件缺失，"
+            "或平台未给该账号开通 AI 网关）。请稍后重试保存；若持续失败，"
+            "请重新登录或在平台确认该账号已开通 AI 网关",
+            code="GATEWAY_CREDS_UNAVAILABLE",
+            recoverable=True,
+        )
+    if reason == "origin":
+        return AppServerError(
+            "平台 AI 网关地址配置不合法（QRAFT_GATEWAY_BASE 须为 https），无法路由该模型",
+            code="GATEWAY_ORIGIN_INVALID",
+        )
+    return AppServerError(f"Unsupported model: {model}", code="INVALID_PARAMS")
+
+
 def _qraft_gateway_routable(config: Any, model: str) -> bool:
     """Whether the model is routed via the platform AI gateway at runtime.
 
@@ -93,20 +167,17 @@ def _qraft_gateway_routable(config: Any, model: str) -> bool:
     唯一可用的网关模型会被拒之门外（实测复现：登录用户无任何本地 key，
     保存 deepseek/deepseek-v4-flash 报 Unsupported model）。
     """
-    if not model.startswith("deepseek/"):
+    if _gateway_model_name(model) is None:
+        return False
+    workspace = getattr(config, "workspace_path", None)
+    if not workspace:
         return False
     from miqi.providers.gateway import (
-        GATEWAY_MODEL,
         gateway_origin,
         gateway_token_file,
         read_gateway_creds,
     )
 
-    if model[len("deepseek/"):] != GATEWAY_MODEL:
-        return False
-    workspace = getattr(config, "workspace_path", None)
-    if not workspace:
-        return False
     creds = read_gateway_creds(gateway_token_file(config))
     return bool(creds and gateway_origin())
 
@@ -489,9 +560,7 @@ async def providers_update_handler(
     # 模型值必须能被运行时解析到「有凭据可用」的 provider（#929 review：
     # 仅注册表成员资格不够，无凭据 provider 会兜底错发到错误 API）。
     if not _model_provider_resolvable(config, model_override):
-        raise AppServerError(
-            f"Unsupported model: {model_override}", code="INVALID_PARAMS",
-        )
+        raise unsupported_model_error(config, model_override)
 
     config.agents.defaults.model = model_override
 

@@ -42,6 +42,7 @@
 | `issue-1034-renderer-oom-probe.spec.ts` | 守卫 | `MIQI_1034_PROBE === '1'` | 极高（长跑测量） | spec 自身注明「测量用长跑探针默认跳过」，只在排查 #1034 时手动开 |
 | `full-electron.spec.ts`（部分） | 守卫 | `MIQI_RUN_REAL_WEB_SEARCH_E2E` / `MIQI_RUN_STATEFUL_SESSION_E2E` | 高（真实 LLM） | 5 个用例在 PR CI 上不稳定（#187）：real web search 1、stateful session 1、sidebar switching 2、重启 history 1；该文件其余 11 个用例在 Linux 全量套件里照跑 |
 | `ai-gateway-live.spec.ts` | 守卫 | `QRAFT_LIVE=1` | 中（真实平台账号） | opt-in live 用例；CI 从未设置 `QRAFT_LIVE`（连已删除的 cloud-login live workflow 也只跑两个登录 spec） |
+| `gateway-creds-live.spec.ts` | 守卫 | `QRAFT_LIVE=1` | 中（真实平台账号） | 同 `ai-gateway-live`：验证真实登录后网关凭据握手文件落盘、以及缺失时保存报可重试错误（#1258）。无凭据的 CI 跑不了；**mock 版 `gateway-creds-handshake.spec.ts` 在 CI 全量套件里照跑** |
 | `issue-1185-account-isolation-live.spec.ts` | 守卫 | `QRAFT_LIVE=1` + ≥2 个真实账号 | 中（真实平台账号） | 需要两个账号来回切换验证本地存储隔离 |
 | `issue-1185-task-assets-live.spec.ts` | 守卫 | `QRAFT_LIVE=1` | 中（真实平台账号） | 同上：复杂技能产物跨账号切换 |
 | `billing-live.spec.ts` | 守卫 | `SLURM_MCP_KEY` | 中（真实网关） | 需要 slurm MCP 网关 key，CI 未注入 |

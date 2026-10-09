@@ -411,7 +411,7 @@ describe('QraftService 自动刷新', () => {
     expect(service.status().requiresRelogin).toBe(false);
   });
 
-  it('refresh_token 已失效（永久错误）不再自动重试，标记需重新登录', async () => {
+  it('refresh_token 已失效（永久错误）：不再自动重试，直接退出登录并标记已失效', async () => {
     vi.useFakeTimers();
     const stub = makeClientStub();
     stub.platformLogin.mockResolvedValue({ sub: '1', username: 'u', nickname: 'n' });
@@ -426,14 +426,20 @@ describe('QraftService 自动刷新', () => {
     const delay = 7_199_000 - 15 * 60_000;
     await vi.advanceTimersByTimeAsync(delay + 100);
     expect(stub.refreshTokens).toHaveBeenCalledTimes(1);
-    expect(service.status().refreshError).toBe('REFRESH_TOKEN_INVALID');
-    expect(service.status().requiresRelogin).toBe(true);
-    // 不再调度下一次重试（refreshScheduledAt 清空）
-    expect(service.status().refreshScheduledAt).toBeUndefined();
+    // 自动退出登录：凭据清空、登录门回到登录页，并带上「已自动退出」的标记
+    expect(store.current).toBeNull();
+    expect(service.status().loggedIn).toBe(false);
+    expect(service.status().sessionExpired).toBe(true);
+    expect(statusEvents.some((s: any) => s?.sessionExpired === true)).toBe(true);
 
     // 30 分钟后仍不重试（无新请求、无新定时器）
     await vi.advanceTimersByTimeAsync(30 * 60_000 + 100);
     expect(stub.refreshTokens).toHaveBeenCalledTimes(1);
+
+    // 重新登录成功后清掉「已自动退出」的说明
+    await service.login('18500000000', 'p');
+    expect(service.status().loggedIn).toBe(true);
+    expect(service.status().sessionExpired).toBeUndefined();
   });
 
   it('应用启动时恢复登录态并调度刷新', () => {
@@ -871,6 +877,53 @@ describe('QraftService AI 网关字段（#922）', () => {
     expect(store.current?.aiGateway?.encryptedApiKey).toBe('sk-test-gateway-secret');
     expect(service.status().aiGateway?.status).toBe('active');
   });
+
+  // ── 握手文件重新同步（#1258）──────────────────────────────────────────
+  // 这份文件是 Python 判定「网关凭据可用」的唯一依据；写失败以前只留一条
+  // WARN，渲染进程照旧按内存登录态认为网关可用 → 保存必然被后端拒绝，用户
+  // 只拿到一句误导的 Unsupported model。
+
+  it('syncTokenFileNow 重新写出握手文件并回报成功', async () => {
+    const stub = makeClientStub();
+    stub.platformLogin.mockResolvedValue({ sub: '19', username: 'u', nickname: 'n' });
+    stub.authorizeFlow.mockResolvedValue(makeTokens());
+    stub.getUserInfo.mockResolvedValue(userinfoWithGateway());
+    const service = makeService(stub);
+    const tokenPath = join(dir, 'qraft-token.json');
+
+    await service.login('18500000000', 'p');
+    rmSync(tokenPath, { force: true }); // 磁盘视图丢了（写失败/被清理）
+
+    expect(service.syncTokenFileNow()).toEqual({ ok: true, path: tokenPath });
+    expect(JSON.parse(readFileSync(tokenPath, 'utf8')).aiGateway).toEqual(GATEWAY);
+  });
+
+  it('syncTokenFileNow 写不进去时如实回报失败（不再静默）', async () => {
+    const stub = makeClientStub();
+    stub.platformLogin.mockResolvedValue({ sub: '19', username: 'u', nickname: 'n' });
+    stub.authorizeFlow.mockResolvedValue(makeTokens());
+    stub.getUserInfo.mockResolvedValue(userinfoWithGateway());
+    // 用同名普通文件占住目录位置：mkdirSync 必然失败 → 写入被跳过。
+    writeFileSync(join(dir, 'blocked'), 'not a directory', 'utf8');
+    const service = new QraftService({
+      client: stub as unknown as QraftClient,
+      store,
+      log: noopLog,
+      makeRedirectUri: () => 'http://localhost:38000/callback',
+      tokenFilePath: () => join(dir, 'blocked', 'token.json'),
+    });
+
+    await service.login('18500000000', 'p'); // 登录本身不受影响
+
+    const outcome = service.syncTokenFileNow();
+    expect(outcome.ok).toBe(false);
+    expect(outcome.ok === false && outcome.message.length > 0).toBe(true);
+  });
+
+  it('syncTokenFileNow 未登录时拒绝同步', () => {
+    const service = makeService(makeClientStub());
+    expect(service.syncTokenFileNow()).toMatchObject({ ok: false });
+  });
 });
 
 // ── Slurm 作业扣费（issue #927）─────────────────────────────────────────
@@ -1262,7 +1315,7 @@ describe('QraftService 反馈平台通道（issue #1054）', () => {
     expect((client.submitFeedback.mock.calls[1] as any[])[1]).toBe('NEW-ACCESS');
   });
 
-  it('refresh_token 已作废：置 requiresRelogin 并推状态（登录失效三件套）', async () => {
+  it('refresh_token 已作废：自动退出登录并标记已失效', async () => {
     const client = makeFeedbackClient();
     client.submitFeedback.mockRejectedValue(
       new QraftError('SESSION_EXPIRED', 'access_token 已失效')
@@ -1276,9 +1329,12 @@ describe('QraftService 反馈平台通道（issue #1054）', () => {
     const result = await svc.submitPlatformFeedback({ content: 'x' });
 
     expect(result).toMatchObject({ ok: false, code: 'REFRESH_TOKEN_INVALID' });
-    expect(svc.status().requiresRelogin).toBe(true);
-    expect(svc.status().refreshError).toBe('REFRESH_TOKEN_INVALID');
-    expect(statusEvents.some((s: any) => s?.requiresRelogin === true)).toBe(true);
+    // 平台作废 refresh_token → 自动退出登录（不再停在僵尸登录态里）
+    expect(store.current).toBeNull();
+    expect(svc.status().sessionExpired).toBe(true);
+    expect(statusEvents.some((s: any) => s?.loggedIn === false && s?.sessionExpired === true)).toBe(
+      true
+    );
   });
 
   it('刷新失败（瞬时）：不重试提交，返回刷新错误码', async () => {
@@ -1452,7 +1508,7 @@ describe('QraftService 积分余额拉取（issue #1160）', () => {
     expect((client.getPointsBalance.mock.calls[1] as any[])[1]).toBe('FRESH-TOKEN');
   });
 
-  it('refresh_token 已作废：置 requiresRelogin 并推状态（登录失效三件套）', async () => {
+  it('refresh_token 已作废：自动退出登录并标记已失效', async () => {
     const client = makePointsClient();
     client.getPointsBalance.mockRejectedValue(
       new QraftError('SESSION_EXPIRED', 'access_token 已失效')
@@ -1466,12 +1522,15 @@ describe('QraftService 积分余额拉取（issue #1160）', () => {
     const result = await svc.fetchPointsBalance();
 
     expect(result).toMatchObject({ ok: false, code: 'REFRESH_TOKEN_INVALID' });
-    expect(svc.status().requiresRelogin).toBe(true);
-    expect(svc.status().refreshError).toBe('REFRESH_TOKEN_INVALID');
-    expect(statusEvents.some((s: any) => s?.requiresRelogin === true)).toBe(true);
+    // 平台作废 refresh_token → 自动退出登录
+    expect(store.current).toBeNull();
+    expect(svc.status().sessionExpired).toBe(true);
+    expect(statusEvents.some((s: any) => s?.loggedIn === false && s?.sessionExpired === true)).toBe(
+      true
+    );
   });
 
-  it('刷新成功但新 token 仍被平台拒绝：置 requiresRelogin 引导重新登录', async () => {
+  it('刷新成功但新 token 仍被平台拒绝：自动退出登录并标记已失效', async () => {
     const client = makePointsClient();
     client.getPointsBalance.mockRejectedValue(
       new QraftError('SESSION_EXPIRED', 'access_token 已失效')
@@ -1484,8 +1543,12 @@ describe('QraftService 积分余额拉取（issue #1160）', () => {
 
     expect(result).toMatchObject({ ok: false, code: 'SESSION_EXPIRED' });
     expect(client.getPointsBalance).toHaveBeenCalledTimes(2);
-    expect(svc.status().requiresRelogin).toBe(true);
-    expect(statusEvents.some((s: any) => s?.requiresRelogin === true)).toBe(true);
+    // 刷新成功但新 token 仍被平台拒绝：会话整体失效 → 自动退出登录
+    expect(store.current).toBeNull();
+    expect(svc.status().sessionExpired).toBe(true);
+    expect(statusEvents.some((s: any) => s?.loggedIn === false && s?.sessionExpired === true)).toBe(
+      true
+    );
   });
 
   it('瞬时刷新失败（REFRESH_FAILED）：不置 requiresRelogin，透出错误码', async () => {
@@ -1824,5 +1887,79 @@ describe('QraftService 网关信息补拉（#1251）', () => {
     // 新登录有全新的预算：退避 1 分钟后应再次补拉
     await vi.advanceTimersByTimeAsync(60_000 + 100);
     expect(stub.getUserInfo.mock.calls.length).toBe(afterLogin + 1);
+  });
+});
+
+describe('QraftService 自动退出登录的归属判定（#1253 评审）', () => {
+  it('旧登录态的在途刷新失败：不踢掉重新登录后的新会话', async () => {
+    const stub = makeClientStub();
+    stub.platformLogin.mockResolvedValue({
+      sub: '19',
+      username: 'U-HKY4-GB4E',
+      nickname: 'MiQi测试',
+    });
+    stub.authorizeFlow.mockResolvedValue(makeTokens());
+    stub.getUserInfo.mockResolvedValue({
+      sub: '19',
+      username: 'U-HKY4-GB4E',
+      nickname: 'MiQi测试',
+    });
+    // 挂起的刷新：由用例决定何时以「refresh_token 已失效」失败
+    let failRefresh: ((err: unknown) => void) | undefined;
+    stub.refreshTokens.mockImplementation(
+      () =>
+        new Promise((_resolve, reject) => {
+          failRefresh = reject;
+        })
+    );
+    store.save(makeStoredState());
+    const service = makeService(stub);
+
+    const pending = service.refreshNow(); // 属于当前会话的在途刷新
+    service.logout(); // 用户登出（代际 +1）
+    await service.login('18500000000', 'p'); // 重新登录成功
+    expect(service.status().loggedIn).toBe(true);
+
+    // 旧请求这时才失败：不能让这条件失败把新会话退出登录
+    failRefresh!(new QraftError('REFRESH_TOKEN_INVALID', 'refresh_token 已失效'));
+    const result = await pending;
+
+    expect(result).toMatchObject({ ok: false, code: 'REFRESH_TOKEN_INVALID' });
+    expect(service.status().loggedIn).toBe(true);
+    expect(service.status().sessionExpired).toBeUndefined();
+    // 旧失败也不能把错误码写进新会话的状态
+    expect(service.status().refreshError).toBeUndefined();
+  });
+
+  it('反馈重试仍被平台拒绝（SESSION_EXPIRED）：自动退出登录', async () => {
+    const client = { submitFeedback: vi.fn(), refreshTokens: vi.fn() };
+    client.submitFeedback.mockRejectedValue(
+      new QraftError('SESSION_EXPIRED', 'access_token 已失效')
+    );
+    client.refreshTokens.mockResolvedValue(makeTokens({ accessToken: 'FRESH-TOKEN' }));
+    store.save(makeStoredState());
+    const svc = makeService(client as unknown as ClientStub);
+
+    const result = await svc.submitPlatformFeedback({ content: 'E2E 失效态提交' });
+
+    expect(result).toMatchObject({ ok: false, code: 'SESSION_EXPIRED' });
+    expect(client.submitFeedback).toHaveBeenCalledTimes(2);
+    expect(store.current).toBeNull();
+    expect(svc.status().sessionExpired).toBe(true);
+  });
+
+  it('Slurm 扣费重试仍被平台拒绝（SESSION_EXPIRED）：自动退出登录', async () => {
+    const client = makeChargeClient();
+    client.deductPoints.mockRejectedValue(new QraftError('SESSION_EXPIRED', 'access_token 已失效'));
+    client.refreshTokens.mockResolvedValue(makeTokens({ accessToken: 'FRESH-TOKEN' }));
+    store.save(makeStoredState());
+    const svc = makeService(client as unknown as ClientStub);
+
+    const result = await svc.chargeSlurmJob(SLURM_PAYLOAD);
+
+    expect(result).toMatchObject({ ok: false, code: 'SESSION_EXPIRED' });
+    expect(client.deductPoints).toHaveBeenCalledTimes(2);
+    expect(store.current).toBeNull();
+    expect(svc.status().sessionExpired).toBe(true);
   });
 });

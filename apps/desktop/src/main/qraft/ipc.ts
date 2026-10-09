@@ -17,6 +17,7 @@ import {
   QraftBrowserLoginInput,
   type QraftLoginResult,
   type QraftStatus,
+  type QraftTokenSyncResult,
 } from '../../shared/ipc';
 import {
   QraftError,
@@ -322,6 +323,12 @@ export function registerQraftIpcHandlers(): void {
 
   ipcMain.handle(IPC.QRAFT_REFRESH, async (): Promise<QraftLoginResult> => {
     return getService().refreshNow();
+  });
+
+  // #1258：重新同步登录凭据握手文件并把结果如实回报。渲染进程在保存网关模型
+  // 被 GATEWAY_CREDS_UNAVAILABLE 拒绝后调用，重试前把 Python 读的磁盘视图补上。
+  ipcMain.handle(IPC.QRAFT_SYNC_TOKEN, async (): Promise<QraftTokenSyncResult> => {
+    return getService().syncTokenFileNow();
   });
 
   ipcMain.handle(IPC.QRAFT_LOGOUT, async (): Promise<{ ok: boolean }> => {

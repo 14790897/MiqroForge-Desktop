@@ -11,11 +11,12 @@
  */
 
 import { useState } from 'react';
-import { Globe, LogOut, ShieldCheck, Sparkles } from 'lucide-react';
+import { AlertTriangle, Globe, LogOut, ShieldCheck, Sparkles } from 'lucide-react';
 import { Button } from '../../components/ui/Button';
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '../../components/ui/Dialog';
 import { QraftLoginButton } from '../settings/components/QraftLoginCard';
 import { MiQroForgeLogo } from '../../components/MiQroForgeLogo';
+import { useQraftStatus } from '../../hooks/useQraftStatus';
 
 const BENEFITS: Array<{ icon: typeof Globe; text: string }> = [
   { icon: Sparkles, text: '平台内置模型：模型调用经平台 AI 网关转发，免配置 API Key。' },
@@ -25,6 +26,10 @@ const BENEFITS: Array<{ icon: typeof Globe; text: string }> = [
 
 export function QraftLoginStep() {
   const [confirmingQuit, setConfirmingQuit] = useState(false);
+  const { status } = useQraftStatus();
+  // 平台判定登录失效后主进程会自动退出登录（见 QraftService.logoutSessionExpired）：
+  // 在这里说明「是失效自动退出，不是崩溃」，用户才知道为什么要重新登录。
+  const sessionExpired = status?.sessionExpired === true;
 
   const quit = () => {
     // 走主进程 app.quit()——macOS 上 window.close() 不终止应用（#837 评审）。
@@ -56,6 +61,23 @@ export function QraftLoginStep() {
 
         {/* Body */}
         <div className="flex flex-col gap-4 px-6 py-5">
+          {sessionExpired && (
+            <div
+              data-testid="login-step-session-expired"
+              role="status"
+              className="flex items-start gap-2.5 rounded-lg border px-3 py-2.5 text-xs leading-relaxed"
+              style={{
+                background: 'color-mix(in srgb, var(--approval-warning-bg) 92%, white)',
+                borderColor: 'var(--approval-warning-border)',
+                color: 'var(--approval-warning)',
+              }}
+            >
+              <AlertTriangle size={14} className="mt-0.5 shrink-0" aria-hidden />
+              <span>
+                MiQroForge 平台登录已失效，应用已自动退出登录。请重新登录后继续使用平台功能。
+              </span>
+            </div>
+          )}
           <ul className="flex flex-col gap-2.5">
             {BENEFITS.map((b) => (
               <li key={b.text} className="flex items-start gap-2.5 text-xs leading-relaxed">
