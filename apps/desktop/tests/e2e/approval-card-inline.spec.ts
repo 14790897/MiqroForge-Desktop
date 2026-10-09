@@ -303,16 +303,33 @@ test.describe('#1240 审批卡输入框内联形态', () => {
       // 兜底模态的可访问名在外层 alertdialog 上
       expect(await dialog.getAttribute('aria-labelledby')).toBe('approval-title');
 
+      // 审批挂起时输入区被 hidden，但 ExecutionPolicySelector / ReasoningModeSwitch
+      // 的 document 级 keydown 守卫只挡 INPUT/TEXTAREA —— 焦点在卡片的 DIV/按钮上时
+      // 1–4 会静默改掉看不见的执行策略，Shift+Tab 还会 pick(next) 循环策略。这里锁死。
+      const policyBtn = page
+        .locator('button')
+        .filter({ hasText: /规划|手动|允许编辑|自动/ })
+        .first();
+      const policyBefore = ((await policyBtn.textContent()) ?? '').trim();
+
       // Tab 环：次数多于卡内可聚焦元素数，焦点必须始终留在对话框内
       const inside = () => dialog.evaluate((el) => el.contains(document.activeElement));
       for (let i = 0; i < 8; i++) {
         await page.keyboard.press('Tab');
         expect(await inside(), `第 ${i + 1} 次 Tab 后焦点跑出对话框`).toBe(true);
       }
-      for (let i = 0; i < 4; i++) {
+      // 故意用**奇数**次：策略是 4 项循环，按 4 次正好转一整圈回到原值，会掩盖上面那个
+      // bug（这正是上一轮没用断言抓住它的原因）。数字键同理。
+      for (let i = 0; i < 3; i++) {
         await page.keyboard.press('Shift+Tab');
         expect(await inside(), `第 ${i + 1} 次 Shift+Tab 后焦点跑出对话框`).toBe(true);
       }
+      await page.keyboard.press('1');
+      await page.keyboard.press('4');
+      await page.waitForTimeout(300);
+      const policyAfter = ((await policyBtn.textContent()) ?? '').trim();
+      console.log(`[xpage] 执行策略 前=${policyBefore} 后=${policyAfter}`);
+      expect(policyAfter, '审批挂起期间执行策略被隐藏控件的快捷键改掉了').toBe(policyBefore);
 
       // 阶段 3：Esc 拒绝 → 焦点不得落进任何未渲染元素（尤其聊天区那个 hidden textarea）
       await page.keyboard.press('Escape');

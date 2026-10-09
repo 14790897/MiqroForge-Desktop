@@ -302,15 +302,26 @@ function ComposerImpl(
         </ContextMenu>
         {/* Icon row at the bottom — no text, like DeepSeek */}
         <div className="flex items-center gap-3 pt-1.5 mt-0.5 border-t border-[var(--border-subtle)]">
+          {/* 审批挂起时把这两个控件的键盘监听一起停掉。它们挂的是 **document** 级
+              keydown，守卫只挡 INPUT/TEXTAREA；审批期间焦点在卡片 root（DIV）或某个决策
+              按钮上，两个守卫都不生效 —— 于是 1–4 会静默改掉一个**看不见**的执行策略，
+              Shift+Tab 还会 pick(next) 循环策略、与兜底模态的焦点环抢同一个键。改之前
+              输入区一直可见（审批卡是 fixed 覆盖层），这条是本次把输入内容包进 hidden
+              之后才引入的。 */}
           <ExecutionPolicySelector
             policy={executionPolicy}
             onChange={onExecutionPolicyChange}
             onOpenApprovals={onOpenApprovals}
+            disabled={!!pendingApproval}
           />
           {/* 复杂问题角标（#680 跟进）：轻量气泡挂在模式按钮上，
             3 秒自动消失，不占输入区。 */}
           <div className="relative">
-            <ReasoningModeSwitch mode={reasoningMode} onChange={onReasoningModeChange} />
+            <ReasoningModeSwitch
+              mode={reasoningMode}
+              onChange={onReasoningModeChange}
+              disabled={!!pendingApproval}
+            />
             {complexHint && reasoningMode === 'fast' && (
               <div
                 className="absolute left-full ml-2 top-1/2 -translate-y-1/2 z-50 flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] whitespace-nowrap"
