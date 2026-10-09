@@ -142,6 +142,9 @@ test.describe('#1257 登出中断在途回合', () => {
       .toBeGreaterThan(0);
     await expect(page.getByTitle('停止生成')).toBeVisible({ timeout: 30_000 });
 
+    // 登出前：回合在飞（输入框右侧是「停止生成」）
+    await page.screenshot({ path: 'test-results/issue-1257-before-logout.png', fullPage: true });
+
     // 登出前没有中断收据（有的话下面的断言就不是判别点）
     const before = abortReceipts(miqiHome);
 
@@ -155,6 +158,10 @@ test.describe('#1257 登出中断在途回合', () => {
         message: `登出后 bridge 必须收到 chat.abort 并释放 turn lock（${ABORT_RECEIPT} 应从 ${before} 增加；修复前后端回合会一直跑下去）`,
       })
       .toBeGreaterThan(before);
+
+    // 登出后：回合不再处于「生成中」（输入框右侧回到发送键、可继续输入）
+    await expect(page.getByTitle('停止生成')).toHaveCount(0, { timeout: 30_000 });
+    await page.screenshot({ path: 'test-results/issue-1257-after-logout.png', fullPage: true });
 
     // 登出本身生效
     const status = await page.evaluate(async () => await (window as any).miqi.qraft.status());
