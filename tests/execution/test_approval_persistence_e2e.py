@@ -334,6 +334,8 @@ async def test_session_approval_isolated_per_session():
 
 MCP_SURE_TOOL = "mcp_sure_sure_check"
 MCP_SURE_ARGS = {"project": r"D:\Code\MiQi\sure-poc\hello"}
+# 含 list 的参数:sanitize 会把 list 变成字符串,用来钉住「键必须从原始参数计算」
+MCP_SURE_LIST_ARGS = {"project": r"D:\Code\MiQi\sure-poc\hello", "flags": ["a", "b"]}
 
 
 @pytest.fixture(autouse=True)
@@ -349,14 +351,16 @@ def _cleanup_tool_confirmation_permanent():
     from miqi.agent.command_approval import remove_permanent
 
     remove_permanent(PermissionEngine.key_for(MCP_SURE_TOOL, MCP_SURE_ARGS))
+    remove_permanent(PermissionEngine.key_for(MCP_SURE_TOOL, MCP_SURE_LIST_ARGS))
 
 
 def _make_tool_confirmation_meta():
-    """对照 orchestrator._request_approval 支行 9 的真实 meta 形状（details 携带 arguments）。"""
+    """对照 orchestrator._request_approval 的真实 meta 形状（含 decision_key）。"""
     return {
         "tool_name": MCP_SURE_TOOL,
         "description": f"{MCP_SURE_TOOL}: {dict(MCP_SURE_ARGS)}",
         "details": {"tool_name": MCP_SURE_TOOL, "arguments": dict(MCP_SURE_ARGS)},
+        "decision_key": PermissionEngine.key_for(MCP_SURE_TOOL, MCP_SURE_ARGS),
     }
 
 
@@ -426,6 +430,46 @@ async def test_tool_confirmation_approval_does_not_leak_to_different_args():
     decision = await engine.check(other)
     assert decision.verdict == PermissionVerdict.APPROVAL_REQUIRED, (
         "不同参数必须仍然弹窗（批准只覆盖被批准的那个调用）"
+    )
+
+
+@pytest.mark.asyncio
+async def test_always_approval_persists_with_list_argument():
+    """回归（#1259 CodeRabbit Major）：含 list 的参数经 _sanitize_details 会变成
+    字符串——若审批键从 sanitized details 计算，会与 check() 用**原始参数**算的
+    键不一致，批准过「记住」的调用仍会再弹。decision_key 必须在请求时刻用原始
+    参数计算（_request_approval 的真实行为）。"""
+    args = dict(MCP_SURE_LIST_ARGS)
+    engine = PermissionEngine()
+    orch = _build_orchestrator(engine)
+
+    ctx1 = _make_tool_confirmation_ctx(arguments=args)
+    decision1 = await engine.check(ctx1)
+    assert decision1.verdict == PermissionVerdict.APPROVAL_REQUIRED
+
+    # 复刻 _request_approval 的真实处理顺序：sanitize 展示副本 + 原始参数算 decision_key
+    sanitized = ToolOrchestrator._sanitize_details(
+        {"tool_name": MCP_SURE_TOOL, "arguments": args}
+    )
+    assert isinstance(sanitized["arguments"]["flags"], str), (
+        "前置条件：sanitize 确实把 list 变成了字符串（用例覆盖的正是这一分歧）"
+    )
+    meta = {
+        "tool_name": MCP_SURE_TOOL,
+        "description": f"{MCP_SURE_TOOL}: {args}",
+        "details": sanitized,
+        "decision_key": PermissionEngine.key_for(MCP_SURE_TOOL, args),
+    }
+    approval_id = "turn_001:call_001"
+    _inject_pending_approval(orch, approval_id, meta)
+    orch.resolve_approval(approval_id, "always")
+
+    ctx2 = _make_tool_confirmation_ctx(
+        tool_call_id="call_002", turn_id="turn_002", arguments=args
+    )
+    decision2 = await engine.check(ctx2)
+    assert decision2.verdict == PermissionVerdict.ALLOW, (
+        "list 参数不得破坏「永久允许」（键必须来自原始参数，而非 sanitized 副本）"
     )
 
 

@@ -26,7 +26,12 @@ TOOLS_FILE = os.environ.get("MIQI_SURE_TOOLS_FILE") or os.path.join(os.getcwd(),
 
 
 def _dump_tools(req: dict) -> None:
-    """把请求里的 tools 名单合并落盘(去重、排序)。"""
+    """把**本次请求**的 tools 名单落盘(去重、排序)。
+
+    记录最新一次请求而不是跨请求并集:TurnRunner 每轮携带同一份 tools
+    (包含工具结果后的总结请求),但并集会掩盖「某次请求缺了某个 SURE 工具」
+    这一事实——断言必须看最新请求(#1259 review)。
+    """
     names = []
     for t in req.get("tools") or []:
         fn = t.get("function") or {}
@@ -34,16 +39,10 @@ def _dump_tools(req: dict) -> None:
             names.append(fn["name"])
     if not names:
         return
-    existing: list[str] = []
-    try:
-        with open(TOOLS_FILE, encoding="utf-8") as f:
-            existing = json.load(f)
-    except Exception:
-        existing = []
-    merged = sorted(set(existing) | set(names))
+    latest = sorted(set(names))
     try:
         with open(TOOLS_FILE, "w", encoding="utf-8") as f:
-            json.dump(merged, f, ensure_ascii=False, indent=1)
+            json.dump(latest, f, ensure_ascii=False, indent=1)
     except Exception as e:  # noqa: BLE001 — 落盘失败不阻断回合
         print(f"  [mock-sure] tools dump failed: {e}", flush=True)
 

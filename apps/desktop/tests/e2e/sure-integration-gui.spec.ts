@@ -36,19 +36,22 @@ import {
 import { startMockServer } from './helpers/mock-server';
 import { patchConfigForMock } from './helpers/mock-openai';
 
-/** 被核查的测试项目(PoC 阶段 0 建的两个项目之一) */
-const PROJECT = 'D:\\Code\\MiQi\\sure-poc\\hello';
+/**
+ * 被核查的测试项目:可用 `MIQI_SURE_PROJECT` 覆盖(默认 = PoC 阶段 0 的测试项目;
+ * mock 脚本读同一环境变量,两者保持一致)。
+ */
+const PROJECT = process.env.MIQI_SURE_PROJECT ?? 'D:\\Code\\MiQi\\sure-poc\\hello';
 /** mock 把模型收到的 tools 名单合并落盘到这里 */
 const TOOLS_DUMP = join(tmpdir(), `sure-mock-tools-${Date.now()}.json`);
 
 /**
  * 本机验收专用守卫(#1196,登记见 tests/e2e/CI-COVERAGE.md):
- * 需要 Windows + 本机已安装 SURE(v0.1.2,per-user 安装或 SURE_BIN)。
+ * 需要 Windows + 本机已安装 SURE(v0.1.2,per-user 安装或 SURE_BIN)+ 测试项目存在。
  * CI runner 均未安装 sure.exe → 全部用例跳过;主验证在 Python 单测与本机 e2e。
  */
 const SURE_BIN =
   process.env.SURE_BIN ?? join(process.env.LOCALAPPDATA ?? '', 'SURE', 'bin', 'sure.exe');
-const SURE_E2E_READY = process.platform === 'win32' && existsSync(SURE_BIN);
+const SURE_E2E_READY = process.platform === 'win32' && existsSync(SURE_BIN) && existsSync(PROJECT);
 
 /** 读本轮 E2E 临时 MIQI_HOME 里 bridge 写下的日志(账户级 / 未登录两种形态)。 */
 function findBridgeLog(miqiHome: string): string | undefined {
