@@ -1565,6 +1565,236 @@ describe('QraftService 积分余额拉取（issue #1160）', () => {
   });
 });
 
+/** 让构造函数里 fire-and-forget 的补拉跑完（真实计时器，靠事件循环轮转）。 */
+async function flushAsync(): Promise<void> {
+  for (let i = 0; i < 5; i += 1) await new Promise((resolve) => setImmediate(resolve));
+}
+
+describe('QraftService 网关信息补拉（#1251）', () => {
+  const ACTIVE_GATEWAY = {
+    encryptedApiKey: 'sk-gw-secret',
+    status: 'active',
+    configVersion: 1,
+  };
+
+  it('启动时登录态缺 aiGateway：补拉 userinfo 后落盘、推状态并写 token 文件', async () => {
+    const stub = makeClientStub();
+    stub.getUserInfo.mockResolvedValue({
+      sub: '19',
+      username: 'U-HKY4-GB4E',
+      nickname: 'MiQi测试',
+      aiGateway: ACTIVE_GATEWAY,
+    });
+    // 复现「登录时平台还没下发」：登录态里没有 aiGateway 块。
+    store.save(makeStoredState());
+    const service = makeService(stub);
+
+    await flushAsync();
+
+    expect(stub.getUserInfo).toHaveBeenCalledTimes(1);
+    expect(store.current?.aiGateway).toMatchObject({ status: 'active', configVersion: 1 });
+    // 渲染进程拿到的是非敏感视图（不含密钥）
+    expect(service.status().aiGateway).toEqual({ status: 'active', configVersion: 1 });
+    expect(statusEvents.length).toBeGreaterThanOrEqual(1);
+    // Python 握手通道：token 文件补上 aiGateway 块（make_provider 据此走网关）
+    const tokenFile = JSON.parse(readFileSync(join(dir, 'qraft-token.json'), 'utf8'));
+    expect(tokenFile.aiGateway).toMatchObject({ status: 'active', configVersion: 1 });
+  });
+
+  it('「立即刷新」刷新 token 后补拉：启动补拉失败也能靠它恢复', async () => {
+    const stub = makeClientStub();
+    stub.refreshTokens.mockResolvedValue(makeTokens({ accessToken: 'ACCESS-NEW' }));
+    stub.getUserInfo
+      .mockRejectedValueOnce(new QraftError('NETWORK_UNREACHABLE', '断网'))
+      .mockResolvedValue({
+        sub: '19',
+        username: 'U-HKY4-GB4E',
+        nickname: 'MiQi测试',
+        aiGateway: ACTIVE_GATEWAY,
+      });
+    store.save(makeStoredState());
+    const service = makeService(stub);
+
+    await flushAsync();
+    expect(service.status().aiGateway).toBeUndefined(); // 启动补拉失败 → 仍「未下发」
+
+    const result = await service.refreshNow();
+
+    expect(result.ok).toBe(true);
+    expect(stub.getUserInfo).toHaveBeenCalledTimes(2);
+    expect(service.status().aiGateway?.status).toBe('active');
+  });
+
+  it('补拉失败按退避重试，平台开通后自动生效（无需重登）', async () => {
+    vi.useFakeTimers();
+    const stub = makeClientStub();
+    stub.getUserInfo
+      .mockRejectedValueOnce(new QraftError('NETWORK_UNREACHABLE', '断网'))
+      .mockResolvedValue({
+        sub: '19',
+        username: 'U-HKY4-GB4E',
+        nickname: 'MiQi测试',
+        aiGateway: ACTIVE_GATEWAY,
+      });
+    store.save(makeStoredState());
+    const service = makeService(stub);
+
+    await vi.advanceTimersByTimeAsync(0);
+    expect(stub.getUserInfo).toHaveBeenCalledTimes(1);
+    expect(service.status().aiGateway).toBeUndefined();
+
+    // 第 1 次退避（1 分钟）后重试成功
+    await vi.advanceTimersByTimeAsync(60_000 + 100);
+    expect(stub.getUserInfo).toHaveBeenCalledTimes(2);
+    expect(service.status().aiGateway?.status).toBe('active');
+
+    // 生效后不再重试
+    await vi.advanceTimersByTimeAsync(30 * 60_000);
+    expect(stub.getUserInfo).toHaveBeenCalledTimes(2);
+  });
+
+  it('平台始终未下发：补拉重试有上限，不会无限打平台', async () => {
+    vi.useFakeTimers();
+    const stub = makeClientStub();
+    // 登录成功但平台没给网关块（未开通）
+    stub.getUserInfo.mockResolvedValue({
+      sub: '19',
+      username: 'U-HKY4-GB4E',
+      nickname: 'MiQi测试',
+    });
+    store.save(makeStoredState());
+    makeService(stub);
+
+    await vi.advanceTimersByTimeAsync(0);
+    // 退避序列 1/2/4/8/8 分钟 → 首次 + 5 次重试
+    await vi.advanceTimersByTimeAsync(60_000 + 120_000 + 240_000 + 480_000 + 480_000 + 1_000);
+    expect(stub.getUserInfo).toHaveBeenCalledTimes(6);
+
+    await vi.advanceTimersByTimeAsync(60 * 60_000);
+    expect(stub.getUserInfo).toHaveBeenCalledTimes(6);
+  });
+
+  it('userinfo 返回的账号与登录态不一致：忽略补拉，不切换账号', async () => {
+    const stub = makeClientStub();
+    stub.getUserInfo.mockResolvedValue({
+      sub: '56',
+      username: 'OTHER-USER',
+      nickname: '别人的账号',
+      aiGateway: ACTIVE_GATEWAY,
+    });
+    store.save(makeStoredState());
+    const service = makeService(stub);
+
+    await flushAsync();
+
+    expect(service.status().account?.sub).toBe('19');
+    expect(store.current?.account.username).toBe('U-HKY4-GB4E');
+    expect(service.status().aiGateway).toBeUndefined();
+    service.logout(); // 取消补拉计时器，避免用例结束后残留定时器
+  });
+
+  it('本次补拉未带网关时不覆盖登录态里已有的网关', async () => {
+    const stub = makeClientStub();
+    stub.getUserInfo.mockResolvedValue({
+      sub: '19',
+      username: 'U-HKY4-GB4E',
+      nickname: 'MiQi测试',
+    });
+    store.save(makeStoredState({ aiGateway: { ...ACTIVE_GATEWAY, encryptedApiKey: 'sk-old' } }));
+    const service = makeService(stub);
+
+    await flushAsync();
+
+    expect(store.current?.aiGateway?.encryptedApiKey).toBe('sk-old');
+    expect(service.status().aiGateway?.status).toBe('active');
+  });
+
+  it('access_token 已失效时先刷新再补拉一次', async () => {
+    const stub = makeClientStub();
+    stub.refreshTokens.mockResolvedValue(makeTokens({ accessToken: 'ACCESS-NEW' }));
+    stub.getUserInfo
+      .mockRejectedValueOnce(new QraftError('SESSION_EXPIRED', 'access_token 已失效'))
+      .mockResolvedValue({
+        sub: '19',
+        username: 'U-HKY4-GB4E',
+        nickname: 'MiQi测试',
+        aiGateway: ACTIVE_GATEWAY,
+      });
+    store.save(makeStoredState());
+    const service = makeService(stub);
+
+    await flushAsync();
+
+    expect(stub.refreshTokens).toHaveBeenCalledTimes(1);
+    expect(stub.getUserInfo).toHaveBeenCalledTimes(2);
+    expect(service.status().aiGateway?.status).toBe('active');
+  });
+
+  it('平台开通失败（failed）也继续补拉：平台恢复后自动接上', async () => {
+    vi.useFakeTimers();
+    const stub = makeClientStub();
+    stub.getUserInfo
+      .mockResolvedValueOnce({
+        sub: '19',
+        username: 'U-HKY4-GB4E',
+        nickname: 'MiQi测试',
+        aiGateway: { ...ACTIVE_GATEWAY, status: 'failed' },
+      })
+      .mockResolvedValue({
+        sub: '19',
+        username: 'U-HKY4-GB4E',
+        nickname: 'MiQi测试',
+        aiGateway: ACTIVE_GATEWAY,
+      });
+    store.save(makeStoredState({ aiGateway: { ...ACTIVE_GATEWAY, status: 'failed' } }));
+    const service = makeService(stub);
+
+    await vi.advanceTimersByTimeAsync(0);
+    expect(service.status().aiGateway?.status).toBe('failed');
+
+    // 第 1 次退避（1 分钟）后平台已恢复 → 生效并停止重试
+    await vi.advanceTimersByTimeAsync(60_000 + 100);
+    expect(service.status().aiGateway?.status).toBe('active');
+
+    await vi.advanceTimersByTimeAsync(30 * 60_000);
+    expect(stub.getUserInfo).toHaveBeenCalledTimes(2);
+  });
+
+  it('退避预算用尽后不登出直接重新登录：新登录拿到全新的补拉预算', async () => {
+    // 回归（CodeRabbit #1252）：persistLogin 若先 schedule 再 cancel/重置，
+    // 上一份登录态耗尽的预算会留给新登录 —— 新登录就再也拿不到补拉。
+    vi.useFakeTimers();
+    const stub = makeClientStub();
+    stub.platformLogin.mockResolvedValue({
+      sub: '19',
+      username: 'U-HKY4-GB4E',
+      nickname: 'MiQi测试',
+    });
+    stub.authorizeFlow.mockResolvedValue(makeTokens());
+    // 平台始终不下发网关 → 每次都排重试，直到预算用尽
+    stub.getUserInfo.mockResolvedValue({
+      sub: '19',
+      username: 'U-HKY4-GB4E',
+      nickname: 'MiQi测试',
+    });
+    store.save(makeStoredState());
+    const service = makeService(stub);
+
+    await vi.advanceTimersByTimeAsync(0);
+    // 首次 + 5 次退避重试（1/2/4/8/8 分钟）= 6 次，预算用尽
+    await vi.advanceTimersByTimeAsync(60_000 + 120_000 + 240_000 + 480_000 + 480_000 + 1_000);
+    expect(stub.getUserInfo).toHaveBeenCalledTimes(6);
+
+    // 不登出，直接重新登录（平台仍未下发网关）
+    await service.login('18500000000', 'p');
+    const afterLogin = stub.getUserInfo.mock.calls.length;
+
+    // 新登录有全新的预算：退避 1 分钟后应再次补拉
+    await vi.advanceTimersByTimeAsync(60_000 + 100);
+    expect(stub.getUserInfo.mock.calls.length).toBe(afterLogin + 1);
+  });
+});
+
 describe('QraftService 自动退出登录的归属判定（#1253 评审）', () => {
   it('旧登录态的在途刷新失败：不踢掉重新登录后的新会话', async () => {
     const stub = makeClientStub();
