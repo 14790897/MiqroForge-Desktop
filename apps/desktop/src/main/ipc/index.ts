@@ -17,7 +17,7 @@ import { randomUUID } from 'crypto';
 import { basename, join } from 'path';
 import type { BrowserWindow } from 'electron';
 import { isRequestNotDispatched, type BridgeManager } from '../bridge';
-import { abortInFlightChats, trackInFlightChat, untrackInFlightChat } from '../chat-inflight';
+import { abortInFlightChats, trackInFlightChat } from '../chat-inflight';
 import { sendToFrame } from '../frame-send';
 import {
   buildCleanupContext,
@@ -374,8 +374,10 @@ export function registerIpcHandlers(bridge: BridgeManager): void {
     };
     // 通道异常结束（bridge 抛错）也算 turn 结束，否则登记表里会留下永远不会被
     // 摘掉的"在飞"会话，下一次崩溃的恢复提示就会撒谎。
-    // #1257: 同时在在途登记表里登记本会话 —— 登出时据此中断还跑着的回合。
-    trackInFlightChat(sessionKey);
+    // #1257: 同时在在途登记表里登记这次请求 —— 登出时据此中断还跑着的回合。
+    // 用返回的注销句柄而不是按会话摘除：同一会话可能有两条在途请求（后到的
+    // 会被后端以 TURN_IN_PROGRESS 拒掉），按会话摘会把仍在跑的那条一起摘掉。
+    const releaseInFlight = trackInFlightChat(sessionKey);
     const sendPromise = bridge.send(
       'chat.send',
       {
@@ -392,13 +394,13 @@ export function registerIpcHandlers(bridge: BridgeManager): void {
         if (type === 'progress') {
           safeSend('chat:progress', data);
         } else if (type === 'final') {
-          untrackInFlightChat(sessionKey);
+          releaseInFlight();
           safeSend('chat:final', data);
         } else if (type === 'error') {
-          untrackInFlightChat(sessionKey);
+          releaseInFlight();
           safeSend('chat:error', data);
         } else if (type === 'aborted') {
-          untrackInFlightChat(sessionKey);
+          releaseInFlight();
           safeSend('chat:aborted', data);
         } else if (type === 'approval_request') {
           safeSend('approval:request', data);
@@ -457,7 +459,7 @@ export function registerIpcHandlers(bridge: BridgeManager): void {
     try {
       return await sendPromise;
     } catch (e) {
-      untrackInFlightChat(sessionKey);
+      releaseInFlight();
       if (isRequestNotDispatched(e)) {
         return chatNotDispatchedResult(e instanceof Error ? e.message : String(e));
       }

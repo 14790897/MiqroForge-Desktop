@@ -9,23 +9,38 @@
  * 会话还被 turn lock 挡着（新消息一律 TURN_IN_PROGRESS，直到超时）。
  * 主进程是唯一知道「哪些会话还有在途回合」且不随登录门卸载的地方，所以在
  * 这里登记，登出时逐个 `chat.abort`。
+ *
+ * 登记粒度是**每个请求**而不是会话：同一会话可以同时有两个在途请求（后到的
+ * 会被后端以 TURN_IN_PROGRESS 拒掉），若按会话记一个条目，被拒那次一收到终态
+ * 就会把先到那个仍在跑的回合一并摘掉，登出时漏掉它（CodeRabbit #1260）。
  */
 
-const inFlight = new Set<string>();
+let nextRequestId = 0;
+/** requestId → 会话键。 */
+const inFlight = new Map<number, string>();
 
-/** 登记一个在途回合（同一会话多条消息只记一次，中断按会话进行）。 */
-export function trackInFlightChat(sessionKey: string): void {
-  if (sessionKey) inFlight.add(sessionKey);
+/**
+ * 登记一次在途请求，返回它的注销句柄（幂等）。
+ *
+ * 用句柄而不是 `(sessionKey, requestId)` 两个参数：调用方拿不到、也不需要
+ * 拼 id，终结时调一次即可；重复调用（多个终态事件 + 通道异常）不会误摘别人。
+ */
+export function trackInFlightChat(sessionKey: string): () => void {
+  if (!sessionKey) return () => undefined;
+  nextRequestId += 1;
+  const requestId = nextRequestId;
+  inFlight.set(requestId, sessionKey);
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    inFlight.delete(requestId);
+  };
 }
 
-/** 回合到达终态（含被中断）后摘除登记。 */
-export function untrackInFlightChat(sessionKey: string): void {
-  inFlight.delete(sessionKey);
-}
-
-/** 当前仍登记着在途回合的会话键（拷贝，调用方可安全遍历）。 */
+/** 当前仍登记着在途回合的会话键（去重：同一会话多个在途请求只中断一次）。 */
 export function inFlightChatSessions(): string[] {
-  return [...inFlight];
+  return [...new Set(inFlight.values())];
 }
 
 /** 清空登记（登出中断后再调用，避免残留的登记让下一次登出打断新会话）。 */

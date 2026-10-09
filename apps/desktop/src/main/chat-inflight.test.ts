@@ -4,7 +4,6 @@ import {
   clearInFlightChats,
   inFlightChatSessions,
   trackInFlightChat,
-  untrackInFlightChat,
   type ChatAbortSender,
 } from './chat-inflight';
 
@@ -20,28 +19,59 @@ function makeSender(): ChatAbortSender & { calls: Array<[string, unknown]> } {
 }
 
 describe('chat-inflight（#1257 登出中断在途回合）', () => {
-  it('登记 / 摘除 / 清空', () => {
+  it('登记返回注销句柄，注销后会话从登记表消失', () => {
     clearInFlightChats();
-    trackInFlightChat('desktop:a');
-    trackInFlightChat('desktop:a'); // 同会话重复登记只记一次
-    trackInFlightChat('desktop:b');
+    const releaseA = trackInFlightChat('desktop:a');
+    const releaseB = trackInFlightChat('desktop:b');
     expect(inFlightChatSessions().sort()).toEqual(['desktop:a', 'desktop:b']);
 
-    untrackInFlightChat('desktop:a');
+    releaseA();
     expect(inFlightChatSessions()).toEqual(['desktop:b']);
 
+    releaseB();
+    expect(inFlightChatSessions()).toEqual([]);
+  });
+
+  it('注销句柄幂等：多个终态事件 + 通道异常重复调用不误摘别人', () => {
     clearInFlightChats();
+    const releaseA = trackInFlightChat('desktop:a');
+    const releaseB = trackInFlightChat('desktop:b');
+
+    releaseA();
+    releaseA(); // final 事件后再来一次 aborted / catch
+    releaseA();
+    expect(inFlightChatSessions()).toEqual(['desktop:b']);
+
+    releaseB();
+    expect(inFlightChatSessions()).toEqual([]);
+  });
+
+  it('同一会话两条在途请求：后到那条的终态不摘掉仍在跑的前一条（#1260 回归）', () => {
+    clearInFlightChats();
+    // 同一会话：第二条会被后端以 TURN_IN_PROGRESS 拒掉，先到的那条仍在跑
+    const releaseFirst = trackInFlightChat('desktop:default');
+    const releaseSecond = trackInFlightChat('desktop:default');
+    expect(inFlightChatSessions()).toEqual(['desktop:default']);
+
+    releaseSecond(); // 被拒那条先收到终态（error）
+
+    // 关键：仍在跑的那条还在登记里 —— 否则登出会漏掉它
+    expect(inFlightChatSessions()).toEqual(['desktop:default']);
+
+    releaseFirst();
     expect(inFlightChatSessions()).toEqual([]);
   });
 
   it('空串会话键不登记（拿不到会话名时不发无意义的中断）', () => {
     clearInFlightChats();
-    trackInFlightChat('');
+    const release = trackInFlightChat('');
     expect(inFlightChatSessions()).toEqual([]);
+    expect(() => release()).not.toThrow();
   });
 
-  it('逐会话发 chat.abort，并在发完前清空登记', async () => {
+  it('逐会话发 chat.abort（同一会话多条在途只中断一次），并在发完前清空登记', async () => {
     clearInFlightChats();
+    trackInFlightChat('desktop:a');
     trackInFlightChat('desktop:a');
     trackInFlightChat('desktop:b');
     const sender = makeSender();
