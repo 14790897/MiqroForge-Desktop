@@ -471,9 +471,11 @@ export class QraftService {
     this.syncTokenFile(state);
     this.emitStatus();
     // 登录时平台没下发网关（未开通/开通中）→ 排上补拉重试：平台侧开通后
-    // 无需重新登录即可生效（#1251）。登录响应里已带可用网关时清掉旧计时器。
+    // 无需重新登录即可生效（#1251）。**先取消**：不登出直接重新登录时
+    //（例如登录失效后重登），上一份登录态可能已经用完退避预算、或还挂着
+    // 旧计时器 —— 不重置的话新登录会拿不到补拉（正是本 issue 要修的现象）。
+    this.cancelGatewayInfoRetry();
     if (!isGatewayUsable(state)) this.scheduleGatewayInfoRetry();
-    else this.cancelGatewayInfoRetry();
   }
 
   private errorResult(err: unknown): QraftLoginResult {

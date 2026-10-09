@@ -1743,4 +1743,38 @@ describe('QraftService 网关信息补拉（#1251）', () => {
     await vi.advanceTimersByTimeAsync(30 * 60_000);
     expect(stub.getUserInfo).toHaveBeenCalledTimes(2);
   });
+
+  it('退避预算用尽后不登出直接重新登录：新登录拿到全新的补拉预算', async () => {
+    // 回归（CodeRabbit #1252）：persistLogin 若先 schedule 再 cancel/重置，
+    // 上一份登录态耗尽的预算会留给新登录 —— 新登录就再也拿不到补拉。
+    vi.useFakeTimers();
+    const stub = makeClientStub();
+    stub.platformLogin.mockResolvedValue({
+      sub: '19',
+      username: 'U-HKY4-GB4E',
+      nickname: 'MiQi测试',
+    });
+    stub.authorizeFlow.mockResolvedValue(makeTokens());
+    // 平台始终不下发网关 → 每次都排重试，直到预算用尽
+    stub.getUserInfo.mockResolvedValue({
+      sub: '19',
+      username: 'U-HKY4-GB4E',
+      nickname: 'MiQi测试',
+    });
+    store.save(makeStoredState());
+    const service = makeService(stub);
+
+    await vi.advanceTimersByTimeAsync(0);
+    // 首次 + 5 次退避重试（1/2/4/8/8 分钟）= 6 次，预算用尽
+    await vi.advanceTimersByTimeAsync(60_000 + 120_000 + 240_000 + 480_000 + 480_000 + 1_000);
+    expect(stub.getUserInfo).toHaveBeenCalledTimes(6);
+
+    // 不登出，直接重新登录（平台仍未下发网关）
+    await service.login('18500000000', 'p');
+    const afterLogin = stub.getUserInfo.mock.calls.length;
+
+    // 新登录有全新的预算：退避 1 分钟后应再次补拉
+    await vi.advanceTimersByTimeAsync(60_000 + 100);
+    expect(stub.getUserInfo.mock.calls.length).toBe(afterLogin + 1);
+  });
 });
