@@ -326,6 +326,50 @@ def _register_fonts() -> dict[str, str]:
     return registered
 
 
+# ── 列表项目符号的字体级降级（#1238）─────────────────────────────
+#
+# reportlab 对缺失字形不做回退：直接画成 .notdef 空心方框，文本层抽出来是
+# \x00。SimHei（Windows 上最常发现的中文字体）恰好没有 U+2022（•），此前列表
+# 项硬编码 "• " 前缀 → 每个项目符号都是方框（实测：3 条列表 = 3 个 \x00）。
+# 按已注册字体的 cmap 选第一个可用的候选符号：• → ·（U+00B7，SimHei 有）→ -。
+
+_BULLET_CANDIDATES = ("•", "·", "-")
+_BULLET_CACHE: dict[str, str] = {}
+
+
+def _font_supports_char(font_name: str, ch: str) -> bool | None:
+    """查已注册字体 cmap 是否含该字符。
+
+    True/False 为确定结果；None 表示无法判定（内置 Type1 字体没有 cmap、
+    名字未注册等），调用方必须按「可能支持」处理——把本来能渲染的内置字体
+    误降级同样是缺陷。
+    """
+    try:
+        from reportlab.pdfbase import pdfmetrics
+
+        face = getattr(pdfmetrics.getFont(font_name), "face", None)
+        char_to_glyph = getattr(face, "charToGlyph", None)
+        if not char_to_glyph:
+            return None
+        return ord(ch) in char_to_glyph
+    except Exception:  # noqa: BLE001 — 判定失败一律按「未知」处理
+        return None
+
+
+def _list_bullet(font_name: str) -> str:
+    """返回该字体下可渲染的列表项目符号（结果按字体名缓存）。"""
+    cached = _BULLET_CACHE.get(font_name)
+    if cached is not None:
+        return cached
+    chosen = _BULLET_CANDIDATES[-1]
+    for candidate in _BULLET_CANDIDATES:
+        if _font_supports_char(font_name, candidate) is not False:
+            chosen = candidate
+            break
+    _BULLET_CACHE[font_name] = chosen
+    return chosen
+
+
 def _build_pdf(
     output_path: Path,
     title: str | None,
@@ -462,11 +506,22 @@ def _build_pdf(
         """块文本进 ``Paragraph()`` 前统一转义（P1：源稿/content 均属不可信输入）。
 
         ``content_escaped=True`` 表示文本已由 ``_md_to_blocks`` 转过，跳过以免
-        显示成字面 ``&amp;``；表格单元格不走本函数（``Table`` 用 drawString，
-        不解析 XML，转义反而会显示成 ``R&amp;D``）。
+        显示成字面 ``&amp;``；表格单元格不走本函数——它们在 table 分支统一
+        转义并包进 ``Paragraph``（#1238），两条路径的单元格此前都
+        未转义，单元格的转义恒只做一次（见 ``_cell``）。
         """
         text = str(raw)
         return text if content_escaped else _md_escape(text)
+
+    def _cell(value: Any, style: Any) -> Any:
+        """表格单元格 → Paragraph flowable（按列宽换行必需，见 table 分支）。
+
+        单元格文本不经过 ``_block_text`` 的 ``content_escaped`` 判定：两条来源
+        路径的单元格此前都未经转义（``Table`` 不解析 XML），这里统一
+        ``_md_escape`` —— Paragraph 会解析 XML，转义恒只做这一次。
+        """
+        text = "" if value is None else str(value)
+        return Paragraph(_md_escape(text), style) if text else ""
 
     story: list[Any] = []
 
@@ -536,11 +591,28 @@ def _build_pdf(
             elif block_type == "table":
                 headers = block.get("headers", [])
                 rows = block.get("rows", [])
+                # 单元格必须包成 Paragraph 才能按列宽换行（#1238）：
+                # 纯字符串单元格在 reportlab 里是单行 drawString，长中文直接溢出
+                # 列宽压到邻列（实测 4 列行程表 6 对 span 重叠）。Paragraph 会解析
+                # XML，因此单元格文本在这里统一 _md_escape——content_path 与
+                # content 两条路径的单元格此前都未经转义（Table 不解析 XML）。
+                # wordWrap="CJK" 是中文换行的必要条件：默认只在空格处断行，
+                # 无空格的中文长串换不了行、照旧溢出。
+                cell_size = body_size - 1
+                cell_style = ParagraphStyle(
+                    "DocTableCell",
+                    fontName=body_font,
+                    fontSize=cell_size,
+                    leading=cell_size * 1.3,
+                    alignment=TA_CENTER,
+                    wordWrap="CJK",
+                )
+
                 table_data = []
                 if headers:
-                    table_data.append([str(h) if h else "" for h in headers])
+                    table_data.append([_cell(h, cell_style) for h in headers])
                 for row in rows:
-                    table_data.append([str(c) if c is not None else "" for c in row])
+                    table_data.append([_cell(c, cell_style) for c in row])
                 if table_data:
                     # Calculate column widths
                     avail_width = page_size[0] - 3.17 * 2 * cm
@@ -554,6 +626,7 @@ def _build_pdf(
                         ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#F0F0F0")),
                         ("TEXTCOLOR", (0, 0), (-1, 0), colors.black),
                         ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+                        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
                         ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
                         ("TOPPADDING", (0, 0), (-1, -1), 4),
                         ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
@@ -564,8 +637,9 @@ def _build_pdf(
 
             elif block_type == "list":
                 items = block.get("items", [])
+                bullet = _list_bullet(body_font)
                 for item in items:
-                    story.append(Paragraph(f"• {_block_text(item)}", pbody_style))
+                    story.append(Paragraph(f"{bullet} {_block_text(item)}", pbody_style))
 
             elif block_type == "spacer":
                 height = float(block.get("height", 12))
@@ -614,8 +688,8 @@ def _md_inline(text: str) -> str:
 
     顺序：先转义 ``& < >``，再插入工具自身生成的 ``<b>`` / ``<link>``——顺序
     反了会把自己的标签也转义掉。作用域只有段落/标题/列表（经 Paragraph 渲染）；
-    表格单元格（Table 走 drawString、不解析 XML）与代码围栏内容**不**经过本函数，
-    否则表格里的 ``R&D`` 会变成 ``R&amp;D``。
+    表格单元格与代码围栏内容**不**经过本函数（表格内不支持行内标记；单元格的
+    XML 转义由 ``_build_pdf`` 的 table 分支在包 ``Paragraph`` 时统一做）。
 
     链接仅接受 http/https；URL 属性里的 ``"`` 必须转成 ``&quot;``，否则
     paraparser 抛 ``invalid attribute name``，异常被 ``execute`` 的 except 吞掉
@@ -864,9 +938,9 @@ def _md_to_blocks(
     行首图片 ``![alt](path)``（嵌入 PNG/JPEG）。
 
     行内 Markdown（仅 content_path 路径）：``**粗体**`` 与 ``[文字](http(s)://…)``
-    链接，作用域仅段落/标题/列表；表格单元格**不**做转义或行内转换（表格走
-    Table/drawString 不解析 XML，转义会显示成字面量 ``R&amp;D``）；代码围栏
-    只转义、不做行内转换（``<img ...>`` 保留为字面文字，见下「已知限制 1」）。
+    链接，作用域仅段落/标题/列表；表格单元格**不**做行内转换（表格内不支持行内
+    标记；XML 转义由 ``_build_pdf`` 的 table 分支在包 ``Paragraph`` 时统一做）；
+    代码围栏只转义、不做行内转换（``<img ...>`` 保留为字面文字，见下「已知限制 1」）。
 
     图片：相对路径先 join 源稿父目录，再进 ``_resolve_source_path`` 复校白名单，
     并要求落在源稿自身通过校验的那个根之内（不接受跨根读取）；越界/损坏/超限/
@@ -879,7 +953,8 @@ def _md_to_blocks(
 
     本函数产出的块文本**已全部 XML 转义**（段落/标题/列表/图注走 ``_md_inline``，
     代码围栏走 ``_md_escape``），调用方必须传 ``_build_pdf(content_escaped=True)``
-    才不会二次转义；表格单元格除外（不走 Paragraph）。
+    才不会二次转义；表格单元格除外（不做行内转换，转义在 ``_build_pdf`` 的
+    table 分支统一做）。
 
     这是**受支持的 Markdown 子集**，不是完整 Markdown renderer——只恢复结构骨架。
     已知限制：

@@ -157,7 +157,22 @@ test.describe('Task Assets Preview & Persistence', () => {
     // fallback modal). A leftover radix Dialog focus trap swallows the NEXT
     // test's Enter → chat.send never fires → no file created → false fail.
     // (See task-assets-classification reference postmortem #1.)
+    //
+    // Escape alone is NOT enough: the PDF preview renders its content in an
+    // <iframe>, and Chromium moves focus INTO that child frame on load
+    // (document.activeElement === iframe). The keydown then never reaches
+    // Radix's document-level Escape listener, so the dialog stays open —
+    // deterministically, in every retry. Try Escape first (it covers dialogs
+    // with no frame), then dismiss via the explicit close control, which
+    // works no matter where focus currently sits.
     await page.keyboard.press('Escape').catch(() => {});
+    const leftoverDialog = page.getByRole('dialog');
+    if ((await leftoverDialog.count()) > 0) {
+      await leftoverDialog
+        .getByTestId('file-preview-close')
+        .click({ timeout: 5_000 })
+        .catch(() => {});
+    }
     await expect(page.getByRole('dialog')).toHaveCount(0, { timeout: 5_000 });
   });
 

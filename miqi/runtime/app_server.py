@@ -624,6 +624,12 @@ class AppServer:
         # 2. Check session authorization (if session-scoped).
         #    Skip for chat.send/chat.abort (auto-create sessions) and
         #    sessions.get/sessions.list (read disk data, not registry state).
+        #
+        #    files.read 同理豁免：它自己解析路径并做会话归属校验
+        #    （file_handlers._validate_file_path，带 client_id + session_key），
+        #    数据来自磁盘，**不需要一个存活的 runtime session**。用 registry
+        #    去挡它，等于在会话尚未注册时拒绝一次完全合法的读取——bridge 重启后、
+        #    会话发出第一条消息之前、以及会话闲置被回收之后都属于这种状态。
         if session_id is not None and method not in (
             "chat.send", "chat.abort",
             "sessions.get", "sessions.list",
@@ -631,6 +637,9 @@ class AppServer:
             "sessions.workspace",
             "sessions.delete", "sessions.archive", "sessions.unarchive",
             "sessions.rename", "sessions.truncate",
+            # 只放宽 files.read：它是只读的，且是实测被拒的那一个。files.* 的其余
+            # 方法走同一套校验、同样的论证也成立，但目前没有失败证据，需要时另行评估。
+            "files.read",
         ):
             session = await self.registry.get_session(client_id, session_id)
             if session is None:

@@ -1,3 +1,21 @@
+## [0.36.2](https://github.com/14790897/MiqroForge-Desktop/compare/v0.36.1...v0.36.2) (2026-10-08)
+
+
+### Bug Fixes
+
+* **bridge:** stdout 写移出事件循环，父进程不读时不再停摆 ([#1203](https://github.com/14790897/MiqroForge-Desktop/issues/1203)) ([#1242](https://github.com/14790897/MiqroForge-Desktop/issues/1242)) ([c24b80d](https://github.com/14790897/MiqroForge-Desktop/commit/c24b80d1aea599483173032ad451a49c1e1d49ac)), closes [#266](https://github.com/14790897/MiqroForge-Desktop/issues/266)
+* **desktop:** 积分查询失败透出平台服务端明细 ([#1233](https://github.com/14790897/MiqroForge-Desktop/issues/1233)) ([a0cecc2](https://github.com/14790897/MiqroForge-Desktop/commit/a0cecc2415da783fe27f82905026647e51218f5c))
+* **pdf:** 表格单元格按列宽换行 + 项目符号按字体字形降级（[#1238](https://github.com/14790897/MiqroForge-Desktop/issues/1238)） ([#1239](https://github.com/14790897/MiqroForge-Desktop/issues/1239)) ([4eca701](https://github.com/14790897/MiqroForge-Desktop/commit/4eca70174748d5fda1d884bc4b68db3b627d08fe))
+* **session:** app-home 工作区不再被当作会话绑定根（[#1236](https://github.com/14790897/MiqroForge-Desktop/issues/1236)） ([#1237](https://github.com/14790897/MiqroForge-Desktop/issues/1237)) ([81ee547](https://github.com/14790897/MiqroForge-Desktop/commit/81ee547728415bc62ef4efe029af06d2d04a585f))
+
+---
+## 下载说明
+
+macOS 用户请按芯片架构选择安装包：
+
+- **Apple Silicon (M1/M2/M3/M4)**：下载 `0.36.2-arm64.dmg`（ARM 架构）
+- **Intel**：下载 `0.36.2.dmg`（x86 无后缀）
+
 ## [0.36.1](https://github.com/14790897/MiqroForge-Desktop/compare/v0.36.0...v0.36.1) (2026-09-29)
 
 
