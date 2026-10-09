@@ -17,6 +17,7 @@ import { randomUUID } from 'crypto';
 import { basename, join } from 'path';
 import type { BrowserWindow } from 'electron';
 import { isRequestNotDispatched, type BridgeManager } from '../bridge';
+import { abortInFlightChats, trackInFlightChat, untrackInFlightChat } from '../chat-inflight';
 import { sendToFrame } from '../frame-send';
 import {
   buildCleanupContext,
@@ -288,6 +289,20 @@ async function sessionWorkspaceRoots(
 }
 
 export function registerIpcHandlers(bridge: BridgeManager): void {
+  // #1257: 登出（用户主动登出 / 平台判定失效自动退出）时中断在途回合 ——
+  // 后端回合不会因为本地登出而停下，界面会一直停在「生成中」，会话还被
+  // bridge 侧 turn lock 占着（新消息一律 TURN_IN_PROGRESS）。登记表与中断
+  // 逻辑在 chat-inflight.ts，这里只负责把 bridge 接上。
+  // 动态 import 沿用本文件对 qraft/ipc 的既有加载方式，避免模块环。
+  void import('../qraft/ipc')
+    .then(({ setLogoutCleanup }) => {
+      setLogoutCleanup(() => {
+        void abortInFlightChats(bridge);
+      });
+    })
+    .catch(() => {
+      /* qraft 模块不可用时不影响 IPC 注册 */
+    });
   // -----------------------------------------------------------------------
   // Runtime
   // -----------------------------------------------------------------------
@@ -359,6 +374,8 @@ export function registerIpcHandlers(bridge: BridgeManager): void {
     };
     // 通道异常结束（bridge 抛错）也算 turn 结束，否则登记表里会留下永远不会被
     // 摘掉的"在飞"会话，下一次崩溃的恢复提示就会撒谎。
+    // #1257: 同时在在途登记表里登记本会话 —— 登出时据此中断还跑着的回合。
+    trackInFlightChat(sessionKey);
     const sendPromise = bridge.send(
       'chat.send',
       {
@@ -375,10 +392,13 @@ export function registerIpcHandlers(bridge: BridgeManager): void {
         if (type === 'progress') {
           safeSend('chat:progress', data);
         } else if (type === 'final') {
+          untrackInFlightChat(sessionKey);
           safeSend('chat:final', data);
         } else if (type === 'error') {
+          untrackInFlightChat(sessionKey);
           safeSend('chat:error', data);
         } else if (type === 'aborted') {
+          untrackInFlightChat(sessionKey);
           safeSend('chat:aborted', data);
         } else if (type === 'approval_request') {
           safeSend('approval:request', data);
@@ -437,6 +457,7 @@ export function registerIpcHandlers(bridge: BridgeManager): void {
     try {
       return await sendPromise;
     } catch (e) {
+      untrackInFlightChat(sessionKey);
       if (isRequestNotDispatched(e)) {
         return chatNotDispatchedResult(e instanceof Error ? e.message : String(e));
       }

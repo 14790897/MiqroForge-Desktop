@@ -1548,3 +1548,51 @@ describe('QraftService 积分余额拉取（issue #1160）', () => {
     expect(logged).toContain("Data truncated for column 'type'");
   });
 });
+
+describe('QraftService 登出收尾（#1257 中断在途回合）', () => {
+  it('logout 调用 onLogoutCleanup（在清凭据之前）', () => {
+    const stub = makeClientStub();
+    store.save(makeStoredState());
+    const order: string[] = [];
+    const svc = new QraftService({
+      client: stub as unknown as QraftClient,
+      store,
+      log: noopLog,
+      makeRedirectUri: () => 'http://localhost:38000/callback',
+      tokenFilePath: () => join(dir, 'qraft-token.json'),
+      onLogoutCleanup: () => {
+        // 收尾时凭据还在：中断请求本身不依赖它，但顺序上不该先被清掉
+        order.push(store.current ? 'cleanup-with-state' : 'cleanup-without-state');
+      },
+    });
+
+    svc.logout();
+
+    expect(order).toEqual(['cleanup-with-state']);
+    expect(store.current).toBeNull();
+  });
+
+  it('收尾抛错不影响登出：凭据照样清空并记录 WARN', () => {
+    const stub = makeClientStub();
+    store.save(makeStoredState());
+    const logs: string[] = [];
+    const svc = new QraftService({
+      client: stub as unknown as QraftClient,
+      store,
+      log: ((_level: string, message: string) => {
+        logs.push(message);
+      }) as unknown as QraftLogger,
+      makeRedirectUri: () => 'http://localhost:38000/callback',
+      tokenFilePath: () => join(dir, 'qraft-token.json'),
+      onLogoutCleanup: () => {
+        throw new Error('abort 炸了');
+      },
+    });
+
+    expect(() => svc.logout()).not.toThrow();
+
+    expect(store.current).toBeNull();
+    expect(svc.status().loggedIn).toBe(false);
+    expect(logs.join('\n')).toContain('登出收尾失败');
+  });
+});

@@ -118,6 +118,13 @@ export interface QraftServiceOptions {
    * 截断，去重索引必须跨重启完整保留，否则被淘汰的作业会重复扣费。
    */
   billedJobIdsPath?: () => string | null;
+  /**
+   * 登出（含平台判定失效自动退出）时的收尾（#1257）：中断本客户端在途的
+   * 聊天回合。后端回合不会因为本地登出而停下 —— 界面一直停在「生成中」，
+   * 会话还被 bridge 的 turn lock 占着。不 await：logout 是同步路径，
+   * 中断失败不影响登出结果。
+   */
+  onLogoutCleanup?: () => void;
 }
 
 export function defaultRedirectUri(): string {
@@ -589,6 +596,16 @@ export class QraftService {
 
   logout(): void {
     this.cancelRefresh();
+    // #1257: 先中断在途聊天回合再清凭据 —— 后端回合不会因为本地登出而停下，
+    // 留着会让界面卡在「生成中」、会话被 turn lock 占住。失败不影响登出。
+    try {
+      this.options.onLogoutCleanup?.();
+    } catch (err) {
+      this.options.log(
+        'WARN',
+        `qraft: 登出收尾失败（${err instanceof Error ? err.message : err}）`
+      );
+    }
     // 使登出前发起的在途刷新结果作废（runRefresh 代际校验丢弃）。
     this.authGeneration += 1;
     this.inFlightRefresh = null;
