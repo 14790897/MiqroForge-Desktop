@@ -13,6 +13,8 @@
 
 import { test, expect } from '@playwright/test';
 import type { ElectronApplication, Page } from '@playwright/test';
+import { createServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs';
@@ -32,11 +34,14 @@ interface SeededAiGateway {
 }
 
 /** 构造 plain 信封的预置登录态（QraftStore 无 safeStorage 降级读取），可携带 aiGateway。 */
-function buildSeededStoreContent(aiGateway: SeededAiGateway | null): string {
+function buildSeededStoreContent(
+  aiGateway: SeededAiGateway | null,
+  overrides: { baseUrl?: string } = {}
+): string {
   const state: Record<string, unknown> = {
     version: 1,
     env: 'test',
-    baseUrl: 'https://test.forge.miqroera.com/api',
+    baseUrl: overrides.baseUrl ?? 'https://test.forge.miqroera.com/api',
     clientId: 'miqi',
     clientSecret: 'test-client-secret',
     redirectUri: 'http://localhost:38000/callback',
@@ -252,5 +257,129 @@ test.describe('AI 网关 E2E (issue #922)', () => {
       path: 'test-results/gateway-model-autoready-1172-no-config.png',
       fullPage: true,
     });
+  });
+
+  // macOS CI 的 undici fetch 连不上本地 127.0.0.1 监听（同 qraft-login.spec.ts）。
+  test.skip(
+    process.platform === 'darwin' && !!process.env.CI,
+    'macOS CI cannot reach the local mock server'
+  );
+
+  test('登录态缺 aiGateway（登录时未下发）：启动补拉失败后，点「立即刷新」补拉 userinfo 并生效（#1251）', async () => {
+    // #1251 的现场：平台在用户登录**之后**才开通网关，或登录那次 userinfo
+    // 失败（登录流程只记警告、照常成功）—— 登录态里没有 aiGateway 块。
+    // 旧行为只在登录那一刻拉一次 userinfo，这份「未下发」会一直留着，
+    // 用户只能退出重登。本用例用本地 mock 平台覆盖两条补拉路径。
+    test.setTimeout(180_000);
+    let userInfoCalls = 0;
+    const mock = createServer((req, res) => {
+      const url = req.url ?? '';
+      if (url.includes('/oauth2/userinfo')) {
+        userInfoCalls += 1;
+        if (userInfoCalls === 1) {
+          // 启动那一次失败：模拟平台瞬时不可用 / 下发失败（非 JSON → USERINFO_FAILED）
+          res.writeHead(500, { 'Content-Type': 'text/plain' });
+          res.end('platform unavailable');
+          return;
+        }
+        // 真实平台实测：字段平铺在顶层（无 data 嵌套）
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(
+          JSON.stringify({
+            code: 200,
+            msg: 'ok',
+            sub: '19',
+            username: 'E2E-GATEWAY',
+            nickname: 'E2E网关测试',
+            encryptedApiKey: GATEWAY_KEY,
+            aiGatewayStatus: 'active',
+            configVersion: 1,
+            consumerId: 'C-E2E',
+          })
+        );
+        return;
+      }
+      if (url.includes('/oauth2/refresh')) {
+        req.resume();
+        // 刷新成功响应同样是平铺结构（见 QraftClient.refreshTokens）
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(
+          JSON.stringify({
+            code: 200,
+            msg: 'ok',
+            token_type: 'bearer',
+            access_token: 'e2e-refreshed-access-token',
+            refresh_token: 'e2e-fake-refresh-token',
+            expires_in: '7199',
+          })
+        );
+        return;
+      }
+      // 其余（设置页会自动拉积分余额）：正常空余额信封，避免干扰断言
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(
+        JSON.stringify({
+          code: 200,
+          msg: 'ok',
+          data: { availablePoints: 0, heldPoints: 0, totalEarned: 0, totalSpent: 0 },
+        })
+      );
+    });
+    await new Promise<void>((resolve) => mock.listen(0, '127.0.0.1', resolve));
+    const mockPort = (mock.address() as AddressInfo).port;
+
+    try {
+      await closeElectronApp(electronApp, fixture.miqiHome);
+      writeFileSync(
+        storePath,
+        buildSeededStoreContent(null, { baseUrl: `http://127.0.0.1:${mockPort}/api` }),
+        'utf8'
+      );
+      const f2 = await launchElectronApp();
+      electronApp = f2.electronApp;
+      page = f2.page;
+      fixture = f2;
+
+      await gotoQraftTab(page);
+      await expect(page.getByText('已登录')).toBeVisible({ timeout: 15_000 });
+
+      // 启动补拉失败 → 平台账号页没有网关行（用户看到的就是「没有网关状态」）。
+      // 等应用真正发过一次 userinfo 再断言，避免抢在补拉发起之前。
+      await expect.poll(() => userInfoCalls, { timeout: 15_000 }).toBeGreaterThanOrEqual(1);
+      await expect(page.getByTestId('qraft-ai-gateway')).toHaveCount(0);
+
+      // 「立即刷新」= 用户的补拉入口：刷新 token 后重新取 userinfo
+      await page.getByTestId('qraft-refresh-btn').click();
+      await expect(page.getByTestId('qraft-ai-gateway')).toBeVisible({ timeout: 30_000 });
+      await expect(page.getByTestId('qraft-ai-gateway-status')).toHaveText('可用');
+      await expect(page.getByTestId('qraft-ai-gateway')).toContainText('配置版本 v1');
+
+      // Python 握手通道：token 文件补上 aiGateway 块（make_provider 据此走网关）
+      const tokenFile = JSON.parse(
+        readFileSync(
+          join(getAccountWorkspaceDir(fixture.miqiHome, '19'), '.qraft', 'token.json'),
+          'utf8'
+        )
+      );
+      expect(tokenFile.aiGateway).toMatchObject({
+        encryptedApiKey: GATEWAY_KEY,
+        status: 'active',
+        configVersion: 1,
+      });
+
+      // 密钥仍然不进渲染进程
+      const statusJson = await page.evaluate(async () =>
+        JSON.stringify(await (window as any).miqi.qraft.status())
+      );
+      expect(statusJson).not.toContain(GATEWAY_KEY);
+      expect(statusJson).toContain('"aiGateway":{"status":"active","configVersion":1}');
+
+      await page.screenshot({
+        path: 'test-results/ai-gateway-e2e-late-delivery.png',
+        fullPage: true,
+      });
+    } finally {
+      await mock.close();
+    }
   });
 });

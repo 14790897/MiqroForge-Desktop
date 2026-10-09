@@ -6,8 +6,8 @@
  *   1. 已登录提交：平台 POST /oauth2/feedback 携带 Bearer access_token 与
  *      {type, content, contact} → 成功视图不出现「平台归属未同步」提示；
  *   2. access_token 失效（业务码 40102）且 refresh_token 被平台作废（40102）：
- *      飞书通道已兜底记录，提交仍成功，但展示「平台归属未同步」，并触发
- *      登录失效三件套的全局横幅（QraftReloginNotifier）。
+ *      飞书通道已兜底记录，提交仍成功，但展示「平台归属未同步」，并且
+ *      **自动退出登录**（顶栏回到一键登录入口、status.sessionExpired=true）。
  *
  * 平台服务用本地 http mock（不依赖 MiQroForge 网络）：登录态由测试预置
  * （MIQI_QRAFT_STORE，plain 信封，与 ai-gateway.spec.ts 同策略），
@@ -228,7 +228,7 @@ test.describe('Feedback platform channel E2E（issue #1054）', () => {
     });
   });
 
-  test('access_token 失效且 refresh 作废：提交仍成功 + 未同步提示 + 重登横幅', async () => {
+  test('access_token 失效且 refresh 作废：提交仍成功 + 未同步提示 + 自动退出登录', async () => {
     const started = await startMockPlatform(
       new Map([
         [
@@ -265,9 +265,13 @@ test.describe('Feedback platform channel E2E（issue #1054）', () => {
     await expect(page.getByText('提交成功！')).toBeVisible({ timeout: 30_000 });
     await expect(page.getByTestId('feedback-platform-unsynced')).toBeVisible();
 
-    // 登录失效全局横幅（三件套之一）；文案指向重新登录。
-    await expect(page.getByTestId('qraft-relogin-notify')).toBeVisible({ timeout: 15_000 });
-    await expect(page.getByTestId('qraft-relogin-notify')).toContainText('重新登录');
+    // 平台判定 refresh_token 作废 → 自动退出登录：顶栏回到一键登录入口
+    //（旧行为是留在主界面弹「登录已失效」横幅，那条路径已随自动退出取消）。
+    await expect(page.getByTestId('topbar-login-btn')).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByTestId('qraft-relogin-notify')).toHaveCount(0);
+    const qraftStatus = await page.evaluate(async () => await (window as any).miqi.qraft.status());
+    expect(qraftStatus.loggedIn).toBe(false);
+    expect(qraftStatus.sessionExpired).toBe(true);
 
     // 刷新与重试路径：先 40102 提交失败 → refresh 作废 → 不重试提交。
     const feedbackCalls = started.calls.filter((c) => c.path === '/api/oauth2/feedback');

@@ -11345,6 +11345,9 @@ export function ChatConsole({
                   <span>系统应用打开</span>
                 </button>
                 <button
+                  type="button"
+                  data-testid="file-preview-close"
+                  aria-label="关闭预览"
                   onClick={(e) => {
                     e.stopPropagation();
                     e.preventDefault();
@@ -12459,7 +12462,15 @@ const MessageBubble = memo(function MessageBubble({
             data-testid={isUser ? 'chat-message-user' : 'chat-message-assistant'}
           >
             {!isUser && !hideHeader && (
-              <div className="flex items-center gap-2 mb-3 pl-2">
+              // 这里不要再写 mb-*：父容器是 `flex flex-col gap-3`（12px），
+              // flex gap 与外边距**不塌陷**——写 mb-3 会叠成 24px。
+              //
+              // 12px 正好与带思考块的回复对齐，两边同走 12px 但机制不同：
+              //   有思考块：外层普通块，头部 mb-3(12) 与 ThinkBlock my-0.5(2)
+              //             是相邻兄弟外边距，**塌陷**后取大者 = 12px
+              //   无思考块：本行，父容器 gap-3(12) + 0 = 12px
+              // 改任一处的数值前，先确认另一边塌陷后的实际值，否则又会不一致。
+              <div className="flex items-center gap-2 pl-2">
                 <AgentAvatar />
                 <span
                   className="text-[16px] font-semibold shrink-0 whitespace-nowrap"
@@ -12740,25 +12751,48 @@ const MessageBubble = memo(function MessageBubble({
                           block above, not msg.reasoning (which lives on the
                           separate progress row and is always undefined here). */}
                         {(msg.reasoningMode ?? reasoningMode) === 'fast' &&
-                          !msg.reasoning &&
-                          !hideHeader && (
+                        !msg.reasoning &&
+                        !hideHeader ? (
+                          // 🚀 必须浮在正文**首行**左侧。原先 <span> 是内联元素、
+                          // 后面紧跟块级的 MarkdownContent，两者相邻会被拆成两个块
+                          // —— 小火箭独占一行、正文从下一行开始（就是「小火箭位置
+                          // 不对、和正文隔了一整行」的成因）。float-left 让它落进首行
+                          // 行盒，只压缩第 1 行，后续各行左边缘不动。
+                          //
+                          // 外层不加 text-*/leading-*：继承 data-message-body 的
+                          // 14px/1.7，float 盒高 23.8px 恰好等于首行行盒 → 与首行字
+                          // 竖直对齐（实测偏差 0.4px；若在外层写 leading-5 只有 20px，
+                          // 会高 1.5px）。
+                          // 内层字号 13px = ThinkBlock 头部那个模式图标（🚀 快速思考 /
+                          // 🧠 深度思考，ThinkBlock.tsx text-[13px]）——同一个「模式标」
+                          // 在两处出现，字号必须同步，否则一大一小。
+                          // flow-root 生成 BFC，把 float 关在本层。否则正文为空
+                          // （只剩 reasoning）时，float 会串到下一条消息的首行。
+                          <div className="flow-root">
                             <span
-                              className="mr-1 text-[11px] leading-none select-none"
+                              className="float-left mr-1 select-none"
                               style={{ color: '#d9a520' }}
                             >
-                              🚀
+                              <span className="text-[13px]">🚀</span>
                             </span>
-                          )}
-                        {/* #671: streaming = 本条是最后一条且会话正在生成 ——
-                            正在生成的回答流式期间 mermaid/svg 显示源码；历史消息不塌回。
-                            CodeRabbit 修订：改用真实生成信号 streaming（2722/2724 由
-                            turn 生命周期驱动），不再用乐观 sending 时间戳 ——
-                            sending 是用户回合信号，assistant 回复期间可能已为 null。 */}
-                        <MarkdownContent
-                          content={msg.content}
-                          streaming={streaming}
-                          sources={sources}
-                        />
+                            {/* #671: streaming = 本条是最后一条且会话正在生成 ——
+                                正在生成的回答流式期间 mermaid/svg 显示源码；历史消息不塌回。
+                                CodeRabbit 修订：改用真实生成信号 streaming（2722/2724 由
+                                turn 生命周期驱动），不再用乐观 sending 时间戳 ——
+                                sending 是用户回合信号，assistant 回复期间可能已为 null。 */}
+                            <MarkdownContent
+                              content={msg.content}
+                              streaming={streaming}
+                              sources={sources}
+                            />
+                          </div>
+                        ) : (
+                          <MarkdownContent
+                            content={msg.content}
+                            streaming={streaming}
+                            sources={sources}
+                          />
+                        )}
                       </>
                     ) : (
                       renderContent((msg as any).__cleanContent ?? msg.content)

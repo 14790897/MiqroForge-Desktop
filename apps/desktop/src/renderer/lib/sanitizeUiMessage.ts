@@ -82,6 +82,14 @@ export function sanitizeUiMessage(raw: string): string {
   if (lower.includes('provider test failed')) {
     return '连接测试失败，请检查 API Key、API Base、模型名称或网络。';
   }
+  // #1258：保存网关模型被「登录凭据握手文件还没到位」拒绝时，别让用户对着
+  // `Error invoking remote method 'config:update'…` 猜发生了什么。
+  if (lower.includes('gateway_creds_unavailable')) {
+    return '平台 AI 网关凭据对当前账号不可用（本机登录凭据握手文件缺失，或平台未给该账号开通 AI 网关）。请稍后重试保存；若持续失败，请重新登录或在平台确认该账号已开通 AI 网关。';
+  }
+  if (lower.includes('gateway_origin_invalid')) {
+    return '平台 AI 网关地址配置不合法（须为 https），该模型无法经网关推理，请联系管理员。';
+  }
   if (lower.includes('connection error')) {
     return '连接模型服务失败，请检查网络或 API Base。';
   }
