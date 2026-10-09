@@ -11345,6 +11345,9 @@ export function ChatConsole({
                   <span>系统应用打开</span>
                 </button>
                 <button
+                  type="button"
+                  data-testid="file-preview-close"
+                  aria-label="关闭预览"
                   onClick={(e) => {
                     e.stopPropagation();
                     e.preventDefault();
