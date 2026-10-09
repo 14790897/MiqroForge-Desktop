@@ -179,6 +179,9 @@ export const IPC = {
   QRAFT_STATUS_SYNC: 'qraft:statusSync',
   QRAFT_REFRESH: 'qraft:refresh',
   QRAFT_LOGOUT: 'qraft:logout',
+  // #1258：重新同步登录凭据握手文件（保存网关模型被 GATEWAY_CREDS_UNAVAILABLE
+  // 拒绝后，重试前把 Python 读的那份磁盘视图补上）。
+  QRAFT_SYNC_TOKEN: 'qraft:syncToken',
   QRAFT_POINTS_BALANCE: 'qraft:pointsBalance',
   QRAFT_BILLING_HISTORY: 'qraft:billingHistory',
 
@@ -1562,6 +1565,15 @@ export interface QraftLoginResult {
   code?: QraftErrorCode;
   message?: string;
 }
+
+/**
+ * 登录凭据握手文件（`<workspace>/.qraft/token.json`）的同步结果（#1258）。
+ *
+ * 这份文件是 Python 判定「平台网关凭据可用」的唯一依据。同步失败必须如实
+ * 回报：否则渲染进程按内存登录态认为网关可用，后端却读不到凭据，用户只会
+ * 拿到一句误导的 `Unsupported model`。
+ */
+export type QraftTokenSyncResult = { ok: true; path: string } | { ok: false; message: string };
 
 /** 本地留存的扣费历史条目（issue #927；平台无扣费历史查询接口）。 */
 export interface QraftBillingHistoryEntry {

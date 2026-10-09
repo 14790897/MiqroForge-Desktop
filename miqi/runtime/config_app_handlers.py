@@ -280,12 +280,13 @@ def register_config_app_handlers(server: AppServer) -> None:
                     "默认模型不能为空，请从下拉列表选择预设模型",
                     code="INVALID_PARAMS",
                 )
-            from miqi.runtime.provider_handlers import _model_provider_resolvable
+            from miqi.runtime.provider_handlers import (
+                _model_provider_resolvable,
+                unsupported_model_error,
+            )
 
             if not _model_provider_resolvable(new_config, model_value):
-                raise AppServerError(
-                    f"Unsupported model: {model_value}", code="INVALID_PARAMS",
-                )
+                raise unsupported_model_error(new_config, model_value)
 
         # Save to disk (atomic from the caller's perspective — validation
         # passed, so this write is the only side effect)

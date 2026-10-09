@@ -85,6 +85,7 @@ import type {
   QraftBillingHistoryEntry,
   QraftErrorCode,
   QraftStatus,
+  QraftTokenSyncResult,
   ConfigUpdatedPayload,
 } from '../shared/ipc';
 
@@ -812,6 +813,8 @@ const api = {
     initialStatus: readInitialQraftStatus(),
     refresh: (): Promise<QraftLoginResult> => ipcRenderer.invoke(IPC.QRAFT_REFRESH),
     logout: (): Promise<{ ok: boolean }> => ipcRenderer.invoke(IPC.QRAFT_LOGOUT),
+    // #1258：重新同步登录凭据握手文件（Python 判定网关凭据可用的唯一依据）。
+    syncToken: (): Promise<QraftTokenSyncResult> => ipcRenderer.invoke(IPC.QRAFT_SYNC_TOKEN),
     pointsBalance: (): Promise<
       | { ok: true; points: QraftPointsBalance }
       | { ok: false; code: QraftErrorCode; message: string }

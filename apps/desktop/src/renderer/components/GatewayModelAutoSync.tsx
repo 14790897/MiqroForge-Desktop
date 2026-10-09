@@ -92,6 +92,21 @@ interface ConfigUpdateResult {
 }
 
 /**
+ * 从桥错误里取回错误码（bridge.ts 抛 `new Error("<message> (<CODE>)")`）。
+ *
+ * Electron 的 `ipcRenderer.invoke` 只把 message 透给渲染进程，自定义的
+ * `.code` 属性会在序列化时丢掉，所以只能从文案尾部取（现有契约，用户报错
+ * 里那句 `… (INVALID_PARAMS)` 就是它）。
+ */
+export function bridgeErrorCode(err: unknown): string | null {
+  const message = err instanceof Error ? err.message : String(err ?? '');
+  // 取最后一个全大写括号标记：桥错误固定以 `(CODE)` 结尾，但外层还会套 Electron
+  // 的 "Error invoking remote method …" 前缀/后缀，端点锚定并不可靠。
+  const matches = [...message.matchAll(/\(([A-Z][A-Z0-9_]{2,})\)/g)];
+  return matches.length ? matches[matches.length - 1][1] : null;
+}
+
+/**
  * 自动同步的保存动作（独立导出以便无 DOM 单测，#991 review）。
  *
  * 用当前模型值做 expectModel 比较并设置：后端只在磁盘上的默认模型仍与快照
@@ -101,6 +116,12 @@ interface ConfigUpdateResult {
  * isEligible 在写入前再查一次（仍在「登录 + 网关 active」才允许写）：读快照
  * 与查 provider 列表都带 await，期间用户完全可能已经登出或网关失效，而后端
  * 的比较并设置只看模型值，察觉不到这种变化。
+ *
+ * resyncToken（#1258）：后端以 GATEWAY_CREDS_UNAVAILABLE 拒绝时，说明它读的
+ * 那份握手文件 `<workspace>/.qraft/token.json` 不可用 —— 而渲染进程判定
+ * 「网关可用」用的是内存里的登录态，两者从不校验一致性。此时先重新同步一次
+ * 握手文件再重试一次：这条路径曾把用户挡在「Unsupported model」外面，且
+ * 重试全败后静默放弃（#1258 真实用户两次遇到）。
  */
 export async function saveGatewayModelIfUnusable(
   getConfig: () => Promise<unknown>,
@@ -110,7 +131,8 @@ export async function saveGatewayModelIfUnusable(
     expectModel?: string
   ) => Promise<ConfigUpdateResult | unknown>,
   invalidate: () => void,
-  isEligible: () => boolean
+  isEligible: () => boolean,
+  resyncToken?: () => Promise<{ ok: boolean; message?: string }>
 ): Promise<void> {
   const config = await getConfig();
   const current = currentDefaultModel(config);
@@ -124,7 +146,19 @@ export async function saveGatewayModelIfUnusable(
   const modelId = gatewayModelToAutoSet(current, ownOrGatewayResolvable);
   if (!modelId) return;
   if (!isEligible()) return; // 登出 / 网关失效 → 不写
-  const result = await updateConfig({ agents: { defaults: { model: modelId } } }, current);
+  const payload = { agents: { defaults: { model: modelId } } };
+  let result: ConfigUpdateResult | unknown;
+  try {
+    result = await updateConfig(payload, current);
+  } catch (err) {
+    // 握手文件没到位：重新同步一次再重试一次；同步本身失败（如 .qraft 写不进去）
+    // 就保留后端语义，交给上层上报，不再假装成功。
+    if (bridgeErrorCode(err) !== 'GATEWAY_CREDS_UNAVAILABLE' || !resyncToken) throw err;
+    if (!isEligible()) throw err;
+    const synced = await resyncToken();
+    if (!synced?.ok) throw err;
+    result = await updateConfig(payload, current);
+  }
   if (result && typeof result === 'object' && (result as ConfigUpdateResult).saved === false) {
     return; // 被比较并设置拦截：用户的选择优先
   }
@@ -173,6 +207,8 @@ export function GatewayModelAutoSync() {
   const attemptedRef = useRef(false);
   // 重试期间用户登出 / 网关失效 → 立即停手，别把网关模型写给未登录用户。
   const eligibleRef = useRef(false);
+  // 最后一次失败原因：放弃重试后要留下一句能查的记录，不能再静默（#1258）。
+  const failureRef = useRef<string | null>(null);
 
   useEffect(() => {
     eligibleRef.current = loggedIn && gatewayActive;
@@ -187,17 +223,32 @@ export function GatewayModelAutoSync() {
     attemptedRef.current = true;
 
     void autoSyncGatewayModel(
-      () =>
-        saveGatewayModelIfUnusable(
-          () => window.miqi.config.get(),
-          () => window.miqi.providers.list(),
-          (config, expectModel) => window.miqi.config.update(config, expectModel),
-          invalidateConfigCache,
-          () => eligibleRef.current
-        ),
+      async () => {
+        failureRef.current = null;
+        try {
+          await saveGatewayModelIfUnusable(
+            () => window.miqi.config.get(),
+            () => window.miqi.providers.list(),
+            (config, expectModel) => window.miqi.config.update(config, expectModel),
+            invalidateConfigCache,
+            () => eligibleRef.current,
+            // 网关凭据握手文件没到位时的补救通道（#1258）。
+            () => window.miqi.qraft.syncToken()
+          );
+        } catch (err) {
+          failureRef.current = err instanceof Error ? err.message : String(err);
+          throw err;
+        }
+      },
       () => eligibleRef.current
     ).then((ok) => {
-      if (!ok) attemptedRef.current = false; // 未成功 → 等下一次状态变化再试
+      if (ok) return;
+      // 全败后以前只复位 attemptedRef —— 用户侧「默认模型始终不就绪」连一条
+      // 可查原因都没有（#1258）。
+      console.error(
+        `[gateway] 网关默认模型自动就绪失败：${failureRef.current ?? '桥未在超时内响应'}`
+      );
+      attemptedRef.current = false; // 未成功 → 等下一次状态变化再试
     });
   }, [loggedIn, gatewayActive, status.state]);
 
