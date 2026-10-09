@@ -1564,3 +1564,77 @@ describe('QraftService 积分余额拉取（issue #1160）', () => {
     expect(logged).toContain("Data truncated for column 'type'");
   });
 });
+
+describe('QraftService 自动退出登录的归属判定（#1253 评审）', () => {
+  it('旧登录态的在途刷新失败：不踢掉重新登录后的新会话', async () => {
+    const stub = makeClientStub();
+    stub.platformLogin.mockResolvedValue({
+      sub: '19',
+      username: 'U-HKY4-GB4E',
+      nickname: 'MiQi测试',
+    });
+    stub.authorizeFlow.mockResolvedValue(makeTokens());
+    stub.getUserInfo.mockResolvedValue({
+      sub: '19',
+      username: 'U-HKY4-GB4E',
+      nickname: 'MiQi测试',
+    });
+    // 挂起的刷新：由用例决定何时以「refresh_token 已失效」失败
+    let failRefresh: ((err: unknown) => void) | undefined;
+    stub.refreshTokens.mockImplementation(
+      () =>
+        new Promise((_resolve, reject) => {
+          failRefresh = reject;
+        })
+    );
+    store.save(makeStoredState());
+    const service = makeService(stub);
+
+    const pending = service.refreshNow(); // 属于当前会话的在途刷新
+    service.logout(); // 用户登出（代际 +1）
+    await service.login('18500000000', 'p'); // 重新登录成功
+    expect(service.status().loggedIn).toBe(true);
+
+    // 旧请求这时才失败：不能让这条件失败把新会话退出登录
+    failRefresh!(new QraftError('REFRESH_TOKEN_INVALID', 'refresh_token 已失效'));
+    const result = await pending;
+
+    expect(result).toMatchObject({ ok: false, code: 'REFRESH_TOKEN_INVALID' });
+    expect(service.status().loggedIn).toBe(true);
+    expect(service.status().sessionExpired).toBeUndefined();
+    // 旧失败也不能把错误码写进新会话的状态
+    expect(service.status().refreshError).toBeUndefined();
+  });
+
+  it('反馈重试仍被平台拒绝（SESSION_EXPIRED）：自动退出登录', async () => {
+    const client = { submitFeedback: vi.fn(), refreshTokens: vi.fn() };
+    client.submitFeedback.mockRejectedValue(
+      new QraftError('SESSION_EXPIRED', 'access_token 已失效')
+    );
+    client.refreshTokens.mockResolvedValue(makeTokens({ accessToken: 'FRESH-TOKEN' }));
+    store.save(makeStoredState());
+    const svc = makeService(client as unknown as ClientStub);
+
+    const result = await svc.submitPlatformFeedback({ content: 'E2E 失效态提交' });
+
+    expect(result).toMatchObject({ ok: false, code: 'SESSION_EXPIRED' });
+    expect(client.submitFeedback).toHaveBeenCalledTimes(2);
+    expect(store.current).toBeNull();
+    expect(svc.status().sessionExpired).toBe(true);
+  });
+
+  it('Slurm 扣费重试仍被平台拒绝（SESSION_EXPIRED）：自动退出登录', async () => {
+    const client = makeChargeClient();
+    client.deductPoints.mockRejectedValue(new QraftError('SESSION_EXPIRED', 'access_token 已失效'));
+    client.refreshTokens.mockResolvedValue(makeTokens({ accessToken: 'FRESH-TOKEN' }));
+    store.save(makeStoredState());
+    const svc = makeService(client as unknown as ClientStub);
+
+    const result = await svc.chargeSlurmJob(SLURM_PAYLOAD);
+
+    expect(result).toMatchObject({ ok: false, code: 'SESSION_EXPIRED' });
+    expect(client.deductPoints).toHaveBeenCalledTimes(2);
+    expect(store.current).toBeNull();
+    expect(svc.status().sessionExpired).toBe(true);
+  });
+});

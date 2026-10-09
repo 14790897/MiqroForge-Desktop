@@ -727,7 +727,11 @@ export class QraftService {
           if (retryErr instanceof QraftError && retryErr.code === 'SESSION_EXPIRED') {
             // 新 token 仍被平台拒绝：会话整体失效（平台作废整会话等），
             // 自动退出登录并说明原因（issue #1160 / 自动退出）。
-            this.logoutSessionExpired('积分余额查询', '刷新后仍被平台拒绝（会话已失效）');
+            this.logoutSessionExpired(
+              '积分余额查询',
+              '刷新后仍被平台拒绝（会话已失效）',
+              generation
+            );
           } else {
             this.options.log('WARN', pointsFailureLog(retryErr));
           }
@@ -802,6 +806,15 @@ export class QraftService {
           );
           return { ok: true };
         } catch (retryErr) {
+          if (retryErr instanceof QraftError && retryErr.code === 'SESSION_EXPIRED') {
+            // 刷新后的新 token 仍被平台拒绝：会话整体失效 → 自动退出登录
+            //（与积分余额查询路径同一判定，CodeRabbit #1255）。
+            this.logoutSessionExpired(
+              '反馈平台提交',
+              '刷新后仍被平台拒绝（会话已失效）',
+              generation
+            );
+          }
           if (retryErr instanceof QraftError) {
             return { ok: false, code: retryErr.code, message: retryErr.message };
           }
@@ -982,16 +995,30 @@ export class QraftService {
             if (!fresh || this.authGeneration !== generation || fresh.account.sub !== accountSub) {
               throw new QraftError('INTERNAL', '登录状态在计费期间发生变化，本次作业计费已取消');
             }
-            balance = await this.options.client.deductPoints(
-              {
-                ...config,
-                baseUrl: fresh.baseUrl,
-                clientId: fresh.clientId,
-                clientSecret: fresh.clientSecret,
-              },
-              fresh.tokens.accessToken,
-              { amount: SLURM_JOB_COST, source: 'slurm-job', resourceType: 'slurm', memo }
-            );
+            // 刷新后的新 token 仍被平台拒绝 = 会话整体失效 → 自动退出登录
+            //（与积分余额查询路径同一判定，CodeRabbit #1255）。只在这一步
+            // 判定：刷新本身失败属瞬时/永久由刷新路径负责，不在这里重复。
+            try {
+              balance = await this.options.client.deductPoints(
+                {
+                  ...config,
+                  baseUrl: fresh.baseUrl,
+                  clientId: fresh.clientId,
+                  clientSecret: fresh.clientSecret,
+                },
+                fresh.tokens.accessToken,
+                { amount: SLURM_JOB_COST, source: 'slurm-job', resourceType: 'slurm', memo }
+              );
+            } catch (retryErr) {
+              if (retryErr instanceof QraftError && retryErr.code === 'SESSION_EXPIRED') {
+                this.logoutSessionExpired(
+                  'Slurm 作业扣费',
+                  '刷新后仍被平台拒绝（会话已失效）',
+                  generation
+                );
+              }
+              throw retryErr;
+            }
           } else {
             throw err;
           }
@@ -1135,6 +1162,8 @@ export class QraftService {
   async refreshNow(): Promise<QraftLoginResult> {
     const state = this.options.store.current;
     if (!state) return { ok: false, code: 'INVALID_CONFIG', message: '尚未登录' };
+    // 发起前捕获登录代际：失败回来时若已登出/重登，这份失败属于旧会话。
+    const generation = this.authGeneration;
     const refresh = this.doRefresh(state);
     try {
       await refresh;
@@ -1153,7 +1182,7 @@ export class QraftService {
         // 不再重复处理 —— 先到的路径已归类失败并排好退避重试（CodeRabbit #1114）。
         if (this.lastHandledRefreshFailure !== refresh) {
           this.lastHandledRefreshFailure = refresh;
-          this.handleRefreshFailure(err, state, '手动');
+          this.handleRefreshFailure(err, state, '手动', generation);
         }
         return { ok: false, code: err.code, message: err.message };
       }
@@ -1204,6 +1233,8 @@ export class QraftService {
   private async tickRefresh(state: QraftStoredState): Promise<void> {
     // 已退出登录（store 已清）时丢弃过期定时任务，不重试也不写回任何状态。
     if (!this.options.store.current) return;
+    // 发起前捕获登录代际（同 refreshNow）：失败回来时可能已经登出/重登。
+    const generation = this.authGeneration;
     const refresh = this.doRefresh(state);
     try {
       await refresh;
@@ -1218,7 +1249,7 @@ export class QraftService {
       // （CodeRabbit #1114）。
       if (this.lastHandledRefreshFailure === refresh) return;
       this.lastHandledRefreshFailure = refresh;
-      this.handleRefreshFailure(err, state, '自动');
+      this.handleRefreshFailure(err, state, '自动', generation);
     }
   }
 
@@ -1230,8 +1261,16 @@ export class QraftService {
    * 一个没有解释的登录页，也不会误以为应用崩了。
    *
    * 只处理永久失效：瞬时失败（网络/平台 5xx）继续静默退避重试，不打扰用户。
+   *
+   * `generation` 是发起这次请求时的登录代际：退出登录/重新登录会把它 +1，
+   * 于是「上一份登录态的在途请求失败后才回来」不会被拿来踢掉新会话
+   *（CodeRabbit #1255）—— 否则用户刚重登成功就会被一条旧失败退出登录。
    */
-  private logoutSessionExpired(via: string, reason: string): void {
+  private logoutSessionExpired(via: string, reason: string, generation: number): void {
+    if (this.authGeneration !== generation) {
+      this.options.log('WARN', `qraft: ${via}：${reason}，但登录态已变化，忽略本次自动退出`);
+      return;
+    }
     this.options.log('WARN', `qraft: ${via}：${reason}，已自动退出登录`);
     this.logout({ sessionExpired: true });
   }
@@ -1243,12 +1282,26 @@ export class QraftService {
    *     （见 logoutSessionExpired）；
    *   - 其余（网络/平台 5xx）：瞬时失败，不打扰用户，指数退避静默重试
    *     （issue #1087）。
+   *
+   * `generation` 由调用方在发起刷新前捕获，用于判定这份失败是否还属于当前
+   * 登录态（见 logoutSessionExpired）。
    */
-  private handleRefreshFailure(err: unknown, state: QraftStoredState, via: '自动' | '手动'): void {
+  private handleRefreshFailure(
+    err: unknown,
+    state: QraftStoredState,
+    via: '自动' | '手动',
+    generation: number
+  ): void {
     const code = err instanceof QraftError ? err.code : 'REFRESH_FAILED';
+    if (this.authGeneration !== generation) {
+      // 这份失败属于已经结束的登录态（期间登出或重新登录）：既不能拿它
+      // 踢掉新会话，也不能把错误码/退避重试写到新会话的状态上（CodeRabbit #1255）。
+      this.options.log('WARN', `qraft: ${via}刷新失败（${code}）属于已结束的登录态，忽略`);
+      return;
+    }
     this.refreshError = code;
     if (isPermanentRefreshError(code)) {
-      this.logoutSessionExpired(via + '刷新失败', '平台判定 refresh_token 已失效');
+      this.logoutSessionExpired(via + '刷新失败', '平台判定 refresh_token 已失效', generation);
     } else {
       const delay = this.nextRefreshRetryDelay();
       this.refreshRetryAttempt += 1;
