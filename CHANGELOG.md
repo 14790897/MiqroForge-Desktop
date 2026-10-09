@@ -1,3 +1,26 @@
+# [0.37.0](https://github.com/14790897/MiqroForge-Desktop/compare/v0.36.2...v0.37.0) (2026-10-09)
+
+
+### Bug Fixes
+
+* **desktop:** fast 模式内联 🚀 标与正文首行并排、字号对齐快速思考 ([#1246](https://github.com/14790897/MiqroForge-Desktop/issues/1246)) ([#1250](https://github.com/14790897/MiqroForge-Desktop/issues/1250)) ([bb269bd](https://github.com/14790897/MiqroForge-Desktop/commit/bb269bde6bf21ce1b4d4ded8219bc1e92e112288))
+* **desktop:** 登出时中断在途聊天回合，不再卡在「生成中」（[#1257](https://github.com/14790897/MiqroForge-Desktop/issues/1257)） ([#1260](https://github.com/14790897/MiqroForge-Desktop/issues/1260)) ([8edf79a](https://github.com/14790897/MiqroForge-Desktop/commit/8edf79a2aa11934c90d7a1ee25942657d2dfe073))
+* **desktop:** 登录后补拉 AI 网关下发，网关状态不再停在「未下发」（[#1251](https://github.com/14790897/MiqroForge-Desktop/issues/1251)） ([#1252](https://github.com/14790897/MiqroForge-Desktop/issues/1252)) ([32ebfff](https://github.com/14790897/MiqroForge-Desktop/commit/32ebfffbaf3bd64632dd3bd81b0a778f13a12527))
+* **desktop:** 网关凭据握手缺失时给可重试语义并自动重新同步（[#1258](https://github.com/14790897/MiqroForge-Desktop/issues/1258)） ([#1261](https://github.com/14790897/MiqroForge-Desktop/issues/1261)) ([4f31dab](https://github.com/14790897/MiqroForge-Desktop/commit/4f31dab156a0bb48d52ee6c64b9ffdb889c932cc))
+
+
+### Features
+
+* **desktop:** 平台登录失效时自动退出登录，登录页说明「已自动退出」（[#1253](https://github.com/14790897/MiqroForge-Desktop/issues/1253)） ([#1255](https://github.com/14790897/MiqroForge-Desktop/issues/1255)) ([e8d7fc2](https://github.com/14790897/MiqroForge-Desktop/commit/e8d7fc258416c5d18e4ccf02686711e38f8cbfea))
+
+---
+## 下载说明
+
+macOS 用户请按芯片架构选择安装包：
+
+- **Apple Silicon (M1/M2/M3/M4)**：下载 `0.37.0-arm64.dmg`（ARM 架构）
+- **Intel**：下载 `0.37.0.dmg`（x86 无后缀）
+
 ## [0.36.2](https://github.com/14790897/MiqroForge-Desktop/compare/v0.36.1...v0.36.2) (2026-10-08)
 
 
