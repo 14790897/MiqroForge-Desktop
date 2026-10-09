@@ -227,7 +227,7 @@ test.describe('MiQroForge 平台登录 E2E (issue #726)', () => {
     'macOS CI cannot reach the local mock server'
   );
 
-  test('refresh_token 已失效（平台作废）→ 停止自动重试并引导重新登录', async () => {
+  test('refresh_token 已失效（平台作废）→ 自动退出登录，登录页说明「已自动退出」', async () => {
     let refreshCalls = 0;
     const mockServer = await startInvalidRefreshMock(() => {
       refreshCalls += 1;
@@ -242,118 +242,49 @@ test.describe('MiQroForge 平台登录 E2E (issue #726)', () => {
       await closeElectronApp(electronApp, fixture.miqiHome);
       seedExpiredStore(mockPort);
 
-      const f2 = await launchElectronApp();
+      // 登录门**不绕过**：要看真实用户看到的登录页（#1095）与「已自动退出」提示。
+      const f2 = await launchElectronApp(undefined, { noLoginBypass: true });
       electronApp = f2.electronApp;
       page = f2.page;
       fixture = f2;
 
-      // 平台登录失效的全局告知：无需进入设置页，chat 页即弹横幅，
-      // 顶栏账号 chip 同步切换为失效警示态。
-      await expect(page.getByTestId('qraft-relogin-notify')).toBeVisible({ timeout: 15_000 });
-      await expect(page.getByTestId('qraft-relogin-notify')).toContainText('登录已失效');
-      await expect(page.getByTestId('qraft-relogin-notify-action')).toContainText('去重新登录');
-      await expect(page.getByTestId('topbar-relogin-chip')).toBeVisible();
-      await expect(page.getByTestId('topbar-relogin-chip')).toContainText('登录已失效');
+      // 平台判定 refresh_token 作废 → 直接自动退出登录，人停在登录页
+      await expect(page.getByTestId('login-step')).toBeVisible({ timeout: 60_000 });
+      const notice = page.getByTestId('login-step-session-expired');
+      await expect(notice).toBeVisible({ timeout: 30_000 });
+      await expect(notice).toContainText('登录已失效');
+      await expect(notice).toContainText('已自动退出登录');
+
+      // 状态：已登出 + 带失效标记（登录页据此说明，而不是让人面对无解释的登录页）
+      const status = await page.evaluate(async () => await (window as any).miqi.qraft.status());
+      expect(status.loggedIn).toBe(false);
+      expect(status.sessionExpired).toBe(true);
+
+      // 凭据已清干净：加密登录态文件被清空
+      await expect
+        .poll(() => (existsSync(storePath) ? readFileSync(storePath, 'utf8') : ''), {
+          timeout: 10_000,
+        })
+        .toBe('');
 
       await page.screenshot({
-        path: 'test-results/qraft-e2e-relogin-notify.png',
+        path: 'test-results/qraft-e2e-auto-logout.png',
         fullPage: true,
       });
 
-      // 横幅水平居中于窗口：Tailwind v4 的 -translate-x-1/2 落在独立 translate
-      // 属性上，若 keyframes 的 transform 里再写一次 translate(-50%) 会叠加，
-      // 横幅整体左移半个身位。
-      const { bannerCenter, viewportCenter } = await page
-        .getByTestId('qraft-relogin-notify')
-        .evaluate((el) => {
-          const rect = el.getBoundingClientRect();
-          return {
-            bannerCenter: rect.left + rect.width / 2,
-            viewportCenter: document.documentElement.clientWidth / 2,
-          };
-        });
-      expect(Math.abs(bannerCenter - viewportCenter)).toBeLessThanOrEqual(1);
-
-      // 关闭横幅后不再出现；顶栏 chip 持续提示
-      await page.getByTestId('qraft-relogin-notify-close').click();
-      await expect(page.getByTestId('qraft-relogin-notify')).toHaveCount(0);
-      await expect(page.getByTestId('topbar-relogin-chip')).toBeVisible();
-
-      await gotoQraftTab(page);
-
-      // 引导重新登录的横幅出现（REFRESH_TOKEN_INVALID 置 requiresRelogin）
-      await expect(page.getByTestId('qraft-relogin-banner')).toBeVisible({ timeout: 15_000 });
+      // 永久失效不再自动重试：观察窗口内没有新的刷新请求
       expect(refreshCalls).toBeGreaterThanOrEqual(1);
-
-      // 永久失败不再排 30 分钟重试：计划自动刷新显示 —，且 3 秒内无新请求
-      await expect(page.getByText('计划自动刷新：').locator('..').locator('dd')).toHaveText('—');
+      const callsAfterLogout = refreshCalls;
       await page.waitForTimeout(3000);
-      expect(refreshCalls).toBe(1);
-
-      // 手动刷新：错误框展示新分类文案，且不回显 refresh_token 原文
-      //（mock 会回显请求里实际发送的 token，客户端必须脱敏）
-      await page.getByTestId('qraft-refresh-btn').click();
-      const errorBox = page.getByTestId('qraft-refresh-error');
-      await expect(errorBox).toBeVisible({ timeout: 15_000 });
-      await expect(errorBox).toContainText('refresh_token 已失效，请重新登录');
-      await expect(errorBox).not.toContainText('e2e-fake-refresh-token');
-
-      await page.screenshot({
-        path: 'test-results/qraft-e2e-refresh-invalid.png',
-        fullPage: true,
-      });
+      expect(refreshCalls).toBe(callsAfterLogout);
     } finally {
       await mockServer.close();
     }
   });
 
-  test('登录已失效：发送消息被拦截，给出重登引导气泡（一键登录按钮）', async () => {
-    const mockServer = await startInvalidRefreshMock();
-    const mockPort = mockServer.port;
-
-    try {
-      await closeElectronApp(electronApp, fixture.miqiHome);
-      seedExpiredStore(mockPort);
-
-      const f2 = await launchElectronApp();
-      electronApp = f2.electronApp;
-      page = f2.page;
-      fixture = f2;
-
-      // 全局告知横幅出现后关闭，专注验证发送拦截分支
-      await expect(page.getByTestId('qraft-relogin-notify')).toBeVisible({ timeout: 15_000 });
-      await page.getByTestId('qraft-relogin-notify-close').click();
-
-      // 发送消息：登录失效拦截先于无 provider 判定，乐观气泡被换成
-      // 重登引导（chat-error-login-btn 一键登录），输入草稿被恢复。
-      const textarea = page.locator('[data-testid="chat-input-container"] textarea');
-      await textarea.fill('继续之前的工作');
-      await page.evaluate(() => {
-        const ta = document.querySelector<HTMLTextAreaElement>(
-          '[data-testid="chat-input-container"] textarea'
-        );
-        if (!ta) throw new Error('textarea not found');
-        ta.dispatchEvent(
-          new KeyboardEvent('keydown', {
-            key: 'Enter',
-            code: 'Enter',
-            keyCode: 13,
-            bubbles: true,
-            cancelable: true,
-          })
-        );
-      });
-
-      await expect(page.getByTestId('chat-error-login-btn')).toBeVisible({ timeout: 30_000 });
-      await expect(page.getByTestId('chat-error-login-btn')).toContainText('登录 MiQroForge 账号');
-      await expect(textarea).toHaveValue('继续之前的工作');
-
-      await page.screenshot({
-        path: 'test-results/qraft-e2e-relogin-send-intercept.png',
-        fullPage: true,
-      });
-    } finally {
-      await mockServer.close();
-    }
-  });
+  // 说明：此前这里还有一条「自动退出后发送消息仍给一键登录引导」的用例。
+  // 它依赖「退出后的发送会较快失败并冒出引导气泡」，但退出会同时清掉 token
+  // 文件，发送往往停在「生成中」而不返回错误 —— 断言不稳定（实测 30s 超时）；
+  // 且该场景只在 E2E 绕登录门（MIQI_LOGIN_BYPASS）时存在，生产里未登录用户
+  // 停在登录页、发不出消息。同样的引导气泡已由 qraft-login-entry.spec.ts 覆盖。
 });
