@@ -26,6 +26,11 @@
  *      时，同步必须**显式报告失败**，不能像以前那样静默只留一条 WARN。
  *
  * 不依赖 MiQroForge 网络：登录态由测试预置（plain 信封），与 ai-gateway.spec.ts 同策略。
+ *
+ * ⚠️ 应用必须以 `noUserConfig: true` 启动（见 beforeAll）：本 spec 的前提是
+ * **平台网关是这个模型唯一的可用路径**。带着本地 provider 凭据（CI 会把
+ * DEEPSEEK_API_KEY 写进 app 的 config.json）时，握手文件不可用也照样能保存成功
+ * —— 那条分支测的就是「没有任何本地凭据的登录用户」，前提不成立则断言无意义。
  */
 
 import { test, expect } from '@playwright/test';
@@ -129,14 +134,53 @@ test.describe('网关凭据握手失效时的保存语义（#1258）', () => {
     storePath = join(tmpdir(), `qraft-handshake-e2e-store-${process.pid}.json`);
     process.env[STORE_ENV] = storePath;
     writeFileSync(storePath, buildSeededStoreContent(), 'utf8');
-    fixture = await launchElectronApp();
+    // noUserConfig（全新安装，不拷本机/CI 的 config.json）：本 spec 的前提是
+    // **网关是这个模型唯一的可用路径**。CI 会把 DEEPSEEK_API_KEY 写进 app 的
+    // config.json —— 带着本地 provider 凭据时，即使握手文件不可用，保存也由
+    // 「模型自己的 provider 有凭据」合法放行，断言就测不到网关这一条分支了
+    // （首轮 CI 三条用例正是这样失败的）。零凭据也正好是真实用户处境的复现。
+    fixture = await launchElectronApp(undefined, { noUserConfig: true });
     electronApp = fixture.electronApp;
     page = fixture.page;
     workspaceDir = getAccountWorkspaceDir(fixture.miqiHome, ACCOUNT_SUB);
     tokenFile = join(workspaceDir, '.qraft', 'token.json');
     // 握手文件由开机时的登录态恢复写出来（QraftService 构造函数 → syncTokenFile）。
     await expect.poll(() => existsSync(tokenFile), { timeout: 30_000 }).toBe(true);
-  });
+
+    // 前提校验（fail fast）：本机必须没有任何可用的本地 provider 凭据 —— 否则
+    // 保存会由「模型自己的 provider 有凭据」合法放行，下面三条断言就测不到网关
+    // 那条分支（首轮 CI 正是这样失败的）。哪天临时 home 里混进了凭据，这里立刻
+    // 报出来，而不是让断言静默失去意义。
+    const configured = await page.evaluate(async () => {
+      const r = await (
+        window as unknown as { miqi: { providers: { list: () => Promise<any> } } }
+      ).miqi.providers.list();
+      return (r?.providers ?? [])
+        .filter((p: { configured?: boolean }) => p.configured)
+        .map((p: { name: string }) => p.name);
+    });
+    expect(configured, '本 spec 需要「零本地凭据」环境：网关是唯一可用路径').toEqual([]);
+
+    // 等登录后的自动就绪跑完再开始用例：全新安装下 agents.defaults.model 是
+    // schema 默认值，登录 + 网关 active 会触发一次自动写入（GatewayModelAutoSync）。
+    // 用例若在那之前删掉握手文件，自动就绪自己的「重同步 + 重试」会把文件补回来
+    // （正是本 PR 加的自愈逻辑），随后用例的保存就会成功 —— 断言被测的东西被
+    // 悄悄换掉。等到 config.json 落盘为网关模型，那次自动同步就已结束
+    // （成功后 attemptedRef 不再复位，本次运行不会重跑）。
+    await expect
+      .poll(
+        () => {
+          try {
+            return JSON.parse(readFileSync(join(fixture.miqiHome, 'config.json'), 'utf8')).agents
+              ?.defaults?.model;
+          } catch {
+            return '';
+          }
+        },
+        { timeout: 120_000 }
+      )
+      .toBe(GATEWAY_MODEL);
+  }, 240_000); // 冷启动 + 桥握手 + 自动就绪重试窗口（CI 上实测可到数十秒）
 
   test.afterAll(async () => {
     delete process.env[STORE_ENV];
@@ -218,10 +262,13 @@ test.describe('网关凭据握手失效时的保存语义（#1258）', () => {
     });
   });
 
-  test('握手文件写不进去（.qraft 被 junction 占用）：同步显式报错，不再静默', async () => {
+  test('握手文件写不进去（.qraft 被 symlink/junction 占用）：同步显式报错，不再静默', async () => {
     test.setTimeout(120_000);
-    // Windows 上 lstat 把目录 junction 报成 symlink → syncTokenFile 的守卫
-    // 拒绝写入。修复前只有一条 WARN，调用方完全看不到（静默吞掉）。
+    // `.qraft` 被目录链接占用时 syncTokenFile 的守卫拒绝写入（真实触发路径：
+    // Windows 上 `lstatSync` 把目录 junction 报成 symlink，用户把数据目录用
+    // junction 挪到别的盘就会命中）。修复前只有一条 WARN，调用方完全看不到。
+    // `'junction'` 在 POSIX 上退化为普通目录 symlink，两边都会被 lstat 判成
+    // 链接、命中同一条守卫，所以这条用例在 Linux/macOS 上同样有效（CI 实测）。
     const qraftDir = join(workspaceDir, '.qraft');
     const junctionTarget = join(fixture.miqiHome, 'qraft-junction-target');
     rmSync(qraftDir, { recursive: true, force: true });
