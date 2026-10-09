@@ -46,7 +46,8 @@ const TOOLS_DUMP = join(tmpdir(), `sure-mock-tools-${Date.now()}.json`);
  * 需要 Windows + 本机已安装 SURE(v0.1.2,per-user 安装或 SURE_BIN)。
  * CI runner 均未安装 sure.exe → 全部用例跳过;主验证在 Python 单测与本机 e2e。
  */
-const SURE_BIN = process.env.SURE_BIN ?? join(process.env.LOCALAPPDATA ?? '', 'SURE', 'bin', 'sure.exe');
+const SURE_BIN =
+  process.env.SURE_BIN ?? join(process.env.LOCALAPPDATA ?? '', 'SURE', 'bin', 'sure.exe');
 const SURE_E2E_READY = process.platform === 'win32' && existsSync(SURE_BIN);
 
 /** 读本轮 E2E 临时 MIQI_HOME 里 bridge 写下的日志(账户级 / 未登录两种形态)。 */
@@ -128,7 +129,9 @@ test.describe('SURE 集成 GUI 验收(阶段 0)', () => {
       const allowPermanent = page.getByTestId('approval-allow-permanent');
       await expect(allowPermanent).toBeVisible({ timeout: 10_000 });
       await expect(page.getByText('Unknown tool', { exact: false })).toHaveCount(0);
-      console.log('[sure-acceptance] 审批弹窗已出现;「永久允许」按钮存在(allow_permanent=true,D5-A 已落地)');
+      console.log(
+        '[sure-acceptance] 审批弹窗已出现;「永久允许」按钮存在(allow_permanent=true,D5-A 已落地)'
+      );
       await page.screenshot({
         path: 'test-results/sure-acceptance-1-approval-dialog.png',
         timeout: 15_000,
@@ -155,10 +158,7 @@ test.describe('SURE 集成 GUI 验收(阶段 0)', () => {
         await page.waitForTimeout(1000);
       }
       await expect(reportMarker).toBeVisible({ timeout: 30_000 });
-      expect(
-        extraDialogs,
-        '「永久允许」后同参数的第二次调用不应再弹审批(键对齐回归,D5-A)'
-      ).toBe(0);
+      expect(extraDialogs, '「永久允许」后同参数的第二次调用不应再弹审批(键对齐回归,D5-A)').toBe(0);
       await expect(main.getByText('NOT CHECKED', { exact: false }).first()).toBeVisible({
         timeout: 30_000,
       });
