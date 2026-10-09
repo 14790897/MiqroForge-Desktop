@@ -5,9 +5,9 @@
  *
  * 刷新策略：按平台下发的 expires_in（2026-09-21 实测约 30 天，早期约 2 小时）
  * 提前 15 分钟用 refresh_token 刷新。刷新失败按性质区分（issue #1087）：
- * 瞬时失败（网络不可达/平台 5xx）静默指数退避重试，不打扰用户；只有
- * 平台明确作废 refresh_token（REFRESH_TOKEN_INVALID）才置 requiresRelogin，
- * 由「登录失效三件套」（横幅/顶栏 chip/发送拦截）引导重新登录。
+ * 瞬时失败（网络不可达/平台 5xx）静默指数退避重试，不打扰用户；平台明确作废
+ * refresh_token（REFRESH_TOKEN_INVALID）或会话整体被拒时不再重试，**自动退出
+ * 登录**并在登录页说明「登录已失效，已自动退出」（见 logoutSessionExpired）。
  */
 
 import {
@@ -186,6 +186,9 @@ export class QraftService {
   private refreshScheduledAt: number | null = null;
   private refreshError: QraftErrorCode | null = null;
   private requiresRelogin = false;
+  /** 因平台判定登录已失效而自动退出登录：登录页据此给出「已自动退出」说明。
+   *  只存在于本次进程内，重新登录成功即清除（见 logoutSessionExpired）。 */
+  private sessionExpired = false;
   /** 瞬时刷新失败的退避重试代数（决定下次重试间隔），成功刷新/登录/登出时归零。 */
   private refreshRetryAttempt = 0;
   /** 最近一次已处理失败的在途刷新 Promise：手动与自动路径并发 await
@@ -445,6 +448,8 @@ export class QraftService {
     this.refreshError = null;
     this.refreshRetryAttempt = 0;
     this.requiresRelogin = false;
+    // 重新登录成功：清掉「已自动退出」的说明，登录页不再赘述上一次失效。
+    this.sessionExpired = false;
     this.scheduleRefresh(state);
     this.syncTokenFile(state);
     this.emitStatus();
@@ -562,7 +567,9 @@ export class QraftService {
 
   status(): QraftStatus {
     const state = this.options.store.current;
-    if (!state) return { loggedIn: false };
+    // 未登录也要带出「为什么退出」：平台判定失效后应用自动退出，登录页据此说明。
+    if (!state)
+      return { loggedIn: false, ...(this.sessionExpired ? { sessionExpired: true } : {}) };
     const now = Date.now();
     return {
       loggedIn: true,
@@ -587,8 +594,14 @@ export class QraftService {
     };
   }
 
-  logout(): void {
+  /**
+   * 退出登录。`sessionExpired` 表示这次是被平台判定登录失效后的**自动退出**
+   * （见 logoutSessionExpired）：登录页据此说明原因；用户主动登出不带该标记。
+   */
+  logout(opts: { sessionExpired?: boolean } = {}): void {
     this.cancelRefresh();
+    // 先记下来：emitStatus 在方法末尾，登录页读到的就是这次退出的原因。
+    this.sessionExpired = opts.sessionExpired === true;
     // 使登出前发起的在途刷新结果作废（runRefresh 代际校验丢弃）。
     this.authGeneration += 1;
     this.inFlightRefresh = null;
@@ -713,13 +726,8 @@ export class QraftService {
         } catch (retryErr) {
           if (retryErr instanceof QraftError && retryErr.code === 'SESSION_EXPIRED') {
             // 新 token 仍被平台拒绝：会话整体失效（平台作废整会话等），
-            // 置 requiresRelogin 停掉渲染层重试并引导重新登录（issue #1160）。
-            this.requiresRelogin = true;
-            this.emitStatus();
-            this.options.log(
-              'ERROR',
-              'qraft: 刷新后重试积分余额仍失败（SESSION_EXPIRED）：会话已失效，请重新登录'
-            );
+            // 自动退出登录并说明原因（issue #1160 / 自动退出）。
+            this.logoutSessionExpired('积分余额查询', '刷新后仍被平台拒绝（会话已失效）');
           } else {
             this.options.log('WARN', pointsFailureLog(retryErr));
           }
@@ -1215,23 +1223,32 @@ export class QraftService {
   }
 
   /**
+   * 平台判定登录已失效（refresh_token 被作废 / 会话被平台拒绝）时的收尾：
+   * **自动退出登录**，而不是留在「已登录但平台调用必然失败」的僵尸状态里，
+   * 等用户自己点重新登录。退出后登录门（#1095）把人停在登录页，并由
+   * sessionExpired 标记说明「登录已失效，已自动退出」——用户不会看到
+   * 一个没有解释的登录页，也不会误以为应用崩了。
+   *
+   * 只处理永久失效：瞬时失败（网络/平台 5xx）继续静默退避重试，不打扰用户。
+   */
+  private logoutSessionExpired(via: string, reason: string): void {
+    this.options.log('WARN', `qraft: ${via}：${reason}，已自动退出登录`);
+    this.logout({ sessionExpired: true });
+  }
+
+  /**
    * 刷新失败的统一处理（refreshNow 与 tickRefresh 共用，按在途 Promise
    * 身份去重后只调用一次）：
-   *   - REFRESH_TOKEN_INVALID（平台作废）：永久失败，置 requiresRelogin 走
-   *     登录失效三件套，撤销定时器不再重试；
-   *   - 其余（网络/平台 5xx）：瞬时失败，不置 requiresRelogin（不弹横幅、
-   *     不拦截发送），指数退避静默重试（issue #1087）。
+   *   - REFRESH_TOKEN_INVALID（平台作废）：永久失败，不再重试，自动退出登录
+   *     （见 logoutSessionExpired）；
+   *   - 其余（网络/平台 5xx）：瞬时失败，不打扰用户，指数退避静默重试
+   *     （issue #1087）。
    */
   private handleRefreshFailure(err: unknown, state: QraftStoredState, via: '自动' | '手动'): void {
     const code = err instanceof QraftError ? err.code : 'REFRESH_FAILED';
     this.refreshError = code;
     if (isPermanentRefreshError(code)) {
-      this.requiresRelogin = true;
-      this.cancelRefresh();
-      this.options.log(
-        'ERROR',
-        `qraft: ${via}刷新失败（${code}）：refresh_token 已失效，请重新登录（不再自动重试）`
-      );
+      this.logoutSessionExpired(via + '刷新失败', '平台判定 refresh_token 已失效');
     } else {
       const delay = this.nextRefreshRetryDelay();
       this.refreshRetryAttempt += 1;

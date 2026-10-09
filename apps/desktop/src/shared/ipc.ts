@@ -1618,6 +1618,10 @@ export interface QraftStatus {
   refreshScheduledAt?: number;
   refreshError?: QraftErrorCode;
   requiresRelogin?: boolean;
+  /** 因平台判定登录已失效（refresh_token 被作废 / 会话被平台拒绝）而**自动退出登录**：
+   *  登录页据此给出「已自动退出」的说明，而不是让用户面对一个没有解释的登录页。
+   *  重新登录成功即清除；仅存在于本次进程内（重启后登录页不再赘述）。 */
+  sessionExpired?: boolean;
   /** 最近一次拉取的积分余额（设置页拉取后缓存，随状态事件推送）。 */
   points?: QraftPointsBalance;
   /** 平台 AI 网关开通状态（登录且 active 时模型调用走网关）。 */
