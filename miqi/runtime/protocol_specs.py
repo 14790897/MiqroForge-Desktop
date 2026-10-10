@@ -74,6 +74,11 @@ from miqi.runtime.session_request_models import (
     SessionKeyParams,
 )
 from miqi.runtime.session_response_models import SESSION_METHOD_RESULT_MODELS
+from miqi.runtime.sure_protocol_models import (
+    SURE_EVENT_MODELS,
+    SURE_METHOD_RESULT_MODELS,
+    SureCheckStartParams,
+)
 from miqi.runtime.thread_request_models import (
     ChatAbortParams,
     ThreadArchiveCompatParams,
@@ -673,3 +678,37 @@ FUZZY_FILE_SEARCH_SESSION_STOP = model_spec(
 REPLAY_TURNS = spec("replay.turns", scope=MethodScope.DEBUG, required=["threadId"])
 REPLAY_TIMELINE = spec("replay.timeline", scope=MethodScope.DEBUG, required=["threadId", "turnId"])
 REPLAY_MESSAGES = spec("replay.messages", scope=MethodScope.DEBUG, required=["threadId"])
+
+# ── 阶段 3:SURE 验收(sure/*;事件为孤儿事件,由桥自动转发)──────────────────
+
+SURE_HEALTH = model_spec(
+    "sure.health",
+    EmptyParams,
+    scope=MethodScope.CONNECTION,
+    result_model=SURE_METHOD_RESULT_MODELS["sure.health"],
+)
+SURE_CHECK_START = model_spec(
+    "sure.check.start",
+    SureCheckStartParams,
+    scope=MethodScope.CONNECTION,
+    emits=[
+        "sure_check_progress",
+        "sure_check_report",
+        "sure_check_failed",
+        "sure_check_cancelled",
+    ],
+    result_model=SURE_METHOD_RESULT_MODELS["sure.check.start"],
+    event_models=SURE_EVENT_MODELS,
+)
+SURE_CHECK_CANCEL = model_spec(
+    "sure.check.cancel",
+    EmptyParams,
+    scope=MethodScope.CONNECTION,
+    result_model=SURE_METHOD_RESULT_MODELS["sure.check.cancel"],
+)
+SURE_CHECK_STATUS = model_spec(
+    "sure.check.status",
+    EmptyParams,
+    scope=MethodScope.CONNECTION,
+    result_model=SURE_METHOD_RESULT_MODELS["sure.check.status"],
+)

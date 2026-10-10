@@ -628,27 +628,42 @@ def _sure_bin_from_localappdata() -> str | None:
     return candidate if os.path.isfile(candidate) else None
 
 
+def resolve_sure_bin() -> str | None:
+    """探测本机 SURE 可执行文件,返回路径或 None（阶段 3 原生通道复用同一探测）。
+
+    顺序与 SURE 自身启动器一致：SURE_BIN → PATH → %LOCALAPPDATA% 兜底。
+    逐段探测：单段异常视为**该段**未命中（不遮蔽后续探测）；命中即停。
+    每次调用重新探测（无缓存）：用户中途安装 SURE 后即可用上。
+    """
+    for resolver in (_sure_bin_from_env, _sure_bin_from_path, _sure_bin_from_localappdata):
+        try:
+            found = resolver()
+        except Exception as exc:  # noqa: BLE001 —— 单段失败等价于该段未命中
+            logger.debug("SURE 二进制探测段 {} 失败,按未命中处理: {}", resolver.__name__, exc)
+            continue
+        if found:
+            return found
+    return None
+
+
 def detect_sure_mcp_server() -> MCPServerConfig | None:
     """只读探测本机 SURE 二进制，命中则构造默认 MCP 条目（#1268）。
 
-    探测顺序与 SURE 自身启动器一致：SURE_BIN → PATH → %LOCALAPPDATA% 兜底。
-    不自动安装、不改任何文件；探测异常按「未安装」处理（记日志，不影响配置加载）。
-    每次调用重新探测（无缓存）：用户中途安装 SURE 后，新会话即可用上。
+    探测顺序与 SURE 自身启动器一致：SURE_BIN → PATH → %LOCALAPPDATA% 兜底
+    （见 :func:`resolve_sure_bin`）。不自动安装、不改任何文件；探测异常按
+    「未安装」处理（记日志，不影响配置加载）。每次调用重新探测（无缓存）：
+    用户中途安装 SURE 后，新会话即可用上。
     """
-    try:
-        for resolver in (_sure_bin_from_env, _sure_bin_from_path, _sure_bin_from_localappdata):
-            found = resolver()
-            if found:
-                return MCPServerConfig(
-                    type="stdio",
-                    command=found,
-                    args=["mcp", "serve"],
-                    tool_timeout=600,
-                    progress_interval_seconds=10,
-                    description=SURE_DEFAULT_MCP_DESCRIPTION,
-                )
-    except Exception as exc:  # noqa: BLE001 —— 探测失败等价于「未安装」
-        logger.debug("SURE 默认条目探测失败,按未安装处理: {}", exc)
+    found = resolve_sure_bin()
+    if found:
+        return MCPServerConfig(
+            type="stdio",
+            command=found,
+            args=["mcp", "serve"],
+            tool_timeout=600,
+            progress_interval_seconds=10,
+            description=SURE_DEFAULT_MCP_DESCRIPTION,
+        )
     return None
 
 
