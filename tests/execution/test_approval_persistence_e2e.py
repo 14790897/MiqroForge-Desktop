@@ -21,9 +21,9 @@ import pytest
 
 from miqi.execution.orchestrator import (
     _MAX_COMMAND_LENGTH,
-    _summarize_pattern_for_log,
     ToolExecutionContext,
     ToolOrchestrator,
+    _summarize_pattern_for_log,
 )
 from miqi.execution.permission_engine import (
     PermissionEngine,
