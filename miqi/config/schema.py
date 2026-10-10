@@ -550,6 +550,9 @@ class MCPServerConfig(Base):
     command: str = ""  # Stdio: command to run (e.g. "npx")
     args: list[str] = Field(default_factory=list)  # Stdio: command arguments
     env: dict[str, str] = Field(default_factory=dict)  # Stdio: extra env vars
+    # Stdio: 启动工作目录（#1267：插件条目由 PluginManager 注入插件根目录，
+    # 含分隔符的相对 command 依此解析）；空 = 继承调用方 cwd。
+    cwd: str = ""
     url: str = ""  # HTTP/SSE: endpoint URL
     headers: dict[str, str] = Field(default_factory=dict)  # HTTP/SSE: Custom HTTP Headers
     insecure_http: bool = False  # Explicit opt-in: allow non-loopback http:// endpoints (credentials in cleartext; platform gateway has no https yet)

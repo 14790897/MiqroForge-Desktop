@@ -223,6 +223,21 @@ class ClientSessionRegistry:
             )
             await runtime.start()
 
+            # #1267：把本会话装配好的插件管理器发布到 bridge_context/state——
+            # plugin/* 处理器与插件页此前读到的该键恒为 None（插件列表永远为空、
+            # 安装/启停操作无处可落）。各会话的 PluginManager 扫描同一组目录，
+            # 列表等价；启停状态为内存态、仅影响发布时点所在实例（既有语义）。
+            _services = getattr(runtime, "services", None)
+            _pm = getattr(_services, "plugin_manager", None) if _services is not None else None
+            if _pm is not None:
+                self.bridge_context["plugin_manager"] = _pm
+                _bridge_state = self.bridge_context.get("state")
+                if _bridge_state is not None:
+                    try:
+                        _bridge_state._plugin_manager = _pm
+                    except Exception:
+                        pass  # 属性发布是尽力而为，绝不阻塞会话建立
+
             # Register the key→workspace binding in the app-home index now that
             # the runtime is up.  The conversation mirror task_runner writes
             # lands in SessionManager(workspace) (the folder), while

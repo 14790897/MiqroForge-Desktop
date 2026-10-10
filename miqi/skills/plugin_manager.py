@@ -247,7 +247,7 @@ class PluginManager:
     ) -> LoadedPlugin | None:
         """Load a single plugin from its directory."""
         import json
-        manifest_data = json.loads(manifest_path.read_text())
+        manifest_data = json.loads(manifest_path.read_text(encoding="utf-8"))
 
         # Auto-discover skills from filesystem for KWP-style plugins
         # that don't declare skills explicitly in manifest

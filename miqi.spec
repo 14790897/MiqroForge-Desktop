@@ -14,6 +14,9 @@ a = Analysis(
     datas=[
         ('miqi/templates', 'miqi/templates'),
         ('miqi/skills', 'miqi/skills'),
+        # #1267：内置插件（system_plugins_dir = miqi/plugins）须随桥打包，
+        # 否则 PyInstaller onefile 下插件目录不存在，内置插件永不被发现。
+        ('miqi/plugins', 'miqi/plugins'),
         (_roc_models, 'rapidocr_onnxruntime/models'),
     ],
     hiddenimports=[
