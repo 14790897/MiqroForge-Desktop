@@ -318,18 +318,32 @@ test.describe('#1240 审批卡输入框内联形态', () => {
         await page.keyboard.press('Tab');
         expect(await inside(), `第 ${i + 1} 次 Tab 后焦点跑出对话框`).toBe(true);
       }
-      // 故意用**奇数**次：策略是 4 项循环，按 4 次正好转一整圈回到原值，会掩盖上面那个
-      // bug（这正是上一轮没用断言抓住它的原因）。数字键同理。
+      // 每次按键后**立刻**校验，不能只在结尾查一次。初始策略恰为 plan 时，「Shift+Tab
+      // 改掉」会被后面的 `1`（=plan）抵消掉，结尾那次断言照样通过——奇数次的技巧只挡得住
+      // 单条快捷键转整圈，挡不住两条路径互相抵消。
+      const policyLabel = async () => ((await policyBtn.textContent()) ?? '').trim();
+      const expectPolicyUnchanged = async (step: string) => {
+        // 停一拍再查：否则可能因为改动还没生效而误判成「没变」，把 bug 放过去
+        await page.waitForTimeout(150);
+        expect(await policyLabel(), `审批挂起期间执行策略被改掉了（${step}）`).toBe(policyBefore);
+      };
+
       for (let i = 0; i < 3; i++) {
         await page.keyboard.press('Shift+Tab');
         expect(await inside(), `第 ${i + 1} 次 Shift+Tab 后焦点跑出对话框`).toBe(true);
+        await expectPolicyUnchanged(`第 ${i + 1} 次 Shift+Tab`);
       }
       await page.keyboard.press('1');
+      await expectPolicyUnchanged('按 1');
       await page.keyboard.press('4');
-      await page.waitForTimeout(300);
-      const policyAfter = ((await policyBtn.textContent()) ?? '').trim();
-      console.log(`[xpage] 执行策略 前=${policyBefore} 后=${policyAfter}`);
-      expect(policyAfter, '审批挂起期间执行策略被隐藏控件的快捷键改掉了').toBe(policyBefore);
+      await expectPolicyUnchanged('按 4');
+      // 4 = auto，而 pick('auto') 只 setConfirmAuto(true)、**不调 onChange**——标签不变
+      // 也能通过上面那条断言，所以确认框必须单独查。它没有 testid，按文案定位。
+      await expect(
+        page.getByText('开启自动模式', { exact: true }),
+        '审批挂起期间按 4 弹出了自动模式确认框'
+      ).toHaveCount(0);
+      console.log(`[xpage] 执行策略 前=${policyBefore} 后=${await policyLabel()}`);
 
       // 阶段 3：Esc 拒绝 → 焦点不得落进任何未渲染元素（尤其聊天区那个 hidden textarea）
       await page.keyboard.press('Escape');
