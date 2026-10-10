@@ -331,10 +331,14 @@ def _register_fonts() -> dict[str, str]:
 # reportlab 对缺失字形不做回退：直接画成 .notdef 空心方框，文本层抽出来是
 # \x00。SimHei（Windows 上最常发现的中文字体）恰好没有 U+2022（•），此前列表
 # 项硬编码 "• " 前缀 → 每个项目符号都是方框（实测：3 条列表 = 3 个 \x00）。
-# 按已注册字体的 cmap 选第一个可用的候选符号：• → ·（U+00B7，SimHei 有）→ -。
+# #1238 先按 cmap 把符号降级成 ·（U+00B7，SimHei 有）；这里进一步：正文字体
+# 缺 • 时，bullet 单独用符号字体渲染（<font name=...> 内联标签，只影响这一个
+# 字形），保住标准圆点 •；符号字体也不可用时才退回 · → - 降级。
 
 _BULLET_CANDIDATES = ("•", "·", "-")
 _BULLET_CACHE: dict[str, str] = {}
+_bullet_symbol_font_state: str | None = None
+_bullet_symbol_font_probed = False
 
 
 def _font_supports_char(font_name: str, ch: str) -> bool | None:
@@ -356,16 +360,74 @@ def _font_supports_char(font_name: str, ch: str) -> bool | None:
         return None
 
 
+def _bullet_symbol_font() -> str | None:
+    """注册并返回一个可渲染 U+2022 的符号字体名；都不可用则返回 None。
+
+    候选第一优先是 reportlab 自带分发的 Bitstream Vera（版本随锁文件固定、
+    不赌宿主装了什么字体），宿主字体（雅黑 / DejaVu）只作后备。结果缓存，
+    只探测注册一次。
+    """
+    global _bullet_symbol_font_state, _bullet_symbol_font_probed
+    if _bullet_symbol_font_probed:
+        return _bullet_symbol_font_state
+    _bullet_symbol_font_probed = True
+
+    candidates: list[tuple[str, str]] = []
+    try:
+        import reportlab
+
+        candidates.append(
+            (
+                "MiqiBulletSymbolVera",
+                os.path.join(os.path.dirname(reportlab.__file__), "fonts", "Vera.ttf"),
+            )
+        )
+    except Exception:  # noqa: BLE001 — 探测失败按无此候选处理
+        pass
+    candidates += [
+        ("MiqiBulletSymbolMsyh", "C:/Windows/Fonts/msyh.ttc"),
+        ("MiqiBulletSymbolDejaVu", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"),
+    ]
+
+    for name, path in candidates:
+        if not os.path.exists(path):
+            continue
+        try:
+            from reportlab.pdfbase import pdfmetrics
+            from reportlab.pdfbase.ttfonts import TTFont
+
+            if name not in pdfmetrics.getRegisteredFontNames():
+                pdfmetrics.registerFont(TTFont(name, path))
+            if _font_supports_char(name, _BULLET_CANDIDATES[0]) is False:
+                continue
+            _bullet_symbol_font_state = name
+            return name
+        except Exception as exc:  # noqa: BLE001 — 单候选失败换下一个
+            logger.warning("PDF: bullet 符号字体 {} 不可用: {}", path, exc)
+    return None
+
+
 def _list_bullet(font_name: str) -> str:
-    """返回该字体下可渲染的列表项目符号（结果按字体名缓存）。"""
+    """返回该字体下可渲染的列表项目符号（结果按字体名缓存）。
+
+    正文字体含 • → 直接用；缺 • 时用符号字体渲染同一个 •（内联 <font> 标签
+    允许 bullet 与正文混排）；符号字体也不可用时按 cmap 降级 · → -。
+    """
     cached = _BULLET_CACHE.get(font_name)
     if cached is not None:
         return cached
-    chosen = _BULLET_CANDIDATES[-1]
-    for candidate in _BULLET_CANDIDATES:
-        if _font_supports_char(font_name, candidate) is not False:
-            chosen = candidate
-            break
+    if _font_supports_char(font_name, _BULLET_CANDIDATES[0]) is not False:
+        chosen = _BULLET_CANDIDATES[0]
+    else:
+        symbol_font = _bullet_symbol_font()
+        if symbol_font is not None:
+            chosen = f'<font name="{symbol_font}">{_BULLET_CANDIDATES[0]}</font>'
+        else:
+            chosen = _BULLET_CANDIDATES[-1]
+            for candidate in _BULLET_CANDIDATES[1:]:
+                if _font_supports_char(font_name, candidate) is not False:
+                    chosen = candidate
+                    break
     _BULLET_CACHE[font_name] = chosen
     return chosen
 
@@ -596,8 +658,11 @@ def _build_pdf(
                 # 列宽压到邻列（实测 4 列行程表 6 对 span 重叠）。Paragraph 会解析
                 # XML，因此单元格文本在这里统一 _md_escape——content_path 与
                 # content 两条路径的单元格此前都未经转义（Table 不解析 XML）。
-                # wordWrap="CJK" 是中文换行的必要条件：默认只在空格处断行，
-                # 无空格的中文长串换不了行、照旧溢出。
+                # 不设 wordWrap="CJK"（#1238 打磨）：CJK 硬切在任意字符间断行，
+                # 时间/数字串被拆成 "18:5" / "1 连云港"（dumbSplit 的 half-line
+                # 回退在 91.9pt 列宽下找不到断点，实测复现）。默认换行在空格处
+                # 断、超长无空格片段由 splitLongWords 兜底——与正文段落同一机制
+                # （正文从未开过 CJK 硬切，长中文换行一直正常）。
                 cell_size = body_size - 1
                 cell_style = ParagraphStyle(
                     "DocTableCell",
@@ -605,7 +670,6 @@ def _build_pdf(
                     fontSize=cell_size,
                     leading=cell_size * 1.3,
                     alignment=TA_CENTER,
-                    wordWrap="CJK",
                 )
 
                 table_data = []

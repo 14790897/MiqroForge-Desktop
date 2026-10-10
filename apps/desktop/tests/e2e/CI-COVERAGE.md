@@ -43,6 +43,7 @@
 | `issue-1036-rpc-starvation-probe.spec.ts` | 守卫 | `MIQI_1036_PROBE === '1'` | 极高（真实模型 + 真实 exec 长跑；窗口默认 20 分钟） | 测量用长跑探针：默认跳过，只在排查 #1036「长 turn 期间部分 RPC 被饿死」时手动开。判据是「一次 `config.get` settle 用时 ≥ 30s」即命中（30s 是判据阈值；720s 是它的客户端超时上限，不是命中所需时长），窗口必须同时长到能容纳若干采样，electron-e2e 的 job 上限撑不住；它回答的是「这个问题是否存在」而非回归 |
 | `full-electron.spec.ts`（部分） | 守卫 | `MIQI_RUN_REAL_WEB_SEARCH_E2E` / `MIQI_RUN_STATEFUL_SESSION_E2E` | 高（真实 LLM） | 5 个用例在 PR CI 上不稳定（#187）：real web search 1、stateful session 1、sidebar switching 2、重启 history 1；该文件其余 11 个用例在 Linux 全量套件里照跑 |
 | `ai-gateway-live.spec.ts` | 守卫 | `QRAFT_LIVE=1` | 中（真实平台账号） | opt-in live 用例；CI 从未设置 `QRAFT_LIVE`（连已删除的 cloud-login live workflow 也只跑两个登录 spec） |
+| `gateway-creds-live.spec.ts` | 守卫 | `QRAFT_LIVE=1` | 中（真实平台账号） | 同 `ai-gateway-live`：验证真实登录后网关凭据握手文件落盘、以及缺失时保存报可重试错误（#1258）。无凭据的 CI 跑不了；**mock 版 `gateway-creds-handshake.spec.ts` 在 CI 全量套件里照跑** |
 | `issue-1185-account-isolation-live.spec.ts` | 守卫 | `QRAFT_LIVE=1` + ≥2 个真实账号 | 中（真实平台账号） | 需要两个账号来回切换验证本地存储隔离 |
 | `issue-1185-task-assets-live.spec.ts` | 守卫 | `QRAFT_LIVE=1` | 中（真实平台账号） | 同上：复杂技能产物跨账号切换 |
 | `billing-live.spec.ts` | 守卫 | `SLURM_MCP_KEY` | 中（真实网关） | 需要 slurm MCP 网关 key，CI 未注入 |
@@ -53,6 +54,8 @@
 | `tool-error-neutral.spec.ts`（部分） | 守卫 | `SKIP_SANDBOX_ON_CI`（`MIQI_RUN_SANDBOX_E2E`） | 中（真实 LLM + WSL 沙箱） | 该变量只在 wsl-e2e 的沙箱点名步骤里设置，而那一步只收集 sandbox-exec / session-key-mapping / sandbox-toggle，不含本文件；「注入事件」那条 describe 在 Linux 上照跑，只有「真实链路 + 沙箱」这条零覆盖 |
 | `task-assets.spec.ts`（部分） | 守卫 | 无条件 `test.skip('标题', fn)` | 低 | 「AI 生成 .docx → 任务资产预览」一条被永久禁用；该文件其余用例在 Linux 上跑 |
 | `uninstall-cleanup.spec.ts` | 守卫 | `MIQI_E2E_UNINSTALL=1`（显式 opt-in）+ win32 + `~/.miqi`/`%APPDATA%\miqi-desktop` 当前不存在 + `dist-new/` 下有构建好的安装器；WSL 断言另需 `MIQI_E2E_WSL_ROOTFS` | 高（真机 NSIS 安装/卸载 + WSL 卷清理） | 卸载残留清理只能在真实 Windows 安装上验证：CI 既不设 `MIQI_E2E_UNINSTALL`、job 里也没有构建好的安装器（wsl-e2e 那一步按名字收集的 7 个 spec 不含本文件）；且它会真的安装再卸载整套应用、读写 `%APPDATA%` / `%LOCALAPPDATA%` / `HKCU\Software\MiqroForge` 等真实数据根，只能在被明确告知「本机可跑安装/卸载」的机器上执行（WSL 注销逻辑另有 `src/main/ipc/cleanup.test.ts` 单测覆盖） |
+
+| `sure-integration-gui.spec.ts` | 守卫 | win32 + 本机安装 SURE（`SURE_BIN` 或 `%LOCALAPPDATA%\SURE\bin\sure.exe`）+ 测试项目存在（`MIQI_SURE_PROJECT` 或默认 PoC 路径；均为 spec 内 `existsSync`） | 低（脚本化 mock 模型，单用例约 30s，无真实 LLM） | SURE 是 Windows per-user 安装的本地二进制（v0.1.2），CI runner 均未安装——spec 断言「5 个 `mcp_sure_*` 工具注册 + 审批弹窗 + 报告渲染」，无 sure.exe 时工具根本不注册。主验证在 Python 单测（`tests/execution/test_permission_engine.py`、`test_approval_persistence_e2e.py`）；接进 CI 需在 workflow 里预装 SURE（见 #1256） |
 
 ## 已接进 CI（#1196）
 

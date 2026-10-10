@@ -17,6 +17,7 @@ import {
   QraftBrowserLoginInput,
   type QraftLoginResult,
   type QraftStatus,
+  type QraftTokenSyncResult,
 } from '../../shared/ipc';
 import {
   QraftError,
@@ -114,8 +115,18 @@ function getService(): QraftService {
         return null;
       }
     },
+    // #1257: 登出（含平台判定失效自动退出）时中断在途聊天回合 —— 由
+    // main/ipc 注册（那里才持有 bridge），qraft 模块本身不依赖 bridge。
+    onLogoutCleanup: () => logoutCleanup?.(),
   });
   return service;
+}
+
+/** 登出收尾钩子（main/ipc 注册）：中断本客户端在途聊天回合。 */
+let logoutCleanup: (() => void) | null = null;
+
+export function setLogoutCleanup(fn: (() => void) | null): void {
+  logoutCleanup = fn;
 }
 
 /** 浏览器登录窗口等待用户完成授权的超时时间。 */
@@ -312,6 +323,12 @@ export function registerQraftIpcHandlers(): void {
 
   ipcMain.handle(IPC.QRAFT_REFRESH, async (): Promise<QraftLoginResult> => {
     return getService().refreshNow();
+  });
+
+  // #1258：重新同步登录凭据握手文件并把结果如实回报。渲染进程在保存网关模型
+  // 被 GATEWAY_CREDS_UNAVAILABLE 拒绝后调用，重试前把 Python 读的磁盘视图补上。
+  ipcMain.handle(IPC.QRAFT_SYNC_TOKEN, async (): Promise<QraftTokenSyncResult> => {
+    return getService().syncTokenFileNow();
   });
 
   ipcMain.handle(IPC.QRAFT_LOGOUT, async (): Promise<{ ok: boolean }> => {

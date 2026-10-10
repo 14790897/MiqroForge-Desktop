@@ -179,6 +179,9 @@ export const IPC = {
   QRAFT_STATUS_SYNC: 'qraft:statusSync',
   QRAFT_REFRESH: 'qraft:refresh',
   QRAFT_LOGOUT: 'qraft:logout',
+  // #1258：重新同步登录凭据握手文件（保存网关模型被 GATEWAY_CREDS_UNAVAILABLE
+  // 拒绝后，重试前把 Python 读的那份磁盘视图补上）。
+  QRAFT_SYNC_TOKEN: 'qraft:syncToken',
   QRAFT_POINTS_BALANCE: 'qraft:pointsBalance',
   QRAFT_BILLING_HISTORY: 'qraft:billingHistory',
 
@@ -245,6 +248,11 @@ export const ChatSendInput = z.object({
   session_key: z.string().optional(),
   thread_id: z.string().optional(),
   mode: z.enum(['plan', 'manual', 'edit', 'auto']).optional(),
+  // #680 断线修复：renderer/preload 一直在发 reasoning_mode，但 zod parse
+  // 默认剥离未知键 → 后端永远收不到档位（bridge 日志 reasoning_mode 0 次）。
+  // enum 而非 free string：非法档位在参数构造阶段就按「确定未派发」拦下，
+  // 与 bridge 侧「非 fast/think 一律 None」的宽松降级互补。
+  reasoning_mode: z.enum(['fast', 'think']).optional(),
   workspace: z.string().optional(),
   resume_turn_id: z.string().optional(),
   drop_from_turn_id: z.string().optional(),
@@ -1563,6 +1571,15 @@ export interface QraftLoginResult {
   message?: string;
 }
 
+/**
+ * 登录凭据握手文件（`<workspace>/.qraft/token.json`）的同步结果（#1258）。
+ *
+ * 这份文件是 Python 判定「平台网关凭据可用」的唯一依据。同步失败必须如实
+ * 回报：否则渲染进程按内存登录态认为网关可用，后端却读不到凭据，用户只会
+ * 拿到一句误导的 `Unsupported model`。
+ */
+export type QraftTokenSyncResult = { ok: true; path: string } | { ok: false; message: string };
+
 /** 本地留存的扣费历史条目（issue #927；平台无扣费历史查询接口）。 */
 export interface QraftBillingHistoryEntry {
   /** 计费请求唯一 ID（Python 侧生成，去重键）。 */
@@ -1618,6 +1635,10 @@ export interface QraftStatus {
   refreshScheduledAt?: number;
   refreshError?: QraftErrorCode;
   requiresRelogin?: boolean;
+  /** 因平台判定登录已失效（refresh_token 被作废 / 会话被平台拒绝）而**自动退出登录**：
+   *  登录页据此给出「已自动退出」的说明，而不是让用户面对一个没有解释的登录页。
+   *  重新登录成功即清除；仅存在于本次进程内（重启后登录页不再赘述）。 */
+  sessionExpired?: boolean;
   /** 最近一次拉取的积分余额（设置页拉取后缓存，随状态事件推送）。 */
   points?: QraftPointsBalance;
   /** 平台 AI 网关开通状态（登录且 active 时模型调用走网关）。 */

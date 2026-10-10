@@ -1,3 +1,44 @@
+# [0.37.0](https://github.com/14790897/MiqroForge-Desktop/compare/v0.36.2...v0.37.0) (2026-10-09)
+
+
+### Bug Fixes
+
+* **desktop:** fast 模式内联 🚀 标与正文首行并排、字号对齐快速思考 ([#1246](https://github.com/14790897/MiqroForge-Desktop/issues/1246)) ([#1250](https://github.com/14790897/MiqroForge-Desktop/issues/1250)) ([bb269bd](https://github.com/14790897/MiqroForge-Desktop/commit/bb269bde6bf21ce1b4d4ded8219bc1e92e112288))
+* **desktop:** 登出时中断在途聊天回合，不再卡在「生成中」（[#1257](https://github.com/14790897/MiqroForge-Desktop/issues/1257)） ([#1260](https://github.com/14790897/MiqroForge-Desktop/issues/1260)) ([8edf79a](https://github.com/14790897/MiqroForge-Desktop/commit/8edf79a2aa11934c90d7a1ee25942657d2dfe073))
+* **desktop:** 登录后补拉 AI 网关下发，网关状态不再停在「未下发」（[#1251](https://github.com/14790897/MiqroForge-Desktop/issues/1251)） ([#1252](https://github.com/14790897/MiqroForge-Desktop/issues/1252)) ([32ebfff](https://github.com/14790897/MiqroForge-Desktop/commit/32ebfffbaf3bd64632dd3bd81b0a778f13a12527))
+* **desktop:** 网关凭据握手缺失时给可重试语义并自动重新同步（[#1258](https://github.com/14790897/MiqroForge-Desktop/issues/1258)） ([#1261](https://github.com/14790897/MiqroForge-Desktop/issues/1261)) ([4f31dab](https://github.com/14790897/MiqroForge-Desktop/commit/4f31dab156a0bb48d52ee6c64b9ffdb889c932cc))
+
+
+### Features
+
+* **desktop:** 平台登录失效时自动退出登录，登录页说明「已自动退出」（[#1253](https://github.com/14790897/MiqroForge-Desktop/issues/1253)） ([#1255](https://github.com/14790897/MiqroForge-Desktop/issues/1255)) ([e8d7fc2](https://github.com/14790897/MiqroForge-Desktop/commit/e8d7fc258416c5d18e4ccf02686711e38f8cbfea))
+
+---
+## 下载说明
+
+macOS 用户请按芯片架构选择安装包：
+
+- **Apple Silicon (M1/M2/M3/M4)**：下载 `0.37.0-arm64.dmg`（ARM 架构）
+- **Intel**：下载 `0.37.0.dmg`（x86 无后缀）
+
+## [0.36.2](https://github.com/14790897/MiqroForge-Desktop/compare/v0.36.1...v0.36.2) (2026-10-08)
+
+
+### Bug Fixes
+
+* **bridge:** stdout 写移出事件循环，父进程不读时不再停摆 ([#1203](https://github.com/14790897/MiqroForge-Desktop/issues/1203)) ([#1242](https://github.com/14790897/MiqroForge-Desktop/issues/1242)) ([c24b80d](https://github.com/14790897/MiqroForge-Desktop/commit/c24b80d1aea599483173032ad451a49c1e1d49ac)), closes [#266](https://github.com/14790897/MiqroForge-Desktop/issues/266)
+* **desktop:** 积分查询失败透出平台服务端明细 ([#1233](https://github.com/14790897/MiqroForge-Desktop/issues/1233)) ([a0cecc2](https://github.com/14790897/MiqroForge-Desktop/commit/a0cecc2415da783fe27f82905026647e51218f5c))
+* **pdf:** 表格单元格按列宽换行 + 项目符号按字体字形降级（[#1238](https://github.com/14790897/MiqroForge-Desktop/issues/1238)） ([#1239](https://github.com/14790897/MiqroForge-Desktop/issues/1239)) ([4eca701](https://github.com/14790897/MiqroForge-Desktop/commit/4eca70174748d5fda1d884bc4b68db3b627d08fe))
+* **session:** app-home 工作区不再被当作会话绑定根（[#1236](https://github.com/14790897/MiqroForge-Desktop/issues/1236)） ([#1237](https://github.com/14790897/MiqroForge-Desktop/issues/1237)) ([81ee547](https://github.com/14790897/MiqroForge-Desktop/commit/81ee547728415bc62ef4efe029af06d2d04a585f))
+
+---
+## 下载说明
+
+macOS 用户请按芯片架构选择安装包：
+
+- **Apple Silicon (M1/M2/M3/M4)**：下载 `0.36.2-arm64.dmg`（ARM 架构）
+- **Intel**：下载 `0.36.2.dmg`（x86 无后缀）
+
 ## [0.36.1](https://github.com/14790897/MiqroForge-Desktop/compare/v0.36.0...v0.36.1) (2026-09-29)
 
 

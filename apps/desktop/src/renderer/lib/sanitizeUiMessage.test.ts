@@ -79,6 +79,25 @@ describe('sanitizeUiMessage', () => {
     expect(out).not.toContain('[path]');
   });
 
+  it('gives an actionable message when the gateway handshake file is not ready (#1258)', () => {
+    // 真实用户两次遇到：登录后保存网关模型被拒，只看到
+    // `Error invoking remote method 'config:update'… (GATEWAY_CREDS_UNAVAILABLE)`，
+    // 既不知道发生了什么也不知道能重试。
+    const out = sanitizeUiMessage(
+      "Error invoking remote method 'config:update': Error: 平台 AI 网关凭据在本机尚未就绪… (GATEWAY_CREDS_UNAVAILABLE)"
+    );
+    expect(out).toContain('重试');
+    expect(out).not.toContain('Error invoking remote method');
+  });
+
+  it('reports a misconfigured gateway origin distinctly (#1258)', () => {
+    const out = sanitizeUiMessage(
+      "Error invoking remote method 'config:update': Error: 网关地址配置不合法 (GATEWAY_ORIGIN_INVALID)"
+    );
+    expect(out).toContain('https');
+    expect(out).not.toContain('Error invoking remote method');
+  });
+
   it('masks credential URLs with uppercase schemes (#991 review)', () => {
     const out = sanitizeUiMessage('boom at HTTPS://user:secret@example.com/path');
     expect(out).not.toContain('secret');
