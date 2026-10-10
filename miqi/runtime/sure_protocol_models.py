@@ -49,6 +49,16 @@ class SureCheckStatusResult(BaseModel):
     task: SureTaskSnapshot | None
 
 
+class SureFixStartParams(BaseModel):
+    project: str = Field(description="项目绝对路径(缺省/非绝对/不存在一律拒绝)")
+
+
+class SureFixStartResult(BaseModel):
+    agent_id: str = Field(serialization_alias="agentId")
+    session_key: str = Field(serialization_alias="sessionKey")
+    project: str
+
+
 class SureCheckProgressEvent(BaseModel):
     task_id: str = Field(serialization_alias="taskId")
     project: str
@@ -86,6 +96,7 @@ SURE_METHOD_RESULT_MODELS: dict[str, type[BaseModel]] = {
     "sure.check.start": SureCheckStartResult,
     "sure.check.cancel": SureCheckCancelResult,
     "sure.check.status": SureCheckStatusResult,
+    "sure.fix.start": SureFixStartResult,
 }
 
 SURE_EVENT_MODELS: dict[str, type[BaseModel]] = {

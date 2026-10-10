@@ -8,7 +8,16 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { AlertTriangle, FolderOpen, Loader2, Play, RefreshCw, Wrench, XCircle } from 'lucide-react';
+import {
+  AlertTriangle,
+  FolderOpen,
+  Loader2,
+  Play,
+  RefreshCw,
+  Wand2,
+  Wrench,
+  XCircle,
+} from 'lucide-react';
 import { Button } from '../../components/ui/Button';
 import { ReportView } from './ReportView';
 import {
@@ -42,6 +51,12 @@ export function AcceptancePage() {
   const [actionError, setActionError] = useState<string | null>(null);
   // 阶段 4:当前/最近一次任务命令(check/repair/recheck)——驱动运行中文案与按钮
   const [runningCommand, setRunningCommand] = useState<SureCommand>('check');
+  // 阶段 4:修复子代理(完成经 chat:subagent_result 关联 → 自动复核)
+  const [fixAgentId, setFixAgentId] = useState<string | null>(null);
+  const [fixNotice, setFixNotice] = useState<string | null>(null);
+  const fixAgentRef = useRef<string | null>(null);
+  // 事件订阅在挂载时建立;run 每次渲染重建——经 ref 取最新实现(自动复核用)
+  const runRef = useRef<(command: SureCommand) => void>(() => {});
   // #1273 评审:本任务是否已收到终态事件(report/failed/cancelled)——
   // start 响应晚于终态事件到达时,不得把 phase 覆盖回「运行中」藏掉结果。
   const terminalRef = useRef(false);
@@ -122,6 +137,24 @@ export function AcceptancePage() {
     } catch {
       /* preload 无 sure 命名空间时可忽略(旧构建) */
     }
+    try {
+      // 阶段 4:修复子代理完成 → 自动复核(按 task_id 关联本次 spawn)
+      unsubs.push(
+        window.miqi.chat.onSubagentResult((d) => {
+          if (!d || d.task_id !== fixAgentRef.current) return;
+          fixAgentRef.current = null;
+          setFixAgentId(null);
+          if (d.status === 'ok') {
+            setFixNotice('修复子代理已完成——正在自动复核(对比)…');
+            runRef.current('recheck');
+          } else {
+            setFixNotice(`修复子代理未成功完成(${d.status});可手动复核或再试。`);
+          }
+        })
+      );
+    } catch {
+      /* 旧 preload 无 chat 命名空间 */
+    }
     return () => unsubs.forEach((u) => u());
   }, [refreshHealth]);
 
@@ -166,6 +199,30 @@ export function AcceptancePage() {
     },
     [project]
   );
+
+  useEffect(() => {
+    runRef.current = run;
+  }, [run]);
+
+  const fixIt = useCallback(async () => {
+    setActionError(null);
+    try {
+      const res = (await window.miqi.sure.startFix(project.trim())) as SureApiResult<{
+        agentId: string;
+        sessionKey: string;
+        project: string;
+      }> | null;
+      if (!res || !res.ok) {
+        setActionError(res ? res.error : '启动修复子代理失败(桥可能未运行)');
+        return;
+      }
+      fixAgentRef.current = res.value.agentId;
+      setFixAgentId(res.value.agentId);
+      setFixNotice('修复子代理已启动,完成后将自动复核;期间可在聊天里看到它的工作。');
+    } catch (e) {
+      setActionError(e instanceof Error ? e.message : String(e));
+    }
+  }, [project]);
 
   const cancelCheck = useCallback(async () => {
     try {
@@ -243,6 +300,16 @@ export function AcceptancePage() {
         </div>
       ) : null}
 
+      {fixNotice ? (
+        <div
+          className="rounded-md border border-[var(--info)] bg-[var(--info-bg)] px-3 py-2 text-xs text-[var(--info)]"
+          data-testid="acceptance-fix-notice"
+        >
+          {fixNotice}
+          {fixAgentId ? <span className="ml-2 font-mono opacity-70">{fixAgentId}</span> : null}
+        </div>
+      ) : null}
+
       {/* 选项目 + 开始 */}
       {phase === 'idle' || phase === 'running' ? (
         <div className="flex items-center gap-2">
@@ -308,13 +375,25 @@ export function AcceptancePage() {
               </Button>
             ) : null}
             {envelope.command === 'repair' ? (
-              <Button
-                size="sm"
-                onClick={() => void run('recheck')}
-                data-testid="acceptance-recheck"
-              >
-                <RefreshCw size={13} className="mr-1" /> 复核(修复后对比)
-              </Button>
+              <>
+                <Button
+                  size="sm"
+                  onClick={() => void fixIt()}
+                  disabled={fixAgentId !== null}
+                  data-testid="acceptance-fix"
+                >
+                  <Wand2 size={13} className="mr-1" />
+                  {fixAgentId ? '修复子代理运行中…' : '交给 AI 修复'}
+                </Button>
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={() => void run('recheck')}
+                  data-testid="acceptance-recheck"
+                >
+                  <RefreshCw size={13} className="mr-1" /> 复核(修复后对比)
+                </Button>
+              </>
             ) : null}
             {envelope.command === 'recheck' &&
             (envelope.details.lifecycle?.still_open?.length ?? 0) > 0 ? (

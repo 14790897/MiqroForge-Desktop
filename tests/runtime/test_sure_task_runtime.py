@@ -429,6 +429,9 @@ async def test_repair_command_emits_contracts(fake_sure_bin, tmp_path):
     repairs = envelope["details"]["repairs"]
     assert len(repairs) == 5
     assert repairs[0]["rechecks_that_must_pass"]
+    # 阶段 4:最近报告缓存(修复流程取契约用),按命令过滤
+    assert rt.last_report("c1", command="repair") is not None
+    assert rt.last_report("c1", command="check") is None
 
 
 @pytest.mark.asyncio

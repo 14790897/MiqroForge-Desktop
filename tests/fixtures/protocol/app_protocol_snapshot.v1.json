@@ -4599,6 +4599,48 @@
       },
       {
         "deprecatedBy": null,
+        "description": "把最近一次 repair 契约交给客户端最近活跃会话里的 code-agent 子代理执行修复;完成经 chat:subagent_result 事件回报。",
+        "emits": [],
+        "eventSchemas": {},
+        "method": "sure.fix.start",
+        "paramsSchema": {
+          "additionalProperties": true,
+          "properties": {
+            "project": {
+              "description": "项目绝对路径(缺省/非绝对/不存在一律拒绝)",
+              "type": "string"
+            }
+          },
+          "required": [
+            "project"
+          ],
+          "type": "object"
+        },
+        "resultSchema": {
+          "additionalProperties": false,
+          "properties": {
+            "agentId": {
+              "type": "string"
+            },
+            "project": {
+              "type": "string"
+            },
+            "sessionKey": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "agentId",
+            "project",
+            "sessionKey"
+          ],
+          "type": "object"
+        },
+        "scope": "connection",
+        "stability": "stable"
+      },
+      {
+        "deprecatedBy": null,
         "description": null,
         "emits": [],
         "eventSchemas": {},
@@ -6004,8 +6046,8 @@
   },
   "methodCounts": {
     "legacy": 81,
-    "total": 170,
-    "typed": 89
+    "total": 171,
+    "typed": 90
   },
   "schemaVersion": 1
 }

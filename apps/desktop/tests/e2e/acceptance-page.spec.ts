@@ -12,15 +12,21 @@
 
 import { test, expect } from '@playwright/test';
 import type { ElectronApplication, Page } from '@playwright/test';
+import type { ChildProcess } from 'node:child_process';
 import { chmodSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import {
   closeElectronApp,
+  createNewConversation,
   launchElectronApp,
+  sendMessage,
+  stopMockServer,
   waitForBridgeInitialized,
+  waitForResponseComplete,
 } from './helpers/electron-setup';
-import { resolveMockPython } from './helpers/mock-server';
+import { resolveMockPython, startMockServer } from './helpers/mock-server';
+import { patchConfigForMock } from './helpers/mock-openai';
 
 const REPO_ROOT = resolve(__dirname, '..', '..', '..', '..');
 const MOCK_CLI = join(REPO_ROOT, 'scripts', 'mock_sure_cli.py');
@@ -123,8 +129,10 @@ test.describe.serial('验收(SURE)面板 E2E · 健康/运行/报告', () => {
     // 复核:mock recheck fixture = still_open 5 / closed 0(「删标记但不跑检查 = 仍 open」语义)
     await page.getByTestId('acceptance-recheck').click();
     await expect(page.getByText(/复审对比中/)).toBeVisible({ timeout: 10_000 });
-    await expect(page.getByText('复审对比')).toBeVisible({ timeout: 30_000 });
-    await expect(page.getByText(/发现项只在修复契约点名的检查/)).toBeVisible();
+    // 对比区独有文案(避免子串撞上运行中卡片),确保截图是终态
+    await expect(page.getByText(/发现项只在修复契约点名的检查/)).toBeVisible({
+      timeout: 30_000,
+    });
     await expect(
       page.getByText('project contains fake payment', { exact: false }).first()
     ).toBeVisible();
@@ -168,5 +176,66 @@ test.describe.serial('验收(SURE)面板 E2E · 取消', () => {
     await expect(page.getByTestId('acceptance-report')).not.toBeVisible();
 
     await page.screenshot({ path: 'test-results/acceptance-cancelled.png', fullPage: true });
+  });
+});
+
+test.describe.serial('验收(SURE)面板 E2E · 交给 AI 修复(阶段 4)', () => {
+  let electronApp: ElectronApplication;
+  let page: Page;
+  let prevSureBin: string | undefined;
+  let mockProc: ChildProcess | undefined;
+  const project = mkdtempSync(join(tmpdir(), 'sure-e2e-fix-'));
+
+  test.beforeAll(async () => {
+    const binDir = mkdtempSync(join(tmpdir(), 'sure-e2e-bin-fix-'));
+    prevSureBin = process.env.SURE_BIN;
+    process.env.SURE_BIN = makeSureWrapper(binDir, 400);
+
+    // 修复子代理是真实 agent(agent_jobs → turn_runner):用静态 LLM mock 收尾,
+    // 零工具调用、不依赖任何真实模型;子代理工作区挂靠聊天会话
+    const mock = await startMockServer('mock_llm_reply.py');
+    mockProc = mock.proc;
+    const fixture = await launchElectronApp((cfg) => patchConfigForMock(cfg, mock.mockUrl));
+    electronApp = fixture.electronApp;
+    page = fixture.page;
+    await waitForBridgeInitialized(page, 30);
+
+    await createNewConversation(page);
+    await sendMessage(page, '你好');
+    await waitForResponseComplete(page);
+  });
+
+  test.afterAll(async () => {
+    await closeElectronApp(electronApp);
+    if (mockProc) stopMockServer(mockProc);
+    // #1273 评审:还原 SURE_BIN(同上)
+    if (prevSureBin === undefined) delete process.env.SURE_BIN;
+    else process.env.SURE_BIN = prevSureBin;
+  });
+
+  test('交给 AI 修复 → 子代理完成 → 自动复核对比', async () => {
+    await openAcceptance(page);
+    await page.getByTestId('acceptance-project-input').fill(project);
+    await page.getByTestId('acceptance-start').click();
+    await expect(page.getByTestId('acceptance-report')).toBeVisible({ timeout: 30_000 });
+
+    await page.getByTestId('acceptance-repair').click();
+    await expect(page.getByText('修复契约(5)')).toBeVisible({ timeout: 30_000 });
+
+    await page.getByTestId('acceptance-fix').click();
+    // 通知元素必须出现;但子代理可能极快完成并把"已启动"立刻改写为"已完成"——
+    // 只断言两态之一,不锁中间文案(否则与真实速度赛跑,已实测踩中)
+    await expect(page.getByTestId('acceptance-fix-notice')).toBeVisible({ timeout: 15_000 });
+    // 子代理(mock LLM,零工具调用)→ subagent_result(ok)→ 页面自动复核
+    // (聊天区与子代理卡也有同款文案,断言收敛到本页通知元素)
+    await expect(page.getByTestId('acceptance-fix-notice')).toContainText(
+      /修复子代理已启动|修复子代理已完成/,
+      { timeout: 150_000 }
+    );
+    // 等自动复核的最终对比视图(独有文案),截图定格在终态
+    await expect(page.getByText(/发现项只在修复契约点名的检查/)).toBeVisible({
+      timeout: 60_000,
+    });
+    await page.screenshot({ path: 'test-results/acceptance-fix-flow.png', fullPage: true });
   });
 });

@@ -2498,6 +2498,15 @@ for m in ("pydantic", "httpx", "loguru"):
     return bridge.sendSafeWithError('sure.check.status');
   });
 
+  ipcMain.handle(IPC.SURE_FIX_START, async (_event, payload: unknown) => {
+    const raw = payload as { project?: unknown } | null | undefined;
+    const project = raw?.project;
+    if (typeof project !== 'string') {
+      return { ok: false, error: 'project must be a string', code: 'INVALID_PARAMS' };
+    }
+    return bridge.sendSafeWithError('sure.fix.start', { project });
+  });
+
   // -- Feedback --------------------------------------------------------------
   ipcMain.handle(IPC.FEEDBACK_SUBMIT, async (_event, payload: unknown) => {
     const input = FeedbackSubmitInput.parse(payload);

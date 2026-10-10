@@ -170,11 +170,12 @@ export const IPC = {
   FEEDBACK_SUBMIT: 'feedback:submit',
   FEEDBACK_LIST: 'feedback:list',
 
-  // SURE 验收面板(阶段 3):原生 spawn 核查
+  // SURE 验收面板(阶段 3/4):原生 spawn 核查 + 修复子代理
   SURE_HEALTH: 'sure:health',
   SURE_CHECK_START: 'sure:check-start',
   SURE_CHECK_CANCEL: 'sure:check-cancel',
   SURE_CHECK_STATUS: 'sure:check-status',
+  SURE_FIX_START: 'sure:fix-start',
 
   // MiQroForge 平台 OAuth2 登录 (issue #726, 主进程本地处理)
   QRAFT_LOGIN: 'qraft:login',
