@@ -96,6 +96,7 @@ import type {
   SureCheckReportEvent,
   SureCheckStartResult,
   SureCheckStatus,
+  SureFixStartResult,
   SureHealth,
 } from '../shared/sureReport';
 
@@ -847,6 +848,9 @@ const api = {
       ipcRenderer.invoke(IPC.SURE_CHECK_CANCEL),
     status: (): Promise<SureApiResult<SureCheckStatus>> =>
       ipcRenderer.invoke(IPC.SURE_CHECK_STATUS),
+    // 阶段 4:把最近修复契约交给会话里的 code-agent 子代理执行
+    startFix: (project: string): Promise<SureApiResult<SureFixStartResult>> =>
+      ipcRenderer.invoke(IPC.SURE_FIX_START, { project }),
     onProgress: (callback: (data: SureCheckProgress) => void): (() => void) => {
       const handler = (_event: Electron.IpcRendererEvent, data: SureCheckProgress) =>
         callback(data);

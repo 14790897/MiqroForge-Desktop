@@ -9,6 +9,7 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 MOCK_CLI = REPO_ROOT / "scripts" / "mock_sure_cli.py"
+FIXTURES = REPO_ROOT / "tests" / "fixtures" / "sure"
 
 
 def _fake_sure_bin(tmp_path: Path) -> str:
@@ -196,3 +197,98 @@ async def test_repair_command_streams_contracts(tmp_path):
     report = next(e for e in events if e["event"] == "sure_check_report")
     assert report["data"]["command"] == "repair"
     assert len(report["data"]["envelope"]["details"]["repairs"]) == 5
+
+
+# ── 阶段 4:「交给 AI 修复」(spawn code-agent 子代理)────────────────────
+
+
+class _FakeControl:
+    def __init__(self):
+        self.calls: list[dict] = []
+
+    async def spawn(self, agent_type, task, *, label=None, user_roots=None, **kwargs):
+        from types import SimpleNamespace
+
+        self.calls.append(
+            {"agent_type": agent_type, "task": task, "label": label, "user_roots": user_roots}
+        )
+        return SimpleNamespace(agent_id="agent-1")
+
+
+def _make_fix_server(*, with_session: bool, cached_repair: bool):
+    from types import SimpleNamespace
+
+    from miqi.runtime.app_server import AppServer, ClientSessionRegistry
+    from miqi.runtime.sure_app_handlers import register_sure_handlers
+    from miqi.runtime.sure_report import parse_sure_output
+    from miqi.runtime.sure_task_runtime import SureTaskRuntime
+
+    registry = ClientSessionRegistry()
+    runtime = SureTaskRuntime(bin_provider=lambda: None, env_builder=lambda: {**os.environ})
+    registry.bridge_context = {"sure_task_runtime": runtime}
+    control = _FakeControl()
+    if with_session:
+        registry._sessions["c:s1"] = SimpleNamespace(
+            services=SimpleNamespace(agent_control=control)
+        )
+        registry._client_sessions["c"] = {"c:s1"}  # list_sessions 读取处
+        registry._session_clients["c:s1"] = {"c"}
+        registry._last_activity["c:s1"] = 100.0
+    if cached_repair:
+        envelope = parse_sure_output(
+            (FIXTURES / "report-repair-fake-payment.json").read_text(encoding="utf-8")
+        )
+        runtime._last_reports["c"] = envelope
+    server = AppServer(registry)
+    register_sure_handlers(server)
+    return server, registry, runtime, control
+
+
+def test_build_fix_task_carries_contract_and_hard_rules():
+    from miqi.runtime.sure_app_handlers import build_fix_task
+    from miqi.runtime.sure_report import parse_sure_output
+
+    envelope = parse_sure_output(
+        (FIXTURES / "report-repair-fake-payment.json").read_text(encoding="utf-8")
+    )
+    text = build_fix_task("D:/proj", list(envelope.details.repairs))
+    assert "【契约 1/5】" in text
+    assert "必须修复" in text
+    assert "禁止走捷径" in text
+    assert "chk_noopfakepayment" in text  # 复核项逐字保留
+    assert "不算证据" in text  # 硬规则:完成语不是证据
+    assert "D:/proj" in text
+
+
+@pytest.mark.asyncio
+async def test_fix_requires_cached_repair_contract(tmp_path):
+    server, _, _, _ = _make_fix_server(with_session=True, cached_repair=False)
+    resp = await _dispatch(
+        server, "sure.fix.start", {"project": str(tmp_path)}, client_id="c"
+    )
+    assert resp["code"] == "SURE_NO_CONTRACT"
+
+
+@pytest.mark.asyncio
+async def test_fix_requires_session(tmp_path):
+    server, _, _, _ = _make_fix_server(with_session=False, cached_repair=True)
+    resp = await _dispatch(
+        server, "sure.fix.start", {"project": str(tmp_path)}, client_id="c"
+    )
+    assert resp["code"] == "SURE_NO_SESSION"
+
+
+@pytest.mark.asyncio
+async def test_fix_spawns_code_agent_with_user_root(tmp_path):
+    server, _, _, control = _make_fix_server(with_session=True, cached_repair=True)
+    resp = await _dispatch(
+        server, "sure.fix.start", {"project": str(tmp_path)}, client_id="c"
+    )
+    assert "result" in resp, resp
+    assert resp["result"]["agentId"] == "agent-1"
+    assert resp["result"]["sessionKey"] == "c:s1"
+    assert len(control.calls) == 1
+    call = control.calls[0]
+    assert call["agent_type"] == "code-agent"
+    assert call["user_roots"] == [str(tmp_path)]  # 项目授权给子代理
+    assert "不算证据" in call["task"]

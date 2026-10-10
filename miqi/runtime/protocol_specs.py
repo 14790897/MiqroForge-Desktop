@@ -78,6 +78,7 @@ from miqi.runtime.sure_protocol_models import (
     SURE_EVENT_MODELS,
     SURE_METHOD_RESULT_MODELS,
     SureCheckStartParams,
+    SureFixStartParams,
 )
 from miqi.runtime.thread_request_models import (
     ChatAbortParams,
@@ -711,4 +712,12 @@ SURE_CHECK_STATUS = model_spec(
     EmptyParams,
     scope=MethodScope.CONNECTION,
     result_model=SURE_METHOD_RESULT_MODELS["sure.check.status"],
+)
+SURE_FIX_START = model_spec(
+    "sure.fix.start",
+    SureFixStartParams,
+    scope=MethodScope.CONNECTION,
+    result_model=SURE_METHOD_RESULT_MODELS["sure.fix.start"],
+    description="把最近一次 repair 契约交给客户端最近活跃会话里的 code-agent "
+    "子代理执行修复;完成经 chat:subagent_result 事件回报。",
 )

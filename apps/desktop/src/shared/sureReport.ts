@@ -298,6 +298,13 @@ export interface SureCheckStatus {
   } | null;
 }
 
+/** `sure.fix.start` 的结果:修复子代理已启动(完成经 chat:subagent_result 回报)。 */
+export interface SureFixStartResult {
+  agentId: string;
+  sessionKey: string;
+  project: string;
+}
+
 /** 运行中文案(核查中 / 生成修复契约中 / 复审对比中);未知命令原样回退。 */
 export function commandLabel(command: string): string {
   const labels: Record<string, string> = {

@@ -290,6 +290,8 @@ class SureTaskRuntime:
         self._env_builder = env_builder or build_sure_env
         self._progress_interval = progress_interval
         self._tasks: dict[str, SureTask] = {}
+        #: 每客户端最近一次完成任务的信封(阶段 4:修复流程取最近 repair 契约)
+        self._last_reports: dict[str, Any] = {}
 
     # ── 查询 ─────────────────────────────────────────────────────────────
 
@@ -311,6 +313,15 @@ class SureTaskRuntime:
             "startedAt": task.started_at_ms,
             "command": task.command,
         }
+
+    def last_report(self, client_id: str, *, command: str | None = None):
+        """最近一次完成任务的报告信封;可按命令过滤(阶段 4 修复流程用)。"""
+        envelope = self._last_reports.get(client_id)
+        if envelope is None:
+            return None
+        if command is not None and envelope.command != command:
+            return None
+        return envelope
 
     # ── 生命周期 ─────────────────────────────────────────────────────────
 
@@ -548,6 +559,7 @@ class SureTaskRuntime:
             "sure_check_report",
             {"envelope": envelope.model_dump(mode="json"), "elapsedMs": task.elapsed_ms()},
         )
+        self._last_reports[task.client_id] = envelope
         logger.info(
             "SURE 核查完成: {} outcome={} exit={}",
             task.task_id,
