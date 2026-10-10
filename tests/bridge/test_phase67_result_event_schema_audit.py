@@ -27,6 +27,10 @@ async def test_result_and_event_schemas_match_response_models():
         PROCESS_METHOD_RESULT_MODELS,
     )
     from miqi.runtime.protocol_model_schema import result_schema_from_model
+    from miqi.runtime.sure_protocol_models import (
+        SURE_EVENT_MODELS,
+        SURE_METHOD_RESULT_MODELS,
+    )
 
     loop = BridgeRuntimeLoop(
         send_func=_CaptureSend().send,
@@ -42,6 +46,7 @@ async def test_result_and_event_schemas_match_response_models():
         for method, model in {
             **PROCESS_METHOD_RESULT_MODELS,
             **FILESYSTEM_METHOD_RESULT_MODELS,
+            **SURE_METHOD_RESULT_MODELS,
         }.items():
             expected = result_schema_from_model(model)
             actual = by_method[method]["resultSchema"]
@@ -51,6 +56,7 @@ async def test_result_and_event_schemas_match_response_models():
         expected_events = {
             **PROCESS_EVENT_MODELS,
             **FILESYSTEM_EVENT_MODELS,
+            **SURE_EVENT_MODELS,
         }
         for method, item in by_method.items():
             event_schemas = item.get("eventSchemas", {})
