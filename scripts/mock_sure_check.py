@@ -138,6 +138,11 @@ class Handler(BaseHTTPRequestHandler):
                     if name == "mcp_sure_sure_check":
                         n_check += 1
 
+        last_user = next(
+            (str(m.get("content", "")) for m in reversed(messages) if m.get("role") == "user"),
+            "",
+        )
+
         def tc(name, args, cid="call_sure_check"):
             return {
                 "id": "mock-tc",
@@ -161,6 +166,30 @@ class Handler(BaseHTTPRequestHandler):
                 "choices": [{"index": 0, "message": {"role": "assistant", "content": content}, "finish_reason": "stop"}],
                 "usage": {"prompt_tokens": 20, "completion_tokens": 10, "total_tokens": 30},
             }
+
+        # ── 缺路径场景(#1266 路径保护回归):prompt 含「缺路径」→ 第一轮发
+        # **不带 project** 的调用(预期被 MiQi 侧在派发前拒绝,sure.exe 不会
+        # 启动);第二轮把工具结果(拒绝文案)原文回贴。按探针调用 id 计数,
+        # 不受同一会话里此前正常回合的调用数影响。
+        if "缺路径" in last_user:
+            n_probe = sum(
+                1
+                for m in messages
+                if m.get("role") == "assistant" and m.get("tool_calls")
+                for c in m["tool_calls"]
+                if c.get("id") == "call_guard_probe"
+            )
+            if n_probe == 0:
+                print("  [mock-sure] guard-probe → tool_call 无 project", flush=True)
+                self._respond(tc("mcp_sure_sure_check", {}, "call_guard_probe"))
+                return
+            tool_content = ""
+            for m in reversed(messages):
+                if m.get("role") == "tool":
+                    tool_content = str(m.get("content") or "")
+                    break
+            self._respond(text("工具结果原文:\n\n" + tool_content))
+            return
 
         project = os.environ.get("MIQI_SURE_PROJECT") or DEFAULT_PROJECT
         if n_check == 0:

@@ -16,6 +16,7 @@ from miqi.execution.hook_runtime import (
     HookRuntime,
 )
 from miqi.execution.orchestrator import (
+    OrchestrationResult,
     ToolExecutionContext,
     ToolOrchestrator,
 )
@@ -267,3 +268,33 @@ class TestSanitizeExcForUi:
         assert "sessions/；" in out
         assert "工作区" in out
         assert "[path]" not in out
+
+
+# ── SURE 路径运行时保护（#1256）：拒绝在编排层传导 ─────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_sure_path_guard_denies_before_execution(mock_orch_components):
+    """缺 project 的 SURE 核查调用由**真实** PermissionEngine 拒绝：
+    DENIED_BY_POLICY + 修正提示（含"绝对路径"）传给模型，工具从未执行。"""
+    from miqi.execution.permission_engine import PermissionEngine
+
+    orch = ToolOrchestrator(
+        permission_engine=PermissionEngine(),
+        sandbox_engine=mock_orch_components["sandbox_engine"],
+        hook_runtime=mock_orch_components["hook_runtime"],
+        tool_registry=mock_orch_components["tool_registry"],
+        event_emitter=mock_orch_components["event_emitter"],
+    )
+    tool_mock = MagicMock()
+    tool_mock.execute = AsyncMock(return_value="should-not-run")
+    tool_mock.validate_params = MagicMock(return_value=[])
+    mock_orch_components["tool_registry"].get.return_value = tool_mock
+
+    ctx = make_ctx(tool_name="mcp_sure_sure_check", arguments={})
+    result_ctx = await orch.execute(ctx)
+
+    assert result_ctx.status == OrchestrationResult.DENIED_BY_POLICY
+    assert "权限被拒绝" in result_ctx.result
+    assert "绝对路径" in result_ctx.result
+    tool_mock.execute.assert_not_called()

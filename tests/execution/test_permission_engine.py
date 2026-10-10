@@ -1,4 +1,6 @@
 """Tests for miqi.execution.permission_engine."""
+import os
+
 import pytest
 
 from miqi.config.schema import ApprovalBypassConfig
@@ -141,6 +143,17 @@ MCP_SURE_TOOLS = (
     "mcp_sure_sure_status",
 )
 
+# ── SURE 路径运行时保护（#1256 阶段 1 子项,拒绝制）────────────────────────
+# 省略 project 时 SURE 核查的是它**自己的启动目录**而不是用户项目(PoC 已复现)。
+# 结构性错误不是可授权的偏好:本检查位于 deny 模式之后、全部放行名单/绕过之前。
+
+SURE_PROJECT_TOOLS = (
+    "mcp_sure_sure_check",
+    "mcp_sure_sure_recheck",
+    "mcp_sure_sure_get_repair",
+)
+
+
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("tool_name", MCP_SURE_TOOLS)
@@ -153,7 +166,9 @@ async def test_mcp_sure_tools_require_approval_with_permanent_allow(tool_name):
     "<tool>: <target>" 形式。
     """
     engine = PermissionEngine()
-    ctx = FakeContext(tool_name, {"project": r"D:\Code\MiQi\sure-poc\hello"})
+    # 平台可移植的绝对路径:路径守卫(#1266)会拒绝非绝对路径——CI(ubuntu)上
+    # 字面量 Windows 路径不是绝对路径,而这个用例核的是审批语义,不是路径校验
+    ctx = FakeContext(tool_name, {"project": os.path.abspath(os.path.join("sure-poc", "hello"))})
     decision = await engine.check(ctx)
     assert decision.verdict == PermissionVerdict.APPROVAL_REQUIRED
     assert decision.category == "tool_confirmation"
@@ -169,6 +184,79 @@ async def test_other_mcp_tools_keep_no_permanent_allow():
     decision = await engine.check(ctx)
     assert decision.verdict == PermissionVerdict.APPROVAL_REQUIRED
     assert decision.allow_permanent is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool_name", SURE_PROJECT_TOOLS)
+async def test_sure_project_tools_deny_missing_project(tool_name):
+    """缺少 project/为空 → 拒绝,理由要说清"应传绝对路径"。"""
+    engine = PermissionEngine()
+    for args in ({}, {"project": ""}, {"project": "   "}):
+        decision = await engine.check(FakeContext(tool_name, args))
+        assert decision.verdict == PermissionVerdict.DENY, args
+        assert "project" in decision.reason
+        assert "绝对路径" in decision.reason
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool_name", SURE_PROJECT_TOOLS)
+async def test_sure_project_tools_deny_relative_project(tool_name):
+    """相对路径 → SURE 会相对它自己的 cwd 解析,同样拒绝。"""
+    engine = PermissionEngine()
+    decision = await engine.check(FakeContext(tool_name, {"project": "sure-poc/hello"}))
+    assert decision.verdict == PermissionVerdict.DENY
+    assert "绝对路径" in decision.reason
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(os.name != "nt", reason="盘符相对路径的语义仅 Windows 成立")
+async def test_sure_project_tools_deny_drive_relative_windows_path():
+    """Windows 上单反斜杠开头的盘符相对路径(\\repo)必须拒绝:Python<3.13 的
+    os.path.isabs 对它返回 True(本机实测),但它相对的是"当前盘符",不是用户
+    项目——校验必须用 Path(...).is_absolute()(要求完全限定;CodeRabbit #1266)。"""
+    engine = PermissionEngine()
+    decision = await engine.check(
+        FakeContext("mcp_sure_sure_check", {"project": r"\sure-poc\hello"})
+    )
+    assert decision.verdict == PermissionVerdict.DENY
+    assert "绝对路径" in decision.reason
+
+
+@pytest.mark.asyncio
+async def test_sure_project_tools_absolute_project_falls_through_to_approval_flow():
+    """绝对路径 → 不进路径保护,按既有审批分支走(不因本保护自动放行)。"""
+    engine = PermissionEngine()
+    abs_path = os.path.abspath("sure-poc")
+    decision = await engine.check(FakeContext("mcp_sure_sure_check", {"project": abs_path}))
+    assert decision.verdict == PermissionVerdict.APPROVAL_REQUIRED
+
+
+@pytest.mark.asyncio
+async def test_sure_status_and_report_tools_not_affected_by_path_guard():
+    """不带 project 的 SURE 工具(status/get_report)不受路径保护影响。"""
+    engine = PermissionEngine()
+    for tool_name in ("mcp_sure_sure_status", "mcp_sure_sure_get_report"):
+        decision = await engine.check(FakeContext(tool_name, {}))
+        assert decision.verdict == PermissionVerdict.APPROVAL_REQUIRED, tool_name
+
+
+@pytest.mark.asyncio
+async def test_sure_project_guard_beats_wildcard_permanent_allowlist():
+    """`*:*` 通配放行不能绕过路径保护——否则一次全量放行就重新打开误查目录的口子。"""
+    engine = PermissionEngine(permanent_allowlist={"*:*"})
+    decision = await engine.check(FakeContext("mcp_sure_sure_check", {}))
+    assert decision.verdict == PermissionVerdict.DENY
+
+
+@pytest.mark.asyncio
+async def test_sure_project_guard_beats_approval_bypass():
+    """审批绕过(plan mode 等)不能绕过路径保护。"""
+    ctx = FakeContext("mcp_sure_sure_check", {})
+    ctx.bypass_approval = True
+    engine = PermissionEngine()
+    decision = await engine.check(ctx)
+    assert decision.verdict == PermissionVerdict.DENY
+
 
 
 @pytest.mark.asyncio

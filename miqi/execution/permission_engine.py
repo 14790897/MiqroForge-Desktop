@@ -17,6 +17,7 @@ import json
 import re
 from dataclasses import dataclass, field
 from enum import Enum
+from pathlib import Path
 from typing import Any
 
 from miqi.execution.exec_policy import PolicyVerdict
@@ -142,6 +143,18 @@ class PermissionEngine:
         "mcp_sure_sure_status",
     })
 
+    # SURE 项目核查工具（MCP server 'sure'，命名 mcp_sure_<tool>）。
+    # 这三个工具带 project 参数：省略时 SURE 核查的是它**自己的启动目录**而不是
+    # 用户项目（PoC 已复现）。路径运行时保护 v1 = 拒绝制——缺失/非绝对路径直接
+    # DENY 并提示改传绝对路径（#1256 阶段 1 子项）。前提：MCP server 名为 'sure'
+    # 的标准配置；服务器改名后工具名变为 mcp_<server>_<tool>，本保护不随之生效
+    # （与 D5-A 审批名单同一前提）。
+    SURE_PROJECT_TOOLS: frozenset[str] = frozenset({
+        "mcp_sure_sure_check",
+        "mcp_sure_sure_recheck",
+        "mcp_sure_sure_get_repair",
+    })
+
     # Safe shell commands: auto-allow (metacharacter-free commands only)
     # Trailing spaces allow exact match; the matcher strips input before
     # comparing, so bare "ls" matches "ls " and "pwd" matches "pwd ".
@@ -185,6 +198,35 @@ class PermissionEngine:
                 return PermissionDecision(
                     verdict=PermissionVerdict.DENY,
                     reason=f"Matches deny pattern: {pattern}",
+                )
+
+        # 1.5 SURE 路径运行时保护（#1256）：带 project 的核查工具必须显式传
+        # **绝对路径**——省略时 SURE 会核查它自己的启动目录，而不是用户项目
+        # （PoC 已复现）。这是结构性错误、不是可授权的偏好，因此位于任何放行
+        # 名单 / 审批绕过之前：`*:*` 通配放行或 plan mode 的 bypass 都不能让它
+        # 通过；拒绝理由直接把修正方法写给模型（它可自纠后重试）。
+        if tool_name in self.SURE_PROJECT_TOOLS:
+            project = ctx.arguments.get("project")
+            if not isinstance(project, str) or not project.strip():
+                return PermissionDecision(
+                    verdict=PermissionVerdict.DENY,
+                    reason=(
+                        "缺少 project 参数。SURE 核查工具必须显式传项目绝对路径——"
+                        "省略时 SURE 会核查它自己的启动目录，而不是用户的项目。"
+                        "请把 project 设为该项目的绝对路径后重试。"
+                    ),
+                )
+            if not Path(project).is_absolute():
+                # 用 Path(...).is_absolute() 而非 os.path.isabs:后者在 Python<3.13
+                # 的 Windows 上对盘符相对路径(如 `\repo`)返回 True——它相对的是
+                # "当前盘符",不是用户项目;Path 要求完全限定(带盘符的根),
+                # 与"必须是绝对路径"的守卫语义一致(CodeRabbit #1266)。
+                return PermissionDecision(
+                    verdict=PermissionVerdict.DENY,
+                    reason=(
+                        f"project 必须是绝对路径（收到：{project!r}）。"
+                        "请传该项目在工作区中的绝对路径后重试。"
+                    ),
                 )
 
         # 1a. 确认卡本身是「用户决策入口」——它必须在审批层之前跑起来，
