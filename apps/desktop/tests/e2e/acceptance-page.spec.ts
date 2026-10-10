@@ -13,7 +13,7 @@
 import { test, expect } from '@playwright/test';
 import type { ElectronApplication, Page } from '@playwright/test';
 import type { ChildProcess } from 'node:child_process';
-import { chmodSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import {
@@ -30,6 +30,15 @@ import { patchConfigForMock } from './helpers/mock-openai';
 
 const REPO_ROOT = resolve(__dirname, '..', '..', '..', '..');
 const MOCK_CLI = join(REPO_ROOT, 'scripts', 'mock_sure_cli.py');
+
+/** 自建临时目录清理:Windows 下刚退出的子进程句柄可能瞬时占用,重试+容忍。 */
+function cleanupDir(dir: string): void {
+  try {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
+  } catch {
+    // TEMP 里的残留由系统兜底;清理失败绝不连累用例结果
+  }
+}
 
 /** 生成包装脚本:SURE_BIN 指向它,内部把 mock CLI 以"sure"身份执行。 */
 function makeSureWrapper(dir: string, delayMs: number): string {
@@ -66,21 +75,31 @@ test.describe.serial('验收(SURE)面板 E2E · 健康/运行/报告', () => {
   let electronApp: ElectronApplication;
   let page: Page;
   let prevSureBin: string | undefined;
-  const project = mkdtempSync(join(tmpdir(), 'sure-e2e-proj-'));
+  let binDir: string;
+  let project: string;
+  let miqiHome: string;
 
   test.beforeAll(async () => {
-    const binDir = mkdtempSync(join(tmpdir(), 'sure-e2e-bin-'));
+    // ⚠️ 一切 mkdtemp 都放 beforeAll:describe 体在 Playwright 主进程收集
+    // 测试时也会执行一次,顶层创建目录会泄漏一份且永远无人清理(实测踩中)
+    binDir = mkdtempSync(join(tmpdir(), 'sure-e2e-bin-'));
+    project = mkdtempSync(join(tmpdir(), 'sure-e2e-proj-'));
     prevSureBin = process.env.SURE_BIN;
     // 1.2s 延迟:让「运行中 + 已耗时」态可被观察
     process.env.SURE_BIN = makeSureWrapper(binDir, 1200);
     const fixture = await launchElectronApp();
     electronApp = fixture.electronApp;
     page = fixture.page;
+    miqiHome = fixture.miqiHome;
     await waitForBridgeInitialized(page, 30);
   });
 
   test.afterAll(async () => {
     await closeElectronApp(electronApp);
+    // 自建临时目录随用例清理(测试产物不留存);MIQI_HOME 兜一道容错清理
+    cleanupDir(binDir);
+    cleanupDir(project);
+    cleanupDir(miqiHome);
     // #1273 评审:还原 SURE_BIN,避免同一 worker 上后续 spec 继承 mock 二进制
     // (如 sure-integration-gui 的守卫与默认条目探测都会读它)
     if (prevSureBin === undefined) delete process.env.SURE_BIN;
@@ -144,21 +163,28 @@ test.describe.serial('验收(SURE)面板 E2E · 取消', () => {
   let electronApp: ElectronApplication;
   let page: Page;
   let prevSureBin: string | undefined;
-  const project = mkdtempSync(join(tmpdir(), 'sure-e2e-proj-slow-'));
+  let binDir: string;
+  let project: string;
+  let miqiHome: string;
 
   test.beforeAll(async () => {
-    const binDir = mkdtempSync(join(tmpdir(), 'sure-e2e-bin-slow-'));
+    binDir = mkdtempSync(join(tmpdir(), 'sure-e2e-bin-slow-'));
+    project = mkdtempSync(join(tmpdir(), 'sure-e2e-proj-slow-'));
     prevSureBin = process.env.SURE_BIN;
     // 30s 延迟:留足点击「取消核查」的窗口
     process.env.SURE_BIN = makeSureWrapper(binDir, 30_000);
     const fixture = await launchElectronApp();
     electronApp = fixture.electronApp;
     page = fixture.page;
+    miqiHome = fixture.miqiHome;
     await waitForBridgeInitialized(page, 30);
   });
 
   test.afterAll(async () => {
     await closeElectronApp(electronApp);
+    cleanupDir(binDir);
+    cleanupDir(project);
+    cleanupDir(miqiHome);
     // #1273 评审:还原 SURE_BIN(同上)
     if (prevSureBin === undefined) delete process.env.SURE_BIN;
     else process.env.SURE_BIN = prevSureBin;
@@ -184,10 +210,13 @@ test.describe.serial('验收(SURE)面板 E2E · 交给 AI 修复(阶段 4)', () 
   let page: Page;
   let prevSureBin: string | undefined;
   let mockProc: ChildProcess | undefined;
-  const project = mkdtempSync(join(tmpdir(), 'sure-e2e-fix-'));
+  let binDir: string;
+  let project: string;
+  let miqiHome: string;
 
   test.beforeAll(async () => {
-    const binDir = mkdtempSync(join(tmpdir(), 'sure-e2e-bin-fix-'));
+    binDir = mkdtempSync(join(tmpdir(), 'sure-e2e-bin-fix-'));
+    project = mkdtempSync(join(tmpdir(), 'sure-e2e-fix-'));
     prevSureBin = process.env.SURE_BIN;
     process.env.SURE_BIN = makeSureWrapper(binDir, 400);
 
@@ -198,6 +227,7 @@ test.describe.serial('验收(SURE)面板 E2E · 交给 AI 修复(阶段 4)', () 
     const fixture = await launchElectronApp((cfg) => patchConfigForMock(cfg, mock.mockUrl));
     electronApp = fixture.electronApp;
     page = fixture.page;
+    miqiHome = fixture.miqiHome;
     await waitForBridgeInitialized(page, 30);
 
     await createNewConversation(page);
@@ -208,6 +238,9 @@ test.describe.serial('验收(SURE)面板 E2E · 交给 AI 修复(阶段 4)', () 
   test.afterAll(async () => {
     await closeElectronApp(electronApp);
     if (mockProc) stopMockServer(mockProc);
+    cleanupDir(binDir);
+    cleanupDir(project);
+    cleanupDir(miqiHome);
     // #1273 评审:还原 SURE_BIN(同上)
     if (prevSureBin === undefined) delete process.env.SURE_BIN;
     else process.env.SURE_BIN = prevSureBin;
