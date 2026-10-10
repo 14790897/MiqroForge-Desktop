@@ -17,6 +17,7 @@ import { randomUUID } from 'crypto';
 import { basename, join } from 'path';
 import type { BrowserWindow } from 'electron';
 import { isRequestNotDispatched, type BridgeManager } from '../bridge';
+import { writeMainProcessLog } from '../electron-log';
 import { abortInFlightChats, trackInFlightChat } from '../chat-inflight';
 import { sendToFrame } from '../frame-send';
 import {
@@ -682,7 +683,21 @@ export function registerIpcHandlers(bridge: BridgeManager): void {
   // -----------------------------------------------------------------------
   ipcMain.handle(IPC.CONFIG_GET, async () => {
     const bridgeConfig = await bridge.sendSafe('config.get');
-    return bridgeConfig ?? readLocalConfig();
+    if (bridgeConfig === null || bridgeConfig === undefined) {
+      // #1036: `sendSafe` returns null both when the bridge is not running and
+      // when the request timed out (720 s), and this fallback then hands the
+      // renderer a plausible-looking local config — so a dropped request is
+      // silently downgraded to "used the local copy". Record which one it was.
+      writeMainProcessLog(
+        'WARN',
+        'config.get returned no value — serving the local config instead ' +
+          '(bridge down, or the request was dropped before its reply arrived)',
+        bridge.getProjectRoot(),
+        'bridge'
+      );
+      return readLocalConfig();
+    }
+    return bridgeConfig;
   });
 
   ipcMain.handle(IPC.CONFIG_UPDATE, async (_event, payload: unknown) => {

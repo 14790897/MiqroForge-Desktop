@@ -1909,6 +1909,7 @@ class ExecTool(Tool):
                 # the picture entirely — no double-quoting surprises.
                 process = await asyncio.create_subprocess_exec(
                     bash, "-c", command,
+                    stdin=asyncio.subprocess.DEVNULL,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                     cwd=cwd,
@@ -1918,6 +1919,7 @@ class ExecTool(Tool):
             else:
                 process = await asyncio.create_subprocess_shell(
                     command,
+                    stdin=asyncio.subprocess.DEVNULL,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                     cwd=cwd,
