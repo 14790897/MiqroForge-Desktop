@@ -166,7 +166,9 @@ async def test_mcp_sure_tools_require_approval_with_permanent_allow(tool_name):
     "<tool>: <target>" 形式。
     """
     engine = PermissionEngine()
-    ctx = FakeContext(tool_name, {"project": r"D:\Code\MiQi\sure-poc\hello"})
+    # 平台可移植的绝对路径:路径守卫(#1266)会拒绝非绝对路径——CI(ubuntu)上
+    # 字面量 Windows 路径不是绝对路径,而这个用例核的是审批语义,不是路径校验
+    ctx = FakeContext(tool_name, {"project": os.path.abspath(os.path.join("sure-poc", "hello"))})
     decision = await engine.check(ctx)
     assert decision.verdict == PermissionVerdict.APPROVAL_REQUIRED
     assert decision.category == "tool_confirmation"

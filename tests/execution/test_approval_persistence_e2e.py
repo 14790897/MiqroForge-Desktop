@@ -14,6 +14,7 @@ the permission engine actually triggers APPROVAL_REQUIRED.
 """
 
 import asyncio
+import os
 from unittest.mock import MagicMock
 
 import pytest
@@ -333,9 +334,12 @@ async def test_session_approval_isolated_per_session():
 # 是空承诺。此处钉住修复后的契约：同参数重放免弹窗、不同参数仍弹窗、键稳定可跨进程。
 
 MCP_SURE_TOOL = "mcp_sure_sure_check"
-MCP_SURE_ARGS = {"project": r"D:\Code\MiQi\sure-poc\hello"}
+# 平台可移植的绝对路径:路径守卫(#1266)会拒绝非绝对路径——CI(ubuntu)上字面量
+# Windows 路径不是绝对路径;这些用例核的是审批/「记住」语义,不是路径校验
+_MCP_SURE_PROJECT = os.path.abspath(os.path.join("sure-poc", "hello"))
+MCP_SURE_ARGS = {"project": _MCP_SURE_PROJECT}
 # 含 list 的参数:sanitize 会把 list 变成字符串,用来钉住「键必须从原始参数计算」
-MCP_SURE_LIST_ARGS = {"project": r"D:\Code\MiQi\sure-poc\hello", "flags": ["a", "b"]}
+MCP_SURE_LIST_ARGS = {"project": _MCP_SURE_PROJECT, "flags": ["a", "b"]}
 
 
 @pytest.fixture(autouse=True)
@@ -425,7 +429,7 @@ async def test_tool_confirmation_approval_does_not_leak_to_different_args():
     other = _make_tool_confirmation_ctx(
         tool_call_id="call_002",
         turn_id="turn_002",
-        arguments={"project": r"D:\Code\MiQi\sure-poc\演示 项目"},
+        arguments={"project": os.path.abspath(os.path.join("sure-poc", "演示 项目"))},
     )
     decision = await engine.check(other)
     assert decision.verdict == PermissionVerdict.APPROVAL_REQUIRED, (
