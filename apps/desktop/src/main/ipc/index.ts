@@ -2464,6 +2464,29 @@ for m in ("pydantic", "httpx", "loguru"):
     return bridge.sendSafe('plugins.toggle', { name, enabled });
   });
 
+  // ---------------------------------------------------------------------------
+  // SURE 验收(阶段 3):健康检查 + 原生 spawn 核查 + 取消/状态
+  // 事件通路:sure_check_progress/report/failed/cancelled 由 Python 侧以
+  // 孤儿事件发出,bridge.ts 按 IPC_EVENTS 常量名自动转发到渲染层
+  // (见 bridge.ts 的 orphan event forwarder),主进程无需逐条接线。
+  // ---------------------------------------------------------------------------
+  ipcMain.handle(IPC.SURE_HEALTH, async () => {
+    return bridge.sendSafeWithError('sure.health');
+  });
+
+  ipcMain.handle(IPC.SURE_CHECK_START, async (_event, payload: unknown) => {
+    const { project } = payload as { project: string };
+    return bridge.sendSafeWithError('sure.check.start', { project });
+  });
+
+  ipcMain.handle(IPC.SURE_CHECK_CANCEL, async () => {
+    return bridge.sendSafeWithError('sure.check.cancel');
+  });
+
+  ipcMain.handle(IPC.SURE_CHECK_STATUS, async () => {
+    return bridge.sendSafeWithError('sure.check.status');
+  });
+
   // -- Feedback --------------------------------------------------------------
   ipcMain.handle(IPC.FEEDBACK_SUBMIT, async (_event, payload: unknown) => {
     const input = FeedbackSubmitInput.parse(payload);

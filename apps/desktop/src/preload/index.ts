@@ -88,6 +88,16 @@ import type {
   QraftTokenSyncResult,
   ConfigUpdatedPayload,
 } from '../shared/ipc';
+import type {
+  SureApiResult,
+  SureCheckCancelled,
+  SureCheckEnvelope,
+  SureCheckFailure,
+  SureCheckProgress,
+  SureCheckStartResult,
+  SureCheckStatus,
+  SureHealth,
+} from '../shared/sureReport';
 
 type FeedbackSubmitInputType = z.infer<typeof FeedbackSubmitInput>;
 
@@ -825,6 +835,40 @@ const api = {
       const handler = (_event: Electron.IpcRendererEvent, status: QraftStatus) => callback(status);
       ipcRenderer.on(IPC_EVENTS.QRAFT_STATUS_CHANGED, handler);
       return () => ipcRenderer.removeListener(IPC_EVENTS.QRAFT_STATUS_CHANGED, handler);
+    },
+  },
+
+  // -- SURE 验收(阶段 3):原生 spawn 核查 -----------------------------------------
+  sure: {
+    health: (): Promise<SureApiResult<SureHealth>> => ipcRenderer.invoke(IPC.SURE_HEALTH),
+    startCheck: (project: string): Promise<SureApiResult<SureCheckStartResult>> =>
+      ipcRenderer.invoke(IPC.SURE_CHECK_START, { project }),
+    cancelCheck: (): Promise<SureApiResult<{ ok: boolean }>> =>
+      ipcRenderer.invoke(IPC.SURE_CHECK_CANCEL),
+    status: (): Promise<SureApiResult<SureCheckStatus>> =>
+      ipcRenderer.invoke(IPC.SURE_CHECK_STATUS),
+    onProgress: (callback: (data: SureCheckProgress) => void): (() => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, data: SureCheckProgress) =>
+        callback(data);
+      ipcRenderer.on(IPC_EVENTS.SURE_CHECK_PROGRESS, handler);
+      return () => ipcRenderer.removeListener(IPC_EVENTS.SURE_CHECK_PROGRESS, handler);
+    },
+    onReport: (callback: (data: SureCheckEnvelope) => void): (() => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, data: SureCheckEnvelope) =>
+        callback(data);
+      ipcRenderer.on(IPC_EVENTS.SURE_CHECK_REPORT, handler);
+      return () => ipcRenderer.removeListener(IPC_EVENTS.SURE_CHECK_REPORT, handler);
+    },
+    onFailed: (callback: (data: SureCheckFailure) => void): (() => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, data: SureCheckFailure) => callback(data);
+      ipcRenderer.on(IPC_EVENTS.SURE_CHECK_FAILED, handler);
+      return () => ipcRenderer.removeListener(IPC_EVENTS.SURE_CHECK_FAILED, handler);
+    },
+    onCancelled: (callback: (data: SureCheckCancelled) => void): (() => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, data: SureCheckCancelled) =>
+        callback(data);
+      ipcRenderer.on(IPC_EVENTS.SURE_CHECK_CANCELLED, handler);
+      return () => ipcRenderer.removeListener(IPC_EVENTS.SURE_CHECK_CANCELLED, handler);
     },
   },
 };

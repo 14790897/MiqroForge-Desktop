@@ -170,6 +170,12 @@ export const IPC = {
   FEEDBACK_SUBMIT: 'feedback:submit',
   FEEDBACK_LIST: 'feedback:list',
 
+  // SURE 验收面板(阶段 3):原生 spawn 核查
+  SURE_HEALTH: 'sure:health',
+  SURE_CHECK_START: 'sure:check-start',
+  SURE_CHECK_CANCEL: 'sure:check-cancel',
+  SURE_CHECK_STATUS: 'sure:check-status',
+
   // MiQroForge 平台 OAuth2 登录 (issue #726, 主进程本地处理)
   QRAFT_LOGIN: 'qraft:login',
   QRAFT_BROWSER_LOGIN: 'qraft:browserLogin',
@@ -234,6 +240,12 @@ export const IPC_EVENTS = {
   // WSL install progress events
   WSL_INSTALL_PROGRESS: 'wsl:installProgress',
   WSL_CHECK_UPDATED: 'wsl:checkUpdated',
+
+  // SURE 核查事件(阶段 3):随 sure:check-start 的流式响应逐条转发
+  SURE_CHECK_PROGRESS: 'sure:check_progress',
+  SURE_CHECK_REPORT: 'sure:check_report',
+  SURE_CHECK_FAILED: 'sure:check_failed',
+  SURE_CHECK_CANCELLED: 'sure:check_cancelled',
 
   // MiQroForge 登录态变化（自动刷新/过期时由主进程推送）
   QRAFT_STATUS_CHANGED: 'qraft:statusChanged',
