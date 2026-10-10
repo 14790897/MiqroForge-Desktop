@@ -44,6 +44,7 @@ import {
   createNewConversation,
   launchElectronApp,
   closeElectronApp,
+  setReasoningMode,
 } from './helpers/electron-setup';
 
 const INPUT = '[data-testid="chat-input-container"] textarea';
@@ -113,6 +114,11 @@ test.describe('Issue #797: turn lock released on abort → immediate resend work
     electronApp = fixture.electronApp;
     page = fixture.page;
     miqiHome = fixture.miqiHome;
+    // #680 接通后默认 fast 档的 3 轮工具帽真正生效：本 spec 的提示词 A 要求
+    // 「依次 5 次 web_search」（≥5 轮模型→工具往返），在 fast 下会被预算帽
+    // 中途终止、测不到「工具执行中停止」场景。切「深度研究」(think) 恢复
+    // 无预算约束的多轮执行（与真实用户跑长搜索任务的选择一致）。
+    await setReasoningMode(page, 'think');
   }, 180_000);
 
   test.afterAll(async () => {

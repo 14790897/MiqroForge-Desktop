@@ -385,6 +385,9 @@ export function registerIpcHandlers(bridge: BridgeManager): void {
         session_key: sessionKey,
         thread_id: (input as any).thread_id ?? undefined,
         mode: input.mode,
+        // #680 断线修复：把档位转发进 bridge payload（loop.py 读
+        // reasoning_mode 后决定 FAST_PROMPT/THINK_PROMPT 与预算）。
+        reasoning_mode: input.reasoning_mode,
         attachments: input.attachments,
         workspace: input.workspace,
         resume_turn_id: (input as any).resume_turn_id ?? undefined,

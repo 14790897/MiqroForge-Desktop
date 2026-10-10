@@ -155,6 +155,21 @@ export async function sendMessage(page: Page, text: string) {
   await expect(page.locator('[data-testid="chat-input-container"] textarea')).toHaveValue('');
 }
 
+/**
+ * 切换 composer 的推理档位（#680 接通后 fast 档预算真正生效）。
+ *
+ * 启动默认是 fast（3 轮工具往返熔断 / 30s / 2048 token）——mock 状态机驱动
+ * 的多轮卡片流（如 confirm-card 的 5 轮往返）会撞上 3 轮帽，需要显式切到
+ * 「深度研究」(think)，就像真实用户做多步任务时会做的选择。
+ */
+export async function setReasoningMode(page: Page, mode: 'fast' | 'think') {
+  await page.locator('button[aria-label="回答模式"]').first().click();
+  await page.getByRole('button', { name: mode === 'think' ? /深度研究/ : /极速回答/ }).click();
+  await expect
+    .poll(async () => page.evaluate(() => sessionStorage.getItem('miqi-reasoning-mode')))
+    .toBe(mode);
+}
+
 /** Frontend generic message shown when a turn fails on the provider side
  *  (rate limit / overload / transient network) — the LLM never replied. */
 export const PROVIDER_UNAVAILABLE_TEXT = '模型服务暂时不可用或过载';
