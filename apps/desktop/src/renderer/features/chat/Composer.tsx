@@ -16,6 +16,7 @@ import {
   type ExecutionPolicy,
 } from '../../components/ExecutionPolicySelector';
 import { ReasoningModeSwitch, type ReasoningMode } from './components/ReasoningModeSwitch';
+import { useApproval } from '../../contexts/ApprovalContext';
 import {
   Send,
   Square,
@@ -103,6 +104,8 @@ function ComposerImpl(
 ) {
   const [input, setInput] = useState('');
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  // 审批挂起时把输入内容让给审批卡（见下面插槽处的说明）
+  const { pending: pendingApproval } = useApproval();
 
   useImperativeHandle(
     ref,
@@ -217,170 +220,194 @@ function ComposerImpl(
         boxShadow: '0 -4px 20px rgba(0,0,0,0.06), 0 2px 8px rgba(0,0,0,0.04)',
       }}
     >
-      {/* 框内顶部插槽：附件预览由 ChatConsole portal 投到这里(显示在输入框内部) */}
-      <div ref={attachmentSlotRef} />
-      {/* issue #962 起点任务：选过的子项目 / 子子项目以可移除胶囊显示在输入框里
+      {/* 框内插槽：审批卡由 ApprovalModal portal 投到这里。形态对齐 WorkBuddy 的
+          sandbox-intercept-card（它的源码路径就是 chat-input/sandbox-intercept-card.tsx）
+          —— 卡片沾满输入框宽度、位于输入框内，而不是浮在窗口中央的模态。
+          放在附件插槽之前，审批要压在最上面。 */}
+      <div data-testid="approval-slot" />
+      {/* 审批挂起时，卡片（ApprovalModal portal 进上面的插槽）直接顶掉输入内容。
+          审批是阻塞的：等待期间输入框除了「中断当前生成」没有实际用途，留着它白占
+          ~100px 高度。用 hidden 而不是条件卸载，用户已输入的文字和内部状态都保留；
+          常态用 display:contents 包一层，对原有 flex 布局零影响。 */}
+      <div className={pendingApproval ? 'hidden' : 'contents'}>
+        {/* 框内顶部插槽：附件预览由 ChatConsole portal 投到这里(显示在输入框内部)。
+            放在让位包裹层**之内**——放外面的话审批期间附件预览会留在卡片下方不跟着
+            让位。必须在让位时保持挂载（它是 portal 目标），所以随包裹层 hidden 而不是卸载 */}
+        <div ref={attachmentSlotRef} />
+        {/* issue #962 起点任务：选过的子项目 / 子子项目以可移除胶囊显示在输入框里
           （形态对齐 WorkBuddy 的「文档处理 ×」）。#1021/#1042 之后输入框被抽成
           Composer 组件，这段就跟着搬过来——数据由 ChatConsole 传，这里只负责画。
           排在附件插槽之后，胶囊才紧挨着下方输入的文字。 */}
-      {(starterScene || starterTask) && (
-        <div className="flex flex-wrap items-center gap-1.5 pb-2">
-          {starterScene && (
-            <button
-              type="button"
-              onClick={onClearStarterScene}
-              title="移除这个子项目"
-              className="group flex items-center gap-1.5 rounded-full pl-2.5 pr-1.5 py-1 text-[11.5px] cursor-pointer transition-colors duration-150"
-              style={{
-                // 跟 L2/L3 的选中态用同一套灰（#962 反馈：对话框里的也要一致）
-                background: 'var(--starter-fill-active)',
-                border: '1px solid color-mix(in srgb, var(--text) 12%, transparent)',
-                color: 'var(--text)',
-              }}
-            >
-              <span className="text-[11px] leading-none">{starterScene.icon}</span>
-              {starterScene.title}
-              <X size={11} className="opacity-50 group-hover:opacity-100" />
-            </button>
-          )}
-          {starterTask && (
-            <button
-              type="button"
-              onClick={onClearStarterTask}
-              title="移除这个任务"
-              className="group flex items-center gap-1.5 rounded-full pl-2.5 pr-1.5 py-1 text-[11.5px] cursor-pointer transition-colors duration-150"
-              style={{
-                background: 'var(--starter-fill-active)',
-                border: '1px solid color-mix(in srgb, var(--text) 12%, transparent)',
-                color: 'var(--text)',
-              }}
-            >
-              <span className="text-[11px] leading-none">{starterTask.icon}</span>
-              {starterTask.title}
-              <X size={11} className="opacity-50 group-hover:opacity-100" />
-            </button>
-          )}
-        </div>
-      )}
-      {/* Textarea on top — grows up to 1/3 of viewport (DeepSeek style) */}
-      <ContextMenu items={inputContextItems} minWidth={160}>
-        {({ onContextMenu }) => (
-          <Textarea
-            ref={textareaRef}
-            value={input}
-            onChange={(e) => {
-              setInput(e.target.value);
-            }}
-            onKeyDown={handleKeyDown}
-            onContextMenu={onContextMenu}
-            placeholder={
-              adjustHint
-                ? '请输入调整要求（例如：市场改为海外、步骤精简到 3 步…）'
-                : '请输入消息或拖入文件...'
-            }
-            rows={1}
-            allowResize={true}
-            className="-mx-7 w-[calc(100%+3.5rem)] rounded-none border-0 bg-transparent px-7 py-0 leading-7! focus:ring-0 focus:border-0 min-h-[52px] max-h-[25vh] text-[15px]"
-            style={{ color: 'var(--text)', fieldSizing: 'content' }}
-          />
+        {(starterScene || starterTask) && (
+          <div className="flex flex-wrap items-center gap-1.5 pb-2">
+            {starterScene && (
+              <button
+                type="button"
+                onClick={onClearStarterScene}
+                title="移除这个子项目"
+                className="group flex items-center gap-1.5 rounded-full pl-2.5 pr-1.5 py-1 text-[11.5px] cursor-pointer transition-colors duration-150"
+                style={{
+                  // 跟 L2/L3 的选中态用同一套灰（#962 反馈：对话框里的也要一致）
+                  background: 'var(--starter-fill-active)',
+                  border: '1px solid color-mix(in srgb, var(--text) 12%, transparent)',
+                  color: 'var(--text)',
+                }}
+              >
+                <span className="text-[11px] leading-none">{starterScene.icon}</span>
+                {starterScene.title}
+                <X size={11} className="opacity-50 group-hover:opacity-100" />
+              </button>
+            )}
+            {starterTask && (
+              <button
+                type="button"
+                onClick={onClearStarterTask}
+                title="移除这个任务"
+                className="group flex items-center gap-1.5 rounded-full pl-2.5 pr-1.5 py-1 text-[11.5px] cursor-pointer transition-colors duration-150"
+                style={{
+                  background: 'var(--starter-fill-active)',
+                  border: '1px solid color-mix(in srgb, var(--text) 12%, transparent)',
+                  color: 'var(--text)',
+                }}
+              >
+                <span className="text-[11px] leading-none">{starterTask.icon}</span>
+                {starterTask.title}
+                <X size={11} className="opacity-50 group-hover:opacity-100" />
+              </button>
+            )}
+          </div>
         )}
-      </ContextMenu>
-      {/* Icon row at the bottom — no text, like DeepSeek */}
-      <div className="flex items-center gap-3 pt-1.5 mt-0.5 border-t border-[var(--border-subtle)]">
-        <ExecutionPolicySelector
-          policy={executionPolicy}
-          onChange={onExecutionPolicyChange}
-          onOpenApprovals={onOpenApprovals}
-        />
-        {/* 复杂问题角标（#680 跟进）：轻量气泡挂在模式按钮上，
-            3 秒自动消失，不占输入区。 */}
-        <div className="relative">
-          <ReasoningModeSwitch mode={reasoningMode} onChange={onReasoningModeChange} />
-          {complexHint && reasoningMode === 'fast' && (
-            <div
-              className="absolute left-full ml-2 top-1/2 -translate-y-1/2 z-50 flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] whitespace-nowrap"
-              style={{
-                background: '#2f2f3a',
-                border: '1px solid rgba(157,106,223,.45)',
-                color: '#c9a5ef',
-                boxShadow: '0 4px 14px rgba(0,0,0,.35)',
+        {/* Textarea on top — grows up to 1/3 of viewport (DeepSeek style) */}
+        <ContextMenu items={inputContextItems} minWidth={160}>
+          {({ onContextMenu }) => (
+            <Textarea
+              ref={textareaRef}
+              value={input}
+              onChange={(e) => {
+                setInput(e.target.value);
               }}
-            >
-              {/* 指向按钮的小箭头（左侧） */}
-              <span
-                className="absolute -left-[5px] top-1/2 -translate-y-1/2 w-2 h-2"
+              onKeyDown={handleKeyDown}
+              onContextMenu={onContextMenu}
+              placeholder={
+                adjustHint
+                  ? '请输入调整要求（例如：市场改为海外、步骤精简到 3 步…）'
+                  : '请输入消息或拖入文件...'
+              }
+              rows={1}
+              allowResize={true}
+              className="-mx-7 w-[calc(100%+3.5rem)] rounded-none border-0 bg-transparent px-7 py-0 leading-7! focus:ring-0 focus:border-0 min-h-[52px] max-h-[25vh] text-[15px]"
+              style={{ color: 'var(--text)', fieldSizing: 'content' }}
+            />
+          )}
+        </ContextMenu>
+        {/* Icon row at the bottom — no text, like DeepSeek */}
+        <div className="flex items-center gap-3 pt-1.5 mt-0.5 border-t border-[var(--border-subtle)]">
+          {/* 审批挂起时把这两个控件的键盘监听一起停掉。它们挂的是 **document** 级
+              keydown，守卫只挡 INPUT/TEXTAREA；审批期间焦点在卡片 root（DIV）或某个决策
+              按钮上，两个守卫都不生效 —— 于是 1–4 会静默改掉一个**看不见**的执行策略，
+              Shift+Tab 还会 pick(next) 循环策略、与兜底模态的焦点环抢同一个键。改之前
+              输入区一直可见（审批卡是 fixed 覆盖层），这条是本次把输入内容包进 hidden
+              之后才引入的。 */}
+          <ExecutionPolicySelector
+            policy={executionPolicy}
+            onChange={onExecutionPolicyChange}
+            onOpenApprovals={onOpenApprovals}
+            disabled={!!pendingApproval}
+          />
+          {/* 复杂问题角标（#680 跟进）：轻量气泡挂在模式按钮上，
+            3 秒自动消失，不占输入区。 */}
+          <div className="relative">
+            <ReasoningModeSwitch
+              mode={reasoningMode}
+              onChange={onReasoningModeChange}
+              disabled={!!pendingApproval}
+            />
+            {complexHint && reasoningMode === 'fast' && (
+              <div
+                className="absolute left-full ml-2 top-1/2 -translate-y-1/2 z-50 flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] whitespace-nowrap"
                 style={{
                   background: '#2f2f3a',
-                  borderLeft: '1px solid rgba(157,106,223,.45)',
-                  borderBottom: '1px solid rgba(157,106,223,.45)',
-                  transform: 'translateY(-50%) rotate(45deg)',
+                  border: '1px solid rgba(157,106,223,.45)',
+                  color: '#c9a5ef',
+                  boxShadow: '0 4px 14px rgba(0,0,0,.35)',
                 }}
-              />
-              <span>💡 建议</span>
-              <button
-                type="button"
-                onClick={() => {
-                  onReasoningModeChange('think');
-                  onComplexHintDismiss();
-                }}
-                className="font-semibold cursor-pointer"
-                style={{ color: '#d9b8f5' }}
               >
-                🧠 深度研究
-              </button>
-              <button
-                type="button"
-                onClick={onComplexHintDismiss}
-                className="opacity-60 hover:opacity-100 cursor-pointer"
-                aria-label="关闭提示"
-              >
-                ✕
-              </button>
-            </div>
+                {/* 指向按钮的小箭头（左侧） */}
+                <span
+                  className="absolute -left-[5px] top-1/2 -translate-y-1/2 w-2 h-2"
+                  style={{
+                    background: '#2f2f3a',
+                    borderLeft: '1px solid rgba(157,106,223,.45)',
+                    borderBottom: '1px solid rgba(157,106,223,.45)',
+                    transform: 'translateY(-50%) rotate(45deg)',
+                  }}
+                />
+                <span>💡 建议</span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    onReasoningModeChange('think');
+                    onComplexHintDismiss();
+                  }}
+                  className="font-semibold cursor-pointer"
+                  style={{ color: '#d9b8f5' }}
+                >
+                  🧠 深度研究
+                </button>
+                <button
+                  type="button"
+                  onClick={onComplexHintDismiss}
+                  className="opacity-60 hover:opacity-100 cursor-pointer"
+                  aria-label="关闭提示"
+                >
+                  ✕
+                </button>
+              </div>
+            )}
+          </div>
+          {/* AI disclaimer — centered in the mode row, fades when typing */}
+          <div className="flex-1 flex items-center justify-center">
+            <span
+              className="text-size-2xs leading-relaxed tracking-wide text-[var(--text-faint)] italic select-none transition-opacity duration-300"
+              style={{ opacity: !input.trim() && !hasAttachments ? 1 : 0 }}
+            >
+              AI 也会犯错误，对于重要答案请谨慎验证
+            </span>
+          </div>
+          <button
+            onClick={onAttachClick}
+            className="shrink-0 p-1.5 rounded hover:bg-[var(--surface-muted)] transition-colors"
+            title="附件或图片"
+            aria-label="附件或图片"
+          >
+            <Paperclip size={15} style={{ color: 'var(--text-faint)' }} />
+          </button>
+          {streaming && !input.trim() && !hasAttachments ? (
+            <button
+              onClick={onAbort}
+              title="停止生成"
+              aria-label="停止生成"
+              className="shrink-0 w-8 h-8 rounded-full flex items-center justify-center transition-all duration-200 hover:bg-[var(--surface-muted)] active:scale-95"
+            >
+              <Square size={12} style={{ color: 'var(--text-muted)' }} fill="currentColor" />
+            </button>
+          ) : (
+            <button
+              onClick={() => onSubmit(input)}
+              disabled={!input.trim() && !hasAttachments}
+              title={streaming ? '中断当前生成并发送' : '发送'}
+              aria-label={streaming ? '中断当前生成并发送' : '发送'}
+              className="shrink-0 w-8 h-8 rounded-full flex items-center justify-center transition-all duration-200 hover:brightness-110 hover:-translate-y-px active:scale-95 disabled:opacity-30 disabled:hover:brightness-100 disabled:hover:translate-y-0 disabled:shadow-none"
+              style={{
+                background:
+                  'linear-gradient(135deg, var(--accent), color-mix(in srgb, var(--accent) 65%, #000))',
+                boxShadow: '0 2px 10px color-mix(in srgb, var(--accent) 35%, transparent)',
+              }}
+            >
+              <Send size={14} style={{ color: '#fff' }} />
+            </button>
           )}
         </div>
-        {/* AI disclaimer — centered in the mode row, fades when typing */}
-        <div className="flex-1 flex items-center justify-center">
-          <span
-            className="text-size-2xs leading-relaxed tracking-wide text-[var(--text-faint)] italic select-none transition-opacity duration-300"
-            style={{ opacity: !input.trim() && !hasAttachments ? 1 : 0 }}
-          >
-            AI 也会犯错误，对于重要答案请谨慎验证
-          </span>
-        </div>
-        <button
-          onClick={onAttachClick}
-          className="shrink-0 p-1.5 rounded hover:bg-[var(--surface-muted)] transition-colors"
-          title="附件或图片"
-          aria-label="附件或图片"
-        >
-          <Paperclip size={15} style={{ color: 'var(--text-faint)' }} />
-        </button>
-        {streaming && !input.trim() && !hasAttachments ? (
-          <button
-            onClick={onAbort}
-            title="停止生成"
-            aria-label="停止生成"
-            className="shrink-0 w-8 h-8 rounded-full flex items-center justify-center transition-all duration-200 hover:bg-[var(--surface-muted)] active:scale-95"
-          >
-            <Square size={12} style={{ color: 'var(--text-muted)' }} fill="currentColor" />
-          </button>
-        ) : (
-          <button
-            onClick={() => onSubmit(input)}
-            disabled={!input.trim() && !hasAttachments}
-            title={streaming ? '中断当前生成并发送' : '发送'}
-            aria-label={streaming ? '中断当前生成并发送' : '发送'}
-            className="shrink-0 w-8 h-8 rounded-full flex items-center justify-center transition-all duration-200 hover:brightness-110 hover:-translate-y-px active:scale-95 disabled:opacity-30 disabled:hover:brightness-100 disabled:hover:translate-y-0 disabled:shadow-none"
-            style={{
-              background:
-                'linear-gradient(135deg, var(--accent), color-mix(in srgb, var(--accent) 65%, #000))',
-              boxShadow: '0 2px 10px color-mix(in srgb, var(--accent) 35%, transparent)',
-            }}
-          >
-            <Send size={14} style={{ color: '#fff' }} />
-          </button>
-        )}
       </div>
     </div>
   );
