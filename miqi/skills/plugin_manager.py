@@ -12,6 +12,8 @@ from __future__ import annotations
 import asyncio
 import importlib
 import inspect
+import json
+import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -93,6 +95,8 @@ class PluginManager:
         self.workspace = workspace
         self._hook_runtime = hook_runtime
         self._plugins: dict[str, LoadedPlugin] = {}
+        # #1267 评审：跨会话/跨启动共享的停用状态（与 user 插件目录同级）。
+        self._state_path = self.user_dir.parent / "plugins_state.json"
 
     def _make_command_callback(self, target: str):
         """Build an async callback that runs ``target`` through a shell."""
@@ -265,8 +269,13 @@ class PluginManager:
         plugin = LoadedPlugin(
             manifest=manifest, path=plugin_dir, scope=scope
         )
+        # #1267 评审：应用持久停用状态——上一会话停用/卸载（内置）过的插件，
+        # 下个会话发现时直接以 disabled 装载，不再注册 hooks。
+        if plugin.manifest.name in self._disabled_names():
+            plugin.status = "disabled"
         self._attach_plugin_commands(plugin)
-        self._register_plugin_hooks(plugin)
+        if plugin.status == "active":
+            self._register_plugin_hooks(plugin)
         return plugin
 
     def _attach_plugin_commands(self, plugin: LoadedPlugin) -> None:
@@ -466,28 +475,78 @@ class PluginManager:
             raise
         return plugin
 
+    # ── 持久停用状态（#1267 评审）──────────────────────────────────────────
+
+    def _disabled_names(self) -> set[str]:
+        """持久层记录的停用插件名。缺失/损坏一律视为空——状态文件绝不
+        被允许拖垮发现（宁可工具缺席，不可会话起不来）。"""
+        try:
+            data = json.loads(self._state_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return set()
+        names = data.get("disabled") if isinstance(data, dict) else None
+        if not isinstance(names, list):
+            return set()
+        return {n for n in names if isinstance(n, str)}
+
+    def _set_disabled(self, name: str, disabled: bool) -> None:
+        """读改写状态文件（原子替换）。写失败降级为仅本实例内存态并告警。"""
+        names = self._disabled_names()
+        if disabled:
+            names.add(name)
+        else:
+            names.discard(name)
+        try:
+            self._state_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self._state_path.with_name(self._state_path.name + ".tmp")
+            tmp.write_text(
+                json.dumps({"disabled": sorted(names)}, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            os.replace(tmp, self._state_path)
+        except OSError:
+            logger.warning(
+                "插件停用状态写入失败（仅本会话内生效）: {}", self._state_path
+            )
+
     def uninstall_plugin(self, name: str) -> bool:
         """Uninstall a plugin by name.
 
-        Removes the plugin directory from user/system dirs and unloads
-        the plugin. Returns True if the plugin was found and removed.
+        ``user`` 作用域：目录真实删除并清除其停用记录（同名重装不被误停用）。
+        ``system``（随包内置）作用域：磁盘副本**不删除**——onefile 构建每次启动
+        重新解包，开发机上它还是仓库源码；卸载折叠为**持久停用**（写入状态文件，
+        由每次发现时生效）。报告成功且下次启动不会「又回来」——不再假装删掉了
+        一个删不掉的目录（#1267 评审）。
         """
         import shutil
 
         validate_plugin_name(name)
 
-        for base in [self.user_dir, self.system_dir]:
-            target = (base / name).resolve()
-            try:
-                target.relative_to(base.resolve())
-            except ValueError:
-                continue
-            if target.exists():
+        user_target = (self.user_dir / name).resolve()
+        try:
+            user_target.relative_to(self.user_dir.resolve())
+        except ValueError:
+            pass
+        else:
+            if user_target.exists():
                 self._unregister_plugin_hooks(name)
-                shutil.rmtree(target, ignore_errors=True)
-                if name in self._plugins:
-                    del self._plugins[name]
+                shutil.rmtree(user_target, ignore_errors=True)
+                self._plugins.pop(name, None)
+                self._set_disabled(name, False)
                 return True
+
+        plugin = self._plugins.get(name)
+        system_target = (self.system_dir / name).resolve()
+        try:
+            system_target.relative_to(self.system_dir.resolve())
+        except ValueError:
+            return False
+        if system_target.exists() or (plugin is not None and plugin.scope == "system"):
+            self._unregister_plugin_hooks(name)
+            self._set_disabled(name, True)
+            if plugin is not None:
+                plugin.status = "disabled"
+            return True
         return False
 
     def discover_sync(self) -> list[LoadedPlugin]:
@@ -539,7 +598,7 @@ class PluginManager:
         return plugin
 
     def toggle_plugin(self, name: str, enabled: bool) -> LoadedPlugin:
-        """Toggle a plugin enabled/disabled.
+        """Toggle a plugin enabled/disabled（持久化，跨会话/重启生效，#1267 评审）。
 
         Raises ValueError if the plugin is not found.
         """
@@ -557,4 +616,5 @@ class PluginManager:
         else:
             plugin.status = "disabled"
             self._unregister_plugin_hooks(name)
+        self._set_disabled(name, not enabled)
         return plugin

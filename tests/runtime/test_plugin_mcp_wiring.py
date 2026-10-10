@@ -2,13 +2,9 @@
 
 import os
 from pathlib import Path
-from unittest.mock import MagicMock
-
-import pytest
 
 from miqi.config.schema import MCPServerConfig
 from miqi.runtime.plugin_mcp import merge_plugin_mcp_servers, resolve_plugin_command
-
 
 # ── resolve_plugin_command ──────────────────────────────────────────────
 
@@ -27,12 +23,13 @@ def test_resolve_absolute_missing_file_returns_none(tmp_path):
     assert resolve_plugin_command(str(tmp_path / "missing.exe")) is None
 
 
-def test_resolve_uses_path_which(monkeypatch):
+def test_resolve_uses_path_which(monkeypatch, tmp_path):
+    found = str(tmp_path / "sure")  # 平台中立地给出一个绝对路径
     monkeypatch.setattr(
         "miqi.runtime.plugin_mcp.shutil.which",
-        lambda name: "/usr/local/bin/sure" if name == "sure" else None,
+        lambda name: found if name == "sure" else None,
     )
-    assert resolve_plugin_command("sure") == "/usr/local/bin/sure"
+    assert resolve_plugin_command("sure") == found
 
 
 def test_resolve_windows_per_user_convention(monkeypatch, tmp_path):
@@ -183,3 +180,36 @@ def test_shipped_sure_plugin_package_loads(tmp_path):
     assert cmd["status"] == "active"
     assert cmd["body"]
     assert "绝对路径" in cmd["body"]
+
+
+# ── 解析结果绝对化(#1267 评审)──────────────────────────────────────────
+
+
+def test_resolve_absolutizes_relative_which_result(monkeypatch):
+    """PATH 命中返回相对路径时必须绝对化——stdio 启动会先切到插件 cwd,
+    相对命令会在新 cwd 下解析到另一个文件(评审:Return an absolute
+    executable path before changing cwd)。"""
+    import miqi.runtime.plugin_mcp as wiring
+
+    monkeypatch.setattr(
+        wiring.shutil, "which", lambda name: os.path.join("rel", "bin", name)
+    )
+    got = wiring.resolve_plugin_command("sure")
+    assert got is not None
+    assert os.path.isabs(got)
+
+
+def test_resolve_absolutizes_relative_plugin_dir_candidate(monkeypatch, tmp_path):
+    """第 4 路(相对路径按插件根解析)在 plugin_dir 为相对路径时同样绝对化。"""
+    import miqi.runtime.plugin_mcp as wiring
+
+    monkeypatch.setattr(wiring.shutil, "which", lambda name: None)
+    tool = tmp_path / "plug" / "bin" / "tool"
+    tool.parent.mkdir(parents=True)
+    tool.write_text("", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+
+    got = wiring.resolve_plugin_command("bin/tool", plugin_dir="plug")
+    assert got is not None
+    assert os.path.isabs(got)
+    assert Path(got) == tool

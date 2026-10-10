@@ -39,6 +39,9 @@ def resolve_plugin_command(command: str, *, plugin_dir: str = "") -> str | None:
     4. 含路径分隔符的相对路径——按插件根目录(``plugin_dir``)解析。
 
     全部未命中返回 ``None``(调用方跳过该服务器并记日志,不静默注入)。
+
+    命中的结果一律返回**绝对路径**(#1267 评审):stdio 启动会先切到插件
+    ``cwd``,相对路径将在新 cwd 下解析,可能指到另一个文件或启动失败。
     """
     if not command:
         return None
@@ -46,7 +49,7 @@ def resolve_plugin_command(command: str, *, plugin_dir: str = "") -> str | None:
         return command if os.path.isfile(command) else None
     found = shutil.which(command)
     if found:
-        return found
+        return os.path.abspath(found)
     if sys.platform == "win32":
         root = os.environ.get("LOCALAPPDATA", "").strip()
         if root:
@@ -56,7 +59,7 @@ def resolve_plugin_command(command: str, *, plugin_dir: str = "") -> str | None:
     if plugin_dir and ("/" in command or "\\" in command):
         candidate = Path(plugin_dir) / command
         if candidate.is_file():
-            return str(candidate)
+            return os.path.abspath(str(candidate))
     return None
 
 
