@@ -176,12 +176,17 @@ async def probe_sure_health(
 ) -> dict[str, Any]:
     """``sure --version`` 探测:二进制是否可用 + 版本号(供面板"引导安装"分支)。
 
-    永不抛出:任何失败折叠为 ``installed=False`` + 面向用户的 error。
+    永不抛出:任何失败折叠为 ``installed=False`` + 面向用户的 error
+    (唯一例外:协程被外部取消——清理完子进程后原样上抛取消,见 ③)。
 
     外部评审第 2 轮修正:① 超时/异常时**显式终止并回收子进程**——wait_for 只
     取消等待、不杀进程,反复健康检查会泄漏孤儿;探测与任务同款 spawn
     (POSIX ``start_new_session``),复用 ``_kill_process_tree`` 树杀语义;
     ② 退出码非零视为不可用——不能把"能启动"当成"能工作"。
+    ③ 协程被外部取消:CancelledError 继承 BaseException,不落入 except
+    Exception——取消落在 communicate 等待期时清理分支会整体跳过,卡死的
+    ``sure --version`` 变孤儿。与 ``_run`` 同款:先树杀回收,再原样上抛,
+    不吞取消语义(外部评审第 3 轮 P2)。
     """
     provider = bin_provider or resolve_sure_bin
     builder = env_builder or build_sure_env
@@ -208,6 +213,16 @@ async def probe_sure_health(
             **spawn_kwargs,
         )
         stdout_b, _stderr_b = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+    except asyncio.CancelledError:
+        # 协程被外部取消(退出清理等):CancelledError 是 BaseException,
+        # 不会被下方 except 捕获——不清理则卡死的子进程成孤儿。
+        # 与 _run 同款:先树杀并回收,再把取消原样上抛(不吞取消语义)。
+        if proc is not None:
+            try:
+                await _kill_process_tree(proc)
+            except Exception:  # noqa: BLE001 —— 清理失败不改变取消语义
+                logger.warning("健康检查取消后清理 SURE 子进程未成功: {}", binary)
+        raise
     except Exception as exc:  # noqa: BLE001 —— 健康检查绝不抛出
         if proc is not None:
             try:

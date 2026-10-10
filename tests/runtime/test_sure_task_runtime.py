@@ -298,3 +298,49 @@ async def test_health_nonzero_exit_is_not_installed(tmp_path):
     )
     assert res["installed"] is False
     assert res["error"]
+
+
+@pytest.mark.asyncio
+async def test_health_cancellation_kills_child_process(tmp_path, monkeypatch):
+    """协程被外部取消也必须终止并回收子进程,且取消语义原样上抛(外部评审 P2)。
+
+    CancelledError 继承 BaseException,不落入 except Exception——取消若落在
+    communicate 等待期,原实现会整体跳过清理分支,卡死的 sure --version 变孤儿。
+    """
+    import miqi.runtime.sure_task_runtime as rt_mod
+
+    marker = tmp_path / "health_started.marker"
+    slow_bin = _wrap_as_sure(
+        tmp_path,
+        "from pathlib import Path\n"
+        f"Path({str(marker)!r}).write_text('up', encoding='utf-8')\n"
+        "import time\ntime.sleep(15)\n",
+    )
+    calls = []
+    real_kill = rt_mod._kill_process_tree
+
+    async def spy(proc, **kwargs):
+        calls.append(proc)
+        await real_kill(proc, **kwargs)
+
+    monkeypatch.setattr(rt_mod, "_kill_process_tree", spy)
+
+    task = asyncio.create_task(
+        rt_mod.probe_sure_health(
+            bin_provider=lambda: slow_bin,
+            env_builder=lambda: {**os.environ},
+            timeout=60.0,  # 远大于取消点:必须走"取消"路径而非"超时"路径
+        )
+    )
+    # 等子进程真正起来(标记文件)再取消,保证取消点落在 communicate 等待期内
+    deadline = asyncio.get_event_loop().time() + 15.0
+    while not marker.exists():
+        assert asyncio.get_event_loop().time() < deadline, "被测子进程未启动"
+        await asyncio.sleep(0.05)
+    await asyncio.sleep(0.1)
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert len(calls) == 1, "取消必须触发显式进程清理"
+    assert calls[0].returncode is not None, "清理后子进程必须已被回收"
