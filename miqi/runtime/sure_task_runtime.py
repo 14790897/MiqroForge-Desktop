@@ -65,12 +65,15 @@ class SureUnavailableError(RuntimeError):
     """本机没有可用的 SURE 二进制(或无法启动)。message 面向用户。"""
 
     code = "SURE_UNAVAILABLE"
+    #: 面向用户的固定安全文案(处理器转 AppServerError 时使用,避免注入异常原文)
+    USER_MESSAGE = "未找到 SURE:请安装 SURE,或用 SURE_BIN 指向其可执行文件"
 
 
 class SureBusyError(RuntimeError):
     """该客户端已有核查在运行(每客户端单任务)。"""
 
     code = "SURE_BUSY"
+    USER_MESSAGE = "已有核查在运行——请等待完成或先取消"
 
 
 @dataclass
@@ -252,12 +255,10 @@ class SureTaskRuntime:
             SureUnavailableError: 探测不到或无法启动 SURE 二进制。
         """
         if self.active_for(client_id) is not None:
-            raise SureBusyError("已有核查在运行——请等待完成或先取消")
+            raise SureBusyError(SureBusyError.USER_MESSAGE)
         binary = self._bin_provider()
         if not binary:
-            raise SureUnavailableError(
-                "未找到 SURE:请安装 SURE,或用 SURE_BIN 指向其可执行文件"
-            )
+            raise SureUnavailableError(SureUnavailableError.USER_MESSAGE)
         task = SureTask(
             task_id=f"sure-{uuid.uuid4().hex[:12]}",
             client_id=client_id,

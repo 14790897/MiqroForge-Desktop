@@ -4332,6 +4332,304 @@
         "description": null,
         "emits": [],
         "eventSchemas": {},
+        "method": "sure.check.cancel",
+        "paramsSchema": {
+          "additionalProperties": true,
+          "type": "object"
+        },
+        "resultSchema": {
+          "additionalProperties": false,
+          "properties": {
+            "ok": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "ok"
+          ],
+          "type": "object"
+        },
+        "scope": "connection",
+        "stability": "stable"
+      },
+      {
+        "deprecatedBy": null,
+        "description": null,
+        "emits": [
+          "sure_check_progress",
+          "sure_check_report",
+          "sure_check_failed",
+          "sure_check_cancelled"
+        ],
+        "eventSchemas": {
+          "sure_check_cancelled": {
+            "additionalProperties": false,
+            "properties": {
+              "elapsedMs": {
+                "type": "integer"
+              },
+              "project": {
+                "type": "string"
+              },
+              "taskId": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "elapsedMs",
+              "project",
+              "taskId"
+            ],
+            "type": "object"
+          },
+          "sure_check_failed": {
+            "additionalProperties": false,
+            "properties": {
+              "code": {
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              },
+              "project": {
+                "type": "string"
+              },
+              "stderrTail": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
+              },
+              "taskId": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "code",
+              "message",
+              "project",
+              "taskId"
+            ],
+            "type": "object"
+          },
+          "sure_check_progress": {
+            "additionalProperties": false,
+            "properties": {
+              "elapsedMs": {
+                "type": "integer"
+              },
+              "project": {
+                "type": "string"
+              },
+              "state": {
+                "type": "string"
+              },
+              "taskId": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "elapsedMs",
+              "project",
+              "state",
+              "taskId"
+            ],
+            "type": "object"
+          },
+          "sure_check_report": {
+            "additionalProperties": false,
+            "properties": {
+              "elapsedMs": {
+                "type": "integer"
+              },
+              "envelope": {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              "project": {
+                "type": "string"
+              },
+              "taskId": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "elapsedMs",
+              "envelope",
+              "project",
+              "taskId"
+            ],
+            "type": "object"
+          }
+        },
+        "method": "sure.check.start",
+        "paramsSchema": {
+          "additionalProperties": true,
+          "properties": {
+            "project": {
+              "description": "项目绝对路径(缺省/非绝对/不存在一律拒绝)",
+              "type": "string"
+            }
+          },
+          "required": [
+            "project"
+          ],
+          "type": "object"
+        },
+        "resultSchema": {
+          "additionalProperties": false,
+          "properties": {
+            "project": {
+              "type": "string"
+            },
+            "taskId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "project",
+            "taskId"
+          ],
+          "type": "object"
+        },
+        "scope": "connection",
+        "stability": "stable"
+      },
+      {
+        "deprecatedBy": null,
+        "description": null,
+        "emits": [],
+        "eventSchemas": {},
+        "method": "sure.check.status",
+        "paramsSchema": {
+          "additionalProperties": true,
+          "type": "object"
+        },
+        "resultSchema": {
+          "$defs": {
+            "SureTaskSnapshot": {
+              "properties": {
+                "elapsed_ms": {
+                  "title": "Elapsed Ms",
+                  "type": "integer"
+                },
+                "project": {
+                  "title": "Project",
+                  "type": "string"
+                },
+                "started_at": {
+                  "title": "Started At",
+                  "type": "integer"
+                },
+                "state": {
+                  "title": "State",
+                  "type": "string"
+                },
+                "task_id": {
+                  "title": "Task Id",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "task_id",
+                "project",
+                "state",
+                "elapsed_ms",
+                "started_at"
+              ],
+              "title": "SureTaskSnapshot",
+              "type": "object"
+            }
+          },
+          "additionalProperties": false,
+          "properties": {
+            "task": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/SureTaskSnapshot"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "task"
+          ],
+          "type": "object"
+        },
+        "scope": "connection",
+        "stability": "stable"
+      },
+      {
+        "deprecatedBy": null,
+        "description": null,
+        "emits": [],
+        "eventSchemas": {},
+        "method": "sure.health",
+        "paramsSchema": {
+          "additionalProperties": true,
+          "type": "object"
+        },
+        "resultSchema": {
+          "additionalProperties": false,
+          "properties": {
+            "binary": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "error": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "installed": {
+              "type": "boolean"
+            },
+            "version": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "binary",
+            "error",
+            "installed",
+            "version"
+          ],
+          "type": "object"
+        },
+        "scope": "connection",
+        "stability": "stable"
+      },
+      {
+        "deprecatedBy": null,
+        "description": null,
+        "emits": [],
+        "eventSchemas": {},
         "method": "thread.archive",
         "paramsSchema": {
           "additionalProperties": true,
@@ -5676,8 +5974,8 @@
   },
   "methodCounts": {
     "legacy": 81,
-    "total": 166,
-    "typed": 85
+    "total": 170,
+    "typed": 89
   },
   "schemaVersion": 1
 }

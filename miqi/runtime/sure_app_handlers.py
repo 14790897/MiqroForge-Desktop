@@ -10,6 +10,9 @@ from __future__ import annotations
 import os
 from typing import Any
 
+from loguru import logger
+
+from miqi.runtime import protocol_specs
 from miqi.runtime.app_server import AppServerError, get_bridge_context
 from miqi.runtime.sure_task_runtime import (
     SureBusyError,
@@ -58,9 +61,14 @@ def register_sure_handlers(server) -> None:
                 client_id=client_id, project=project, on_event=_on_event
             )
         except SureUnavailableError as exc:
-            raise AppServerError(str(exc), code=exc.code) from exc
+            # Phase 35 审计:AppServerError 只带固定安全文案,异常原文进日志
+            logger.warning("sure.check.start 不可用: {}", exc)
+            raise AppServerError(
+                SureUnavailableError.USER_MESSAGE, code=SureUnavailableError.code
+            ) from exc
         except SureBusyError as exc:
-            raise AppServerError(str(exc), code=exc.code) from exc
+            logger.warning("sure.check.start 被拒(忙): {}", exc)
+            raise AppServerError(SureBusyError.USER_MESSAGE, code=SureBusyError.code) from exc
         return {"result": result}
 
     async def _sure_check_cancel(request_id, params, client_id, session_id, registry):
@@ -70,7 +78,13 @@ def register_sure_handlers(server) -> None:
     async def _sure_check_status(request_id, params, client_id, session_id, registry):
         return {"result": {"task": _get_runtime(registry).status(client_id=client_id)}}
 
-    server.register_method("sure.health", _sure_health)
-    server.register_method("sure.check.start", _sure_check_start)
-    server.register_method("sure.check.cancel", _sure_check_cancel)
-    server.register_method("sure.check.status", _sure_check_status)
+    server.register_method("sure.health", _sure_health, spec=protocol_specs.SURE_HEALTH)
+    server.register_method(
+        "sure.check.start", _sure_check_start, spec=protocol_specs.SURE_CHECK_START
+    )
+    server.register_method(
+        "sure.check.cancel", _sure_check_cancel, spec=protocol_specs.SURE_CHECK_CANCEL
+    )
+    server.register_method(
+        "sure.check.status", _sure_check_status, spec=protocol_specs.SURE_CHECK_STATUS
+    )
