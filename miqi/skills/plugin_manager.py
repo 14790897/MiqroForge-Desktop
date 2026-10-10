@@ -15,6 +15,7 @@ import inspect
 import json
 import os
 import re
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -34,6 +35,11 @@ _PLUGIN_NAME_RE = re.compile(r"^[a-zA-Z0-9]([a-zA-Z0-9_.-]{0,62}[a-zA-Z0-9])?$")
 
 # Hosts allowed for direct plugin installation via URL.
 ALLOWED_HOSTS = {"github.com", "gitlab.com", "bitbucket.org"}
+
+# 状态文件读-改-写的进程内互斥（#1267 评审 P2）：_set_disabled /
+# _set_workspace_trust 全程持锁，并发写不丢更新、不共享临时文件。
+# 跨进程并发为文档化约束：单用户桌面场景，最后写者胜出。
+_STATE_LOCK = threading.Lock()
 
 
 def validate_plugin_name(name: str) -> None:
@@ -81,6 +87,9 @@ class PluginManager:
     1. ~/.forge/plugins/           — user plugins
     2. <workspace>/.forge/plugins/ — workspace plugins
     3. <miqi_install>/plugins/    — system/builtin plugins
+
+    Workspace 插件内容随被打开的项目而来、**默认不可信**（#1267 评审）：
+    未显式启用前以 disabled 装载——不注册 hooks、不并入 MCP、命令不注入。
     """
 
     def __init__(
@@ -269,9 +278,14 @@ class PluginManager:
         plugin = LoadedPlugin(
             manifest=manifest, path=plugin_dir, scope=scope
         )
-        # #1267 评审：应用持久停用状态——上一会话停用/卸载（内置）过的插件，
-        # 下个会话发现时直接以 disabled 装载，不再注册 hooks。
-        if plugin.manifest.name in self._disabled_names():
+        # #1267 评审（P1 信任边界）：全局停用或「未授权的工作区插件」直接
+        # 以 disabled 装载——不注册 hooks、不并入 MCP、命令不注入。工作区
+        # 内容随被打开的项目而来、可能不可信，必须由用户显式启用（授权按
+        # 工作区路径 + 插件名持久化，不跨工作区泄漏）。
+        if plugin.manifest.name in self._disabled_names() or (
+            plugin.scope == "workspace"
+            and not self._workspace_trusted(plugin.manifest.name)
+        ):
             plugin.status = "disabled"
         self._attach_plugin_commands(plugin)
         if plugin.status == "active":
@@ -475,39 +489,82 @@ class PluginManager:
             raise
         return plugin
 
-    # ── 持久停用状态（#1267 评审）──────────────────────────────────────────
+    # ── 持久状态与信任（#1267 评审：P1 信任边界 + P2 并发）──────────────────
 
-    def _disabled_names(self) -> set[str]:
-        """持久层记录的停用插件名。缺失/损坏一律视为空——状态文件绝不
-        被允许拖垮发现（宁可工具缺席，不可会话起不来）。"""
+    def _read_state(self) -> tuple[set[str], set[str]]:
+        """(disabled, enabled) 两个集合。缺失/损坏一律视为空——状态文件
+        绝不被允许拖垮发现（宁可工具缺席，不可会话起不来）。"""
         try:
             data = json.loads(self._state_path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
-            return set()
-        names = data.get("disabled") if isinstance(data, dict) else None
-        if not isinstance(names, list):
-            return set()
-        return {n for n in names if isinstance(n, str)}
+            return set(), set()
+        if not isinstance(data, dict):
+            return set(), set()
 
-    def _set_disabled(self, name: str, disabled: bool) -> None:
-        """读改写状态文件（原子替换）。写失败降级为仅本实例内存态并告警。"""
-        names = self._disabled_names()
-        if disabled:
-            names.add(name)
-        else:
-            names.discard(name)
+        def _names(key: str) -> set[str]:
+            value = data.get(key)
+            if not isinstance(value, list):
+                return set()
+            return {n for n in value if isinstance(n, str)}
+
+        return _names("disabled"), _names("enabled")
+
+    def _write_state(self, disabled: set[str], enabled: set[str]) -> None:
+        """原子落盘（临时文件 + replace）。写失败降级为仅本实例内存态并告警。"""
         try:
             self._state_path.parent.mkdir(parents=True, exist_ok=True)
             tmp = self._state_path.with_name(self._state_path.name + ".tmp")
             tmp.write_text(
-                json.dumps({"disabled": sorted(names)}, ensure_ascii=False, indent=2),
+                json.dumps(
+                    {"disabled": sorted(disabled), "enabled": sorted(enabled)},
+                    ensure_ascii=False,
+                    indent=2,
+                ),
                 encoding="utf-8",
             )
             os.replace(tmp, self._state_path)
         except OSError:
             logger.warning(
-                "插件停用状态写入失败（仅本会话内生效）: {}", self._state_path
+                "插件状态写入失败（仅本会话内生效）: {}", self._state_path
             )
+
+    def _set_disabled(self, name: str, disabled: bool) -> None:
+        """全局停用/恢复：读-改-写在进程内锁下完成（P2：并发写不丢更新）。"""
+        with _STATE_LOCK:
+            disabled_set, enabled_set = self._read_state()
+            if disabled:
+                disabled_set.add(name)
+            else:
+                disabled_set.discard(name)
+            self._write_state(disabled_set, enabled_set)
+
+    def _disabled_names(self) -> set[str]:
+        return self._read_state()[0]
+
+    def _workspace_key(self, name: str) -> str | None:
+        """工作区插件的信任键：绝对工作区路径 + 插件名（授权不跨工作区）。"""
+        if self.workspace is None:
+            return None
+        return f"{Path(self.workspace).resolve()}::{name}"
+
+    def _workspace_trusted(self, name: str) -> bool:
+        key = self._workspace_key(name)
+        if key is None:
+            return False
+        return key in self._read_state()[1]
+
+    def _set_workspace_trust(self, name: str, trusted: bool) -> None:
+        """工作区插件的显式授权/撤销（与 _set_disabled 同持锁）。"""
+        key = self._workspace_key(name)
+        if key is None:
+            return
+        with _STATE_LOCK:
+            disabled_set, enabled_set = self._read_state()
+            if trusted:
+                enabled_set.add(key)
+            else:
+                enabled_set.discard(key)
+            self._write_state(disabled_set, enabled_set)
 
     def uninstall_plugin(self, name: str) -> bool:
         """Uninstall a plugin by name.
@@ -616,5 +673,9 @@ class PluginManager:
         else:
             plugin.status = "disabled"
             self._unregister_plugin_hooks(name)
-        self._set_disabled(name, not enabled)
+        if plugin.scope == "workspace":
+            # 工作区插件：启用/停用即授权/撤销（按工作区路径持久化，#1267 评审）
+            self._set_workspace_trust(name, enabled)
+        else:
+            self._set_disabled(name, not enabled)
         return plugin
