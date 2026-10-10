@@ -4365,6 +4365,9 @@
           "sure_check_cancelled": {
             "additionalProperties": false,
             "properties": {
+              "command": {
+                "type": "string"
+              },
               "elapsedMs": {
                 "type": "integer"
               },
@@ -4376,6 +4379,7 @@
               }
             },
             "required": [
+              "command",
               "elapsedMs",
               "project",
               "taskId"
@@ -4386,6 +4390,9 @@
             "additionalProperties": false,
             "properties": {
               "code": {
+                "type": "string"
+              },
+              "command": {
                 "type": "string"
               },
               "message": {
@@ -4411,6 +4418,7 @@
             },
             "required": [
               "code",
+              "command",
               "message",
               "project",
               "taskId"
@@ -4420,6 +4428,9 @@
           "sure_check_progress": {
             "additionalProperties": false,
             "properties": {
+              "command": {
+                "type": "string"
+              },
               "elapsedMs": {
                 "type": "integer"
               },
@@ -4434,6 +4445,7 @@
               }
             },
             "required": [
+              "command",
               "elapsedMs",
               "project",
               "state",
@@ -4444,6 +4456,9 @@
           "sure_check_report": {
             "additionalProperties": false,
             "properties": {
+              "command": {
+                "type": "string"
+              },
               "elapsedMs": {
                 "type": "integer"
               },
@@ -4459,6 +4474,7 @@
               }
             },
             "required": [
+              "command",
               "elapsedMs",
               "envelope",
               "project",
@@ -4471,6 +4487,11 @@
         "paramsSchema": {
           "additionalProperties": true,
           "properties": {
+            "command": {
+              "default": "check",
+              "description": "check | repair | recheck(阶段 4:修复契约/复审对比)",
+              "type": "string"
+            },
             "project": {
               "description": "项目绝对路径(缺省/非绝对/不存在一律拒绝)",
               "type": "string"
@@ -4484,6 +4505,9 @@
         "resultSchema": {
           "additionalProperties": false,
           "properties": {
+            "command": {
+              "type": "string"
+            },
             "project": {
               "type": "string"
             },
@@ -4492,6 +4516,7 @@
             }
           },
           "required": [
+            "command",
             "project",
             "taskId"
           ],
@@ -4514,6 +4539,10 @@
           "$defs": {
             "SureTaskSnapshot": {
               "properties": {
+                "command": {
+                  "title": "Command",
+                  "type": "string"
+                },
                 "elapsed_ms": {
                   "title": "Elapsed Ms",
                   "type": "integer"
@@ -4540,7 +4569,8 @@
                 "project",
                 "state",
                 "elapsed_ms",
-                "started_at"
+                "started_at",
+                "command"
               ],
               "title": "SureTaskSnapshot",
               "type": "object"

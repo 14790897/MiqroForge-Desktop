@@ -159,3 +159,40 @@ async def test_health_reports_version_and_missing(tmp_path, monkeypatch):
     resp2 = await _dispatch(server, "sure.health", {})
     assert resp2["result"]["installed"] is False
     assert resp2["result"]["error"]
+
+
+# ── 阶段 4:repair / recheck 命令 ─────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_start_rejects_unknown_command(tmp_path):
+    server, _, _ = _make_server(_fake_sure_bin(tmp_path))
+    resp = await _dispatch(
+        server, "sure.check.start", {"project": str(tmp_path), "command": "doctor"}
+    )
+    assert resp["code"] == "INVALID_PARAMS"
+
+
+@pytest.mark.asyncio
+async def test_repair_command_streams_contracts(tmp_path):
+    server, _, _ = _make_server(_fake_sure_bin(tmp_path))
+    events: list[dict] = []
+
+    async def sink(envelope):
+        events.append(envelope)
+
+    server.set_event_sink("test-client", sink)
+
+    resp = await _dispatch(
+        server, "sure.check.start", {"project": str(tmp_path), "command": "repair"}
+    )
+    assert resp["result"]["command"] == "repair"
+
+    deadline = asyncio.get_event_loop().time() + 15.0
+    while asyncio.get_event_loop().time() < deadline:
+        if any(e["event"] == "sure_check_report" for e in events):
+            break
+        await asyncio.sleep(0.05)
+    report = next(e for e in events if e["event"] == "sure_check_report")
+    assert report["data"]["command"] == "repair"
+    assert len(report["data"]["envelope"]["details"]["repairs"]) == 5

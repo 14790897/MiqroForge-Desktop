@@ -32,6 +32,13 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FIXTURE_DIR = REPO_ROOT / "tests" / "fixtures" / "sure"
 
+#: 各命令的默认 fixture(阶段 4:repair/recheck 复用真实采集产物)。
+_DEFAULT_FIXTURES = {
+    "check": "report-check-findings.json",
+    "repair": "report-repair-fake-payment.json",
+    "recheck": "report-recheck-fake-payment.json",
+}
+
 
 def _project_arg(argv: list[str]) -> str | None:
     for arg in argv[1:]:
@@ -51,9 +58,10 @@ def main(argv: list[str]) -> int:
     if "--version" in argv:
         print("sure 9.9.9-mock")
         return 0
-    if not argv or argv[0] != "check":
+    if not argv or argv[0] not in _DEFAULT_FIXTURES:
         print(f"mock sure: unsupported arguments: {argv}", file=sys.stderr)
         return 2
+    command = argv[0]
 
     delay_ms = int(os.environ.get("MOCK_SURE_DELAY_MS", "0") or "0")
     if delay_ms > 0:
@@ -69,7 +77,7 @@ def main(argv: list[str]) -> int:
         if idx + 1 < len(argv):
             fmt = argv[idx + 1]
 
-    fixture_name = os.environ.get("MOCK_SURE_FIXTURE", "report-check-findings.json")
+    fixture_name = os.environ.get("MOCK_SURE_FIXTURE") or _DEFAULT_FIXTURES[command]
     data = json.loads((FIXTURE_DIR / fixture_name).read_text(encoding="utf-8"))
 
     project = _project_arg(argv)
