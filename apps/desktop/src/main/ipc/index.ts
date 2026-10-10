@@ -2475,7 +2475,12 @@ for m in ("pydantic", "httpx", "loguru"):
   });
 
   ipcMain.handle(IPC.SURE_CHECK_START, async (_event, payload: unknown) => {
-    const { project } = payload as { project: string };
+    // #1273 评审:渲染层参数视为不可信——解构前先校验,坏载荷返回
+    // SureApiResult 形状而不是抛 TypeError。
+    const project = (payload as { project?: unknown } | null | undefined)?.project;
+    if (typeof project !== 'string') {
+      return { ok: false, error: 'project must be a string', code: 'INVALID_PARAMS' };
+    }
     return bridge.sendSafeWithError('sure.check.start', { project });
   });
 

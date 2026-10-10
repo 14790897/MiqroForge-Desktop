@@ -207,3 +207,51 @@ def test_env_whitelist_only_allows_named_vars():
     }
     # SURE_BIN 在白名单内(子进程兜底解析需要)
     assert build_sure_env({**base, "SURE_BIN": r"C:\sure.exe"})["SURE_BIN"] == r"C:\sure.exe"
+
+
+def test_mock_cli_emits_strict_utf8_json(tmp_path):
+    """CI(windows-latest)回归:mock 必须像真 sure.exe 一样输出**严格 UTF-8**。
+
+    生产白名单会剥掉 PYTHONUTF8;若 mock 走 locale 编码,中文在 cp1252 下
+    直接 UnicodeEncodeError(CI windows 实测),在 GBK 下字节碎裂。锁定
+    sys.stdout.reconfigure(utf-8)。
+    """
+    import json
+    import subprocess
+
+    env = {k: v for k, v in os.environ.items() if k not in ("PYTHONUTF8", "PYTHONIOENCODING")}
+    proc = subprocess.run(
+        [sys.executable, str(MOCK_CLI), "check", str(tmp_path), "--format", "json"],
+        capture_output=True,
+        env=env,
+    )
+    text = proc.stdout.decode("utf-8")  # 严格解码:任一非法字节即失败
+    data = json.loads(text)
+    assert data["details"]["report"]["totals"]["open_findings"] == 5
+    # 中文内容无损往返(fixture 的 settings_file 里含用户名)
+    assert "董加钧" in text
+
+
+@pytest.mark.asyncio
+async def test_cancel_refused_after_process_exit(fake_sure_bin, tmp_path):
+    """#1273 评审:进程已退出、报告在途的窗口内 cancel 必须拒绝,保住成品报告。"""
+    from miqi.runtime.sure_task_runtime import SureTask
+
+    rt = _runtime(fake_sure_bin)
+
+    class _StubProc:
+        returncode = 1  # 已退出(not_green 是正常结果)
+        pid = 424242
+
+    task = SureTask(
+        task_id="sure-exited",
+        client_id="c1",
+        project=str(tmp_path),
+        started_monotonic=0.0,
+        started_at_ms=0,
+    )
+    task.proc = _StubProc()  # type: ignore[assignment]
+    rt._tasks[task.task_id] = task
+
+    assert await rt.cancel(client_id="c1") is False
+    assert task.cancelled is False

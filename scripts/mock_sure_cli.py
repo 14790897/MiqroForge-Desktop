@@ -41,6 +41,13 @@ def _project_arg(argv: list[str]) -> str | None:
 
 
 def main(argv: list[str]) -> int:
+    # 与真 sure.exe(Rust)一致:输出**严格 UTF-8**,与调用方 locale 无关——
+    # 白名单环境会剥掉 PYTHONUTF8,若走 locale(cp1252/GBK)中文会崩或碎 JSON。
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+        sys.stderr.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
     if "--version" in argv:
         print("sure 9.9.9-mock")
         return 0

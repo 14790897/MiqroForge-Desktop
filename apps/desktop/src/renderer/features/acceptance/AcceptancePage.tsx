@@ -7,7 +7,7 @@
  * 不复制任何核查逻辑——结论一律以 SURE 为准,状态如实呈现不美化。
  */
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { AlertTriangle, FolderOpen, Loader2, Play, RefreshCw, XCircle } from 'lucide-react';
 import { Button } from '../../components/ui/Button';
 import { ReportView } from './ReportView';
@@ -34,6 +34,9 @@ export function AcceptancePage() {
   const [envelope, setEnvelope] = useState<SureCheckEnvelope | null>(null);
   const [failure, setFailure] = useState<SureCheckFailure | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+  // #1273 评审:本任务是否已收到终态事件(report/failed/cancelled)——
+  // start 响应晚于终态事件到达时,不得把 phase 覆盖回「运行中」藏掉结果。
+  const terminalRef = useRef(false);
 
   const refreshHealth = useCallback(async () => {
     setHealthChecking(true);
@@ -86,6 +89,7 @@ export function AcceptancePage() {
       );
       unsubs.push(
         window.miqi.sure.onReport((d) => {
+          terminalRef.current = true;
           setEnvelope(d.envelope);
           setFailure(null);
           setPhase('report');
@@ -94,12 +98,14 @@ export function AcceptancePage() {
       );
       unsubs.push(
         window.miqi.sure.onFailed((f) => {
+          terminalRef.current = true;
           setFailure(f);
           setPhase('failed');
         })
       );
       unsubs.push(
         window.miqi.sure.onCancelled(() => {
+          terminalRef.current = true;
           setPhase('cancelled');
         })
       );
@@ -120,6 +126,7 @@ export function AcceptancePage() {
     setActionError(null);
     setEnvelope(null);
     setFailure(null);
+    terminalRef.current = false; // 新任务:终态守卫复位
     try {
       const res = (await window.miqi.sure.startCheck(project.trim())) as SureApiResult<{
         taskId: string;
@@ -127,13 +134,21 @@ export function AcceptancePage() {
       }> | null;
       if (!res || !res.ok) {
         setActionError(res ? res.error : '启动核查失败(桥可能未运行)');
+        // #1273 评审:失败回到 idle——否则在 report/failed 态发起重试失败后,
+        // 输入框与开始按钮被隐藏,用户无法再次重试。
+        setPhase('idle');
         return;
       }
       setStartedAt(Date.now());
       setElapsedMs(0);
-      setPhase('running');
+      // #1273 评审:终态事件可能先于 start 响应到达(极快进程)——
+      // 已终结则不覆盖回「运行中」,保住报告/失败/取消态。
+      if (!terminalRef.current) {
+        setPhase('running');
+      }
     } catch (e) {
       setActionError(e instanceof Error ? e.message : String(e));
+      setPhase('idle');
     }
   }, [project]);
 

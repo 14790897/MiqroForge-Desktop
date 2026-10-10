@@ -293,9 +293,15 @@ class SureTaskRuntime:
         return {"taskId": task.task_id, "project": project}
 
     async def cancel(self, *, client_id: str) -> bool:
-        """终止该客户端当前核查的进程树;取消不产出报告。"""
+        """终止该客户端当前核查的进程树;取消不产出报告。
+
+        #1273 评审:进程已退出、runner 尚未收尾(communicate 未落定)的窗口内
+        拒绝取消——此时报告已在途,置 cancelled 会把成品报告吞成"已取消"。
+        """
         task = self.active_for(client_id)
         if task is None or task.proc is None:
+            return False
+        if task.proc.returncode is not None:
             return False
         task.cancelled = True
         logger.info("SURE 核查取消: {}", task.task_id)

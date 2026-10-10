@@ -59,10 +59,12 @@ async function openAcceptance(p: Page): Promise<void> {
 test.describe.serial('验收(SURE)面板 E2E · 健康/运行/报告', () => {
   let electronApp: ElectronApplication;
   let page: Page;
+  let prevSureBin: string | undefined;
   const project = mkdtempSync(join(tmpdir(), 'sure-e2e-proj-'));
 
   test.beforeAll(async () => {
     const binDir = mkdtempSync(join(tmpdir(), 'sure-e2e-bin-'));
+    prevSureBin = process.env.SURE_BIN;
     // 1.2s 延迟:让「运行中 + 已耗时」态可被观察
     process.env.SURE_BIN = makeSureWrapper(binDir, 1200);
     const fixture = await launchElectronApp();
@@ -73,6 +75,10 @@ test.describe.serial('验收(SURE)面板 E2E · 健康/运行/报告', () => {
 
   test.afterAll(async () => {
     await closeElectronApp(electronApp);
+    // #1273 评审:还原 SURE_BIN,避免同一 worker 上后续 spec 继承 mock 二进制
+    // (如 sure-integration-gui 的守卫与默认条目探测都会读它)
+    if (prevSureBin === undefined) delete process.env.SURE_BIN;
+    else process.env.SURE_BIN = prevSureBin;
   });
 
   test('健康行 → 运行中 → 四块结构化报告', async () => {
@@ -105,10 +111,12 @@ test.describe.serial('验收(SURE)面板 E2E · 健康/运行/报告', () => {
 test.describe.serial('验收(SURE)面板 E2E · 取消', () => {
   let electronApp: ElectronApplication;
   let page: Page;
+  let prevSureBin: string | undefined;
   const project = mkdtempSync(join(tmpdir(), 'sure-e2e-proj-slow-'));
 
   test.beforeAll(async () => {
     const binDir = mkdtempSync(join(tmpdir(), 'sure-e2e-bin-slow-'));
+    prevSureBin = process.env.SURE_BIN;
     // 30s 延迟:留足点击「取消核查」的窗口
     process.env.SURE_BIN = makeSureWrapper(binDir, 30_000);
     const fixture = await launchElectronApp();
@@ -119,6 +127,9 @@ test.describe.serial('验收(SURE)面板 E2E · 取消', () => {
 
   test.afterAll(async () => {
     await closeElectronApp(electronApp);
+    // #1273 评审:还原 SURE_BIN(同上)
+    if (prevSureBin === undefined) delete process.env.SURE_BIN;
+    else process.env.SURE_BIN = prevSureBin;
   });
 
   test('运行中可取消 → 已取消态(取消不产出报告)', async () => {
