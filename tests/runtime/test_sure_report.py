@@ -116,3 +116,66 @@ def test_parse_sure_version_output():
     assert parse_sure_version("sure 0.12.0") == "0.12.0"
     assert parse_sure_version("garbage") is None
     assert parse_sure_version("") is None
+
+
+# ── 阶段 4:repair 契约与 recheck 对比 ────────────────────────────────────
+
+
+def test_parse_repair_report_contracts():
+    from miqi.runtime.sure_report import parse_sure_output
+
+    env = parse_sure_output(_read("report-repair-fake-payment.json"))
+    assert env.command == "repair"
+    assert env.details.purpose == "repair"
+    repairs = env.details.repairs
+    assert len(repairs) == 5
+    first = repairs[0]
+    assert first.id.startswith("rep_")
+    assert first.issue_id.startswith("fnd_")
+    assert first.problem and first.why_it_matters
+    assert first.required_fix and first.acceptance
+    # schema 之外的字段(Sure 实际输出)必须保留,不得丢
+    assert first.rechecks_that_must_pass
+    assert first.forbidden_shortcuts
+    assert first.evidence and first.evidence[0].get("class") == "observed_fact"
+
+
+def test_parse_recheck_lifecycle_comparison():
+    from miqi.runtime.sure_report import parse_sure_output
+
+    env = parse_sure_output(_read("report-recheck-fake-payment.json"))
+    assert env.command == "recheck"
+    lc = env.details.lifecycle
+    assert lc is not None
+    assert lc.closed == []
+    assert len(lc.still_open) == 5
+    first = lc.still_open[0]
+    assert first.id.startswith("fnd_")
+    assert first.status == "open"
+    assert first.severity and first.title
+
+
+def test_parse_check_lifecycle_is_none():
+    from miqi.runtime.sure_report import parse_sure_output
+
+    env = parse_sure_output(_read("report-check-hello.json"))
+    assert env.command == "check"
+    assert env.details.lifecycle is None
+    assert env.details.repairs == []
+
+
+def test_parse_check_output_remains_check_only():
+    """向后兼容:parse_check_output 仍只接受 check(阶段 3 契约不变)。"""
+    from miqi.runtime.sure_report import SureReportError, parse_check_output
+
+    with pytest.raises(SureReportError):
+        parse_check_output(_read("report-repair-fake-payment.json"))
+
+
+def test_parse_sure_output_rejects_unknown_command():
+    from miqi.runtime.sure_report import SureReportError, parse_sure_output
+
+    raw = json.loads(_read("report-check-hello.json"))
+    raw["command"] = "doctor"
+    with pytest.raises(SureReportError):
+        parse_sure_output(json.dumps(raw))
