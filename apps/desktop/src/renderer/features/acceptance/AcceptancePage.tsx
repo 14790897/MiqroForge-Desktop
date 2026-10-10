@@ -85,8 +85,8 @@ export function AcceptancePage() {
         })
       );
       unsubs.push(
-        window.miqi.sure.onReport((env) => {
-          setEnvelope(env);
+        window.miqi.sure.onReport((d) => {
+          setEnvelope(d.envelope);
           setFailure(null);
           setPhase('report');
           void refreshHealth(); // 报告里带 sure_version,顺手刷新健康行

@@ -91,9 +91,9 @@ import type {
 import type {
   SureApiResult,
   SureCheckCancelled,
-  SureCheckEnvelope,
   SureCheckFailure,
   SureCheckProgress,
+  SureCheckReportEvent,
   SureCheckStartResult,
   SureCheckStatus,
   SureHealth,
@@ -853,8 +853,8 @@ const api = {
       ipcRenderer.on(IPC_EVENTS.SURE_CHECK_PROGRESS, handler);
       return () => ipcRenderer.removeListener(IPC_EVENTS.SURE_CHECK_PROGRESS, handler);
     },
-    onReport: (callback: (data: SureCheckEnvelope) => void): (() => void) => {
-      const handler = (_event: Electron.IpcRendererEvent, data: SureCheckEnvelope) =>
+    onReport: (callback: (data: SureCheckReportEvent) => void): (() => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, data: SureCheckReportEvent) =>
         callback(data);
       ipcRenderer.on(IPC_EVENTS.SURE_CHECK_REPORT, handler);
       return () => ipcRenderer.removeListener(IPC_EVENTS.SURE_CHECK_REPORT, handler);

@@ -211,6 +211,14 @@ export interface SureCheckProgress {
   state: string;
 }
 
+/** `sure_check_report` 事件载荷:信封包在 `envelope` 字段里(含任务关联信息)。 */
+export interface SureCheckReportEvent {
+  taskId: string;
+  project: string;
+  envelope: SureCheckEnvelope;
+  elapsedMs: number;
+}
+
 /** 核查失败(含"报告版本不支持"等,code 供 UI 归类,message 面向用户)。 */
 export interface SureCheckFailure {
   taskId: string;
