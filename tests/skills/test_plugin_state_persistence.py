@@ -60,7 +60,7 @@ def test_toggle_disable_is_persistent_across_managers(tmp_path):
     assert pm1.get_plugin("sticky").status == "active"
 
     pm1.toggle_plugin("sticky", enabled=False)
-    assert "sticky" in _read_disabled(tmp_path), "停用状态应写入状态文件"
+    assert "user:sticky" in _read_disabled(tmp_path), "停用状态应写入状态文件"
 
     pm2 = _manager(user_dir, system_dir)
     asyncio.run(pm2.discover())
@@ -68,7 +68,7 @@ def test_toggle_disable_is_persistent_across_managers(tmp_path):
 
     # 重新启用 → 状态清除,再发现即恢复 active
     pm2.toggle_plugin("sticky", enabled=True)
-    assert "sticky" not in _read_disabled(tmp_path)
+    assert "user:sticky" not in _read_disabled(tmp_path)
 
     pm3 = _manager(user_dir, system_dir)
     asyncio.run(pm3.discover())
@@ -91,7 +91,7 @@ def test_uninstall_system_plugin_records_exclusion_without_deleting(tmp_path):
     assert pm1.uninstall_plugin("bundled") is True
     assert (system_dir / "bundled").exists(), "内置插件目录绝不允许被删除"
     assert pm1.get_plugin("bundled").status == "disabled"
-    assert "bundled" in _read_disabled(tmp_path)
+    assert "system:bundled" in _read_disabled(tmp_path)
 
     pm2 = _manager(user_dir, system_dir)
     asyncio.run(pm2.discover())
@@ -109,11 +109,11 @@ def test_uninstall_user_plugin_removes_dir_and_clears_state(tmp_path):
     pm = _manager(user_dir, system_dir)
     asyncio.run(pm.discover())
     pm.toggle_plugin("removable", enabled=False)
-    assert "removable" in _read_disabled(tmp_path)
+    assert "user:removable" in _read_disabled(tmp_path)
 
     assert pm.uninstall_plugin("removable") is True
     assert not (user_dir / "removable").exists(), "user 插件目录应被删除"
-    assert "removable" not in _read_disabled(tmp_path)
+    assert "user:removable" not in _read_disabled(tmp_path)
 
 
 def test_corrupt_state_file_is_tolerated(tmp_path):
@@ -128,3 +128,73 @@ def test_corrupt_state_file_is_tolerated(tmp_path):
     pm = _manager(user_dir, system_dir)
     asyncio.run(pm.discover())
     assert pm.get_plugin("sticky").status == "active"
+
+
+# ── #1267 评审(第 4 轮):作用域隔离、写失败如实上报、卸载失败不假装成功 ──
+
+
+def test_user_uninstall_preserves_system_disabled_record(tmp_path):
+    """卸载同名 user 插件不得清掉 system 插件的停用记录——否则系统插件
+    会未经显式启用就复活(#1267 评审:停用记录按 scope 隔离)。"""
+    user_dir = tmp_path / "user"
+    system_dir = tmp_path / "system"
+    user_dir.mkdir()
+    system_dir.mkdir()
+    _make_plugin_dir(system_dir, "twin")
+    _make_plugin_dir(user_dir, "twin")
+
+    pm = _manager(user_dir, system_dir)
+    pm._set_disabled_for("system", "twin", True)  # 系统插件被持久停用
+
+    assert pm.uninstall_plugin("twin") is True  # user 副本被卸载
+    assert not (user_dir / "twin").exists()
+    assert "system:twin" in _read_disabled(tmp_path), "system 停用记录必须保留"
+    assert "user:twin" not in _read_disabled(tmp_path)
+
+    pm2 = _manager(user_dir, system_dir)
+    asyncio.run(pm2.discover())
+    assert pm2.get_plugin("twin").status == "disabled", "系统插件仍保持停用"
+
+
+def test_toggle_reports_state_write_failure(tmp_path, monkeypatch):
+    """状态写入失败必须传播给调用方,内存状态不得先行变更——否则「停用」
+    会在下次启动被磁盘上的旧授权/记录推翻(#1267 评审)。"""
+    import pytest
+
+    _make_plugin_dir(tmp_path / "user", "sticky")
+    pm = _manager(tmp_path / "user", tmp_path / "system")
+    asyncio.run(pm.discover())
+    assert pm.get_plugin("sticky").status == "active"
+
+    def _boom(src, dst):
+        raise OSError("disk full")
+
+    monkeypatch.setattr("miqi.skills.plugin_manager.os.replace", _boom)
+
+    with pytest.raises(OSError):
+        pm.toggle_plugin("sticky", enabled=False)
+    assert pm.get_plugin("sticky").status == "active", "写失败时内存状态不得变更"
+
+
+def test_user_uninstall_propagates_removal_failure(tmp_path, monkeypatch):
+    """user 插件目录删除失败(占用/权限)必须抛出,不得清注册表假装卸载成功
+    ——否则 discovery 下次会把它再装回来(#1267 评审)。"""
+    import shutil
+
+    import pytest
+
+    _make_plugin_dir(tmp_path / "user", "locked")
+    pm = _manager(tmp_path / "user", tmp_path / "system")
+    asyncio.run(pm.discover())
+
+    def _boom(*args, **kwargs):
+        if kwargs.get("ignore_errors"):
+            return  # 模拟真实 rmtree 的 ignore_errors 语义
+        raise OSError("directory in use")
+
+    monkeypatch.setattr(shutil, "rmtree", _boom)
+
+    with pytest.raises(OSError):
+        pm.uninstall_plugin("locked")
+    assert pm.get_plugin("locked") is not None, "卸载失败时注册表不得清空"
+    assert (tmp_path / "user" / "locked").exists()

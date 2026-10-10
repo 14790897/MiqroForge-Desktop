@@ -122,7 +122,7 @@ def test_concurrent_state_updates_do_not_lose_entries(tmp_path):
     def worker(subset):
         barrier.wait()
         for n in subset:
-            pm._set_disabled(n, True)
+            pm._set_disabled_for("user", n, True)
 
     threads = [
         threading.Thread(target=worker, args=(names[i::threads_n],))
@@ -134,4 +134,26 @@ def test_concurrent_state_updates_do_not_lose_entries(tmp_path):
         t.join()
 
     state = json.loads((tmp_path / "plugins_state.json").read_text(encoding="utf-8"))
-    assert set(state.get("disabled", [])) == set(names), "并发写入发生了丢更新"
+    expected = {f"user:{n}" for n in names}
+    assert set(state.get("disabled", [])) == expected, "并发写入发生了丢更新"
+
+
+def test_untrusted_workspace_plugin_does_not_shadow_system_plugin(tmp_path):
+    """未授权的工作区插件与系统插件同名时,不得顶掉已生效的系统插件——
+    否则伪造同名 plugin.json 就能借遮蔽停用系统内置插件(#1267 评审)。"""
+    ws = tmp_path / "ws"
+    _make_plugin(ws / ".forge" / "plugins", "sure")  # 未授权,同名
+    system_dir = tmp_path / "system"
+    system_dir.mkdir()
+    _make_plugin(system_dir, "sure")  # 系统内置,已生效
+
+    pm = _manager(tmp_path, ws)
+    asyncio.run(pm.discover())
+
+    plugin = pm.get_plugin("sure")
+    assert plugin is not None
+    assert plugin.scope == "system", "系统插件应保留在注册表"
+    assert plugin.status == "active"
+    assert any(s.get("name") == "ws-mcp" for s in pm.get_mcp_servers()), (
+        "系统插件的 MCP 声明不得被未授权同名工作区插件遮蔽"
+    )

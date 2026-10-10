@@ -60,3 +60,43 @@ async def test_discard_session_keeps_other_sessions_plugin_manager():
     await registry._discard_session("c:other", session)
 
     assert registry.bridge_context["plugin_manager"] is published
+
+
+@pytest.mark.asyncio
+async def test_stop_session_clears_its_published_plugin_manager():
+    """正常停止/空闲淘汰路径同样清理已发布引用(#1267 评审)。"""
+    from unittest.mock import MagicMock
+
+    from miqi.runtime.app_server import ClientSessionRegistry
+
+    pm = object()
+    state = MagicMock()
+    state._plugin_manager = pm
+    session = _FakeSession(pm)
+
+    registry = ClientSessionRegistry()
+    registry.bridge_context = {"plugin_manager": pm, "state": state}
+    registry._sessions["c:s"] = session
+
+    await registry.stop_session("c:s")
+
+    assert session.stopped
+    assert registry.bridge_context["plugin_manager"] is None
+    assert state._plugin_manager is None
+
+
+@pytest.mark.asyncio
+async def test_stop_session_keeps_other_sessions_plugin_manager():
+    from miqi.runtime.app_server import ClientSessionRegistry
+
+    published = object()
+    mine = object()
+    session = _FakeSession(mine)
+
+    registry = ClientSessionRegistry()
+    registry.bridge_context = {"plugin_manager": published, "state": None}
+    registry._sessions["c:x"] = session
+
+    await registry.stop_session("c:x")
+
+    assert registry.bridge_context["plugin_manager"] is published

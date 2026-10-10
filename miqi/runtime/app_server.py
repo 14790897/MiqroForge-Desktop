@@ -316,6 +316,24 @@ class ClientSessionRegistry:
         )
         return runtime
 
+    def _clear_published_plugin_manager(self, session: Any) -> None:
+        """#1267 评审：会话停止/退役时，若 bridge 发布的正是该会话的插件管理器，
+        以对象身份比较后清空——plugin/* 处理器不得继续操作已停止会话的实例；
+        其他会话的实例不受影响。
+        """
+        _pm = getattr(getattr(session, "services", None), "plugin_manager", None)
+        if _pm is None or self.bridge_context.get("plugin_manager") is not _pm:
+            return
+        self.bridge_context["plugin_manager"] = None
+        _bridge_state = self.bridge_context.get("state")
+        if _bridge_state is not None and getattr(
+            _bridge_state, "_plugin_manager", None
+        ) is _pm:
+            try:
+                _bridge_state._plugin_manager = None
+            except Exception:
+                pass
+
     async def _discard_session(
         self,
         session_id: str,
@@ -345,20 +363,7 @@ class ClientSessionRegistry:
         for owned in self._client_sessions.values():
             owned.discard(session_id)
 
-        # #1267 评审：插件管理器随会话退役。若 bridge 发布的正是这个会话的实例，
-        # 一并清空——否则 plugin/* 处理器会继续操作已停止会话的实例；别的会话的
-        # 实例不受影响（比较对象身份）。
-        _pm = getattr(getattr(session, "services", None), "plugin_manager", None)
-        if _pm is not None and self.bridge_context.get("plugin_manager") is _pm:
-            self.bridge_context["plugin_manager"] = None
-            _bridge_state = self.bridge_context.get("state")
-            if _bridge_state is not None and getattr(
-                _bridge_state, "_plugin_manager", None
-            ) is _pm:
-                try:
-                    _bridge_state._plugin_manager = None
-                except Exception:
-                    pass
+        self._clear_published_plugin_manager(session)
 
         # `get_session` 那条路径拿不到 sandbox_manager 参数，用创建时记下的那个。
         manager = sandbox_manager if sandbox_manager is not None else self._sandbox_manager
@@ -454,6 +459,9 @@ class ClientSessionRegistry:
         # 账号记录跟着一起清（#1185）：漏掉它，每次空闲淘汰都会留下一份已停
         # 会话的归属记录，而且那条记录还会让下一次同键复用的比对拿到过期账号。
         self._session_account.pop(session_id, None)
+        # #1267 评审：正常停止/空闲淘汰与退役走同一条清理——已停止的会话
+        # 不得继续作为 bridge 的插件控制目标。
+        self._clear_published_plugin_manager(runtime)
 
     async def stop_all(self) -> None:
         """Stop all sessions (shutdown hook)."""

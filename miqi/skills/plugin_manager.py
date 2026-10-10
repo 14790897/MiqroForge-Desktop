@@ -241,6 +241,22 @@ class PluginManager:
                         plugin_dir, manifest_path, scope
                     )
                     if plugin:
+                        # #1267 评审：未授权(disabled)的同名插件不得顶掉已生效
+                        # 的插件——伪造同名 plugin.json 不能借遮蔽停用系统插件。
+                        existing = self._plugins.get(plugin.manifest.name)
+                        if (
+                            plugin.status == "disabled"
+                            and existing is not None
+                            and existing.status == "active"
+                        ):
+                            logger.warning(
+                                "插件 '{}'({} 作用域)未授权且与已生效的 {} 作用域"
+                                "插件同名,保留已生效插件",
+                                plugin.manifest.name,
+                                scope,
+                                existing.scope,
+                            )
+                            continue
                         self._plugins[plugin.manifest.name] = plugin
                         discovered.append(plugin)
                 except Exception as e:
@@ -278,11 +294,11 @@ class PluginManager:
         plugin = LoadedPlugin(
             manifest=manifest, path=plugin_dir, scope=scope
         )
-        # #1267 评审（P1 信任边界）：全局停用或「未授权的工作区插件」直接
-        # 以 disabled 装载——不注册 hooks、不并入 MCP、命令不注入。工作区
+        # #1267 评审（P1 信任边界）：该作用域被停用、或「未授权的工作区插件」
+        # 直接以 disabled 装载——不注册 hooks、不并入 MCP、命令不注入。工作区
         # 内容随被打开的项目而来、可能不可信，必须由用户显式启用（授权按
         # 工作区路径 + 插件名持久化，不跨工作区泄漏）。
-        if plugin.manifest.name in self._disabled_names() or (
+        if self._disabled_for(plugin.scope, plugin.manifest.name) or (
             plugin.scope == "workspace"
             and not self._workspace_trusted(plugin.manifest.name)
         ):
@@ -510,36 +526,43 @@ class PluginManager:
         return _names("disabled"), _names("enabled")
 
     def _write_state(self, disabled: set[str], enabled: set[str]) -> None:
-        """原子落盘（临时文件 + replace）。写失败降级为仅本实例内存态并告警。"""
-        try:
-            self._state_path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = self._state_path.with_name(self._state_path.name + ".tmp")
-            tmp.write_text(
-                json.dumps(
-                    {"disabled": sorted(disabled), "enabled": sorted(enabled)},
-                    ensure_ascii=False,
-                    indent=2,
-                ),
-                encoding="utf-8",
-            )
-            os.replace(tmp, self._state_path)
-        except OSError:
-            logger.warning(
-                "插件状态写入失败（仅本会话内生效）: {}", self._state_path
-            )
+        """原子落盘（临时文件 + os.replace）。失败**向上抛**——调用方必须能
+        如实向用户报告；“内存已改、磁盘没动”的分叉会在下次启动被推翻
+        （#1267 评审）。"""
+        self._state_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self._state_path.with_name(self._state_path.name + ".tmp")
+        tmp.write_text(
+            json.dumps(
+                {"disabled": sorted(disabled), "enabled": sorted(enabled)},
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        os.replace(tmp, self._state_path)
 
-    def _set_disabled(self, name: str, disabled: bool) -> None:
-        """全局停用/恢复：读-改-写在进程内锁下完成（P2：并发写不丢更新）。"""
+    @staticmethod
+    def _disabled_key(scope: str, name: str) -> str:
+        return f"{scope}:{name}"
+
+    def _disabled_for(self, scope: str, name: str) -> bool:
+        """该作用域的插件是否被持久停用。兼容早期格式的裸名字记录
+        （视为匹配任意作用域）。"""
+        keys = self._read_state()[0]
+        return self._disabled_key(scope, name) in keys or name in keys
+
+    def _set_disabled_for(self, scope: str, name: str, disabled: bool) -> None:
+        """按作用域记录/清除停用（#1267 评审：同名跨作用域不串扰）。
+        读-改-写在进程内锁下完成（P2）；写入失败向上抛，调用方必须如实报告。"""
+        key = self._disabled_key(scope, name)
         with _STATE_LOCK:
             disabled_set, enabled_set = self._read_state()
+            disabled_set.discard(name)  # 顺带清理早期裸名字格式的记录
             if disabled:
-                disabled_set.add(name)
+                disabled_set.add(key)
             else:
-                disabled_set.discard(name)
+                disabled_set.discard(key)
             self._write_state(disabled_set, enabled_set)
-
-    def _disabled_names(self) -> set[str]:
-        return self._read_state()[0]
 
     def _workspace_key(self, name: str) -> str | None:
         """工作区插件的信任键：绝对工作区路径 + 插件名（授权不跨工作区）。"""
@@ -569,7 +592,8 @@ class PluginManager:
     def uninstall_plugin(self, name: str) -> bool:
         """Uninstall a plugin by name.
 
-        ``user`` 作用域：目录真实删除并清除其停用记录（同名重装不被误停用）。
+        ``user`` 作用域：目录真实删除，并清除其 user 作用域停用记录（同名重装
+        不被误停用；不影响同名 system 插件的记录）。
         ``system``（随包内置）作用域：磁盘副本**不删除**——onefile 构建每次启动
         重新解包，开发机上它还是仓库源码；卸载折叠为**持久停用**（写入状态文件，
         由每次发现时生效）。报告成功且下次启动不会「又回来」——不再假装删掉了
@@ -586,10 +610,13 @@ class PluginManager:
             pass
         else:
             if user_target.exists():
+                # #1267 评审：删除失败(占用/权限)必须抛出——不得清空注册表
+                # 假装卸载成功(discovery 下次会把它再装回来)；记录清除只做
+                # user 作用域,不影响同名 system 插件的停用记录。
+                shutil.rmtree(user_target)
                 self._unregister_plugin_hooks(name)
-                shutil.rmtree(user_target, ignore_errors=True)
                 self._plugins.pop(name, None)
-                self._set_disabled(name, False)
+                self._set_disabled_for("user", name, False)
                 return True
 
         plugin = self._plugins.get(name)
@@ -599,8 +626,9 @@ class PluginManager:
         except ValueError:
             return False
         if system_target.exists() or (plugin is not None and plugin.scope == "system"):
+            # #1267 评审：先落盘(失败即抛),再改内存。
+            self._set_disabled_for("system", name, True)
             self._unregister_plugin_hooks(name)
-            self._set_disabled(name, True)
             if plugin is not None:
                 plugin.status = "disabled"
             return True
@@ -666,6 +694,13 @@ class PluginManager:
         if plugin is None:
             raise ValueError(f"Plugin '{name}' not found")
 
+        # #1267 评审：先持久化（失败即抛，内存状态保持不变），再改内存与
+        # hooks——避免「界面已变、磁盘没动」在下次启动被推翻。
+        if plugin.scope == "workspace":
+            # 工作区插件：启用/停用即授权/撤销（按工作区路径持久化）
+            self._set_workspace_trust(name, enabled)
+        else:
+            self._set_disabled_for(plugin.scope, name, not enabled)
         if enabled:
             plugin.status = "active"
             self._unregister_plugin_hooks(name)
@@ -673,9 +708,4 @@ class PluginManager:
         else:
             plugin.status = "disabled"
             self._unregister_plugin_hooks(name)
-        if plugin.scope == "workspace":
-            # 工作区插件：启用/停用即授权/撤销（按工作区路径持久化，#1267 评审）
-            self._set_workspace_trust(name, enabled)
-        else:
-            self._set_disabled(name, not enabled)
         return plugin
