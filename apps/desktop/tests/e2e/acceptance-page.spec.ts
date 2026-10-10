@@ -106,6 +106,30 @@ test.describe.serial('验收(SURE)面板 E2E · 健康/运行/报告', () => {
 
     await page.screenshot({ path: 'test-results/acceptance-report.png', fullPage: true });
   });
+
+  test('生成修复契约 → 复核对比(阶段 4;承接上一条的报告态)', async () => {
+    // describe.serial:上一条用例结束时处于 check 报告态,操作行含「生成修复契约」
+    await page.getByTestId('acceptance-repair').click();
+    await expect(page.getByTestId('acceptance-running')).toBeVisible({ timeout: 10_000 });
+    await expect(page.getByText(/生成修复契约中/)).toBeVisible();
+
+    await expect(page.getByTestId('acceptance-report')).toBeVisible({ timeout: 30_000 });
+    await expect(page.getByText('修复契约(5)')).toBeVisible();
+    await expect(page.getByText('必须修复:').first()).toBeVisible();
+    await expect(page.getByText('禁止走捷径:').first()).toBeVisible();
+    await expect(page.getByText('fake payment', { exact: false }).first()).toBeVisible();
+    await page.screenshot({ path: 'test-results/acceptance-repair.png', fullPage: true });
+
+    // 复核:mock recheck fixture = still_open 5 / closed 0(「删标记但不跑检查 = 仍 open」语义)
+    await page.getByTestId('acceptance-recheck').click();
+    await expect(page.getByText(/复审对比中/)).toBeVisible({ timeout: 10_000 });
+    await expect(page.getByText('复审对比')).toBeVisible({ timeout: 30_000 });
+    await expect(page.getByText(/发现项只在修复契约点名的检查/)).toBeVisible();
+    await expect(
+      page.getByText('project contains fake payment', { exact: false }).first()
+    ).toBeVisible();
+    await page.screenshot({ path: 'test-results/acceptance-recheck.png', fullPage: true });
+  });
 });
 
 test.describe.serial('验收(SURE)面板 E2E · 取消', () => {

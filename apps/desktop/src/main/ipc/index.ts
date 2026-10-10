@@ -2476,12 +2476,18 @@ for m in ("pydantic", "httpx", "loguru"):
 
   ipcMain.handle(IPC.SURE_CHECK_START, async (_event, payload: unknown) => {
     // #1273 评审:渲染层参数视为不可信——解构前先校验,坏载荷返回
-    // SureApiResult 形状而不是抛 TypeError。
-    const project = (payload as { project?: unknown } | null | undefined)?.project;
+    // SureApiResult 形状而不是抛 TypeError。command(阶段 4)交给
+    // Python 侧校验(check/repair/recheck)。
+    const raw = payload as { project?: unknown; command?: unknown } | null | undefined;
+    const project = raw?.project;
     if (typeof project !== 'string') {
       return { ok: false, error: 'project must be a string', code: 'INVALID_PARAMS' };
     }
-    return bridge.sendSafeWithError('sure.check.start', { project });
+    const command = typeof raw?.command === 'string' ? raw.command : undefined;
+    return bridge.sendSafeWithError(
+      'sure.check.start',
+      command ? { project, command } : { project }
+    );
   });
 
   ipcMain.handle(IPC.SURE_CHECK_CANCEL, async () => {

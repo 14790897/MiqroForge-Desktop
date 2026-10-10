@@ -8,19 +8,25 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { AlertTriangle, FolderOpen, Loader2, Play, RefreshCw, XCircle } from 'lucide-react';
+import { AlertTriangle, FolderOpen, Loader2, Play, RefreshCw, Wrench, XCircle } from 'lucide-react';
 import { Button } from '../../components/ui/Button';
 import { ReportView } from './ReportView';
 import {
+  commandLabel,
   formatElapsed,
   type SureApiResult,
   type SureCheckEnvelope,
   type SureCheckFailure,
   type SureCheckStatus,
+  type SureCommand,
   type SureHealth,
 } from '../../../shared/sureReport';
 
 type Phase = 'idle' | 'running' | 'report' | 'failed' | 'cancelled';
+
+function asCommand(value: unknown): SureCommand {
+  return value === 'repair' || value === 'recheck' ? value : 'check';
+}
 
 export function AcceptancePage() {
   const [health, setHealth] = useState<SureHealth | null>(null);
@@ -34,6 +40,8 @@ export function AcceptancePage() {
   const [envelope, setEnvelope] = useState<SureCheckEnvelope | null>(null);
   const [failure, setFailure] = useState<SureCheckFailure | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+  // 阶段 4:当前/最近一次任务命令(check/repair/recheck)——驱动运行中文案与按钮
+  const [runningCommand, setRunningCommand] = useState<SureCommand>('check');
   // #1273 评审:本任务是否已收到终态事件(report/failed/cancelled)——
   // start 响应晚于终态事件到达时,不得把 phase 覆盖回「运行中」藏掉结果。
   const terminalRef = useRef(false);
@@ -64,6 +72,7 @@ export function AcceptancePage() {
           setProject(res.value.task.project);
           setStartedAt(res.value.task.startedAt);
           setElapsedMs(res.value.task.elapsedMs);
+          setRunningCommand(asCommand(res.value.task.command));
           setPhase('running');
         }
       } catch {
@@ -81,6 +90,7 @@ export function AcceptancePage() {
     try {
       unsubs.push(
         window.miqi.sure.onProgress((d) => {
+          setRunningCommand(asCommand(d.command));
           setElapsedMs(d.elapsedMs);
           setStartedAt((s) => s ?? Date.now() - d.elapsedMs);
           setPhase('running');
@@ -122,35 +132,40 @@ export function AcceptancePage() {
     return () => clearInterval(timer);
   }, [phase, startedAt]);
 
-  const startCheck = useCallback(async () => {
-    setActionError(null);
-    setEnvelope(null);
-    setFailure(null);
-    terminalRef.current = false; // 新任务:终态守卫复位
-    try {
-      const res = (await window.miqi.sure.startCheck(project.trim())) as SureApiResult<{
-        taskId: string;
-        project: string;
-      }> | null;
-      if (!res || !res.ok) {
-        setActionError(res ? res.error : '启动核查失败(桥可能未运行)');
-        // #1273 评审:失败回到 idle——否则在 report/failed 态发起重试失败后,
-        // 输入框与开始按钮被隐藏,用户无法再次重试。
+  const run = useCallback(
+    async (command: SureCommand) => {
+      setActionError(null);
+      setEnvelope(null);
+      setFailure(null);
+      terminalRef.current = false; // 新任务:终态守卫复位
+      setRunningCommand(command);
+      try {
+        const res = (await window.miqi.sure.startCheck(project.trim(), command)) as SureApiResult<{
+          taskId: string;
+          project: string;
+          command?: string;
+        }> | null;
+        if (!res || !res.ok) {
+          setActionError(res ? res.error : '启动失败(桥可能未运行)');
+          // #1273 评审:失败回到 idle——否则在 report/failed 态发起重试失败后,
+          // 输入框与开始按钮被隐藏,用户无法再次重试。
+          setPhase('idle');
+          return;
+        }
+        setStartedAt(Date.now());
+        setElapsedMs(0);
+        // #1273 评审:终态事件可能先于 start 响应到达(极快进程)——
+        // 已终结则不覆盖回「运行中」,保住报告/失败/取消态。
+        if (!terminalRef.current) {
+          setPhase('running');
+        }
+      } catch (e) {
+        setActionError(e instanceof Error ? e.message : String(e));
         setPhase('idle');
-        return;
       }
-      setStartedAt(Date.now());
-      setElapsedMs(0);
-      // #1273 评审:终态事件可能先于 start 响应到达(极快进程)——
-      // 已终结则不覆盖回「运行中」,保住报告/失败/取消态。
-      if (!terminalRef.current) {
-        setPhase('running');
-      }
-    } catch (e) {
-      setActionError(e instanceof Error ? e.message : String(e));
-      setPhase('idle');
-    }
-  }, [project]);
+    },
+    [project]
+  );
 
   const cancelCheck = useCallback(async () => {
     try {
@@ -254,7 +269,7 @@ export function AcceptancePage() {
       {phase === 'idle' ? (
         <Button
           size="sm"
-          onClick={() => void startCheck()}
+          onClick={() => void run('check')}
           disabled={!sureReady || !project.trim()}
           data-testid="acceptance-start"
         >
@@ -271,7 +286,8 @@ export function AcceptancePage() {
           <Loader2 size={16} className="animate-spin text-[var(--info)]" />
           <div className="flex-1 min-w-0">
             <p className="text-xs text-[var(--text)]">
-              核查中 · 已耗时 <span className="font-mono">{formatElapsed(elapsedMs)}</span>
+              {commandLabel(runningCommand)}中 · 已耗时{' '}
+              <span className="font-mono">{formatElapsed(elapsedMs)}</span>
             </p>
             <p className="text-size-2xs text-[var(--text-faint)] font-mono truncate">{project}</p>
           </div>
@@ -285,9 +301,29 @@ export function AcceptancePage() {
       {phase === 'report' && envelope ? (
         <div className="space-y-4" data-testid="acceptance-report">
           <ReportView envelope={envelope} />
-          <div className="pt-2 border-t border-[var(--border)]">
-            <Button variant="secondary" size="sm" onClick={() => void startCheck()}>
-              <RefreshCw size={13} className="mr-1" /> 再次核查
+          <div className="flex items-center gap-2 pt-2 border-t border-[var(--border)] flex-wrap">
+            {envelope.command === 'check' && envelope.details.report.findings.length > 0 ? (
+              <Button size="sm" onClick={() => void run('repair')} data-testid="acceptance-repair">
+                <Wrench size={13} className="mr-1" /> 生成修复契约
+              </Button>
+            ) : null}
+            {envelope.command === 'repair' ? (
+              <Button
+                size="sm"
+                onClick={() => void run('recheck')}
+                data-testid="acceptance-recheck"
+              >
+                <RefreshCw size={13} className="mr-1" /> 复核(修复后对比)
+              </Button>
+            ) : null}
+            {envelope.command === 'recheck' &&
+            (envelope.details.lifecycle?.still_open?.length ?? 0) > 0 ? (
+              <Button size="sm" onClick={() => void run('repair')}>
+                <Wrench size={13} className="mr-1" /> 再取修复契约
+              </Button>
+            ) : null}
+            <Button variant="secondary" size="sm" onClick={() => void run('check')}>
+              <RefreshCw size={13} className="mr-1" /> 重新核查
             </Button>
           </div>
         </div>
@@ -309,7 +345,7 @@ export function AcceptancePage() {
               {failure.stderrTail}
             </pre>
           ) : null}
-          <Button variant="secondary" size="sm" onClick={() => void startCheck()}>
+          <Button variant="secondary" size="sm" onClick={() => void run(runningCommand)}>
             <RefreshCw size={13} className="mr-1" /> 重试
           </Button>
         </div>

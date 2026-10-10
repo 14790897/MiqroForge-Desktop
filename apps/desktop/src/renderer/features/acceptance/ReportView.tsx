@@ -12,7 +12,9 @@ import type { ReactNode } from 'react';
 import type {
   SureCheckEnvelope,
   SureFinding,
+  SureLifecycle,
   SureNotChecked,
+  SureRepairContract,
   SureStageRecord,
 } from '../../../shared/sureReport';
 import {
@@ -124,8 +126,75 @@ function StageRow({ stage }: { stage: SureStageRecord }) {
   );
 }
 
+function ContractList({ label, items }: { label: string; items: string[] }) {
+  if (items.length === 0) return null;
+  return (
+    <div>
+      <span className="text-size-2xs text-[var(--text-faint)]">{label}:</span>
+      <ul className="list-disc pl-4 text-xs text-[var(--text-muted)]">
+        {items.map((item, i) => (
+          <li key={i}>{item}</li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+function RepairContractCard({ contract }: { contract: SureRepairContract }) {
+  return (
+    <div className="rounded-md border border-[var(--border)] p-3 space-y-2">
+      <p className="text-sm font-medium text-[var(--text)]">{contract.problem}</p>
+      <p className="text-xs text-[var(--text-muted)]">{contract.why_it_matters}</p>
+      <div className="space-y-1.5">
+        <ContractList label="必须修复" items={contract.required_fix} />
+        <ContractList label="必须保留" items={contract.preserve ?? []} />
+        <ContractList label="验收标准" items={contract.acceptance} />
+        <ContractList label="禁止走捷径" items={contract.forbidden_shortcuts ?? []} />
+      </div>
+      {contract.rechecks_that_must_pass && contract.rechecks_that_must_pass.length > 0 ? (
+        <p className="text-size-2xs font-mono text-[var(--text-faint)]">
+          复核项:{contract.rechecks_that_must_pass.join('、')}
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
+/** 复审对比(recheck):关闭有条件,残留不隐藏。 */
+function LifecycleSection({ lifecycle }: { lifecycle: SureLifecycle }) {
+  return (
+    <section>
+      <SectionTitle>复审对比</SectionTitle>
+      <p className="text-size-2xs text-[var(--text-muted)] mb-2">
+        发现项只在修复契约点名的检查<strong>本次运行且全部通过</strong>时才关闭;其余原样保留。
+      </p>
+      {lifecycle.closed.length === 0 && lifecycle.still_open.length === 0 ? (
+        <p className="text-xs text-[var(--text-muted)]">没有可对比的发现项变化。</p>
+      ) : (
+        <div className="divide-y divide-[var(--border)]">
+          {lifecycle.closed.map((f) => (
+            <div key={f.id} className="flex items-center gap-2 py-1.5">
+              <ToneBadge tone="ok">已关闭</ToneBadge>
+              <span className="text-xs text-[var(--text)]">{f.title}</span>
+            </div>
+          ))}
+          {lifecycle.still_open.map((f) => (
+            <div key={f.id} className="flex items-center gap-2 py-1.5 flex-wrap">
+              <ToneBadge tone={findingTone(f.severity)}>{f.severity}</ToneBadge>
+              <span className="text-xs text-[var(--text)]">{f.title}</span>
+              <span className="text-size-2xs text-[var(--text-muted)]">
+                {findingStatusLabel(f.status)}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
 export function ReportView({ envelope }: { envelope: SureCheckEnvelope }) {
-  const { report, stages } = envelope.details;
+  const { report, stages, repairs, lifecycle } = envelope.details;
   const agg = report.aggregate;
 
   return (
@@ -158,6 +227,21 @@ export function ReportView({ envelope }: { envelope: SureCheckEnvelope }) {
           </p>
         ) : null}
       </section>
+
+      {/* ② 复审对比(recheck) */}
+      {lifecycle ? <LifecycleSection lifecycle={lifecycle} /> : null}
+
+      {/* ③ 修复契约(repair) */}
+      {repairs && repairs.length > 0 ? (
+        <section>
+          <SectionTitle>修复契约({repairs.length})</SectionTitle>
+          <div className="space-y-2">
+            {repairs.map((c) => (
+              <RepairContractCard key={c.id} contract={c} />
+            ))}
+          </div>
+        </section>
+      ) : null}
 
       {/* ② 发现的问题 */}
       <section>
