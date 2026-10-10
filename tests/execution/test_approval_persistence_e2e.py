@@ -21,6 +21,7 @@ import pytest
 
 from miqi.execution.orchestrator import (
     _MAX_COMMAND_LENGTH,
+    _summarize_pattern_for_log,
     ToolExecutionContext,
     ToolOrchestrator,
 )
@@ -166,6 +167,25 @@ async def test_session_approval_persists_for_long_exec_command():
         "Long exec command should auto-allow via session allowlist, "
         f"got {decision2.verdict}"
     )
+
+
+def test_summarize_pattern_for_log_redacts_long_exec_command():
+    """日志摘要：exec 命令超长时截断（匹配键仍完整），其余 pattern 原样。
+
+    回归 #1272 CodeRabbit Security & Privacy：完整命令 500 字符之后可能带
+    凭据，不应落进 INFO 日志。
+    """
+    long_cmd = "curl https://api.example.com " + "x" * 600 + " --token=SECRET"
+    pattern = f"exec:{long_cmd}"
+
+    summarized = _summarize_pattern_for_log(pattern)
+    assert "SECRET" not in summarized
+    assert summarized.startswith("exec:")
+    assert len(summarized) <= len("exec:") + _MAX_COMMAND_LENGTH + 1  # 1 = 省略号
+
+    # 短命令与其它工具类别不变
+    assert _summarize_pattern_for_log("exec:echo hi") == "exec:echo hi"
+    assert _summarize_pattern_for_log("write_file:/etc/hosts") == "write_file:/etc/hosts"
 
 
 @pytest.mark.asyncio

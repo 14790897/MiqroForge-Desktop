@@ -199,6 +199,21 @@ def _sanitize_exc_for_ui(exc: BaseException) -> str:
     return f"{type(exc).__name__}: {raw}" if raw else type(exc).__name__
 
 
+def _summarize_pattern_for_log(pattern: str) -> str:
+    """Log-safe summary of an allowlist pattern.
+
+    匹配端用完整键（exec 的键是 exec:<完整命令>），但 INFO 日志里只保留命令
+    前 _MAX_COMMAND_LENGTH 字符 —— 完整命令 500 字符之后可能带凭据，不应
+    落进日志（#1272 CodeRabbit Security & Privacy）。其余工具的 pattern 是
+    hash 或路径，保持原样。
+    """
+    if pattern.startswith("exec:"):
+        cmd = pattern[len("exec:"):]
+        if len(cmd) > _MAX_COMMAND_LENGTH:
+            return f"exec:{cmd[:_MAX_COMMAND_LENGTH]}…"
+    return pattern
+
+
 class OrchestrationResult(str, Enum):
     SUCCESS = "success"
     DENIED_BY_POLICY = "denied_by_policy"
@@ -831,7 +846,7 @@ class ToolOrchestrator:
         self.permissions.permanent_allowlist.add(pattern)
         logger.info(
             "Permanent approval recorded: pattern={!r} session={}",
-            pattern, self._session_id,
+            _summarize_pattern_for_log(pattern), self._session_id,
         )
 
         # Phase 31.X: sync to global (cross-session, persisted) allowlist
@@ -862,7 +877,7 @@ class ToolOrchestrator:
         self.permissions.session_allowlist.add(pattern)
         logger.info(
             "Session approval recorded: pattern={!r} session={}",
-            pattern, self._session_id,
+            _summarize_pattern_for_log(pattern), self._session_id,
         )
 
     def list_pending_approvals(self) -> list[dict[str, Any]]:
