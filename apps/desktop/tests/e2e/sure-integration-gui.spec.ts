@@ -200,4 +200,21 @@ test.describe('SURE 集成 GUI 验收(阶段 0)', () => {
       console.log('[sure-acceptance] GUI 验收完成:工具表✓ 注册✓ 弹窗✓(永久允许可用) 报告渲染✓');
     }
   );
+
+  test('缺 project 的核查调用在派发前被拒(路径运行时保护)', { timeout: LLM_TIMEOUT }, async () => {
+    const main = page.locator('main');
+    // mock 在含「缺路径」的 prompt 下发出**不带 project** 的 mcp_sure_sure_check
+    await sendMessage(page, '缺路径:请调用核查工具检查一下项目(不要传路径参数)');
+    // 拒绝文案直接进聊天区(工具结果),模型逐字回贴
+    await expect(main.getByText('权限被拒绝', { exact: false }).first()).toBeVisible({
+      timeout: 60_000,
+    });
+    await expect(main.getByText('绝对路径', { exact: false }).first()).toBeVisible({
+      timeout: 10_000,
+    });
+    // 路径保护位于审批判定之前(结构性错误不是可授权的偏好):不应出现审批弹窗
+    expect(await page.getByTestId('approval-title').count()).toBe(0);
+    await waitForResponseComplete(page, 60_000);
+    console.log('[sure-acceptance] 缺 project 调用已在派发前被拒,且未弹审批');
+  });
 });
