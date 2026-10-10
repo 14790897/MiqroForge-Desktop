@@ -177,6 +177,11 @@ async def probe_sure_health(
     """``sure --version`` 探测:二进制是否可用 + 版本号(供面板"引导安装"分支)。
 
     永不抛出:任何失败折叠为 ``installed=False`` + 面向用户的 error。
+
+    外部评审第 2 轮修正:① 超时/异常时**显式终止并回收子进程**——wait_for 只
+    取消等待、不杀进程,反复健康检查会泄漏孤儿;探测与任务同款 spawn
+    (POSIX ``start_new_session``),复用 ``_kill_process_tree`` 树杀语义;
+    ② 退出码非零视为不可用——不能把"能启动"当成"能工作"。
     """
     provider = bin_provider or resolve_sure_bin
     builder = env_builder or build_sure_env
@@ -188,16 +193,27 @@ async def probe_sure_health(
             "version": None,
             "error": "未找到 SURE:请安装 SURE,或用 SURE_BIN 指向其可执行文件",
         }
+    spawn_kwargs: dict[str, Any] = {}
+    if os.name == "nt":
+        spawn_kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+    else:
+        spawn_kwargs["start_new_session"] = True  # 进程组隔离,树杀不会误伤自身
+    proc: asyncio.subprocess.Process | None = None
     try:
         proc = await asyncio.create_subprocess_exec(
             binary, "--version",
             env=builder(),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
-            **(dict(creationflags=subprocess.CREATE_NO_WINDOW) if os.name == "nt" else {}),
+            **spawn_kwargs,
         )
         stdout_b, _stderr_b = await asyncio.wait_for(proc.communicate(), timeout=timeout)
     except Exception as exc:  # noqa: BLE001 —— 健康检查绝不抛出
+        if proc is not None:
+            try:
+                await _kill_process_tree(proc)
+            except Exception:
+                logger.warning("健康检查失败后清理 SURE 子进程未成功: {}", binary)
         return {
             "installed": False,
             "binary": binary,
@@ -205,6 +221,13 @@ async def probe_sure_health(
             "error": f"无法运行 SURE:{exc}",
         }
     version = parse_sure_version((stdout_b or b"").decode("utf-8", errors="replace"))
+    if proc.returncode != 0:
+        return {
+            "installed": False,
+            "binary": binary,
+            "version": version,
+            "error": f"SURE --version 退出码 {int(proc.returncode or 0)},二进制可能损坏",
+        }
     return {"installed": True, "binary": binary, "version": version, "error": None}
 
 

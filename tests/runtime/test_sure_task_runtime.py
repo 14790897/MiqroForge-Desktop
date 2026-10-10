@@ -255,3 +255,46 @@ async def test_cancel_refused_after_process_exit(fake_sure_bin, tmp_path):
 
     assert await rt.cancel(client_id="c1") is False
     assert task.cancelled is False
+
+
+# ── 健康检查:超时清理与退出码判定(外部评审第 2 轮)────────────────────
+
+
+@pytest.mark.asyncio
+async def test_health_timeout_kills_child_process(tmp_path, monkeypatch):
+    """sure --version 卡死超时后,子进程必须被显式终止并回收(不留孤儿)。"""
+    import miqi.runtime.sure_task_runtime as rt_mod
+
+    slow_bin = _wrap_as_sure(tmp_path, "import time\ntime.sleep(300)\n")
+    calls = []
+    real_kill = rt_mod._kill_process_tree
+
+    async def spy(proc, **kwargs):
+        calls.append(proc)
+        await real_kill(proc, **kwargs)
+
+    monkeypatch.setattr(rt_mod, "_kill_process_tree", spy)
+
+    res = await rt_mod.probe_sure_health(
+        bin_provider=lambda: slow_bin,
+        env_builder=lambda: {**os.environ},
+        timeout=0.5,
+    )
+    assert res["installed"] is False
+    assert len(calls) == 1, "超时必须触发显式进程清理"
+    assert calls[0].returncode is not None, "清理后子进程必须已被回收"
+
+
+@pytest.mark.asyncio
+async def test_health_nonzero_exit_is_not_installed(tmp_path):
+    """--version 退出码非零 → installed=False(不能把"能启动"当"能工作")。"""
+    import miqi.runtime.sure_task_runtime as rt_mod
+
+    bad_bin = _wrap_as_sure(tmp_path, "import sys\nprint('sure 0.1.2')\nsys.exit(3)\n")
+    res = await rt_mod.probe_sure_health(
+        bin_provider=lambda: bad_bin,
+        env_builder=lambda: {**os.environ},
+        timeout=5.0,
+    )
+    assert res["installed"] is False
+    assert res["error"]
