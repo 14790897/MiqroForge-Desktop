@@ -603,6 +603,10 @@ class ToolOrchestrator:
                         if isinstance(decision.details, dict)
                         else "")[:_MAX_COMMAND_LENGTH],
             "allow_permanent": decision.allow_permanent,
+            # 审批键用**原始**参数在请求时刻算好并存这里(独立于 sanitize 的展示
+            # 副本):记录端(_make_approval_pattern)与匹配端(check)由此共用同一
+            # 稳定键,「本次会话允许/永久允许」才真正生效(#1259 CodeRabbit Major)
+            "decision_key": PermissionEngine.key_for(ctx.tool_name, ctx.arguments),
             "created_at": created_at,
             "timeout_ms": self.approval_timeout_ms,
         }
@@ -788,7 +792,22 @@ class ToolOrchestrator:
             if not path:
                 return None
             return f"{tool}:{path}"
-        # Fallback: use the description field (user-visible text)
+        # 首选:_request_approval 在请求时刻用**原始参数**算好的 decision_key。
+        # 不能用 meta["details"] 里的副本:那是经 _sanitize_details 处理的展示副本
+        # (list/tuple 被转成字符串、长字符串被截断、名为 token 的键被丢弃),与
+        # check() 匹配端用原始参数计算的键可能不一致——批准过「记住」的参数稍后
+        # 仍会再弹审批(#1259 CodeRabbit Major)。
+        key = meta.get("decision_key")
+        if isinstance(key, str) and key:
+            return key
+        # 兼容:旧形状 meta(details 携带 arguments)按同一稳定键计算;
+        # details 形状不可控(历史上存在字符串形态),失败即落 description。
+        details = meta.get("details")
+        args = details.get("arguments") if isinstance(details, dict) else None
+        if isinstance(args, dict):
+            return PermissionEngine.key_for(tool, args)
+        # 最后兜底:参数不可得(如 network 分支的 details 无 arguments)时退回
+        # description 仅作记录,不参与匹配(与该分支的历史行为一致)。
         pattern = (meta.get("description") or "").strip()
         if not pattern:
             return None
