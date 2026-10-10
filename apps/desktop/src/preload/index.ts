@@ -841,8 +841,8 @@ const api = {
   // -- SURE 验收(阶段 3):原生 spawn 核查 -----------------------------------------
   sure: {
     health: (): Promise<SureApiResult<SureHealth>> => ipcRenderer.invoke(IPC.SURE_HEALTH),
-    startCheck: (project: string): Promise<SureApiResult<SureCheckStartResult>> =>
-      ipcRenderer.invoke(IPC.SURE_CHECK_START, { project }),
+    startCheck: (project: string, command?: string): Promise<SureApiResult<SureCheckStartResult>> =>
+      ipcRenderer.invoke(IPC.SURE_CHECK_START, { project, command }),
     cancelCheck: (): Promise<SureApiResult<{ ok: boolean }>> =>
       ipcRenderer.invoke(IPC.SURE_CHECK_CANCEL),
     status: (): Promise<SureApiResult<SureCheckStatus>> =>
