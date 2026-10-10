@@ -12,10 +12,10 @@ Consults (in order):
 
 from __future__ import annotations
 
-import os
 import re
 from dataclasses import dataclass, field
 from enum import Enum
+from pathlib import Path
 from typing import Any
 
 from miqi.execution.exec_policy import PolicyVerdict
@@ -204,7 +204,11 @@ class PermissionEngine:
                         "请把 project 设为该项目的绝对路径后重试。"
                     ),
                 )
-            if not os.path.isabs(project):
+            if not Path(project).is_absolute():
+                # 用 Path(...).is_absolute() 而非 os.path.isabs:后者在 Python<3.13
+                # 的 Windows 上对盘符相对路径(如 `\repo`)返回 True——它相对的是
+                # "当前盘符",不是用户项目;Path 要求完全限定(带盘符的根),
+                # 与"必须是绝对路径"的守卫语义一致(CodeRabbit #1266)。
                 return PermissionDecision(
                     verdict=PermissionVerdict.DENY,
                     reason=(

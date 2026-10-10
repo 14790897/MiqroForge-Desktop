@@ -168,6 +168,20 @@ async def test_sure_project_tools_deny_relative_project(tool_name):
 
 
 @pytest.mark.asyncio
+@pytest.mark.skipif(os.name != "nt", reason="盘符相对路径的语义仅 Windows 成立")
+async def test_sure_project_tools_deny_drive_relative_windows_path():
+    """Windows 上单反斜杠开头的盘符相对路径(\\repo)必须拒绝:Python<3.13 的
+    os.path.isabs 对它返回 True(本机实测),但它相对的是"当前盘符",不是用户
+    项目——校验必须用 Path(...).is_absolute()(要求完全限定;CodeRabbit #1266)。"""
+    engine = PermissionEngine()
+    decision = await engine.check(
+        FakeContext("mcp_sure_sure_check", {"project": r"\sure-poc\hello"})
+    )
+    assert decision.verdict == PermissionVerdict.DENY
+    assert "绝对路径" in decision.reason
+
+
+@pytest.mark.asyncio
 async def test_sure_project_tools_absolute_project_falls_through_to_approval_flow():
     """绝对路径 → 不进路径保护,按既有审批分支走(不因本保护自动放行)。"""
     engine = PermissionEngine()
