@@ -30,7 +30,7 @@ from typing import Any, Awaitable, Callable
 from loguru import logger
 
 from miqi.config.schema import resolve_sure_bin
-from miqi.runtime.sure_report import SureReportError, parse_check_output, parse_sure_version
+from miqi.runtime.sure_report import SureReportError, parse_sure_output, parse_sure_version
 
 #: 进度心跳间隔(秒)。静默期也必须发,防 bridge 600s 空闲 drain(方案 §3 通道 B)。
 PROGRESS_INTERVAL_SECONDS = 5.0
@@ -89,6 +89,7 @@ class SureTask:
     project: str
     started_monotonic: float
     started_at_ms: int
+    command: str = "check"  # check | repair | recheck(阶段 4)
     proc: asyncio.subprocess.Process | None = None
     cancelled: bool = False
     runner: asyncio.Task | None = None
@@ -308,19 +309,28 @@ class SureTaskRuntime:
             "state": "running",
             "elapsedMs": task.elapsed_ms(),
             "startedAt": task.started_at_ms,
+            "command": task.command,
         }
 
     # ── 生命周期 ─────────────────────────────────────────────────────────
 
     async def start(
-        self, *, client_id: str, project: str, on_event: EventCallback
+        self,
+        *,
+        client_id: str,
+        project: str,
+        on_event: EventCallback,
+        command: str = "check",
     ) -> dict[str, Any]:
-        """启动一次核查;立即返回 {taskId, project},完成经 on_event 上报。
+        """启动一次 SURE 任务(check/repair/recheck);立即返回,完成经 on_event 上报。
 
         Raises:
-            SureBusyError: 该客户端已有核查在运行。
+            ValueError: 命令不在 check/repair/recheck 内。
+            SureBusyError: 该客户端已有任务在运行。
             SureUnavailableError: 探测不到或无法启动 SURE 二进制。
         """
+        if command not in ("check", "repair", "recheck"):
+            raise ValueError(f"unsupported SURE command: {command!r}")
         if self.active_for(client_id) is not None:
             raise SureBusyError(SureBusyError.USER_MESSAGE)
         binary = self._bin_provider()
@@ -332,6 +342,7 @@ class SureTaskRuntime:
             project=project,
             started_monotonic=time.monotonic(),
             started_at_ms=int(time.time() * 1000),
+            command=command,
         )
         self._tasks[task.task_id] = task
         spawn_kwargs: dict[str, Any] = {}
@@ -341,7 +352,7 @@ class SureTaskRuntime:
             spawn_kwargs["start_new_session"] = True  # 进程组 → killpg 可及全树
         try:
             task.proc = await asyncio.create_subprocess_exec(
-                binary, "check", project, "--format", "json",
+                binary, command, project, "--format", "json",
                 cwd=project,
                 env=self._env_builder(),
                 stdout=asyncio.subprocess.PIPE,
@@ -355,9 +366,13 @@ class SureTaskRuntime:
             self._run(task, on_event), name=f"sure-run:{task.task_id}"
         )
         logger.info(
-            "SURE 核查启动: {} project={} pid={}", task.task_id, project, task.proc.pid
+            "SURE 任务启动: {} command={} project={} pid={}",
+            task.task_id,
+            command,
+            project,
+            task.proc.pid,
         )
-        return {"taskId": task.task_id, "project": project}
+        return {"taskId": task.task_id, "project": project, "command": command}
 
     async def cancel(self, *, client_id: str) -> bool:
         """终止该客户端当前核查的进程树;取消不产出报告。
@@ -404,7 +419,12 @@ class SureTaskRuntime:
         assert proc is not None
 
         async def _emit(kind: str, data: dict[str, Any]) -> None:
-            payload = {"taskId": task.task_id, "project": task.project, **data}
+            payload = {
+                "taskId": task.task_id,
+                "project": task.project,
+                "command": task.command,
+                **data,
+            }
             try:
                 await on_event(kind, payload)
             except Exception:
@@ -513,7 +533,7 @@ class SureTaskRuntime:
             )
             return
         try:
-            envelope = parse_check_output(stdout)
+            envelope = parse_sure_output(stdout)
         except SureReportError as exc:
             tail = (stderr.strip() or stdout.strip())[-400:]
             message = str(exc)

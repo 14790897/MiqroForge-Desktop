@@ -403,3 +403,63 @@ async def test_health_cancellation_kills_child_process(tmp_path, monkeypatch):
         "取消后 stdout/stderr 管道传输必须已关闭——悬置的读流不会自行收尾,"
         "会拖到事件循环关闭后才被 GC(Windows proactor: unclosed transport)"
     )
+
+
+# ── 阶段 4:repair / recheck 命令 ─────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_repair_command_emits_contracts(fake_sure_bin, tmp_path):
+    events: list[tuple[str, dict]] = []
+
+    async def on_event(kind: str, data: dict) -> None:
+        events.append((kind, data))
+
+    rt = _runtime(fake_sure_bin)
+    started = await rt.start(
+        client_id="c1", project=str(tmp_path), on_event=on_event, command="repair"
+    )
+    assert started["command"] == "repair"
+    await _wait_for(events, ("sure_check_report",))
+
+    report = next(d for k, d in events if k == "sure_check_report")
+    assert report["command"] == "repair"
+    envelope = report["envelope"]
+    assert envelope["command"] == "repair"
+    repairs = envelope["details"]["repairs"]
+    assert len(repairs) == 5
+    assert repairs[0]["rechecks_that_must_pass"]
+
+
+@pytest.mark.asyncio
+async def test_recheck_command_emits_lifecycle(fake_sure_bin, tmp_path):
+    events: list[tuple[str, dict]] = []
+
+    async def on_event(kind: str, data: dict) -> None:
+        events.append((kind, data))
+
+    rt = _runtime(fake_sure_bin)
+    await rt.start(
+        client_id="c1", project=str(tmp_path), on_event=on_event, command="recheck"
+    )
+    await _wait_for(events, ("sure_check_report",))
+
+    report = next(d for k, d in events if k == "sure_check_report")
+    envelope = report["envelope"]
+    assert envelope["command"] == "recheck"
+    lifecycle = envelope["details"]["lifecycle"]
+    assert lifecycle["closed"] == []
+    assert len(lifecycle["still_open"]) == 5
+    assert report["command"] == "recheck"
+
+
+@pytest.mark.asyncio
+async def test_unknown_command_rejected(fake_sure_bin, tmp_path):
+    async def on_event(kind: str, data: dict) -> None:
+        pass
+
+    rt = _runtime(fake_sure_bin)
+    with pytest.raises(ValueError):
+        await rt.start(
+            client_id="c1", project=str(tmp_path), on_event=on_event, command="doctor"
+        )

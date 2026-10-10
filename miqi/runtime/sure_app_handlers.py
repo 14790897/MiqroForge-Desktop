@@ -51,6 +51,12 @@ def register_sure_handlers(server) -> None:
         if not os.path.isdir(project):
             raise AppServerError(f"项目目录不存在:{project}", code="INVALID_PARAMS")
 
+        command = (params or {}).get("command", "check")
+        if command not in ("check", "repair", "recheck"):
+            raise AppServerError(
+                "command 必须是 check/repair/recheck", code="INVALID_PARAMS"
+            )
+
         runtime = _get_runtime(registry)
 
         async def _on_event(kind: str, data: dict) -> None:
@@ -58,7 +64,7 @@ def register_sure_handlers(server) -> None:
 
         try:
             result = await runtime.start(
-                client_id=client_id, project=project, on_event=_on_event
+                client_id=client_id, project=project, on_event=_on_event, command=command
             )
         except SureUnavailableError as exc:
             # Phase 35 审计:AppServerError 只带固定安全文案,异常原文进日志
