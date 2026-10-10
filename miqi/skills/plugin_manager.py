@@ -12,7 +12,10 @@ from __future__ import annotations
 import asyncio
 import importlib
 import inspect
+import json
+import os
 import re
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -32,6 +35,11 @@ _PLUGIN_NAME_RE = re.compile(r"^[a-zA-Z0-9]([a-zA-Z0-9_.-]{0,62}[a-zA-Z0-9])?$")
 
 # Hosts allowed for direct plugin installation via URL.
 ALLOWED_HOSTS = {"github.com", "gitlab.com", "bitbucket.org"}
+
+# 状态文件读-改-写的进程内互斥（#1267 评审 P2）：_set_disabled /
+# _set_workspace_trust 全程持锁，并发写不丢更新、不共享临时文件。
+# 跨进程并发为文档化约束：单用户桌面场景，最后写者胜出。
+_STATE_LOCK = threading.Lock()
 
 
 def validate_plugin_name(name: str) -> None:
@@ -79,6 +87,9 @@ class PluginManager:
     1. ~/.forge/plugins/           — user plugins
     2. <workspace>/.forge/plugins/ — workspace plugins
     3. <miqi_install>/plugins/    — system/builtin plugins
+
+    Workspace 插件内容随被打开的项目而来、**默认不可信**（#1267 评审）：
+    未显式启用前以 disabled 装载——不注册 hooks、不并入 MCP、命令不注入。
     """
 
     def __init__(
@@ -93,6 +104,8 @@ class PluginManager:
         self.workspace = workspace
         self._hook_runtime = hook_runtime
         self._plugins: dict[str, LoadedPlugin] = {}
+        # #1267 评审：跨会话/跨启动共享的停用状态（与 user 插件目录同级）。
+        self._state_path = self.user_dir.parent / "plugins_state.json"
 
     def _make_command_callback(self, target: str):
         """Build an async callback that runs ``target`` through a shell."""
@@ -228,6 +241,22 @@ class PluginManager:
                         plugin_dir, manifest_path, scope
                     )
                     if plugin:
+                        # #1267 评审：未授权(disabled)的同名插件不得顶掉已生效
+                        # 的插件——伪造同名 plugin.json 不能借遮蔽停用系统插件。
+                        existing = self._plugins.get(plugin.manifest.name)
+                        if (
+                            plugin.status == "disabled"
+                            and existing is not None
+                            and existing.status == "active"
+                        ):
+                            logger.warning(
+                                "插件 '{}'({} 作用域)未授权且与已生效的 {} 作用域"
+                                "插件同名,保留已生效插件",
+                                plugin.manifest.name,
+                                scope,
+                                existing.scope,
+                            )
+                            continue
                         self._plugins[plugin.manifest.name] = plugin
                         discovered.append(plugin)
                 except Exception as e:
@@ -247,7 +276,7 @@ class PluginManager:
     ) -> LoadedPlugin | None:
         """Load a single plugin from its directory."""
         import json
-        manifest_data = json.loads(manifest_path.read_text())
+        manifest_data = json.loads(manifest_path.read_text(encoding="utf-8"))
 
         # Auto-discover skills from filesystem for KWP-style plugins
         # that don't declare skills explicitly in manifest
@@ -265,8 +294,18 @@ class PluginManager:
         plugin = LoadedPlugin(
             manifest=manifest, path=plugin_dir, scope=scope
         )
+        # #1267 评审（P1 信任边界）：该作用域被停用、或「未授权的工作区插件」
+        # 直接以 disabled 装载——不注册 hooks、不并入 MCP、命令不注入。工作区
+        # 内容随被打开的项目而来、可能不可信，必须由用户显式启用（授权按
+        # 工作区路径 + 插件名持久化，不跨工作区泄漏）。
+        if self._disabled_for(plugin.scope, plugin.manifest.name) or (
+            plugin.scope == "workspace"
+            and not self._workspace_trusted(plugin.manifest.name)
+        ):
+            plugin.status = "disabled"
         self._attach_plugin_commands(plugin)
-        self._register_plugin_hooks(plugin)
+        if plugin.status == "active":
+            self._register_plugin_hooks(plugin)
         return plugin
 
     def _attach_plugin_commands(self, plugin: LoadedPlugin) -> None:
@@ -466,28 +505,133 @@ class PluginManager:
             raise
         return plugin
 
+    # ── 持久状态与信任（#1267 评审：P1 信任边界 + P2 并发）──────────────────
+
+    def _read_state(self) -> tuple[set[str], set[str]]:
+        """(disabled, enabled) 两个集合。缺失/损坏一律视为空——状态文件
+        绝不被允许拖垮发现（宁可工具缺席，不可会话起不来）。"""
+        try:
+            data = json.loads(self._state_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return set(), set()
+        if not isinstance(data, dict):
+            return set(), set()
+
+        def _names(key: str) -> set[str]:
+            value = data.get(key)
+            if not isinstance(value, list):
+                return set()
+            return {n for n in value if isinstance(n, str)}
+
+        return _names("disabled"), _names("enabled")
+
+    def _write_state(self, disabled: set[str], enabled: set[str]) -> None:
+        """原子落盘（临时文件 + os.replace）。失败**向上抛**——调用方必须能
+        如实向用户报告；“内存已改、磁盘没动”的分叉会在下次启动被推翻
+        （#1267 评审）。"""
+        self._state_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self._state_path.with_name(self._state_path.name + ".tmp")
+        tmp.write_text(
+            json.dumps(
+                {"disabled": sorted(disabled), "enabled": sorted(enabled)},
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        os.replace(tmp, self._state_path)
+
+    @staticmethod
+    def _disabled_key(scope: str, name: str) -> str:
+        return f"{scope}:{name}"
+
+    def _disabled_for(self, scope: str, name: str) -> bool:
+        """该作用域的插件是否被持久停用。兼容早期格式的裸名字记录
+        （视为匹配任意作用域）。"""
+        keys = self._read_state()[0]
+        return self._disabled_key(scope, name) in keys or name in keys
+
+    def _set_disabled_for(self, scope: str, name: str, disabled: bool) -> None:
+        """按作用域记录/清除停用（#1267 评审：同名跨作用域不串扰）。
+        读-改-写在进程内锁下完成（P2）；写入失败向上抛，调用方必须如实报告。"""
+        key = self._disabled_key(scope, name)
+        with _STATE_LOCK:
+            disabled_set, enabled_set = self._read_state()
+            disabled_set.discard(name)  # 顺带清理早期裸名字格式的记录
+            if disabled:
+                disabled_set.add(key)
+            else:
+                disabled_set.discard(key)
+            self._write_state(disabled_set, enabled_set)
+
+    def _workspace_key(self, name: str) -> str | None:
+        """工作区插件的信任键：绝对工作区路径 + 插件名（授权不跨工作区）。"""
+        if self.workspace is None:
+            return None
+        return f"{Path(self.workspace).resolve()}::{name}"
+
+    def _workspace_trusted(self, name: str) -> bool:
+        key = self._workspace_key(name)
+        if key is None:
+            return False
+        return key in self._read_state()[1]
+
+    def _set_workspace_trust(self, name: str, trusted: bool) -> None:
+        """工作区插件的显式授权/撤销（与 _set_disabled 同持锁）。"""
+        key = self._workspace_key(name)
+        if key is None:
+            return
+        with _STATE_LOCK:
+            disabled_set, enabled_set = self._read_state()
+            if trusted:
+                enabled_set.add(key)
+            else:
+                enabled_set.discard(key)
+            self._write_state(disabled_set, enabled_set)
+
     def uninstall_plugin(self, name: str) -> bool:
         """Uninstall a plugin by name.
 
-        Removes the plugin directory from user/system dirs and unloads
-        the plugin. Returns True if the plugin was found and removed.
+        ``user`` 作用域：目录真实删除，并清除其 user 作用域停用记录（同名重装
+        不被误停用；不影响同名 system 插件的记录）。
+        ``system``（随包内置）作用域：磁盘副本**不删除**——onefile 构建每次启动
+        重新解包，开发机上它还是仓库源码；卸载折叠为**持久停用**（写入状态文件，
+        由每次发现时生效）。报告成功且下次启动不会「又回来」——不再假装删掉了
+        一个删不掉的目录（#1267 评审）。
         """
         import shutil
 
         validate_plugin_name(name)
 
-        for base in [self.user_dir, self.system_dir]:
-            target = (base / name).resolve()
-            try:
-                target.relative_to(base.resolve())
-            except ValueError:
-                continue
-            if target.exists():
+        user_target = (self.user_dir / name).resolve()
+        try:
+            user_target.relative_to(self.user_dir.resolve())
+        except ValueError:
+            pass
+        else:
+            if user_target.exists():
+                # #1267 评审：删除失败(占用/权限)必须抛出——不得清空注册表
+                # 假装卸载成功(discovery 下次会把它再装回来)；记录清除只做
+                # user 作用域,不影响同名 system 插件的停用记录。
+                shutil.rmtree(user_target)
                 self._unregister_plugin_hooks(name)
-                shutil.rmtree(target, ignore_errors=True)
-                if name in self._plugins:
-                    del self._plugins[name]
+                self._plugins.pop(name, None)
+                self._set_disabled_for("user", name, False)
                 return True
+
+        plugin = self._plugins.get(name)
+        system_target = (self.system_dir / name).resolve()
+        try:
+            system_target.relative_to(self.system_dir.resolve())
+        except ValueError:
+            return False
+        if system_target.exists() or (plugin is not None and plugin.scope == "system"):
+            # #1267 评审：先落盘(失败即抛),再改内存。
+            self._set_disabled_for("system", name, True)
+            self._unregister_plugin_hooks(name)
+            if plugin is not None:
+                plugin.status = "disabled"
+            return True
         return False
 
     def discover_sync(self) -> list[LoadedPlugin]:
@@ -539,7 +683,7 @@ class PluginManager:
         return plugin
 
     def toggle_plugin(self, name: str, enabled: bool) -> LoadedPlugin:
-        """Toggle a plugin enabled/disabled.
+        """Toggle a plugin enabled/disabled（持久化，跨会话/重启生效，#1267 评审）。
 
         Raises ValueError if the plugin is not found.
         """
@@ -550,6 +694,13 @@ class PluginManager:
         if plugin is None:
             raise ValueError(f"Plugin '{name}' not found")
 
+        # #1267 评审：先持久化（失败即抛，内存状态保持不变），再改内存与
+        # hooks——避免「界面已变、磁盘没动」在下次启动被推翻。
+        if plugin.scope == "workspace":
+            # 工作区插件：启用/停用即授权/撤销（按工作区路径持久化）
+            self._set_workspace_trust(name, enabled)
+        else:
+            self._set_disabled_for(plugin.scope, name, not enabled)
         if enabled:
             plugin.status = "active"
             self._unregister_plugin_hooks(name)

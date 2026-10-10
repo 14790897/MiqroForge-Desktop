@@ -655,7 +655,11 @@ async def _connect_one_server(
                 )
             elif transport == "stdio":
                 params = StdioServerParameters(
-                    command=cfg.command, args=cfg.args, env=cfg.env or None
+                    command=cfg.command,
+                    args=cfg.args,
+                    env=cfg.env or None,
+                    # #1267：插件条目带 cwd（插件根目录）时随 stdio 启动生效
+                    cwd=(getattr(cfg, "cwd", "") or None),
                 )
                 read, write = await server_stack.enter_async_context(stdio_client(params))
             elif transport == "http":

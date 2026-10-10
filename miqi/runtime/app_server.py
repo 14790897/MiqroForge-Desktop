@@ -294,11 +294,45 @@ class ClientSessionRegistry:
             self._client_sessions.setdefault(client_id, set()).add(session_id)
             self._session_clients[session_id] = {client_id}
             self._last_activity[session_id] = time.time()
+
+            # #1267：把本会话装配好的插件管理器发布到 bridge_context/state——
+            # plugin/* 处理器与插件页此前读到的该键恒为 None（插件列表永远为空、
+            # 安装/启停操作无处可落）。发布放在账号校验与登记**之后**（#1267 评审）：
+            # 中途换账号会被 _discard_session 拒绝，先发布会把被拒会话的管理器
+            # 留在 bridge 上；启停/卸载状态持久化于 plugins_state.json。
+            _services = getattr(runtime, "services", None)
+            _pm = getattr(_services, "plugin_manager", None) if _services is not None else None
+            if _pm is not None:
+                self.bridge_context["plugin_manager"] = _pm
+                _bridge_state = self.bridge_context.get("state")
+                if _bridge_state is not None:
+                    try:
+                        _bridge_state._plugin_manager = _pm
+                    except Exception:
+                        pass  # 属性发布是尽力而为，绝不阻塞会话建立
         logger.info(
             "ClientSessionRegistry: created session {} for client {}",
             session_id, client_id,
         )
         return runtime
+
+    def _clear_published_plugin_manager(self, session: Any) -> None:
+        """#1267 评审：会话停止/退役时，若 bridge 发布的正是该会话的插件管理器，
+        以对象身份比较后清空——plugin/* 处理器不得继续操作已停止会话的实例；
+        其他会话的实例不受影响。
+        """
+        _pm = getattr(getattr(session, "services", None), "plugin_manager", None)
+        if _pm is None or self.bridge_context.get("plugin_manager") is not _pm:
+            return
+        self.bridge_context["plugin_manager"] = None
+        _bridge_state = self.bridge_context.get("state")
+        if _bridge_state is not None and getattr(
+            _bridge_state, "_plugin_manager", None
+        ) is _pm:
+            try:
+                _bridge_state._plugin_manager = None
+            except Exception:
+                pass
 
     async def _discard_session(
         self,
@@ -328,6 +362,8 @@ class ClientSessionRegistry:
         self._last_activity.pop(session_id, None)
         for owned in self._client_sessions.values():
             owned.discard(session_id)
+
+        self._clear_published_plugin_manager(session)
 
         # `get_session` 那条路径拿不到 sandbox_manager 参数，用创建时记下的那个。
         manager = sandbox_manager if sandbox_manager is not None else self._sandbox_manager
@@ -423,6 +459,9 @@ class ClientSessionRegistry:
         # 账号记录跟着一起清（#1185）：漏掉它，每次空闲淘汰都会留下一份已停
         # 会话的归属记录，而且那条记录还会让下一次同键复用的比对拿到过期账号。
         self._session_account.pop(session_id, None)
+        # #1267 评审：正常停止/空闲淘汰与退役走同一条清理——已停止的会话
+        # 不得继续作为 bridge 的插件控制目标。
+        self._clear_published_plugin_manager(runtime)
 
     async def stop_all(self) -> None:
         """Stop all sessions (shutdown hook)."""
