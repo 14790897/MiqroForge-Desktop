@@ -12,6 +12,8 @@ Consults (in order):
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from dataclasses import dataclass, field
 from enum import Enum
@@ -129,6 +131,16 @@ class PermissionEngine:
         "task_begin",
         "task_end",
         "cron",
+        # SURE 项目核查工具(MCP server 'sure' 的 5 个工具,#1256 D5-A)。
+        # 此前落 unknown-tool 默认分支:每次调用都弹审批、无可「记住」选项、
+        # 文案为 "Unknown tool: …"。加入后仍弹审批但可「永久允许」。
+        # 注意:成员匹配为精确匹配(tool_name in ...),前缀规则不生效;
+        # 名字由 mcp_<server>_<tool> 命名规则生成(miqi/agent/tools/mcp.py)。
+        "mcp_sure_sure_check",
+        "mcp_sure_sure_get_report",
+        "mcp_sure_sure_get_repair",
+        "mcp_sure_sure_recheck",
+        "mcp_sure_sure_status",
     })
 
     # SURE 项目核查工具（MCP server 'sure'，命名 mcp_sure_<tool>）。
@@ -513,4 +525,20 @@ class PermissionEngine:
             return f"exec:{ctx.arguments.get('command', '')}"
         if tool in PermissionEngine.FILE_WRITE_TOOLS:
             return f"{tool}:{_office_target_path(tool, ctx.arguments)}"
-        return f"{tool}:{hash(str(ctx.arguments))}"
+        return PermissionEngine.key_for(tool, ctx.arguments)
+
+    @staticmethod
+    def key_for(tool_name: str, arguments: Any) -> str:
+        """tool + 参数 的稳定键（「本次会话允许 / 永久允许」的记录端与匹配端共用）。
+
+        不能用内置 ``hash()``：它对 str 每进程加盐（PYTHONHASHSEED 随机），
+        dict 顺序一变键也变——持久化的「永久允许」在重启后/不同参数顺序下
+        永远匹配不上（任何记录都成为空承诺，见 #1256 D5-A 验收）。
+        改用 canonical JSON（sort_keys）的 sha256 前 16 位十六进制。
+        """
+        try:
+            canonical = json.dumps(arguments, sort_keys=True, ensure_ascii=False, default=str)
+        except Exception:  # noqa: BLE001 — 极端不可序列化参数退回 repr，键仍稳定
+            canonical = repr(arguments)
+        digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
+        return f"{tool_name}:{digest}"

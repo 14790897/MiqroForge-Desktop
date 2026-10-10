@@ -54,6 +54,8 @@
 | `task-assets.spec.ts`（部分） | 守卫 | 无条件 `test.skip('标题', fn)` | 低 | 「AI 生成 .docx → 任务资产预览」一条被永久禁用；该文件其余用例在 Linux 上跑 |
 | `uninstall-cleanup.spec.ts` | 守卫 | `MIQI_E2E_UNINSTALL=1`（显式 opt-in）+ win32 + `~/.miqi`/`%APPDATA%\miqi-desktop` 当前不存在 + `dist-new/` 下有构建好的安装器；WSL 断言另需 `MIQI_E2E_WSL_ROOTFS` | 高（真机 NSIS 安装/卸载 + WSL 卷清理） | 卸载残留清理只能在真实 Windows 安装上验证：CI 既不设 `MIQI_E2E_UNINSTALL`、job 里也没有构建好的安装器（wsl-e2e 那一步按名字收集的 7 个 spec 不含本文件）；且它会真的安装再卸载整套应用、读写 `%APPDATA%` / `%LOCALAPPDATA%` / `HKCU\Software\MiqroForge` 等真实数据根，只能在被明确告知「本机可跑安装/卸载」的机器上执行（WSL 注销逻辑另有 `src/main/ipc/cleanup.test.ts` 单测覆盖） |
 
+| `sure-integration-gui.spec.ts` | 守卫 | win32 + 本机安装 SURE（`SURE_BIN` 或 `%LOCALAPPDATA%\SURE\bin\sure.exe`）+ 测试项目存在（`MIQI_SURE_PROJECT` 或默认 PoC 路径；均为 spec 内 `existsSync`） | 低（脚本化 mock 模型，单用例约 30s，无真实 LLM） | SURE 是 Windows per-user 安装的本地二进制（v0.1.2），CI runner 均未安装——spec 断言「5 个 `mcp_sure_*` 工具注册 + 审批弹窗 + 报告渲染」，无 sure.exe 时工具根本不注册。主验证在 Python 单测（`tests/execution/test_permission_engine.py`、`test_approval_persistence_e2e.py`）；接进 CI 需在 workflow 里预装 SURE（见 #1256） |
+
 ## 已接进 CI（#1196）
 
 以下两个 spec 原本也在零覆盖之列（win32-only 守卫），#1196 把它们接进了
