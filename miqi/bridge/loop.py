@@ -772,6 +772,10 @@ class BridgeRuntimeLoop:
         )
         register_workbench_process_state_handlers(self._app_server)
 
+        # 阶段 3:SURE 验收面板(sure/* 方法族:健康检查 / 原生核查 / 取消 / 状态)
+        from miqi.runtime.sure_app_handlers import register_sure_handlers
+        register_sure_handlers(self._app_server)
+
         # Phase 45: register Codex-style initialize/initialized handlers
         from miqi.runtime.initialize_protocol import (
             ConnectionState,
@@ -809,8 +813,15 @@ class BridgeRuntimeLoop:
             if fuzzy_runtime is not None:
                 fuzzy_runtime.cleanup_client(client_id)
 
+        # 阶段 3:客户端断连时终止其正在运行的 SURE 核查(整棵进程树)
+        async def _kill_client_sure_tasks(client_id: str) -> None:
+            sure_runtime = registry.bridge_context.get("sure_task_runtime")
+            if sure_runtime is not None:
+                await sure_runtime.kill_client(client_id)
+
         self._app_server.add_client_cleanup_hook(_kill_client_processes)
         self._app_server.add_client_cleanup_hook(_cleanup_phase46_client_resources)
+        self._app_server.add_client_cleanup_hook(_kill_client_sure_tasks)
 
         logger.info(
             "BridgeRuntimeLoop: AppServer initialized with {} methods",
