@@ -41,6 +41,12 @@ HEALTH_TIMEOUT_SECONDS = 10.0
 #: stdout 报文大小上限(防失控输出;正常报告几十 KB)。
 MAX_REPORT_BYTES = 8 * 1024 * 1024
 
+#: 子进程输出分块读取大小(stdout 有界累计;stderr 尾部保留)。
+STDIO_CHUNK_BYTES = 64 * 1024
+
+#: stderr 尾部保留上限(失败卡只展示最后 400 字符,留裕量)。
+STDERR_TAIL_BYTES = 8 * 1024
+
 #: 子进程环境白名单(方案 §阶段 3 工程选型,已评审)。
 _ENV_ALLOWLIST = (
     "SystemRoot",
@@ -395,11 +401,53 @@ class SureTaskRuntime:
         # 启动即一条进度(0ms):客户端据此立刻进入"运行中"
         await _emit("sure_check_progress", {"elapsedMs": 0, "state": "running"})
         heartbeat = asyncio.create_task(_heartbeat(), name=f"sure-hb:{task.task_id}")
+        async def _read_stdout_bounded() -> tuple[bytes, bool]:
+            """有界读取 stdout:累计超过 MAX_REPORT_BYTES 立即返回溢出标记。
+
+            不再用 communicate() 整段读回后才查上限——失控/对抗性输出会先
+            把内存吃满(评审:读取阶段就要设界,超限即由调用方终止写入方)。
+            """
+            assert proc.stdout is not None
+            chunks: list[bytes] = []
+            total = 0
+            while True:
+                chunk = await proc.stdout.read(STDIO_CHUNK_BYTES)
+                if not chunk:
+                    return b"".join(chunks), False
+                chunks.append(chunk)
+                total += len(chunk)
+                if total > MAX_REPORT_BYTES:
+                    return b"".join(chunks), True
+
+        async def _read_stderr_tail() -> bytes:
+            """持续排空 stderr 但只保留尾部(防管道写满拖死子进程;内存有界)。"""
+            assert proc.stderr is not None
+            tail = b""
+            while True:
+                chunk = await proc.stderr.read(STDIO_CHUNK_BYTES)
+                if not chunk:
+                    return tail
+                tail = (tail + chunk)[-STDERR_TAIL_BYTES:]
+
+        stdout_task = asyncio.create_task(
+            _read_stdout_bounded(), name=f"sure-out:{task.task_id}"
+        )
+        stderr_task = asyncio.create_task(
+            _read_stderr_tail(), name=f"sure-err:{task.task_id}"
+        )
         try:
-            stdout_b, stderr_b = await proc.communicate()
+            stdout_b, overflow = await stdout_task
+            if overflow:
+                # 超限即终止进程树,不等输出自然结束(写入方此刻被阻断收掉)
+                await _kill_process_tree(proc)
+            stderr_b = await stderr_task
+            await proc.wait()
         except asyncio.CancelledError:
-            # 运行时整体收停:先确保进程树终止,再向外抛
+            # 运行时整体收停:先让读流收尾并终止进程树,再向外抛
+            stdout_task.cancel()
+            stderr_task.cancel()
             await _kill_process_tree(proc)
+            await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
             self._tasks.pop(task.task_id, None)
             raise
         finally:
@@ -415,10 +463,14 @@ class SureTaskRuntime:
         stdout = stdout_b.decode("utf-8", errors="replace")
         stderr = stderr_b.decode("utf-8", errors="replace")
 
-        if len(stdout_b) > MAX_REPORT_BYTES:
+        if overflow:
             await _emit(
                 "sure_check_failed",
-                {"message": "SURE 输出超过上限,已放弃解析", "code": "SURE_OUTPUT_TOO_LARGE"},
+                {
+                    "message": "SURE 输出超过上限,已放弃解析",
+                    "code": "SURE_OUTPUT_TOO_LARGE",
+                    "stderrTail": stderr.strip()[-400:],
+                },
             )
             return
         try:

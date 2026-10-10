@@ -169,6 +169,43 @@ async def test_invalid_report_output_emits_failed(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_oversized_stdout_is_bounded_and_process_killed(tmp_path, monkeypatch):
+    """stdout 超过 8MiB 上限:读取阶段即截断并终止进程(评审:读取要有界)。
+
+    旧实现 communicate() 整段读回后才查 len——失控输出会先把内存吃满;
+    新实现分块累计,超限立即返回溢出标记并树杀写入方(不等它自然结束)。
+    """
+    import miqi.runtime.sure_task_runtime as rt_mod
+
+    big_bin = _wrap_as_sure(
+        tmp_path,
+        "import sys\nsys.stdout.write('x' * (9 * 1024 * 1024))\n",
+    )
+    calls = []
+    real_kill = rt_mod._kill_process_tree
+
+    async def spy(proc, **kwargs):
+        calls.append(proc)
+        await real_kill(proc, **kwargs)
+
+    monkeypatch.setattr(rt_mod, "_kill_process_tree", spy)
+
+    events: list[tuple[str, dict]] = []
+
+    async def on_event(kind: str, data: dict) -> None:
+        events.append((kind, data))
+
+    rt = _runtime(big_bin)
+    await rt.start(client_id="c1", project=str(tmp_path), on_event=on_event)
+    await _wait_for(events, ("sure_check_failed",))
+    failure = next(d for k, d in events if k == "sure_check_failed")
+    assert failure["code"] == "SURE_OUTPUT_TOO_LARGE"
+    assert failure["message"]
+    assert len(calls) == 1, "超限必须终止写入方进程树(不能等它自然结束)"
+    assert calls[0].returncode is not None, "超限后子进程必须已被回收"
+
+
+@pytest.mark.asyncio
 async def test_stop_all_kills_running_tasks(fake_sure_bin, tmp_path, monkeypatch):
     monkeypatch.setenv("MOCK_SURE_DELAY_MS", "30000")
 
