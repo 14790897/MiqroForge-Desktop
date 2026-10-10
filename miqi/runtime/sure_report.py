@@ -102,6 +102,48 @@ class StageRecord(_Model):
     detail: str | None = None
 
 
+class SureRepairContract(_Model):
+    """修复契约(绑定 schemas/repair.schema.json;阶段 4)。
+
+    问题是什么、必须修什么、必须保留什么、验收标准是什么——"修复以契约为界"。
+    ``rechecks_that_must_pass`` 是 SURE 实际输出、schema 未列出的关键字段:
+    契约点名的检查**全部跑过且通过**时,对应发现项才关闭(防假修复语义)。
+    """
+
+    id: str
+    issue_id: str
+    problem: str
+    why_it_matters: str
+    required_fix: list[str] = Field(default_factory=list)
+    acceptance: list[str] = Field(default_factory=list)
+    preserve: list[str] = Field(default_factory=list)
+    recheck: list[str] = Field(default_factory=list)
+    rechecks_that_must_pass: list[str] = Field(default_factory=list)
+    #: 证据锚点等自由对象(observed_fact 等),原样保留
+    evidence: list[dict[str, Any]] = Field(default_factory=list)
+    forbidden_shortcuts: list[str] = Field(default_factory=list)
+
+
+class SureLifecycleFinding(_Model):
+    """recheck 对比里的单条发现项。"""
+
+    id: str
+    severity: str
+    status: str
+    title: str
+
+
+class SureLifecycle(_Model):
+    """recheck 的结构化对比结果(check/repair 时为 None)。
+
+    语义硬约束(SURE stage 12):``closed`` 只包含"契约点名的检查本次运行且
+    全部通过"的发现项;删掉问题标记但检查未跑,发现项仍留在 ``still_open``。
+    """
+
+    closed: list[SureLifecycleFinding] = Field(default_factory=list)
+    still_open: list[SureLifecycleFinding] = Field(default_factory=list)
+
+
 class CheckDetails(_Model):
     project: str
     purpose: str
@@ -109,6 +151,9 @@ class CheckDetails(_Model):
     state: str
     report: Report
     stages: list[StageRecord] = Field(default_factory=list)
+    #: 阶段 4:repair 输出携带契约数组;recheck 输出携带结构化对比
+    repairs: list[SureRepairContract] = Field(default_factory=list)
+    lifecycle: SureLifecycle | None = None
 
 
 class CheckEnvelope(_Model):
@@ -120,11 +165,20 @@ class CheckEnvelope(_Model):
     sure_version: str
 
 
-def parse_check_output(stdout: str) -> CheckEnvelope:
-    """解析 ``sure check --format json`` 的 stdout(约定为单行 JSON 对象)。
+#: 本模块可解析的 SURE 命令(阶段 4 加入 repair/recheck;三者外壳一致)。
+KNOWN_COMMANDS = ("check", "repair", "recheck")
+
+
+def parse_sure_output(
+    stdout: str, *, commands: tuple[str, ...] = KNOWN_COMMANDS
+) -> CheckEnvelope:
+    """解析 ``sure <command> --format json`` 的 stdout(约定为单行 JSON 对象)。
+
+    ``commands`` 限定可接受的命令集合(默认 ``check``/``repair``/``recheck``)。
 
     Raises:
-        SureReportError: 输出非法 JSON、缺必需字段或 schema_version 不受支持。
+        SureReportError: 输出非法 JSON、缺必需字段、命令不在集合内或
+        schema_version 不受支持。
     """
     lines = [line for line in stdout.strip().splitlines() if line.strip()]
     if not lines:
@@ -141,8 +195,9 @@ def parse_check_output(stdout: str) -> CheckEnvelope:
     except Exception as exc:  # pydantic ValidationError → 用户可读错误
         raise SureReportError(f"SURE 报告缺少必需字段或字段类型不符:{exc}") from exc
 
-    if envelope.command != "check":
-        raise SureReportError(f"不是 check 报告(command={envelope.command!r})")
+    if envelope.command not in commands:
+        expected = "/".join(commands)
+        raise SureReportError(f"不是 {expected} 报告(command={envelope.command!r})")
     if envelope.details.report.schema_version < SUPPORTED_SCHEMA_MIN:
         raise SureReportError(
             "SURE 报告 schema_version "
@@ -150,6 +205,11 @@ def parse_check_output(stdout: str) -> CheckEnvelope:
             f"{SUPPORTED_SCHEMA_MIN},请升级 SURE 或本应用"
         )
     return envelope
+
+
+def parse_check_output(stdout: str) -> CheckEnvelope:
+    """解析 ``sure check --format json`` 的 stdout(阶段 3 契约:仅 check)。"""
+    return parse_sure_output(stdout, commands=("check",))
 
 
 def parse_sure_version(output: str) -> str | None:
