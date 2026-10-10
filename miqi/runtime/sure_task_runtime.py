@@ -174,6 +174,35 @@ async def _kill_process_tree(
             pass
 
 
+def _close_subprocess_transport(proc: asyncio.subprocess.Process) -> None:
+    """显式关闭子进程的传输与读管道(幂等,收尾用)。
+
+    被取消/停止消费的读流不会自行走到 EOF 收尾:子进程传输可能先自闭合
+    (_closed=True)而管道仍开着,此时传输 close() 会短路,需逐个显式关闭;
+    否则管道拖到事件循环关闭后才被 GC——Windows proactor 的 __del__ 会报
+    unclosed transport(ValueError: I/O operation on closed pipe)。
+    """
+    transport = getattr(proc, "_transport", None)
+    if transport is None:
+        return
+    try:
+        transport.close()
+        for proto in (getattr(transport, "_pipes", None) or {}).values():
+            if proto is not None:
+                proto.pipe.close()
+    except Exception:  # noqa: BLE001 —— 收尾失败只记日志
+        logger.debug("关闭 SURE 子进程传输异常(忽略)")
+
+
+async def _cleanup_probe_subprocess(proc: asyncio.subprocess.Process, binary: str) -> None:
+    """探测被打断(超时/取消)后的确定性收尾:树杀回收 + 关闭传输。"""
+    try:
+        await _kill_process_tree(proc)
+    except Exception:  # noqa: BLE001 —— 收尾失败不改变探测结论
+        logger.warning("健康检查失败后清理 SURE 子进程未成功: {}", binary)
+    _close_subprocess_transport(proc)
+
+
 async def probe_sure_health(
     *,
     bin_provider: Callable[[], str | None] | None = None,
@@ -222,19 +251,13 @@ async def probe_sure_health(
     except asyncio.CancelledError:
         # 协程被外部取消(退出清理等):CancelledError 是 BaseException,
         # 不会被下方 except 捕获——不清理则卡死的子进程成孤儿。
-        # 与 _run 同款:先树杀并回收,再把取消原样上抛(不吞取消语义)。
+        # 收尾(树杀+关传输)后再把取消原样上抛(不吞取消语义)。
         if proc is not None:
-            try:
-                await _kill_process_tree(proc)
-            except Exception:  # noqa: BLE001 —— 清理失败不改变取消语义
-                logger.warning("健康检查取消后清理 SURE 子进程未成功: {}", binary)
+            await _cleanup_probe_subprocess(proc, binary)
         raise
     except Exception as exc:  # noqa: BLE001 —— 健康检查绝不抛出
         if proc is not None:
-            try:
-                await _kill_process_tree(proc)
-            except Exception:
-                logger.warning("健康检查失败后清理 SURE 子进程未成功: {}", binary)
+            await _cleanup_probe_subprocess(proc, binary)
         return {
             "installed": False,
             "binary": binary,
@@ -435,11 +458,26 @@ class SureTaskRuntime:
         stderr_task = asyncio.create_task(
             _read_stderr_tail(), name=f"sure-err:{task.task_id}"
         )
+        async def _drain_stdout_to_eof() -> None:
+            """丢弃剩余 stdout 直至 EOF(有界内存),让管道传输正常收尾。"""
+            assert proc.stdout is not None
+            try:
+                while await proc.stdout.read(STDIO_CHUNK_BYTES):
+                    pass
+            except Exception:  # noqa: BLE001 —— 收尾读取失败不影响结论
+                logger.debug("SURE stdout 排空失败(忽略)")
+
         try:
             stdout_b, overflow = await stdout_task
             if overflow:
-                # 超限即终止进程树,不等输出自然结束(写入方此刻被阻断收掉)
+                # 超限即终止进程树,不等输出自然结束(写入方此刻被阻断收掉);
+                # 随后排空至 EOF——读到一半停下的管道不会自行收尾,会拖到
+                # 事件循环关闭后才被 GC(Windows proactor: unclosed transport)
                 await _kill_process_tree(proc)
+                try:
+                    await asyncio.wait_for(_drain_stdout_to_eof(), timeout=5.0)
+                except asyncio.TimeoutError:
+                    logger.warning("SURE 超限后排空 stdout 超时(放弃等待)")
             stderr_b = await stderr_task
             await proc.wait()
         except asyncio.CancelledError:
@@ -448,6 +486,7 @@ class SureTaskRuntime:
             stderr_task.cancel()
             await _kill_process_tree(proc)
             await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
+            _close_subprocess_transport(proc)
             self._tasks.pop(task.task_id, None)
             raise
         finally:

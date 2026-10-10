@@ -65,6 +65,16 @@ async def _wait_for(events: list, kinds: tuple[str, ...], timeout_s: float = 15.
     raise AssertionError(f"未等到事件 {kinds};已收到: {[k for k, _ in events]}")
 
 
+def _pipe_transports_closed(proc) -> bool:
+    """stdout/stderr 两条管道传输是否都已关闭。
+
+    子进程传输可能先自闭合,而管道传输单独悬置(悬置读流在事件循环关闭后
+    被 GC → Windows proactor __del__ 告警);防线必须查管道层。
+    """
+    pipes = [p.pipe for p in proc._transport._pipes.values() if p is not None]
+    return bool(pipes) and all(p.is_closing() for p in pipes)
+
+
 @pytest.mark.asyncio
 async def test_check_flow_emits_progress_then_report(fake_sure_bin, tmp_path):
     events: list[tuple[str, dict]] = []
@@ -203,6 +213,10 @@ async def test_oversized_stdout_is_bounded_and_process_killed(tmp_path, monkeypa
     assert failure["message"]
     assert len(calls) == 1, "超限必须终止写入方进程树(不能等它自然结束)"
     assert calls[0].returncode is not None, "超限后子进程必须已被回收"
+    assert _pipe_transports_closed(calls[0]), (
+        "超限中止后 stdout/stderr 管道传输必须已收尾——读到一半停下的管道"
+        "不会自行走到 EOF,会拖到循环关闭后才被 GC(Win: unclosed transport)"
+    )
 
 
 @pytest.mark.asyncio
@@ -320,6 +334,10 @@ async def test_health_timeout_kills_child_process(tmp_path, monkeypatch):
     assert res["installed"] is False
     assert len(calls) == 1, "超时必须触发显式进程清理"
     assert calls[0].returncode is not None, "清理后子进程必须已被回收"
+    assert _pipe_transports_closed(calls[0]), (
+        "超时后 stdout/stderr 管道传输必须已关闭——悬置的读流不会自行收尾,"
+        "会拖到事件循环关闭后才被 GC(Windows proactor: unclosed transport)"
+    )
 
 
 @pytest.mark.asyncio
@@ -381,3 +399,7 @@ async def test_health_cancellation_kills_child_process(tmp_path, monkeypatch):
         await task
     assert len(calls) == 1, "取消必须触发显式进程清理"
     assert calls[0].returncode is not None, "清理后子进程必须已被回收"
+    assert _pipe_transports_closed(calls[0]), (
+        "取消后 stdout/stderr 管道传输必须已关闭——悬置的读流不会自行收尾,"
+        "会拖到事件循环关闭后才被 GC(Windows proactor: unclosed transport)"
+    )
