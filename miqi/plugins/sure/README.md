@@ -9,7 +9,24 @@
 |---|---|
 | MCP 服务声明 | `sure`(stdio,`sure mcp serve`);`tool_timeout` 600s、进度心跳 10s。会话启动时连接,5 个工具以 `mcp_sure_*` 注册进工具表 |
 | 快捷命令 | `/sure-check <项目绝对路径>`——把核查纪律(显式绝对路径、如实转述、修复走 recheck)注入当轮系统提示 |
+| 事件桥接(观测) | 4 个 module 型钩子(会话开始/工具前/工具后/会话停止)→ `sure hook ingest --source miqi`;最小采集、失败静默、不阻塞执行(阶段5·Tier 1,见下文) |
 | 技能 | **不重复携带**:使用内置技能 `sure-check` / `sure-fix`(随应用分发,#1262) |
+
+## 事件桥接(阶段5,观测级)
+
+`sure_hooks.py` 由 `plugin.json` 的 `hooks` 数组声明为 4 个 module 型钩子
+(`session_start` / `pre_tool_use` / `post_tool_use` / `stop`),把会话生命周期
+与词表内工具事件喂给 `sure hook ingest --source miqi`;对端契约是 SURE 的
+`normalizer::miqi` 与其 `integrations/miqi/README.md`。
+
+- **只上报**:`exec` / `read_file` / `write_file` / `edit_file` / `apply_patch`
+  与 4 类会话事件;`list_dir` 与其余工具不回传(SURE 侧对未收名字按 fail-closed 读);
+- **最小采集**:不带工具参数(args)与输出内容;子进程环境走白名单
+  (`build_sure_env`)——平台令牌与 `MIQI_*` 不透传;
+- **fire-and-forget**:SURE 未装、3 秒超时、返回错误一律静默跳过并清理子进程树
+  ——事件是观测证据,绝不改变 MiQi 的工具执行结果;
+- **能力级别如实为 Tier 1(观测)**:SURE 回传的决策当前只被记录、未被执行;
+  保护级(Tier 2)需要核心的 fail-closed 桥接与测试矩阵,未实现前不宣称。
 
 ## 二进制解析约定(实现前定题,记录取舍)
 
