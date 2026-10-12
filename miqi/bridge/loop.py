@@ -1129,7 +1129,7 @@ class BridgeRuntimeLoop:
                     doc_texts.append(
                         f"\n\n[Uploaded: {doc_name} — use pdf_read or read_file tool to access]"
                     )
-                _emit_doc_progress(doc_name, "ready", "Ready")
+                await _emit_doc_progress(doc_name, "ready", "Ready")
 
             if doc_texts:
                 content = content + "\n".join(doc_texts)
