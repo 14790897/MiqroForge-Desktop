@@ -1896,12 +1896,19 @@ async def test_files_read_nested_path_no_basename_fallback(fake_config, fake_pro
 
 def test_is_bare_name_shapes():
     """Bare-name guard: only single file-name segments qualify (#1274)."""
+    import os
+
     from miqi.runtime import file_handlers
 
     assert file_handlers._is_bare_name("report.md") is True
     assert file_handlers._is_bare_name(".skill-run.json") is True
     assert file_handlers._is_bare_name("sub/report.md") is False
-    assert file_handlers._is_bare_name("sub\\report.md") is False
+    # 反斜杠只在 Windows 是路径分隔符；POSIX 上它是合法文件名字符，
+    # "sub\report.md" 在那里本身就是一个单段裸名。
+    if os.sep == "\\":
+        assert file_handlers._is_bare_name("sub\\report.md") is False
+    else:
+        assert file_handlers._is_bare_name("sub\\report.md") is True
     assert file_handlers._is_bare_name("..") is False
     assert file_handlers._is_bare_name(".") is False
     assert file_handlers._is_bare_name("") is False
