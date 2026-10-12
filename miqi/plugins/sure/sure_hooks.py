@@ -30,6 +30,7 @@ from datetime import datetime, timezone
 from loguru import logger
 
 from miqi.config.schema import resolve_sure_bin
+from miqi.execution.orchestrator import OrchestrationResult
 from miqi.runtime.sure_task_runtime import (
     _close_subprocess_transport,
     _kill_process_tree,
@@ -165,13 +166,18 @@ async def on_pre_tool_use(ctx) -> None:
 
 
 async def on_post_tool_use(ctx) -> None:
-    """HookPoint.POST_TOOL_USE → PostToolUse。
+    """HookPoint.POST_TOOL_USE → PostToolUse(仅词表内工具、且工具确实完成)。
 
-    v1 只在成功路径触发(失败/拒绝没有完成事件),result 固定为 "ok"——
-    失败自然呈现为"有 requested 无 completed"。
+    orchestrator 在工具内部报错(`_execute_in_sandbox` 自标 TOOL_ERROR)后
+    仍会调到这里——那种情况**不发 completed**,如实呈现为"有 requested 无
+    completed"(失败不误记成功)。result 固定 "ok";失败/拒绝的细节不在
+    v1 载荷里(最小采集)。
     """
     tool = getattr(ctx, "tool_name", "")
     if tool not in _VOCABULARY:
+        return
+    status = getattr(ctx, "status", None)
+    if status is not None and status != OrchestrationResult.SUCCESS:
         return
     await _send(
         "PostToolUse",

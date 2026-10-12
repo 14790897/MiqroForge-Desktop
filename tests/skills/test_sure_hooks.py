@@ -121,6 +121,32 @@ async def test_non_vocabulary_tools_are_not_sent(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_post_tool_use_skips_error_status(tmp_path, monkeypatch):
+    """失败不误记成功:工具内部报错(TOOL_ERROR)时不得发 PostToolUse。
+
+    orchestrator 在 `_execute_in_sandbox` 自标 TOOL_ERROR 后仍会调用 POST 钩子
+    ——观测语义应为"有 requested 无 completed",而不是 completed。
+    """
+    from miqi.execution.orchestrator import OrchestrationResult
+
+    sur = _load_sure_hooks()
+    binary, captured = _capture_bin(tmp_path)
+    monkeypatch.setattr(sur, "resolve_sure_bin", lambda: binary)
+
+    error_ctx = _tool_ctx()
+    error_ctx.status = OrchestrationResult.TOOL_ERROR
+    await sur.on_post_tool_use(error_ctx)
+    assert not captured.exists(), "报错的工具调用不得发 completed"
+
+    ok_ctx = _tool_ctx()
+    ok_ctx.status = OrchestrationResult.SUCCESS
+    await sur.on_post_tool_use(ok_ctx)
+    event = _read_events(captured)[0]
+    assert event["event"] == "PostToolUse"
+    assert event["result"] == "ok"
+
+
+@pytest.mark.asyncio
 async def test_session_lifecycle_maps(tmp_path, monkeypatch):
     sur = _load_sure_hooks()
     binary, captured = _capture_bin(tmp_path)
