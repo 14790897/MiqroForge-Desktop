@@ -475,7 +475,7 @@ export function findFileByBasename(root: string, bare: string): string | null {
   const stack: string[] = [root];
   while (stack.length > 0 && visited < BASENAME_WALK_LIMIT) {
     const dir = stack.pop()!;
-    let entries: ReturnType<typeof readdirSync>;
+    let entries: Array<{ name: string; isDirectory(): boolean }>;
     try {
       entries = readdirSync(dir, { withFileTypes: true });
     } catch {
