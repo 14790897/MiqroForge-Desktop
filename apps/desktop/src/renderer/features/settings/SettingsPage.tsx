@@ -97,6 +97,7 @@ import AgentPanel from '../agents/AgentPanel';
 import { PermissionsPage } from '../permissions/PermissionsPage';
 import { PluginMarket } from '../plugins/PluginMarket';
 import WslStatusPage from '../wsl/WslStatusPage';
+import { AcceptancePage } from '../acceptance/AcceptancePage';
 import { FeedbackPage } from '../feedback/FeedbackPage';
 import { QraftPage } from './components/QraftPage';
 import { LegalDocumentsPage } from '../legal/LegalDocumentsPage';
@@ -115,6 +116,7 @@ export type SettingsTab =
   | 'experience'
   | 'permissions'
   | 'plugins'
+  | 'acceptance'
   | 'qraft'
   | 'cron'
   | 'wsl'
@@ -198,6 +200,13 @@ const SETTINGS_CATEGORIES: SettingsCategory[] = [
         description: '插件市场与扩展',
         keywords: ['plugin', '插件'],
         icon: Puzzle,
+      },
+      {
+        value: 'acceptance',
+        label: '验收(SURE)',
+        description: '项目只读核查与结构化报告',
+        keywords: ['sure', '验收', '核查', 'check', 'acceptance'],
+        icon: ShieldCheck,
       },
       {
         value: 'skills',
@@ -2761,6 +2770,24 @@ export function SettingsPage({
             )}
           >
             <PluginMarket />
+          </ErrorBoundary>
+        </Tabs.Content>
+        <Tabs.Content value="acceptance" className="flex-1 overflow-y-auto">
+          <ErrorBoundary
+            fallback={(error, reset) => (
+              <div className="p-6 text-sm" style={{ color: 'var(--danger)' }}>
+                ⚠️ 验收页面加载失败: {error.message}
+                <button
+                  onClick={reset}
+                  className="ml-2 underline"
+                  style={{ color: 'var(--accent)' }}
+                >
+                  重试
+                </button>
+              </div>
+            )}
+          >
+            <AcceptancePage />
           </ErrorBoundary>
         </Tabs.Content>
         <Tabs.Content value="qraft" className="flex-1 overflow-y-auto">

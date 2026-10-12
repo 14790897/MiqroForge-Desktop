@@ -20,8 +20,10 @@ from unittest.mock import MagicMock
 import pytest
 
 from miqi.execution.orchestrator import (
+    _MAX_COMMAND_LENGTH,
     ToolExecutionContext,
     ToolOrchestrator,
+    _summarize_pattern_for_log,
 )
 from miqi.execution.permission_engine import (
     PermissionEngine,
@@ -66,12 +68,14 @@ def _make_meta(tool_name="exec", command=UNSAFE_EXEC_CMD):
     """Create minimal approval metadata matching orchestrator's expected format.
 
     The orchestrator's _make_approval_pattern uses:
-      - meta["tool_name"] and meta["command"] for exec tools
+      - meta["command_key"]（完整命令）做 exec 的键；meta["command"] 只是
+        被截断到 _MAX_COMMAND_LENGTH 的展示副本
       - meta["tool_name"] and meta["details"]["path"] for file_write tools
     """
     meta = {
         "tool_name": tool_name,
         "command": command,
+        "command_key": command,
         "description": f"Run: {command}",
         "details": {"command": command},
     }
@@ -129,6 +133,59 @@ async def test_session_approval_persists_for_exec():
     assert decision2.verdict == PermissionVerdict.ALLOW, (
         f"Second call should auto-allow via session allowlist, got {decision2.verdict}"
     )
+
+
+@pytest.mark.asyncio
+async def test_session_approval_persists_for_long_exec_command():
+    """>500 字符的 exec 命令：记录端用完整命令做键（展示副本被截断），与匹配端一致。
+
+    回归 #1259 同类缺陷的 exec 分支：记录端曾用截断到 _MAX_COMMAND_LENGTH 的
+    展示副本拼键，匹配端用完整命令 —— 长命令批准后每次重跑都再弹审批。
+    """
+    long_cmd = "rm -rf /tmp/" + ("d" * 600)
+    engine = PermissionEngine()
+    orch = _build_orchestrator(engine)
+
+    # Step 1: First call of long command — must require approval
+    ctx1 = make_ctx("exec", long_cmd)
+    decision1 = await engine.check(ctx1)
+    assert decision1.verdict == PermissionVerdict.APPROVAL_REQUIRED
+
+    # Step 2: User approves with "session" —— 展示副本按真实流程截断，键必须完整
+    approval_id = "turn_001:call_001"
+    meta = _make_meta("exec", long_cmd)
+    meta["command"] = long_cmd[:_MAX_COMMAND_LENGTH]
+    _inject_pending_approval(orch, approval_id, meta)
+    result = orch.resolve_approval(approval_id, "session")
+    assert result.resolved is True
+    assert f"exec:{long_cmd}" in engine.session_allowlist
+
+    # Step 3: Second identical call — should auto-allow via session allowlist
+    ctx2 = make_ctx("exec", long_cmd, tool_call_id="call_002", turn_id="turn_002")
+    decision2 = await engine.check(ctx2)
+    assert decision2.verdict == PermissionVerdict.ALLOW, (
+        "Long exec command should auto-allow via session allowlist, "
+        f"got {decision2.verdict}"
+    )
+
+
+def test_summarize_pattern_for_log_redacts_long_exec_command():
+    """日志摘要：exec 命令超长时截断（匹配键仍完整），其余 pattern 原样。
+
+    回归 #1272 CodeRabbit Security & Privacy：完整命令 500 字符之后可能带
+    凭据，不应落进 INFO 日志。
+    """
+    long_cmd = "curl https://api.example.com " + "x" * 600 + " --token=SECRET"
+    pattern = f"exec:{long_cmd}"
+
+    summarized = _summarize_pattern_for_log(pattern)
+    assert "SECRET" not in summarized
+    assert summarized.startswith("exec:")
+    assert len(summarized) <= len("exec:") + _MAX_COMMAND_LENGTH + 1  # 1 = 省略号
+
+    # 短命令与其它工具类别不变
+    assert _summarize_pattern_for_log("exec:echo hi") == "exec:echo hi"
+    assert _summarize_pattern_for_log("write_file:/etc/hosts") == "write_file:/etc/hosts"
 
 
 @pytest.mark.asyncio

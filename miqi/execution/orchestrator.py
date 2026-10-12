@@ -199,6 +199,21 @@ def _sanitize_exc_for_ui(exc: BaseException) -> str:
     return f"{type(exc).__name__}: {raw}" if raw else type(exc).__name__
 
 
+def _summarize_pattern_for_log(pattern: str) -> str:
+    """Log-safe summary of an allowlist pattern.
+
+    匹配端用完整键（exec 的键是 exec:<完整命令>），但 INFO 日志里只保留命令
+    前 _MAX_COMMAND_LENGTH 字符 —— 完整命令 500 字符之后可能带凭据，不应
+    落进日志（#1272 CodeRabbit Security & Privacy）。其余工具的 pattern 是
+    hash 或路径，保持原样。
+    """
+    if pattern.startswith("exec:"):
+        cmd = pattern[len("exec:"):]
+        if len(cmd) > _MAX_COMMAND_LENGTH:
+            return f"exec:{cmd[:_MAX_COMMAND_LENGTH]}…"
+    return pattern
+
+
 class OrchestrationResult(str, Enum):
     SUCCESS = "success"
     DENIED_BY_POLICY = "denied_by_policy"
@@ -602,6 +617,12 @@ class ToolOrchestrator:
             "command": ((decision.details or {}).get("command", "")
                         if isinstance(decision.details, dict)
                         else "")[:_MAX_COMMAND_LENGTH],
+            # 审批键用的**完整**命令：上面的展示副本被截断到 _MAX_COMMAND_LENGTH，
+            # 而匹配端 _make_key 用原始参数拼 exec:<command>，长命令下两者不等，
+            # 「本次会话允许/永久允许」会永远匹配不上（#1259 同类缺陷的 exec 分支）
+            "command_key": ((decision.details or {}).get("command", "")
+                            if isinstance(decision.details, dict)
+                            else ""),
             "allow_permanent": decision.allow_permanent,
             # 审批键用**原始**参数在请求时刻算好并存这里(独立于 sanitize 的展示
             # 副本):记录端(_make_approval_pattern)与匹配端(check)由此共用同一
@@ -769,13 +790,17 @@ class ToolOrchestrator:
         Uses the same key format as PermissionEngine._make_key so the
         allowlist entry matches future permission checks:
 
-        - exec tools:     exec:<command>
+        - exec tools:     exec:<command>（原始完整命令，经 command_key）
         - file_write tools: <tool_name>:<path>
         - other tools:    <tool_name>:<hash of arguments> (via description)
         """
         tool = meta.get("tool_name", "")
         if tool == "exec":
-            cmd = meta.get("command", "")
+            # 键用原始完整命令（command_key），不能用展示副本 command —— 它被
+            # 截断到 _MAX_COMMAND_LENGTH，而匹配端 _make_key 用完整命令，长命令
+            # 的记录永远匹配不上（#1259 同类缺陷的 exec 分支）。
+            # 旧形状的 meta 没有 command_key，退回展示副本（与历史行为一致）。
+            cmd = meta.get("command_key") or meta.get("command", "")
             if not cmd:
                 return None
             return f"exec:{cmd}"
@@ -821,7 +846,7 @@ class ToolOrchestrator:
         self.permissions.permanent_allowlist.add(pattern)
         logger.info(
             "Permanent approval recorded: pattern={!r} session={}",
-            pattern, self._session_id,
+            _summarize_pattern_for_log(pattern), self._session_id,
         )
 
         # Phase 31.X: sync to global (cross-session, persisted) allowlist
@@ -852,7 +877,7 @@ class ToolOrchestrator:
         self.permissions.session_allowlist.add(pattern)
         logger.info(
             "Session approval recorded: pattern={!r} session={}",
-            pattern, self._session_id,
+            _summarize_pattern_for_log(pattern), self._session_id,
         )
 
     def list_pending_approvals(self) -> list[dict[str, Any]]:
