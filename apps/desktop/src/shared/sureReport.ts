@@ -239,7 +239,26 @@ export interface SureHealth {
   installed: boolean;
   binary: string | null;
   version: string | null;
+  /** 阶段 6(D3):与最低支持版本的兼容判定;null/缺省 = 无法判断(旧后端) */
+  compatible?: boolean | null;
   error: string | null;
+}
+
+/** 本面板支持的最低 SURE 版本(与 Python 侧 MIN_SUPPORTED_SURE_VERSION 一致)。 */
+export const MIN_SUPPORTED_SURE_VERSION = '0.1.2';
+
+/**
+ * 版本不兼容时给用户的提示;兼容 / 无法判断 / 未安装 / 旧后端均返回 null。
+ *
+ * 不兼容是明确结论(compatible === false),才提示并拦下「开始核查」;
+ * 「无法判断」(字段缺失或 null)不拦——那是如实呈现,不是拒绝服务。
+ */
+export function sureIncompatibilityNotice(
+  health: SureHealth | null | undefined
+): string | null {
+  if (!health?.installed) return null;
+  if (health.compatible !== false) return null;
+  return `SURE 版本不兼容:当前 ${health.version ?? '未知'},最低要求 ${MIN_SUPPORTED_SURE_VERSION}。请升级 SURE,或用 SURE_BIN 指向 ≥${MIN_SUPPORTED_SURE_VERSION} 的构建。`;
 }
 
 /** 运行中进度心跳(静默期也发,防 bridge 600s 空闲 drain)。 */

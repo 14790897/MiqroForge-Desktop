@@ -30,7 +30,13 @@ from typing import Any, Awaitable, Callable
 from loguru import logger
 
 from miqi.config.schema import resolve_sure_bin
-from miqi.runtime.sure_report import SureReportError, parse_sure_output, parse_sure_version
+from miqi.runtime.sure_report import (
+    MIN_SUPPORTED_SURE_VERSION,
+    SureReportError,
+    parse_sure_output,
+    parse_sure_version,
+    version_at_least,
+)
 
 #: 进度心跳间隔(秒)。静默期也必须发,防 bridge 600s 空闲 drain(方案 §3 通道 B)。
 PROGRESS_INTERVAL_SECONDS = 5.0
@@ -232,6 +238,7 @@ async def probe_sure_health(
             "installed": False,
             "binary": None,
             "version": None,
+            "compatible": None,
             "error": "未找到 SURE:请安装 SURE,或用 SURE_BIN 指向其可执行文件",
         }
     spawn_kwargs: dict[str, Any] = {}
@@ -263,6 +270,7 @@ async def probe_sure_health(
             "installed": False,
             "binary": binary,
             "version": None,
+            "compatible": None,
             "error": f"无法运行 SURE:{exc}",
         }
     version = parse_sure_version((stdout_b or b"").decode("utf-8", errors="replace"))
@@ -271,9 +279,17 @@ async def probe_sure_health(
             "installed": False,
             "binary": binary,
             "version": version,
+            "compatible": None,
             "error": f"SURE --version 退出码 {int(proc.returncode or 0)},二进制可能损坏",
         }
-    return {"installed": True, "binary": binary, "version": version, "error": None}
+    return {
+        "installed": True,
+        "binary": binary,
+        "version": version,
+        # 阶段 6(D3):低于最低支持版本 → False;版本无法解析 → None(无法判断)
+        "compatible": version_at_least(version, MIN_SUPPORTED_SURE_VERSION),
+        "error": None,
+    }
 
 
 class SureTaskRuntime:

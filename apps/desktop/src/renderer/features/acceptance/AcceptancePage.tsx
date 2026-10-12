@@ -23,6 +23,7 @@ import { ReportView } from './ReportView';
 import {
   commandLabel,
   formatElapsed,
+  sureIncompatibilityNotice,
   type SureApiResult,
   type SureCheckEnvelope,
   type SureCheckFailure,
@@ -246,6 +247,8 @@ export function AcceptancePage() {
   }, []);
 
   const sureReady = Boolean(health?.installed);
+  // 阶段 6(D3):明确的不兼容(compatible === false)才拦;无法判断不拦
+  const incompatibilityNotice = sureIncompatibilityNotice(health);
 
   return (
     <div className="p-6 max-w-3xl space-y-5">
@@ -288,6 +291,21 @@ export function AcceptancePage() {
             </Button>
           </div>
         </div>
+      ) : incompatibilityNotice ? (
+        <div
+          className="rounded-md border border-[var(--danger)] bg-[var(--danger-bg)] p-3 space-y-2"
+          data-testid="acceptance-incompatible"
+        >
+          <div className="flex items-center gap-2 text-xs text-[var(--danger)]">
+            <AlertTriangle size={14} />
+            <span>{incompatibilityNotice}</span>
+          </div>
+          <div className="flex items-center gap-2">
+            <Button variant="secondary" size="sm" onClick={() => void refreshHealth()}>
+              <RefreshCw size={13} className="mr-1" /> 重新检测
+            </Button>
+          </div>
+        </div>
       ) : (
         <p className="text-size-2xs text-[var(--text-faint)] font-mono truncate">
           SURE {health?.version ?? '版本未知'} · {health?.binary}
@@ -310,8 +328,8 @@ export function AcceptancePage() {
         </div>
       ) : null}
 
-      {/* 选项目 + 开始 */}
-      {phase === 'idle' || phase === 'running' ? (
+      {/* 选项目 + 开始(版本不兼容时整块隐藏,上方不兼容横幅给出原因) */}
+      {incompatibilityNotice === null && (phase === 'idle' || phase === 'running') ? (
         <div className="flex items-center gap-2">
           <input
             type="text"
@@ -333,7 +351,7 @@ export function AcceptancePage() {
         </div>
       ) : null}
 
-      {phase === 'idle' ? (
+      {incompatibilityNotice === null && phase === 'idle' ? (
         <Button
           size="sm"
           onClick={() => void run('check')}

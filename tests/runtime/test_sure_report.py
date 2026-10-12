@@ -118,6 +118,26 @@ def test_parse_sure_version_output():
     assert parse_sure_version("") is None
 
 
+# ── 阶段 6:版本兼容判定(最低支持 ≥0.1.2,方案 D3)────────────────────────
+
+
+def test_version_at_least_compares_numerically():
+    from miqi.runtime.sure_report import version_at_least
+
+    assert version_at_least("0.1.2", "0.1.2") is True
+    assert version_at_least("0.2.0", "0.1.2") is True
+    assert version_at_least("1.0.0", "0.9.9") is True
+    assert version_at_least("0.1.1", "0.1.2") is False
+    assert version_at_least("0.0.9", "0.1.2") is False
+    # 后缀不参与比较(mock 的 9.9.9-mock、预发布后缀)
+    assert version_at_least("9.9.9-mock", "0.1.2") is True
+    assert version_at_least("0.1.2-rc1", "0.1.2") is True
+    # 无法解析 = 无法判断(既不是 False,也不是 True)
+    assert version_at_least(None, "0.1.2") is None
+    assert version_at_least("", "0.1.2") is None
+    assert version_at_least("garbage", "0.1.2") is None
+
+
 # ── 阶段 4:repair 契约与 recheck 对比 ────────────────────────────────────
 
 

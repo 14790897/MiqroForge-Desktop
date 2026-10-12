@@ -4662,6 +4662,17 @@
                 }
               ]
             },
+            "compatible": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
             "error": {
               "anyOf": [
                 {

@@ -16,12 +16,17 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
 #: 本模块建模所依据的最低报告 schema 版本(schemas/report.schema.json)。
 SUPPORTED_SCHEMA_MIN = 3
+
+#: 本面板支持的最低 SURE 版本(方案 D3:最低支持 ≥0.1.2;"已测版本"另计——
+#: 未来版本号更高也需重跑契约测试才算支持)。
+MIN_SUPPORTED_SURE_VERSION = "0.1.2"
 
 
 class SureReportError(ValueError):
@@ -218,3 +223,23 @@ def parse_sure_version(output: str) -> str | None:
     if len(parts) >= 2 and parts[0] == "sure":
         return parts[1]
     return None
+
+
+def version_at_least(version: str | None, minimum: str) -> bool | None:
+    """``version`` 是否 ≥ ``minimum``(比较前三个数字段,后缀忽略)。
+
+    无法解析(缺失/垃圾字符串)→ ``None``:这是"无法判断",既不是达标也不是
+    不达标——调用方必须把它当第三种结果对待,不得折叠成任一布尔(方案 D3:
+    不合规如实报"不兼容",判断不了就如实说判断不了)。
+    """
+
+    def parts(text: str) -> tuple[int, int, int] | None:
+        match = re.match(r"^(\d+)\.(\d+)\.(\d+)", text.strip())
+        if match is None:
+            return None
+        return (int(match.group(1)), int(match.group(2)), int(match.group(3)))
+
+    left, right = parts(version or ""), parts(minimum)
+    if left is None or right is None:
+        return None
+    return left >= right

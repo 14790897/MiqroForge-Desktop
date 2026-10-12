@@ -356,6 +356,47 @@ async def test_health_nonzero_exit_is_not_installed(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_health_reports_version_compatibility(tmp_path):
+    """阶段 6:健康检查给出兼容判定——低于最低支持版本 → False;达标 → True;
+    版本无法解析 → None(无法判断);未安装 → None(兼容性无意义)。"""
+    import miqi.runtime.sure_task_runtime as rt_mod
+
+    old_bin = _wrap_as_sure(tmp_path, "print('sure 0.0.9')\n")
+    res = await rt_mod.probe_sure_health(
+        bin_provider=lambda: old_bin,
+        env_builder=lambda: {**os.environ},
+        timeout=5.0,
+    )
+    assert res["installed"] is True
+    assert res["compatible"] is False
+
+    ok_bin = _wrap_as_sure(tmp_path, "print('sure 0.1.2')\n")
+    res = await rt_mod.probe_sure_health(
+        bin_provider=lambda: ok_bin,
+        env_builder=lambda: {**os.environ},
+        timeout=5.0,
+    )
+    assert res["compatible"] is True
+
+    unknown_bin = _wrap_as_sure(tmp_path, "print('no version here')\n")
+    res = await rt_mod.probe_sure_health(
+        bin_provider=lambda: unknown_bin,
+        env_builder=lambda: {**os.environ},
+        timeout=5.0,
+    )
+    assert res["installed"] is True
+    assert res["compatible"] is None
+
+    res = await rt_mod.probe_sure_health(
+        bin_provider=lambda: None,
+        env_builder=lambda: {**os.environ},
+        timeout=5.0,
+    )
+    assert res["installed"] is False
+    assert res["compatible"] is None
+
+
+@pytest.mark.asyncio
 async def test_health_cancellation_kills_child_process(tmp_path, monkeypatch):
     """协程被外部取消也必须终止并回收子进程,且取消语义原样上抛(外部评审 P2)。
 

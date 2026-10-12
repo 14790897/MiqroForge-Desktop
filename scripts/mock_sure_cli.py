@@ -56,7 +56,8 @@ def main(argv: list[str]) -> int:
     except Exception:
         pass
     if "--version" in argv:
-        print("sure 9.9.9-mock")
+        # 行为旋钮:E2E 用低版本模拟"版本不兼容"场景(默认保持既有版本号)
+        print(os.environ.get("MOCK_SURE_VERSION", "sure 9.9.9-mock"))
         return 0
     if not argv or argv[0] not in _DEFAULT_FIXTURES:
         print(f"mock sure: unsupported arguments: {argv}", file=sys.stderr)

@@ -5,9 +5,12 @@ import {
   findingStatusLabel,
   findingTone,
   formatElapsed,
+  MIN_SUPPORTED_SURE_VERSION,
   rawOutcomeLabel,
   stageOutcomeLabel,
   stageTone,
+  sureIncompatibilityNotice,
+  type SureHealth,
 } from './sureReport';
 
 describe('aggregateTone / aggregateLabel', () => {
@@ -78,5 +81,35 @@ describe('formatElapsed', () => {
     expect(formatElapsed(83_000)).toBe('1:23');
     expect(formatElapsed(3_723_000)).toBe('1:02:03');
     expect(formatElapsed(-5)).toBe('0:00');
+  });
+});
+
+describe('sureIncompatibilityNotice', () => {
+  const base: SureHealth = {
+    installed: true,
+    binary: 'C:/sure.exe',
+    version: '0.0.9',
+    compatible: false,
+    error: null,
+  };
+
+  it('低于最低支持版本 → 提示同时给出当前与最低版本', () => {
+    const notice = sureIncompatibilityNotice(base);
+    expect(notice).toContain('不兼容');
+    expect(notice).toContain('0.0.9');
+    expect(notice).toContain(MIN_SUPPORTED_SURE_VERSION);
+  });
+
+  it('达标 / 无法判断 / 旧后端无字段 / 未安装 → 无提示', () => {
+    expect(sureIncompatibilityNotice({ ...base, compatible: true })).toBeNull();
+    expect(sureIncompatibilityNotice({ ...base, compatible: null })).toBeNull();
+    // 旧后端(未实现 compatible 字段)不得被当成不兼容
+    const legacy = { ...base } as Partial<SureHealth>;
+    delete legacy.compatible;
+    expect(sureIncompatibilityNotice(legacy as SureHealth)).toBeNull();
+    expect(
+      sureIncompatibilityNotice({ ...base, installed: false })
+    ).toBeNull();
+    expect(sureIncompatibilityNotice(null)).toBeNull();
   });
 });

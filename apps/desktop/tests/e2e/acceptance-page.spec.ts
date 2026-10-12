@@ -41,21 +41,23 @@ function cleanupDir(dir: string): void {
 }
 
 /** 生成包装脚本:SURE_BIN 指向它,内部把 mock CLI 以"sure"身份执行。 */
-function makeSureWrapper(dir: string, delayMs: number): string {
+function makeSureWrapper(dir: string, delayMs: number, versionLine?: string): string {
   const { command, args } = resolveMockPython();
   const argStr = args.map((a) => `"${a}"`).join(' ');
   if (process.platform === 'win32') {
     const wrapper = join(dir, 'sure.cmd');
+    const versionEnv = versionLine ? `set MOCK_SURE_VERSION=${versionLine}\r\n` : '';
     writeFileSync(
       wrapper,
-      `@echo off\r\nset MOCK_SURE_DELAY_MS=${delayMs}\r\n"${command}" ${argStr} "${MOCK_CLI}" %*\r\n`
+      `@echo off\r\nset MOCK_SURE_DELAY_MS=${delayMs}\r\n${versionEnv}"${command}" ${argStr} "${MOCK_CLI}" %*\r\n`
     );
     return wrapper;
   }
   const wrapper = join(dir, 'sure');
+  const versionEnv = versionLine ? `export MOCK_SURE_VERSION="${versionLine}"\n` : '';
   writeFileSync(
     wrapper,
-    `#!/bin/sh\nexport MOCK_SURE_DELAY_MS=${delayMs}\nexec "${command}" ${argStr} "${MOCK_CLI}" "$@"\n`
+    `#!/bin/sh\nexport MOCK_SURE_DELAY_MS=${delayMs}\n${versionEnv}exec "${command}" ${argStr} "${MOCK_CLI}" "$@"\n`
   );
   chmodSync(wrapper, 0o755);
   return wrapper;
@@ -270,5 +272,46 @@ test.describe.serial('验收(SURE)面板 E2E · 交给 AI 修复(阶段 4)', () 
       timeout: 60_000,
     });
     await page.screenshot({ path: 'test-results/acceptance-fix-flow.png', fullPage: true });
+  });
+});
+
+test.describe.serial('验收(SURE)面板 E2E · 版本不兼容(阶段 6)', () => {
+  let electronApp: ElectronApplication;
+  let page: Page;
+  let prevSureBin: string | undefined;
+  let binDir: string;
+  let miqiHome: string;
+
+  test.beforeAll(async () => {
+    binDir = mkdtempSync(join(tmpdir(), 'sure-e2e-bin-'));
+    prevSureBin = process.env.SURE_BIN;
+    // 低于最低支持版本(0.1.2):明确的不兼容 → 给出原因横幅并隐藏开始入口
+    process.env.SURE_BIN = makeSureWrapper(binDir, 30, 'sure 0.0.9');
+    const fixture = await launchElectronApp();
+    electronApp = fixture.electronApp;
+    page = fixture.page;
+    miqiHome = fixture.miqiHome;
+    await waitForBridgeInitialized(page, 30);
+  });
+
+  test.afterAll(async () => {
+    await closeElectronApp(electronApp);
+    cleanupDir(binDir);
+    cleanupDir(miqiHome);
+    if (prevSureBin === undefined) delete process.env.SURE_BIN;
+    else process.env.SURE_BIN = prevSureBin;
+  });
+
+  test('低版本 SURE → 不兼容横幅,开始入口整块隐藏', async () => {
+    await openAcceptance(page);
+    const banner = page.locator('[data-testid="acceptance-incompatible"]');
+    await expect(banner).toBeVisible({ timeout: 10_000 });
+    await expect(banner).toContainText('不兼容');
+    await expect(banner).toContainText('0.1.2'); // 最低要求
+    await expect(banner).toContainText('0.0.9'); // 当前版本
+    // 拒绝服务要给出原因:开始控件是隐藏(不是禁用),横幅即原因
+    await expect(page.locator('[data-testid="acceptance-start"]')).toHaveCount(0);
+    await expect(page.locator('[data-testid="acceptance-project-input"]')).toHaveCount(0);
+    await page.screenshot({ path: 'test-results/acceptance-incompatible.png', fullPage: true });
   });
 });

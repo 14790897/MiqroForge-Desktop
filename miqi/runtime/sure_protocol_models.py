@@ -23,6 +23,8 @@ class SureHealthResult(BaseModel):
     installed: bool
     binary: str | None
     version: str | None
+    #: 阶段 6(D3):与最低支持版本(≥0.1.2)的兼容判定;None = 无法判断
+    compatible: bool | None = None
     error: str | None
 
 
