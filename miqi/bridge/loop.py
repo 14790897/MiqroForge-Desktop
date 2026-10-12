@@ -1427,6 +1427,7 @@ class BridgeRuntimeLoop:
             heartbeat_task = asyncio.create_task(_heartbeat())
 
             from miqi.protocol.events import (
+                ABORT_NOTICE_ERROR_KIND,
                 AgentMessageDeltaEvent,
                 AgentMessageEvent,
                 AgentReasoningEvent,
@@ -1491,6 +1492,15 @@ class BridgeRuntimeLoop:
                     break
 
                 if isinstance(event, ErrorEvent):
+                    # AbortTurn's notice rides the same queue as real turn
+                    # errors, but it is not a failure of THIS request's turn —
+                    # the aborted turn ends through TurnAbortedEvent.  The
+                    # aborted turn's own drain frequently exits before the
+                    # notice is enqueued, stranding it for the next chat.send,
+                    # which then reported an error for a turn that in fact ran
+                    # to completion.  Consume it and keep draining.
+                    if event.error_kind == ABORT_NOTICE_ERROR_KIND:
+                        continue
                     await _emit_terminal("error", {
                         "message": event.message,
                         "code": event.error_kind or "ERROR",

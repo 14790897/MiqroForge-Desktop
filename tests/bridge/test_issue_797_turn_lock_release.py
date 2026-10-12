@@ -14,6 +14,13 @@ draining in the background (consuming the old turn's eventual terminal
 event), and the next chat.send's drain first awaits that released
 predecessor so a stale terminal event can never be misread as the NEW
 request's terminal.
+
+Follow-up: awaiting the predecessor closes the stale TASK race but not the
+stale QUEUE one.  AbortTurn also enqueues an informational ErrorEvent after
+cancelling the turn, and the released drain usually exits before that lands —
+stranding a terminal-shaped event on the shared queue, which the next
+chat.send then adopted (a turn that ran to completion reported as a failure).
+The notice is now tagged ABORT_NOTICE_ERROR_KIND and the drain skips it.
 """
 
 import asyncio
@@ -21,7 +28,14 @@ import asyncio
 import pytest
 
 from miqi.bridge.loop import BridgeRuntimeLoop
-from miqi.protocol.events import TurnAbortedEvent, TurnCompleteEvent, TurnStartedEvent
+from miqi.protocol.events import (
+    ABORT_NOTICE_ERROR_KIND,
+    ErrorEvent,
+    EventSeverity,
+    TurnAbortedEvent,
+    TurnCompleteEvent,
+    TurnStartedEvent,
+)
 
 
 class _FakeAppServer:
@@ -195,3 +209,96 @@ async def test_new_drain_waits_for_released_predecessor():
     await asyncio.wait_for(asyncio.wait([new]), timeout=5)
     new_terminals = [m for m in recorded if m.get("id") == "req-new"]
     assert [t["type"] for t in new_terminals] == ["final"]
+
+
+# ── AbortTurn's notice vs. a later chat.send ────────────────────────────
+
+
+def _abort_notice(turn_id: str = "t-old") -> ErrorEvent:
+    """The event AbortTurn enqueues after cancelling the turn.
+
+    Informational: the aborted turn already ends through TurnAbortedEvent.
+    Waiting on the task (above) cannot cover it — it is a stale QUEUE entry,
+    not a stale task, and it is enqueued only after
+    ``cancel_approvals_for_thread`` returns, i.e. usually after the released
+    drain has already read that terminal and exited.
+    """
+    return ErrorEvent(
+        turn_id=turn_id,
+        severity=EventSeverity.WARNING,
+        error_kind=ABORT_NOTICE_ERROR_KIND,
+        message="Turn aborted for thread sess.",
+        recoverable=True,
+    )
+
+
+@pytest.mark.asyncio
+async def test_stranded_abort_notice_is_not_adopted_by_next_drain():
+    """Stop-then-send (#797 follow-up): the notice left behind by the aborted
+    turn must not settle the NEXT chat.send — that turn runs to completion."""
+    loop, sent = _make_loop()
+    runtime = _QueueRuntime()
+
+    # Old turn, released by chat.abort and drained to its own terminal.
+    pred = _spawn_drain(loop, "req-old", runtime)
+    await asyncio.sleep(0)
+    loop._session_drain_tasks["c:sess"] = pred
+    assert loop.release_turn_lock("c:sess") is True
+    runtime.queue.put_nowait(TurnAbortedEvent(
+        turn_id="t-old", thread_id="sess", reason="user",
+    ))
+    await asyncio.wait_for(asyncio.wait([pred]), timeout=5)
+    assert [t["type"] for t in _terminals(sent, "req-old")] == ["aborted"]
+
+    # AbortTurn's notice lands AFTER that drain exited — nobody is reading.
+    runtime.queue.put_nowait(_abort_notice())
+
+    # The user sends again immediately; that turn runs to completion.
+    new = _spawn_drain(loop, "req-new", runtime)
+    await asyncio.sleep(0)
+    runtime.queue.put_nowait(TurnStartedEvent(
+        turn_id="t-new", agent_name="a", thread_id="sess",
+    ))
+    runtime.queue.put_nowait(TurnCompleteEvent(
+        turn_id="t-new", thread_id="sess", outcome="success",
+    ))
+    await asyncio.wait_for(asyncio.wait([new]), timeout=5)
+
+    terminals = [t["type"] for t in _terminals(sent, "req-new")]
+    assert terminals == ["final"], f"stale abort notice adopted as terminal: {terminals}"
+
+
+@pytest.mark.asyncio
+async def test_abort_notice_does_not_mask_the_aborted_terminal():
+    """The other enqueue order: if the drain reads the notice first it must
+    skip it and still report the turn's TurnAbortedEvent, so the UI shows
+    「已停止」 rather than an error for the request the user just stopped."""
+    loop, sent = _make_loop()
+    runtime = _QueueRuntime()
+    drain = _spawn_drain(loop, "req-old", runtime)
+    await asyncio.sleep(0)
+
+    runtime.queue.put_nowait(_abort_notice())
+    runtime.queue.put_nowait(TurnAbortedEvent(
+        turn_id="t-old", thread_id="sess", reason="user",
+    ))
+    await asyncio.wait_for(asyncio.wait([drain]), timeout=5)
+
+    assert [t["type"] for t in _terminals(sent, "req-old")] == ["aborted"]
+
+
+@pytest.mark.asyncio
+async def test_untagged_error_event_still_terminates_request():
+    """Guard against over-skipping: only the abort notice is informational —
+    a real ErrorEvent must keep failing its request."""
+    loop, sent = _make_loop()
+    runtime = _QueueRuntime()
+    drain = _spawn_drain(loop, "req-x", runtime)
+    await asyncio.sleep(0)
+
+    runtime.queue.put_nowait(ErrorEvent(turn_id="t-x", message="boom"))
+    await asyncio.wait_for(asyncio.wait([drain]), timeout=5)
+
+    terminals = _terminals(sent, "req-x")
+    assert [t["type"] for t in terminals] == ["error"]
+    assert terminals[0]["data"]["message"] == "boom"

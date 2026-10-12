@@ -246,6 +246,14 @@ class ErrorEvent:
     error_kind: str | None = None  # Plan 57: provider error category (additive)
 
 
+# AbortTurn puts an informational ErrorEvent ("Turn aborted for thread X") on
+# the shared session queue.  It is NOT a failure of any turn — the aborted turn
+# terminates through TurnAbortedEvent.  Tagged so the chat drain can tell it
+# apart from a real error; untagged it is adoptable as the NEXT chat.send's
+# terminal (see miqi/bridge/loop.py::_drain_chat_events).
+ABORT_NOTICE_ERROR_KIND = "turn_aborted"
+
+
 @dataclass
 class WarningEvent:
     """A warning that the user should see."""
