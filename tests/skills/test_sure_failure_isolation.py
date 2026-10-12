@@ -110,6 +110,9 @@ async def test_tool_execution_survives_hanging_sure(tmp_path, monkeypatch):
     assert result.result and "contents-x" in result.result
     assert elapsed < 5.0, f"卡死的 SURE 不得拖垮工具执行(实测 {elapsed:.1f}s)"
 
+    # 契约:入队后收尾排空(不留半途 spawn 给 teardown)
+    await sure_hooks.flush(3.0)
+
 
 @pytest.mark.asyncio
 async def test_tool_execution_survives_missing_sure(tmp_path, monkeypatch):
@@ -123,6 +126,8 @@ async def test_tool_execution_survives_missing_sure(tmp_path, monkeypatch):
 
     assert result.status == "success", result.result
     assert result.result and "contents-x" in result.result
+
+    await sure_hooks.flush(2.0)  # 契约:入队后收尾排空
 
 
 @pytest.mark.asyncio
@@ -185,3 +190,5 @@ async def test_broken_hook_module_does_not_block_tool_execution(tmp_path, monkey
     result = await tool_runtime.execute_one(turn, call)
 
     assert result.status == "success", result.result
+
+    await sure_hooks.flush(2.0)  # 契约:入队后收尾排空

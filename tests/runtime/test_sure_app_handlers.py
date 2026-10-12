@@ -215,7 +215,7 @@ class _FakeControl:
         return SimpleNamespace(agent_id="agent-1")
 
 
-def _make_fix_server(*, with_session: bool, cached_repair: bool):
+def _make_fix_server(*, with_session: bool, cached_repair_project: str | None = None):
     from types import SimpleNamespace
 
     from miqi.runtime.app_server import AppServer, ClientSessionRegistry
@@ -234,10 +234,12 @@ def _make_fix_server(*, with_session: bool, cached_repair: bool):
         registry._client_sessions["c"] = {"c:s1"}  # list_sessions 读取处
         registry._session_clients["c:s1"] = {"c"}
         registry._last_activity["c:s1"] = 100.0
-    if cached_repair:
+    if cached_repair_project is not None:
         envelope = parse_sure_output(
             (FIXTURES / "report-repair-fake-payment.json").read_text(encoding="utf-8")
         )
+        # 报告里的项目与请求项目一致才允许启动修复(评审第 2 轮 P2)
+        envelope.details.project = cached_repair_project
         runtime._last_reports["c"] = envelope
     server = AppServer(registry)
     register_sure_handlers(server)
@@ -262,7 +264,7 @@ def test_build_fix_task_carries_contract_and_hard_rules():
 
 @pytest.mark.asyncio
 async def test_fix_requires_cached_repair_contract(tmp_path):
-    server, _, _, _ = _make_fix_server(with_session=True, cached_repair=False)
+    server, _, _, _ = _make_fix_server(with_session=True, cached_repair_project=None)
     resp = await _dispatch(
         server, "sure.fix.start", {"project": str(tmp_path)}, client_id="c"
     )
@@ -270,8 +272,40 @@ async def test_fix_requires_cached_repair_contract(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_fix_rejects_project_mismatch(tmp_path):
+    """评审第 2 轮 P2:报告中的项目与请求项目不一致 → 拒绝启动修复子代理。"""
+    server, _, _, control = _make_fix_server(
+        with_session=True, cached_repair_project=str(tmp_path / "another-project")
+    )
+    resp = await _dispatch(
+        server, "sure.fix.start", {"project": str(tmp_path)}, client_id="c"
+    )
+    assert resp["code"] == "SURE_PROJECT_MISMATCH"
+    assert "重新生成修复契约" in resp["error"]
+    assert not control.calls, "不一致时不得派发子代理"
+
+
+@pytest.mark.asyncio
+async def test_fix_accepts_project_spelling_differences(tmp_path):
+    """同一路径的不同书写(尾部分隔符等)不算不一致。"""
+    import os as _os
+
+    spelled = str(tmp_path) + _os.sep
+    server, _, _, control = _make_fix_server(
+        with_session=True, cached_repair_project=str(tmp_path)
+    )
+    resp = await _dispatch(
+        server, "sure.fix.start", {"project": spelled}, client_id="c"
+    )
+    assert "result" in resp, resp
+    assert len(control.calls) == 1
+
+
+@pytest.mark.asyncio
 async def test_fix_requires_session(tmp_path):
-    server, _, _, _ = _make_fix_server(with_session=False, cached_repair=True)
+    server, _, _, _ = _make_fix_server(
+        with_session=False, cached_repair_project=str(tmp_path)
+    )
     resp = await _dispatch(
         server, "sure.fix.start", {"project": str(tmp_path)}, client_id="c"
     )
@@ -280,7 +314,9 @@ async def test_fix_requires_session(tmp_path):
 
 @pytest.mark.asyncio
 async def test_fix_spawns_code_agent_with_user_root(tmp_path):
-    server, _, _, control = _make_fix_server(with_session=True, cached_repair=True)
+    server, _, _, control = _make_fix_server(
+        with_session=True, cached_repair_project=str(tmp_path)
+    )
     resp = await _dispatch(
         server, "sure.fix.start", {"project": str(tmp_path)}, client_id="c"
     )

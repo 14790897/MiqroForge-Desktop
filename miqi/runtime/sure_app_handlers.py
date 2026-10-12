@@ -146,6 +146,16 @@ def register_sure_handlers(server) -> None:
                 "请先在本页生成修复契约,再交给 AI 修复", code="SURE_NO_CONTRACT"
             )
 
+        # 评审第 2 轮 P2:报告项目与请求项目必须一致——后端不依赖前端状态
+        # 保证一致性;授权子代理的目录只能是被修复契约覆盖的那个项目。
+        if os.path.normcase(os.path.normpath(envelope.details.project)) != os.path.normcase(
+            os.path.normpath(project)
+        ):
+            raise AppServerError(
+                "修复契约与当前项目不一致——请对当前项目重新生成修复契约",
+                code="SURE_PROJECT_MISMATCH",
+            )
+
         # 面板是 client 级(无 session_id):选该客户端最近活跃的会话
         session_key = None
         best_activity = -1.0

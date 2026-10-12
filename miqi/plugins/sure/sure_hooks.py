@@ -4,9 +4,14 @@
 plugin_manager._make_module_callback),模块名要避免与其他插件撞车,
 故用 sure_hooks 而非 hooks。
 
-设计约束(阶段5 方案定稿):
-- 事件是观测(Tier 1):fire-and-forget——SURE 未装、超时、返回错误时
-  一律静默跳过,**绝不阻塞或改变 MiQi 的工具执行结果**;
+设计约束(阶段5 方案定稿;评审第 2 轮补齐):
+- 事件是观测(Tier 1),严格 fire-and-forget:钩子回调只做**非阻塞投递**
+  (有界队列 + 按需排空任务,队列空即收摊、不留常驻后台任务),SURE 子
+  进程的启动/等待/超时全部发生在排空任务里——单次工具调用的延迟不受
+  观测影响;
+- 队列满、SURE 未装、超时、返回错误:一律静默丢弃并计数(bridge_stats),
+  **绝不反过来阻塞工具**;应用退出时未投出的事件随进程结束丢弃
+  (观测通道的既定边界);
 - 最小采集:只发会话身份/项目根/工具名/结果状态/时间戳,不发工具参数
   (args)与输出内容;子进程环境走 sure_task_runtime 的白名单
   (build_sure_env)——平台令牌与 MIQI_* 不透传;
@@ -25,6 +30,8 @@ import asyncio
 import json
 import os
 import subprocess
+import weakref
+from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from loguru import logger
@@ -37,8 +44,14 @@ from miqi.runtime.sure_task_runtime import (
     build_sure_env,
 )
 
-#: ingest 子进程的等待上限(秒)。这是工具执行路径上的同步等待,必须短。
+#: 后台 ingest 的等待上限(秒)。等待发生在队列工作者里,不在工具执行路径上。
 INGEST_TIMEOUT_SECONDS = 3.0
+
+#: 事件队列上限。满即丢弃(观测通道:丢弃优于阻塞)。
+MAX_QUEUE = 256
+
+#: 会话停止时的排空等待上限(秒)。
+FLUSH_TIMEOUT_SECONDS = 3.0
 
 #: 只上报这些工具(SURE 侧词表;其余名字在 SURE 侧按未知名 fail-closed)。
 _VOCABULARY = frozenset(
@@ -79,19 +92,40 @@ async def _ingest(payload: dict, workspace: str | None) -> None:
     cwd = workspace if workspace and os.path.isdir(workspace) else None
     proc: asyncio.subprocess.Process | None = None
     try:
-        proc = await asyncio.create_subprocess_exec(
-            binary,
-            "hook",
-            "ingest",
-            "--source",
-            "miqi",
-            cwd=cwd,
-            env=build_sure_env(),
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.DEVNULL,
-            **spawn_kwargs,
+        # 取消防护(实测:pytest 事件循环收尾的 Runner 会把挂起任务"取消并等待",
+        # 而 Windows proactor 上 spawn 中途被取消时 connect_write_pipe 的
+        # future 永不落定 → 收尾永久挂起)。shield 把 spawn 保护到自然完成,
+        # 取消在下面被吸收:先拿到 proc、树杀回收,再原样上抛取消。
+        spawn = asyncio.ensure_future(
+            asyncio.create_subprocess_exec(
+                binary,
+                "hook",
+                "ingest",
+                "--source",
+                "miqi",
+                cwd=cwd,
+                env=build_sure_env(),
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+                **spawn_kwargs,
+            )
         )
+        try:
+            proc = await asyncio.shield(spawn)
+        except asyncio.CancelledError:
+            # spawn 继续在后台跑完(有界),收下 proc 清理后再上抛取消
+            try:
+                proc = await asyncio.wait_for(asyncio.shield(spawn), timeout=10.0)
+            except Exception:
+                logger.debug("SURE ingest 取消后未能取回子进程(放弃回收)")
+                raise
+            try:
+                await _kill_process_tree(proc)
+            except Exception:
+                logger.debug("SURE ingest 取消后清理子进程失败(忽略)")
+            _close_subprocess_transport(proc)
+            raise
         await asyncio.wait_for(
             proc.communicate(json.dumps(payload, ensure_ascii=False).encode("utf-8")),
             timeout=INGEST_TIMEOUT_SECONDS,
@@ -116,7 +150,106 @@ async def _ingest(payload: dict, workspace: str | None) -> None:
             _close_subprocess_transport(proc)
 
 
-async def _send(
+@dataclass
+class _BridgeState:
+    """一条事件循环的桥接状态:有界队列 + 计数(不持循环的强引用)。
+
+    worker 只留**弱引用**:Task 强引用其事件循环,若这里强持 Task,模块
+    (sys.modules 永生)→ 循环 → 循环上一切挂起回调 → ……的引用链会让循环
+    永不回收——实测后果:测试进程退出时 sqlite 非守护工作线程无人关闭,
+    解释器卡死在 shutdown(评审第 2 轮连带修复)。
+    """
+
+    queue: asyncio.Queue
+    worker_ref: weakref.ref | None = None
+    enqueued: int = 0
+    dropped: int = 0
+    ingested: int = 0
+
+
+#: 按事件循环隔离(测试每例一条新循环;生产全程同一条,随循环回收)。
+_states: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
+
+
+async def _drain(state: _BridgeState) -> None:
+    """消费到队列空即收摊——不留常驻任务(投递时按需重建,见 _enqueue)。
+
+    串行消费保序;SURE 的全部等待发生在这里,不在工具执行路径上。
+    """
+    while True:
+        try:
+            payload, workspace = state.queue.get_nowait()
+        except asyncio.QueueEmpty:
+            return
+        try:
+            await _ingest(payload, workspace)
+            state.ingested += 1
+        finally:
+            state.queue.task_done()
+
+
+def _state() -> _BridgeState:
+    loop = asyncio.get_running_loop()
+    state: _BridgeState | None = _states.get(loop)
+    if state is None:
+        state = _BridgeState(queue=asyncio.Queue(maxsize=MAX_QUEUE))
+        _states[loop] = state
+    return state
+
+
+def _enqueue(payload: dict, workspace: str | None) -> None:
+    """非阻塞投递;队列满 → 静默丢弃并计数(观测绝不阻塞执行)。
+
+    单线程协作调度下无滞留窗口:若排空任务此刻不在跑(空闲已收摊,或从未
+    创建),就在这里重建——投递与重建同一同步段,不存在"刚判空、又被投递"
+    的交错。
+    """
+    state = _state()
+    state.enqueued += 1
+    try:
+        state.queue.put_nowait((payload, workspace))
+    except asyncio.QueueFull:
+        state.dropped += 1
+        logger.debug(
+            "SURE 事件队列已满,丢弃事件: {} (累计丢弃 {})",
+            payload.get("event"),
+            state.dropped,
+        )
+        return
+    if state.worker_ref is None or not _worker_alive(state):
+        state.worker_ref = weakref.ref(asyncio.get_running_loop().create_task(_drain(state)))
+
+
+def _worker_alive(state: _BridgeState) -> bool:
+    task = state.worker_ref() if state.worker_ref is not None else None
+    return task is not None and not task.done()
+
+
+async def flush(timeout: float = FLUSH_TIMEOUT_SECONDS) -> None:
+    """等待队列排空(带界)。超时即放弃——观测通道不保证送达。"""
+    state: _BridgeState | None = _states.get(asyncio.get_running_loop())
+    if state is None:
+        return
+    try:
+        await asyncio.wait_for(state.queue.join(), timeout)
+    except asyncio.TimeoutError:
+        logger.debug("SURE 事件队列排空超时(放弃等待)")
+
+
+def bridge_stats() -> dict:
+    """当前循环的桥接计数(可观测性;不含任何载荷内容)。"""
+    state: _BridgeState | None = _states.get(asyncio.get_running_loop())
+    if state is None:
+        return {"enqueued": 0, "dropped": 0, "ingested": 0, "pending": 0}
+    return {
+        "enqueued": state.enqueued,
+        "dropped": state.dropped,
+        "ingested": state.ingested,
+        "pending": state.queue.qsize(),
+    }
+
+
+def _send(
     event_name: str,
     session_id: str,
     workspace: str | None,
@@ -129,13 +262,13 @@ async def _send(
         payload["tool"] = tool
     if result is not None:
         payload["result"] = result
-    await _ingest(payload, workspace)
+    _enqueue(payload, workspace)
 
 
 async def on_session_start(ctx) -> None:
     """HookPoint.SESSION_START → SessionStart(生命周期 ctx,数据在 ctx.data)。"""
     data = getattr(ctx, "data", None) or {}
-    await _send(
+    _send(
         "SessionStart",
         str(data.get("session_id") or ""),
         data.get("workspace"),
@@ -143,13 +276,14 @@ async def on_session_start(ctx) -> None:
 
 
 async def on_stop(ctx) -> None:
-    """HookPoint.STOP → Stop。"""
+    """HookPoint.STOP → Stop;会话收尾时排空队列(带界),尽量少丢事件。"""
     data = getattr(ctx, "data", None) or {}
-    await _send(
+    _send(
         "Stop",
         str(data.get("session_id") or ""),
         data.get("workspace"),
     )
+    await flush()
 
 
 async def on_pre_tool_use(ctx) -> None:
@@ -157,7 +291,7 @@ async def on_pre_tool_use(ctx) -> None:
     tool = getattr(ctx, "tool_name", "")
     if tool not in _VOCABULARY:
         return
-    await _send(
+    _send(
         "PreToolUse",
         str(getattr(ctx, "session_id", "") or ""),
         getattr(ctx, "workspace", "") or None,
@@ -179,7 +313,7 @@ async def on_post_tool_use(ctx) -> None:
     status = getattr(ctx, "status", None)
     if status is not None and status != OrchestrationResult.SUCCESS:
         return
-    await _send(
+    _send(
         "PostToolUse",
         str(getattr(ctx, "session_id", "") or ""),
         getattr(ctx, "workspace", "") or None,

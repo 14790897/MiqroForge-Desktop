@@ -8,6 +8,7 @@
 超时、返回错误时一律静默跳过,绝不阻塞或改变 MiQi 的工具执行结果。
 """
 
+import asyncio
 import json
 import os
 import sys
@@ -28,6 +29,9 @@ def _load_sure_hooks():
         "sure_hooks", PLUGIN_DIR / "sure_hooks.py"
     )
     module = importlib.util.module_from_spec(spec)
+    # 与真实导入一致:先登记 sys.modules 再执行——@dataclass 依赖
+    # 定义模块能在 sys.modules 中解析(生产侧 import_module 天然如此)。
+    sys.modules["sure_hooks"] = module
     spec.loader.exec_module(module)
     return module
 
@@ -81,6 +85,7 @@ async def test_pre_tool_use_sends_tool_requested(tmp_path, monkeypatch):
     monkeypatch.setattr(sur, "resolve_sure_bin", lambda: binary)
 
     await sur.on_pre_tool_use(_tool_ctx())
+    await sur.flush()  # 投递在后台进行:等排空后再断言
 
     event = _read_events(captured)[0]
     assert event["event"] == "PreToolUse"
@@ -100,6 +105,7 @@ async def test_post_tool_use_carries_ok_result(tmp_path, monkeypatch):
     monkeypatch.setattr(sur, "resolve_sure_bin", lambda: binary)
 
     await sur.on_post_tool_use(_tool_ctx(tool="write_file"))
+    await sur.flush()
 
     event = _read_events(captured)[0]
     assert event["event"] == "PostToolUse"
@@ -141,6 +147,7 @@ async def test_post_tool_use_skips_error_status(tmp_path, monkeypatch):
     ok_ctx = _tool_ctx()
     ok_ctx.status = OrchestrationResult.SUCCESS
     await sur.on_post_tool_use(ok_ctx)
+    await sur.flush()
     event = _read_events(captured)[0]
     assert event["event"] == "PostToolUse"
     assert event["result"] == "ok"
@@ -153,7 +160,8 @@ async def test_session_lifecycle_maps(tmp_path, monkeypatch):
     monkeypatch.setattr(sur, "resolve_sure_bin", lambda: binary)
 
     await sur.on_session_start(_lifecycle_ctx())
-    await sur.on_stop(_lifecycle_ctx())
+    await sur.on_stop(_lifecycle_ctx())  # on_stop 自带排空(等队列收尾再返回)
+    await sur.flush()
 
     events = _read_events(captured)
     assert [e["event"] for e in events] == ["SessionStart", "Stop"]
@@ -163,12 +171,78 @@ async def test_session_lifecycle_maps(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_tool_callbacks_return_without_waiting_for_sure(tmp_path, monkeypatch):
+    """P2(#1278 评审第 2 轮):观测不阻塞执行——回调投递即返回,
+    SURE 子进程的等待/超时发生在后台工作里,与工具执行解耦。"""
+    sur = _load_sure_hooks()
+    hang_bin = _wrap_as_sure(tmp_path, "import time\ntime.sleep(30)\n")
+    monkeypatch.setattr(sur, "resolve_sure_bin", lambda: hang_bin)
+    monkeypatch.setattr(sur, "INGEST_TIMEOUT_SECONDS", 2.0)
+
+    started = time.monotonic()
+    await sur.on_pre_tool_use(_tool_ctx())
+    await sur.on_post_tool_use(_tool_ctx())
+    elapsed = time.monotonic() - started
+
+    # 同步等待时这里会是 ~2s/次;解耦后应当毫秒级返回
+    assert elapsed < 0.35, f"工具回调不得等待 SURE(实测 {elapsed:.2f}s)"
+    stats = sur.bridge_stats()
+    assert stats["enqueued"] == 2
+    assert stats["dropped"] == 0
+
+    # 收尾:等后台把两次 ingest(各 ~2s 超时)排空,避免悬挂任务
+    await sur.flush(10.0)
+
+
+@pytest.mark.asyncio
+async def test_events_ingest_in_order(tmp_path, monkeypatch):
+    """有界队列保序:同一工具的前/后事件按投递顺序落盘。"""
+    sur = _load_sure_hooks()
+    binary, captured = _capture_bin(tmp_path)
+    monkeypatch.setattr(sur, "resolve_sure_bin", lambda: binary)
+
+    await sur.on_pre_tool_use(_tool_ctx())
+    await sur.on_post_tool_use(_tool_ctx())
+    await sur.flush()
+
+    assert [e["event"] for e in _read_events(captured)] == ["PreToolUse", "PostToolUse"]
+
+
+@pytest.mark.asyncio
+async def test_full_queue_drops_quietly(tmp_path, monkeypatch):
+    """队列满 → 静默丢弃并计数(观测绝不反过来阻塞工具),不抛异常。"""
+    sur = _load_sure_hooks()
+    hang_bin = _wrap_as_sure(tmp_path, "import time\ntime.sleep(30)\n")
+    monkeypatch.setattr(sur, "resolve_sure_bin", lambda: hang_bin)
+    monkeypatch.setattr(sur, "INGEST_TIMEOUT_SECONDS", 30.0)
+    monkeypatch.setattr(sur, "MAX_QUEUE", 1)
+
+    started = time.monotonic()
+    for _ in range(4):
+        await sur.on_pre_tool_use(_tool_ctx())
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 0.5, "满队列也必须立即返回"
+    stats = sur.bridge_stats()
+    assert stats["enqueued"] == 4
+    assert stats["dropped"] >= 2, f"队列上限 1,应有事件被丢弃:{stats}"
+
+    # 收尾:等排空任务真正起来(卡进 30s ingest)再取消,并等取消清理完成(有界)
+    await asyncio.sleep(0.1)
+    st = sur._state()
+    assert st.worker_ref is not None and st.worker_ref() is not None
+    st.worker_ref().cancel()
+    await sur.flush(5.0)
+
+
+@pytest.mark.asyncio
 async def test_missing_binary_is_silent(tmp_path, monkeypatch):
     sur = _load_sure_hooks()
     _, captured = _capture_bin(tmp_path)
     monkeypatch.setattr(sur, "resolve_sure_bin", lambda: None)
 
     await sur.on_pre_tool_use(_tool_ctx())  # 不应抛出
+    await sur.flush()  # 契约:入队后收尾排空(不留半途 spawn 给 teardown)
 
     assert not captured.exists()
 
@@ -180,6 +254,7 @@ async def test_failing_ingest_is_silent(tmp_path, monkeypatch):
     monkeypatch.setattr(sur, "resolve_sure_bin", lambda: failing)
 
     await sur.on_pre_tool_use(_tool_ctx())  # 退出码非零不应抛出
+    await sur.flush()  # 契约:入队后收尾排空(不留半途 spawn 给 teardown)
 
 
 @pytest.mark.asyncio
@@ -190,9 +265,10 @@ async def test_ingest_timeout_is_silent_and_bounded(tmp_path, monkeypatch):
     monkeypatch.setattr(sur, "INGEST_TIMEOUT_SECONDS", 0.5)
 
     started = time.monotonic()
-    await sur.on_pre_tool_use(_tool_ctx())  # 超时应被吞掉并尽快返回
+    await sur.on_pre_tool_use(_tool_ctx())  # 投递即返回,不等 ingest
+    assert time.monotonic() - started < 1.0
 
-    assert time.monotonic() - started < 10
+    await sur.flush(5.0)  # 后台按 0.5s 超时静默收掉,排空有界
 
 
 @pytest.mark.asyncio
@@ -221,3 +297,4 @@ async def test_plugin_manifest_registers_the_four_hooks(tmp_path):
         regs = [r for r in runtime._hooks[point] if r.source == "sure"]
         assert len(regs) == 1, f"{point} 未由 sure 插件注册"
         assert regs[0].tool_pattern == "*"
+
