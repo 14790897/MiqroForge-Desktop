@@ -1,6 +1,8 @@
 import {
   existsSync,
+  lstatSync,
   mkdirSync,
+  readdirSync,
   readFileSync,
   realpathSync,
   renameSync,
@@ -446,6 +448,93 @@ export function sessionFilesDirKey(sessionKey: string): string {
   const parts = sessionKey.split(':');
   if (parts.length >= 3) parts.shift();
   return parts.join('_').replace(/[^A-Za-z0-9._-]/g, '_');
+}
+
+/** Hard cap on entries visited by findFileByBasename (#1274). */
+const BASENAME_WALK_LIMIT = 20000;
+
+/** True for a single file-name segment with no directory component (#1274). */
+export function isBareFileName(raw: string): boolean {
+  if (!raw || raw === '.' || raw === '..' || raw.includes(':')) return false;
+  const normalised = raw.replace(/\\/g, '/');
+  return !normalised.includes('/') && basename(normalised) === normalised;
+}
+
+/**
+ * Bounded basename search under *root* for a tracked bare name (#1274).
+ *
+ * Sandbox exec tracking records bare file names in tracked_files.json while
+ * the host copy lands in a nested tree under the session files dir, so direct
+ * resolution misses.  Deterministic pick: shallowest relative path wins (the
+ * run-leaf root over `delivery/` copies); ties broken by newest mtime.
+ * Symlinks/junctions are skipped; the walk is bounded by BASENAME_WALK_LIMIT.
+ */
+export function findFileByBasename(root: string, bare: string): string | null {
+  let best: { depth: number; mtime: number; path: string } | null = null;
+  let visited = 0;
+  const stack: string[] = [root];
+  while (stack.length > 0 && visited < BASENAME_WALK_LIMIT) {
+    const dir = stack.pop()!;
+    let entries: ReturnType<typeof readdirSync>;
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      visited += 1;
+      const full = join(dir, entry.name);
+      let isLink = false;
+      try {
+        isLink = lstatSync(full).isSymbolicLink();
+      } catch {
+        continue;
+      }
+      if (isLink) continue;
+      if (entry.isDirectory()) {
+        stack.push(full);
+        continue;
+      }
+      if (entry.name !== bare) continue;
+      const depth = full.slice(root.length).split(/[\\/]/).filter(Boolean).length;
+      let mtime = 0;
+      try {
+        mtime = lstatSync(full).mtimeMs;
+      } catch {
+        /* keep 0 */
+      }
+      if (best === null || depth < best.depth || (depth === best.depth && mtime > best.mtime)) {
+        best = { depth, mtime, path: full };
+      }
+    }
+  }
+  return best ? best.path : null;
+}
+
+/**
+ * Fallback resolution for tracked bare names that missed direct resolution
+ * (#1274): search the session's own roots (bound folder for folder-bound
+ * sessions, the session files dir otherwise) by basename.
+ *
+ * Only bare single-segment names qualify — anything with a directory
+ * component was already resolved (or rejected) by resolveWorkspacePath and
+ * must not be silently re-targeted at a different file.
+ */
+export function resolveBareNameFallback(
+  raw: string,
+  sessionKey: string | undefined,
+  extraRoots: Array<string | null | undefined>
+): string | null {
+  if (!sessionKey || !isBareFileName(raw)) return null;
+  const roots: string[] = [
+    ...(extraRoots.filter((r): r is string => typeof r === 'string' && r.length > 0) ?? []),
+    join(getWorkspacePath(), 'sessions', sessionFilesDirKey(sessionKey), 'files'),
+  ];
+  for (const root of roots) {
+    const hit = findFileByBasename(root, raw);
+    if (hit) return hit;
+  }
+  return null;
 }
 
 /**

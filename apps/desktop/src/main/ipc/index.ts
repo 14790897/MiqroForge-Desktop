@@ -101,6 +101,7 @@ import {
   getWorkspacePath,
   isWithinCanonicalWorkspace,
   readLocalConfig,
+  resolveBareNameFallback,
   resolveWorkspacePath,
   shellEscape,
 } from './workspace-path';
@@ -1955,6 +1956,14 @@ for m in ("pydantic", "httpx", "loguru"):
       return { opened: false, path: raw, error: e?.message ?? String(e) };
     }
 
+    // #1274: 追踪台账裸名（沙箱 exec 追踪）与实际嵌套落点不匹配——直接解析
+    // 不到时在会话自己的根（绑定文件夹 / 会话 files 目录）按 basename 兜底
+    // 搜一次。命中的路径仍会过下方 isWithinCanonicalWorkspace 包含性校验。
+    if (!existsSync(absolutePath)) {
+      const fallback = resolveBareNameFallback(raw, parsed.data.session_key, extraRoots);
+      if (fallback) absolutePath = fallback;
+    }
+
     // On Windows the file may live inside a WSL sandbox.
     const candidates: string[] = [absolutePath];
 
@@ -2255,15 +2264,22 @@ for m in ("pydantic", "httpx", "loguru"):
     // #1062: 解析放进 try —— 工作区外路径 throw 会变成 IPC rejection（渲染层静默无反应）。
     try {
       const absolutePath = resolveWorkspacePath(clean, extraRoots);
-      if (!existsSync(absolutePath)) {
+      // #1274: 追踪台账裸名与实际嵌套落点不匹配——直接解析不到时按 basename
+      // 兜底搜一次（有界、浅路径优先），命中路径仍过下方包含性校验。
+      let resolvedPath = absolutePath;
+      if (!existsSync(resolvedPath)) {
+        const fallback = resolveBareNameFallback(clean, parsed.data.session_key, extraRoots);
+        if (fallback) resolvedPath = fallback;
+      }
+      if (!existsSync(resolvedPath)) {
         return { revealed: false, path: raw, error: `File not found: ${absolutePath}` };
       }
       // Follow symlinks/junctions so a link pointing outside the workspace can't
       // reveal a host directory through the lexical containment check (#955).
-      if (!isWithinCanonicalWorkspace(absolutePath, getWorkspacePath(), extraRoots)) {
+      if (!isWithinCanonicalWorkspace(resolvedPath, getWorkspacePath(), extraRoots)) {
         return { revealed: false, path: raw, error: `Path outside workspace: ${raw}` };
       }
-      if (!skipOsLaunchForE2E()) shell.showItemInFolder(absolutePath);
+      if (!skipOsLaunchForE2E()) shell.showItemInFolder(resolvedPath);
       return { revealed: true, path: raw };
     } catch (e: any) {
       return { revealed: false, path: raw, error: e?.message ?? String(e) };

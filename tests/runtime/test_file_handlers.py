@@ -1797,3 +1797,155 @@ async def test_find_ledger_root_rejects_stale_folder_copy_when_unbound_at_app_ho
         SimpleNamespace(get_session=_get_session),
     )
     assert result["result"]["content"] == "current session file"
+
+
+# ── #1274: tracked bare-name basename fallback ───────────────────────────────
+
+
+def _ensure_session_nested_file(workspace, session_key: str, rel_path: str, content: str = "nested"):
+    """Create a file at a nested path inside the session files tree."""
+    from miqi.session.session_keys import session_files_dir_key
+
+    files_dir = workspace / "sessions" / session_files_dir_key(session_key) / "files"
+    target = files_dir / rel_path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(content, encoding="utf-8")
+    return target
+
+
+@pytest.mark.asyncio
+async def test_files_read_bare_name_fallback_resolves_nested_tree(fake_config, fake_provider, tmp_path):
+    """files.read resolves a tracked bare name that lives in a nested tree (#1274)."""
+    from miqi.runtime.app_server import ClientSessionRegistry
+    from miqi.runtime.file_handlers import files_read_handler
+
+    sm, ws = _setup_session("bare-name-read", "client-1")
+    _ensure_session_nested_file(
+        ws, "bare-name-read",
+        "bvse-mof-demo/output/run-x/zif8_report.md",
+        "nested report",
+    )
+
+    registry = ClientSessionRegistry()
+    result = await files_read_handler(
+        "req-1",
+        {"path": "zif8_report.md", "session_key": "bare-name-read"},
+        "client-1", None, registry,
+    )
+    assert result["result"]["content"] == "nested report"
+    # 解析到的是嵌套落点，不是 session files 根
+    assert result["result"]["path"] == "zif8_report.md"
+
+
+@pytest.mark.asyncio
+async def test_files_read_bare_name_fallback_missing_still_not_found(fake_config, fake_provider, tmp_path):
+    """A bare name present nowhere in the session tree stays NOT_FOUND (#1274)."""
+    from miqi.runtime.app_server import AppServerError, ClientSessionRegistry
+    from miqi.runtime.file_handlers import files_read_handler
+
+    sm, ws = _setup_session("bare-name-miss", "client-1")
+    _ensure_session_nested_file(ws, "bare-name-miss", "other/report.md", "x")
+
+    registry = ClientSessionRegistry()
+    with pytest.raises(AppServerError) as exc_info:
+        await files_read_handler(
+            "req-1",
+            {"path": "ghost.md", "session_key": "bare-name-miss"},
+            "client-1", None, registry,
+        )
+    assert exc_info.value.code == "NOT_FOUND"
+
+
+@pytest.mark.asyncio
+async def test_files_read_bare_name_fallback_cross_client_rejected(fake_config, fake_provider, tmp_path):
+    """The basename fallback never crosses the session ownership boundary (#1274)."""
+    from miqi.runtime.app_server import AppServerError, ClientSessionRegistry
+    from miqi.runtime.file_handlers import files_read_handler
+
+    sm, ws = _setup_session("bare-name-x", "client-A")
+    _ensure_session_nested_file(ws, "bare-name-x", "deep/secret.txt", "secret")
+
+    registry = ClientSessionRegistry()
+    with pytest.raises(AppServerError) as exc_info:
+        await files_read_handler(
+            "req-1",
+            {"path": "secret.txt", "session_key": "bare-name-x"},
+            "client-B", None, registry,
+        )
+    assert exc_info.value.code == "UNAUTHORIZED"
+
+
+@pytest.mark.asyncio
+async def test_files_read_nested_path_no_basename_fallback(fake_config, fake_provider, tmp_path):
+    """Paths with a directory component never get re-targeted by the fallback (#1274)."""
+    from miqi.runtime.app_server import AppServerError, ClientSessionRegistry
+    from miqi.runtime.file_handlers import files_read_handler
+
+    sm, ws = _setup_session("nested-path-read", "client-1")
+    _ensure_session_nested_file(ws, "nested-path-read", "sub/report.md", "x")
+
+    registry = ClientSessionRegistry()
+    with pytest.raises(AppServerError) as exc_info:
+        await files_read_handler(
+            "req-1",
+            {"path": "sub/missing.md", "session_key": "nested-path-read"},
+            "client-1", None, registry,
+        )
+    assert exc_info.value.code == "NOT_FOUND"
+
+
+def test_is_bare_name_shapes():
+    """Bare-name guard: only single file-name segments qualify (#1274)."""
+    from miqi.runtime import file_handlers
+
+    assert file_handlers._is_bare_name("report.md") is True
+    assert file_handlers._is_bare_name(".skill-run.json") is True
+    assert file_handlers._is_bare_name("sub/report.md") is False
+    assert file_handlers._is_bare_name("sub\\report.md") is False
+    assert file_handlers._is_bare_name("..") is False
+    assert file_handlers._is_bare_name(".") is False
+    assert file_handlers._is_bare_name("") is False
+    assert file_handlers._is_bare_name("a:b") is False
+
+
+def test_find_by_basename_under_shallowest_wins(tmp_path):
+    """Ambiguous basename: the shallowest match wins (#1274)."""
+    from miqi.runtime import file_handlers
+
+    deep = tmp_path / "a" / "b" / "x.txt"
+    deep.parent.mkdir(parents=True)
+    deep.write_text("deep", encoding="utf-8")
+    shallow = tmp_path / "c" / "x.txt"
+    shallow.parent.mkdir()
+    shallow.write_text("shallow", encoding="utf-8")
+
+    hit = file_handlers._find_by_basename_under(tmp_path, "x.txt")
+    assert hit == shallow
+
+
+def test_find_by_basename_under_same_depth_newest_wins(tmp_path):
+    """Ambiguous basename at equal depth: newest mtime wins (#1274)."""
+    import os
+
+    from miqi.runtime import file_handlers
+
+    left = tmp_path / "l" / "x.txt"
+    left.parent.mkdir()
+    left.write_text("left", encoding="utf-8")
+    right = tmp_path / "r" / "x.txt"
+    right.parent.mkdir()
+    right.write_text("right", encoding="utf-8")
+    os.utime(left, (1_600_000_000, 1_600_000_000))
+    os.utime(right, (1_700_000_000, 1_700_000_000))
+
+    hit = file_handlers._find_by_basename_under(tmp_path, "x.txt")
+    assert hit == right
+
+
+def test_find_by_basename_under_missing_returns_none(tmp_path):
+    """No match anywhere → None (#1274)."""
+    from miqi.runtime import file_handlers
+
+    (tmp_path / "other.txt").write_text("x", encoding="utf-8")
+    assert file_handlers._find_by_basename_under(tmp_path, "ghost.txt") is None
+    assert file_handlers._find_by_basename_under(tmp_path / "no-dir", "ghost.txt") is None
