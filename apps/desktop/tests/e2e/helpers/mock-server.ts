@@ -22,8 +22,7 @@
  * 本模块做两件事（对应 #1118 修复任务的两条要求）：
  *
  *   - `resolveMockPython()`：候选链逐个探测，选第一个真的能起解释器的
- *     （MIQI_PYTHON_PATH → 仓库 venv → uv run python → python3 → python；
- *     venv 直启零开销，uv 兜底——见下方 b/c 的实测说明）。
+ *     （MIQI_PYTHON_PATH → uv run python → 仓库 venv → python3 → python）。
  *     思路与 `helpers/electron-setup.ts` 里「MIQI_PYTHON_PATH 探测不通过就清掉
  *     让 bridge 走 uv」一致：不信任环境变量本身，只信任探测结果。
  *   - `startMockServer()`：spawn 失败立刻抛（不再空转 30s），失败/超时消息带上
@@ -92,11 +91,10 @@ function pythonCandidates(): Array<Omit<PythonProbe, 'ok' | 'detail'>> {
     candidates.push({ label: `MIQI_PYTHON_PATH=${fromEnv}`, command: fromEnv, args: [] });
   }
 
-  // b. 仓库 venv 直启（**优先于 uv**）。mock 脚本只用标准库，venv 解释器
-  //    spawn 后毫秒级就绪；而 `uv run python` 每次 spawn 都要做工程解析/
-  //    同步检查——#1278 实测：macOS runner 并发跑 e2e 时，单个 uv run 冷启动
-  //    可超过 30s 启动超时（mock_llm_reply 三连败），venv 直启无此开销。
-  //    macos CI 的 `uv sync` 建在**仓库根**（日志：Creating virtual
+  // b. uv：CI（macos job `pip install uv; uv sync`）与本地都有，会自己找仓库 venv。
+  candidates.push({ label: 'uv run python', command: 'uv', args: ['run', 'python'] });
+
+  // c. 仓库 venv。macos CI 实测 `uv sync` 建在**仓库根**（日志：Creating virtual
   //    environment at: <repo>/.venv），apps/desktop 下也允许存在——两处都试。
   for (const root of [APPS_DESKTOP, REPO_ROOT]) {
     const exe =
@@ -105,9 +103,6 @@ function pythonCandidates(): Array<Omit<PythonProbe, 'ok' | 'detail'>> {
         : join(root, '.venv', 'bin', 'python');
     candidates.push({ label: `venv ${exe}`, command: exe, args: [] });
   }
-
-  // c. uv：兜底（venv 不在、或被 uv 建在别处时）。uv 会自己找仓库 venv。
-  candidates.push({ label: 'uv run python', command: 'uv', args: ['run', 'python'] });
 
   // d./e. PATH 上的通用名。posix 上 `python3` 才是稳的那个，所以排在 `python` 前。
   if (process.platform !== 'win32') {
