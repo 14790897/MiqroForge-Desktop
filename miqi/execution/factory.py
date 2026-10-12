@@ -27,6 +27,7 @@ def create_default_orchestrator(
     ledger_runtime: Any | None = None,
     exec_timeout_ms: int | None = None,
     has_approval_responder: bool = True,
+    hook_runtime: Any | None = None,
 ) -> Any:
     """Create a ToolOrchestrator with sensible defaults.
 
@@ -45,6 +46,12 @@ def create_default_orchestrator(
             Defaults to 30s; pass the configured ``tools.exec.timeout``
             (in ms) so the selection does not silently cap commands below
             the user's setting.
+        hook_runtime: Shared HookRuntime to consume hooks from. Sessions
+            must pass the same instance PluginManager registers plugin hooks
+            on — a private instance here would leave every plugin-registered
+            PRE_TOOL_USE/POST_TOOL_USE/PERMISSION_REQUEST hook silently
+            unexecuted. ``None`` creates a private one for callers that wire
+            no plugins (tests, one-off runs).
     Returns:
         Configured ToolOrchestrator instance.
     """
@@ -76,7 +83,7 @@ def create_default_orchestrator(
             allow_fallback_to_none=allow_fallback_to_none,
             default_timeout_ms=exec_timeout_ms or 30_000,
         ),
-        hook_runtime=HookRuntime(),
+        hook_runtime=hook_runtime if hook_runtime is not None else HookRuntime(),
         tool_registry=tool_registry,
         event_emitter=emitter,
         ledger_runtime=ledger_runtime,
