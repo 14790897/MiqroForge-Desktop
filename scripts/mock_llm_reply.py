@@ -10,6 +10,7 @@ spawn → subagent_result → 自动复核 的全链路,又不依赖任何真实
 from __future__ import annotations
 
 import json
+import socketserver
 import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -78,10 +79,24 @@ class _Handler(BaseHTTPRequestHandler):
         pass
 
 
+class FastBindHTTPServer(ThreadingHTTPServer):
+    """HTTPServer.server_bind() 会用 socket.getfqdn(host) 反查 DNS；
+    某些 CI runner（macOS）上该反查会卡住，导致 ready 行永远不打印、
+    serve_forever 永不执行。这里跳过反查：server_name 直接用 host。
+    （与 mock_hang / mock_mcp / mock_openai 同款#1278 macos-e2e 实测踩中。）"""
+
+    def server_bind(self):
+        socketserver.TCPServer.server_bind(self)
+        host, port = self.server_address[:2]
+        self.server_name = host
+        self.server_port = port
+
+
 def main() -> None:
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 3465
-    server = ThreadingHTTPServer(("127.0.0.1", port), _Handler)
-    print(f"mock llm ready http://127.0.0.1:{port}/v1", flush=True)
+    server = FastBindHTTPServer(("127.0.0.1", port), _Handler)
+    actual_port = server.server_address[1]
+    print(f"mock llm ready http://127.0.0.1:{actual_port}/v1", flush=True)
     server.serve_forever()
 
 
