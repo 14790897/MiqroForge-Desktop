@@ -253,9 +253,7 @@ export const MIN_SUPPORTED_SURE_VERSION = '0.1.2';
  * 不兼容是明确结论(compatible === false),才提示并拦下「开始核查」;
  * 「无法判断」(字段缺失或 null)不拦——那是如实呈现,不是拒绝服务。
  */
-export function sureIncompatibilityNotice(
-  health: SureHealth | null | undefined
-): string | null {
+export function sureIncompatibilityNotice(health: SureHealth | null | undefined): string | null {
   if (!health?.installed) return null;
   if (health.compatible !== false) return null;
   return `SURE 版本不兼容:当前 ${health.version ?? '未知'},最低要求 ${MIN_SUPPORTED_SURE_VERSION}。请升级 SURE,或用 SURE_BIN 指向 ≥${MIN_SUPPORTED_SURE_VERSION} 的构建。`;

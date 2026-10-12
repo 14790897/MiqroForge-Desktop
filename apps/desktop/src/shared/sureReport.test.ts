@@ -107,9 +107,7 @@ describe('sureIncompatibilityNotice', () => {
     const legacy = { ...base } as Partial<SureHealth>;
     delete legacy.compatible;
     expect(sureIncompatibilityNotice(legacy as SureHealth)).toBeNull();
-    expect(
-      sureIncompatibilityNotice({ ...base, installed: false })
-    ).toBeNull();
+    expect(sureIncompatibilityNotice({ ...base, installed: false })).toBeNull();
     expect(sureIncompatibilityNotice(null)).toBeNull();
   });
 });
