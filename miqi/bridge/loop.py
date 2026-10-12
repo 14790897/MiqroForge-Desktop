@@ -1494,12 +1494,21 @@ class BridgeRuntimeLoop:
                 if isinstance(event, ErrorEvent):
                     # AbortTurn's notice rides the same queue as real turn
                     # errors, but it is not a failure of THIS request's turn —
-                    # the aborted turn ends through TurnAbortedEvent.  The
-                    # aborted turn's own drain frequently exits before the
-                    # notice is enqueued, stranding it for the next chat.send,
-                    # which then reported an error for a turn that in fact ran
-                    # to completion.  Consume it and keep draining.
+                    # the aborted turn ends through TurnAbortedEvent.  It is
+                    # produced only on the abort path taken with no active turn
+                    # (RuntimeSession._run), i.e. when the stop lands after the
+                    # turn already ended; an abort during a running turn goes
+                    # through the cancellation bypass and enqueues nothing.  On
+                    # that path the aborted turn's own drain has already read
+                    # its terminal and exited, so the notice is stranded for the
+                    # next chat.send, which then reported an error for a turn
+                    # that in fact ran to completion.  Consume it and keep going.
                     if event.error_kind == ABORT_NOTICE_ERROR_KIND:
+                        logger.info(
+                            "chat.send drain: skipped a stranded abort notice "
+                            "for request {} (turn_id={})",
+                            request_id, event.turn_id,
+                        )
                         continue
                     await _emit_terminal("error", {
                         "message": event.message,

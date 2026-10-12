@@ -16,18 +16,25 @@ predecessor so a stale terminal event can never be misread as the NEW
 request's terminal.
 
 Follow-up: awaiting the predecessor closes the stale TASK race but not the
-stale QUEUE one.  AbortTurn also enqueues an informational ErrorEvent after
-cancelling the turn, and the released drain usually exits before that lands —
-stranding a terminal-shaped event on the shared queue, which the next
-chat.send then adopted (a turn that ran to completion reported as a failure).
-The notice is now tagged ABORT_NOTICE_ERROR_KIND and the drain skips it.
+stale QUEUE one.  AbortTurn also enqueues an informational ErrorEvent — but
+only on the abort path taken when the session has no active turn
+(RuntimeSession._run), i.e. when the stop lands after the turn it targets has
+already ended; an abort during a running turn goes through the cancellation
+bypass and enqueues nothing.  On that path the aborted turn's own drain has
+already read its terminal and exited, so the notice is stranded on the shared
+queue and the next chat.send adopted it (a turn that ran to completion
+reported as a failure).  The notice is now tagged ABORT_NOTICE_ERROR_KIND and
+the drain skips it; tests/runtime/test_abort_notice_enqueued.py pins the half
+that produces it.
 """
 
 import asyncio
+from types import SimpleNamespace
 
 import pytest
 
 from miqi.bridge.loop import BridgeRuntimeLoop
+from miqi.protocol.commands import AbortTurn
 from miqi.protocol.events import (
     ABORT_NOTICE_ERROR_KIND,
     ErrorEvent,
@@ -36,6 +43,7 @@ from miqi.protocol.events import (
     TurnCompleteEvent,
     TurnStartedEvent,
 )
+from miqi.runtime.session import RuntimeSession
 
 
 class _FakeAppServer:
@@ -219,9 +227,9 @@ def _abort_notice(turn_id: str = "t-old") -> ErrorEvent:
 
     Informational: the aborted turn already ends through TurnAbortedEvent.
     Waiting on the task (above) cannot cover it — it is a stale QUEUE entry,
-    not a stale task, and it is enqueued only after
-    ``cancel_approvals_for_thread`` returns, i.e. usually after the released
-    drain has already read that terminal and exited.
+    not a stale task, and by construction it is enqueued only when no turn is
+    active, i.e. after the aborted turn's drain has already read that terminal
+    and exited.
     """
     return ErrorEvent(
         turn_id=turn_id,
@@ -302,3 +310,54 @@ async def test_untagged_error_event_still_terminates_request():
     terminals = _terminals(sent, "req-x")
     assert [t["type"] for t in terminals] == ["error"]
     assert terminals[0]["data"]["message"] == "boom"
+
+
+# ── the real dispatch loop, end to end ──────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_stop_then_send_survives_the_real_dispatch_loop():
+    """Stop-then-send over the REAL RuntimeSession dispatch loop.
+
+    The tests above hand-build the notice, so they pin the drain half only.
+    Here the notice is produced by the real code path (a real session whose
+    ``_run`` dispatches a real AbortTurn with no active turn), left stranded
+    exactly as in production, and then read by a real drain.
+    """
+    loop, sent = _make_loop()
+    session = RuntimeSession(services=SimpleNamespace(
+        session_id="c:sess",
+        orchestrator=None,
+        ledger_runtime=None,
+    ))
+    dispatch = asyncio.create_task(session._run())
+    try:
+        # 1. The user stops a turn that has already ended → no active turn →
+        #    AbortTurn reaches TaskRunner.handle and leaves the notice behind.
+        await session.submit(AbortTurn(thread_id="sess"))
+        notice = await asyncio.wait_for(session._events.get(), timeout=2)
+        assert getattr(notice, "error_kind", None) == ABORT_NOTICE_ERROR_KIND
+        # Put it back: the point is that it is still sitting on the shared
+        # queue, with no drain left to read it, when the next chat.send starts.
+        session._events.put_nowait(notice)
+
+        # 2. The user sends again immediately.
+        drain = _spawn_drain(loop, "req-new", session)
+        await asyncio.sleep(0)
+        session._events.put_nowait(TurnStartedEvent(
+            turn_id="t-new", agent_name="a", thread_id="sess",
+        ))
+        session._events.put_nowait(TurnCompleteEvent(
+            turn_id="t-new", thread_id="sess", outcome="success",
+        ))
+        await asyncio.wait_for(asyncio.wait([drain]), timeout=5)
+    finally:
+        dispatch.cancel()
+        try:
+            await dispatch
+        except asyncio.CancelledError:
+            pass
+
+    assert [t["type"] for t in _terminals(sent, "req-new")] == ["final"], (
+        "the stranded abort notice settled the next chat.send"
+    )
