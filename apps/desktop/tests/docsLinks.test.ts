@@ -29,12 +29,10 @@ describe('#1155 设置页「文档」链接', () => {
     expect(new URL(DOCS_BASE_URL).protocol).toBe('https:');
   });
 
-  it('文档站根地址是本仓库的 Pages 路径，不再指向旧仓库 /MiQi/', () => {
-    const repoName = mkdocsScalar('repo_url')
-      .replace(/\.git$/, '')
-      .split('/')
-      .pop();
-    expect(new URL(DOCS_BASE_URL).pathname).toBe(`/${repoName}/`);
+  it('文档站根地址是本仓库的自定义域名，不再指向旧仓库 /MiQi/', () => {
+    const docsUrl = new URL(DOCS_BASE_URL);
+    expect(docsUrl.origin).toBe('https://miqro.sixiangjia.de');
+    expect(docsUrl.pathname).toBe('/');
     expect(DOCS_BASE_URL).not.toContain('/MiQi/');
   });
 
