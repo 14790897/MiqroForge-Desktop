@@ -71,15 +71,12 @@ async function startMockOpenAI(): Promise<{ proc: ChildProcess; mockUrl: string 
 
 /** 把 main 的 sessions:truncate 换成必抛 —— 模拟「后端删除历史失败」。 */
 async function patchTruncateToFail(electronApp: ElectronApplication): Promise<void> {
-  await electronApp.evaluate(
-    async ({ ipcMain }, channel: string) => {
-      ipcMain.removeHandler(channel);
-      ipcMain.handle(channel, async () => {
-        throw new Error('truncate failed (e2e)');
-      });
-    },
-    SESSIONS_TRUNCATE
-  );
+  await electronApp.evaluate(async ({ ipcMain }, channel: string) => {
+    ipcMain.removeHandler(channel);
+    ipcMain.handle(channel, async () => {
+      throw new Error('truncate failed (e2e)');
+    });
+  }, SESSIONS_TRUNCATE);
 }
 
 /** hover 用户消息 → 编辑 → 提交(newText 覆盖编辑框内容)。 */
@@ -185,10 +182,7 @@ test.describe('编辑提交失败不得静默丢弃', () => {
 
       const shot = 'test-results/edit-failure-not-silent.png';
       await page.screenshot({ path: shot, fullPage: true });
-      await postScreenshotToPr(
-        shot,
-        '✅ truncate 失败:编辑框保持打开、原因行就位、旧问答原地不动'
-      );
+      await postScreenshotToPr(shot, '✅ truncate 失败:编辑框保持打开、原因行就位、旧问答原地不动');
     }
   );
 });

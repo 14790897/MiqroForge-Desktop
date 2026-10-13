@@ -28,7 +28,12 @@ import { test, expect } from '@playwright/test';
 import type { ElectronApplication, Page } from '@playwright/test';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { join } from 'node:path';
-import { createNewConversation, launchElectronApp, closeElectronApp, sendMessage } from './helpers/electron-setup';
+import {
+  createNewConversation,
+  launchElectronApp,
+  closeElectronApp,
+  sendMessage,
+} from './helpers/electron-setup';
 import { postScreenshotToPr } from './helpers/pr-image-post';
 
 const REPO_ROOT = join(__dirname, '..', '..', '..', '..');
@@ -109,37 +114,33 @@ test.describe('生成中铅笔置灰', () => {
     mockServer?.kill();
   });
 
-  test(
-    '生成中铅笔置灰且 tooltip 说真话，回合结束后恢复可点',
-    { timeout: 180_000 },
-    async () => {
-      // sendMessage 只等用户气泡出现+输入框清空,不等回复 —— 它返回时回合
-      // 已经在跑,而 mock 还要 SLOW_MS 才回,这就是我们要的「生成中」窗口。
-      await sendMessage(page, `MOCK_SLOW:${SLOW_MS}:慢回复内容`);
+  test('生成中铅笔置灰且 tooltip 说真话，回合结束后恢复可点', { timeout: 180_000 }, async () => {
+    // sendMessage 只等用户气泡出现+输入框清空,不等回复 —— 它返回时回合
+    // 已经在跑,而 mock 还要 SLOW_MS 才回,这就是我们要的「生成中」窗口。
+    await sendMessage(page, `MOCK_SLOW:${SLOW_MS}:慢回复内容`);
 
-      const bubble = page.getByTestId('chat-message-user').first();
-      const pencil = page.getByTestId('edit-message-btn').first();
-      await bubble.hover();
+    const bubble = page.getByTestId('chat-message-user').first();
+    const pencil = page.getByTestId('edit-message-btn').first();
+    await bubble.hover();
 
-      // 关键断言:生成中铅笔必须禁用,且 tooltip 不得再假装可编辑
-      await expect(pencil).toBeDisabled({ timeout: 10_000 });
-      await expect(pencil).toHaveAttribute('title', TITLE_STREAMING);
+    // 关键断言:生成中铅笔必须禁用,且 tooltip 不得再假装可编辑
+    await expect(pencil).toBeDisabled({ timeout: 10_000 });
+    await expect(pencil).toHaveAttribute('title', TITLE_STREAMING);
 
-      // 证据截图:生成中的铅笔(置灰)与仍在生成的回答
-      const shot = 'test-results/edit-pencil-disabled.png';
-      await page.screenshot({ path: shot, fullPage: true });
-      await postScreenshotToPr(shot, '✅ 生成中:铅笔置灰、tooltip 为「生成中，先停止再编辑」');
+    // 证据截图:生成中的铅笔(置灰)与仍在生成的回答
+    const shot = 'test-results/edit-pencil-disabled.png';
+    await page.screenshot({ path: shot, fullPage: true });
+    await postScreenshotToPr(shot, '✅ 生成中:铅笔置灰、tooltip 为「生成中，先停止再编辑」');
 
-      // 回合结束(「停止生成」按钮消失)后,铅笔恢复可点
-      await expect(page.getByRole('button', { name: '停止生成' })).toHaveCount(0, {
-        timeout: 90_000,
-      });
-      await expect(page.getByTestId('chat-message-assistant')).toHaveCount(1, {
-        timeout: 90_000,
-      });
-      await bubble.hover();
-      await expect(pencil).toBeEnabled({ timeout: 10_000 });
-      await expect(pencil).toHaveAttribute('title', TITLE_EDITABLE);
-    }
-  );
+    // 回合结束(「停止生成」按钮消失)后,铅笔恢复可点
+    await expect(page.getByRole('button', { name: '停止生成' })).toHaveCount(0, {
+      timeout: 90_000,
+    });
+    await expect(page.getByTestId('chat-message-assistant')).toHaveCount(1, {
+      timeout: 90_000,
+    });
+    await bubble.hover();
+    await expect(pencil).toBeEnabled({ timeout: 10_000 });
+    await expect(pencil).toHaveAttribute('title', TITLE_EDITABLE);
+  });
 });
