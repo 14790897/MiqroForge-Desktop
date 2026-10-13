@@ -9,9 +9,9 @@ plugin_manager._make_module_callback),模块名要避免与其他插件撞车,
   (有界队列 + 按需排空任务,队列空即收摊、不留常驻后台任务),SURE 子
   进程的启动/等待/超时全部发生在排空任务里——单次工具调用的延迟不受
   观测影响;
-- 队列满、SURE 未装、超时、返回错误:一律静默丢弃并计数(bridge_stats),
-  **绝不反过来阻塞工具**;应用退出时未投出的事件随进程结束丢弃
-  (观测通道的既定边界);
+- 队列满、SURE 未装、超时、返回错误:一律静默丢弃并计数(bridge_stats
+  区分投递/入队/写入成功/未写入,评审第 3 轮),**绝不反过来阻塞工具**;
+  应用退出时未投出的事件随进程结束丢弃(观测通道的既定边界);
 - 最小采集:只发会话身份/项目根/工具名/结果状态/时间戳,不发工具参数
   (args)与输出内容;子进程环境走 sure_task_runtime 的白名单
   (build_sure_env)——平台令牌与 MIQI_* 不透传;
@@ -75,15 +75,19 @@ def _base_event(event: str, session_id: str, workspace: str | None) -> dict:
     return payload
 
 
-async def _ingest(payload: dict, workspace: str | None) -> None:
+async def _ingest(payload: dict, workspace: str | None) -> bool:
     """把一条事件喂给 ``sure hook ingest``;任何失败静默跳过。
 
     超时/异常时终止整棵子进程树并回收(与 sure_task_runtime 同款清理),
     再吞掉异常——本通道是观测,不是门禁。
+
+    返回 True 仅当事件**确认写入 SURE**(子进程退出码 0);未装、超时、
+    异常、非零退出均返回 False——统计据此区分「写入成功」与「排空未
+    写入」(评审第 3 轮)。
     """
     binary = resolve_sure_bin()
     if not binary:
-        return
+        return False
     spawn_kwargs: dict = {}
     if os.name == "nt":
         spawn_kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
@@ -130,6 +134,15 @@ async def _ingest(payload: dict, workspace: str | None) -> None:
             proc.communicate(json.dumps(payload, ensure_ascii=False).encode("utf-8")),
             timeout=INGEST_TIMEOUT_SECONDS,
         )
+        if proc.returncode != 0:
+            # communicate 不因非零退出抛错:显式判退出码,才算「写入成功」
+            logger.debug(
+                "SURE hook ingest 退出码 {} (未写入): {}",
+                proc.returncode,
+                payload.get("event"),
+            )
+            return False
+        return True
     except asyncio.CancelledError:
         # 会话收停时取消落在等待中途:清理子进程后原样上抛。
         if proc is not None:
@@ -148,6 +161,7 @@ async def _ingest(payload: dict, workspace: str | None) -> None:
                 logger.debug("SURE ingest 子进程清理失败(忽略)")
         if proc is not None:
             _close_subprocess_transport(proc)
+        return False
 
 
 @dataclass
@@ -158,13 +172,19 @@ class _BridgeState:
     (sys.modules 永生)→ 循环 → 循环上一切挂起回调 → ……的引用链会让循环
     永不回收——实测后果:测试进程退出时 sqlite 非守护工作线程无人关闭,
     解释器卡死在 shutdown(评审第 2 轮连带修复)。
+
+    计数口径(评审第 3 轮):attempted=投递调用;enqueued=成功入队;
+    dropped=队满丢弃;ingested=确认写入(退出码 0);ingest_failed=排空
+    未写入(未装/超时/出错/非零退出)。
     """
 
     queue: asyncio.Queue
     worker_ref: weakref.ref | None = None
+    attempted: int = 0
     enqueued: int = 0
     dropped: int = 0
     ingested: int = 0
+    ingest_failed: int = 0
 
 
 #: 按事件循环隔离(测试每例一条新循环;生产全程同一条,随循环回收)。
@@ -182,8 +202,10 @@ async def _drain(state: _BridgeState) -> None:
         except asyncio.QueueEmpty:
             return
         try:
-            await _ingest(payload, workspace)
-            state.ingested += 1
+            if await _ingest(payload, workspace):
+                state.ingested += 1
+            else:
+                state.ingest_failed += 1
         finally:
             state.queue.task_done()
 
@@ -205,7 +227,7 @@ def _enqueue(payload: dict, workspace: str | None) -> None:
     的交错。
     """
     state = _state()
-    state.enqueued += 1
+    state.attempted += 1
     try:
         state.queue.put_nowait((payload, workspace))
     except asyncio.QueueFull:
@@ -216,6 +238,7 @@ def _enqueue(payload: dict, workspace: str | None) -> None:
             state.dropped,
         )
         return
+    state.enqueued += 1
     if state.worker_ref is None or not _worker_alive(state):
         state.worker_ref = weakref.ref(asyncio.get_running_loop().create_task(_drain(state)))
 
@@ -237,14 +260,29 @@ async def flush(timeout: float = FLUSH_TIMEOUT_SECONDS) -> None:
 
 
 def bridge_stats() -> dict:
-    """当前循环的桥接计数(可观测性;不含任何载荷内容)。"""
+    """当前循环的桥接计数(可观测性;不含任何载荷内容)。
+
+    口径(评审第 3 轮):attempted=投递调用(含被丢弃);enqueued=成功
+    入队;dropped=队满丢弃;ingested=确认写入 SURE(退出码 0);failed=
+    排空时未写入(未装/超时/出错/非零退出);pending=仍在队列中(不含
+    正在处理的一条)。
+    """
     state: _BridgeState | None = _states.get(asyncio.get_running_loop())
     if state is None:
-        return {"enqueued": 0, "dropped": 0, "ingested": 0, "pending": 0}
+        return {
+            "attempted": 0,
+            "enqueued": 0,
+            "dropped": 0,
+            "ingested": 0,
+            "failed": 0,
+            "pending": 0,
+        }
     return {
+        "attempted": state.attempted,
         "enqueued": state.enqueued,
         "dropped": state.dropped,
         "ingested": state.ingested,
+        "failed": state.ingest_failed,
         "pending": state.queue.qsize(),
     }
 

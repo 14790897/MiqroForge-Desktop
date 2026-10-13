@@ -187,11 +187,17 @@ async def test_tool_callbacks_return_without_waiting_for_sure(tmp_path, monkeypa
     # 同步等待时这里会是 ~2s/次;解耦后应当毫秒级返回
     assert elapsed < 0.35, f"工具回调不得等待 SURE(实测 {elapsed:.2f}s)"
     stats = sur.bridge_stats()
+    assert stats["attempted"] == 2
     assert stats["enqueued"] == 2
     assert stats["dropped"] == 0
 
     # 收尾:等后台把两次 ingest(各 ~2s 超时)排空,避免悬挂任务
     await sur.flush(10.0)
+
+    # 卡死的 SURE 从未确认写入:计 failed 而非 ingested(评审第 3 轮口径)
+    stats = sur.bridge_stats()
+    assert stats["ingested"] == 0
+    assert stats["failed"] == 2
 
 
 @pytest.mark.asyncio
@@ -206,6 +212,35 @@ async def test_events_ingest_in_order(tmp_path, monkeypatch):
     await sur.flush()
 
     assert [e["event"] for e in _read_events(captured)] == ["PreToolUse", "PostToolUse"]
+
+
+@pytest.mark.asyncio
+async def test_stats_distinguish_written_from_attempted(tmp_path, monkeypatch):
+    """评审第 3 轮 P3:统计区分「投递 / 入队 / 写入成功 / 未写入」。
+
+    只有子进程退出码 0 才计 ingested;SURE 未装/超时/出错/非零退出计
+    failed;队满计 dropped——此前 ingested 把静默跳过也计数,排障时会
+    误读为「SURE 已收到」。
+    """
+    sur = _load_sure_hooks()
+    binary, captured = _capture_bin(tmp_path)
+    monkeypatch.setattr(sur, "resolve_sure_bin", lambda: binary)
+
+    await sur.on_pre_tool_use(_tool_ctx())
+    await sur.flush()
+    written = sur.bridge_stats()
+    assert (
+        written["attempted"], written["enqueued"], written["ingested"], written["failed"]
+    ) == (1, 1, 1, 0)
+
+    monkeypatch.setattr(sur, "resolve_sure_bin", lambda: None)
+    await sur.on_pre_tool_use(_tool_ctx())
+    await sur.flush()
+    skipped = sur.bridge_stats()
+    assert (
+        skipped["attempted"], skipped["enqueued"], skipped["ingested"], skipped["failed"]
+    ) == (2, 2, 1, 1)
+    assert len(_read_events(captured)) == 1, "捕获文件只应有成功写入的那条"
 
 
 @pytest.mark.asyncio
@@ -224,8 +259,12 @@ async def test_full_queue_drops_quietly(tmp_path, monkeypatch):
 
     assert elapsed < 0.5, "满队列也必须立即返回"
     stats = sur.bridge_stats()
-    assert stats["enqueued"] == 4
-    assert stats["dropped"] >= 2, f"队列上限 1,应有事件被丢弃:{stats}"
+    # 4 次投递都发生在排空任务首次调度之前(回调不让出事件循环),单线程
+    # 调度下确定性:首条入队,其余 3 条队满丢弃(评审第 3 轮口径:
+    # attempted 记全部投递,enqueued 只记真正入队的)
+    assert stats["attempted"] == 4
+    assert stats["enqueued"] == 1
+    assert stats["dropped"] == 3, stats
 
     # 收尾:等排空任务真正起来(卡进 30s ingest)再取消,并等取消清理完成(有界)
     await asyncio.sleep(0.1)
@@ -245,6 +284,10 @@ async def test_missing_binary_is_silent(tmp_path, monkeypatch):
     await sur.flush()  # 契约:入队后收尾排空(不留半途 spawn 给 teardown)
 
     assert not captured.exists()
+    stats = sur.bridge_stats()
+    assert stats["attempted"] == 1 and stats["enqueued"] == 1
+    assert stats["ingested"] == 0, "SURE 未装不算写入成功(评审第 3 轮口径)"
+    assert stats["failed"] == 1
 
 
 @pytest.mark.asyncio
@@ -255,6 +298,10 @@ async def test_failing_ingest_is_silent(tmp_path, monkeypatch):
 
     await sur.on_pre_tool_use(_tool_ctx())  # 退出码非零不应抛出
     await sur.flush()  # 契约:入队后收尾排空(不留半途 spawn 给 teardown)
+
+    stats = sur.bridge_stats()
+    assert stats["ingested"] == 0, "非零退出码不算写入成功(评审第 3 轮口径)"
+    assert stats["failed"] == 1
 
 
 @pytest.mark.asyncio
@@ -269,6 +316,10 @@ async def test_ingest_timeout_is_silent_and_bounded(tmp_path, monkeypatch):
     assert time.monotonic() - started < 1.0
 
     await sur.flush(5.0)  # 后台按 0.5s 超时静默收掉,排空有界
+
+    stats = sur.bridge_stats()
+    assert stats["ingested"] == 0, "超时不算写入成功(评审第 3 轮口径)"
+    assert stats["failed"] == 1
 
 
 @pytest.mark.asyncio
