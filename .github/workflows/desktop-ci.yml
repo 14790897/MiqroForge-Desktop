@@ -131,6 +131,21 @@ jobs:
           uv sync
           sudo apt-get update -qq && sudo apt-get install -y -qq bubblewrap
 
+      - name: Install SURE (real binary for the acceptance panel E2E)
+        if: env.E2E_TRUSTED == 'true'
+        # 验收面板 E2E 不 mock SURE(E2E 一律真实):装官方 v0.1.2 的 Linux
+        # 产物,校验和钉死。未配置 analysis provider 时(面板 spawn 的白名单
+        # env 没有密钥通道),真实 check 走确定性路径、如实给出「检查不足」报告,
+        # 断言围绕这份真实报告的结构。桥接 E2E 需要含 miqi 的 fork 构建,CI 上
+        # 找不到会如实 skip(登记在 tests/e2e/CI-COVERAGE.md)。
+        run: |
+          curl -sSL -o "$RUNNER_TEMP/sure.tar.gz" \
+            https://github.com/lichman0405/SURE/releases/download/v0.1.2/sure-0.1.2-x86_64-unknown-linux-gnu.tar.gz
+          echo "7bb52a1f789d0591ab17daa468ca3a0cee5fde5a9e468aabee723626da050401  $RUNNER_TEMP/sure.tar.gz" | sha256sum -c -
+          tar xzf "$RUNNER_TEMP/sure.tar.gz" -C "$RUNNER_TEMP"
+          sudo install -m 755 "$RUNNER_TEMP/sure-0.1.2-x86_64-unknown-linux-gnu/sure" /usr/local/bin/sure
+          sure --version
+
       - name: Install Playwright browsers
         if: env.E2E_TRUSTED == 'true'
         run: npx playwright install chromium --with-deps

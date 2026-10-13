@@ -23,7 +23,6 @@ __pycache__/
 poetry.lock
 .pytest_cache/
 .pytest-basetemp*/
-.sure-bridge-e2e-*/
 site/
 *.log
 .ruff_cache/

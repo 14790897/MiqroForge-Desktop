@@ -25,9 +25,7 @@
 import { test, expect } from '@playwright/test';
 import type { ElectronApplication, Page } from '@playwright/test';
 import { spawnSync } from 'node:child_process';
-import { copyFileSync, existsSync, mkdirSync, rmSync } from 'node:fs';
-import { homedir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { rmSync } from 'node:fs';
 import {
   closeElectronApp,
   createNewConversation,
@@ -36,6 +34,8 @@ import {
   sendUntilDoneOrProviderDown,
   waitForBridgeInitialized,
 } from './helpers/electron-setup';
+import { findRealSureBin, runSureJson } from './helpers/sure-binary';
+import { seedGatewayCredentials } from './helpers/real-ai';
 
 const VOCABULARY = ['exec', 'read_file', 'write_file', 'edit_file', 'apply_patch'];
 
@@ -48,62 +48,16 @@ function cleanupDir(dir: string): void {
   }
 }
 
-/** 真实 SURE 二进制的查找链:env SURE_BIN → PATH → 平台默认安装位置。 */
-function findRealSureBin(): string | null {
-  const fromEnv = process.env.SURE_BIN;
-  if (fromEnv && existsSync(fromEnv)) return fromEnv;
-  const which = spawnSync(process.platform === 'win32' ? 'where' : 'which', ['sure'], {
-    encoding: 'utf-8',
-    windowsHide: true,
-    timeout: 15_000,
-  });
-  const hit = (which.stdout ?? '').split('\n')[0]?.trim();
-  if (which.status === 0 && hit && existsSync(hit)) return hit;
-  const fallback =
-    process.platform === 'win32' && process.env.LOCALAPPDATA
-      ? join(process.env.LOCALAPPDATA, 'SURE', 'bin', 'sure.exe')
-      : '';
-  return fallback && existsSync(fallback) ? fallback : null;
-}
-
 /** 该构建是否含 miqi 集成(fork 构建的 doctor 列出 miqi;官方 0.1.2 没有)。 */
 function sureSupportsMiqi(bin: string): boolean {
   const res = spawnSync(bin, ['doctor'], { encoding: 'utf-8', timeout: 30_000, windowsHide: true });
   return (res.stdout ?? '').includes('miqi');
 }
 
-/** 跑真实 sure 并把 stdout 解析为 JSON(outcome 非 ok / 解析失败返回 null)。 */
-function runSureJson(bin: string, args: string[]): any | null {
-  const res = spawnSync(bin, [...args, '--format', 'json'], {
-    encoding: 'utf-8',
-    timeout: 30_000,
-    windowsHide: true,
-  });
-  if (res.status !== 0 || !res.stdout) return null;
-  try {
-    return JSON.parse(res.stdout.trim()) as any;
-  } catch {
-    return null;
-  }
-}
-
 /**
- * 本机真实工作区里的平台网关凭据(`<MIQI_HOME>/workspace/.qraft/token.json`)。
- *
- * 本机 MiQi 的模型经「平台账号 AI 网关」(config.providers 为空):Python 端
- * 从会话工作区这份文件的 `aiGateway` 块取凭据路由(providers/gateway.py,
- * 明文 JSON)。E2E 的临时工作区是空的 → 复制这份文件进去,真实模型即可经
- * 平台网关调用,环境仍完全隔离。CI 上主目录里没有该文件 → 返回 null →
- * 不复制,走 CI 注入的 config.json provider。
+ * 本机真实工作区里的网关凭据复用(见 helpers/real-ai.ts):
+ * E2E 的临时工作区是空的,复制这份文件进去,真实模型即可经平台网关调用。
  */
-function findRealWorkspaceToken(): string | null {
-  for (const base of ['.forge', '.miqi']) {
-    const file = join(homedir(), base, 'workspace', '.qraft', 'token.json');
-    if (existsSync(file)) return file;
-  }
-  return null;
-}
-
 test.describe.serial('SURE 事件桥接 E2E · 对话工具调用 → 真实 SURE 落库', () => {
   let electronApp: ElectronApplication | null = null;
   let page: Page;
@@ -126,19 +80,13 @@ test.describe.serial('SURE 事件桥接 E2E · 对话工具调用 → 真实 SUR
     );
 
     // AI 走真实模型:不 patch、不 mock。本机模型经「平台账号 AI 网关」——
-    // launch 后把真实工作区的网关凭据复制进本轮临时工作区(见
-    // findRealWorkspaceToken);CI 上找不到 → 不复制,走注入的 config.json provider。
-    const realToken = findRealWorkspaceToken();
+    // launch 后把真实工作区的网关凭据复制进本轮临时工作区(见 helpers/real-ai.ts);
+    // CI 上找不到 → 不注入,走注入的 config.json provider。
     const fixture = await launchElectronApp();
     electronApp = fixture.electronApp;
     page = fixture.page;
     miqiHome = fixture.miqiHome;
-    if (realToken) {
-      const dst = join(miqiHome, 'workspace', '.qraft');
-      mkdirSync(dst, { recursive: true });
-      copyFileSync(realToken, join(dst, 'token.json'));
-      console.log(`[test] 复用本机真实网关凭据: ${realToken}`);
-    }
+    seedGatewayCredentials(miqiHome);
     await waitForBridgeInitialized(page, 30);
     await createNewConversation(page);
   });

@@ -1,10 +1,23 @@
 /**
- * 阶段 3 验收面板 E2E —— 跨平台、零外部依赖(不要求本机安装 SURE)。
+ * 阶段 3-4 验收(SURE)面板 E2E —— 真实 SURE、真实 AI,零 mock。
  *
- * SURE_BIN 指向本 spec 生成的包装脚本(win: .cmd / posix: sh),包装内
- * `exec` mock CLI(scripts/mock_sure_cli.py,输出真实采集的报告 fixture)。
- * 覆盖全链路:设置页「验收(SURE)」入口 → 健康行(SURE 9.9.9-mock)→
- * 开始核查 →「运行中 + 已耗时」→ 四块结构化报告 →(第二组)取消态。
+ * 前置:安装 SURE(查找链 SURE_BIN → PATH → 平台默认位置;CI 的
+ * electron-e2e 会装官方 v0.1.2 的 Linux 产物)。找不到时如实 skip,
+ * 绝不 mock 顶替。
+ *
+ * 测试项目是真实的:一个含 `# TODO` 的 py 文件会让确定性检查产出 1 条
+ * 真实 finding(not_green),由此走通「检查 → 修复契约 → 交给 AI 真修 →
+ * 自动复核」全链路。未配置 analysis provider 时(面板 spawn 的白名单
+ * env 没有密钥通道),check 如实给出「检查不足 + 阶段 NOT CHECKED」的
+ * 报告——面板如实渲染,断言围绕真实结构,不抠 fixture 数字。
+ *
+ * 已移除的两个场景(理由如实登记在 PR 描述):
+ *   - 「低版本 SURE → 不兼容横幅」:构造低版本必须 mock 二进制(禁令);
+ *     版本比较逻辑由 tests/runtime/test_sure_report.py 的 version_at_least
+ *     四态单测覆盖。
+ *   - 「运行中可取消」:无 provider 的真实检查在秒级内完成,不存在稳定的
+ *     取消窗口;取消语义由 sure_task_runtime 的 pytest(进程树回收、取消
+ *     后状态)覆盖。
  *
  * Run: cd apps/desktop && npm run build && npx playwright test \
  *      --config=playwright.config.ts --project=electron acceptance-page
@@ -12,24 +25,19 @@
 
 import { test, expect } from '@playwright/test';
 import type { ElectronApplication, Page } from '@playwright/test';
-import type { ChildProcess } from 'node:child_process';
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { join } from 'node:path';
 import {
   closeElectronApp,
   createNewConversation,
   launchElectronApp,
   sendMessage,
-  stopMockServer,
   waitForBridgeInitialized,
   waitForResponseComplete,
 } from './helpers/electron-setup';
-import { resolveMockPython, startMockServer } from './helpers/mock-server';
-import { patchConfigForMock } from './helpers/mock-openai';
-
-const REPO_ROOT = resolve(__dirname, '..', '..', '..', '..');
-const MOCK_CLI = join(REPO_ROOT, 'scripts', 'mock_sure_cli.py');
+import { findRealSureBin, runSureJson } from './helpers/sure-binary';
+import { seedGatewayCredentials } from './helpers/real-ai';
 
 /** 自建临时目录清理:Windows 下刚退出的子进程句柄可能瞬时占用,重试+容忍。 */
 function cleanupDir(dir: string): void {
@@ -38,29 +46,6 @@ function cleanupDir(dir: string): void {
   } catch {
     // TEMP 里的残留由系统兜底;清理失败绝不连累用例结果
   }
-}
-
-/** 生成包装脚本:SURE_BIN 指向它,内部把 mock CLI 以"sure"身份执行。 */
-function makeSureWrapper(dir: string, delayMs: number, versionLine?: string): string {
-  const { command, args } = resolveMockPython();
-  const argStr = args.map((a) => `"${a}"`).join(' ');
-  if (process.platform === 'win32') {
-    const wrapper = join(dir, 'sure.cmd');
-    const versionEnv = versionLine ? `set MOCK_SURE_VERSION=${versionLine}\r\n` : '';
-    writeFileSync(
-      wrapper,
-      `@echo off\r\nset MOCK_SURE_DELAY_MS=${delayMs}\r\n${versionEnv}"${command}" ${argStr} "${MOCK_CLI}" %*\r\n`
-    );
-    return wrapper;
-  }
-  const wrapper = join(dir, 'sure');
-  const versionEnv = versionLine ? `export MOCK_SURE_VERSION="${versionLine}"\n` : '';
-  writeFileSync(
-    wrapper,
-    `#!/bin/sh\nexport MOCK_SURE_DELAY_MS=${delayMs}\n${versionEnv}exec "${command}" ${argStr} "${MOCK_CLI}" "$@"\n`
-  );
-  chmodSync(wrapper, 0o755);
-  return wrapper;
 }
 
 async function openAcceptance(p: Page): Promise<void> {
@@ -73,245 +58,127 @@ async function openAcceptance(p: Page): Promise<void> {
   await expect(p.getByRole('heading', { name: '验收(SURE)' })).toBeVisible({ timeout: 10_000 });
 }
 
-test.describe.serial('验收(SURE)面板 E2E · 健康/运行/报告', () => {
-  let electronApp: ElectronApplication;
+const NO_SURE_SKIP = '未安装 SURE(查找链 SURE_BIN → PATH → 默认位置)——E2E 不 mock 外部依赖';
+
+test.describe.serial('验收(SURE)面板 E2E · 真实 SURE', () => {
+  let electronApp: ElectronApplication | null = null;
   let page: Page;
-  let prevSureBin: string | undefined;
-  let binDir: string;
-  let project: string;
-  let miqiHome: string;
+  let sureBin: string | null = null;
+  let project = '';
+  let miqiHome = '';
 
   test.beforeAll(async () => {
-    // ⚠️ 一切 mkdtemp 都放 beforeAll:describe 体在 Playwright 主进程收集
-    // 测试时也会执行一次,顶层创建目录会泄漏一份且永远无人清理(实测踩中)
-    binDir = mkdtempSync(join(tmpdir(), 'sure-e2e-bin-'));
-    project = mkdtempSync(join(tmpdir(), 'sure-e2e-proj-'));
-    prevSureBin = process.env.SURE_BIN;
-    // 1.2s 延迟:让「运行中 + 已耗时」态可被观察
-    process.env.SURE_BIN = makeSureWrapper(binDir, 1200);
+    sureBin = findRealSureBin();
+    if (!sureBin) return; // 各用例如实 skip;不启动 app
+
+    // 真实测试项目:含 TODO 的 py 文件 → 确定性检查产出 1 条真实 finding,
+    // 「交给 AI 修复」有真实素材可修(清理 TODO 后 recheck 将关闭该发现项)
+    project = mkdtempSync(join(tmpdir(), 'sure-accept-'));
+    writeFileSync(
+      join(project, 'README.md'),
+      '# acceptance probe\n\nA tiny project checked by the real SURE binary.\n'
+    );
+    writeFileSync(
+      join(project, 'pay.py'),
+      '# TODO: implement the payment flow, not finished yet\nraise NotImplementedError("payment")\n'
+    );
+
     const fixture = await launchElectronApp();
     electronApp = fixture.electronApp;
     page = fixture.page;
     miqiHome = fixture.miqiHome;
+    // 「交给 AI 修复」是真实子代理:本机经平台网关(复制真实凭据),
+    // CI 走注入的 config.json provider(无凭据文件时静默跳过)
+    seedGatewayCredentials(miqiHome);
     await waitForBridgeInitialized(page, 30);
-  });
-
-  test.afterAll(async () => {
-    await closeElectronApp(electronApp);
-    // 自建临时目录随用例清理(测试产物不留存);MIQI_HOME 兜一道容错清理
-    cleanupDir(binDir);
-    cleanupDir(project);
-    cleanupDir(miqiHome);
-    // #1273 评审:还原 SURE_BIN,避免同一 worker 上后续 spec 继承 mock 二进制
-    // (如 sure-integration-gui 的守卫与默认条目探测都会读它)
-    if (prevSureBin === undefined) delete process.env.SURE_BIN;
-    else process.env.SURE_BIN = prevSureBin;
-  });
-
-  test('健康行 → 运行中 → 四块结构化报告', async () => {
-    await openAcceptance(page);
-
-    // 健康检查:mock 的 --version 输出
-    await expect(page.getByText(/SURE 9\.9\.9-mock/)).toBeVisible({ timeout: 15_000 });
-
-    await page.getByTestId('acceptance-project-input').fill(project);
-    await page.getByTestId('acceptance-start').click();
-
-    // 运行中(延迟窗口内)
-    await expect(page.getByTestId('acceptance-running')).toBeVisible({ timeout: 10_000 });
-    await expect(page.getByText('核查中')).toBeVisible();
-    await expect(page.getByText('已耗时')).toBeVisible();
-
-    // 结构化报告(真实采集的 findings fixture:not_enough_checked + 5 findings + 5 未验证)
-    await expect(page.getByTestId('acceptance-report')).toBeVisible({ timeout: 30_000 });
-    await expect(page.getByText('检查不足,无法判断')).toBeVisible();
-    await expect(page.getByText('not_green · exit 1')).toBeVisible();
-    await expect(page.getByText('发现的问题(5)')).toBeVisible();
-    await expect(page.getByText('fake payment', { exact: false }).first()).toBeVisible();
-    await expect(page.getByText('尚未验证的项目(5)')).toBeVisible();
-    await expect(page.getByText('核查阶段')).toBeVisible();
-
-    await page.screenshot({ path: 'test-results/acceptance-report.png', fullPage: true });
-  });
-
-  test('生成修复契约 → 复核对比(阶段 4;承接上一条的报告态)', async () => {
-    // describe.serial:上一条用例结束时处于 check 报告态,操作行含「生成修复契约」
-    await page.getByTestId('acceptance-repair').click();
-    await expect(page.getByTestId('acceptance-running')).toBeVisible({ timeout: 10_000 });
-    await expect(page.getByText(/生成修复契约中/)).toBeVisible();
-
-    await expect(page.getByTestId('acceptance-report')).toBeVisible({ timeout: 30_000 });
-    await expect(page.getByText('修复契约(5)')).toBeVisible();
-    await expect(page.getByText('必须修复:').first()).toBeVisible();
-    await expect(page.getByText('禁止走捷径:').first()).toBeVisible();
-    await expect(page.getByText('fake payment', { exact: false }).first()).toBeVisible();
-    await page.screenshot({ path: 'test-results/acceptance-repair.png', fullPage: true });
-
-    // 复核:mock recheck fixture = still_open 5 / closed 0(「删标记但不跑检查 = 仍 open」语义)
-    await page.getByTestId('acceptance-recheck').click();
-    await expect(page.getByText(/复审对比中/)).toBeVisible({ timeout: 10_000 });
-    // 对比区独有文案(避免子串撞上运行中卡片),确保截图是终态
-    await expect(page.getByText(/发现项只在修复契约点名的检查/)).toBeVisible({
-      timeout: 30_000,
-    });
-    await expect(
-      page.getByText('project contains fake payment', { exact: false }).first()
-    ).toBeVisible();
-    await page.screenshot({ path: 'test-results/acceptance-recheck.png', fullPage: true });
-  });
-});
-
-test.describe.serial('验收(SURE)面板 E2E · 取消', () => {
-  let electronApp: ElectronApplication;
-  let page: Page;
-  let prevSureBin: string | undefined;
-  let binDir: string;
-  let project: string;
-  let miqiHome: string;
-
-  test.beforeAll(async () => {
-    binDir = mkdtempSync(join(tmpdir(), 'sure-e2e-bin-slow-'));
-    project = mkdtempSync(join(tmpdir(), 'sure-e2e-proj-slow-'));
-    prevSureBin = process.env.SURE_BIN;
-    // 30s 延迟:留足点击「取消核查」的窗口
-    process.env.SURE_BIN = makeSureWrapper(binDir, 30_000);
-    const fixture = await launchElectronApp();
-    electronApp = fixture.electronApp;
-    page = fixture.page;
-    miqiHome = fixture.miqiHome;
-    await waitForBridgeInitialized(page, 30);
-  });
-
-  test.afterAll(async () => {
-    await closeElectronApp(electronApp);
-    cleanupDir(binDir);
-    cleanupDir(project);
-    cleanupDir(miqiHome);
-    // #1273 评审:还原 SURE_BIN(同上)
-    if (prevSureBin === undefined) delete process.env.SURE_BIN;
-    else process.env.SURE_BIN = prevSureBin;
-  });
-
-  test('运行中可取消 → 已取消态(取消不产出报告)', async () => {
-    await openAcceptance(page);
-
-    await page.getByTestId('acceptance-project-input').fill(project);
-    await page.getByTestId('acceptance-start').click();
-    await expect(page.getByTestId('acceptance-running')).toBeVisible({ timeout: 10_000 });
-
-    await page.getByRole('button', { name: /取消核查/ }).click();
-    await expect(page.getByTestId('acceptance-cancelled')).toBeVisible({ timeout: 30_000 });
-    await expect(page.getByTestId('acceptance-report')).not.toBeVisible();
-
-    await page.screenshot({ path: 'test-results/acceptance-cancelled.png', fullPage: true });
-  });
-});
-
-test.describe.serial('验收(SURE)面板 E2E · 交给 AI 修复(阶段 4)', () => {
-  let electronApp: ElectronApplication;
-  let page: Page;
-  let prevSureBin: string | undefined;
-  let mockProc: ChildProcess | undefined;
-  let binDir: string;
-  let project: string;
-  let miqiHome: string;
-
-  test.beforeAll(async () => {
-    binDir = mkdtempSync(join(tmpdir(), 'sure-e2e-bin-fix-'));
-    project = mkdtempSync(join(tmpdir(), 'sure-e2e-fix-'));
-    prevSureBin = process.env.SURE_BIN;
-    process.env.SURE_BIN = makeSureWrapper(binDir, 400);
-
-    // 修复子代理是真实 agent(agent_jobs → turn_runner):用静态 LLM mock 收尾,
-    // 零工具调用、不依赖任何真实模型;子代理工作区挂靠聊天会话
-    const mock = await startMockServer('mock_llm_reply.py');
-    mockProc = mock.proc;
-    const fixture = await launchElectronApp((cfg) => patchConfigForMock(cfg, mock.mockUrl));
-    electronApp = fixture.electronApp;
-    page = fixture.page;
-    miqiHome = fixture.miqiHome;
-    await waitForBridgeInitialized(page, 30);
-
+    // 修复子代理挂靠一个真实聊天会话(空会话不落盘,spawn 需要真实会话)
     await createNewConversation(page);
     await sendMessage(page, '你好');
     await waitForResponseComplete(page);
   });
 
   test.afterAll(async () => {
-    await closeElectronApp(electronApp);
-    if (mockProc) stopMockServer(mockProc);
-    cleanupDir(binDir);
-    cleanupDir(project);
-    cleanupDir(miqiHome);
-    // #1273 评审:还原 SURE_BIN(同上)
-    if (prevSureBin === undefined) delete process.env.SURE_BIN;
-    else process.env.SURE_BIN = prevSureBin;
+    if (electronApp) await closeElectronApp(electronApp);
+    if (miqiHome) cleanupDir(miqiHome);
+    // 清理本轮真实 check/recheck 写进 SURE 记录库的会话(真实命令,尽力而为):
+    // ① check/recheck 以测试项目为 project_root;② 桥接事件以会话工作区为 project_root
+    if (sureBin) {
+      for (const scope of [project, miqiHome ? join(miqiHome, 'workspace') : '']) {
+        if (!scope) continue;
+        const del = runSureJson(sureBin, ['history', 'delete', '--project', scope]);
+        console.log(`[test] 清理记录(${scope}): outcome=${del?.outcome ?? '<无输出>'}`);
+      }
+    }
+    if (project) cleanupDir(project);
   });
 
-  test('交给 AI 修复 → 子代理完成 → 自动复核对比', async () => {
+  test('健康行(真实版本)→ 真实检查报告(结构如实)', async () => {
+    if (!sureBin) test.skip(true, NO_SURE_SKIP);
     await openAcceptance(page);
+    // 真实二进制的版本(不绑死具体数字,CI 装的官方版与 fork 都应通过)
+    await expect(page.getByText(/SURE \d+\.\d+\.\d+/)).toBeVisible({ timeout: 15_000 });
+
     await page.getByTestId('acceptance-project-input').fill(project);
     await page.getByTestId('acceptance-start').click();
-    await expect(page.getByTestId('acceptance-report')).toBeVisible({ timeout: 30_000 });
 
-    await page.getByTestId('acceptance-repair').click();
-    await expect(page.getByText('修复契约(5)')).toBeVisible({ timeout: 30_000 });
-
-    await page.getByTestId('acceptance-fix').click();
-    // 通知元素必须出现;但子代理可能极快完成并把"已启动"立刻改写为"已完成"——
-    // 只断言两态之一,不锁中间文案(否则与真实速度赛跑,已实测踩中)
-    await expect(page.getByTestId('acceptance-fix-notice')).toBeVisible({ timeout: 15_000 });
-    // 子代理(mock LLM,零工具调用)→ subagent_result(ok)→ 页面自动复核
-    // (聊天区与子代理卡也有同款文案,断言收敛到本页通知元素)
-    await expect(page.getByTestId('acceptance-fix-notice')).toContainText(
-      /修复子代理已启动|修复子代理已完成/,
-      { timeout: 150_000 }
-    );
-    // 等自动复核的最终对比视图(独有文案),截图定格在终态
-    await expect(page.getByText(/发现项只在修复契约点名的检查/)).toBeVisible({
-      timeout: 60_000,
+    // 真实检查(无 provider 时秒级完成;给足余量)
+    await expect(page.getByTestId('acceptance-report')).toBeVisible({ timeout: 120_000 });
+    // 真实结论因 SURE 构建而异:官方 0.1.2 release 判「检查不足」(TODO 检查
+    // 未能运行);fork 构建(main tip)能真跑该检查、判「需要关注」(not_ready)。
+    // 断言不锁具体某一版,只要求如实呈现其一——绝不美化
+    await expect(page.getByText(/检查不足,无法判断|需要关注/).first()).toBeVisible({
+      timeout: 15_000,
     });
+    // 真实的 1 条发现项(TODO/FIXME 确定性检查)
+    await expect(page.getByText('发现的问题(1)')).toBeVisible({ timeout: 15_000 });
+    // 逐阶段明细(真实 12 阶段记录)
+    await expect(page.getByText('核查阶段')).toBeVisible({ timeout: 15_000 });
+    await page.screenshot({ path: 'test-results/acceptance-report.png', fullPage: true });
+  });
+
+  test('真实修复契约 → 真实复核对比(未修复 → still_open)', async () => {
+    if (!sureBin) test.skip(true, NO_SURE_SKIP);
+    // serial:承接上一条的真实检查报告态
+    await page.getByTestId('acceptance-repair').click();
+    await expect(page.getByTestId('acceptance-report')).toBeVisible({ timeout: 60_000 });
+    await expect(page.getByText('修复契约(1)')).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByText('必须修复:').first()).toBeVisible();
+    // 注:"禁止走捷径"段只在契约含 forbidden_shortcuts 时渲染(随 SURE 构建
+    // 与内容而异,官方 0.1.2 的契约有、fork 的这份没有)——不锁它
+    await page.screenshot({ path: 'test-results/acceptance-repair.png', fullPage: true });
+
+    // 复核:尚未修复 → 真实对比应如实呈现 still_open(不关闭任何发现)
+    await page.getByTestId('acceptance-recheck').click();
+    await expect(page.getByTestId('acceptance-report')).toBeVisible({ timeout: 60_000 });
+    await expect(page.getByText(/发现项只在修复契约点名的检查/)).toBeVisible({ timeout: 60_000 });
+    await page.screenshot({ path: 'test-results/acceptance-recheck.png', fullPage: true });
+  });
+
+  test('交给 AI 修复(真实子代理)→ 自动复核对比', async () => {
+    if (!sureBin) test.skip(true, NO_SURE_SKIP);
+    // serial:上一条结束时 envelope 是 recheck(对比态;该配置下检查"未能运行",
+    // 结果如实呈现为「无法确认」,因此没有 still_open 入口)——点「重新核查」
+    // 回到 check 报告态,生成契约,再交给 AI 修复
+    await page.getByRole('button', { name: /重新核查/ }).click();
+    await expect(page.getByTestId('acceptance-report')).toBeVisible({ timeout: 120_000 });
+    await expect(page.getByTestId('acceptance-repair')).toBeVisible({ timeout: 15_000 });
+    await page.getByTestId('acceptance-repair').click();
+    await expect(page.getByText('修复契约(1)')).toBeVisible({ timeout: 60_000 });
+    await page.getByTestId('acceptance-fix').click();
+    // 通知元素必须出现:真实子代理要么完成,要么如实报错(此配置下契约
+    // 要求"允许 SURE 运行该检查",改代码的子代理可能做不到)——两种终态
+    // 都接受,但绝不允许"卡住不明"
+    await expect(page.getByTestId('acceptance-fix-notice')).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByTestId('acceptance-fix-notice')).toContainText(
+      /修复子代理已完成|修复子代理未成功完成/,
+      { timeout: 300_000 }
+    );
+    // 子代理完成会自动触发复核;报错则手动复核——两条路径汇合到对比视图
+    const recheckBtn = page.getByTestId('acceptance-recheck');
+    if (await recheckBtn.isVisible().catch(() => false)) {
+      await recheckBtn.click();
+    }
+    await expect(page.getByText(/发现项只在修复契约点名的检查/)).toBeVisible({ timeout: 300_000 });
     await page.screenshot({ path: 'test-results/acceptance-fix-flow.png', fullPage: true });
-  });
-});
-
-test.describe.serial('验收(SURE)面板 E2E · 版本不兼容(阶段 6)', () => {
-  let electronApp: ElectronApplication;
-  let page: Page;
-  let prevSureBin: string | undefined;
-  let binDir: string;
-  let miqiHome: string;
-
-  test.beforeAll(async () => {
-    binDir = mkdtempSync(join(tmpdir(), 'sure-e2e-bin-'));
-    prevSureBin = process.env.SURE_BIN;
-    // 低于最低支持版本(0.1.2):明确的不兼容 → 给出原因横幅并隐藏开始入口
-    process.env.SURE_BIN = makeSureWrapper(binDir, 30, 'sure 0.0.9');
-    const fixture = await launchElectronApp();
-    electronApp = fixture.electronApp;
-    page = fixture.page;
-    miqiHome = fixture.miqiHome;
-    await waitForBridgeInitialized(page, 30);
-  });
-
-  test.afterAll(async () => {
-    await closeElectronApp(electronApp);
-    cleanupDir(binDir);
-    cleanupDir(miqiHome);
-    if (prevSureBin === undefined) delete process.env.SURE_BIN;
-    else process.env.SURE_BIN = prevSureBin;
-  });
-
-  test('低版本 SURE → 不兼容横幅,开始入口整块隐藏', async () => {
-    await openAcceptance(page);
-    const banner = page.locator('[data-testid="acceptance-incompatible"]');
-    await expect(banner).toBeVisible({ timeout: 10_000 });
-    await expect(banner).toContainText('不兼容');
-    await expect(banner).toContainText('0.1.2'); // 最低要求
-    await expect(banner).toContainText('0.0.9'); // 当前版本
-    // 拒绝服务要给出原因:开始控件是隐藏(不是禁用),横幅即原因
-    await expect(page.locator('[data-testid="acceptance-start"]')).toHaveCount(0);
-    await expect(page.locator('[data-testid="acceptance-project-input"]')).toHaveCount(0);
-    await page.screenshot({ path: 'test-results/acceptance-incompatible.png', fullPage: true });
   });
 });
