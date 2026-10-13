@@ -1,16 +1,27 @@
 import { describe, expect, it, beforeEach, afterEach } from 'vitest';
-import { existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'fs';
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  utimesSync,
+  writeFileSync,
+} from 'fs';
 import { tmpdir } from 'os';
 import { dirname, join } from 'path';
 import {
   buildWslSearchScript,
   claimLegacyWorkspace,
   clearActiveAccount,
+  findFileByBasename,
   getDefaultWorkspacePath,
   getWorkspacePath,
+  isBareFileName,
   isWithinCanonicalWorkspace,
   readActiveAccount,
   readLegacyWorkspaceOwner,
+  resolveBareNameFallback,
   resolveWorkspacePath,
   sanitizeSessionKeyForPath,
   sessionFilesDirKey,
@@ -603,5 +614,113 @@ describe('account marker contract with miqi/paths.py (#1185)', () => {
       delete process.env['MIQI_HOME'];
       rmSync(home, { recursive: true, force: true });
     }
+  });
+});
+
+// ── #1274: tracked bare-name basename fallback ───────────────────────────────
+
+describe('isBareFileName', () => {
+  it('accepts single file-name segments only', () => {
+    expect(isBareFileName('report.md')).toBe(true);
+    expect(isBareFileName('.skill-run.json')).toBe(true);
+    expect(isBareFileName('sub/report.md')).toBe(false);
+    expect(isBareFileName('sub\\report.md')).toBe(false);
+    expect(isBareFileName('..')).toBe(false);
+    expect(isBareFileName('.')).toBe(false);
+    expect(isBareFileName('')).toBe(false);
+    expect(isBareFileName('a:b')).toBe(false);
+  });
+});
+
+describe('findFileByBasename', () => {
+  it('finds a nested file by basename', () => {
+    const root = join(tmpdir(), `basename-${Date.now()}`);
+    const target = join(root, 'bvse', 'output', 'run-x', 'report.md');
+    mkdirSync(dirname(target), { recursive: true });
+    writeFileSync(target, 'nested');
+    expect(findFileByBasename(root, 'report.md')).toBe(target);
+    expect(findFileByBasename(root, 'ghost.md')).toBeNull();
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it('shallowest match wins when the basename is ambiguous', () => {
+    const root = join(tmpdir(), `basename-shallow-${Date.now()}`);
+    const deep = join(root, 'a', 'b', 'x.txt');
+    const shallow = join(root, 'c', 'x.txt');
+    mkdirSync(dirname(deep), { recursive: true });
+    mkdirSync(dirname(shallow), { recursive: true });
+    writeFileSync(deep, 'deep');
+    writeFileSync(shallow, 'shallow');
+    expect(findFileByBasename(root, 'x.txt')).toBe(shallow);
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it('newest mtime wins at equal depth', () => {
+    const root = join(tmpdir(), `basename-mtime-${Date.now()}`);
+    const left = join(root, 'l', 'x.txt');
+    const right = join(root, 'r', 'x.txt');
+    mkdirSync(dirname(left), { recursive: true });
+    mkdirSync(dirname(right), { recursive: true });
+    writeFileSync(left, 'left');
+    writeFileSync(right, 'right');
+    utimesSync(left, new Date(1000), new Date(1000));
+    utimesSync(right, new Date(9000), new Date(9000));
+    expect(findFileByBasename(root, 'x.txt')).toBe(right);
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it('skips symlinks', () => {
+    const root = join(tmpdir(), `basename-link-${Date.now()}`);
+    mkdirSync(root, { recursive: true });
+    writeFileSync(join(root, 'real.txt'), 'real');
+    try {
+      symlinkSync(join(root, 'real.txt'), join(root, 'x.txt'));
+    } catch {
+      // 无特权环境（Windows 非开发者模式）建不了链接——跳过断言
+      rmSync(root, { recursive: true, force: true });
+      return;
+    }
+    expect(findFileByBasename(root, 'x.txt')).toBeNull();
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it('returns null for a missing root', () => {
+    expect(findFileByBasename(join(tmpdir(), `no-root-${Date.now()}`), 'x.txt')).toBeNull();
+  });
+});
+
+describe('resolveBareNameFallback', () => {
+  let home: string;
+
+  beforeEach(() => {
+    home = join(tmpdir(), `miqi-fallback-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    process.env['MIQI_HOME'] = home;
+  });
+
+  afterEach(() => {
+    delete process.env['MIQI_HOME'];
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  it('resolves a tracked bare name under the session files tree', () => {
+    const filesDir = join(
+      getWorkspacePath(),
+      'sessions',
+      sessionFilesDirKey('desktop:123'),
+      'files'
+    );
+    const target = join(filesDir, 'bvse-mof-demo', 'output', 'run-x', 'report.md');
+    mkdirSync(dirname(target), { recursive: true });
+    writeFileSync(target, 'nested');
+    expect(resolveBareNameFallback('report.md', 'desktop:123', [])).toBe(target);
+  });
+
+  it('returns null without a session key or for non-bare paths', () => {
+    expect(resolveBareNameFallback('report.md', undefined, [])).toBeNull();
+    expect(resolveBareNameFallback('sub/report.md', 'desktop:123', [])).toBeNull();
+  });
+
+  it('returns null when no file with that basename exists', () => {
+    expect(resolveBareNameFallback('ghost.md', 'desktop:123', [])).toBeNull();
   });
 });
