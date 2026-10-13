@@ -245,3 +245,92 @@ test.describe('验收(SURE)面板 E2E · 模型评估(需真实 key)', () => {
     }
   });
 });
+
+const FULL_REPAIR_SKIP =
+  '完整修复闭环需要真实子代理(分钟级)跑完——默认如实跳过,设 MIQI_E2E_FULL_REPAIR=1 显式启用';
+
+/**
+ * 完整修复闭环:核查 → 生成契约 → 交给 AI 修复(真实子代理)→ 等它修完 →
+ * 自动复核对比 → 契约点名的检查真通过后,发现项被关闭(「已关闭」徽标)。
+ *
+ * 与上方只验证"派发成功"的用例互补:这条赌真实子代理的完整运行(时长与
+ * 成败都是真实系统的行为),默认 skip、由 MIQI_E2E_FULL_REPAIR=1 显式开启;
+ * 等待期间顺手批准任何弹出来的审批卡,真实结局(完成/未成功完成)如实分流。
+ */
+test.describe('验收(SURE)面板 E2E · 完整修复闭环(需真实子代理跑完)', () => {
+  test('子代理修完 → 自动复核 → 发现项关闭', async () => {
+    test.setTimeout(900_000);
+    if (!process.env.MIQI_E2E_FULL_REPAIR) test.skip(true, FULL_REPAIR_SKIP);
+    const sureBin = findRealSureBin();
+    if (!sureBin) test.skip(true, NO_SURE_SKIP);
+
+    const project = mkdtempSync(join(tmpdir(), 'sure-accept-fullfix-'));
+    writeFileSync(
+      join(project, 'pay.py'),
+      '# TODO: implement the payment flow, not finished yet\nraise NotImplementedError("payment")\n'
+    );
+
+    const fixture = await launchElectronApp();
+    try {
+      seedGatewayCredentials(fixture.miqiHome);
+      await waitForBridgeInitialized(fixture.page, 30);
+      // 修复子代理挂靠真实会话(阶段 4 的既有前提)
+      await createNewConversation(fixture.page);
+      await sendMessage(fixture.page, '你好');
+      await waitForResponseComplete(fixture.page);
+
+      await openAcceptance(fixture.page);
+      await fixture.page.getByTestId('acceptance-project-input').fill(project);
+      await fixture.page.getByTestId('acceptance-start').click();
+      await expect(fixture.page.getByTestId('acceptance-report')).toBeVisible({ timeout: 120_000 });
+      await fixture.page.getByTestId('acceptance-repair').click();
+      await expect(fixture.page.getByText('修复契约(1)')).toBeVisible({ timeout: 60_000 });
+      await fixture.page.getByTestId('acceptance-fix').click();
+
+      const notice = fixture.page.getByTestId('acceptance-fix-notice');
+      await expect(notice).toBeVisible({ timeout: 15_000 });
+
+      // 等真实子代理:完成/未成功完成如实分流,期间顺手批准审批卡
+      const deadline = Date.now() + 720_000;
+      let verdict = '';
+      while (Date.now() < deadline) {
+        for (const name of ['持久允许', '永久允许', '允许']) {
+          const btn = fixture.page.getByRole('button', { name });
+          if (await btn.first().isVisible().catch(() => false)) {
+            await btn.first().click().catch(() => {});
+            break;
+          }
+        }
+        const text = (await notice.textContent().catch(() => '')) ?? '';
+        if (text.includes('已完成')) {
+          verdict = 'completed';
+          break;
+        }
+        if (text.includes('未成功完成')) {
+          verdict = 'failed';
+          break;
+        }
+        await fixture.page.waitForTimeout(3000);
+      }
+      const finalNotice = (await notice.textContent().catch(() => '')) ?? '';
+      expect(verdict, `子代理结局(notice=${finalNotice})`).toBe('completed');
+
+      // 完成 → 自动复核(对比)落地
+      await expect(fixture.page.getByText('复审对比')).toBeVisible({ timeout: 180_000 });
+      // 契约点名的检查真通过 → 发现项关闭(「已关闭」),而不是"未解决"
+      await expect(fixture.page.getByText('已关闭').first()).toBeVisible({ timeout: 120_000 });
+      await fixture.page.screenshot({
+        path: 'test-results/acceptance-fix-complete.png',
+        fullPage: true,
+      });
+    } finally {
+      await closeElectronApp(fixture.electronApp);
+      const del = runSureJson(sureBin, ['history', 'delete', '--project', project]);
+      console.log(`[test] 清理记录(${project}): outcome=${del?.outcome ?? '<无输出>'}`);
+      cleanupDir(project);
+      // 调试开关:保留临时 home 以便翻子代理的运行日志
+      if (!process.env.MIQI_E2E_KEEP_HOME) cleanupDir(fixture.miqiHome);
+      else console.log(`[test] MIQI_E2E_KEEP_HOME=1,保留 ${fixture.miqiHome}`);
+    }
+  });
+});
