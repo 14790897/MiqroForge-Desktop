@@ -210,6 +210,50 @@ async def _cleanup_probe_subprocess(proc: asyncio.subprocess.Process, binary: st
     _close_subprocess_transport(proc)
 
 
+async def _probe_supports_miqi(
+    binary: str, env: dict[str, str], spawn_kwargs: dict[str, Any], timeout: float
+) -> bool | None:
+    """``sure doctor`` 的集成清单是否列出 miqi(该构建含 MiQi 事件集成)。
+
+    易用性批次:把"官方构建不支持 hook ingest --source miqi"从静默失败变成
+    面板上的明确提示。探测失败(超时/异常/非零退出)返回 None「无法判断」,
+    绝不抛出;取消语义与 ``probe_sure_health`` 相同(清理后原样上抛)。
+    """
+    proc: asyncio.subprocess.Process | None = None
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            binary, "doctor",
+            env=env,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+            **spawn_kwargs,
+        )
+        stdout_b, _stderr_b = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        if proc.returncode != 0:
+            return None
+        text = (stdout_b or b"").decode("utf-8", errors="replace")
+        # doctor 的集成清单行形如 "  miqi   hooks that record ..."——按行首
+        # 匹配,避免路径等位置出现 miqi 子串时误报
+        return any(line.strip().startswith("miqi") for line in text.splitlines())
+    except asyncio.CancelledError:
+        if proc is not None:
+            try:
+                await _kill_process_tree(proc)
+            except Exception:
+                logger.debug("miqi 能力探测取消后清理子进程未成功")
+            _close_subprocess_transport(proc)
+        raise
+    except Exception:  # noqa: BLE001 —— 能力探测绝不抛出
+        if proc is not None and proc.returncode is None:
+            try:
+                await _kill_process_tree(proc)
+            except Exception:
+                logger.debug("miqi 能力探测异常后清理子进程未成功")
+        if proc is not None:
+            _close_subprocess_transport(proc)
+        return None
+
+
 async def probe_sure_health(
     *,
     bin_provider: Callable[[], str | None] | None = None,
@@ -239,6 +283,7 @@ async def probe_sure_health(
             "binary": None,
             "version": None,
             "compatible": None,
+            "supports_miqi": None,
             "error": "未找到 SURE:请安装 SURE,或用 SURE_BIN 指向其可执行文件",
         }
     spawn_kwargs: dict[str, Any] = {}
@@ -271,6 +316,7 @@ async def probe_sure_health(
             "binary": binary,
             "version": None,
             "compatible": None,
+            "supports_miqi": None,
             "error": f"无法运行 SURE:{exc}",
         }
     version = parse_sure_version((stdout_b or b"").decode("utf-8", errors="replace"))
@@ -280,14 +326,18 @@ async def probe_sure_health(
             "binary": binary,
             "version": version,
             "compatible": None,
+            "supports_miqi": None,
             "error": f"SURE --version 退出码 {int(proc.returncode or 0)},二进制可能损坏",
         }
+    # 易用性批次:该构建是否含 MiQi 事件集成(doctor 清单行;失败折叠为 None)
+    supports_miqi = await _probe_supports_miqi(binary, builder(), spawn_kwargs, timeout)
     return {
         "installed": True,
         "binary": binary,
         "version": version,
         # 阶段 6(D3):低于最低支持版本 → False;版本无法解析 → None(无法判断)
         "compatible": version_at_least(version, MIN_SUPPORTED_SURE_VERSION),
+        "supports_miqi": supports_miqi,
         "error": None,
     }
 

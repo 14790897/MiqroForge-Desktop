@@ -10,6 +10,7 @@ import {
   stageOutcomeLabel,
   stageTone,
   sureIncompatibilityNotice,
+  sureEventBridgeNotice,
   type SureHealth,
 } from './sureReport';
 
@@ -109,5 +110,33 @@ describe('sureIncompatibilityNotice', () => {
     expect(sureIncompatibilityNotice(legacy as SureHealth)).toBeNull();
     expect(sureIncompatibilityNotice({ ...base, installed: false })).toBeNull();
     expect(sureIncompatibilityNotice(null)).toBeNull();
+  });
+});
+
+describe('sureEventBridgeNotice', () => {
+  const base: SureHealth = {
+    installed: true,
+    binary: 'C:/sure.exe',
+    version: '0.1.2',
+    compatible: true,
+    supports_miqi: false,
+    error: null,
+  };
+
+  it('构建不含 MiQi 事件集成 → 提示给出出路(不拦截检查的语义写清楚)', () => {
+    const notice = sureEventBridgeNotice(base);
+    expect(notice).toContain('不支持 MiQi 事件记录');
+    expect(notice).toContain('SURE_BIN');
+  });
+
+  it('含集成 / 无法判断 / 旧后端无字段 / 未安装 → 无提示', () => {
+    expect(sureEventBridgeNotice({ ...base, supports_miqi: true })).toBeNull();
+    // 探测失败(无法判断)不得当成"不支持"
+    expect(sureEventBridgeNotice({ ...base, supports_miqi: null })).toBeNull();
+    const legacy = { ...base } as Partial<SureHealth>;
+    delete legacy.supports_miqi;
+    expect(sureEventBridgeNotice(legacy as SureHealth)).toBeNull();
+    expect(sureEventBridgeNotice({ ...base, installed: false })).toBeNull();
+    expect(sureEventBridgeNotice(null)).toBeNull();
   });
 });

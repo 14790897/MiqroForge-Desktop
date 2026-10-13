@@ -241,6 +241,8 @@ export interface SureHealth {
   version: string | null;
   /** 阶段 6(D3):与最低支持版本的兼容判定;null/缺省 = 无法判断(旧后端) */
   compatible?: boolean | null;
+  /** 易用性批次:该构建是否含 MiQi 事件集成(doctor 清单行);null/缺省 = 无法判断 */
+  supports_miqi?: boolean | null;
   error: string | null;
 }
 
@@ -257,6 +259,18 @@ export function sureIncompatibilityNotice(health: SureHealth | null | undefined)
   if (!health?.installed) return null;
   if (health.compatible !== false) return null;
   return `SURE 版本不兼容:当前 ${health.version ?? '未知'},最低要求 ${MIN_SUPPORTED_SURE_VERSION}。请升级 SURE,或用 SURE_BIN 指向 ≥${MIN_SUPPORTED_SURE_VERSION} 的构建。`;
+}
+
+/**
+ * 「该构建不支持 MiQi 事件记录」的提示;未安装 / 支持 / 无法判断均返回 null。
+ *
+ * 官方 0.1.2 不支持 `hook ingest --source miqi`:检查、修复与复核不受影响,
+ * 但 AI 操作历史(会话/工具事件)无法记录。**提示而不是拦截**——检查仍可用。
+ */
+export function sureEventBridgeNotice(health: SureHealth | null | undefined): string | null {
+  if (!health?.installed) return null;
+  if (health.supports_miqi !== false) return null;
+  return '当前 SURE 构建不支持 MiQi 事件记录(无法记录 AI 的操作历史);检查、修复与复核不受影响。如需事件记录,请用 SURE_BIN 指向包含 MiQi 集成的 SURE 构建。';
 }
 
 /** 运行中进度心跳(静默期也发,防 bridge 600s 空闲 drain)。 */

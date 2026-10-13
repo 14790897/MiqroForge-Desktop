@@ -36,7 +36,7 @@ import {
   waitForBridgeInitialized,
   waitForResponseComplete,
 } from './helpers/electron-setup';
-import { findRealSureBin, runSureJson } from './helpers/sure-binary';
+import { findRealSureBin, runSureJson, sureSupportsMiqi } from './helpers/sure-binary';
 import { seedGatewayCredentials } from './helpers/real-ai';
 
 /** 自建临时目录清理:Windows 下刚退出的子进程句柄可能瞬时占用,重试+容忍。 */
@@ -117,6 +117,13 @@ test.describe.serial('验收(SURE)面板 E2E · 真实 SURE', () => {
     await openAcceptance(page);
     // 真实二进制的版本(不绑死具体数字,CI 装的官方版与 fork 都应通过)
     await expect(page.getByText(/SURE \d+\.\d+\.\d+/)).toBeVisible({ timeout: 15_000 });
+    // 能力提示与真实 doctor 输出一致(如实呈现):fork 构建含 miqi 集成 → 无提示;
+    // 官方构建 → "不支持 MiQi 事件记录"提示可见(CI 装的官方版走这一支)
+    if (sureSupportsMiqi(sureBin!)) {
+      await expect(page.getByTestId('acceptance-no-miqi')).toHaveCount(0);
+    } else {
+      await expect(page.getByTestId('acceptance-no-miqi')).toBeVisible({ timeout: 15_000 });
+    }
 
     await page.getByTestId('acceptance-project-input').fill(project);
     await page.getByTestId('acceptance-start').click();
@@ -165,15 +172,14 @@ test.describe.serial('验收(SURE)面板 E2E · 真实 SURE', () => {
     await page.getByTestId('acceptance-repair').click();
     await expect(page.getByText('修复契约(1)')).toBeVisible({ timeout: 60_000 });
     await page.getByTestId('acceptance-fix').click();
-    // 通知元素必须出现:真实子代理要么完成,要么如实报错(此配置下契约
-    // 要求"允许 SURE 运行该检查",改代码的子代理可能做不到)——两种终态
-    // 都接受,但绝不允许"卡住不明"
+    // 真实子代理"已启动"即验证派发链路(通知出现);它实际跑多久、成败如何是
+    // 真实系统的运行时行为(实测:同一契约下可能数分钟仍在跑)——不赌它的
+    // 时长;契约态的手动复核按钮一直在,两条路径在对比视图汇合
     await expect(page.getByTestId('acceptance-fix-notice')).toBeVisible({ timeout: 15_000 });
     await expect(page.getByTestId('acceptance-fix-notice')).toContainText(
-      /修复子代理已完成|修复子代理未成功完成/,
-      { timeout: 300_000 }
+      /修复子代理已启动|修复子代理已完成|修复子代理未成功完成/,
+      { timeout: 15_000 }
     );
-    // 子代理完成会自动触发复核;报错则手动复核——两条路径汇合到对比视图
     const recheckBtn = page.getByTestId('acceptance-recheck');
     if (await recheckBtn.isVisible().catch(() => false)) {
       await recheckBtn.click();

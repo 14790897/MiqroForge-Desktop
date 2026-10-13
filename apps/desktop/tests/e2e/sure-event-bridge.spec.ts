@@ -24,7 +24,6 @@
 
 import { test, expect } from '@playwright/test';
 import type { ElectronApplication, Page } from '@playwright/test';
-import { spawnSync } from 'node:child_process';
 import { rmSync } from 'node:fs';
 import {
   closeElectronApp,
@@ -34,7 +33,7 @@ import {
   sendUntilDoneOrProviderDown,
   waitForBridgeInitialized,
 } from './helpers/electron-setup';
-import { findRealSureBin, runSureJson } from './helpers/sure-binary';
+import { findRealSureBin, runSureJson, sureSupportsMiqi } from './helpers/sure-binary';
 import { seedGatewayCredentials } from './helpers/real-ai';
 
 const VOCABULARY = ['exec', 'read_file', 'write_file', 'edit_file', 'apply_patch'];
@@ -46,12 +45,6 @@ function cleanupDir(dir: string): void {
   } catch {
     // TEMP 里的残留由系统兜底;清理失败绝不连累用例结果
   }
-}
-
-/** 该构建是否含 miqi 集成(fork 构建的 doctor 列出 miqi;官方 0.1.2 没有)。 */
-function sureSupportsMiqi(bin: string): boolean {
-  const res = spawnSync(bin, ['doctor'], { encoding: 'utf-8', timeout: 30_000, windowsHide: true });
-  return (res.stdout ?? '').includes('miqi');
 }
 
 /**

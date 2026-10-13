@@ -40,3 +40,12 @@ export function runSureJson(bin: string, args: string[]): any | null {
     return null;
   }
 }
+
+/**
+ * 该构建是否含 miqi 集成——`sure doctor` 的集成清单行(官方 0.1.2 没有,
+ * fork 构建才有)。按行首 `miqi` 匹配,避免路径等处的子串误报。
+ */
+export function sureSupportsMiqi(bin: string): boolean {
+  const res = spawnSync(bin, ['doctor'], { encoding: 'utf-8', timeout: 30_000, windowsHide: true });
+  return /^\s*miqi\s/m.test(res.stdout ?? '');
+}

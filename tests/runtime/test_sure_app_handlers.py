@@ -162,6 +162,57 @@ async def test_health_reports_version_and_missing(tmp_path, monkeypatch):
     assert resp2["result"]["error"]
 
 
+def _bin_with_doctor(tmp_path: Path, doctor_mode: str) -> str:
+    """假 sure:--version 正常;doctor 按 doctor_mode 输出(with-miqi/plain/fail)。"""
+    script = tmp_path / f"sure_impl_{doctor_mode}.py"
+    body = (
+        "import sys\n"
+        "args = sys.argv[1:]\n"
+        "if args and args[0] == '--version':\n"
+        "    print('sure 0.1.2')\n"
+        "elif args and args[0] == 'doctor':\n"
+    )
+    if doctor_mode == "with-miqi":
+        body += "    print('  miqi                 hooks that record what an agent did')\n"
+    elif doctor_mode == "plain":
+        body += "    print('  claude-code          hooks that record what an agent did')\n"
+    else:  # fail
+        body += "    sys.exit(3)\n"
+    script.write_text(body, encoding="utf-8")
+    if os.name == "nt":
+        wrapper = tmp_path / f"sure_{doctor_mode}.cmd"
+        wrapper.write_text(
+            f'@echo off\r\n"{sys.executable}" "{script}" %*\r\n', encoding="utf-8"
+        )
+    else:
+        wrapper = tmp_path / f"sure_{doctor_mode}"
+        wrapper.write_text(
+            f'#!/bin/sh\nexec "{sys.executable}" "{script}" "$@"\n', encoding="utf-8"
+        )
+        wrapper.chmod(0o755)
+    return str(wrapper)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("doctor_mode", "expected"),
+    [("with-miqi", True), ("plain", False), ("fail", None)],
+)
+async def test_health_reports_miqi_support(tmp_path, monkeypatch, doctor_mode, expected):
+    """易用性批次:健康检查探测该构建是否含 MiQi 事件集成(doctor 清单行)。
+
+    True=列出 miqi(fork 构建);False=未列出(官方版);None=探测失败(无法判断)。
+    """
+    import miqi.runtime.sure_task_runtime as sure_rt_mod
+
+    fake = _bin_with_doctor(tmp_path, doctor_mode)
+    monkeypatch.setattr(sure_rt_mod, "resolve_sure_bin", lambda: fake)
+    server, _, _ = _make_server(None)
+    resp = await _dispatch(server, "sure.health", {})
+    assert resp["result"]["installed"] is True, resp
+    assert resp["result"]["supports_miqi"] is expected, resp
+
+
 # ── 阶段 4:repair / recheck 命令 ─────────────────────────────────────────
 
 
