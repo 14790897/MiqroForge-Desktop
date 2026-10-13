@@ -259,7 +259,7 @@ const FULL_REPAIR_SKIP =
  */
 test.describe('验收(SURE)面板 E2E · 完整修复闭环(需真实子代理跑完)', () => {
   test('子代理修完 → 自动复核 → 发现项关闭', async () => {
-    test.setTimeout(900_000);
+    test.setTimeout(2_400_000);
     if (!process.env.MIQI_E2E_FULL_REPAIR) test.skip(true, FULL_REPAIR_SKIP);
     const sureBin = findRealSureBin();
     if (!sureBin) test.skip(true, NO_SURE_SKIP);
@@ -290,8 +290,10 @@ test.describe('验收(SURE)面板 E2E · 完整修复闭环(需真实子代理�
       const notice = fixture.page.getByTestId('acceptance-fix-notice');
       await expect(notice).toBeVisible({ timeout: 15_000 });
 
-      // 等真实子代理:完成/未成功完成如实分流,期间顺手批准审批卡
-      const deadline = Date.now() + 720_000;
+      // 等真实子代理:完成/未成功完成如实分流,期间顺手批准审批卡。
+      // 窗口 30 分钟——2026-10-13 实测:网关慢时一次非流式回退可达 600s,
+      // 720s 的窗口会在子代理仍在工作时拔线,把它误判成"未完成"。
+      const deadline = Date.now() + 1_800_000;
       let verdict = '';
       while (Date.now() < deadline) {
         for (const name of ['持久允许', '永久允许', '允许']) {

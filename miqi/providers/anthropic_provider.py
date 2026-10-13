@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import time
+import traceback
 from typing import Any
 
 import anthropic
@@ -497,6 +498,16 @@ class AnthropicProvider(LLMProvider):
                 final_message = await stream.get_final_message()
         except Exception as e:  # noqa: BLE001 — 与 chat() 一样不向上抛
             kind = resilience.classify_error(e)
+            # 2026-10-13:修复子代理多轮死于空消息的流中断(实测 AssertionError):
+            # str(e)=="" 让现场查无可查。类型名与 repr 即使空也带信息;traceback
+            # 手动嵌入消息(本仓日志格式不渲染 loguru 的 exception 字段)。
+            logger.debug(
+                "stream_chat: stream raised {}: {!r} (kind={})\n{}",
+                type(e).__name__,
+                e,
+                kind.value,
+                traceback.format_exc(),
+            )
             if saw_output:
                 # 中途失败：屏幕上已有半截输出，重试会重复内容——照 chat() 的
                 # 契约把错误当成一次"错误回复"交回去，让上层照常处理。
