@@ -7,9 +7,11 @@
  *
  * 测试项目是真实的:一个含 `# TODO` 的 py 文件会让确定性检查产出 1 条
  * 真实 finding(not_green),由此走通「检查 → 修复契约 → 交给 AI 真修 →
- * 自动复核」全链路。未配置 analysis provider 时(面板 spawn 的白名单
- * env 没有密钥通道),check 如实给出「检查不足 + 阶段 NOT CHECKED」的
- * 报告——面板如实渲染,断言围绕真实结构,不抠 fixture 数字。
+ * 自动复核」全链路。本套件的运行环境不带 SURE_OPENAI_API_KEY(2026-10-13
+ * 起白名单放行该变量、面板随用户环境启用模型评估):无 key 时 check 如实
+ * 呈现「provider 已配置但 key 未配置」或「未配置分析」——面板如实渲染,
+ * 断言围绕真实结构,不抠 fixture 数字。带 key 的模型评估路径由下方第二个
+ * describe 覆盖(环境无 key 时如实 skip,绝不 mock)。
  *
  * 已移除的两个场景(理由如实登记在 PR 描述):
  *   - 「低版本 SURE → 不兼容横幅」:构造低版本必须 mock 二进制(禁令);
@@ -186,5 +188,60 @@ test.describe.serial('验收(SURE)面板 E2E · 真实 SURE', () => {
     }
     await expect(page.getByText(/发现项只在修复契约点名的检查/)).toBeVisible({ timeout: 300_000 });
     await page.screenshot({ path: 'test-results/acceptance-fix-flow.png', fullPage: true });
+  });
+});
+
+const NO_KEY_SKIP =
+  '本机未设置 SURE_OPENAI_API_KEY——真实模型评估无从跑起,E2E 不 mock 外部依赖,如实跳过';
+
+/**
+ * 模型评估(面板路径,2026-10-13 接入):`SURE_OPENAI_API_KEY` 已进面板
+ * spawn 白名单,检查随用户环境启用模型评估。真实前置:①运行环境带该 key
+ * (用户自己的 DeepSeek 凭据);②用户级 analysis 配置已设
+ * (provider=openai_compatible + endpoint/model);③SURE 构建含模型评估
+ * 阶段(fork ≥ 0.1.3)。任一不满足时如实 skip 或如实呈现,绝不 mock。
+ */
+test.describe('验收(SURE)面板 E2E · 模型评估(需真实 key)', () => {
+  test('面板检查 → 第 8 阶段真实评估 + Model assessment 发现项', async () => {
+    if (!process.env.SURE_OPENAI_API_KEY) test.skip(true, NO_KEY_SKIP);
+    const sureBin = findRealSureBin();
+    if (!sureBin) test.skip(true, NO_SURE_SKIP);
+
+    const project = mkdtempSync(join(tmpdir(), 'sure-accept-model-'));
+    writeFileSync(
+      join(project, 'pay.py'),
+      '# TODO: implement the refund flow, not finished yet\nraise NotImplementedError("refund")\n'
+    );
+
+    const fixture = await launchElectronApp();
+    try {
+      await openAcceptance(fixture.page);
+      await fixture.page.getByTestId('acceptance-project-input').fill(project);
+      await fixture.page.getByTestId('acceptance-start').click();
+
+      await expect(fixture.page.getByTestId('acceptance-report')).toBeVisible({
+        timeout: 180_000,
+      });
+      // 第 8 阶段真实跑了模型(flagged / noise 两种判定都算"模型被调用")
+      await expect(fixture.page.getByText(/assessed 1 completeness candidate/)).toBeVisible({
+        timeout: 120_000,
+      });
+      // 用户要看的效果:报告里出现模型评估条目。用户环境实测配置的是
+      // deepseek-flash,判该 TODO 为 problem 是稳定行为;若模型偶判 noise,
+      // 该断言如实失败并暴露,不美化。
+      await expect(fixture.page.getByText(/Model assessment:/).first()).toBeVisible({
+        timeout: 120_000,
+      });
+      await fixture.page.screenshot({
+        path: 'test-results/acceptance-model-assessment.png',
+        fullPage: true,
+      });
+    } finally {
+      await closeElectronApp(fixture.electronApp);
+      const del = runSureJson(sureBin, ['history', 'delete', '--project', project]);
+      console.log(`[test] 清理记录(${project}): outcome=${del?.outcome ?? '<无输出>'}`);
+      cleanupDir(project);
+      cleanupDir(fixture.miqiHome);
+    }
   });
 });

@@ -6,8 +6,10 @@
   显式传参(避免 CLI 省略路径取进程 cwd 的坑);JSON 是**结束时的一份完整
   报告**,进度只发"运行中 + 已耗时"心跳——**不虚构阶段级进度**;
 - 子进程环境**白名单化**(SystemRoot/PATH/TEMP/LOCALAPPDATA/APPDATA/
-  USERPROFILE/SURE_BIN):不透传平台令牌、MIQI_* 等;SURE_OPENAI_API_KEY
-  不注入(面板不启用模型评估,记录为边界);
+  USERPROFILE/SURE_BIN/SURE_OPENAI_API_KEY):不透传平台令牌、MIQI_* 等;
+  SURE_OPENAI_API_KEY 是**用户自己的** SURE 分析凭据,2026-10-13 起随白名单
+  放行——面板检查因此随用户级 analysis 配置启用模型评估(早先"不注入"
+  的边界由该需求取代);
 - 取消终止**整个进程树**(Windows ``taskkill /T /F``;POSIX 以
   ``start_new_session`` 分组后 killpg),取消不产出报告——与 CLI 语义一致
   (JSON 只在正常结束时发射)。
@@ -54,6 +56,9 @@ STDIO_CHUNK_BYTES = 64 * 1024
 STDERR_TAIL_BYTES = 8 * 1024
 
 #: 子进程环境白名单(方案 §阶段 3 工程选型,已评审)。
+#: 2026-10-13:`SURE_OPENAI_API_KEY` 增补——面板启用模型评估,这是白名单里
+#: 唯一的用户凭据;平台令牌与 MIQI_* 依旧不透传(单测
+#: `test_env_whitelist_only_allows_named_vars` 同时锁定"放行"与"不泄漏")。
 _ENV_ALLOWLIST = (
     "SystemRoot",
     "PATH",
@@ -62,6 +67,7 @@ _ENV_ALLOWLIST = (
     "APPDATA",
     "USERPROFILE",
     "SURE_BIN",
+    "SURE_OPENAI_API_KEY",
 )
 
 EventCallback = Callable[[str, dict], Awaitable[None]]

@@ -246,6 +246,9 @@ def test_env_whitelist_only_allows_named_vars():
         "SECRET_TOKEN": "leak-me-not",
         "MIQI_HOME": "leak-me-not",
         "OPENAI_API_KEY": "leak-me-not",
+        # 2026-10-13:面板启用模型评估——SURE 自己的分析凭据(用户自己的 key)
+        # 放行;通用 OPENAI_API_KEY 依旧被剥离(白名单只认 SURE 的变量名)。
+        "SURE_OPENAI_API_KEY": "user-sure-key",
     }
     env = build_sure_env(base)
     assert env == {
@@ -255,9 +258,16 @@ def test_env_whitelist_only_allows_named_vars():
         "LOCALAPPDATA": r"C:\lad",
         "APPDATA": r"C:\ad",
         "USERPROFILE": r"C:\u",
+        "SURE_OPENAI_API_KEY": "user-sure-key",
     }
+    assert "OPENAI_API_KEY" not in env
+    assert "MIQI_HOME" not in env
+    assert "SECRET_TOKEN" not in env
     # SURE_BIN 在白名单内(子进程兜底解析需要)
     assert build_sure_env({**base, "SURE_BIN": r"C:\sure.exe"})["SURE_BIN"] == r"C:\sure.exe"
+    # 环境里没有该 key 时不注入空值
+    without_key = {k: v for k, v in base.items() if k != "SURE_OPENAI_API_KEY"}
+    assert "SURE_OPENAI_API_KEY" not in build_sure_env(without_key)
 
 
 def test_mock_cli_emits_strict_utf8_json(tmp_path):
