@@ -1,6 +1,6 @@
 # 更新日志
 
-完整版本更新日志请参见 [GitHub 仓库 CHANGELOG.md](https://github.com/14790897/MiQi/blob/develop/CHANGELOG.md)。
+完整版本更新日志请参见 [GitHub 仓库 CHANGELOG.md](https://github.com/miqro-org/MiqroForge-Desktop/blob/develop/CHANGELOG.md)。
 
 ## 最新更新 (2026-06)
 

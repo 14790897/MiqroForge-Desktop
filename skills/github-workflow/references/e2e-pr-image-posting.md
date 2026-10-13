@@ -37,7 +37,7 @@ e2e 测试跑完后，把截图上传到本仓库的固定预发布（release as
 | 变量 | 默认 | 作用 |
 |---|---|---|
 | `MIQI_E2E_POST_IMG` | CI=1 / 本地=0 | 强制开启（`1`）或关闭（`0`）贴图 |
-| `MIQI_IMG_REPO` | `14790897/MiQi` | 目标仓库（fork 测试时覆盖） |
+| `MIQI_IMG_REPO` | `miqro-org/MiqroForge-Desktop` | 目标仓库（fork 测试时覆盖） |
 | `GH_TOKEN` / `GITHUB_TOKEN` | 无 | 上传与写描述的鉴权；本地可回退到 `gh auth token` |
 
 ## 如何在 spec 中接入（给 AI 的代码模式）
@@ -80,8 +80,8 @@ test.describe('My Acceptance E2E', () => {
 
 ```bash
 # 用 gh 直接调 API（本地需 gh auth login；CI 用 GITHUB_TOKEN）
-gh api repos/14790897/MiQi/releases/tags/_gh-imgup --jq '.id' 2>/dev/null ||
-  gh api repos/14790897/MiQi/releases -X POST \
+gh api repos/miqro-org/MiqroForge-Desktop/releases/tags/_gh-imgup --jq '.id' 2>/dev/null ||
+  gh api repos/miqro-org/MiqroForge-Desktop/releases -X POST \
     -F tag_name='_gh-imgup' -F name='_gh-imgup' -F prerelease=true \
     -f body='Image assets - do not delete' --jq '.id'
 # 再用 release assets 上传接口（uploads.github.com）传文件，

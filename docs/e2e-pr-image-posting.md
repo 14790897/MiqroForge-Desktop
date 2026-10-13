@@ -19,7 +19,7 @@ e2e 测试跑完后，把截图上传到本仓库的固定预发布（release as
 | 存放位置 | 本仓库固定预发布 `_gh-imgup`（复用创建，Releases 列表只有一条） |
 | 上传 API | release assets（官方公开 API，token 即可；实测匿名可访问 HTTP 200） |
 | 去重 | 文件名 = `原名-<sha256前8位>.<ext>`；相同内容重复上传返回 422 时自动复用已有资产 |
-| 实现 | 纯 Node `fetch`（无 shell 依赖），见 [tests/e2e/helpers/pr-image-post.ts](https://github.com/14790897/MiqroForge-Desktop/blob/develop/apps/desktop/tests/e2e/helpers/pr-image-post.ts) |
+| 实现 | 纯 Node `fetch`（无 shell 依赖），见 [tests/e2e/helpers/pr-image-post.ts](https://github.com/miqro-org/MiqroForge-Desktop/blob/develop/apps/desktop/tests/e2e/helpers/pr-image-post.ts) |
 | 为何不用 draft release | draft 资产的下载 URL 对外（甚至带 token）都返回 404，评论里会裂图——必须 published 预发布 |
 | 为何不用 user-attachments | 原生贴图端点无公开 API，需驱动真实浏览器且有 TOS 风险（actions-cool/issues-helper 已被封） |
 
@@ -35,7 +35,7 @@ e2e 测试跑完后，把截图上传到本仓库的固定预发布（release as
 | 变量 | 默认 | 作用 |
 |---|---|---|
 | `MIQI_E2E_POST_IMG` | CI=1 / 本地=0 | 强制开启（`1`）或关闭（`0`）贴图 |
-| `MIQI_IMG_REPO` | `14790897/MiQi` | 目标仓库（fork 测试时覆盖） |
+| `MIQI_IMG_REPO` | `miqro-org/MiqroForge-Desktop` | 目标仓库（fork 测试时覆盖） |
 | `GH_TOKEN` / `GITHUB_TOKEN` | 无 | 上传与评论的鉴权；本地可回退到 `gh auth token` |
 
 ## 如何在 spec 中接入（给 AI 的代码模式）
@@ -71,15 +71,15 @@ test.describe('My Acceptance E2E', () => {
 
 已接入的参考 spec：
 
-- [no-sandbox-exec.spec.ts](https://github.com/14790897/MiqroForge-Desktop/blob/develop/apps/desktop/tests/e2e/no-sandbox-exec.spec.ts)
-- [mof5-qraft-upload.spec.ts](https://github.com/14790897/MiqroForge-Desktop/blob/develop/apps/desktop/tests/e2e/mof5-qraft-upload.spec.ts)
+- [no-sandbox-exec.spec.ts](https://github.com/miqro-org/MiqroForge-Desktop/blob/develop/apps/desktop/tests/e2e/no-sandbox-exec.spec.ts)
+- [mof5-qraft-upload.spec.ts](https://github.com/miqro-org/MiqroForge-Desktop/blob/develop/apps/desktop/tests/e2e/mof5-qraft-upload.spec.ts)
 
 ## 手动上传一张图（不跑测试）
 
 ```bash
 # 用 gh 直接调 API（本地需 gh auth login；CI 用 GITHUB_TOKEN）
-gh api repos/14790897/MiQi/releases/tags/_gh-imgup --jq '.id' 2>/dev/null ||
-  gh api repos/14790897/MiQi/releases -X POST \
+gh api repos/miqro-org/MiqroForge-Desktop/releases/tags/_gh-imgup --jq '.id' 2>/dev/null ||
+  gh api repos/miqro-org/MiqroForge-Desktop/releases -X POST \
     -F tag_name='_gh-imgup' -F name='_gh-imgup' -F prerelease=true \
     -f body='Image assets - do not delete' --jq '.id'
 # 再用 release assets 上传接口（uploads.github.com）传文件，
