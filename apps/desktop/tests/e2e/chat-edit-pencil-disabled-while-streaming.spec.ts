@@ -29,6 +29,7 @@ import type { ElectronApplication, Page } from '@playwright/test';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { join } from 'node:path';
 import { createNewConversation, launchElectronApp, closeElectronApp, sendMessage } from './helpers/electron-setup';
+import { postScreenshotToPr } from './helpers/pr-image-post';
 
 const REPO_ROOT = join(__dirname, '..', '..', '..', '..');
 
@@ -123,6 +124,11 @@ test.describe('生成中铅笔置灰', () => {
       // 关键断言:生成中铅笔必须禁用,且 tooltip 不得再假装可编辑
       await expect(pencil).toBeDisabled({ timeout: 10_000 });
       await expect(pencil).toHaveAttribute('title', TITLE_STREAMING);
+
+      // 证据截图:生成中的铅笔(置灰)与仍在生成的回答
+      const shot = 'test-results/edit-pencil-disabled.png';
+      await page.screenshot({ path: shot, fullPage: true });
+      await postScreenshotToPr(shot, '✅ 生成中:铅笔置灰、tooltip 为「生成中，先停止再编辑」');
 
       // 回合结束(「停止生成」按钮消失)后,铅笔恢复可点
       await expect(page.getByRole('button', { name: '停止生成' })).toHaveCount(0, {
