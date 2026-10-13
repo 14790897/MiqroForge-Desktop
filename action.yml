@@ -328,20 +328,28 @@ runs:
             }
 
             const data = await response.json();
-            const aiResult = data.choices?.[0]?.message?.content || '';
+            const aiResult = (data.choices?.[0]?.message?.content || '').trim();
             console.log(`[AI 审核] 结果:\n${aiResult}`);
 
+            // 只有拿到明确结论才算数。模型返回空、或三个真实性标记一个都没有时，
+            // 这次审核等于没产出结果——而空结果里当然找不到 ❌/⚠️，按「没找到否定
+            // 标记就当通过」的老写法，会挂一条「✅ 审核通过」的评论，把没执行的
+            // 审核报成通过。
             const hasFake = aiResult.includes('❌');
             const hasSuspicious = aiResult.includes('⚠️');
+            const hasReal = aiResult.includes('✅');
+            const verdict = hasFake || hasSuspicious
+              ? '> ⚠️ AI 检测到日志可能存在问题，请维护者人工复核。'
+              : hasReal
+                ? '> ✅ AI 审核通过，日志看起来真实可信。'
+                : '> ⚠️ AI 本次未产出结论（模型返回为空或未给出真实性判定），未代表审核通过，请维护者人工查看日志。';
 
             const comment = [
               '### 🤖 AI 日志审核',
               '',
-              aiResult,
+              aiResult || '（模型返回为空）',
               '',
-              hasFake || hasSuspicious
-                ? '> ⚠️ AI 检测到日志可能存在问题，请维护者人工复核。'
-                : '> ✅ AI 审核通过，日志看起来真实可信。',
+              verdict,
             ].join('\n');
 
             // Dedup: update existing or create new
