@@ -55,13 +55,18 @@ def _wrap_as_sure(tmp_path: Path, body: str) -> str:
 
 
 def _capture_bin(tmp_path: Path) -> tuple[str, Path]:
-    """假 sure:把每次 stdin 事件追加到 captured.jsonl,返回 (binary, 文件)。"""
+    """假 sure:把每次 stdin 事件追加到 captured.jsonl,返回 (binary, 文件)。
+
+    stdin 走**字节透传**(与真实 sure.exe 的字节流语义一致):文本模式
+    sys.stdin.read() 会按 Windows ANSI 代码页解码 UTF-8 载荷,中文路径
+    变 lone surrogate,写出时 UnicodeEncodeError(桥接 E2E 实测踩中)。
+    """
     captured = tmp_path / "captured.jsonl"
     body = (
         "import sys\n"
-        "data = sys.stdin.read()\n"
-        f"with open(r'{captured}', 'a', encoding='utf-8') as fh:\n"
-        "    fh.write(data + chr(10))\n"
+        "data = sys.stdin.buffer.read()\n"
+        f"with open(r'{captured}', 'ab') as fh:\n"
+        "    fh.write(data + bytes([10]))\n"
     )
     return _wrap_as_sure(tmp_path, body), captured
 

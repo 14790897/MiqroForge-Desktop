@@ -24,14 +24,19 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 def _fake_sure_capture(tmp_path: Path) -> tuple[str, Path]:
-    """假 sure:每次 stdin 事件追加到 captured.jsonl,返回 (binary, 文件)。"""
+    """假 sure:每次 stdin 事件追加到 captured.jsonl,返回 (binary, 文件)。
+
+    stdin 走**字节透传**(与真实 sure.exe 的字节流语义一致):文本模式
+    sys.stdin.read() 会按 Windows ANSI 代码页解码 UTF-8 载荷(中文路径
+    会变 lone surrogate 并在写出时崩溃,E2E 实测踩中)。
+    """
     captured = tmp_path / "accept-captured.jsonl"
     script = tmp_path / "sure_impl.py"
     script.write_text(
         "import sys\n"
-        "data = sys.stdin.read()\n"
-        f"with open(r'{captured}', 'a', encoding='utf-8') as fh:\n"
-        "    fh.write(data + chr(10))\n",
+        "data = sys.stdin.buffer.read()\n"
+        f"with open(r'{captured}', 'ab') as fh:\n"
+        "    fh.write(data + bytes([10]))\n",
         encoding="utf-8",
     )
     if os.name == "nt":
