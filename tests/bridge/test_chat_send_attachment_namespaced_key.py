@@ -109,3 +109,52 @@ async def test_chat_send_saves_attachment_to_canonical_session_dir(tmp_path, mon
     )
     assert not raw.exists(), "附件不该落在 raw 名目录"
     assert runtime.submitted, "handler 应把消息交给 runtime.submit"
+
+
+@pytest.mark.asyncio
+async def test_chat_send_emits_doc_progress_ready(tmp_path, monkeypatch):
+    """文档附件的 "ready" 进度必须真的发出去。
+
+    这个调用点是 ``_chat_send_handler`` 里四个 ``_emit_doc_progress`` 中唯一
+    漏了 ``await`` 的：coroutine 从不执行，文件永远停在 extracting/extracted，
+    只在事件循环关闭时留一条 "coroutine ... was never awaited" 的
+    RuntimeWarning（改前实测 loop.py:1132）。警告容易在噪音里被忽略，故锁定
+    可观测结果。
+    """
+    payload = b"attachment body"
+    runtime = FakeRuntime()
+    loop = _make_loop(tmp_path)
+    emitted: list[tuple[str, dict]] = []
+
+    async def _record(client_id, event_type, data, **kwargs) -> None:
+        emitted.append((event_type, data))
+
+    loop._app_server.emit_client_event = _record
+
+    async def _noop_drain(**kwargs) -> None:
+        return None
+
+    monkeypatch.setattr(loop, "_drain_chat_events", _noop_drain)
+
+    await loop._chat_send_handler(
+        request_id="req-doc-1",
+        params={
+            "session_key": _KEY,
+            "thread_id": "t1",
+            "content": "带文档的消息",
+            "attachments": [
+                {
+                    "name": "note.txt",
+                    "data_base64": base64.b64encode(payload).decode("ascii"),
+                }
+            ],
+        },
+        client_id=_CLIENT,
+        session_id=None,
+        registry=FakeRegistry(runtime),
+    )
+    await asyncio.sleep(0)
+
+    ready = [d for (t, d) in emitted if t == "progress" and d.get("stage") == "ready"]
+    assert ready, f"文档 ready 进度未发出（漏 await？）：{emitted}"
+    assert ready[0]["type"] == "doc_progress"
