@@ -11908,7 +11908,7 @@ const MessageBubble = memo(function MessageBubble({
   // 编辑态(#828):用户消息原地变输入框,提交后截断重发
   const [editing, setEditing] = useState(false);
   const [editText, setEditText] = useState('');
-  /** 编辑提交被拒的原因——保持编辑框打开时显示在底栏下方（#1028）。 */
+  /** 编辑提交被拒的原因——保持编辑框打开时显示在底栏下方。 */
   const [editError, setEditError] = useState<string | null>(null);
   /** 提交进行中（等 sessions.truncate 与重发落地）。挡重复提交。 */
   const [submitting, setSubmitting] = useState(false);
