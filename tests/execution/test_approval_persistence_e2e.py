@@ -14,13 +14,16 @@ the permission engine actually triggers APPROVAL_REQUIRED.
 """
 
 import asyncio
+import os
 from unittest.mock import MagicMock
 
 import pytest
 
 from miqi.execution.orchestrator import (
+    _MAX_COMMAND_LENGTH,
     ToolExecutionContext,
     ToolOrchestrator,
+    _summarize_pattern_for_log,
 )
 from miqi.execution.permission_engine import (
     PermissionEngine,
@@ -65,12 +68,14 @@ def _make_meta(tool_name="exec", command=UNSAFE_EXEC_CMD):
     """Create minimal approval metadata matching orchestrator's expected format.
 
     The orchestrator's _make_approval_pattern uses:
-      - meta["tool_name"] and meta["command"] for exec tools
+      - meta["command_key"]（完整命令）做 exec 的键；meta["command"] 只是
+        被截断到 _MAX_COMMAND_LENGTH 的展示副本
       - meta["tool_name"] and meta["details"]["path"] for file_write tools
     """
     meta = {
         "tool_name": tool_name,
         "command": command,
+        "command_key": command,
         "description": f"Run: {command}",
         "details": {"command": command},
     }
@@ -128,6 +133,59 @@ async def test_session_approval_persists_for_exec():
     assert decision2.verdict == PermissionVerdict.ALLOW, (
         f"Second call should auto-allow via session allowlist, got {decision2.verdict}"
     )
+
+
+@pytest.mark.asyncio
+async def test_session_approval_persists_for_long_exec_command():
+    """>500 字符的 exec 命令：记录端用完整命令做键（展示副本被截断），与匹配端一致。
+
+    回归 #1259 同类缺陷的 exec 分支：记录端曾用截断到 _MAX_COMMAND_LENGTH 的
+    展示副本拼键，匹配端用完整命令 —— 长命令批准后每次重跑都再弹审批。
+    """
+    long_cmd = "rm -rf /tmp/" + ("d" * 600)
+    engine = PermissionEngine()
+    orch = _build_orchestrator(engine)
+
+    # Step 1: First call of long command — must require approval
+    ctx1 = make_ctx("exec", long_cmd)
+    decision1 = await engine.check(ctx1)
+    assert decision1.verdict == PermissionVerdict.APPROVAL_REQUIRED
+
+    # Step 2: User approves with "session" —— 展示副本按真实流程截断，键必须完整
+    approval_id = "turn_001:call_001"
+    meta = _make_meta("exec", long_cmd)
+    meta["command"] = long_cmd[:_MAX_COMMAND_LENGTH]
+    _inject_pending_approval(orch, approval_id, meta)
+    result = orch.resolve_approval(approval_id, "session")
+    assert result.resolved is True
+    assert f"exec:{long_cmd}" in engine.session_allowlist
+
+    # Step 3: Second identical call — should auto-allow via session allowlist
+    ctx2 = make_ctx("exec", long_cmd, tool_call_id="call_002", turn_id="turn_002")
+    decision2 = await engine.check(ctx2)
+    assert decision2.verdict == PermissionVerdict.ALLOW, (
+        "Long exec command should auto-allow via session allowlist, "
+        f"got {decision2.verdict}"
+    )
+
+
+def test_summarize_pattern_for_log_redacts_long_exec_command():
+    """日志摘要：exec 命令超长时截断（匹配键仍完整），其余 pattern 原样。
+
+    回归 #1272 CodeRabbit Security & Privacy：完整命令 500 字符之后可能带
+    凭据，不应落进 INFO 日志。
+    """
+    long_cmd = "curl https://api.example.com " + "x" * 600 + " --token=SECRET"
+    pattern = f"exec:{long_cmd}"
+
+    summarized = _summarize_pattern_for_log(pattern)
+    assert "SECRET" not in summarized
+    assert summarized.startswith("exec:")
+    assert len(summarized) <= len("exec:") + _MAX_COMMAND_LENGTH + 1  # 1 = 省略号
+
+    # 短命令与其它工具类别不变
+    assert _summarize_pattern_for_log("exec:echo hi") == "exec:echo hi"
+    assert _summarize_pattern_for_log("write_file:/etc/hosts") == "write_file:/etc/hosts"
 
 
 @pytest.mark.asyncio
@@ -324,4 +382,174 @@ async def test_session_approval_isolated_per_session():
     decision_b = await engine_b.check(ctx_b)
     assert decision_b.verdict == PermissionVerdict.APPROVAL_REQUIRED, (
         "Session B must not inherit Session A's approval"
+    )
+
+
+# ── tool_confirmation 类工具（mcp_sure_* 等）的持久化（#1256 D5-A）────────
+# 历史缺陷：记录端（_make_approval_pattern）对这类工具回退到 description 字符串，
+# 匹配端（_make_key）用 "tool:hash(args)"——两者永不相等，「本次会话允许/永久允许」
+# 是空承诺。此处钉住修复后的契约：同参数重放免弹窗、不同参数仍弹窗、键稳定可跨进程。
+
+MCP_SURE_TOOL = "mcp_sure_sure_check"
+# 平台可移植的绝对路径:路径守卫(#1266)会拒绝非绝对路径——CI(ubuntu)上字面量
+# Windows 路径不是绝对路径;这些用例核的是审批/「记住」语义,不是路径校验
+_MCP_SURE_PROJECT = os.path.abspath(os.path.join("sure-poc", "hello"))
+MCP_SURE_ARGS = {"project": _MCP_SURE_PROJECT}
+# 含 list 的参数:sanitize 会把 list 变成字符串,用来钉住「键必须从原始参数计算」
+MCP_SURE_LIST_ARGS = {"project": _MCP_SURE_PROJECT, "flags": ["a", "b"]}
+
+
+@pytest.fixture(autouse=True)
+def _cleanup_tool_confirmation_permanent():
+    """清掉本模块测试可能写进**进程级全局名单**的 mcp_sure 键。
+
+    文件层面的隔离由 tests/conftest.py 负责（MIQI_HOME 指到临时目录）；但
+    command_approval._permanent_approved 是进程级集合——「always」用例写入后，
+    同一次 pytest 进程里其它文件对同参数的 check() 会直接命中，造成串扰。
+    这里按键精确回收（幂等，键不存在时是 no-op）。
+    """
+    yield
+    from miqi.agent.command_approval import remove_permanent
+
+    remove_permanent(PermissionEngine.key_for(MCP_SURE_TOOL, MCP_SURE_ARGS))
+    remove_permanent(PermissionEngine.key_for(MCP_SURE_TOOL, MCP_SURE_LIST_ARGS))
+
+
+def _make_tool_confirmation_meta():
+    """对照 orchestrator._request_approval 的真实 meta 形状（含 decision_key）。"""
+    return {
+        "tool_name": MCP_SURE_TOOL,
+        "description": f"{MCP_SURE_TOOL}: {dict(MCP_SURE_ARGS)}",
+        "details": {"tool_name": MCP_SURE_TOOL, "arguments": dict(MCP_SURE_ARGS)},
+        "decision_key": PermissionEngine.key_for(MCP_SURE_TOOL, MCP_SURE_ARGS),
+    }
+
+
+def _make_tool_confirmation_ctx(tool_call_id="call_001", turn_id="turn_001", arguments=None):
+    return ToolExecutionContext(
+        tool_name=MCP_SURE_TOOL,
+        tool_call_id=tool_call_id,
+        turn_id=turn_id,
+        thread_id="thread_abc",
+        agent_type="main",
+        arguments=dict(arguments if arguments is not None else MCP_SURE_ARGS),
+    )
+
+
+@pytest.mark.asyncio
+async def test_session_approval_persists_for_tool_confirmation_tool():
+    """'session' 批准后，同参数的 mcp_sure 工具调用应免弹窗。"""
+    engine = PermissionEngine()
+    orch = _build_orchestrator(engine)
+
+    ctx1 = _make_tool_confirmation_ctx()
+    decision1 = await engine.check(ctx1)
+    assert decision1.verdict == PermissionVerdict.APPROVAL_REQUIRED
+    assert decision1.allow_permanent is True  # D5-A：已入 TOOL_CONFIRMATION_TOOLS
+
+    approval_id = "turn_001:call_001"
+    _inject_pending_approval(orch, approval_id, _make_tool_confirmation_meta())
+    orch.resolve_approval(approval_id, "session")
+
+    ctx2 = _make_tool_confirmation_ctx(tool_call_id="call_002", turn_id="turn_002")
+    decision2 = await engine.check(ctx2)
+    assert decision2.verdict == PermissionVerdict.ALLOW, (
+        "session 批准后，同参数调用必须免弹窗（记录端与匹配端键不一致会让这里是空的）"
+    )
+
+
+@pytest.mark.asyncio
+async def test_always_approval_persists_for_tool_confirmation_tool():
+    """'always' 批准后，同参数的 mcp_sure 工具调用应免弹窗。"""
+    engine = PermissionEngine()
+    orch = _build_orchestrator(engine)
+
+    approval_id = "turn_001:call_001"
+    _inject_pending_approval(orch, approval_id, _make_tool_confirmation_meta())
+    orch.resolve_approval(approval_id, "always")
+
+    ctx2 = _make_tool_confirmation_ctx(tool_call_id="call_002", turn_id="turn_002")
+    decision2 = await engine.check(ctx2)
+    assert decision2.verdict == PermissionVerdict.ALLOW
+
+
+@pytest.mark.asyncio
+async def test_tool_confirmation_approval_does_not_leak_to_different_args():
+    """批准一个项目参数，不能让另一个项目的核查调用也免弹窗。"""
+    engine = PermissionEngine()
+    orch = _build_orchestrator(engine)
+
+    approval_id = "turn_001:call_001"
+    _inject_pending_approval(orch, approval_id, _make_tool_confirmation_meta())
+    orch.resolve_approval(approval_id, "session")
+
+    other = _make_tool_confirmation_ctx(
+        tool_call_id="call_002",
+        turn_id="turn_002",
+        arguments={"project": os.path.abspath(os.path.join("sure-poc", "演示 项目"))},
+    )
+    decision = await engine.check(other)
+    assert decision.verdict == PermissionVerdict.APPROVAL_REQUIRED, (
+        "不同参数必须仍然弹窗（批准只覆盖被批准的那个调用）"
+    )
+
+
+@pytest.mark.asyncio
+async def test_always_approval_persists_with_list_argument():
+    """回归（#1259 CodeRabbit Major）：含 list 的参数经 _sanitize_details 会变成
+    字符串——若审批键从 sanitized details 计算，会与 check() 用**原始参数**算的
+    键不一致，批准过「记住」的调用仍会再弹。decision_key 必须在请求时刻用原始
+    参数计算（_request_approval 的真实行为）。"""
+    args = dict(MCP_SURE_LIST_ARGS)
+    engine = PermissionEngine()
+    orch = _build_orchestrator(engine)
+
+    ctx1 = _make_tool_confirmation_ctx(arguments=args)
+    decision1 = await engine.check(ctx1)
+    assert decision1.verdict == PermissionVerdict.APPROVAL_REQUIRED
+
+    # 复刻 _request_approval 的真实处理顺序：sanitize 展示副本 + 原始参数算 decision_key
+    sanitized = ToolOrchestrator._sanitize_details(
+        {"tool_name": MCP_SURE_TOOL, "arguments": args}
+    )
+    assert isinstance(sanitized["arguments"]["flags"], str), (
+        "前置条件：sanitize 确实把 list 变成了字符串（用例覆盖的正是这一分歧）"
+    )
+    meta = {
+        "tool_name": MCP_SURE_TOOL,
+        "description": f"{MCP_SURE_TOOL}: {args}",
+        "details": sanitized,
+        "decision_key": PermissionEngine.key_for(MCP_SURE_TOOL, args),
+    }
+    approval_id = "turn_001:call_001"
+    _inject_pending_approval(orch, approval_id, meta)
+    orch.resolve_approval(approval_id, "always")
+
+    ctx2 = _make_tool_confirmation_ctx(
+        tool_call_id="call_002", turn_id="turn_002", arguments=args
+    )
+    decision2 = await engine.check(ctx2)
+    assert decision2.verdict == PermissionVerdict.ALLOW, (
+        "list 参数不得破坏「永久允许」（键必须来自原始参数，而非 sanitized 副本）"
+    )
+
+
+@pytest.mark.asyncio
+async def test_make_key_stable_for_tool_confirmation_tool():
+    """key 必须与 dict 顺序无关、且为 tool:<16hex> 稳定摘要。
+
+    内置 hash() 每进程加盐、随 dict 顺序变化——持久化的「永久允许」跨重启永远
+    匹配不上，即使同一进程内换了参数顺序也会失效。
+    """
+    k1 = PermissionEngine._make_key(
+        _make_tool_confirmation_ctx(arguments={"a": 1, "project": "X"})
+    )
+    k2 = PermissionEngine._make_key(
+        _make_tool_confirmation_ctx(arguments={"project": "X", "a": 1})
+    )
+    assert k1 == k2, "键必须与参数 dict 顺序无关"
+    prefix, _, digest = k1.partition(":")
+    assert prefix == MCP_SURE_TOOL
+    assert len(digest) == 16 and all(c in "0123456789abcdef" for c in digest), (
+        f"键应为 tool:<16hex> 稳定摘要，实际 {k1!r}"
     )

@@ -69,7 +69,7 @@ describe('chat-inflight（#1257 登出中断在途回合）', () => {
     expect(() => release()).not.toThrow();
   });
 
-  it('逐会话发 chat.abort（同一会话多条在途只中断一次），并在发完前清空登记', async () => {
+  it('逐会话发 chat.abort（同一会话多条在途只中断一次），成功后摘除登记', async () => {
     clearInFlightChats();
     trackInFlightChat('desktop:a');
     trackInFlightChat('desktop:a');
@@ -83,11 +83,11 @@ describe('chat-inflight（#1257 登出中断在途回合）', () => {
       ['chat.abort', { session_key: 'desktop:a' }],
       ['chat.abort', { session_key: 'desktop:b' }],
     ]);
-    // 登记已清空：残留登记会让下一次登出误伤新会话
+    // 中断成功后才摘除：登记已清空，不会残留到下一次登出
     expect(inFlightChatSessions()).toEqual([]);
   });
 
-  it('单个会话中断失败不影响其余会话，登记同样清空', async () => {
+  it('中断失败的会话登记保留，下一次登出重试成功后摘除（#1257 桥重启场景）', async () => {
     clearInFlightChats();
     trackInFlightChat('desktop:a');
     trackInFlightChat('desktop:b');
@@ -103,10 +103,16 @@ describe('chat-inflight（#1257 登出中断在途回合）', () => {
       },
     };
 
-    await abortInFlightChats(sender);
+    const aborted = await abortInFlightChats(sender);
 
     expect(calls).toEqual(['desktop:a', 'desktop:b']);
+    expect(aborted).toEqual(['desktop:b']);
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('中断在途回合失败（desktop:a）'));
+    // 失败的登记保留在表里 —— 下次登出还能重试，不会永久脱离跟踪
+    expect(inFlightChatSessions()).toEqual(['desktop:a']);
+
+    // 下一次登出：桥恢复后重试成功，登记摘除
+    await abortInFlightChats(makeSender());
     expect(inFlightChatSessions()).toEqual([]);
     warn.mockRestore();
   });

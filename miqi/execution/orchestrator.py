@@ -199,6 +199,21 @@ def _sanitize_exc_for_ui(exc: BaseException) -> str:
     return f"{type(exc).__name__}: {raw}" if raw else type(exc).__name__
 
 
+def _summarize_pattern_for_log(pattern: str) -> str:
+    """Log-safe summary of an allowlist pattern.
+
+    匹配端用完整键（exec 的键是 exec:<完整命令>），但 INFO 日志里只保留命令
+    前 _MAX_COMMAND_LENGTH 字符 —— 完整命令 500 字符之后可能带凭据，不应
+    落进日志（#1272 CodeRabbit Security & Privacy）。其余工具的 pattern 是
+    hash 或路径，保持原样。
+    """
+    if pattern.startswith("exec:"):
+        cmd = pattern[len("exec:"):]
+        if len(cmd) > _MAX_COMMAND_LENGTH:
+            return f"exec:{cmd[:_MAX_COMMAND_LENGTH]}…"
+    return pattern
+
+
 class OrchestrationResult(str, Enum):
     SUCCESS = "success"
     DENIED_BY_POLICY = "denied_by_policy"
@@ -602,7 +617,17 @@ class ToolOrchestrator:
             "command": ((decision.details or {}).get("command", "")
                         if isinstance(decision.details, dict)
                         else "")[:_MAX_COMMAND_LENGTH],
+            # 审批键用的**完整**命令：上面的展示副本被截断到 _MAX_COMMAND_LENGTH，
+            # 而匹配端 _make_key 用原始参数拼 exec:<command>，长命令下两者不等，
+            # 「本次会话允许/永久允许」会永远匹配不上（#1259 同类缺陷的 exec 分支）
+            "command_key": ((decision.details or {}).get("command", "")
+                            if isinstance(decision.details, dict)
+                            else ""),
             "allow_permanent": decision.allow_permanent,
+            # 审批键用**原始**参数在请求时刻算好并存这里(独立于 sanitize 的展示
+            # 副本):记录端(_make_approval_pattern)与匹配端(check)由此共用同一
+            # 稳定键,「本次会话允许/永久允许」才真正生效(#1259 CodeRabbit Major)
+            "decision_key": PermissionEngine.key_for(ctx.tool_name, ctx.arguments),
             "created_at": created_at,
             "timeout_ms": self.approval_timeout_ms,
         }
@@ -765,13 +790,17 @@ class ToolOrchestrator:
         Uses the same key format as PermissionEngine._make_key so the
         allowlist entry matches future permission checks:
 
-        - exec tools:     exec:<command>
+        - exec tools:     exec:<command>（原始完整命令，经 command_key）
         - file_write tools: <tool_name>:<path>
         - other tools:    <tool_name>:<hash of arguments> (via description)
         """
         tool = meta.get("tool_name", "")
         if tool == "exec":
-            cmd = meta.get("command", "")
+            # 键用原始完整命令（command_key），不能用展示副本 command —— 它被
+            # 截断到 _MAX_COMMAND_LENGTH，而匹配端 _make_key 用完整命令，长命令
+            # 的记录永远匹配不上（#1259 同类缺陷的 exec 分支）。
+            # 旧形状的 meta 没有 command_key，退回展示副本（与历史行为一致）。
+            cmd = meta.get("command_key") or meta.get("command", "")
             if not cmd:
                 return None
             return f"exec:{cmd}"
@@ -788,7 +817,22 @@ class ToolOrchestrator:
             if not path:
                 return None
             return f"{tool}:{path}"
-        # Fallback: use the description field (user-visible text)
+        # 首选:_request_approval 在请求时刻用**原始参数**算好的 decision_key。
+        # 不能用 meta["details"] 里的副本:那是经 _sanitize_details 处理的展示副本
+        # (list/tuple 被转成字符串、长字符串被截断、名为 token 的键被丢弃),与
+        # check() 匹配端用原始参数计算的键可能不一致——批准过「记住」的参数稍后
+        # 仍会再弹审批(#1259 CodeRabbit Major)。
+        key = meta.get("decision_key")
+        if isinstance(key, str) and key:
+            return key
+        # 兼容:旧形状 meta(details 携带 arguments)按同一稳定键计算;
+        # details 形状不可控(历史上存在字符串形态),失败即落 description。
+        details = meta.get("details")
+        args = details.get("arguments") if isinstance(details, dict) else None
+        if isinstance(args, dict):
+            return PermissionEngine.key_for(tool, args)
+        # 最后兜底:参数不可得(如 network 分支的 details 无 arguments)时退回
+        # description 仅作记录,不参与匹配(与该分支的历史行为一致)。
         pattern = (meta.get("description") or "").strip()
         if not pattern:
             return None
@@ -802,7 +846,7 @@ class ToolOrchestrator:
         self.permissions.permanent_allowlist.add(pattern)
         logger.info(
             "Permanent approval recorded: pattern={!r} session={}",
-            pattern, self._session_id,
+            _summarize_pattern_for_log(pattern), self._session_id,
         )
 
         # Phase 31.X: sync to global (cross-session, persisted) allowlist
@@ -833,7 +877,7 @@ class ToolOrchestrator:
         self.permissions.session_allowlist.add(pattern)
         logger.info(
             "Session approval recorded: pattern={!r} session={}",
-            pattern, self._session_id,
+            _summarize_pattern_for_log(pattern), self._session_id,
         )
 
     def list_pending_approvals(self) -> list[dict[str, Any]]:

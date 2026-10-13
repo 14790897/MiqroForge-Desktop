@@ -116,6 +116,17 @@ export function normalizeBridgeMessage(resp: BridgeResponse): NormalizedBridgeMe
 }
 
 /**
+ * #1036 transport trace: the `type=` field printed for a stdout line that could
+ * not be matched to a pending request. Uses the same discriminator as the
+ * receive side (`normalizeBridgeMessage`: `type` first, then `event`) so a
+ * future producer that switches to the `event` key keeps this line honest —
+ * and so events, which also carry an `id`, are never mistaken for responses.
+ */
+function traceLineType(resp: NormalizedBridgeMessage): string {
+  return resp.eventType ?? 'response';
+}
+
+/**
  * Renderer IPC channel for an orphan bridge event, or undefined when the event
  * name maps to no known channel (then it is dropped — never mis-routed).
  *
@@ -222,6 +233,14 @@ export class BridgeManager extends EventEmitter {
   private clientId: string = 'miqi-desktop';
   private stoppingPromise: Promise<void> | null = null;
   private _sandboxAvailable: boolean = false;
+  /**
+   * #1036 transport trace: the bridge's own pid, taken from the ready
+   * handshake. Deliberately NOT `child.pid` — on Windows a venv's python.exe
+   * is a launcher that re-execs the real interpreter, so the spawned pid
+   * differs from the pid the bridge reports about itself, and the trace lines
+   * from the two sides would not join.
+   */
+  private bridgePid: number | undefined;
 
   get sandboxAvailable(): boolean {
     return this._sandboxAvailable;
@@ -229,6 +248,11 @@ export class BridgeManager extends EventEmitter {
 
   set sandboxAvailable(v: boolean) {
     this._sandboxAvailable = v;
+  }
+
+  /** Bridge process identity stamped on the #1036 trace lines. */
+  private tracePid(): number | undefined {
+    return this.bridgePid ?? this.process?.pid;
   }
 
   constructor(projectRoot?: string) {
@@ -283,6 +307,10 @@ export class BridgeManager extends EventEmitter {
 
     let startedProcess: ChildProcess | null = null;
     let startedReader: Interface | null = null;
+    // #1036: this generation's bridge pid (from the ready handshake). Held
+    // per generation — not via `this.bridgePid` — so a late line from a
+    // superseded process is still attributed to the process that wrote it.
+    let startedPid: number | undefined;
 
     try {
       const bridgeProcess = spawn(command, args, {
@@ -305,6 +333,10 @@ export class BridgeManager extends EventEmitter {
       });
       this.process = bridgeProcess;
       startedProcess = bridgeProcess;
+      // #1036: this generation's pid is unknown until the ready handshake
+      // carries it — clear the previous generation's so nothing can be
+      // attributed to a bridge that is already gone.
+      this.bridgePid = undefined;
 
       const lineReader = createInterface({
         input: bridgeProcess.stdout!,
@@ -313,8 +345,18 @@ export class BridgeManager extends EventEmitter {
       this.rl = lineReader;
       startedReader = lineReader;
 
+      /** #1036: pid for the trace lines emitted for THIS bridge process. */
+      const linePid = () => startedPid ?? bridgeProcess.pid ?? '?';
+
       lineReader.on('line', (line: string) => {
-        if (this.process !== bridgeProcess) return;
+        if (this.process !== bridgeProcess) {
+          // #1036: a superseded bridge process keeps writing for a moment after
+          // a restart. Dropping those lines used to leave no trace at all, so
+          // an old process's late line was indistinguishable from a response
+          // that never arrived. Tag it with the writer's pid.
+          this.recordMainLog('WARN', `bridge-stale-line dropped pid=${linePid()}`, 'bridge');
+          return;
+        }
         try {
           const raw: BridgeResponse = JSON.parse(line);
           const resp = normalizeBridgeMessage(raw);
@@ -388,12 +430,32 @@ export class BridgeManager extends EventEmitter {
 
           if (!resp.requestId) {
             this.addLog(`[Bridge] Ignoring response without id/request_id: ${line}`);
+            // #1036: a response that came back but carries no id can never be
+            // matched to a caller. This used to be in-memory only (addLog) —
+            // invisible in the durable log, where it is one of the two
+            // candidate explanations for a request that "never returned".
+            this.recordMainLog(
+              'WARN',
+              `bridge-resp orphan pid=${linePid()} id=- ` +
+                `type=${traceLineType(resp)} — no id/request_id: ${line}`,
+              'bridge'
+            );
             return;
           }
 
           const pending = this.pending.get(resp.requestId);
           if (!pending) {
             this.addLog(`[Bridge] No pending request for response ${resp.requestId}`);
+            // #1036: the response arrived (the bridge did its job) but the
+            // caller is gone — e.g. it already timed out. Durable line so the
+            // "bridge never answered" and "answer lost in the main process"
+            // hypotheses can be told apart from the log alone.
+            this.recordMainLog(
+              'WARN',
+              `bridge-resp orphan pid=${linePid()} id=${resp.requestId} ` +
+                `type=${traceLineType(resp)}`,
+              'bridge'
+            );
             return;
           }
 
@@ -417,6 +479,17 @@ export class BridgeManager extends EventEmitter {
         } catch (e) {
           const errMsg = e instanceof Error ? e.message : String(e);
           this.addLog(`[Bridge] Error processing stdout line: ${errMsg} — raw: ${line}`);
+          // #1036: an unparseable stdout line (truncated / polluted JSON) used
+          // to be in-memory only. Durable copy — the raw line is capped so a
+          // corrupted multi-megabyte line cannot balloon the log file, but its
+          // true length is kept so the truncation is visible.
+          const rawSample =
+            line.length > 1000 ? `${line.slice(0, 1000)}…[+${line.length - 1000}]` : line;
+          this.recordMainLog(
+            'WARN',
+            `Error processing stdout line (pid=${linePid()}): ${errMsg} — raw: ${rawSample}`,
+            'bridge'
+          );
         }
       });
 
@@ -471,6 +544,13 @@ export class BridgeManager extends EventEmitter {
           try {
             const msg = JSON.parse(line);
             if (msg.type === 'ready') {
+              // #1036: prefer the pid the bridge reports about itself — see
+              // the bridgePid field. Falls back to child.pid for a bridge
+              // built before the handshake carried it.
+              if (typeof msg.pid === 'number') {
+                this.bridgePid = msg.pid;
+                startedPid = msg.pid;
+              }
               done();
             }
           } catch {
@@ -814,7 +894,14 @@ export class BridgeManager extends EventEmitter {
     params?: Record<string, unknown>,
     onEvent?: (type: string, data: unknown) => void
   ): Promise<unknown> {
-    if (!this.isRunning()) return null;
+    if (!this.isRunning()) {
+      // #1036: this `return null` is silent — no WARN, not even in memory.
+      // Callers (e.g. ipc/index.ts config.get) treat it as "no value" and fall
+      // back to local state, so a bridge that is simply not running looks
+      // exactly like a request that was dropped mid-flight. Make it visible.
+      this.recordMainLog('WARN', `sendSafe ${method} skipped: bridge not running`, 'bridge');
+      return null;
+    }
     try {
       return await this.send(method, params, onEvent);
     } catch (e: any) {
@@ -940,6 +1027,7 @@ export class BridgeManager extends EventEmitter {
       });
 
       const stdin = this.process!.stdin!;
+      const bridgePid = this.tracePid();
       if (!stdin.writable || stdin.destroyed) {
         clearTimeout(timeout);
         this.pending.delete(id);
@@ -952,10 +1040,27 @@ export class BridgeManager extends EventEmitter {
             // 写入失败(EPIPE 等):行没有完整送达,后端不会开始这个 turn。
             // 保守起见不标 not-dispatched —— 数据可能已进入管道缓冲区,
             // 由上层按「可能已派发」处理。
+            this.recordMainLog(
+              'WARN',
+              `bridge-req write-failed pid=${bridgePid ?? '?'} id=${id} method=${method} ` +
+                `err=${err.message}`,
+              'bridge'
+            );
             clearTimeout(timeout);
             this.pending.delete(id);
             reject(err);
+            return;
           }
+          // #1036: logged from INSIDE the write callback (not before write()),
+          // because that is what separates "still sitting in the Node write
+          // buffer" from "handed to the OS pipe". Without this line, a request
+          // that never leaves the main process and one that never comes back
+          // leave the same trace: none.
+          this.recordMainLog(
+            'INFO',
+            `bridge-req written pid=${bridgePid ?? '?'} id=${id} method=${method}`,
+            'bridge'
+          );
         });
       } catch (err) {
         // 序列化失败(JSON.stringify 抛错)或 stdin.write 同步抛错 —— 一个字节

@@ -50,6 +50,11 @@ if hasattr(sys.stdin, 'reconfigure'):
 # Get raw binary stdout for _send so we bypass any remaining text-layer encoding
 _stdout_buffer = sys.stdout.buffer if hasattr(sys.stdout, 'buffer') else None
 
+#: #1036 transport trace — this process's identity, stamped on every
+#: `bridge-resp sent` line so a log that spans a bridge restart can be split
+#: by generation (loop.py opens each generation with `bridge-start`).
+_BRIDGE_PID = os.getpid()
+
 # stdout 的写全部交给一条专用线程，事件循环一个字节都不写。
 #
 # 往管道里写，OS 缓冲（Windows 上约 64KB）一满就阻塞；而读端是 Electron 主进程，
@@ -84,8 +89,11 @@ def _log(msg: str, level: str = "INFO") -> None:
     """
     try:
         print(f"[miqi-bridge] {msg}", file=sys.stderr, flush=True)
-    except OSError:
-        # stderr may be closed during shutdown on Windows / PyInstaller
+    except (OSError, ValueError):
+        # stderr may be closed during shutdown on Windows / PyInstaller — and a
+        # *closed* stream raises ValueError, not OSError.  Tracing must never
+        # take down a caller (in `_send` it would surface as a second response
+        # for the same request, via the dispatch error path).
         pass
 
 
@@ -163,12 +171,32 @@ def _stop_stdout_writer(timeout: float = 5.0) -> None:
     thread.join(timeout=timeout)
 
 
+def _is_response_envelope(data: dict[str, Any]) -> bool:
+    """True for a response (``result``/``error`` envelope), false for an event.
+
+    The discriminator is "carries no event key", matching the receive side
+    (`normalizeBridgeMessage` in apps/desktop/src/main/bridge.ts, which reads
+    `type` and then `event`).  Both keys are checked so a producer that later
+    switches to `event` cannot make the trace silently stop matching, and so
+    events — which also carry an `id` — are never logged as responses.
+    """
+    return "type" not in data and "event" not in data
+
+
 def _send(data: dict[str, Any]) -> None:
     """Queue one atomic JSON line for stdout as UTF-8 bytes.
 
     Never blocks: the write itself — and therefore any pipe backpressure — is
     handled by the writer thread, so a parent that stops draining stdout can no
     longer stall the event loop (#1203).
+
+    #1036: every response is also traced to stderr as ``bridge-resp sent
+    pid=… id=… bytes=…`` so that "the bridge answered but the reply never
+    reached the main process" can be told apart from "the bridge never
+    answered".  The trace is emitted when the line is *queued* (the writer
+    thread does the actual write, #1203); ``bytes=`` is the encoded size that
+    write will put on the wire, so it still matches the ``resp_bytes=`` on the
+    ``dispatch-done`` line for the same request.
     """
     global _stdout_backlog_warned_at
     line = (json.dumps(data, ensure_ascii=False) + "\n").encode('utf-8')
@@ -187,6 +215,17 @@ def _send(data: dict[str, Any]) -> None:
                 f"the bridge keeps serving (writes are off the event loop)",
                 "WARNING",
             )
+
+    # `_log` prints to sys.stderr, and `print(file=None)` would fall back to
+    # stdout — i.e. straight into the protocol channel.  Skip the trace rather
+    # than risk that (a windowed build has no stderr; the protocol must not
+    # depend on the trace being writable).
+    if _is_response_envelope(data) and sys.stderr is not None:
+        _log(
+            f"bridge-resp sent pid={_BRIDGE_PID} "
+            f"id={data.get('id') or data.get('request_id') or '?'} "
+            f"bytes={len(line)}"
+        )
 
 
 def _result(req_id: str, result: Any = None) -> None:
@@ -763,6 +802,53 @@ def _clear_sandbox_state_file_fast() -> None:
         pass
 
 
+def _detach_protocol_stdin(fd: int = 0) -> Any:
+    """把 JSON 协议从 fd ``fd`` 挪到专用描述符，并让 ``fd`` 指向空设备(#1036)。
+
+    桥用 stdin 收发协议。而 Windows（与 POSIX）会把父进程的标准输入交给**每一个
+    没有显式重定向它的子进程** —— 于是桥在沙箱里跑命令时，那条命令链
+    （``wsl.exe …``）拿的是**同一根管道**，命令存活期间就能把协议行读走：那些
+    请求永远到不了本进程的读线程，Desktop 一路等到 720s 超时(#1036)。
+
+    给每个 spawn 显式接 ``stdin=DEVNULL`` 只能治已知的那几处（全仓库 58 处
+    spawn 点，历史上只有 3 处设过它）。这里把隔离做成**结构性**的：协议挪到
+    私有描述符，``fd`` 变成空设备 —— 之后**任何**子进程（含第三方库自己起的）
+    继承到的都是空设备。
+
+    实测（Windows）：调用后新起的、没给 ``stdin=`` 的子进程读到空；而桥自己仍
+    能从专用描述符读到协议行。
+
+    返回承载协议的流（``fd`` 为 0 时同时绑到 ``sys.stdin``）；环境不允许隔离时
+    返回 None —— 保持原状，绝不因此阻塞启动。
+    """
+    try:
+        protocol_fd = os.dup(fd)          # Python 3.4+ 起 dup 出的描述符不可继承
+    except OSError:
+        return None
+    try:
+        devnull_fd = os.open(os.devnull, os.O_RDONLY)
+    except OSError:
+        os.close(protocol_fd)
+        return None
+    try:
+        # 标准输入到此为止：``fd``（Windows 上还有 STD_INPUT_HANDLE，由 os.dup2
+        # 一并更新）都指向空设备。此后起的子进程再读标准输入只会读到 EOF。
+        os.dup2(devnull_fd, fd)
+    except OSError:
+        # 重定向失败：把已经 dup 出来的协议描述符关掉再放弃，否则既泄漏一个
+        # 描述符，又会让异常冲出 main() 的「返回 None 就保持原状」兜底。
+        os.close(protocol_fd)
+        return None
+    finally:
+        os.close(devnull_fd)
+    # 读线程按行读 sys.stdin（loop.py 的 _stdin_reader），所以 fd 0 的情况要把
+    # 它换成私有描述符上的包装；编码与启动时的 reconfigure 一致。
+    protocol = os.fdopen(protocol_fd, "r", encoding="utf-8", errors="replace")
+    if fd == 0:
+        sys.stdin = protocol
+    return protocol
+
+
 def main() -> None:
     global _bridge_state
 
@@ -798,6 +884,12 @@ def main() -> None:
 
     _init_logging()
     _log("Bridge server starting")
+    # #1036: 先做结构性隔离 —— 之后启动的任何子进程（工作区初始化、沙箱、
+    # 插件 hook、MCP…）都继承不到协议管道。详见 _detach_protocol_stdin。
+    if _detach_protocol_stdin() is not None:
+        _log("Bridge protocol stdin detached from fd 0 (children inherit the null device)")
+    else:
+        _log("Bridge protocol stdin left as-is (could not detach; per-spawn DEVNULL still applies)")
     _ensure_workspace_init()
 
     # Persist approval history so records survive bridge restarts

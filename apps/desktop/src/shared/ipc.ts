@@ -170,6 +170,12 @@ export const IPC = {
   FEEDBACK_SUBMIT: 'feedback:submit',
   FEEDBACK_LIST: 'feedback:list',
 
+  // SURE 验收面板(阶段 3):原生 spawn 核查
+  SURE_HEALTH: 'sure:health',
+  SURE_CHECK_START: 'sure:check-start',
+  SURE_CHECK_CANCEL: 'sure:check-cancel',
+  SURE_CHECK_STATUS: 'sure:check-status',
+
   // MiQroForge 平台 OAuth2 登录 (issue #726, 主进程本地处理)
   QRAFT_LOGIN: 'qraft:login',
   QRAFT_BROWSER_LOGIN: 'qraft:browserLogin',
@@ -235,6 +241,12 @@ export const IPC_EVENTS = {
   WSL_INSTALL_PROGRESS: 'wsl:installProgress',
   WSL_CHECK_UPDATED: 'wsl:checkUpdated',
 
+  // SURE 核查事件(阶段 3):随 sure:check-start 的流式响应逐条转发
+  SURE_CHECK_PROGRESS: 'sure:check_progress',
+  SURE_CHECK_REPORT: 'sure:check_report',
+  SURE_CHECK_FAILED: 'sure:check_failed',
+  SURE_CHECK_CANCELLED: 'sure:check_cancelled',
+
   // MiQroForge 登录态变化（自动刷新/过期时由主进程推送）
   QRAFT_STATUS_CHANGED: 'qraft:statusChanged',
 } as const;
@@ -248,6 +260,11 @@ export const ChatSendInput = z.object({
   session_key: z.string().optional(),
   thread_id: z.string().optional(),
   mode: z.enum(['plan', 'manual', 'edit', 'auto']).optional(),
+  // #680 断线修复：renderer/preload 一直在发 reasoning_mode，但 zod parse
+  // 默认剥离未知键 → 后端永远收不到档位（bridge 日志 reasoning_mode 0 次）。
+  // enum 而非 free string：非法档位在参数构造阶段就按「确定未派发」拦下，
+  // 与 bridge 侧「非 fast/think 一律 None」的宽松降级互补。
+  reasoning_mode: z.enum(['fast', 'think']).optional(),
   workspace: z.string().optional(),
   resume_turn_id: z.string().optional(),
   drop_from_turn_id: z.string().optional(),

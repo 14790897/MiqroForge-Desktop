@@ -1,8 +1,12 @@
 """Configuration schema using Pydantic."""
 
+import os
+import shutil
+import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from loguru import logger
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from pydantic.alias_generators import to_camel
 from pydantic_settings import BaseSettings
@@ -550,6 +554,9 @@ class MCPServerConfig(Base):
     command: str = ""  # Stdio: command to run (e.g. "npx")
     args: list[str] = Field(default_factory=list)  # Stdio: command arguments
     env: dict[str, str] = Field(default_factory=dict)  # Stdio: extra env vars
+    # Stdio: 启动工作目录（#1267：插件条目由 PluginManager 注入插件根目录，
+    # 含分隔符的相对 command 依此解析）；空 = 继承调用方 cwd。
+    cwd: str = ""
     url: str = ""  # HTTP/SSE: endpoint URL
     headers: dict[str, str] = Field(default_factory=dict)  # HTTP/SSE: Custom HTTP Headers
     insecure_http: bool = False  # Explicit opt-in: allow non-loopback http:// endpoints (credentials in cleartext; platform gateway has no https yet)
@@ -579,6 +586,94 @@ DEFAULT_MCP_SERVERS: dict = {
         "description": "MiQroForge 平台托管 SLURM 集群：作业提交/状态监控/取消、分区查询、输出与文件传输",
     },
 }
+
+# ── #1268：检测到本机 SURE 时的默认条目 ────────────────────────────────
+# 与 slurm 相同：只有用户**完全未写** mcpServers 键时才经由 default_factory
+# 生效；显式配置（含空对象=全部关闭）整体覆盖，不合并。区别是 SURE 条目是
+# **只读探测**：检测到本机安装才注入，不自动安装、不改任何文件——未安装时
+# 不注册任何工具，Agent 如实说「SURE 未安装」（与 sure-check 技能语义一致，
+# 不给假绿）。
+# 注意：任何一次 config 写盘都会把生效中的默认物化进用户配置，此后以显式
+# 配置为准（与 slurm 既有行为一致）；卸载 SURE 后该条目表现为连接失败并
+# 跳过（#1259 已验证的失败模式），可手动删除。
+
+#: 检测到的 SURE 默认条目描述（与 #1259 落地的注册文案一致）。
+SURE_DEFAULT_MCP_DESCRIPTION = "SURE 项目核查:检查 AI 生成项目是否虚假完成,生成修复契约"
+
+
+def _sure_bin_from_env() -> str | None:
+    """① $env:SURE_BIN——指向存在的文件才命中；指向不存在的文件视为未命中。"""
+    raw = os.environ.get("SURE_BIN", "").strip()
+    if raw and os.path.isfile(raw):
+        return raw
+    return None
+
+
+def _sure_bin_from_path() -> str | None:
+    """② PATH 上的 sure（shutil.which 负责 PATHEXT 与绝对化）。"""
+    return shutil.which("sure")
+
+
+def _sure_bin_from_localappdata() -> str | None:
+    """③ Windows 兜底 %LOCALAPPDATA%\\SURE\\bin\\sure.exe（per-user 安装位置）。
+
+    非 Windows 不兜底（macOS/Linux 仅 ①②）——与 SURE 自身启动器的解析顺序一致。
+    """
+    if sys.platform != "win32":
+        return None
+    root = os.environ.get("LOCALAPPDATA", "").strip()
+    if not root:
+        return None
+    candidate = os.path.join(root, "SURE", "bin", "sure.exe")
+    return candidate if os.path.isfile(candidate) else None
+
+
+def resolve_sure_bin() -> str | None:
+    """探测本机 SURE 可执行文件,返回路径或 None（阶段 3 原生通道复用同一探测）。
+
+    顺序与 SURE 自身启动器一致：SURE_BIN → PATH → %LOCALAPPDATA% 兜底。
+    逐段探测：单段异常视为**该段**未命中（不遮蔽后续探测）；命中即停。
+    每次调用重新探测（无缓存）：用户中途安装 SURE 后即可用上。
+    """
+    for resolver in (_sure_bin_from_env, _sure_bin_from_path, _sure_bin_from_localappdata):
+        try:
+            found = resolver()
+        except Exception as exc:  # noqa: BLE001 —— 单段失败等价于该段未命中
+            logger.debug("SURE 二进制探测段 {} 失败,按未命中处理: {}", resolver.__name__, exc)
+            continue
+        if found:
+            return found
+    return None
+
+
+def detect_sure_mcp_server() -> MCPServerConfig | None:
+    """只读探测本机 SURE 二进制，命中则构造默认 MCP 条目（#1268）。
+
+    探测顺序与 SURE 自身启动器一致：SURE_BIN → PATH → %LOCALAPPDATA% 兜底
+    （见 :func:`resolve_sure_bin`）。不自动安装、不改任何文件；探测异常按
+    「未安装」处理（记日志，不影响配置加载）。每次调用重新探测（无缓存）：
+    用户中途安装 SURE 后，新会话即可用上。
+    """
+    found = resolve_sure_bin()
+    if found:
+        return MCPServerConfig(
+            type="stdio",
+            command=found,
+            args=["mcp", "serve"],
+            tool_timeout=600,
+            progress_interval_seconds=10,
+            description=SURE_DEFAULT_MCP_DESCRIPTION,
+        )
+    return None
+
+
+def _build_default_mcp_servers() -> dict[str, MCPServerConfig]:
+    """默认 mcp_servers（ToolsConfig.default_factory）：平台 slurm + 检测到的 SURE。"""
+    servers = {name: MCPServerConfig(**cfg) for name, cfg in DEFAULT_MCP_SERVERS.items()}
+    sure = detect_sure_mcp_server()
+    if sure is not None:
+        servers["sure"] = sure
+    return servers
 
 
 class ObservabilityConfig(Base):
@@ -611,9 +706,8 @@ class ToolsConfig(Base):
     mcp_servers: dict[str, MCPServerConfig] = Field(
         # validate_default 未开启：default_factory 结果不会自动校验，
         # 这里显式构造 MCPServerConfig 实例保证类型正确。
-        default_factory=lambda: {
-            name: MCPServerConfig(**cfg) for name, cfg in DEFAULT_MCP_SERVERS.items()
-        }
+        # #1268：工厂同时包含检测到的本机 SURE（只读探测，未安装则无该条目）。
+        default_factory=_build_default_mcp_servers
     )
 
 

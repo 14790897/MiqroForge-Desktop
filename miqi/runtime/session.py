@@ -141,6 +141,12 @@ class RuntimeSession:
         if ledger is not None:
             await ledger.initialize()
 
+        # #1267: 装载文件式插件（用户/系统/工作区目录）。每个会话启动时重扫
+        # 一次——新安装的插件在**下一个会话**即可生效（与 MCP 配置"新建会话
+        # 生效"的既有语义一致）；单个插件装载失败由 PluginManager 标记为
+        # error 状态，不影响会话启动。
+        await self._discover_plugins()
+
         # MCP integration: connect configured MCP servers (tools.mcpServers)
         # and register their tools into the session's ToolRegistry.  Runs
         # before the dispatch task starts so the tools are advertised on the
@@ -162,10 +168,27 @@ class RuntimeSession:
                 ),
             )
 
+    async def _discover_plugins(self) -> None:
+        """装载文件式插件（#1267）。
+
+        PluginManager 此前在生产路径上从未被 discover——插件声明的
+        MCP 服务器/斜杠命令/hooks 全部到不了运行时。这里在会话启动时
+        装载一次；失败只记日志，不阻塞会话（单个坏插件由 PluginManager
+        自身标记为 error，其余照常）。
+        """
+        pm = getattr(self.services, "plugin_manager", None)
+        if pm is None:
+            return
+        try:
+            await pm.discover()
+        except Exception:
+            _session_logger.exception("插件装载失败（会话继续启动）")
+
     async def _connect_mcp(self) -> None:
         """Connect configured MCP servers and register their tools (Phase MCP).
 
-        Reads ``config.tools.mcp_servers`` and delegates to
+        Reads ``config.tools.mcp_servers``（并并入插件声明的服务器，#1267；
+        显式配置同名为准）and delegates to
         ``miqi.agent.tools.mcp.connect_mcp_servers``, which registers an
         ``MCPToolWrapper`` per tool (or a lazy gateway) into the shared
         ToolRegistry.  Connection is attempted exactly once per session —
@@ -179,7 +202,19 @@ class RuntimeSession:
         self._mcp_connected = True
 
         tools_cfg = getattr(self._config, "tools", None) if self._config is not None else None
-        mcp_servers = getattr(tools_cfg, "mcp_servers", None) or {}
+        mcp_servers = dict(getattr(tools_cfg, "mcp_servers", None) or {})
+
+        # #1267: 并入插件声明的 MCP 服务器。显式配置同名为准；条目非法或
+        # command 无法解析（PATH/Windows 每用户安装约定）→ 跳过并记日志。
+        pm = getattr(self.services, "plugin_manager", None)
+        if pm is not None:
+            try:
+                from miqi.runtime.plugin_mcp import merge_plugin_mcp_servers
+
+                mcp_servers = merge_plugin_mcp_servers(mcp_servers, pm.get_mcp_servers())
+            except Exception:
+                _session_logger.exception("插件 MCP 条目合并失败（仅使用显式配置）")
+
         if not mcp_servers:
             return
 

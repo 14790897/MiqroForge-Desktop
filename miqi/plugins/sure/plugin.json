@@ -1,0 +1,20 @@
+{
+  "name": "sure",
+  "version": "0.1.0",
+  "description": "SURE 项目核查接入:注册本地 SURE 的 MCP 服务(5 个核查工具),并提供 /sure-check 快捷命令。核查结论一律以 SURE 报告为准。",
+  "author": "MiQroForge",
+  "skills": [],
+  "mcp_servers": [
+    {
+      "name": "sure",
+      "type": "stdio",
+      "command": "sure",
+      "args": ["mcp", "serve"],
+      "tool_timeout": 600,
+      "progress_interval_seconds": 10,
+      "description": "SURE 项目核查:检查 AI 生成项目是否虚假完成,生成修复契约"
+    }
+  ],
+  "slash_commands": [],
+  "hooks": []
+}

@@ -161,11 +161,47 @@ async function importBridgeManager() {
   return mod.BridgeManager;
 }
 
+// #1036 transport trace: bridge.ts's recordMainLog delegates to
+// electron-log's writeMainProcessLog, which would otherwise append to
+// <projectRoot>/workspace/logs/electron-main-<date>.log. Capture the durable
+// lines instead so the trace can be asserted on.
+const { writeMainProcessLog: mockWriteMainProcessLog } = vi.hoisted(() => ({
+  writeMainProcessLog: vi.fn(),
+}));
+
+vi.mock('./electron-log', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./electron-log')>();
+  return { ...actual, writeMainProcessLog: mockWriteMainProcessLog };
+});
+
+/** Messages the bridge manager wrote to the durable log, with source 'bridge'. */
+function mainLogMessages(): string[] {
+  return mockWriteMainProcessLog.mock.calls
+    .filter((call) => call[3] === 'bridge')
+    .map((call) => String(call[1]));
+}
+
+/** Let readline deliver whatever was pushed into the mock stdout. */
+function settle(ms = 30): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 function createMockProcess() {
   const stdout = new PassThrough();
   const stderr = new PassThrough();
   const proc = {
-    stdin: { write: vi.fn(), end: vi.fn(), writable: true, destroyed: false },
+    // #1036: calling the write callback synchronously mirrors Node's
+    // "chunk handed to the pipe" notification, which is where the transport
+    // trace records `bridge-req written`.
+    stdin: {
+      write: vi.fn((_chunk: string, cb?: (err?: Error | null) => void) => {
+        if (cb) cb(null);
+        return true;
+      }),
+      end: vi.fn(),
+      writable: true,
+      destroyed: false,
+    },
     stdout,
     stderr,
     on: vi.fn(),
@@ -173,6 +209,8 @@ function createMockProcess() {
     removeListener: vi.fn(),
     kill: vi.fn(),
     exitCode: null as number | null,
+    // #1036: stamped on the transport-trace lines.
+    pid: 4242,
   };
   mockSpawn.mockReturnValue(proc);
   return proc;
@@ -208,13 +246,14 @@ function findRequestId(proc: ReturnType<typeof createMockProcess>, method: strin
 async function startBridge(
   proc: ReturnType<typeof createMockProcess>,
   bridge: InstanceType<Awaited<ReturnType<typeof importBridgeManager>>>,
-  initResult: Record<string, unknown> = { clientId: 'test', serverInfo: { version: '1' } }
+  initResult: Record<string, unknown> = { clientId: 'test', serverInfo: { version: '1' } },
+  readyLine: Record<string, unknown> = { type: 'ready' }
 ): Promise<void> {
   const startPromise = bridge.start();
   // Wait for spawn + readline + ready-handshake handlers to be set up
   await new Promise((r) => setTimeout(r, 300));
   // Resolve the ready handshake
-  feedLine(proc, { type: 'ready' });
+  feedLine(proc, readyLine);
   // Wait for the 250ms exit-check + initializeConnection() to send initialize
   await new Promise((r) => setTimeout(r, 350));
   // Feed the initialize response
@@ -901,5 +940,143 @@ describe('channelForEventType', () => {
   it('不认识的事件名返回 undefined（宁可丢掉，也不误投到别的通道）', () => {
     expect(channelForEventType('totally_unknown_event')).toBeUndefined();
     expect(channelForEventType('')).toBeUndefined();
+  });
+});
+
+// ============================================================
+// #1036 传输层埋点 —— 每个可能丢请求的环节都要在落盘日志里留痕
+//
+// 事故形态：一个长 turn 里 `config.get` ×17 / `plugins.list` ×3 全部走满
+// 720s 客户端超时，而同一窗口内 `files.read` ×22 被正常应答。丢失点可能
+// 在「main 写出 / 桥收取 / 桥回包 / main 匹配」四段中的任意一段，而其中
+// 「响应没匹配上」「响应行坏了」「主进程写出后无人应答」三段当时一个字节
+// 的日志都不留 —— 这正是查不出根因的直接原因。
+//
+// 桥侧对应埋点（stdin-read / stdin-enqueue / stdin-recv / dispatch-* /
+// bridge-resp sent）见 tests/bridge/test_bridge_transport_trace.py。
+// ============================================================
+
+describe('BridgeManager 传输层埋点 (#1036)', () => {
+  it('在 stdin.write 回调里落盘 bridge-req written（区分"压缓冲"与"已交内核"）', async () => {
+    const BridgeManager = await importBridgeManager();
+    const proc = createMockProcess();
+    const bridge = new BridgeManager('/fake/root');
+    await startBridge(proc, bridge);
+    mockWriteMainProcessLog.mockClear();
+
+    const promise = bridge.send('config.get', {});
+    const id = findRequestId(proc, 'config.get');
+
+    // 必须写在回调里：写在 write() 之前就分不清「已入 Node 缓冲」和
+    // 「已交给管道」，而那正是第一行判据要看的东西。
+    const written = mainLogMessages().find((m) => m.startsWith('bridge-req written'));
+    expect(written).toBeTruthy();
+    expect(written).toContain(`id=${id}`);
+    expect(written).toContain('method=config.get');
+    expect(written).toContain(`pid=${proc.pid}`);
+
+    feedLine(proc, { id, result: { ok: 1 } });
+    await promise;
+  });
+
+  it('响应没有 id 时落盘 bridge-resp orphan（今天只 addLog、不落盘）', async () => {
+    const BridgeManager = await importBridgeManager();
+    const proc = createMockProcess();
+    const bridge = new BridgeManager('/fake/root');
+    await startBridge(proc, bridge);
+    mockWriteMainProcessLog.mockClear();
+
+    // 没有 id、也没有事件键 —— 认不出属于哪个调用方。
+    feedLine(proc, { result: { ok: true } });
+    await settle();
+
+    const line = mainLogMessages().find((m) => m.startsWith('bridge-resp orphan'));
+    expect(line).toBeTruthy();
+    expect(line).toContain('id=-');
+    expect(line).toContain('type=response');
+    expect(line).toContain(`pid=${proc.pid}`);
+  });
+
+  it('响应找不到对应 pending 时落盘 bridge-resp orphan（带上 id 与类型）', async () => {
+    const BridgeManager = await importBridgeManager();
+    const proc = createMockProcess();
+    const bridge = new BridgeManager('/fake/root');
+    await startBridge(proc, bridge);
+    mockWriteMainProcessLog.mockClear();
+
+    // 调用方早已超时/失败 → pending 里没有这条 id。
+    feedLine(proc, { id: 'ghost-1', result: { ok: true } });
+    await settle();
+
+    const line = mainLogMessages().find((m) => m.startsWith('bridge-resp orphan'));
+    expect(line).toBeTruthy();
+    expect(line).toContain('id=ghost-1');
+    expect(line).toContain('type=response');
+  });
+
+  it('整行 JSON 解析失败时落盘 Error processing stdout line（含原始行）', async () => {
+    const BridgeManager = await importBridgeManager();
+    const proc = createMockProcess();
+    const bridge = new BridgeManager('/fake/root');
+    await startBridge(proc, bridge);
+    mockWriteMainProcessLog.mockClear();
+
+    // 被截断/污染的一行（例如大响应在管道里被切碎）。
+    proc.stdout.write('{"id":"cut-off","result":{"partial":\n');
+    await settle();
+
+    const line = mainLogMessages().find((m) => m.startsWith('Error processing stdout line'));
+    expect(line).toBeTruthy();
+    expect(line).toContain(`pid=${proc.pid}`);
+    expect(line).toContain('raw: {"id":"cut-off"');
+  });
+
+  it('代际不符的迟到行落盘 bridge-stale-line dropped，且不会被当成响应', async () => {
+    const BridgeManager = await importBridgeManager();
+    const proc = createMockProcess();
+    const bridge = new BridgeManager('/fake/root');
+    await startBridge(proc, bridge);
+    mockWriteMainProcessLog.mockClear();
+
+    // 模拟热重载换进程：旧进程的行到达时 this.process 已经不是它了。
+    (bridge as any).process = null;
+    feedLine(proc, { id: 'late-1', type: 'progress', data: {} });
+    await settle();
+
+    const line = mainLogMessages().find((m) => m.startsWith('bridge-stale-line dropped'));
+    expect(line).toBeTruthy();
+    expect(line).toContain(`pid=${proc.pid}`);
+    // 迟到行不是「响应回来了但没匹配上」——两者必须能分开。
+    expect(mainLogMessages().some((m) => m.includes('orphan'))).toBe(false);
+  });
+
+  it('sendSafe 因桥未运行而静默返回 null 时也要落盘（这条连 WARN 都不打）', async () => {
+    const BridgeManager = await importBridgeManager();
+    const bridge = new BridgeManager('/fake/root');
+    mockWriteMainProcessLog.mockClear();
+
+    const value = await bridge.sendSafe('config.get');
+
+    expect(value).toBeNull();
+    expect(mainLogMessages()).toContain('sendSafe config.get skipped: bridge not running');
+  });
+
+  it('用 ready 握手里桥自报的 pid（Windows venv 启动器的 pid 与解释器不同）', async () => {
+    const BridgeManager = await importBridgeManager();
+    const proc = createMockProcess();
+    const bridge = new BridgeManager('/fake/root');
+    // 桥自报 pid 7777，与 spawn 出来的 child.pid(4242) 不同 —— 这正是 Windows
+    // venv python.exe（启动器）的现实。两侧的埋点必须用同一个数才拼得起来。
+    await startBridge(proc, bridge, undefined, { type: 'ready', pid: 7777 });
+    mockWriteMainProcessLog.mockClear();
+
+    const promise = bridge.send('config.get', {});
+    const written = mainLogMessages().find((m) => m.startsWith('bridge-req written'));
+
+    expect(written).toContain('pid=7777');
+    expect(written).not.toContain(`pid=${proc.pid}`);
+
+    feedLine(proc, { id: findRequestId(proc, 'config.get'), result: {} });
+    await promise;
   });
 });

@@ -134,6 +134,30 @@ def paragraph_texts(monkeypatch):
     return texts
 
 
+@pytest.fixture
+def paragraph_style_captor(monkeypatch):
+    """记录传给 reportlab ``Paragraph`` 的 (原始文本, style)，供字体无关的样式断言。
+
+    与 ``paragraph_texts`` 同一手法（补丁 ``reportlab.platypus.Paragraph`` 类本身），
+    额外带出 style —— 用于断言单元格样式没有启用 ``wordWrap="CJK"`` 硬切
+    （#1238 打磨：硬切会拆数字串，样式级的回归比几何断行更稳定）。
+    """
+    import reportlab.platypus as _platypus
+
+    seen: list = []
+    real_paragraph = _platypus.Paragraph
+
+    class _RecordingParagraph(real_paragraph):  # type: ignore[misc, valid-type]
+        def __init__(self, *args, **kwargs):
+            text = args[0] if args else kwargs.get("text", "")
+            style = args[1] if len(args) > 1 else kwargs.get("style")
+            seen.append((str(text), style))
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr(_platypus, "Paragraph", _RecordingParagraph)
+    return seen
+
+
 def _assert_placeholder_rendered(texts, alt):
     """断言降级占位 ``[图表：{alt}（见源稿）]`` 进入了渲染（字体无关）。"""
     expected = _squash(f"[图表：{alt}（见源稿）]")
@@ -1315,6 +1339,10 @@ async def test_content_path_md_copy_dangling_symlink_not_written_through(tmp_pat
 # 单行 drawString，长中文溢出列宽压到邻列）；3 条列表的 "•"(U+2022) 在 SimHei
 # 无字形 → 空心方框，文本层 3 个 \x00。断言尽量字体无关：结构断言用 Paragraph
 # 入参捕获，几何断言用 ASCII 单元格（CI runner 无 CJK 字体，中文提取不可靠）。
+#
+# #1238 打磨（本文件末尾小节）：当时为长中文换行给单元格开了 wordWrap="CJK"，
+# 但 CJK 硬切把时间串拆成 "18:5"/"1 连云港" → 改回默认换行；项目符号从 ·
+# 改回经符号字体渲染的 •（SimHei 缺的字形由 reportlab 自带 Vera 补）。
 
 
 def _overlapping_span_pairs(pdf_path):
@@ -1389,8 +1417,12 @@ async def test_table_cells_render_as_paragraphs_with_cjk(tmp_path, paragraph_tex
     assert cell in paragraph_texts, paragraph_texts
 
 
-def test_list_bullet_falls_back_when_font_lacks_u2022(monkeypatch):
-    """#1238: 项目符号按字体 cmap 降级：• → ·（SimHei 场景）→ -；未知按支持处理。"""
+def test_list_bullet_uses_symbol_font_when_body_lacks_u2022(monkeypatch):
+    """#1238 打磨: 正文字体缺 • 时改用符号字体渲染 •（内联 <font>），不再降级 ·。
+
+    SimHei 场景（无 U+2022、有 U+00B7）现在应拿到符号字体版的 • 标记，
+    而不是降到中间点；未知字体照旧按「可能支持」直接用 •。
+    """
     import miqi.documents.pdf_create_tool as pdfmod
 
     coverage = {
@@ -1403,12 +1435,41 @@ def test_list_bullet_falls_back_when_font_lacks_u2022(monkeypatch):
         "_font_supports_char",
         lambda name, ch: (ord(ch) in coverage[name]) if name in coverage else None,
     )
+    monkeypatch.setattr(pdfmod, "_bullet_symbol_font", lambda: "SymFont")
     pdfmod._BULLET_CACHE.clear()
 
     assert pdfmod._list_bullet("FontWithBullet") == "\u2022"
+    assert pdfmod._list_bullet("FontNoBullet") == '<font name="SymFont">\u2022</font>'
+    assert pdfmod._list_bullet("UnknownFont") == "\u2022"
+
+
+def test_list_bullet_falls_back_to_middot_without_symbol_font(monkeypatch):
+    """符号字体也不可用时，仍按 cmap 降级 · → -（#1238 链保留为最后一级）。"""
+    import miqi.documents.pdf_create_tool as pdfmod
+
+    coverage = {
+        "FontNoBullet": {0x00B7, 0x2192},
+        "FontBare": set(),
+    }
+    monkeypatch.setattr(
+        pdfmod,
+        "_font_supports_char",
+        lambda name, ch: (ord(ch) in coverage[name]) if name in coverage else None,
+    )
+    monkeypatch.setattr(pdfmod, "_bullet_symbol_font", lambda: None)
+    pdfmod._BULLET_CACHE.clear()
+
     assert pdfmod._list_bullet("FontNoBullet") == "\u00b7"
     assert pdfmod._list_bullet("FontBare") == "-"
-    assert pdfmod._list_bullet("UnknownFont") == "\u2022"
+
+
+def test_bullet_symbol_font_renders_u2022():
+    """符号字体真实可注册且 cmap 含 U+2022（首选 reportlab 自带 Vera，任意平台可用）。"""
+    import miqi.documents.pdf_create_tool as pdfmod
+
+    name = pdfmod._bullet_symbol_font()
+    assert name is not None, "reportlab 自带 Vera.ttf 应始终可用"
+    assert pdfmod._font_supports_char(name, "\u2022") is True
 
 
 @pytest.mark.asyncio
@@ -1430,8 +1491,29 @@ async def test_list_item_bullet_not_nul_in_text_layer(tmp_path):
     assert any(b in text for b in ("\u2022", "\u00b7", "-"))
 
 
-def test_list_bullet_simhei_uses_middot():
-    """#1238 本机真实字体回归：SimHei 缺 U+2022 → 选 U+00B7（非 Windows 平台跳过）。"""
+@pytest.mark.asyncio
+async def test_list_bullet_u2022_when_cjk_font_present(tmp_path):
+    """#1238 打磨: 有真实 CJK 字体时，列表符号映射回 •（符号字体兜底生效）且非 NUL。
+
+    门控：无任何可注册 CJK 字体的 runner（#1238 的 CI runner）跳过——那些环境
+    走 Helvetica，内置 • 直接可用，「SimHei 缺字形」场景不存在。
+    """
+    from miqi.documents.pdf_create_tool import CreatePdfTool, _register_fonts
+
+    if _register_fonts().get("default_cjk", "Helvetica") == "Helvetica":
+        pytest.skip("无 CJK 字体，SimHei 缺字形场景不存在")
+
+    (tmp_path / "r.md").write_text("- first item\n- second item\n", encoding="utf-8")
+    tool = CreatePdfTool(workspace=tmp_path, allowed_dir=tmp_path)
+    assert "Created:" in await tool.execute(filename="o.pdf", content_path="r.md")
+
+    text = _pdf_text(tmp_path / "o.pdf")
+    assert "\x00" not in text, repr(text)
+    assert "\u2022" in text, repr(text)
+
+
+def test_list_bullet_simhei_uses_symbol_font_bullet():
+    """#1238 打磨 本机真实字体：SimHei 缺 U+2022 → 借符号字体输出 •（非 Windows 跳过）。"""
     from pathlib import Path
 
     simhei = Path("C:/Windows/Fonts/simhei.ttf")
@@ -1441,9 +1523,112 @@ def test_list_bullet_simhei_uses_middot():
     from reportlab.pdfbase import pdfmetrics
     from reportlab.pdfbase.ttfonts import TTFont
 
-    from miqi.documents.pdf_create_tool import _list_bullet
+    import miqi.documents.pdf_create_tool as pdfmod
 
     probe = "SimHeiBulletProbe"
     if probe not in pdfmetrics.getRegisteredFontNames():
         pdfmetrics.registerFont(TTFont(probe, str(simhei)))
-    assert _list_bullet(probe) == "\u00b7"
+    pdfmod._BULLET_CACHE.clear()
+
+    got = pdfmod._list_bullet(probe)
+    assert got.startswith("<font name="), got
+    assert "\u2022" in got, got
+    assert got != "\u00b7"
+
+
+# \u2500\u2500 #1238 \u6253\u78e8\uff1a\u53bb\u6389 CJK \u786c\u5207\u540e\u7684\u65ad\u884c\u56de\u5f52 \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+#
+# \u80cc\u666f\uff1awordWrap="CJK" \u5728\u4efb\u610f\u5b57\u7b26\u95f4\u65ad\u884c\uff0c\u628a\u65f6\u95f4\u4e32\u62c6\u6210 "18:5" / "1 \u8fde\u4e91\u6e2f"
+# \uff08dumbSplit \u7684\u534a\u884c\u56de\u9000\u5728 91.9pt \u5217\u5bbd\u4e0b\u627e\u4e0d\u5230\u65ad\u70b9\uff0cdumbSplit/textsplit \u5b9e\u6d4b
+# \u590d\u73b0\uff09\u3002\u4fee\u590d\uff1a\u5355\u5143\u683c\u6837\u5f0f\u6539\u7528\u9ed8\u8ba4\u6362\u884c\uff08\u7a7a\u683c\u5904\u65ad + splitLongWords \u62c6\u8d85\u957f\u8bcd\uff0c
+# \u4e0e\u6b63\u6587\u6bb5\u843d\u540c\u4e00\u673a\u5236\uff09\u3002\u4ee5\u4e0b\u7528\u4f8b\u628a\u300c\u6570\u5b57\u4e32\u5b8c\u6574\u300d\u300c\u957f\u65e0\u7a7a\u683c\u7247\u6bb5\u4ecd\u6362\u884c\u4e0d\u6ea2\u51fa\u300d
+# \u4e24\u4e2a\u65b9\u5411\u90fd\u9489\u4f4f\uff1bCJK \u91cf\u5ea6\u76f8\u5173\u7684\u7528\u4f8b\u5728\u65e0\u53ef\u6ce8\u518c CJK \u5b57\u4f53\u7684 runner \u4e0a\u8df3\u8fc7
+# \uff08#1238 \u7684 CI runner \u65e0 CJK \u5b57\u4f53\uff0c\u4e2d\u6587\u7f3a\u5b57\u5f62\u3001\u91cf\u5ea6\u5931\u771f\uff09\u3002
+
+
+@pytest.mark.asyncio
+async def test_table_cell_style_does_not_enable_cjk_hard_wrap(tmp_path, paragraph_style_captor):
+    """\u5b57\u4f53\u65e0\u5173\uff1a\u5355\u5143\u683c\u6837\u5f0f\u4e0d\u5f97\u542f\u7528 wordWrap="CJK" \u786c\u5207\uff08\u6570\u5b57\u4e32\u88ab\u62c6\u7684\u6839\u56e0\uff09\u3002"""
+    from miqi.documents.pdf_create_tool import CreatePdfTool
+
+    cell = "\u957f\u4e2d\u6587\u5355\u5143\u683c\u5185\u5bb9\u9700\u8981\u6309\u5217\u5bbd\u6362\u884c"
+    (tmp_path / "r.md").write_text(
+        f"| \u5217\u4e00 | \u5217\u4e8c |\n| --- | --- |\n| {cell} | \u77ed |\n", encoding="utf-8"
+    )
+    tool = CreatePdfTool(workspace=tmp_path, allowed_dir=tmp_path)
+    assert "Created:" in await tool.execute(filename="o.pdf", content_path="r.md")
+
+    cell_styles = [s for t, s in paragraph_style_captor if s is not None and t == cell]
+    assert cell_styles, paragraph_style_captor
+    for style in cell_styles:
+        assert (style.wordWrap or "LTR").upper() != "CJK", style.wordWrap
+
+
+@pytest.mark.asyncio
+async def test_table_cell_time_strings_not_split_with_cjk_font(tmp_path):
+    """\u771f\u5b9e\u884c\u7a0b\u8868\u6587\u6848\uff1a\u65f6\u95f4\u4e32\u8de8\u884c\u4e0d\u5f97\u88ab\u62c6\u5f00\uff08\u4fee\u590d\u524d "18:51" \u2192 "18:5"/"1 \u8fde\u4e91\u6e2f"\uff09\u3002
+
+    \u95e8\u63a7\uff1aCJK \u786c\u5207\u7684\u534a\u884c\u56de\u9000\u5931\u8d25\u4f9d\u8d56 CJK \u5b57\u4f53\u7684\u5b57\u5bbd\u91cf\u5ea6\uff08Helvetica \u4e0b\u65ad\u70b9
+    \u4f4d\u7f6e\u4e0d\u540c\u3001\u4e0d\u590d\u73b0\uff09\uff0c\u65e0 CJK \u5b57\u4f53\u65f6\u8df3\u8fc7\u3002
+    """
+    from miqi.documents.pdf_create_tool import CreatePdfTool, _register_fonts
+
+    if _register_fonts().get("default_cjk", "Helvetica") == "Helvetica":
+        pytest.skip("\u65e0 CJK \u5b57\u4f53\uff1aCJK \u91cf\u5ea6\u65ad\u884c\u573a\u666f\u4e0d\u53ef\u590d\u73b0")
+
+    cell = "14:40 \u5230\u5a01\u6d77\u7ad9 \u2192 D2154 15:13 \u5a01\u6d77\u7ad9\u53d1 \u2192 18:51 \u8fde\u4e91\u6e2f \u2192 D1667 19:18 \u8fde\u4e91\u6e2f\u53d1 \u2192 \u5e38\u5dde"
+    (tmp_path / "r.md").write_text(
+        f"| \u65e5\u671f | \u884c\u7a0b | \u5907\u6ce8 | \u5bbf |\n| --- | --- | --- | --- |\n| 10.5 | {cell} | \u2014 | \u5e38\u5dde |\n",
+        encoding="utf-8",
+    )
+    tool = CreatePdfTool(workspace=tmp_path, allowed_dir=tmp_path)
+    assert "Created:" in await tool.execute(filename="o.pdf", content_path="r.md")
+
+    lines = [ln.strip() for ln in _pdf_text(tmp_path / "o.pdf").splitlines()]
+    assert not any(ln.endswith("18:5") for ln in lines), lines
+    assert not any(ln.startswith("1 \u8fde\u4e91\u6e2f") for ln in lines), lines
+    assert any("18:51" in ln for ln in lines), lines
+    assert any("19:18" in ln for ln in lines), lines
+
+
+@pytest.mark.asyncio
+async def test_table_long_unspaced_cjk_wraps_no_overlap(tmp_path):
+    """\u56de\u5f52\uff08#1238 \u6838\u5fc3\u95ee\u9898\uff09\uff1a\u65e0\u7a7a\u683c\u957f\u4e2d\u6587\u5355\u5143\u683c\u4ecd\u6309\u5217\u5bbd\u6362\u884c\u3001\u96f6\u91cd\u53e0\u3001\u5b57\u5168\u3002
+
+    \u53bb\u6389 CJK \u786c\u5207\u540e\uff0c\u957f\u4e2d\u6587\u6362\u884c\u9760\u9ed8\u8ba4\u6362\u884c\u7684 splitLongWords \u515c\u5e95\u2014\u2014\u672c\u7528\u4f8b
+    \u8bc1\u660e\u8be5\u515c\u5e95\u6210\u7acb\uff08\u6ea2\u51fa\u5c31\u4f1a\u4ea7\u751f span \u91cd\u53e0\uff09\u3002\u65e0 CJK \u5b57\u4f53\u65f6\u8df3\u8fc7\u3002
+    """
+    from miqi.documents.pdf_create_tool import CreatePdfTool, _register_fonts
+
+    if _register_fonts().get("default_cjk", "Helvetica") == "Helvetica":
+        pytest.skip("\u65e0 CJK \u5b57\u4f53\uff1a\u4e2d\u6587\u91cf\u5ea6\u5931\u771f\uff0c\u51e0\u4f55\u65ad\u8a00\u4e0d\u53ef\u9760")
+
+    long_cjk = "\u957f\u4e2d\u6587\u5355\u5143\u683c\u5185\u5bb9\u9700\u8981\u6309\u5217\u5bbd\u6362\u884c\u8fd9\u662f\u6ca1\u6709\u4efb\u4f55\u7a7a\u683c\u7684\u8fde\u7eed\u4e2d\u6587\u6587\u672c\u7528\u6765\u9a8c\u8bc1\u6362\u884c"
+    (tmp_path / "r.md").write_text(
+        f"| \u5217\u4e00 | \u5217\u4e8c |\n| --- | --- |\n| {long_cjk} | \u77ed |\n", encoding="utf-8"
+    )
+    tool = CreatePdfTool(workspace=tmp_path, allowed_dir=tmp_path)
+    assert "Created:" in await tool.execute(filename="o.pdf", content_path="r.md")
+
+    assert _overlapping_span_pairs(tmp_path / "o.pdf") == [], "\u957f\u4e2d\u6587\u6ea2\u51fa\u538b\u5230\u90bb\u5217"
+    assert _squash(long_cjk) in _squash(_pdf_text(tmp_path / "o.pdf"))
+
+
+@pytest.mark.asyncio
+async def test_table_long_unspaced_ascii_word_wraps_no_overlap(tmp_path):
+    """\u5b57\u4f53\u65e0\u5173\uff1a\u8d85\u957f\u65e0\u7a7a\u683c ASCII \u5355\u5143\uff08\u5355\u4e2a\u8d85\u957f"\u8bcd"\uff09\u4e5f\u5fc5\u987b\u6362\u884c\u4e14\u4e0d\u6ea2\u51fa\u3002
+
+    \u9ed8\u8ba4\u6362\u884c\u5bf9\u8d85\u957f\u8bcd\u8d70 splitLongWords \u5f3a\u5236\u62c6\u5206\u2014\u2014\u8fd9\u662f\u53bb\u6389 CJK \u786c\u5207\u540e\u957f
+    \u65e0\u7a7a\u683c\u5185\u5bb9\u7684\u515c\u5e95\u8def\u5f84\uff0c\u7528 Helvetica \u91cf\u5ea6\u5728\u4efb\u610f runner \u4e0a\u53ef\u5224\u5b9a\u3002
+    """
+    from miqi.documents.pdf_create_tool import CreatePdfTool
+
+    word = "Supercalifragilisticexpialidocious" * 3
+    (tmp_path / "r.md").write_text(
+        f"| Col A | Col B |\n| --- | --- |\n| {word} | short |\n", encoding="utf-8"
+    )
+    tool = CreatePdfTool(workspace=tmp_path, allowed_dir=tmp_path)
+    assert "Created:" in await tool.execute(filename="o.pdf", content_path="r.md")
+
+    assert _overlapping_span_pairs(tmp_path / "o.pdf") == [], "\u8d85\u957f\u8bcd\u6ea2\u51fa\u538b\u5230\u90bb\u5217"
+    assert _squash(word) in _squash(_pdf_text(tmp_path / "o.pdf"))

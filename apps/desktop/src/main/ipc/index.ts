@@ -17,6 +17,7 @@ import { randomUUID } from 'crypto';
 import { basename, join } from 'path';
 import type { BrowserWindow } from 'electron';
 import { isRequestNotDispatched, type BridgeManager } from '../bridge';
+import { writeMainProcessLog } from '../electron-log';
 import { abortInFlightChats, trackInFlightChat } from '../chat-inflight';
 import { sendToFrame } from '../frame-send';
 import {
@@ -100,6 +101,7 @@ import {
   getWorkspacePath,
   isWithinCanonicalWorkspace,
   readLocalConfig,
+  resolveBareNameFallback,
   resolveWorkspacePath,
   shellEscape,
 } from './workspace-path';
@@ -385,6 +387,9 @@ export function registerIpcHandlers(bridge: BridgeManager): void {
         session_key: sessionKey,
         thread_id: (input as any).thread_id ?? undefined,
         mode: input.mode,
+        // #680 断线修复：把档位转发进 bridge payload（loop.py 读
+        // reasoning_mode 后决定 FAST_PROMPT/THINK_PROMPT 与预算）。
+        reasoning_mode: input.reasoning_mode,
         attachments: input.attachments,
         workspace: input.workspace,
         resume_turn_id: (input as any).resume_turn_id ?? undefined,
@@ -679,7 +684,21 @@ export function registerIpcHandlers(bridge: BridgeManager): void {
   // -----------------------------------------------------------------------
   ipcMain.handle(IPC.CONFIG_GET, async () => {
     const bridgeConfig = await bridge.sendSafe('config.get');
-    return bridgeConfig ?? readLocalConfig();
+    if (bridgeConfig === null || bridgeConfig === undefined) {
+      // #1036: `sendSafe` returns null both when the bridge is not running and
+      // when the request timed out (720 s), and this fallback then hands the
+      // renderer a plausible-looking local config — so a dropped request is
+      // silently downgraded to "used the local copy". Record which one it was.
+      writeMainProcessLog(
+        'WARN',
+        'config.get returned no value — serving the local config instead ' +
+          '(bridge down, or the request was dropped before its reply arrived)',
+        bridge.getProjectRoot(),
+        'bridge'
+      );
+      return readLocalConfig();
+    }
+    return bridgeConfig;
   });
 
   ipcMain.handle(IPC.CONFIG_UPDATE, async (_event, payload: unknown) => {
@@ -1937,6 +1956,14 @@ for m in ("pydantic", "httpx", "loguru"):
       return { opened: false, path: raw, error: e?.message ?? String(e) };
     }
 
+    // #1274: 追踪台账裸名（沙箱 exec 追踪）与实际嵌套落点不匹配——直接解析
+    // 不到时在会话自己的根（绑定文件夹 / 会话 files 目录）按 basename 兜底
+    // 搜一次。命中的路径仍会过下方 isWithinCanonicalWorkspace 包含性校验。
+    if (!existsSync(absolutePath)) {
+      const fallback = resolveBareNameFallback(raw, parsed.data.session_key, extraRoots);
+      if (fallback) absolutePath = fallback;
+    }
+
     // On Windows the file may live inside a WSL sandbox.
     const candidates: string[] = [absolutePath];
 
@@ -2237,15 +2264,22 @@ for m in ("pydantic", "httpx", "loguru"):
     // #1062: 解析放进 try —— 工作区外路径 throw 会变成 IPC rejection（渲染层静默无反应）。
     try {
       const absolutePath = resolveWorkspacePath(clean, extraRoots);
-      if (!existsSync(absolutePath)) {
+      // #1274: 追踪台账裸名与实际嵌套落点不匹配——直接解析不到时按 basename
+      // 兜底搜一次（有界、浅路径优先），命中路径仍过下方包含性校验。
+      let resolvedPath = absolutePath;
+      if (!existsSync(resolvedPath)) {
+        const fallback = resolveBareNameFallback(clean, parsed.data.session_key, extraRoots);
+        if (fallback) resolvedPath = fallback;
+      }
+      if (!existsSync(resolvedPath)) {
         return { revealed: false, path: raw, error: `File not found: ${absolutePath}` };
       }
       // Follow symlinks/junctions so a link pointing outside the workspace can't
       // reveal a host directory through the lexical containment check (#955).
-      if (!isWithinCanonicalWorkspace(absolutePath, getWorkspacePath(), extraRoots)) {
+      if (!isWithinCanonicalWorkspace(resolvedPath, getWorkspacePath(), extraRoots)) {
         return { revealed: false, path: raw, error: `Path outside workspace: ${raw}` };
       }
-      if (!skipOsLaunchForE2E()) shell.showItemInFolder(absolutePath);
+      if (!skipOsLaunchForE2E()) shell.showItemInFolder(resolvedPath);
       return { revealed: true, path: raw };
     } catch (e: any) {
       return { revealed: false, path: raw, error: e?.message ?? String(e) };
@@ -2444,6 +2478,34 @@ for m in ("pydantic", "httpx", "loguru"):
   ipcMain.handle(IPC.PLUGINS_TOGGLE, async (_event, payload: unknown) => {
     const { name, enabled } = payload as { name: string; enabled: boolean };
     return bridge.sendSafe('plugins.toggle', { name, enabled });
+  });
+
+  // ---------------------------------------------------------------------------
+  // SURE 验收(阶段 3):健康检查 + 原生 spawn 核查 + 取消/状态
+  // 事件通路:sure_check_progress/report/failed/cancelled 由 Python 侧以
+  // 孤儿事件发出,bridge.ts 按 IPC_EVENTS 常量名自动转发到渲染层
+  // (见 bridge.ts 的 orphan event forwarder),主进程无需逐条接线。
+  // ---------------------------------------------------------------------------
+  ipcMain.handle(IPC.SURE_HEALTH, async () => {
+    return bridge.sendSafeWithError('sure.health');
+  });
+
+  ipcMain.handle(IPC.SURE_CHECK_START, async (_event, payload: unknown) => {
+    // #1273 评审:渲染层参数视为不可信——解构前先校验,坏载荷返回
+    // SureApiResult 形状而不是抛 TypeError。
+    const project = (payload as { project?: unknown } | null | undefined)?.project;
+    if (typeof project !== 'string') {
+      return { ok: false, error: 'project must be a string', code: 'INVALID_PARAMS' };
+    }
+    return bridge.sendSafeWithError('sure.check.start', { project });
+  });
+
+  ipcMain.handle(IPC.SURE_CHECK_CANCEL, async () => {
+    return bridge.sendSafeWithError('sure.check.cancel');
+  });
+
+  ipcMain.handle(IPC.SURE_CHECK_STATUS, async () => {
+    return bridge.sendSafeWithError('sure.check.status');
   });
 
   // -- Feedback --------------------------------------------------------------

@@ -29,3 +29,5 @@ The skill format and metadata structure follow OpenClaw's conventions to maintai
 | `qraft-workflowspec-export` | Export session outputs to a schema-validated WorkflowRun JSON, validate (schema + semantic A/B), confirm the plan with the user, and upload to the MiQroForge platform (dataUpload) |
 | `skill-creator` | Create new skills |
 | `pptx-generator` | Generate, edit, and read PowerPoint presentations |
+| `sure-check` | Check an AI-built project with the local SURE checker (MCP) and report statuses honestly |
+| `sure-fix` | Repair SURE findings via the bounded repair contract, then re-check |

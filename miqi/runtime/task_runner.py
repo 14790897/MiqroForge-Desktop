@@ -26,6 +26,7 @@ from miqi.protocol.commands import (
     UserMessage,
 )
 from miqi.protocol.events import (
+    ABORT_NOTICE_ERROR_KIND,
     AgentMessageEvent,
     ApprovalResolvedEvent,
     CommandRejectedEvent,
@@ -205,9 +206,22 @@ class TaskRunner:
             if callable(cancel_fn) and inspect.iscoroutinefunction(cancel_fn):
                 await cancel_fn(thread_id, reason="Turn aborted by user.")
 
+            # Informational only — the aborted turn's real terminal is the
+            # TurnAbortedEvent its own task emits.  Tagged so the chat drain
+            # cannot mistake this notice for a turn failure: it is reached only
+            # when the abort is dispatched with no active turn (see
+            # RuntimeSession._run), so the aborted turn's drain has already
+            # exited — left on the shared queue, it used to be adopted as the
+            # NEXT chat.send's terminal, failing a turn that actually ran to
+            # completion.
+            #
+            # The turn_id lookup below is defensive: the finished turn clears
+            # _active_turn_ids in its own finally, so on the path that actually
+            # produces this notice the uuid fallback always wins.
             await self._events.put(ErrorEvent(
-                turn_id=str(uuid.uuid4())[:12],
+                turn_id=self._active_turn_ids.get(thread_id) or str(uuid.uuid4())[:12],
                 severity=EventSeverity.WARNING,
+                error_kind=ABORT_NOTICE_ERROR_KIND,
                 message=f"Turn aborted for thread {thread_id}.",
                 recoverable=True,
             ))

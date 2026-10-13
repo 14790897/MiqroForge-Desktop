@@ -22,6 +22,9 @@ function mkdocsScalar(key: string): string {
 
 const DOCS_BASE = mkdocsScalar('site_url');
 const REPO_URL = mkdocsScalar('repo_url');
+// 与 docsLinks.ts 的 REPO_LABEL 同一套推导：`https://github.com/owner/repo` → `owner/repo`。
+// 写死 owner 会让这条断言在下一次仓库迁移时又变成假失败——仓库名本来就只有一个来源（mkdocs.yml）。
+const REPO_LABEL = REPO_URL.replace(/^https?:\/\/[^/]+\//, '').replace(/\.git$/, '');
 
 async function openDocsTab(page: Page) {
   await page.locator('[data-testid="nav-system-settings"]').click();
@@ -68,7 +71,7 @@ test('issue #1155: 设置页文档链接指向当前文档站而非旧仓库路�
     // 底部 GitHub 仓库链接也别再显示旧仓库名。
     const repoLink = panel.getByRole('link', { name: /GitHub 仓库/ });
     await expect(repoLink).toHaveAttribute('href', REPO_URL);
-    await expect(repoLink).toContainText('14790897/MiqroForge-Desktop');
+    await expect(repoLink).toContainText(REPO_LABEL);
 
     await page.screenshot({
       path: `test-results/issue-1155-docs-tab.png`,

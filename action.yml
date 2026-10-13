@@ -132,10 +132,14 @@ runs:
             return m?.[1]?.trim() || '';
           };
 
+          // 空白判定：GitHub 表单对空字段渲染 `_No response_`，直接提交空正文的
+          // issue 也可能照抄这个占位符——两者都不能算「已填写」。
+          const isBlank = (v) => !v || v.trim() === '' || v.trim() === '_No response_';
+
           // 1. Description
           {
             const val = extract('Bug 描述');
-            if (!val) {
+            if (isBlank(val)) {
               failures.push(`Bug 描述：未填写`);
             }
           }
@@ -144,7 +148,7 @@ runs:
           {
             const val = extract('环境');
             const stillDefault = val?.includes('运行上方命令后将输出粘贴到这里');
-            if (!val || stillDefault) {
+            if (isBlank(val) || stillDefault) {
               failures.push(`环境信息：未填写`);
             }
           }
@@ -153,7 +157,7 @@ runs:
           {
             const val = extract('复现步骤');
             const actual = val?.split('\n').filter(l => l.replace(/^\d+\.\s*/, '').trim().length > 0).join('\n').trim();
-            if (!actual) {
+            if (isBlank(actual)) {
               failures.push(`复现步骤：未填写`);
             }
           }
@@ -161,7 +165,7 @@ runs:
           // 4. Frequency
           {
             const val = extract('复现频率');
-            if (!val) {
+            if (isBlank(val)) {
               failures.push(`复现频率：未填写`);
             }
           }
@@ -169,7 +173,7 @@ runs:
           // 5. Expected behavior
           {
             const val = extract('期望行为');
-            if (!val) {
+            if (isBlank(val)) {
               failures.push(`期望行为：未填写`);
             }
           }
@@ -177,7 +181,7 @@ runs:
           // 6. Actual behavior
           {
             const val = extract('实际行为');
-            if (!val) {
+            if (isBlank(val)) {
               failures.push(`实际行为：未填写`);
             }
           }
@@ -185,7 +189,7 @@ runs:
           // 7. Logs
           {
             const val = extract('日志');
-            if (!val) {
+            if (isBlank(val)) {
               failures.push(`日志：未填写`);
             }
           }
@@ -324,20 +328,28 @@ runs:
             }
 
             const data = await response.json();
-            const aiResult = data.choices?.[0]?.message?.content || '';
+            const aiResult = (data.choices?.[0]?.message?.content || '').trim();
             console.log(`[AI 审核] 结果:\n${aiResult}`);
 
+            // 只有拿到明确结论才算数。模型返回空、或三个真实性标记一个都没有时，
+            // 这次审核等于没产出结果——而空结果里当然找不到 ❌/⚠️，按「没找到否定
+            // 标记就当通过」的老写法，会挂一条「✅ 审核通过」的评论，把没执行的
+            // 审核报成通过。
             const hasFake = aiResult.includes('❌');
             const hasSuspicious = aiResult.includes('⚠️');
+            const hasReal = aiResult.includes('✅');
+            const verdict = hasFake || hasSuspicious
+              ? '> ⚠️ AI 检测到日志可能存在问题，请维护者人工复核。'
+              : hasReal
+                ? '> ✅ AI 审核通过，日志看起来真实可信。'
+                : '> ⚠️ AI 本次未产出结论（模型返回为空或未给出真实性判定），未代表审核通过，请维护者人工查看日志。';
 
             const comment = [
               '### 🤖 AI 日志审核',
               '',
-              aiResult,
+              aiResult || '（模型返回为空）',
               '',
-              hasFake || hasSuspicious
-                ? '> ⚠️ AI 检测到日志可能存在问题，请维护者人工复核。'
-                : '> ✅ AI 审核通过，日志看起来真实可信。',
+              verdict,
             ].join('\n');
 
             // Dedup: update existing or create new

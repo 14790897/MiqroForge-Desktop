@@ -98,3 +98,47 @@ describe('chat:send 的派发三态(#1072)', () => {
     expect(isChatNotDispatched(result)).toBe(false);
   });
 });
+
+/**
+ * #680 断线修复：renderer/preload 一直带 reasoning_mode，但 ChatSendInput
+ * 没有这个字段 → zod parse 静默剥离 → bridge 侧 loop.py 永远读不到档位
+ * （「极速」的 3 轮熔断/30s 预算/FAST_PROMPT 从未生效）。这两条断言把
+ * 「schema 认它」和「handler 转发它」分别钉住 —— 只修其一链仍然断。
+ */
+describe('chat:send 转发 reasoning_mode(#680)', () => {
+  it('fast / think 原样进入 bridge payload', async () => {
+    bridgeSend.mockResolvedValue({ message: 'ok' });
+
+    await invoke({ content: 'hi', session_key: 'desktop:1', reasoning_mode: 'think' });
+    expect(bridgeSend).toHaveBeenLastCalledWith(
+      'chat.send',
+      expect.objectContaining({ reasoning_mode: 'think' }),
+      expect.any(Function)
+    );
+
+    await invoke({ content: 'hi', session_key: 'desktop:1', reasoning_mode: 'fast' });
+    expect(bridgeSend).toHaveBeenLastCalledWith(
+      'chat.send',
+      expect.objectContaining({ reasoning_mode: 'fast' }),
+      expect.any(Function)
+    );
+  });
+
+  it('未带档位时 payload 里为 undefined（bridge 侧 params.get 得 None,按默认档处理）', async () => {
+    bridgeSend.mockResolvedValue({ message: 'ok' });
+
+    await invoke({ content: 'hi', session_key: 'desktop:1' });
+
+    const params = bridgeSend.mock.calls.at(-1)?.[1] as Record<string, unknown>;
+    expect(params.reasoning_mode).toBeUndefined();
+  });
+
+  it('非法档位 → enum 在参数构造阶段拦下,请求不触达 bridge', async () => {
+    const callsBefore = bridgeSend.mock.calls.length;
+
+    const result = await invoke({ content: 'hi', reasoning_mode: 'deep' });
+
+    expect(isChatNotDispatched(result)).toBe(true);
+    expect(bridgeSend.mock.calls.length).toBe(callsBefore);
+  });
+});

@@ -43,7 +43,7 @@ export function inFlightChatSessions(): string[] {
   return [...new Set(inFlight.values())];
 }
 
-/** 清空登记（登出中断后再调用，避免残留的登记让下一次登出打断新会话）。 */
+/** 清空登记（测试复位/断言用；生产路径按请求摘除，见 abortInFlightChats）。 */
 export function clearInFlightChats(): void {
   inFlight.clear();
 }
@@ -57,19 +57,37 @@ export interface ChatAbortSender {
 }
 
 /**
- * 中断登记表里的每个在途会话，返回被中断的会话键。
+ * 中断登记表里的每个在途会话，返回中断成功的会话键。
  *
- * 先清空登记再逐条发中断：中断失败（bridge 未起 / 刚热重启）不该让残留登记
- * 在**下一次**登出时误伤新会话；单个会话失败也不影响其余会话。
+ * 逐会话先发中断、**成功后**再摘除该会话登记（不再先清空再发）：中断失败
+ * （bridge 未起 / 刚热重启的瞬时故障）时登记留在表里，下一次登出会重试 ——
+ * 还在跑的回合不会因一次失败永久脱离跟踪、拿不到任何补救（#1257 僵尸回合
+ * 场景）。单个会话失败不影响其余会话。快照之后新登记的请求（登出瞬间还在
+ * 派发的）不在本轮摘除范围内，留给下一次登出处理，不会被误摘。
  */
 export async function abortInFlightChats(sender: ChatAbortSender): Promise<string[]> {
-  const keys = inFlightChatSessions();
-  clearInFlightChats();
-  for (const sessionKey of keys) {
-    const res = await sender.sendSafeWithError('chat.abort', { session_key: sessionKey });
-    if (!res.ok) {
-      console.warn(`[chat] 中断在途回合失败（${sessionKey}）：${res.error}`);
+  const requestIdsBySession = new Map<string, number[]>();
+  for (const [requestId, sessionKey] of inFlight) {
+    const ids = requestIdsBySession.get(sessionKey);
+    if (ids) {
+      ids.push(requestId);
+    } else {
+      requestIdsBySession.set(sessionKey, [requestId]);
     }
   }
-  return keys;
+  const aborted: string[] = [];
+  for (const [sessionKey, requestIds] of requestIdsBySession) {
+    const res = await sender.sendSafeWithError('chat.abort', { session_key: sessionKey });
+    if (res.ok) {
+      for (const requestId of requestIds) {
+        inFlight.delete(requestId);
+      }
+      aborted.push(sessionKey);
+    } else {
+      console.warn(
+        `[chat] 中断在途回合失败（${sessionKey}）：${res.error}（登记保留，下次登出重试）`
+      );
+    }
+  }
+  return aborted;
 }

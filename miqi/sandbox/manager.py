@@ -587,12 +587,14 @@ class SandboxManager:
             proc = await _create_subprocess_exec(
                 "wsl.exe", "-d", distro, "--",
                 "find", self.wsl_base_dir, "-mindepth", "1", "-maxdepth", "1", "-type", "d",
+                stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
         else:
             proc = await _create_subprocess_exec(
                 "find", str(self.sandbox_base_dir), "-mindepth", "1", "-maxdepth", "1", "-type", "d",
+                stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )

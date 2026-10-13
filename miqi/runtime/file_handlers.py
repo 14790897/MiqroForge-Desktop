@@ -857,6 +857,97 @@ def _find_in_sandbox_workspaces(
     return None
 
 
+# Hard cap on entries visited by the bare-name basename fallback below, so a
+# pathological session files tree cannot turn a read into an unbounded walk
+# (#1274).
+_BASENAME_WALK_LIMIT = 20000
+
+
+def _is_bare_name(file_path: str) -> bool:
+    """True for a single file-name segment with no directory component.
+
+    Mirrors the shape of tracked-files ledger entries written by sandbox exec
+    tracking: the bare ``name`` field of tracked_files.json (#1274).  Explicitly
+    excludes ``.``/``..`` and Windows ADS names (``name:stream``).
+    """
+    if not file_path or file_path in (".", "..") or ":" in file_path:
+        return False
+    try:
+        return Path(file_path).name == file_path
+    except (OSError, ValueError):
+        return False
+
+
+def _find_by_basename_under(root: Path, bare: str) -> Path | None:
+    """Bounded basename search under *root* for a tracked bare name.
+
+    Read-side fallback (#1274): sandbox exec tracking records bare file names
+    (``zif8_7111968_Na_report.md``) in tracked_files.json while the host copy
+    lands in a nested tree (``bvse-mof-demo/output/<run>/…``), so direct
+    resolution at the session files root misses.
+
+    Deterministic pick: shallowest relative path wins (the run-leaf root over
+    ``delivery/`` copies); ties broken by newest mtime.  Reparse points are
+    skipped so a junction cannot pull the walk outside the session directory.
+    """
+    if not root.is_dir():
+        return None
+    best: tuple[int, float, Path] | None = None
+    visited = 0
+    stack: list[Path] = [root]
+    while stack and visited < _BASENAME_WALK_LIMIT:
+        directory = stack.pop()
+        try:
+            entries = list(directory.iterdir())
+        except OSError:
+            continue
+        for entry in entries:
+            visited += 1
+            if _is_link(entry):
+                continue
+            if entry.is_dir():
+                stack.append(entry)
+                continue
+            if entry.name != bare:
+                continue
+            try:
+                mtime = entry.stat().st_mtime
+            except OSError:
+                mtime = 0.0
+            key = (len(entry.relative_to(root).parts), -mtime)
+            if best is None or key < best[:2]:
+                best = (key[0], key[1], entry)
+    return best[2] if best else None
+
+
+def _tracked_bare_name_fallback(
+    client_id: str,
+    session_key: str,
+    file_path: str,
+    runtime_workspace: str | None,
+) -> Path | None:
+    """Resolve a tracked bare name that missed direct resolution (#1274).
+
+    Only bare single-segment names qualify — anything with a directory
+    component was already resolved (or rejected) by ``_validate_file_path``
+    and must not be silently re-targeted at a different file.
+    """
+    if not session_key or not _is_bare_name(file_path):
+        return None
+    bound_root = _session_root(
+        client_id, session_key, runtime_workspace=runtime_workspace,
+    )
+    if bound_root is not None:
+        roots = [bound_root.resolve()]
+    else:
+        roots = [_resolve_session_files_path(client_id, session_key)]
+    for root in roots:
+        hit = _find_by_basename_under(root, file_path)
+        if hit is not None:
+            return hit
+    return None
+
+
 async def files_read_handler(
     request_id: str,
     params: dict[str, Any],
@@ -920,15 +1011,28 @@ async def files_read_handler(
                 file_path, resolved,
             )
         else:
-            logger.warning(
-                "[files:read] file not found — checked host={} session_key={}",
-                resolved, session_key,
+            # #1274: tracked bare names (sandbox exec tracking) miss direct
+            # resolution because the host copy lands in a nested tree under
+            # the session files dir.  Search by basename before failing.
+            basename_hit = _tracked_bare_name_fallback(
+                client_id, session_key, file_path, runtime_workspace,
             )
-            raise AppServerError(
-                f"File not found: {file_path}"
-                + (f" (session: {session_key})" if session_key else ""),
-                code="NOT_FOUND",
-            )
+            if basename_hit is not None:
+                resolved = basename_hit
+                logger.info(
+                    "[files:read] bare-name fallback resolved {} → {}",
+                    file_path, resolved,
+                )
+            else:
+                logger.warning(
+                    "[files:read] file not found — checked host={} session_key={}",
+                    resolved, session_key,
+                )
+                raise AppServerError(
+                    f"File not found: {file_path}"
+                    + (f" (session: {session_key})" if session_key else ""),
+                    code="NOT_FOUND",
+                )
 
     if not wsl_distro:
         # Host-accessible file — use normal path checks
