@@ -187,26 +187,37 @@ jobs:
         # 于是「UI 有工具卡、真实 SURE 记录里却没有 tool.completed」这种首跑失败，只能
         # 等下一轮再猜（2026-10-14 实测：连续三轮 flaky，汇总只给错误首行）。
         # 桥接自己的异常路径本来就有日志（sure_hooks.py 的丢弃 / 写入失败 / 排空超时），
-        # 这里只捞这几行、不做整份 tail —— 常态零行，出现即有据可查：
-        # 「attempted>0 但 ingested 少」= SURE 侧写入失败，「队列已满」= 队满丢弃，
-        # 两者都没有 = 钩子压根没触发（装配问题）。bridge_stats() 目前只被单测调用、
-        # 不落任何日志，这几行是 CI 里唯一的现场。
+        # 且桥接日志的文件 sink 是 `logger.add(..., level="DEBUG")` **无过滤器**
+        # （miqi/bridge/server.py），所以这几行只要发生就一定落盘、也一定被这里捞到。
+        # 只捞这几行、不做整份 tail —— 常态零行。
+        #
+        # 报告必须同时给出「查了几份日志」：只看异常数时，「0」既可能是「都干净」，
+        # 也可能是「一份日志都没找到」（glob 没命中 / home 被清）—— 两者含义天差地别
+        # （前者说明事件压根没进队，后者说明这次什么都没查到）。所以 0 份时显式 warning。
+        #
+        # 注意：happy path 是**静默**的（成功写入不发日志），所以「0 异常」的读法是
+        # 「没发生丢弃/写入失败/排空超时」，而不是「事件送达了」。
         run: |
-          files=0
+          logs=0
+          hits_files=0
           for d in "${TMPDIR:-}" "${RUNNER_TEMP:-}" /tmp; do
             [ -n "$d" ] || continue
             for f in "$d"/miqi-e2e-*/workspace/logs/bridge-*.log; do
               [ -e "$f" ] || continue
+              logs=$((logs + 1))
               hits=$(grep -E "SURE 事件队列已满|SURE hook ingest 失败|SURE 事件队列排空超时" "$f" || true)
               if [ -n "$hits" ]; then
-                files=$((files + 1))
+                hits_files=$((hits_files + 1))
                 echo "::group::bridge ingest anomalies: $f"
                 echo "$hits"
                 echo "::endgroup::"
               fi
             done
           done
-          echo "bridge ingest anomalies: ${files} 个日志有异常行"
+          echo "bridge ingest anomalies: ${hits_files}/${logs} 个日志有异常行"
+          if [ "$logs" -eq 0 ]; then
+            echo "::warning::没有找到任何桥接日志（miqi-e2e-*/workspace/logs/bridge-*.log）——本次的「0 异常」不代表链路干净，只是没查到"
+          fi
 
       - name: Guard — a skipped SURE test fails the job
         if: always()
