@@ -18,6 +18,20 @@ from loguru import logger
 
 from miqi.runtime.agent_graph_store import AgentGraphStore
 
+# 失速看门狗的默认阈值(判定逻辑见 AgentJobRuntime._watch_stall)。
+#
+# **阈值必须长于该路径最坏的合法单次等待,否则看门狗杀掉的是在工作、只是慢
+# 的作业**——采样的是"挂起点连续不动",而这些等待里挂起点本来就不动,合法
+# 与卡死对它没有区别。实测最坏:一次网关非流式回退可达 600s(2026-10-13,
+# e2e 注释同款记录);2026-10-14 首战:修复子代理在网关等待里被旧的
+# 5×60s=300s 阈值误杀(本机 12:06 的 stall dump,作业按 stalled 收尾)。
+# 取 15×60s=15 分钟:超过实测最坏 + 余量,且仍短于完整修复闭环 E2E 的
+# 30 分钟等待窗口——真卡死依然有界、依然自诊、依然如实收尾。
+# tests/runtime/test_agent_jobs.py::test_the_stall_threshold_outlasts_the_measured_worst_case_wait
+# 把这条策略钉在两个实测边界之间。
+STALL_INTERVAL_SECONDS: float = 60.0
+STALL_SAMPLES: int = 15
+
 
 @dataclass
 class AgentJob:
@@ -52,15 +66,15 @@ class AgentJobRuntime:
         *,
         services: Any,
         store: AgentGraphStore | None = None,
-        stall_interval: float = 60.0,
-        stall_samples: int = 5,
+        stall_interval: float = STALL_INTERVAL_SECONDS,
+        stall_samples: int = STALL_SAMPLES,
     ):
         self.services = services
         self._store = store
         self._jobs: dict[str, AgentJob] = {}
         self._tasks: dict[str, asyncio.Task | Any] = {}
         # 失速看门狗(2026-10-14):见 _watch_stall。间隔与采样次数可在测试
-        # 里调小;默认 5×60s=5 分钟,远超该路径任何合法单次等待。
+        # 里调小;默认必须长于实测最坏的合法单次等待——见模块常量处的记录。
         self._stall_interval = stall_interval
         self._stall_samples = stall_samples
         if store is not None:
@@ -245,10 +259,13 @@ class AgentJobRuntime:
         running(面板长期"运行中",重启后还留僵尸行)。
 
         判定:每 `stall_interval` 秒采样作业任务的最内层挂起帧(文件:行号),
-        连续 `stall_samples` 次相同即判失速。默认 5×60s=5 分钟,远超该
-        路径任何合法单次等待(openai 提供者最坏重试爆发 <4 分钟)。判失速
-        时先把全部 asyncio 任务的挂起栈 dump 进日志(下一次现场自诊,不必
-        再靠 py-spy),再以 "stalled" 如实收尾——绝不无声挂起。
+        连续 `stall_samples` 次相同即判失速。默认见模块常量
+        `STALL_INTERVAL_SECONDS`/`STALL_SAMPLES`:阈值必须长于实测最坏的合法
+        单次等待——旧的 5×60s=300s 假设"最坏重试爆发 <4 分钟",被同一 PR
+        实测的网关非流式回退 600s 证伪,首战即在完整修复闭环里误杀了还在
+        网关等待中的子代理。判失速时先把全部 asyncio 任务的挂起栈 dump 进
+        日志(下一次现场自诊,不必再靠 py-spy),再以 "stalled" 如实收尾——
+        绝不无声挂起。
         """
         last: tuple[str, int] | None = None
         same = 0

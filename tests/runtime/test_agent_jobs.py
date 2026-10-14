@@ -71,6 +71,33 @@ async def test_agent_job_completes_and_persists_result(fake_services_for_jobs):
     assert found["result_preview"]
 
 
+def test_the_stall_threshold_outlasts_the_measured_worst_case_wait():
+    """看门狗阈值必须长于实测最坏的合法单次等待——采样点在这些等待里不动,
+    合法与卡死对它没有区别。
+
+    实测最坏:一次网关非流式回退可达 600s(2026-10-13,e2e 注释同款记录);
+    2026-10-14 首战:修复子代理在网关等待里被 5 分钟阈值误杀(sure-e2e 完整
+    修复闭环,本机 12:06 的 stall dump)。上界是该 E2E 的 30 分钟等待窗口:
+    真卡死交给看门狗兜底,不该由测试超时收场。
+    """
+    import inspect
+
+    from miqi.runtime.agent_jobs import AgentJobRuntime
+
+    params = inspect.signature(AgentJobRuntime.__init__).parameters
+    seconds = params["stall_interval"].default * params["stall_samples"].default
+    assert seconds > 600.0, (
+        f"the stall threshold ({seconds:.0f}s) is not longer than the measured worst "
+        "legal single wait (600s gateway non-stream fallback): a working-but-slow job "
+        "would be killed"
+    )
+    assert seconds < 1800.0, (
+        f"the stall threshold ({seconds:.0f}s) does not fit inside the full-repair E2E's "
+        "30-minute window: a genuinely stuck job would be ended by the test's deadline "
+        "instead of by the watchdog"
+    )
+
+
 @pytest.mark.asyncio
 async def test_stalled_job_is_failed_by_the_watchdog(fake_services):
     """2026-10-14:无声卡死的作业必须被看门狗如实收尾,而不是永远 running。
