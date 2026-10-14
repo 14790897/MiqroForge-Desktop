@@ -2,12 +2,14 @@ name: 'E2E app setup'
 description: 'Electron E2E 共用的应用侧准备：装依赖 →（可选）装官方 SURE → 装 Playwright → 构建 renderer → 生成 config.json'
 author: 'MiQi'
 
-# 为什么抽成复合动作（而不是在两个 job 里各留一份）：
-# electron-e2e（desktop-ci.yml）与 sure-e2e（sure-e2e.yml）此前有一份**逐字相同**的
-# 32 行 config.json heredoc，外加 Install dependencies / Install Playwright browsers /
-# Build renderer 三段同样的命令（实测差异只有 `if: env.E2E_TRUSTED == 'true'` 一行）。
-# config.json 是这两个 job 里唯一「内容必须与 app 严格同源」的东西：provider 字段或
-# agents.defaults 一改 schema，抄两份就会改一漏一 —— 而 sure-e2e 恰恰是那个「必须真实
+# 为什么抽成复合动作（而不是在每个 job 里各留一份）：
+# electron-e2e / macos-e2e（desktop-ci.yml）与 sure-e2e（sure-e2e.yml）此前各有**一份
+# 逐字相同**的 32 行 config.json heredoc（实测三份互 diff 为空），外加 Install
+# dependencies / Install Playwright browsers / Build renderer 三段同样的命令 —— 差异只
+# 有两处：electron-e2e 侧多一行 `if: env.E2E_TRUSTED == 'true'`，以及 macOS 侧不装
+# bubblewrap（本动作用 RUNNER_OS 判断）。
+# config.json 是这几个 job 里唯一「内容必须与 app 严格同源」的东西：provider 字段或
+# agents.defaults 一改 schema，抄多份就必然改一漏一 —— 而 sure-e2e 恰恰是那个「必须真实
 # AI」的 job，配置漂移的表现是模型走错端点/模型名，要么假红，要么看着正常、跑的却不是
 # 被测配置。
 #
@@ -30,7 +32,7 @@ inputs:
     description: 'web 搜索 provider 的密钥'
     required: true
   install-sure:
-    description: '是否安装官方 SURE v0.1.2（sha256 钉死）。sure-e2e 传 false —— 它要的是含 miqi 的 fork 构建，由该工作流自建'
+    description: '是否安装官方 SURE v0.1.2（sha256 钉死，产物只有 Linux 版）。electron-e2e 传 true；sure-e2e 传 false —— 它要的是含 miqi 的 fork 构建，由该工作流自建；macos-e2e 传 false'
     required: false
     default: 'false'
 
@@ -40,11 +42,15 @@ runs:
     - name: 'Install dependencies'
       shell: bash
       working-directory: ${{ inputs.working-directory }}
+      # bubblewrap 只在 Linux 侧装：macos-e2e 也用本动作，而 macOS 上没有 apt（它的
+      # 沙箱用例本来就被 --grep-invert 排除，见 desktop-ci.yml）。
       run: |
         npm ci
         pip install uv
         uv sync
-        sudo apt-get update -qq && sudo apt-get install -y -qq bubblewrap
+        if [ "$RUNNER_OS" = "Linux" ]; then
+          sudo apt-get update -qq && sudo apt-get install -y -qq bubblewrap
+        fi
 
     - name: 'Install SURE (official v0.1.2, checksum pinned)'
       if: inputs.install-sure == 'true'
