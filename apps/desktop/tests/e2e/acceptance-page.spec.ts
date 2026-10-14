@@ -143,6 +143,13 @@ test.describe.serial('验收(SURE)面板 E2E · 真实 SURE', () => {
     // 逐阶段明细(真实 12 阶段记录)
     await expect(page.getByText('核查阶段')).toBeVisible({ timeout: 15_000 });
     await page.screenshot({ path: 'test-results/acceptance-report.png', fullPage: true });
+
+    // 2026-10-14 回归:切走再切回,完成态的报告必须还在——此前一离开面板
+    // 再回来,报告与项目输入全部丢失(报告只活在组件 state 里)。
+    await page.getByRole('button', { name: /返回任务/ }).click();
+    await openAcceptance(page);
+    await expect(page.getByTestId('acceptance-report')).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByText('发现的问题(1)')).toBeVisible({ timeout: 15_000 });
   });
 
   test('真实修复契约 → 真实复核对比(未修复 → still_open)', async () => {

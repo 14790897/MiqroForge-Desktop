@@ -109,6 +109,15 @@ async def test_start_streams_events_as_orphans(tmp_path):
     assert report["request_id"] is None
     assert report["data"]["envelope"]["details"]["report"]["totals"]["open_findings"] == 5
 
+    # 2026-10-14:完成后的 status 快照要带回最近报告——面板切页/重开靠它恢复
+    # 完成态(此前只带回"运行中",完成报告一离开面板就丢)
+    status = await _dispatch(server, "sure.check.status", {})
+    assert status["result"]["task"] is None
+    last = status["result"]["lastReport"]
+    assert last is not None
+    assert last["command"] == "check"
+    assert last["details"]["report"]["totals"]["open_findings"] == 5
+
 
 @pytest.mark.asyncio
 async def test_busy_and_cancel_and_status(tmp_path, monkeypatch):
@@ -143,6 +152,8 @@ async def test_busy_and_cancel_and_status(tmp_path, monkeypatch):
 
     status2 = await _dispatch(server, "sure.check.status", {})
     assert status2["result"]["task"] is None
+    # 取消不产生完成报告:lastReport 保持 None
+    assert status2["result"]["lastReport"] is None
 
 
 @pytest.mark.asyncio

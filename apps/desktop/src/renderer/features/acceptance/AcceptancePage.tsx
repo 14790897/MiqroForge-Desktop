@@ -78,19 +78,30 @@ export function AcceptancePage() {
     }
   }, []);
 
-  // 挂载:健康检查 + 运行中任务对账(页面切换/重开不丢"运行中"状态)
+  // 挂载:健康检查 + 运行中任务对账 + 最近完成报告恢复(页面切换/重开
+  // 既不丢"运行中",也不丢完成态——2026-10-14:此前完成报告只活在组件
+  // state 里,一离开面板再回来报告与项目全部丢失)
   useEffect(() => {
     void refreshHealth();
     let alive = true;
     void (async () => {
       try {
         const res = (await window.miqi.sure.status()) as SureApiResult<SureCheckStatus> | null;
-        if (alive && res?.ok && res.value.task) {
+        if (!alive || !res?.ok) return;
+        if (res.value.task) {
           setProject(res.value.task.project);
           setStartedAt(res.value.task.startedAt);
           setElapsedMs(res.value.task.elapsedMs);
           setRunningCommand(asCommand(res.value.task.command));
           setPhase('running');
+          return;
+        }
+        const last = res.value.lastReport;
+        if (last) {
+          setEnvelope(last);
+          if (last.details?.project) setProject(last.details.project);
+          setRunningCommand(asCommand(last.command));
+          setPhase('report');
         }
       } catch {
         /* 旧版 preload 可能缺 sure 命名空间——忽略 */

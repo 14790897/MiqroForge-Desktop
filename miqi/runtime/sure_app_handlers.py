@@ -121,7 +121,17 @@ def register_sure_handlers(server) -> None:
         return {"result": {"ok": ok}}
 
     async def _sure_check_status(request_id, params, client_id, session_id, registry):
-        return {"result": {"task": _get_runtime(registry).status(client_id=client_id)}}
+        # task = 运行中的对账;lastReport = 最近一次完成报告——面板切页/重开
+        # 后靠它恢复完成态(2026-10-14:此前只带回"运行中",完成态一离开
+        # 面板再回来报告与项目全部丢失)。从无完成任务时为 None。
+        runtime = _get_runtime(registry)
+        last = runtime.last_report(client_id)
+        return {
+            "result": {
+                "task": runtime.status(client_id=client_id),
+                "lastReport": last.model_dump(mode="json") if last is not None else None,
+            }
+        }
 
     async def _sure_fix_start(request_id, params, client_id, session_id, registry):
         """把最近一次 repair 契约交给自己会话里的 code-agent 子代理执行修复。
