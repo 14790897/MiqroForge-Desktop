@@ -35,6 +35,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
+  LLM_TIMEOUT,
   closeElectronApp,
   createNewConversation,
   launchElectronApp,
@@ -355,8 +356,12 @@ test.describe('验收(SURE)面板 E2E · 完整修复闭环(需真实子代理�
 
       // 完成 → 自动复核(对比)落地
       await expect(fixture.page.getByText('复审对比')).toBeVisible({ timeout: 180_000 });
-      // 契约点名的检查真通过 → 发现项关闭(「已关闭」),而不是"未解决"
-      await expect(fixture.page.getByText('已关闭').first()).toBeVisible({ timeout: 120_000 });
+      // 契约点名的检查真通过 → 发现项关闭(「已关闭」),而不是"未解决"。
+      // 用 LLM_TIMEOUT 而不是 120s:这条自动复核是 SURE 的完整一轮 recheck,而
+      // sure-e2e 给它配了真实模型评估(第 8 阶段),是 LLM 绑定的等待 —— 2026-10-14
+      // 实测首跑在 120s 窗口里没等到、重试才过(flaky),同一条用例里前一步「复审对比」
+      // 都给了 180s,这一步反而更短属于窗口没给够,不是语义变松(仍然必须真出现「已关闭」)。
+      await expect(fixture.page.getByText('已关闭').first()).toBeVisible({ timeout: LLM_TIMEOUT });
       await fixture.page.screenshot({
         path: 'test-results/acceptance-fix-complete.png',
         fullPage: true,

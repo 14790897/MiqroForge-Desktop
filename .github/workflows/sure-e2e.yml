@@ -174,6 +174,34 @@ jobs:
             echo "::endgroup::"
           done
 
+      - name: Bridge ingest anomalies — always (flaky runs stay green, failure() never fires)
+        if: always()
+        working-directory: .
+        # flaky 的运行是**绿的**：`if: failure()` 不成立，桥接日志随 runner 一起消亡 ——
+        # 于是「UI 有工具卡、真实 SURE 记录里却没有 tool.completed」这种首跑失败，只能
+        # 等下一轮再猜（2026-10-14 实测：连续三轮 flaky，汇总只给错误首行）。
+        # 桥接自己的异常路径本来就有日志（sure_hooks.py 的丢弃 / 写入失败 / 排空超时），
+        # 这里只捞这几行、不做整份 tail —— 常态零行，出现即有据可查：
+        # 「attempted>0 但 ingested 少」= SURE 侧写入失败，「队列已满」= 队满丢弃，
+        # 两者都没有 = 钩子压根没触发（装配问题）。bridge_stats() 目前只被单测调用、
+        # 不落任何日志，这几行是 CI 里唯一的现场。
+        run: |
+          files=0
+          for d in "${TMPDIR:-}" "${RUNNER_TEMP:-}" /tmp; do
+            [ -n "$d" ] || continue
+            for f in "$d"/miqi-e2e-*/workspace/logs/bridge-*.log; do
+              [ -e "$f" ] || continue
+              hits=$(grep -E "SURE 事件队列已满|SURE hook ingest 失败|SURE 事件队列排空超时" "$f" || true)
+              if [ -n "$hits" ]; then
+                files=$((files + 1))
+                echo "::group::bridge ingest anomalies: $f"
+                echo "$hits"
+                echo "::endgroup::"
+              fi
+            done
+          done
+          echo "bridge ingest anomalies: ${files} 个日志有异常行"
+
       - name: Guard — a skipped SURE test fails the job
         if: always()
         env:
