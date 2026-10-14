@@ -65,12 +65,17 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Install dependencies
-        run: |
-          npm ci
-          pip install uv
-          uv sync
-          sudo apt-get update -qq && sudo apt-get install -y -qq bubblewrap
+      # 装依赖 / 装 Playwright / 构建 renderer / 生成 config.json 收在
+      # .github/actions/e2e-app-setup（与 electron-e2e 共用同一份，避免 config.json
+      # 的 provider 配置抄成两份后漂移）。这里 install-sure: false —— 本 job 要的是
+      # 含 miqi 的 fork 构建，由下面那步自建。
+      - name: E2E app setup (deps + Playwright + renderer + config.json)
+        uses: ./.github/actions/e2e-app-setup
+        with:
+          install-sure: 'false'
+          deepseek-api-key: ${{ secrets.DEEPSEEK_API_KEY }}
+          deepseek-api-base: ${{ secrets.DEEPSEEK_API_BASE }}
+          brave-api-key: ${{ secrets.BRAVE_API_KEY }}
 
       - name: Build the fork SURE (pinned to the commit with miqi support)
         working-directory: .
@@ -113,49 +118,6 @@ jobs:
             endpoint: ${{ secrets.DEEPSEEK_API_BASE }}/chat/completions
             model: deepseek-flash
           SUREEOF
-
-      - name: Install Playwright browsers
-        run: npx playwright install chromium --with-deps
-
-      - name: Build renderer
-        run: npm run build -- --logLevel warn
-
-      - name: Generate config.json
-        working-directory: .
-        run: |
-          mkdir -p ~/.forge
-          cat > ~/.forge/config.json << 'CONFEOF'
-          {
-            "providers": {
-              "siliconflow": {
-                "apiKey": "${{ secrets.DEEPSEEK_API_KEY }}",
-                "apiBase": "${{ secrets.DEEPSEEK_API_BASE }}",
-                "extraHeaders": null
-              }
-            },
-            "agents": {
-              "defaults": {
-                "model": "deepseek-flash",
-                "maxTokens": 393216,
-                "temperature": 1,
-                "maxToolIterations": 10,
-                "runtime": "app_server"
-              },
-              "commandApproval": { "enabled": false }
-            },
-            "tools": {
-              "web": {
-                "search": {
-                  "provider": "brave",
-                  "apiKey": "${{ secrets.BRAVE_API_KEY }}",
-                  "maxResults": 3
-                },
-                "fetch": { "provider": "builtin" }
-              },
-              "exec": { "timeout": 30, "envPassthrough": [] }
-            }
-          }
-          CONFEOF
 
       - name: AI connectivity probe — fail fast if provider unreachable
         # 与 electron-e2e 同款先行探针：provider 不可达时立刻红，不给下游
