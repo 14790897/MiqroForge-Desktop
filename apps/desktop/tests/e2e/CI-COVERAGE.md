@@ -69,9 +69,11 @@
   模型评估用例要求 `SURE_OPENAI_API_KEY` 与用户级 analysis 配置，由工作流
   注入 / 写入（`~/.config/SURE/sure.yaml`）；完整闭环用例（子代理修完 →
   自动复核 → 发现项「已关闭」）由 `MIQI_E2E_FULL_REPAIR=1` 显式启用，满足
-  评审 #1278 P2-2「至少一条用例走到『已完成』分支」；
+  评审 #1278 P2-2「至少一条用例走到『已完成』分支」——该断言的闭环语义依赖
+  钉死的 fork 提交（见下：`c4fd952` 的「目标消失即关闭」+ `88da6bc` 的
+  stage 12 契约重建，二者缺一修好的项目都关不掉）；
 - `sure-event-bridge.spec.ts`（1 条）——要求 `sure doctor` 列出 miqi：工作流在
-  CI 内 clone `JJJY9/SURE`（**钉死 sha** `c4fd952`）并 `cargo build --release`，
+  CI 内 clone `JJJY9/SURE`（**钉死 sha** `88da6bc`）并 `cargo build --release`，
   装上 PATH 后就地断言 doctor 能力行（没有 miqi 直接红，钉住「跑的是含集成的
   那份构建」）。
 
