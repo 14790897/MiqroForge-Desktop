@@ -415,6 +415,9 @@ class BridgeRuntimeLoop:
                 if self._bridge_state else None
             ),
             "experience_store": None,  # lazily set by experience_handlers
+            # 2026-10-14:需要会话但不以消息触发的处理器借它在"没有任何会话"
+            # 时自动开一个(SURE 修复派发);取材与 chat.send 建会话一致。
+            "ensure_session": self._ensure_session_for_client,
         }
         self._app_server = AppServer(registry)
         # Phase 45: expose AppServer in bridge_context so handlers can
@@ -917,6 +920,53 @@ class BridgeRuntimeLoop:
                 )
 
     # ── chat.send handler ──────────────────────────────────────────────────
+
+    async def _ensure_session_for_client(self, client_id: str, session_key: str) -> Any:
+        """Get-or-create a RuntimeSession without a chat message.
+
+        取材与 chat.send 首次建会话一致:config 来自 bridge_state、provider
+        走 make_provider、沙箱管理器复用同一份。2026-10-14:SURE 修复派发在
+        没有任何会话时自动开一个——空会话不落盘、没有宿主时此前直接爆红
+        要求用户先手动创建,很不方便。
+
+        经 registry.bridge_context["ensure_session"] 发布给处理器使用
+        (与该字典"处理器从这里读共享状态"的既有约定一致)。
+        """
+        registry = self._app_server.registry
+        runtime_id = f"{client_id}:{session_key}"
+        existing = await registry.get_session(client_id, runtime_id)
+        if existing is not None:
+            return existing
+        if self._bridge_state is None:
+            from miqi.runtime.app_server import AppServerError
+
+            raise AppServerError(
+                "Bridge state not available for session creation", code="INTERNAL"
+            )
+        config = self._bridge_state.load_config()
+        from miqi.providers.factory import make_provider
+
+        try:
+            provider = make_provider(config)
+        except ValueError as exc:
+            from miqi.runtime.app_server import AppServerError
+
+            raise AppServerError(
+                "No API key configured — set one in Settings > Models",
+                code="NO_API_KEY",
+            ) from exc
+        self._bridge_state._ensure_sandbox_manager()
+        sandbox_manager = getattr(self._bridge_state, "_sandbox_manager", None)
+        if sandbox_manager == "disabled":
+            sandbox_manager = None
+        return await registry.create_session(
+            client_id=client_id,
+            session_key=session_key,
+            config=config,
+            provider=provider,
+            workspace=config.workspace_path,
+            sandbox_manager=sandbox_manager,
+        )
 
     async def _chat_send_handler(
         self, request_id: str, params: dict, client_id: str,

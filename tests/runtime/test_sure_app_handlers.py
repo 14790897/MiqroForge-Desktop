@@ -280,7 +280,12 @@ class _FakeControl:
         return SimpleNamespace(agent_id="agent-1")
 
 
-def _make_fix_server(*, with_session: bool, cached_repair_project: str | None = None):
+def _make_fix_server(
+    *,
+    with_session: bool,
+    cached_repair_project: str | None = None,
+    auto_session: bool = False,
+):
     from types import SimpleNamespace
 
     from miqi.runtime.app_server import AppServer, ClientSessionRegistry
@@ -299,6 +304,23 @@ def _make_fix_server(*, with_session: bool, cached_repair_project: str | None = 
         registry._client_sessions["c"] = {"c:s1"}  # list_sessions 读取处
         registry._session_clients["c:s1"] = {"c"}
         registry._last_activity["c:s1"] = 100.0
+    if auto_session:
+        # 2026-10-14:模拟 bridge 发布的 ensure_session——登记调用并真的把
+        # 会话注册进 registry(修复派发应在"没有任何会话"时用它自动开一个)。
+        ensured: list[tuple[str, str]] = []
+        control.ensured = ensured  # 测试从这里读记录,不改返回元组
+
+        async def _ensure(client_id: str, session_key: str) -> None:
+            ensured.append((client_id, session_key))
+            sid = f"{client_id}:{session_key}"
+            registry._sessions[sid] = SimpleNamespace(
+                services=SimpleNamespace(agent_control=control)
+            )
+            registry._client_sessions.setdefault(client_id, set()).add(sid)
+            registry._session_clients[sid] = {client_id}
+            registry._last_activity[sid] = 1.0
+
+        registry.bridge_context["ensure_session"] = _ensure
     if cached_repair_project is not None:
         envelope = parse_sure_output(
             (FIXTURES / "report-repair-fake-payment.json").read_text(encoding="utf-8")
@@ -375,6 +397,30 @@ async def test_fix_requires_session(tmp_path):
         server, "sure.fix.start", {"project": str(tmp_path)}, client_id="c"
     )
     assert resp["code"] == "SURE_NO_SESSION"
+
+
+@pytest.mark.asyncio
+async def test_fix_without_session_auto_creates_one(tmp_path):
+    """2026-10-14:没有会话时自动开一个,不再爆红要求用户先手动创建。
+
+    借用 bridge 发布的 ensure_session;建好后照常派发,目标会话即为新建的
+    那只(用户可在聊天列表里围观)。
+    """
+    server, registry, _, control = _make_fix_server(
+        with_session=False,
+        cached_repair_project=str(tmp_path),
+        auto_session=True,
+    )
+    resp = await _dispatch(
+        server, "sure.fix.start", {"project": str(tmp_path)}, client_id="c"
+    )
+    assert "result" in resp, resp
+    assert len(control.ensured) == 1
+    cid, skey = control.ensured[0]
+    assert cid == "c"
+    assert skey.startswith("desktop:")
+    assert len(control.calls) == 1  # 照常派发子代理
+    assert resp["result"]["sessionKey"] == f"c:{skey}"
 
 
 @pytest.mark.asyncio

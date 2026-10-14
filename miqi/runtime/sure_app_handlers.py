@@ -8,6 +8,7 @@ Electron 侧 bridge.ts 按 IPC_EVENTS 常量名自动转发到渲染层,主进�
 from __future__ import annotations
 
 import os
+import time
 from typing import Any
 
 from loguru import logger
@@ -215,8 +216,27 @@ def register_sure_handlers(server) -> None:
             else None
         )
         if session is None:
+            # 2026-10-14:没有任何会话时自动开一个——修复派发不再要求用户
+            # 先手动创建(空会话不落盘,没有宿主时此前直接爆红,很不方便)。
+            # 建会话的取材由 bridge 发布(ensure_session,与 chat.send 一致);
+            # 桥未提供该能力时保留旧行为与旧文案。
+            ensure = getattr(registry, "bridge_context", {}).get("ensure_session")
+            if ensure is not None:
+                try:
+                    new_key = f"desktop:{int(time.time() * 1000)}"
+                    await ensure(client_id, new_key)
+                    session = await registry.get_session(
+                        client_id, f"{client_id}:{new_key}"
+                    )
+                    if session is not None:
+                        # 与既有会话路径同语义:返回完整会话 id 作 sessionKey
+                        session_key = f"{client_id}:{new_key}"
+                except Exception as exc:  # noqa: BLE001 — 如实回退到旧路径
+                    logger.warning("sure.fix.start: 自动建会话失败: {}", exc)
+                    session = None
+        if session is None:
             raise AppServerError(
-                "没有可用的聊天会话——修复子代理运行在会话中,请先在聊天里创建一个会话",
+                "没有可用的聊天会话,且自动创建失败——请先在聊天里创建一个会话",
                 code="SURE_NO_SESSION",
             )
         control = getattr(getattr(session, "services", None), "agent_control", None)
