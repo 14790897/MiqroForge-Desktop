@@ -98,14 +98,19 @@ jobs:
 
       - name: Write SURE user settings (model assessment runs for real)
         working-directory: .
-        # 面板模型评估用例要求用户级 analysis 配置在位（与真实用户机器同构）；
-        # 端点/模型与下面 config.json 的 provider 同源。
+        # 面板模型评估用例要求用户级 analysis 配置在位（与真实用户机器同构）。
+        # 端点必须与 config.json 的 provider **同源拼接**：应用侧 AsyncOpenAI
+        # 的 base_url 就是 DEEPSEEK_API_BASE、SDK 自拼 /chat/completions——
+        # SURE 原样 POST endpoint 不做拼接，所以要显式拼出同一个地址。
+        # 2026-10-14 首修轮把这里硬编码成 api.deepseek.com（旧的"同源"只是同一个
+        # key，不是同一个端点）；key 与 base 若不同源，第 8 阶段只会如实报
+        # 「could not assess」——窗口里三个用例连带红（实测 run 38512919407）。
         run: |
           mkdir -p "$HOME/.config/SURE"
           cat > "$HOME/.config/SURE/sure.yaml" << 'SUREEOF'
           analysis:
             provider: openai_compatible
-            endpoint: https://api.deepseek.com/v1/chat/completions
+            endpoint: ${{ secrets.DEEPSEEK_API_BASE }}/chat/completions
             model: deepseek-flash
           SUREEOF
 
@@ -172,18 +177,38 @@ jobs:
         timeout-minutes: 45
         env:
           PLAYWRIGHT_SKIP_WEB_SERVER: '1'
+          # 失败诊断的前提：spec 的 afterAll 默认删掉临时 MIQI_HOME（连桥接日志
+          # 一起），下面那步就只剩空 glob 可 dump（2026-10-14 实测）。留下它。
+          MIQI_E2E_KEEP_HOME: '1'
 
       - name: Dump bridge logs on failure (CI diagnostics)
         if: failure()
         working-directory: .
         # PR 运行不上传 artifact（安全设计），失败时的桥接日志此前随之消亡——
         # 这里把每个临时 MIQI_HOME 的 bridge 日志尾部打进 job 日志（job 日志不是
-        # 公开产物），让失败自曝现场：与失速看门狗同一纪律。
+        # 公开产物），让失败自曝现场：与失速看门狗同一纪律。tmpdir 按 TMPDIR →
+        # RUNNER_TEMP → /tmp 逐个兜（只在 /tmp 找的那版一旦 runner 改了口径就是
+        # 空 glob，与 afterAll 删 home 叠在一起会静默什么都 dump 不到）。
         run: |
-          for f in /tmp/miqi-e2e-*/workspace/logs/bridge-*.log; do
-            [ -e "$f" ] || continue
-            echo "::group::bridge log tail: $f"
-            tail -n 120 "$f"
+          found=0
+          for d in "${TMPDIR:-}" "${RUNNER_TEMP:-}" /tmp; do
+            [ -n "$d" ] || continue
+            for f in "$d"/miqi-e2e-*/workspace/logs/bridge-*.log; do
+              [ -e "$f" ] || continue
+              found=1
+              echo "::group::bridge log tail: $f"
+              tail -n 120 "$f"
+              echo "::endgroup::"
+            done
+          done
+          [ "$found" -eq 1 ] || echo "::warning::no bridge logs found to dump (MIQI_E2E_KEEP_HOME should be 1)"
+          # Playwright 的 error-context.md 带页面快照 = 面板按真实数据渲染出的文本：
+          # 失败断言之外，第 8 阶段这类“如实呈现的原因”也在这里（模型评估何时为
+          # 何没跑、报告计数为几），不必再猜。
+          for ctx in apps/desktop/test-results/*/error-context.md; do
+            [ -e "$ctx" ] || continue
+            echo "::group::error context: $ctx"
+            sed -n '1,260p' "$ctx"
             echo "::endgroup::"
           done
 
