@@ -12,6 +12,7 @@
 | `desktop-ci.yml` → `electron-e2e` | ubuntu | 全量；provider key 写进 app 的 **config.json**（不是环境变量），环境变量只注入 `QRAFT_PHONE` / `QRAFT_PASSWORD`；**不含**任何 `MIQI_RUN_*` / `QRAFT_LIVE` |
 | `desktop-ci.yml` → `macos-e2e` | macOS | `--grep-invert` 掉 9 组之后的子集（见 README 覆盖表）；连 `QRAFT_PHONE` / `QRAFT_PASSWORD` 都不注入 |
 | `python-tests.yml` → `wsl-e2e` | windows | **按名字**点名 7 个：one-click-install、sandbox-exec、session-key-mapping、sandbox-toggle、#1157、#1171、open-external-path-security |
+| `sure-e2e.yml` → `sure-e2e` | ubuntu | **按名字**点名 2 个：`acceptance-page`、`sure-event-bridge`；**CI 内构建 fork 版 SURE**（钉死 sha，构建后断言 `doctor` 有 miqi 行，没有即红）；注入 `SURE_OPENAI_API_KEY`（=`DEEPSEEK_API_KEY`）与 `MIQI_E2E_FULL_REPAIR=1`；跑完校验 `test-reports/results.json`——两条 spec 内出现 skipped 即判失败（`SURE_E2E_SKIP_ALLOWLIST` 默认空 = 无豁免） |
 
 注意「环境变量」与「config.json」的区别：spec 的守卫读的是 `process.env`。app 能从 config.json
 拿到 provider key，不代表 spec 的门也成立——`billing-hosted-live.spec.ts` 把 `DEEPSEEK_API_KEY`
@@ -56,7 +57,29 @@
 | `uninstall-cleanup.spec.ts` | 守卫 | `MIQI_E2E_UNINSTALL=1`（显式 opt-in）+ win32 + `~/.miqi`/`%APPDATA%\miqi-desktop` 当前不存在 + `dist-new/` 下有构建好的安装器；WSL 断言另需 `MIQI_E2E_WSL_ROOTFS` | 高（真机 NSIS 安装/卸载 + WSL 卷清理） | 卸载残留清理只能在真实 Windows 安装上验证：CI 既不设 `MIQI_E2E_UNINSTALL`、job 里也没有构建好的安装器（wsl-e2e 那一步按名字收集的 7 个 spec 不含本文件）；且它会真的安装再卸载整套应用、读写 `%APPDATA%` / `%LOCALAPPDATA%` / `HKCU\Software\MiqroForge` 等真实数据根，只能在被明确告知「本机可跑安装/卸载」的机器上执行（WSL 注销逻辑另有 `src/main/ipc/cleanup.test.ts` 单测覆盖） |
 
 | `sure-integration-gui.spec.ts` | 守卫 | win32 + 本机安装 SURE（`SURE_BIN` 或 `%LOCALAPPDATA%\SURE\bin\sure.exe`）+ 测试项目存在（`MIQI_SURE_PROJECT` 或默认 PoC 路径；均为 spec 内 `existsSync`） | 低（脚本化 mock 模型，单用例约 30s，无真实 LLM） | SURE 是 Windows per-user 安装的本地二进制（v0.1.2），CI runner 均未安装——spec 断言「5 个 `mcp_sure_*` 工具注册 + 审批弹窗 + 报告渲染」，无 sure.exe 时工具根本不注册。主验证在 Python 单测（`tests/execution/test_permission_engine.py`、`test_approval_persistence_e2e.py`）；接进 CI 需在 workflow 里预装 SURE（见 #1256） |
-| `sure-event-bridge.spec.ts` | 人工 | 运行时检测：env `SURE_BIN` / PATH / 默认安装位置均无**含 miqi 集成**的 SURE（官方 0.1.2 不支持 `hook ingest --source miqi`，只有 fork 构建 `sure doctor` 才列出 miqi） | 中（真实 AI 一次工具往返 + 真实 SURE 落库读回） | CI runner 未安装 fork 构建（官方产物在 electron-e2e 已装，但不含 miqi）；接线方式是把 fork 的构建产物放进 electron-e2e，接入前由本机验证（`SURE_BIN` 指向 fork 构建）。守卫形态是运行时 `existsSync` + `doctor` 探测，检测器判不到，故标「人工」 |
+
+## 已接进 CI（sure-e2e 工作流，#1278）
+
+`desktop-ci.yml` 走 `pull_request_target`，工作流定义取自 base 分支——PR 内新增
+步骤对本 PR 的 CI 是惰性的（评审 #1278 P1-1 实测：SURE E2E 用例全部 skip、job
+照样 success）。新增的 `sure-e2e.yml` 由 `pull_request` 触发，工作流取自 PR 分支
+本身，并把环境补到「全部用例真跑」：
+
+- `acceptance-page.spec.ts`（5 条：面板三场景 + 模型评估 + 完整修复闭环）——
+  模型评估用例要求 `SURE_OPENAI_API_KEY` 与用户级 analysis 配置，由工作流
+  注入 / 写入（`~/.config/SURE/sure.yaml`）；完整闭环用例（子代理修完 →
+  自动复核 → 发现项「已关闭」）由 `MIQI_E2E_FULL_REPAIR=1` 显式启用，满足
+  评审 #1278 P2-2「至少一条用例走到『已完成』分支」；
+- `sure-event-bridge.spec.ts`（1 条）——要求 `sure doctor` 列出 miqi：工作流在
+  CI 内 clone `JJJY9/SURE`（**钉死 sha** `c4fd952`）并 `cargo build --release`，
+  装上 PATH 后就地断言 doctor 能力行（没有 miqi 直接红，钉住「跑的是含集成的
+  那份构建」）。
+
+**skip 不再算过**（评审 #1278 P2-1）：工作流跑完读 `test-reports/results.json`，
+两条 spec 内出现任何 skipped 即判失败；确实可豁免的用例以
+`SURE_E2E_SKIP_ALLOWLIST` 显式点名（默认空）。官方 v0.1.2 的 `Install SURE`
+步骤保留在 `desktop-ci.yml`——它合入 develop 后对后续 PR 的 electron-e2e 生效
+（官方构建覆盖验收面板的确定性路径）；**含 miqi 的完整覆盖以 `sure-e2e` 为准**。
 
 ## 已接进 CI（#1196）
 

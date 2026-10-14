@@ -1,0 +1,231 @@
+name: SURE E2E
+
+# 为什么单独一个工作流（评审 #1278 P1-1）：
+# desktop-ci.yml 走 `pull_request_target`，该事件下**工作流定义取自 base 分支**
+# （develop），PR 里新增/修改的步骤（如 "Install SURE"）对本 PR 的 CI 是惰性的——
+# SURE E2E 四条用例在 CI 上全部 skip 而 job 照样 success，正是「看起来全绿、实际
+# 没跑」的形状。本文件由 `pull_request` 触发，工作流取自 PR 分支本身，因此本 PR
+# 即刻生效。
+#
+# 为什么 CI 里构建 fork 版 SURE（评审 #1278 P1-2）：
+# 事件桥接用例要求 `sure doctor` 列出 miqi——官方 v0.1.2 对 `hook ingest --source
+# miqi` 直接不支持，只有 fork 构建才有。这里 clone 公开仓库 JJJY9/SURE 并**钉死
+# sha** 后 `cargo build --release`，装上 PATH；构建完成后就地断言 doctor 的能力行，
+# 没有 miqi 直接红（钉住「跑的是含集成的那份构建」这一前提）。
+#
+# 「skip 也算过」在这里被堵掉（评审 #1278 P2-1）：跑完读 test-reports/results.json，
+# 两条 spec 内出现任何 skipped 即判失败；确实可豁免的用例以
+# SURE_E2E_SKIP_ALLOWLIST 显式点名（默认空 = 无豁免）。
+#
+# 信任边界与 desktop-ci 的 electron-e2e 相同（仓库安全策略）：只有 head 分支在
+# 本仓库（等价写权限）的 PR 才跑——本 job 会把 DEEPSEEK 凭据放上 runner 并执行
+# PR 检出的代码。不受信任来源（fork）时整个 job 跳过；「Skipped 的 job」是诚实的
+# 缺席，而不是绿步骤的假象。
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: sure-e2e-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  sure-e2e:
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: apps/desktop
+    env:
+      # E2E 一律真实：app 的模型调用经 config.json 的 DeepSeek provider；
+      # SURE 的模型评估共用同一把 key（下面写入它的用户级配置）。
+      SURE_OPENAI_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+      # 完整闭环用例（子代理修完 → 自动复核 → 发现项「已关闭」）显式启用——
+      # 评审 #1278 P2-2：至少一条用例走到「已完成」分支而非双终态放行。
+      MIQI_E2E_FULL_REPAIR: '1'
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # 本 job 在凭据落盘后执行 PR 检出的代码（spec / 构建脚本），
+          # checkout 默认把 job token 写进 .git/config —— 别交给 PR 代码。
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          npm ci
+          pip install uv
+          uv sync
+          sudo apt-get update -qq && sudo apt-get install -y -qq bubblewrap
+
+      - name: Build the fork SURE (pinned to the commit with miqi support)
+        working-directory: .
+        env:
+          # 评审锚定的提交：含 MiQi 钩子事件（edf95a7 起）与复核查「目标消失即关闭」
+          # 语义（c4fd952）——完整闭环用例的「已关闭」断言依赖后者。
+          SURE_FORK_SHA: c4fd952e21074c30c0a0a937718fd00a3cd6a83c
+        run: |
+          set -euo pipefail
+          git init -q "$RUNNER_TEMP/sure-fork"
+          cd "$RUNNER_TEMP/sure-fork"
+          git remote add origin https://github.com/JJJY9/SURE.git
+          git fetch -q --depth 1 origin "$SURE_FORK_SHA"
+          git checkout -q FETCH_HEAD
+          test "$(git rev-parse HEAD)" = "$SURE_FORK_SHA"
+          cargo build --release -p sure-cli
+          sudo install -m 755 target/release/sure /usr/local/bin/sure
+          sure --version
+          # 能力钉死：跑的不是含 miqi 的那份构建就直接红（桥接用例的前提）。
+          sure doctor | grep -F "miqi"
+        timeout-minutes: 35
+
+      - name: Write SURE user settings (model assessment runs for real)
+        working-directory: .
+        # 面板模型评估用例要求用户级 analysis 配置在位（与真实用户机器同构）；
+        # 端点/模型与下面 config.json 的 provider 同源。
+        run: |
+          mkdir -p "$HOME/.config/SURE"
+          cat > "$HOME/.config/SURE/sure.yaml" << 'SUREEOF'
+          analysis:
+            provider: openai_compatible
+            endpoint: https://api.deepseek.com/v1/chat/completions
+            model: deepseek-flash
+          SUREEOF
+
+      - name: Install Playwright browsers
+        run: npx playwright install chromium --with-deps
+
+      - name: Build renderer
+        run: npm run build -- --logLevel warn
+
+      - name: Generate config.json
+        working-directory: .
+        run: |
+          mkdir -p ~/.forge
+          cat > ~/.forge/config.json << 'CONFEOF'
+          {
+            "providers": {
+              "siliconflow": {
+                "apiKey": "${{ secrets.DEEPSEEK_API_KEY }}",
+                "apiBase": "${{ secrets.DEEPSEEK_API_BASE }}",
+                "extraHeaders": null
+              }
+            },
+            "agents": {
+              "defaults": {
+                "model": "deepseek-flash",
+                "maxTokens": 393216,
+                "temperature": 1,
+                "maxToolIterations": 10,
+                "runtime": "app_server"
+              },
+              "commandApproval": { "enabled": false }
+            },
+            "tools": {
+              "web": {
+                "search": {
+                  "provider": "brave",
+                  "apiKey": "${{ secrets.BRAVE_API_KEY }}",
+                  "maxResults": 3
+                },
+                "fetch": { "provider": "builtin" }
+              },
+              "exec": { "timeout": 30, "envPassthrough": [] }
+            }
+          }
+          CONFEOF
+
+      - name: AI connectivity probe — fail fast if provider unreachable
+        # 与 electron-e2e 同款先行探针：provider 不可达时立刻红，不给下游
+        # 「真实 AI」用例留下 skip/超时才暴露的机会。
+        run: |
+          xvfb-run --auto-servernum \
+            npx playwright test --config=playwright.config.ts --project=electron \
+            --grep "AI Connectivity" --reporter=list
+        timeout-minutes: 10
+        env:
+          PLAYWRIGHT_SKIP_WEB_SERVER: '1'
+
+      - name: Run SURE E2E (acceptance + event bridge)
+        run: |
+          xvfb-run --auto-servernum \
+            npx playwright test \
+              tests/e2e/acceptance-page.spec.ts tests/e2e/sure-event-bridge.spec.ts \
+              --config=playwright.config.ts --project=electron
+        timeout-minutes: 45
+        env:
+          PLAYWRIGHT_SKIP_WEB_SERVER: '1'
+
+      - name: Guard — a skipped SURE test fails the job
+        if: always()
+        env:
+          # 确实可豁免的用例在此显式点名（逗号分隔、按标题子串匹配）；默认空。
+          SURE_E2E_SKIP_ALLOWLIST: ''
+        run: |
+          node - <<'GUARDEOF'
+          const fs = require('node:fs');
+          const reportPath = 'test-reports/results.json';
+          if (!fs.existsSync(reportPath)) {
+            console.error('::error::test-reports/results.json 不存在——SURE E2E 没有产出报告（按失败处理）');
+            process.exit(1);
+          }
+          const report = JSON.parse(fs.readFileSync(reportPath, 'utf8'));
+          const files = ['acceptance-page.spec.ts', 'sure-event-bridge.spec.ts'];
+          const allow = (process.env.SURE_E2E_SKIP_ALLOWLIST || '')
+            .split(',').map((s) => s.trim()).filter(Boolean);
+          const rows = [];
+          const walk = (suite) => {
+            for (const spec of suite.specs || []) {
+              const file = spec.file || suite.file || '';
+              if (!files.some((f) => file.endsWith(f))) continue;
+              for (const test of spec.tests || []) {
+                rows.push({
+                  file: file.split(/[\\/]/).pop(),
+                  title: spec.title,
+                  status: test.status,
+                });
+              }
+            }
+            for (const child of suite.suites || []) walk(child);
+          };
+          for (const suite of report.suites || []) walk(suite);
+          let bad = 0;
+          for (const row of rows) {
+            const skipped = row.status === 'skipped';
+            const exempt = skipped && allow.some((a) => row.title.includes(a));
+            const mark = skipped ? (exempt ? 'SKIP(whitelisted)' : 'SKIP(FAIL)') : row.status.toUpperCase();
+            console.log(`${mark.padEnd(16)} ${row.file} :: ${row.title}`);
+            if (skipped && !exempt) bad += 1;
+          }
+          if (bad > 0) {
+            console.error(`::error::SURE E2E 有 ${bad} 条用例被跳过——按失败处理（前置就绪是硬前提，不允许 skip 绿）`);
+            process.exit(1);
+          }
+          console.log(`SURE E2E: ${rows.length} 条用例，0 skip`);
+          GUARDEOF
+
+      - name: Summarize flaky E2E tests
+        if: always()
+        uses: ./.github/actions/summarize-flaky
+        with:
+          report_path: apps/desktop/test-reports/results.json
+        env:
+          # 纵深防御（与 electron-e2e 相同）：同一 job 里先跑过 PR 代码，
+          # 显式清空动态链接器/解释器会读的几个变量。
+          LD_PRELOAD: ''
+          LD_LIBRARY_PATH: ''
+          NODE_OPTIONS: ''
