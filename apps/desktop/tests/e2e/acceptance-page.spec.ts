@@ -308,8 +308,16 @@ test.describe('验收(SURE)面板 E2E · 完整修复闭环(需真实子代理�
       while (Date.now() < deadline) {
         for (const name of ['持久允许', '永久允许', '允许']) {
           const btn = fixture.page.getByRole('button', { name });
-          if (await btn.first().isVisible().catch(() => false)) {
-            await btn.first().click().catch(() => {});
+          if (
+            await btn
+              .first()
+              .isVisible()
+              .catch(() => false)
+          ) {
+            await btn
+              .first()
+              .click()
+              .catch(() => {});
             break;
           }
         }

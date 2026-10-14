@@ -123,6 +123,7 @@ async def test_await_chain_walks_to_the_innermost_await(fake_services):
     三层全部列出——失速 dump 的可用性就是这条链的完整度。
     """
     import asyncio as aio
+
     from miqi.runtime.agent_jobs import AgentJobRuntime
 
     never = aio.Event()
