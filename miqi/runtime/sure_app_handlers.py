@@ -258,6 +258,26 @@ def register_sure_handlers(server) -> None:
         except Exception as exc:  # noqa: BLE001 —— 统一折叠为可展示错误
             logger.exception("sure.fix.start 失败: {}", exc)
             raise AppServerError("修复子代理启动失败,详见日志", code="INTERNAL") from exc
+
+        # 2026-10-14:派发后立刻补一条作业事件 drain。侦察结论(2026-10-10)
+        # 说作业"完全绕开该队列"——实测不是:作业回合的 turn_runner 用的是
+        # 会话级 emitter,它的流仍落进会话事件队列(4096 有界),而队列唯一的
+        # 消费者是 chat.send 的 drain;面板派发没有聊天请求兜着,填满后作业
+        # 冻在第一个增量上(agent_jobs 失速 dump 的现场)。桥未提供该能力时
+        # 如实跳过:派发照旧,只是不再有实时流。
+        drain = getattr(registry, "bridge_context", {}).get("drain_agent_job_events")
+        if drain is not None:
+            try:
+                await drain(
+                    runtime=runtime,
+                    thread_id=live.thread_id,
+                    session_id=getattr(session, "session_id", None) or session_key,
+                    session_key=session_key,
+                    client_id=client_id,
+                    agent_id=live.agent_id,
+                )
+            except Exception as exc:  # noqa: BLE001 —— drain 注册失败不连累派发
+                logger.warning("sure.fix.start: 作业事件 drain 注册失败: {}", exc)
         return {
             "result": {"agentId": live.agent_id, "sessionKey": session_key, "project": project}
         }

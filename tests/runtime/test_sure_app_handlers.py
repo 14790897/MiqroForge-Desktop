@@ -277,7 +277,9 @@ class _FakeControl:
         self.calls.append(
             {"agent_type": agent_type, "task": task, "label": label, "user_roots": user_roots}
         )
-        return SimpleNamespace(agent_id="agent-1")
+        # 与真实 LiveAgent 同形:thread_id 恒在(作业自己的线程,事件 drain
+        # 的 set_thread_session 映射要用它)。
+        return SimpleNamespace(agent_id="agent-1", thread_id="agent-1-thread")
 
 
 def _make_fix_server(
@@ -439,3 +441,49 @@ async def test_fix_spawns_code_agent_with_user_root(tmp_path):
     assert call["agent_type"] == "code-agent"
     assert call["user_roots"] == [str(tmp_path)]  # 项目授权给子代理
     assert "不算证据" in call["task"]
+
+
+@pytest.mark.asyncio
+async def test_fix_registers_a_job_event_drain(tmp_path):
+    """2026-10-14:派发成功后要补一条作业事件 drain——作业的流没人排空会冻住它。
+
+    现场:作业回合的事件仍落进会话事件队列(4096 有界;唯一的消费者是
+    chat.send 的 drain),而面板派发没有聊天请求兜着——队列填满后作业冻在
+    第一个增量上(agent_jobs 失速 dump:作业任务停在 turn_runner 的 emit,
+    链条末端是 asyncio 队列的 put)。桥通过 bridge_context 发布
+    `drain_agent_job_events`;派发成功后必须调用它,参数指回本会话与这只作业。
+    """
+    server, registry, _, control = _make_fix_server(
+        with_session=True, cached_repair_project=str(tmp_path)
+    )
+    drained: list[dict] = []
+
+    async def _drain(**kwargs):
+        drained.append(kwargs)
+
+    registry.bridge_context["drain_agent_job_events"] = _drain
+    resp = await _dispatch(
+        server, "sure.fix.start", {"project": str(tmp_path)}, client_id="c"
+    )
+    assert "result" in resp, resp
+    assert len(control.calls) == 1
+    assert len(drained) == 1, "派发后没有注册作业事件 drain"
+    assert drained[0]["client_id"] == "c"
+    assert drained[0]["session_key"] == "c:s1"
+    assert drained[0]["session_id"] == "c:s1"
+    assert drained[0]["agent_id"] == "agent-1"
+    assert drained[0]["thread_id"] == "agent-1-thread"
+    assert drained[0]["runtime"] is not None
+
+
+@pytest.mark.asyncio
+async def test_fix_without_bridge_drain_still_dispatches(tmp_path):
+    """桥未提供 drain_agent_job_events(旧桥/测试替身)时如实跳过,派发不受影响。"""
+    server, _, _, control = _make_fix_server(
+        with_session=True, cached_repair_project=str(tmp_path)
+    )
+    resp = await _dispatch(
+        server, "sure.fix.start", {"project": str(tmp_path)}, client_id="c"
+    )
+    assert "result" in resp, resp
+    assert len(control.calls) == 1
