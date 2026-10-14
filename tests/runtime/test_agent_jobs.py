@@ -99,6 +99,49 @@ def test_the_stall_threshold_outlasts_the_measured_worst_case_wait():
 
 
 @pytest.mark.asyncio
+async def test_a_job_initializes_a_history_runtime_the_session_never_started(tmp_path):
+    """作业回合经 HistoryRuntime 落 turn——落在「建了没 start」的会话上时,首个
+    落库会 `HistoryRuntime.initialize() must be called before use`(2026-10-14
+    CI 实测:修复子代理派发 4 秒即 failed,完整闭环用例 attempt 1 因此必红,且
+    错误只此一行、无堆栈)。作业运行器保证依赖就绪,不赌会话启动的时序。
+    """
+    from types import SimpleNamespace
+
+    from miqi.runtime.agent_jobs import AgentJobRuntime
+    from miqi.runtime.history_runtime import HistoryRuntime
+
+    history = HistoryRuntime(tmp_path / "runtime.db", session_id="s-unstarted")
+    seen: dict[str, bool] = {}
+
+    async def _run(job):
+        # 生产路径里回合的首个落库动作正是读这条连接;未 initialize 时抛
+        # RuntimeError——就是 CI 里那行失败的原文。
+        seen["conn"] = history._conn is not None
+        return SimpleNamespace(final_content="done")
+
+    services = SimpleNamespace(
+        session_id="s-unstarted",
+        history_runtime=history,
+        turn_runner=SimpleNamespace(run_agent_job=_run),
+        agent_control=None,
+    )
+    runtime = AgentJobRuntime(services=services, stall_interval=0.05, stall_samples=3)
+    job = await runtime.start(
+        agent_type="code-agent", task="t", parent_thread_id="main",
+    )
+
+    deadline = asyncio.get_event_loop().time() + 5.0
+    while asyncio.get_event_loop().time() < deadline:
+        if job.status not in ("queued", "running"):
+            break
+        await asyncio.sleep(0.02)
+
+    assert job.status == "completed", f"作业未完成: {job.error}"
+    assert seen.get("conn") is True, "回合开始前 history 仍未 initialize"
+    await history.close()
+
+
+@pytest.mark.asyncio
 async def test_stalled_job_is_failed_by_the_watchdog(fake_services):
     """2026-10-14:无声卡死的作业必须被看门狗如实收尾,而不是永远 running。
 

@@ -213,6 +213,15 @@ class AgentJobRuntime:
             else None
         )
         try:
+            # 依赖就绪(2026-10-14 CI 实测):作业回合经 HistoryRuntime 落 turn,
+            # 而它只在 RuntimeSession.start() 里 initialize 一次——作业落在
+            # 「建了没 start / start 未完成」的会话上时,首个落库即
+            # `HistoryRuntime.initialize() must be called before use`,派发 4 秒
+            # 即 failed(修复子代理 attempt 1 因此必红,错误只有一行、无堆栈)。
+            # 这里保证依赖已就绪,不赌会话启动的时序;守卫幂等,见其 docstring。
+            history = getattr(self.services, "history_runtime", None)
+            if history is not None:
+                await history.ensure_initialized()
             result = await self.services.turn_runner.run_agent_job(job)
             job.result = result.final_content
             job.status = "completed"
