@@ -6,10 +6,13 @@
   显式传参(避免 CLI 省略路径取进程 cwd 的坑);JSON 是**结束时的一份完整
   报告**,进度只发"运行中 + 已耗时"心跳——**不虚构阶段级进度**;
 - 子进程环境**白名单化**(SystemRoot/PATH/TEMP/LOCALAPPDATA/APPDATA/
-  USERPROFILE/SURE_BIN/SURE_OPENAI_API_KEY):不透传平台令牌、MIQI_* 等;
-  SURE_OPENAI_API_KEY 是**用户自己的** SURE 分析凭据,2026-10-13 起随白名单
-  放行——面板检查因此随用户级 analysis 配置启用模型评估(早先"不注入"
-  的边界由该需求取代);
+  USERPROFILE/SURE_BIN/SURE_OPENAI_API_KEY/HOME/XDG_CONFIG_HOME/XDG_DATA_HOME):
+  不透传平台令牌、MIQI_* 等;SURE_OPENAI_API_KEY 是**用户自己的** SURE 分析凭据,
+  2026-10-13 起随白名单放行——面板检查因此随用户级 analysis 配置启用模型评估
+  (早先"不注入"的边界由该需求取代);HOME/XDG_* 是 2026-10-14 CI 实测的修复:
+  Linux 下 SURE 的用户配置/数据目录经它们解析(Windows 走已知文件夹;两键在
+  Windows 上不存在=无操作)——缺了它,CI 里面板 check 读不到 analysis 配置、
+  模型评估不出场(sure-e2e 首跑红);
 - 取消终止**整个进程树**(Windows ``taskkill /T /F``;POSIX 以
   ``start_new_session`` 分组后 killpg),取消不产出报告——与 CLI 语义一致
   (JSON 只在正常结束时发射)。
@@ -68,6 +71,12 @@ _ENV_ALLOWLIST = (
     "USERPROFILE",
     "SURE_BIN",
     "SURE_OPENAI_API_KEY",
+    # 2026-10-14:Linux 下 SURE 的用户配置/数据目录经 HOME/XDG_* 解析
+    # (Windows 走已知文件夹 API;这几个键在 Windows 上不存在=无操作)。
+    # CI 实测:sure-e2e 首跑里面板 check 读不到用户级 analysis 配置。
+    "HOME",
+    "XDG_CONFIG_HOME",
+    "XDG_DATA_HOME",
 )
 
 EventCallback = Callable[[str, dict], Awaitable[None]]

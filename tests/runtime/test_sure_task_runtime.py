@@ -249,6 +249,11 @@ def test_env_whitelist_only_allows_named_vars():
         # 2026-10-13:面板启用模型评估——SURE 自己的分析凭据(用户自己的 key)
         # 放行;通用 OPENAI_API_KEY 依旧被剥离(白名单只认 SURE 的变量名)。
         "SURE_OPENAI_API_KEY": "user-sure-key",
+        # 2026-10-14:Linux 下 SURE 的用户配置/数据目录经 HOME/XDG_* 解析
+        # (CI 实测:缺了它面板 check 读不到 analysis 配置)。
+        "HOME": "/home/u",
+        "XDG_CONFIG_HOME": "/home/u/.config",
+        "XDG_DATA_HOME": "/home/u/.local/share",
     }
     env = build_sure_env(base)
     assert env == {
@@ -259,6 +264,9 @@ def test_env_whitelist_only_allows_named_vars():
         "APPDATA": r"C:\ad",
         "USERPROFILE": r"C:\u",
         "SURE_OPENAI_API_KEY": "user-sure-key",
+        "HOME": "/home/u",
+        "XDG_CONFIG_HOME": "/home/u/.config",
+        "XDG_DATA_HOME": "/home/u/.local/share",
     }
     assert "OPENAI_API_KEY" not in env
     assert "MIQI_HOME" not in env
