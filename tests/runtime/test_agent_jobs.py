@@ -116,6 +116,41 @@ async def test_stalled_job_is_failed_by_the_watchdog(fake_services):
 
 
 @pytest.mark.asyncio
+async def test_await_chain_walks_to_the_innermost_await(fake_services):
+    """2026-10-14 首战教训:get_stack() 只给最外一帧,卡点在 cr_await 链里。
+
+    构造三层嵌套 await(最内层停在 Event.wait),断言 _await_chain 能把
+    三层全部列出——失速 dump 的可用性就是这条链的完整度。
+    """
+    import asyncio as aio
+    from miqi.runtime.agent_jobs import AgentJobRuntime
+
+    never = aio.Event()
+
+    async def inner():
+        await never.wait()
+
+    async def middle():
+        await inner()
+
+    async def outer():
+        await middle()
+
+    task = aio.create_task(outer())
+    await aio.sleep(0.05)  # 让它停在 inner 里
+    runtime = AgentJobRuntime(services=fake_services)
+    chain = runtime._await_chain(task)
+    task.cancel()
+    try:
+        await task
+    except aio.CancelledError:
+        pass
+    assert len(chain) >= 3, chain
+    assert any("test_agent_jobs.py" in entry for entry in chain), chain
+    assert any("locks.py" in entry or "events" in entry for entry in chain), chain
+
+
+@pytest.mark.asyncio
 async def test_agent_job_get_raises_for_unknown():
     from miqi.runtime.agent_jobs import AgentJobRuntime
 

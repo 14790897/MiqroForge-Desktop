@@ -8,6 +8,7 @@ becomes an AgentJob tracked by the runtime, with lifecycle management
 from __future__ import annotations
 
 import asyncio
+import os
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -285,7 +286,12 @@ class AgentJobRuntime:
                 return
 
     def _dump_tasks(self, job: AgentJob) -> None:
-        """把当前全部 asyncio 任务的挂起栈写进日志(失速现场自诊)。"""
+        """把当前全部 asyncio 任务的 await 链写进日志(失速现场自诊)。
+
+        `Task.get_stack()` 对挂起的协程只给最外层一帧——真正的卡点在
+        `cr_await` 链里(2026-10-14 看门狗首战实测:作业任务只打出一帧,
+        断点不可见)。这里手动沿 `cr_await` 走到底,打印完整等待链。
+        """
         try:
             tasks = list(asyncio.all_tasks())
         except RuntimeError:
@@ -294,17 +300,34 @@ class AgentJobRuntime:
             "stall dump for job {}: {} task(s)", job.job_id, len(tasks)
         )
         for task in tasks:
-            try:
-                frames = task.get_stack()
-            except Exception:  # noqa: BLE001 — 诊断尽力而为
-                frames = []
-            top = [
-                f"{frame.f_code.co_filename.rsplit('\\\\', 1)[-1]}:{frame.f_lineno}"
-                for frame in frames[-4:]
-            ]
+            chain = self._await_chain(task)
             logger.error(
-                "  task {!r} done={} stack={}",
+                "  task {!r} done={} wait-chain: {}",
                 task.get_name(),
                 task.done(),
-                " <- ".join(top) if top else "<none>",
+                " <- ".join(chain) if chain else "<none>",
             )
+
+    @staticmethod
+    def _await_chain(task: asyncio.Task) -> list[str]:
+        """任务协程的完整 await 链(外层 → 最内层卡点),最多 16 层。"""
+        chain: list[str] = []
+        try:
+            coro = task.get_coro()
+        except Exception:  # noqa: BLE001 — 诊断尽力而为
+            return chain
+        seen = 0
+        while coro is not None and seen < 16:
+            frame = getattr(coro, "cr_frame", None) or getattr(
+                coro, "gi_frame", None
+            )
+            if frame is not None:
+                chain.append(
+                    f"{os.path.basename(frame.f_code.co_filename)}:"
+                    f"{frame.f_lineno}"
+                )
+            coro = getattr(coro, "cr_await", None) or getattr(
+                coro, "gi_yieldfrom", None
+            )
+            seen += 1
+        return chain
