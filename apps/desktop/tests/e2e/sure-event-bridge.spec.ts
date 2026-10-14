@@ -86,7 +86,15 @@ test.describe.serial('SURE 事件桥接 E2E · 对话工具调用 → 真实 SUR
 
   test.afterAll(async () => {
     if (electronApp) await closeElectronApp(electronApp);
-    if (miqiHome) cleanupDir(miqiHome);
+    // 与「完整修复闭环」那条一致:Bridge ingest anomalies / Dump bridge logs 两步都要
+    // 读 <MIQI_HOME>/workspace/logs/bridge-*.log,而无条件删掉临时 home 等于把它们
+    // 变成空转 —— 本 spec 的失败恰恰是「UI 有工具卡但没有 tool.completed」,
+    // 现场就在那份日志里。CI 由工作流设 MIQI_E2E_KEEP_HOME=1。
+    if (miqiHome) {
+      if (process.env.MIQI_E2E_KEEP_HOME)
+        console.log(`[test] MIQI_E2E_KEEP_HOME=1,保留 ${miqiHome}`);
+      else cleanupDir(miqiHome);
+    }
     // 清理本轮测试写进真实记录库的会话(尽力;失败只记日志不连累用例)
     if (sureBin) {
       if (!sureSessionId) {

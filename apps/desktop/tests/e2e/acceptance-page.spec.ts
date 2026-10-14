@@ -115,7 +115,14 @@ test.describe.serial('验收(SURE)面板 E2E · 真实 SURE', () => {
 
   test.afterAll(async () => {
     if (electronApp) await closeElectronApp(electronApp);
-    if (miqiHome) cleanupDir(miqiHome);
+    // 同「完整修复闭环」:CI 用 MIQI_E2E_KEEP_HOME=1 留住临时 home —— 桥接日志
+    // (<MIQI_HOME>/workspace/logs/bridge-*.log)是 Bridge ingest anomalies / Dump
+    // bridge logs 两步的唯一现场,无条件删掉等于让那两步空转。
+    if (miqiHome) {
+      if (process.env.MIQI_E2E_KEEP_HOME)
+        console.log(`[test] MIQI_E2E_KEEP_HOME=1,保留 ${miqiHome}`);
+      else cleanupDir(miqiHome);
+    }
     // 清理本轮真实 check/recheck 写进 SURE 记录库的会话(真实命令,尽力而为):
     // ① check/recheck 以测试项目为 project_root;② 桥接事件以会话工作区为 project_root
     if (sureBin) {
@@ -271,7 +278,11 @@ test.describe('验收(SURE)面板 E2E · 模型评估(需真实 key)', () => {
       const del = runSureJson(sureBin, ['history', 'delete', '--project', project]);
       console.log(`[test] 清理记录(${project}): outcome=${del?.outcome ?? '<无输出>'}`);
       cleanupDir(project);
-      cleanupDir(fixture.miqiHome);
+      if (process.env.MIQI_E2E_KEEP_HOME) {
+        console.log(`[test] MIQI_E2E_KEEP_HOME=1,保留 ${fixture.miqiHome}`);
+      } else {
+        cleanupDir(fixture.miqiHome);
+      }
     }
   });
 });
