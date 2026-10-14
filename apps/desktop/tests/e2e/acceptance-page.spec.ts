@@ -7,11 +7,15 @@
  *
  * 测试项目是真实的:一个含 `# TODO` 的 py 文件会让确定性检查产出 1 条
  * 真实 finding(not_green),由此走通「检查 → 修复契约 → 交给 AI 真修 →
- * 自动复核」全链路。本套件的运行环境不带 SURE_OPENAI_API_KEY(2026-10-13
- * 起白名单放行该变量、面板随用户环境启用模型评估):无 key 时 check 如实
- * 呈现「provider 已配置但 key 未配置」或「未配置分析」——面板如实渲染,
- * 断言围绕真实结构,不抠 fixture 数字。带 key 的模型评估路径由下方第二个
- * describe 覆盖(环境无 key 时如实 skip,绝不 mock)。
+ * 自动复核」全链路。运行环境不带 SURE_OPENAI_API_KEY 时(2026-10-13 起
+ * 白名单放行该变量、面板随用户环境启用模型评估)check 如实呈现「provider
+ * 已配置但 key 未配置」或「未配置分析」;带 key 时(即下方模型评估 describe
+ * 的前提——用户级 analysis 配置 + key)同一 TODO 会经第 8 阶段多出一条
+ * 「Model assessment」条目,发现项计数如实分流(2026-10-14 实测:同一项目
+ * 1 条 → 2 条)——expectedFindings 管计数,不抠死数字也不放宽。
+ * 修复契约计数不随之变:模型条目不点名检查,不产契约(实测 repairs 恒 1)。
+ * 带 key 的模型评估路径由下方第二个 describe 覆盖(环境无 key 时如实 skip,
+ * 绝不 mock)。
  *
  * 已移除的两个场景(理由如实登记在 PR 描述):
  *   - 「低版本 SURE → 不兼容横幅」:构造低版本必须 mock 二进制(禁令);
@@ -61,6 +65,15 @@ async function openAcceptance(p: Page): Promise<void> {
 }
 
 const NO_SURE_SKIP = '未安装 SURE(查找链 SURE_BIN → PATH → 默认位置)——E2E 不 mock 外部依赖';
+
+/**
+ * 发现项数量随真实环境如实分流:确定性 TODO 检查恒产 1 条;环境带
+ * SURE_OPENAI_API_KEY(即下方模型评估 describe 的前提——用户级 analysis
+ * 配置 + key)时,第 8 阶段对同一候选再产出一条「Model assessment」条目,
+ * 计数如实为 2(2026-10-14 实测,与模型 describe 的断言同一前提)。key 在位
+ * 而模型评估没跑通,这里与模型 describe 一同红——不美化。
+ */
+const expectedFindings = (): number => (process.env.SURE_OPENAI_API_KEY ? 2 : 1);
 
 test.describe.serial('验收(SURE)面板 E2E · 真实 SURE', () => {
   let electronApp: ElectronApplication | null = null;
@@ -138,8 +151,11 @@ test.describe.serial('验收(SURE)面板 E2E · 真实 SURE', () => {
     await expect(page.getByText(/检查不足,无法判断|需要关注/).first()).toBeVisible({
       timeout: 15_000,
     });
-    // 真实的 1 条发现项(TODO/FIXME 确定性检查)
-    await expect(page.getByText('发现的问题(1)')).toBeVisible({ timeout: 15_000 });
+    // 真实的发现项:1 条(TODO/FIXME 确定性检查);带 key 的环境另有模型评估条目,
+    // 计数随环境分流(expectedFindings)
+    await expect(page.getByText(`发现的问题(${expectedFindings()})`)).toBeVisible({
+      timeout: 15_000,
+    });
     // 逐阶段明细(真实 12 阶段记录)
     await expect(page.getByText('核查阶段')).toBeVisible({ timeout: 15_000 });
     await page.screenshot({ path: 'test-results/acceptance-report.png', fullPage: true });
@@ -149,7 +165,9 @@ test.describe.serial('验收(SURE)面板 E2E · 真实 SURE', () => {
     await page.getByRole('button', { name: /返回任务/ }).click();
     await openAcceptance(page);
     await expect(page.getByTestId('acceptance-report')).toBeVisible({ timeout: 15_000 });
-    await expect(page.getByText('发现的问题(1)')).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByText(`发现的问题(${expectedFindings()})`)).toBeVisible({
+      timeout: 15_000,
+    });
   });
 
   test('真实修复契约 → 真实复核对比(未修复 → still_open)', async () => {

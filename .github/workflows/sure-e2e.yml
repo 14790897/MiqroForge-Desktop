@@ -75,9 +75,12 @@ jobs:
       - name: Build the fork SURE (pinned to the commit with miqi support)
         working-directory: .
         env:
-          # 评审锚定的提交：含 MiQi 钩子事件（edf95a7 起）与复核查「目标消失即关闭」
-          # 语义（c4fd952）——完整闭环用例的「已关闭」断言依赖后者。
-          SURE_FORK_SHA: c4fd952e21074c30c0a0a937718fd00a3cd6a83c
+          # 评审锚定的提交：含 MiQi 钩子事件（edf95a7 起）、复核查「目标消失即关闭」
+          # 语义（c4fd952）与「修好即关闭」的 stage 12 契约重建（88da6bc，
+          # 2026-10-14：c4fd952 的规则此前走不到——当次运行没有 finding 就没有
+          # 契约，本机 CLI 与 CI 实测 closed 恒空）——完整闭环用例的「已关闭」
+          # 断言依赖后两者。
+          SURE_FORK_SHA: 88da6bc78a3f7633fa9fb0e67759ea539bdab143
         run: |
           set -euo pipefail
           git init -q "$RUNNER_TEMP/sure-fork"
@@ -169,6 +172,20 @@ jobs:
         timeout-minutes: 45
         env:
           PLAYWRIGHT_SKIP_WEB_SERVER: '1'
+
+      - name: Dump bridge logs on failure (CI diagnostics)
+        if: failure()
+        working-directory: .
+        # PR 运行不上传 artifact（安全设计），失败时的桥接日志此前随之消亡——
+        # 这里把每个临时 MIQI_HOME 的 bridge 日志尾部打进 job 日志（job 日志不是
+        # 公开产物），让失败自曝现场：与失速看门狗同一纪律。
+        run: |
+          for f in /tmp/miqi-e2e-*/workspace/logs/bridge-*.log; do
+            [ -e "$f" ] || continue
+            echo "::group::bridge log tail: $f"
+            tail -n 120 "$f"
+            echo "::endgroup::"
+          done
 
       - name: Guard — a skipped SURE test fails the job
         if: always()
