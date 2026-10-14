@@ -248,15 +248,19 @@ test.describe('验收(SURE)面板 E2E · 模型评估(需真实 key)', () => {
       await expect(fixture.page.getByTestId('acceptance-report')).toBeVisible({
         timeout: 180_000,
       });
-      // 第 8 阶段真实跑了模型(flagged / noise 两种判定都算"模型被调用")
+      // 第 8 阶段真实跑了模型(flagged / noise 两种判定都算"模型被调用")。
+      // 这两条都是 SURE 第 8 阶段的真实模型评估落地 —— LLM 绑定的等待，用 LLM_TIMEOUT。
+      // 2026-10-14 实测:120s 窗口下首跑等不到「Model assessment:」(失败瞬间页面快照为
+      // 「已核查 1 · 未能运行 0 · 未解决问题 1 / Can fix later 未解决」，即评估条目还没渲染
+      // 出来)，重试才过。断言不变，只是把窗口给够。
       await expect(fixture.page.getByText(/assessed 1 completeness candidate/)).toBeVisible({
-        timeout: 120_000,
+        timeout: LLM_TIMEOUT,
       });
       // 用户要看的效果:报告里出现模型评估条目。用户环境实测配置的是
       // deepseek-flash,判该 TODO 为 problem 是稳定行为;若模型偶判 noise,
       // 该断言如实失败并暴露,不美化。
       await expect(fixture.page.getByText(/Model assessment:/).first()).toBeVisible({
-        timeout: 120_000,
+        timeout: LLM_TIMEOUT,
       });
       await fixture.page.screenshot({
         path: 'test-results/acceptance-model-assessment.png',
