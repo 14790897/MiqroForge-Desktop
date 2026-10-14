@@ -269,7 +269,13 @@ def register_sure_handlers(server) -> None:
         if drain is not None:
             try:
                 await drain(
-                    runtime=runtime,
+                    # 会话对象本身:它持有 next_event,drain 靠它消费事件队列。
+                    # 2026-10-14 修复:此前误传 `_get_runtime` 的 SureTaskRuntime
+                    # ——drain 任务第一次 next_event 就 AttributeError 而死,队列
+                    # 无人排空,子代理的流一满(4096)就冻在 emit 上(CI 重试两次
+                    # 900s stall,chain 与旧形态相同;本机"通过"是事件量没到
+                    # 上限的运气)。
+                    runtime=session,
                     thread_id=live.thread_id,
                     session_id=getattr(session, "session_id", None) or session_key,
                     session_key=session_key,

@@ -158,8 +158,14 @@ jobs:
             for f in "$d"/miqi-e2e-*/workspace/logs/bridge-*.log; do
               [ -e "$f" ] || continue
               found=1
-              echo "::group::bridge log tail: $f"
-              tail -n 120 "$f"
+              echo "::group::bridge log: $f"
+              # 派发期的关键行（drain 注册/死亡、sure.fix.start、作业失败/失速）
+              # 全文找——只打 tail 会让它们落在窗口外（2026-10-14 实测：传错
+              # runtime 的 drain 一启动就死，那行 error 在 tail 窗口之外，害得
+              # 归因多绕了一轮）。
+              grep -nE "job event drain registered|drain error|作业事件 drain|sure\.fix\.start|Agent job .* failed|stalled at|_watch_stall" "$f" | tail -n 40 || true
+              echo "--- tail 200 ---"
+              tail -n 200 "$f"
               echo "::endgroup::"
             done
           done

@@ -473,7 +473,15 @@ async def test_fix_registers_a_job_event_drain(tmp_path):
     assert drained[0]["session_id"] == "c:s1"
     assert drained[0]["agent_id"] == "agent-1"
     assert drained[0]["thread_id"] == "agent-1-thread"
-    assert drained[0]["runtime"] is not None
+    # 必须是 **RuntimeSession 对象本身**（它才持有 next_event;drain 靠它消费
+    # 会话事件队列）。此前传的是 `_get_runtime` 的 SureTaskRuntime——drain 任务
+    # 第一次 next_event 就 AttributeError 而死,队列无人排空,子代理流一满
+    # (4096)就冻在 emit 上;本机通过只是事件量没到上限的运气,CI 重试必挂
+    # (2026-10-14 run 38525430992 的两个 900s stall,链条同旧形态)。
+    assert drained[0]["runtime"] is registry._sessions["c:s1"], (
+        "drain 拿到的不是会话对象(它必须持有 next_event):"
+        f"{type(drained[0]['runtime']).__name__}"
+    )
 
 
 @pytest.mark.asyncio
