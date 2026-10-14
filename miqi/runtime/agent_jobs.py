@@ -46,11 +46,22 @@ class AgentJobRuntime:
     started via start() and can be listed, queried, or killed.
     """
 
-    def __init__(self, *, services: Any, store: AgentGraphStore | None = None):
+    def __init__(
+        self,
+        *,
+        services: Any,
+        store: AgentGraphStore | None = None,
+        stall_interval: float = 60.0,
+        stall_samples: int = 5,
+    ):
         self.services = services
         self._store = store
         self._jobs: dict[str, AgentJob] = {}
         self._tasks: dict[str, asyncio.Task | Any] = {}
+        # 失速看门狗(2026-10-14):见 _watch_stall。间隔与采样次数可在测试
+        # 里调小;默认 5×60s=5 分钟,远超该路径任何合法单次等待。
+        self._stall_interval = stall_interval
+        self._stall_samples = stall_samples
         if store is not None:
             self._load_jobs()
 
@@ -180,18 +191,29 @@ class AgentJobRuntime:
                 error=None,
                 completed_at=None,
             )
+        job_task = asyncio.current_task()
+        watchdog = (
+            asyncio.create_task(self._watch_stall(job, job_task))
+            if job_task is not None
+            else None
+        )
         try:
             result = await self.services.turn_runner.run_agent_job(job)
             job.result = result.final_content
             job.status = "completed"
         except asyncio.CancelledError:
-            job.error = "Cancelled"
-            job.status = "aborted"
+            # 看门狗判失速时会先写好 job.error/status 再取消本任务:如实保留
+            # 失速结论;其余来源的取消仍按 aborted 记录。
+            if not job.error:
+                job.error = "Cancelled"
+                job.status = "aborted"
         except Exception as exc:
             job.error = str(exc)
             job.status = "error"
             logger.error("Agent job {} failed: {}", job.job_id, exc)
         finally:
+            if watchdog is not None:
+                watchdog.cancel()
             job.completed_at = time.time()
             if self._store is not None:
                 self._store.update_job_status(
@@ -213,3 +235,76 @@ class AgentJobRuntime:
                     logger.warning(
                         "notify_completed failed for job {}", job.job_id,
                     )
+
+    async def _watch_stall(self, job: AgentJob, job_task: asyncio.Task) -> None:
+        """失速看门狗(2026-10-14:修复子代理无声卡死事故)。
+
+        现场:作业可能停在一个永不触发的内部等待上——事件循环空闲、无
+        socket、无数据库活动、所有已知超时层都不触发,作业则永远停在
+        running(面板长期"运行中",重启后还留僵尸行)。
+
+        判定:每 `stall_interval` 秒采样作业任务的最内层挂起帧(文件:行号),
+        连续 `stall_samples` 次相同即判失速。默认 5×60s=5 分钟,远超该
+        路径任何合法单次等待(openai 提供者最坏重试爆发 <4 分钟)。判失速
+        时先把全部 asyncio 任务的挂起栈 dump 进日志(下一次现场自诊,不必
+        再靠 py-spy),再以 "stalled" 如实收尾——绝不无声挂起。
+        """
+        last: tuple[str, int] | None = None
+        same = 0
+        while not job_task.done():
+            await asyncio.sleep(self._stall_interval)
+            if job_task.done():
+                return
+            frames = job_task.get_stack()
+            point = (
+                (frames[-1].f_code.co_filename, frames[-1].f_lineno)
+                if frames
+                else None
+            )
+            if point is not None and point == last:
+                same += 1
+            else:
+                same = 0
+                last = point
+            if same >= self._stall_samples - 1:
+                where = f"{point[0]}:{point[1]}" if point else "<no stack>"
+                seconds = self._stall_interval * (same + 1)
+                logger.error(
+                    "Agent job {} stalled at {} (no progress for {:.0f}s); "
+                    "dumping tasks and failing the job",
+                    job.job_id,
+                    where,
+                    seconds,
+                )
+                self._dump_tasks(job)
+                job.error = (
+                    f"stalled at {where} (no progress for {seconds:.0f}s)"
+                )
+                job.status = "error"
+                job_task.cancel()
+                return
+
+    def _dump_tasks(self, job: AgentJob) -> None:
+        """把当前全部 asyncio 任务的挂起栈写进日志(失速现场自诊)。"""
+        try:
+            tasks = list(asyncio.all_tasks())
+        except RuntimeError:
+            return
+        logger.error(
+            "stall dump for job {}: {} task(s)", job.job_id, len(tasks)
+        )
+        for task in tasks:
+            try:
+                frames = task.get_stack()
+            except Exception:  # noqa: BLE001 — 诊断尽力而为
+                frames = []
+            top = [
+                f"{frame.f_code.co_filename.rsplit('\\\\', 1)[-1]}:{frame.f_lineno}"
+                for frame in frames[-4:]
+            ]
+            logger.error(
+                "  task {!r} done={} stack={}",
+                task.get_name(),
+                task.done(),
+                " <- ".join(top) if top else "<none>",
+            )

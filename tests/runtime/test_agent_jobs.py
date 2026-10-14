@@ -72,6 +72,50 @@ async def test_agent_job_completes_and_persists_result(fake_services_for_jobs):
 
 
 @pytest.mark.asyncio
+async def test_stalled_job_is_failed_by_the_watchdog(fake_services):
+    """2026-10-14:无声卡死的作业必须被看门狗如实收尾,而不是永远 running。
+
+    复现形态:run_agent_job 停在一个永不触发的等待上(实测现场:事件循环
+    空闲、无 socket、无 DB 活动、所有超时层都不触发)。看门狗以(可调小的)
+    采样间隔判定"挂起点连续不动"后:日志 dump + 作业按 stalled 失败 +
+    正常通知前端。
+    """
+    from miqi.runtime.agent_jobs import AgentJobRuntime
+
+    never = asyncio.Event()
+
+    async def _forever(job):
+        await never.wait()
+
+    fake_services.turn_runner.run_agent_job = _forever
+    notified: list[tuple[str, str]] = []
+
+    class _AC:
+        async def notify_completed(self, job_id, status):
+            notified.append((job_id, status))
+
+    fake_services.agent_control = _AC()
+
+    runtime = AgentJobRuntime(
+        services=fake_services, stall_interval=0.05, stall_samples=3,
+    )
+    job = await runtime.start(
+        agent_type="code-agent", task="will stall", parent_thread_id="main",
+    )
+
+    deadline = asyncio.get_event_loop().time() + 5.0
+    while asyncio.get_event_loop().time() < deadline:
+        if job.status not in ("queued", "running"):
+            break
+        await asyncio.sleep(0.05)
+
+    assert job.status == "error"
+    assert job.error and "stalled" in job.error
+    assert notified and notified[-1] == (job.job_id, "error")
+    never.set()
+
+
+@pytest.mark.asyncio
 async def test_agent_job_get_raises_for_unknown():
     from miqi.runtime.agent_jobs import AgentJobRuntime
 
