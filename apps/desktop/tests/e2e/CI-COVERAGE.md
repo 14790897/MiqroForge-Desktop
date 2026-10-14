@@ -79,9 +79,11 @@
 
 **skip 不再算过**（评审 #1278 P2-1）：工作流跑完读 `test-reports/results.json`，
 两条 spec 内出现任何 skipped 即判失败；确实可豁免的用例以
-`SURE_E2E_SKIP_ALLOWLIST` 显式点名（默认空）。官方 v0.1.2 的 `Install SURE`
-步骤保留在 `desktop-ci.yml`——它合入 develop 后对后续 PR 的 electron-e2e 生效
-（官方构建覆盖验收面板的确定性路径）；**含 miqi 的完整覆盖以 `sure-e2e` 为准**。
+`SURE_E2E_SKIP_ALLOWLIST` 显式点名（默认空）。官方 v0.1.2 的 SURE 安装保留在
+electron-e2e（`install-sure: 'true'`，实现已抽进 `.github/actions/e2e-app-setup`，
+与 macos-e2e / sure-e2e 共用同一份应用侧准备）——它合入 develop 后对后续 PR 的
+electron-e2e 生效（官方构建覆盖验收面板的确定性路径）；**含 miqi 的完整覆盖以
+`sure-e2e` 为准**。
 
 ## 已接进 CI（#1196）
 
