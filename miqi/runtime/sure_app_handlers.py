@@ -123,15 +123,50 @@ def register_sure_handlers(server) -> None:
     async def _sure_check_status(request_id, params, client_id, session_id, registry):
         # task = 运行中的对账;lastReport = 最近一次完成报告——面板切页/重开
         # 后靠它恢复完成态(2026-10-14:此前只带回"运行中",完成态一离开
-        # 面板再回来报告与项目全部丢失)。从无完成任务时为 None。
+        # 面板再回来报告与项目全部丢失)。
+        # runningAgents/agentCap = 与 sure.fix.start 并发闸同源的快照——
+        # 面板凭它把「交给 AI 修复」显示为禁用,避免"新报告让按钮重新亮起、
+        # 用户连点撞上限爆红"(2026-10-14 用户实测)。
         runtime = _get_runtime(registry)
         last = runtime.last_report(client_id)
+        running, cap = await _running_agents(registry, client_id)
         return {
             "result": {
                 "task": runtime.status(client_id=client_id),
                 "lastReport": last.model_dump(mode="json") if last is not None else None,
+                "runningAgents": running,
+                "agentCap": cap,
             }
         }
+
+    async def _running_agents(registry, client_id) -> tuple[int, int]:
+        """最近活跃会话里未终结的子代理数,及该会话的并发上限。
+
+        与 `sure.fix.start` 选会话、数并发的方式一致(该入口的闸在
+        `AgentControl.spawn`:`list_agents` 的 status 叠加作业运行时状态,
+        queued/running 视为未终结)。无会话/无能力时如实回 (0, 3):这是一份
+        尽力而为的快照,不是闸门本身——越权拒绝仍由 spawn 侧负责。
+        """
+        session_key = None
+        best_activity = -1.0
+        for sid in registry.list_sessions(client_id):
+            activity = registry._last_activity.get(sid, 0.0)
+            if activity >= best_activity:
+                best_activity = activity
+                session_key = sid
+        if session_key is None:
+            return 0, 3
+        session = await registry.get_session(client_id, session_key)
+        control = getattr(getattr(session, "services", None), "agent_control", None) if session else None
+        if control is None:
+            return 0, 3
+        try:
+            agents = control.list_agents()
+        except Exception as exc:  # noqa: BLE001 — 快照尽力而为,失败如实回 0
+            logger.debug("running-agents 快照失败: {}", exc)
+            return 0, getattr(control, "max_concurrent", 3)
+        running = sum(1 for a in agents if a.get("status") in ("queued", "running"))
+        return running, getattr(control, "max_concurrent", 3)
 
     async def _sure_fix_start(request_id, params, client_id, session_id, registry):
         """把最近一次 repair 契约交给自己会话里的 code-agent 子代理执行修复。

@@ -55,6 +55,13 @@ export function AcceptancePage() {
   const [runningCommand, setRunningCommand] = useState<SureCommand>('check');
   // 阶段 4:修复子代理(完成经 chat:subagent_result 关联 → 自动复核)
   const [fixAgentId, setFixAgentId] = useState<string | null>(null);
+  // 修复派发的并发快照(挂载时取自后端,与 spawn 闸同源)——2026-10-14:
+  // 此前按钮只认本地 fixAgentId,新的报告/切页会把它复位,按钮重新亮起
+  // 邀请连点,直到撞上并发上限(3)爆红。
+  const [fixGate, setFixGate] = useState<{ full: boolean; cap: number }>({
+    full: false,
+    cap: 3,
+  });
   const [fixNotice, setFixNotice] = useState<string | null>(null);
   const fixAgentRef = useRef<string | null>(null);
   // 事件订阅在挂载时建立;run 每次渲染重建——经 ref 取最新实现(自动复核用)
@@ -88,6 +95,10 @@ export function AcceptancePage() {
       try {
         const res = (await window.miqi.sure.status()) as SureApiResult<SureCheckStatus> | null;
         if (!alive || !res?.ok) return;
+        setFixGate({
+          full: (res.value.runningAgents ?? 0) >= (res.value.agentCap ?? 3),
+          cap: res.value.agentCap ?? 3,
+        });
         if (res.value.task) {
           setProject(res.value.task.project);
           setStartedAt(res.value.task.startedAt);
@@ -422,11 +433,15 @@ export function AcceptancePage() {
                 <Button
                   size="sm"
                   onClick={() => void fixIt()}
-                  disabled={fixAgentId !== null}
+                  disabled={fixAgentId !== null || fixGate.full}
                   data-testid="acceptance-fix"
                 >
                   <Wand2 size={13} className="mr-1" />
-                  {fixAgentId ? '修复子代理运行中…' : '交给 AI 修复'}
+                  {fixAgentId
+                    ? '修复子代理运行中…'
+                    : fixGate.full
+                      ? `子代理并发已满(${fixGate.cap})…`
+                      : '交给 AI 修复'}
                 </Button>
                 <Button
                   variant="secondary"

@@ -117,6 +117,9 @@ async def test_start_streams_events_as_orphans(tmp_path):
     assert last is not None
     assert last["command"] == "check"
     assert last["details"]["report"]["totals"]["open_findings"] == 5
+    # 修复派发并发快照(与 spawn 闸同源):无会话/无代理时如实 0 + 默认上限 3
+    assert status["result"]["runningAgents"] == 0
+    assert status["result"]["agentCap"] == 3
 
 
 @pytest.mark.asyncio

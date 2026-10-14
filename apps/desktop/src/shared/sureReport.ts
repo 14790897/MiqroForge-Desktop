@@ -329,6 +329,10 @@ export interface SureCheckStatus {
   } | null;
   /** 最近一次完成任务的报告信封(切页/重开恢复用;从未有完成任务时为 null)。 */
   lastReport?: SureCheckEnvelope | null;
+  /** 最近活跃会话里未终结的子代理数(与修复派发的并发闸同源;快照,尽力而为)。 */
+  runningAgents?: number;
+  /** 该会话的子代理并发上限(与 runningAgents 配套;缺省 3)。 */
+  agentCap?: number;
 }
 
 /** `sure.fix.start` 的结果:修复子代理已启动(完成经 chat:subagent_result 回报)。 */
