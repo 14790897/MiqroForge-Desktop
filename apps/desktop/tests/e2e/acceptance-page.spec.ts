@@ -272,7 +272,10 @@ test.describe('验收(SURE)面板 E2E · 完整修复闭环(需真实子代理�
 
     const fixture = await launchElectronApp();
     try {
-      seedGatewayCredentials(fixture.miqiHome);
+      // 凭据通道二选一:默认复制平台网关凭据(有凭据文件 → 网关路由);
+      // 设 MIQI_E2E_NO_GATEWAY_SEED=1 则不复制——与 CI 同构,模型走
+      // config.json 的自带 provider(直连供应商,绕开平台网关)。
+      if (!process.env.MIQI_E2E_NO_GATEWAY_SEED) seedGatewayCredentials(fixture.miqiHome);
       await waitForBridgeInitialized(fixture.page, 30);
       // 修复子代理挂靠真实会话(阶段 4 的既有前提)
       await createNewConversation(fixture.page);
