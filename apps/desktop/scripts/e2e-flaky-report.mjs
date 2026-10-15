@@ -92,6 +92,15 @@ function formatDuration(ms) {
   return minutes ? `${minutes}m${String(rest).padStart(2, '0')}s` : `${seconds}s`;
 }
 
+/** 失败断言的位置，写成 `path/to/spec.ts:233:7`（基准同注解的 file=，方便直接检索）。 */
+function locationText(location, rootDir) {
+  if (!location?.file) return '';
+  const where = repoRelative(location.file, rootDir);
+  const line = location.line ? `:${location.line}` : '';
+  const column = location.column ? `:${location.column}` : '';
+  return `${where}${line}${column}`;
+}
+
 /**
  * 注解里的 file 要相对仓库根，才能挂到 PR 的文件视图上；spec.file 是相对 config.rootDir 的，
  * 所以基准取报告里的 rootDir，而不是 cwd。
@@ -160,7 +169,21 @@ function toEntry({ spec, test, titles }) {
       .map((result) => ({
         retry: result.retry,
         status: result.status,
+        // 用 undefined 表示「报告没带时长」，0 表示「真的跑了 0ms」—— 两者此前都被压成 0，
+        // 摘要里于是把「瞬间失败」显示得像「没有数据」。
+        duration: typeof result.duration === 'number' ? result.duration : undefined,
         error: firstLine(result.error?.message),
+        // 断言落在哪一行、那次尝试跑了多久：只给「错误首行」时，`expect(locator).toBeVisible()
+        // failed` 这类报错根本看不出是哪条断言、也没法区分「等不到」和「跑太慢」—— #1278 连续
+        // 三轮 flaky 全卡在这个盲区。Playwright 的 JSON 报告里 error.location 与 duration 都是
+        // 现成的，白留不如用上。
+        location: result.error?.location
+          ? {
+              file: result.error.location.file,
+              line: result.error.location.line,
+              column: result.error.location.column,
+            }
+          : null,
       })),
   };
 }
@@ -260,8 +283,11 @@ export function buildMarkdown(report) {
     const where = `${repoRelative(entry.file, rootDir)}:${entry.line}:${entry.column}`;
     lines.push(`- ${inlineCode(`${label(entry)}${where} › ${entry.title}`)}`);
     for (const attempt of entry.attempts) {
+      const took = attempt.duration === undefined ? '' : `（${formatDuration(attempt.duration)}）`;
       const suffix = attempt.error ? `：${inlineCode(attempt.error)}` : '';
-      lines.push(`  - 第 ${attempt.retry + 1} 次尝试 ${attempt.status}${suffix}`);
+      lines.push(`  - 第 ${attempt.retry + 1} 次尝试 ${attempt.status}${took}${suffix}`);
+      const at = locationText(attempt.location, rootDir);
+      if (at) lines.push(`    - 断言于 ${inlineCode(at)}`);
     }
   }
   // 报告内容由 PR 决定，清单长度不能跟着它无限涨 —— 截断处明确写出来，别让人以为只有这些。
@@ -278,10 +304,13 @@ export function buildAnnotations(report) {
   const rootDir = report?.config?.rootDir || process.cwd();
   return collectFlaky(report).map((entry) => {
     const failures = entry.attempts
-      .map(
-        (attempt) =>
-          `第 ${attempt.retry + 1} 次 ${attempt.status}${attempt.error ? `: ${attempt.error}` : ''}`
-      )
+      .map((attempt) => {
+        const at = locationText(attempt.location, rootDir);
+        return (
+          `第 ${attempt.retry + 1} 次 ${attempt.status}` +
+          `${attempt.error ? `: ${attempt.error}` : ''}${at ? ` @ ${at}` : ''}`
+        );
+      })
       .join('；');
     const props = [
       `file=${escapeProperty(repoRelative(entry.file, rootDir))}`,

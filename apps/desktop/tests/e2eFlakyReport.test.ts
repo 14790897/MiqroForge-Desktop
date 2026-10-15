@@ -47,11 +47,17 @@ function makeReport(overrides = {}) {
                       {
                         retry: 0,
                         status: 'failed',
+                        duration: 20000,
                         error: {
                           message:
                             'Error: expect(locator).toBeVisible() failed\n\n' +
                             'Locator: locator(\'[data-testid="file-preview-btn"]\').first()\n' +
                             'Timeout: 20000ms\nError: element(s) not found',
+                          location: {
+                            file: 'tests/e2e/issue-877-rich-preview.spec.ts',
+                            line: 121,
+                            column: 7,
+                          },
                         },
                       },
                       { retry: 1, status: 'passed', duration: 5321 },
@@ -143,12 +149,47 @@ describe('collectFlaky', () => {
     });
   });
 
-  it('只留真正失败的尝试，报错取首行（多行 Locator/Call log 不进摘要）', () => {
+  it('只留真正失败的尝试，报错取首行（多行 Locator/Call log 不进摘要），并带上断言落点与耗时', () => {
     const [entry] = collectFlaky(makeReport());
 
     expect(entry.attempts).toEqual([
-      { retry: 0, status: 'failed', error: 'Error: expect(locator).toBeVisible() failed' },
+      {
+        retry: 0,
+        status: 'failed',
+        duration: 20000,
+        error: 'Error: expect(locator).toBeVisible() failed',
+        location: {
+          file: 'tests/e2e/issue-877-rich-preview.spec.ts',
+          line: 121,
+          column: 7,
+        },
+      },
     ]);
+  });
+
+  it('CI 形态的绝对路径落点:走 repoRelative 的回退,不把 runner 路径打进摘要', () => {
+    // 真实 Playwright JSON 报告里 error.location.file 是**绝对路径**(spec.file 才是相对
+    // rootDir 的),而本地 fixture 一直是相对路径 + beforeEach 删掉 GITHUB_WORKSPACE,
+    // 于是 repoRelative 在 `if (!workspace || !file) return file` 就短路返回 ——
+    // 生产真正走的那条分支(绝对路径 + 仓库名切回)从来没被测过。这条补上。
+    const report = makeReport();
+    const runnerPath =
+      '/home/runner/work/MiqroForge-Desktop/MiqroForge-Desktop/tests/e2e/issue-877-rich-preview.spec.ts';
+    report.suites[0].suites[0].specs[0].tests[0].results[0].error.location = {
+      file: runnerPath,
+      line: 121,
+      column: 7,
+    };
+    process.env.GITHUB_WORKSPACE = '/home/runner/work/MiqroForge-Desktop/MiqroForge-Desktop';
+    process.env.GITHUB_REPOSITORY = 'miqro-org/MiqroForge-Desktop';
+    try {
+      const markdown = buildMarkdown(report);
+      expect(markdown).toContain('issue-877-rich-preview.spec.ts:121:7');
+      expect(markdown).not.toContain('/home/runner/work');
+    } finally {
+      delete process.env.GITHUB_WORKSPACE;
+      delete process.env.GITHUB_REPOSITORY;
+    }
   });
 
   it('没有 flaky 时返回空数组', () => {
@@ -171,7 +212,11 @@ describe('buildMarkdown', () => {
       '[electron] tests/e2e/issue-877-rich-preview.spec.ts:121:7 › issue #877 rich preview ' +
         '› DOCX preview renders headings and table structure'
     );
-    expect(markdown).toContain('第 1 次尝试 failed：`Error: expect(locator).toBeVisible() failed`');
+    expect(markdown).toContain(
+      '第 1 次尝试 failed（20s）：`Error: expect(locator).toBeVisible() failed`'
+    );
+    // 断言落点：没有它时，「哪条断言超时」只能靠猜。
+    expect(markdown).toContain('断言于 `tests/e2e/issue-877-rich-preview.spec.ts:121:7`');
     // 失败到底的用例由 Playwright 自己报，这一步只负责被重试掩盖的那些。
     expect(markdown).not.toContain('qraft-login-entry');
   });

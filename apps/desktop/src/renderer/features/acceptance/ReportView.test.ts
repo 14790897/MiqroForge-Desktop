@@ -8,9 +8,12 @@ function makeEnvelope(overrides?: {
   severity?: string;
   findings?: unknown[];
   notChecked?: unknown[];
+  command?: string;
+  repairs?: unknown[];
+  lifecycle?: unknown;
 }): SureCheckEnvelope {
   return {
-    command: 'check',
+    command: overrides?.command ?? 'check',
     exit_code: 1,
     outcome: 'not_green',
     protocol_version: 1,
@@ -74,6 +77,8 @@ function makeEnvelope(overrides?: {
           reason_explained: '未配置分析 provider。',
         },
       ],
+      repairs: (overrides?.repairs ?? []) as SureCheckEnvelope['details']['repairs'],
+      lifecycle: (overrides?.lifecycle ?? null) as SureCheckEnvelope['details']['lifecycle'],
     },
   };
 }
@@ -120,5 +125,50 @@ describe('ReportView', () => {
     expect(html).toContain('未运行');
     expect(html).toContain('未配置分析 provider。');
     expect(html).toContain('fp_test');
+  });
+
+  it('repair 信封渲染修复契约(必须修复/保留/验收/禁止走捷径/复核项)', () => {
+    const html = render(
+      makeEnvelope({
+        command: 'repair',
+        repairs: [
+          {
+            id: 'rep_1',
+            issue_id: 'fnd_1',
+            problem: '项目包含假支付令牌',
+            why_it_matters: '无法确认这部分工作。',
+            required_fix: ['允许 SURE 运行该检查后复核。'],
+            preserve: ['不得隐藏症状。'],
+            acceptance: ['重跑检查确认通过。'],
+            rechecks_that_must_pass: ['chk_noopfake'],
+            forbidden_shortcuts: ['只删观测输出不改代码路径。'],
+          },
+        ],
+      })
+    );
+    expect(html).toContain('修复契约(1)');
+    expect(html).toContain('项目包含假支付令牌');
+    expect(html).toContain('允许 SURE 运行该检查后复核。');
+    expect(html).toContain('不得隐藏症状。');
+    expect(html).toContain('重跑检查确认通过。');
+    expect(html).toContain('只删观测输出不改代码路径。');
+    expect(html).toContain('chk_noopfake');
+  });
+
+  it('recheck 信封渲染复审对比:已关闭/仍开放 + 关闭条件说明', () => {
+    const html = render(
+      makeEnvelope({
+        command: 'recheck',
+        lifecycle: {
+          closed: [{ id: 'f1', severity: 'Must fix', status: 'resolved', title: '已修复项' }],
+          still_open: [{ id: 'f2', severity: 'Must fix', status: 'open', title: '仍开放项' }],
+        },
+      })
+    );
+    expect(html).toContain('复审对比');
+    expect(html).toContain('已关闭');
+    expect(html).toContain('已修复项');
+    expect(html).toContain('仍开放项');
+    expect(html).toContain('全部通过'); // 关闭条件说明必须在场(防止"删标记=修好"的误读)
   });
 });

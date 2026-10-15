@@ -164,7 +164,11 @@ class RuntimeSession:
                 HookPoint.SESSION_START,
                 LifecycleHookContext(
                     hook_point=HookPoint.SESSION_START,
-                    data={"session_id": self.session_id},
+                    # 阶段5:workspace 一并下发(SURE 事件归属用,插件消费)
+                    data={
+                        "session_id": self.session_id,
+                        "workspace": str(self.services.workspace),
+                    },
                 ),
             )
 
@@ -241,12 +245,18 @@ class RuntimeSession:
         if self._hooks is not None:
             end_ctx = LifecycleHookContext(
                 hook_point=HookPoint.SESSION_END,
-                data={"session_id": self.session_id},
+                data={
+                    "session_id": self.session_id,
+                    "workspace": str(self.services.workspace),
+                },
             )
             await self._hooks.run(HookPoint.SESSION_END, end_ctx)
             stop_ctx = LifecycleHookContext(
                 hook_point=HookPoint.STOP,
-                data={"session_id": self.session_id},
+                data={
+                    "session_id": self.session_id,
+                    "workspace": str(self.services.workspace),
+                },
             )
             await self._hooks.run(HookPoint.STOP, stop_ctx)
 

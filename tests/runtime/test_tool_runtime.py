@@ -73,6 +73,34 @@ async def test_tool_runtime_executes_parallel_calls_through_orchestrator(
     assert fake_orchestrator.execute.await_count == 2
 
 
+@pytest.mark.asyncio
+async def test_execute_one_carries_workspace_from_turn():
+    """阶段5:执行上下文携带会话项目根(SURE 事件归属用)。"""
+    from pathlib import Path
+    from types import SimpleNamespace
+
+    captured = {}
+
+    class _CapturingOrchestrator:
+        async def execute(self, ctx):
+            captured["ctx"] = ctx
+            return ctx
+
+    runtime = ToolRuntime(orchestrator=_CapturingOrchestrator())
+    turn = SimpleNamespace(
+        turn_id="turn-1",
+        thread_id="thread-1",
+        agent_metadata=SimpleNamespace(name="main"),
+        session_id="c:s1",
+        workspace=Path("D:/work/proj"),
+    )
+    tool_call = SimpleNamespace(name="exec", id="call-1", arguments={})
+
+    await runtime.execute_one(turn, tool_call)
+
+    assert captured["ctx"].workspace == str(Path("D:/work/proj"))
+
+
 def test_tool_runtime_requires_orchestrator():
     """ToolRuntime raises RuntimeError when orchestrator is None."""
     with pytest.raises(RuntimeError, match="ToolRuntime requires a ToolOrchestrator"):

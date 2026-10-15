@@ -14,18 +14,24 @@ from pydantic import BaseModel, Field
 
 class SureCheckStartParams(BaseModel):
     project: str = Field(description="项目绝对路径(缺省/非绝对/不存在一律拒绝)")
+    command: str = Field(
+        default="check", description="check | repair | recheck(阶段 4:修复契约/复审对比)"
+    )
 
 
 class SureHealthResult(BaseModel):
     installed: bool
     binary: str | None
     version: str | None
+    #: 阶段 6(D3):与最低支持版本(≥0.1.2)的兼容判定;None = 无法判断
+    compatible: bool | None = None
     error: str | None
 
 
 class SureCheckStartResult(BaseModel):
     task_id: str = Field(serialization_alias="taskId")
     project: str
+    command: str
 
 
 class SureCheckCancelResult(BaseModel):
@@ -38,15 +44,27 @@ class SureTaskSnapshot(BaseModel):
     state: str
     elapsed_ms: int = Field(serialization_alias="elapsedMs")
     started_at: int = Field(serialization_alias="startedAt")
+    command: str
 
 
 class SureCheckStatusResult(BaseModel):
     task: SureTaskSnapshot | None
 
 
+class SureFixStartParams(BaseModel):
+    project: str = Field(description="项目绝对路径(缺省/非绝对/不存在一律拒绝)")
+
+
+class SureFixStartResult(BaseModel):
+    agent_id: str = Field(serialization_alias="agentId")
+    session_key: str = Field(serialization_alias="sessionKey")
+    project: str
+
+
 class SureCheckProgressEvent(BaseModel):
     task_id: str = Field(serialization_alias="taskId")
     project: str
+    command: str
     elapsed_ms: int = Field(serialization_alias="elapsedMs")
     state: str
 
@@ -54,6 +72,7 @@ class SureCheckProgressEvent(BaseModel):
 class SureCheckReportEvent(BaseModel):
     task_id: str = Field(serialization_alias="taskId")
     project: str
+    command: str
     envelope: dict[str, Any]
     elapsed_ms: int = Field(serialization_alias="elapsedMs")
 
@@ -61,6 +80,7 @@ class SureCheckReportEvent(BaseModel):
 class SureCheckFailedEvent(BaseModel):
     task_id: str = Field(serialization_alias="taskId")
     project: str
+    command: str
     message: str
     code: str
     stderr_tail: str | None = Field(default=None, serialization_alias="stderrTail")
@@ -69,6 +89,7 @@ class SureCheckFailedEvent(BaseModel):
 class SureCheckCancelledEvent(BaseModel):
     task_id: str = Field(serialization_alias="taskId")
     project: str
+    command: str
     elapsed_ms: int = Field(serialization_alias="elapsedMs")
 
 
@@ -77,6 +98,7 @@ SURE_METHOD_RESULT_MODELS: dict[str, type[BaseModel]] = {
     "sure.check.start": SureCheckStartResult,
     "sure.check.cancel": SureCheckCancelResult,
     "sure.check.status": SureCheckStatusResult,
+    "sure.fix.start": SureFixStartResult,
 }
 
 SURE_EVENT_MODELS: dict[str, type[BaseModel]] = {

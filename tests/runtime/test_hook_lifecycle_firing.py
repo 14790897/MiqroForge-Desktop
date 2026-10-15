@@ -386,6 +386,28 @@ async def test_session_fires_start_and_stop_hooks() -> None:
     assert HookPoint.STOP in recorder.points()
 
 
+@pytest.mark.asyncio
+async def test_session_hook_data_carries_workspace() -> None:
+    """阶段5:会话生命周期钩子数据携带项目根(SURE 事件归属用)。"""
+    hooks = HookRuntime()
+    seen: list[dict] = []
+
+    async def record(ctx) -> None:
+        seen.append(dict(ctx.data))
+
+    for point in (HookPoint.SESSION_START, HookPoint.STOP):
+        hooks.register(HookRegistration(point, "*", record))
+
+    services = _make_session_services(hooks)
+    session = RuntimeSession(services=services, hooks=hooks)
+
+    await session.start()
+    await session.stop()
+
+    assert seen, "生命周期钩子未触发"
+    assert all(item.get("workspace") == str(Path.cwd()) for item in seen)
+
+
 # ── AgentControl tests ────────────────────────────────────────────────────────
 
 @pytest.mark.asyncio
