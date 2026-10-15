@@ -222,7 +222,15 @@ class AgentJobRuntime:
             history = getattr(self.services, "history_runtime", None)
             if history is not None:
                 await history.ensure_initialized()
-            result = await self.services.turn_runner.run_agent_job(job)
+            # 会话身份随任务下传(2026-10-15):作业 turn 的 workspace 会被工具
+            # ctx 继承、再被 SURE 事件桥接当 project_root 发出——不传时作业
+            # 路径落到默认 "."，SURE 按设计拒收非绝对路径，子代理的工具事件
+            # 会整段静默丢失(本地与 CI 实测)。
+            result = await self.services.turn_runner.run_agent_job(
+                job,
+                workspace=self.services.workspace,
+                session_id=self.services.session_id,
+            )
             job.result = result.final_content
             job.status = "completed"
         except asyncio.CancelledError:

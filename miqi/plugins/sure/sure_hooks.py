@@ -83,7 +83,9 @@ async def _ingest(payload: dict, workspace: str | None) -> bool:
 
     返回 True 仅当事件**确认写入 SURE**(子进程退出码 0);未装、超时、
     异常、非零退出均返回 False——统计据此区分「写入成功」与「排空未
-    写入」(评审第 3 轮)。
+    写入」(评审第 3 轮)。退出码 1 是例外语义:那是「决策非放行」(block),
+    事件与决策其实已落库(2026-10-15 用真实 store 复现确认)——计数口径
+    不随之改,如实区分只做在日志文案里。
     """
     binary = resolve_sure_bin()
     if not binary:
@@ -135,12 +137,21 @@ async def _ingest(payload: dict, workspace: str | None) -> bool:
             timeout=INGEST_TIMEOUT_SECONDS,
         )
         if proc.returncode != 0:
-            # communicate 不因非零退出抛错:显式判退出码,才算「写入成功」
-            logger.debug(
-                "SURE hook ingest 退出码 {} (未写入): {}",
-                proc.returncode,
-                payload.get("event"),
-            )
+            # communicate 不因非零退出抛错:显式判退出码,才算「写入成功」。
+            # 退出码 1 不是写失败:SURE 的语义是「跑了,但答案不干净」= 决策
+            # 为 block——事件与决策都已落库(2026-10-15 复现确认),文案如实
+            # 区分,别把排查带向「写入失败」。
+            if proc.returncode == 1:
+                logger.debug(
+                    "SURE hook ingest 退出码 1(决策非放行,事件已记录): {}",
+                    payload.get("event"),
+                )
+            else:
+                logger.debug(
+                    "SURE hook ingest 退出码 {} (未写入): {}",
+                    proc.returncode,
+                    payload.get("event"),
+                )
             return False
         return True
     except asyncio.CancelledError:

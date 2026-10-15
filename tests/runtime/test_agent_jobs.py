@@ -10,7 +10,7 @@ def fake_services_for_jobs(fake_services):
     """Services fixture with a working turn_runner.run_agent_job mock."""
     from miqi.runtime.turn_runner import TurnResult
 
-    async def _fake_run_agent_job(job):
+    async def _fake_run_agent_job(job, **_kwargs):
         return TurnResult(
             final_content=f"Completed: {job.task}",
             messages=[{"role": "assistant", "content": f"Completed: {job.task}"}],
@@ -71,6 +71,28 @@ async def test_agent_job_completes_and_persists_result(fake_services_for_jobs):
     assert found["result_preview"]
 
 
+@pytest.mark.asyncio
+async def test_job_run_inherits_session_workspace_and_identity(fake_services):
+    """回归(2026-10-15):run_agent_job 曾只收到 job——作业 turn 的 workspace 落到
+    默认 "."，工具 ctx 继承它、SURE 事件桥接再把它当 project_root 发出，被 SURE
+    按设计拒收(非绝对路径、什么也不记录)，子代理的工具事件整段静默丢失
+    (本地与 CI 实测)。会话的 workspace/session_id 必须随任务下传。"""
+    from miqi.runtime.agent_jobs import AgentJobRuntime
+
+    captured: dict = {}
+
+    async def _capture(job, **kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(final_content="ok")
+
+    fake_services.turn_runner.run_agent_job = _capture
+    runtime = AgentJobRuntime(services=fake_services)
+    await runtime.start(agent_type="code-agent", task="t", parent_thread_id="main")
+    await asyncio.sleep(0.1)
+    assert captured["workspace"] == fake_services.workspace
+    assert captured["session_id"] == fake_services.session_id
+
+
 def test_the_stall_threshold_outlasts_the_measured_worst_case_wait():
     """看门狗阈值必须长于实测最坏的合法单次等待——采样点在这些等待里不动,
     合法与卡死对它没有区别。
@@ -113,7 +135,7 @@ async def test_a_job_initializes_a_history_runtime_the_session_never_started(tmp
     history = HistoryRuntime(tmp_path / "runtime.db", session_id="s-unstarted")
     seen: dict[str, bool] = {}
 
-    async def _run(job):
+    async def _run(job, **_kwargs):
         # 生产路径里回合的首个落库动作正是读这条连接;未 initialize 时抛
         # RuntimeError——就是 CI 里那行失败的原文。
         seen["conn"] = history._conn is not None
@@ -121,6 +143,7 @@ async def test_a_job_initializes_a_history_runtime_the_session_never_started(tmp
 
     services = SimpleNamespace(
         session_id="s-unstarted",
+        workspace=tmp_path,
         history_runtime=history,
         turn_runner=SimpleNamespace(run_agent_job=_run),
         agent_control=None,
@@ -154,7 +177,7 @@ async def test_stalled_job_is_failed_by_the_watchdog(fake_services):
 
     never = asyncio.Event()
 
-    async def _forever(job):
+    async def _forever(job, **_kwargs):
         await never.wait()
 
     fake_services.turn_runner.run_agent_job = _forever
@@ -235,7 +258,7 @@ async def test_agent_job_kill_aborts_running_job(fake_services_for_jobs):
     from miqi.runtime.agent_jobs import AgentJobRuntime
 
     # Use a blocking turn runner so the job stays "running"
-    async def _blocking(_job):
+    async def _blocking(_job, **_kwargs):
         await asyncio.sleep(10)
         from miqi.runtime.turn_runner import TurnResult
         return TurnResult(final_content="done", messages=[], tools_used=[])
@@ -295,7 +318,7 @@ async def test_persisted_job_survives_restart(tmp_path, fake_services_for_jobs):
     db_path = tmp_path / "agent_graph.db"
     store = AgentGraphStore(db_path)
 
-    async def _fake_run_agent_job(job):
+    async def _fake_run_agent_job(job, **_kwargs):
         return TurnResult(final_content="done", messages=[], tools_used=[])
 
     fake_services_for_jobs.turn_runner.run_agent_job = _fake_run_agent_job
