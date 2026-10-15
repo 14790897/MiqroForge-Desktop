@@ -1,3 +1,18 @@
+# [0.39.0](https://github.com/miqro-org/MiqroForge-Desktop/compare/v0.38.0...v0.39.0) (2026-10-15)
+
+
+### Features
+
+* **sure:** 修复闭环、事件桥接与交付验证(SURE 集成阶段 4+5+6) ([#1278](https://github.com/miqro-org/MiqroForge-Desktop/issues/1278)) ([6a1d600](https://github.com/miqro-org/MiqroForge-Desktop/commit/6a1d600ec714aa7b991496855f341371939e74f0)), closes [#7c3a6156](https://github.com/miqro-org/MiqroForge-Desktop/issues/7c3a6156) [#1185](https://github.com/miqro-org/MiqroForge-Desktop/issues/1185)
+
+---
+## 下载说明
+
+macOS 用户请按芯片架构选择安装包：
+
+- **Apple Silicon (M1/M2/M3/M4)**：下载 `0.39.0-arm64.dmg`（ARM 架构）
+- **Intel**：下载 `0.39.0.dmg`（x86 无后缀）
+
 # [0.38.0](https://github.com/miqro-org/MiqroForge-Desktop/compare/v0.37.0...v0.38.0) (2026-10-13)
 
 
