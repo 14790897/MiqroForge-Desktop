@@ -4,6 +4,7 @@ description: 用 heredoc 喂 Python 脚本做文件补丁会踩反斜杠转义�
 type: feedback
 ---
 
+
 在本机（Windows + Git Bash）用 `python - <<'EOF' ... EOF` 传脚本做字符串替换/文件补丁，多次踩坑：
 
 1. **两层解析**：bash heredoc（`<<'EOF'` 原样、`<<EOF` 展开 `$`/`\`）→ Python 字符串（`\U`/`\b`/`\n` 是转义序列）——Windows 路径 `C:\Users\...` 在非 raw 字符串里触发 "truncated \UXXXXXXXX escape" SyntaxError

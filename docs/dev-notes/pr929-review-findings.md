@@ -4,6 +4,7 @@ description: "PR #929（模型选择收口）max-effort 审查结论：15 条 fi
 type: project
 ---
 
+
 PR #929（feat(desktop): 模型选择收口 #835，2026-09-03 已合并 develop）经 max-effort 审查（10 角度 + 14 验证 + 缺口扫描）共 15 条 finding，全部 CONFIRMED/PLAUSIBLE，未修复。核心问题类：
 
 1. **安全**：内置企业共享密钥在聊天路径（factory.get_api_base）仍会发往遗留自定义 api_base，test 路径的钉端点守卫没覆盖聊天；收口后无任何应用内入口能清除遗留 base。

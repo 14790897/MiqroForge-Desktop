@@ -4,6 +4,7 @@ description: "issue #714 修复要点 — 最终方案为同回合并发确认�
 type: project
 ---
 
+
 issue #714（确认卡堆叠/僵尸卡）分两个 PR：
 
 **#716（已合入，部分被 #718 替换）**：前端 `resolved:false` → backendReleased（不恢复 pending，消除点击后反弹的僵尸卡循环，前端 IPC 异常恢复时需先删 resolved 副本避免双渲染）+ KUN 复核（dispatch 串行 + loop finally 对超时/取消/异常均发 resolved 事件）。gate 的"同回合并发拒绝"方案被用户否定——真实 LLM 一次发 3 张卡时后 2 张被自动取消，用户失去确认机会。
@@ -21,6 +22,6 @@ issue #714（确认卡堆叠/僵尸卡）分两个 PR：
 **踩坑**：
 - mock 循环变量遮蔽：`for tc in m["tool_calls"]` 遮蔽同名 `tc()` helper → `TypeError: 'dict' object is not callable`（修复：改名 call）
 - playwright webServer 3458 端口残留 → taskkill 后重试；长页面 fullPage 截图 30s 超时 → 加 timeout: 60_000；双 worker 并行两 Electron 实例 sendMessage 易 flake → `--workers=1`
-- `*.png` 被 gitignore，截图 `git add -f` 入 `docs/screenshots/<feature>/`，PR body 用 `https://github.com/14790897/MiqroForge-Desktop/raw/<branch>/docs/screenshots/...` 引用
+- `*.png` 被 gitignore，截图 `git add -f` 入 `docs/screenshots/<feature>/`，PR body 用 `https://github.com/14790897/MiQi/raw/<branch>/docs/screenshots/...` 引用
 
 相关：[confirm-card-two-runtime-map](confirm-card-two-runtime-map.md)、[legacy-main-path-only](legacy-main-path-only.md)
