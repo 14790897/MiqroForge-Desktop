@@ -354,9 +354,12 @@ test.describe('验收(SURE)面板 E2E · 完整修复闭环(需真实子代理�
 
       const notice = fixture.page.getByTestId('acceptance-fix-notice');
       // 窗口提到 LLM_TIMEOUT 只为与前一处口径一致。**但这条不是窗口问题**:
-      // 2026-10-15 本地实测给到 240s 仍等不到,且那一轮 app 日志里根本没有 sure.* 调用
-      // (只有 config.get / plugins.list 轮询)—— 派发压根没发生。加窗口治不了它,
-      // 留待产品侧定位(CI 上这条能过到更后面的「已关闭」,说明与本机的现象不同源)。
+      // 2026-10-15 本地实测给到 240s 也等不到 notice,原因查清了:那一轮 fixture
+      // 没有登录态——发送在 UI 侧被拦(chat.send 一次都没到桥接),核查与修复契约
+      // 照常跑完,而 sure.fix.start 因「没有可用的聊天会话,且自动建会话失败
+      // (No API key configured)」被拒,派发根本没被受理。这是本机环境(未登录),
+      // 不是产品缺陷;本机复现前先登录(helpers.browserLogin)。CI 上该用例能跑到
+      // 「已关闭」并(重试后)通过。
       await expect(notice).toBeVisible({ timeout: LLM_TIMEOUT });
 
       // 等真实子代理:完成/未成功完成如实分流,期间顺手批准审批卡。
