@@ -190,6 +190,16 @@ jobs:
           # 对应的两个 spec 自己声明关闭录屏/截图/追踪（手机号不进产物）。
           QRAFT_PHONE: ${{ secrets.QRAFT_PHONE }}
           QRAFT_PASSWORD: ${{ secrets.QRAFT_PASSWORD }}
+          # QRAFT_LIVE 门控的 live 用例（ai-gateway-live / gateway-creds-live）
+          # 靠这个开关点亮 —— 它此前在 CI 里**没有任何地方被设置**，这几条 spec
+          # 并入套件后其实一直是 skip（2026-10-15 复核发现）。两条 #1185 双账号
+          # 用例还需要 A/B 两份账号凭据（下面的 *_A/*_B）：secret 缺席时它们
+          # 如实 skip，存在即自动点亮。
+          QRAFT_LIVE: '1'
+          QRAFT_PHONE_A: ${{ secrets.QRAFT_PHONE_A }}
+          QRAFT_PASSWORD_A: ${{ secrets.QRAFT_PASSWORD_A }}
+          QRAFT_PHONE_B: ${{ secrets.QRAFT_PHONE_B }}
+          QRAFT_PASSWORD_B: ${{ secrets.QRAFT_PASSWORD_B }}
 
       - name: Summarize flaky E2E tests
         # #1107：flaky 清单就地汇总，报告**不离开这个 job**（上传 artifact / release asset 都会
