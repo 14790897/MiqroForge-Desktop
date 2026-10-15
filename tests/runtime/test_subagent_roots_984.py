@@ -180,6 +180,32 @@ class TestRunAgentJobTurn:
 # ── extraction guard in TurnRunner.run ───────────────────────────────────
 
 
+    @pytest.mark.asyncio
+    async def test_turn_inherits_session_workspace_and_id(self, monkeypatch) -> None:
+        """回归(2026-10-15):作业 turn 的 workspace/session_id 必须是会话真值——
+        工具 ctx 继承 turn.workspace，SURE 事件桥接把它当 project_root 发出；
+        落到默认 "." 时 SURE 按设计拒收(非绝对路径、什么也不记录)，子代理的
+        工具事件整段静默丢失(本地与 CI 实测)。"""
+        runner = _mk_runner()
+        captured: dict = {}
+
+        async def _fake_run(**kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace(final_content="ok")
+
+        monkeypatch.setattr(runner, "run", _fake_run)
+        job = AgentJob(
+            job_id="j", agent_type="code-agent", task="do it",
+            thread_id="th", parent_thread_id="p",
+        )
+        await runner.run_agent_job(
+            job, workspace=Path("/abs/session-ws"), session_id="sess-1"
+        )
+        turn = captured["turn"]
+        assert turn.workspace == Path("/abs/session-ws")
+        assert turn.session_id == "sess-1"
+
+
 class TestExtractionGuard:
     @pytest.mark.asyncio
     async def test_subagent_turn_does_not_extract(self, monkeypatch) -> None:

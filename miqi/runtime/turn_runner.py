@@ -1017,12 +1017,28 @@ class TurnRunner:
             reasoning_elapsed_s=reasoning_elapsed_s,
         )
 
-    async def run_agent_job(self, job: Any) -> TurnResult:
+    async def run_agent_job(
+        self,
+        job: Any,
+        *,
+        workspace: Path | None = None,
+        session_id: str = "",
+    ) -> TurnResult:
         """Run a sub-agent job through TurnRunner.
 
         Builds a TurnContext from the job metadata, resolves tools
         via the CapabilityResolver if available, and executes a
         single turn. Used by AgentJobRuntime._run().
+
+        ``workspace`` / ``session_id`` are the owning session's own values,
+        passed down by the job runtime — they must be the real ones. Tools
+        inherit ``turn.workspace`` into ``ToolExecutionContext.workspace``
+        (tool_runtime.execute_one), and the SURE event bridge sends that value
+        as the event's ``project_root``: a non-absolute one (the old
+        ``Path(".")`` fallback always won — no provider carries ``workspace``)
+        is refused by SURE by design, so every sub-agent tool event was
+        silently dropped (2026-10-15). The fallbacks remain only for callers
+        that pass neither.
         """
         from pathlib import Path
 
@@ -1034,7 +1050,8 @@ class TurnRunner:
             turn_id=job.job_id,
             agent_metadata=metadata,
             thread_id=job.thread_id,
-            workspace=getattr(self._provider, "workspace", Path(".")),
+            workspace=workspace or getattr(self._provider, "workspace", Path(".")),
+            session_id=session_id,
             model=self._provider.get_default_model(),
             provider=self._provider,
             execution_policy="edit",  # sub-agents default to normal approval flow
