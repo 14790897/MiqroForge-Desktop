@@ -169,7 +169,9 @@ function toEntry({ spec, test, titles }) {
       .map((result) => ({
         retry: result.retry,
         status: result.status,
-        duration: typeof result.duration === 'number' ? result.duration : 0,
+        // 用 undefined 表示「报告没带时长」，0 表示「真的跑了 0ms」—— 两者此前都被压成 0，
+        // 摘要里于是把「瞬间失败」显示得像「没有数据」。
+        duration: typeof result.duration === 'number' ? result.duration : undefined,
         error: firstLine(result.error?.message),
         // 断言落在哪一行、那次尝试跑了多久：只给「错误首行」时，`expect(locator).toBeVisible()
         // failed` 这类报错根本看不出是哪条断言、也没法区分「等不到」和「跑太慢」—— #1278 连续
@@ -281,7 +283,7 @@ export function buildMarkdown(report) {
     const where = `${repoRelative(entry.file, rootDir)}:${entry.line}:${entry.column}`;
     lines.push(`- ${inlineCode(`${label(entry)}${where} › ${entry.title}`)}`);
     for (const attempt of entry.attempts) {
-      const took = attempt.duration ? `（${formatDuration(attempt.duration)}）` : '';
+      const took = attempt.duration === undefined ? '' : `（${formatDuration(attempt.duration)}）`;
       const suffix = attempt.error ? `：${inlineCode(attempt.error)}` : '';
       lines.push(`  - 第 ${attempt.retry + 1} 次尝试 ${attempt.status}${took}${suffix}`);
       const at = locationText(attempt.location, rootDir);

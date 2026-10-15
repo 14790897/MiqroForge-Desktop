@@ -167,6 +167,31 @@ describe('collectFlaky', () => {
     ]);
   });
 
+  it('CI 形态的绝对路径落点:走 repoRelative 的回退,不把 runner 路径打进摘要', () => {
+    // 真实 Playwright JSON 报告里 error.location.file 是**绝对路径**(spec.file 才是相对
+    // rootDir 的),而本地 fixture 一直是相对路径 + beforeEach 删掉 GITHUB_WORKSPACE,
+    // 于是 repoRelative 在 `if (!workspace || !file) return file` 就短路返回 ——
+    // 生产真正走的那条分支(绝对路径 + 仓库名切回)从来没被测过。这条补上。
+    const report = makeReport();
+    const runnerPath =
+      '/home/runner/work/MiqroForge-Desktop/MiqroForge-Desktop/tests/e2e/issue-877-rich-preview.spec.ts';
+    report.suites[0].suites[0].specs[0].tests[0].results[0].error.location = {
+      file: runnerPath,
+      line: 121,
+      column: 7,
+    };
+    process.env.GITHUB_WORKSPACE = '/home/runner/work/MiqroForge-Desktop/MiqroForge-Desktop';
+    process.env.GITHUB_REPOSITORY = 'miqro-org/MiqroForge-Desktop';
+    try {
+      const markdown = buildMarkdown(report);
+      expect(markdown).toContain('issue-877-rich-preview.spec.ts:121:7');
+      expect(markdown).not.toContain('/home/runner/work');
+    } finally {
+      delete process.env.GITHUB_WORKSPACE;
+      delete process.env.GITHUB_REPOSITORY;
+    }
+  });
+
   it('没有 flaky 时返回空数组', () => {
     const report = makeReport();
     report.suites[0].suites[0].specs[0].tests[0].status = 'expected';

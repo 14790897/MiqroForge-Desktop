@@ -49,6 +49,23 @@ function cleanupDir(dir: string): void {
 }
 
 /**
+ * 临时 MIQI_HOME 的收尾策略,一处定义。
+ *
+ * CI 用 MIQI_E2E_KEEP_HOME=1 留住它 —— 「Bridge ingest anomalies」「Dump bridge logs」
+ * 两步读的正是 `<home>/workspace/logs/bridge-*.log`,无条件删掉等于把它们变成空转
+ * (这个 spec 的失败现场就在那份日志里)。此前这段策略在三条 afterAll/finally 里各写
+ * 一遍、写法还不一致,改一处漏一处。
+ */
+function disposeMiqiHome(miqiHome: string): void {
+  if (!miqiHome) return;
+  if (process.env.MIQI_E2E_KEEP_HOME) {
+    console.log(`[test] MIQI_E2E_KEEP_HOME=1,保留 ${miqiHome}`);
+    return;
+  }
+  cleanupDir(miqiHome);
+}
+
+/**
  * 从记录库的会话列表里认出**本轮**的会话:按 project_root 匹配本轮临时 home。
  *
  * 为什么不能用「不在 baseline 里、且 started_at 够新」:并发下(CI 的 4 workers、
@@ -64,47 +81,53 @@ function isOurSession(session: unknown, homeName: string): boolean {
 }
 
 /**
- * 本轮 app 实际执行过哪些工具 —— 取自桥接日志里 orchestrator 的执行记录
- * (`Tool execute: name=<tool>`)。
+ * 本轮 app 实际执行过哪些工具、成功与否 —— 取自桥接日志里 orchestrator 的执行记录
+ * (miqi/execution/orchestrator.py):
+ *   成功 → `Tool <name> done (Nms): result prefix=…`(DEBUG)
+ *   失败 → `Tool <name> execution failed (Nms): …`(WARNING)
  *
- * 为什么不用 UI 文本:工具卡的标题是 `工具调用 · N`(多调用折叠态),而
- * 「写入文件」这类字样恰恰会出现在**模型回复正文**里(2026-10-14 本机实测:
- * 正文「已将 … 写入文件：」把标签匹配骗过了),用文本判会在该静默时判红。
- * 日志里的执行记录才是 app 真做了什么。
+ * 为什么不用 UI 文本:工具卡标题是 `工具调用 · N`(多调用折叠态),而「写入文件」这类
+ * 字样恰恰会出现在**模型回复正文**里(2026-10-14 本机实测:正文「已将 … 写入文件：」
+ * 骗过了标签匹配)。日志里的执行记录才是 app 真做了什么。
  *
- * 两种 home 布局都扫:旧 `<home>/workspace/logs`,新 `<home>/accounts/<id>/workspace/logs`
- * (getWorkspacePath,见 src/main/ipc/workspace-path.ts)。
+ * 为什么区分成败:词表内工具**执行失败**时,桥接按设计只发 requested、不发 completed
+ * (sure_hooks.on_post_tool_use 对 status != SUCCESS 直接 return)——那不是回归;
+ * 成功执行却没有 completed 才是。
+ *
+ * 只扫 `<home>/workspace/logs`:E2E 的临时 home 没有活跃账号(launchElectronApp 不写
+ * accounts/.active、且 MIQI_LOGIN_BYPASS=1),workspace 解析恒为旧布局 —— 与 CI 两个
+ * 读日志的步骤同一个 glob。若将来布局变了,返回的 logsFound 会是 0,调用方据此**判红**
+ * 而不是跳过(见下方守卫),不会静默失明。
  */
-function readExecutedTools(miqiHome: string): string[] {
-  const files: string[] = [];
-  const collect = (dir: string) => {
-    try {
-      for (const entry of readdirSync(dir)) {
-        if (entry.startsWith('bridge-') && entry.endsWith('.log')) files.push(join(dir, entry));
-      }
-    } catch {
-      // 该布局不存在,跳过
-    }
-  };
-  collect(join(miqiHome, 'workspace', 'logs'));
+function readExecutedTools(miqiHome: string): {
+  logsFound: number;
+  ok: Set<string>;
+  failed: Set<string>;
+} {
+  const dir = join(miqiHome, 'workspace', 'logs');
+  let files: string[] = [];
   try {
-    for (const account of readdirSync(join(miqiHome, 'accounts'))) {
-      collect(join(miqiHome, 'accounts', account, 'workspace', 'logs'));
-    }
+    files = readdirSync(dir).filter(
+      (entry) => entry.startsWith('bridge-') && entry.endsWith('.log')
+    );
   } catch {
-    // 旧布局没有 accounts
+    // 目录不存在 → logsFound 0,由调用方判红
   }
-  const names = new Set<string>();
-  for (const file of files) {
+  const ok = new Set<string>();
+  const failed = new Set<string>();
+  let readable = 0;
+  for (const entry of files) {
     let content = '';
     try {
-      content = readFileSync(file, 'utf8');
+      content = readFileSync(join(dir, entry), 'utf8');
     } catch {
-      continue;
+      continue; // 读不了这份就跳过;一份都读不到时 logsFound 为 0 → 判红
     }
-    for (const m of content.matchAll(/Tool execute: name=([A-Za-z0-9_]+)/g)) names.add(m[1]);
+    readable += 1;
+    for (const m of content.matchAll(/Tool ([A-Za-z0-9_]+) done \(/g)) ok.add(m[1]);
+    for (const m of content.matchAll(/Tool ([A-Za-z0-9_]+) execution failed \(/g)) failed.add(m[1]);
   }
-  return [...names];
+  return { logsFound: readable, ok, failed };
 }
 
 /**
@@ -141,15 +164,7 @@ test.describe.serial('SURE 事件桥接 E2E · 对话工具调用 → 真实 SUR
 
   test.afterAll(async () => {
     if (electronApp) await closeElectronApp(electronApp);
-    // 与「完整修复闭环」那条一致:Bridge ingest anomalies / Dump bridge logs 两步都要
-    // 读 <MIQI_HOME>/workspace/logs/bridge-*.log,而无条件删掉临时 home 等于把它们
-    // 变成空转 —— 本 spec 的失败恰恰是「UI 有工具卡但没有 tool.completed」,
-    // 现场就在那份日志里。CI 由工作流设 MIQI_E2E_KEEP_HOME=1。
-    if (miqiHome) {
-      if (process.env.MIQI_E2E_KEEP_HOME)
-        console.log(`[test] MIQI_E2E_KEEP_HOME=1,保留 ${miqiHome}`);
-      else cleanupDir(miqiHome);
-    }
+    disposeMiqiHome(miqiHome);
     // 清理本轮测试写进真实记录库的会话(尽力;失败只记日志不连累用例)
     if (sureBin) {
       if (!sureSessionId) {
@@ -217,17 +232,32 @@ test.describe.serial('SURE 事件桥接 E2E · 对话工具调用 → 真实 SUR
       // 查明**不是**这里的 ②,而是 spec 认错了会话(并发下按「新鲜度」捞到了 acceptance
       // 的会话,里面本来就没有 tool.completed)——见 isOurSession。② 仍是一个真实且独立
       // 的误报源(模型只用词表外工具时按设计静默),所以这个判据保留。
-      const executedTools = readExecutedTools(miqiHome);
-      const vocabularyExecuted = executedTools.filter((tool) => VOCABULARY.includes(tool));
-      if (vocabularyExecuted.length > 0) {
+      const executed = readExecutedTools(miqiHome);
+      // 读不到日志 ≠ 链路干净:判不了就不许按「前提不成立」滑过去(否则日志格式一改,
+      // 真回归会被静默降级成 skip)。
+      if (executed.logsFound === 0) {
         throw new Error(
-          `应用执行了词表内工具(${vocabularyExecuted.join(', ')}),但真实 SURE 记录里没有 tool.completed——疑似桥接回归`
+          '读不到本轮的桥接日志(<MIQI_HOME>/workspace/logs/bridge-*.log),无法判定这轮是否发生过桥接——不按「用例前提不成立」跳过'
+        );
+      }
+      const okVocabulary = [...executed.ok].filter((tool) => VOCABULARY.includes(tool));
+      if (okVocabulary.length > 0) {
+        throw new Error(
+          `应用成功执行了词表内工具(${okVocabulary.join(', ')}),但真实 SURE 记录里没有 tool.completed——疑似桥接回归`
+        );
+      }
+      const failedVocabulary = [...executed.failed].filter((tool) => VOCABULARY.includes(tool));
+      if (failedVocabulary.length > 0) {
+        // 执行失败的工具按设计只发 requested:这一轮的 completed 断言前提不成立。
+        test.skip(
+          true,
+          `词表内工具执行失败(${failedVocabulary.join(', ')})——按设计只发 requested 不发 completed,用例前提不成立`
         );
       }
       test.skip(
         true,
-        executedTools.length > 0
-          ? `真实模型本回合只执行了词表外工具(${executedTools.join(', ')})——按设计不上报,用例前提不成立`
+        executed.ok.size + executed.failed.size > 0
+          ? `真实模型本回合只执行了词表外工具(${[...executed.ok, ...executed.failed].join(', ')})——按设计不上报,用例前提不成立`
           : '真实模型本回合未调用工具——用例前提不成立'
       );
     }

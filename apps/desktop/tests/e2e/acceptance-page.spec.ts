@@ -55,6 +55,22 @@ function cleanupDir(dir: string): void {
   }
 }
 
+/**
+ * 临时 MIQI_HOME 的收尾策略,一处定义。
+ *
+ * CI 用 MIQI_E2E_KEEP_HOME=1 留住它 ——「Bridge ingest anomalies」「Dump bridge logs」
+ * 两步读的正是 `<home>/workspace/logs/bridge-*.log`,无条件删掉等于把它们变成空转。
+ * 此前这段策略在本文件里写了三遍、写法还各不相同(含一处把条件写反),改一处漏一处。
+ */
+function disposeMiqiHome(miqiHome: string): void {
+  if (!miqiHome) return;
+  if (process.env.MIQI_E2E_KEEP_HOME) {
+    console.log(`[test] MIQI_E2E_KEEP_HOME=1,保留 ${miqiHome}`);
+    return;
+  }
+  cleanupDir(miqiHome);
+}
+
 async function openAcceptance(p: Page): Promise<void> {
   const settingsBtn = p.locator('[data-testid="nav-system-settings"]');
   await expect(settingsBtn).toBeVisible({ timeout: 15_000 });
@@ -115,14 +131,7 @@ test.describe.serial('验收(SURE)面板 E2E · 真实 SURE', () => {
 
   test.afterAll(async () => {
     if (electronApp) await closeElectronApp(electronApp);
-    // 同「完整修复闭环」:CI 用 MIQI_E2E_KEEP_HOME=1 留住临时 home —— 桥接日志
-    // (<MIQI_HOME>/workspace/logs/bridge-*.log)是 Bridge ingest anomalies / Dump
-    // bridge logs 两步的唯一现场,无条件删掉等于让那两步空转。
-    if (miqiHome) {
-      if (process.env.MIQI_E2E_KEEP_HOME)
-        console.log(`[test] MIQI_E2E_KEEP_HOME=1,保留 ${miqiHome}`);
-      else cleanupDir(miqiHome);
-    }
+    disposeMiqiHome(miqiHome);
     // 清理本轮真实 check/recheck 写进 SURE 记录库的会话(真实命令,尽力而为):
     // ① check/recheck 以测试项目为 project_root;② 桥接事件以会话工作区为 project_root
     if (sureBin) {
@@ -236,6 +245,13 @@ const NO_KEY_SKIP =
  */
 test.describe('验收(SURE)面板 E2E · 模型评估(需真实 key)', () => {
   test('面板检查 → 第 8 阶段真实评估 + Model assessment 发现项', async () => {
+    // 本用例串了三次真实等待:报告 180s + 两次 LLM_TIMEOUT(各 240s)= 660s,超过
+    // electron 项目 600s 的默认用例上限(playwright.config.ts)。不抬高上限的话,
+    // 第三条断言的窗口永远走不满,失败会显示成 "Test timeout exceeded" 而不是断言
+    // 本身的错,还会白搭一次 Electron 重启 + 真实 SURE check 的重试。仓库既有写法
+    // 同此(delivery-path-truth / session-workspace-isolation / task-assets 均
+    // test.setTimeout(LLM_TIMEOUT * 2))。
+    test.setTimeout(LLM_TIMEOUT * 2);
     if (!process.env.SURE_OPENAI_API_KEY) test.skip(true, NO_KEY_SKIP);
     const sureBin = findRealSureBin();
     if (!sureBin) test.skip(true, NO_SURE_SKIP);
@@ -278,11 +294,7 @@ test.describe('验收(SURE)面板 E2E · 模型评估(需真实 key)', () => {
       const del = runSureJson(sureBin, ['history', 'delete', '--project', project]);
       console.log(`[test] 清理记录(${project}): outcome=${del?.outcome ?? '<无输出>'}`);
       cleanupDir(project);
-      if (process.env.MIQI_E2E_KEEP_HOME) {
-        console.log(`[test] MIQI_E2E_KEEP_HOME=1,保留 ${fixture.miqiHome}`);
-      } else {
-        cleanupDir(fixture.miqiHome);
-      }
+      disposeMiqiHome(fixture.miqiHome);
     }
   });
 });
@@ -386,9 +398,7 @@ test.describe('验收(SURE)面板 E2E · 完整修复闭环(需真实子代理�
       const del = runSureJson(sureBin, ['history', 'delete', '--project', project]);
       console.log(`[test] 清理记录(${project}): outcome=${del?.outcome ?? '<无输出>'}`);
       cleanupDir(project);
-      // 调试开关:保留临时 home 以便翻子代理的运行日志
-      if (!process.env.MIQI_E2E_KEEP_HOME) cleanupDir(fixture.miqiHome);
-      else console.log(`[test] MIQI_E2E_KEEP_HOME=1,保留 ${fixture.miqiHome}`);
+      disposeMiqiHome(fixture.miqiHome);
     }
   });
 });

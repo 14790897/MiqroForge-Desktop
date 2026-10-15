@@ -126,9 +126,17 @@ jobs:
       # 装依赖 / 装官方 SURE / 装 Playwright / 构建 renderer / 生成 config.json
       # 收在 .github/actions/e2e-app-setup（与 sure-e2e 共用同一份，避免 config.json
       # 的 provider 配置抄成两份后漂移）。
+      #
+      # 引用写**绝对 ref（@develop）而不是 `./`**：本 job 由 pull_request_target 触发，
+      # 工作流定义取自 base 分支，而 `uses: ./…` 是由 **checkout 出来的那份代码**解析的
+      # —— 一个在本次合入之前就开着的 PR，其 head 里根本没有这个新 action，checkout 又
+      # 正是那个 head（见上面的 ref:），步骤会以 "Can't find 'action.yml'" 失败，
+      # electron-e2e 这个必需检查会红到作者同步 develop 为止。写 @develop 则与
+      # 「工作流取自 base」同源，新老 PR 一律可用；代价是 PR 内对 action.yml 的改动
+      # 不会在 electron-e2e 里生效 —— 这正是本 job 的信任模型（YAML 归 base）。
       - name: E2E app setup (deps + official SURE + config.json)
         if: env.E2E_TRUSTED == 'true'
-        uses: ./.github/actions/e2e-app-setup
+        uses: miqro-org/MiqroForge-Desktop/.github/actions/e2e-app-setup@develop
         with:
           install-sure: 'true'
           deepseek-api-key: ${{ secrets.DEEPSEEK_API_KEY }}
@@ -264,9 +272,10 @@ jobs:
       # .github/actions/e2e-app-setup（三个 job 共用同一份，避免 config.json 的
       # provider 配置抄成三份后漂移）。install-sure: false —— 官方 SURE 产物只有
       # Linux 版，macOS 侧本就没装。
+      # 引用写绝对 ref 的理由同 electron-e2e（pre-existing 的 PR head 里没有这个 action）。
       - name: E2E app setup (deps + Playwright + renderer + config.json)
         if: env.E2E_TRUSTED == 'true'
-        uses: ./.github/actions/e2e-app-setup
+        uses: miqro-org/MiqroForge-Desktop/.github/actions/e2e-app-setup@develop
         with:
           install-sure: 'false'
           deepseek-api-key: ${{ secrets.DEEPSEEK_API_KEY }}

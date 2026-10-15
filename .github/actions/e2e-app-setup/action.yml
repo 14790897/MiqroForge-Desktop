@@ -2,20 +2,13 @@ name: 'E2E app setup'
 description: 'Electron E2E 共用的应用侧准备：装依赖 →（可选）装官方 SURE → 装 Playwright → 构建 renderer → 生成 config.json'
 author: 'MiQi'
 
-# 为什么抽成复合动作（而不是在每个 job 里各留一份）：
-# electron-e2e / macos-e2e（desktop-ci.yml）与 sure-e2e（sure-e2e.yml）此前各有**一份
-# 逐字相同**的 32 行 config.json heredoc（实测三份互 diff 为空），外加 Install
-# dependencies / Install Playwright browsers / Build renderer 三段同样的命令 —— 差异只
-# 有两处：electron-e2e 侧多一行 `if: env.E2E_TRUSTED == 'true'`，以及 macOS 侧不装
-# bubblewrap（本动作用 RUNNER_OS 判断）。
-# config.json 是这几个 job 里唯一「内容必须与 app 严格同源」的东西：provider 字段或
-# agents.defaults 一改 schema，抄多份就必然改一漏一 —— 而 sure-e2e 恰恰是那个「必须真实
-# AI」的 job，配置漂移的表现是模型走错端点/模型名，要么假红，要么看着正常、跑的却不是
-# 被测配置。
+# electron-e2e / macos-e2e（desktop-ci.yml）与 sure-e2e（sure-e2e.yml）共用的应用侧准备。
+# 抽出来是为了单源化那份 ~/.forge/config.json —— 它是这几个 job 里唯一「内容必须与 app
+# 严格同源」的东西，抄几份就会改一漏一（漂移的表现是假红，或看着正常却跑的不是被测配置）。
 #
 # 信任边界不变：本动作由调用方 checkout 出来的那份代码解析，与该 job 早已执行的 PR 代码
-# 同源；门禁仍由调用方负责（electron-e2e 用步骤级 if: env.E2E_TRUSTED，sure-e2e 用
-# job 级 if）。
+# 同源；门禁由调用方负责（electron-e2e / macos-e2e 用步骤级 if: env.E2E_TRUSTED，
+# sure-e2e 用 job 级 if）。
 
 inputs:
   working-directory:
@@ -32,7 +25,7 @@ inputs:
     description: 'web 搜索 provider 的密钥'
     required: true
   install-sure:
-    description: '是否安装官方 SURE v0.1.2（sha256 钉死，产物只有 Linux 版）。electron-e2e 传 true；sure-e2e 传 false —— 它要的是含 miqi 的 fork 构建，由该工作流自建；macos-e2e 传 false'
+    description: '是否安装官方 SURE v0.1.2（sha256 钉死，仅 Linux x86_64 产物；非 Linux runner 一律跳过）'
     required: false
     default: 'false'
 
@@ -53,7 +46,9 @@ runs:
         fi
 
     - name: 'Install SURE (official v0.1.2, checksum pinned)'
-      if: inputs.install-sure == 'true'
+      # 顺手按平台兜底：产物是 Linux x86_64、校验用 GNU sha256sum，macOS 上会以
+      # 「command not found」这种与真实原因无关的方式炸掉整个 setup 步骤。
+      if: inputs.install-sure == 'true' && runner.os == 'Linux'
       shell: bash
       # 验收面板 E2E 不 mock SURE（E2E 一律真实）：装官方 v0.1.2 的 Linux 产物、
       # 校验和钉死。未配置 analysis provider 时（面板 spawn 的白名单 env 没有密钥
