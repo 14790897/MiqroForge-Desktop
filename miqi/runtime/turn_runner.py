@@ -14,6 +14,7 @@ import asyncio
 import json
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Callable
 
@@ -1040,8 +1041,6 @@ class TurnRunner:
         silently dropped (2026-10-15). The fallbacks remain only for callers
         that pass neither.
         """
-        from pathlib import Path
-
         from miqi.runtime.agent_registry import AgentRegistry
         from miqi.runtime.turn_context import TurnContext
 

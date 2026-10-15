@@ -77,6 +77,8 @@ async def test_job_run_inherits_session_workspace_and_identity(fake_services):
     默认 "."，工具 ctx 继承它、SURE 事件桥接再把它当 project_root 发出，被 SURE
     按设计拒收(非绝对路径、什么也不记录)，子代理的工具事件整段静默丢失
     (本地与 CI 实测)。会话的 workspace/session_id 必须随任务下传。"""
+    from types import SimpleNamespace
+
     from miqi.runtime.agent_jobs import AgentJobRuntime
 
     captured: dict = {}
