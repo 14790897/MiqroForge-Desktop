@@ -125,8 +125,15 @@ test.describe.serial('验收(SURE)面板 E2E · 真实 SURE', () => {
     await waitForBridgeInitialized(page, 30);
     // 修复子代理挂靠一个真实聊天会话(空会话不落盘,spawn 需要真实会话)
     await createNewConversation(page);
+    // 这一轮是真实模型经平台网关,而「网关慢」是本仓记录过的正常情形:**一次**非流式
+    // 回退实测可达 600s(同文件「完整修复闭环」那条的 30 分钟窗口就是照这个值定的)。
+    // 默认 120s 会把「网关慢」判成失败 —— 2026-10-15 本地与 CI 都在这里红(报
+    // `回合在 120000ms 内没有结束`),而同一轮里桥接 spec 的回合是正常的。
+    // 给足预算;并把 beforeAll 自身的超时一并抬高,否则 hook 会先被项目 600s 上限掐掉,
+    // 报错又退化成看不出原因的超时。
+    test.setTimeout(LLM_TIMEOUT * 4);
     await sendMessage(page, '你好');
-    await waitForResponseComplete(page);
+    await waitForResponseComplete(page, LLM_TIMEOUT * 3);
   });
 
   test.afterAll(async () => {
@@ -218,11 +225,13 @@ test.describe.serial('验收(SURE)面板 E2E · 真实 SURE', () => {
     await page.getByTestId('acceptance-fix').click();
     // 真实子代理"已启动"即验证派发链路(通知出现);它实际跑多久、成败如何是
     // 真实系统的运行时行为(实测:同一契约下可能数分钟仍在跑)——不赌它的
-    // 时长;契约态的手动复核按钮一直在,两条路径在对比视图汇合
-    await expect(page.getByTestId('acceptance-fix-notice')).toBeVisible({ timeout: 15_000 });
+    // 时长;契约态的手动复核按钮一直在,两条路径在对比视图汇合。
+    // 窗口用 LLM_TIMEOUT:派发那一下 app 正忙(建会话、起子代理),15s 在 sure-e2e
+    // 那种 4 并发真实 Electron 的负载下偏紧(2026-10-15 本地就是卡在这 15s)。
+    await expect(page.getByTestId('acceptance-fix-notice')).toBeVisible({ timeout: LLM_TIMEOUT });
     await expect(page.getByTestId('acceptance-fix-notice')).toContainText(
       /修复子代理已启动|修复子代理已完成|修复子代理未成功完成/,
-      { timeout: 15_000 }
+      { timeout: LLM_TIMEOUT }
     );
     const recheckBtn = page.getByTestId('acceptance-recheck');
     if (await recheckBtn.isVisible().catch(() => false)) {
@@ -344,7 +353,11 @@ test.describe('验收(SURE)面板 E2E · 完整修复闭环(需真实子代理�
       await fixture.page.getByTestId('acceptance-fix').click();
 
       const notice = fixture.page.getByTestId('acceptance-fix-notice');
-      await expect(notice).toBeVisible({ timeout: 15_000 });
+      // 窗口提到 LLM_TIMEOUT 只为与前一处口径一致。**但这条不是窗口问题**:
+      // 2026-10-15 本地实测给到 240s 仍等不到,且那一轮 app 日志里根本没有 sure.* 调用
+      // (只有 config.get / plugins.list 轮询)—— 派发压根没发生。加窗口治不了它,
+      // 留待产品侧定位(CI 上这条能过到更后面的「已关闭」,说明与本机的现象不同源)。
+      await expect(notice).toBeVisible({ timeout: LLM_TIMEOUT });
 
       // 等真实子代理:完成/未成功完成如实分流,期间顺手批准审批卡。
       // 窗口 30 分钟——2026-10-13 实测:网关慢时一次非流式回退可达 600s,
