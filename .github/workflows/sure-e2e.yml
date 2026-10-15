@@ -130,18 +130,40 @@ jobs:
         env:
           PLAYWRIGHT_SKIP_WEB_SERVER: '1'
 
+      - name: Assert QRAFT login secrets are present
+        # acceptance 的真实登录段(QRAFT_LIVE=1)由这两个 secret 门控;缺失时
+        # 显式失败,避免「登录链路其实没跑」的绿色假象。与其它凭据同一信任边界:
+        # job 级 if 已限定同仓 head 分支,不受信任来源整个 job 不进来。
+        env:
+          QRAFT_PHONE: ${{ secrets.QRAFT_PHONE }}
+          QRAFT_PASSWORD: ${{ secrets.QRAFT_PASSWORD }}
+        run: |
+          if [ -z "$QRAFT_PHONE" ] || [ -z "$QRAFT_PASSWORD" ]; then
+            echo "::error::QRAFT_PHONE/QRAFT_PASSWORD secrets 缺失——真实登录用例会被跳过,按失败处理"
+            exit 1
+          fi
+
       - name: Run SURE E2E (acceptance + event bridge)
         run: |
           xvfb-run --auto-servernum \
             npx playwright test \
               tests/e2e/acceptance-page.spec.ts tests/e2e/sure-event-bridge.spec.ts \
               --config=playwright.config.ts --project=electron
-        timeout-minutes: 45
+        # 60 分钟(原 45):套件接入真实登录后模型调用走生产账号的平台网关路由
+        # (与本地同构),慢窗口下单回合可达 600s——acceptance 的等待预算就是照
+        # 这个值定的;45 分钟不再有足够余量。
+        timeout-minutes: 60
         env:
           PLAYWRIGHT_SKIP_WEB_SERVER: '1'
           # 失败诊断的前提：spec 的 afterAll 默认删掉临时 MIQI_HOME（连桥接日志
           # 一起），下面那步就只剩空 glob 可 dump（2026-10-14 实测）。留下它。
           MIQI_E2E_KEEP_HOME: '1'
+          # 真实账号登录(生产环境):acceptance 的登录段据此启用——本机与 CI 同
+          # 一条路(与 electron-e2e 的云端登录凭据同源;该 step 已被 job 级 if
+          # 限定为信任来源)。
+          QRAFT_LIVE: '1'
+          QRAFT_PHONE: ${{ secrets.QRAFT_PHONE }}
+          QRAFT_PASSWORD: ${{ secrets.QRAFT_PASSWORD }}
 
       - name: Dump bridge logs on failure (CI diagnostics)
         if: failure()

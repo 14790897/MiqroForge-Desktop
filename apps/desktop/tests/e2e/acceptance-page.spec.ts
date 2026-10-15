@@ -35,6 +35,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
+  browserLogin,
   LLM_TIMEOUT,
   closeElectronApp,
   createNewConversation,
@@ -69,6 +70,21 @@ function disposeMiqiHome(miqiHome: string): void {
     return;
   }
   cleanupDir(miqiHome);
+}
+
+/**
+ * QRAFT_LIVE=1 时先真实登录(生产账号)。本机跑必须:临时 MIQI_HOME 没有登录态,
+ * 发送会被登录门拦(chat.send 到不了桥接),修复派发也就没有会话可挂靠。
+ * CI 的 sure-e2e 注入同一凭据(与 electron-e2e 的云端登录 live 用例同源);
+ * 变量未设时原样继续 —— 走 CI 注入的 config.json provider 的场景不需要登录。
+ */
+async function loginWhenLive(p: Page, app: ElectronApplication): Promise<void> {
+  if (process.env.QRAFT_LIVE !== '1') return;
+  const loggedIn = p.getByText('已登录');
+  if (!(await loggedIn.isVisible({ timeout: 5_000 }).catch(() => false))) {
+    await browserLogin(p, app, process.env.QRAFT_PHONE ?? '', process.env.QRAFT_PASSWORD ?? '');
+  }
+  await expect(loggedIn).toBeVisible({ timeout: 90_000 });
 }
 
 async function openAcceptance(p: Page): Promise<void> {
@@ -119,9 +135,11 @@ test.describe.serial('验收(SURE)面板 E2E · 真实 SURE', () => {
     electronApp = fixture.electronApp;
     page = fixture.page;
     miqiHome = fixture.miqiHome;
-    // 「交给 AI 修复」是真实子代理:本机经平台网关(复制真实凭据),
-    // CI 走注入的 config.json provider(无凭据文件时静默跳过)
+    // 「交给 AI 修复」是真实子代理。凭据两条路:QRAFT_LIVE=1 时先真实登录
+    // (本机与 sure-e2e CI 同一凭据,走生产账号的平台网关路由);未设时沿用
+    // 注入的 config.json provider(网关凭据文件复制不到时静默跳过)。
     seedGatewayCredentials(miqiHome);
+    await loginWhenLive(page, fixture.electronApp);
     await waitForBridgeInitialized(page, 30);
     // 修复子代理挂靠一个真实聊天会话(空会话不落盘,spawn 需要真实会话)
     await createNewConversation(page);
@@ -338,6 +356,9 @@ test.describe('验收(SURE)面板 E2E · 完整修复闭环(需真实子代理�
       // 设 MIQI_E2E_NO_GATEWAY_SEED=1 则不复制——与 CI 同构,模型走
       // config.json 的自带 provider(直连供应商,绕开平台网关)。
       if (!process.env.MIQI_E2E_NO_GATEWAY_SEED) seedGatewayCredentials(fixture.miqiHome);
+      // 同第一个 describe:QRAFT_LIVE=1(本机 / sure-e2e CI)先真实登录——
+      // 否则发送被登录门拦、没有会话,派发必然 SURE_NO_SESSION(见下方 notice 注释)
+      await loginWhenLive(fixture.page, fixture.electronApp);
       await waitForBridgeInitialized(fixture.page, 30);
       // 修复子代理挂靠真实会话(阶段 4 的既有前提)
       await createNewConversation(fixture.page);
@@ -354,12 +375,12 @@ test.describe('验收(SURE)面板 E2E · 完整修复闭环(需真实子代理�
 
       const notice = fixture.page.getByTestId('acceptance-fix-notice');
       // 窗口提到 LLM_TIMEOUT 只为与前一处口径一致。**但这条不是窗口问题**:
-      // 2026-10-15 本地实测给到 240s 也等不到 notice,原因查清了:那一轮 fixture
-      // 没有登录态——发送在 UI 侧被拦(chat.send 一次都没到桥接),核查与修复契约
-      // 照常跑完,而 sure.fix.start 因「没有可用的聊天会话,且自动建会话失败
-      // (No API key configured)」被拒,派发根本没被受理。这是本机环境(未登录),
-      // 不是产品缺陷;本机复现前先登录(helpers.browserLogin)。CI 上该用例能跑到
-      // 「已关闭」并(重试后)通过。
+      // 2026-10-15 本地实测给到 240s 也等不到 notice,当天查清并修掉了根因——
+      // 那一轮 fixture 没有登录态:发送在 UI 侧被拦(chat.send 一次都没到桥接),
+      // 核查与修复契约照常跑完,而 sure.fix.start 因「没有可用的聊天会话,且自动
+      // 建会话失败(No API key configured)」被拒,派发根本没被受理。现在
+      // QRAFT_LIVE=1 时上面的 loginWhenLive 会先真实登录(本机与 sure-e2e 同一
+      // 凭据);CI 上该用例能跑到「已关闭」并(重试后)通过。
       await expect(notice).toBeVisible({ timeout: LLM_TIMEOUT });
 
       // 等真实子代理:完成/未成功完成如实分流,期间顺手批准审批卡。
