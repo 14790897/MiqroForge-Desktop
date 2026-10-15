@@ -189,6 +189,31 @@ async def test_with_retry_retries_httpx_readerror_then_succeeds() -> None:
     assert retries == [(1, ErrorKind.TRANSIENT)]
 
 
+def test_classify_error_stream_cut_assertion_is_transient() -> None:
+    """平台网关的 SSE 在消息完成前断开时,anthropic SDK 的 get_final_message()
+    以 AssertionError(__final_message_snapshot is None)收场(str 为空,任何
+    字符串分支都接不住;2026-10-13 修复子代理多轮实测)。这是"流被掐断"的
+    瞬态信号,必须可重试,而不是终态。"""
+    assert classify_error(AssertionError()) == ErrorKind.TRANSIENT
+
+
+async def test_with_retry_retries_stream_cut_assertion_then_succeeds() -> None:
+    """与 httpx.ReadError 同型:断言型断流第一次失败、重试成功。"""
+
+    calls = 0
+
+    async def factory() -> str:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise AssertionError()
+        return "ok"
+
+    result = await with_retry(factory, max_attempts=3, sleep=lambda _: asyncio.sleep(0))
+    assert result == "ok"
+    assert calls == 2
+
+
 async def test_with_retry_does_not_retry_fatal_error() -> None:
     """A FATAL-classified error must NOT be retried (control case)."""
 

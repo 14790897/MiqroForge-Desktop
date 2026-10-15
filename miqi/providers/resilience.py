@@ -406,6 +406,15 @@ def classify_error(exc: BaseException) -> ErrorKind:
     if by_message is not None:
         return by_message
 
+    # 平台网关的 SSE 在消息完成前断开时,anthropic SDK 的
+    # get_final_message() 以 AssertionError(__final_message_snapshot is None)
+    # 收场——str 为空,任何字符串/类型分支都接不住(2026-10-13 修复子代理
+    # 多轮实测,终态分类让流中断跳过了重试直接失败)。这是"流被掐断"的瞬态
+    # 信号:按可重试处理,重发一次通常就好;真断言型缺陷也只是多试一轮,
+    # 同一错误仍会如实浮出。
+    if isinstance(exc, AssertionError):
+        return ErrorKind.TRANSIENT
+
     return ErrorKind.FATAL
 
 

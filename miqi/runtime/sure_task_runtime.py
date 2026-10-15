@@ -6,8 +6,13 @@
   显式传参(避免 CLI 省略路径取进程 cwd 的坑);JSON 是**结束时的一份完整
   报告**,进度只发"运行中 + 已耗时"心跳——**不虚构阶段级进度**;
 - 子进程环境**白名单化**(SystemRoot/PATH/TEMP/LOCALAPPDATA/APPDATA/
-  USERPROFILE/SURE_BIN):不透传平台令牌、MIQI_* 等;SURE_OPENAI_API_KEY
-  不注入(面板不启用模型评估,记录为边界);
+  USERPROFILE/SURE_BIN/SURE_OPENAI_API_KEY/HOME/XDG_CONFIG_HOME/XDG_DATA_HOME):
+  不透传平台令牌、MIQI_* 等;SURE_OPENAI_API_KEY 是**用户自己的** SURE 分析凭据,
+  2026-10-13 起随白名单放行——面板检查因此随用户级 analysis 配置启用模型评估
+  (早先"不注入"的边界由该需求取代);HOME/XDG_* 是 2026-10-14 CI 实测的修复:
+  Linux 下 SURE 的用户配置/数据目录经它们解析(Windows 走已知文件夹;两键在
+  Windows 上不存在=无操作)——缺了它,CI 里面板 check 读不到 analysis 配置、
+  模型评估不出场(sure-e2e 首跑红);
 - 取消终止**整个进程树**(Windows ``taskkill /T /F``;POSIX 以
   ``start_new_session`` 分组后 killpg),取消不产出报告——与 CLI 语义一致
   (JSON 只在正常结束时发射)。
@@ -30,7 +35,13 @@ from typing import Any, Awaitable, Callable
 from loguru import logger
 
 from miqi.config.schema import resolve_sure_bin
-from miqi.runtime.sure_report import SureReportError, parse_check_output, parse_sure_version
+from miqi.runtime.sure_report import (
+    MIN_SUPPORTED_SURE_VERSION,
+    SureReportError,
+    parse_sure_output,
+    parse_sure_version,
+    version_at_least,
+)
 
 #: 进度心跳间隔(秒)。静默期也必须发,防 bridge 600s 空闲 drain(方案 §3 通道 B)。
 PROGRESS_INTERVAL_SECONDS = 5.0
@@ -48,6 +59,9 @@ STDIO_CHUNK_BYTES = 64 * 1024
 STDERR_TAIL_BYTES = 8 * 1024
 
 #: 子进程环境白名单(方案 §阶段 3 工程选型,已评审)。
+#: 2026-10-13:`SURE_OPENAI_API_KEY` 增补——面板启用模型评估,这是白名单里
+#: 唯一的用户凭据;平台令牌与 MIQI_* 依旧不透传(单测
+#: `test_env_whitelist_only_allows_named_vars` 同时锁定"放行"与"不泄漏")。
 _ENV_ALLOWLIST = (
     "SystemRoot",
     "PATH",
@@ -56,6 +70,13 @@ _ENV_ALLOWLIST = (
     "APPDATA",
     "USERPROFILE",
     "SURE_BIN",
+    "SURE_OPENAI_API_KEY",
+    # 2026-10-14:Linux 下 SURE 的用户配置/数据目录经 HOME/XDG_* 解析
+    # (Windows 走已知文件夹 API;这几个键在 Windows 上不存在=无操作)。
+    # CI 实测:sure-e2e 首跑里面板 check 读不到用户级 analysis 配置。
+    "HOME",
+    "XDG_CONFIG_HOME",
+    "XDG_DATA_HOME",
 )
 
 EventCallback = Callable[[str, dict], Awaitable[None]]
@@ -89,6 +110,7 @@ class SureTask:
     project: str
     started_monotonic: float
     started_at_ms: int
+    command: str = "check"  # check | repair | recheck(阶段 4)
     proc: asyncio.subprocess.Process | None = None
     cancelled: bool = False
     runner: asyncio.Task | None = None
@@ -203,6 +225,50 @@ async def _cleanup_probe_subprocess(proc: asyncio.subprocess.Process, binary: st
     _close_subprocess_transport(proc)
 
 
+async def _probe_supports_miqi(
+    binary: str, env: dict[str, str], spawn_kwargs: dict[str, Any], timeout: float
+) -> bool | None:
+    """``sure doctor`` 的集成清单是否列出 miqi(该构建含 MiQi 事件集成)。
+
+    易用性批次:把"官方构建不支持 hook ingest --source miqi"从静默失败变成
+    面板上的明确提示。探测失败(超时/异常/非零退出)返回 None「无法判断」,
+    绝不抛出;取消语义与 ``probe_sure_health`` 相同(清理后原样上抛)。
+    """
+    proc: asyncio.subprocess.Process | None = None
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            binary, "doctor",
+            env=env,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+            **spawn_kwargs,
+        )
+        stdout_b, _stderr_b = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        if proc.returncode != 0:
+            return None
+        text = (stdout_b or b"").decode("utf-8", errors="replace")
+        # doctor 的集成清单行形如 "  miqi   hooks that record ..."——按行首
+        # 匹配,避免路径等位置出现 miqi 子串时误报
+        return any(line.strip().startswith("miqi") for line in text.splitlines())
+    except asyncio.CancelledError:
+        if proc is not None:
+            try:
+                await _kill_process_tree(proc)
+            except Exception:
+                logger.debug("miqi 能力探测取消后清理子进程未成功")
+            _close_subprocess_transport(proc)
+        raise
+    except Exception:  # noqa: BLE001 —— 能力探测绝不抛出
+        if proc is not None and proc.returncode is None:
+            try:
+                await _kill_process_tree(proc)
+            except Exception:
+                logger.debug("miqi 能力探测异常后清理子进程未成功")
+        if proc is not None:
+            _close_subprocess_transport(proc)
+        return None
+
+
 async def probe_sure_health(
     *,
     bin_provider: Callable[[], str | None] | None = None,
@@ -231,6 +297,8 @@ async def probe_sure_health(
             "installed": False,
             "binary": None,
             "version": None,
+            "compatible": None,
+            "supports_miqi": None,
             "error": "未找到 SURE:请安装 SURE,或用 SURE_BIN 指向其可执行文件",
         }
     spawn_kwargs: dict[str, Any] = {}
@@ -262,6 +330,8 @@ async def probe_sure_health(
             "installed": False,
             "binary": binary,
             "version": None,
+            "compatible": None,
+            "supports_miqi": None,
             "error": f"无法运行 SURE:{exc}",
         }
     version = parse_sure_version((stdout_b or b"").decode("utf-8", errors="replace"))
@@ -270,9 +340,21 @@ async def probe_sure_health(
             "installed": False,
             "binary": binary,
             "version": version,
+            "compatible": None,
+            "supports_miqi": None,
             "error": f"SURE --version 退出码 {int(proc.returncode or 0)},二进制可能损坏",
         }
-    return {"installed": True, "binary": binary, "version": version, "error": None}
+    # 易用性批次:该构建是否含 MiQi 事件集成(doctor 清单行;失败折叠为 None)
+    supports_miqi = await _probe_supports_miqi(binary, builder(), spawn_kwargs, timeout)
+    return {
+        "installed": True,
+        "binary": binary,
+        "version": version,
+        # 阶段 6(D3):低于最低支持版本 → False;版本无法解析 → None(无法判断)
+        "compatible": version_at_least(version, MIN_SUPPORTED_SURE_VERSION),
+        "supports_miqi": supports_miqi,
+        "error": None,
+    }
 
 
 class SureTaskRuntime:
@@ -289,6 +371,8 @@ class SureTaskRuntime:
         self._env_builder = env_builder or build_sure_env
         self._progress_interval = progress_interval
         self._tasks: dict[str, SureTask] = {}
+        #: 每客户端最近一次完成任务的信封(阶段 4:修复流程取最近 repair 契约)
+        self._last_reports: dict[str, Any] = {}
 
     # ── 查询 ─────────────────────────────────────────────────────────────
 
@@ -308,19 +392,37 @@ class SureTaskRuntime:
             "state": "running",
             "elapsedMs": task.elapsed_ms(),
             "startedAt": task.started_at_ms,
+            "command": task.command,
         }
+
+    def last_report(self, client_id: str, *, command: str | None = None):
+        """最近一次完成任务的报告信封;可按命令过滤(阶段 4 修复流程用)。"""
+        envelope = self._last_reports.get(client_id)
+        if envelope is None:
+            return None
+        if command is not None and envelope.command != command:
+            return None
+        return envelope
 
     # ── 生命周期 ─────────────────────────────────────────────────────────
 
     async def start(
-        self, *, client_id: str, project: str, on_event: EventCallback
+        self,
+        *,
+        client_id: str,
+        project: str,
+        on_event: EventCallback,
+        command: str = "check",
     ) -> dict[str, Any]:
-        """启动一次核查;立即返回 {taskId, project},完成经 on_event 上报。
+        """启动一次 SURE 任务(check/repair/recheck);立即返回,完成经 on_event 上报。
 
         Raises:
-            SureBusyError: 该客户端已有核查在运行。
+            ValueError: 命令不在 check/repair/recheck 内。
+            SureBusyError: 该客户端已有任务在运行。
             SureUnavailableError: 探测不到或无法启动 SURE 二进制。
         """
+        if command not in ("check", "repair", "recheck"):
+            raise ValueError(f"unsupported SURE command: {command!r}")
         if self.active_for(client_id) is not None:
             raise SureBusyError(SureBusyError.USER_MESSAGE)
         binary = self._bin_provider()
@@ -332,6 +434,7 @@ class SureTaskRuntime:
             project=project,
             started_monotonic=time.monotonic(),
             started_at_ms=int(time.time() * 1000),
+            command=command,
         )
         self._tasks[task.task_id] = task
         spawn_kwargs: dict[str, Any] = {}
@@ -341,7 +444,7 @@ class SureTaskRuntime:
             spawn_kwargs["start_new_session"] = True  # 进程组 → killpg 可及全树
         try:
             task.proc = await asyncio.create_subprocess_exec(
-                binary, "check", project, "--format", "json",
+                binary, command, project, "--format", "json",
                 cwd=project,
                 env=self._env_builder(),
                 stdout=asyncio.subprocess.PIPE,
@@ -355,9 +458,13 @@ class SureTaskRuntime:
             self._run(task, on_event), name=f"sure-run:{task.task_id}"
         )
         logger.info(
-            "SURE 核查启动: {} project={} pid={}", task.task_id, project, task.proc.pid
+            "SURE 任务启动: {} command={} project={} pid={}",
+            task.task_id,
+            command,
+            project,
+            task.proc.pid,
         )
-        return {"taskId": task.task_id, "project": project}
+        return {"taskId": task.task_id, "project": project, "command": command}
 
     async def cancel(self, *, client_id: str) -> bool:
         """终止该客户端当前核查的进程树;取消不产出报告。
@@ -404,7 +511,12 @@ class SureTaskRuntime:
         assert proc is not None
 
         async def _emit(kind: str, data: dict[str, Any]) -> None:
-            payload = {"taskId": task.task_id, "project": task.project, **data}
+            payload = {
+                "taskId": task.task_id,
+                "project": task.project,
+                "command": task.command,
+                **data,
+            }
             try:
                 await on_event(kind, payload)
             except Exception:
@@ -513,7 +625,7 @@ class SureTaskRuntime:
             )
             return
         try:
-            envelope = parse_check_output(stdout)
+            envelope = parse_sure_output(stdout)
         except SureReportError as exc:
             tail = (stderr.strip() or stdout.strip())[-400:]
             message = str(exc)
@@ -528,6 +640,7 @@ class SureTaskRuntime:
             "sure_check_report",
             {"envelope": envelope.model_dump(mode="json"), "elapsedMs": task.elapsed_ms()},
         )
+        self._last_reports[task.client_id] = envelope
         logger.info(
             "SURE 核查完成: {} outcome={} exit={}",
             task.task_id,

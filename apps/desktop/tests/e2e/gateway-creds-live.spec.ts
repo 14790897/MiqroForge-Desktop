@@ -111,8 +111,13 @@ describeFn('网关凭据握手真实账号 live E2E (#1258)', () => {
       expect(handshake.aiGateway?.status).toBe('active');
       expect(String(handshake.aiGateway?.encryptedApiKey ?? '').length).toBeGreaterThan(0);
 
-      // 3. 拿掉握手文件 → 保存网关模型必须可重试，不能说模型不支持
-      rmSync(tokenFile, { force: true });
+      // 3. 拿掉握手文件 → 保存网关模型必须可重试，不能说模型不支持。
+      //    两条候选路径都清掉再判定：落点取决于账号是否认领存量共享工作区
+      //    (#1185),首次登录的同步存在短窗口双写——只删「第一个找到的」会留下
+      //    另一份,后端照样读得到,保存成功、firstError=null,偶发假失败
+      //    (2026-10-15 本地实测一次)。清干净再断言,消除这个竞态。
+      for (const p of candidates) rmSync(p, { force: true });
+      expect(candidates.filter((p) => existsSync(p))).toHaveLength(0);
       const firstError = await saveGatewayModel();
       expect(firstError).not.toBeNull();
       expect(firstError!).toContain('GATEWAY_CREDS_UNAVAILABLE');

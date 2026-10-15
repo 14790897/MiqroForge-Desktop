@@ -221,6 +221,10 @@ class RuntimeServices:
             approval_bypass=approval_bypass,
             exec_timeout_ms=_resolve_exec_timeout_ms(config),
             has_approval_responder=has_approval_responder,
+            # 阶段5 前置修复:共享同一 HookRuntime——PluginManager 把插件钩子
+            # 注册在这一个实例上,factory 自建私有实例会让插件注册的
+            # PRE_TOOL_USE/POST_TOOL_USE/PERMISSION_REQUEST 钩子永不触发。
+            hook_runtime=hook_runtime,
         )
 
         # Phase 52: shared agent graph persistence (created before AgentControl)

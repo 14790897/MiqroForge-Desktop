@@ -124,6 +124,21 @@ class HistoryRuntime:
         self._dbx = RuntimeDb(self.db_path, name="history", prepare=self._prepare)
         await self._dbx.open()
 
+    async def ensure_initialized(self) -> None:
+        """``initialize()``, but only when it has not already happened。
+
+        面向的调用方是**不掌握会话启动时序**的运行器:AgentJobRuntime 的作业
+        回合会经本对象落 turn,而会话自己只在 ``RuntimeSession.start()`` 里
+        initialize 一次——作业落在「建了没 start / start 未完成」的会话上时,
+        首个落库即 ``HistoryRuntime.initialize() must be called before use``
+        (2026-10-14 CI 实测:修复子代理派发 4 秒即 failed)。
+
+        幂等靠这道 ``_dbx is None`` 守卫,而不是重复调用 ``initialize()`` 本身
+        ——后者会无条件换掉现有连接(旧连接泄漏、旧库可能被双开)。
+        """
+        if self._dbx is None:
+            await self.initialize()
+
     @staticmethod
     async def _prepare(db: aiosqlite.Connection) -> None:
         db.row_factory = aiosqlite.Row

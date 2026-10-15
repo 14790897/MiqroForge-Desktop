@@ -123,58 +123,25 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Install dependencies
+      # 装依赖 / 装官方 SURE / 装 Playwright / 构建 renderer / 生成 config.json
+      # 收在 .github/actions/e2e-app-setup（与 sure-e2e 共用同一份，避免 config.json
+      # 的 provider 配置抄成两份后漂移）。
+      #
+      # 引用写**绝对 ref（@develop）而不是 `./`**：本 job 由 pull_request_target 触发，
+      # 工作流定义取自 base 分支，而 `uses: ./…` 是由 **checkout 出来的那份代码**解析的
+      # —— 一个在本次合入之前就开着的 PR，其 head 里根本没有这个新 action，checkout 又
+      # 正是那个 head（见上面的 ref:），步骤会以 "Can't find 'action.yml'" 失败，
+      # electron-e2e 这个必需检查会红到作者同步 develop 为止。写 @develop 则与
+      # 「工作流取自 base」同源，新老 PR 一律可用；代价是 PR 内对 action.yml 的改动
+      # 不会在 electron-e2e 里生效 —— 这正是本 job 的信任模型（YAML 归 base）。
+      - name: E2E app setup (deps + official SURE + config.json)
         if: env.E2E_TRUSTED == 'true'
-        run: |
-          npm ci
-          pip install uv
-          uv sync
-          sudo apt-get update -qq && sudo apt-get install -y -qq bubblewrap
-
-      - name: Install Playwright browsers
-        if: env.E2E_TRUSTED == 'true'
-        run: npx playwright install chromium --with-deps
-
-      - name: Build renderer
-        if: env.E2E_TRUSTED == 'true'
-        run: npm run build -- --logLevel warn
-
-      - name: Generate config.json
-        if: env.E2E_TRUSTED == 'true'
-        run: |
-          mkdir -p ~/.forge
-          cat > ~/.forge/config.json << 'CONFEOF'
-          {
-            "providers": {
-              "siliconflow": {
-                "apiKey": "${{ secrets.DEEPSEEK_API_KEY }}",
-                "apiBase": "${{ secrets.DEEPSEEK_API_BASE }}",
-                "extraHeaders": null
-              }
-            },
-            "agents": {
-              "defaults": {
-                "model": "deepseek-flash",
-                "maxTokens": 393216,
-                "temperature": 1,
-                "maxToolIterations": 10,
-                "runtime": "app_server"
-              },
-              "commandApproval": { "enabled": false }
-            },
-            "tools": {
-              "web": {
-                "search": {
-                  "provider": "brave",
-                  "apiKey": "${{ secrets.BRAVE_API_KEY }}",
-                  "maxResults": 3
-                },
-                "fetch": { "provider": "builtin" }
-              },
-              "exec": { "timeout": 30, "envPassthrough": [] }
-            }
-          }
-          CONFEOF
+        uses: miqro-org/MiqroForge-Desktop/.github/actions/e2e-app-setup@develop
+        with:
+          install-sure: 'true'
+          deepseek-api-key: ${{ secrets.DEEPSEEK_API_KEY }}
+          deepseek-api-base: ${{ secrets.DEEPSEEK_API_BASE }}
+          brave-api-key: ${{ secrets.BRAVE_API_KEY }}
 
       - name: AI connectivity probe — fail fast if provider unreachable
         if: env.E2E_TRUSTED == 'true'
@@ -223,6 +190,16 @@ jobs:
           # 对应的两个 spec 自己声明关闭录屏/截图/追踪（手机号不进产物）。
           QRAFT_PHONE: ${{ secrets.QRAFT_PHONE }}
           QRAFT_PASSWORD: ${{ secrets.QRAFT_PASSWORD }}
+          # QRAFT_LIVE 门控的 live 用例（ai-gateway-live / gateway-creds-live）
+          # 靠这个开关点亮 —— 它此前在 CI 里**没有任何地方被设置**，这几条 spec
+          # 并入套件后其实一直是 skip（2026-10-15 复核发现）。两条 #1185 双账号
+          # 用例还需要 A/B 两份账号凭据（下面的 *_A/*_B）：secret 缺席时它们
+          # 如实 skip，存在即自动点亮。
+          QRAFT_LIVE: '1'
+          QRAFT_PHONE_A: ${{ secrets.QRAFT_PHONE_A }}
+          QRAFT_PASSWORD_A: ${{ secrets.QRAFT_PASSWORD_A }}
+          QRAFT_PHONE_B: ${{ secrets.QRAFT_PHONE_B }}
+          QRAFT_PASSWORD_B: ${{ secrets.QRAFT_PASSWORD_B }}
 
       - name: Summarize flaky E2E tests
         # #1107：flaky 清单就地汇总，报告**不离开这个 job**（上传 artifact / release asset 都会
@@ -301,57 +278,19 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Install dependencies
+      # 装依赖 / 装 Playwright / 构建 renderer / 生成 config.json 收在
+      # .github/actions/e2e-app-setup（三个 job 共用同一份，避免 config.json 的
+      # provider 配置抄成三份后漂移）。install-sure: false —— 官方 SURE 产物只有
+      # Linux 版，macOS 侧本就没装。
+      # 引用写绝对 ref 的理由同 electron-e2e（pre-existing 的 PR head 里没有这个 action）。
+      - name: E2E app setup (deps + Playwright + renderer + config.json)
         if: env.E2E_TRUSTED == 'true'
-        run: |
-          npm ci
-          pip install uv
-          uv sync
-
-      - name: Install Playwright browsers
-        if: env.E2E_TRUSTED == 'true'
-        run: npx playwright install chromium --with-deps
-
-      - name: Build renderer
-        if: env.E2E_TRUSTED == 'true'
-        run: npm run build -- --logLevel warn
-
-      - name: Generate config.json
-        if: env.E2E_TRUSTED == 'true'
-        run: |
-          mkdir -p ~/.forge
-          cat > ~/.forge/config.json << 'CONFEOF'
-          {
-            "providers": {
-              "siliconflow": {
-                "apiKey": "${{ secrets.DEEPSEEK_API_KEY }}",
-                "apiBase": "${{ secrets.DEEPSEEK_API_BASE }}",
-                "extraHeaders": null
-              }
-            },
-            "agents": {
-              "defaults": {
-                "model": "deepseek-flash",
-                "maxTokens": 393216,
-                "temperature": 1,
-                "maxToolIterations": 10,
-                "runtime": "app_server"
-              },
-              "commandApproval": { "enabled": false }
-            },
-            "tools": {
-              "web": {
-                "search": {
-                  "provider": "brave",
-                  "apiKey": "${{ secrets.BRAVE_API_KEY }}",
-                  "maxResults": 3
-                },
-                "fetch": { "provider": "builtin" }
-              },
-              "exec": { "timeout": 30, "envPassthrough": [] }
-            }
-          }
-          CONFEOF
+        uses: miqro-org/MiqroForge-Desktop/.github/actions/e2e-app-setup@develop
+        with:
+          install-sure: 'false'
+          deepseek-api-key: ${{ secrets.DEEPSEEK_API_KEY }}
+          deepseek-api-base: ${{ secrets.DEEPSEEK_API_BASE }}
+          brave-api-key: ${{ secrets.BRAVE_API_KEY }}
 
       - name: AI connectivity probe (macOS) — fail fast if provider unreachable
         if: env.E2E_TRUSTED == 'true'

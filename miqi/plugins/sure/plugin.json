@@ -1,7 +1,7 @@
 {
   "name": "sure",
   "version": "0.1.0",
-  "description": "SURE 项目核查接入:注册本地 SURE 的 MCP 服务(5 个核查工具),并提供 /sure-check 快捷命令。核查结论一律以 SURE 报告为准。",
+  "description": "SURE 项目核查接入:注册本地 SURE 的 MCP 服务(5 个核查工具),提供 /sure-check 快捷命令,并把会话事件桥接给 SURE(sure hook ingest,观测级)。核查结论一律以 SURE 报告为准。",
   "author": "MiQroForge",
   "skills": [],
   "mcp_servers": [
@@ -16,5 +16,30 @@
     }
   ],
   "slash_commands": [],
-  "hooks": []
+  "hooks": [
+    {
+      "point": "session_start",
+      "match": "*",
+      "type": "module",
+      "target": "sure_hooks:on_session_start"
+    },
+    {
+      "point": "pre_tool_use",
+      "match": "*",
+      "type": "module",
+      "target": "sure_hooks:on_pre_tool_use"
+    },
+    {
+      "point": "post_tool_use",
+      "match": "*",
+      "type": "module",
+      "target": "sure_hooks:on_post_tool_use"
+    },
+    {
+      "point": "stop",
+      "match": "*",
+      "type": "module",
+      "target": "sure_hooks:on_stop"
+    }
+  ]
 }

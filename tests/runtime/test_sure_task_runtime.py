@@ -246,6 +246,14 @@ def test_env_whitelist_only_allows_named_vars():
         "SECRET_TOKEN": "leak-me-not",
         "MIQI_HOME": "leak-me-not",
         "OPENAI_API_KEY": "leak-me-not",
+        # 2026-10-13:面板启用模型评估——SURE 自己的分析凭据(用户自己的 key)
+        # 放行;通用 OPENAI_API_KEY 依旧被剥离(白名单只认 SURE 的变量名)。
+        "SURE_OPENAI_API_KEY": "user-sure-key",
+        # 2026-10-14:Linux 下 SURE 的用户配置/数据目录经 HOME/XDG_* 解析
+        # (CI 实测:缺了它面板 check 读不到 analysis 配置)。
+        "HOME": "/home/u",
+        "XDG_CONFIG_HOME": "/home/u/.config",
+        "XDG_DATA_HOME": "/home/u/.local/share",
     }
     env = build_sure_env(base)
     assert env == {
@@ -255,9 +263,19 @@ def test_env_whitelist_only_allows_named_vars():
         "LOCALAPPDATA": r"C:\lad",
         "APPDATA": r"C:\ad",
         "USERPROFILE": r"C:\u",
+        "SURE_OPENAI_API_KEY": "user-sure-key",
+        "HOME": "/home/u",
+        "XDG_CONFIG_HOME": "/home/u/.config",
+        "XDG_DATA_HOME": "/home/u/.local/share",
     }
+    assert "OPENAI_API_KEY" not in env
+    assert "MIQI_HOME" not in env
+    assert "SECRET_TOKEN" not in env
     # SURE_BIN 在白名单内(子进程兜底解析需要)
     assert build_sure_env({**base, "SURE_BIN": r"C:\sure.exe"})["SURE_BIN"] == r"C:\sure.exe"
+    # 环境里没有该 key 时不注入空值
+    without_key = {k: v for k, v in base.items() if k != "SURE_OPENAI_API_KEY"}
+    assert "SURE_OPENAI_API_KEY" not in build_sure_env(without_key)
 
 
 def test_mock_cli_emits_strict_utf8_json(tmp_path):
@@ -356,6 +374,47 @@ async def test_health_nonzero_exit_is_not_installed(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_health_reports_version_compatibility(tmp_path):
+    """阶段 6:健康检查给出兼容判定——低于最低支持版本 → False;达标 → True;
+    版本无法解析 → None(无法判断);未安装 → None(兼容性无意义)。"""
+    import miqi.runtime.sure_task_runtime as rt_mod
+
+    old_bin = _wrap_as_sure(tmp_path, "print('sure 0.0.9')\n")
+    res = await rt_mod.probe_sure_health(
+        bin_provider=lambda: old_bin,
+        env_builder=lambda: {**os.environ},
+        timeout=5.0,
+    )
+    assert res["installed"] is True
+    assert res["compatible"] is False
+
+    ok_bin = _wrap_as_sure(tmp_path, "print('sure 0.1.2')\n")
+    res = await rt_mod.probe_sure_health(
+        bin_provider=lambda: ok_bin,
+        env_builder=lambda: {**os.environ},
+        timeout=5.0,
+    )
+    assert res["compatible"] is True
+
+    unknown_bin = _wrap_as_sure(tmp_path, "print('no version here')\n")
+    res = await rt_mod.probe_sure_health(
+        bin_provider=lambda: unknown_bin,
+        env_builder=lambda: {**os.environ},
+        timeout=5.0,
+    )
+    assert res["installed"] is True
+    assert res["compatible"] is None
+
+    res = await rt_mod.probe_sure_health(
+        bin_provider=lambda: None,
+        env_builder=lambda: {**os.environ},
+        timeout=5.0,
+    )
+    assert res["installed"] is False
+    assert res["compatible"] is None
+
+
+@pytest.mark.asyncio
 async def test_health_cancellation_kills_child_process(tmp_path, monkeypatch):
     """协程被外部取消也必须终止并回收子进程,且取消语义原样上抛(外部评审 P2)。
 
@@ -403,3 +462,66 @@ async def test_health_cancellation_kills_child_process(tmp_path, monkeypatch):
         "取消后 stdout/stderr 管道传输必须已关闭——悬置的读流不会自行收尾,"
         "会拖到事件循环关闭后才被 GC(Windows proactor: unclosed transport)"
     )
+
+
+# ── 阶段 4:repair / recheck 命令 ─────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_repair_command_emits_contracts(fake_sure_bin, tmp_path):
+    events: list[tuple[str, dict]] = []
+
+    async def on_event(kind: str, data: dict) -> None:
+        events.append((kind, data))
+
+    rt = _runtime(fake_sure_bin)
+    started = await rt.start(
+        client_id="c1", project=str(tmp_path), on_event=on_event, command="repair"
+    )
+    assert started["command"] == "repair"
+    await _wait_for(events, ("sure_check_report",))
+
+    report = next(d for k, d in events if k == "sure_check_report")
+    assert report["command"] == "repair"
+    envelope = report["envelope"]
+    assert envelope["command"] == "repair"
+    repairs = envelope["details"]["repairs"]
+    assert len(repairs) == 5
+    assert repairs[0]["rechecks_that_must_pass"]
+    # 阶段 4:最近报告缓存(修复流程取契约用),按命令过滤
+    assert rt.last_report("c1", command="repair") is not None
+    assert rt.last_report("c1", command="check") is None
+
+
+@pytest.mark.asyncio
+async def test_recheck_command_emits_lifecycle(fake_sure_bin, tmp_path):
+    events: list[tuple[str, dict]] = []
+
+    async def on_event(kind: str, data: dict) -> None:
+        events.append((kind, data))
+
+    rt = _runtime(fake_sure_bin)
+    await rt.start(
+        client_id="c1", project=str(tmp_path), on_event=on_event, command="recheck"
+    )
+    await _wait_for(events, ("sure_check_report",))
+
+    report = next(d for k, d in events if k == "sure_check_report")
+    envelope = report["envelope"]
+    assert envelope["command"] == "recheck"
+    lifecycle = envelope["details"]["lifecycle"]
+    assert lifecycle["closed"] == []
+    assert len(lifecycle["still_open"]) == 5
+    assert report["command"] == "recheck"
+
+
+@pytest.mark.asyncio
+async def test_unknown_command_rejected(fake_sure_bin, tmp_path):
+    async def on_event(kind: str, data: dict) -> None:
+        pass
+
+    rt = _runtime(fake_sure_bin)
+    with pytest.raises(ValueError):
+        await rt.start(
+            client_id="c1", project=str(tmp_path), on_event=on_event, command="doctor"
+        )

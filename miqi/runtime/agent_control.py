@@ -612,6 +612,8 @@ class AgentControl:
                             # inherited from the parent TurnContext when available
                             client_id=turn_ctx.client_id,
                             session_id=turn_ctx.session_id,
+                            # 阶段5:项目根随上下文走(SURE 事件归属)
+                            workspace=str(getattr(turn_ctx, "workspace", "") or ""),
                         )
                         # #984: the legacy path no longer re-extracts roots
                         # from the spawn task text.  The task is model-authored
