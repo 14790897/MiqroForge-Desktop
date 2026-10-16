@@ -4,6 +4,7 @@ description: GitHub release immutability 开启后 v0.23.0 tag 被墓碑封锁�
 type: project
 ---
 
+
 2026-09-01 事故链：GitHub "Enable release immutability" 功能曾在本仓库开启。
 
 **症状：**

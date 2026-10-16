@@ -4,6 +4,7 @@ description: ask_user_confirm_card 确认卡功能的双路径实现地图——
 type: project
 ---
 
+
 确认卡功能（issue #646 / PR #711）的实现分布在两套运行时：
 
 **KUN 路径**（`miqi/kun_runtime/`）：loop.py 的 `await_user_input` 闭包（waiting_for_user 回合状态、事件键 camelCase：inputId/timeoutSeconds/allowRememberChoice）、user_input_gate.py（按 input_id keyed 的 pending 请求，`request()` 必须收到已宣告的 input_id 否则桌面 resolve miss）、tool_host.py 的 collab gate 拦截（`_execute_user_confirm`）、contracts.py 的 UserInputItem（snake_case 字段）/UserInputRequestedEvent（camelCase 字段）。

@@ -4,6 +4,7 @@ description: loguru add() 对 stream sink 拒绝 encoding 参数（只有路径 
 type: reference
 ---
 
+
 loguru `logger.add()` 的 `encoding` 关键字**只对路径 sink（str/PathLike）有效**；传入 `sys.stderr` 这类 stream sink 会直接 `TypeError: add() got an unexpected keyword argument 'encoding'`（0.7.3 源码：stream 分支读 `sink.encoding` 属性，kwargs 未消费即报错）。第一次修复中文编码崩溃时踩过这个坑，导致 bridge 启动即崩。
 
 **Why:** loguru 对已打开的流无法改编码，只能读流自身的 `encoding` 属性。

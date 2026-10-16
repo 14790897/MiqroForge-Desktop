@@ -4,7 +4,8 @@ description: E2E 环境（Electron 桥接）下每次 Git Bash 子进程 spawn �
 type: project
 ---
 
-E2E（`launchElectronApp` 起的 Electron 桥接 Python）里，**每一次** exec 子进程（Git Bash，`create_subprocess_exec(bash, "-c", ...)`）实际耗时约 25-30 秒——本机直接跑同样命令只要 0.1s，慢在 Electron 桥接环境下（疑似本机安全软件扫描新父进程链）。而 SandboxSelection 超时默认硬编码 30s（`SandboxPolicyEngine.default_timeout_ms`），exec 会在边界上随机超时（"命令在 30 秒后超时"）。
+
+MiQi E2E（`launchElectronApp` 起的 Electron 桥接 Python）里，**每一次** exec 子进程（Git Bash，`create_subprocess_exec(bash, "-c", ...)`）实际耗时约 25-30 秒——本机直接跑同样命令只要 0.1s，慢在 Electron 桥接环境下（疑似 Defender 扫描新父进程链）。而 SandboxSelection 超时默认硬编码 30s（`SandboxPolicyEngine.default_timeout_ms`），exec 会在边界上随机超时（"命令在 30 秒后超时"）。
 
 **Why:** issue #811 E2E 调试时，session 内 `rm -rf` 用例反复在 30s 超时与 29.9s 完成的边界上抖动，mock 驱动的多 exec 序列（mkdir → rm → ls）每步都要等 25-30s，整个 spec 单用例约 1.5 分钟。
 

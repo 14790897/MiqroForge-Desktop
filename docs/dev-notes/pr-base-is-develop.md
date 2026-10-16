@@ -4,6 +4,7 @@ description: "PRs target the develop branch; sync with develop via merge, not re
 type: project
 ---
 
+
 PRs must target `develop`, not `main`. Feature branches stay in sync with `develop` by **merging develop into the branch** (never rebasing).
 
 **Why:** `develop` is the integration branch that stays ahead of `main`. Targeting `main` drags in dozens of unrelated commits from the `develop..main` gap, making the PR diff unreadable and triggering unnecessary CI. 2026-08-10 user explicitly asked: 解决冲突优先使用 merge（已写入 github-workflow 技能的"冲突解决"一节）。PR 采用 **squash 合并**，因此特性分支内 merge develop 产生的合并提交会被 squash 掉，不会污染 develop 历史。

@@ -4,6 +4,7 @@ description: build/ 下的 license_*.txt 会同时被 NSIS 和 DMG 打包拾取�
 type: project
 ---
 
+
 electron-builder 的 buildResources（默认 `build/`）目录下名为 `license_<语言>.txt` / `eula_*.txt` 的文件会被**两个目标**按约定自动拾取：
 
 1. **NSIS**：生成按安装语言匹配的安装协议页（拒绝即终止安装）——#837 隐私协议页依赖此机制；

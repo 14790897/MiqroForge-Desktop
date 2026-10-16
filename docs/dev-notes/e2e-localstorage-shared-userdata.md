@@ -4,6 +4,7 @@ description: E2E 的 --user-data-dir 被 main 的 app.setPath 覆盖，localStor
 type: project
 ---
 
+
 dev 模式（!app.isPackaged）下 main/index.ts 会调用 `app.setPath('userData', %APPDATA%\miqi-desktop-dev\ws-<repoRoot哈希>)`，**覆盖**了 E2E helper 传入的 `--user-data-dir`。因此 localStorage（如 miqi:configReady、miqi:lastSession、#837 的 miqi:privacyConsentVersion）在同一 checkout 的所有 E2E 运行间共享，fresh userData 只隔离了 Chromium 缓存，不隔离 localStorage。
 
 **Why:** #837 隐私协议确认门的 E2E 第二次运行直接跳过门（第一次运行的同意状态残留在共享存储），排查发现是 setPath 覆盖导致。
