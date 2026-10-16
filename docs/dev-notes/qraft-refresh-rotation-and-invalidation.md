@@ -30,4 +30,4 @@ type: project
 - 探针脚本在 `%TEMP%\qraft-*.mjs`（refresh 语义/UA 登录/会话登出/并发数量/业务副作用/idle 阶梯/24h 探针），凭据只走 QRAFT_PHONE/QRAFT_PASSWORD 环境变量，日志全程脱敏
 - 平台错误形态：HTTP 200 + `{"code":500,...,"originalMessage":"SaOAuth2RefreshTokenException: 无效refresh_token: <token原文>"}`（会回显 token，必须脱敏）
 
-相关：[relogin-notification-feature-map](relogin-notification-feature-map.md)（失效告知三件套）、[real-account-features-need-live-e2e](real-account-features-need-live-e2e.md)、[qraft-test-account-credentials](qraft-test-account-credentials.md)
+相关：[relogin-notification-feature-map](relogin-notification-feature-map.md)（失效告知三件套）、[real-account-features-need-live-e2e](real-account-features-need-live-e2e.md)、qraft-test-account-credentials（内部笔记，未导出）

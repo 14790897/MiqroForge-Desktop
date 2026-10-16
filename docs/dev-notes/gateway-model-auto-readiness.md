@@ -19,4 +19,4 @@ type: project
 
 **CI 差异坑（PR #1173 首次 CI 暴露）**：CI 的 e2e workflow 有 `Generate config.json` 步骤，往 `~/.miqi/config.json` 注入 `providers.siliconflow`（**is_gateway=true**，带 secrets 里的真实 key）——`_model_provider_resolvable` 的「已配置网关兜底」分支会把 `anthropic/claude-opus-4-5` 这类模型判为**可解析**（本机 providers 为空时才是 false）。所以依赖「模型不可解析」的 E2E 用例（自动就绪、发送拦截）在 CI 上会翻转结果。夹具要用 `custom/*`（判定硬编码 false，任何 provider 配置下都不可解析）而不是 anthropic 默认值。排查手法：Python 内联复现 `_model_provider_resolvable(config, model)` 两种配置的返回值。
 
-相关：[real-account-features-need-live-e2e](real-account-features-need-live-e2e.md) [qraft-test-account-credentials](qraft-test-account-credentials.md) [platform-domain-migration](platform-domain-migration.md)（测试账号已在生产域名登录）
+相关：[real-account-features-need-live-e2e](real-account-features-need-live-e2e.md) qraft-test-account-credentials（内部笔记，未导出） [platform-domain-migration](platform-domain-migration.md)（测试账号已在生产域名登录）

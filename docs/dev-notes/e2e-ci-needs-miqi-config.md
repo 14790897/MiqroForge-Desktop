@@ -7,7 +7,7 @@ type: project
 
 应用主界面挂载以 `python.check().config_exists`（即 `~/.miqi/config.json` 是否存在）为准（`App.tsx` 的 `needsSetup` 判定）；不存在时停在「欢迎使用 MiQroForge Desktop … 使用默认配置，进入应用」首启动向导，`[data-testid="chat-input-container"]` 永不出现。
 
-**Why:** 2026-09-22 云端登录 live 流水线（[qraft-test-account-credentials](qraft-test-account-credentials.md)）首次 CI 运行 5/5 全挂：症状只有 `waitForInputReady` 60s 超时 + `App UI may still be loading`，渲染进程无任何报错——根因是该 workflow 没有像 desktop-ci.yml 的 electron-e2e 那样生成 `~/.miqi/config.json`（E2E helper 只把用户 home 的配置复制进 MIQI_HOME，CI runner 的 home 里没有）。
+**Why:** 2026-09-22 云端登录 live 流水线（qraft-test-account-credentials，内部笔记，未导出）首次 CI 运行 5/5 全挂：症状只有 `waitForInputReady` 60s 超时 + `App UI may still be loading`，渲染进程无任何报错——根因是该 workflow 没有像 desktop-ci.yml 的 electron-e2e 那样生成 `~/.miqi/config.json`（E2E helper 只把用户 home 的配置复制进 MIQI_HOME，CI runner 的 home 里没有）。
 
 **How to apply:**
 - 2026-09-22 起 E2E helper 已自愈：`waitForInputReady` 检测到向导会点「使用默认配置，进入应用」带入主界面，卡住时抛明确错误（不再是泛指超时）——本机新环境无需手动建配置

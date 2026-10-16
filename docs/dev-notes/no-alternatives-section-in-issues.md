@@ -9,4 +9,4 @@ type: feedback
 
 **Why:** 用户 2026-09-08 明确指示「以后不需要提供备选方案」；备选方案是给产品权衡用的，用户已直接拍板需求，写了也是冗余。
 
-**How to apply:** 写 issue body 时跳过备选方案；若模板/CI 不强制，其余节照常。关联 [github-workflow 技能](github-workflow 技能.md)。
+**How to apply:** 写 issue body 时跳过备选方案；若模板/CI 不强制，其余节照常。关联 `github-workflow` 技能。

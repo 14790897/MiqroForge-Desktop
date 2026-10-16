@@ -9,4 +9,4 @@ Electron 主进程 `net.fetch(url, {redirect:'manual'})` 在目标响应为 302 
 
 **修复（PR #925，2026-09-03）**：`apps/desktop/src/main/qraft/ipc.ts` 的 `netFetchWithManualFallback` —— 仅当 `redirect:'manual'` 且报错含 "Redirect was cancelled" 时回退 Node 内置 fetch（undici，manual 语义正确返回 302），其余请求仍走 net.fetch（系统代理支持）。登录 cookie 由 QraftClient 显式经 Cookie 头携带，回退不影响凭据。
 
-**相关**：#916（2026-09-03）已把设置页 "Qraft 平台" 标签更名 "MiQroForge 平台"，E2E 选择器要 `filter({ hasText: /MiQroForge/ })`；真实扣费链路 E2E 见 [points-billing-feature-map](points-billing-feature-map.md)（billing-live.spec.ts opt-in，凭据环境变量注入）。
+**相关**：#916（2026-09-03）已把设置页 "Qraft 平台" 标签更名 "MiQroForge 平台"，E2E 选择器要 `filter({ hasText: /MiQroForge/ })`；真实扣费链路 E2E 见 points-billing-feature-map（内部笔记，未导出）（billing-live.spec.ts opt-in，凭据环境变量注入）。
