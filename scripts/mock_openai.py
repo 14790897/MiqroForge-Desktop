@@ -22,6 +22,7 @@ import json
 import os
 import re
 import socketserver
+import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 EXEC_TITLE = "确认执行方案？"
@@ -293,6 +294,19 @@ class Handler(BaseHTTPRequestHandler):
             (str(m.get("content", "")) for m in reversed(messages) if m.get("role") == "user"),
             "",
         )
+        # ── 生成中状态 e2e:响应前先睡指定毫秒(前缀 MOCK_SLOW:<ms>:,同受 env gate 控制) ──
+        # 用来制造一个稳定的「回合正在进行」窗口:desktop 在发出 chat.send 的
+        # 那一刻就把 streaming 置为 true(不等第一个 token),所以这里的 sleep
+        # 期间界面处于生成中。用于断言流式期的 UI(如「生成中铅笔置灰」)。
+        if os.environ.get("MIQI_MOCK_TEXT_REPLY") == "1":
+            _slow = re.search(r"MOCK_SLOW:(\d{1,6}):", last_user)
+            if _slow:
+                _ms = int(_slow.group(1))
+                print(f"  [mock] MOCK_SLOW → 先睡 {_ms}ms 再回复", flush=True)
+                time.sleep(_ms / 1000.0)
+                _reply = last_user.split(_slow.group(0), 1)[1].strip() or "慢回复内容"
+                self._respond(text(_reply))
+                return
         # ── 截图/UI e2e 分支:直接文本回复(前缀 MOCK_REPLY:,不影响其他流程) ──
         # 默认关闭(review:不污染默认 mock 行为)——截图 e2e 以环境变量
         # MIQI_MOCK_TEXT_REPLY=1 启动本服务时启用。

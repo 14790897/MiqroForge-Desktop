@@ -1591,6 +1591,30 @@ export function computeDropLastTurns(messages: Message[], fromUserIdx: number): 
   return n;
 }
 
+/** 编辑提交被拒的原因——handleEdit 的每条早退路径各带一个。 */
+export type EditFailureReason =
+  'streaming' | 'pending' | 'empty' | 'stale' | 'truncate-failed' | 'session-switched' | 'rejected';
+
+/** 编辑提交的结果。handleEdit 此前返回 void，调用方无从分辨成功与失败，
+ *  任何一条早退都会让编辑框照常关闭、用户刚写的文本无声消失。 */
+export type EditOutcome = { ok: true } | { ok: false; reason: EditFailureReason };
+
+/** reason → 编辑框下方那行提示文案。 */
+export function describeEditFailure(reason: EditFailureReason | undefined): string {
+  switch (reason) {
+    case 'streaming':
+      return '模型还在生成，先停止再编辑';
+    case 'pending':
+      return '上一条消息还没发出去，稍后再试';
+    case 'truncate-failed':
+      return '删除历史失败，改动未提交';
+    case 'session-switched':
+      return '已切换会话，改动未提交';
+    default:
+      return '改动未提交，请重试';
+  }
+}
+
 /** #886: convert backend interrupted-turn snapshots into resumable cards and
  *  insert each at its chronological position (right after its own user
  *  message, before the later successful turns) instead of appending at the
@@ -9506,27 +9530,38 @@ export function ChatConsole({
      原子化(外部审查 P1):发送前预检 pending guard;handleSend 若在同步段
      被拒(editSendOutcomeRef='rejected'),回滚截断恢复原消息列表。 */
   const handleEdit = useCallback(
-    async (original: Message, newText: string) => {
-      if (streaming) return;
+    async (original: Message, newText: string): Promise<EditOutcome> => {
+      // 生成中不给改。要让这里变成「先中断当前回答再重发」，得先修桥里一个
+      // 既有缺陷：AbortTurn 往共享事件队列塞的那条「Turn aborted」通知是
+      // terminal 形状的，被中断回合自己的排空任务一旦先行退出（它在读到第一个
+      // terminal 就 break），这条通知就滞留，被紧接着的下一条 chat.send 认领 →
+      // 那次发送以 `chat:send` rejected 收场（新回合其实跑成功了，是假失败）。
+      // 与编辑无关，「停止 → 立刻发」同样能踩到，单开分支修。这里只兜住
+      // 「编辑框已打开、之后才进入生成」这个窄窗口——铅笔此时已置灰。
+      if (streaming) return { ok: false, reason: 'streaming' };
+      const sendSessionKey = currentSessionRef.current;
       // 预检:同 session 有 pending 发送时不得截断(截断后必然被 handleSend 拒绝)
-      if (pendingSendIdsRef.current.has(currentSessionRef.current)) return;
+      if (pendingSendIdsRef.current.has(sendSessionKey)) {
+        return { ok: false, reason: 'pending' };
+      }
       const text = newText;
       // 仅用 trim 判空,不改变实际 payload(保留用户刻意换行/空格)
-      if (!text.trim()) return;
-      const sendSessionKey = currentSessionRef.current;
+      if (!text.trim()) return { ok: false, reason: 'empty' };
       const msgs = messagesRef.current;
       const idx = msgs.indexOf(original);
-      if (idx < 0) return;
+      if (idx < 0) return { ok: false, reason: 'stale' };
       const snapshot = msgs;
       // #1020: 先删后端(SessionManager)成功再截断渲染层，失败不动 UI。
       const drop = computeDropLastTurns(msgs, idx);
       try {
         await window.miqi.sessions.truncate(sendSessionKey, drop);
       } catch {
-        return;
+        return { ok: false, reason: 'truncate-failed' };
       }
       // await 期间侧栏可能切走会话——回查 key，切走则不动新会话状态。
-      if (currentSessionRef.current !== sendSessionKey) return;
+      if (currentSessionRef.current !== sendSessionKey) {
+        return { ok: false, reason: 'session-switched' };
+      }
       retryPayloadRef.current = {
         text,
         attachments: original.attachments ?? [],
@@ -9549,7 +9584,9 @@ export function ChatConsole({
         retryPayloadRef.current = null;
         setMessages(snapshot);
         editPendingRollbackRef.current = null;
+        return { ok: false, reason: 'rejected' };
       }
+      return { ok: true };
     },
     [streaming]
   );
@@ -10444,6 +10481,7 @@ export function ChatConsole({
                         toolStepIndex={toolStepByMsg.get(group.msg)}
                         isLast={i === chatGroups.length - 1}
                         streaming={streaming && i === lastAssistantIdx && assistantTailActive}
+                        sessionStreaming={streaming}
                         onResume={group.msg.interrupted ? handleResumeTurn : undefined}
                         onRestart={group.msg.interrupted ? handleRestartTurn : undefined}
                         reasoningMode={reasoningMode}
@@ -11818,8 +11856,14 @@ interface MessageBubbleProps {
   isLastToolRow?: boolean;
   /** web_search result text for this row (click-to-expand cards). */
   searchResults?: string;
-  /** 编辑用户消息并重新回答(#828)。 */
-  onEdit?: (msg: Message, newText: string) => void;
+  /** 编辑用户消息并重新回答(#828)。返回结果决定编辑框是否关闭。 */
+  onEdit?: (msg: Message, newText: string) => Promise<EditOutcome>;
+  /** 会话级 streaming，未窄化。铅笔据此真正置灰 —— 旧代码用的是窄化的
+   *  `streaming`（= `streaming && i === lastAssistantIdx && assistantTailActive`），
+   *  而 `lastAssistantIdx` 按定义指向 assistant 分组，对用户气泡恒为 false，
+   *  于是按钮永远可点、tooltip 永远说“可以改”，点了却什么也不发生。窄化的
+   *  那个仍要留着给流式 mermaid 源码预览用，不能动。 */
+  sessionStreaming?: boolean;
   /** #740: resume/restart an interrupted turn (half-generated reply).
    *  Takes the message (#1042) so the render site can pass its stable
    *  useCallback reference instead of building an inline lambda — that keeps
@@ -11854,6 +11898,7 @@ const MessageBubble = memo(function MessageBubble({
   copyIdx,
   sending,
   onEdit,
+  sessionStreaming,
   onResume,
   onRestart,
   reasoningMode,
@@ -11863,6 +11908,31 @@ const MessageBubble = memo(function MessageBubble({
   // 编辑态(#828):用户消息原地变输入框,提交后截断重发
   const [editing, setEditing] = useState(false);
   const [editText, setEditText] = useState('');
+  /** 编辑提交被拒的原因——保持编辑框打开时显示在底栏下方。 */
+  const [editError, setEditError] = useState<string | null>(null);
+  /** 提交进行中（等 sessions.truncate 与重发落地）。挡重复提交。 */
+  const [submitting, setSubmitting] = useState(false);
+
+  /** 提交编辑：只有 handleEdit 明确 ok 才关闭编辑框；被拒时保持打开并显示原因。
+   *  此前无条件 setEditing(false)，失败路径下用户刚写的字无声消失。 */
+  const submitEdit = async () => {
+    if (!onEdit) {
+      setEditing(false);
+      return;
+    }
+    setSubmitting(true);
+    try {
+      const r = await onEdit(msg, editText);
+      if (r?.ok) {
+        setEditing(false);
+        setEditError(null);
+      } else {
+        setEditError(describeEditFailure(r?.reason));
+      }
+    } finally {
+      setSubmitting(false);
+    }
+  };
   // Message action bar (copy/regenerate/feedback/sources) — restored from
   // #547 after #577 dropped the whole bar, leaving only a hover-only copy
   // button (#577 功能回归修复).  Feedback is persisted to localStorage
@@ -12649,45 +12719,56 @@ const MessageBubble = memo(function MessageBubble({
                       className="w-full resize-none rounded-lg px-3 py-2 text-sm bg-[var(--surface)] text-[var(--text)] border border-[var(--border)] focus:outline-none focus:border-[var(--accent)]"
                       style={{ lineHeight: 'var(--leading-relaxed)' }}
                       onKeyDown={(e) => {
-                        if (e.key === 'Escape') setEditing(false);
-                        if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+                        if (e.key === 'Escape' && !submitting) {
+                          setEditing(false);
+                          setEditError(null);
+                        }
+                        if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && !submitting) {
                           if (
                             editText.trim() !== '' &&
                             editText !== extractFileChips(msg.content).cleanContent
                           ) {
-                            onEdit?.(msg, editText);
+                            void submitEdit();
+                          } else {
+                            setEditing(false);
+                            setEditError(null);
                           }
-                          setEditing(false);
                         }
                       }}
                     />
                     <div className="flex items-center justify-end gap-2">
                       <button
-                        onClick={() => setEditing(false)}
-                        className="px-3 py-1.5 text-xs rounded-lg bg-[var(--surface)] text-[var(--text-muted)] hover:text-[var(--text)] transition-colors"
+                        onClick={() => {
+                          setEditing(false);
+                          setEditError(null);
+                        }}
+                        disabled={submitting}
+                        className="px-3 py-1.5 text-xs rounded-lg bg-[var(--surface)] text-[var(--text-muted)] hover:text-[var(--text)] disabled:opacity-40 transition-colors"
                       >
                         取消
                       </button>
                       <button
-                        onClick={() => {
-                          if (
-                            editText.trim() !== '' &&
-                            editText !== extractFileChips(msg.content).cleanContent
-                          ) {
-                            onEdit?.(msg, editText);
-                          }
-                          setEditing(false);
-                        }}
+                        onClick={() => void submitEdit()}
                         disabled={
                           editText.trim() === '' ||
-                          editText === extractFileChips(msg.content).cleanContent
+                          editText === extractFileChips(msg.content).cleanContent ||
+                          submitting
                         }
                         data-testid="edit-message-submit"
                         className="px-3 py-1.5 text-xs rounded-lg bg-[var(--accent)] text-white disabled:opacity-40 transition-opacity"
                       >
-                        重新回答
+                        {submitting ? '提交中…' : '重新回答'}
                       </button>
                     </div>
+                    {editError && (
+                      <div
+                        className="text-xs"
+                        style={{ color: '#ffd0d0' }}
+                        data-testid="edit-message-error"
+                      >
+                        {editError}
+                      </div>
+                    )}
                   </div>
                 ) : showRawOnError ? (
                   <div>
@@ -12826,13 +12907,14 @@ const MessageBubble = memo(function MessageBubble({
                   {onEdit && (
                     <button
                       onClick={() => {
+                        setEditError(null);
                         setEditing(true);
                         // 附件消息的 content 含序列化文件块 — 编辑器只带可见文本,
                         // 附件原样保留在 original.attachments(CodeRabbit #1011)
                         setEditText(extractFileChips(msg.content).cleanContent);
                       }}
-                      disabled={streaming}
-                      title={streaming ? '生成中,暂不可编辑' : '编辑并重新回答'}
+                      disabled={sessionStreaming}
+                      title={sessionStreaming ? '生成中，先停止再编辑' : '编辑并重新回答'}
                       aria-label="编辑并重新回答"
                       data-testid="edit-message-btn"
                       className="flex items-center justify-center w-7 h-7 rounded-lg bg-[var(--surface-muted)]/70 text-[var(--text-muted)] hover:bg-[var(--surface-muted)] hover:text-[var(--text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)] transition-colors disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-[var(--surface-muted)]/70"
@@ -13239,7 +13321,9 @@ function areMessageBubblePropsEqual(a: MessageBubbleProps, b: MessageBubbleProps
     // them is safe and closes the last gap in this comparator.
     a.onResume === b.onResume &&
     a.onRestart === b.onRestart &&
-    a.onEdit === b.onEdit
+    a.onEdit === b.onEdit &&
+    // sessionStreaming 决定铅笔是否置灰（生成中不给改）。
+    a.sessionStreaming === b.sessionStreaming
   );
 }
 
