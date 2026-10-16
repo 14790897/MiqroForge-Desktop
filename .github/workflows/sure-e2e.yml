@@ -214,10 +214,12 @@ jobs:
         # 只捞这几行、不做整份 tail —— 常态零行。
         #
         # 模式必须覆盖**四条**异常路径，不是三条：`SURE hook ingest 失败(静默跳过)`
-        # 是抛异常那条，而子进程**非零退出**走的是另一句
+        # 是抛异常那条，而子进程**非零退出**里真正的写失败是另一句
         # `SURE hook ingest 退出码 N (未写入)`（sure_hooks.py 的 _ingest）—— 后者才是最
         # 可能的真实写失败，漏掉它这一步就会在正需要它的时候报 「0 异常」。
-        # 用 `SURE hook ingest (失败|退出码)` 一次覆盖两者。
+        # 2026-10-15：`退出码 1` 不算异常——那是「决策非放行」(block)，事件与决策
+        # 其实已落库（日志文案已如实区分）。模式收窄到 `退出码 N (未写入)` 这一
+        # 具体形态，别再把它一起报进来。
         #
         # 报告必须同时给出「查了几份日志」：只看异常数时，「0」既可能是「都干净」，
         # 也可能是「一份日志都没找到」（glob 没命中 / home 被清）—— 两者含义天差地别
@@ -233,7 +235,7 @@ jobs:
             for f in "$d"/miqi-e2e-*/workspace/logs/bridge-*.log; do
               [ -e "$f" ] || continue
               logs=$((logs + 1))
-              hits=$(grep -E "SURE 事件队列已满|SURE hook ingest (失败|退出码)|SURE 事件队列排空超时" "$f" || true)
+              hits=$(grep -E "SURE 事件队列已满|SURE hook ingest (失败|退出码 [0-9]+ \(未写入\))|SURE 事件队列排空超时" "$f" || true)
               if [ -n "$hits" ]; then
                 hits_files=$((hits_files + 1))
                 echo "::group::bridge ingest anomalies: $f"
