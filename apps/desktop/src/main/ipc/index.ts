@@ -2514,6 +2514,10 @@ for m in ("pydantic", "httpx", "loguru"):
     return bridge.sendSafeWithError('sure.check.status');
   });
 
+  ipcMain.handle(IPC.SURE_CHECK_DISMISS, async () => {
+    return bridge.sendSafeWithError('sure.check.dismiss');
+  });
+
   ipcMain.handle(IPC.SURE_FIX_START, async (_event, payload: unknown) => {
     const raw = payload as { project?: unknown } | null | undefined;
     const project = raw?.project;

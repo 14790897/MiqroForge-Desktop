@@ -11,6 +11,7 @@ function makeEnvelope(overrides?: {
   command?: string;
   repairs?: unknown[];
   lifecycle?: unknown;
+  totals?: { checked: number; skipped: number; could_not_run: number; open_findings: number };
 }): SureCheckEnvelope {
   return {
     command: overrides?.command ?? 'check',
@@ -58,7 +59,7 @@ function makeEnvelope(overrides?: {
             is_critical: false,
           },
         ]) as SureCheckEnvelope['details']['report']['not_checked'],
-        totals: { checked: 0, skipped: 0, could_not_run: 5, open_findings: 5 },
+        totals: overrides?.totals ?? { checked: 0, skipped: 0, could_not_run: 5, open_findings: 5 },
       },
       stages: [
         {
@@ -99,6 +100,36 @@ describe('ReportView', () => {
     const notReady = render(makeEnvelope({ severity: 'not_ready' }));
     expect(notReady).toContain('尚未就绪');
     expect(notReady).not.toContain('检查不足,无法判断');
+  });
+
+  it('检查不足且三个计数全为零 → 显示「没有任何检查真正运行」的指引(2026-10-16 用户实测)', () => {
+    const html = render(
+      makeEnvelope({
+        severity: 'not_enough_checked',
+        findings: [],
+        notChecked: [],
+        totals: { checked: 0, skipped: 0, could_not_run: 0, open_findings: 0 },
+      })
+    );
+    expect(html).toContain('没有任何检查真正运行');
+    expect(html).toContain('请换一个真实项目目录后重试');
+  });
+
+  it('检查不足但计数不全为零(如"未能运行 5")→ 不显示该指引(签名不符,不误报原因)', () => {
+    const html = render(makeEnvelope({ severity: 'not_enough_checked' }));
+    expect(html).not.toContain('没有任何检查真正运行');
+  });
+
+  it('非「检查不足」的结论即使计数全零也不显示该指引', () => {
+    const html = render(
+      makeEnvelope({
+        severity: 'needs_attention',
+        findings: [],
+        notChecked: [],
+        totals: { checked: 0, skipped: 0, could_not_run: 0, open_findings: 0 },
+      })
+    );
+    expect(html).not.toContain('没有任何检查真正运行');
   });
 
   it('findings 完整渲染:标题/what/影响/下一步/锚点/状态', () => {

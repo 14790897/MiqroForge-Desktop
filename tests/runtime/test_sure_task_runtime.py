@@ -491,6 +491,12 @@ async def test_repair_command_emits_contracts(fake_sure_bin, tmp_path):
     # 阶段 4:最近报告缓存(修复流程取契约用),按命令过滤
     assert rt.last_report("c1", command="repair") is not None
     assert rt.last_report("c1", command="check") is None
+    # 2026-10-16:「关闭报告」清掉最近报告缓存(面板据此回到入口态,报告不再
+    # 被 status 恢复出来);清后如实回 None,幂等
+    rt.clear_last_report("c1")
+    assert rt.last_report("c1") is None
+    assert rt.last_report("c1", command="repair") is None
+    rt.clear_last_report("c1")  # 没有报告时再清一次不炸
 
 
 @pytest.mark.asyncio

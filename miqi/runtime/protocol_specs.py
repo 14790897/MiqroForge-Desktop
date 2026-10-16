@@ -713,6 +713,14 @@ SURE_CHECK_STATUS = model_spec(
     scope=MethodScope.CONNECTION,
     result_model=SURE_METHOD_RESULT_MODELS["sure.check.status"],
 )
+SURE_CHECK_DISMISS = model_spec(
+    "sure.check.dismiss",
+    EmptyParams,
+    scope=MethodScope.CONNECTION,
+    result_model=SURE_METHOD_RESULT_MODELS["sure.check.dismiss"],
+    description="丢弃最近一次完成报告(面板「关闭报告」按钮,幂等);"
+    "之后 status 不再带回该报告,不触碰运行中的任务。",
+)
 SURE_FIX_START = model_spec(
     "sure.fix.start",
     SureFixStartParams,

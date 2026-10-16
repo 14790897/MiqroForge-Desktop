@@ -38,6 +38,12 @@ class SureCheckCancelResult(BaseModel):
     ok: bool
 
 
+class SureCheckDismissResult(BaseModel):
+    """面板「关闭报告」:丢弃最近一次完成报告(幂等;无报告时也 ok)。"""
+
+    ok: bool
+
+
 class SureTaskSnapshot(BaseModel):
     task_id: str = Field(serialization_alias="taskId")
     project: str
@@ -98,6 +104,7 @@ SURE_METHOD_RESULT_MODELS: dict[str, type[BaseModel]] = {
     "sure.check.start": SureCheckStartResult,
     "sure.check.cancel": SureCheckCancelResult,
     "sure.check.status": SureCheckStatusResult,
+    "sure.check.dismiss": SureCheckDismissResult,
     "sure.fix.start": SureFixStartResult,
 }
 

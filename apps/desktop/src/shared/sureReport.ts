@@ -173,6 +173,11 @@ export function aggregateLabel(severity: string): string {
   return AGGREGATE_LABELS[norm(severity)] ?? severity;
 }
 
+/** 总体结论是否为「检查不足,无法判断」。 */
+export function isNotEnoughChecked(severity: string): boolean {
+  return norm(severity) === 'not_enough_checked';
+}
+
 export function findingTone(severity: string): Tone {
   switch (norm(severity)) {
     case 'must_fix':

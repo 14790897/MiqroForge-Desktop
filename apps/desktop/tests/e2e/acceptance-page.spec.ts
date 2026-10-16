@@ -326,6 +326,77 @@ test.describe('验收(SURE)面板 E2E · 模型评估(需真实 key)', () => {
   });
 });
 
+/**
+ * 2026-10-16 用户实测回归:指向没有项目结构的目录时,面板只显示「检查不足,
+ * 无法判断」,而且报告态没有关闭入口——「就一直显示在本页面」,切页再回来
+ * status 又把报告恢复出来,想换项目重查也无路可走。
+ *
+ * 复刻用户现场(单文件、无清单/README/TODO 的空壳目录),断言:
+ * ① 真实的「检查不足」+「没有任何检查真正运行」指引;
+ * ② 关闭报告回到入口态(项目输入框回来);
+ * ③ 切走再切回报告不复活——关闭清的是后端缓存,不只是本地状态。
+ */
+test.describe('验收(SURE)面板 E2E · 关闭报告与检查不足指引', () => {
+  test('空壳目录 → 检查不足 + 指引 → 关闭报告 → 切页不复活', async () => {
+    const sureBin = findRealSureBin();
+    if (!sureBin) test.skip(true, NO_SURE_SKIP);
+
+    // 用户现场同型:一个 py 文件,没有清单、没有 README 宣称、没有 TODO——
+    // SURE 如实判「没有检查真正运行」,绝不编造结论(该运行不写 SURE 记录库,
+    // 无记录可清)
+    const bare = mkdtempSync(join(tmpdir(), 'sure-accept-bare-'));
+    writeFileSync(
+      join(bare, 'pay.py'),
+      'def refund(order_id):\n    return {"status": "refunded"}\n'
+    );
+
+    const fixture = await launchElectronApp();
+    try {
+      await waitForBridgeInitialized(fixture.page, 30);
+      await openAcceptance(fixture.page);
+      await fixture.page.getByTestId('acceptance-project-input').fill(bare);
+      await fixture.page.getByTestId('acceptance-start').click();
+
+      await expect(fixture.page.getByTestId('acceptance-report')).toBeVisible({
+        timeout: 120_000,
+      });
+      await expect(fixture.page.getByText('检查不足,无法判断').first()).toBeVisible({
+        timeout: 15_000,
+      });
+      await expect(fixture.page.getByText(/没有任何检查真正运行/)).toBeVisible({
+        timeout: 15_000,
+      });
+      await fixture.page.screenshot({
+        path: 'test-results/acceptance-not-enough.png',
+        fullPage: true,
+      });
+
+      // 关闭报告 → 回到入口态(项目输入框回来,可以换目录重查)
+      await fixture.page.getByTestId('acceptance-dismiss').click();
+      await expect(fixture.page.getByTestId('acceptance-project-input')).toBeVisible({
+        timeout: 15_000,
+      });
+      await expect(fixture.page.getByTestId('acceptance-report')).toHaveCount(0);
+
+      // 切走再切回:报告不得复活(关闭写的是后端缓存,不只是本地状态)
+      await fixture.page.getByRole('button', { name: /返回任务/ }).click();
+      await openAcceptance(fixture.page);
+      await expect(fixture.page.getByTestId('acceptance-report')).toHaveCount(0);
+      await expect(fixture.page.getByTestId('acceptance-project-input')).toBeVisible({
+        timeout: 15_000,
+      });
+      await fixture.page.screenshot({
+        path: 'test-results/acceptance-after-dismiss.png',
+        fullPage: true,
+      });
+    } finally {
+      await closeElectronApp(fixture.electronApp);
+      cleanupDir(bare);
+      disposeMiqiHome(fixture.miqiHome);
+    }
+  });
+});
+
 const FULL_REPAIR_SKIP =
   '完整修复闭环需要真实子代理(分钟级)跑完——默认如实跳过,设 MIQI_E2E_FULL_REPAIR=1 显式启用';
 

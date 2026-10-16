@@ -4354,6 +4354,32 @@
       },
       {
         "deprecatedBy": null,
+        "description": "丢弃最近一次完成报告(面板「关闭报告」按钮,幂等);之后 status 不再带回该报告,不触碰运行中的任务。",
+        "emits": [],
+        "eventSchemas": {},
+        "method": "sure.check.dismiss",
+        "paramsSchema": {
+          "additionalProperties": true,
+          "type": "object"
+        },
+        "resultSchema": {
+          "additionalProperties": false,
+          "description": "面板「关闭报告」:丢弃最近一次完成报告(幂等;无报告时也 ok)。",
+          "properties": {
+            "ok": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "ok"
+          ],
+          "type": "object"
+        },
+        "scope": "connection",
+        "stability": "stable"
+      },
+      {
+        "deprecatedBy": null,
         "description": null,
         "emits": [
           "sure_check_progress",
@@ -6057,8 +6083,8 @@
   },
   "methodCounts": {
     "legacy": 81,
-    "total": 171,
-    "typed": 90
+    "total": 172,
+    "typed": 91
   },
   "schemaVersion": 1
 }
