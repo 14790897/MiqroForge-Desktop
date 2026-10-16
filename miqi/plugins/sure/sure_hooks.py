@@ -111,7 +111,7 @@ async def _ingest(payload: dict, workspace: str | None) -> bool:
                 env=build_sure_env(),
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.PIPE,
                 **spawn_kwargs,
             )
         )
@@ -130,16 +130,21 @@ async def _ingest(payload: dict, workspace: str | None) -> bool:
                 logger.debug("SURE ingest 取消后清理子进程失败(忽略)")
             _close_subprocess_transport(proc)
             raise
-        await asyncio.wait_for(
+        _out, err_bytes = await asyncio.wait_for(
             proc.communicate(json.dumps(payload, ensure_ascii=False).encode("utf-8")),
             timeout=INGEST_TIMEOUT_SECONDS,
         )
         if proc.returncode != 0:
-            # communicate 不因非零退出抛错:显式判退出码,才算「写入成功」
+            # communicate 不因非零退出抛错:显式判退出码,才算「写入成功」。
+            # stderr 必须留尾巴(2026-10-16:此前 DEVNULL 丢弃,退出码 5 的原因
+            # ——"The project directory was given as \".\""——花了一整轮外部复现
+            # 才找到;失败原因必须留在自家日志里)。
+            tail = " ".join((err_bytes or b"").decode("utf-8", "replace").split())[-300:]
             logger.debug(
-                "SURE hook ingest 退出码 {} (未写入): {}",
+                "SURE hook ingest 退出码 {} (未写入): {} — {}",
                 proc.returncode,
                 payload.get("event"),
+                tail or "<无 stderr 输出>",
             )
             return False
         return True

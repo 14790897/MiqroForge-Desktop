@@ -162,6 +162,7 @@ class TurnRunner:
         history_runtime: Any | None = None,
         hooks: HookRuntime | None = None,
         clock: Callable[[], float] | None = None,
+        workspace: Any | None = None,
     ):
         self._provider = provider
         self._running = False  # True while run() is executing (hot reload guard)
@@ -177,6 +178,8 @@ class TurnRunner:
         self._ledger = ledger_runtime
         self._history = history_runtime
         self._hooks = hooks
+        # 会话工作区(阶段5:子代理作业回合的 SURE 事件归属用;2026-10-16)
+        self._workspace = workspace
         # 假时钟注入点（#680 跟进）：单测传假时钟即可测 25s/30s 边界，
         # 无需 monkeypatch。
         self._clock = clock or time.monotonic
@@ -1034,7 +1037,13 @@ class TurnRunner:
             turn_id=job.job_id,
             agent_metadata=metadata,
             thread_id=job.thread_id,
-            workspace=getattr(self._provider, "workspace", Path(".")),
+            # 2026-10-16:workspace 必须来自会话(TurnRunner 注入)。旧写法从模型
+            # provider 上 getattr——provider 没有 workspace 属性,退回 Path("."),
+            # 序列化进 SURE 事件里就是相对根 ".";SURE 按纪律整体拒收
+            # ("The project directory was given as \".\", which is not an
+            # absolute path"),于是修复子代理的每个工具事件都以退出码 5 落空
+            # (实锤:桥日志 56 条全部未写入),AI 干活的证据一条都进不了库。
+            workspace=self._workspace or Path("."),
             model=self._provider.get_default_model(),
             provider=self._provider,
             execution_policy="edit",  # sub-agents default to normal approval flow

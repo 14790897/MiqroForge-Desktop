@@ -354,3 +354,44 @@ async def test_plugin_manifest_registers_the_four_hooks(tmp_path):
         assert len(regs) == 1, f"{point} 未由 sure 插件注册"
         assert regs[0].tool_pattern == "*"
 
+
+def _failing_bin(tmp_path: Path) -> str:
+    """假 sure:把一条拒收原因写 stderr、退出码 5(复刻真实 sure 的失败形状)。"""
+    body = (
+        "import sys\n"
+        "sys.stdin.buffer.read()\n"
+        "sys.stderr.write('sure hook could not finish.\\n\\n'\n"
+        "                 'The project directory was given as \".\", "
+        "which is not an absolute path.\\n')\n"
+        "sys.exit(5)\n"
+    )
+    return _wrap_as_sure(tmp_path, body)
+
+
+@pytest.mark.asyncio
+async def test_failed_ingest_leaves_the_reason_in_the_log(tmp_path, monkeypatch):
+    """2026-10-16:失败必须留痕——退出码 5 的真实原因随 stderr 一起被丢弃过。
+
+    现场:56 条「退出码 5 (未写入)」没有任何细节,排查只能靠外部复现;
+    stderr 尾巴必须落进日志(此处钉住"原因文本出现在日志里"这一行为)。
+    """
+    from loguru import logger
+
+    sur = _load_sure_hooks()
+    binary = _failing_bin(tmp_path)
+    monkeypatch.setattr(sur, "resolve_sure_bin", lambda: binary)
+
+    records: list[str] = []
+    sink_id = logger.add(
+        lambda message: records.append(str(message)), level="DEBUG", format="{message}"
+    )
+    try:
+        await sur.on_pre_tool_use(_tool_ctx())
+        await sur.flush()
+    finally:
+        logger.remove(sink_id)
+
+    joined = " ".join(records)
+    assert "退出码 5" in joined
+    assert "not an absolute path" in joined, "stderr 尾巴必须留在日志里"
+

@@ -327,6 +327,9 @@ class RuntimeServices:
             capability_resolver=capability_resolver,
             ledger_runtime=ledger_runtime,
             hooks=hook_runtime,
+            # 2026-10-16:子代理作业回合的 SURE 事件归属需要真实工作区
+            # (旧写法从模型 provider 取,取不到退回 ".",事件整体被 SURE 拒收)
+            workspace=workspace,
         )
 
         # Phase 13: AgentJobRuntime (depends on TurnRunner)
