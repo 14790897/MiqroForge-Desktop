@@ -22,10 +22,10 @@ body:
 
         ```
         # PowerShell
-        irm https://raw.githubusercontent.com/14790897/MiQi/main/scripts/diagnose.ps1 | iex
+        irm https://raw.githubusercontent.com/miqro-org/MiqroForge-Desktop/main/scripts/diagnose.ps1 | iex
 
         # WSL / Git Bash / macOS / Linux
-        curl -sSL https://raw.githubusercontent.com/14790897/MiQi/main/scripts/diagnose.sh | bash
+        curl -sSL https://raw.githubusercontent.com/miqro-org/MiqroForge-Desktop/main/scripts/diagnose.sh | bash
         ```
       placeholder: |
         --- MiQroForge DIAGNOSTIC ---

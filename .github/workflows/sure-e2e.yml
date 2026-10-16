@@ -1,0 +1,310 @@
+name: SURE E2E
+
+# 为什么单独一个工作流（评审 #1278 P1-1）：
+# desktop-ci.yml 走 `pull_request_target`，该事件下**工作流定义取自 base 分支**
+# （develop），PR 里新增/修改的步骤（如 "Install SURE"）对本 PR 的 CI 是惰性的——
+# SURE E2E 四条用例在 CI 上全部 skip 而 job 照样 success，正是「看起来全绿、实际
+# 没跑」的形状。本文件由 `pull_request` 触发，工作流取自 PR 分支本身，因此本 PR
+# 即刻生效。
+#
+# 为什么 CI 里构建 fork 版 SURE（评审 #1278 P1-2）：
+# 事件桥接用例要求 `sure doctor` 列出 miqi——官方 v0.1.2 对 `hook ingest --source
+# miqi` 直接不支持，只有 fork 构建才有。这里 clone 公开仓库 JJJY9/SURE 并**钉死
+# sha** 后 `cargo build --release`，装上 PATH；构建完成后就地断言 doctor 的能力行，
+# 没有 miqi 直接红（钉住「跑的是含集成的那份构建」这一前提）。
+#
+# 「skip 也算过」在这里被堵掉（评审 #1278 P2-1）：跑完读 test-reports/results.json，
+# 两条 spec 内出现任何 skipped 即判失败；确实可豁免的用例以
+# SURE_E2E_SKIP_ALLOWLIST 显式点名（默认空 = 无豁免）。
+#
+# 信任边界与 desktop-ci 的 electron-e2e 相同（仓库安全策略）：只有 head 分支在
+# 本仓库（等价写权限）的 PR 才跑——本 job 会把 DEEPSEEK 凭据放上 runner 并执行
+# PR 检出的代码。不受信任来源（fork）时整个 job 跳过；「Skipped 的 job」是诚实的
+# 缺席，而不是绿步骤的假象。
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: sure-e2e-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  sure-e2e:
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: apps/desktop
+    env:
+      # E2E 一律真实：app 的模型调用经 config.json 的 DeepSeek provider；
+      # SURE 的模型评估共用同一把 key（下面写入它的用户级配置）。
+      SURE_OPENAI_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+      # 完整闭环用例（子代理修完 → 自动复核 → 发现项「已关闭」）显式启用——
+      # 评审 #1278 P2-2：至少一条用例走到「已完成」分支而非双终态放行。
+      MIQI_E2E_FULL_REPAIR: '1'
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # 本 job 在凭据落盘后执行 PR 检出的代码（spec / 构建脚本），
+          # checkout 默认把 job token 写进 .git/config —— 别交给 PR 代码。
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # 装依赖 / 装 Playwright / 构建 renderer / 生成 config.json 收在
+      # .github/actions/e2e-app-setup（与 electron-e2e 共用同一份，避免 config.json
+      # 的 provider 配置抄成两份后漂移）。这里 install-sure: false —— 本 job 要的是
+      # 含 miqi 的 fork 构建，由下面那步自建。
+      - name: E2E app setup (deps + Playwright + renderer + config.json)
+        uses: ./.github/actions/e2e-app-setup
+        with:
+          install-sure: 'false'
+          deepseek-api-key: ${{ secrets.DEEPSEEK_API_KEY }}
+          deepseek-api-base: ${{ secrets.DEEPSEEK_API_BASE }}
+          brave-api-key: ${{ secrets.BRAVE_API_KEY }}
+
+      - name: Build the fork SURE (pinned to the commit with miqi support)
+        working-directory: .
+        env:
+          # 评审锚定的提交：含 MiQi 钩子事件（edf95a7 起）、复核查「目标消失即关闭」
+          # 语义（c4fd952）与「修好即关闭」的 stage 12 契约重建（88da6bc，
+          # 2026-10-14：c4fd952 的规则此前走不到——当次运行没有 finding 就没有
+          # 契约，本机 CLI 与 CI 实测 closed 恒空）——完整闭环用例的「已关闭」
+          # 断言依赖后两者。
+          SURE_FORK_SHA: 88da6bc78a3f7633fa9fb0e67759ea539bdab143
+        run: |
+          set -euo pipefail
+          git init -q "$RUNNER_TEMP/sure-fork"
+          cd "$RUNNER_TEMP/sure-fork"
+          git remote add origin https://github.com/JJJY9/SURE.git
+          git fetch -q --depth 1 origin "$SURE_FORK_SHA"
+          git checkout -q FETCH_HEAD
+          test "$(git rev-parse HEAD)" = "$SURE_FORK_SHA"
+          cargo build --release -p sure-cli
+          sudo install -m 755 target/release/sure /usr/local/bin/sure
+          sure --version
+          # 能力钉死：跑的不是含 miqi 的那份构建就直接红（桥接用例的前提）。
+          sure doctor | grep -F "miqi"
+        timeout-minutes: 35
+
+      - name: Write SURE user settings (model assessment runs for real)
+        working-directory: .
+        # 面板模型评估用例要求用户级 analysis 配置在位（与真实用户机器同构）。
+        # 端点必须与 config.json 的 provider **同源拼接**：应用侧 AsyncOpenAI
+        # 的 base_url 就是 DEEPSEEK_API_BASE、SDK 自拼 /chat/completions——
+        # SURE 原样 POST endpoint 不做拼接，所以要显式拼出同一个地址。
+        # 2026-10-14 首修轮把这里硬编码成 api.deepseek.com（旧的"同源"只是同一个
+        # key，不是同一个端点）；key 与 base 若不同源，第 8 阶段只会如实报
+        # 「could not assess」——窗口里三个用例连带红（实测 run 38512919407）。
+        run: |
+          mkdir -p "$HOME/.config/SURE"
+          cat > "$HOME/.config/SURE/sure.yaml" << 'SUREEOF'
+          analysis:
+            provider: openai_compatible
+            endpoint: ${{ secrets.DEEPSEEK_API_BASE }}/chat/completions
+            model: deepseek-flash
+          SUREEOF
+
+      - name: AI connectivity probe — fail fast if provider unreachable
+        # 与 electron-e2e 同款先行探针：provider 不可达时立刻红，不给下游
+        # 「真实 AI」用例留下 skip/超时才暴露的机会。
+        run: |
+          xvfb-run --auto-servernum \
+            npx playwright test --config=playwright.config.ts --project=electron \
+            --grep "AI Connectivity" --reporter=list
+        timeout-minutes: 10
+        env:
+          PLAYWRIGHT_SKIP_WEB_SERVER: '1'
+
+      - name: Assert QRAFT login secrets are present
+        # acceptance 的真实登录段(QRAFT_LIVE=1)由这两个 secret 门控;缺失时
+        # 显式失败,避免「登录链路其实没跑」的绿色假象。与其它凭据同一信任边界:
+        # job 级 if 已限定同仓 head 分支,不受信任来源整个 job 不进来。
+        env:
+          QRAFT_PHONE: ${{ secrets.QRAFT_PHONE }}
+          QRAFT_PASSWORD: ${{ secrets.QRAFT_PASSWORD }}
+        run: |
+          if [ -z "$QRAFT_PHONE" ] || [ -z "$QRAFT_PASSWORD" ]; then
+            echo "::error::QRAFT_PHONE/QRAFT_PASSWORD secrets 缺失——真实登录用例会被跳过,按失败处理"
+            exit 1
+          fi
+
+      - name: Run SURE E2E (acceptance + event bridge)
+        run: |
+          xvfb-run --auto-servernum \
+            npx playwright test \
+              tests/e2e/acceptance-page.spec.ts tests/e2e/sure-event-bridge.spec.ts \
+              --config=playwright.config.ts --project=electron
+        # 60 分钟(原 45):套件接入真实登录后模型调用走生产账号的平台网关路由
+        # (与本地同构),慢窗口下单回合可达 600s——acceptance 的等待预算就是照
+        # 这个值定的;45 分钟不再有足够余量。
+        timeout-minutes: 60
+        env:
+          PLAYWRIGHT_SKIP_WEB_SERVER: '1'
+          # 失败诊断的前提：spec 的 afterAll 默认删掉临时 MIQI_HOME（连桥接日志
+          # 一起），下面那步就只剩空 glob 可 dump（2026-10-14 实测）。留下它。
+          MIQI_E2E_KEEP_HOME: '1'
+          # 真实账号登录(生产环境):acceptance 的登录段据此启用——本机与 CI 同
+          # 一条路(与 electron-e2e 的云端登录凭据同源;该 step 已被 job 级 if
+          # 限定为信任来源)。
+          QRAFT_LIVE: '1'
+          QRAFT_PHONE: ${{ secrets.QRAFT_PHONE }}
+          QRAFT_PASSWORD: ${{ secrets.QRAFT_PASSWORD }}
+
+      - name: Dump bridge logs on failure (CI diagnostics)
+        if: failure()
+        working-directory: .
+        # PR 运行不上传 artifact（安全设计），失败时的桥接日志此前随之消亡——
+        # 这里把每个临时 MIQI_HOME 的 bridge 日志尾部打进 job 日志（job 日志不是
+        # 公开产物），让失败自曝现场：与失速看门狗同一纪律。tmpdir 按 TMPDIR →
+        # RUNNER_TEMP → /tmp 逐个兜（只在 /tmp 找的那版一旦 runner 改了口径就是
+        # 空 glob，与 afterAll 删 home 叠在一起会静默什么都 dump 不到）。
+        run: |
+          found=0
+          for d in "${TMPDIR:-}" "${RUNNER_TEMP:-}" /tmp; do
+            [ -n "$d" ] || continue
+            for f in "$d"/miqi-e2e-*/workspace/logs/bridge-*.log; do
+              [ -e "$f" ] || continue
+              found=1
+              echo "::group::bridge log: $f"
+              # 派发期的关键行（drain 注册/死亡、sure.fix.start、作业失败/失速）
+              # 全文找——只打 tail 会让它们落在窗口外（2026-10-14 实测：传错
+              # runtime 的 drain 一启动就死，那行 error 在 tail 窗口之外，害得
+              # 归因多绕了一轮）。
+              grep -nE "job event drain registered|drain error|作业事件 drain|sure\.fix\.start|Agent job .* failed|stalled at|_watch_stall" "$f" | tail -n 40 || true
+              echo "--- tail 200 ---"
+              tail -n 200 "$f"
+              echo "::endgroup::"
+            done
+          done
+          [ "$found" -eq 1 ] || echo "::warning::no bridge logs found to dump (MIQI_E2E_KEEP_HOME should be 1)"
+          # Playwright 的 error-context.md 带页面快照 = 面板按真实数据渲染出的文本：
+          # 失败断言之外，第 8 阶段这类“如实呈现的原因”也在这里（模型评估何时为
+          # 何没跑、报告计数为几），不必再猜。
+          for ctx in apps/desktop/test-results/*/error-context.md; do
+            [ -e "$ctx" ] || continue
+            echo "::group::error context: $ctx"
+            sed -n '1,260p' "$ctx"
+            echo "::endgroup::"
+          done
+
+      - name: Bridge ingest anomalies — always (flaky runs stay green, failure() never fires)
+        if: always()
+        working-directory: .
+        # flaky 的运行是**绿的**：`if: failure()` 不成立，桥接日志随 runner 一起消亡 ——
+        # 于是「UI 有工具卡、真实 SURE 记录里却没有 tool.completed」这种首跑失败，只能
+        # 等下一轮再猜（2026-10-14 实测：连续三轮 flaky，汇总只给错误首行）。
+        # 桥接自己的异常路径本来就有日志（sure_hooks.py 的丢弃 / 写入失败 / 排空超时），
+        # 且桥接日志的文件 sink 是 `logger.add(..., level="DEBUG")` **无过滤器**
+        # （miqi/bridge/server.py），所以这几行只要发生就一定落盘、也一定被这里捞到。
+        # 只捞这几行、不做整份 tail —— 常态零行。
+        #
+        # 模式必须覆盖**四条**异常路径，不是三条：`SURE hook ingest 失败(静默跳过)`
+        # 是抛异常那条，而子进程**非零退出**里真正的写失败是另一句
+        # `SURE hook ingest 退出码 N (未写入)`（sure_hooks.py 的 _ingest）—— 后者才是最
+        # 可能的真实写失败，漏掉它这一步就会在正需要它的时候报 「0 异常」。
+        # 2026-10-15：`退出码 1` 不算异常——那是「决策非放行」(block)，事件与决策
+        # 其实已落库（日志文案已如实区分）。模式收窄到 `退出码 N (未写入)` 这一
+        # 具体形态，别再把它一起报进来。
+        #
+        # 报告必须同时给出「查了几份日志」：只看异常数时，「0」既可能是「都干净」，
+        # 也可能是「一份日志都没找到」（glob 没命中 / home 被清）—— 两者含义天差地别
+        # （前者说明事件压根没进队，后者说明这次什么都没查到）。所以 0 份时显式 warning。
+        #
+        # 注意：happy path 是**静默**的（成功写入不发日志），所以「0 异常」的读法是
+        # 「没发生丢弃/写入失败/排空超时」，而不是「事件送达了」。
+        run: |
+          logs=0
+          hits_files=0
+          for d in "${TMPDIR:-}" "${RUNNER_TEMP:-}" /tmp; do
+            [ -n "$d" ] || continue
+            for f in "$d"/miqi-e2e-*/workspace/logs/bridge-*.log; do
+              [ -e "$f" ] || continue
+              logs=$((logs + 1))
+              hits=$(grep -E "SURE 事件队列已满|SURE hook ingest (失败|退出码 [0-9]+ \(未写入\))|SURE 事件队列排空超时" "$f" || true)
+              if [ -n "$hits" ]; then
+                hits_files=$((hits_files + 1))
+                echo "::group::bridge ingest anomalies: $f"
+                echo "$hits"
+                echo "::endgroup::"
+              fi
+            done
+          done
+          echo "bridge ingest anomalies: ${hits_files}/${logs} 个日志有异常行"
+          if [ "$logs" -eq 0 ]; then
+            echo "::warning::没有找到任何桥接日志（miqi-e2e-*/workspace/logs/bridge-*.log）——本次的「0 异常」不代表链路干净，只是没查到"
+          fi
+
+      - name: Guard — a skipped SURE test fails the job
+        if: always()
+        env:
+          # 确实可豁免的用例在此显式点名（逗号分隔、按标题子串匹配）；默认空。
+          SURE_E2E_SKIP_ALLOWLIST: ''
+        run: |
+          node - <<'GUARDEOF'
+          const fs = require('node:fs');
+          const reportPath = 'test-reports/results.json';
+          if (!fs.existsSync(reportPath)) {
+            console.error('::error::test-reports/results.json 不存在——SURE E2E 没有产出报告（按失败处理）');
+            process.exit(1);
+          }
+          const report = JSON.parse(fs.readFileSync(reportPath, 'utf8'));
+          const files = ['acceptance-page.spec.ts', 'sure-event-bridge.spec.ts'];
+          const allow = (process.env.SURE_E2E_SKIP_ALLOWLIST || '')
+            .split(',').map((s) => s.trim()).filter(Boolean);
+          const rows = [];
+          const walk = (suite) => {
+            for (const spec of suite.specs || []) {
+              const file = spec.file || suite.file || '';
+              if (!files.some((f) => file.endsWith(f))) continue;
+              for (const test of spec.tests || []) {
+                rows.push({
+                  file: file.split(/[\\/]/).pop(),
+                  title: spec.title,
+                  status: test.status,
+                });
+              }
+            }
+            for (const child of suite.suites || []) walk(child);
+          };
+          for (const suite of report.suites || []) walk(suite);
+          let bad = 0;
+          for (const row of rows) {
+            const skipped = row.status === 'skipped';
+            const exempt = skipped && allow.some((a) => row.title.includes(a));
+            const mark = skipped ? (exempt ? 'SKIP(whitelisted)' : 'SKIP(FAIL)') : row.status.toUpperCase();
+            console.log(`${mark.padEnd(16)} ${row.file} :: ${row.title}`);
+            if (skipped && !exempt) bad += 1;
+          }
+          if (bad > 0) {
+            console.error(`::error::SURE E2E 有 ${bad} 条用例被跳过——按失败处理（前置就绪是硬前提，不允许 skip 绿）`);
+            process.exit(1);
+          }
+          console.log(`SURE E2E: ${rows.length} 条用例，0 skip`);
+          GUARDEOF
+
+      - name: Summarize flaky E2E tests
+        if: always()
+        uses: ./.github/actions/summarize-flaky
+        with:
+          report_path: apps/desktop/test-reports/results.json
+        env:
+          # 纵深防御（与 electron-e2e 相同）：同一 job 里先跑过 PR 代码，
+          # 显式清空动态链接器/解释器会读的几个变量。
+          LD_PRELOAD: ''
+          LD_LIBRARY_PATH: ''
+          NODE_OPTIONS: ''

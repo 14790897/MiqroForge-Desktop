@@ -58,10 +58,10 @@ agent_created: true
 诊断脚本：
 ```bash
 # PowerShell
-irm https://raw.githubusercontent.com/14790897/MiQi/main/scripts/diagnose.ps1 | iex
+irm https://raw.githubusercontent.com/miqro-org/MiqroForge-Desktop/main/scripts/diagnose.ps1 | iex
 
 # WSL / Git Bash / macOS / Linux
-curl -sSL https://raw.githubusercontent.com/14790897/MiQi/main/scripts/diagnose.sh | bash
+curl -sSL https://raw.githubusercontent.com/miqro-org/MiqroForge-Desktop/main/scripts/diagnose.sh | bash
 ```
 
 ### Issue 模板配置
@@ -229,7 +229,7 @@ git log --oneline origin/main..origin/develop --no-merges
 COMMITS=$(git log --oneline origin/main..origin/develop --no-merges)
 COUNT=$(echo "$COMMITS" | wc -l | tr -d ' ')
 
-gh pr create --repo 14790897/MiQi --base main --head develop \
+gh pr create --repo miqro-org/MiqroForge-Desktop --base main --head develop \
   --title "chore(release): merge develop into main" \
   --body "$(cat <<EOF
 ## 类型
@@ -307,7 +307,7 @@ git push origin chore/sync-main-into-develop
 COMMITS=$(git log --oneline origin/develop..origin/main --no-merges)
 COUNT=$(echo "$COMMITS" | wc -l | tr -d ' ')
 
-gh pr create --repo 14790897/MiQi --base develop --head chore/sync-main-into-develop \
+gh pr create --repo miqro-org/MiqroForge-Desktop --base develop --head chore/sync-main-into-develop \
   --title "chore(release): merge main into develop" \
   --body "$(cat <<EOF
 ## 类型
@@ -351,23 +351,23 @@ EOF
 
 ```bash
 # 1. 查 PR 的 headRefOid（= 合并前 main 位置）
-gh pr view <N> --repo 14790897/MiQi --json headRefOid
+gh pr view <N> --repo miqro-org/MiqroForge-Desktop --json headRefOid
 
 # 2. 重建 main 分支
-gh api repos/14790897/MiQi/git/refs -f ref=refs/heads/main -f sha=<headRefOid>
+gh api repos/miqro-org/MiqroForge-Desktop/git/refs -f ref=refs/heads/main -f sha=<headRefOid>
 ```
 
 ## GitHub CLI quick reference
 
 ```bash
 # Create issue
-gh issue create --repo 14790897/MiQi --title "[FEATURE] xxx" --body "..." --label enhancement
+gh issue create --repo miqro-org/MiqroForge-Desktop --title "[FEATURE] xxx" --body "..." --label enhancement
 
 # Create bug issue
-gh issue create --repo 14790897/MiQi --title "[BUG] xxx" --body "..." --label bug
+gh issue create --repo miqro-org/MiqroForge-Desktop --title "[BUG] xxx" --body "..." --label bug
 
 # Create PR (标题必须符合 conventional commits)
-gh pr create --repo 14790897/MiQi --base develop --head feat/xxx --title "feat(xxx): description" --body "$(cat body.md)"
+gh pr create --repo miqro-org/MiqroForge-Desktop --base develop --head feat/xxx --title "feat(xxx): description" --body "$(cat body.md)"
 
 # View CI checks
 gh pr checks <N>
@@ -468,7 +468,7 @@ gh run view <run-id> --repo OWNER/REPO --log --job=<job-id> | grep "Error:"
 ### 手动上传一张图并写进 PR 描述
 
 ```bash
-REPO=14790897/MiQi
+REPO=miqro-org/MiqroForge-Desktop
 # 1) 复用或创建固定预发布
 RID=$(gh api "repos/$REPO/releases/tags/_gh-imgup" --jq '.id' 2>/dev/null || echo "")
 if [ -z "$RID" ]; then

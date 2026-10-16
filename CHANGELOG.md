@@ -1,3 +1,53 @@
+# [0.39.0](https://github.com/miqro-org/MiqroForge-Desktop/compare/v0.38.0...v0.39.0) (2026-10-15)
+
+
+### Features
+
+* **sure:** 修复闭环、事件桥接与交付验证(SURE 集成阶段 4+5+6) ([#1278](https://github.com/miqro-org/MiqroForge-Desktop/issues/1278)) ([6a1d600](https://github.com/miqro-org/MiqroForge-Desktop/commit/6a1d600ec714aa7b991496855f341371939e74f0)), closes [#7c3a6156](https://github.com/miqro-org/MiqroForge-Desktop/issues/7c3a6156) [#1185](https://github.com/miqro-org/MiqroForge-Desktop/issues/1185)
+
+---
+## 下载说明
+
+macOS 用户请按芯片架构选择安装包：
+
+- **Apple Silicon (M1/M2/M3/M4)**：下载 `0.39.0-arm64.dmg`（ARM 架构）
+- **Intel**：下载 `0.39.0.dmg`（x86 无后缀）
+
+# [0.38.0](https://github.com/miqro-org/MiqroForge-Desktop/compare/v0.37.0...v0.38.0) (2026-10-13)
+
+
+### Bug Fixes
+
+* **bridge,sandbox:** [#1036](https://github.com/miqro-org/MiqroForge-Desktop/issues/1036) 定位到根因并修复 —— 沙箱命令不再继承桥的协议管道 ([#1234](https://github.com/miqro-org/MiqroForge-Desktop/issues/1234)) ([38517d8](https://github.com/miqro-org/MiqroForge-Desktop/commit/38517d8720b642fb080cf4eee1381d7d7fba8319)), closes [#1196](https://github.com/miqro-org/MiqroForge-Desktop/issues/1196)
+* **bridge:** 中断通知不再被下一次 chat.send 认领为终态 ([#1280](https://github.com/miqro-org/MiqroForge-Desktop/issues/1280)) ([45b0f20](https://github.com/miqro-org/MiqroForge-Desktop/commit/45b0f206616d54d1642761ac95fbc189ca55d48f)), closes [#797](https://github.com/miqro-org/MiqroForge-Desktop/issues/797)
+* **ci:** AI 日志审核在模型返回为空时不再谎报「通过」 ([#1283](https://github.com/miqro-org/MiqroForge-Desktop/issues/1283)) ([2d8a028](https://github.com/miqro-org/MiqroForge-Desktop/commit/2d8a02840ac5add538ed24961b7f6105c11e9073))
+* **ci:** 修掉 issue 校验器把 `_No response_` 当作已填写的漏洞 ([#1277](https://github.com/miqro-org/MiqroForge-Desktop/issues/1277)) ([2a3bebb](https://github.com/miqro-org/MiqroForge-Desktop/commit/2a3bebb904e6c9aa32bb3a2632352cfe67233889))
+* **desktop:** 任务资产裸名台账按 basename 兜底解析，嵌套落点文件可打开（[#1274](https://github.com/miqro-org/MiqroForge-Desktop/issues/1274)） ([#1275](https://github.com/miqro-org/MiqroForge-Desktop/issues/1275)) ([99b744d](https://github.com/miqro-org/MiqroForge-Desktop/commit/99b744d14b4205fa6721ceed2eb0edfa22542123))
+* **desktop:** 接通推理档位 reasoning_mode 到 bridge（[#680](https://github.com/miqro-org/MiqroForge-Desktop/issues/680) 桌面端档位从未生效） ([#1244](https://github.com/miqro-org/MiqroForge-Desktop/issues/1244)) ([4e6379d](https://github.com/miqro-org/MiqroForge-Desktop/commit/4e6379dc59916bbebf4fa0ad5dd8bccef76f3363))
+* **docs:** 设置页文档链接改用自定义子域名 miqro.sixiangjia.de ([#1276](https://github.com/miqro-org/MiqroForge-Desktop/issues/1276)) ([8e19466](https://github.com/miqro-org/MiqroForge-Desktop/commit/8e1946665cb830477f78745fa5e0d44608bf6b52))
+* **pdf:** 单元格换行不再拆数字串、项目符号用回 •（[#1238](https://github.com/miqro-org/MiqroForge-Desktop/issues/1238) 打磨） ([#1245](https://github.com/miqro-org/MiqroForge-Desktop/issues/1245)) ([514c4d8](https://github.com/miqro-org/MiqroForge-Desktop/commit/514c4d8291e74ed320799fb725e95c3008916abc))
+* **release:** semantic-release 的 repositoryUrl 跟上仓库迁移 ([#1281](https://github.com/miqro-org/MiqroForge-Desktop/issues/1281)) ([889f1cd](https://github.com/miqro-org/MiqroForge-Desktop/commit/889f1cd2a606179e4e591021b591201743282b4d))
+* 修复 exec 审批键失配与登出中断登记残留（[#1257](https://github.com/miqro-org/MiqroForge-Desktop/issues/1257)/[#1259](https://github.com/miqro-org/MiqroForge-Desktop/issues/1259) 跟进） ([#1272](https://github.com/miqro-org/MiqroForge-Desktop/issues/1272)) ([81072ae](https://github.com/miqro-org/MiqroForge-Desktop/commit/81072ae93914f7b6f93faca44235d51211746f30))
+
+
+### Features
+
+* **config:** 检测到本机 SURE 时默认注入 MCP 条目([#1268](https://github.com/miqro-org/MiqroForge-Desktop/issues/1268)) ([#1269](https://github.com/miqro-org/MiqroForge-Desktop/issues/1269)) ([aef6ee2](https://github.com/miqro-org/MiqroForge-Desktop/commit/aef6ee2e5ccb185ec84a29c625a6f696c3548961))
+* **desktop:** 审批卡改为输入框内联形态——贴满内宽/四档一行/⏎Esc ([#1240](https://github.com/miqro-org/MiqroForge-Desktop/issues/1240)) ([#1241](https://github.com/miqro-org/MiqroForge-Desktop/issues/1241)) ([e9f2e0c](https://github.com/miqro-org/MiqroForge-Desktop/commit/e9f2e0c5e739a9056a05824f8e0d10ebb97fd547)), closes [#1205](https://github.com/miqro-org/MiqroForge-Desktop/issues/1205) [#646-v2](https://github.com/miqro-org/MiqroForge-Desktop/issues/646-v2) [#864](https://github.com/miqro-org/MiqroForge-Desktop/issues/864)
+* **execution:** SURE 核查工具可「永久允许」并修复审批记住键错位([#1256](https://github.com/miqro-org/MiqroForge-Desktop/issues/1256)) ([#1259](https://github.com/miqro-org/MiqroForge-Desktop/issues/1259)) ([b84c1ea](https://github.com/miqro-org/MiqroForge-Desktop/commit/b84c1eac1dd201d1d1a83eda6b75eeb35b1a9ed7)), closes [#1196](https://github.com/miqro-org/MiqroForge-Desktop/issues/1196)
+* **execution:** SURE 核查工具路径运行时保护(拒绝制)([#1256](https://github.com/miqro-org/MiqroForge-Desktop/issues/1256)) ([#1266](https://github.com/miqro-org/MiqroForge-Desktop/issues/1266)) ([686ed94](https://github.com/miqro-org/MiqroForge-Desktop/commit/686ed9402209c83b80f31b7898a991bf7e21b7f5)), closes [#1259](https://github.com/miqro-org/MiqroForge-Desktop/issues/1259)
+* **runtime:** 插件运行时接线 + 内置 SURE 插件包([#1267](https://github.com/miqro-org/MiqroForge-Desktop/issues/1267)) ([#1270](https://github.com/miqro-org/MiqroForge-Desktop/issues/1270)) ([59ebf7e](https://github.com/miqro-org/MiqroForge-Desktop/commit/59ebf7ea13466e2f1573751f36b837250f5e4816)), closes [#1256](https://github.com/miqro-org/MiqroForge-Desktop/issues/1256)
+* **skills:** 新增 sure-check / sure-fix 内置技能(SURE 核查与修复闭环)([#1256](https://github.com/miqro-org/MiqroForge-Desktop/issues/1256)) ([#1262](https://github.com/miqro-org/MiqroForge-Desktop/issues/1262)) ([e95ffde](https://github.com/miqro-org/MiqroForge-Desktop/commit/e95ffde3b9171cb74a941f4d26b2c0a2b0902848))
+* **sure:** 验收面板(阶段 3)——原生核查运行时 + sure/* 方法族 + 结构化报告页 ([#1273](https://github.com/miqro-org/MiqroForge-Desktop/issues/1273)) ([47cc603](https://github.com/miqro-org/MiqroForge-Desktop/commit/47cc603fc4881353e7b28c6e32efef4be066d70c))
+
+---
+## 下载说明
+
+macOS 用户请按芯片架构选择安装包：
+
+- **Apple Silicon (M1/M2/M3/M4)**：下载 `0.38.0-arm64.dmg`（ARM 架构）
+- **Intel**：下载 `0.38.0.dmg`（x86 无后缀）
+
 # [0.37.0](https://github.com/14790897/MiqroForge-Desktop/compare/v0.36.2...v0.37.0) (2026-10-09)
 
 

@@ -79,6 +79,42 @@ export interface SureStageRecord {
   detail?: string | null;
 }
 
+// ── 阶段 4:修复契约与复审对比 ────────────────────────────────────────────
+
+/** SURE 命令(check 核查 / repair 生成修复契约 / recheck 复审对比)。 */
+export type SureCommand = 'check' | 'repair' | 'recheck';
+
+/** 修复契约(绑定 schemas/repair.schema.json;"修复以契约为界")。 */
+export interface SureRepairContract {
+  id: string;
+  issue_id: string;
+  problem: string;
+  why_it_matters: string;
+  required_fix: string[];
+  acceptance: string[];
+  preserve?: string[];
+  recheck?: string[];
+  /** 契约点名的检查 id——全部跑过且通过时,对应发现项才关闭(SURE 语义)。 */
+  rechecks_that_must_pass?: string[];
+  evidence?: Array<Record<string, unknown>>;
+  forbidden_shortcuts?: string[];
+  [k: string]: unknown;
+}
+
+/** recheck 对比里的单条发现项。 */
+export interface SureLifecycleFinding {
+  id: string;
+  severity: string;
+  status: string;
+  title: string;
+}
+
+/** recheck 的结构化对比(check/repair 时为 null)。 */
+export interface SureLifecycle {
+  closed: SureLifecycleFinding[];
+  still_open: SureLifecycleFinding[];
+}
+
 export interface SureCheckDetails {
   project: string;
   purpose: string;
@@ -86,6 +122,9 @@ export interface SureCheckDetails {
   state: string;
   report: SureReport;
   stages: SureStageRecord[];
+  /** 阶段 4:repair 输出携带契约数组;recheck 输出携带结构化对比。 */
+  repairs?: SureRepairContract[];
+  lifecycle?: SureLifecycle | null;
   [k: string]: unknown;
 }
 
@@ -200,13 +239,45 @@ export interface SureHealth {
   installed: boolean;
   binary: string | null;
   version: string | null;
+  /** 阶段 6(D3):与最低支持版本的兼容判定;null/缺省 = 无法判断(旧后端) */
+  compatible?: boolean | null;
+  /** 易用性批次:该构建是否含 MiQi 事件集成(doctor 清单行);null/缺省 = 无法判断 */
+  supports_miqi?: boolean | null;
   error: string | null;
+}
+
+/** 本面板支持的最低 SURE 版本(与 Python 侧 MIN_SUPPORTED_SURE_VERSION 一致)。 */
+export const MIN_SUPPORTED_SURE_VERSION = '0.1.2';
+
+/**
+ * 版本不兼容时给用户的提示;兼容 / 无法判断 / 未安装 / 旧后端均返回 null。
+ *
+ * 不兼容是明确结论(compatible === false),才提示并拦下「开始核查」;
+ * 「无法判断」(字段缺失或 null)不拦——那是如实呈现,不是拒绝服务。
+ */
+export function sureIncompatibilityNotice(health: SureHealth | null | undefined): string | null {
+  if (!health?.installed) return null;
+  if (health.compatible !== false) return null;
+  return `SURE 版本不兼容:当前 ${health.version ?? '未知'},最低要求 ${MIN_SUPPORTED_SURE_VERSION}。请升级 SURE,或用 SURE_BIN 指向 ≥${MIN_SUPPORTED_SURE_VERSION} 的构建。`;
+}
+
+/**
+ * 「该构建不支持 MiQi 事件记录」的提示;未安装 / 支持 / 无法判断均返回 null。
+ *
+ * 官方 0.1.2 不支持 `hook ingest --source miqi`:检查、修复与复核不受影响,
+ * 但 AI 操作历史(会话/工具事件)无法记录。**提示而不是拦截**——检查仍可用。
+ */
+export function sureEventBridgeNotice(health: SureHealth | null | undefined): string | null {
+  if (!health?.installed) return null;
+  if (health.supports_miqi !== false) return null;
+  return '当前 SURE 构建不支持 MiQi 事件记录(无法记录 AI 的操作历史);检查、修复与复核不受影响。如需事件记录,请用 SURE_BIN 指向包含 MiQi 集成的 SURE 构建。';
 }
 
 /** 运行中进度心跳(静默期也发,防 bridge 600s 空闲 drain)。 */
 export interface SureCheckProgress {
   taskId: string;
   project: string;
+  command?: string;
   elapsedMs: number;
   state: string;
 }
@@ -215,6 +286,7 @@ export interface SureCheckProgress {
 export interface SureCheckReportEvent {
   taskId: string;
   project: string;
+  command?: string;
   envelope: SureCheckEnvelope;
   elapsedMs: number;
 }
@@ -223,6 +295,7 @@ export interface SureCheckReportEvent {
 export interface SureCheckFailure {
   taskId: string;
   project: string;
+  command?: string;
   message: string;
   code: string;
   /** 进程中退出时的 stderr/stdout 尾巴(诊断用,可能缺省)。 */
@@ -233,6 +306,7 @@ export interface SureCheckFailure {
 export interface SureCheckCancelled {
   taskId: string;
   project: string;
+  command?: string;
   elapsedMs: number;
 }
 
@@ -240,6 +314,7 @@ export interface SureCheckCancelled {
 export interface SureCheckStartResult {
   taskId: string;
   project: string;
+  command?: string;
 }
 
 /** `sure.check.status`:页面挂载/重开时的对账快照。 */
@@ -250,7 +325,31 @@ export interface SureCheckStatus {
     state: string;
     elapsedMs: number;
     startedAt: number;
+    command?: string;
   } | null;
+  /** 最近一次完成任务的报告信封(切页/重开恢复用;从未有完成任务时为 null)。 */
+  lastReport?: SureCheckEnvelope | null;
+  /** 最近活跃会话里未终结的子代理数(与修复派发的并发闸同源;快照,尽力而为)。 */
+  runningAgents?: number;
+  /** 该会话的子代理并发上限(与 runningAgents 配套;缺省 3)。 */
+  agentCap?: number;
+}
+
+/** `sure.fix.start` 的结果:修复子代理已启动(完成经 chat:subagent_result 回报)。 */
+export interface SureFixStartResult {
+  agentId: string;
+  sessionKey: string;
+  project: string;
+}
+
+/** 运行中文案(核查中 / 生成修复契约中 / 复审对比中);未知命令原样回退。 */
+export function commandLabel(command: string): string {
+  const labels: Record<string, string> = {
+    check: '核查',
+    repair: '生成修复契约',
+    recheck: '复审对比',
+  };
+  return labels[norm(command)] ?? command;
 }
 
 /** 主进程 sendSafeWithError 的统一封装(可展示错误码,如 SURE_UNAVAILABLE/SURE_BUSY)。 */

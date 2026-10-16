@@ -1,0 +1,116 @@
+name: 'E2E app setup'
+description: 'Electron E2E 共用的应用侧准备：装依赖 →（可选）装官方 SURE → 装 Playwright → 构建 renderer → 生成 config.json'
+author: 'MiQi'
+
+# electron-e2e / macos-e2e（desktop-ci.yml）与 sure-e2e（sure-e2e.yml）共用的应用侧准备。
+# 抽出来是为了单源化那份 ~/.forge/config.json —— 它是这几个 job 里唯一「内容必须与 app
+# 严格同源」的东西，抄几份就会改一漏一（漂移的表现是假红，或看着正常却跑的不是被测配置）。
+#
+# 信任边界不变：本动作由调用方 checkout 出来的那份代码解析，与该 job 早已执行的 PR 代码
+# 同源；门禁由调用方负责（electron-e2e / macos-e2e 用步骤级 if: env.E2E_TRUSTED，
+# sure-e2e 用 job 级 if）。
+
+inputs:
+  working-directory:
+    description: '仓库内应用根目录（复合动作不继承 job 的 defaults.run，必须显式传）'
+    required: false
+    default: 'apps/desktop'
+  deepseek-api-key:
+    description: '应用 provider 的密钥'
+    required: true
+  deepseek-api-base:
+    description: '应用 provider 的 base url'
+    required: true
+  brave-api-key:
+    description: 'web 搜索 provider 的密钥'
+    required: true
+  install-sure:
+    description: '是否安装官方 SURE v0.1.2（sha256 钉死，仅 Linux x86_64 产物；非 Linux runner 一律跳过）'
+    required: false
+    default: 'false'
+
+runs:
+  using: 'composite'
+  steps:
+    - name: 'Install dependencies'
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      # bubblewrap 只在 Linux 侧装：macos-e2e 也用本动作，而 macOS 上没有 apt（它的
+      # 沙箱用例本来就被 --grep-invert 排除，见 desktop-ci.yml）。
+      run: |
+        npm ci
+        pip install uv
+        uv sync
+        if [ "$RUNNER_OS" = "Linux" ]; then
+          sudo apt-get update -qq && sudo apt-get install -y -qq bubblewrap
+        fi
+
+    - name: 'Install SURE (official v0.1.2, checksum pinned)'
+      # 顺手按平台兜底：产物是 Linux x86_64、校验用 GNU sha256sum，macOS 上会以
+      # 「command not found」这种与真实原因无关的方式炸掉整个 setup 步骤。
+      if: inputs.install-sure == 'true' && runner.os == 'Linux'
+      shell: bash
+      # 验收面板 E2E 不 mock SURE（E2E 一律真实）：装官方 v0.1.2 的 Linux 产物、
+      # 校验和钉死。未配置 analysis provider 时（面板 spawn 的白名单 env 没有密钥
+      # 通道），真实 check 走确定性路径、如实给出「检查不足」报告，断言围绕这份真实
+      # 报告的结构。桥接用例需要含 miqi 的 fork 构建，不在这里。
+      run: |
+        curl -sSL -o "$RUNNER_TEMP/sure.tar.gz" \
+          https://github.com/lichman0405/SURE/releases/download/v0.1.2/sure-0.1.2-x86_64-unknown-linux-gnu.tar.gz
+        echo "7bb52a1f789d0591ab17daa468ca3a0cee5fde5a9e468aabee723626da050401  $RUNNER_TEMP/sure.tar.gz" | sha256sum -c -
+        tar xzf "$RUNNER_TEMP/sure.tar.gz" -C "$RUNNER_TEMP"
+        sudo install -m 755 "$RUNNER_TEMP/sure-0.1.2-x86_64-unknown-linux-gnu/sure" /usr/local/bin/sure
+        sure --version
+
+    - name: 'Install Playwright browsers'
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: npx playwright install chromium --with-deps
+
+    - name: 'Build renderer'
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: npm run build -- --logLevel warn
+
+    - name: 'Generate config.json'
+      shell: bash
+      # 密钥经 env 交给 shell 展开，不做 ${{ }} 文本插值进脚本体 —— 插值会让密钥里的
+      # 特殊字符有机会改变脚本结构。落盘内容与插值版逐字相同。
+      env:
+        MIQI_E2E_DEEPSEEK_API_KEY: ${{ inputs.deepseek-api-key }}
+        MIQI_E2E_DEEPSEEK_API_BASE: ${{ inputs.deepseek-api-base }}
+        MIQI_E2E_BRAVE_API_KEY: ${{ inputs.brave-api-key }}
+      run: |
+        mkdir -p ~/.forge
+        cat > ~/.forge/config.json << CONFEOF
+        {
+          "providers": {
+            "siliconflow": {
+              "apiKey": "$MIQI_E2E_DEEPSEEK_API_KEY",
+              "apiBase": "$MIQI_E2E_DEEPSEEK_API_BASE",
+              "extraHeaders": null
+            }
+          },
+          "agents": {
+            "defaults": {
+              "model": "deepseek-flash",
+              "maxTokens": 393216,
+              "temperature": 1,
+              "maxToolIterations": 10,
+              "runtime": "app_server"
+            },
+            "commandApproval": { "enabled": false }
+          },
+          "tools": {
+            "web": {
+              "search": {
+                "provider": "brave",
+                "apiKey": "$MIQI_E2E_BRAVE_API_KEY",
+                "maxResults": 3
+              },
+              "fetch": { "provider": "builtin" }
+            },
+            "exec": { "timeout": 30, "envPassthrough": [] }
+          }
+        }
+        CONFEOF

@@ -1,8 +1,8 @@
 site_name: MiQroForge Desktop
 site_description: 基于 Electron 的轻量级个人 AI 助手桌面应用 — 完整技术文档
 site_url: https://miqro.sixiangjia.de/
-repo_url: https://github.com/14790897/MiqroForge-Desktop
-repo_name: 14790897/MiqroForge-Desktop
+repo_url: https://github.com/miqro-org/MiqroForge-Desktop
+repo_name: miqro-org/MiqroForge-Desktop
 edit_uri: edit/main/docs/
 
 theme:
@@ -94,4 +94,6 @@ nav:
       - 开发环境搭建: developer-guide.md
       - E2E 截图自动贴 PR 评论: e2e-pr-image-posting.md
       - 贡献指南: contributing.md
+  - 开发者笔记:
+      - 索引: dev-notes/README.md
   - 更新日志: changelog.md

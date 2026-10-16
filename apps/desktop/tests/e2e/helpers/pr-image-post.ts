@@ -16,7 +16,7 @@ import { execSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { basename } from 'node:path';
 
-const REPO = process.env.MIQI_IMG_REPO ?? '14790897/MiQi';
+const REPO = process.env.MIQI_IMG_REPO ?? 'miqro-org/MiqroForge-Desktop';
 const RELEASE_TAG = '_gh-imgup';
 
 function token(): string | null {

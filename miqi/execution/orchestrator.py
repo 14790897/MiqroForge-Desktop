@@ -236,6 +236,8 @@ class ToolExecutionContext:
     # Phase 31.4: client and session identity for approval scoping
     client_id: str = ""
     session_id: str = ""
+    # 阶段5:会话项目根(SURE 事件归属用;空串 = 未知,由消费方缺省)
+    workspace: str = ""
     # Phase 13: per-turn permission profile (set by TurnRunner/AgentControl)
     permission_profile: Any | None = None
     # Phase 21: cancellation event for long-running tool calls

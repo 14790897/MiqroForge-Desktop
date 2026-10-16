@@ -4,6 +4,7 @@ description: "E2E 测试前端聊天渲染契约可用主进程 webContents.send
 type: project
 ---
 
+
 前端聊天渲染契约的 E2E 不必走真实 LLM/沙箱：从 Playwright 的 `electronApp.evaluate` 里用 `BrowserWindow.getAllWindows().find(w => w.getTitle() === 'MiQroForge Desktop').webContents.send('chat:progress', payload)` 注入后端形状的 progress 事件即可（preload 原样转发，无校验）。
 
 关键坑：

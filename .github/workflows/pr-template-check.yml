@@ -83,7 +83,7 @@ jobs:
                 message +=
                   '\n\n「截图」节需要真实截图（Markdown 图片、图片直链或 GitHub 附件链接），文字占位不算。\n' +
                   '可先用仓库 skills 目录里的 GitHub 技能上传本地截图，再把返回的链接贴进该节：\n' +
-                  'https://github.com/14790897/MiqroForge-Desktop/tree/develop/skills';
+                  'https://github.com/miqro-org/MiqroForge-Desktop/tree/develop/skills';
               }
               core.setFailed(message);
             } else {

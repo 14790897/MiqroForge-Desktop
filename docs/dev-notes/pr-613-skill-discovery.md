@@ -1,8 +1,9 @@
 ---
 name: pr-613-skill-discovery
-description: "本地 Skill 前置索引的最终状态——全局提示词规则（#644）取代触发词（#643）与运行时注入（#642），一条规则即可让 AI 主动发现技能"
+description: "PR #625 已拆分为 #642（基础技能索引）+ #643（触发词增强），父子关系"
 type: project
 ---
+
 
 PR #625（本地 Skill 前置索引）的最终状态：
 - **#642**（已合并后回退）：技能清单注入 + 意图匹配被 #644 取代，已 revert（#645），但 sandbox 读工具修复（根 workspace + session 隔离）保留
