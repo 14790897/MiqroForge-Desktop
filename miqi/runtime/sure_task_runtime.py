@@ -404,6 +404,17 @@ class SureTaskRuntime:
             return None
         return envelope
 
+    def clear_last_report(self, client_id: str) -> None:
+        """丢弃该客户端最近一次完成报告(面板「关闭报告」)。
+
+        2026-10-16 用户实测:报告态没有关闭入口——切走再回来 `status` 又把
+        报告带回来,「就一直显示在本页面」;而且报告态项目输入框被隐藏,
+        换项目重查也走不通。关闭语义=面板明确表示"这次报告我看完了":
+        status 之后不再带回它(否则下一次挂载会把已关闭的报告又恢复出来)。
+        只清"最近完成报告",不触碰运行中的任务。
+        """
+        self._last_reports.pop(client_id, None)
+
     # ── 生命周期 ─────────────────────────────────────────────────────────
 
     async def start(

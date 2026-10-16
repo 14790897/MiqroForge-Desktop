@@ -22,6 +22,7 @@ import {
   aggregateTone,
   findingStatusLabel,
   findingTone,
+  isNotEnoughChecked,
   rawOutcomeLabel,
   stageOutcomeLabel,
   stageTone,
@@ -211,6 +212,19 @@ export function ReportView({ envelope }: { envelope: SureCheckEnvelope }) {
           </span>
         </div>
         <p className="mt-2 text-sm text-[var(--text)]">{agg.headline}</p>
+        {/* 2026-10-16 用户实测:指向无项目结构的目录时只看到「检查不足」徽章与
+            英文 headline,不知道发生了什么、该怎么办——把「没有检查真正运行」
+            说清楚并给出下一步,不淡化也不美化 */}
+        {isNotEnoughChecked(agg.severity) &&
+        report.totals.checked === 0 &&
+        report.totals.skipped === 0 &&
+        report.totals.could_not_run === 0 ? (
+          <p className="mt-2 rounded-md border border-[var(--border)] bg-[var(--surface-muted)] px-3 py-2 text-xs text-[var(--text-muted)]">
+            这次没有任何检查真正运行——常见原因是所选目录不是 SURE
+            能识别的项目(缺少项目清单、源码等可检查内容)。 SURE
+            不会在没有检查支撑时给出结论;请换一个真实项目目录后重试。
+          </p>
+        ) : null}
         <p className="mt-1.5 text-xs text-[var(--text-muted)]">
           已核查 {report.totals.checked} · 跳过 {report.totals.skipped} · 未能运行{' '}
           {report.totals.could_not_run} · 未解决问题 {report.totals.open_findings}

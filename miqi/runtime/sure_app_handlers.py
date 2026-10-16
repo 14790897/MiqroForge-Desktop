@@ -140,6 +140,16 @@ def register_sure_handlers(server) -> None:
             }
         }
 
+    async def _sure_check_dismiss(request_id, params, client_id, session_id, registry):
+        """关闭最近一次完成报告(幂等;不触碰运行中的任务)。
+
+        2026-10-16:报告态此前没有退出入口——重新挂载时 `status` 会把
+        lastReport 恢复出来,报告"一直显示在本页面";这里把它清掉,面板
+        回到入口态(可选项目、发起新核查、选别的目录)。
+        """
+        _get_runtime(registry).clear_last_report(client_id)
+        return {"result": {"ok": True}}
+
     async def _running_agents(registry, client_id) -> tuple[int, int]:
         """最近活跃会话里未终结的子代理数,及该会话的并发上限。
 
@@ -297,6 +307,9 @@ def register_sure_handlers(server) -> None:
     )
     server.register_method(
         "sure.check.status", _sure_check_status, spec=protocol_specs.SURE_CHECK_STATUS
+    )
+    server.register_method(
+        "sure.check.dismiss", _sure_check_dismiss, spec=protocol_specs.SURE_CHECK_DISMISS
     )
     server.register_method(
         "sure.fix.start", _sure_fix_start, spec=protocol_specs.SURE_FIX_START

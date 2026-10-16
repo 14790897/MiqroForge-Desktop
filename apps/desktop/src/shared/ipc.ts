@@ -175,6 +175,7 @@ export const IPC = {
   SURE_CHECK_START: 'sure:check-start',
   SURE_CHECK_CANCEL: 'sure:check-cancel',
   SURE_CHECK_STATUS: 'sure:check-status',
+  SURE_CHECK_DISMISS: 'sure:check-dismiss',
   SURE_FIX_START: 'sure:fix-start',
 
   // MiQroForge 平台 OAuth2 登录 (issue #726, 主进程本地处理)

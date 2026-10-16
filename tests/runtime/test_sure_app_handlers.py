@@ -160,6 +160,44 @@ async def test_busy_and_cancel_and_status(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_dismiss_clears_the_last_report_so_it_does_not_come_back(tmp_path):
+    """2026-10-16 用户实测:报告态没有关闭入口,「就一直显示在本页面」——
+    切页/重挂载时 status 会把 lastReport 恢复出来。sure.check.dismiss 必须把
+    后端缓存清掉,此后 status 如实回 None(面板回到入口态);幂等。
+    """
+    server, _, _ = _make_server(_fake_sure_bin(tmp_path))
+    events: list[dict] = []
+
+    async def sink(envelope):
+        events.append(envelope)
+
+    server.set_event_sink("test-client", sink)
+
+    resp = await _dispatch(server, "sure.check.start", {"project": str(tmp_path)})
+    assert "result" in resp
+
+    deadline = asyncio.get_event_loop().time() + 15.0
+    while asyncio.get_event_loop().time() < deadline:
+        if any(e["event"] == "sure_check_report" for e in events):
+            break
+        await asyncio.sleep(0.05)
+    assert any(e["event"] == "sure_check_report" for e in events), "报告未到达"
+
+    status = await _dispatch(server, "sure.check.status", {})
+    assert status["result"]["lastReport"] is not None
+
+    dismiss = await _dispatch(server, "sure.check.dismiss", {})
+    assert dismiss["result"]["ok"] is True
+
+    status2 = await _dispatch(server, "sure.check.status", {})
+    assert status2["result"]["lastReport"] is None
+
+    # 幂等:无报告时再关一次同样 ok
+    dismiss2 = await _dispatch(server, "sure.check.dismiss", {})
+    assert dismiss2["result"]["ok"] is True
+
+
+@pytest.mark.asyncio
 async def test_health_reports_version_and_missing(tmp_path, monkeypatch):
     import miqi.runtime.sure_task_runtime as sure_rt_mod
 

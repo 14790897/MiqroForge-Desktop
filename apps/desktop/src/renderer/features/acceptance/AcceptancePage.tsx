@@ -16,6 +16,7 @@ import {
   RefreshCw,
   Wand2,
   Wrench,
+  X,
   XCircle,
 } from 'lucide-react';
 import { Button } from '../../components/ui/Button';
@@ -260,6 +261,24 @@ export function AcceptancePage() {
     }
   }, []);
 
+  // 2026-10-16:关闭最近一次完成报告,回到入口态(可选项目、发起新核查)。
+  // 后端必须一并清除(lastReport),否则切页/重挂载时 status 会把已关闭的
+  // 报告又恢复出来——用户实测的"一直显示在本页面"正是这条恢复路径。
+  // 不清 fixNotice:修复子代理仍在跑时,完成后的自动复核会带回对比报告。
+  const dismissReport = useCallback(async () => {
+    try {
+      const res = (await window.miqi.sure.dismissReport()) as SureApiResult<{ ok: boolean }> | null;
+      if (!res || !res.ok) {
+        setActionError(res ? res.error : '关闭失败(桥可能未运行)');
+        return;
+      }
+      setEnvelope(null);
+      setPhase('idle');
+    } catch (e) {
+      setActionError(e instanceof Error ? e.message : String(e));
+    }
+  }, []);
+
   const pickDirectory = useCallback(async () => {
     try {
       const dir = await window.miqi.dialog.openDirectory();
@@ -462,6 +481,17 @@ export function AcceptancePage() {
             <Button variant="secondary" size="sm" onClick={() => void run('check')}>
               <RefreshCw size={13} className="mr-1" /> 重新核查
             </Button>
+            {/* 2026-10-16 用户实测:报告态此前没有退出入口——报告"一直显示"
+                且项目输入框被隐藏,想换项目重查也无路可走 */}
+            <Button
+              variant="secondary"
+              size="sm"
+              className="ml-auto"
+              onClick={() => void dismissReport()}
+              data-testid="acceptance-dismiss"
+            >
+              <X size={13} className="mr-1" /> 关闭报告
+            </Button>
           </div>
         </div>
       ) : null}
@@ -482,9 +512,23 @@ export function AcceptancePage() {
               {failure.stderrTail}
             </pre>
           ) : null}
-          <Button variant="secondary" size="sm" onClick={() => void run(runningCommand)}>
-            <RefreshCw size={13} className="mr-1" /> 重试
-          </Button>
+          <div className="flex items-center gap-2">
+            <Button variant="secondary" size="sm" onClick={() => void run(runningCommand)}>
+              <RefreshCw size={13} className="mr-1" /> 重试
+            </Button>
+            {/* 失败态同样是死路(输入框只在 idle/running 显示)——给一个回到入口的出口 */}
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => {
+                setFailure(null);
+                setPhase('idle');
+              }}
+              data-testid="acceptance-failed-close"
+            >
+              关闭
+            </Button>
+          </div>
         </div>
       ) : null}
 
