@@ -27,6 +27,14 @@ from miqi.bridge.loop_watchdog import watch_loop_lag
 
 CHAT_DRAIN_IDLE_TIMEOUT_SECONDS = 600
 
+# 2026-10-16 实测(用户机上真实的「交给 AI 修复」):作业的"合法静默"可以远超
+# 聊天回合——网关非流式回退单次可达 600s,agent_jobs 看门狗的兜底阈值是 900s
+# (那之内的静默都算合法)。作业 drain 若沿用聊天同款 600s 空闲上限,会在作业
+# 仍在等模型时收摊;此后会话事件队列(4096 有界)没有消费者,作业恢复输出后
+# 填满即冻死——正是这条 drain 当初要防的形态。真正的卡死由看门狗终结作业
+# (终态事件让 drain 正常收摊),这里只兜底"作业无声死亡"的清场,取 2× 阈值。
+JOB_DRAIN_IDLE_TIMEOUT_SECONDS = 1800
+
 # #798: the frontend watchdog reports "后端 60s 无响应" after 60s without
 # progress events, but a turn may legitimately stay silent for minutes
 # (model thinking, long exec with no stdout).  The drain emits a heartbeat
@@ -1003,7 +1011,10 @@ class BridgeRuntimeLoop:
         它跑完再接管,双向都不共消费。
 
         作业结束(回合终态)或空闲超时时 drain 自行收摊;全程失败只会让实时
-        流缺席,不连累作业本身。
+        流缺席,不连累作业本身。空闲上限必须用**作业自己的**更长值——
+        2026-10-16 实测:修复子代理在模型调用里静默 600s,聊天同款上限让
+        drain 中途收摊,作业恢复输出后队列无人排空(4096 冻死形态);
+        JOB_DRAIN_IDLE_TIMEOUT_SECONDS 的注释里有完整来由。
         """
         request_id = f"sure-job-{agent_id}"
         # 终态静音:作业的终态 UX 是 subagent_result 通知,不是合成请求的
@@ -1017,6 +1028,7 @@ class BridgeRuntimeLoop:
                 session_id=session_id,
                 session_key=session_key,
                 client_id=client_id,
+                idle_timeout=JOB_DRAIN_IDLE_TIMEOUT_SECONDS,
             )
         )
         task._miqi_created_at = time.monotonic()
@@ -1434,6 +1446,7 @@ class BridgeRuntimeLoop:
         session_id: str,
         client_id: str,
         session_key: str = "",
+        idle_timeout: float = CHAT_DRAIN_IDLE_TIMEOUT_SECONDS,
     ) -> None:
         """Background task: drain events from RuntimeSession and forward them.
 
@@ -1580,13 +1593,15 @@ class BridgeRuntimeLoop:
 
             while True:
                 # Keep in sync with CHAT_BACKEND_DRAIN_TIMEOUT_MS in
-                # apps/desktop/src/main/bridge.ts.
-                event = await runtime.next_event(timeout=CHAT_DRAIN_IDLE_TIMEOUT_SECONDS)
+                # apps/desktop/src/main/bridge.ts (chat drains only; job
+                # drains carry their own, longer cap — see
+                # JOB_DRAIN_IDLE_TIMEOUT_SECONDS).
+                event = await runtime.next_event(timeout=idle_timeout)
                 if event is None:
                     logger.warning(
                         "chat.send drain idle timeout after {}s "
                         "(request={} session={} thread={})",
-                        CHAT_DRAIN_IDLE_TIMEOUT_SECONDS,
+                        idle_timeout,
                         request_id,
                         session_id,
                         thread_id,
@@ -1595,7 +1610,7 @@ class BridgeRuntimeLoop:
                         "code": "TIMEOUT",
                         "message": (
                             f"Turn 超时（"
-                            f"{CHAT_DRAIN_IDLE_TIMEOUT_SECONDS}s）"
+                            f"{idle_timeout:.0f}s）"
                         ),
                     })
                     break
