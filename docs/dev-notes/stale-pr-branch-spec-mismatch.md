@@ -12,7 +12,7 @@ type: feedback
 **How to apply:**
 1. 分类失败：`gh pr checks <n>` + `gh run view --job <id> --log-failed`；「真实环境/平台/LLM 相关」与「断言写死的旧文案」要分开看。
 2. 对每条失败，`git show <PR head>:<spec 路径>` 与 `git show origin/develop:<spec 路径>` 对拉——若 develop 版本已不一样，基本就是落后所致，合并 develop 即可（本仓惯例用 merge 不用 rebase，见 [pr-base-is-develop](pr-base-is-develop.md)）。
-3. 确定性失败 vs flake 的判定：拿旧 spec 在本机做**反向对照**跑一次（真实账号用例可行，见 [qraft-test-account-credentials](qraft-test-account-credentials.md)），能复现即确定性。
+3. 确定性失败 vs flake 的判定：拿旧 spec 在本机做**反向对照**跑一次（真实账号用例可行，见 qraft-test-account-credentials（内部笔记，未导出）），能复现即确定性。
 4. 纯 LLM 超时类（`waitForResponseComplete` 120s 全重试失败）才是 [e2e-real-llm-hard-fail-rerun](e2e-real-llm-hard-fail-rerun.md) 的重跑场景，别混为一谈。
 5. 合并后本地至少跑 smoke 全量（`npm run build` 后 `npx playwright test --project=smoke`）再 push，遵循 [local-e2e-before-cloud-verification](local-e2e-before-cloud-verification.md)。
 

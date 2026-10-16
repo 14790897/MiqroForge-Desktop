@@ -38,4 +38,4 @@ type: reference
 - 分类修复见 PR #1027（`ErrorKind.CONTENT_BLOCKED`）；未修复的旧版会把两者
   混为 AUTH，用户看到的「认证失败」文案是误报
 
-相关：[ai-gateway-https-policy](ai-gateway-https-policy.md)、[qraft-test-account-credentials](qraft-test-account-credentials.md)
+相关：[ai-gateway-https-policy](ai-gateway-https-policy.md)、qraft-test-account-credentials（内部笔记，未导出）

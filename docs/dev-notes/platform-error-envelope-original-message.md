@@ -29,4 +29,4 @@ MiQroForge 平台所有业务错误都是 **HTTP 200 + 业务码**，真实异�
 - 报错里的 **`type` 是平台数据库列名，不是请求参数**——该接口没有查询参数也没有请求体，只有 `Authorization` 头；`?consumerId=`、`ConsumerId` 头等变体结果完全相同。
 - 只测一个账号容易得出相反结论（换个没绑消费组的账号就「复现不了」）。
 
-排查手法可复用：Electron `safeStorage` + 同 userData 目录解密 `qraft-auth.json` 取 token 直连接口；账号没有可用 token 时走完整 RSA 登录流程现取（`/portal/auth/login` → `doConfirm` → `authorize` 取 code → `/oauth2/token`），凭据见 [qraft-test-account-credentials](qraft-test-account-credentials.md)。注意 refresh_token 失效后平台会把**原文回显在 originalMessage 里**，日志/输出必须脱敏。
+排查手法可复用：Electron `safeStorage` + 同 userData 目录解密 `qraft-auth.json` 取 token 直连接口；账号没有可用 token 时走完整 RSA 登录流程现取（`/portal/auth/login` → `doConfirm` → `authorize` 取 code → `/oauth2/token`），凭据见 qraft-test-account-credentials（内部笔记，未导出）。注意 refresh_token 失效后平台会把**原文回显在 originalMessage 里**，日志/输出必须脱敏。

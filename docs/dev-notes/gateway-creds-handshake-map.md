@@ -26,4 +26,4 @@ type: project
 - 该 spec 里 `config.update` 偶发 `Request config.update timed out`（桥超时类抖动），已做「只对超时重试」的窄兜底。
 - issue 号容易撞车：动手前先 `gh issue list` / `gh pr list` 确认 #号归属（本次差点把 #1253 写成自己的号，实为「登录失效自动退出」那条 FEATURE）。
 
-相关：[verify-fix-in-real-app-not-just-mocks](verify-fix-in-real-app-not-just-mocks.md)、[real-account-features-need-live-e2e](real-account-features-need-live-e2e.md)、[qraft-test-account-credentials](qraft-test-account-credentials.md)、[login-gate-mandatory-login-1095](login-gate-mandatory-login-1095.md)
+相关：[verify-fix-in-real-app-not-just-mocks](verify-fix-in-real-app-not-just-mocks.md)、[real-account-features-need-live-e2e](real-account-features-need-live-e2e.md)、qraft-test-account-credentials（内部笔记，未导出）、[login-gate-mandatory-login-1095](login-gate-mandatory-login-1095.md)
